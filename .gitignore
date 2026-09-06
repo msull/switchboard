@@ -1,0 +1,4 @@
+/target
+# Local secrets (API keys etc). Never commit these.
+.env
+.env.*
