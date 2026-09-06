@@ -524,9 +524,10 @@ Verified headlessly (kittest with a real temp directory: ignored
 directories absent, folder open on click, preview shows the file's text,
 editor and reveal hand-offs recorded, pin round trip, finder match, pinned
 card open) and by hand against this repository as the project (tree,
-Markdown preview of this document). Not yet done from this milestone's
-list: syntax highlighting in text previews, git decorations on rows,
-copy-path feedback, and drag-to-pin from the tree.
+Markdown preview of this document). Text previews use egui's built-in
+highlighter (Rust, C-likes, Python, TOML; plain otherwise). Not yet done
+from this milestone's list: git decorations on rows, copy-path feedback,
+and drag-to-pin from the tree.
 
 ## Open questions
 
