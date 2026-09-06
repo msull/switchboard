@@ -321,6 +321,14 @@ impl AppCore {
         }
         self.end_flight(id);
         match result {
+            // One rollout belongs to one record; binding it twice would
+            // resume the wrong conversation, so refuse and say so.
+            Ok(Some(handle)) if self.bound_elsewhere(id, &handle) => {
+                let name = self.session_name(id);
+                self.error(format!(
+                    "Codex session id unknown for {name}: the only new rollout belongs to another card"
+                ));
+            }
             Ok(Some(handle)) => self.edit_session(id, out, |s| s.resume = Some(handle)),
             Ok(None) => {
                 let name = self.session_name(id);
@@ -332,6 +340,19 @@ impl AppCore {
             }
         }
         self.advance_codex_queue(now, out);
+    }
+}
+
+impl AppCore {
+    /// Another record already resumes with this handle's provider id.
+    fn bound_elsewhere(&self, id: RecordId, handle: &ResumeHandle) -> bool {
+        let provider = handle.provider_id();
+        self.workspaces.iter().flat_map(|w| &w.sessions).any(|s| {
+            s.id != id
+                && s.resume
+                    .as_ref()
+                    .is_some_and(|h| h.provider_id() == provider)
+        })
     }
 }
 

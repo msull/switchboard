@@ -248,7 +248,13 @@ fn read_session_meta(path: &Path) -> Option<SessionMeta> {
 }
 
 /// `rollout-*.jsonl` files under `<root>/YYYY/MM/DD`, optionally only
-/// those modified at or after `since`.
+/// those that came into being at or after `since`.
+///
+/// A live Codex session keeps appending to its rollout, so the mtime of
+/// an earlier session's file can fall inside a later launch's window and
+/// bind two records to one conversation. The filter therefore uses the
+/// earliest timestamp the file carries: birth time where the filesystem
+/// records it (APFS does), else mtime; a file is at least as old as either.
 fn rollout_files(root: &Path, since: Option<SystemTime>) -> Vec<PathBuf> {
     let mut out = Vec::new();
     let mut dirs = vec![(root.to_path_buf(), 0u8)];
@@ -272,8 +278,8 @@ fn rollout_files(root: &Path, since: Option<SystemTime>) -> Vec<PathBuf> {
             if let Some(since) = since {
                 let fresh = entry
                     .metadata()
-                    .and_then(|m| m.modified())
-                    .is_ok_and(|m| m >= since);
+                    .and_then(|m| born(&m))
+                    .is_ok_and(|t| t >= since);
                 if !fresh {
                     continue;
                 }
@@ -282,6 +288,12 @@ fn rollout_files(root: &Path, since: Option<SystemTime>) -> Vec<PathBuf> {
         }
     }
     out
+}
+
+/// When a file came into being: the earlier of its birth time and mtime.
+fn born(m: &std::fs::Metadata) -> std::io::Result<SystemTime> {
+    let modified = m.modified()?;
+    Ok(m.created().map_or(modified, |c| c.min(modified)))
 }
 
 fn home_dir() -> PathBuf {

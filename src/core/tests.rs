@@ -737,6 +737,41 @@ fn codex_discovery_failure_notices_and_unblocks() {
 }
 
 #[test]
+fn codex_discovery_refuses_an_id_bound_to_another_record() {
+    let (mut core, pid, _) = with_records(&[], |_| None);
+    let (first, _) = new_session(&mut core, pid, codex(), Launch::Argv(vec![]));
+    let (second, _) = new_session(&mut core, pid, codex(), Launch::Argv(vec![]));
+    let handle = ResumeHandle::Codex {
+        rollout_id: "r1".into(),
+        transcript: None,
+    };
+    launch_agent(&mut core, first, None);
+    core.dispatch(
+        AppAction::Discovered {
+            id: first,
+            result: Ok(Some(handle.clone())),
+        },
+        Clock::at(30),
+    );
+    launch_agent(&mut core, second, None);
+    // The first session kept writing its rollout, so a naive scan finds
+    // it again for the second launch.
+    let e = core.dispatch(
+        AppAction::Discovered {
+            id: second,
+            result: Ok(Some(handle.clone())),
+        },
+        Clock::at(40),
+    );
+    assert_eq!(saves(&e), 0);
+    assert_eq!(core.session(first).unwrap().resume, Some(handle));
+    assert!(core.session(second).unwrap().resume.is_none());
+    assert!(!core.is_in_flight(second));
+    assert!(core.notice().unwrap().is_error);
+    assert!(core.notice().unwrap().text.contains("another card"));
+}
+
+#[test]
 fn codex_launches_serialize() {
     let (mut core, pid, _) = with_records(&[], |_| None);
     let (first, e1) = new_session(&mut core, pid, codex(), Launch::Argv(vec![]));
