@@ -316,6 +316,18 @@ impl SwitchboardApp {
         }
     }
 
+    /// One full poll right now, ignoring the timers: events, host list,
+    /// Codex discoveries, captions. For tests and the launcher, which
+    /// drive the app without a frame loop.
+    pub fn poll_now(&mut self) {
+        self.last_poll = Some(Instant::now());
+        self.last_caption = Some(Instant::now());
+        self.poll_events();
+        self.poll_host();
+        self.poll_discoveries();
+        self.refresh_captions();
+    }
+
     fn pump(&mut self) {
         let woken = self
             .services

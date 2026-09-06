@@ -47,6 +47,8 @@ src/ui/
   switchboard.rs         every session across projects, waiting first
   dialogs.rs             add project / create session dialogs
 tests/ui.rs              headless flows via egui_kittest with fakes
+tests/gate.rs            Milestone 1 gate: the app driven through dispatch on a real store, tmux, and hooks
+tests/live.rs            real claude / codex / Ghostty runs (all ignored)
 vendor/egui_term/        embedded terminal widget (Harzu/egui_term @ 31bbc7ab, egui 0.36; see SWITCHBOARD-PATCHES.md)
 spikes/                  Spike 0 evidence
 ```
@@ -69,6 +71,18 @@ process the click, one to render its result.
 Tests that hit real services (a model, a paid API) go in their own
 `tests/*.rs` file, marked `#[ignore]`, with the command to run them
 documented here.
+
+`tests/gate.rs` is the Milestone 1 gate: one test per gate item, driving
+`SwitchboardApp` through `dispatch` and `poll_now` on a real `JsonStore`,
+a private `switchboard-test-gate-*` tmux server, and the real hook helper,
+with a fake opener in place of Ghostty. The three that run a real agent
+are ignored; each costs a fraction of a cent:
+
+```sh
+cargo test --test gate -- --ignored claude_sessions_map_to_their_cards --nocapture
+cargo test --test gate -- --ignored hook_events_while_down_apply_in_order --nocapture
+cargo test --test gate -- --ignored codex_launches_bind_distinct_ids --nocapture
+```
 
 ### Pre-commit hook
 
