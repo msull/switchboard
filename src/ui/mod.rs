@@ -14,6 +14,7 @@ mod cards;
 mod dialogs;
 pub mod document;
 pub mod files;
+pub mod palette;
 mod session;
 mod switchboard;
 mod switcher;
@@ -66,6 +67,8 @@ pub struct UiState {
     pub preview: Option<document::Preview>,
     /// The editor command being edited in the settings menu.
     pub editor_draft: Option<String>,
+    /// The quick-switcher, while open.
+    pub palette: Option<palette::PaletteDraft>,
     /// Message being composed for a session, sent with Enter.
     pub input_draft: Option<(RecordId, String)>,
     /// Embedded terminals, only ever the one for the session on screen.
@@ -93,6 +96,7 @@ impl Default for UiState {
             files: HashMap::new(),
             preview: None,
             editor_draft: None,
+            palette: None,
             input_draft: None,
             terminals: HashMap::new(),
             applied_theme: None,
@@ -178,9 +182,11 @@ fn draw_frame(cx: &mut DrawCtx<'_>, ui: &mut Ui) {
     });
 
     dialogs::show(cx, ui.ctx());
+    palette::show(cx, ui.ctx());
 }
 
-/// Esc goes back, Cmd+1..9 switch project, Cmd+0 shows the switchboard.
+/// Esc goes back, Cmd+1..9 switch project, Cmd+0 shows the switchboard,
+/// Cmd+K opens the quick-switcher.
 /// Esc is left alone while a text field, a dialog, or the terminal has
 /// focus.
 fn keyboard(cx: &mut DrawCtx<'_>, ui: &Ui, view: &View) {
@@ -197,7 +203,13 @@ fn keyboard(cx: &mut DrawCtx<'_>, ui: &Ui, view: &View) {
     ];
     let ctx = ui.ctx();
     let nothing_focused = ctx.memory(|m| m.focused().is_none());
-    let has_dialog = cx.state.add_project.is_some() || cx.state.new_session.is_some();
+    let has_dialog = cx.state.add_project.is_some()
+        || cx.state.new_session.is_some()
+        || cx.state.palette.is_some();
+
+    if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::K)) {
+        cx.state.palette = Some(palette::PaletteDraft::default());
+    }
 
     if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::Num0)) {
         cx.dispatch(AppAction::ShowSwitchboard);

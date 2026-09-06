@@ -454,8 +454,9 @@ Follows the template layering. Nothing below touches egui.
    scrollback on disk.
 4. **Environment.** Profiles, Keychain secrets, masked view,
    `.env.example` diff, missing-variable warnings.
-5. **Git awareness and polish.** Decorations, sub-repo discovery, global
-   quick-switcher, dock badge with waiting-session count.
+5. **Git awareness and polish** (built 2026-09-06, see progress below).
+   Decorations, sub-repo discovery, global quick-switcher, dock badge
+   with waiting-session count.
 
 ## Milestone 1 status (2026-09-06)
 
@@ -564,6 +565,10 @@ scrollback" action separate from Remove.
   directories with changes below them. Read through `git status` every
   5 s on a background thread while the board is on screen; nothing is
   written.
+- **Quick-switcher.** Cmd+K (or the Go to button) opens a palette that
+  fuzzy-matches projects and sessions you may see (exclusive mode
+  applies), with each session's state; Enter opens the best hit, Esc
+  closes.
 - **Dock badge.** The number of sessions waiting on you sits on the Dock
   icon (AppKit `dockTile`, main thread, updated only when the count
   changes; exclusive mode hides other projects' counts too). Verified

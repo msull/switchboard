@@ -99,6 +99,7 @@ src/ui/
   board.rs               one project's board of cards, pinned documents, notes
   files.rs               file side panel: lazy tree, fuzzy finder, right-click hand-offs
   document.rs            read-only preview view: Markdown, text, images
+  palette.rs             quick-switcher (Cmd+K) over projects and sessions
   cards.rs               session and document cards, state colors
   session.rs             session view: header, notes, embedded terminal or conversation + message box
   switchboard.rs         every session across projects, waiting first

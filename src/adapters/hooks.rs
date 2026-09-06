@@ -541,7 +541,8 @@ mod tests {
         let mut c = UnixStream::connect(sock.path()).unwrap();
         c.write_all(b"1").unwrap();
         drop(c);
-        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        // Generous: the whole suite runs in parallel on the pre-commit hook.
+        let deadline = std::time::Instant::now() + Duration::from_secs(15);
         while !sock.take_woken() {
             assert!(std::time::Instant::now() < deadline, "no wake-up");
             std::thread::sleep(Duration::from_millis(5));
