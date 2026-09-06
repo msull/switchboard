@@ -123,9 +123,16 @@ pub fn show(cx: &mut DrawCtx<'_>, ui: &mut Ui, pid: ProjectId, path: &Path) {
                             CommonMarkViewer::new().show(ui, &mut cx.state.markdown, text);
                         }
                         Body::Text(text) => {
-                            ui.add(
-                                egui::Label::new(RichText::new(text).monospace()).selectable(true),
-                            );
+                            // egui's built-in highlighter knows Rust, C-likes,
+                            // Python, and TOML; everything else is plain.
+                            let lang = preview
+                                .path
+                                .extension()
+                                .and_then(|e| e.to_str())
+                                .unwrap_or("");
+                            let theme =
+                                egui_extras::syntax_highlighting::CodeTheme::from_style(ui.style());
+                            egui_extras::syntax_highlighting::code_view_ui(ui, &theme, text, lang);
                         }
                         Body::Image(bytes) => {
                             let uri = format!("bytes://{}", preview.path.display());
