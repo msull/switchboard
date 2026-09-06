@@ -282,6 +282,12 @@ impl SwitchboardApp {
                 }
                 None
             }
+            Effect::OpenInEditor { editor, path } => {
+                if let Err(e) = s.opener.open_editor(&editor, &path) {
+                    log::warn!("open in editor failed: {e}");
+                }
+                None
+            }
             Effect::Reveal(path) => {
                 if let Err(e) = s.opener.reveal(&path) {
                     log::warn!("reveal failed: {e}");
@@ -405,6 +411,7 @@ impl SwitchboardApp {
                 .collect(),
             View::Board(p) => self.core.sessions_sorted(p).iter().map(|s| s.id).collect(),
             View::Session(id) => vec![id],
+            View::Document(..) => Vec::new(),
         };
         for id in ids {
             let running = self

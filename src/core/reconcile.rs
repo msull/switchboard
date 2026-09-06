@@ -4,9 +4,13 @@
 //! here: a resume costs money, so it waits for a click.
 
 use crate::core::action::{AppCore, Clock, Effect, FlightKind, Out};
-use crate::core::model::{Launch, RecordId, SessionKind, SessionRecord};
+use crate::core::model::{AgentKind, Launch, RecordId, SessionKind, SessionRecord};
 use crate::ports::host::{HostId, HostStatus, Liveness, SpawnSpec};
 use crate::ports::store::{Loaded, StoreError};
+
+/// An agent without hooks whose pane has printed nothing for this long is
+/// shown idle: it is waiting at its prompt, or for the user.
+pub const QUIET_AFTER: std::time::Duration = std::time::Duration::from_secs(20);
 
 /// Injected into every pane so hooks and shells can report the record
 /// they belong to without relying on cwd.
@@ -39,6 +43,20 @@ impl AppCore {
     /// is the reconcile, which also brings autostart services back.
     pub(super) fn host_listed(&mut self, statuses: Vec<HostStatus>, now: Clock, out: &mut Out) {
         self.host = statuses;
+        self.quiet = self
+            .workspaces
+            .iter()
+            .flat_map(|w| &w.sessions)
+            .filter(|s| s.kind == SessionKind::Agent(AgentKind::Codex))
+            .filter(|s| {
+                self.host_status(s.id).is_some_and(|h| {
+                    h.last_activity
+                        .and_then(|t| now.wall.duration_since(t).ok())
+                        .is_some_and(|quiet| quiet >= QUIET_AFTER)
+                })
+            })
+            .map(|s| s.id)
+            .collect();
         self.record_exit_codes(out);
         if self.store_loaded && !self.reconciled {
             self.reconciled = true;

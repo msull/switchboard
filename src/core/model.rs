@@ -42,6 +42,10 @@ pub struct Settings {
     pub theme: ThemeMode,
     /// Show only the active project, for screen sharing.
     pub exclusive: bool,
+    /// Command that opens a file in the editor (`code`, `zed`, `cursor`,
+    /// `subl`); it gets the path as its one argument. Blank means the
+    /// system text editor via `open -t`.
+    pub editor: String,
 }
 
 /// Switchboard's own id for a project. Never reused.

@@ -125,12 +125,17 @@ fn seed(app: &mut SwitchboardApp) -> Seeded {
 }
 
 fn harness() -> (Harness<'static, SwitchboardApp>, Seeded) {
+    harness_with(FakeOpener::default())
+}
+
+/// A harness whose opener the test keeps a handle to.
+fn harness_with(opener: FakeOpener) -> (Harness<'static, SwitchboardApp>, Seeded) {
     let services = Services {
         store: Box::new(MemoryStore::default()),
         host: Box::new(FakeHost::default()),
         events: Box::new(FakeEvents::default()),
         agents: Box::new(FakeAgents::default()),
-        opener: Box::new(FakeOpener::default()),
+        opener: Box::new(opener),
         transcripts: Box::new(FakeTranscripts::default()),
         wake: None,
     };
@@ -374,6 +379,94 @@ fn host_error_and_read_only_tag_are_shown() {
     harness.run_steps(2);
     harness.get_by_label("tmux 3.2 or newer is required");
     harness.get_by_label("read-only");
+}
+
+/// A project rooted in a real temp directory, for the file side.
+fn file_project(harness: &mut Harness<'static, SwitchboardApp>) -> (tempfile::TempDir, ProjectId) {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("docs")).unwrap();
+    std::fs::create_dir_all(dir.path().join("target")).unwrap();
+    std::fs::write(dir.path().join("README.md"), "# Hello\n\nfrom the readme").unwrap();
+    std::fs::write(dir.path().join("docs/design.md"), "# Design").unwrap();
+    std::fs::write(dir.path().join("target/out.bin"), "x").unwrap();
+    std::fs::write(dir.path().join(".gitignore"), "target/\n").unwrap();
+    let mut p = project("files", at(200));
+    p.root = dir.path().to_path_buf();
+    let pid = p.id;
+    harness
+        .state_mut()
+        .core_mut_for_seeding()
+        .seed(vec![Workspace::new(p)], Vec::new());
+    showing(harness, View::Board(pid));
+    (dir, pid)
+}
+
+#[test]
+fn file_tree_previews_a_file_and_hands_off_to_the_editor() {
+    let opener = FakeOpener::default();
+    let (mut harness, _) = harness_with(opener.clone());
+    let (dir, pid) = file_project(&mut harness);
+    // Ignored directories stay out of the tree; folders open on click.
+    assert!(harness.query_by_label("⏵ target").is_none());
+    click(&mut harness, "⏵ docs");
+    harness.get_by_label("  design.md");
+    click(&mut harness, "  README.md");
+    let readme = dir.path().join("README.md");
+    assert!(actions(&harness).contains(&AppAction::ShowDocument(pid, readme.clone())));
+    assert_eq!(
+        harness.state().core().view(),
+        View::Document(pid, readme.clone())
+    );
+    harness.get_by_label("from the readme");
+    click(&mut harness, "Open in editor");
+    click(&mut harness, "Reveal");
+    // The seeded project already pins README.md, so the button unpins first.
+    click(&mut harness, "Unpin");
+    click(&mut harness, "Pin");
+    assert_eq!(opener.state().edited, vec![(String::new(), readme.clone())]);
+    assert_eq!(opener.state().revealed, vec![readme.clone()]);
+    assert!(actions(&harness).contains(&AppAction::UnpinDocument(pid, "README.md".into())));
+    assert!(actions(&harness).contains(&AppAction::PinDocument(pid, "README.md".into())));
+    harness.get_by_label("Unpin");
+    // One Back in the top bar, one in the document header; either works.
+    harness
+        .get_all_by_role_and_label(Role::Button, "Back")
+        .next()
+        .unwrap()
+        .click();
+    harness.run_steps(2);
+    assert_eq!(harness.state().core().view(), View::Board(pid));
+}
+
+#[test]
+fn finder_matches_across_the_project() {
+    let (mut harness, _) = harness();
+    let (dir, pid) = file_project(&mut harness);
+    type_into(&mut harness, "Find", "dsgn");
+    // The index is built on a thread; give it a moment.
+    for _ in 0..40 {
+        if harness.query_by_label("docs/design.md").is_some() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+        harness.run_steps(2);
+    }
+    click(&mut harness, "docs/design.md");
+    assert!(actions(&harness).contains(&AppAction::ShowDocument(
+        pid,
+        dir.path().join("docs/design.md")
+    )));
+    assert!(harness.query_by_label("target/out.bin").is_none());
+}
+
+#[test]
+fn pinned_card_previews_and_opens() {
+    let opener = FakeOpener::default();
+    let (mut harness, _) = harness_with(opener.clone());
+    let (dir, _pid) = file_project(&mut harness);
+    // README.md is pinned by the seed.
+    click(&mut harness, "Open in app");
+    assert_eq!(opener.state().opened, vec![dir.path().join("README.md")]);
 }
 
 #[test]

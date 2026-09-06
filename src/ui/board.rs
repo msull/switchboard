@@ -55,8 +55,9 @@ pub fn show(cx: &mut DrawCtx<'_>, ui: &mut Ui, pid: ProjectId) {
             ui.label(RichText::new("Pinned").strong());
             ui.separator();
             ui.horizontal_wrapped(|ui| {
-                for path in &workspace.project.pinned {
-                    document_card(ui, &workspace.project.root.join(path));
+                for rel in &workspace.project.pinned {
+                    let path = workspace.project.root.join(rel);
+                    document_card(cx, ui, pid, rel, &path);
                 }
             });
         }

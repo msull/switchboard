@@ -12,6 +12,8 @@
 mod board;
 mod cards;
 mod dialogs;
+pub mod document;
+pub mod files;
 mod session;
 mod switchboard;
 mod switcher;
@@ -22,7 +24,7 @@ use std::time::SystemTime;
 use egui::{Key, Modifiers, Ui};
 
 use crate::app::{Services, SwitchboardApp};
-use crate::core::{AppAction, AppCore, RecordId, ThemeMode, View};
+use crate::core::{AppAction, AppCore, ProjectId, RecordId, ThemeMode, View};
 use crate::ports::transcript::Conversation;
 
 pub use dialogs::{AddProjectDraft, NewSessionDraft};
@@ -58,6 +60,12 @@ pub struct UiState {
     pub notes_draft: Option<(RecordId, String)>,
     /// A session name being edited in the session header.
     pub rename_draft: Option<(RecordId, String)>,
+    /// The file side per project: tree, finder, index.
+    pub files: HashMap<ProjectId, files::FilesState>,
+    /// The document on screen, loaded once per path and file time.
+    pub preview: Option<document::Preview>,
+    /// The editor command being edited in the settings menu.
+    pub editor_draft: Option<String>,
     /// Message being composed for a session, sent with Enter.
     pub input_draft: Option<(RecordId, String)>,
     /// Embedded terminals, only ever the one for the session on screen.
@@ -82,6 +90,9 @@ impl Default for UiState {
             new_session: None,
             notes_draft: None,
             rename_draft: None,
+            files: HashMap::new(),
+            preview: None,
+            editor_draft: None,
             input_draft: None,
             terminals: HashMap::new(),
             applied_theme: None,
@@ -139,9 +150,9 @@ fn draw_frame(cx: &mut DrawCtx<'_>, ui: &mut Ui) {
     // An embedded terminal only lives while its session is on screen.
     // Dropping the backend closes the pty, which detaches the tmux client
     // and leaves the session running.
-    let shown = match view {
-        View::Session(id) => Some(id),
-        View::Switchboard | View::Board(_) => None,
+    let shown = match &view {
+        View::Session(id) => Some(*id),
+        View::Switchboard | View::Board(_) | View::Document(..) => None,
     };
     cx.state.terminals.retain(|id, _| Some(*id) == shown);
 
@@ -151,10 +162,19 @@ fn draw_frame(cx: &mut DrawCtx<'_>, ui: &mut Ui) {
     egui::Panel::bottom("bottom_bar")
         .resizable(false)
         .show(ui, |ui| switcher::bottom_bar(cx, ui));
+    // The file side lives next to the board and the preview it opens.
+    if let View::Board(pid) | View::Document(pid, _) = &view {
+        let pid = *pid;
+        egui::Panel::right("files")
+            .resizable(true)
+            .default_size(300.0)
+            .show(ui, |ui| files::show(cx, ui, pid));
+    }
     egui::CentralPanel::default().show(ui, |ui| match view {
         View::Switchboard => switchboard::show(cx, ui),
         View::Board(pid) => board::show(cx, ui, pid),
         View::Session(id) => session::show(cx, ui, id),
+        View::Document(pid, path) => document::show(cx, ui, pid, &path),
     });
 
     dialogs::show(cx, ui.ctx());

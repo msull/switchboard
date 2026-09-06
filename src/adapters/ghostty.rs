@@ -69,6 +69,27 @@ end tell"#
     }
 }
 
+/// `which` over PATH plus the usual install dirs (Homebrew, `~/.local/bin`,
+/// `/usr/local/bin`). An absolute path is used as is when it exists.
+fn find_command(name: &str) -> Option<PathBuf> {
+    let candidate = Path::new(name);
+    if candidate.is_absolute() {
+        return candidate.is_file().then(|| candidate.to_path_buf());
+    }
+    let home = std::env::var_os("HOME").map_or_else(|| PathBuf::from("/"), PathBuf::from);
+    std::env::var_os("PATH")
+        .map(|p| std::env::split_paths(&p).collect::<Vec<_>>())
+        .unwrap_or_default()
+        .into_iter()
+        .chain([
+            PathBuf::from("/opt/homebrew/bin"),
+            PathBuf::from("/usr/local/bin"),
+            home.join(".local/bin"),
+        ])
+        .map(|d| d.join(name))
+        .find(|p| p.is_file())
+}
+
 fn find_ghostty() -> Option<PathBuf> {
     let home = std::env::var_os("HOME").map_or_else(|| PathBuf::from("/"), PathBuf::from);
     let candidates = [
@@ -114,6 +135,29 @@ impl Opener for MacOpener {
             "-R".into(),
             path.to_string_lossy().into_owned(),
         ])
+    }
+
+    fn open_editor(&self, editor: &str, path: &Path) -> Result<(), String> {
+        let path = path.to_string_lossy().into_owned();
+        if editor.trim().is_empty() {
+            return run(&["open".to_string(), "-t".into(), path]);
+        }
+        // A Dock-launched app has a bare PATH, so look where editors'
+        // shell commands are installed before giving up.
+        let bin = find_command(editor.trim())
+            .ok_or_else(|| format!("editor command {editor:?} not found on PATH"))?;
+        let mut child = Command::new(bin)
+            .arg(path)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .map_err(|e| format!("{editor}: {e}"))?;
+        // Editor launchers exit at once; a long-lived one is left alone.
+        std::thread::spawn(move || {
+            let _ = child.wait();
+        });
+        Ok(())
     }
 
     fn open_terminal(&self, title: &str, argv: &[String], cwd: &Path) -> Result<(), String> {

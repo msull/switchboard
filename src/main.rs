@@ -56,6 +56,8 @@ fn main() -> eframe::Result {
         "Switchboard",
         options,
         Box::new(move |cc| {
+            // Image previews decode through egui's loaders.
+            egui_extras::install_image_loaders(&cc.egui_ctx);
             let ctx = cc.egui_ctx.clone();
             let wake = match WakeSocket::bind_with(&data_dir, move || ctx.request_repaint()) {
                 Ok(w) => Some(w),

@@ -446,8 +446,9 @@ Follows the template layering. Nothing below touches egui.
    agent conversations remain resumable only while the provider retains
    them. This is the product's reason to exist, so it comes before the
    file browser.
-2. **Projects and files.** Tree, fuzzy finder, preview, open in default
-   app and editor, reveal in Finder, pinned document cards.
+2. **Projects and files** (built 2026-09-06, see status below). Tree,
+   fuzzy finder, preview, open in default app and editor, reveal in
+   Finder, pinned document cards.
 3. **Commands and services.** Saved commands, services with start/stop,
    autostart, health, scrollback on disk.
 4. **Environment.** Profiles, Keychain secrets, masked view,
@@ -478,15 +479,54 @@ tmux, Claude Code, Codex, and Ghostty. Verified by hand on this machine:
 
 Known gaps, for the next session:
 
-- Codex has no hooks, so its card stays *working* while alive; the raw
-  stream fallback (OSC 777 parsing) is not implemented yet.
-- Pinned document cards render but have no open action wired.
+- Codex has no hooks; since Milestone 2 a quiet pane reads as *idle*,
+  but the raw stream fallback (OSC 777 parsing) is not implemented.
 - Only Claude Code's `--settings` hooks are wired; the "hooks absent"
   transcript-tail fallback is not implemented.
 - The Add-project and New-session dialogs were verified headlessly
   (kittest), not by clicking in the live app; the live app was driven
   through `SWITCHBOARD_SCRIPT`.
 - Captions can contain glyphs the UI font lacks (shown as boxes).
+
+## Milestone 2 status (2026-09-06)
+
+Built in one unattended session after Milestone 1 was accepted. The
+file side lives in a right-hand panel next to the board and the preview
+it opens; the preview is its own view (`View::Document`) so Back and Esc
+behave as everywhere else.
+
+- **Tree.** Lazily read per directory through the `ignore` crate, so
+  `.gitignore` (plus global excludes) and hidden entries stay out, and
+  symlinks are neither followed nor listed. Refresh re-reads everything.
+- **Finder.** Typing in the Find field switches the panel to fuzzy
+  matches over a whole-project index built on a background thread
+  (capped at 50k entries, the panel says when it stopped). Scoring favors
+  segment starts, contiguous runs, and file names. Enter previews the
+  first hit.
+- **Preview.** Markdown through the conversation view's renderer, text
+  in monospace, PNG/JPEG/GIF/WebP through egui's image loaders, and
+  honest notes for binary, oversized (over 2 MB), or unreadable files.
+  Reloads when the file changes on disk.
+- **Hand-offs.** Open (default app), Open in editor (the `editor`
+  setting: a command such as `code` or `zed`, blank for the system text
+  editor), Reveal in Finder, Copy path, Pin/Unpin; all on the preview
+  header and on the tree's right-click menu. A directory's menu offers
+  "New shell here", which creates a shell session record in that
+  directory.
+- **Pinned cards** preview on click, and carry Open in app and Unpin.
+- **Codex cards** no longer sit at *working* forever: an agent without
+  hooks whose pane has printed nothing for 20 s reads as *idle*; output
+  flips it back to *working*. Claude Code keeps using its hooks.
+- **Settings** (theme, exclusive mode, editor) persist in
+  `settings.json`; sessions can be renamed from their header.
+
+Verified headlessly (kittest with a real temp directory: ignored
+directories absent, folder open on click, preview shows the file's text,
+editor and reveal hand-offs recorded, pin round trip, finder match, pinned
+card open) and by hand against this repository as the project (tree,
+Markdown preview of this document). Not yet done from this milestone's
+list: syntax highlighting in text previews, git decorations on rows,
+copy-path feedback, and drag-to-pin from the tree.
 
 ## Open questions
 

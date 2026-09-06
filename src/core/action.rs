@@ -52,6 +52,8 @@ pub enum View {
     Switchboard,
     Board(ProjectId),
     Session(RecordId),
+    /// A file of the project, previewed read-only.
+    Document(ProjectId, PathBuf),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -84,6 +86,12 @@ pub enum AppAction {
     RenameProject(ProjectId, String),
     PinDocument(ProjectId, PathBuf),
     UnpinDocument(ProjectId, PathBuf),
+    /// Preview a file (absolute path) of the project.
+    ShowDocument(ProjectId, PathBuf),
+    OpenDocument(PathBuf),
+    OpenInEditor(PathBuf),
+    RevealDocument(PathBuf),
+    SetEditor(String),
     // --- sessions
     NewSession {
         project: ProjectId,
@@ -187,6 +195,11 @@ pub enum Effect {
         text: String,
     },
     OpenPath(PathBuf),
+    /// Open the file with the configured editor command.
+    OpenInEditor {
+        editor: String,
+        path: PathBuf,
+    },
     Reveal(PathBuf),
 }
 
@@ -256,6 +269,9 @@ pub struct AppCore {
     pub(super) store_loaded: bool,
     pub(super) reconciled: bool,
     pub(super) settings: Settings,
+    /// Agents without hooks (Codex) whose pane has been quiet for a
+    /// while, per the last host poll: shown idle instead of working.
+    pub(super) quiet: Vec<RecordId>,
 }
 
 impl AppCore {
@@ -274,13 +290,21 @@ impl AppCore {
             AppAction::SaveFinished(_, Err(e)) => self.error(format!("save failed: {e}")),
             AppAction::SaveFinished(_, Ok(())) => {}
             AppAction::HostUnavailable(reason) => self.host_error = reason,
-            AppAction::SetTheme(theme) => self.update_settings(&mut out, |s| s.theme = theme),
-            AppAction::SetExclusive(on) => self.update_settings(&mut out, |s| s.exclusive = on),
             AppAction::HostListed(statuses) => self.host_listed(statuses, now, &mut out),
 
             AppAction::ShowSwitchboard => self.show(View::Switchboard, now, &mut out),
             AppAction::ShowBoard(id) => self.show(View::Board(id), now, &mut out),
             AppAction::ShowSession(id) => self.show(View::Session(id), now, &mut out),
+            AppAction::RenameProject(..)
+            | AppAction::PinDocument(..)
+            | AppAction::UnpinDocument(..)
+            | AppAction::ShowDocument(..)
+            | AppAction::OpenDocument(_)
+            | AppAction::RevealDocument(_)
+            | AppAction::OpenInEditor(_)
+            | AppAction::SetEditor(_)
+            | AppAction::SetTheme(_)
+            | AppAction::SetExclusive(_) => self.files_and_settings(action, now, &mut out),
             AppAction::Back => drop(self.view_stack.pop()),
             AppAction::DismissNotice => {
                 if !self.notices.is_empty() {
@@ -298,17 +322,6 @@ impl AppCore {
                 }
                 self.view_stack
                     .retain(|v| !matches!(v, View::Board(p) if *p == id));
-            }
-            AppAction::RenameProject(id, name) => {
-                self.edit_project(id, &mut out, |p| p.name = name);
-            }
-            AppAction::PinDocument(id, path) => self.edit_project(id, &mut out, |p| {
-                if !p.pinned.contains(&path) {
-                    p.pinned.push(path);
-                }
-            }),
-            AppAction::UnpinDocument(id, path) => {
-                self.edit_project(id, &mut out, |p| p.pinned.retain(|d| *d != path));
             }
 
             AppAction::NewSession {
@@ -425,7 +438,8 @@ impl AppCore {
     }
 
     fn show(&mut self, view: View, now: Clock, out: &mut Out) {
-        if let View::Board(id) = view {
+        if let View::Board(id) | View::Document(id, _) = &view {
+            let id = *id;
             self.edit_project(id, out, |p| p.last_active = now.wall);
         }
         if self.view() != view {
@@ -576,6 +590,37 @@ impl AppCore {
             .filter(|w| self.project_visible(w.project.id))
     }
 
+    /// Project edits, the document hand-offs, and the preferences, split
+    /// out of `dispatch` for length.
+    fn files_and_settings(&mut self, action: AppAction, now: Clock, out: &mut Out) {
+        match action {
+            AppAction::RenameProject(id, name) => {
+                self.edit_project(id, out, |p| p.name = name);
+            }
+            AppAction::PinDocument(id, path) => self.edit_project(id, out, |p| {
+                if !p.pinned.contains(&path) {
+                    p.pinned.push(path);
+                }
+            }),
+            AppAction::UnpinDocument(id, path) => {
+                self.edit_project(id, out, |p| p.pinned.retain(|d| *d != path));
+            }
+            AppAction::ShowDocument(pid, path) => self.show(View::Document(pid, path), now, out),
+            AppAction::OpenDocument(path) => out.push(Effect::OpenPath(path)),
+            AppAction::RevealDocument(path) => out.push(Effect::Reveal(path)),
+            AppAction::OpenInEditor(path) => out.push(Effect::OpenInEditor {
+                editor: self.settings.editor.clone(),
+                path,
+            }),
+            AppAction::SetEditor(editor) => {
+                self.update_settings(out, |s| editor.trim().clone_into(&mut s.editor));
+            }
+            AppAction::SetTheme(theme) => self.update_settings(out, |s| s.theme = theme),
+            AppAction::SetExclusive(on) => self.update_settings(out, |s| s.exclusive = on),
+            _ => {}
+        }
+    }
+
     fn update_settings(&mut self, out: &mut Out, change: impl FnOnce(&mut Settings)) {
         let mut next = self.settings.clone();
         change(&mut next);
@@ -601,6 +646,9 @@ impl AppCore {
         match self.host_status(id).map(|h| &h.liveness) {
             Some(Liveness::Running { .. }) => match record.activity {
                 Activity::WaitingOnYou => CardState::WaitingOnYou,
+                Activity::Working | Activity::Unknown if self.quiet.contains(&id) => {
+                    CardState::Idle
+                }
                 Activity::Working => CardState::Working,
                 Activity::Idle | Activity::Ended => CardState::Idle,
                 // Nothing reported yet: an agent that just started is busy
