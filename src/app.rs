@@ -305,7 +305,10 @@ impl SwitchboardApp {
 
     fn poll_host(&mut self) {
         match self.services.host.list() {
-            Ok(list) => self.dispatch(AppAction::HostListed(list)),
+            Ok(list) => {
+                log::debug!("host lists {} pane(s)", list.len());
+                self.dispatch(AppAction::HostListed(list));
+            }
             Err(e) => log::warn!("host list failed: {e}"),
         }
     }

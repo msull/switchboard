@@ -99,6 +99,12 @@ impl TmuxHost {
         // and every pane inherits the server's. An app launched from the
         // Dock gets launchd's minimal PATH, so add the usual tool dirs.
         cmd.env("PATH", augmented_path());
+        // Without a UTF-8 locale tmux replaces the tab separators in
+        // `-F` output with `_` (and a server started that way treats pane
+        // output as ASCII). Dock-launched apps have no LANG at all.
+        if !has_utf8_locale() {
+            cmd.env("LANG", "en_US.UTF-8");
+        }
         // When Switchboard itself was launched from inside a Claude Code
         // session, the inherited CLAUDE* variables make child agents skip
         // transcript writes, which breaks resume. Strip them.
@@ -169,7 +175,11 @@ impl ProcessHost for TmuxHost {
             Err(e) => return Err(e),
         };
         let mut statuses: Vec<HostStatus> = Vec::new();
-        for status in out.lines().filter_map(parse_status) {
+        for line in out.lines() {
+            let Some(status) = parse_status(line) else {
+                log::warn!("unparseable list-panes line: {line:?}");
+                continue;
+            };
             // A session's first pane stands for the session; the app
             // never opens more windows, so extras are the user's doing.
             if !statuses.iter().any(|s| s.id == status.id) {
@@ -289,6 +299,14 @@ impl ProcessHost for TmuxHost {
             session_target(id),
         ]
     }
+}
+
+/// Whether the locale variables tmux consults name a UTF-8 codeset.
+fn has_utf8_locale() -> bool {
+    ["LC_ALL", "LC_CTYPE", "LANG"]
+        .iter()
+        .filter_map(std::env::var_os)
+        .any(|v| v.to_string_lossy().to_ascii_uppercase().contains("UTF-8"))
 }
 
 /// Directories a Dock-launched app's PATH lacks but a login shell has.
@@ -478,6 +496,20 @@ mod tests {
             ]
         );
         assert_eq!(TmuxHost::default_socket(), "switchboard");
+    }
+
+    #[test]
+    fn command_carries_tool_dirs_and_a_utf8_locale() {
+        let host = TmuxHost::new("switchboard-test-env", None);
+        let cmd = host.command();
+        let envs: Vec<_> = cmd
+            .get_envs()
+            .filter_map(|(k, v)| Some((k.to_string_lossy().into_owned(), v?.to_owned())))
+            .collect();
+        let path = envs.iter().find(|(k, _)| k == "PATH").expect("PATH set");
+        assert!(path.1.to_string_lossy().contains("/opt/homebrew/bin"));
+        let lang = envs.iter().find(|(k, _)| k == "LANG");
+        assert_eq!(lang.is_some(), !has_utf8_locale());
     }
 
     #[test]
