@@ -53,8 +53,7 @@ impl TmuxHost {
         Self {
             socket: socket_name.to_owned(),
             config: config_path.unwrap_or_else(|| PathBuf::from("/dev/null")),
-            bin: std::env::var_os("SWITCHBOARD_TMUX")
-                .map_or_else(|| PathBuf::from("tmux"), PathBuf::from),
+            bin: std::env::var_os("SWITCHBOARD_TMUX").map_or_else(locate_tmux, PathBuf::from),
         }
     }
 
@@ -96,7 +95,10 @@ impl TmuxHost {
     fn command(&self) -> Command {
         let mut cmd = Command::new(&self.bin);
         cmd.arg("-L").arg(&self.socket).arg("-f").arg(&self.config);
-        // The server inherits this process's environment on first start.
+        // The server inherits this process's environment on first start,
+        // and every pane inherits the server's. An app launched from the
+        // Dock gets launchd's minimal PATH, so add the usual tool dirs.
+        cmd.env("PATH", augmented_path());
         // When Switchboard itself was launched from inside a Claude Code
         // session, the inherited CLAUDE* variables make child agents skip
         // transcript writes, which breaks resume. Strip them.
@@ -287,6 +289,44 @@ impl ProcessHost for TmuxHost {
             session_target(id),
         ]
     }
+}
+
+/// Directories a Dock-launched app's PATH lacks but a login shell has.
+fn extra_bin_dirs() -> Vec<PathBuf> {
+    let home = std::env::var_os("HOME").map_or_else(|| PathBuf::from("/"), PathBuf::from);
+    vec![
+        PathBuf::from("/opt/homebrew/bin"),
+        PathBuf::from("/usr/local/bin"),
+        home.join(".local/bin"),
+    ]
+}
+
+/// `tmux` from `PATH`, else from the usual install dirs, as an absolute
+/// path so the same binary is handed to Ghostty. Falls back to the bare
+/// name, which lets the probe report "not found".
+fn locate_tmux() -> PathBuf {
+    let path_dirs = std::env::var_os("PATH")
+        .map(|p| std::env::split_paths(&p).collect::<Vec<_>>())
+        .unwrap_or_default();
+    path_dirs
+        .into_iter()
+        .chain(extra_bin_dirs())
+        .map(|d| d.join("tmux"))
+        .find(|p| p.is_file())
+        .unwrap_or_else(|| PathBuf::from("tmux"))
+}
+
+/// The current PATH with any missing [`extra_bin_dirs`] appended.
+fn augmented_path() -> std::ffi::OsString {
+    let mut dirs: Vec<PathBuf> = std::env::var_os("PATH")
+        .map(|p| std::env::split_paths(&p).collect())
+        .unwrap_or_default();
+    for d in extra_bin_dirs() {
+        if !dirs.contains(&d) {
+            dirs.push(d);
+        }
+    }
+    std::env::join_paths(dirs).unwrap_or_else(|_| std::env::var_os("PATH").unwrap_or_default())
 }
 
 /// `=name`: exact session match, so `foo` never resolves to `foobar`.
