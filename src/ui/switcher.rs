@@ -52,6 +52,13 @@ pub fn top_bar(cx: &mut DrawCtx<'_>, ui: &mut Ui, view: &View) {
         if ui.button("Add project").clicked() {
             cx.state.add_project = Some(AddProjectDraft::default());
         }
+        if ui
+            .button("Go to")
+            .on_hover_text("Find a project or session (Cmd+K)")
+            .clicked()
+        {
+            cx.state.palette = Some(super::palette::PaletteDraft::default());
+        }
 
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             let settings = cx.core.settings().clone();

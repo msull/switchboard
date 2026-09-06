@@ -470,6 +470,22 @@ fn pinned_card_previews_and_opens() {
 }
 
 #[test]
+fn quick_switcher_opens_the_best_match_on_enter() {
+    let (mut harness, ids) = harness();
+    harness.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::K);
+    harness.run_steps(2);
+    let field = harness.get_by_label("Search");
+    field.focus();
+    field.type_text("srv");
+    harness.run_steps(2);
+    harness.key_press(egui::Key::Enter);
+    harness.run_steps(2);
+    assert!(actions(&harness).contains(&AppAction::ShowSession(ids.server)));
+    assert_eq!(harness.state().core().view(), View::Session(ids.server));
+    assert!(harness.state().ui_state.palette.is_none());
+}
+
+#[test]
 fn service_header_offers_restart_and_autostart() {
     let (mut harness, ids) = harness();
     showing(&mut harness, View::Session(ids.deploy));
