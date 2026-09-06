@@ -200,6 +200,13 @@ impl AppCore {
         Vec::new()
     }
 
+    /// Populate state directly, bypassing dispatch. For UI tests and the
+    /// demo launcher only; the app itself always goes through `dispatch`.
+    pub fn seed(&mut self, workspaces: Vec<Workspace>, host: Vec<HostStatus>) {
+        self.workspaces = workspaces;
+        self.host = host;
+    }
+
     // --- read model for the UI
 
     #[must_use]

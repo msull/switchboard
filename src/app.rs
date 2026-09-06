@@ -42,6 +42,11 @@ impl SwitchboardApp {
         &self.core
     }
 
+    /// See [`AppCore::seed`]; tests and the demo launcher only.
+    pub fn core_mut_for_seeding(&mut self) -> &mut AppCore {
+        &mut self.core
+    }
+
     #[must_use]
     pub fn services(&self) -> &Services {
         &self.services
