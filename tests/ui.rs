@@ -377,6 +377,25 @@ fn host_error_and_read_only_tag_are_shown() {
 }
 
 #[test]
+fn session_view_renames_on_enter() {
+    let (mut harness, ids) = harness();
+    showing(&mut harness, View::Session(ids.server));
+    click(&mut harness, "Rename");
+    let field = harness.get_by_label("Session name");
+    field.focus();
+    field.type_text(" v2");
+    harness.run_steps(2);
+    harness.key_press(egui::Key::Enter);
+    harness.run_steps(2);
+    assert!(
+        actions(&harness).contains(&AppAction::RenameSession(ids.server, "server v2".into())),
+        "{:?}",
+        actions(&harness)
+    );
+    harness.get_by_label("server v2");
+}
+
+#[test]
 fn session_view_header_buttons_dispatch() {
     let (mut harness, ids) = harness();
     showing(&mut harness, View::Session(ids.server));

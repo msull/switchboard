@@ -21,7 +21,8 @@ for agent sessions, and `claude` and/or `codex` on `PATH`. The app tells
 you at the bottom of the window when tmux is missing.
 
 Data lives in `~/Library/Application Support/Switchboard/`: one JSON file
-per project under `projects/` (with a `.bak` of the previous version), the
+per project under `projects/` (with a `.bak` of the previous version),
+`settings.json` (theme, exclusive mode), the
 tmux config and socket name, `claude-hooks.json` (passed to Claude Code
 with `--settings`), `events.log` (the hook event log), `wake.sock`, and
 `scrollback/`. Sessions run on a private tmux server (`tmux -L

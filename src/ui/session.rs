@@ -135,7 +135,7 @@ fn header(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord) {
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.horizontal(|ui| {
-                ui.heading(&record.name);
+                name_or_editor(cx, ui, record);
                 ui.label(RichText::new(kind_label(record.kind)).weak());
                 ui.label(RichText::new(state.label()).color(state_color(ui, &state)));
                 ui.label(RichText::new(record.cwd.display().to_string()).weak());
@@ -164,6 +164,52 @@ fn header(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord) {
                 });
             });
         });
+}
+
+/// The session name as a heading with a Rename button, or, while a
+/// rename is under way, a text field: Enter commits, Esc cancels.
+fn name_or_editor(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord) {
+    let editing = cx
+        .state
+        .rename_draft
+        .as_ref()
+        .is_some_and(|(id, _)| *id == record.id);
+    if !editing {
+        ui.heading(&record.name);
+        if ui.small_button("Rename").clicked() {
+            cx.state.rename_draft = Some((record.id, record.name.clone()));
+        }
+        return;
+    }
+    let mut done = None;
+    if let Some((_, draft)) = cx.state.rename_draft.as_mut() {
+        let label = ui.label("Session name").id;
+        let response = ui
+            .add(egui::TextEdit::singleline(draft).desired_width(220.0))
+            .labelled_by(label);
+        response.request_focus();
+        let (enter, escape) = ui.input(|i| {
+            (
+                i.key_pressed(egui::Key::Enter),
+                i.key_pressed(egui::Key::Escape),
+            )
+        });
+        if enter {
+            done = Some(Some(draft.trim().to_owned()));
+        } else if escape {
+            done = Some(None);
+        }
+    }
+    match done {
+        Some(Some(name)) => {
+            cx.state.rename_draft = None;
+            if !name.is_empty() && name != record.name {
+                cx.dispatch(AppAction::RenameSession(record.id, name));
+            }
+        }
+        Some(None) => cx.state.rename_draft = None,
+        None => {}
+    }
 }
 
 fn notes(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord) {

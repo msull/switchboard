@@ -56,6 +56,8 @@ pub struct UiState {
     pub new_session: Option<NewSessionDraft>,
     /// Notes text being edited in the session view, with its record.
     pub notes_draft: Option<(RecordId, String)>,
+    /// A session name being edited in the session header.
+    pub rename_draft: Option<(RecordId, String)>,
     /// Message being composed for a session, sent with Enter.
     pub input_draft: Option<(RecordId, String)>,
     /// Embedded terminals, only ever the one for the session on screen.
@@ -79,6 +81,7 @@ impl Default for UiState {
             add_project: None,
             new_session: None,
             notes_draft: None,
+            rename_draft: None,
             input_draft: None,
             terminals: HashMap::new(),
             applied_theme: None,
