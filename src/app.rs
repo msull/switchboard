@@ -89,8 +89,9 @@ impl SwitchboardApp {
             Err(e) => Err(e),
         };
         self.dispatch(AppAction::StoreLoaded(loaded));
-        self.poll_host();
+        self.last_poll = Some(Instant::now());
         self.poll_events();
+        self.poll_host();
     }
 
     #[must_use]

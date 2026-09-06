@@ -14,6 +14,7 @@ pub mod adapters;
 pub mod app;
 pub mod core;
 pub mod ports;
+pub mod script;
 pub mod ui;
 
 pub use app::SwitchboardApp;

@@ -65,6 +65,13 @@ fn main() -> eframe::Result {
             };
             let mut app = SwitchboardApp::with_services(services);
             app.start();
+            // Dev aid: a script of actions to run at startup.
+            if let Some(path) = std::env::var_os("SWITCHBOARD_SCRIPT") {
+                match std::fs::read_to_string(&path) {
+                    Ok(text) => switchboard::script::run(&mut app, &text),
+                    Err(e) => log::error!("script {}: {e}", path.to_string_lossy()),
+                }
+            }
             Ok(Box::new(app))
         }),
     )
