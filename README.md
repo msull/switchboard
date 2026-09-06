@@ -83,6 +83,7 @@ src/adapters/
   store.rs               JSON store: atomic writes, .bak, flock
   tmux.rs                tmux process host on the private socket
   hooks.rs               append-first event log + socket wake-up + hook settings JSON
+  files.rs               project file index: gitignore-aware scan, lazy children, fuzzy match
   agents.rs              Claude Code / Codex launch, resume, preflight, discovery
   transcript.rs          Claude Code transcript (JSONL) -> Conversation turns
   ghostty.rs             open, reveal, Ghostty window launch and raise
@@ -93,6 +94,8 @@ src/ui/
   mod.rs                 UiState, draw loop (collect actions, then dispatch), keyboard
   switcher.rs            top bar (project strip, badge, add project) and bottom bar
   board.rs               one project's board of cards, pinned documents, notes
+  files.rs               file side panel: lazy tree, fuzzy finder, right-click hand-offs
+  document.rs            read-only preview view: Markdown, text, images
   cards.rs               session and document cards, state colors
   session.rs             session view: header, notes, embedded terminal or conversation + message box
   switchboard.rs         every session across projects, waiting first

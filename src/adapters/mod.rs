@@ -2,6 +2,7 @@
 
 pub mod agents;
 pub mod fakes;
+pub mod files;
 pub mod ghostty;
 pub mod hooks;
 pub mod store;

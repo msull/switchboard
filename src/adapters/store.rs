@@ -441,6 +441,7 @@ mod tests {
         let settings = Settings {
             theme: ThemeMode::Dark,
             exclusive: true,
+            editor: "zed".into(),
         };
         store.save_settings(&settings).unwrap();
         assert_eq!(store.load_all().unwrap().settings, settings);

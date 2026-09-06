@@ -179,19 +179,39 @@ fn card_buttons(cx: &mut DrawCtx<'_>, ui: &mut Ui, id: RecordId, running: bool) 
     });
 }
 
-/// A pinned document. Opening it needs an `Effect::OpenPath`, which no
-/// UI action produces yet, so the card only shows the file for now.
-// TODO: dispatch an open-document action once the core exposes one.
-pub fn document_card(ui: &mut Ui, path: &Path) {
-    ui.allocate_ui(vec2(CARD_SIZE.x, 48.0), |ui| {
-        egui::Frame::group(ui.style())
-            .inner_margin(GAP)
-            .show(ui, |ui| {
-                ui.set_min_width(CARD_SIZE.x - 2.0 * GAP);
-                ui.strong(file_name(path));
-                ui.label(RichText::new(path.display().to_string()).weak().small());
-            });
-    });
+/// A pinned document: click previews it; the buttons open it in the
+/// default app or unpin it. `rel` is the path as stored (relative to the
+/// project root), `path` the absolute one.
+pub fn document_card(cx: &mut DrawCtx<'_>, ui: &mut Ui, pid: ProjectId, rel: &Path, path: &Path) {
+    let response = ui
+        .allocate_ui(vec2(CARD_SIZE.x, 64.0), |ui| {
+            egui::Frame::group(ui.style())
+                .inner_margin(GAP)
+                .show(ui, |ui| {
+                    ui.set_min_width(CARD_SIZE.x - 2.0 * GAP);
+                    ui.strong(file_name(path));
+                    // The folder, when there is one; the name is above.
+                    if let Some(dir) = rel.parent().filter(|d| !d.as_os_str().is_empty()) {
+                        ui.label(RichText::new(dir.display().to_string()).weak().small());
+                    }
+                    ui.horizontal(|ui| {
+                        if ui
+                            .small_button("Open in app")
+                            .on_hover_text("Open with the default app")
+                            .clicked()
+                        {
+                            cx.dispatch(AppAction::OpenDocument(path.to_path_buf()));
+                        }
+                        if ui.small_button("Unpin").clicked() {
+                            cx.dispatch(AppAction::UnpinDocument(pid, rel.to_path_buf()));
+                        }
+                    });
+                });
+        })
+        .response;
+    if response.interact(Sense::click()).clicked() {
+        cx.dispatch(AppAction::ShowDocument(pid, path.to_path_buf()));
+    }
 }
 
 fn last_line(text: &str) -> String {

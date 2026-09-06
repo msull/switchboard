@@ -3,7 +3,7 @@
 //! clicking. Lines: `add-project <name> <root>`, `new-shell <project>
 //! <name>`, `new-claude <project> <name>`, `new-codex <project> <name>`,
 //! `new-service <project> <name> <command...>`, `show-board <project>`,
-//! `show-session <name>`, `send <name> <text...>`, `return <name>`,
+//! `show-session <name>`, `show-document <project> <relative path>`, `send <name> <text...>`, `return <name>`,
 //! `kill <name>`, `switchboard`, `sleep <secs>` (then polls).
 //! Blank lines and `#` comments are ignored; unknown lines are logged.
 
@@ -98,6 +98,10 @@ fn step(app: &mut SwitchboardApp, w: &[&str]) -> Result<(), String> {
         ["show-board", p] => {
             let (id, _) = project(app, p)?;
             app.dispatch(AppAction::ShowBoard(id));
+        }
+        ["show-document", p, rel] => {
+            let (id, root) = project(app, p)?;
+            app.dispatch(AppAction::ShowDocument(id, root.join(rel)));
         }
         ["show-session", n] => {
             let id = session(app, n)?;

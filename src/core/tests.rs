@@ -196,7 +196,7 @@ fn set_theme_saves_settings_once_per_change() {
         effects,
         vec![Effect::SaveSettings(Settings {
             theme: ThemeMode::Dark,
-            exclusive: false,
+            ..Settings::default()
         })]
     );
     assert_eq!(core.settings().theme, ThemeMode::Dark);
@@ -204,6 +204,63 @@ fn set_theme_saves_settings_once_per_change() {
         core.dispatch(AppAction::SetTheme(ThemeMode::Dark), Clock::at(1))
             .is_empty()
     );
+}
+
+#[test]
+fn quiet_codex_pane_reads_idle_until_output_resumes() {
+    let p = project("p");
+    let mut w = Workspace::new(p.clone());
+    let r = record(p.id, codex(), 0);
+    let id = r.id;
+    w.sessions.push(r);
+    let (mut core, _) = loaded(vec![w], vec![]);
+    let now = Clock::at(60_000);
+    let mut status = running(id);
+    status.last_activity = Some(now.wall - Duration::from_secs(5));
+    core.dispatch(AppAction::HostListed(vec![status.clone()]), now);
+    assert_eq!(core.card_state(id), CardState::Working);
+    status.last_activity = Some(now.wall - Duration::from_secs(30));
+    core.dispatch(AppAction::HostListed(vec![status.clone()]), now);
+    assert_eq!(core.card_state(id), CardState::Idle);
+    // Claude Code has hooks, so silence means nothing for it.
+    let mut w2 = Workspace::new(project("q"));
+    let r2 = record(w2.project.id, agent(), 0);
+    let id2 = r2.id;
+    w2.sessions.push(r2);
+    let (mut core2, _) = loaded(vec![w2], vec![]);
+    let mut s2 = running(id2);
+    s2.last_activity = Some(now.wall - Duration::from_secs(300));
+    core2.dispatch(AppAction::HostListed(vec![s2]), now);
+    assert_eq!(core2.card_state(id2), CardState::Working);
+}
+
+#[test]
+fn document_view_and_file_actions() {
+    let p = project("p");
+    let pid = p.id;
+    let (mut core, _) = loaded(vec![Workspace::new(p)], vec![]);
+    let doc = PathBuf::from("/work/p/docs/design.md");
+    let e = core.dispatch(AppAction::ShowDocument(pid, doc.clone()), Clock::at(1));
+    assert_eq!(core.view(), View::Document(pid, doc.clone()));
+    assert_eq!(saves(&e), 1, "showing a document marks the project active");
+    assert_eq!(
+        core.dispatch(AppAction::OpenDocument(doc.clone()), Clock::at(2)),
+        vec![Effect::OpenPath(doc.clone())]
+    );
+    assert_eq!(
+        core.dispatch(AppAction::RevealDocument(doc.clone()), Clock::at(3)),
+        vec![Effect::Reveal(doc.clone())]
+    );
+    core.dispatch(AppAction::SetEditor(" zed ".into()), Clock::at(4));
+    assert_eq!(
+        core.dispatch(AppAction::OpenInEditor(doc.clone()), Clock::at(5)),
+        vec![Effect::OpenInEditor {
+            editor: "zed".into(),
+            path: doc
+        }]
+    );
+    core.dispatch(AppAction::Back, Clock::at(6));
+    assert_eq!(core.view(), View::Switchboard);
 }
 
 #[test]

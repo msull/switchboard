@@ -31,7 +31,7 @@ pub fn top_bar(cx: &mut DrawCtx<'_>, ui: &mut Ui, view: &View) {
         ui.separator();
 
         let active = match view {
-            View::Board(pid) => Some(*pid),
+            View::Board(pid) | View::Document(pid, _) => Some(*pid),
             View::Session(id) => cx.core.session(*id).map(|s| s.project),
             View::Switchboard => None,
         };
@@ -61,6 +61,24 @@ pub fn top_bar(cx: &mut DrawCtx<'_>, ui: &mut Ui, view: &View) {
                     if ui.radio(mode == settings.theme, mode.label()).clicked() {
                         cx.dispatch(AppAction::SetTheme(mode));
                         ui.close();
+                    }
+                }
+                ui.separator();
+                ui.label(RichText::new("Editor command").weak());
+                let draft = cx
+                    .state
+                    .editor_draft
+                    .get_or_insert_with(|| settings.editor.clone());
+                let field = ui.add(
+                    egui::TextEdit::singleline(draft)
+                        .hint_text("code, zed, cursor (blank: system editor)")
+                        .desired_width(200.0),
+                );
+                if field.lost_focus() {
+                    let editor = draft.clone();
+                    cx.state.editor_draft = None;
+                    if editor.trim() != settings.editor {
+                        cx.dispatch(AppAction::SetEditor(editor));
                     }
                 }
                 ui.separator();

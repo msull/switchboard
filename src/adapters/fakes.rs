@@ -195,6 +195,7 @@ impl AgentLauncher for FakeAgents {
 pub struct FakeOpenerState {
     pub opened: Vec<PathBuf>,
     pub revealed: Vec<PathBuf>,
+    pub edited: Vec<(String, PathBuf)>,
     pub terminals: Vec<(String, Vec<String>, PathBuf)>,
     pub raised: Vec<String>,
     /// Titles `raise_terminal` reports as existing.
@@ -217,6 +218,12 @@ impl Opener for FakeOpener {
     }
     fn reveal(&self, path: &Path) -> Result<(), String> {
         self.state().revealed.push(path.to_path_buf());
+        Ok(())
+    }
+    fn open_editor(&self, editor: &str, path: &Path) -> Result<(), String> {
+        self.state()
+            .edited
+            .push((editor.into(), path.to_path_buf()));
         Ok(())
     }
     fn open_terminal(&self, title: &str, argv: &[String], cwd: &Path) -> Result<(), String> {
