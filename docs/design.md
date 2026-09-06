@@ -158,6 +158,14 @@ of the workspace record and comes back with it. "Waiting on you" cards
 sort or highlight first so the board is also a to-do list of agents that
 need attention.
 
+**The switchboard.** Above all workspaces sits the view the app is named
+for: every session across every project that is running, waiting, or
+recently exited, as one list of cards grouped by project and sorted with
+*waiting on you* first. It is the morning start page and the "what did I
+leave running" check before shutting the laptop. Clicking a card switches
+to that workspace and opens the session. The dock badge counts the
+sessions waiting on you.
+
 **The session view.** The terminal for one session, with its metadata in
 a sidebar (notes, env profile, resume handle, scrollback link). Never a
 dead end: the board is one keystroke away, and the next waiting session
@@ -227,7 +235,8 @@ Follows the template layering. Nothing below touches egui.
    host and terminal view.
 1. **Workspace records.** Projects, sessions as records on a board of
    cards, launch and return-to for agents via hand-off to a real
-   terminal, session state from the spike's signal. Restart the app,
+   terminal, session state from the spike's signal, and the cross-project
+   switchboard view built from the same records. Restart the app,
    reboot the machine, everything is still listed and resumable. This is
    the product's reason to exist, so it comes before the file browser.
 2. **Projects and files.** Tree, fuzzy finder, preview, open in default
@@ -237,7 +246,7 @@ Follows the template layering. Nothing below touches egui.
 4. **Environment.** Profiles, Keychain secrets, masked view,
    `.env.example` diff, missing-variable warnings.
 5. **Git awareness and polish.** Decorations, sub-repo discovery, global
-   quick-switcher, dock badge with running-service count.
+   quick-switcher, dock badge with waiting-session count.
 
 ## Open questions
 
