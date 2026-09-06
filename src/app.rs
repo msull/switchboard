@@ -50,6 +50,8 @@ pub struct SwitchboardApp {
     services: Services,
     started: Instant,
     last_poll: Option<Instant>,
+    /// The waiting count last put on the Dock badge.
+    badge: Option<usize>,
     last_caption: Option<Instant>,
     discoveries: Vec<Discovery>,
     /// Transient state owned by the UI (dialog drafts, embedded terminals).
@@ -72,6 +74,7 @@ impl SwitchboardApp {
             services,
             started: Instant::now(),
             last_poll: None,
+            badge: None,
             last_caption: None,
             discoveries: Vec::new(),
             ui_state: UiState::default(),
@@ -510,9 +513,14 @@ impl eframe::App for SwitchboardApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.dispatch(AppAction::Tick);
         if self.last_poll.is_some() {
-            // Only after `start`: tests never poll.
+            // Only after `start`: tests never poll, and never badge.
             self.pump();
             ui.ctx().request_repaint_after(POLL_INTERVAL);
+            let waiting = self.core.waiting_count();
+            if self.badge != Some(waiting) {
+                crate::adapters::dock::set_waiting_badge(waiting);
+                self.badge = Some(waiting);
+            }
         }
         crate::ui::draw(self, ui);
     }

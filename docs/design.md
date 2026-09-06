@@ -555,6 +555,14 @@ Not done: the parser-fed readable history with its own cap and search,
 raw-stream rotation in the running app, and a per-session "delete
 scrollback" action separate from Remove.
 
+## Milestone 5 progress (2026-09-06)
+
+- **Dock badge.** The number of sessions waiting on you sits on the Dock
+  icon (AppKit `dockTile`, main thread, updated only when the count
+  changes; exclusive mode hides other projects' counts too). Verified
+  with an injected `PermissionRequest` hook event: card, "1 waiting", red
+  project dot, and the badge all agreed.
+
 ## Open questions
 
 - When the shareable project config arrives, is a hash-and-approve flow

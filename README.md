@@ -83,6 +83,7 @@ src/adapters/
   store.rs               JSON store: atomic writes, .bak, flock
   tmux.rs                tmux process host on the private socket
   hooks.rs               append-first event log + socket wake-up + hook settings JSON
+  dock.rs                Dock badge with the waiting-session count (macOS)
   files.rs               project file index: gitignore-aware scan, lazy children, fuzzy match
   scrollback.rs          read the pipe-pane stream back as plain text (cold sessions)
   agents.rs              Claude Code / Codex launch, resume, preflight, discovery

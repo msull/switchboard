@@ -1,6 +1,7 @@
 //! Concrete implementations of the ports, plus fakes for tests.
 
 pub mod agents;
+pub mod dock;
 pub mod fakes;
 pub mod files;
 pub mod ghostty;
