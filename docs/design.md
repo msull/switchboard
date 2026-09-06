@@ -2,175 +2,206 @@
 
 ## Status
 
-Initial design draft, 2026-09-05. Written before any code beyond the
-scaffold. Expect the terminal section to change after the spike.
+Design draft, 2026-09-05, revised the same day to put persistence at the
+center. Written before any code beyond the scaffold. Expect the terminal
+section to change after the spike.
 
-## Product concept
+## The problem
 
-Switchboard is a desktop app for the person who runs many things at once
-with coding agents: several clients, several repos, and a few non-code
-responsibilities that still benefit from notes, tooling, and an agent.
+Cmux (a macOS multiplexer built on embedded Ghostty, aimed at agent coding
+sessions) does most of what is needed: workspaces per project, several
+agent sessions side by side, a terminal that feels native. It has two
+gaps, and the first is the reason Switchboard exists:
 
-Everything hangs off a **project**: a root directory on disk, almost always
-with a git repo somewhere inside it. Within a project you:
+1. **Workspaces do not survive a restart.** A good workspace takes real
+   effort to set up: named agent sessions mid-task, a dev server, a few
+   shells in the right directories. Those get revisited weeks or a month
+   later. A reboot, an app update, or a crash loses all of it.
+2. **No file management.** Finding, previewing, and opening the files a
+   session is working on means leaving for Finder or an editor.
 
-- see the folder structure and get to any file fast, with a preview
-  (Markdown rendered) and a one-keystroke jump to the default program;
-- launch coding agents, several at a time, give each session a name, and
-  come back to it later;
-- run saved commands and long-running services (a dev server, a watcher)
-  in a terminal-like pane;
-- keep the project's environment variables straight.
+Switchboard is that tool with persistence as the first design constraint
+and a file browser beside the sessions.
 
-Concrete projects: one per client; one each for Prompt Box and
-Switchboard; one for the PTA role; one for Cub Scouts. Some projects *are*
-the repo (Prompt Box). Others are a workspace folder holding notes,
-tooling, and metadata, with the real work in repos one level down.
-Switchboard must be comfortable with both.
+## The core idea: workspaces are data, processes are a cache
+
+Nothing survives a reboot except what is on disk. So a workspace is never
+"a set of running processes." It is a **description** on disk of what
+should be running, plus everything needed to bring each piece back:
+
+- for a shell: its directory and environment profile;
+- for a command or service: its command line, directory, env profile;
+- for an agent session: all of the above plus the agent's own **resume
+  handle** (Claude Code's session id, for example), the name you gave it,
+  and your notes about where it was;
+- for every session: the scrollback, on disk, so what happened is
+  readable even when nothing is running.
+
+Running processes are a cache of that description. Switchboard starts
+them on demand, reattaches to them if they are still alive, and writes
+enough back to the description (last seen, exit code, updated resume
+handle) that the next start picks up where the last left off. Quitting
+Switchboard, restarting it, or rebooting the machine changes only whether
+the cache is warm.
+
+This is the discipline the whole app follows: every feature asks "what is
+the on-disk record, and how is it rehydrated?" before "what does the pane
+look like?"
 
 ## Priorities, in order
 
-1. **Never lose a session.** A named agent session, a running service, or
-   an unsaved note must survive Switchboard quitting or crashing, or at
-   least be resumable with one click.
+1. **A workspace comes back.** After quit, crash, update, or reboot, every
+   project shows its sessions by name with a one-click return. Agent
+   sessions resume their conversation where the agent supports it. A
+   month-old workspace is as usable as one from this morning.
 2. **Fast to the file.** Open a project, find a file, read it, open it
    elsewhere: seconds, keyboard-driven.
 3. **One place for the running things.** What is running, in which
-   project, since when, is it healthy. No hunting through terminal tabs.
+   project, since when, is it healthy.
 4. **Stay out of the way.** Switchboard organizes; it does not wrap or
    reinvent the agents, editors, or shells. If the native tool is better
    at something, hand off to it.
-5. **Portable core.** The project model, session registry, and command
-   runner do not depend on egui, so a CLI or a different front end can
-   reuse them.
+5. **Portable core.** The workspace model and session registry do not
+   depend on egui, so a CLI or another front end can reuse them.
 
 ## Concepts
 
 ### Project
 
-- `name`, `root` (absolute path), optional `notes` (Markdown, stored in
-  the project), optional tags for grouping (client, personal, code).
+- `name`, `root` (absolute path), optional `notes` (Markdown), optional
+  tags for grouping (client, personal, code).
+- Concrete projects: one per client; one each for Prompt Box and
+  Switchboard; one for the PTA role; one for Cub Scouts.
 - **Layout kinds**, detected rather than declared: `root` is itself a git
-  repo, or `root` contains one or more repos in subdirectories. Both are
-  shown the same way; the git decorations attach to whichever directories
-  are repos.
-- Project-local metadata lives in `<root>/.switchboard/` (sessions,
-  commands, env settings) so it travels with the folder and can be
-  git-ignored or committed as the user prefers. The global list of
-  projects lives in the platform data directory.
+  repo, or `root` contains repos in subdirectories with notes and tooling
+  beside them. Both are shown the same way; git decorations attach to
+  whichever directories are repos.
+- Project-local records live in `<root>/.switchboard/` so they travel
+  with the folder. The global list of projects lives in the platform data
+  directory. Both are plain files (JSON or TOML), human-readable and
+  hand-editable, so a broken app never locks the user out of their own
+  workspace records.
+
+### Workspace record
+
+One per project, the durable heart of the app. Contains the list of
+sessions with, per session:
+
+- `name`, `kind` (agent, command, service, shell), `cwd`, `command line`,
+  `env profile`, `created`, `last seen`, `notes`;
+- `resume` (kind-specific: agent session id, or nothing);
+- `layout` hints (which sessions were open, in what order) so the view
+  comes back as it was;
+- `scrollback` path.
+
+Written on every change, never only on quit. A crash loses at most the
+last few seconds.
+
+### Session kinds
+
+- **Agent sessions** are the reason for the app. Naming is required at
+  launch. On launch, Switchboard captures the agent's resume handle;
+  "return to it" runs the agent's resume command in the recorded
+  directory. If the agent cannot resume, it still comes back with its
+  scrollback, notes, and directory, and a fresh agent can be started with
+  the notes as context.
+- **Services** are long-running commands with start/stop, a health line
+  (running since, exit code if it died), and a log tail. Marked
+  `autostart` or not; a workspace can bring its dev server back with it.
+- **Commands** are one-shot, saved per project with a name, exit code
+  recorded.
+- **Shells** are plain terminals in a directory.
 
 ### File browser and preview
 
-- Tree of the root, lazily loaded, with a fuzzy file finder (type to
-  filter across the whole project, honoring `.gitignore`).
-- Preview pane for the selected file: rendered Markdown, syntax-highlighted
-  text, images, and a size-capped hex/plain fallback. Read-only.
+- Tree of the root, lazily loaded, with a fuzzy finder across the project
+  honoring `.gitignore`.
+- Preview pane: rendered Markdown, syntax-highlighted text, images, a
+  size-capped fallback. Read-only.
 - Actions: open in default app, open in editor, reveal in Finder, copy
-  path. Directories: open in terminal (a new session in that directory).
-- Git decorations on tree rows: modified, untracked, branch name on repo
-  roots. Cheap polling, not a full git client.
-
-### Session
-
-A session is anything with a terminal attached, tracked by the project.
-
-- Fields: `name`, `kind` (agent, command, service, shell), `cwd`,
-  `command line`, `env profile`, `created`, `last seen`, free-form `notes`.
-- **Agent sessions** are the reason for the app. Naming is required at
-  launch ("dock badge", "refactor persistence"). Where the agent supports
-  it, record its own resume handle (Claude Code's session id, for example)
-  so "return to it" works even after the process is gone.
-- **Services** are long-running commands with a start/stop button, a
-  health line (running since, exit code if it died), and a log tail. Think
-  `npm start`.
-- **Commands** are one-shot, saved per project with a name, run in a
-  terminal pane, exit code recorded.
-- Every session's transcript is kept on disk (a scrollback file) so
-  reading what happened does not depend on the process still existing.
+  path; for directories, open a shell session there.
+- Git decorations on rows: modified, untracked, branch on repo roots.
 
 ### Environment
 
-- Each project has zero or more **env profiles**: named sets of variables,
-  layered: global secrets (stored in the macOS Keychain, referenced by
-  name) < project `.env` files < profile overrides.
-- Sessions pick a profile at launch; the resolved environment is shown
-  with secret values masked.
-- Helpers: diff `.env` against `.env.example`, flag variables a saved
-  command references but the profile does not define, never write secrets
-  to disk in plaintext outside the `.env` files the user already owns.
+- Env profiles per project, layered: global secrets (macOS Keychain,
+  referenced by name) < project `.env` files < profile overrides.
+- Sessions record which profile they use; the resolved environment is
+  shown with secrets masked.
+- Helpers: diff `.env` against `.env.example`; flag variables a saved
+  command references but the profile does not define. Secrets are never
+  written in plaintext anywhere the user did not already put them.
 
-## The terminal question (Spike 0)
+## Spike 0: resumability first, rendering second
 
-Everything session-shaped needs a terminal. The choice decides the app's
-feel, so it gets a spike before Milestone 1. Options, roughly in order of
-how much Switchboard has to build:
+The spike exists to prove the core idea against the real agents before
+any UI is built. Questions, in order:
 
-1. **Hand off entirely.** Switchboard launches a named tmux session in
-   Ghostty (or the user's terminal) and tracks it. Persistence comes free
-   from the tmux server surviving app restarts. Switchboard shows only the
-   metadata and a "jump to" button. Cheapest, and consistent with
-   priority 4, but the app is then a launcher, and reading a session means
-   leaving the app.
-2. **tmux as backend, Switchboard as renderer.** Use tmux control mode
-   (`tmux -CC`, what iTerm2 does) to own the processes and their
-   persistence, and render panes inside egui. Requires a terminal renderer
-   in egui but no PTY management of our own, and sessions outlive the app.
-3. **Own the PTYs.** `portable-pty` plus `alacritty_terminal` for the grid
-   and a custom egui view (evaluate the `egui_term` crate before writing
-   one). Full control and no tmux dependency, but sessions die with the
-   app unless we add our own daemon, which is exactly what tmux is.
+1. **Can Claude Code sessions be captured and resumed reliably?** Confirm
+   the exact mechanism: whether a session id can be assigned at launch or
+   must be discovered from `~/.claude/projects/` after the fact, whether
+   `--resume` works from a different terminal weeks later, and what state
+   (permissions, working directory) it needs. Repeat for any other agent
+   in use (Codex, etc.).
+2. **What survives an app restart without a reboot, and is it worth
+   keeping?** A tmux server keeps processes alive across Switchboard
+   restarts. That is a nice warm cache, but it must not become the
+   persistence mechanism, since it dies on reboot. Decide whether tmux is
+   the process host (also giving reattach for free) or whether Switchboard
+   owns PTYs directly and accepts that processes die with it.
+3. **How is a terminal shown?** Only after 1 and 2. Options: hand off to
+   Ghostty or Cmux with a jump-to button; render tmux control mode panes
+   in egui; or own PTYs with `alacritty_terminal` and an egui view
+   (evaluate the `egui_term` crate first). Measure whether an
+   egui-rendered terminal handles a full-screen TUI (a coding agent,
+   `vim`) acceptably.
 
-The spike measures, for options 2 and 3: does an egui-rendered terminal
-handle a full-screen TUI (a coding agent, `vim`, `htop`) with acceptable
-latency and correct colors, and how much code that takes. It also checks
-whether Ghostty can be embedded (libghostty) or scripted well enough to
-make option 1 feel integrated. Deliverable: a `spikes/terminal` crate with
-a README of findings and a recommendation.
-
-Likely outcome: start with option 1 for agents (the agent's own TUI is
-best in a real terminal) and option 2 or 3 for commands and services
-(where a log-like pane is enough), then revisit.
+Deliverable: `spikes/resume/` with a README recording the mechanisms
+that actually work, and a recommendation for the process host and the
+terminal view. Likely shape: tmux as the warm cache and process host,
+agents resumed through their own commands, terminal shown either in
+Ghostty via hand-off or in egui depending on what question 3 finds.
 
 ## Architecture
 
 Follows the template layering. Nothing below touches egui.
 
-- `core`: project registry, session registry, env resolution, the state
-  machine for launching, watching, and retiring sessions. Actions in,
-  effects out, clock injected.
-- `ports`: `FileSystem` (list, read, watch), `Git` (status, branch, repo
-  discovery), `ProcessRunner` (spawn with env and cwd, stream output,
-  signal), `Terminal` (whatever the spike chooses), `Opener` (default app,
-  editor, Finder), `SecretStore` (Keychain), `Store` (project and session
-  metadata).
+- `core`: project registry, workspace records, env resolution, and the
+  state machine for launching, watching, reattaching, and retiring
+  sessions. Actions in, effects out, clock injected. The rehydration
+  logic (record in, list of launch effects out) is pure and fully unit
+  tested.
+- `ports`: `Store` (records), `FileSystem` (list, read, watch), `Git`
+  (status, branch, repo discovery), `ProcessHost` (spawn with env and
+  cwd, attach, signal, stream output), `Terminal` (whatever the spike
+  chooses), `Opener` (default app, editor, Finder), `SecretStore`.
 - `adapters`: real implementations, each with a fake. The fake process
-  runner plays back scripted output so UI tests never spawn anything.
+  host plays scripted output so UI tests never spawn anything.
 - `app`: runs effects, drains worker channels, feeds results back.
-- `ui`: three-column layout: projects, tree and finder, detail (preview or
-  session pane). Sessions list per project with status dots.
+- `ui`: projects, tree and finder, detail (preview or session view).
 
 ## Milestones
 
-0. **Terminal spike.** Answer the question above; pick an approach.
-1. **Projects and files.** Add and switch projects, tree, fuzzy finder,
-   preview (Markdown, text, images), open in default app and editor,
-   reveal in Finder. Persisted project list. Usable on its own.
-2. **Commands and services.** Saved commands, run in a pane, exit codes.
-   Services with start/stop and health. Scrollback on disk.
-3. **Agent sessions.** Named launches, session list, return-to, resume
-   handles for Claude Code. Notes per session.
-4. **Environment.** Profiles, Keychain-backed secrets, masked view,
+0. **Resumability spike.** Prove agent resume and choose the process
+   host and terminal view.
+1. **Workspace records.** Projects, sessions as records, launch and
+   return-to for agents via hand-off to a real terminal. Restart the app,
+   reboot the machine, everything is still listed and resumable. This is
+   the product's reason to exist, so it comes before the file browser.
+2. **Projects and files.** Tree, fuzzy finder, preview, open in default
+   app and editor, reveal in Finder.
+3. **Commands and services.** Saved commands, services with start/stop,
+   autostart, health, scrollback on disk.
+4. **Environment.** Profiles, Keychain secrets, masked view,
    `.env.example` diff, missing-variable warnings.
 5. **Git awareness and polish.** Decorations, sub-repo discovery, global
-   quick-switcher across projects, dock badge with running-service count.
+   quick-switcher, dock badge with running-service count.
 
 ## Open questions
 
-- How much of a session's state is worth persisting beyond "how to resume
-  it"? Full scrollback for every command may be more disk than value.
+- How much scrollback to keep per session? Full history for every
+  command may be more disk than value; agents keep their own transcripts.
 - Should `.switchboard/` be committed by default? Sessions are personal;
   saved commands are arguably shared.
-- Is a Markdown *editor* for project notes in scope, or is "open in
-  editor" enough? Leaning enough, per priority 4.
-- Multiple machines: is a project list sync (iCloud Drive, a dotfiles
-  repo) needed early? Leaning no.
+- Notes editor in scope, or "open in editor"? Leaning open in editor.
+- Multiple machines: sync the project list early? Leaning no.
