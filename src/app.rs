@@ -10,6 +10,7 @@ use crate::ports::events::EventSource;
 use crate::ports::host::ProcessHost;
 use crate::ports::opener::Opener;
 use crate::ports::store::Store;
+use crate::ui::UiState;
 
 pub struct Services {
     pub store: Box<dyn Store>,
@@ -23,6 +24,13 @@ pub struct SwitchboardApp {
     core: AppCore,
     services: Services,
     started: Instant,
+    /// Transient state owned by the UI (dialog drafts, embedded terminals).
+    /// Nothing in here is persisted or read by the core.
+    pub ui_state: UiState,
+    /// When set, every dispatched action is also appended to `dispatched`.
+    /// UI tests use this to assert what a click did.
+    pub record_actions: bool,
+    pub dispatched: Vec<AppAction>,
 }
 
 impl SwitchboardApp {
@@ -34,6 +42,9 @@ impl SwitchboardApp {
             core: AppCore::new(),
             services,
             started: Instant::now(),
+            ui_state: UiState::default(),
+            record_actions: false,
+            dispatched: Vec::new(),
         }
     }
 
@@ -61,6 +72,9 @@ impl SwitchboardApp {
 
     /// The single entry point for every user, worker, or timer action.
     pub fn dispatch(&mut self, action: AppAction) {
+        if self.record_actions {
+            self.dispatched.push(action.clone());
+        }
         let now = self.clock();
         let effects = self.core.dispatch(action, now);
         for effect in effects {

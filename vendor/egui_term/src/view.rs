@@ -133,7 +133,12 @@ impl<'a> TerminalView<'a> {
     }
 
     fn process_input(self, layout: &Response, state: &mut TerminalViewState) -> Self {
-        if !layout.has_focus() || !layout.contains_pointer() {
+        // Switchboard patch: keyboard input follows egui focus, pointer input
+        // follows the pointer. Upstream required both, which dropped keys
+        // whenever the mouse rested outside the widget.
+        let has_focus = layout.has_focus();
+        let has_pointer = layout.contains_pointer();
+        if !has_focus && !has_pointer {
             return self;
         }
 
@@ -146,13 +151,17 @@ impl<'a> TerminalView<'a> {
                 egui::Event::Text(_)
                 | egui::Event::Key { .. }
                 | egui::Event::Copy
-                | egui::Event::Paste(_) => input_actions.push(process_keyboard_event(
-                    event,
-                    self.backend,
-                    &self.bindings_layout,
-                    modifiers,
-                )),
-                egui::Event::MouseWheel { unit, delta, .. } => input_actions.push(
+                | egui::Event::Paste(_)
+                    if has_focus =>
+                {
+                    input_actions.push(process_keyboard_event(
+                        event,
+                        self.backend,
+                        &self.bindings_layout,
+                        modifiers,
+                    ))
+                }
+                egui::Event::MouseWheel { unit, delta, .. } if has_pointer => input_actions.push(
                     process_mouse_wheel(state, self.font.font_type().size, unit, delta),
                 ),
                 egui::Event::PointerButton {
@@ -161,7 +170,7 @@ impl<'a> TerminalView<'a> {
                     modifiers,
                     pos,
                     ..
-                } => input_actions.push(process_button_click(
+                } if has_pointer => input_actions.push(process_button_click(
                     state,
                     layout,
                     self.backend,
@@ -171,7 +180,7 @@ impl<'a> TerminalView<'a> {
                     &modifiers,
                     pressed,
                 )),
-                egui::Event::PointerMoved(pos) => {
+                egui::Event::PointerMoved(pos) if has_pointer => {
                     input_actions = process_mouse_move(state, layout, self.backend, pos, &modifiers)
                 }
                 _ => {}
