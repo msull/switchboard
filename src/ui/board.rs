@@ -8,6 +8,33 @@ use super::dialogs::NewSessionDraft;
 use super::{DrawCtx, GAP, PAD};
 use crate::core::ProjectId;
 
+/// Branch and change count per repository the project holds, from the
+/// file side's git state (refreshed there).
+fn git_line(cx: &mut DrawCtx<'_>, ui: &mut Ui, pid: ProjectId) {
+    let Some(git) = cx.state.files.get(&pid).and_then(|f| f.git.clone()) else {
+        return;
+    };
+    for repo in &git.repos {
+        let name = if repo.rel.as_os_str().is_empty() {
+            String::new()
+        } else {
+            format!("{} ", repo.rel.display())
+        };
+        let text = format!("{name}on {}", repo.branch);
+        ui.label(RichText::new(text).weak())
+            .on_hover_text("git branch");
+        if repo.changed > 0 {
+            ui.label(
+                RichText::new(format!("{} changed", repo.changed))
+                    .color(super::files::change_color(
+                        crate::adapters::git::Change::Modified,
+                    ))
+                    .small(),
+            );
+        }
+    }
+}
+
 pub fn show(cx: &mut DrawCtx<'_>, ui: &mut Ui, pid: ProjectId) {
     let Some(workspace) = cx.core.workspace(pid).cloned() else {
         ui.label("This project no longer exists.");
@@ -30,6 +57,7 @@ pub fn show(cx: &mut DrawCtx<'_>, ui: &mut Ui, pid: ProjectId) {
                 if ui.button("New session").clicked() {
                     cx.state.new_session = Some(NewSessionDraft::new(&workspace.project));
                 }
+                git_line(cx, ui, pid);
             });
             if !workspace.project.notes.is_empty() {
                 ui.label(&workspace.project.notes);
