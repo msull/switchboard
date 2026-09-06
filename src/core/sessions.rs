@@ -188,6 +188,33 @@ impl AppCore {
         }
     }
 
+    /// Kill the pane if there is one, then launch the record fresh.
+    /// Agents are not restarted this way (a restart would lose the
+    /// conversation); for them it is a plain return.
+    pub(super) fn restart_session(&mut self, id: RecordId, now: Clock, out: &mut Out) {
+        if self.is_in_flight(id) {
+            return;
+        }
+        let Some(record) = self.session(id) else {
+            return;
+        };
+        if matches!(record.kind, SessionKind::Agent(_)) {
+            self.return_to_session(id, now, out);
+            return;
+        }
+        if let Some(reason) = self.host_error.clone() {
+            let name = record.name.clone();
+            self.error(format!("cannot restart {name}: {reason}"));
+            return;
+        }
+        let host = HostId(id.host_name());
+        if self.host_status(id).is_some() {
+            out.push(Effect::Kill(host.clone()));
+            self.host.retain(|h| h.id != host);
+        }
+        self.launch_fresh(id, now, out);
+    }
+
     pub(super) fn transcript_checked(
         &mut self,
         id: RecordId,

@@ -470,6 +470,20 @@ fn pinned_card_previews_and_opens() {
 }
 
 #[test]
+fn service_header_offers_restart_and_autostart() {
+    let (mut harness, ids) = harness();
+    showing(&mut harness, View::Session(ids.deploy));
+    click(&mut harness, "Restart");
+    click(&mut harness, "Autostart");
+    let dispatched = actions(&harness);
+    assert!(dispatched.contains(&AppAction::RestartSession(ids.deploy)));
+    assert!(dispatched.contains(&AppAction::SetAutostart(ids.deploy, true)));
+    // Agents cannot be restarted from the header.
+    showing(&mut harness, View::Session(ids.agent));
+    assert!(harness.query_by_label("Restart").is_none());
+}
+
+#[test]
 fn session_view_renames_on_enter() {
     let (mut harness, ids) = harness();
     showing(&mut harness, View::Session(ids.server));

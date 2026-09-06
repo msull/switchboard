@@ -207,6 +207,43 @@ fn set_theme_saves_settings_once_per_change() {
 }
 
 #[test]
+fn restart_kills_the_pane_and_spawns_again() {
+    let p = project("p");
+    let mut w = Workspace::new(p.clone());
+    let r = record(p.id, SessionKind::Service, 0);
+    let id = r.id;
+    w.sessions.push(r);
+    let (mut core, _) = loaded(vec![w], vec![running(id)]);
+    let effects = core.dispatch(AppAction::RestartSession(id), Clock::at(1));
+    assert!(matches!(effects[0], Effect::Kill(ref h) if h.0 == id.host_name()));
+    assert!(matches!(effects[1], Effect::Spawn { id: sid, .. } if sid == id));
+    assert_eq!(effects.len(), 2);
+    // While the relaunch is in flight a second restart does nothing.
+    assert!(
+        core.dispatch(AppAction::RestartSession(id), Clock::at(2))
+            .is_empty()
+    );
+}
+
+#[test]
+fn remove_of_a_cold_record_forgets_its_scrollback() {
+    let p = project("p");
+    let mut w = Workspace::new(p.clone());
+    let r = record(p.id, SessionKind::Shell, 0);
+    let id = r.id;
+    w.sessions.push(r);
+    let (mut core, _) = loaded(vec![w], vec![]);
+    let effects = core.dispatch(AppAction::RemoveSession(id), Clock::at(1));
+    assert!(
+        effects
+            .iter()
+            .any(|e| matches!(e, Effect::Forget(h) if h.0 == id.host_name()))
+    );
+    assert!(!effects.iter().any(|e| matches!(e, Effect::Kill(_))));
+    assert!(core.session(id).is_none());
+}
+
+#[test]
 fn quiet_codex_pane_reads_idle_until_output_resumes() {
     let p = project("p");
     let mut w = Workspace::new(p.clone());
