@@ -449,8 +449,9 @@ Follows the template layering. Nothing below touches egui.
 2. **Projects and files** (built 2026-09-06, see status below). Tree,
    fuzzy finder, preview, open in default app and editor, reveal in
    Finder, pinned document cards.
-3. **Commands and services.** Saved commands, services with start/stop,
-   autostart, health, scrollback on disk.
+3. **Commands and services** (built 2026-09-06, see status below).
+   Saved commands, services with start/stop, autostart, health,
+   scrollback on disk.
 4. **Environment.** Profiles, Keychain secrets, masked view,
    `.env.example` diff, missing-variable warnings.
 5. **Git awareness and polish.** Decorations, sub-repo discovery, global
@@ -528,6 +529,31 @@ Markdown preview of this document). Text previews use egui's built-in
 highlighter (Rust, C-likes, Python, TOML; plain otherwise). Not yet done
 from this milestone's list: git decorations on rows, copy-path feedback,
 and drag-to-pin from the tree.
+
+## Milestone 3 status (2026-09-06)
+
+Most of this milestone came with Milestone 1's records: commands and
+services are session kinds with a saved command line, a recorded exit
+code on the card ("exited (1) since 3h"), Kill, and `pipe-pane`
+scrollback on disk. Added now:
+
+- **Restart** on the session header of a shell, command, or service:
+  kills the pane if there is one and launches the record fresh; idempotent
+  while the relaunch is in flight. Agents get no Restart (it would
+  discard the conversation); Return covers them.
+- **Autostart** checkbox on a service's header; the reconcile on start
+  already launched cold autostart services.
+- **Scrollback after the pane is gone.** The raw `pipe-pane` stream is
+  read back with escape sequences stripped (CSI, OSC, charset escapes;
+  `\r` overwrites a line): the open session shows the last 200 lines
+  under "last output kept on disk", and cards get their caption from it.
+  Verified by killing both the app and the tmux server and reopening the
+  session. Removing a cold record deletes its scrollback file; removing a
+  running one leaves the process and its file alone, as before.
+
+Not done: the parser-fed readable history with its own cap and search,
+raw-stream rotation in the running app, and a per-session "delete
+scrollback" action separate from Remove.
 
 ## Open questions
 

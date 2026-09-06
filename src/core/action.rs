@@ -119,6 +119,8 @@ pub enum AppAction {
         text: String,
     },
     KillSession(RecordId),
+    /// Stop a shell, command, or service if it runs, then start it again.
+    RestartSession(RecordId),
     RemoveSession(RecordId),
     // --- results from effects / workers
     LaunchPrepared {
@@ -195,6 +197,8 @@ pub enum Effect {
         text: String,
     },
     OpenPath(PathBuf),
+    /// Drop what the host kept for a removed record (scrollback on disk).
+    Forget(HostId),
     /// Open the file with the configured editor command.
     OpenInEditor {
         editor: String,
@@ -365,6 +369,7 @@ impl AppCore {
                 }
             }
             AppAction::RemoveSession(id) => self.remove_session(id, &mut out),
+            AppAction::RestartSession(id) => self.restart_session(id, now, &mut out),
 
             AppAction::LaunchPrepared { id, result } => {
                 self.launch_prepared(id, result, now, &mut out);
@@ -487,6 +492,11 @@ impl AppCore {
     }
 
     fn remove_session(&mut self, id: RecordId, out: &mut Out) {
+        // A running process is left alone (removing a record is not a
+        // kill); only a gone pane's scrollback is dropped with the record.
+        if self.host_status(id).is_none() {
+            out.push(Effect::Forget(HostId(id.host_name())));
+        }
         for w in &mut self.workspaces {
             let before = w.sessions.len();
             w.sessions.retain(|s| s.id != id);

@@ -153,6 +153,24 @@ fn header(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord) {
                     if ui.button("Kill").clicked() {
                         cx.dispatch(AppAction::KillSession(record.id));
                     }
+                    if !matches!(record.kind, SessionKind::Agent(_))
+                        && ui
+                            .button("Restart")
+                            .on_hover_text("Stop it if it runs, then start it again")
+                            .clicked()
+                    {
+                        cx.dispatch(AppAction::RestartSession(record.id));
+                    }
+                    if record.kind == SessionKind::Service {
+                        let mut autostart = record.autostart;
+                        if ui
+                            .checkbox(&mut autostart, "Autostart")
+                            .on_hover_text("Start with Switchboard when its pane is gone")
+                            .changed()
+                        {
+                            cx.dispatch(AppAction::SetAutostart(record.id, autostart));
+                        }
+                    }
                     let open = if running {
                         "Open in terminal"
                     } else {
@@ -590,7 +608,12 @@ fn code_block(ui: &mut Ui, text: &str) {
 
 fn terminal_body(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord) {
     if !is_running(cx.core, record.id) {
-        ui.label(RichText::new("Not running. Return starts it again.").weak());
+        let note = if cx.state.snapshots.contains_key(&record.id) {
+            "Not running. Return starts it again; below is the last output kept on disk."
+        } else {
+            "Not running. Return starts it again."
+        };
+        ui.label(RichText::new(note).weak());
         if let Some(text) = cx.state.snapshots.get(&record.id) {
             egui::ScrollArea::vertical().show(ui, |ui| code_block(ui, text));
         }

@@ -84,6 +84,7 @@ src/adapters/
   tmux.rs                tmux process host on the private socket
   hooks.rs               append-first event log + socket wake-up + hook settings JSON
   files.rs               project file index: gitignore-aware scan, lazy children, fuzzy match
+  scrollback.rs          read the pipe-pane stream back as plain text (cold sessions)
   agents.rs              Claude Code / Codex launch, resume, preflight, discovery
   transcript.rs          Claude Code transcript (JSONL) -> Conversation turns
   ghostty.rs             open, reveal, Ghostty window launch and raise

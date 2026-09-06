@@ -245,12 +245,7 @@ impl SwitchboardApp {
                 None
             }
             Effect::Spawn { id, mut spec } => {
-                spec.scrollback = Some(
-                    s.store
-                        .data_dir()
-                        .join("scrollback")
-                        .join(format!("{}.vt", spec.id.0)),
-                );
+                spec.scrollback = Some(self.scrollback_path(&spec.id));
                 let result = s.host.spawn(&spec).map_err(|e| e.to_string());
                 if let Err(e) = &result {
                     log::error!("spawn {} failed: {e}", spec.id.0);
@@ -273,6 +268,15 @@ impl SwitchboardApp {
             Effect::Kill(host) => {
                 if let Err(e) = s.host.kill(&host) {
                     log::warn!("kill {} failed: {e}", host.0);
+                }
+                None
+            }
+            Effect::Forget(host) => {
+                let path = self.scrollback_path(&host);
+                if let Err(e) = std::fs::remove_file(&path)
+                    && e.kind() != std::io::ErrorKind::NotFound
+                {
+                    log::warn!("remove {}: {e}", path.display());
                 }
                 None
             }
@@ -323,6 +327,24 @@ impl SwitchboardApp {
         } else {
             s.opener
                 .open_terminal(title, &s.host.attach_command(host), cwd)
+        }
+    }
+
+    /// A pane that is gone still has its output on disk: the open
+    /// session shows the tail of it, cards get a caption from it once.
+    fn cold_scrollback(&mut self, id: RecordId, host: &HostId, on_screen: bool) {
+        if !on_screen && self.ui_state.captions.contains_key(&id) {
+            return;
+        }
+        let path = self.scrollback_path(host);
+        let Ok(text) = crate::adapters::scrollback::tail_text(&path, 200) else {
+            return;
+        };
+        if let Some(last) = text.lines().rev().find(|l| !l.trim().is_empty()) {
+            self.ui_state.captions.insert(id, last.trim().to_owned());
+        }
+        if on_screen {
+            self.ui_state.snapshots.insert(id, text);
         }
     }
 
@@ -396,6 +418,15 @@ impl SwitchboardApp {
         }
     }
 
+    /// Where the host pipes a session's raw output.
+    fn scrollback_path(&self, host: &HostId) -> PathBuf {
+        self.services
+            .store
+            .data_dir()
+            .join("scrollback")
+            .join(format!("{}.vt", host.0))
+    }
+
     /// Captions for cards on screen and the snapshot for the open session.
     fn refresh_captions(&mut self) {
         let view = self.core.view();
@@ -418,10 +449,11 @@ impl SwitchboardApp {
                 .core
                 .host_status(id)
                 .is_some_and(|h| !matches!(h.liveness, Liveness::Missing));
+            let host = HostId(id.host_name());
             if !running {
+                self.cold_scrollback(id, &host, matches!(view, View::Session(sid) if sid == id));
                 continue;
             }
-            let host = HostId(id.host_name());
             let wants_snapshot = matches!(view, View::Session(sid) if sid == id)
                 && self
                     .core
