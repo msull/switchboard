@@ -557,6 +557,13 @@ scrollback" action separate from Remove.
 
 ## Milestone 5 progress (2026-09-06)
 
+- **Git awareness.** The board header shows each repository the project
+  holds (the root, or repositories one or two directories down, so a
+  clients folder works) with its branch and changed-path count; tree rows
+  carry M/?/! for modified, untracked, conflicted files and a dot on
+  directories with changes below them. Read through `git status` every
+  5 s on a background thread while the board is on screen; nothing is
+  written.
 - **Dock badge.** The number of sessions waiting on you sits on the Dock
   icon (AppKit `dockTile`, main thread, updated only when the count
   changes; exclusive mode hides other projects' counts too). Verified

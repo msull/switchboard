@@ -8,16 +8,20 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, channel};
+use std::time::{Duration, Instant};
 
-use egui::{RichText, Ui};
+use egui::{Color32, RichText, Ui};
 
 use super::{DrawCtx, GAP};
 use crate::adapters::files::{Entry, Listing, children, fuzzy, scan};
+use crate::adapters::git::{Change, GitState, inspect};
 use crate::core::{AppAction, Launch, ProjectId, SessionKind};
 
 /// The index stops here; the finder says so when it does.
 pub const MAX_INDEX_ENTRIES: usize = 50_000;
 const MAX_HITS: usize = 60;
+/// How often `git status` is re-run for a project on screen.
+const GIT_INTERVAL: Duration = Duration::from_secs(5);
 
 /// Per-project state of the file side.
 #[derive(Default)]
@@ -32,6 +36,10 @@ pub struct FilesState {
     /// A scan in progress, delivering the listing.
     pub scan: Option<Receiver<std::io::Result<Listing>>>,
     pub selected: Option<PathBuf>,
+    /// Branches and changed paths, refreshed in the background.
+    pub git: Option<Arc<GitState>>,
+    pub git_scan: Option<Receiver<GitState>>,
+    pub git_at: Option<Instant>,
 }
 
 impl FilesState {
@@ -39,6 +47,29 @@ impl FilesState {
         self.children.clear();
         self.listing = None;
         self.scan = None;
+    }
+
+    /// Refresh the git state every `GIT_INTERVAL`, off the UI thread.
+    pub fn poll_git(&mut self, root: &Path, ctx: &egui::Context) {
+        if let Some(rx) = &self.git_scan {
+            if let Ok(state) = rx.try_recv() {
+                self.git = Some(Arc::new(state));
+                self.git_scan = None;
+            }
+            return;
+        }
+        if self.git_at.is_some_and(|t| t.elapsed() < GIT_INTERVAL) {
+            return;
+        }
+        self.git_at = Some(Instant::now());
+        let (tx, rx) = channel();
+        let root = root.to_path_buf();
+        let ctx = ctx.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(inspect(&root));
+            ctx.request_repaint();
+        });
+        self.git_scan = Some(rx);
     }
 
     /// Start (once) and poll the background scan.
@@ -87,11 +118,14 @@ pub fn show(cx: &mut DrawCtx<'_>, ui: &mut Ui, pid: ProjectId) {
         .map(|w| w.project.pinned.clone())
         .unwrap_or_default();
     let mut state = cx.state.files.remove(&pid).unwrap_or_default();
+    state.poll_git(&root, ui.ctx());
+    let git = state.git.clone();
     let mut actions = Vec::new();
     let mut side = Side {
         pid,
         root: &root,
         pinned: &pinned,
+        git: git.as_deref(),
         actions: &mut actions,
     };
     ui.spacing_mut().item_spacing = egui::vec2(GAP, GAP);
@@ -142,10 +176,34 @@ struct Side<'a> {
     pid: ProjectId,
     root: &'a Path,
     pinned: &'a [PathBuf],
+    git: Option<&'a GitState>,
     actions: &'a mut Vec<AppAction>,
 }
 
+/// Row colors for git status.
+#[must_use]
+pub fn change_color(change: Change) -> Color32 {
+    match change {
+        Change::Modified => Color32::from_rgb(235, 140, 0),
+        Change::Untracked => Color32::from_rgb(60, 170, 80),
+        Change::Conflict => Color32::from_rgb(220, 50, 50),
+    }
+}
+
 impl Side<'_> {
+    /// The git glyph for a row, drawn after its name.
+    fn decoration(&self, ui: &mut Ui, rel: &Path, is_dir: bool) {
+        if let Some(change) = self.git.and_then(|g| g.status_of(rel, is_dir)) {
+            let glyph = if is_dir { "•" } else { change.glyph() };
+            ui.label(RichText::new(glyph).color(change_color(change)).small())
+                .on_hover_text(match change {
+                    Change::Modified => "modified",
+                    Change::Untracked => "untracked",
+                    Change::Conflict => "conflict",
+                });
+        }
+    }
+
     fn preview(&mut self, path: &Path) {
         self.actions
             .push(AppAction::ShowDocument(self.pid, path.to_path_buf()));
@@ -248,6 +306,7 @@ fn directory(ui: &mut Ui, state: &mut FilesState, side: &mut Side<'_>, dir: &Pat
                     }
                 }
                 response.context_menu(|ui| side.context_menu(ui, &path, true));
+                side.decoration(ui, &entry.rel, true);
             } else {
                 let selected = state.selected.as_deref() == Some(path.as_path());
                 let response = ui.selectable_label(selected, format!("  {name}"));
@@ -256,6 +315,7 @@ fn directory(ui: &mut Ui, state: &mut FilesState, side: &mut Side<'_>, dir: &Pat
                     side.preview(&path);
                 }
                 response.context_menu(|ui| side.context_menu(ui, &path, false));
+                side.decoration(ui, &entry.rel, false);
             }
         });
         if entry.is_dir && state.expanded.contains(&path) {

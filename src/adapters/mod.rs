@@ -5,6 +5,7 @@ pub mod dock;
 pub mod fakes;
 pub mod files;
 pub mod ghostty;
+pub mod git;
 pub mod hooks;
 pub mod scrollback;
 pub mod store;
