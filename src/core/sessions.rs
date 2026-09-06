@@ -147,34 +147,44 @@ impl AppCore {
         if self.is_in_flight(id) {
             return;
         }
-        let Some(record) = self.session(id) else {
+        let Some(record) = self.session(id).cloned() else {
             return;
         };
+        let record = &record;
         if let Some(reason) = self.host_error.clone() {
             let name = record.name.clone();
             self.error(format!("cannot return to {name}: {reason}"));
             return;
         }
-        match self.host_status(id).map(|h| &h.liveness) {
-            // Warm, or dead but the pane is kept: attaching shows it either way.
-            Some(Liveness::Running { .. } | Liveness::Exited { .. }) => {
+        let liveness = self.host_status(id).map(|h| h.liveness.clone());
+        if let Some(Liveness::Exited { .. }) = liveness {
+            // A dead pane kept by the host is cold: clear it so the
+            // resume or relaunch below can reuse the name.
+            let host = HostId(id.host_name());
+            out.push(Effect::Kill(host.clone()));
+            self.host.retain(|h| h.id != host);
+        }
+        match liveness {
+            Some(Liveness::Running { .. }) => {
                 out.push(attach(record));
             }
-            Some(Liveness::Missing) | None => match (record.kind, &record.resume) {
-                (SessionKind::Agent(_), Some(handle)) if !record.not_resumable => {
-                    let handle = handle.clone();
-                    self.start_flight(id, FlightKind::Preflight, now);
-                    out.push(Effect::CheckTranscript { id, handle });
-                }
-                _ => {
-                    // No conversation to resume: a fresh agent in the same
-                    // directory, or a shell/command/service run again.
-                    if record.not_resumable {
-                        self.edit_session(id, out, |s| s.not_resumable = false);
+            Some(Liveness::Exited { .. } | Liveness::Missing) | None => {
+                match (record.kind, &record.resume) {
+                    (SessionKind::Agent(_), Some(handle)) if !record.not_resumable => {
+                        let handle = handle.clone();
+                        self.start_flight(id, FlightKind::Preflight, now);
+                        out.push(Effect::CheckTranscript { id, handle });
                     }
-                    self.launch_fresh(id, now, out);
+                    _ => {
+                        // No conversation to resume: a fresh agent in the same
+                        // directory, or a shell/command/service run again.
+                        if record.not_resumable {
+                            self.edit_session(id, out, |s| s.not_resumable = false);
+                        }
+                        self.launch_fresh(id, now, out);
+                    }
                 }
-            },
+            }
         }
     }
 

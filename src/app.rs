@@ -247,6 +247,10 @@ impl SwitchboardApp {
                 id,
                 result: self.attach(&host, &title, &cwd),
             }),
+            Effect::SendInput { host, text } => {
+                self.send_input(&host, &text);
+                None
+            }
             Effect::Kill(host) => {
                 if let Err(e) = s.host.kill(&host) {
                     log::warn!("kill {} failed: {e}", host.0);
@@ -265,6 +269,23 @@ impl SwitchboardApp {
                 }
                 None
             }
+        }
+    }
+
+    /// Type `text` into the pane, then Enter as a separate write after a
+    /// pause: a newline inside the same chunk reads as a pasted line break
+    /// to a TUI, not as submit.
+    fn send_input(&self, host: &HostId, text: &str) {
+        let r = self
+            .services
+            .host
+            .write(host, text.as_bytes())
+            .and_then(|()| {
+                std::thread::sleep(Duration::from_millis(150));
+                self.services.host.write(host, b"\r")
+            });
+        if let Err(e) = r {
+            log::warn!("send input to {} failed: {e}", host.0);
         }
     }
 

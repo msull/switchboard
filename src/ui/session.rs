@@ -168,7 +168,52 @@ fn notes(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord) {
 
 fn agent_body(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord) {
     ui.label("This session runs in Ghostty. Use Open in terminal to bring its window up.");
+    message_box(cx, ui, record);
     snapshot(cx, ui, record.id);
+}
+
+/// A one-line message box: Enter (or Send) types the text into the
+/// session's terminal and presses Enter there, without opening its window.
+fn message_box(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord) {
+    let running = super::cards::is_running(cx.core, record.id);
+    if cx
+        .state
+        .input_draft
+        .as_ref()
+        .is_none_or(|(id, _)| *id != record.id)
+    {
+        cx.state.input_draft = Some((record.id, String::new()));
+    }
+    let mut send = false;
+    ui.horizontal(|ui| {
+        let label = ui.label("Message");
+        if let Some((_, draft)) = cx.state.input_draft.as_mut() {
+            let response = ui
+                .add_enabled(
+                    running,
+                    egui::TextEdit::singleline(draft)
+                        .hint_text("type here and press Enter to send into the session")
+                        .desired_width(ui.available_width() - 70.0),
+                )
+                .labelled_by(label.id);
+            if response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                send = true;
+                response.request_focus();
+            }
+        }
+        if ui.add_enabled(running, egui::Button::new("Send")).clicked() {
+            send = true;
+        }
+    });
+    if let (true, Some((_, draft))) = (send, cx.state.input_draft.as_mut()) {
+        let text = std::mem::take(draft);
+        if !text.trim().is_empty() {
+            cx.dispatch(AppAction::SendInput {
+                id: record.id,
+                text,
+            });
+        }
+    }
 }
 
 fn snapshot(cx: &mut DrawCtx<'_>, ui: &mut Ui, id: RecordId) {

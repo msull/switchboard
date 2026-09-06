@@ -3,7 +3,8 @@
 //! clicking. Lines: `add-project <name> <root>`, `new-shell <project>
 //! <name>`, `new-claude <project> <name>`, `new-codex <project> <name>`,
 //! `new-service <project> <name> <command...>`, `show-board <project>`,
-//! `show-session <name>`, `return <name>`, `kill <name>`, `switchboard`.
+//! `show-session <name>`, `send <name> <text...>`, `return <name>`,
+//! `kill <name>`, `switchboard`, `sleep <secs>` (then polls).
 //! Blank lines and `#` comments are ignored; unknown lines are logged.
 
 use std::path::PathBuf;
@@ -106,11 +107,23 @@ fn step(app: &mut SwitchboardApp, w: &[&str]) -> Result<(), String> {
             let id = session(app, n)?;
             app.dispatch(AppAction::ReturnToSession(id));
         }
+        ["send", n, text @ ..] => {
+            let id = session(app, n)?;
+            app.dispatch(AppAction::SendInput {
+                id,
+                text: text.join(" "),
+            });
+        }
         ["kill", n] => {
             let id = session(app, n)?;
             app.dispatch(AppAction::KillSession(id));
         }
         ["switchboard"] => app.dispatch(AppAction::ShowSwitchboard),
+        ["sleep", secs] => {
+            let secs: u64 = secs.parse().map_err(|_| "bad sleep")?;
+            std::thread::sleep(std::time::Duration::from_secs(secs));
+            app.poll_now();
+        }
         _ => return Err("unknown line".into()),
     }
     Ok(())

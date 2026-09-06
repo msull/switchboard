@@ -895,7 +895,7 @@ fn session_edits_save() {
 // --- 5. return (idempotent)
 
 #[test]
-fn return_to_running_or_exited_attaches() {
+fn return_to_running_attaches_and_return_to_exited_relaunches() {
     let (mut core, _, ids) = with_records(&[agent(), SessionKind::Shell], |s| {
         Some(if s.layout.order == 0 {
             running(s.id)
@@ -903,12 +903,16 @@ fn return_to_running_or_exited_attaches() {
             exited(s.id, Some(0))
         })
     });
-    for id in ids {
-        let e = core.dispatch(AppAction::ReturnToSession(id), Clock::at(1));
-        assert_eq!(e.len(), 1);
-        assert!(matches!(&e[0], Effect::Attach { id: i, .. } if *i == id));
-        assert!(!core.is_in_flight(id));
-    }
+    // Running agent: attach only.
+    let e = core.dispatch(AppAction::ReturnToSession(ids[0]), Clock::at(1));
+    assert_eq!(e.len(), 1);
+    assert!(matches!(&e[0], Effect::Attach { id: i, .. } if *i == ids[0]));
+    assert!(!core.is_in_flight(ids[0]));
+    // Exited shell: the dead pane is killed, then the shell is spawned again.
+    let e = core.dispatch(AppAction::ReturnToSession(ids[1]), Clock::at(2));
+    assert!(matches!(&e[0], Effect::Kill(h) if h.0 == ids[1].host_name()));
+    assert_eq!(spawns(&e).len(), 1);
+    assert!(!e.iter().any(|x| matches!(x, Effect::Attach { .. })));
 }
 
 #[test]
@@ -1533,4 +1537,111 @@ fn return_right_after_spawn_attaches_instead_of_spawning_again() {
         "expected Attach, got {effects:?}"
     );
     assert!(!effects.iter().any(|e| matches!(e, Effect::Spawn { .. })));
+}
+
+#[test]
+fn send_input_targets_a_running_session_only() {
+    let mut core = AppCore::new();
+    let root = PathBuf::from("/tmp/p");
+    core.dispatch(AppAction::StoreLoaded(Ok(Loaded::default())), Clock::at(0));
+    core.dispatch(AppAction::HostListed(vec![]), Clock::at(1));
+    core.dispatch(
+        AppAction::AddProject {
+            name: "p".into(),
+            root: root.clone(),
+        },
+        Clock::at(2),
+    );
+    let project = core.workspaces()[0].project.id;
+    core.dispatch(
+        AppAction::NewSession {
+            project,
+            name: "sh".into(),
+            kind: SessionKind::Shell,
+            cwd: root,
+            launch: Launch::Shell,
+        },
+        Clock::at(3),
+    );
+    let id = core.workspaces()[0].sessions[0].id;
+    // Not running yet (spawn not confirmed): an error notice, no effect.
+    let effects = core.dispatch(
+        AppAction::SendInput {
+            id,
+            text: "ls".into(),
+        },
+        Clock::at(4),
+    );
+    assert!(effects.is_empty());
+    assert!(core.notices().iter().any(|n| n.is_error));
+    core.dispatch(
+        AppAction::HostListed(vec![HostStatus {
+            id: HostId(id.host_name()),
+            liveness: Liveness::Running {
+                pid: 1,
+                command: "zsh".into(),
+            },
+            cwd: None,
+            last_activity: None,
+            title: None,
+        }]),
+        Clock::at(5),
+    );
+    let effects = core.dispatch(
+        AppAction::SendInput {
+            id,
+            text: "ls".into(),
+        },
+        Clock::at(6),
+    );
+    assert_eq!(
+        effects,
+        vec![Effect::SendInput {
+            host: HostId(id.host_name()),
+            text: "ls".into()
+        }]
+    );
+}
+
+#[test]
+fn return_to_an_exited_pane_kills_it_and_resumes() {
+    let mut core = AppCore::new();
+    let root = PathBuf::from("/tmp/p");
+    core.dispatch(AppAction::StoreLoaded(Ok(Loaded::default())), Clock::at(0));
+    core.dispatch(AppAction::HostListed(vec![]), Clock::at(1));
+    core.dispatch(
+        AppAction::AddProject {
+            name: "p".into(),
+            root: root.clone(),
+        },
+        Clock::at(2),
+    );
+    let project = core.workspaces()[0].project.id;
+    core.dispatch(
+        AppAction::NewSession {
+            project,
+            name: "sh".into(),
+            kind: SessionKind::Shell,
+            cwd: root,
+            launch: Launch::Shell,
+        },
+        Clock::at(3),
+    );
+    let id = core.workspaces()[0].sessions[0].id;
+    core.dispatch(AppAction::Spawned { id, result: Ok(()) }, Clock::at(4));
+    core.dispatch(
+        AppAction::HostListed(vec![HostStatus {
+            id: HostId(id.host_name()),
+            liveness: Liveness::Exited { code: Some(0) },
+            cwd: None,
+            last_activity: None,
+            title: None,
+        }]),
+        Clock::at(5),
+    );
+    assert_eq!(core.card_state(id), CardState::Exited(Some(0)));
+    let effects = core.dispatch(AppAction::ReturnToSession(id), Clock::at(6));
+    assert!(matches!(effects.first(), Some(Effect::Kill(h)) if h.0 == id.host_name()));
+    assert!(effects.iter().any(|e| matches!(e, Effect::Spawn { .. })));
+    assert!(!effects.iter().any(|e| matches!(e, Effect::Attach { .. })));
 }

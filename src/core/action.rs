@@ -101,6 +101,12 @@ pub enum AppAction {
         group: Option<String>,
     },
     ReturnToSession(RecordId),
+    /// Type `text` into the session's terminal and press Enter, as if the
+    /// user had typed it there.
+    SendInput {
+        id: RecordId,
+        text: String,
+    },
     KillSession(RecordId),
     RemoveSession(RecordId),
     // --- results from effects / workers
@@ -171,6 +177,11 @@ pub enum Effect {
         cwd: PathBuf,
     },
     Kill(HostId),
+    /// Write `text` to the pane, then Enter.
+    SendInput {
+        host: HostId,
+        text: String,
+    },
     OpenPath(PathBuf),
     Reveal(PathBuf),
 }
@@ -318,6 +329,20 @@ impl AppCore {
                 s.layout.group = group;
             }),
             AppAction::ReturnToSession(id) => self.return_to_session(id, now, &mut out),
+            AppAction::SendInput { id, text } => {
+                let running = self
+                    .host_status(id)
+                    .is_some_and(|h| matches!(h.liveness, Liveness::Running { .. }));
+                if let (true, Some(status)) = (running, self.host_status(id)) {
+                    out.push(Effect::SendInput {
+                        host: status.id.clone(),
+                        text,
+                    });
+                } else {
+                    let name = self.session_name(id);
+                    self.error(format!("{name} is not running; return to it first"));
+                }
+            }
             AppAction::KillSession(id) => {
                 if let Some(status) = self.host_status(id) {
                     out.push(Effect::Kill(status.id.clone()));
