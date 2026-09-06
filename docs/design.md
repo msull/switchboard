@@ -90,12 +90,12 @@ sessions with, per session:
 - `name`, `kind` (agent, command, service, shell), `cwd`, `command line`,
   `env profile`, `created`, `last seen`, `notes`;
 - `resume` (kind-specific: agent session id, or nothing);
-- `layout` hints (which sessions were open, in what order) so the view
+- `layout` hints (card position and grouping on the board) so the view
   comes back as it was;
 - `scrollback` path.
 
-Written on every change, never only on quit. A crash loses at most the
-last few seconds.
+Also holds the project's pinned documents. Written on every change, never
+only on quit. A crash loses at most the last few seconds.
 
 ### Session kinds
 
@@ -132,6 +132,41 @@ last few seconds.
   command references but the profile does not define. Secrets are never
   written in plaintext anywhere the user did not already put them.
 
+## How it looks
+
+**Workspace switcher.** One project is active at a time. Switching is a
+single keystroke or click: a strip or palette of projects, most recent
+first, with a dot showing whether anything in it is running or waiting.
+
+**The board.** The active workspace is a board of cards, not a tree of
+tabs. Two kinds of card:
+
+- **Session cards**, one per shell, agent, command, or service. Each shows
+  the name, kind, directory, how long it has been running or since it was
+  last seen, and a state derived from what the process is doing:
+  *waiting on you* (the agent asked a question or stopped for approval),
+  *working*, *idle at a prompt*, *exited* (with the exit code), or *not
+  running* (the record exists, click to bring it back). The last line or
+  two of output as a caption. Clicking a card opens the session; a
+  keystroke gets back to the board.
+- **Document cards** for pinned files: the design doc, a to-do list, a
+  client brief. Click opens the preview; a modifier opens the default
+  app. Any file in the browser can be pinned with one action.
+
+Cards can be dragged into an order and grouped; the arrangement is part
+of the workspace record and comes back with it. "Waiting on you" cards
+sort or highlight first so the board is also a to-do list of agents that
+need attention.
+
+**The session view.** The terminal for one session, with its metadata in
+a sidebar (notes, env profile, resume handle, scrollback link). Never a
+dead end: the board is one keystroke away, and the next waiting session
+is one more.
+
+**The file side.** The tree, finder, and preview from the concepts above
+live in a panel next to the board, so pinning a document or opening a
+shell in a directory is a drag or a click away.
+
 ## Spike 0: resumability first, rendering second
 
 The spike exists to prove the core idea against the real agents before
@@ -149,7 +184,13 @@ any UI is built. Questions, in order:
    persistence mechanism, since it dies on reboot. Decide whether tmux is
    the process host (also giving reattach for free) or whether Switchboard
    owns PTYs directly and accepts that processes die with it.
-3. **How is a terminal shown?** Only after 1 and 2. Options: hand off to
+3. **How is "waiting on you" detected?** The board depends on knowing a
+   session's state without reading the screen. Candidates: Claude Code's
+   hooks (a `Notification` or `Stop` hook can write a marker file or hit a
+   local socket), its transcript files, the terminal bell, or as a last
+   resort an idle-output heuristic. Find the cheapest signal that is
+   right nearly always, per agent.
+4. **How is a terminal shown?** Only after 1 to 3. Options: hand off to
    Ghostty or Cmux with a jump-to button; render tmux control mode panes
    in egui; or own PTYs with `alacritty_terminal` and an egui view
    (evaluate the `egui_term` crate first). Measure whether an
@@ -178,18 +219,19 @@ Follows the template layering. Nothing below touches egui.
 - `adapters`: real implementations, each with a fake. The fake process
   host plays scripted output so UI tests never spawn anything.
 - `app`: runs effects, drains worker channels, feeds results back.
-- `ui`: projects, tree and finder, detail (preview or session view).
+- `ui`: workspace switcher, board of cards, session view, file panel.
 
 ## Milestones
 
 0. **Resumability spike.** Prove agent resume and choose the process
    host and terminal view.
-1. **Workspace records.** Projects, sessions as records, launch and
-   return-to for agents via hand-off to a real terminal. Restart the app,
+1. **Workspace records.** Projects, sessions as records on a board of
+   cards, launch and return-to for agents via hand-off to a real
+   terminal, session state from the spike's signal. Restart the app,
    reboot the machine, everything is still listed and resumable. This is
    the product's reason to exist, so it comes before the file browser.
 2. **Projects and files.** Tree, fuzzy finder, preview, open in default
-   app and editor, reveal in Finder.
+   app and editor, reveal in Finder, pinned document cards.
 3. **Commands and services.** Saved commands, services with start/stop,
    autostart, health, scrollback on disk.
 4. **Environment.** Profiles, Keychain secrets, masked view,
