@@ -107,7 +107,7 @@ sessions with, per session:
   "Trust boundary");
 - `layout` hints (card position and grouping on the board) so the view
   comes back as it was;
-- `scrollback` and transcript backup paths.
+- `scrollback` path.
 
 Also holds the project's pinned documents.
 
@@ -194,9 +194,10 @@ never run anything on its own.
   hash, and any change or new entry requires approval again. Autostart
   from shared config is never honored without that approval.
 - **Secrets** come from the Keychain and from `.env` files the user
-  already owns; Switchboard never writes them elsewhere. Scrollback and
-  transcripts can contain secrets that a process printed; they are stored
-  privately, capped, rotatable, and deletable, and the UI says so.
+  already owns; Switchboard never writes them elsewhere. Scrollback can
+  contain secrets that a process printed; it is stored privately, capped,
+  rotatable, and deletable, and the UI says so. Agent transcripts stay
+  where the provider keeps them; Switchboard reads but never copies them.
 
 ## How it looks
 
@@ -289,15 +290,14 @@ evidence. The decisions:
    more elsewhere). Live status is also readable from
    `~/.claude/sessions/<pid>.json`. Codex has `codex resume <uuid>` but no
    launch-time id, so its id is discovered from its session files.
-   **Retention risk:** transcripts are pruned after 30 days by default.
-   Switchboard checks `cleanupPeriodDays` in `~/.claude/settings.json` and
-   shows a warning card when it is unset, and independently backs up
-   transcripts continuously: the transcript is append-only JSONL, so a
-   file watch (or short timer) copies it into private state while the
-   session runs, not only at session end, which would miss crashes and
-   reboots. Cold resume restores the backup to the provider's path first.
-   The restore path is unproven and is a Milestone 1 gate test. Codex
-   retention is unknown and must be checked the same way.
+   **Retention:** Claude Code prunes transcripts after `cleanupPeriodDays`
+   (default 30). Switchboard does not copy or back up agent transcripts;
+   the provider's retention is the user's choice and the limit of what
+   can be resumed. Before offering a resume, Switchboard checks that the
+   provider's transcript still exists; if not, the card says *not
+   resumable*, keeps its name, notes, and scrollback, and offers a fresh
+   session in the same directory. A one-time hint names the setting when
+   the first pruned session is encountered.
 2. **Process host: tmux.** One private tmux server (own socket, own config)
    hosts every session. Sessions outlive the app, a fresh process reattaches
    and reads history, `list-panes -a -F` gives liveness, pid, and exit code
@@ -378,8 +378,8 @@ Follows the template layering. Nothing below touches egui.
    - repeated "return" never duplicates an agent;
    - killing and restarting Switchboard preserves live processes and
      state;
-   - a cold restart resumes from the backed-up transcript after the
-     provider's copy is deleted;
+   - a record whose provider transcript was deleted shows *not resumable*
+     and offers a fresh session instead of failing;
    - a Codex session resumes from a discovered id;
    - a corrupt record recovers from `.bak` with a visible notice;
    - hook events produced while the app was down are neither lost nor
