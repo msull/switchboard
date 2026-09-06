@@ -1498,3 +1498,39 @@ fn clock_at_is_monotone_in_both_scales() {
     );
     assert!(a.wall > SystemTime::UNIX_EPOCH);
 }
+
+#[test]
+fn return_right_after_spawn_attaches_instead_of_spawning_again() {
+    let mut core = AppCore::new();
+    let root = PathBuf::from("/tmp/p");
+    core.dispatch(AppAction::StoreLoaded(Ok(Loaded::default())), Clock::at(0));
+    core.dispatch(AppAction::HostListed(vec![]), Clock::at(1));
+    core.dispatch(
+        AppAction::AddProject {
+            name: "p".into(),
+            root: root.clone(),
+        },
+        Clock::at(2),
+    );
+    let project = core.workspaces()[0].project.id;
+    let effects = core.dispatch(
+        AppAction::NewSession {
+            project,
+            name: "sh".into(),
+            kind: SessionKind::Shell,
+            cwd: root,
+            launch: Launch::Shell,
+        },
+        Clock::at(3),
+    );
+    assert!(effects.iter().any(|e| matches!(e, Effect::Spawn { .. })));
+    let id = core.workspaces()[0].sessions[0].id;
+    core.dispatch(AppAction::Spawned { id, result: Ok(()) }, Clock::at(4));
+    // No host poll has happened yet.
+    let effects = core.dispatch(AppAction::ReturnToSession(id), Clock::at(5));
+    assert!(
+        effects.iter().any(|e| matches!(e, Effect::Attach { .. })),
+        "expected Attach, got {effects:?}"
+    );
+    assert!(!effects.iter().any(|e| matches!(e, Effect::Spawn { .. })));
+}

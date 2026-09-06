@@ -11,7 +11,7 @@ use crate::core::model::{
 };
 use crate::core::reconcile::env_with_record_id;
 use crate::ports::agent::AgentLaunch;
-use crate::ports::host::{HostId, Liveness, SpawnSpec};
+use crate::ports::host::{HostId, HostStatus, Liveness, SpawnSpec};
 
 impl AppCore {
     #[allow(clippy::too_many_arguments)]
@@ -275,6 +275,22 @@ impl AppCore {
                     s.activity = Activity::Unknown;
                     s.last_exit = None;
                 });
+                // Until the next host poll, treat the session as running so
+                // a "return" in that window attaches instead of spawning
+                // again. The poll replaces this placeholder.
+                let host_id = HostId(id.host_name());
+                if !self.host.iter().any(|h| h.id == host_id) {
+                    self.host.push(HostStatus {
+                        id: host_id,
+                        liveness: Liveness::Running {
+                            pid: 0,
+                            command: String::new(),
+                        },
+                        cwd: None,
+                        last_activity: Some(now.wall),
+                        title: None,
+                    });
+                }
                 let Some(record) = self.session(id) else {
                     self.end_flight(id);
                     return;

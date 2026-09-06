@@ -506,23 +506,8 @@ fn repeated_return_opens_at_most_one_window_and_one_session() {
     let title = id.host_name();
 
     // Before the first poll the core has no host status for the new
-    // record, so each of these tries to spawn again; the host refuses a
-    // second session with the same name, which surfaces as an error
-    // notice rather than a duplicate.
-    for _ in 0..3 {
-        app.dispatch(AppAction::ReturnToSession(id));
-    }
-    assert_eq!(gate.list().len(), 1);
-    let early_errors = app.core().notices().iter().filter(|n| n.is_error).count();
-    println!("returns before the first poll: {early_errors} refused spawns");
-
-    wait_until(
-        &mut app,
-        "shell running",
-        Duration::from_secs(5),
-        QUICK,
-        |app| is_running(app, id),
-    );
+    // record, but a successful spawn leaves a placeholder "running" status
+    // so a return in that window attaches instead of spawning again.
     app.dispatch(AppAction::ReturnToSession(id));
     {
         let s = gate.opener.state();
@@ -534,13 +519,24 @@ fn repeated_return_opens_at_most_one_window_and_one_session() {
             gate.host.attach_command(&HostId(title.clone()))
         );
     }
-    // The window now exists: further returns only raise it.
+    // The window now exists: further returns only raise it, before and
+    // after the first real host poll.
     gate.opener.state().existing.push(title.clone());
-    for _ in 0..3 {
+    for _ in 0..2 {
         app.dispatch(AppAction::ReturnToSession(id));
     }
-    app.poll_now();
-    app.dispatch(AppAction::ReturnToSession(id));
+    assert_eq!(gate.list().len(), 1);
+
+    wait_until(
+        &mut app,
+        "shell running",
+        Duration::from_secs(5),
+        QUICK,
+        |app| is_running(app, id),
+    );
+    for _ in 0..2 {
+        app.dispatch(AppAction::ReturnToSession(id));
+    }
     {
         let s = gate.opener.state();
         assert_eq!(s.terminals.len(), 1);
@@ -549,7 +545,7 @@ fn repeated_return_opens_at_most_one_window_and_one_session() {
     assert_eq!(gate.list().len(), 1);
     assert_eq!(
         app.core().notices().iter().filter(|n| n.is_error).count(),
-        early_errors,
+        0,
         "{:?}",
         app.core().notices()
     );
