@@ -24,7 +24,11 @@ src/bin/switchboard-hook.rs  helper Claude Code hooks call (std only)
 src/lib.rs               module tree and the layering rules
 src/core/
   model.rs               durable data model (Project, SessionRecord, ResumeHandle, CardState)
-  action.rs              AppAction, Effect, Clock, AppCore::dispatch (reconcile, return, events)
+  action.rs              AppAction, Effect, Clock, AppCore::dispatch, read model for the UI
+  reconcile.rs           StoreLoaded / HostListed: card states, autostart services, spawn specs
+  sessions.rs            launch, idempotent return, resume preflight, Codex serialization
+  events.rs              hook events -> record activity (matched by record id, ordered by time)
+  tests.rs               state-transition tests for the core
 src/ports/               traits: store, host, events, agent, opener
 src/adapters/
   store.rs               JSON store: atomic writes, .bak, flock
