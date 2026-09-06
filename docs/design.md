@@ -2,26 +2,31 @@
 
 ## Status
 
-Design draft, 2026-09-05, revised the same day to put persistence at the
-center. Written before any code beyond the scaffold. Expect the terminal
-section to change after the spike.
+Design draft, 2026-09-05. Revised the same day to put persistence at the
+center, then again after Spike 0 and an external review, which added the
+durable store contract, the trust boundary, the host lifecycle (agents
+always inside tmux, Ghostty attaches), reconcile-on-start, and the
+Milestone 1 gate.
 
 ## The problem
 
-Cmux (a macOS multiplexer built on embedded Ghostty, aimed at agent coding
-sessions) does most of what is needed: workspaces per project, several
-agent sessions side by side, a terminal that feels native. It has two
-gaps, and the first is the reason Switchboard exists:
+A good workspace takes real effort to set up: named agent sessions
+mid-task, a dev server, a few shells in the right directories. Those get
+revisited weeks or a month later. Today they live in terminal
+multiplexers, and a reboot, an app update, or a crash loses all of it.
+Finding, previewing, and opening the files a session is working on means
+leaving for Finder or an editor. And nothing shows, across every project,
+which agents are waiting for a decision.
 
-1. **Workspaces do not survive a restart.** A good workspace takes real
-   effort to set up: named agent sessions mid-task, a dev server, a few
-   shells in the right directories. Those get revisited weeks or a month
-   later. A reboot, an app update, or a crash loses all of it.
-2. **No file management.** Finding, previewing, and opening the files a
-   session is working on means leaving for Finder or an editor.
+Switchboard is a tool with persistence as the first design constraint, a
+file browser beside the sessions, and one view over all of them.
 
-Switchboard is that tool with persistence as the first design constraint
-and a file browser beside the sessions.
+Prior art: Cmux (a macOS multiplexer on embedded Ghostty, aimed at agent
+sessions) has the per-project workspace and side-by-side sessions, and
+recent versions have grown some session restore. It is GPL and its control
+socket is closed to outside processes by default. Switchboard does not
+integrate with or embed it; it is a reference for what the session side
+should feel like, nothing more.
 
 ## The core idea: workspaces are data, processes are a cache
 
@@ -87,24 +92,64 @@ look like?"
 One per project, the durable heart of the app. Contains the list of
 sessions with, per session:
 
-- `name`, `kind` (agent, command, service, shell), `cwd`, `command line`,
-  `env profile`, `created`, `last seen`, `notes`;
-- `resume` (kind-specific: agent session id, or nothing);
+- `id` (Switchboard's own, stable, never reused), `name`, `kind` (agent,
+  command, service, shell), `cwd`, `env profile`, `created`, `last seen`,
+  `notes`;
+- what to run: for launches Switchboard composes itself (agents), a
+  structured `argv`; for user-authored commands and services, the command
+  string plus the shell that runs it, stored as written;
+- `host` (the tmux session or pane id while one exists; cleared when the
+  pane is gone);
+- `resume` (the provider's handle: Claude Code session UUID, Codex rollout
+  id, or nothing). The three ids are distinct and never conflated: record
+  id for Switchboard, host id for the process, resume id for the agent;
+- `autostart` for services, honored only when the record is trusted (see
+  "Trust boundary");
 - `layout` hints (card position and grouping on the board) so the view
   comes back as it was;
-- `scrollback` path.
+- `scrollback` and transcript backup paths.
 
-Also holds the project's pinned documents. Written on every change, never
-only on quit. A crash loses at most the last few seconds.
+Also holds the project's pinned documents.
+
+### Durable store
+
+The store is the product, so its mechanics are fixed here rather than
+left to the implementation:
+
+- **Format.** JSON, one file per project record plus a global project
+  index, each with a `schema_version` integer. Readers accept older
+  versions and migrate forward; the app refuses to write a version it does
+  not understand.
+- **Location.** Private runtime state lives under the platform data
+  directory (`~/Library/Application Support/Switchboard/`), file mode
+  `0600`, directories `0700`. Nothing executable or secret is read from a
+  project directory in Milestone 1; see "Trust boundary" for the later,
+  optional shareable config.
+- **Writes.** Every change: serialize to a temp file in the same
+  directory, `fsync`, rename over the old file, keep the previous file as
+  `.bak`. A crash loses at most the last change in flight.
+- **Reads.** Validate on load. A truncated or unparsable file falls back
+  to `.bak` with a visible notice, never silently to empty. A project
+  whose root has moved is shown as *missing* with a relocate action; its
+  record is never deleted automatically.
+- **Single writer.** A lock file under the data directory; a second
+  instance opens read-only and says so. External edits by hand are
+  supported by re-reading on a file watch and reconciling, not by
+  assuming the in-memory copy is authoritative.
+- **Ids.** UUIDs generated by Switchboard. Renaming, moving, or resuming
+  never changes a record id.
 
 ### Session kinds
 
 - **Agent sessions** are the reason for the app. Naming is required at
-  launch. On launch, Switchboard captures the agent's resume handle;
-  "return to it" runs the agent's resume command in the recorded
-  directory. If the agent cannot resume, it still comes back with its
-  scrollback, notes, and directory, and a fresh agent can be started with
-  the notes as context.
+  launch. Switchboard assigns or captures the agent's resume handle and
+  runs the agent inside the process host. "Return to it" is idempotent:
+  if the host pane is alive (warm), it attaches a terminal to it; if not
+  (cold), it starts the agent's resume command inside a new pane in the
+  recorded directory, then attaches. Two clicks never make two processes
+  for one record. If the agent cannot resume, the session still comes
+  back with its scrollback, notes, and directory, and a fresh agent can be
+  started with the notes as context.
 - **Services** are long-running commands with start/stop, a health line
   (running since, exit code if it died), and a log tail. Marked
   `autostart` or not; a workspace can bring its dev server back with it.
@@ -131,6 +176,27 @@ only on quit. A crash loses at most the last few seconds.
 - Helpers: diff `.env` against `.env.example`; flag variables a saved
   command references but the profile does not define. Secrets are never
   written in plaintext anywhere the user did not already put them.
+
+### Trust boundary
+
+Switchboard executes commands from records, so where records come from
+matters. A record that arrived via `git clone` or a branch checkout must
+never run anything on its own.
+
+- **Milestone 1: private state only.** Records live under Application
+  Support and are written only by Switchboard on this machine. Nothing in
+  a project directory is executed or even parsed as configuration.
+- **Later, optional shareable config.** A committed
+  `<root>/.switchboard/project.json` may carry saved commands, service
+  definitions, env profile names (never values), and pinned documents. It
+  never carries transcripts, secrets, or live-session state. Its contents
+  are shown, not run, until the user approves them; approval records a
+  hash, and any change or new entry requires approval again. Autostart
+  from shared config is never honored without that approval.
+- **Secrets** come from the Keychain and from `.env` files the user
+  already owns; Switchboard never writes them elsewhere. Scrollback and
+  transcripts can contain secrets that a process printed; they are stored
+  privately, capped, rotatable, and deletable, and the UI says so.
 
 ## How it looks
 
@@ -223,41 +289,58 @@ evidence. The decisions:
    more elsewhere). Live status is also readable from
    `~/.claude/sessions/<pid>.json`. Codex has `codex resume <uuid>` but no
    launch-time id, so its id is discovered from its session files.
-   **Retention risk:** transcripts are pruned after 30 days by default;
-   Switchboard must check `cleanupPeriodDays` in `~/.claude/settings.json`
-   and show a warning card when it is unset, and should copy transcripts
-   into `.switchboard/` at session end as a backup.
+   **Retention risk:** transcripts are pruned after 30 days by default.
+   Switchboard checks `cleanupPeriodDays` in `~/.claude/settings.json` and
+   shows a warning card when it is unset, and independently backs up
+   transcripts continuously: the transcript is append-only JSONL, so a
+   file watch (or short timer) copies it into private state while the
+   session runs, not only at session end, which would miss crashes and
+   reboots. Cold resume restores the backup to the provider's path first.
+   The restore path is unproven and is a Milestone 1 gate test. Codex
+   retention is unknown and must be checked the same way.
 2. **Process host: tmux.** One private tmux server (own socket, own config)
    hosts every session. Sessions outlive the app, a fresh process reattaches
    and reads history, `list-panes -a -F` gives liveness, pid, and exit code
    for the whole board in one ~3 ms call, and a control-mode client streams
    output for the session view. `pipe-pane -o` writes scrollback to disk
    and the raw stream carries escapes tmux strips from its own state.
-   A `portable-pty` adapter implements the same `ProcessHost` trait as the
-   no-tmux fallback and for tests. Control-mode readers must be
-   byte-oriented (chunks split mid-character).
+   tmux 3.2 or newer is a hard requirement in Milestone 1: without it the
+   app explains what to install and does not offer persistent launches.
+   A `portable-pty` adapter implements the same `ProcessHost` trait for
+   tests only; bundling tmux inside the app is the later answer (the spike
+   showed it is feasible). Control-mode readers must be byte-oriented
+   (chunks split mid-character).
 3. **Session state: hooks first.** Claude Code hooks map cleanly onto the
    card states: `PermissionRequest` (also covers questions) = waiting on
    you; `UserPromptSubmit` / `PostToolUse` = working; `Stop` = idle;
    `SessionEnd` = exited. Switchboard ships a `switchboard-hook` binary
    that writes one line to a Unix socket and spools to a file when the app
-   is down; hooks are registered per project (local settings or
-   `--settings` at launch) and correlate by cwd on the first
-   `SessionStart`, then by session id. Hook-free fallback for Claude Code:
+   is down. Hooks are passed at launch via `--settings`, so nothing is
+   written into the project. Correlation never relies on cwd: for Claude
+   Code the session UUID is assigned by Switchboard and known before
+   spawn; for every host pane Switchboard also injects
+   `SWITCHBOARD_RECORD_ID` into the tmux environment so the hook helper
+   reports the record id directly, which is how Codex and shells
+   correlate. The spool file is rotated by atomic rename before draining,
+   events are idempotent (replaying one is harmless), and every state
+   derived from events is reconciled against tmux liveness. Hook-free fallback for Claude Code:
    the OSC 777 notify text ("needs your permission") from the pane's raw
    stream; tmux state alone cannot tell idle from waiting. Shells get
    idle/working and exit codes from Ghostty's OSC 133 shell integration,
    which works inside tmux. Transcript tailing is the last resort.
-4. **Terminal view: hand off agents, embed the rest.** Agent sessions open
-   in Ghostty: `open -na Ghostty --args --title=<name>
-   --working-directory=<cwd> -e <cmd>`, and the window is raised later by
-   title. Shells, commands, and services render inside the app with
+4. **Terminal view: hand off agents, embed the rest.** Agent sessions are
+   shown in Ghostty, but Ghostty never runs the agent itself: it runs
+   `tmux -L <switchboard socket> attach-session -t <host id>`, launched as
+   `open -na Ghostty --args --title=<record id> --working-directory=<cwd>
+   -e <that attach command>`, and the window is raised later by title.
+   Closing the Ghostty window detaches; the agent keeps running in tmux
+   with its liveness, scrollback, hook signals, and reattach intact.
+   Shells, commands, and services render inside the app with
    `egui_term` (vendored from git; builds on egui 0.36 unchanged; renders
    `top`, `vim`, and Claude Code's TUI correctly at 1-3 ms per frame).
    Two patches needed: keys are dropped unless the pointer is over the
-   widget, and `TERM` must be set explicitly. Cmux has a rich CLI but its
-   socket refuses outside processes by default, so it stays an optional
-   integration. libghostty is not usable from Rust yet.
+   widget, and `TERM` must be set explicitly. Cmux was surveyed and is
+   not integrated (user decision). libghostty is not usable from Rust yet.
 
 ## Architecture
 
@@ -265,9 +348,12 @@ Follows the template layering. Nothing below touches egui.
 
 - `core`: project registry, workspace records, env resolution, and the
   state machine for launching, watching, reattaching, and retiring
-  sessions. Actions in, effects out, clock injected. The rehydration
-  logic (record in, list of launch effects out) is pure and fully unit
-  tested.
+  sessions. Actions in, effects out, clock injected. Startup is a
+  **reconcile**, not a launch: records plus the host's live pane list go
+  in, and out come card states (warm, cold, exited) and launch effects
+  only for trusted `autostart` services. Agents are never resumed
+  automatically, since a resume costs money. The reconcile is pure and
+  fully unit tested.
 - `ports`: `Store` (records), `FileSystem` (list, read, watch), `Git`
   (status, branch, repo discovery), `ProcessHost` (spawn with env and
   cwd, attach, signal, stream output; tmux and PTY adapters), `Agent`
@@ -283,9 +369,21 @@ Follows the template layering. Nothing below touches egui.
 
 0. **Resumability spike.** Done; see "Spike 0 results".
 1. **Workspace records.** Projects, sessions as records on a board of
-   cards, launch and return-to for agents via hand-off to a real
-   terminal, session state from the spike's signal, and the cross-project
-   switchboard view built from the same records. Restart the app,
+   cards, launch and return-to for agents via tmux with Ghostty attached,
+   session state from hooks, and the cross-project switchboard view built
+   from the same records. **Gate**, demonstrated end to end before any
+   Milestone 2 work:
+   - two Claude Code sessions in the same cwd map to the correct cards;
+   - closing the Ghostty window detaches without killing the agent;
+   - repeated "return" never duplicates an agent;
+   - killing and restarting Switchboard preserves live processes and
+     state;
+   - a cold restart resumes from the backed-up transcript after the
+     provider's copy is deleted;
+   - a Codex session resumes from a discovered id;
+   - a corrupt record recovers from `.bak` with a visible notice;
+   - hook events produced while the app was down are neither lost nor
+     misapplied. Restart the app,
    reboot the machine, everything is still listed and resumable. This is
    the product's reason to exist, so it comes before the file browser.
 2. **Projects and files.** Tree, fuzzy finder, preview, open in default
@@ -301,7 +399,7 @@ Follows the template layering. Nothing below touches egui.
 
 - How much scrollback to keep per session? Full history for every
   command may be more disk than value; agents keep their own transcripts.
-- Should `.switchboard/` be committed by default? Sessions are personal;
-  saved commands are arguably shared.
+- When the shareable project config arrives, is a hash-and-approve flow
+  enough, or should shared commands run in a visibly sandboxed way?
 - Notes editor in scope, or "open in editor"? Leaning open in editor.
 - Multiple machines: sync the project list early? Leaning no.
