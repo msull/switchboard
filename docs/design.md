@@ -487,7 +487,6 @@ Known gaps, for the next session:
   (kittest), not by clicking in the live app; the live app was driven
   through `SWITCHBOARD_SCRIPT`.
 - Captions can contain glyphs the UI font lacks (shown as boxes).
-- No app bundle or icon yet; `cargo run` only.
 
 ## Open questions
 

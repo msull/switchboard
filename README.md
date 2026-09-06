@@ -28,6 +28,22 @@ with `--settings`), `events.log` (the hook event log), `wake.sock`, and
 switchboard`), never on your default one. Nothing is written into a
 project directory.
 
+## App bundle
+
+```sh
+./scripts/bundle.sh          # installs ~/Applications/Switchboard.app
+./scripts/icon.sh            # regenerates the icon from assets/Switchboard.svg
+```
+
+The bundle carries both binaries (`switchboard` and `switchboard-hook`,
+which the app locates next to its own executable). Raising a Ghostty
+window needs Accessibility, and macOS ties that grant to the code
+signature: the script signs with `CODESIGN_IDENTITY`, else a "Switchboard
+Dev" or "Prompt Box Dev" certificate from Keychain Access, else ad-hoc
+(in which case the grant is reset each rebuild). `scripts/icon.sh`
+renders the SVG with AppKit into `assets/Switchboard.icns` for Finder and
+`assets/icon-256.rgba`, which `src/main.rs` embeds for the Dock.
+
 Dev aids, all environment variables:
 
 - `SWITCHBOARD_DATA_DIR=<dir>`: use another data directory (keep the path

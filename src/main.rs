@@ -37,10 +37,18 @@ fn main() -> eframe::Result {
         log::error!("could not write hook settings: {e}");
     }
 
+    // The running process sets its own Dock icon; without this macOS shows
+    // a generic one while the app is open. Raw RGBA from scripts/icon.sh.
+    let icon = egui::IconData {
+        rgba: include_bytes!("../assets/icon-256.rgba").to_vec(),
+        width: 256,
+        height: 256,
+    };
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1100.0, 720.0])
-            .with_min_inner_size([600.0, 400.0]),
+            .with_min_inner_size([600.0, 400.0])
+            .with_icon(icon),
         ..Default::default()
     };
 
