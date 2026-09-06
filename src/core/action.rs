@@ -1,15 +1,30 @@
-//! The state machine. `AppCore` holds plain data; `dispatch` applies one
-//! action and returns the side effects the shell should perform. Because
-//! time is passed in explicitly, tests never sleep and never depend on the
-//! wall clock.
+//! The state machine. `AppCore` holds the workspaces and derived state;
+//! `dispatch` applies one action at an explicit time and returns effects.
+//!
+//! Contract for the implementation (Milestone 1):
+//! - Startup is a reconcile: `StoreLoaded` then `HostListed` produce card
+//!   states, never launches, except `Effect::Spawn` for trusted
+//!   `autostart` services.
+//! - "Return" is idempotent: `ReturnToSession` emits `Attach` when the host
+//!   status is `Running`, `PrepareResume` (then `Spawn`, then `Attach`)
+//!   when it is `Missing`, and nothing when a resume is already in flight.
+//! - Events older than `record.last_event_at` are ignored.
+//! - `Liveness` from the host overrides event-derived activity.
+//! - Every change to a workspace emits `Effect::Save` for it.
 
+use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-/// How long a toast stays visible.
-const TOAST_TTL: Duration = Duration::from_secs(3);
+use crate::core::model::{
+    AgentKind, CardState, Launch, ProjectId, RecordId, ResumeHandle, SessionKind, SessionRecord,
+    Workspace,
+};
+use crate::ports::agent::AgentLaunch;
+use crate::ports::events::SessionEvent;
+use crate::ports::host::{HostId, HostStatus, SpawnSpec};
+use crate::ports::store::{Loaded, StoreError};
 
-/// The current time, as seen by the core. `mono` is for durations and
-/// expiry; `wall` is for anything shown to the user or persisted.
+/// The current time as the core sees it.
 #[derive(Debug, Clone, Copy)]
 pub struct Clock {
     pub mono: Duration,
@@ -17,7 +32,6 @@ pub struct Clock {
 }
 
 impl Clock {
-    /// A clock for tests: `mono_ms` milliseconds since some origin.
     #[must_use]
     pub fn at(mono_ms: u64) -> Self {
         Self {
@@ -27,39 +41,150 @@ impl Clock {
     }
 }
 
-/// A transient message shown at the bottom of the window.
+/// Which screen is showing.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Toast {
-    pub text: String,
-    pub is_error: bool,
-    pub expires_at: Duration,
+pub enum View {
+    /// Every session across every project.
+    Switchboard,
+    Board(ProjectId),
+    Session(RecordId),
 }
 
-/// Everything that can happen: user input, timer ticks, and the results of
-/// effects the shell ran on the core's behalf.
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Notice {
+    pub text: String,
+    pub is_error: bool,
+    pub expires_at: Option<Duration>,
+}
+
+/// Inputs from UI, workers, and the host poll.
+#[derive(Debug, Clone, PartialEq)]
 pub enum AppAction {
-    NameChanged(String),
-    Greet,
-    CopyGreeting,
-    /// Reported by the shell after it ran `Effect::WriteClipboard`.
-    ClipboardWriteFinished(Result<(), String>),
-    /// A frame passed; lets timed state (toasts) expire.
+    // --- startup / persistence
+    StoreLoaded(Result<Loaded, StoreError>),
+    SaveFinished(ProjectId, Result<(), StoreError>),
+    /// The host is unusable (tmux missing); `None` clears.
+    HostUnavailable(Option<String>),
+    // --- navigation
+    ShowSwitchboard,
+    ShowBoard(ProjectId),
+    ShowSession(RecordId),
+    Back,
+    DismissNotice,
+    // --- projects
+    AddProject {
+        name: String,
+        root: PathBuf,
+    },
+    RemoveProject(ProjectId),
+    RenameProject(ProjectId, String),
+    PinDocument(ProjectId, PathBuf),
+    UnpinDocument(ProjectId, PathBuf),
+    // --- sessions
+    NewSession {
+        project: ProjectId,
+        name: String,
+        kind: SessionKind,
+        cwd: PathBuf,
+        launch: Launch,
+    },
+    RenameSession(RecordId, String),
+    SetSessionNotes(RecordId, String),
+    SetAutostart(RecordId, bool),
+    MoveCard {
+        id: RecordId,
+        order: u32,
+        group: Option<String>,
+    },
+    ReturnToSession(RecordId),
+    KillSession(RecordId),
+    RemoveSession(RecordId),
+    // --- results from effects / workers
+    LaunchPrepared {
+        id: RecordId,
+        result: Result<AgentLaunch, String>,
+    },
+    Spawned {
+        id: RecordId,
+        result: Result<(), String>,
+    },
+    Attached {
+        id: RecordId,
+        result: Result<(), String>,
+    },
+    TranscriptChecked {
+        id: RecordId,
+        exists: bool,
+    },
+    Discovered {
+        id: RecordId,
+        result: Result<Option<ResumeHandle>, String>,
+    },
+    /// Result of one `ProcessHost::list` poll.
+    HostListed(Vec<HostStatus>),
+    Events(Vec<SessionEvent>),
     Tick,
 }
 
-/// Work the core wants done but cannot do itself.
+/// Work the shell performs on the core's behalf.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Effect {
-    WriteClipboard(String),
+    Save(Workspace),
+    Delete(ProjectId),
+    /// Compose a fresh launch for an agent record (worker; reports `LaunchPrepared`).
+    PrepareLaunch {
+        id: RecordId,
+        kind: AgentKind,
+        name: String,
+        cwd: PathBuf,
+    },
+    PrepareResume {
+        id: RecordId,
+        handle: ResumeHandle,
+        name: String,
+        cwd: PathBuf,
+    },
+    CheckTranscript {
+        id: RecordId,
+        handle: ResumeHandle,
+    },
+    /// Discover a Codex id created in `cwd` after `since`.
+    Discover {
+        id: RecordId,
+        kind: AgentKind,
+        cwd: PathBuf,
+        since: SystemTime,
+    },
+    Spawn {
+        id: RecordId,
+        spec: SpawnSpec,
+    },
+    /// Open (or raise) the external terminal attached to the host session.
+    Attach {
+        id: RecordId,
+        host: HostId,
+        title: String,
+        cwd: PathBuf,
+    },
+    Kill(HostId),
+    OpenPath(PathBuf),
+    Reveal(PathBuf),
 }
 
-/// Top-level application state. Plain data and pure methods only.
+/// Top-level state. Plain data and pure methods only.
 #[derive(Debug, Default)]
 pub struct AppCore {
-    name: String,
-    greet_count: u32,
-    toast: Option<Toast>,
+    workspaces: Vec<Workspace>,
+    view_stack: Vec<View>,
+    notice: Option<Notice>,
+    host_error: Option<String>,
+    read_only: bool,
+    /// Latest host status per session, from the last poll.
+    host: Vec<HostStatus>,
+    /// Records with a launch or resume in flight (idempotent return).
+    in_flight: Vec<RecordId>,
+    /// Codex launches are serialized: at most one discovery pending.
+    codex_pending: Option<RecordId>,
 }
 
 impl AppCore {
@@ -68,122 +193,64 @@ impl AppCore {
         Self::default()
     }
 
-    /// The single entry point. Applies `action` at time `now` and returns
-    /// the effects the shell must run.
+    /// The single entry point. Implemented in Milestone 1 by the core
+    /// work item; see the module docs for the contract.
     pub fn dispatch(&mut self, action: AppAction, now: Clock) -> Vec<Effect> {
-        let mut effects = Vec::new();
-        self.expire_toast(now.mono);
-        match action {
-            AppAction::NameChanged(name) => self.name = name,
-            AppAction::Greet => self.greet_count += 1,
-            AppAction::CopyGreeting => effects.push(Effect::WriteClipboard(self.greeting())),
-            AppAction::ClipboardWriteFinished(Ok(())) => {
-                self.show_toast("Greeting copied", false, now);
-            }
-            AppAction::ClipboardWriteFinished(Err(e)) => {
-                self.show_toast(format!("Copy failed: {e}"), true, now);
-            }
-            AppAction::Tick => {}
-        }
-        effects
+        let _ = (action, now, &self.in_flight, &self.codex_pending);
+        Vec::new()
     }
+
+    // --- read model for the UI
 
     #[must_use]
-    pub fn name(&self) -> &str {
-        &self.name
+    pub fn view(&self) -> View {
+        self.view_stack.last().cloned().unwrap_or(View::Switchboard)
     }
-
-    /// The greeting for the current name.
     #[must_use]
-    pub fn greeting(&self) -> String {
-        let name = self.name.trim();
-        if name.is_empty() {
-            "Hello, World!".to_owned()
-        } else {
-            format!("Hello, {name}!")
-        }
+    pub fn workspaces(&self) -> &[Workspace] {
+        &self.workspaces
     }
-
     #[must_use]
-    pub fn greet_count(&self) -> u32 {
-        self.greet_count
+    pub fn workspace(&self, id: ProjectId) -> Option<&Workspace> {
+        self.workspaces.iter().find(|w| w.project.id == id)
     }
-
     #[must_use]
-    pub fn toast(&self) -> Option<&Toast> {
-        self.toast.as_ref()
+    pub fn session(&self, id: RecordId) -> Option<&SessionRecord> {
+        self.workspaces
+            .iter()
+            .flat_map(|w| &w.sessions)
+            .find(|s| s.id == id)
     }
-
-    fn show_toast(&mut self, text: impl Into<String>, is_error: bool, now: Clock) {
-        self.toast = Some(Toast {
-            text: text.into(),
-            is_error,
-            expires_at: now.mono + TOAST_TTL,
-        });
+    #[must_use]
+    pub fn host_status(&self, id: RecordId) -> Option<&HostStatus> {
+        let name = id.host_name();
+        self.host.iter().find(|h| h.id.0 == name)
     }
-
-    fn expire_toast(&mut self, now: Duration) {
-        if self.toast.as_ref().is_some_and(|t| now >= t.expires_at) {
-            self.toast = None;
-        }
+    /// Derived card state for a record: host liveness first, then activity.
+    #[must_use]
+    pub fn card_state(&self, id: RecordId) -> CardState {
+        let _ = id;
+        CardState::NotRunning
     }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn greeting_defaults_to_world() {
-        assert_eq!(AppCore::new().greeting(), "Hello, World!");
+    #[must_use]
+    pub fn notice(&self) -> Option<&Notice> {
+        self.notice.as_ref()
     }
-
-    #[test]
-    fn greeting_uses_trimmed_name() {
-        let mut core = AppCore::new();
-        core.dispatch(AppAction::NameChanged("  Sully ".into()), Clock::at(0));
-        assert_eq!(core.greeting(), "Hello, Sully!");
+    #[must_use]
+    pub fn host_error(&self) -> Option<&str> {
+        self.host_error.as_deref()
     }
-
-    #[test]
-    fn greet_increments_count_without_effects() {
-        let mut core = AppCore::new();
-        assert!(core.dispatch(AppAction::Greet, Clock::at(0)).is_empty());
-        core.dispatch(AppAction::Greet, Clock::at(1));
-        assert_eq!(core.greet_count(), 2);
+    #[must_use]
+    pub fn read_only(&self) -> bool {
+        self.read_only
     }
-
-    #[test]
-    fn copy_requests_a_clipboard_write_and_toasts_on_success() {
-        let mut core = AppCore::new();
-        let effects = core.dispatch(AppAction::CopyGreeting, Clock::at(0));
-        assert_eq!(effects, [Effect::WriteClipboard("Hello, World!".into())]);
-        core.dispatch(AppAction::ClipboardWriteFinished(Ok(())), Clock::at(10));
-        assert_eq!(
-            core.toast().map(|t| t.text.as_str()),
-            Some("Greeting copied")
-        );
-    }
-
-    #[test]
-    fn clipboard_failure_shows_an_error_toast() {
-        let mut core = AppCore::new();
-        core.dispatch(
-            AppAction::ClipboardWriteFinished(Err("no display".into())),
-            Clock::at(0),
-        );
-        let toast = core.toast().expect("toast");
-        assert!(toast.is_error);
-        assert_eq!(toast.text, "Copy failed: no display");
-    }
-
-    #[test]
-    fn toast_expires_with_the_clock() {
-        let mut core = AppCore::new();
-        core.dispatch(AppAction::ClipboardWriteFinished(Ok(())), Clock::at(0));
-        core.dispatch(AppAction::Tick, Clock::at(2_999));
-        assert!(core.toast().is_some());
-        core.dispatch(AppAction::Tick, Clock::at(3_000));
-        assert!(core.toast().is_none());
+    /// Sessions across all projects that are waiting on the user.
+    #[must_use]
+    pub fn waiting_count(&self) -> usize {
+        self.workspaces
+            .iter()
+            .flat_map(|w| &w.sessions)
+            .filter(|s| self.card_state(s.id) == CardState::WaitingOnYou)
+            .count()
     }
 }

@@ -1,0 +1,15 @@
+# Vendored from https://github.com/Harzu/egui_term at 31bbc7ab (2026-07-30),
+# because the crates.io release (0.1.0, 2025-04) is far behind master and
+# master pins egui 0.35. Only this Cargo.toml was changed (egui 0.35 -> 0.36)
+# plus whatever source edits are listed in the spike README.
+[package]
+name = "egui_term"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[dependencies]
+egui = "0.36"
+alacritty_terminal = "0.26"
+anyhow = "1"
+open = "5"

@@ -14,15 +14,28 @@ path = "src/lib.rs"
 name = "switchboard"
 path = "src/main.rs"
 
+# Tiny helper that Claude Code hooks call; must start in well under a
+# millisecond, so it uses only std.
+[[bin]]
+name = "switchboard-hook"
+path = "src/bin/switchboard-hook.rs"
+
 [dependencies]
-arboard = "3.6"
+anyhow = "1"
+directories = "6"
 eframe = "0.36"
 egui = "0.36"
+egui_term = { path = "vendor/egui_term" }
 env_logger = "0.11"
+fd-lock = "4"
 log = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4", "serde"] }
 
 [dev-dependencies]
 egui_kittest = { version = "0.36", features = ["eframe"] }
+tempfile = "3"
 
 [lints.rust]
 unsafe_code = "forbid"
@@ -30,8 +43,6 @@ unsafe_code = "forbid"
 [lints.clippy]
 all = { level = "warn", priority = -1 }
 pedantic = { level = "warn", priority = -1 }
-# Pedantic asks for `# Errors` / `# Panics` sections on every fallible fn;
-# more noise than signal in an application crate.
 missing_errors_doc = "allow"
 missing_panics_doc = "allow"
 module_name_repetitions = "allow"

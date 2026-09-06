@@ -1,43 +1,50 @@
-//! Orchestration: owns [`AppCore`] and the port adapters. Maps effects to
-//! adapter calls and feeds their results back as actions. Rendering lives
-//! in [`crate::ui`].
+//! Orchestration: owns [`AppCore`] and the adapters. Maps effects to
+//! adapter calls and feeds results back as actions. Rendering lives in
+//! [`crate::ui`].
 
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Instant, SystemTime};
 
-use crate::adapters::clipboard::SystemClipboard;
 use crate::core::{AppAction, AppCore, Clock, Effect};
-use crate::ports::clipboard::Clipboard;
+use crate::ports::agent::AgentLauncher;
+use crate::ports::events::EventSource;
+use crate::ports::host::ProcessHost;
+use crate::ports::opener::Opener;
+use crate::ports::store::Store;
+
+pub struct Services {
+    pub store: Box<dyn Store>,
+    pub host: Box<dyn ProcessHost>,
+    pub events: Box<dyn EventSource>,
+    pub agents: Box<dyn AgentLauncher>,
+    pub opener: Box<dyn Opener>,
+}
 
 pub struct SwitchboardApp {
     core: AppCore,
-    clipboard: Box<dyn Clipboard>,
+    services: Services,
     started: Instant,
-    /// Text in the name box; mirrored into the core when it changes.
-    pub name_input: String,
 }
 
 impl SwitchboardApp {
-    /// Creates the app with real adapters. The creation context gives
-    /// access to egui settings (fonts, storage, etc.) when needed.
+    /// Creates the app with the given adapters. Real ones are assembled in
+    /// `main.rs`; tests pass fakes.
     #[must_use]
-    pub fn new(_cc: &eframe::CreationContext<'_>) -> Self {
-        Self::with_services(Box::new(SystemClipboard::default()))
-    }
-
-    /// Creates the app with the given adapters. Tests pass fakes.
-    #[must_use]
-    pub fn with_services(clipboard: Box<dyn Clipboard>) -> Self {
+    pub fn with_services(services: Services) -> Self {
         Self {
             core: AppCore::new(),
-            clipboard,
+            services,
             started: Instant::now(),
-            name_input: String::new(),
         }
     }
 
     #[must_use]
     pub fn core(&self) -> &AppCore {
         &self.core
+    }
+
+    #[must_use]
+    pub fn services(&self) -> &Services {
+        &self.services
     }
 
     fn clock(&self) -> Clock {
@@ -47,7 +54,7 @@ impl SwitchboardApp {
         }
     }
 
-    /// The single entry point for every user or timer action.
+    /// The single entry point for every user, worker, or timer action.
     pub fn dispatch(&mut self, action: AppAction) {
         let now = self.clock();
         let effects = self.core.dispatch(action, now);
@@ -58,17 +65,11 @@ impl SwitchboardApp {
         }
     }
 
-    /// Performs one effect; returns the action that reports its result, or
-    /// `None` when the result arrives later (for example from a worker
-    /// thread via a channel drained in `ui`). Every effect here is
-    /// synchronous, hence the lint allow; drop it once one is not.
-    #[allow(clippy::unnecessary_wraps)]
+    /// Performs one effect; returns the action reporting its result, or
+    /// `None` when the result arrives later from a worker.
     fn run_effect(&mut self, effect: Effect) -> Option<AppAction> {
-        match effect {
-            Effect::WriteClipboard(text) => Some(AppAction::ClipboardWriteFinished(
-                self.clipboard.write_text(&text),
-            )),
-        }
+        let _ = (&self.services, effect);
+        None
     }
 }
 
@@ -76,9 +77,5 @@ impl eframe::App for SwitchboardApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.dispatch(AppAction::Tick);
         crate::ui::draw(self, ui);
-        if self.core.toast().is_some() {
-            // Keep repainting so the toast disappears on time without input.
-            ui.ctx().request_repaint_after(Duration::from_millis(250));
-        }
     }
 }

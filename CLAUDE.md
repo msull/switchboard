@@ -13,6 +13,23 @@ The pre-commit hook runs all three checks. Enable it with
 `git config core.hooksPath .githooks` on a fresh clone. Do not commit with
 `--no-verify`.
 
+## Milestone 1 contract (read before touching code)
+
+`docs/design.md` is the spec; "Spike 0 results", "Durable store", "Trust
+boundary", and the Milestone 1 gate are binding. `spikes/*/README.md` hold
+verified commands and measured numbers; copy from them rather than
+re-deriving. The shared types and traits in `src/core/model.rs`,
+`src/core/action.rs` (the `AppAction`/`Effect` surface), and `src/ports/`
+are the contract between work items: extend them additively, never
+rename or remove, and say so in the commit message when you add.
+
+Hard rules: no keystroke injection into windows (no System Events
+`keystroke`, no `osascript` typing); tmux experiments only on the
+`switchboard` socket or a `switchboard-test-*` socket; never write into a
+project directory's `.claude/` or `.switchboard/`; never modify
+`~/.claude/settings.json`; real agent runs use `--model haiku`-class cheap
+settings and a one-turn prompt.
+
 ## Architecture rules
 
 - `src/core/` is deterministic: no egui, no threads, no I/O, no wall clock.

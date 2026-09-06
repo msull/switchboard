@@ -19,17 +19,25 @@ cargo fmt --all                                      # format
 ### Layout
 
 ```
-src/main.rs              thin launcher: logging, window options, run_native
+src/main.rs              launcher: wires real adapters, opens the window
+src/bin/switchboard-hook.rs  helper Claude Code hooks call (std only)
 src/lib.rs               module tree and the layering rules
-src/core/                deterministic, egui-free
-  action.rs              AppAction, Effect, Clock, AppCore::dispatch (the state machine)
-src/ports/               traits the core needs from the outside world
-  clipboard.rs           clipboard that reports failure
-src/adapters/            real implementations plus fakes for tests
-  clipboard.rs           arboard clipboard; FakeClipboard
-src/app.rs               SwitchboardApp: owns core + adapters; runs effects, feeds results back
-src/ui.rs                egui drawing and input -> actions
-tests/ui.rs              headless flows via egui_kittest with fake adapters
+src/core/
+  model.rs               durable data model (Project, SessionRecord, ResumeHandle, CardState)
+  action.rs              AppAction, Effect, Clock, AppCore::dispatch (reconcile, return, events)
+src/ports/               traits: store, host, events, agent, opener
+src/adapters/
+  store.rs               JSON store: atomic writes, .bak, flock
+  tmux.rs                tmux process host on the private socket
+  hooks.rs               append-first event log + socket wake-up + hook settings JSON
+  agents.rs              Claude Code / Codex launch, resume, preflight, discovery
+  ghostty.rs             open, reveal, Ghostty window launch and raise
+  fakes.rs               test doubles for every port
+src/app.rs               SwitchboardApp: owns core + adapters; runs effects; polls host
+src/ui/                  switcher, board of cards, session view, switchboard view
+tests/ui.rs              headless flows via egui_kittest with fakes
+vendor/egui_term/        embedded terminal widget (Harzu/egui_term @ 31bbc7ab, egui 0.36)
+spikes/                  Spike 0 evidence
 ```
 
 The flow for any feature: the UI dispatches an `AppAction`; the core

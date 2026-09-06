@@ -1,13 +1,14 @@
-//! Library crate. The app lives here so integration tests in `tests/` can
-//! drive it; `src/main.rs` is a thin launcher.
+//! Switchboard library crate. `src/main.rs` is a thin launcher and
+//! `src/bin/switchboard-hook.rs` is the hook helper.
 //!
-//! Layering:
-//! - `core`: deterministic state machine. No egui, no threads, no I/O.
-//!   Everything enters through `AppCore::dispatch` and leaves as `Effect`s.
-//! - `ports`: traits describing what the core needs from the outside world.
-//! - `adapters`: real implementations of the ports, plus fakes for tests.
-//! - `app`: owns the core and the adapters; runs effects, feeds results back.
-//! - `ui`: egui drawing and input -> actions. Nothing else lives here.
+//! Layering (see `docs/design.md`):
+//! - `core`: deterministic. Records, card states, the reconcile, and the
+//!   state machine. No egui, no threads, no I/O, no wall clock.
+//! - `ports`: traits for the outside world (store, process host, agent
+//!   launchers, session events, opener).
+//! - `adapters`: real implementations, plus fakes for tests.
+//! - `app`: owns core and adapters; runs effects; drains workers.
+//! - `ui`: egui drawing and input -> actions.
 
 pub mod adapters;
 pub mod app;

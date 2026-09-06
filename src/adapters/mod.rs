@@ -1,3 +1,8 @@
-//! Concrete implementations of the ports, plus test doubles.
+//! Concrete implementations of the ports, plus fakes for tests.
 
-pub mod clipboard;
+pub mod agents;
+pub mod fakes;
+pub mod ghostty;
+pub mod hooks;
+pub mod store;
+pub mod tmux;
