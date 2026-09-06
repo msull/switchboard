@@ -17,6 +17,7 @@ impl AppCore {
         match result {
             Ok(loaded) => {
                 self.workspaces = loaded.workspaces;
+                self.settings = loaded.settings;
                 for notice in loaded.notices {
                     if notice == StoreError::Locked {
                         self.read_only = true;

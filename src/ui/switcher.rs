@@ -6,12 +6,12 @@ use egui::{Button, Color32, RichText, Ui};
 use super::cards::{project_dot_color, state_color};
 use super::dialogs::AddProjectDraft;
 use super::{DrawCtx, GAP};
-use crate::core::{AppAction, AppCore, CardState, Project, View};
+use crate::core::{AppAction, AppCore, CardState, Project, ThemeMode, View};
 
 /// Projects most recently active first: the switcher order, also used
 /// for Cmd+1..9.
 pub fn projects_by_recency(core: &AppCore) -> Vec<&Project> {
-    let mut projects: Vec<&Project> = core.workspaces().iter().map(|w| &w.project).collect();
+    let mut projects: Vec<&Project> = core.visible_workspaces().map(|w| &w.project).collect();
     projects.sort_by_key(|p| std::cmp::Reverse(p.last_active));
     projects
 }
@@ -54,6 +54,30 @@ pub fn top_bar(cx: &mut DrawCtx<'_>, ui: &mut Ui, view: &View) {
         }
 
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let settings = cx.core.settings().clone();
+            ui.menu_button("Settings", |ui| {
+                ui.label(RichText::new("Theme").weak());
+                for mode in ThemeMode::ALL {
+                    if ui.radio(mode == settings.theme, mode.label()).clicked() {
+                        cx.dispatch(AppAction::SetTheme(mode));
+                        ui.close();
+                    }
+                }
+                ui.separator();
+                let mut exclusive = settings.exclusive;
+                if ui
+                    .checkbox(&mut exclusive, "Exclusive: only the active project")
+                    .on_hover_text("Hides every other project while screen sharing")
+                    .changed()
+                {
+                    cx.dispatch(AppAction::SetExclusive(exclusive));
+                    ui.close();
+                }
+            });
+            if settings.exclusive {
+                ui.label(RichText::new("exclusive").weak())
+                    .on_hover_text("Other projects are hidden (Settings)");
+            }
             if *view != View::Switchboard && ui.button("Back").clicked() {
                 cx.dispatch(AppAction::Back);
             }

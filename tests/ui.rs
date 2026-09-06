@@ -16,7 +16,7 @@ use switchboard::adapters::fakes::{
 use switchboard::app::Services;
 use switchboard::core::{
     Activity, AgentKind, AppAction, CardLayout, Launch, Notice, Project, ProjectId, RecordId,
-    ResumeHandle, SessionKind, SessionRecord, View, Workspace,
+    ResumeHandle, SessionKind, SessionRecord, ThemeMode, View, Workspace,
 };
 use switchboard::ports::host::{HostId, HostStatus, Liveness};
 use switchboard::ports::transcript::{
@@ -166,6 +166,27 @@ fn actions(harness: &Harness<'static, SwitchboardApp>) -> Vec<AppAction> {
 fn click(harness: &mut Harness<'static, SwitchboardApp>, label: &str) {
     harness.get_by_label(label).click();
     harness.run_steps(2);
+}
+
+#[test]
+fn settings_menu_sets_the_theme() {
+    let (mut harness, _) = harness();
+    click(&mut harness, "Settings");
+    click(&mut harness, "Dark");
+    assert!(actions(&harness).contains(&AppAction::SetTheme(ThemeMode::Dark)));
+    assert_eq!(harness.state().core().settings().theme, ThemeMode::Dark);
+}
+
+#[test]
+fn exclusive_mode_hides_the_other_projects() {
+    let (mut harness, _) = harness();
+    assert!(harness.query_all_by_label("beta").count() > 0);
+    click(&mut harness, "Settings");
+    click(&mut harness, "Exclusive: only the active project");
+    assert!(actions(&harness).contains(&AppAction::SetExclusive(true)));
+    // alpha was active most recently, so it is the one that stays.
+    assert!(harness.query_all_by_label("alpha").count() > 0);
+    assert_eq!(harness.query_all_by_label("beta").count(), 0);
 }
 
 fn type_into(harness: &mut Harness<'static, SwitchboardApp>, label: &str, text: &str) {

@@ -9,7 +9,7 @@ use uuid::Uuid;
 use super::action::{AppAction, AppCore, Clock, Effect, View};
 use super::model::{
     Activity, AgentKind, CardState, Launch, Project, ProjectId, RecordId, ResumeHandle,
-    SessionKind, SessionRecord, Workspace,
+    SessionKind, SessionRecord, Settings, ThemeMode, Workspace,
 };
 use super::reconcile::RECORD_ID_ENV;
 use crate::ports::agent::AgentLaunch;
@@ -98,6 +98,7 @@ fn loaded(workspaces: Vec<Workspace>, host: Vec<HostStatus>) -> (AppCore, Vec<Ef
         AppAction::StoreLoaded(Ok(Loaded {
             workspaces,
             notices: vec![],
+            ..Loaded::default()
         })),
         Clock::at(0),
     );
@@ -188,6 +189,38 @@ fn launch_agent(core: &mut AppCore, id: RecordId, handle: Option<ResumeHandle>) 
 // --- 1. startup reconcile
 
 #[test]
+fn set_theme_saves_settings_once_per_change() {
+    let mut core = AppCore::new();
+    let effects = core.dispatch(AppAction::SetTheme(ThemeMode::Dark), Clock::at(0));
+    assert_eq!(
+        effects,
+        vec![Effect::SaveSettings(Settings {
+            theme: ThemeMode::Dark,
+            exclusive: false,
+        })]
+    );
+    assert_eq!(core.settings().theme, ThemeMode::Dark);
+    assert!(
+        core.dispatch(AppAction::SetTheme(ThemeMode::Dark), Clock::at(1))
+            .is_empty()
+    );
+}
+
+#[test]
+fn exclusive_mode_hides_all_but_the_active_project() {
+    let mut core = AppCore::new();
+    let (a, b) = (Workspace::new(project("a")), Workspace::new(project("b")));
+    let (ida, idb) = (a.project.id, b.project.id);
+    core.seed(vec![a, b], Vec::new());
+    core.dispatch(AppAction::ShowBoard(idb), Clock::at(5));
+    assert!(core.project_visible(ida) && core.project_visible(idb));
+    core.dispatch(AppAction::SetExclusive(true), Clock::at(6));
+    assert_eq!(core.active_project(), Some(idb));
+    assert!(!core.project_visible(ida) && core.project_visible(idb));
+    assert_eq!(core.visible_workspaces().count(), 1);
+}
+
+#[test]
 fn store_loaded_installs_workspaces_and_notices() {
     let mut core = AppCore::new();
     let w = Workspace::new(project("a"));
@@ -199,6 +232,7 @@ fn store_loaded_installs_workspaces_and_notices() {
                 recovered: true,
                 detail: "eof".into(),
             }],
+            ..Loaded::default()
         })),
         Clock::at(0),
     );

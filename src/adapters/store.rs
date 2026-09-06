@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 use directories::ProjectDirs;
 use uuid::Uuid;
 
-use crate::core::{ProjectId, SCHEMA_VERSION, Workspace};
+use crate::core::{ProjectId, SCHEMA_VERSION, Settings, Workspace};
 use crate::ports::store::{Loaded, Store, StoreError};
 
 /// Store backed by JSON files. Construct with [`JsonStore::new`], then
@@ -51,6 +51,10 @@ impl JsonStore {
 
     fn projects_dir(&self) -> PathBuf {
         self.dir.join("projects")
+    }
+
+    fn settings_path(&self) -> PathBuf {
+        self.dir.join("settings.json")
     }
 
     fn lock_path(&self) -> PathBuf {
@@ -117,10 +121,14 @@ impl Store for JsonStore {
     }
 
     fn load_all(&self) -> Result<Loaded, StoreError> {
+        let mut loaded = Loaded {
+            settings: self.load_settings(),
+            ..Loaded::default()
+        };
         let dir = self.projects_dir();
         let entries = match fs::read_dir(&dir) {
             Ok(entries) => entries,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Loaded::default()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(loaded),
             Err(e) => return Err(io_err("read", &dir, &e)),
         };
         let mut paths: Vec<PathBuf> = entries
@@ -130,7 +138,6 @@ impl Store for JsonStore {
             .collect();
         paths.sort();
 
-        let mut loaded = Loaded::default();
         for path in paths {
             let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
             let Ok(id) = Uuid::parse_str(stem) else {
@@ -200,8 +207,45 @@ impl Store for JsonStore {
         sync_dir(&dir)
     }
 
+    fn save_settings(&self, settings: &Settings) -> Result<(), StoreError> {
+        if self.lock.is_none() {
+            return Err(StoreError::Locked);
+        }
+        let json = serde_json::to_vec_pretty(settings)
+            .map_err(|e| StoreError::Io(format!("serialize: {e}")))?;
+        ensure_dir(&self.dir)?;
+        let path = self.settings_path();
+        let tmp = Self::temp_path(&path);
+        let mut file = open_private(&tmp, true)?;
+        file.write_all(&json)
+            .and_then(|()| file.sync_all())
+            .map_err(|e| io_err("write", &tmp, &e))?;
+        drop(file);
+        fs::rename(&tmp, &path).map_err(|e| io_err("rename", &tmp, &e))?;
+        sync_dir(&self.dir)
+    }
+
     fn data_dir(&self) -> PathBuf {
         self.dir.clone()
+    }
+}
+
+impl JsonStore {
+    /// Preferences are not worth a recovery notice: an unreadable file
+    /// is logged and the defaults apply.
+    fn load_settings(&self) -> Settings {
+        let path = self.settings_path();
+        match fs::read(&path) {
+            Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_else(|e| {
+                log::warn!("{}: {e}; using default settings", path.display());
+                Settings::default()
+            }),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Settings::default(),
+            Err(e) => {
+                log::warn!("{}: {e}; using default settings", path.display());
+                Settings::default()
+            }
+        }
     }
 }
 
@@ -386,6 +430,21 @@ mod tests {
 
     fn record_path(store: &JsonStore, ws: &Workspace) -> PathBuf {
         store.record_path(ws.project.id)
+    }
+
+    #[test]
+    fn settings_round_trip_and_default_when_absent() {
+        use crate::core::ThemeMode;
+        let dir = tempfile::tempdir().unwrap();
+        let store = locked_store(dir.path());
+        assert_eq!(store.load_all().unwrap().settings, Settings::default());
+        let settings = Settings {
+            theme: ThemeMode::Dark,
+            exclusive: true,
+        };
+        store.save_settings(&settings).unwrap();
+        assert_eq!(store.load_all().unwrap().settings, settings);
+        assert!(!dir.path().join("settings.json.tmp").exists());
     }
 
     #[test]

@@ -171,24 +171,41 @@ impl SwitchboardApp {
         }
     }
 
-    /// Performs one effect; returns the action reporting its result, or
-    /// `None` when the result arrives later (discovery) or has no report.
-    fn run_effect(&mut self, effect: Effect) -> Option<AppAction> {
-        let s = &self.services;
+    /// The persistence effects; only a workspace save reports back.
+    fn run_store_effect(&self, effect: Effect) -> Option<AppAction> {
+        let store = &self.services.store;
         match effect {
+            Effect::SaveSettings(settings) => {
+                store
+                    .save_settings(&settings)
+                    .unwrap_or_else(|e| log::error!("save settings failed: {e}"));
+                None
+            }
             Effect::Save(ws) => {
                 let id = ws.project.id;
-                let result = s.store.save(&ws);
+                let result = store.save(&ws);
                 if let Err(e) = &result {
                     log::error!("save failed: {e}");
                 }
                 Some(AppAction::SaveFinished(id, result))
             }
             Effect::Delete(id) => {
-                if let Err(e) = s.store.delete(id) {
+                if let Err(e) = store.delete(id) {
                     log::error!("delete failed: {e}");
                 }
                 None
+            }
+            _ => None,
+        }
+    }
+
+    /// Performs one effect; returns the action reporting its result, or
+    /// `None` when the result arrives later (discovery) or has no report.
+    fn run_effect(&mut self, effect: Effect) -> Option<AppAction> {
+        let s = &self.services;
+        match effect {
+            Effect::SaveSettings(_) | Effect::Save(_) | Effect::Delete(_) => {
+                self.run_store_effect(effect)
             }
             Effect::PrepareLaunch {
                 id,

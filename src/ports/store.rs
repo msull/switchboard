@@ -4,7 +4,7 @@
 
 use std::path::PathBuf;
 
-use crate::core::{ProjectId, Workspace};
+use crate::core::{ProjectId, Settings, Workspace};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StoreError {
@@ -48,6 +48,7 @@ impl std::fmt::Display for StoreError {
 pub struct Loaded {
     pub workspaces: Vec<Workspace>,
     pub notices: Vec<StoreError>,
+    pub settings: Settings,
 }
 
 pub trait Store: Send {
@@ -57,6 +58,8 @@ pub trait Store: Send {
     fn load_all(&self) -> Result<Loaded, StoreError>;
     fn save(&self, workspace: &Workspace) -> Result<(), StoreError>;
     fn delete(&self, id: ProjectId) -> Result<(), StoreError>;
+    /// Persist the app-wide preferences (loaded as part of `load_all`).
+    fn save_settings(&self, settings: &Settings) -> Result<(), StoreError>;
     /// Directory for per-session files (scrollback, event log).
     fn data_dir(&self) -> PathBuf;
 }

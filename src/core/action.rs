@@ -21,7 +21,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::core::model::{
     Activity, AgentKind, CardState, Launch, Project, ProjectId, RecordId, ResumeHandle,
-    SessionKind, SessionRecord, Workspace,
+    SessionKind, SessionRecord, Settings, ThemeMode, Workspace,
 };
 use crate::ports::agent::AgentLaunch;
 use crate::ports::events::SessionEvent;
@@ -101,6 +101,9 @@ pub enum AppAction {
         group: Option<String>,
     },
     ReturnToSession(RecordId),
+    SetTheme(ThemeMode),
+    /// Exclusive mode shows only the active project (screen sharing).
+    SetExclusive(bool),
     /// Type `text` into the session's terminal and press Enter, as if the
     /// user had typed it there.
     SendInput {
@@ -141,6 +144,7 @@ pub enum AppAction {
 pub enum Effect {
     Save(Workspace),
     Delete(ProjectId),
+    SaveSettings(Settings),
     /// Compose a fresh launch for an agent record (worker; reports `LaunchPrepared`).
     PrepareLaunch {
         id: RecordId,
@@ -251,6 +255,7 @@ pub struct AppCore {
     /// The store has loaded, so the next host poll is the reconcile.
     pub(super) store_loaded: bool,
     pub(super) reconciled: bool,
+    pub(super) settings: Settings,
 }
 
 impl AppCore {
@@ -269,22 +274,20 @@ impl AppCore {
             AppAction::SaveFinished(_, Err(e)) => self.error(format!("save failed: {e}")),
             AppAction::SaveFinished(_, Ok(())) => {}
             AppAction::HostUnavailable(reason) => self.host_error = reason,
+            AppAction::SetTheme(theme) => self.update_settings(&mut out, |s| s.theme = theme),
+            AppAction::SetExclusive(on) => self.update_settings(&mut out, |s| s.exclusive = on),
             AppAction::HostListed(statuses) => self.host_listed(statuses, now, &mut out),
 
             AppAction::ShowSwitchboard => self.show(View::Switchboard, now, &mut out),
             AppAction::ShowBoard(id) => self.show(View::Board(id), now, &mut out),
             AppAction::ShowSession(id) => self.show(View::Session(id), now, &mut out),
-            AppAction::Back => {
-                self.view_stack.pop();
-            }
+            AppAction::Back => drop(self.view_stack.pop()),
             AppAction::DismissNotice => {
                 if !self.notices.is_empty() {
                     self.notices.remove(0);
                 }
             }
-            AppAction::Tick => self
-                .notices
-                .retain(|n| n.expires_at.is_none_or(|t| t > now.mono)),
+            AppAction::Tick => self.expire_notices(now),
 
             AppAction::AddProject { name, root } => self.add_project(name, root, now, &mut out),
             AppAction::RemoveProject(id) => {
@@ -416,6 +419,11 @@ impl AppCore {
         });
     }
 
+    fn expire_notices(&mut self, now: Clock) {
+        self.notices
+            .retain(|n| n.expires_at.is_none_or(|t| t > now.mono));
+    }
+
     fn show(&mut self, view: View, now: Clock, out: &mut Out) {
         if let View::Board(id) = view {
             self.edit_project(id, out, |p| p.last_active = now.wall);
@@ -540,6 +548,46 @@ impl AppCore {
             .find(|s| s.id == id)
     }
     #[must_use]
+    pub fn settings(&self) -> &Settings {
+        &self.settings
+    }
+
+    /// The project last shown (most recent `last_active`); the one
+    /// exclusive mode keeps visible.
+    #[must_use]
+    pub fn active_project(&self) -> Option<ProjectId> {
+        self.workspaces
+            .iter()
+            .map(|w| &w.project)
+            .max_by_key(|p| p.last_active)
+            .map(|p| p.id)
+    }
+
+    /// Whether the UI may show this project at all.
+    #[must_use]
+    pub fn project_visible(&self, id: ProjectId) -> bool {
+        !self.settings.exclusive || self.active_project() == Some(id)
+    }
+
+    /// Workspaces the UI may show, in stored order.
+    pub fn visible_workspaces(&self) -> impl Iterator<Item = &Workspace> {
+        self.workspaces
+            .iter()
+            .filter(|w| self.project_visible(w.project.id))
+    }
+
+    fn update_settings(&mut self, out: &mut Out, change: impl FnOnce(&mut Settings)) {
+        let mut next = self.settings.clone();
+        change(&mut next);
+        if next != self.settings {
+            self.settings = next;
+            if !self.read_only {
+                out.push(Effect::SaveSettings(self.settings.clone()));
+            }
+        }
+    }
+
+    #[must_use]
     pub fn host_status(&self, id: RecordId) -> Option<&HostStatus> {
         let name = id.host_name();
         self.host.iter().find(|h| h.id.0 == name)
@@ -630,8 +678,7 @@ impl AppCore {
     /// Sessions across all projects that are waiting on the user.
     #[must_use]
     pub fn waiting_count(&self) -> usize {
-        self.workspaces
-            .iter()
+        self.visible_workspaces()
             .flat_map(|w| &w.sessions)
             .filter(|s| self.card_state(s.id) == CardState::WaitingOnYou)
             .count()

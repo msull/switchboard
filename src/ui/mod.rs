@@ -22,7 +22,7 @@ use std::time::SystemTime;
 use egui::{Key, Modifiers, Ui};
 
 use crate::app::{Services, SwitchboardApp};
-use crate::core::{AppAction, AppCore, RecordId, View};
+use crate::core::{AppAction, AppCore, RecordId, ThemeMode, View};
 use crate::ports::transcript::Conversation;
 
 pub use dialogs::{AddProjectDraft, NewSessionDraft};
@@ -60,6 +60,8 @@ pub struct UiState {
     pub input_draft: Option<(RecordId, String)>,
     /// Embedded terminals, only ever the one for the session on screen.
     pub terminals: HashMap<RecordId, EmbeddedTerminal>,
+    /// The theme last pushed into egui; pushed again only when it changes.
+    pub applied_theme: Option<ThemeMode>,
     next_terminal_id: u64,
 }
 
@@ -79,6 +81,7 @@ impl Default for UiState {
             notes_draft: None,
             input_draft: None,
             terminals: HashMap::new(),
+            applied_theme: None,
             next_terminal_id: 0,
         }
     }
@@ -118,6 +121,15 @@ pub fn draw(app: &mut SwitchboardApp, ui: &mut Ui) {
 }
 
 fn draw_frame(cx: &mut DrawCtx<'_>, ui: &mut Ui) {
+    let theme = cx.core.settings().theme;
+    if cx.state.applied_theme != Some(theme) {
+        ui.ctx().set_theme(match theme {
+            ThemeMode::Auto => egui::ThemePreference::System,
+            ThemeMode::Light => egui::ThemePreference::Light,
+            ThemeMode::Dark => egui::ThemePreference::Dark,
+        });
+        cx.state.applied_theme = Some(theme);
+    }
     let view = cx.core.view();
     keyboard(cx, ui, &view);
 

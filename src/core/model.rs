@@ -11,6 +11,39 @@ use uuid::Uuid;
 /// Bump when the on-disk shape changes incompatibly.
 pub const SCHEMA_VERSION: u32 = 1;
 
+/// How the UI picks its colours: follow the system, or force one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum ThemeMode {
+    #[default]
+    Auto,
+    Light,
+    Dark,
+}
+
+impl ThemeMode {
+    pub const ALL: [Self; 3] = [Self::Auto, Self::Light, Self::Dark];
+
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Auto => "Auto",
+            Self::Light => "Light",
+            Self::Dark => "Dark",
+        }
+    }
+}
+
+/// App-wide preferences: one `settings.json` per data directory, not per
+/// project. Unknown fields are kept out and missing ones default, so the
+/// file needs no schema version.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Settings {
+    pub theme: ThemeMode,
+    /// Show only the active project, for screen sharing.
+    pub exclusive: bool,
+}
+
 /// Switchboard's own id for a project. Never reused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct ProjectId(pub Uuid);

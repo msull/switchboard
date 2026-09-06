@@ -11,7 +11,7 @@ pub fn show(cx: &mut DrawCtx<'_>, ui: &mut Ui) {
     ui.spacing_mut().item_spacing = egui::vec2(GAP, GAP);
     ui.heading("All sessions");
 
-    let mut workspaces: Vec<Workspace> = cx.core.workspaces().to_vec();
+    let mut workspaces: Vec<Workspace> = cx.core.visible_workspaces().cloned().collect();
     // A project's rank is its most urgent card; ties go to the most
     // recently active project.
     let rank = |w: &Workspace| {
