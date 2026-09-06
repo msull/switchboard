@@ -10,7 +10,7 @@ use super::{DrawCtx, GAP};
 use crate::core::{AppAction, AppCore, CardState, ProjectId, RecordId, SessionKind, SessionRecord};
 use crate::ports::host::Liveness;
 
-pub const CARD_SIZE: egui::Vec2 = vec2(260.0, 120.0);
+pub const CARD_SIZE: egui::Vec2 = vec2(260.0, 136.0);
 
 /// Semantic colors for card states. Orange and green are fixed; the rest
 /// come from the theme so dim text stays readable in light and dark.
@@ -102,8 +102,10 @@ pub fn session_card(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord) {
         .cloned()
         .or_else(|| cx.core.host_status(record.id).and_then(|h| h.title.clone()));
 
+    // The board lays cards out left to right; the card's own content
+    // stacks top to bottom regardless.
     let response = ui
-        .allocate_ui(CARD_SIZE, |ui| {
+        .allocate_ui_with_layout(CARD_SIZE, egui::Layout::top_down(egui::Align::Min), |ui| {
             egui::Frame::group(ui.style())
                 .inner_margin(GAP)
                 .show(ui, |ui| {
@@ -125,7 +127,10 @@ pub fn session_card(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord) {
                     );
                     state_line(ui, record, &state, running);
                     if let Some(caption) = caption {
-                        ui.label(RichText::new(last_line(&caption)).weak().small());
+                        ui.add(
+                            egui::Label::new(RichText::new(last_line(&caption)).weak().small())
+                                .truncate(),
+                        );
                     }
                     ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
                         card_buttons(cx, ui, record.id, running);

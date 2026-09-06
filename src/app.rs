@@ -19,8 +19,10 @@ use crate::ui::UiState;
 const POLL_INTERVAL: Duration = Duration::from_secs(1);
 /// How often card captions and the session snapshot are refreshed.
 const CAPTION_INTERVAL: Duration = Duration::from_secs(2);
-/// How long a Codex id discovery keeps looking before giving up.
-const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(30);
+/// How long a Codex id discovery keeps looking. Codex writes its rollout
+/// file on the first prompt, not at launch, so this is generous; a
+/// discovery also ends as soon as the pane is gone.
+const DISCOVERY_TIMEOUT: Duration = Duration::from_hours(24);
 
 pub struct Services {
     pub store: Box<dyn Store>,
@@ -92,6 +94,37 @@ impl SwitchboardApp {
         self.last_poll = Some(Instant::now());
         self.poll_events();
         self.poll_host();
+        self.rearm_discoveries();
+    }
+
+    /// A running Codex pane whose record has no resume handle yet (the
+    /// app was restarted, or the id appeared late) keeps being looked for.
+    fn rearm_discoveries(&mut self) {
+        let pending: Vec<(RecordId, PathBuf, SystemTime)> = self
+            .core
+            .workspaces()
+            .iter()
+            .flat_map(|w| &w.sessions)
+            .filter(|r| {
+                matches!(r.kind, SessionKind::Agent(AgentKind::Codex)) && r.resume.is_none()
+            })
+            .filter(|r| {
+                self.core
+                    .host_status(r.id)
+                    .is_some_and(|h| matches!(h.liveness, Liveness::Running { .. }))
+            })
+            .map(|r| (r.id, r.cwd.clone(), r.created))
+            .collect();
+        for (id, cwd, since) in pending {
+            log::info!("re-arming Codex id discovery for {}", id.host_name());
+            self.discoveries.push(Discovery {
+                id,
+                kind: AgentKind::Codex,
+                cwd,
+                since,
+                deadline: Instant::now() + DISCOVERY_TIMEOUT,
+            });
+        }
     }
 
     #[must_use]
@@ -266,8 +299,12 @@ impl SwitchboardApp {
     fn poll_discoveries(&mut self) {
         let mut finished = Vec::new();
         for (i, d) in self.discoveries.iter().enumerate() {
+            let alive = self
+                .core
+                .host_status(d.id)
+                .is_some_and(|h| matches!(h.liveness, Liveness::Running { .. }));
             match self.services.agents.discover(d.kind, &d.cwd, d.since) {
-                Ok(None) if Instant::now() < d.deadline => {}
+                Ok(None) if alive && Instant::now() < d.deadline => {}
                 Ok(None) => finished.push((i, Ok(None))),
                 other => finished.push((i, other)),
             }
