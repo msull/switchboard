@@ -481,7 +481,7 @@ impl AppCore {
         host_error: Option<String>,
         read_only: bool,
     ) {
-        self.notice = notice;
+        self.notices = notice.into_iter().collect();
         self.host_error = host_error;
         self.read_only = read_only;
     }

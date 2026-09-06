@@ -422,10 +422,7 @@ fn command_digits_switch_projects() {
     );
 }
 
-// `card_state` and `waiting_count` are stubs on this branch, so state
-// labels and the badge cannot be asserted yet.
 #[test]
-#[ignore = "enable after core lands"]
 fn waiting_badge_counts_waiting_sessions() {
     let (harness, _) = harness();
     harness.get_by_label("1 waiting");
