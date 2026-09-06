@@ -30,6 +30,15 @@ project directory's `.claude/` or `.switchboard/`; never modify
 `~/.claude/settings.json`; real agent runs use `--model haiku`-class cheap
 settings and a one-turn prompt.
 
+## Driving the live app
+
+There is no keystroke injection in this repo. To put the running app into
+a state, use `SWITCHBOARD_SCRIPT=<file>` (see `src/script.rs`) with
+`SWITCHBOARD_DATA_DIR` and `SWITCHBOARD_TMUX_SOCKET` pointing at test
+locations, then screenshot the window (`screencapture -l <window id>`).
+Sending keys into the app's own test tmux panes with `tmux -L <test
+socket> send-keys` is fine; sending keys to windows is not.
+
 ## Architecture rules
 
 - `src/core/` is deterministic: no egui, no threads, no I/O, no wall clock.

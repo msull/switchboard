@@ -11,9 +11,41 @@ Requires Rust 1.95 or newer.
 
 ```sh
 cargo run --locked                                   # launch the app
-cargo test --locked                                  # unit tests + headless UI tests
+cargo test --locked                                  # unit + headless UI + tmux integration tests
 cargo clippy --locked --all-targets -- -D warnings   # lint
 cargo fmt --all                                      # format
+```
+
+Requirements: macOS, `tmux` 3.2 or newer (`brew install tmux`), Ghostty
+for agent sessions, and `claude` and/or `codex` on `PATH`. The app tells
+you at the bottom of the window when tmux is missing.
+
+Data lives in `~/Library/Application Support/Switchboard/`: one JSON file
+per project under `projects/` (with a `.bak` of the previous version), the
+tmux config and socket name, `claude-hooks.json` (passed to Claude Code
+with `--settings`), `events.log` (the hook event log), `wake.sock`, and
+`scrollback/`. Sessions run on a private tmux server (`tmux -L
+switchboard`), never on your default one. Nothing is written into a
+project directory.
+
+Dev aids, all environment variables:
+
+- `SWITCHBOARD_DATA_DIR=<dir>`: use another data directory (keep the path
+  short; the wake socket path has a 104-byte limit).
+- `SWITCHBOARD_TMUX_SOCKET=<name>`: use another tmux socket name.
+- `SWITCHBOARD_SCRIPT=<file>`: run actions at startup, one per line, so
+  the app can be put into a known state without clicking. See
+  `src/script.rs` for the lines (`add-project`, `new-shell`, `new-claude`,
+  `new-codex`, `new-service`, `show-board`, `show-session`, `return`,
+  `kill`, `switchboard`).
+- `SWITCHBOARD_TMUX=<path>`: tmux binary to use.
+- `RUST_LOG=switchboard=debug`: verbose logging.
+
+Live tests that spend money or open windows are `#[ignore]`d:
+
+```sh
+cargo test --test live -- --ignored --nocapture     # one cheap claude, codex, and Ghostty run each
+cargo test --test gate -- --ignored --nocapture     # the Milestone 1 gate items that need real agents
 ```
 
 ### Layout
@@ -37,7 +69,8 @@ src/adapters/
   agents.rs              Claude Code / Codex launch, resume, preflight, discovery
   ghostty.rs             open, reveal, Ghostty window launch and raise
   fakes.rs               test doubles for every port
-src/app.rs               SwitchboardApp: owns core + adapters; runs effects; polls host
+src/app.rs               SwitchboardApp: owns core + adapters; runs effects; polls host and events
+src/script.rs            SWITCHBOARD_SCRIPT dev aid
 src/ui/
   mod.rs                 UiState, draw loop (collect actions, then dispatch), keyboard
   switcher.rs            top bar (project strip, badge, add project) and bottom bar
@@ -47,6 +80,8 @@ src/ui/
   switchboard.rs         every session across projects, waiting first
   dialogs.rs             add project / create session dialogs
 tests/ui.rs              headless flows via egui_kittest with fakes
+tests/live.rs            ignored: real claude / codex / Ghostty runs
+tests/gate.rs            Milestone 1 gate: real store, tmux, hooks; agents ignored
 vendor/egui_term/        embedded terminal widget (Harzu/egui_term @ 31bbc7ab, egui 0.36; see SWITCHBOARD-PATCHES.md)
 spikes/                  Spike 0 evidence
 ```

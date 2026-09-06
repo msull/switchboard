@@ -420,8 +420,9 @@ Follows the template layering. Nothing below touches egui.
 ## Milestones
 
 0. **Resumability spike.** Done; see "Spike 0 results".
-1. **Workspace records.** Projects, sessions as records on a board of
-   cards, launch and return-to for agents via tmux with Ghostty attached,
+1. **Workspace records** (done, see status above). Projects, sessions as
+   records on a board of cards, launch and return-to for agents via tmux
+   with Ghostty attached,
    session state from hooks, and the cross-project switchboard view built
    from the same records. **Gate**, demonstrated end to end before any
    Milestone 2 work:
@@ -453,6 +454,40 @@ Follows the template layering. Nothing below touches egui.
    `.env.example` diff, missing-variable warnings.
 5. **Git awareness and polish.** Decorations, sub-repo discovery, global
    quick-switcher, dock badge with waiting-session count.
+
+## Milestone 1 status (2026-09-06)
+
+Built overnight from the design, in five parallel work items on the
+skeleton's shared types, then integrated and exercised against real
+tmux, Claude Code, Codex, and Ghostty. Verified by hand on this machine:
+
+- project and session records persist; the app was killed and restarted
+  repeatedly and every session came back warm, with the reconcile
+  finding the live tmux panes;
+- a Claude Code session launches inside tmux, Ghostty attaches, hooks
+  flow through `switchboard-hook` to the board: working, then idle after
+  a one-word prompt, then *waiting on you* (orange, "1 waiting" badge,
+  red project dot) when the agent asked a question;
+- closing the Ghostty window (detaching) leaves the agent running with
+  the same pid; "return" raises the existing window when one exists and
+  opens a fresh attached one when it does not; never two processes;
+- a shell session shows inside the app through the embedded terminal
+  (an `egui_term` view running `tmux attach`), with output flowing in;
+- a Codex session's rollout id is discovered after its first prompt and
+  stored as the resume handle, including after an app restart.
+
+Known gaps, for the next session:
+
+- Codex has no hooks, so its card stays *working* while alive; the raw
+  stream fallback (OSC 777 parsing) is not implemented yet.
+- Pinned document cards render but have no open action wired.
+- Only Claude Code's `--settings` hooks are wired; the "hooks absent"
+  transcript-tail fallback is not implemented.
+- The Add-project and New-session dialogs were verified headlessly
+  (kittest), not by clicking in the live app; the live app was driven
+  through `SWITCHBOARD_SCRIPT`.
+- Captions can contain glyphs the UI font lacks (shown as boxes).
+- No app bundle or icon yet; `cargo run` only.
 
 ## Open questions
 
