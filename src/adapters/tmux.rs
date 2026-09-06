@@ -96,6 +96,15 @@ impl TmuxHost {
     fn command(&self) -> Command {
         let mut cmd = Command::new(&self.bin);
         cmd.arg("-L").arg(&self.socket).arg("-f").arg(&self.config);
+        // The server inherits this process's environment on first start.
+        // When Switchboard itself was launched from inside a Claude Code
+        // session, the inherited CLAUDE* variables make child agents skip
+        // transcript writes, which breaks resume. Strip them.
+        for (key, _) in std::env::vars_os() {
+            if key.to_string_lossy().starts_with("CLAUDE") {
+                cmd.env_remove(&key);
+            }
+        }
         cmd
     }
 

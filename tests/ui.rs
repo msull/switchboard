@@ -126,6 +126,7 @@ fn harness() -> (Harness<'static, SwitchboardApp>, Seeded) {
         events: Box::new(FakeEvents::default()),
         agents: Box::new(FakeAgents::default()),
         opener: Box::new(FakeOpener::default()),
+        wake: None,
     };
     let mut harness = Harness::builder()
         .with_size(egui::vec2(1200.0, 900.0))

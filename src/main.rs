@@ -1,22 +1,40 @@
-//! Desktop entry point.
+//! Desktop entry point: assembles the real adapters and starts the app.
+
+use std::path::PathBuf;
 
 use switchboard::SwitchboardApp;
-use switchboard::adapters::fakes::{FakeAgents, FakeEvents, FakeHost, FakeOpener, MemoryStore};
+use switchboard::adapters::agents::Agents;
+use switchboard::adapters::ghostty::MacOpener;
+use switchboard::adapters::hooks::{HookLog, WakeSocket, write_hook_settings};
+use switchboard::adapters::store::JsonStore;
+use switchboard::adapters::tmux::TmuxHost;
 use switchboard::app::Services;
 
 fn main() -> eframe::Result {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("switchboard=info"))
         .init();
 
-    // Real adapters are wired in once the work items land; until then the
-    // launcher runs on fakes so the window opens.
-    let services = Services {
-        store: Box::new(MemoryStore::default()),
-        host: Box::new(FakeHost::default()),
-        events: Box::new(FakeEvents::default()),
-        agents: Box::new(FakeAgents::default()),
-        opener: Box::new(FakeOpener::default()),
-    };
+    // `SWITCHBOARD_DATA_DIR` overrides the data directory for testing.
+    let data_dir = std::env::var_os("SWITCHBOARD_DATA_DIR").map_or_else(
+        || JsonStore::default_dir().expect("data directory"),
+        PathBuf::from,
+    );
+    std::fs::create_dir_all(&data_dir).expect("create data directory");
+
+    let tmux_conf = data_dir.join("tmux.conf");
+    TmuxHost::write_default_config(&tmux_conf).expect("write tmux config");
+    let socket = std::env::var("SWITCHBOARD_TMUX_SOCKET")
+        .unwrap_or_else(|_| TmuxHost::default_socket().to_owned());
+    let host = TmuxHost::new(&socket, Some(tmux_conf));
+
+    // The hook helper lives next to this binary.
+    let hook_bin = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.join("switchboard-hook")))
+        .expect("hook helper path");
+    if let Err(e) = write_hook_settings(&data_dir, &hook_bin) {
+        log::error!("could not write hook settings: {e}");
+    }
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -28,6 +46,26 @@ fn main() -> eframe::Result {
     eframe::run_native(
         "Switchboard",
         options,
-        Box::new(move |_cc| Ok(Box::new(SwitchboardApp::with_services(services)))),
+        Box::new(move |cc| {
+            let ctx = cc.egui_ctx.clone();
+            let wake = match WakeSocket::bind_with(&data_dir, move || ctx.request_repaint()) {
+                Ok(w) => Some(w),
+                Err(e) => {
+                    log::error!("wake socket: {e}");
+                    None
+                }
+            };
+            let services = Services {
+                store: Box::new(JsonStore::new(data_dir.clone())),
+                host: Box::new(host),
+                events: Box::new(HookLog::new(data_dir.clone())),
+                agents: Box::new(Agents::detect(data_dir.clone())),
+                opener: Box::new(MacOpener::detect()),
+                wake,
+            };
+            let mut app = SwitchboardApp::with_services(services);
+            app.start();
+            Ok(Box::new(app))
+        }),
     )
 }

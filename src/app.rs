@@ -1,16 +1,26 @@
 //! Orchestration: owns [`AppCore`] and the adapters. Maps effects to
-//! adapter calls and feeds results back as actions. Rendering lives in
-//! [`crate::ui`].
+//! adapter calls and feeds results back as actions; polls the host and
+//! the event log on a timer; keeps the UI's captions fresh. Rendering
+//! lives in [`crate::ui`].
 
-use std::time::{Instant, SystemTime};
+use std::path::PathBuf;
+use std::time::{Duration, Instant, SystemTime};
 
-use crate::core::{AppAction, AppCore, Clock, Effect};
+use crate::adapters::hooks::WakeSocket;
+use crate::core::{AgentKind, AppAction, AppCore, Clock, Effect, RecordId, SessionKind, View};
 use crate::ports::agent::AgentLauncher;
 use crate::ports::events::EventSource;
-use crate::ports::host::ProcessHost;
+use crate::ports::host::{HostId, Liveness, ProcessHost};
 use crate::ports::opener::Opener;
-use crate::ports::store::Store;
+use crate::ports::store::{Store, StoreError};
 use crate::ui::UiState;
+
+/// How often the host is listed and the event log read.
+const POLL_INTERVAL: Duration = Duration::from_secs(1);
+/// How often card captions and the session snapshot are refreshed.
+const CAPTION_INTERVAL: Duration = Duration::from_secs(2);
+/// How long a Codex id discovery keeps looking before giving up.
+const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub struct Services {
     pub store: Box<dyn Store>,
@@ -18,12 +28,26 @@ pub struct Services {
     pub events: Box<dyn EventSource>,
     pub agents: Box<dyn AgentLauncher>,
     pub opener: Box<dyn Opener>,
+    /// The hook helper's wake-up socket; `None` in tests.
+    pub wake: Option<WakeSocket>,
+}
+
+/// A Codex launch waiting for its rollout file.
+struct Discovery {
+    id: RecordId,
+    kind: AgentKind,
+    cwd: PathBuf,
+    since: SystemTime,
+    deadline: Instant,
 }
 
 pub struct SwitchboardApp {
     core: AppCore,
     services: Services,
     started: Instant,
+    last_poll: Option<Instant>,
+    last_caption: Option<Instant>,
+    discoveries: Vec<Discovery>,
     /// Transient state owned by the UI (dialog drafts, embedded terminals).
     /// Nothing in here is persisted or read by the core.
     pub ui_state: UiState,
@@ -35,17 +59,38 @@ pub struct SwitchboardApp {
 
 impl SwitchboardApp {
     /// Creates the app with the given adapters. Real ones are assembled in
-    /// `main.rs`; tests pass fakes.
+    /// `main.rs`, which then calls [`Self::start`]; tests pass fakes and
+    /// seed the core instead.
     #[must_use]
     pub fn with_services(services: Services) -> Self {
         Self {
             core: AppCore::new(),
             services,
             started: Instant::now(),
+            last_poll: None,
+            last_caption: None,
+            discoveries: Vec::new(),
             ui_state: UiState::default(),
             record_actions: false,
             dispatched: Vec::new(),
         }
+    }
+
+    /// Startup: probe the host, take the store lock, load records, then
+    /// list the host so the core reconciles. Never launches an agent.
+    pub fn start(&mut self) {
+        if let Err(e) = self.services.host.probe() {
+            log::warn!("host unavailable: {e}");
+            self.dispatch(AppAction::HostUnavailable(Some(e)));
+        }
+        let loaded = match self.services.store.lock() {
+            Ok(true) => self.services.store.load_all(),
+            Ok(false) => Err(StoreError::Locked),
+            Err(e) => Err(e),
+        };
+        self.dispatch(AppAction::StoreLoaded(loaded));
+        self.poll_host();
+        self.poll_events();
     }
 
     #[must_use]
@@ -75,26 +120,233 @@ impl SwitchboardApp {
         if self.record_actions {
             self.dispatched.push(action.clone());
         }
+        self.dispatch_inner(action);
+    }
+
+    /// Dispatch without recording: effect results are consequences, not
+    /// what the UI asked for.
+    fn dispatch_inner(&mut self, action: AppAction) {
         let now = self.clock();
         let effects = self.core.dispatch(action, now);
         for effect in effects {
             if let Some(result) = self.run_effect(effect) {
-                self.dispatch(result);
+                self.dispatch_inner(result);
             }
         }
     }
 
     /// Performs one effect; returns the action reporting its result, or
-    /// `None` when the result arrives later from a worker.
+    /// `None` when the result arrives later (discovery) or has no report.
     fn run_effect(&mut self, effect: Effect) -> Option<AppAction> {
-        let _ = (&self.services, effect);
-        None
+        let s = &self.services;
+        match effect {
+            Effect::Save(ws) => {
+                let id = ws.project.id;
+                let result = s.store.save(&ws);
+                if let Err(e) = &result {
+                    log::error!("save failed: {e}");
+                }
+                Some(AppAction::SaveFinished(id, result))
+            }
+            Effect::Delete(id) => {
+                if let Err(e) = s.store.delete(id) {
+                    log::error!("delete failed: {e}");
+                }
+                None
+            }
+            Effect::PrepareLaunch {
+                id,
+                kind,
+                name,
+                cwd,
+            } => Some(AppAction::LaunchPrepared {
+                id,
+                result: s.agents.prepare_launch(kind, id, &name, &cwd),
+            }),
+            Effect::PrepareResume {
+                id,
+                handle,
+                name,
+                cwd,
+            } => Some(AppAction::LaunchPrepared {
+                id,
+                result: s.agents.prepare_resume(&handle, id, &name, &cwd),
+            }),
+            Effect::CheckTranscript { id, handle } => Some(AppAction::TranscriptChecked {
+                id,
+                exists: s.agents.transcript_exists(&handle),
+            }),
+            Effect::Discover {
+                id,
+                kind,
+                cwd,
+                since,
+            } => {
+                self.discoveries.push(Discovery {
+                    id,
+                    kind,
+                    cwd,
+                    since,
+                    deadline: Instant::now() + DISCOVERY_TIMEOUT,
+                });
+                None
+            }
+            Effect::Spawn { id, mut spec } => {
+                spec.scrollback = Some(
+                    s.store
+                        .data_dir()
+                        .join("scrollback")
+                        .join(format!("{}.vt", spec.id.0)),
+                );
+                let result = s.host.spawn(&spec).map_err(|e| e.to_string());
+                if let Err(e) = &result {
+                    log::error!("spawn {} failed: {e}", spec.id.0);
+                }
+                Some(AppAction::Spawned { id, result })
+            }
+            Effect::Attach {
+                id,
+                host,
+                title,
+                cwd,
+            } => Some(AppAction::Attached {
+                id,
+                result: self.attach(&host, &title, &cwd),
+            }),
+            Effect::Kill(host) => {
+                if let Err(e) = s.host.kill(&host) {
+                    log::warn!("kill {} failed: {e}", host.0);
+                }
+                None
+            }
+            Effect::OpenPath(path) => {
+                if let Err(e) = s.opener.open_default(&path) {
+                    log::warn!("open failed: {e}");
+                }
+                None
+            }
+            Effect::Reveal(path) => {
+                if let Err(e) = s.opener.reveal(&path) {
+                    log::warn!("reveal failed: {e}");
+                }
+                None
+            }
+        }
+    }
+
+    /// Raise the terminal window for this session if one exists,
+    /// otherwise open a new one attached to the host session.
+    fn attach(&self, host: &HostId, title: &str, cwd: &std::path::Path) -> Result<(), String> {
+        let s = &self.services;
+        if s.opener.raise_terminal(title)? {
+            Ok(())
+        } else {
+            s.opener
+                .open_terminal(title, &s.host.attach_command(host), cwd)
+        }
+    }
+
+    fn poll_host(&mut self) {
+        match self.services.host.list() {
+            Ok(list) => self.dispatch(AppAction::HostListed(list)),
+            Err(e) => log::warn!("host list failed: {e}"),
+        }
+    }
+
+    fn poll_events(&mut self) {
+        let events = self.services.events.poll();
+        if !events.is_empty() {
+            self.dispatch(AppAction::Events(events));
+            self.services.events.checkpoint();
+        }
+    }
+
+    /// Pending Codex discoveries: cheap file scans, so run on the poll tick.
+    fn poll_discoveries(&mut self) {
+        let mut finished = Vec::new();
+        for (i, d) in self.discoveries.iter().enumerate() {
+            match self.services.agents.discover(d.kind, &d.cwd, d.since) {
+                Ok(None) if Instant::now() < d.deadline => {}
+                Ok(None) => finished.push((i, Ok(None))),
+                other => finished.push((i, other)),
+            }
+        }
+        for (i, result) in finished.into_iter().rev() {
+            let d = self.discoveries.remove(i);
+            self.dispatch(AppAction::Discovered { id: d.id, result });
+        }
+    }
+
+    /// Captions for cards on screen and the snapshot for the open session.
+    fn refresh_captions(&mut self) {
+        let view = self.core.view();
+        let ids: Vec<RecordId> = match view {
+            View::Switchboard => self
+                .core
+                .all_sessions_sorted()
+                .iter()
+                .map(|s| s.id)
+                .collect(),
+            View::Board(p) => self.core.sessions_sorted(p).iter().map(|s| s.id).collect(),
+            View::Session(id) => vec![id],
+        };
+        for id in ids {
+            let running = self
+                .core
+                .host_status(id)
+                .is_some_and(|h| !matches!(h.liveness, Liveness::Missing));
+            if !running {
+                continue;
+            }
+            let host = HostId(id.host_name());
+            let wants_snapshot = matches!(view, View::Session(sid) if sid == id)
+                && self
+                    .core
+                    .session(id)
+                    .is_some_and(|s| matches!(s.kind, SessionKind::Agent(_)));
+            let lines = if wants_snapshot { Some(60) } else { Some(3) };
+            if let Ok(text) = self.services.host.snapshot(&host, lines) {
+                if wants_snapshot {
+                    self.ui_state.snapshots.insert(id, text.clone());
+                }
+                if let Some(last) = text.lines().rev().find(|l| !l.trim().is_empty()) {
+                    self.ui_state.captions.insert(id, last.trim().to_owned());
+                }
+            }
+        }
+    }
+
+    fn pump(&mut self) {
+        let woken = self
+            .services
+            .wake
+            .as_ref()
+            .is_some_and(WakeSocket::take_woken);
+        let due = self.last_poll.is_none_or(|t| t.elapsed() >= POLL_INTERVAL);
+        if woken || due {
+            self.last_poll = Some(Instant::now());
+            self.poll_events();
+            self.poll_host();
+            self.poll_discoveries();
+        }
+        if self
+            .last_caption
+            .is_none_or(|t| t.elapsed() >= CAPTION_INTERVAL)
+        {
+            self.last_caption = Some(Instant::now());
+            self.refresh_captions();
+        }
     }
 }
 
 impl eframe::App for SwitchboardApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.dispatch(AppAction::Tick);
+        if self.last_poll.is_some() {
+            // Only after `start`: tests never poll.
+            self.pump();
+            ui.ctx().request_repaint_after(POLL_INTERVAL);
+        }
         crate::ui::draw(self, ui);
     }
 }
