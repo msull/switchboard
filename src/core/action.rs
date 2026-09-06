@@ -207,6 +207,23 @@ impl AppCore {
         self.host = host;
     }
 
+    /// Show `view` directly, bypassing dispatch. UI tests only.
+    pub fn seed_view(&mut self, view: View) {
+        self.view_stack.push(view);
+    }
+
+    /// Set the bottom-bar state directly, bypassing dispatch. UI tests only.
+    pub fn seed_status(
+        &mut self,
+        notice: Option<Notice>,
+        host_error: Option<String>,
+        read_only: bool,
+    ) {
+        self.notice = notice;
+        self.host_error = host_error;
+        self.read_only = read_only;
+    }
+
     // --- read model for the UI
 
     #[must_use]

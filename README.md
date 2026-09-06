@@ -34,9 +34,16 @@ src/adapters/
   ghostty.rs             open, reveal, Ghostty window launch and raise
   fakes.rs               test doubles for every port
 src/app.rs               SwitchboardApp: owns core + adapters; runs effects; polls host
-src/ui/                  switcher, board of cards, session view, switchboard view
+src/ui/
+  mod.rs                 UiState, draw loop (collect actions, then dispatch), keyboard
+  switcher.rs            top bar (project strip, badge, add project) and bottom bar
+  board.rs               one project's board of cards, pinned documents, notes
+  cards.rs               session and document cards, state colors
+  session.rs             session view: header, notes, embedded terminal or Ghostty note
+  switchboard.rs         every session across projects, waiting first
+  dialogs.rs             add project / create session dialogs
 tests/ui.rs              headless flows via egui_kittest with fakes
-vendor/egui_term/        embedded terminal widget (Harzu/egui_term @ 31bbc7ab, egui 0.36)
+vendor/egui_term/        embedded terminal widget (Harzu/egui_term @ 31bbc7ab, egui 0.36; see SWITCHBOARD-PATCHES.md)
 spikes/                  Spike 0 evidence
 ```
 
