@@ -10,13 +10,18 @@ use egui::accesskit::Role;
 use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;
 use switchboard::SwitchboardApp;
-use switchboard::adapters::fakes::{FakeAgents, FakeEvents, FakeHost, FakeOpener, MemoryStore};
+use switchboard::adapters::fakes::{
+    FakeAgents, FakeEvents, FakeHost, FakeOpener, FakeTranscripts, MemoryStore,
+};
 use switchboard::app::Services;
 use switchboard::core::{
     Activity, AgentKind, AppAction, CardLayout, Launch, Notice, Project, ProjectId, RecordId,
-    SessionKind, SessionRecord, View, Workspace,
+    ResumeHandle, SessionKind, SessionRecord, View, Workspace,
 };
 use switchboard::ports::host::{HostId, HostStatus, Liveness};
+use switchboard::ports::transcript::{
+    Activity as TranscriptActivity, ActivityKind, Conversation, ToolDetail, Turn, Usage,
+};
 
 /// Ids of the seeded records, so tests can name them in assertions.
 struct Seeded {
@@ -126,6 +131,7 @@ fn harness() -> (Harness<'static, SwitchboardApp>, Seeded) {
         events: Box::new(FakeEvents::default()),
         agents: Box::new(FakeAgents::default()),
         opener: Box::new(FakeOpener::default()),
+        transcripts: Box::new(FakeTranscripts::default()),
         wake: None,
     };
     let mut harness = Harness::builder()
@@ -429,4 +435,167 @@ fn waiting_badge_counts_waiting_sessions() {
     harness.get_by_label("1 waiting");
     harness.get_by_label("waiting on you");
     harness.get_by_label("exited (1)");
+}
+
+/// A Claude Code session, running, with a resume handle: the shape the
+/// conversation view needs. Added on top of the standard seed.
+fn seed_claude(harness: &mut Harness<'static, SwitchboardApp>, ids: &Seeded) -> RecordId {
+    let mut claude = record(
+        ids.beta,
+        "claude-agent",
+        SessionKind::Agent(AgentKind::ClaudeCode),
+        1,
+    );
+    claude.resume = Some(ResumeHandle::ClaudeCode {
+        session_id: uuid::Uuid::nil(),
+        transcript: Some(PathBuf::from("/nowhere/x.jsonl")),
+    });
+    let id = claude.id;
+    let core = harness.state_mut().core_mut_for_seeding();
+    let mut workspaces = core.workspaces().to_vec();
+    workspaces
+        .iter_mut()
+        .find(|w| w.project.id == ids.beta)
+        .unwrap()
+        .sessions
+        .push(claude);
+    let host = vec![HostStatus {
+        id: HostId(id.host_name()),
+        liveness: Liveness::Running {
+            pid: 43,
+            command: "claude".into(),
+        },
+        cwd: None,
+        last_activity: None,
+        title: None,
+    }];
+    core.seed(workspaces, host);
+    id
+}
+
+fn two_turns() -> Conversation {
+    let tool = TranscriptActivity {
+        kind: ActivityKind::Tool,
+        line: "Bash: Read crate name from Cargo.toml".into(),
+        at: Some(at(10)),
+        error: false,
+        detail: Some(ToolDetail {
+            name: "Bash".into(),
+            input: "{\"command\": \"grep name Cargo.toml\"}".into(),
+            result: "name = \"switchboard\"".into(),
+        }),
+    };
+    Conversation {
+        title: Some("explain-repo".into()),
+        model: Some("claude-fable-5-1".into()),
+        version: Some("2.1.263".into()),
+        branch: Some("main".into()),
+        start: Some(at(0)),
+        end: Some(at(70)),
+        turns: vec![
+            Turn {
+                n: 1,
+                at: Some(at(0)),
+                end: Some(at(2)),
+                user: "reply with the single word pong".into(),
+                final_text: "pong".into(),
+                assistant_msgs: 1,
+                ..Turn::default()
+            },
+            Turn {
+                n: 2,
+                at: Some(at(5)),
+                end: Some(at(70)),
+                user: "What is the crate called?".into(),
+                activity: vec![tool],
+                final_text: "The crate is called switchboard.".into(),
+                assistant_msgs: 2,
+                tools: 1,
+                ..Turn::default()
+            },
+        ],
+        usage: Usage {
+            output: 18,
+            ..Usage::default()
+        },
+    }
+}
+
+#[test]
+fn claude_session_shows_the_conversation_and_message_box() {
+    let (mut harness, ids) = harness();
+    let id = seed_claude(&mut harness, &ids);
+    harness
+        .state_mut()
+        .ui_state
+        .conversations
+        .insert(id, (None, two_turns()));
+    showing(&mut harness, View::Session(id));
+    harness.get_by_label("explain-repo");
+    harness.get_by_label("reply with the single word pong");
+    harness.get_by_label("What is the crate called?");
+    harness.get_by_label("pong");
+    harness.get_by_label("The crate is called switchboard.");
+    harness.get_by_label("2 msgs · 1 tools · 2m");
+    harness.get_by_label("Message");
+    harness.get_by_role_and_label(Role::Button, "Send");
+    harness.get_by_label("Terminal");
+    // Activity is folded by default; the toggle opens every turn's list.
+    assert!(
+        harness
+            .query_by_label_contains("Bash: Read crate name")
+            .is_none()
+    );
+    click(&mut harness, "Expand activity");
+    harness.get_by_label_contains("Bash: Read crate name");
+}
+
+#[test]
+fn claude_session_without_a_conversation_falls_back_to_the_snapshot() {
+    let (mut harness, ids) = harness();
+    let id = seed_claude(&mut harness, &ids);
+    harness
+        .state_mut()
+        .ui_state
+        .conversation_errors
+        .insert(id, "no transcript".into());
+    harness
+        .state_mut()
+        .ui_state
+        .snapshots
+        .insert(id, "⏺ working".into());
+    showing(&mut harness, View::Session(id));
+    harness.get_by_label_contains("runs in Ghostty");
+    harness.get_by_label_contains("no transcript");
+    assert!(harness.query_all_by_value("⏺ working").next().is_some());
+    harness.get_by_label("Message");
+}
+
+#[test]
+fn polling_reads_the_transcript_into_the_ui_state() {
+    let services = Services {
+        store: Box::new(MemoryStore::default()),
+        host: Box::new(FakeHost::default()),
+        events: Box::new(FakeEvents::default()),
+        agents: Box::new(FakeAgents::default()),
+        opener: Box::new(FakeOpener::default()),
+        transcripts: Box::new(FakeTranscripts {
+            conversation: Some(two_turns()),
+        }),
+        wake: None,
+    };
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1200.0, 900.0))
+        .build_eframe(move |_cc| {
+            let mut app = SwitchboardApp::with_services(services);
+            app.ui_state.embed_terminals = false;
+            app
+        });
+    let ids = seed(harness.state_mut());
+    let id = seed_claude(&mut harness, &ids);
+    showing(&mut harness, View::Session(id));
+    harness.state_mut().poll_now();
+    let app = harness.state();
+    assert_eq!(app.ui_state.conversations[&id].1.turns.len(), 2);
+    assert!(!app.ui_state.conversation_errors.contains_key(&id));
 }

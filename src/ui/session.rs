@@ -1,18 +1,24 @@
 //! The session view: header and notes for one record, and either an
-//! embedded terminal (shells, commands, services) or a note that the
-//! session lives in Ghostty plus its last snapshot (agents).
+//! embedded terminal (shells, commands, services) or, for agents, the
+//! conversation read from the transcript with a message box docked at
+//! the bottom. Agents run in Ghostty; the raw screen snapshot is kept
+//! in a "Terminal" fold under the conversation.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, channel};
 
-use egui::{RichText, Ui};
+use std::time::SystemTime;
+
+use egui::{Color32, CornerRadius, Frame, Margin, RichText, Stroke, Ui};
+use egui_commonmark::{CommonMarkCache, CommonMarkViewer};
 use egui_term::{BackendSettings, PtyEvent, TerminalBackend, TerminalView};
 
 use super::cards::{is_running, kind_label, state_color};
-use super::{DrawCtx, GAP};
+use super::{DrawCtx, GAP, PAD, UiState};
 use crate::core::{AppAction, RecordId, SessionKind, SessionRecord};
 use crate::ports::host::HostId;
+use crate::ports::transcript::{Activity, ActivityKind, Conversation, ToolDetail, Turn};
 
 /// An `egui_term` backend attached to one host session, plus the channel
 /// that tells us when its pty closed.
@@ -92,7 +98,6 @@ pub fn show(cx: &mut DrawCtx<'_>, ui: &mut Ui, id: RecordId) {
     ui.spacing_mut().item_spacing = egui::vec2(GAP, GAP);
     header(cx, ui, &record);
     notes(cx, ui, &record);
-    ui.separator();
     match record.kind {
         SessionKind::Agent(_) => agent_body(cx, ui, &record),
         SessionKind::Shell | SessionKind::Command | SessionKind::Service => {
@@ -101,38 +106,64 @@ pub fn show(cx: &mut DrawCtx<'_>, ui: &mut Ui, id: RecordId) {
     }
 }
 
+/// `Margin` takes whole pixels as `i8`; these are `PAD` and `GAP` in that
+/// form.
+const PAD_PX: i8 = 12;
+const GAP_PX: i8 = 8;
+
+/// The 1 px line that bounds every region, from the theme so it reads
+/// in light and dark.
+fn border(ui: &Ui) -> Stroke {
+    Stroke::new(1.0, ui.visuals().widgets.noninteractive.bg_stroke.color)
+}
+
+/// A fill that hints at `accent` on top of the panel color: a few
+/// percent in light mode, more in dark where the panel is near black.
+fn tint(ui: &Ui, accent: Color32) -> Color32 {
+    let t = if ui.visuals().dark_mode { 0.18 } else { 0.09 };
+    ui.visuals().panel_fill.lerp_to_gamma(accent, t)
+}
+
 fn header(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord) {
     let state = cx.core.card_state(record.id);
     let running = is_running(cx.core, record.id);
-    ui.horizontal(|ui| {
-        ui.heading(&record.name);
-        ui.label(RichText::new(kind_label(record.kind)).weak());
-        ui.label(RichText::new(state.label()).color(state_color(ui, &state)));
-        ui.label(RichText::new(record.cwd.display().to_string()).weak());
-        if let Some(handle) = &record.resume {
-            ui.label(
-                RichText::new(format!("resume {}", handle.provider_id()))
-                    .weak()
-                    .small(),
-            );
-        }
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if ui.button("Back").clicked() {
-                cx.dispatch(AppAction::Back);
-            }
-            if ui.button("Kill").clicked() {
-                cx.dispatch(AppAction::KillSession(record.id));
-            }
-            let open = if running {
-                "Open in terminal"
-            } else {
-                "Return"
-            };
-            if ui.button(open).clicked() {
-                cx.dispatch(AppAction::ReturnToSession(record.id));
-            }
+    Frame::new()
+        .fill(ui.visuals().faint_bg_color)
+        .stroke(border(ui))
+        .corner_radius(4)
+        .inner_margin(PAD)
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| {
+                ui.heading(&record.name);
+                ui.label(RichText::new(kind_label(record.kind)).weak());
+                ui.label(RichText::new(state.label()).color(state_color(ui, &state)));
+                ui.label(RichText::new(record.cwd.display().to_string()).weak());
+                if let Some(handle) = &record.resume {
+                    ui.label(
+                        RichText::new(format!("resume {}", handle.provider_id()))
+                            .weak()
+                            .small(),
+                    );
+                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button("Back").clicked() {
+                        cx.dispatch(AppAction::Back);
+                    }
+                    if ui.button("Kill").clicked() {
+                        cx.dispatch(AppAction::KillSession(record.id));
+                    }
+                    let open = if running {
+                        "Open in terminal"
+                    } else {
+                        "Return"
+                    };
+                    if ui.button(open).clicked() {
+                        cx.dispatch(AppAction::ReturnToSession(record.id));
+                    }
+                });
+            });
         });
-    });
 }
 
 fn notes(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord) {
@@ -148,34 +179,88 @@ fn notes(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord) {
     }
     let mut changed = None;
     if let Some((_, draft)) = cx.state.notes_draft.as_mut() {
-        ui.horizontal(|ui| {
-            let label = ui.label("Notes").id;
-            let response = ui.add(
-                egui::TextEdit::multiline(draft)
-                    .desired_rows(2)
-                    .desired_width(f32::INFINITY),
-            );
-            if response.changed() {
-                changed = Some(draft.clone());
-            }
-            response.labelled_by(label);
-        });
+        Frame::new()
+            .stroke(border(ui))
+            .corner_radius(4)
+            .inner_margin(Margin::symmetric(PAD_PX, GAP_PX))
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.horizontal(|ui| {
+                    let label = ui.label("Notes").id;
+                    let response = ui.add(
+                        egui::TextEdit::multiline(draft)
+                            .desired_rows(2)
+                            .desired_width(f32::INFINITY),
+                    );
+                    if response.changed() {
+                        changed = Some(draft.clone());
+                    }
+                    response.labelled_by(label);
+                });
+            });
     }
     if let Some(text) = changed {
         cx.dispatch(AppAction::SetSessionNotes(record.id, text));
     }
 }
 
+/// Chat layout: the message box is a panel docked at the bottom, drawn
+/// first so it claims its space; the conversation fills what is left.
 fn agent_body(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord) {
-    ui.label("This session runs in Ghostty. Use Open in terminal to bring its window up.");
-    message_box(cx, ui, record);
-    snapshot(cx, ui, record.id);
+    let fill = ui.visuals().widgets.inactive.weak_bg_fill;
+    egui::Panel::bottom("message_panel")
+        .resizable(false)
+        .frame(Frame::new().fill(fill).inner_margin(PAD))
+        .show(ui, |ui| message_box(cx, ui, record));
+    Frame::new()
+        .stroke(border(ui))
+        .corner_radius(4)
+        .inner_margin(GAP)
+        .show(ui, |ui| {
+            ui.set_min_size(ui.available_size());
+            // Drawing needs several fields of the UI state at once; taking
+            // them apart borrows each on its own, which the borrow checker
+            // allows where `cx.state.x` next to `cx.state.y` would not.
+            let UiState {
+                conversations,
+                conversation_errors,
+                expand_activity,
+                expand_applied,
+                markdown,
+                snapshots,
+                ..
+            } = &mut *cx.state;
+            let snapshot = snapshots.get(&record.id);
+            if let Some((_, conversation)) = conversations.get(&record.id) {
+                conversation_view(
+                    ui,
+                    record.id,
+                    conversation,
+                    expand_activity,
+                    expand_applied,
+                    markdown,
+                    snapshot,
+                );
+            } else {
+                ui.label(
+                    "This session runs in Ghostty. Use Open in terminal to bring its window up.",
+                );
+                if let Some(e) = conversation_errors.get(&record.id) {
+                    ui.label(RichText::new(format!("No conversation view: {e}")).weak());
+                }
+                if let Some(text) = snapshot {
+                    egui::ScrollArea::vertical()
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| code_block(ui, text));
+                }
+            }
+        });
 }
 
-/// A one-line message box: Enter (or Send) types the text into the
+/// One-line message box: Enter (or Send) types the text into the
 /// session's terminal and presses Enter there, without opening its window.
 fn message_box(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord) {
-    let running = super::cards::is_running(cx.core, record.id);
+    let running = is_running(cx.core, record.id);
     if cx
         .state
         .input_draft
@@ -216,22 +301,253 @@ fn message_box(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord) {
     }
 }
 
-fn snapshot(cx: &mut DrawCtx<'_>, ui: &mut Ui, id: RecordId) {
-    if let Some(text) = cx.state.snapshots.get(&id) {
-        egui::ScrollArea::vertical().show(ui, |ui| {
-            ui.add(
-                egui::TextEdit::multiline(&mut text.as_str())
-                    .code_editor()
-                    .desired_width(f32::INFINITY),
-            );
+/// Header line, then the turns in a scroll area that follows new
+/// content, with the raw terminal snapshot folded away at the end.
+fn conversation_view(
+    ui: &mut Ui,
+    id: RecordId,
+    conversation: &Conversation,
+    expand: &mut bool,
+    expand_applied: &mut Option<bool>,
+    markdown: &mut CommonMarkCache,
+    snapshot: Option<&String>,
+) {
+    ui.horizontal(|ui| {
+        ui.strong(conversation.title.as_deref().unwrap_or("(untitled)"));
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.checkbox(expand, "Expand activity");
         });
+    });
+    ui.label(RichText::new(meta_line(conversation)).weak().small());
+    ui.separator();
+    // Push the toggle into every section only on the frame it changes,
+    // so single sections can still be opened and closed by hand.
+    let open = (*expand_applied != Some(*expand)).then_some(*expand);
+    *expand_applied = Some(*expand);
+    egui::ScrollArea::vertical()
+        .auto_shrink([false, false])
+        .stick_to_bottom(true)
+        .show(ui, |ui| {
+            for turn in &conversation.turns {
+                turn_block(ui, turn, open, markdown);
+            }
+            egui::CollapsingHeader::new("Terminal")
+                .id_salt(("terminal", id))
+                .show(ui, |ui| match snapshot {
+                    Some(text) => code_block(ui, text),
+                    None => {
+                        ui.label(RichText::new("No snapshot yet.").weak());
+                    }
+                });
+        });
+}
+
+fn meta_line(c: &Conversation) -> String {
+    let mut parts = vec![
+        format!(
+            "{} → {} ({})",
+            time_text(c.start),
+            time_text(c.end),
+            duration_text(c.start, c.end)
+        ),
+        format!("{} turns", c.turns.len()),
+    ];
+    parts.extend(c.model.clone());
+    parts.extend(c.version.as_ref().map(|v| format!("v{v}")));
+    parts.extend(c.branch.clone());
+    parts.push(format!("out {:.1}k tok", f64_from(c.usage.output) / 1000.0));
+    parts.push(format!(
+        "cache read {:.1}M",
+        f64_from(c.usage.cache_read) / 1e6
+    ));
+    parts.join(" · ")
+}
+
+/// Precision loss is fine for a display figure.
+#[allow(clippy::cast_precision_loss)]
+fn f64_from(n: u64) -> f64 {
+    n as f64
+}
+
+fn time_text(t: Option<SystemTime>) -> String {
+    t.map_or_else(String::new, |t| {
+        chrono::DateTime::<chrono::Local>::from(t)
+            .format("%Y-%m-%d %H:%M")
+            .to_string()
+    })
+}
+
+/// "5m" or "1.5h" between two times; empty when either is missing.
+fn duration_text(a: Option<SystemTime>, b: Option<SystemTime>) -> String {
+    let (Some(a), Some(b)) = (a, b) else {
+        return String::new();
+    };
+    let secs = b.duration_since(a).map_or(0, |d| d.as_secs());
+    let mins = secs.div_ceil(60).max(u64::from(secs > 30));
+    if mins < 60 {
+        format!("{mins}m")
+    } else {
+        format!("{:.1}h", f64_from(mins) / 60.0)
     }
+}
+
+/// One turn: the prompt, the folded activity list, the final answer.
+fn turn_block(ui: &mut Ui, turn: &Turn, open: Option<bool>, markdown: &mut CommonMarkCache) {
+    let user_fill = tint(ui, Color32::from_rgb(80, 110, 230));
+    let final_fill = tint(ui, Color32::from_rgb(60, 170, 80));
+    let activity_fill = ui.visuals().faint_bg_color;
+    let stroke = border(ui);
+    Frame::new().stroke(stroke).corner_radius(6).show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        ui.spacing_mut().item_spacing.y = 0.0;
+        Frame::new()
+            .fill(user_fill)
+            .corner_radius(CornerRadius {
+                nw: 6,
+                ne: 6,
+                sw: 0,
+                se: 0,
+            })
+            .inner_margin(PAD)
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.spacing_mut().item_spacing = egui::vec2(GAP, GAP / 2.0);
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(format!("#{}", turn.n)).weak().small());
+                    ui.label(RichText::new(time_text(turn.at)).weak().small());
+                    if let Some(mode) = &turn.permission_mode {
+                        ui.label(RichText::new(mode).weak().small());
+                    }
+                });
+                ui.add(egui::Label::new(RichText::new(&turn.user).monospace()).wrap());
+            });
+        Frame::new()
+            .fill(activity_fill)
+            .stroke(stroke)
+            .inner_margin(Margin::symmetric(PAD_PX, GAP_PX / 2))
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.spacing_mut().item_spacing = egui::vec2(GAP, GAP / 2.0);
+                egui::CollapsingHeader::new(RichText::new(stats_line(turn)).weak().small())
+                    .id_salt(("activity", turn.n))
+                    .open(open)
+                    .show(ui, |ui| {
+                        if turn.activity.is_empty() {
+                            ui.label(RichText::new("no tool activity").weak().italics());
+                        }
+                        for (i, a) in turn.activity.iter().enumerate() {
+                            activity_row(ui, a, (turn.n, i));
+                        }
+                    });
+            });
+        Frame::new()
+            .fill(final_fill)
+            .corner_radius(CornerRadius {
+                nw: 0,
+                ne: 0,
+                sw: 6,
+                se: 6,
+            })
+            .inner_margin(PAD)
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.spacing_mut().item_spacing = egui::vec2(GAP, GAP / 2.0);
+                if turn.final_text.is_empty() {
+                    ui.label(
+                        RichText::new("no final response (interrupted or tool-only)")
+                            .weak()
+                            .italics(),
+                    );
+                } else {
+                    CommonMarkViewer::new().show(ui, markdown, &turn.final_text);
+                }
+            });
+    });
+}
+
+fn stats_line(t: &Turn) -> String {
+    let mut parts = vec![
+        format!("{} msgs", t.assistant_msgs),
+        format!("{} tools", t.tools),
+    ];
+    if t.thinking > 0 {
+        parts.push(format!("{} thinking", t.thinking));
+    }
+    if t.errors > 0 {
+        parts.push(format!("{} errors", t.errors));
+    }
+    let d = duration_text(t.at, t.end);
+    parts.push(if d.is_empty() { "0m".into() } else { d });
+    parts.join(" · ")
+}
+
+/// A tool row folds open to its input and result; text and system rows
+/// are single lines.
+fn activity_row(ui: &mut Ui, a: &Activity, salt: (usize, usize)) {
+    let (glyph, color) = match (a.error, a.kind) {
+        (true, _) => ("⚙", ui.visuals().error_fg_color),
+        (false, ActivityKind::Tool) => ("⚙", ui.visuals().text_color()),
+        (false, ActivityKind::Text) => ("…", ui.visuals().weak_text_color()),
+        (false, ActivityKind::System) => ("·", ui.visuals().weak_text_color()),
+    };
+    let glyph_color = if a.error {
+        color
+    } else {
+        ui.visuals().hyperlink_color
+    };
+    let mut line = RichText::new(&a.line).color(color);
+    line = match a.kind {
+        ActivityKind::Text => line.italics(),
+        ActivityKind::Tool | ActivityKind::System => line.monospace(),
+    };
+    match &a.detail {
+        Some(detail) => {
+            egui::CollapsingHeader::new(
+                RichText::new(format!("{glyph} {}", a.line))
+                    .monospace()
+                    .color(color),
+            )
+            .id_salt(("tool", salt))
+            .show(ui, |ui| tool_detail(ui, detail, salt));
+        }
+        None => {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(glyph).color(glyph_color));
+                ui.add(egui::Label::new(line).truncate());
+            });
+        }
+    }
+}
+
+fn tool_detail(ui: &mut Ui, detail: &ToolDetail, salt: (usize, usize)) {
+    for (label, text) in [("input", &detail.input), ("result", &detail.result)] {
+        ui.label(RichText::new(label).weak().small());
+        if text.is_empty() {
+            ui.label(RichText::new("(empty)").weak().italics());
+            continue;
+        }
+        egui::ScrollArea::both()
+            .id_salt((label, salt))
+            .max_height(200.0)
+            .show(ui, |ui| code_block(ui, text));
+    }
+}
+
+/// Read-only monospace text, selectable.
+fn code_block(ui: &mut Ui, text: &str) {
+    ui.add(
+        egui::TextEdit::multiline(&mut { text })
+            .code_editor()
+            .desired_width(f32::INFINITY),
+    );
 }
 
 fn terminal_body(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord) {
     if !is_running(cx.core, record.id) {
         ui.label(RichText::new("Not running. Return starts it again.").weak());
-        snapshot(cx, ui, record.id);
+        if let Some(text) = cx.state.snapshots.get(&record.id) {
+            egui::ScrollArea::vertical().show(ui, |ui| code_block(ui, text));
+        }
         return;
     }
     if !cx.state.embed_terminals {

@@ -61,12 +61,13 @@ src/core/
   sessions.rs            launch, idempotent return, resume preflight, Codex serialization
   events.rs              hook events -> record activity (matched by record id, ordered by time)
   tests.rs               state-transition tests for the core
-src/ports/               traits: store, host, events, agent, opener
+src/ports/               traits: store, host, events, agent, opener, transcript
 src/adapters/
   store.rs               JSON store: atomic writes, .bak, flock
   tmux.rs                tmux process host on the private socket
   hooks.rs               append-first event log + socket wake-up + hook settings JSON
   agents.rs              Claude Code / Codex launch, resume, preflight, discovery
+  transcript.rs          Claude Code transcript (JSONL) -> Conversation turns
   ghostty.rs             open, reveal, Ghostty window launch and raise
   fakes.rs               test doubles for every port
 src/app.rs               SwitchboardApp: owns core + adapters; runs effects; polls host and events
@@ -76,10 +77,11 @@ src/ui/
   switcher.rs            top bar (project strip, badge, add project) and bottom bar
   board.rs               one project's board of cards, pinned documents, notes
   cards.rs               session and document cards, state colors
-  session.rs             session view: header, notes, embedded terminal or Ghostty note
+  session.rs             session view: header, notes, embedded terminal or conversation + message box
   switchboard.rs         every session across projects, waiting first
   dialogs.rs             add project / create session dialogs
 tests/ui.rs              headless flows via egui_kittest with fakes
+tests/fixtures/          a small real Claude Code transcript for the parser tests
 tests/live.rs            ignored: real claude / codex / Ghostty runs
 tests/gate.rs            Milestone 1 gate: real store, tmux, hooks; agents ignored
 vendor/egui_term/        embedded terminal widget (Harzu/egui_term @ 31bbc7ab, egui 0.36; see SWITCHBOARD-PATCHES.md)

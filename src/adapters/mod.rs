@@ -6,3 +6,4 @@ pub mod ghostty;
 pub mod hooks;
 pub mod store;
 pub mod tmux;
+pub mod transcript;

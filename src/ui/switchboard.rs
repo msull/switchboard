@@ -33,6 +33,7 @@ pub fn show(cx: &mut DrawCtx<'_>, ui: &mut Ui) {
         }
         for workspace in &workspaces {
             ui.label(RichText::new(&workspace.project.name).strong());
+            ui.separator();
             let mut sessions: Vec<_> = workspace.sessions.iter().collect();
             sessions.sort_by_key(|s| card_key(cx.core, s));
             if sessions.is_empty() {

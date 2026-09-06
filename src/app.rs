@@ -13,6 +13,7 @@ use crate::ports::events::EventSource;
 use crate::ports::host::{HostId, Liveness, ProcessHost};
 use crate::ports::opener::Opener;
 use crate::ports::store::{Store, StoreError};
+use crate::ports::transcript::TranscriptReader;
 use crate::ui::UiState;
 
 /// How often the host is listed and the event log read.
@@ -30,6 +31,7 @@ pub struct Services {
     pub events: Box<dyn EventSource>,
     pub agents: Box<dyn AgentLauncher>,
     pub opener: Box<dyn Opener>,
+    pub transcripts: Box<dyn TranscriptReader>,
     /// The hook helper's wake-up socket; `None` in tests.
     pub wake: Option<WakeSocket>,
 }
@@ -336,9 +338,44 @@ impl SwitchboardApp {
         }
     }
 
+    /// The conversation shown in the session view, re-read only when the
+    /// transcript file changed. Reading is synchronous: transcripts are
+    /// usually well under a megabyte and parse in a few milliseconds,
+    /// while a long session of several megabytes costs tens of
+    /// milliseconds once per change, which one frame absorbs.
+    fn refresh_conversation(&mut self, id: RecordId) {
+        let Some(handle) = self.core.session(id).and_then(|s| {
+            matches!(s.kind, SessionKind::Agent(_))
+                .then(|| s.resume.clone())
+                .flatten()
+        }) else {
+            return;
+        };
+        let modified = self.services.transcripts.modified(&handle);
+        let cached = self.ui_state.conversations.get(&id).map(|(m, _)| *m);
+        if cached == Some(modified) {
+            return;
+        }
+        match self.services.transcripts.read(&handle) {
+            Ok(conversation) => {
+                self.ui_state.conversation_errors.remove(&id);
+                self.ui_state
+                    .conversations
+                    .insert(id, (modified, conversation));
+            }
+            Err(e) => {
+                self.ui_state.conversations.remove(&id);
+                self.ui_state.conversation_errors.insert(id, e);
+            }
+        }
+    }
+
     /// Captions for cards on screen and the snapshot for the open session.
     fn refresh_captions(&mut self) {
         let view = self.core.view();
+        if let View::Session(id) = view {
+            self.refresh_conversation(id);
+        }
         let ids: Vec<RecordId> = match view {
             View::Switchboard => self
                 .core

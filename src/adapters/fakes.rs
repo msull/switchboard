@@ -12,6 +12,7 @@ use crate::ports::events::{EventSource, SessionEvent};
 use crate::ports::host::{HostId, HostInfo, HostStatus, ProcessHost, SpawnSpec};
 use crate::ports::opener::Opener;
 use crate::ports::store::{Loaded, Store, StoreError};
+use crate::ports::transcript::{Conversation, TranscriptReader};
 
 /// In-memory store; `saved` records every save in order.
 #[derive(Debug, Default)]
@@ -225,5 +226,24 @@ impl Opener for FakeOpener {
         let mut s = self.state();
         s.raised.push(title.into());
         Ok(s.existing.iter().any(|t| t == title))
+    }
+}
+
+/// Serves one scripted conversation for every handle; `None` reads as
+/// a missing transcript.
+#[derive(Debug, Default)]
+pub struct FakeTranscripts {
+    pub conversation: Option<Conversation>,
+}
+
+impl TranscriptReader for FakeTranscripts {
+    fn read(&self, _handle: &ResumeHandle) -> Result<Conversation, String> {
+        self.conversation
+            .clone()
+            .ok_or_else(|| "no transcript".to_owned())
+    }
+    fn modified(&self, _handle: &ResumeHandle) -> Option<SystemTime> {
+        // A fixed time: the fake never changes, so the app reads it once.
+        self.conversation.as_ref().map(|_| std::time::UNIX_EPOCH)
     }
 }

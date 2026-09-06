@@ -17,11 +17,13 @@ mod switchboard;
 mod switcher;
 
 use std::collections::HashMap;
+use std::time::SystemTime;
 
 use egui::{Key, Modifiers, Ui};
 
 use crate::app::{Services, SwitchboardApp};
 use crate::core::{AppAction, AppCore, RecordId, View};
+use crate::ports::transcript::Conversation;
 
 pub use dialogs::{AddProjectDraft, NewSessionDraft};
 pub use session::EmbeddedTerminal;
@@ -37,6 +39,19 @@ pub struct UiState {
     /// Screen snapshots per session, filled by the app; shown read-only
     /// for agent sessions and for sessions that are not running.
     pub snapshots: HashMap<RecordId, String>,
+    /// Parsed transcripts per agent session with the file time they were
+    /// read at, filled by the app; the session view draws them.
+    pub conversations: HashMap<RecordId, (Option<SystemTime>, Conversation)>,
+    /// Why a session has no conversation (unsupported agent, no file).
+    pub conversation_errors: HashMap<RecordId, String>,
+    /// Open every turn's activity list instead of just the summary line.
+    pub expand_activity: bool,
+    /// The last `expand_activity` value pushed into the collapsing
+    /// headers; they follow the toggle only on the frame it changes, so
+    /// individual sections can still be opened and closed by hand.
+    pub expand_applied: Option<bool>,
+    /// Layout cache for the markdown in final responses.
+    pub markdown: egui_commonmark::CommonMarkCache,
     pub add_project: Option<AddProjectDraft>,
     pub new_session: Option<NewSessionDraft>,
     /// Notes text being edited in the session view, with its record.
@@ -54,6 +69,11 @@ impl Default for UiState {
             embed_terminals: true,
             captions: HashMap::new(),
             snapshots: HashMap::new(),
+            conversations: HashMap::new(),
+            conversation_errors: HashMap::new(),
+            expand_activity: false,
+            expand_applied: None,
+            markdown: egui_commonmark::CommonMarkCache::default(),
             add_project: None,
             new_session: None,
             notes_draft: None,
@@ -169,3 +189,6 @@ fn keyboard(cx: &mut DrawCtx<'_>, ui: &Ui, view: &View) {
 
 /// Consistent spacing everywhere: the 8 px grid from the design.
 pub const GAP: f32 = 8.0;
+/// Inner padding of every framed region (header strip, turn blocks,
+/// docked message panel), so boundaries line up across views.
+pub const PAD: f32 = 12.0;

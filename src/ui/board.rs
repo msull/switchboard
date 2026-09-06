@@ -5,7 +5,7 @@ use egui::{RichText, Ui};
 
 use super::cards::{card_key, document_card, session_card};
 use super::dialogs::NewSessionDraft;
-use super::{DrawCtx, GAP};
+use super::{DrawCtx, GAP, PAD};
 use crate::core::ProjectId;
 
 pub fn show(cx: &mut DrawCtx<'_>, ui: &mut Ui, pid: ProjectId) {
@@ -15,22 +15,33 @@ pub fn show(cx: &mut DrawCtx<'_>, ui: &mut Ui, pid: ProjectId) {
     };
     ui.spacing_mut().item_spacing = egui::vec2(GAP, GAP);
 
-    ui.horizontal(|ui| {
-        ui.heading(&workspace.project.name);
-        ui.label(RichText::new(workspace.project.root.display().to_string()).weak());
-        if ui.button("New session").clicked() {
-            cx.state.new_session = Some(NewSessionDraft::new(&workspace.project));
-        }
-    });
-    if !workspace.project.notes.is_empty() {
-        ui.label(&workspace.project.notes);
-    }
-    ui.add_space(GAP);
+    // The project strip is a framed region so the board's own heading is
+    // told apart from the switcher above it.
+    egui::Frame::new()
+        .fill(ui.visuals().faint_bg_color)
+        .stroke(ui.visuals().widgets.noninteractive.bg_stroke)
+        .corner_radius(4)
+        .inner_margin(PAD)
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| {
+                ui.heading(&workspace.project.name);
+                ui.label(RichText::new(workspace.project.root.display().to_string()).weak());
+                if ui.button("New session").clicked() {
+                    cx.state.new_session = Some(NewSessionDraft::new(&workspace.project));
+                }
+            });
+            if !workspace.project.notes.is_empty() {
+                ui.label(&workspace.project.notes);
+            }
+        });
 
     let mut sessions: Vec<_> = workspace.sessions.iter().collect();
     sessions.sort_by_key(|s| card_key(cx.core, s));
 
     egui::ScrollArea::vertical().show(ui, |ui| {
+        ui.label(RichText::new("Sessions").strong());
+        ui.separator();
         if sessions.is_empty() {
             ui.label(RichText::new("No sessions yet. Start one with New session.").weak());
         }
@@ -42,6 +53,7 @@ pub fn show(cx: &mut DrawCtx<'_>, ui: &mut Ui, pid: ProjectId) {
         if !workspace.project.pinned.is_empty() {
             ui.add_space(GAP);
             ui.label(RichText::new("Pinned").strong());
+            ui.separator();
             ui.horizontal_wrapped(|ui| {
                 for path in &workspace.project.pinned {
                     document_card(ui, &workspace.project.root.join(path));

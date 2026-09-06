@@ -6,3 +6,4 @@ pub mod events;
 pub mod host;
 pub mod opener;
 pub mod store;
+pub mod transcript;
