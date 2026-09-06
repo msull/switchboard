@@ -1,0 +1,82 @@
+  [   0.7s] '\x1b]0;✳ Claude Code'
+  [   0.7s] BEL
+  [   0.7s] '\x1b]9;4;0;'
+  [   0.7s] BEL
+[  1.1s] SessionStart: [('SessionStart', 'startup')]
+screen tail: b'\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\r\x1b[2C\x1b[1B\x1b[38;2;153;153;153m\xe2\x8f\xb8 manual mode on \xc2\xb7 ? for shortcuts \xc2\xb7 \xe2\x86\x90 for agents\x1b[71G\x1b[39m\x1b[K\r\x1b[42C\x1b[1B                            \x1b[38;2;153;153;153m0 tokens\x1b[39m\r\r\n\x1b[43G\x1b[38;2;255;193;7mauto\x1b[48Gmode\x1b[53Gunavailable\x1b[65Gfor\x1b[69Gthis\x1b[74Gmodel\x1b[39m\r\r\n\x1b[2C\x1b[5A\x1b[?25h\x1b[?2026l'
+  [   5.9s] '\x1b]0;◐ Claude Code'
+  [   5.9s] BEL
+  [   5.9s] '\x1b]9;4;3;'
+  [   5.9s] BEL
+  [   6.7s] '\x1b]0;◐ Create spike-perm-test.txt'
+  [   6.7s] BEL
+  [   6.8s] '\x1b]0;◑ Create spike-perm-test.txt'
+  [   6.8s] BEL
+  [   7.8s] '\x1b]0;◐ Create spike-perm-test.txt'
+  [   7.8s] BEL
+  [   8.4s] '\x1b]0;✳ Create spike-perm-test.txt'
+  [   8.4s] BEL
+[  2.2s] permission prompt: [('SessionStart', 'startup'), ('UserPromptSubmit', None), ('PreToolUse', 'Bash'), ('PermissionRequest', 'Bash')]
+BEL count while waiting on permission: 6  OSC9: 1  OSC777: 0
+  [  10.7s] '\x1b]0;◐ Create spike-perm-test.txt'
+  [  10.7s] BEL
+  [  11.6s] '\x1b]0;◑ Create spike-perm-test.txt'
+  [  11.6s] BEL
+  [  12.6s] '\x1b]0;◐ Create spike-perm-test.txt'
+  [  12.6s] BEL
+  [  13.3s] '\x1b]0;✳ Create spike-perm-test.txt'
+  [  13.3s] BEL
+  [  13.3s] '\x1b]9;4;0;'
+  [  13.3s] BEL
+[  3.2s] Stop after approval: [('SessionStart', 'startup'), ('UserPromptSubmit', None), ('PreToolUse', 'Bash'), ('PermissionRequest', 'Bash'), ('PostToolUse', 'Bash'), ('Stop', None)]
+  [  14.6s] '\x1b]0;◐ Create spike-perm-test.txt'
+  [  14.6s] BEL
+  [  14.6s] '\x1b]9;4;3;'
+  [  14.6s] BEL
+  [  15.5s] '\x1b]0;◑ Create spike-perm-test.txt'
+  [  15.5s] BEL
+  [  16.5s] '\x1b]0;◐ Create spike-perm-test.txt'
+  [  16.5s] BEL
+  [  17.4s] '\x1b]0;◑ Create spike-perm-test.txt'
+  [  17.4s] BEL
+  [  17.6s] '\x1b]0;✳ Create spike-perm-test.txt'
+  [  17.6s] BEL
+[  3.1s] question: [('SessionStart', 'startup'), ('UserPromptSubmit', None), ('PreToolUse', 'Bash'), ('PermissionRequest', 'Bash'), ('PostToolUse', 'Bash'), ('Stop', None), ('UserPromptSubmit', None), ('PreToolUse', 'AskUserQuestion'), ('PermissionRequest', 'AskUserQuestion')]
+BEL count while question pending: 6  OSC9: 1
+  [  21.3s] '\x1b]0;◑ Create spike-perm-test.txt'
+  [  21.3s] BEL
+  [  22.2s] '\x1b]0;◐ Create spike-perm-test.txt'
+  [  22.2s] BEL
+  [  23.2s] '\x1b]0;◑ Create spike-perm-test.txt'
+  [  23.2s] BEL
+  [  24.2s] '\x1b]0;◐ Create spike-perm-test.txt'
+  [  24.2s] BEL
+  [  24.2s] '\x1b]0;✳ Create spike-perm-test.txt'
+  [  24.2s] BEL
+  [  24.2s] '\x1b]9;4;0;'
+  [  24.2s] BEL
+[  3.2s] Stop after answer: [('SessionStart', 'startup'), ('UserPromptSubmit', None), ('PreToolUse', 'Bash'), ('PermissionRequest', 'Bash'), ('PostToolUse', 'Bash'), ('Stop', None), ('UserPromptSubmit', None), ('PreToolUse', 'AskUserQuestion'), ('PermissionRequest', 'AskUserQuestion'), ('PostToolUse', 'AskUserQuestion'), ('Stop', None)]
+  [  84.2s] '\x1b]777;notify;Claude Code;Claude is waiting for your input'
+  [  84.2s] BEL
+[ 60.4s] idle_prompt: [('SessionStart', 'startup'), ('UserPromptSubmit', None), ('PreToolUse', 'Bash'), ('PermissionRequest', 'Bash'), ('PostToolUse', 'Bash'), ('Stop', None), ('UserPromptSubmit', None), ('PreToolUse', 'AskUserQuestion'), ('PermissionRequest', 'AskUserQuestion'), ('PostToolUse', 'AskUserQuestion'), ('Stop', None), ('SubagentStop', None), ('Notification', 'idle_prompt')]
+BEL count during idle: 1  OSC9: 0
+  [  85.5s] '\x1b]9;4;0;'
+  [  85.5s] BEL
+  [  85.5s] '\x1b]0;'
+  [  85.5s] BEL
+[  1.0s] SessionEnd: [('SessionStart', 'startup'), ('UserPromptSubmit', None), ('PreToolUse', 'Bash'), ('PermissionRequest', 'Bash'), ('PostToolUse', 'Bash'), ('Stop', None), ('UserPromptSubmit', None), ('PreToolUse', 'AskUserQuestion'), ('PermissionRequest', 'AskUserQuestion'), ('PostToolUse', 'AskUserQuestion'), ('Stop', None), ('SubagentStop', None), ('Notification', 'idle_prompt'), ('SessionEnd', 'prompt_input_exit')]
+FINAL EVENTS:
+   ('SessionStart', 'startup')
+   ('UserPromptSubmit', None)
+   ('PreToolUse', 'Bash')
+   ('PermissionRequest', 'Bash')
+   ('PostToolUse', 'Bash')
+   ('Stop', None)
+   ('UserPromptSubmit', None)
+   ('PreToolUse', 'AskUserQuestion')
+   ('PermissionRequest', 'AskUserQuestion')
+   ('PostToolUse', 'AskUserQuestion')
+   ('Stop', None)
+   ('SubagentStop', None)
+   ('Notification', 'idle_prompt')
+   ('SessionEnd', 'prompt_input_exit')

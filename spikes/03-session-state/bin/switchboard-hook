@@ -1,0 +1,14 @@
+#!/bin/sh
+# Prototype of the command Switchboard registers for every Claude Code hook.
+# Reads the hook payload from stdin, wraps it with the event name, and hands
+# it to the app. Never blocks the agent: socket write has nobody listening ->
+# fall back to appending to a spool file the app drains on next start.
+# Exit 0 always so Claude Code never sees a failed hook.
+#   usage in settings.json: "command": "switchboard-hook <EventName>"
+SOCK="${SWITCHBOARD_SOCK:-$HOME/Library/Application Support/switchboard/hook.sock}"
+SPOOL="${SWITCHBOARD_SPOOL:-$HOME/Library/Application Support/switchboard/hook-spool.jsonl}"
+payload=$(cat)
+line=$(printf '%s' "$payload" | jq -c --arg ev "$1" --arg t "$(date +%s)" '{v:1,event:$ev,t:($t|tonumber),ppid:'"$PPID"'} + {session_id,cwd,transcript_path,notification_type,tool_name,reason,source,permission_mode,last_assistant_message}' 2>/dev/null) || line="{\"v\":1,\"event\":\"$1\",\"raw\":$payload}"
+if [ -S "$SOCK" ] && printf '%s\n' "$line" | nc -U "$SOCK" 2>/dev/null; then exit 0; fi
+mkdir -p "$(dirname "$SPOOL")" 2>/dev/null; printf '%s\n' "$line" >> "$SPOOL" 2>/dev/null
+exit 0

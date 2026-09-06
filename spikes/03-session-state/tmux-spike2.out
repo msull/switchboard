@@ -1,0 +1,48 @@
+=== 5b. control mode, client held open 4s
+%session-changed $0 spike
+%window-add @1
+%output %1 bye\015\012\007
+%exit
+=== 4b. Claude Code in pane with default-terminal xterm-ghostty (terminfo: present)
+   1 [ 0.25s] TERM="claude --model haiku --settings /Users/sully/code_repos/personal/switchboard/spikes/
+   1 [ 0.50s] TERM="claude --model haiku --settings /Users/sully/code_repos/personal/switchboard/spikes/
+   1 [ 0.75s] TERM="claude --model haiku --settings /Users/sully/code_repos/personal/switchboard/spikes/
+   1 [ 1.00s] TERM="claude --model haiku --settings /Users/sully/code_repos/personal/switchboard/spikes/
+   1 [ 1.25s] TERM="claude --model haiku --settings /Users/sully/code_repos/personal/switchboard/spikes/
+   1 [ 1.50s] TERM="claude --model haiku --settings /Users/sully/code_repos/personal/switchboard/spikes/
+   1 [ 1.75s] TERM="claude --model haiku --settings /Users/sully/code_repos/personal/switchboard/spikes/
+   1 [ 2.00s] TERM="claude --model haiku --settings /Users/sully/code_repos/personal/switchboard/spikes/
+   1 [ 2.25s] TERM="claude --model haiku --settings /Users/sully/code_repos/personal/switchboard/spikes/
+   1 [ 2.50s] TERM="claude --model haiku --settings /Users/sully/code_repos/personal/switchboard/spikes/
+   1 [ 2.75s] TERM="claude --model haiku --settings /Users/sully/code_repos/personal/switchboard/spikes/
+   1 [ 3.00s] TERM="claude --model haiku --settings /Users/sully/code_repos/personal/switchboard/spikes/
+   1 [ 3.25s] TERM="claude --model haiku --settings /Users/sully/code_repos/personal/switchboard/spikes/
+   1 [ 3.50s] TERM="claude --model haiku --settings /Users/sully/code_repos/personal/switchboard/spikes/
+   1 [ 3.75s] TERM="claude --model haiku --settings /Users/sully/code_repos/personal/switchboard/spikes/
+   1 [ 4.00s] TERM="claude --model haiku --settings /Users/sully/code_repos/personal/switchboard/spikes/
+   1 [ 4.25s] TERM="claude --model haiku --settings /Users/sully/code_repos/personal/switchboard/spikes/
+   1 [ 4.50s] TERM="claude --model haiku --settings /Users/sully/code_repos/personal/switchboard/spikes/
+   1 [ 4.75s] TERM="claude --model haiku --settings /Users/sully/code_repos/personal/switchboard/spikes/
+   1 [ 5.00s] TERM="claude --model haiku --settings /Users/sully/code_repos/personal/switchboard/spikes/
+   1 [ 5.25s] TERM="claude --model haiku --settings /Users/sully/code_repos/personal/switchboard/spikes/
+   1 [ 5.50s] TERM="claude --model haiku --settings /Users/sully/code_repos/personal/switchboard/spikes/
+   1 [ 5.75s] TERM="claude --model haiku --settings /Users/sully/code_repos/personal/switchboard/spikes/
+   1 [ 6.00s] TERM="claude --model haiku --settings /Users/sully/code_repos/personal/switchboard/spikes/
+   1 [ 6.25s] TERM="claude --model haiku --settings /Users/sully/code_repos/personal/switchboard/spikes/
+   1 [ 6.50s] TERM="claude --model haiku --settings /Users/sully/code_repos/personal/switchboard/spikes/
+   1 [ 6.75s] TERM="claude --model haiku --settings /Users/sully/code_repos/personal/switchboard/spikes/
+   1 [ 7.00s] TERM="claude --model haiku --settings /Users/sully/code_repos/personal/switchboard/spikes/
+   1 [ 7.25s] TERM="claude --model haiku --settings /Users/sully/code_repos/personal/switchboard/spikes/
+   1 [ 7.50s] TERM="claude --model haiku --settings /Users/sully/code_repos/personal/switchboard/spikes/
+--- hooks:
+SessionStart 
+UserPromptSubmit 
+PreToolUse Bash
+PermissionRequest Bash
+--- OSC in raw:
+   b'\x1b]0;\xe2\x9c\xb3 Claude Code'
+   b'\x1b]0;\xe2\x9c\xb3 spike-perm-test.txt creation'
+  BEL: 2 OSC9;4: 0 bytes: 9472
+env TERM inside pane: 16660
+TERM=xterm-ghostty
+server killed: no server running on /private/tmp/tmux-501/switchboard-spike-state

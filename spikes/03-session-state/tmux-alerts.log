@@ -1,0 +1,17 @@
+1788675821 alert-activity @1 
+1788675822 pane-died @1 %1
+1788675823 alert-activity @2 
+1788675824 alert-bell @2 
+1788675824 alert-silence @1 
+1788675828 alert-silence @2 
+1788675829 alert-activity @3 
+1788675832 alert-activity @4 
+1788675834 alert-silence @3 
+1788675834 alert-activity @5 
+1788675835 alert-silence @4 
+1788675841 alert-silence @5 
+1788675852 pane-died @4 %4
+1788675855 pane-died @2 %2
+1788675860 alert-activity @6 
+1788675861 pane-died @3 %3
+1788675861 pane-died @6 %6

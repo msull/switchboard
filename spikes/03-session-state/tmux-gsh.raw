@@ -1,0 +1,5 @@
+bash-5.2$ source /Applications/Ghostty.app/Contents/Resources/ghostty/shell-integration/bash/ghostty.bash
+]7;kitty-shell-cwd://Sullys-MacBook-Pro.local/Users/sully/code_repos/personal/switchboard/spikes/03-session-state]133;A;aid=16211bash-5.2$ ]133;B[5 q]2;~/code_repos/personal/switchboard/spikes/03-session-stateecho hi; false
+[0 q]2;echo hi; false]133;C;hi
+]133;D;1;aid=16211]133;A;aid=16211bash-5.2$ ]133;B[5 q]2;~/code_repos/personal/switchboard/spikes/03-session-statesleep 20
+[0 q]2;sleep 20]133;C;]133;D;0;aid=16211]133;A;aid=16211bash-5.2$ ]133;B[5 q]2;~/code_repos/personal/switchboard/spikes/03-session-stateexit

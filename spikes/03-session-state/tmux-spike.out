@@ -1,0 +1,100 @@
+=== 1. exit status via remain-on-exit
+--- t=0.3s (dead window still running)
+idle\tsleep\tdead=0\tstatus=\tbell=0\tact=0\tsil=0\ttitle=Sullys-MacBook-Pro.local
+dead\tzsh\tdead=0\tstatus=\tbell=0\tact=1\tsil=0\ttitle=Sullys-MacBook-Pro.local
+--- t=1.8s
+idle\tsleep\tdead=0\tstatus=\tbell=0\tact=0\tsil=0\ttitle=Sullys-MacBook-Pro.local
+dead\tsleep\tdead=1\tstatus=3\tbell=0\tact=1\tsil=0\ttitle=Sullys-MacBook-Pro.local
+=== 2. bell / activity / silence flags (window not current, so flags can set)
+--- t=3s after bell window started
+idle\tsleep\tdead=0\tstatus=\tbell=0\tact=1\tsil=1\ttitle=Sullys-MacBook-Pro.local
+dead\tsleep\tdead=1\tstatus=3\tbell=0\tact=1\tsil=1\ttitle=Sullys-MacBook-Pro.local
+bell\tsleep\tdead=0\tstatus=\tbell=1\tact=1\tsil=0\ttitle=Sullys-MacBook-Pro.local
+--- t=6s (silence 3s should have tripped)
+idle\tsleep\tdead=0\tstatus=\tbell=0\tact=1\tsil=1\ttitle=Sullys-MacBook-Pro.local
+dead\tsleep\tdead=1\tstatus=3\tbell=0\tact=1\tsil=1\ttitle=Sullys-MacBook-Pro.local
+bell\tsleep\tdead=0\tstatus=\tbell=1\tact=1\tsil=1\ttitle=Sullys-MacBook-Pro.local
+--- alerts log:
+1788675821 alert-activity @1 
+1788675822 pane-died @1 %1
+1788675823 alert-activity @2 
+1788675824 alert-bell @2 
+1788675824 alert-silence @1 
+1788675828 alert-silence @2 
+=== 3. OSC passthrough: 0 (title), 777 (notify), 133 (prompt marks), 7 (cwd)
+--- t=after osc window
+idle\tsleep\tdead=0\tstatus=\tbell=0\tact=1\tsil=1\ttitle=Sullys-MacBook-Pro.local
+dead\tsleep\tdead=1\tstatus=3\tbell=0\tact=1\tsil=1\ttitle=Sullys-MacBook-Pro.local
+bell\tsleep\tdead=0\tstatus=\tbell=1\tact=1\tsil=1\ttitle=Sullys-MacBook-Pro.local
+osc\tsleep\tdead=0\tstatus=\tbell=0\tact=1\tsil=0\ttitle=TITLE-FROM-OSC0
+--- capture-pane -e -p (escapes tmux kept in the grid):
+prompt$ cmdout
+--- pipe-pane raw bytes (what the pty wrote):
+^[]0;TITLE-FROM-OSC0^G^[]777;notify;X;needs you^G^[]133;A^Gprompt$ ^[]133;B^Gcmd^[]133;C^Gout^M
+^[]133;D;7^G^[]7;file://h/tmp^G^[Ptmux;^[^[]777;notify;X;wrapped^G^[\
+--- real Ghostty bash integration, commands on stdin (no keystrokes):
+--- t=ghostty bash in pane
+idle\tsleep\tdead=0\tstatus=\tbell=0\tact=1\tsil=1\ttitle=Sullys-MacBook-Pro.local
+dead\tsleep\tdead=1\tstatus=3\tbell=0\tact=1\tsil=1\ttitle=Sullys-MacBook-Pro.local
+bell\tsleep\tdead=0\tstatus=\tbell=1\tact=1\tsil=1\ttitle=Sullys-MacBook-Pro.local
+osc\tsleep\tdead=0\tstatus=\tbell=0\tact=1\tsil=1\ttitle=TITLE-FROM-OSC0
+gsh\tsleep\tdead=0\tstatus=\tbell=0\tact=1\tsil=0\ttitle=sleep 20
+--- pipe-pane raw:
+bash-5.2$ source /Applications/Ghostty.app/Contents/Resources/ghostty/shell-integration/bash/ghostty.bash^M
+^[]7;kitty-shell-cwd://Sullys-MacBook-Pro.local/Users/sully/code_repos/personal/switchboard/spikes/03-session-state^G^[]133;A;aid=16211^Gbash-5.2$ ^[]133;B^G^[[5 q^[]2;~/code_repos/personal/switchboard/spikes/03-session-state^Gecho hi; false^M
+^A^[[0 q^B^[]2;echo hi; false^G^[]133;C;^Ghi^M
+^[]133;D;1;aid=16211^G^[]133;A;aid=16211^Gbash-5.2$ ^[]133;B^G^[[5 q^[]2;~/code_repos/personal/switchboard/spikes/03-session-state^Gsleep 20^M
+^A^[[0 q^B^[]2;sleep 20^G^[]133;C;^G
+=== 4. Claude Code in a pane, initial prompt as argv (no keystrokes), hooks via --settings
+[ 1s] claude\t2.1.263\tdead=0\tstatus=\tbell=0\tact=1\tsil=0\ttitle=✳ Claude Code
+[ 2s] claude\t2.1.263\tdead=0\tstatus=\tbell=0\tact=1\tsil=0\ttitle=✳ spike-perm-test.txt
+[ 3s] claude\t2.1.263\tdead=0\tstatus=\tbell=0\tact=1\tsil=0\ttitle=✳ spike-perm-test.txt
+[ 4s] claude\t2.1.263\tdead=0\tstatus=\tbell=0\tact=1\tsil=0\ttitle=✳ spike-perm-test.txt
+[ 5s] claude\t2.1.263\tdead=0\tstatus=\tbell=0\tact=1\tsil=0\ttitle=✳ spike-perm-test.txt
+[ 6s] claude\t2.1.263\tdead=0\tstatus=\tbell=0\tact=1\tsil=1\ttitle=✳ spike-perm-test.txt
+[ 7s] claude\t2.1.263\tdead=0\tstatus=\tbell=0\tact=1\tsil=1\ttitle=✳ spike-perm-test.txt
+[ 8s] claude\t2.1.263\tdead=0\tstatus=\tbell=0\tact=1\tsil=1\ttitle=✳ spike-perm-test.txt
+[ 9s] claude\t2.1.263\tdead=0\tstatus=\tbell=0\tact=1\tsil=1\ttitle=✳ spike-perm-test.txt
+[10s] claude\t2.1.263\tdead=0\tstatus=\tbell=0\tact=1\tsil=1\ttitle=✳ spike-perm-test.txt
+[11s] claude\t2.1.263\tdead=0\tstatus=\tbell=0\tact=1\tsil=1\ttitle=✳ spike-perm-test.txt
+[12s] claude\t2.1.263\tdead=0\tstatus=\tbell=0\tact=1\tsil=1\ttitle=✳ spike-perm-test.txt
+[13s] claude\t2.1.263\tdead=0\tstatus=\tbell=0\tact=1\tsil=1\ttitle=✳ spike-perm-test.txt
+[14s] claude\t2.1.263\tdead=0\tstatus=\tbell=0\tact=1\tsil=1\ttitle=✳ spike-perm-test.txt
+[15s] claude\t2.1.263\tdead=0\tstatus=\tbell=0\tact=1\tsil=1\ttitle=✳ spike-perm-test.txt
+[16s] claude\t2.1.263\tdead=0\tstatus=\tbell=0\tact=1\tsil=1\ttitle=✳ spike-perm-test.txt
+[17s] claude\t2.1.263\tdead=0\tstatus=\tbell=0\tact=1\tsil=1\ttitle=✳ spike-perm-test.txt
+[18s] claude\t2.1.263\tdead=0\tstatus=\tbell=0\tact=1\tsil=1\ttitle=✳ spike-perm-test.txt
+[19s] claude\t2.1.263\tdead=0\tstatus=\tbell=0\tact=1\tsil=1\ttitle=✳ spike-perm-test.txt
+[20s] claude\t2.1.263\tdead=0\tstatus=\tbell=0\tact=1\tsil=1\ttitle=✳ spike-perm-test.txt
+[21s] claude\t2.1.263\tdead=0\tstatus=\tbell=0\tact=1\tsil=1\ttitle=✳ spike-perm-test.txt
+[22s] claude\t2.1.263\tdead=0\tstatus=\tbell=0\tact=1\tsil=1\ttitle=✳ spike-perm-test.txt
+[23s] claude\t2.1.263\tdead=0\tstatus=\tbell=0\tact=1\tsil=1\ttitle=✳ spike-perm-test.txt
+[24s] claude\t2.1.263\tdead=0\tstatus=\tbell=0\tact=1\tsil=1\ttitle=✳ spike-perm-test.txt
+--- hooks seen:
+SessionStart 
+UserPromptSubmit 
+PreToolUse Bash
+PermissionRequest Bash
+Notification permission_prompt
+--- OSC sequences in pipe-pane raw:
+   b'\x1b]0;\xe2\x9c\xb3 Claude Code'
+   b'\x1b]0;\xe2\x9c\xb3 spike-perm-test.txt'
+   b'\x1b]777;notify;Claude Code;Claude needs your permission'
+  BEL count: 3 bytes: 9373
+--- capture-pane -e tail (grid):
+cut: stdin: Illegal byte sequence
+ Do you want to proceed?
+ ^[[38;5;153m--- pane_title of claude pane:
+✳ spike-perm-test.txt | cmd=2.1.263 | pid=16244
+--- after kill-window, hooks:
+Notification 
+SessionEnd other
+=== 5. control mode notifications (tmux -C) for a dying pane
+%begin 1788675860 444 0
+%end 1788675860 444 0
+%session-changed $0 spike
+%begin 1788675860 449 1
+%end 1788675860 449 1
+%window-add @6
+%exit
+server killed: no server running on /private/tmp/tmux-501/switchboard-spike-state

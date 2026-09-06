@@ -1,0 +1,7 @@
+  [  6.8s] hook ('SessionStart', None)
+  [  6.8s] hook ('UserPromptSubmit', None)
+  [  9.0s] hook ('PreToolUse', 'Bash')
+  [  9.0s] hook ('PermissionRequest', 'Bash')
+  [ 14.2s] b'\x1b]777;notify;Claude Code;Claude needs your permission'
+  [ 15.2s] hook ('Notification', 'permission_prompt')
+events: [('SessionStart', None), ('UserPromptSubmit', None), ('PreToolUse', 'Bash'), ('PermissionRequest', 'Bash'), ('Notification', 'permission_prompt'), ('SessionEnd', None)]

@@ -1,0 +1,22 @@
+[package]
+name = "spike-process-host"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Spike 0, question 2: tmux server vs. app-owned PTYs as the session process host"
+
+# An empty workspace table makes this crate its own root so cargo never tries
+# to attach it to the app crate two directories up.
+[workspace]
+
+[dependencies]
+portable-pty = "0.9"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"

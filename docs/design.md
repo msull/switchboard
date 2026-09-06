@@ -211,6 +211,54 @@ terminal view. Likely shape: tmux as the warm cache and process host,
 agents resumed through their own commands, terminal shown either in
 Ghostty via hand-off or in egui depending on what question 3 finds.
 
+## Spike 0 results (2026-09-05)
+
+Four spikes ran in parallel; see `spikes/README.md` and each directory for
+evidence. The decisions:
+
+1. **Claude Code resume: solved.** Switchboard generates a UUID, stores it
+   in the workspace record, then launches `claude --session-id <uuid>
+   --name <name>` in the project directory. Return-to runs `claude --resume
+   <uuid>` in the recorded cwd (resume works from any cwd but costs ~7x
+   more elsewhere). Live status is also readable from
+   `~/.claude/sessions/<pid>.json`. Codex has `codex resume <uuid>` but no
+   launch-time id, so its id is discovered from its session files.
+   **Retention risk:** transcripts are pruned after 30 days by default;
+   Switchboard must check `cleanupPeriodDays` in `~/.claude/settings.json`
+   and show a warning card when it is unset, and should copy transcripts
+   into `.switchboard/` at session end as a backup.
+2. **Process host: tmux.** One private tmux server (own socket, own config)
+   hosts every session. Sessions outlive the app, a fresh process reattaches
+   and reads history, `list-panes -a -F` gives liveness, pid, and exit code
+   for the whole board in one ~3 ms call, and a control-mode client streams
+   output for the session view. `pipe-pane -o` writes scrollback to disk
+   and the raw stream carries escapes tmux strips from its own state.
+   A `portable-pty` adapter implements the same `ProcessHost` trait as the
+   no-tmux fallback and for tests. Control-mode readers must be
+   byte-oriented (chunks split mid-character).
+3. **Session state: hooks first.** Claude Code hooks map cleanly onto the
+   card states: `PermissionRequest` (also covers questions) = waiting on
+   you; `UserPromptSubmit` / `PostToolUse` = working; `Stop` = idle;
+   `SessionEnd` = exited. Switchboard ships a `switchboard-hook` binary
+   that writes one line to a Unix socket and spools to a file when the app
+   is down; hooks are registered per project (local settings or
+   `--settings` at launch) and correlate by cwd on the first
+   `SessionStart`, then by session id. Hook-free fallback for Claude Code:
+   the OSC 777 notify text ("needs your permission") from the pane's raw
+   stream; tmux state alone cannot tell idle from waiting. Shells get
+   idle/working and exit codes from Ghostty's OSC 133 shell integration,
+   which works inside tmux. Transcript tailing is the last resort.
+4. **Terminal view: hand off agents, embed the rest.** Agent sessions open
+   in Ghostty: `open -na Ghostty --args --title=<name>
+   --working-directory=<cwd> -e <cmd>`, and the window is raised later by
+   title. Shells, commands, and services render inside the app with
+   `egui_term` (vendored from git; builds on egui 0.36 unchanged; renders
+   `top`, `vim`, and Claude Code's TUI correctly at 1-3 ms per frame).
+   Two patches needed: keys are dropped unless the pointer is over the
+   widget, and `TERM` must be set explicitly. Cmux has a rich CLI but its
+   socket refuses outside processes by default, so it stays an optional
+   integration. libghostty is not usable from Rust yet.
+
 ## Architecture
 
 Follows the template layering. Nothing below touches egui.
@@ -222,8 +270,10 @@ Follows the template layering. Nothing below touches egui.
   tested.
 - `ports`: `Store` (records), `FileSystem` (list, read, watch), `Git`
   (status, branch, repo discovery), `ProcessHost` (spawn with env and
-  cwd, attach, signal, stream output), `Terminal` (whatever the spike
-  chooses), `Opener` (default app, editor, Finder), `SecretStore`.
+  cwd, attach, signal, stream output; tmux and PTY adapters), `Agent`
+  (launch and resume command lines per agent kind), `StateSignals` (hook
+  socket, raw-stream parser), `Opener` (default app, editor, Finder,
+  Ghostty hand-off and raise), `SecretStore`.
 - `adapters`: real implementations, each with a fake. The fake process
   host plays scripted output so UI tests never spawn anything.
 - `app`: runs effects, drains worker channels, feeds results back.
@@ -231,8 +281,7 @@ Follows the template layering. Nothing below touches egui.
 
 ## Milestones
 
-0. **Resumability spike.** Prove agent resume and choose the process
-   host and terminal view.
+0. **Resumability spike.** Done; see "Spike 0 results".
 1. **Workspace records.** Projects, sessions as records on a board of
    cards, launch and return-to for agents via hand-off to a real
    terminal, session state from the spike's signal, and the cross-project
