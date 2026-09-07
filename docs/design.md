@@ -190,7 +190,11 @@ left to the implementation:
 - Tree of the root, lazily loaded, with a fuzzy finder across the project
   honoring `.gitignore`.
 - Preview pane: rendered Markdown, syntax-highlighted text, images, a
-  size-capped fallback. Read-only.
+  size-capped fallback. Read-only. The bottom half of the file side
+  shows the selected file; Expand opens it full size.
+- The file side is always next to a board and can be toggled next to a
+  session (Files button, Cmd+B), so a file can be checked without
+  leaving the terminal or the conversation.
 - Actions: open in default app, open in editor, reveal in Finder, copy
   path; for directories, open a shell session there.
 - Git decorations on rows: modified, untracked, branch on repo roots.
@@ -611,6 +615,13 @@ environment section on the session view itself.
   changes; exclusive mode hides other projects' counts too). Verified
   with an injected `PermissionRequest` hook event: card, "1 waiting", red
   project dot, and the badge all agreed.
+
+- **File side next to a session.** The Files toggle in the session
+  header (or Cmd+B) opens the project's tree and finder beside the
+  terminal or conversation. The side's bottom half previews the
+  selected file in place, on boards too; a click no longer leaves the
+  view, and Expand (or Preview in the row menu) opens the full document
+  view. The toggle is UI state, not a setting, so it starts closed.
 
 ## Open questions
 

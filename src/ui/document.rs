@@ -1,6 +1,7 @@
 //! Read-only preview of one file of a project: rendered Markdown, plain
 //! text, or a note for what cannot be shown. Reloads when the file
-//! changes on disk.
+//! changes on disk. The full-screen view lives here; the file side's
+//! bottom pane draws the same body through [`body`].
 
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
@@ -8,7 +9,7 @@ use std::time::SystemTime;
 use egui::{Frame, RichText, Ui};
 use egui_commonmark::CommonMarkViewer;
 
-use super::{DrawCtx, GAP, PAD};
+use super::{DrawCtx, GAP, PAD, UiState};
 use crate::core::{AppAction, ProjectId};
 
 /// Files above this are not read; the preview says so instead.
@@ -93,16 +94,21 @@ fn body_of(path: &Path, bytes: Vec<u8>) -> Body {
     }
 }
 
-pub fn show(cx: &mut DrawCtx<'_>, ui: &mut Ui, pid: ProjectId, path: &Path) {
-    ui.spacing_mut().item_spacing = egui::vec2(GAP, GAP);
-    let fresh = cx
-        .state
+/// Load `path` into the state's preview slot unless the copy there is
+/// still current.
+pub fn ensure_loaded(state: &mut UiState, path: &Path) {
+    let fresh = state
         .preview
         .as_ref()
         .is_some_and(|p| p.path == path && !p.stale());
     if !fresh {
-        cx.state.preview = Some(Preview::load(path));
+        state.preview = Some(Preview::load(path));
     }
+}
+
+pub fn show(cx: &mut DrawCtx<'_>, ui: &mut Ui, pid: ProjectId, path: &Path) {
+    ui.spacing_mut().item_spacing = egui::vec2(GAP, GAP);
+    ensure_loaded(cx.state, path);
     let Some(preview) = cx.state.preview.clone() else {
         return;
     };
@@ -118,36 +124,50 @@ pub fn show(cx: &mut DrawCtx<'_>, ui: &mut Ui, pid: ProjectId, path: &Path) {
                 .inner_margin(PAD)
                 .show(ui, |ui| {
                     ui.set_width(ui.available_width());
-                    match &preview.body {
-                        Body::Markdown(text) => {
-                            CommonMarkViewer::new().show(ui, &mut cx.state.markdown, text);
-                        }
-                        Body::Text(text) => {
-                            // egui's built-in highlighter knows Rust, C-likes,
-                            // Python, and TOML; everything else is plain.
-                            let lang = preview
-                                .path
-                                .extension()
-                                .and_then(|e| e.to_str())
-                                .unwrap_or("");
-                            let theme =
-                                egui_extras::syntax_highlighting::CodeTheme::from_style(ui.style());
-                            egui_extras::syntax_highlighting::code_view_ui(ui, &theme, text, lang);
-                        }
-                        Body::Image(bytes) => {
-                            let uri = format!("bytes://{}", preview.path.display());
-                            ui.add(
-                                egui::Image::from_bytes(uri, bytes.clone())
-                                    .max_width(ui.available_width())
-                                    .fit_to_original_size(1.0),
-                            );
-                        }
-                        Body::Binary => weak(ui, "Binary file; open it in another app."),
-                        Body::TooLarge => weak(ui, "Too large to preview; open it in another app."),
-                        Body::Missing(why) => weak(ui, &format!("Cannot read this file: {why}")),
-                    }
+                    body(cx.state, ui);
                 });
         });
+}
+
+/// Draw the loaded preview's contents: Markdown, highlighted text, an
+/// image, or the note for what cannot be shown.
+pub fn body(state: &mut UiState, ui: &mut Ui) {
+    // Destructuring borrows two fields of `state` at once, which a method
+    // call on `state` could not: the preview is read while the markdown
+    // layout cache is written.
+    let UiState {
+        preview, markdown, ..
+    } = state;
+    let Some(preview) = preview else {
+        return;
+    };
+    match &preview.body {
+        Body::Markdown(text) => {
+            CommonMarkViewer::new().show(ui, markdown, text);
+        }
+        Body::Text(text) => {
+            // egui's built-in highlighter knows Rust, C-likes, Python,
+            // and TOML; everything else is plain.
+            let lang = preview
+                .path
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("");
+            let theme = egui_extras::syntax_highlighting::CodeTheme::from_style(ui.style());
+            egui_extras::syntax_highlighting::code_view_ui(ui, &theme, text, lang);
+        }
+        Body::Image(bytes) => {
+            let uri = format!("bytes://{}", preview.path.display());
+            ui.add(
+                egui::Image::from_bytes(uri, bytes.clone())
+                    .max_width(ui.available_width())
+                    .fit_to_original_size(1.0),
+            );
+        }
+        Body::Binary => weak(ui, "Binary file; open it in another app."),
+        Body::TooLarge => weak(ui, "Too large to preview; open it in another app."),
+        Body::Missing(why) => weak(ui, &format!("Cannot read this file: {why}")),
+    }
 }
 
 fn weak(ui: &mut Ui, text: &str) {

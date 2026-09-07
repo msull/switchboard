@@ -1,8 +1,10 @@
-//! The file side of a board: a lazily loaded tree of the project root
-//! and a fuzzy finder over the whole project, both honoring
-//! `.gitignore`. Clicking a file previews it; a right click offers the
-//! hand-offs (default app, editor, Finder, copy path, pin) and, for a
-//! directory, a shell there.
+//! The file side of a board or a session: a lazily loaded tree of the
+//! project root and a fuzzy finder over the whole project, both honoring
+//! `.gitignore`, with a preview of the selected file in the bottom half.
+//! Clicking a file previews it there (or, when the full document view is
+//! already on screen, in that view); a right click offers the hand-offs
+//! (default app, editor, Finder, copy path, pin) and, for a directory, a
+//! shell there.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -12,7 +14,7 @@ use std::time::{Duration, Instant};
 
 use egui::{Color32, RichText, Ui};
 
-use super::{DrawCtx, GAP};
+use super::{DrawCtx, GAP, document};
 use crate::adapters::files::{Entry, Listing, children, fuzzy, scan};
 use crate::adapters::git::{Change, GitState, inspect};
 use crate::core::{AppAction, Launch, ProjectId, SessionKind};
@@ -108,7 +110,10 @@ impl FilesState {
     }
 }
 
-pub fn show(cx: &mut DrawCtx<'_>, ui: &mut Ui, pid: ProjectId) {
+/// Draw the file side for `pid`. With `inline` the selected file is
+/// previewed in the bottom half of the side itself; without it a click
+/// opens the full document view (which is then already on screen).
+pub fn show(cx: &mut DrawCtx<'_>, ui: &mut Ui, pid: ProjectId, inline: bool) {
     let Some(root) = cx.core.workspace(pid).map(|w| w.project.root.clone()) else {
         return;
     };
@@ -126,9 +131,23 @@ pub fn show(cx: &mut DrawCtx<'_>, ui: &mut Ui, pid: ProjectId) {
         root: &root,
         pinned: &pinned,
         git: git.as_deref(),
+        inline,
         actions: &mut actions,
     };
     ui.spacing_mut().item_spacing = egui::vec2(GAP, GAP);
+    // Panels claim their space before the rest of the side is laid out,
+    // so the preview goes first even though it sits at the bottom.
+    if inline {
+        let selected = state.selected.clone();
+        let cleared = egui::Panel::bottom(egui::Id::new(("files_preview", pid)))
+            .resizable(true)
+            .default_size(ui.available_height() / 2.0)
+            .show(ui, |ui| preview_pane(cx, ui, pid, selected.as_deref()))
+            .inner;
+        if cleared {
+            state.selected = None;
+        }
+    }
     ui.horizontal(|ui| {
         ui.label(RichText::new("Files").strong());
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -147,7 +166,7 @@ pub fn show(cx: &mut DrawCtx<'_>, ui: &mut Ui, pid: ProjectId) {
         let field = ui
             .add(
                 egui::TextEdit::singleline(&mut state.query)
-                    .hint_text("fuzzy path, Enter previews the first hit")
+                    .hint_text("fuzzy path, Enter picks the first hit")
                     .desired_width(f32::INFINITY),
             )
             .labelled_by(label);
@@ -164,11 +183,85 @@ pub fn show(cx: &mut DrawCtx<'_>, ui: &mut Ui, pid: ProjectId) {
             } else {
                 finder(ui, &mut state, &mut side, open_first);
             }
+            // The blank space under the rows: a click there clears the
+            // selection, as in Finder.
+            let blank = ui.available_rect_before_wrap();
+            if blank.height() > 0.0 && ui.allocate_rect(blank, egui::Sense::click()).clicked() {
+                state.selected = None;
+            }
         });
     cx.state.files.insert(pid, state);
     for action in actions {
         cx.dispatch(action);
     }
+}
+
+/// The bottom half of the side: the selected file, drawn by the
+/// document view's renderer, with a way to the full view. Returns
+/// whether the × was clicked, which clears the selection.
+fn preview_pane(cx: &mut DrawCtx<'_>, ui: &mut Ui, pid: ProjectId, path: Option<&Path>) -> bool {
+    ui.spacing_mut().item_spacing = egui::vec2(GAP, GAP);
+    // A panel shrinks to its content; an empty pane would collapse and
+    // then jump back when a file is selected. Hold the panel's height.
+    ui.set_min_height(ui.available_height());
+    let Some(path) = path else {
+        ui.label(RichText::new("Select a file to preview it here.").weak());
+        return false;
+    };
+    let mut cleared = false;
+    document::ensure_loaded(cx.state, path);
+    let (name, size) = cx.state.preview.as_ref().map_or_else(
+        || (String::new(), 0),
+        |p| {
+            (
+                p.path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default(),
+                p.size,
+            )
+        },
+    );
+    ui.horizontal(|ui| {
+        ui.label(RichText::new(name).strong());
+        ui.label(RichText::new(document::size_text(size)).weak().small());
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if ui
+                .small_button("×")
+                .on_hover_text("Clear the selection")
+                .clicked()
+            {
+                cleared = true;
+            }
+            if ui
+                .small_button("Expand")
+                .on_hover_text("Preview it full size")
+                .clicked()
+            {
+                cx.dispatch(AppAction::ShowDocument(pid, path.to_path_buf()));
+            }
+            if ui.small_button("Open in editor").clicked() {
+                cx.dispatch(AppAction::OpenInEditor(path.to_path_buf()));
+            }
+        });
+    });
+    ui.separator();
+    let is_code = cx
+        .state
+        .preview
+        .as_ref()
+        .is_some_and(|p| matches!(p.body, document::Body::Text(_)));
+    egui::ScrollArea::both()
+        .id_salt(("files_preview_body", pid, path))
+        .auto_shrink(false)
+        .show(ui, |ui| {
+            // Code keeps its lines and scrolls sideways; prose wraps.
+            if is_code {
+                ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
+            }
+            document::body(cx.state, ui);
+        });
+    cleared
 }
 
 /// What every row needs to build its actions.
@@ -177,6 +270,8 @@ struct Side<'a> {
     root: &'a Path,
     pinned: &'a [PathBuf],
     git: Option<&'a GitState>,
+    /// The selection is previewed in the side; a click does not navigate.
+    inline: bool,
     actions: &'a mut Vec<AppAction>,
 }
 
@@ -204,7 +299,15 @@ impl Side<'_> {
         }
     }
 
+    /// What a click on a file row does beyond selecting it.
     fn preview(&mut self, path: &Path) {
+        if !self.inline {
+            self.expand(path);
+        }
+    }
+
+    /// Open the full document view.
+    fn expand(&mut self, path: &Path) {
         self.actions
             .push(AppAction::ShowDocument(self.pid, path.to_path_buf()));
     }
@@ -228,7 +331,7 @@ impl Side<'_> {
             }
         } else {
             if ui.button("Preview").clicked() {
-                self.preview(path);
+                self.expand(path);
                 ui.close();
             }
             if ui.button("Open").on_hover_text("Default app").clicked() {
