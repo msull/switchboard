@@ -11,12 +11,12 @@ use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;
 use switchboard::SwitchboardApp;
 use switchboard::adapters::fakes::{
-    FakeAgents, FakeEvents, FakeHost, FakeOpener, FakeTranscripts, MemoryStore,
+    FakeAgents, FakeEvents, FakeHost, FakeOpener, FakeSecrets, FakeTranscripts, MemoryStore,
 };
 use switchboard::app::Services;
 use switchboard::core::{
-    Activity, AgentKind, AppAction, CardLayout, Launch, Notice, Project, ProjectId, RecordId,
-    ResumeHandle, SessionKind, SessionRecord, ThemeMode, View, Workspace,
+    Activity, AgentKind, AppAction, CardLayout, Launch, Notice, Project, ProjectEnv, ProjectId,
+    RecordId, ResumeHandle, SessionKind, SessionRecord, ThemeMode, View, Workspace,
 };
 use switchboard::ports::host::{HostId, HostStatus, Liveness};
 use switchboard::ports::transcript::{
@@ -45,6 +45,7 @@ fn project(name: &str, last_active: SystemTime) -> Project {
         tags: Vec::new(),
         notes: format!("notes for {name}"),
         pinned: vec![PathBuf::from("README.md")],
+        env: ProjectEnv::default(),
         created: at(0),
         last_active,
     }
@@ -130,6 +131,13 @@ fn harness() -> (Harness<'static, SwitchboardApp>, Seeded) {
 
 /// A harness whose opener the test keeps a handle to.
 fn harness_with(opener: FakeOpener) -> (Harness<'static, SwitchboardApp>, Seeded) {
+    harness_full(opener, FakeSecrets::default())
+}
+
+fn harness_full(
+    opener: FakeOpener,
+    secrets: FakeSecrets,
+) -> (Harness<'static, SwitchboardApp>, Seeded) {
     let services = Services {
         store: Box::new(MemoryStore::default()),
         host: Box::new(FakeHost::default()),
@@ -137,6 +145,7 @@ fn harness_with(opener: FakeOpener) -> (Harness<'static, SwitchboardApp>, Seeded
         agents: Box::new(FakeAgents::default()),
         opener: Box::new(opener),
         transcripts: Box::new(FakeTranscripts::default()),
+        secrets: Box::new(secrets),
         wake: None,
     };
     let mut harness = Harness::builder()
@@ -470,6 +479,31 @@ fn pinned_card_previews_and_opens() {
 }
 
 #[test]
+fn environment_dialog_saves_variables_and_stores_secrets() {
+    let secrets = FakeSecrets::default();
+    let (mut harness, ids) = harness_full(FakeOpener::default(), secrets.clone());
+    showing(&mut harness, View::Board(ids.alpha));
+    click(&mut harness, "Environment");
+    click(&mut harness, "Add variable");
+    type_into(&mut harness, "Name 1", "TOKEN");
+    type_into(&mut harness, "Value 1", "s3cret");
+    click(&mut harness, "Secret 1");
+    click(&mut harness, "Save");
+    let dispatched = actions(&harness);
+    assert!(dispatched.iter().any(|a| matches!(
+        a,
+        AppAction::SetProjectEnv(pid, env)
+            if *pid == ids.alpha && env.vars.len() == 1 && env.vars[0].secret && env.vars[0].value.is_empty()
+    )));
+    let account = format!("project/{}/TOKEN", ids.alpha.0);
+    assert_eq!(
+        secrets.state().get(&account).map(String::as_str),
+        Some("s3cret")
+    );
+    assert!(harness.state().ui_state.env_dialog.is_none());
+}
+
+#[test]
 fn quick_switcher_opens_the_best_match_on_enter() {
     let (mut harness, ids) = harness();
     harness.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::K);
@@ -745,6 +779,7 @@ fn polling_reads_the_transcript_into_the_ui_state() {
         transcripts: Box::new(FakeTranscripts {
             conversation: Some(two_turns()),
         }),
+        secrets: Box::new(FakeSecrets::default()),
         wake: None,
     };
     let mut harness = Harness::builder()

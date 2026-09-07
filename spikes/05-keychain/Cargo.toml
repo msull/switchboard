@@ -1,0 +1,11 @@
+[package]
+name = "spike-keychain"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Milestone 4 spike: generic-password items in the macOS Keychain from a signed app, without prompts"
+
+[workspace]
+
+[dependencies]
+security-framework = "3"

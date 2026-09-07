@@ -88,6 +88,10 @@ pub fn top_bar(cx: &mut DrawCtx<'_>, ui: &mut Ui, view: &View) {
                         cx.dispatch(AppAction::SetEditor(editor));
                     }
                 }
+                if ui.button("Environment…").clicked() {
+                    cx.state.env_dialog = Some(super::env::EnvDraft::global(cx.core, cx.services));
+                    ui.close();
+                }
                 ui.separator();
                 let mut exclusive = settings.exclusive;
                 if ui

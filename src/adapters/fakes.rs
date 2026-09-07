@@ -2,6 +2,7 @@
 //! app's demo mode. Each is a plain struct with public fields so tests
 //! can inspect calls and script results.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
@@ -236,6 +237,30 @@ impl Opener for FakeOpener {
         let mut s = self.state();
         s.raised.push(title.into());
         Ok(s.existing.iter().any(|t| t == title))
+    }
+}
+
+/// Secrets in memory, shared so a test can read back what the app stored.
+#[derive(Debug, Clone, Default)]
+pub struct FakeSecrets(pub Arc<Mutex<HashMap<String, String>>>);
+
+impl FakeSecrets {
+    pub fn state(&self) -> std::sync::MutexGuard<'_, HashMap<String, String>> {
+        self.0.lock().expect("fake secrets lock")
+    }
+}
+
+impl crate::ports::secrets::SecretStore for FakeSecrets {
+    fn get(&self, account: &str) -> Result<Option<String>, String> {
+        Ok(self.state().get(account).cloned())
+    }
+    fn set(&self, account: &str, value: &str) -> Result<(), String> {
+        self.state().insert(account.into(), value.into());
+        Ok(())
+    }
+    fn delete(&self, account: &str) -> Result<(), String> {
+        self.state().remove(account);
+        Ok(())
     }
 }
 

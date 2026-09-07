@@ -33,6 +33,40 @@ impl ThemeMode {
     }
 }
 
+/// One environment variable of a layer. A plain variable keeps its value
+/// here; a secret keeps only its name, the value lives in the secret
+/// store under the layer's account name.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct EnvVar {
+    pub name: String,
+    pub value: String,
+    pub secret: bool,
+}
+
+/// A project's environment: its own variables and whether its `.env`
+/// files are read (opt-in, since a repository ships them).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ProjectEnv {
+    pub vars: Vec<EnvVar>,
+    pub load_dotenv: bool,
+    /// Relative to the root; `.env` when empty.
+    pub dotenv_files: Vec<String>,
+}
+
+impl ProjectEnv {
+    /// The files to read when `load_dotenv` is on.
+    #[must_use]
+    pub fn files(&self) -> Vec<String> {
+        if self.dotenv_files.is_empty() {
+            vec![".env".into()]
+        } else {
+            self.dotenv_files.clone()
+        }
+    }
+}
+
 /// App-wide preferences: one `settings.json` per data directory, not per
 /// project. Unknown fields are kept out and missing ones default, so the
 /// file needs no schema version.
@@ -46,6 +80,8 @@ pub struct Settings {
     /// `subl`); it gets the path as its one argument. Blank means the
     /// system text editor via `open -t`.
     pub editor: String,
+    /// Variables every session gets, under the project's own.
+    pub env: Vec<EnvVar>,
 }
 
 /// Switchboard's own id for a project. Never reused.
@@ -100,6 +136,8 @@ pub struct Project {
     /// Pinned document cards, paths relative to `root`.
     #[serde(default)]
     pub pinned: Vec<PathBuf>,
+    #[serde(default)]
+    pub env: ProjectEnv,
     pub created: SystemTime,
     /// Most recent time this project was active; drives switcher order.
     pub last_active: SystemTime,

@@ -22,7 +22,7 @@ you at the bottom of the window when tmux is missing.
 
 Data lives in `~/Library/Application Support/Switchboard/`: one JSON file
 per project under `projects/` (with a `.bak` of the previous version),
-`settings.json` (theme, exclusive mode), the
+`settings.json` (theme, exclusive mode, editor, global variables), the
 tmux config and socket name, `claude-hooks.json` (passed to Claude Code
 with `--settings`), `events.log` (the hook event log), `wake.sock`, and
 `scrollback/`. Sessions run on a private tmux server (`tmux -L
@@ -53,8 +53,9 @@ Dev aids, all environment variables:
 - `SWITCHBOARD_SCRIPT=<file>`: run actions at startup, one per line, so
   the app can be put into a known state without clicking. See
   `src/script.rs` for the lines (`add-project`, `new-shell`, `new-claude`,
-  `new-codex`, `new-service`, `show-board`, `show-session`, `return`,
-  `kill`, `switchboard`).
+  `new-codex`, `new-service`, `show-board`, `show-session`, `show-document`,
+  `set-env`, `set-secret`, `dotenv`, `environment`, `send`, `return`,
+  `kill`, `switchboard`, `sleep`).
 - `SWITCHBOARD_TMUX=<path>`: tmux binary to use.
 - `RUST_LOG=switchboard=debug`: verbose logging.
 
@@ -86,6 +87,8 @@ src/adapters/
   dock.rs                Dock badge with the waiting-session count (macOS)
   files.rs               project file index: gitignore-aware scan, lazy children, fuzzy match
   git.rs                 branches, change counts, per-path status; finds repos one or two dirs down
+  keychain.rs            secrets as generic-password items in the login Keychain (tests use a temp keychain)
+  dotenv.rs              .env parser (opt-in per project) and .env.example names
   scrollback.rs          read the pipe-pane stream back as plain text (cold sessions)
   agents.rs              Claude Code / Codex launch, resume, preflight, discovery
   transcript.rs          Claude Code transcript (JSONL) -> Conversation turns
@@ -100,6 +103,7 @@ src/ui/
   files.rs               file side panel: lazy tree, fuzzy finder, right-click hand-offs
   document.rs            read-only preview view: Markdown, text, images
   palette.rs             quick-switcher (Cmd+K) over projects and sessions
+  env.rs                 Environment dialog: variables, secrets, .env opt-in, masked preview
   cards.rs               session and document cards, state colors
   session.rs             session view: header, notes, embedded terminal or conversation + message box
   switchboard.rs         every session across projects, waiting first
