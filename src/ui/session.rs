@@ -179,6 +179,13 @@ fn header(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord) {
                     if ui.button(open).clicked() {
                         cx.dispatch(AppAction::ReturnToSession(record.id));
                     }
+                    if ui
+                        .selectable_label(cx.state.files_open, "Files")
+                        .on_hover_text("Show the project's files beside the session (Cmd+B)")
+                        .clicked()
+                    {
+                        cx.state.files_open = !cx.state.files_open;
+                    }
                 });
             });
         });
@@ -464,7 +471,7 @@ fn turn_block(ui: &mut Ui, turn: &Turn, open: Option<bool>, markdown: &mut Commo
     Frame::new().stroke(stroke).corner_radius(6).show(ui, |ui| {
         ui.set_width(ui.available_width());
         ui.spacing_mut().item_spacing.y = 0.0;
-        Frame::new()
+        let user_rect = Frame::new()
             .fill(user_fill)
             .corner_radius(CornerRadius {
                 nw: 6,
@@ -484,7 +491,10 @@ fn turn_block(ui: &mut Ui, turn: &Turn, open: Option<bool>, markdown: &mut Commo
                     }
                 });
                 ui.add(egui::Label::new(RichText::new(&turn.user).monospace()).wrap());
-            });
+            })
+            .response
+            .rect;
+        message_menu(ui, user_rect, ("user", turn.n), &turn.user);
         Frame::new()
             .fill(activity_fill)
             .stroke(stroke)
@@ -504,7 +514,7 @@ fn turn_block(ui: &mut Ui, turn: &Turn, open: Option<bool>, markdown: &mut Commo
                         }
                     });
             });
-        Frame::new()
+        let final_rect = Frame::new()
             .fill(final_fill)
             .corner_radius(CornerRadius {
                 nw: 0,
@@ -525,8 +535,36 @@ fn turn_block(ui: &mut Ui, turn: &Turn, open: Option<bool>, markdown: &mut Commo
                 } else {
                     CommonMarkViewer::new().show(ui, markdown, &turn.final_text);
                 }
-            });
+            })
+            .response
+            .rect;
+        if !turn.final_text.is_empty() {
+            message_menu(ui, final_rect, ("final", turn.n), &turn.final_text);
+        }
     });
+}
+
+/// The right-click menu of one message (the user's prompt or the
+/// agent's answer) covering `rect`. Copy for now; more to come.
+///
+/// The block is not made clickable: that would put it above the labels
+/// and links inside it in egui's hit test and take their clicks. The
+/// pointer is checked directly instead, and the menu is opened by hand.
+fn message_menu(ui: &mut Ui, rect: egui::Rect, salt: (&str, usize), text: &str) {
+    let response = ui.interact(rect, ui.id().with(salt), egui::Sense::hover());
+    let right_clicked = ui.input(|i| {
+        i.pointer.button_clicked(egui::PointerButton::Secondary)
+            && i.pointer.interact_pos().is_some_and(|p| rect.contains(p))
+    });
+    egui::Popup::menu(&response)
+        .open_memory(right_clicked.then_some(egui::SetOpenCommand::Bool(true)))
+        .at_pointer_fixed()
+        .show(|ui| {
+            if ui.button("Copy").clicked() {
+                ui.ctx().copy_text(text.to_owned());
+                ui.close();
+            }
+        });
 }
 
 fn stats_line(t: &Turn) -> String {

@@ -1,5 +1,6 @@
 //! Top bar (project switcher, switchboard button, waiting badge, add
-//! project, back) and bottom bar (notice, host error, read-only tag).
+//! project, files toggle, back) and bottom bar (notice, host error,
+//! read-only tag).
 
 use egui::{Button, Color32, RichText, Ui};
 
@@ -7,6 +8,9 @@ use super::cards::{project_dot_color, state_color};
 use super::dialogs::AddProjectDraft;
 use super::{DrawCtx, GAP};
 use crate::core::{AppAction, AppCore, CardState, Project, ThemeMode, View};
+
+/// The top bar's toggle for the file side of a session.
+pub const FILES_ICON: &str = "📁";
 
 /// Projects most recently active first: the switcher order, also used
 /// for Cmd+1..9.
@@ -62,53 +66,26 @@ pub fn top_bar(cx: &mut DrawCtx<'_>, ui: &mut Ui, view: &View) {
 
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             let settings = cx.core.settings().clone();
-            ui.menu_button("Settings", |ui| {
-                ui.label(RichText::new("Theme").weak());
-                for mode in ThemeMode::ALL {
-                    if ui.radio(mode == settings.theme, mode.label()).clicked() {
-                        cx.dispatch(AppAction::SetTheme(mode));
-                        ui.close();
-                    }
-                }
-                ui.separator();
-                ui.label(RichText::new("Editor command").weak());
-                let draft = cx
-                    .state
-                    .editor_draft
-                    .get_or_insert_with(|| settings.editor.clone());
-                let field = ui.add(
-                    egui::TextEdit::singleline(draft)
-                        .hint_text("code, zed, cursor (blank: system editor)")
-                        .desired_width(200.0),
-                );
-                if field.lost_focus() {
-                    let editor = draft.clone();
-                    cx.state.editor_draft = None;
-                    if editor.trim() != settings.editor {
-                        cx.dispatch(AppAction::SetEditor(editor));
-                    }
-                }
-                if ui.button("Environment…").clicked() {
-                    cx.state.env_dialog = Some(super::env::EnvDraft::global(cx.core, cx.services));
-                    ui.close();
-                }
-                ui.separator();
-                let mut exclusive = settings.exclusive;
-                if ui
-                    .checkbox(&mut exclusive, "Exclusive: only the active project")
-                    .on_hover_text("Hides every other project while screen sharing")
-                    .changed()
-                {
-                    cx.dispatch(AppAction::SetExclusive(exclusive));
-                    ui.close();
-                }
-            });
+            settings_menu(cx, ui, &settings);
             if settings.exclusive {
                 ui.label(RichText::new("exclusive").weak())
                     .on_hover_text("Other projects are hidden (Settings)");
             }
             if *view != View::Switchboard && ui.button("Back").clicked() {
                 cx.dispatch(AppAction::Back);
+            }
+            // The glyph comes from egui's emoji font; it reads as a
+            // folder in light and dark.
+            if matches!(view, View::Session(_))
+                && ui
+                    .add(
+                        Button::new(RichText::new(FILES_ICON).size(18.0))
+                            .selected(cx.state.files_open),
+                    )
+                    .on_hover_text("Show the project's files beside the session (Cmd+B)")
+                    .clicked()
+            {
+                cx.state.files_open = !cx.state.files_open;
             }
             let waiting = cx.core.waiting_count();
             if waiting > 0 {
@@ -119,6 +96,51 @@ pub fn top_bar(cx: &mut DrawCtx<'_>, ui: &mut Ui, view: &View) {
                 );
             }
         });
+    });
+}
+
+/// The Settings menu: theme, editor command, environment, exclusive.
+fn settings_menu(cx: &mut DrawCtx<'_>, ui: &mut Ui, settings: &crate::core::Settings) {
+    ui.menu_button("Settings", |ui| {
+        ui.label(RichText::new("Theme").weak());
+        for mode in ThemeMode::ALL {
+            if ui.radio(mode == settings.theme, mode.label()).clicked() {
+                cx.dispatch(AppAction::SetTheme(mode));
+                ui.close();
+            }
+        }
+        ui.separator();
+        ui.label(RichText::new("Editor command").weak());
+        let draft = cx
+            .state
+            .editor_draft
+            .get_or_insert_with(|| settings.editor.clone());
+        let field = ui.add(
+            egui::TextEdit::singleline(draft)
+                .hint_text("code, zed, cursor (blank: system editor)")
+                .desired_width(200.0),
+        );
+        if field.lost_focus() {
+            let editor = draft.clone();
+            cx.state.editor_draft = None;
+            if editor.trim() != settings.editor {
+                cx.dispatch(AppAction::SetEditor(editor));
+            }
+        }
+        if ui.button("Environment…").clicked() {
+            cx.state.env_dialog = Some(super::env::EnvDraft::global(cx.core, cx.services));
+            ui.close();
+        }
+        ui.separator();
+        let mut exclusive = settings.exclusive;
+        if ui
+            .checkbox(&mut exclusive, "Exclusive: only the active project")
+            .on_hover_text("Hides every other project while screen sharing")
+            .changed()
+        {
+            cx.dispatch(AppAction::SetExclusive(exclusive));
+            ui.close();
+        }
     });
 }
 

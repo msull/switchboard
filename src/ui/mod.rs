@@ -64,6 +64,9 @@ pub struct UiState {
     pub rename_draft: Option<(RecordId, String)>,
     /// The file side per project: tree, finder, index.
     pub files: HashMap<ProjectId, files::FilesState>,
+    /// Show the file side next to a session (the Files toggle, Cmd+B).
+    /// Boards always have it.
+    pub files_open: bool,
     /// The document on screen, loaded once per path and file time.
     pub preview: Option<document::Preview>,
     /// The editor command being edited in the settings menu.
@@ -97,6 +100,7 @@ impl Default for UiState {
             notes_draft: None,
             rename_draft: None,
             files: HashMap::new(),
+            files_open: false,
             preview: None,
             editor_draft: None,
             palette: None,
@@ -170,13 +174,20 @@ fn draw_frame(cx: &mut DrawCtx<'_>, ui: &mut Ui) {
     egui::Panel::bottom("bottom_bar")
         .resizable(false)
         .show(ui, |ui| switcher::bottom_bar(cx, ui));
-    // The file side lives next to the board and the preview it opens.
-    if let View::Board(pid) | View::Document(pid, _) = &view {
-        let pid = *pid;
+    // The file side lives next to the board, next to the full preview it
+    // opens, and, when toggled on, next to a session. The full preview
+    // shows the selection itself; elsewhere the side previews inline.
+    let files_for = match &view {
+        View::Board(pid) => Some((*pid, true)),
+        View::Document(pid, _) => Some((*pid, false)),
+        View::Session(id) if cx.state.files_open => cx.core.session(*id).map(|s| (s.project, true)),
+        View::Session(_) | View::Switchboard => None,
+    };
+    if let Some((pid, inline)) = files_for {
         egui::Panel::right("files")
             .resizable(true)
-            .default_size(300.0)
-            .show(ui, |ui| files::show(cx, ui, pid));
+            .default_size(340.0)
+            .show(ui, |ui| files::show(cx, ui, pid, inline));
     }
     egui::CentralPanel::default().show(ui, |ui| match view {
         View::Switchboard => switchboard::show(cx, ui),
@@ -191,7 +202,8 @@ fn draw_frame(cx: &mut DrawCtx<'_>, ui: &mut Ui) {
 }
 
 /// Esc goes back, Cmd+1..9 switch project, Cmd+0 shows the switchboard,
-/// Cmd+K opens the quick-switcher.
+/// Cmd+K opens the quick-switcher, Cmd+B toggles the file side of a
+/// session.
 /// Esc is left alone while a text field, a dialog, or the terminal has
 /// focus.
 fn keyboard(cx: &mut DrawCtx<'_>, ui: &Ui, view: &View) {
@@ -215,6 +227,11 @@ fn keyboard(cx: &mut DrawCtx<'_>, ui: &Ui, view: &View) {
 
     if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::K)) {
         cx.state.palette = Some(palette::PaletteDraft::default());
+    }
+    if matches!(view, View::Session(_))
+        && ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::B))
+    {
+        cx.state.files_open = !cx.state.files_open;
     }
 
     if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::Num0)) {

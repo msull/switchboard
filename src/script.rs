@@ -4,6 +4,8 @@
 //! <name>`, `new-claude <project> <name>`, `new-codex <project> <name>`,
 //! `new-service <project> <name> <command...>`, `show-board <project>`,
 //! `show-session <name>`, `show-document <project> <relative path>`,
+//! `files on|off` (the file side of a session), `select-file <project>
+//! <relative path>` (previewed in that side),
 //! `set-env <project> NAME=VALUE`, `set-secret <project> NAME VALUE`,
 //! `dotenv <project> on|off`, `environment <project>` (opens the dialog), `send <name> <text...>`, `return <name>`,
 //! `kill <name>`, `switchboard`, `sleep <secs>` (then polls).
@@ -106,6 +108,11 @@ fn step(app: &mut SwitchboardApp, w: &[&str]) -> Result<(), String> {
         ["show-document", p, rel] => {
             let (id, root) = project(app, p)?;
             app.dispatch(AppAction::ShowDocument(id, root.join(rel)));
+        }
+        ["files", on] => app.ui_state.files_open = *on == "on",
+        ["select-file", p, rel] => {
+            let (id, root) = project(app, p)?;
+            app.ui_state.files.entry(id).or_default().selected = Some(root.join(rel));
         }
         ["set-env" | "set-secret" | "dotenv" | "environment", ..] => env_step(app, w)?,
         ["show-session", n] => {

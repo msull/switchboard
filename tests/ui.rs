@@ -390,8 +390,11 @@ fn host_error_and_read_only_tag_are_shown() {
     harness.get_by_label("read-only");
 }
 
-/// A project rooted in a real temp directory, for the file side.
-fn file_project(harness: &mut Harness<'static, SwitchboardApp>) -> (tempfile::TempDir, ProjectId) {
+/// A project rooted in a real temp directory, for the file side, with one
+/// shell session so the side can be toggled next to it.
+fn file_project(
+    harness: &mut Harness<'static, SwitchboardApp>,
+) -> (tempfile::TempDir, ProjectId, RecordId) {
     let dir = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(dir.path().join("docs")).unwrap();
     std::fs::create_dir_all(dir.path().join("target")).unwrap();
@@ -402,25 +405,36 @@ fn file_project(harness: &mut Harness<'static, SwitchboardApp>) -> (tempfile::Te
     let mut p = project("files", at(200));
     p.root = dir.path().to_path_buf();
     let pid = p.id;
+    let shell = record(pid, "sh", SessionKind::Shell, 0);
+    let sid = shell.id;
+    let mut ws = Workspace::new(p);
+    ws.sessions = vec![shell];
     harness
         .state_mut()
         .core_mut_for_seeding()
-        .seed(vec![Workspace::new(p)], Vec::new());
+        .seed(vec![ws], Vec::new());
     showing(harness, View::Board(pid));
-    (dir, pid)
+    (dir, pid, sid)
 }
 
 #[test]
 fn file_tree_previews_a_file_and_hands_off_to_the_editor() {
     let opener = FakeOpener::default();
     let (mut harness, _) = harness_with(opener.clone());
-    let (dir, pid) = file_project(&mut harness);
+    let (dir, pid, _) = file_project(&mut harness);
     // Ignored directories stay out of the tree; folders open on click.
     assert!(harness.query_by_label("⏵ target").is_none());
     click(&mut harness, "⏵ docs");
     harness.get_by_label("  design.md");
+    harness.get_by_label("Select a file to preview it here.");
+    // A click previews in the side's bottom half and stays on the board;
+    // Expand opens the full view.
     click(&mut harness, "  README.md");
     let readme = dir.path().join("README.md");
+    harness.get_by_label("from the readme");
+    assert_eq!(harness.state().core().view(), View::Board(pid));
+    assert!(!actions(&harness).contains(&AppAction::ShowDocument(pid, readme.clone())));
+    click(&mut harness, "Expand");
     assert!(actions(&harness).contains(&AppAction::ShowDocument(pid, readme.clone())));
     assert_eq!(
         harness.state().core().view(),
@@ -450,7 +464,7 @@ fn file_tree_previews_a_file_and_hands_off_to_the_editor() {
 #[test]
 fn finder_matches_across_the_project() {
     let (mut harness, _) = harness();
-    let (dir, pid) = file_project(&mut harness);
+    let (_dir, pid, _) = file_project(&mut harness);
     type_into(&mut harness, "Find", "dsgn");
     // The index is built on a thread; give it a moment.
     for _ in 0..40 {
@@ -461,18 +475,49 @@ fn finder_matches_across_the_project() {
         harness.run_steps(2);
     }
     click(&mut harness, "docs/design.md");
-    assert!(actions(&harness).contains(&AppAction::ShowDocument(
-        pid,
-        dir.path().join("docs/design.md")
-    )));
+    harness.get_by_label("Design");
+    assert_eq!(harness.state().core().view(), View::Board(pid));
     assert!(harness.query_by_label("target/out.bin").is_none());
+}
+
+#[test]
+fn session_view_toggles_the_file_side_with_a_preview() {
+    let (mut harness, _) = harness();
+    let (_dir, pid, sid) = file_project(&mut harness);
+    showing(&mut harness, View::Session(sid));
+    assert!(harness.query_by_label("Find").is_none());
+    // The toggle is a button; the side's heading has the same text.
+    let toggle = |harness: &mut Harness<'static, SwitchboardApp>| {
+        harness.get_by_role_and_label(Role::Button, "Files").click();
+        harness.run_steps(2);
+    };
+    toggle(&mut harness);
+    harness.get_by_label("Find");
+    click(&mut harness, "  README.md");
+    harness.get_by_label("from the readme");
+    // The preview lives in the side; the session stays on screen.
+    assert_eq!(harness.state().core().view(), View::Session(sid));
+    // The pane's × clears the selection.
+    click(&mut harness, "×");
+    harness.get_by_label("Select a file to preview it here.");
+    assert!(harness.query_by_label("from the readme").is_none());
+    toggle(&mut harness);
+    assert!(harness.query_by_label("Find").is_none());
+    // The top bar's folder icon flips the same state.
+    click(&mut harness, "📁");
+    harness.get_by_label("Find");
+    click(&mut harness, "📁");
+    assert!(harness.query_by_label("Find").is_none());
+    // Only sessions have the toggle; boards always show the side.
+    showing(&mut harness, View::Board(pid));
+    assert!(harness.query_by_label("📁").is_none());
 }
 
 #[test]
 fn pinned_card_previews_and_opens() {
     let opener = FakeOpener::default();
     let (mut harness, _) = harness_with(opener.clone());
-    let (dir, _pid) = file_project(&mut harness);
+    let (dir, _pid, _) = file_project(&mut harness);
     // README.md is pinned by the seed.
     click(&mut harness, "Open in app");
     assert_eq!(opener.state().opened, vec![dir.path().join("README.md")]);
@@ -745,6 +790,38 @@ fn claude_session_shows_the_conversation_and_message_box() {
     );
     click(&mut harness, "Expand activity");
     harness.get_by_label_contains("Bash: Read crate name");
+}
+
+#[test]
+fn messages_have_a_context_menu_with_copy() {
+    let (mut harness, ids) = harness();
+    let id = seed_claude(&mut harness, &ids);
+    harness
+        .state_mut()
+        .ui_state
+        .conversations
+        .insert(id, (None, two_turns()));
+    showing(&mut harness, View::Session(id));
+    assert!(harness.query_by_label("Copy").is_none());
+    // The prompt and the answer each get the menu.
+    harness
+        .get_by_label("What is the crate called?")
+        .click_secondary();
+    harness.run_steps(2);
+    harness.get_by_label("Copy").click();
+    harness.step();
+    let copied = harness
+        .output()
+        .platform_output
+        .commands
+        .iter()
+        .any(|c| *c == egui::OutputCommand::CopyText("What is the crate called?".into()));
+    assert!(copied, "{:?}", harness.output().platform_output.commands);
+    harness.run_steps(2);
+    assert!(harness.query_by_label("Copy").is_none());
+    harness.get_by_label("pong").click_secondary();
+    harness.run_steps(2);
+    harness.get_by_role_and_label(Role::Button, "Copy");
 }
 
 #[test]
