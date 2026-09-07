@@ -19,9 +19,10 @@
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use crate::core::env::SecretScope;
 use crate::core::model::{
-    Activity, AgentKind, CardState, Launch, Project, ProjectId, RecordId, ResumeHandle,
-    SessionKind, SessionRecord, Settings, ThemeMode, Workspace,
+    Activity, AgentKind, CardState, EnvVar, Launch, Project, ProjectEnv, ProjectId, RecordId,
+    ResumeHandle, SessionKind, SessionRecord, Settings, ThemeMode, Workspace,
 };
 use crate::ports::agent::AgentLaunch;
 use crate::ports::events::SessionEvent;
@@ -92,6 +93,18 @@ pub enum AppAction {
     OpenInEditor(PathBuf),
     RevealDocument(PathBuf),
     SetEditor(String),
+    SetGlobalEnv(Vec<EnvVar>),
+    SetProjectEnv(ProjectId, ProjectEnv),
+    /// Put a secret value in the store; the value never reaches a record.
+    StoreSecret {
+        scope: SecretScope,
+        name: String,
+        value: String,
+    },
+    DeleteSecret {
+        scope: SecretScope,
+        name: String,
+    },
     // --- sessions
     NewSession {
         project: ProjectId,
@@ -199,6 +212,11 @@ pub enum Effect {
     OpenPath(PathBuf),
     /// Drop what the host kept for a removed record (scrollback on disk).
     Forget(HostId),
+    StoreSecret {
+        account: String,
+        value: String,
+    },
+    DeleteSecret(String),
     /// Open the file with the configured editor command.
     OpenInEditor {
         editor: String,
@@ -307,6 +325,10 @@ impl AppCore {
             | AppAction::RevealDocument(_)
             | AppAction::OpenInEditor(_)
             | AppAction::SetEditor(_)
+            | AppAction::SetGlobalEnv(_)
+            | AppAction::SetProjectEnv(..)
+            | AppAction::StoreSecret { .. }
+            | AppAction::DeleteSecret { .. }
             | AppAction::SetTheme(_)
             | AppAction::SetExclusive(_) => self.files_and_settings(action, now, &mut out),
             AppAction::Back => drop(self.view_stack.pop()),
@@ -463,6 +485,7 @@ impl AppCore {
             tags: Vec::new(),
             notes: String::new(),
             pinned: Vec::new(),
+            env: ProjectEnv::default(),
             created: now.wall,
             last_active: now.wall,
         }));
@@ -624,6 +647,15 @@ impl AppCore {
             }),
             AppAction::SetEditor(editor) => {
                 self.update_settings(out, |s| editor.trim().clone_into(&mut s.editor));
+            }
+            AppAction::SetGlobalEnv(env) => self.update_settings(out, |s| s.env = env),
+            AppAction::SetProjectEnv(id, env) => self.edit_project(id, out, |p| p.env = env),
+            AppAction::StoreSecret { scope, name, value } => out.push(Effect::StoreSecret {
+                account: scope.account(&name),
+                value,
+            }),
+            AppAction::DeleteSecret { scope, name } => {
+                out.push(Effect::DeleteSecret(scope.account(&name)));
             }
             AppAction::SetTheme(theme) => self.update_settings(out, |s| s.theme = theme),
             AppAction::SetExclusive(on) => self.update_settings(out, |s| s.exclusive = on),

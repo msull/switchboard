@@ -13,6 +13,7 @@ mod board;
 mod cards;
 mod dialogs;
 pub mod document;
+pub mod env;
 pub mod files;
 pub mod palette;
 mod session;
@@ -69,6 +70,8 @@ pub struct UiState {
     pub editor_draft: Option<String>,
     /// The quick-switcher, while open.
     pub palette: Option<palette::PaletteDraft>,
+    /// The Environment dialog, while open.
+    pub env_dialog: Option<env::EnvDraft>,
     /// Message being composed for a session, sent with Enter.
     pub input_draft: Option<(RecordId, String)>,
     /// Embedded terminals, only ever the one for the session on screen.
@@ -97,6 +100,7 @@ impl Default for UiState {
             preview: None,
             editor_draft: None,
             palette: None,
+            env_dialog: None,
             input_draft: None,
             terminals: HashMap::new(),
             applied_theme: None,
@@ -183,6 +187,7 @@ fn draw_frame(cx: &mut DrawCtx<'_>, ui: &mut Ui) {
 
     dialogs::show(cx, ui.ctx());
     palette::show(cx, ui.ctx());
+    env::show(cx, ui.ctx());
 }
 
 /// Esc goes back, Cmd+1..9 switch project, Cmd+0 shows the switchboard,
@@ -205,7 +210,8 @@ fn keyboard(cx: &mut DrawCtx<'_>, ui: &Ui, view: &View) {
     let nothing_focused = ctx.memory(|m| m.focused().is_none());
     let has_dialog = cx.state.add_project.is_some()
         || cx.state.new_session.is_some()
-        || cx.state.palette.is_some();
+        || cx.state.palette.is_some()
+        || cx.state.env_dialog.is_some();
 
     if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::K)) {
         cx.state.palette = Some(palette::PaletteDraft::default());

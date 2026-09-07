@@ -8,7 +8,7 @@ use uuid::Uuid;
 
 use super::action::{AppAction, AppCore, Clock, Effect, View};
 use super::model::{
-    Activity, AgentKind, CardState, Launch, Project, ProjectId, RecordId, ResumeHandle,
+    Activity, AgentKind, CardState, Launch, Project, ProjectEnv, ProjectId, RecordId, ResumeHandle,
     SessionKind, SessionRecord, Settings, ThemeMode, Workspace,
 };
 use super::reconcile::RECORD_ID_ENV;
@@ -28,6 +28,7 @@ fn project(name: &str) -> Project {
         tags: vec![],
         notes: String::new(),
         pinned: vec![],
+        env: ProjectEnv::default(),
         created: t,
         last_active: t,
     }

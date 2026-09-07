@@ -3,14 +3,18 @@
 //! clicking. Lines: `add-project <name> <root>`, `new-shell <project>
 //! <name>`, `new-claude <project> <name>`, `new-codex <project> <name>`,
 //! `new-service <project> <name> <command...>`, `show-board <project>`,
-//! `show-session <name>`, `show-document <project> <relative path>`, `send <name> <text...>`, `return <name>`,
+//! `show-session <name>`, `show-document <project> <relative path>`,
+//! `set-env <project> NAME=VALUE`, `set-secret <project> NAME VALUE`,
+//! `dotenv <project> on|off`, `environment <project>` (opens the dialog), `send <name> <text...>`, `return <name>`,
 //! `kill <name>`, `switchboard`, `sleep <secs>` (then polls).
 //! Blank lines and `#` comments are ignored; unknown lines are logged.
 
 use std::path::PathBuf;
 
 use crate::app::SwitchboardApp;
-use crate::core::{AgentKind, AppAction, Launch, ProjectId, RecordId, SessionKind};
+use crate::core::{
+    AgentKind, AppAction, EnvVar, Launch, ProjectId, RecordId, SecretScope, SessionKind,
+};
 
 pub fn run(app: &mut SwitchboardApp, text: &str) {
     for line in text.lines() {
@@ -103,6 +107,7 @@ fn step(app: &mut SwitchboardApp, w: &[&str]) -> Result<(), String> {
             let (id, root) = project(app, p)?;
             app.dispatch(AppAction::ShowDocument(id, root.join(rel)));
         }
+        ["set-env" | "set-secret" | "dotenv" | "environment", ..] => env_step(app, w)?,
         ["show-session", n] => {
             let id = session(app, n)?;
             app.dispatch(AppAction::ShowSession(id));
@@ -129,6 +134,67 @@ fn step(app: &mut SwitchboardApp, w: &[&str]) -> Result<(), String> {
             app.poll_now();
         }
         _ => return Err("unknown line".into()),
+    }
+    Ok(())
+}
+
+/// The environment lines, split out of `step` for length.
+fn env_step(app: &mut SwitchboardApp, w: &[&str]) -> Result<(), String> {
+    match w {
+        ["set-env", p, pair] => {
+            let (id, _) = project(app, p)?;
+            let (name, value) = pair
+                .split_once('=')
+                .ok_or_else(|| format!("set-env wants NAME=VALUE, got {pair}"))?;
+            let mut env = app
+                .core()
+                .workspace(id)
+                .map(|w| w.project.env.clone())
+                .unwrap_or_default();
+            env.vars.retain(|v| v.name != name);
+            env.vars.push(EnvVar {
+                name: name.into(),
+                value: value.into(),
+                secret: false,
+            });
+            app.dispatch(AppAction::SetProjectEnv(id, env));
+        }
+        ["set-secret", p, name, value] => {
+            let (id, _) = project(app, p)?;
+            let mut env = app
+                .core()
+                .workspace(id)
+                .map(|w| w.project.env.clone())
+                .unwrap_or_default();
+            env.vars.retain(|v| v.name != *name);
+            env.vars.push(EnvVar {
+                name: (*name).into(),
+                value: String::new(),
+                secret: true,
+            });
+            app.dispatch(AppAction::SetProjectEnv(id, env));
+            app.dispatch(AppAction::StoreSecret {
+                scope: SecretScope::Project(id),
+                name: (*name).into(),
+                value: (*value).into(),
+            });
+        }
+        ["dotenv", p, on] => {
+            let (id, _) = project(app, p)?;
+            let mut env = app
+                .core()
+                .workspace(id)
+                .map(|w| w.project.env.clone())
+                .unwrap_or_default();
+            env.load_dotenv = *on == "on";
+            app.dispatch(AppAction::SetProjectEnv(id, env));
+        }
+        ["environment", p] => {
+            let (id, _) = project(app, p)?;
+            app.ui_state.env_dialog =
+                crate::ui::env::EnvDraft::project(app.core(), app.services(), id);
+        }
+        _ => return Err(format!("unknown environment line: {}", w.join(" "))),
     }
     Ok(())
 }

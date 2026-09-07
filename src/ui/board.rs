@@ -57,6 +57,13 @@ pub fn show(cx: &mut DrawCtx<'_>, ui: &mut Ui, pid: ProjectId) {
                 if ui.button("New session").clicked() {
                     cx.state.new_session = Some(NewSessionDraft::new(&workspace.project));
                 }
+                if ui
+                    .button("Environment")
+                    .on_hover_text("Variables and secrets new sessions get")
+                    .clicked()
+                {
+                    cx.state.env_dialog = super::env::EnvDraft::project(cx.core, cx.services, pid);
+                }
                 git_line(cx, ui, pid);
             });
             if !workspace.project.notes.is_empty() {

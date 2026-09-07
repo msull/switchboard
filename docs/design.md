@@ -452,8 +452,9 @@ Follows the template layering. Nothing below touches egui.
 3. **Commands and services** (built 2026-09-06, see status below).
    Saved commands, services with start/stop, autostart, health,
    scrollback on disk.
-4. **Environment.** Profiles, Keychain secrets, masked view,
-   `.env.example` diff, missing-variable warnings.
+4. **Environment** (built 2026-09-06 after Spike 5, see status below).
+   Global and per-project variables, Keychain secrets, opt-in `.env`,
+   masked view, `.env.example` diff.
 5. **Git awareness and polish** (built 2026-09-06, see progress below).
    Decorations, sub-repo discovery, global quick-switcher, dock badge
    with waiting-session count.
@@ -555,6 +556,42 @@ scrollback on disk. Added now:
 Not done: the parser-fed readable history with its own cap and search,
 raw-stream rotation in the running app, and a per-session "delete
 scrollback" action separate from Remove.
+
+## Milestone 4 status (2026-09-06)
+
+Spike 5 (`spikes/05-keychain`) first: generic-password items created by
+the bundle are readable by later builds signed with the same identity and
+bundle identifier, without a prompt (the item ACL is identifier plus
+certificate, not a build hash). Decisions taken with the user: variables
+exist at two levels, global and per project; `.env` loading is opt-in
+per project.
+
+- **Layers.** Global variables (in `settings.json`), then the project's
+  `.env` files when it opted in, then the project's own variables; later
+  layers win. Resolution is a pure function in `core::env`; the app feeds
+  it parsed files and a secret lookup.
+- **Secrets.** A variable marked secret keeps only its name in the
+  record; the value is a Keychain item under service
+  `com.sadburger.switchboard`, account `global/NAME` or
+  `project/<id>/NAME`. The adapter is tested against a throwaway keychain
+  file, never the login keychain. Values reach tmux through `-e` flags,
+  never a shell command line, and are never logged (names only).
+- **Dialog.** Settings > Environment… edits the global layer; the board's
+  Environment button edits the project: name/value rows with a Secret
+  toggle (secret values are typed into a password field and stored on
+  Save; the field never shows them back), Remove, the `.env` opt-in with
+  a file list, and a "New sessions get" preview with sources, masked
+  secrets behind a Reveal button, "no value stored" for a secret the
+  Keychain lacks, and the names `.env.example` declares that nothing
+  defines.
+- Verified live: a scratch project with `.env` (`FOO`, `BAZ`), a project
+  variable overriding `FOO`, a secret `BAR`; the shell session's
+  environment held all three with the right precedence, and the dialog's
+  preview and `.env.example` line matched.
+
+Not done: per-session overrides (the `env_profile` field is still
+unused), flagging `$VAR` references in saved commands, and a masked
+environment section on the session view itself.
 
 ## Milestone 5 progress (2026-09-06)
 

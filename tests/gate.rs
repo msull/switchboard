@@ -36,7 +36,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use switchboard::SwitchboardApp;
 use switchboard::adapters::agents::Agents;
-use switchboard::adapters::fakes::FakeOpener;
+use switchboard::adapters::fakes::{FakeOpener, FakeSecrets};
 use switchboard::adapters::hooks::{HookLog, unix_millis, write_hook_settings};
 use switchboard::adapters::store::JsonStore;
 use switchboard::adapters::tmux::TmuxHost;
@@ -44,7 +44,7 @@ use switchboard::adapters::transcript::ClaudeTranscripts;
 use switchboard::app::Services;
 use switchboard::core::{
     Activity, AgentKind, AppAction, AppCore, CardLayout, CardState, Clock, Effect, Launch, Project,
-    ProjectId, RecordId, ResumeHandle, SessionKind, SessionRecord, Workspace,
+    ProjectEnv, ProjectId, RecordId, ResumeHandle, SessionKind, SessionRecord, Workspace,
 };
 use switchboard::ports::agent::{AgentLaunch, AgentLauncher};
 use switchboard::ports::events::{EventKind, EventSource, SessionEvent};
@@ -107,6 +107,7 @@ impl Gate {
             agents: Box::new(Agents::detect(&self.data_dir)),
             opener: Box::new(self.opener.clone()),
             transcripts: Box::new(ClaudeTranscripts),
+            secrets: Box::new(FakeSecrets::default()),
             wake: None,
         })
     }
@@ -256,6 +257,7 @@ fn project(root: &Path) -> Project {
         tags: Vec::new(),
         notes: String::new(),
         pinned: Vec::new(),
+        env: ProjectEnv::default(),
         created: now,
         last_active: now,
     }

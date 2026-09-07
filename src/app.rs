@@ -7,11 +7,14 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime};
 
 use crate::adapters::hooks::WakeSocket;
-use crate::core::{AgentKind, AppAction, AppCore, Clock, Effect, RecordId, SessionKind, View};
+use crate::core::{
+    AgentKind, AppAction, AppCore, Clock, Effect, ProjectId, RecordId, Resolved, SessionKind, View,
+};
 use crate::ports::agent::AgentLauncher;
 use crate::ports::events::EventSource;
 use crate::ports::host::{HostId, Liveness, ProcessHost};
 use crate::ports::opener::Opener;
+use crate::ports::secrets::SecretStore;
 use crate::ports::store::{Store, StoreError};
 use crate::ports::transcript::TranscriptReader;
 use crate::ui::UiState;
@@ -32,8 +35,40 @@ pub struct Services {
     pub agents: Box<dyn AgentLauncher>,
     pub opener: Box<dyn Opener>,
     pub transcripts: Box<dyn TranscriptReader>,
+    pub secrets: Box<dyn SecretStore>,
     /// The hook helper's wake-up socket; `None` in tests.
     pub wake: Option<WakeSocket>,
+}
+
+/// The environment sessions of `pid` get: global variables, the
+/// project's `.env` files when it opted in, then its own variables;
+/// secrets read from the store. Also what `.env.example` asks for.
+#[must_use]
+pub fn resolve_project_env(core: &AppCore, services: &Services, pid: ProjectId) -> Resolved {
+    let Some(project) = core.workspace(pid).map(|w| &w.project) else {
+        return Resolved::default();
+    };
+    let mut dotenv = Vec::new();
+    if project.env.load_dotenv {
+        for file in project.env.files() {
+            match std::fs::read_to_string(project.root.join(&file)) {
+                Ok(text) => dotenv.push((file, crate::adapters::dotenv::parse(&text))),
+                Err(e) => log::warn!("{file} in {}: {e}", project.root.display()),
+            }
+        }
+    }
+    let example = std::fs::read_to_string(project.root.join(".env.example"))
+        .map(|t| crate::adapters::dotenv::names(&t))
+        .unwrap_or_default();
+    let lookup = |account: &str| services.secrets.get(account).ok().flatten();
+    crate::core::env::resolve(
+        &core.settings().env,
+        pid,
+        &project.env,
+        &dotenv,
+        &example,
+        &lookup,
+    )
 }
 
 /// A Codex launch waiting for its rollout file.
@@ -198,6 +233,18 @@ impl SwitchboardApp {
                 }
                 None
             }
+            Effect::StoreSecret { account, value } => {
+                if let Err(e) = self.services.secrets.set(&account, &value) {
+                    log::error!("store secret {account}: {e}");
+                }
+                None
+            }
+            Effect::DeleteSecret(account) => {
+                if let Err(e) = self.services.secrets.delete(&account) {
+                    log::error!("delete secret {account}: {e}");
+                }
+                None
+            }
             _ => None,
         }
     }
@@ -207,9 +254,11 @@ impl SwitchboardApp {
     fn run_effect(&mut self, effect: Effect) -> Option<AppAction> {
         let s = &self.services;
         match effect {
-            Effect::SaveSettings(_) | Effect::Save(_) | Effect::Delete(_) => {
-                self.run_store_effect(effect)
-            }
+            Effect::SaveSettings(_)
+            | Effect::Save(_)
+            | Effect::Delete(_)
+            | Effect::StoreSecret { .. }
+            | Effect::DeleteSecret(_) => self.run_store_effect(effect),
             Effect::PrepareLaunch {
                 id,
                 kind,
@@ -249,6 +298,7 @@ impl SwitchboardApp {
             }
             Effect::Spawn { id, mut spec } => {
                 spec.scrollback = Some(self.scrollback_path(&spec.id));
+                spec.env = self.spawn_env(id, spec.env);
                 let result = s.host.spawn(&spec).map_err(|e| e.to_string());
                 if let Err(e) = &result {
                     log::error!("spawn {} failed: {e}", spec.id.0);
@@ -419,6 +469,27 @@ impl SwitchboardApp {
                 self.ui_state.conversation_errors.insert(id, e);
             }
         }
+    }
+
+    /// The project's environment under the launcher's own variables, so
+    /// an agent-specific value still wins.
+    fn spawn_env(&self, id: RecordId, own: Vec<(String, String)>) -> Vec<(String, String)> {
+        let Some(pid) = self.core.session(id).map(|s| s.project) else {
+            return own;
+        };
+        let resolved = resolve_project_env(&self.core, &self.services, pid);
+        let missing = resolved.missing();
+        if !missing.is_empty() {
+            log::warn!("secrets without a stored value: {}", missing.join(", "));
+        }
+        let mut env = resolved.pairs();
+        log::debug!(
+            "injecting {:?} into {}",
+            env.iter().map(|(k, _)| k.as_str()).collect::<Vec<_>>(),
+            id.host_name()
+        );
+        env.extend(own);
+        env
     }
 
     /// Where the host pipes a session's raw output.

@@ -6,6 +6,7 @@ use switchboard::SwitchboardApp;
 use switchboard::adapters::agents::Agents;
 use switchboard::adapters::ghostty::MacOpener;
 use switchboard::adapters::hooks::{HookLog, WakeSocket, write_hook_settings};
+use switchboard::adapters::keychain::KeychainStore;
 use switchboard::adapters::store::JsonStore;
 use switchboard::adapters::tmux::TmuxHost;
 use switchboard::adapters::transcript::ClaudeTranscripts;
@@ -73,6 +74,7 @@ fn main() -> eframe::Result {
                 agents: Box::new(Agents::detect(data_dir.clone())),
                 opener: Box::new(MacOpener::detect()),
                 transcripts: Box::new(ClaudeTranscripts),
+                secrets: Box::new(KeychainStore::login()),
                 wake,
             };
             let mut app = SwitchboardApp::with_services(services);

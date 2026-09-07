@@ -415,6 +415,7 @@ mod tests {
                 tags: vec!["rust".into()],
                 notes: "notes".into(),
                 pinned: vec![PathBuf::from("README.md")],
+                env: crate::core::ProjectEnv::default(),
                 created: now,
                 last_active: now,
             },
@@ -442,6 +443,7 @@ mod tests {
             theme: ThemeMode::Dark,
             exclusive: true,
             editor: "zed".into(),
+            env: Vec::new(),
         };
         store.save_settings(&settings).unwrap();
         assert_eq!(store.load_all().unwrap().settings, settings);
