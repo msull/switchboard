@@ -36,6 +36,9 @@ set -g set-titles on
 set -g set-titles-string \"#{pane_title}\"
 ";
 
+/// Gap between typed text and the Enter that submits it.
+const ENTER_DELAY: std::time::Duration = std::time::Duration::from_millis(150);
+
 /// A handle to one private tmux server, addressed by socket name.
 #[derive(Debug, Clone)]
 pub struct TmuxHost {
@@ -279,6 +282,21 @@ impl ProcessHost for TmuxHost {
         let mut args = vec!["send-keys", "-t", &target, "-H"];
         args.extend(hex.iter().map(String::as_str));
         self.run(&args)?;
+        Ok(())
+    }
+
+    fn write_line(&self, id: &HostId, text: &str) -> io::Result<()> {
+        self.write(id, text.as_bytes())?;
+        // The handle is a socket name and two paths, so the thread gets
+        // its own copy and the UI thread never waits on the pause.
+        let host = self.clone();
+        let id = id.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(ENTER_DELAY);
+            if let Err(e) = host.write(&id, b"\r") {
+                log::warn!("enter after input to {} failed: {e}", id.0);
+            }
+        });
         Ok(())
     }
 

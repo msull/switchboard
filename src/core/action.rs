@@ -136,6 +136,8 @@ pub enum AppAction {
     RestartSession(RecordId),
     RemoveSession(RecordId),
     // --- results from effects / workers
+    /// An effect with no result of its own failed; the user is told.
+    Failed(String),
     LaunchPrepared {
         id: RecordId,
         result: Result<AgentLaunch, String>,
@@ -311,6 +313,7 @@ impl AppCore {
             AppAction::StoreLoaded(result) => self.store_loaded(result),
             AppAction::SaveFinished(_, Err(e)) => self.error(format!("save failed: {e}")),
             AppAction::SaveFinished(_, Ok(())) => {}
+            AppAction::Failed(text) => self.error(text),
             AppAction::HostUnavailable(reason) => self.host_error = reason,
             AppAction::HostListed(statuses) => self.host_listed(statuses, now, &mut out),
 
@@ -340,15 +343,7 @@ impl AppCore {
             AppAction::Tick => self.expire_notices(now),
 
             AppAction::AddProject { name, root } => self.add_project(name, root, now, &mut out),
-            AppAction::RemoveProject(id) => {
-                let before = self.workspaces.len();
-                self.workspaces.retain(|w| w.project.id != id);
-                if self.workspaces.len() != before {
-                    out.push(Effect::Delete(id));
-                }
-                self.view_stack
-                    .retain(|v| !matches!(v, View::Board(p) if *p == id));
-            }
+            AppAction::RemoveProject(id) => self.remove_project(id, now, &mut out),
 
             AppAction::NewSession {
                 project,
@@ -491,6 +486,31 @@ impl AppCore {
         }));
         out.touch(id);
         self.view_stack.push(View::Board(id));
+    }
+
+    /// Drop a project and everything the core remembers about its
+    /// sessions: views, flights, and its place in the Codex queue. A
+    /// pending discovery for one of its records would otherwise block
+    /// every later Codex launch until it expired.
+    fn remove_project(&mut self, id: ProjectId, now: Clock, out: &mut Out) {
+        let Some(pos) = self.workspaces.iter().position(|w| w.project.id == id) else {
+            return;
+        };
+        let workspace = self.workspaces.remove(pos);
+        out.push(Effect::Delete(id));
+        let gone = |r: RecordId| workspace.sessions.iter().any(|s| s.id == r);
+        self.view_stack.retain(|v| match v {
+            View::Board(p) | View::Document(p, _) => *p != id,
+            View::Session(r) => !gone(*r),
+            View::Switchboard => true,
+        });
+        self.in_flight.retain(|f| !gone(f.id));
+        self.codex_queue.retain(|r| !gone(*r));
+        self.quiet.retain(|r| !gone(*r));
+        if self.codex_pending.is_some_and(gone) {
+            self.codex_pending = None;
+        }
+        self.advance_codex_queue(now, out);
     }
 
     fn edit_project(&mut self, id: ProjectId, out: &mut Out, edit: impl FnOnce(&mut Project)) {
@@ -659,7 +679,35 @@ impl AppCore {
             }
             AppAction::SetTheme(theme) => self.update_settings(out, |s| s.theme = theme),
             AppAction::SetExclusive(on) => self.update_settings(out, |s| s.exclusive = on),
-            _ => {}
+            AppAction::StoreLoaded(_)
+            | AppAction::SaveFinished(..)
+            | AppAction::HostUnavailable(_)
+            | AppAction::HostListed(_)
+            | AppAction::ShowSwitchboard
+            | AppAction::ShowBoard(_)
+            | AppAction::ShowSession(_)
+            | AppAction::Back
+            | AppAction::DismissNotice
+            | AppAction::Tick
+            | AppAction::AddProject { .. }
+            | AppAction::RemoveProject(_)
+            | AppAction::NewSession { .. }
+            | AppAction::RenameSession(..)
+            | AppAction::SetSessionNotes(..)
+            | AppAction::SetAutostart(..)
+            | AppAction::MoveCard { .. }
+            | AppAction::ReturnToSession(_)
+            | AppAction::SendInput { .. }
+            | AppAction::KillSession(_)
+            | AppAction::RestartSession(_)
+            | AppAction::RemoveSession(_)
+            | AppAction::Failed(_)
+            | AppAction::LaunchPrepared { .. }
+            | AppAction::TranscriptChecked { .. }
+            | AppAction::Spawned { .. }
+            | AppAction::Attached { .. }
+            | AppAction::Discovered { .. }
+            | AppAction::Events(_) => unreachable!("dispatched by `dispatch` itself"),
         }
     }
 

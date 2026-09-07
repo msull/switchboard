@@ -328,48 +328,94 @@ fn agent_body(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord) {
         });
 }
 
-/// One-line message box: Enter (or Send) types the text into the
-/// session's terminal and presses Enter there, without opening its window.
+/// Rows the message box shows before it scrolls.
+const MESSAGE_MAX_ROWS: usize = 8;
+
+/// The message box: a multi-line field docked under the conversation.
+/// Enter (or Send) types the text into the session's terminal and
+/// presses Enter there, without opening its window; Shift+Enter adds a
+/// line. Files dropped on the window land in the draft as paths, which
+/// is how an agent is pointed at an image or a document.
 fn message_box(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord) {
     let running = is_running(cx.core, record.id);
-    if cx
-        .state
-        .input_draft
-        .as_ref()
-        .is_none_or(|(id, _)| *id != record.id)
-    {
-        cx.state.input_draft = Some((record.id, String::new()));
+    let dropped: Vec<PathBuf> = ui.input(|i| {
+        i.raw
+            .dropped_files
+            .iter()
+            .map(|f| f.path().to_path_buf())
+            .collect()
+    });
+    let draft = cx.state.input_drafts.entry(record.id).or_default();
+    for path in dropped {
+        append_path(draft, &path);
     }
     let mut send = false;
-    ui.horizontal(|ui| {
+    let field_id = ui.id().with(("message", record.id));
+    ui.horizontal_top(|ui| {
         let label = ui.label("Message");
-        if let Some((_, draft)) = cx.state.input_draft.as_mut() {
-            let response = ui
-                .add_enabled(
-                    running,
-                    egui::TextEdit::singleline(draft)
-                        .hint_text("type here and press Enter to send into the session")
-                        .desired_width(ui.available_width() - 70.0),
-                )
-                .labelled_by(label.id);
-            if response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                send = true;
-                response.request_focus();
-            }
-        }
+        let row_height = ui.text_style_height(&egui::TextStyle::Body);
+        #[allow(clippy::cast_precision_loss)]
+        let max_height = row_height * MESSAGE_MAX_ROWS as f32 + GAP;
+        egui::ScrollArea::vertical()
+            .id_salt(("message_scroll", record.id))
+            .max_height(max_height)
+            .show(ui, |ui| {
+                let response = ui
+                    .add_enabled(
+                        running,
+                        egui::TextEdit::multiline(draft)
+                            .id(field_id)
+                            .hint_text(
+                                "Enter sends, Shift+Enter adds a line, drop files for their paths",
+                            )
+                            .desired_rows(3)
+                            .desired_width(ui.available_width() - 70.0)
+                            .return_key(egui::KeyboardShortcut::new(
+                                egui::Modifiers::SHIFT,
+                                egui::Key::Enter,
+                            )),
+                    )
+                    .labelled_by(label.id);
+                // Plain Enter is not the field's return key any more, so it
+                // reaches us here; Cmd+Enter sends too, for the habit.
+                let enter = ui.input(|i| {
+                    i.key_pressed(egui::Key::Enter)
+                        && (i.modifiers.is_none() || i.modifiers.command_only())
+                });
+                if response.has_focus() && enter {
+                    send = true;
+                }
+            });
         if ui.add_enabled(running, egui::Button::new("Send")).clicked() {
             send = true;
         }
     });
-    if let (true, Some((_, draft))) = (send, cx.state.input_draft.as_mut()) {
+    if send {
         let text = std::mem::take(draft);
-        if !text.trim().is_empty() {
-            cx.dispatch(AppAction::SendInput {
-                id: record.id,
-                text,
-            });
+        if text.trim().is_empty() {
+            return;
         }
+        cx.dispatch(AppAction::SendInput {
+            id: record.id,
+            text,
+        });
+        ui.memory_mut(|m| m.request_focus(field_id));
     }
+}
+
+/// Add a dropped file's path to a draft as its own word, quoted when
+/// it holds spaces so the agent reads it as one path.
+fn append_path(draft: &mut String, path: &std::path::Path) {
+    let shown = path.display().to_string();
+    let word = if shown.contains(' ') {
+        format!("'{shown}'")
+    } else {
+        shown
+    };
+    if !draft.is_empty() && !draft.ends_with([' ', '\n']) {
+        draft.push(' ');
+    }
+    draft.push_str(&word);
 }
 
 /// Header line, then the turns in a scroll area that follows new
@@ -706,4 +752,22 @@ fn terminal_body(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord) {
         .set_size(size);
     let response = ui.add(view);
     term.widget_id = Some(response.id);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::append_path;
+    use std::path::Path;
+
+    #[test]
+    fn dropped_paths_join_the_draft_as_words() {
+        let mut draft = String::new();
+        append_path(&mut draft, Path::new("/tmp/a.png"));
+        assert_eq!(draft, "/tmp/a.png");
+        append_path(&mut draft, Path::new("/tmp/with space.png"));
+        assert_eq!(draft, "/tmp/a.png '/tmp/with space.png'");
+        let mut draft = "look at\n".to_owned();
+        append_path(&mut draft, Path::new("/x"));
+        assert_eq!(draft, "look at\n/x");
+    }
 }

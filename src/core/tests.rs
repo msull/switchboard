@@ -901,6 +901,96 @@ fn codex_discovery_refuses_an_id_bound_to_another_record() {
 }
 
 #[test]
+fn fresh_launch_of_a_not_resumable_codex_record_drops_the_dead_handle() {
+    let p = project("p");
+    let mut w = Workspace::new(p.clone());
+    let mut r = record(p.id, codex(), 0);
+    r.resume = Some(ResumeHandle::Codex {
+        rollout_id: "dead".into(),
+        transcript: None,
+    });
+    r.not_resumable = true;
+    let id = r.id;
+    w.sessions.push(r);
+    let (mut core, _) = loaded(vec![w], vec![]);
+
+    let e = core.dispatch(AppAction::ReturnToSession(id), Clock::at(5));
+    assert!(e.iter().any(|e| matches!(e, Effect::PrepareLaunch { .. })));
+    assert_eq!(saves(&e), 1);
+    let record = core.session(id).unwrap();
+    assert!(!record.not_resumable);
+    assert!(record.resume.is_none(), "the old rollout id is gone");
+
+    // Without a handle the new conversation is discovered and bound.
+    let e = launch_agent(&mut core, id, None);
+    assert!(
+        e.iter().any(|e| matches!(e, Effect::Discover { .. })),
+        "{e:?}"
+    );
+}
+
+#[test]
+fn removing_a_project_forgets_its_flights_views_and_codex_turn() {
+    let (mut core, pid, _) = with_records(&[], |_| None);
+    let (first, _) = new_session(&mut core, pid, codex(), Launch::Argv(vec![]));
+    launch_agent(&mut core, first, None);
+    assert!(core.is_in_flight(first), "discovery pending");
+    core.dispatch(AppAction::ShowSession(first), Clock::at(30));
+    assert_eq!(core.view(), View::Session(first));
+
+    let other = project("other");
+    let opid = other.id;
+    core.dispatch(
+        AppAction::StoreLoaded(Ok(Loaded {
+            workspaces: vec![core.workspace(pid).unwrap().clone(), Workspace::new(other)],
+            ..Loaded::default()
+        })),
+        Clock::at(31),
+    );
+    let (queued, _) = new_session(&mut core, opid, codex(), Launch::Argv(vec![]));
+    assert!(core.queued_codex(queued), "blocked behind the discovery");
+
+    let e = core.dispatch(AppAction::RemoveProject(pid), Clock::at(40));
+    assert!(core.workspace(pid).is_none());
+    assert!(e.contains(&Effect::Delete(pid)));
+    assert!(!core.is_in_flight(first));
+    assert_ne!(core.view(), View::Session(first));
+    assert!(
+        e.iter().any(
+            |e| matches!(e, Effect::PrepareLaunch { id, kind: AgentKind::Codex, .. } if *id == queued)
+        ),
+        "the queued Codex launch proceeds: {e:?}"
+    );
+    assert!(!core.queued_codex(queued));
+
+    // A late result for the removed record is ignored.
+    let e = core.dispatch(
+        AppAction::Discovered {
+            id: first,
+            result: Ok(Some(ResumeHandle::Codex {
+                rollout_id: "r".into(),
+                transcript: None,
+            })),
+        },
+        Clock::at(50),
+    );
+    assert!(e.is_empty(), "{e:?}");
+}
+
+#[test]
+fn a_failed_effect_is_an_error_notice() {
+    let mut core = AppCore::new();
+    let e = core.dispatch(
+        AppAction::Failed("kill s-1 failed: gone".into()),
+        Clock::at(1),
+    );
+    assert!(e.is_empty());
+    let notice = core.notice().unwrap();
+    assert!(notice.is_error);
+    assert_eq!(notice.text, "kill s-1 failed: gone");
+}
+
+#[test]
 fn codex_launches_serialize() {
     let (mut core, pid, _) = with_records(&[], |_| None);
     let (first, e1) = new_session(&mut core, pid, codex(), Launch::Argv(vec![]));

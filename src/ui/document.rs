@@ -4,7 +4,7 @@
 //! bottom pane draws the same body through [`body`].
 
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
+use std::time::{Duration, Instant, SystemTime};
 
 use egui::{Frame, RichText, Ui};
 use egui_commonmark::CommonMarkViewer;
@@ -15,6 +15,10 @@ use crate::core::{AppAction, ProjectId};
 /// Files above this are not read; the preview says so instead.
 pub const MAX_PREVIEW_BYTES: u64 = 2 * 1024 * 1024;
 
+/// How often the file on disk is compared with the loaded copy. A stat
+/// per frame is wasted work; a change shows up within this delay.
+const STALE_CHECK_EVERY: Duration = Duration::from_millis(500);
+
 /// The loaded document.
 #[derive(Debug, Clone)]
 pub struct Preview {
@@ -22,6 +26,8 @@ pub struct Preview {
     pub modified: Option<SystemTime>,
     pub size: u64,
     pub body: Body,
+    /// When the disk was last compared with this copy.
+    checked: Instant,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -58,6 +64,7 @@ impl Preview {
             modified,
             size,
             body,
+            checked: Instant::now(),
         }
     }
 
@@ -97,10 +104,16 @@ fn body_of(path: &Path, bytes: Vec<u8>) -> Body {
 /// Load `path` into the state's preview slot unless the copy there is
 /// still current.
 pub fn ensure_loaded(state: &mut UiState, path: &Path) {
-    let fresh = state
-        .preview
-        .as_ref()
-        .is_some_and(|p| p.path == path && !p.stale());
+    let fresh = state.preview.as_mut().is_some_and(|p| {
+        if p.path != path {
+            return false;
+        }
+        if p.checked.elapsed() < STALE_CHECK_EVERY {
+            return true;
+        }
+        p.checked = Instant::now();
+        !p.stale()
+    });
     if !fresh {
         state.preview = Some(Preview::load(path));
     }
@@ -109,10 +122,13 @@ pub fn ensure_loaded(state: &mut UiState, path: &Path) {
 pub fn show(cx: &mut DrawCtx<'_>, ui: &mut Ui, pid: ProjectId, path: &Path) {
     ui.spacing_mut().item_spacing = egui::vec2(GAP, GAP);
     ensure_loaded(cx.state, path);
-    let Some(preview) = cx.state.preview.clone() else {
+    // The header needs only the path and size, so the body (up to
+    // `MAX_PREVIEW_BYTES`) stays in the state instead of being cloned
+    // every frame.
+    let Some(size) = cx.state.preview.as_ref().map(|p| p.size) else {
         return;
     };
-    header(cx, ui, pid, &preview);
+    header(cx, ui, pid, path, size);
     egui::ScrollArea::vertical()
         .id_salt("document")
         .auto_shrink(false)
@@ -174,19 +190,14 @@ fn weak(ui: &mut Ui, text: &str) {
     ui.label(RichText::new(text).weak());
 }
 
-fn header(cx: &mut DrawCtx<'_>, ui: &mut Ui, pid: ProjectId, preview: &Preview) {
-    let root = cx.core.workspace(pid).map(|w| w.project.root.clone());
-    let rel = root
-        .as_ref()
-        .and_then(|r| preview.path.strip_prefix(r).ok())
-        .map(Path::to_path_buf);
-    let pinned = rel.as_ref().is_some_and(|rel| {
-        cx.core
-            .workspace(pid)
-            .is_some_and(|w| w.project.pinned.contains(rel))
-    });
-    let name = preview
-        .path
+fn header(cx: &mut DrawCtx<'_>, ui: &mut Ui, pid: ProjectId, path: &Path, size: u64) {
+    let project = cx.core.workspace(pid).map(|w| &w.project);
+    let rel = project.and_then(|p| path.strip_prefix(&p.root).ok());
+    let pinned = match (project, rel) {
+        (Some(p), Some(rel)) => p.pinned.iter().any(|d| d == rel),
+        _ => false,
+    };
+    let name = path
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
@@ -199,34 +210,34 @@ fn header(cx: &mut DrawCtx<'_>, ui: &mut Ui, pid: ProjectId, preview: &Preview) 
             ui.set_width(ui.available_width());
             ui.horizontal(|ui| {
                 ui.heading(&name);
-                let shown = rel.as_ref().unwrap_or(&preview.path);
+                let shown = rel.unwrap_or(path);
                 ui.label(RichText::new(shown.display().to_string()).weak());
-                ui.label(RichText::new(size_text(preview.size)).weak().small());
+                ui.label(RichText::new(size_text(size)).weak().small());
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui.button("Back").clicked() {
                         cx.dispatch(AppAction::Back);
                     }
-                    if let Some(rel) = &rel {
+                    if let Some(rel) = rel {
                         let label = if pinned { "Unpin" } else { "Pin" };
                         if ui.button(label).clicked() {
                             cx.dispatch(if pinned {
-                                AppAction::UnpinDocument(pid, rel.clone())
+                                AppAction::UnpinDocument(pid, rel.to_path_buf())
                             } else {
-                                AppAction::PinDocument(pid, rel.clone())
+                                AppAction::PinDocument(pid, rel.to_path_buf())
                             });
                         }
                     }
                     if ui.button("Copy path").clicked() {
-                        ui.ctx().copy_text(preview.path.display().to_string());
+                        ui.ctx().copy_text(path.display().to_string());
                     }
                     if ui.button("Reveal").clicked() {
-                        cx.dispatch(AppAction::RevealDocument(preview.path.clone()));
+                        cx.dispatch(AppAction::RevealDocument(path.to_path_buf()));
                     }
                     if ui.button("Open in editor").clicked() {
-                        cx.dispatch(AppAction::OpenInEditor(preview.path.clone()));
+                        cx.dispatch(AppAction::OpenInEditor(path.to_path_buf()));
                     }
                     if ui.button("Open").on_hover_text("Default app").clicked() {
-                        cx.dispatch(AppAction::OpenDocument(preview.path.clone()));
+                        cx.dispatch(AppAction::OpenDocument(path.to_path_buf()));
                     }
                 });
             });
