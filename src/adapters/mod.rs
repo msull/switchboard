@@ -8,6 +8,7 @@ pub mod files;
 pub mod ghostty;
 pub mod git;
 pub mod hooks;
+#[cfg(target_os = "macos")]
 pub mod keychain;
 pub mod scrollback;
 pub mod store;

@@ -75,8 +75,9 @@ pub struct UiState {
     pub palette: Option<palette::PaletteDraft>,
     /// The Environment dialog, while open.
     pub env_dialog: Option<env::EnvDraft>,
-    /// Message being composed for a session, sent with Enter.
-    pub input_draft: Option<(RecordId, String)>,
+    /// Messages being composed, one per session, so switching away and
+    /// back does not lose a half-written prompt.
+    pub input_drafts: HashMap<RecordId, String>,
     /// Embedded terminals, only ever the one for the session on screen.
     pub terminals: HashMap<RecordId, EmbeddedTerminal>,
     /// The theme last pushed into egui; pushed again only when it changes.
@@ -105,7 +106,7 @@ impl Default for UiState {
             editor_draft: None,
             palette: None,
             env_dialog: None,
-            input_draft: None,
+            input_drafts: HashMap::new(),
             terminals: HashMap::new(),
             applied_theme: None,
             next_terminal_id: 0,

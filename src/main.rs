@@ -6,7 +6,6 @@ use switchboard::SwitchboardApp;
 use switchboard::adapters::agents::Agents;
 use switchboard::adapters::ghostty::MacOpener;
 use switchboard::adapters::hooks::{HookLog, WakeSocket, write_hook_settings};
-use switchboard::adapters::keychain::KeychainStore;
 use switchboard::adapters::store::JsonStore;
 use switchboard::adapters::tmux::TmuxHost;
 use switchboard::adapters::transcript::ClaudeTranscripts;
@@ -74,7 +73,7 @@ fn main() -> eframe::Result {
                 agents: Box::new(Agents::detect(data_dir.clone())),
                 opener: Box::new(MacOpener::detect()),
                 transcripts: Box::new(ClaudeTranscripts),
-                secrets: Box::new(KeychainStore::login()),
+                secrets: secret_store(),
                 wake,
             };
             let mut app = SwitchboardApp::with_services(services);
@@ -89,4 +88,17 @@ fn main() -> eframe::Result {
             Ok(Box::new(app))
         }),
     )
+}
+
+/// The Keychain on macOS. Elsewhere the app only has to build (CI runs
+/// on Linux), so secrets live in memory for the process.
+fn secret_store() -> Box<dyn switchboard::ports::secrets::SecretStore> {
+    #[cfg(target_os = "macos")]
+    {
+        Box::new(switchboard::adapters::keychain::KeychainStore::login())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Box::new(switchboard::adapters::fakes::FakeSecrets::default())
+    }
 }

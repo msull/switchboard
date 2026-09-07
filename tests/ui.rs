@@ -793,6 +793,51 @@ fn claude_session_shows_the_conversation_and_message_box() {
 }
 
 #[test]
+fn message_box_is_multiline_and_enter_sends() {
+    let (mut harness, ids) = harness();
+    let id = seed_claude(&mut harness, &ids);
+    showing(&mut harness, View::Session(id));
+    let field = harness.get_by_label("Message");
+    field.focus();
+    field.type_text("first line");
+    harness.run_steps(2);
+    harness.key_press_modifiers(egui::Modifiers::SHIFT, egui::Key::Enter);
+    harness.run_steps(2);
+    harness.get_by_label("Message").type_text("second line");
+    harness.run_steps(2);
+    // Nothing has been sent yet; the draft survives a trip to the board.
+    assert!(actions(&harness).is_empty());
+    showing(&mut harness, View::Board(ids.beta));
+    showing(&mut harness, View::Session(id));
+    assert_eq!(
+        harness
+            .state()
+            .ui_state
+            .input_drafts
+            .get(&id)
+            .map(String::as_str),
+        Some("first line\nsecond line")
+    );
+    harness.get_by_label("Message").focus();
+    harness.run_steps(2);
+    harness.key_press(egui::Key::Enter);
+    harness.run_steps(2);
+    assert!(actions(&harness).contains(&AppAction::SendInput {
+        id,
+        text: "first line\nsecond line".into()
+    }));
+    assert_eq!(
+        harness
+            .state()
+            .ui_state
+            .input_drafts
+            .get(&id)
+            .map(String::as_str),
+        Some("")
+    );
+}
+
+#[test]
 fn messages_have_a_context_menu_with_copy() {
     let (mut harness, ids) = harness();
     let id = seed_claude(&mut harness, &ids);

@@ -79,7 +79,7 @@ src/core/
   sessions.rs            launch, idempotent return, resume preflight, Codex serialization
   events.rs              hook events -> record activity (matched by record id, ordered by time)
   tests.rs               state-transition tests for the core
-src/ports/               traits: store, host, events, agent, opener, transcript
+src/ports/               traits: store, host, events, agent, opener, transcript, secrets
 src/adapters/
   store.rs               JSON store: atomic writes, .bak, flock
   tmux.rs                tmux process host on the private socket

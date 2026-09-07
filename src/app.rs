@@ -98,6 +98,18 @@ pub struct SwitchboardApp {
     pub dispatched: Vec<AppAction>,
 }
 
+/// Turn an adapter failure into the notice the user sees; the log keeps
+/// the same line. `what` names the attempt, e.g. "kill s-1".
+fn failed<E: std::fmt::Display, W: Into<String>>(
+    result: Result<(), E>,
+    what: impl FnOnce() -> W,
+) -> Option<AppAction> {
+    let e = result.err()?;
+    let text = format!("{} failed: {e}", what().into());
+    log::warn!("{text}");
+    Some(AppAction::Failed(text))
+}
+
 impl SwitchboardApp {
     /// Creates the app with the given adapters. Real ones are assembled in
     /// `main.rs`, which then calls [`Self::start`]; tests pass fakes and
@@ -214,10 +226,7 @@ impl SwitchboardApp {
         let store = &self.services.store;
         match effect {
             Effect::SaveSettings(settings) => {
-                store
-                    .save_settings(&settings)
-                    .unwrap_or_else(|e| log::error!("save settings failed: {e}"));
-                None
+                failed(store.save_settings(&settings), || "save settings")
             }
             Effect::Save(ws) => {
                 let id = ws.project.id;
@@ -227,25 +236,27 @@ impl SwitchboardApp {
                 }
                 Some(AppAction::SaveFinished(id, result))
             }
-            Effect::Delete(id) => {
-                if let Err(e) = store.delete(id) {
-                    log::error!("delete failed: {e}");
-                }
-                None
-            }
+            Effect::Delete(id) => failed(store.delete(id), || "delete project"),
             Effect::StoreSecret { account, value } => {
-                if let Err(e) = self.services.secrets.set(&account, &value) {
-                    log::error!("store secret {account}: {e}");
-                }
-                None
+                failed(self.services.secrets.set(&account, &value), || {
+                    format!("store secret {account}")
+                })
             }
-            Effect::DeleteSecret(account) => {
-                if let Err(e) = self.services.secrets.delete(&account) {
-                    log::error!("delete secret {account}: {e}");
-                }
-                None
-            }
-            _ => None,
+            Effect::DeleteSecret(account) => failed(self.services.secrets.delete(&account), || {
+                format!("delete secret {account}")
+            }),
+            Effect::PrepareLaunch { .. }
+            | Effect::PrepareResume { .. }
+            | Effect::CheckTranscript { .. }
+            | Effect::Discover { .. }
+            | Effect::Spawn { .. }
+            | Effect::Attach { .. }
+            | Effect::Kill(_)
+            | Effect::SendInput { .. }
+            | Effect::OpenPath(_)
+            | Effect::Forget(_)
+            | Effect::OpenInEditor { .. }
+            | Effect::Reveal(_) => unreachable!("not a store effect"),
         }
     }
 
@@ -314,16 +325,10 @@ impl SwitchboardApp {
                 id,
                 result: self.attach(&host, &title, &cwd),
             }),
-            Effect::SendInput { host, text } => {
-                self.send_input(&host, &text);
-                None
-            }
-            Effect::Kill(host) => {
-                if let Err(e) = s.host.kill(&host) {
-                    log::warn!("kill {} failed: {e}", host.0);
-                }
-                None
-            }
+            Effect::SendInput { host, text } => failed(s.host.write_line(&host, &text), || {
+                format!("send input to {}", host.0)
+            }),
+            Effect::Kill(host) => failed(s.host.kill(&host), || format!("kill {}", host.0)),
             Effect::Forget(host) => {
                 let path = self.scrollback_path(&host);
                 if let Err(e) = std::fs::remove_file(&path)
@@ -333,41 +338,17 @@ impl SwitchboardApp {
                 }
                 None
             }
-            Effect::OpenPath(path) => {
-                if let Err(e) = s.opener.open_default(&path) {
-                    log::warn!("open failed: {e}");
-                }
-                None
-            }
+            Effect::OpenPath(path) => failed(s.opener.open_default(&path), || {
+                format!("open {}", path.display())
+            }),
             Effect::OpenInEditor { editor, path } => {
-                if let Err(e) = s.opener.open_editor(&editor, &path) {
-                    log::warn!("open in editor failed: {e}");
-                }
-                None
+                failed(s.opener.open_editor(&editor, &path), || {
+                    format!("open {} in {editor}", path.display())
+                })
             }
-            Effect::Reveal(path) => {
-                if let Err(e) = s.opener.reveal(&path) {
-                    log::warn!("reveal failed: {e}");
-                }
-                None
-            }
-        }
-    }
-
-    /// Type `text` into the pane, then Enter as a separate write after a
-    /// pause: a newline inside the same chunk reads as a pasted line break
-    /// to a TUI, not as submit.
-    fn send_input(&self, host: &HostId, text: &str) {
-        let r = self
-            .services
-            .host
-            .write(host, text.as_bytes())
-            .and_then(|()| {
-                std::thread::sleep(Duration::from_millis(150));
-                self.services.host.write(host, b"\r")
-            });
-        if let Err(e) = r {
-            log::warn!("send input to {} failed: {e}", host.0);
+            Effect::Reveal(path) => failed(s.opener.reveal(&path), || {
+                format!("reveal {}", path.display())
+            }),
         }
     }
 

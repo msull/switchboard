@@ -70,6 +70,14 @@ impl AppCore {
         let Some(record) = self.session(id) else {
             return;
         };
+        // A fresh agent is a new conversation: a handle left from the old
+        // one would stop Codex discovery from binding the new rollout.
+        if matches!(record.kind, SessionKind::Agent(_)) && record.resume.is_some() {
+            self.edit_session(id, out, |s| s.resume = None);
+        }
+        let Some(record) = self.session(id) else {
+            return;
+        };
         match record.kind {
             SessionKind::Agent(AgentKind::Codex) if self.codex_busy() => {
                 self.start_flight(id, FlightKind::Launch, now);
@@ -106,7 +114,7 @@ impl AppCore {
 
     /// Lets the next queued Codex record launch once the previous one is
     /// bound (or has failed).
-    fn advance_codex_queue(&mut self, now: Clock, out: &mut Out) {
+    pub(super) fn advance_codex_queue(&mut self, now: Clock, out: &mut Out) {
         if self.codex_busy() || self.codex_queue.is_empty() {
             return;
         }

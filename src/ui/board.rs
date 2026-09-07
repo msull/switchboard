@@ -36,7 +36,11 @@ fn git_line(cx: &mut DrawCtx<'_>, ui: &mut Ui, pid: ProjectId) {
 }
 
 pub fn show(cx: &mut DrawCtx<'_>, ui: &mut Ui, pid: ProjectId) {
-    let Some(workspace) = cx.core.workspace(pid).cloned() else {
+    // `cx.core` is a shared reference with the frame's lifetime, so a
+    // copy of it can be borrowed from while `cx` itself is lent out
+    // mutably to the cards below; cloning the workspace is not needed.
+    let core = cx.core;
+    let Some(workspace) = core.workspace(pid) else {
         ui.label("This project no longer exists.");
         return;
     };

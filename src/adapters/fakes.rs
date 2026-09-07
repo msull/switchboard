@@ -15,12 +15,11 @@ use crate::ports::opener::Opener;
 use crate::ports::store::{Loaded, Store, StoreError};
 use crate::ports::transcript::{Conversation, TranscriptReader};
 
-/// In-memory store; `saved` records every save in order.
+/// In-memory store. Saves are not recorded: the core's `Effect::Save`
+/// is what tests assert on, so a save here only succeeds or fails.
 #[derive(Debug, Default)]
 pub struct MemoryStore {
     pub initial: Loaded,
-    pub saved: Vec<Workspace>,
-    pub deleted: Vec<ProjectId>,
     pub lock_result: Option<bool>,
     pub fail_save: Option<StoreError>,
 }
@@ -32,14 +31,11 @@ impl Store for MemoryStore {
     fn load_all(&self) -> Result<Loaded, StoreError> {
         Ok(self.initial.clone())
     }
-    fn save(&self, workspace: &Workspace) -> Result<(), StoreError> {
-        if let Some(e) = &self.fail_save {
-            return Err(e.clone());
+    fn save(&self, _workspace: &Workspace) -> Result<(), StoreError> {
+        match &self.fail_save {
+            Some(e) => Err(e.clone()),
+            None => Ok(()),
         }
-        // Interior mutability is avoided on purpose: the app owns the
-        // store by value and tests read `saved` through `SwitchboardApp`.
-        let _ = workspace;
-        Ok(())
     }
     fn delete(&self, _id: ProjectId) -> Result<(), StoreError> {
         Ok(())
@@ -105,6 +101,10 @@ impl ProcessHost for FakeHost {
     fn write(&self, id: &HostId, bytes: &[u8]) -> std::io::Result<()> {
         self.state().written.push((id.clone(), bytes.to_vec()));
         Ok(())
+    }
+    fn write_line(&self, id: &HostId, text: &str) -> std::io::Result<()> {
+        self.write(id, text.as_bytes())?;
+        self.write(id, b"\r")
     }
     fn kill(&self, id: &HostId) -> std::io::Result<()> {
         self.state().killed.push(id.clone());

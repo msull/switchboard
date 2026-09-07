@@ -41,7 +41,7 @@ fn main() {
 
     let line = build_line(&event, &fields);
     let data_dir = data_dir();
-    let _ = std::fs::create_dir_all(&data_dir);
+    let _ = create_private_dir(&data_dir);
     if let Err(e) = append_line(&data_dir.join("events.log"), &line) {
         eprintln!("switchboard-hook: cannot append to events.log: {e}");
     }
@@ -123,8 +123,29 @@ fn push_json_string(out: &mut String, s: &str) {
 /// One `write_all` of the whole line on an `O_APPEND` descriptor, so
 /// concurrent helpers never interleave within a line.
 fn append_line(path: &std::path::Path, line: &str) -> std::io::Result<()> {
-    let mut file = OpenOptions::new().create(true).append(true).open(path)?;
+    let mut options = OpenOptions::new();
+    options.create(true).append(true);
+    // The helper may run before the app has ever created the log, so it
+    // must create it as private as the store would (0600 in a 0700 dir).
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(path)?;
     file.write_all(line.as_bytes())
+}
+
+/// `create_dir_all` with owner-only permissions on the leaf directory.
+fn create_private_dir(dir: &std::path::Path) -> std::io::Result<()> {
+    let mut builder = std::fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    builder.create(dir)
 }
 
 /// Best effort: connect, write one byte, leave. Nobody listening is the
@@ -290,6 +311,21 @@ mod tests {
         assert!(line.contains("\"cwd\":null"));
         assert!(line.contains("\"reason\":\"say \\\"hi\\\"\\n\""));
         assert!(line.contains(&format!("\"last_message\":\"{}\"", "x".repeat(200))));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn creates_the_log_and_its_directory_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = std::env::temp_dir().join(format!("switchboard-hook-{}", std::process::id()));
+        let dir = tmp.join("data");
+        create_private_dir(&dir).unwrap();
+        let log = dir.join("events.log");
+        append_line(&log, "x\n").unwrap();
+        let mode = |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&dir), 0o700);
+        assert_eq!(mode(&log), 0o600);
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[test]

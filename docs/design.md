@@ -616,6 +616,13 @@ environment section on the session view itself.
   with an injected `PermissionRequest` hook event: card, "1 waiting", red
   project dot, and the badge all agreed.
 
+- **Message box.** Multi-line: Enter (or Cmd+Enter) sends, Shift+Enter
+  adds a line, the box grows to eight rows then scrolls. Drafts are
+  kept per session, so leaving and coming back does not lose one. Files
+  dropped on the window are added to the draft as paths, which is the
+  first step toward attachments: an agent given a path to an image or a
+  document reads it itself. Copying a pasted image to a file in the
+  data directory and dropping that path in is the planned next step.
 - **File side next to a session.** The Files toggle in the session
   header (or Cmd+B) opens the project's tree and finder beside the
   terminal or conversation. The side's bottom half previews the
