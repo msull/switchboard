@@ -670,7 +670,9 @@ mod tests {
 
     #[test]
     fn default_dir_ends_with_app_name() {
+        // macOS keeps the case; the XDG layout on Linux lowercases it.
         let dir = JsonStore::default_dir().unwrap();
-        assert!(dir.ends_with("Switchboard"), "{}", dir.display());
+        let leaf = dir.file_name().unwrap().to_string_lossy().to_lowercase();
+        assert_eq!(leaf, "switchboard", "{}", dir.display());
     }
 }
