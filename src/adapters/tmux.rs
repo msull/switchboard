@@ -86,6 +86,17 @@ impl TmuxHost {
 
     /// Kill the whole server on this socket. For tests; the app never does
     /// this because the server is what keeps sessions alive.
+    /// Start and kill a throwaway session, to learn whether this tmux
+    /// can host one at all. A version check is not enough: Ubuntu's
+    /// tmux 3.4 dies at window spawn under `window-size manual` on
+    /// GitHub's runners (a plain container is fine), so the tests call
+    /// this to skip cleanly there.
+    pub fn smoke_test(&self) -> io::Result<()> {
+        let started = self.run(&["new-session", "-d", "-s", "smoke", "-c", "/"]);
+        let _ = self.run(&["kill-session", "-t", "=smoke"]);
+        started.map(|_| ())
+    }
+
     pub fn kill_server(&self) -> io::Result<()> {
         match self.run(&["kill-server"]) {
             Ok(_) => Ok(()),
@@ -559,9 +570,6 @@ mod tests {
     }
 
     /// `None` when tmux is unusable here, so CI without tmux stays green.
-    /// A version check is not enough: Ubuntu's tmux 3.4 dies at window
-    /// spawn under `window-size manual` (GitHub's runners show this, a
-    /// plain container does not), so a throwaway session is tried too.
     fn server() -> Option<Server> {
         let n = NEXT.fetch_add(1, Ordering::Relaxed);
         let socket = format!("switchboard-test-{}-{n}", std::process::id());
@@ -573,9 +581,7 @@ mod tests {
             eprintln!("skipping tmux integration test: {e}");
             return None;
         }
-        let smoke = host.run(&["new-session", "-d", "-s", "smoke", "-c", "/"]);
-        let _ = host.run(&["kill-session", "-t", "=smoke"]);
-        if let Err(e) = smoke {
+        if let Err(e) = host.smoke_test() {
             eprintln!("skipping tmux integration test: cannot start a session here: {e}");
             let _ = host.kill_server();
             return None;

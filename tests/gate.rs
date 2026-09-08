@@ -85,6 +85,11 @@ impl Gate {
             eprintln!("skipping gate test: {e}");
             return None;
         }
+        if let Err(e) = host.smoke_test() {
+            eprintln!("skipping gate test: cannot start a session here: {e}");
+            let _ = host.kill_server();
+            return None;
+        }
         let hook_bin = PathBuf::from(env!("CARGO_BIN_EXE_switchboard-hook"));
         write_hook_settings(&data_dir, &hook_bin).expect("hook settings");
         Some(Self {
