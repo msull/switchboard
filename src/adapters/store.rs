@@ -444,6 +444,7 @@ mod tests {
             exclusive: true,
             editor: "zed".into(),
             env: Vec::new(),
+            files_open: true,
         };
         store.save_settings(&settings).unwrap();
         assert_eq!(store.load_all().unwrap().settings, settings);

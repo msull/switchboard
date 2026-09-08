@@ -15,6 +15,7 @@ use egui_commonmark::{CommonMarkCache, CommonMarkViewer};
 use egui_term::{BackendSettings, PtyEvent, TerminalBackend, TerminalView};
 
 use super::cards::{is_running, kind_label, state_color};
+use super::files::DraggedPath;
 use super::{DrawCtx, GAP, PAD, UiState};
 use crate::core::{AppAction, RecordId, SessionKind, SessionRecord};
 use crate::ports::host::HostId;
@@ -179,12 +180,13 @@ fn header(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord) {
                     if ui.button(open).clicked() {
                         cx.dispatch(AppAction::ReturnToSession(record.id));
                     }
+                    let files_open = cx.core.settings().files_open;
                     if ui
-                        .selectable_label(cx.state.files_open, "Files")
+                        .selectable_label(files_open, "Files")
                         .on_hover_text("Show the project's files beside the session (Cmd+B)")
                         .clicked()
                     {
-                        cx.state.files_open = !cx.state.files_open;
+                        cx.dispatch(AppAction::SetFilesOpen(!files_open));
                     }
                 });
             });
@@ -279,10 +281,23 @@ fn notes(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord) {
 /// first so it claims its space; the conversation fills what is left.
 fn agent_body(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord) {
     let fill = ui.visuals().widgets.inactive.weak_bg_fill;
-    egui::Panel::bottom("message_panel")
+    // A file row dragged from the file side lights the panel up and, on
+    // release, lands in the draft as its path.
+    let hovering = egui::DragAndDrop::has_payload_of_type::<DraggedPath>(ui.ctx());
+    let stroke = if hovering {
+        Stroke::new(2.0, ui.visuals().selection.stroke.color)
+    } else {
+        Stroke::NONE
+    };
+    let panel = egui::Panel::bottom("message_panel")
         .resizable(false)
-        .frame(Frame::new().fill(fill).inner_margin(PAD))
-        .show(ui, |ui| message_box(cx, ui, record));
+        .frame(Frame::new().fill(fill).stroke(stroke).inner_margin(PAD))
+        .show(ui, |ui| message_box(cx, ui, record))
+        .response;
+    if let Some(dropped) = panel.dnd_release_payload::<DraggedPath>() {
+        let draft = cx.state.input_drafts.entry(record.id).or_default();
+        append_path(draft, &dropped.0);
+    }
     Frame::new()
         .stroke(border(ui))
         .corner_radius(4)
@@ -334,8 +349,9 @@ const MESSAGE_MAX_ROWS: usize = 8;
 /// The message box: a multi-line field docked under the conversation.
 /// Enter (or Send) types the text into the session's terminal and
 /// presses Enter there, without opening its window; Shift+Enter adds a
-/// line. Files dropped on the window land in the draft as paths, which
-/// is how an agent is pointed at an image or a document.
+/// line. Files dropped on the window, or rows dragged in from the file
+/// side, land in the draft as paths, which is how an agent is pointed
+/// at an image or a document.
 fn message_box(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord) {
     let running = is_running(cx.core, record.id);
     let dropped: Vec<PathBuf> = ui.input(|i| {
@@ -405,7 +421,7 @@ fn message_box(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord) {
 
 /// Add a dropped file's path to a draft as its own word, quoted when
 /// it holds spaces so the agent reads it as one path.
-fn append_path(draft: &mut String, path: &std::path::Path) {
+pub(super) fn append_path(draft: &mut String, path: &std::path::Path) {
     let shown = path.display().to_string();
     let word = if shown.contains(' ') {
         format!("'{shown}'")

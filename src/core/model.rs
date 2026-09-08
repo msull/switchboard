@@ -82,6 +82,8 @@ pub struct Settings {
     pub editor: String,
     /// Variables every session gets, under the project's own.
     pub env: Vec<EnvVar>,
+    /// The file side is shown next to sessions (boards always have it).
+    pub files_open: bool,
 }
 
 /// Switchboard's own id for a project. Never reused.

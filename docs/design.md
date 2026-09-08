@@ -619,8 +619,10 @@ environment section on the session view itself.
 - **Message box.** Multi-line: Enter (or Cmd+Enter) sends, Shift+Enter
   adds a line, the box grows to eight rows then scrolls. Drafts are
   kept per session, so leaving and coming back does not lose one. Files
-  dropped on the window are added to the draft as paths, which is the
-  first step toward attachments: an agent given a path to an image or a
+  dropped on the window, rows dragged in from the file side, Shift+click
+  on a row, the row menu's "Add path to message", and the preview
+  pane's "To message" all add a path to the draft, which is the first step toward
+  attachments: an agent given a path to an image or a
   document reads it itself. Copying a pasted image to a file in the
   data directory and dropping that path in is the planned next step.
 - **File side next to a session.** The Files toggle in the session
@@ -628,7 +630,8 @@ environment section on the session view itself.
   terminal or conversation. The side's bottom half previews the
   selected file in place, on boards too; a click no longer leaves the
   view, and Expand (or Preview in the row menu) opens the full document
-  view. The toggle is UI state, not a setting, so it starts closed.
+  view. The toggle is saved in `settings.json`, so it comes back the way
+  it was left.
 
 ## Open questions
 

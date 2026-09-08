@@ -316,6 +316,23 @@ fn exclusive_mode_hides_all_but_the_active_project() {
 }
 
 #[test]
+fn the_file_side_toggle_is_a_saved_setting() {
+    let mut core = AppCore::new();
+    core.seed(Vec::new(), Vec::new());
+    assert!(!core.settings().files_open);
+    let effects = core.dispatch(AppAction::SetFilesOpen(true), Clock::at(1));
+    assert!(core.settings().files_open);
+    assert!(
+        effects
+            .iter()
+            .any(|e| matches!(e, Effect::SaveSettings(s) if s.files_open))
+    );
+    // Setting it again to the same value writes nothing.
+    let effects = core.dispatch(AppAction::SetFilesOpen(true), Clock::at(2));
+    assert!(!effects.iter().any(|e| matches!(e, Effect::SaveSettings(_))));
+}
+
+#[test]
 fn store_loaded_installs_workspaces_and_notices() {
     let mut core = AppCore::new();
     let w = Workspace::new(project("a"));
