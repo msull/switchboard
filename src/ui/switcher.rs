@@ -80,12 +80,12 @@ pub fn top_bar(cx: &mut DrawCtx<'_>, ui: &mut Ui, view: &View) {
                 && ui
                     .add(
                         Button::new(RichText::new(FILES_ICON).size(18.0))
-                            .selected(cx.state.files_open),
+                            .selected(settings.files_open),
                     )
                     .on_hover_text("Show the project's files beside the session (Cmd+B)")
                     .clicked()
             {
-                cx.state.files_open = !cx.state.files_open;
+                cx.dispatch(AppAction::SetFilesOpen(!settings.files_open));
             }
             let waiting = cx.core.waiting_count();
             if waiting > 0 {

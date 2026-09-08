@@ -391,7 +391,7 @@ fn host_error_and_read_only_tag_are_shown() {
 }
 
 /// A project rooted in a real temp directory, for the file side, with one
-/// shell session so the side can be toggled next to it.
+/// agent session so the side can be toggled next to its message box.
 fn file_project(
     harness: &mut Harness<'static, SwitchboardApp>,
 ) -> (tempfile::TempDir, ProjectId, RecordId) {
@@ -405,7 +405,7 @@ fn file_project(
     let mut p = project("files", at(200));
     p.root = dir.path().to_path_buf();
     let pid = p.id;
-    let shell = record(pid, "sh", SessionKind::Shell, 0);
+    let shell = record(pid, "sh", SessionKind::Agent(AgentKind::ClaudeCode), 0);
     let sid = shell.id;
     let mut ws = Workspace::new(p);
     ws.sessions = vec![shell];
@@ -834,6 +834,88 @@ fn message_box_is_multiline_and_enter_sends() {
             .get(&id)
             .map(String::as_str),
         Some("")
+    );
+}
+
+#[test]
+fn a_file_row_dragged_onto_the_message_box_adds_its_path() {
+    let (mut harness, _) = harness();
+    let (dir, _pid, sid) = file_project(&mut harness);
+    showing(&mut harness, View::Session(sid));
+    harness.get_by_role_and_label(Role::Button, "Files").click();
+    harness.run_steps(2);
+    let from = harness.get_by_label("  README.md").rect().center();
+    let to = harness.get_by_label("Message").rect().center();
+    // Press on the row, move well past the drag threshold, release over
+    // the message panel.
+    harness.event(egui::Event::PointerMoved(from));
+    harness.event(egui::Event::PointerButton {
+        pos: from,
+        button: egui::PointerButton::Primary,
+        pressed: true,
+        modifiers: egui::Modifiers::NONE,
+    });
+    harness.run_steps(2);
+    for k in 1..=4u8 {
+        harness.event(egui::Event::PointerMoved(from.lerp(to, f32::from(k) / 4.0)));
+        harness.run_steps(2);
+    }
+    harness.event(egui::Event::PointerButton {
+        pos: to,
+        button: egui::PointerButton::Primary,
+        pressed: false,
+        modifiers: egui::Modifiers::NONE,
+    });
+    harness.run_steps(2);
+    assert_eq!(
+        harness
+            .state()
+            .ui_state
+            .input_drafts
+            .get(&sid)
+            .map(String::as_str),
+        Some(dir.path().join("README.md").display().to_string().as_str())
+    );
+}
+
+#[test]
+fn shift_click_the_menu_and_the_pane_put_a_path_in_the_message() {
+    let (mut harness, _) = harness();
+    let (dir, pid, sid) = file_project(&mut harness);
+    let readme = dir.path().join("README.md").display().to_string();
+    // On a board there is no message box, so none of the ways show up.
+    click(&mut harness, "  README.md");
+    assert!(harness.query_by_label("To message").is_none());
+    harness.get_by_label("  README.md").click_secondary();
+    harness.run_steps(2);
+    assert!(harness.query_by_label("Add path to message").is_none());
+    harness.get_by_label("Preview").click();
+    harness.run_steps(2);
+    assert_eq!(
+        harness.state().core().view(),
+        View::Document(pid, dir.path().join("README.md"))
+    );
+
+    showing(&mut harness, View::Session(sid));
+    harness.get_by_role_and_label(Role::Button, "Files").click();
+    harness.run_steps(2);
+    harness
+        .get_by_label("  README.md")
+        .click_modifiers(egui::Modifiers::SHIFT);
+    harness.run_steps(2);
+    harness.get_by_label("  README.md").click_secondary();
+    harness.run_steps(2);
+    click(&mut harness, "Add path to message");
+    click(&mut harness, "  README.md");
+    click(&mut harness, "To message");
+    assert_eq!(
+        harness
+            .state()
+            .ui_state
+            .input_drafts
+            .get(&sid)
+            .map(String::as_str),
+        Some(format!("{readme} {readme} {readme}").as_str())
     );
 }
 

@@ -125,6 +125,8 @@ pub enum AppAction {
     SetTheme(ThemeMode),
     /// Exclusive mode shows only the active project (screen sharing).
     SetExclusive(bool),
+    /// Show or hide the file side next to sessions.
+    SetFilesOpen(bool),
     /// Type `text` into the session's terminal and press Enter, as if the
     /// user had typed it there.
     SendInput {
@@ -333,7 +335,8 @@ impl AppCore {
             | AppAction::StoreSecret { .. }
             | AppAction::DeleteSecret { .. }
             | AppAction::SetTheme(_)
-            | AppAction::SetExclusive(_) => self.files_and_settings(action, now, &mut out),
+            | AppAction::SetExclusive(_)
+            | AppAction::SetFilesOpen(_) => self.files_and_settings(action, now, &mut out),
             AppAction::Back => drop(self.view_stack.pop()),
             AppAction::DismissNotice => {
                 if !self.notices.is_empty() {
@@ -679,6 +682,7 @@ impl AppCore {
             }
             AppAction::SetTheme(theme) => self.update_settings(out, |s| s.theme = theme),
             AppAction::SetExclusive(on) => self.update_settings(out, |s| s.exclusive = on),
+            AppAction::SetFilesOpen(on) => self.update_settings(out, |s| s.files_open = on),
             AppAction::StoreLoaded(_)
             | AppAction::SaveFinished(..)
             | AppAction::HostUnavailable(_)

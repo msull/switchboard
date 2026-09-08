@@ -64,9 +64,6 @@ pub struct UiState {
     pub rename_draft: Option<(RecordId, String)>,
     /// The file side per project: tree, finder, index.
     pub files: HashMap<ProjectId, files::FilesState>,
-    /// Show the file side next to a session (the Files toggle, Cmd+B).
-    /// Boards always have it.
-    pub files_open: bool,
     /// The document on screen, loaded once per path and file time.
     pub preview: Option<document::Preview>,
     /// The editor command being edited in the settings menu.
@@ -101,7 +98,6 @@ impl Default for UiState {
             notes_draft: None,
             rename_draft: None,
             files: HashMap::new(),
-            files_open: false,
             preview: None,
             editor_draft: None,
             palette: None,
@@ -178,17 +174,21 @@ fn draw_frame(cx: &mut DrawCtx<'_>, ui: &mut Ui) {
     // The file side lives next to the board, next to the full preview it
     // opens, and, when toggled on, next to a session. The full preview
     // shows the selection itself; elsewhere the side previews inline.
+    // Only an agent session has a message box for paths to go to.
     let files_for = match &view {
-        View::Board(pid) => Some((*pid, true)),
-        View::Document(pid, _) => Some((*pid, false)),
-        View::Session(id) if cx.state.files_open => cx.core.session(*id).map(|s| (s.project, true)),
+        View::Board(pid) => Some((*pid, true, None)),
+        View::Document(pid, _) => Some((*pid, false, None)),
+        View::Session(id) if cx.core.settings().files_open => cx.core.session(*id).map(|s| {
+            let message = matches!(s.kind, crate::core::SessionKind::Agent(_)).then_some(*id);
+            (s.project, true, message)
+        }),
         View::Session(_) | View::Switchboard => None,
     };
-    if let Some((pid, inline)) = files_for {
+    if let Some((pid, inline, message)) = files_for {
         egui::Panel::right("files")
             .resizable(true)
             .default_size(340.0)
-            .show(ui, |ui| files::show(cx, ui, pid, inline));
+            .show(ui, |ui| files::show(cx, ui, pid, inline, message));
     }
     egui::CentralPanel::default().show(ui, |ui| match view {
         View::Switchboard => switchboard::show(cx, ui),
@@ -232,7 +232,7 @@ fn keyboard(cx: &mut DrawCtx<'_>, ui: &Ui, view: &View) {
     if matches!(view, View::Session(_))
         && ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::B))
     {
-        cx.state.files_open = !cx.state.files_open;
+        cx.dispatch(AppAction::SetFilesOpen(!cx.core.settings().files_open));
     }
 
     if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::Num0)) {

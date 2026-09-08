@@ -109,7 +109,7 @@ fn step(app: &mut SwitchboardApp, w: &[&str]) -> Result<(), String> {
             let (id, root) = project(app, p)?;
             app.dispatch(AppAction::ShowDocument(id, root.join(rel)));
         }
-        ["files", on] => app.ui_state.files_open = *on == "on",
+        ["files", on] => app.dispatch(AppAction::SetFilesOpen(*on == "on")),
         ["select-file", p, rel] => {
             let (id, root) = project(app, p)?;
             app.ui_state.files.entry(id).or_default().selected = Some(root.join(rel));

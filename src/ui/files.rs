@@ -14,10 +14,15 @@ use std::time::{Duration, Instant};
 
 use egui::{Color32, RichText, Ui};
 
+use super::session::append_path;
 use super::{DrawCtx, GAP, document};
 use crate::adapters::files::{Entry, Listing, children, fuzzy, scan};
 use crate::adapters::git::{Change, GitState, inspect};
-use crate::core::{AppAction, Launch, ProjectId, SessionKind};
+use crate::core::{AppAction, Launch, ProjectId, RecordId, SessionKind};
+
+/// The drag-and-drop payload of a file row: its absolute path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DraggedPath(pub PathBuf);
 
 /// The index stops here; the finder says so when it does.
 pub const MAX_INDEX_ENTRIES: usize = 50_000;
@@ -113,7 +118,15 @@ impl FilesState {
 /// Draw the file side for `pid`. With `inline` the selected file is
 /// previewed in the bottom half of the side itself; without it a click
 /// opens the full document view (which is then already on screen).
-pub fn show(cx: &mut DrawCtx<'_>, ui: &mut Ui, pid: ProjectId, inline: bool) {
+/// `message` is the session whose message box paths can be sent to:
+/// Shift+click on a row, the row menu, and the pane's button do that.
+pub fn show(
+    cx: &mut DrawCtx<'_>,
+    ui: &mut Ui,
+    pid: ProjectId,
+    inline: bool,
+    message: Option<RecordId>,
+) {
     let Some(root) = cx.core.workspace(pid).map(|w| w.project.root.clone()) else {
         return;
     };
@@ -126,26 +139,33 @@ pub fn show(cx: &mut DrawCtx<'_>, ui: &mut Ui, pid: ProjectId, inline: bool) {
     state.poll_git(&root, ui.ctx());
     let git = state.git.clone();
     let mut actions = Vec::new();
+    let mut to_message = Vec::new();
     let mut side = Side {
         pid,
         root: &root,
         pinned: &pinned,
         git: git.as_deref(),
         inline,
+        can_message: message.is_some(),
         actions: &mut actions,
+        to_message: &mut to_message,
     };
     ui.spacing_mut().item_spacing = egui::vec2(GAP, GAP);
     // Panels claim their space before the rest of the side is laid out,
     // so the preview goes first even though it sits at the bottom.
     if inline {
         let selected = state.selected.clone();
-        let cleared = egui::Panel::bottom(egui::Id::new(("files_preview", pid)))
+        let outcome = egui::Panel::bottom(egui::Id::new(("files_preview", pid)))
             .resizable(true)
             .default_size(ui.available_height() / 2.0)
-            .show(ui, |ui| preview_pane(cx, ui, pid, selected.as_deref()))
+            .show(ui, |ui| {
+                preview_pane(cx, ui, pid, selected.as_deref(), message.is_some())
+            })
             .inner;
-        if cleared {
-            state.selected = None;
+        match outcome {
+            PaneClick::Clear => state.selected = None,
+            PaneClick::ToMessage => side.to_message.extend(selected.clone()),
+            PaneClick::None => {}
         }
     }
     ui.horizontal(|ui| {
@@ -191,24 +211,43 @@ pub fn show(cx: &mut DrawCtx<'_>, ui: &mut Ui, pid: ProjectId, inline: bool) {
             }
         });
     cx.state.files.insert(pid, state);
+    if let Some(id) = message {
+        let draft = cx.state.input_drafts.entry(id).or_default();
+        for path in to_message {
+            append_path(draft, &path);
+        }
+    }
     for action in actions {
         cx.dispatch(action);
     }
 }
 
+/// What the preview pane's header buttons asked for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PaneClick {
+    None,
+    Clear,
+    ToMessage,
+}
+
 /// The bottom half of the side: the selected file, drawn by the
-/// document view's renderer, with a way to the full view. Returns
-/// whether the × was clicked, which clears the selection.
-fn preview_pane(cx: &mut DrawCtx<'_>, ui: &mut Ui, pid: ProjectId, path: Option<&Path>) -> bool {
+/// document view's renderer, with a way to the full view.
+fn preview_pane(
+    cx: &mut DrawCtx<'_>,
+    ui: &mut Ui,
+    pid: ProjectId,
+    path: Option<&Path>,
+    can_message: bool,
+) -> PaneClick {
     ui.spacing_mut().item_spacing = egui::vec2(GAP, GAP);
     // A panel shrinks to its content; an empty pane would collapse and
     // then jump back when a file is selected. Hold the panel's height.
     ui.set_min_height(ui.available_height());
     let Some(path) = path else {
         ui.label(RichText::new("Select a file to preview it here.").weak());
-        return false;
+        return PaneClick::None;
     };
-    let mut cleared = false;
+    let mut click = PaneClick::None;
     document::ensure_loaded(cx.state, path);
     let (name, size) = cx.state.preview.as_ref().map_or_else(
         || (String::new(), 0),
@@ -231,7 +270,15 @@ fn preview_pane(cx: &mut DrawCtx<'_>, ui: &mut Ui, pid: ProjectId, path: Option<
                 .on_hover_text("Clear the selection")
                 .clicked()
             {
-                cleared = true;
+                click = PaneClick::Clear;
+            }
+            if can_message
+                && ui
+                    .small_button("To message")
+                    .on_hover_text("Put the path in the message box")
+                    .clicked()
+            {
+                click = PaneClick::ToMessage;
             }
             if ui
                 .small_button("Expand")
@@ -261,7 +308,7 @@ fn preview_pane(cx: &mut DrawCtx<'_>, ui: &mut Ui, pid: ProjectId, path: Option<
             }
             document::body(cx.state, ui);
         });
-    cleared
+    click
 }
 
 /// What every row needs to build its actions.
@@ -272,7 +319,11 @@ struct Side<'a> {
     git: Option<&'a GitState>,
     /// The selection is previewed in the side; a click does not navigate.
     inline: bool,
+    /// A message box is on screen to send paths to.
+    can_message: bool,
     actions: &'a mut Vec<AppAction>,
+    /// Paths to put in the message box after the frame.
+    to_message: &'a mut Vec<PathBuf>,
 }
 
 /// Row colors for git status.
@@ -297,6 +348,17 @@ impl Side<'_> {
                     Change::Conflict => "conflict",
                 });
         }
+    }
+
+    /// A click on a file row: select and preview it, or with Shift (and
+    /// a message box on screen) put its path in the message instead.
+    fn pick(&mut self, state: &mut FilesState, path: &Path, shift: bool) {
+        if shift && self.can_message {
+            self.to_message.push(path.to_path_buf());
+            return;
+        }
+        state.selected = Some(path.to_path_buf());
+        self.preview(path);
     }
 
     /// What a click on a file row does beyond selecting it.
@@ -334,6 +396,15 @@ impl Side<'_> {
                 self.expand(path);
                 ui.close();
             }
+            if self.can_message
+                && ui
+                    .button("Add path to message")
+                    .on_hover_text("Shift+click a row does the same")
+                    .clicked()
+            {
+                self.to_message.push(path.to_path_buf());
+                ui.close();
+            }
             if ui.button("Open").on_hover_text("Default app").clicked() {
                 self.actions
                     .push(AppAction::OpenDocument(path.to_path_buf()));
@@ -366,6 +437,19 @@ impl Side<'_> {
             ui.close();
         }
     }
+}
+
+/// A file row: a selectable label that can also be dragged, carrying
+/// its path for whatever accepts a [`DraggedPath`] (the message box).
+/// The row keeps its click; the drag is a second interaction over the
+/// same rect, and egui tells the two apart by pointer movement.
+fn file_row(ui: &mut Ui, selected: bool, text: &str, path: &Path) -> egui::Response {
+    let response = ui.selectable_label(selected, text);
+    response
+        .interact(egui::Sense::drag())
+        .on_hover_cursor(egui::CursorIcon::Grab)
+        .dnd_set_drag_payload(DraggedPath(path.to_path_buf()));
+    response
 }
 
 /// One level of the tree: `dir`'s children, indented by `depth`.
@@ -412,10 +496,9 @@ fn directory(ui: &mut Ui, state: &mut FilesState, side: &mut Side<'_>, dir: &Pat
                 side.decoration(ui, &entry.rel, true);
             } else {
                 let selected = state.selected.as_deref() == Some(path.as_path());
-                let response = ui.selectable_label(selected, format!("  {name}"));
+                let response = file_row(ui, selected, &format!("  {name}"), &path);
                 if response.clicked() {
-                    state.selected = Some(path.clone());
-                    side.preview(&path);
+                    side.pick(state, &path, ui.input(|i| i.modifiers.shift));
                 }
                 response.context_menu(|ui| side.context_menu(ui, &path, false));
                 side.decoration(ui, &entry.rel, false);
@@ -449,10 +532,13 @@ fn finder(ui: &mut Ui, state: &mut FilesState, side: &mut Side<'_>, open_first: 
     for (n, hit) in hits.iter().enumerate() {
         let path = side.root.join(&hit.entry.rel);
         let selected = state.selected.as_deref() == Some(path.as_path());
-        let response = ui.selectable_label(selected, hit.entry.rel.display().to_string());
+        let response = file_row(ui, selected, &hit.entry.rel.display().to_string(), &path);
         if response.clicked() || (open_first && n == 0) {
-            state.selected = Some(path.clone());
-            side.preview(&path);
+            side.pick(
+                state,
+                &path,
+                response.clicked() && ui.input(|i| i.modifiers.shift),
+            );
         }
         response.context_menu(|ui| side.context_menu(ui, &path, false));
     }
