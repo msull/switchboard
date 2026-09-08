@@ -539,7 +539,9 @@ mod tests {
         let sock = WakeSocket::bind(dir.path()).unwrap();
         assert!(!sock.take_woken());
         let mut c = UnixStream::connect(sock.path()).unwrap();
-        c.write_all(b"1").unwrap();
+        // The listener only needs the connection; it may close before
+        // this byte lands, which is a broken pipe, not a failure.
+        let _ = c.write_all(b"1");
         drop(c);
         // Generous: the whole suite runs in parallel on the pre-commit hook.
         let deadline = std::time::Instant::now() + Duration::from_secs(15);
