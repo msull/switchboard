@@ -683,6 +683,17 @@ Items are the ids in `docs/feedback-2026-09.md`.
   Parsing is strict per entry and tolerant per file, so one typo yields
   one warning naming the entry. The gate test covers list, approve,
   autostart after a restart, and the dropped approval.
+- **D1, D2 Run tab.** The side panel next to a board or session has two
+  tabs, Files and Run (Cmd+R shows Run, opening the side beside a
+  session if needed; the header's Files toggle is now "Side"). The Run
+  tab lists the project's services then commands, each with its state,
+  Start/Stop or Run now, Show, the command line and directory, the
+  variables it asks for (marked when the project's environment does not
+  define them), the approval line (Approve, Revoke, "definition changed
+  since approval", "no longer in project.json" with Remove), and the
+  pane's last output. A pane that exited now reads its output from
+  disk like a gone pane, so a finished command's output is there in the
+  session view and the Run tab instead of an empty "Not running".
 
 ## Open questions
 

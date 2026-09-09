@@ -533,7 +533,7 @@ impl SwitchboardApp {
         if let View::Session(id) = view {
             self.refresh_conversation(id);
         }
-        let ids: Vec<RecordId> = match view {
+        let mut ids: Vec<RecordId> = match view {
             View::Switchboard => self
                 .core
                 .all_sessions_sorted()
@@ -544,21 +544,38 @@ impl SwitchboardApp {
             View::Session(id) => vec![id],
             View::Document(..) => Vec::new(),
         };
+        // The Run tab shows every command's and service's output, so
+        // those get a snapshot too while it is on screen.
+        let run_project = match view {
+            View::Board(p) => Some(p),
+            View::Session(id) if self.core.settings().files_open => {
+                self.core.session(id).map(|s| s.project)
+            }
+            View::Session(_) | View::Switchboard | View::Document(..) => None,
+        }
+        .filter(|_| self.core.settings().side_tab == crate::core::SideTab::Run);
+        let run_set: Vec<RecordId> = run_project
+            .map(|p| self.core.run_entries(p).iter().map(|s| s.id).collect())
+            .unwrap_or_default();
+        for id in &run_set {
+            if !ids.contains(id) {
+                ids.push(*id);
+            }
+        }
         for id in ids {
+            let on_screen = matches!(view, View::Session(sid) if sid == id);
+            let wants_snapshot = on_screen || run_set.contains(&id);
+            // A pane that exited still exists (`remain-on-exit`), but its
+            // output on disk is complete, so read that like a gone pane.
             let running = self
                 .core
                 .host_status(id)
-                .is_some_and(|h| !matches!(h.liveness, Liveness::Missing));
+                .is_some_and(|h| matches!(h.liveness, Liveness::Running { .. }));
             let host = HostId(id.host_name());
             if !running {
-                self.cold_scrollback(id, &host, matches!(view, View::Session(sid) if sid == id));
+                self.cold_scrollback(id, &host, wants_snapshot);
                 continue;
             }
-            let wants_snapshot = matches!(view, View::Session(sid) if sid == id)
-                && self
-                    .core
-                    .session(id)
-                    .is_some_and(|s| matches!(s.kind, SessionKind::Agent(_)));
             let lines = if wants_snapshot { Some(60) } else { Some(3) };
             if let Ok(text) = self.services.host.snapshot(&host, lines) {
                 if wants_snapshot {

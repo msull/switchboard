@@ -166,7 +166,10 @@ fn header(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord) {
                     {
                         cx.dispatch(AppAction::RestartSession(record.id));
                     }
-                    if record.kind == SessionKind::Service {
+                    // A defined service's autostart is the file's request,
+                    // shown on the Run tab; only the user's own records
+                    // carry the checkbox.
+                    if record.kind == SessionKind::Service && record.source.is_none() {
                         let mut autostart = record.autostart;
                         if ui
                             .checkbox(&mut autostart, "Autostart")
@@ -186,8 +189,10 @@ fn header(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord) {
                     }
                     let files_open = cx.core.settings().files_open;
                     if ui
-                        .selectable_label(files_open, "Files")
-                        .on_hover_text("Show the project's files beside the session (Cmd+B)")
+                        .selectable_label(files_open, "Side")
+                        .on_hover_text(
+                            "Show the project's files and its Run tab beside the session (Cmd+B, Cmd+R)",
+                        )
                         .clicked()
                     {
                         cx.dispatch(AppAction::SetFilesOpen(!files_open));
@@ -744,7 +749,7 @@ fn tool_detail(ui: &mut Ui, detail: &ToolDetail, salt: (usize, usize)) {
 }
 
 /// Read-only monospace text, selectable.
-fn code_block(ui: &mut Ui, text: &str) {
+pub(super) fn code_block(ui: &mut Ui, text: &str) {
     ui.add(
         egui::TextEdit::multiline(&mut { text })
             .code_editor()

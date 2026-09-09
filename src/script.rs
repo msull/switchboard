@@ -10,15 +10,16 @@
 //! `set-env <project> NAME=VALUE`, `set-secret <project> NAME VALUE`,
 //! `dotenv <project> on|off`, `environment <project>` (opens the dialog),
 //! `send <name> <text...>`, `interrupt <name>` (Escape to the pane),
-//! `return <name>`, `kill <name>`, `switchboard`, `sleep <secs>` (then
-//! polls).
+//! `return <name>`, `kill <name>`, `approve <name>`, `revoke <name>`
+//! (a defined command's approval), `side files|run` (the side panel's
+//! tab), `switchboard`, `sleep <secs>` (then polls).
 //! Blank lines and `#` comments are ignored; unknown lines are logged.
 
 use std::path::PathBuf;
 
 use crate::app::SwitchboardApp;
 use crate::core::{
-    AgentKind, AppAction, EnvVar, Launch, ProjectId, RecordId, SecretScope, SessionKind,
+    AgentKind, AppAction, EnvVar, Launch, ProjectId, RecordId, SecretScope, SessionKind, SideTab,
 };
 
 pub fn run(app: &mut SwitchboardApp, text: &str) {
@@ -138,6 +139,19 @@ fn step(app: &mut SwitchboardApp, w: &[&str]) -> Result<(), String> {
             let id = session(app, n)?;
             app.dispatch(AppAction::Interrupt(id));
         }
+        ["approve", n] => {
+            let id = session(app, n)?;
+            app.dispatch(AppAction::ApproveDefinition(id));
+        }
+        ["revoke", n] => {
+            let id = session(app, n)?;
+            app.dispatch(AppAction::RevokeApproval(id));
+        }
+        ["side", tab] => app.dispatch(AppAction::SetSideTab(if *tab == "run" {
+            SideTab::Run
+        } else {
+            SideTab::Files
+        })),
         ["kill", n] => {
             let id = session(app, n)?;
             app.dispatch(AppAction::KillSession(id));

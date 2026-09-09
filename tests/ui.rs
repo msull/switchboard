@@ -16,10 +16,12 @@ use switchboard::adapters::fakes::{
 };
 use switchboard::app::Services;
 use switchboard::core::{
-    Activity, AgentKind, AppAction, CardLayout, Launch, Notice, Project, ProjectEnv, ProjectId,
-    RecordId, ResumeHandle, SessionKind, SessionRecord, ThemeMode, View, Workspace,
+    Activity, AgentKind, AppAction, Approval, CardLayout, Definition, Launch, Notice, Project,
+    ProjectEnv, ProjectId, RecordId, ResumeHandle, SessionKind, SessionRecord, SideTab, ThemeMode,
+    View, Workspace,
 };
 use switchboard::ports::host::{HostId, HostStatus, Liveness};
+use switchboard::ports::store::Store;
 use switchboard::ports::transcript::{
     Activity as TranscriptActivity, ActivityKind, Conversation, ToolDetail, Turn, Usage,
 };
@@ -32,6 +34,8 @@ struct Seeded {
     server: RecordId,
     deploy: RecordId,
     agent: RecordId,
+    /// A command defined in alpha's `.switchboard/project.json`, unapproved.
+    lint: RecordId,
 }
 
 fn at(secs: u64) -> SystemTime {
@@ -88,6 +92,18 @@ fn seed(app: &mut SwitchboardApp) -> Seeded {
     server.activity = Activity::WaitingOnYou;
     server.activity_reason = Some("permission for Bash".into());
     let deploy = record(alpha.id, "deploy", SessionKind::Service, 2);
+    let mut lint = record(alpha.id, "lint", SessionKind::Command, 3);
+    lint.launch = Launch::Command {
+        command: "cargo clippy".into(),
+        shell: "/bin/zsh".into(),
+    };
+    lint.source = Some(Definition {
+        name: "lint".into(),
+        hash: "h1".into(),
+        env: vec!["RUSTFLAGS".into()],
+        autostart: false,
+        orphaned: false,
+    });
     let agent = record(
         beta.id,
         "codex-agent",
@@ -101,6 +117,7 @@ fn seed(app: &mut SwitchboardApp) -> Seeded {
         server: server.id,
         deploy: deploy.id,
         agent: agent.id,
+        lint: lint.id,
     };
     let host = vec![
         HostStatus {
@@ -122,7 +139,7 @@ fn seed(app: &mut SwitchboardApp) -> Seeded {
         },
     ];
     let mut alpha_ws = Workspace::new(alpha);
-    alpha_ws.sessions = vec![build, server, deploy];
+    alpha_ws.sessions = vec![build, server, deploy, lint];
     let mut beta_ws = Workspace::new(beta);
     beta_ws.sessions = vec![agent];
     app.core_mut_for_seeding()
@@ -492,9 +509,8 @@ fn session_view_toggles_the_file_side_with_a_preview() {
     let (_dir, pid, sid) = file_project(&mut harness);
     showing(&mut harness, View::Session(sid));
     assert!(harness.query_by_label("Find").is_none());
-    // The toggle is a button; the side's heading has the same text.
     let toggle = |harness: &mut Harness<'static, SwitchboardApp>| {
-        harness.get_by_role_and_label(Role::Button, "Files").click();
+        harness.get_by_role_and_label(Role::Button, "Side").click();
         harness.run_steps(2);
     };
     toggle(&mut harness);
@@ -568,6 +584,71 @@ fn quick_switcher_opens_the_best_match_on_enter() {
     assert!(actions(&harness).contains(&AppAction::ShowSession(ids.server)));
     assert_eq!(harness.state().core().view(), View::Session(ids.server));
     assert!(harness.state().ui_state.palette.is_none());
+}
+
+#[test]
+fn run_tab_lists_definitions_and_approves() {
+    let (mut harness, ids) = harness();
+    showing(&mut harness, View::Board(ids.alpha));
+    assert!(harness.query_by_label("cargo clippy").is_none());
+    click(&mut harness, "Run");
+    assert!(actions(&harness).contains(&AppAction::SetSideTab(SideTab::Run)));
+    harness.get_by_label("cargo clippy");
+    harness.get_by_label_contains("RUSTFLAGS (not defined)");
+    harness.get_by_label("needs approval");
+    // The user's own service is listed too (also on the board's cards).
+    assert!(harness.query_all_by_label("deploy").next().is_some());
+    click(&mut harness, "Approve");
+    assert!(actions(&harness).contains(&AppAction::ApproveDefinition(ids.lint)));
+    let lint = harness.state().core().session(ids.lint).unwrap().clone();
+    assert_eq!(lint.approved_hash.as_deref(), Some("h1"));
+    assert_eq!(lint.approval(), Approval::Approved);
+    harness.get_by_label("approved");
+    click(&mut harness, "Revoke");
+    assert!(actions(&harness).contains(&AppAction::RevokeApproval(ids.lint)));
+    harness.get_by_label("needs approval");
+    // Back to the files.
+    click(&mut harness, "Files");
+    harness.get_by_label("Find");
+}
+
+#[test]
+fn cmd_r_opens_the_run_tab_beside_a_session() {
+    let (mut harness, ids) = harness();
+    showing(&mut harness, View::Session(ids.server));
+    assert!(harness.query_by_label("cargo clippy").is_none());
+    harness.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::R);
+    harness.run_steps(2);
+    let dispatched = actions(&harness);
+    assert!(dispatched.contains(&AppAction::SetSideTab(SideTab::Run)));
+    assert!(dispatched.contains(&AppAction::SetFilesOpen(true)));
+    harness.get_by_label("cargo clippy");
+    // An unapproved command is refused even if something asks for it.
+    harness
+        .state_mut()
+        .dispatch(AppAction::RestartSession(ids.lint));
+    harness.run_steps(2);
+    harness.get_by_label_contains("not approved");
+}
+
+#[test]
+fn exited_command_shows_its_last_output() {
+    let (mut harness, ids) = harness();
+    let dir = MemoryStore::default().data_dir().join("scrollback");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join(format!("{}.vt", ids.deploy.host_name()));
+    std::fs::write(&path, "npm ERR! deploy failed\n").unwrap();
+    showing(&mut harness, View::Session(ids.deploy));
+    harness.state_mut().poll_now();
+    harness.run_steps(2);
+    harness.get_by_label_contains("last output kept on disk");
+    assert!(
+        harness
+            .query_all_by_value("npm ERR! deploy failed")
+            .next()
+            .is_some()
+    );
+    std::fs::remove_file(path).unwrap();
 }
 
 #[test]
@@ -948,7 +1029,7 @@ fn a_file_row_dragged_onto_the_message_box_adds_its_path() {
     let (mut harness, _) = harness();
     let (dir, _pid, sid) = file_project(&mut harness);
     showing(&mut harness, View::Session(sid));
-    harness.get_by_role_and_label(Role::Button, "Files").click();
+    harness.get_by_role_and_label(Role::Button, "Side").click();
     harness.run_steps(2);
     let from = harness.get_by_label("  README.md").rect().center();
     let to = harness.get_by_label("Message").rect().center();
@@ -1003,7 +1084,7 @@ fn shift_click_the_menu_and_the_pane_put_a_path_in_the_message() {
     );
 
     showing(&mut harness, View::Session(sid));
-    harness.get_by_role_and_label(Role::Button, "Files").click();
+    harness.get_by_role_and_label(Role::Button, "Side").click();
     harness.run_steps(2);
     harness
         .get_by_label("  README.md")

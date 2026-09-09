@@ -16,6 +16,7 @@ pub mod document;
 pub mod env;
 pub mod files;
 pub mod palette;
+mod run;
 mod session;
 mod switchboard;
 mod switcher;
@@ -26,7 +27,7 @@ use std::time::SystemTime;
 use egui::{Key, Modifiers, Ui};
 
 use crate::app::{Services, SwitchboardApp};
-use crate::core::{AppAction, AppCore, ProjectId, RecordId, ThemeMode, View};
+use crate::core::{AppAction, AppCore, ProjectId, RecordId, SideTab, ThemeMode, View};
 use crate::ports::transcript::Conversation;
 
 pub use dialogs::{AddProjectDraft, NewSessionDraft};
@@ -56,6 +57,9 @@ pub struct UiState {
     pub expand_applied: Option<bool>,
     /// Show the raw pane as a panel under an agent's conversation.
     pub terminal_open: bool,
+    /// Variable names the project's environment defines, for the Run
+    /// tab's "not defined" marks: project, when resolved, names.
+    pub run_env: Option<(ProjectId, std::time::Instant, Vec<String>)>,
     /// Layout cache for the markdown in final responses.
     pub markdown: egui_commonmark::CommonMarkCache,
     pub add_project: Option<AddProjectDraft>,
@@ -95,6 +99,7 @@ impl Default for UiState {
             expand_activity: false,
             expand_applied: None,
             terminal_open: false,
+            run_env: None,
             markdown: egui_commonmark::CommonMarkCache::default(),
             add_project: None,
             new_session: None,
@@ -191,7 +196,21 @@ fn draw_frame(cx: &mut DrawCtx<'_>, ui: &mut Ui) {
         egui::Panel::right("files")
             .resizable(true)
             .default_size(340.0)
-            .show(ui, |ui| files::show(cx, ui, pid, inline, message));
+            .show(ui, |ui| {
+                let tab = cx.core.settings().side_tab;
+                ui.horizontal(|ui| {
+                    for t in [SideTab::Files, SideTab::Run] {
+                        if ui.selectable_label(tab == t, t.label()).clicked() && tab != t {
+                            cx.dispatch(AppAction::SetSideTab(t));
+                        }
+                    }
+                });
+                ui.separator();
+                match tab {
+                    SideTab::Files => files::show(cx, ui, pid, inline, message),
+                    SideTab::Run => run::show(cx, ui, pid),
+                }
+            });
     }
     egui::CentralPanel::default().show(ui, |ui| match view {
         View::Switchboard => switchboard::show(cx, ui),
@@ -206,9 +225,9 @@ fn draw_frame(cx: &mut DrawCtx<'_>, ui: &mut Ui) {
 }
 
 /// Esc goes back, Cmd+1..9 switch project, Cmd+0 shows the switchboard,
-/// Cmd+K opens the quick-switcher, Cmd+B toggles the file side of a
-/// session, Cmd+T the raw pane under a conversation, and Cmd+. sends
-/// Escape to the session's terminal.
+/// Cmd+K opens the quick-switcher, Cmd+B toggles the side panel of a
+/// session, Cmd+R shows its Run tab, Cmd+T the raw pane under a
+/// conversation, and Cmd+. sends Escape to the session's terminal.
 /// Esc is left alone while a text field, a dialog, or the terminal has
 /// focus.
 fn keyboard(cx: &mut DrawCtx<'_>, ui: &Ui, view: &View) {
@@ -249,6 +268,16 @@ fn keyboard(cx: &mut DrawCtx<'_>, ui: &Ui, view: &View) {
         && ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::T))
     {
         cx.state.terminal_open = !cx.state.terminal_open;
+    }
+    // Cmd+R shows the Run tab, opening the side beside a session if it
+    // is closed; Cmd+B keeps toggling the side as a whole.
+    if matches!(view, View::Session(_) | View::Board(_))
+        && ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::R))
+    {
+        cx.dispatch(AppAction::SetSideTab(SideTab::Run));
+        if matches!(view, View::Session(_)) && !cx.core.settings().files_open {
+            cx.dispatch(AppAction::SetFilesOpen(true));
+        }
     }
 
     if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::Num0)) {
