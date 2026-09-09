@@ -226,9 +226,10 @@ fn draw_frame(cx: &mut DrawCtx<'_>, ui: &mut Ui) {
 }
 
 /// Esc goes back, Cmd+1..9 switch project, Cmd+0 shows the switchboard,
-/// Cmd+K opens the quick-switcher, Cmd+B toggles the side panel of a
-/// session, Cmd+R shows its Run tab, Cmd+T the raw pane under a
-/// conversation, and Cmd+. sends Escape to the session's terminal.
+/// Cmd+K opens the quick-switcher, Cmd+B and Cmd+R show the Files and
+/// Run tabs of the side panel (again to close it beside a session),
+/// Cmd+T the raw pane under a conversation, and Cmd+. sends Escape to
+/// the session's terminal.
 /// Esc is left alone while a text field, a dialog, or the terminal has
 /// focus.
 fn keyboard(cx: &mut DrawCtx<'_>, ui: &Ui, view: &View) {
@@ -253,10 +254,28 @@ fn keyboard(cx: &mut DrawCtx<'_>, ui: &Ui, view: &View) {
     if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::K)) {
         cx.state.palette = Some(palette::PaletteDraft::default());
     }
-    if matches!(view, View::Session(_))
-        && ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::B))
-    {
-        cx.dispatch(AppAction::SetFilesOpen(!cx.core.settings().files_open));
+    // Cmd+B and Cmd+R each name a tab of the side panel: they show it,
+    // opening the side beside a session if it is closed, and a second
+    // press on the tab already showing closes the side again. Boards
+    // always have the side, so there the keys only switch tabs.
+    for (key, tab) in [(Key::B, SideTab::Files), (Key::R, SideTab::Run)] {
+        if !matches!(view, View::Session(_) | View::Board(_))
+            || !ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, key))
+        {
+            continue;
+        }
+        let settings = cx.core.settings();
+        let showing = settings.side_tab == tab;
+        if showing && settings.files_open && matches!(view, View::Session(_)) {
+            cx.dispatch(AppAction::SetFilesOpen(false));
+            continue;
+        }
+        if !showing {
+            cx.dispatch(AppAction::SetSideTab(tab));
+        }
+        if matches!(view, View::Session(_)) && !settings.files_open {
+            cx.dispatch(AppAction::SetFilesOpen(true));
+        }
     }
     // Cmd+. is the macOS "stop" key; Escape already means Back here and
     // would also blur the message box.
@@ -270,17 +289,6 @@ fn keyboard(cx: &mut DrawCtx<'_>, ui: &Ui, view: &View) {
     {
         cx.state.terminal_open = !cx.state.terminal_open;
     }
-    // Cmd+R shows the Run tab, opening the side beside a session if it
-    // is closed; Cmd+B keeps toggling the side as a whole.
-    if matches!(view, View::Session(_) | View::Board(_))
-        && ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::R))
-    {
-        cx.dispatch(AppAction::SetSideTab(SideTab::Run));
-        if matches!(view, View::Session(_)) && !cx.core.settings().files_open {
-            cx.dispatch(AppAction::SetFilesOpen(true));
-        }
-    }
-
     if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::Num0)) {
         cx.dispatch(AppAction::ShowSwitchboard);
     }

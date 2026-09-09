@@ -655,12 +655,27 @@ fn cmd_r_opens_the_run_tab_beside_a_session() {
     let (mut harness, ids) = harness();
     showing(&mut harness, View::Session(ids.server));
     assert!(harness.query_by_label("cargo clippy").is_none());
-    harness.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::R);
-    harness.run_steps(2);
+    let press = |harness: &mut Harness<'static, SwitchboardApp>, key| {
+        harness.key_press_modifiers(egui::Modifiers::COMMAND, key);
+        harness.run_steps(2);
+    };
+    press(&mut harness, egui::Key::R);
     let dispatched = actions(&harness);
     assert!(dispatched.contains(&AppAction::SetSideTab(SideTab::Run)));
     assert!(dispatched.contains(&AppAction::SetFilesOpen(true)));
     harness.get_by_label("cargo clippy");
+    // Cmd+B switches the open side to Files; a second Cmd+B closes it,
+    // and Cmd+R then reopens it straight on Run.
+    press(&mut harness, egui::Key::B);
+    harness.get_by_label("Find");
+    assert!(harness.query_by_label("cargo clippy").is_none());
+    press(&mut harness, egui::Key::B);
+    assert!(harness.query_by_label("Find").is_none());
+    assert!(!harness.state().core().settings().files_open);
+    press(&mut harness, egui::Key::R);
+    harness.get_by_label("cargo clippy");
+    press(&mut harness, egui::Key::R);
+    assert!(harness.query_by_label("cargo clippy").is_none());
     // An unapproved command is refused even if something asks for it.
     harness
         .state_mut()
