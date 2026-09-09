@@ -22,11 +22,12 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use crate::core::env::SecretScope;
 use crate::core::model::{
     Activity, AgentKind, CardState, EnvVar, Launch, Project, ProjectEnv, ProjectId, RecordId,
-    ResumeHandle, SessionKind, SessionRecord, Settings, ThemeMode, Workspace,
+    ResumeHandle, SessionKind, SessionRecord, Settings, SideTab, ThemeMode, Workspace,
 };
 use crate::ports::agent::AgentLaunch;
 use crate::ports::events::SessionEvent;
 use crate::ports::host::{HostId, HostStatus, Liveness, SpawnSpec};
+use crate::ports::project_config::ProjectConfig;
 use crate::ports::store::{Loaded, StoreError};
 
 /// The current time as the core sees it.
@@ -127,6 +128,18 @@ pub enum AppAction {
     SetExclusive(bool),
     /// Show or hide the file side next to sessions.
     SetFilesOpen(bool),
+    /// Which tab the side panel shows.
+    SetSideTab(SideTab),
+    /// The project's `.switchboard/project.json` was read (or is absent,
+    /// or unusable). Entries become records that cannot run until
+    /// approved.
+    ProjectConfigRead {
+        project: ProjectId,
+        result: Result<Option<ProjectConfig>, String>,
+    },
+    /// The user approved the record's current definition.
+    ApproveDefinition(RecordId),
+    RevokeApproval(RecordId),
     /// Type `text` into the session's terminal and press Enter, as if the
     /// user had typed it there.
     SendInput {
@@ -221,6 +234,12 @@ pub enum Effect {
         host: HostId,
         bytes: Vec<u8>,
     },
+    /// Read `<root>/.switchboard/project.json`; answered with
+    /// `ProjectConfigRead`.
+    ReadProjectConfig {
+        project: ProjectId,
+        root: PathBuf,
+    },
     OpenPath(PathBuf),
     /// Drop what the host kept for a removed record (scrollback on disk).
     Forget(HostId),
@@ -280,6 +299,17 @@ impl Out {
 /// How long a success notice stays up.
 const NOTICE_TTL: Duration = Duration::from_secs(4);
 
+/// The state of a project's definition file as last read.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ConfigStatus {
+    /// A file exists (usable or not).
+    pub present: bool,
+    /// Entries that were skipped, and why.
+    pub warnings: Vec<String>,
+    /// The file could not be used at all.
+    pub error: Option<String>,
+}
+
 /// Top-level state. Plain data and pure methods only.
 ///
 /// Fields are `pub(super)` so the sibling transition modules can reach
@@ -295,6 +325,9 @@ pub struct AppCore {
     pub(super) host: Vec<HostStatus>,
     /// Records with a launch or resume in flight (idempotent return).
     pub(super) in_flight: Vec<Flight>,
+    /// What the last read of each project's definition file said.
+    /// Transient: it is re-read at startup.
+    pub(super) config_status: Vec<(ProjectId, ConfigStatus)>,
     /// Codex launches are serialized: at most one discovery pending.
     pub(super) codex_pending: Option<RecordId>,
     /// Codex records waiting for their turn to launch, in order.
@@ -320,7 +353,7 @@ impl AppCore {
     pub fn dispatch(&mut self, action: AppAction, now: Clock) -> Vec<Effect> {
         let mut out = Out::default();
         match action {
-            AppAction::StoreLoaded(result) => self.store_loaded(result),
+            AppAction::StoreLoaded(result) => self.store_loaded(result, &mut out),
             AppAction::SaveFinished(_, Err(e)) => self.error(format!("save failed: {e}")),
             AppAction::SaveFinished(_, Ok(())) => {}
             AppAction::Failed(text) => self.error(text),
@@ -344,7 +377,11 @@ impl AppCore {
             | AppAction::DeleteSecret { .. }
             | AppAction::SetTheme(_)
             | AppAction::SetExclusive(_)
-            | AppAction::SetFilesOpen(_) => self.files_and_settings(action, now, &mut out),
+            | AppAction::SetFilesOpen(_)
+            | AppAction::SetSideTab(_)
+            | AppAction::ProjectConfigRead { .. }
+            | AppAction::ApproveDefinition(_)
+            | AppAction::RevokeApproval(_) => self.files_and_settings(action, now, &mut out),
             AppAction::Back => drop(self.view_stack.pop()),
             AppAction::DismissNotice => {
                 if !self.notices.is_empty() {
@@ -378,24 +415,12 @@ impl AppCore {
             }),
             AppAction::ReturnToSession(id) => self.return_to_session(id, now, &mut out),
             AppAction::SendInput { id, text } => {
-                if let Some(host) = self.running_host(id) {
-                    out.push(Effect::SendInput { host, text });
-                } else {
-                    let name = self.session_name(id);
-                    self.error(format!("{name} is not running; return to it first"));
-                }
+                self.aim_at_pane(id, &mut out, |host| Effect::SendInput { host, text });
             }
-            AppAction::Interrupt(id) => {
-                if let Some(host) = self.running_host(id) {
-                    out.push(Effect::SendKeys {
-                        host,
-                        bytes: vec![0x1b],
-                    });
-                } else {
-                    let name = self.session_name(id);
-                    self.error(format!("{name} is not running; nothing to interrupt"));
-                }
-            }
+            AppAction::Interrupt(id) => self.aim_at_pane(id, &mut out, |host| Effect::SendKeys {
+                host,
+                bytes: vec![0x1b],
+            }),
             AppAction::KillSession(id) => {
                 if let Some(status) = self.host_status(id) {
                     out.push(Effect::Kill(status.id.clone()));
@@ -501,6 +526,13 @@ impl AppCore {
             last_active: now.wall,
         }));
         out.touch(id);
+        out.push(super::definitions::read_config(
+            id,
+            self.workspaces
+                .last()
+                .map(|w| w.project.root.clone())
+                .unwrap_or_default(),
+        ));
         self.view_stack.push(View::Board(id));
     }
 
@@ -696,6 +728,12 @@ impl AppCore {
             AppAction::SetTheme(theme) => self.update_settings(out, |s| s.theme = theme),
             AppAction::SetExclusive(on) => self.update_settings(out, |s| s.exclusive = on),
             AppAction::SetFilesOpen(on) => self.update_settings(out, |s| s.files_open = on),
+            AppAction::SetSideTab(tab) => self.update_settings(out, |s| s.side_tab = tab),
+            AppAction::ProjectConfigRead { project, result } => {
+                self.project_config_read(project, result, now, out);
+            }
+            AppAction::ApproveDefinition(id) => self.approve_definition(id, out),
+            AppAction::RevokeApproval(id) => self.revoke_approval(id, out),
             AppAction::StoreLoaded(_)
             | AppAction::SaveFinished(..)
             | AppAction::HostUnavailable(_)
@@ -745,11 +783,19 @@ impl AppCore {
         let name = id.host_name();
         self.host.iter().find(|h| h.id.0 == name)
     }
-    /// The host id of a record whose pane is running right now.
-    fn running_host(&self, id: RecordId) -> Option<HostId> {
-        self.host_status(id)
+    /// Emit an effect aimed at a record's running pane, or a notice when
+    /// there is none.
+    fn aim_at_pane(&mut self, id: RecordId, out: &mut Out, effect: impl FnOnce(HostId) -> Effect) {
+        let host = self
+            .host_status(id)
             .filter(|h| matches!(h.liveness, Liveness::Running { .. }))
-            .map(|h| h.id.clone())
+            .map(|h| h.id.clone());
+        if let Some(host) = host {
+            out.push(effect(host));
+        } else {
+            let name = self.session_name(id);
+            self.error(format!("{name} is not running; return to it first"));
+        }
     }
     /// Derived card state for a record: host liveness first, then activity.
     #[must_use]
@@ -780,6 +826,39 @@ impl AppCore {
             Some(Liveness::Missing) | None if record.not_resumable => CardState::NotResumable,
             Some(Liveness::Missing) | None => CardState::NotRunning,
         }
+    }
+    /// What the last read of a project's definition file found; `None`
+    /// before the first read.
+    #[must_use]
+    pub fn config_status(&self, project: ProjectId) -> Option<&ConfigStatus> {
+        self.config_status
+            .iter()
+            .find(|(p, _)| *p == project)
+            .map(|(_, s)| s)
+    }
+    /// A project's commands and services: services first, then by the
+    /// saved order. These are the Run tab's and run bar's entries.
+    #[must_use]
+    pub fn run_entries(&self, project: ProjectId) -> Vec<&SessionRecord> {
+        let mut entries: Vec<&SessionRecord> = self
+            .workspace(project)
+            .map(|w| {
+                w.sessions
+                    .iter()
+                    .filter(|s| matches!(s.kind, SessionKind::Command | SessionKind::Service))
+                    .collect()
+            })
+            .unwrap_or_default();
+        entries.sort_by_key(|s| (s.kind != SessionKind::Service, s.layout.order));
+        entries
+    }
+    /// A project's agents and shells: the board's cards, waiting first.
+    #[must_use]
+    pub fn board_sessions(&self, project: ProjectId) -> Vec<&SessionRecord> {
+        self.sessions_sorted(project)
+            .into_iter()
+            .filter(|s| matches!(s.kind, SessionKind::Agent(_) | SessionKind::Shell))
+            .collect()
     }
     /// The card state as text, with the reason when the session waits:
     /// "waiting on you: permission for Bash".

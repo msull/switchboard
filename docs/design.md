@@ -220,13 +220,15 @@ never run anything on its own.
 - **Milestone 1: private state only.** Records live under Application
   Support and are written only by Switchboard on this machine. Nothing in
   a project directory is executed or even parsed as configuration.
-- **Later, optional shareable config.** A committed
-  `<root>/.switchboard/project.json` may carry saved commands, service
-  definitions, env profile names (never values), and pinned documents. It
+- **Shareable config (built 2026-09-08).** A committed
+  `<root>/.switchboard/project.json` carries command and service
+  definitions with the variable names they expect (never values). It
   never carries transcripts, secrets, or live-session state. Its contents
-  are shown, not run, until the user approves them; approval records a
-  hash, and any change or new entry requires approval again. Autostart
-  from shared config is never honored without that approval.
+  are shown, not run, until the user approves each entry; approval
+  records a hash of the entry on the record, and any change or new entry
+  requires approval again. Autostart from shared config is never honored
+  without that approval. The file is capped at 64 KiB and refused when
+  it is a symlink; the README documents its schema.
 - **Secrets** come from the Keychain and from `.env` files the user
   already owns; Switchboard never writes them elsewhere. Scrollback can
   contain secrets that a process printed; it is stored privately, capped,
@@ -443,8 +445,9 @@ Follows the template layering. Nothing below touches egui.
      misapplied;
    - two Codex sessions launched at the same moment in the same cwd each
      resume the correct conversation;
-   - a hostile `<root>/.switchboard/` directory containing commands and
-     an autostart service is ignored entirely.
+   - a hostile `<root>/.switchboard/project.json` with an autostart
+     service is listed and never run until approved; approving, editing
+     the file, and the dropped approval are exercised end to end.
 
    Restart the app, reboot the machine: everything remains listed, and
    agent conversations remain resumable only while the provider retains
@@ -670,10 +673,21 @@ Items are the ids in `docs/feedback-2026-09.md`.
   stored with the activity (`activity_reason`, schema v2, older files
   load with it empty). States that fire no hook are still invisible
   (pane scraping is an open question).
+- **D3, D4 Definitions and approval.** `<root>/.switchboard/project.json`
+  (schema in the README) is read at startup, when a project is added,
+  and every 5 s by mtime. Each entry becomes a record with a `source`
+  (name, content hash, env names, autostart request) that cannot run
+  until approved; `approved_hash` on the record (schema v3) must equal
+  the current hash, so an edit drops the approval and reverting it
+  restores it. Entries removed from the file are orphaned, not deleted.
+  Parsing is strict per entry and tolerant per file, so one typo yields
+  one warning naming the entry. The gate test covers list, approve,
+  autostart after a restart, and the dropped approval.
 
 ## Open questions
 
-- When the shareable project config arrives, is a hash-and-approve flow
-  enough, or should shared commands run in a visibly sandboxed way?
+- Shared project config runs with a hash-and-approve flow and no
+  sandbox. Should approved commands be restricted to the variables they
+  list instead of receiving the whole project environment?
 - Notes editor in scope, or "open in editor"? Leaning open in editor.
 - Multiple machines: sync the project list early? Leaning no.

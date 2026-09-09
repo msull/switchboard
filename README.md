@@ -21,14 +21,47 @@ for agent sessions, and `claude` and/or `codex` on `PATH`. The app tells
 you at the bottom of the window when tmux is missing.
 
 Data lives in `~/Library/Application Support/Switchboard/`: one JSON file
-per project under `projects/` (with a `.bak` of the previous version),
+per project under `projects/` (with a `.bak` of the previous version;
+approvals of defined commands live inside these records),
 `settings.json` (theme, exclusive mode, editor, global variables, file
-side shown next to sessions), the
+side shown next to sessions and its tab), the
 tmux config and socket name, `claude-hooks.json` (passed to Claude Code
 with `--settings`), `events.log` (the hook event log), `wake.sock`, and
 `scrollback/`. Sessions run on a private tmux server (`tmux -L
 switchboard`), never on your default one. Nothing is written into a
 project directory.
+
+### Defining commands and services
+
+A project can declare its commands and services in
+`<root>/.switchboard/project.json`, so an agent working in the project
+can set them up for you:
+
+```json
+{
+  "version": 1,
+  "commands": [
+    { "name": "rebundle", "command": "./scripts/bundle.sh" },
+    { "name": "lint", "command": "cargo clippy", "cwd": "crates/app", "env": ["RUSTFLAGS"] }
+  ],
+  "services": [
+    { "name": "web", "command": "npm run dev", "autostart": true }
+  ]
+}
+```
+
+Names are 1 to 64 characters and unique across both lists; `cwd` is
+relative to the project root and may not use `..`; `env` lists the
+variable names the command expects (values come from the project's
+environment, never from this file). An entry with an unknown field or
+a bad value is skipped with a warning that names it; the rest still
+load. The file is limited to 64 KiB and must not be a symlink.
+
+Nothing in the file runs until you approve the entry in the Run tab,
+where you see the command, its directory, and the variables it asks
+for. Any change to an entry drops its approval; `autostart` is honored
+only for approved services. Switchboard never writes into
+`.switchboard/`.
 
 ## App bundle
 
@@ -78,9 +111,10 @@ src/core/
   action.rs              AppAction, Effect, Clock, AppCore::dispatch, read model for the UI
   reconcile.rs           StoreLoaded / HostListed: card states, autostart services, spawn specs
   sessions.rs            launch, idempotent return, resume preflight, Codex serialization
+  definitions.rs         .switchboard/project.json entries -> records; hash-keyed approval
   events.rs              hook events -> record activity (matched by record id, ordered by time)
   tests.rs               state-transition tests for the core
-src/ports/               traits: store, host, events, agent, opener, transcript, secrets
+src/ports/               traits: store, host, events, agent, opener, transcript, secrets, project_config
 src/adapters/
   store.rs               JSON store: atomic writes, .bak, flock
   tmux.rs                tmux process host on the private socket
@@ -90,6 +124,7 @@ src/adapters/
   git.rs                 branches, change counts, per-path status; finds repos one or two dirs down
   keychain.rs            secrets as generic-password items in the login Keychain (tests use a temp keychain)
   dotenv.rs              .env parser (opt-in per project) and .env.example names
+  project_config.rs      reads and validates .switchboard/project.json (capped, no symlinks)
   scrollback.rs          read the pipe-pane stream back as plain text (cold sessions)
   agents.rs              Claude Code / Codex launch, resume, preflight, discovery
   transcript.rs          Claude Code transcript (JSONL) -> Conversation turns

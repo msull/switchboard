@@ -47,8 +47,13 @@ outside a `cfg(target_os = "macos")` table may need macOS to compile.
   `switchboard-test-*` socket. Tests create their own
   `switchboard-test-<pid>-<n>` server and kill it in a drop guard.
 - Never write into a project directory's `.claude/` or `.switchboard/`.
-  Nothing in a project directory is executed or parsed as config; a
-  hostile `.switchboard/` must be ignored entirely.
+  The one thing read from a project directory as configuration is
+  `<root>/.switchboard/project.json`: its entries are parsed and listed
+  but never executed until the user approves each one in the Run tab.
+  Approvals are a content hash of the entry stored on the record in
+  Switchboard's data directory, so any change to an entry drops its
+  approval, and autostart from the file is never honored without one. A
+  hostile file can therefore only put unapproved entries on the Run tab.
 - Never modify `~/.claude/settings.json`. Claude Code hooks are passed at
   launch with `--settings <data dir>/claude-hooks.json`.
 - Real agent runs use `--model haiku`-class settings and a one-turn
@@ -57,7 +62,8 @@ outside a `cfg(target_os = "macos")` table may need macOS to compile.
 - Secret values never reach a record, a log line, a shell command line,
   or a tool result. They travel as tmux `-e` flags; log names only.
 - Agents are never resumed automatically (a resume costs money). The
-  startup reconcile launches only trusted `autostart` services.
+  startup reconcile launches only `autostart` services that are
+  user-created or approved (`SessionRecord::effective_autostart`).
 
 ## Architecture
 

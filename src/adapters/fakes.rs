@@ -12,6 +12,7 @@ use crate::ports::agent::{AgentLaunch, AgentLauncher};
 use crate::ports::events::{EventSource, SessionEvent};
 use crate::ports::host::{HostId, HostInfo, HostStatus, ProcessHost, SpawnSpec};
 use crate::ports::opener::Opener;
+use crate::ports::project_config::{ProjectConfig, ProjectConfigReader};
 use crate::ports::store::{Loaded, Store, StoreError};
 use crate::ports::transcript::{Conversation, TranscriptReader};
 
@@ -280,5 +281,26 @@ impl TranscriptReader for FakeTranscripts {
     fn modified(&self, _handle: &ResumeHandle) -> Option<SystemTime> {
         // A fixed time: the fake never changes, so the app reads it once.
         self.conversation.as_ref().map(|_| std::time::UNIX_EPOCH)
+    }
+}
+
+/// Scripted definition file: `config` is what every project's read
+/// returns (`None` for no file); `error` wins when set.
+#[derive(Debug, Default)]
+pub struct FakeProjectConfig {
+    pub config: Option<ProjectConfig>,
+    pub error: Option<String>,
+    pub modified: Option<SystemTime>,
+}
+
+impl ProjectConfigReader for FakeProjectConfig {
+    fn read(&self, _root: &Path) -> Result<Option<ProjectConfig>, String> {
+        match &self.error {
+            Some(e) => Err(e.clone()),
+            None => Ok(self.config.clone()),
+        }
+    }
+    fn modified(&self, _root: &Path) -> Option<SystemTime> {
+        self.modified
     }
 }

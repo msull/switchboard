@@ -11,7 +11,8 @@ use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;
 use switchboard::SwitchboardApp;
 use switchboard::adapters::fakes::{
-    FakeAgents, FakeEvents, FakeHost, FakeOpener, FakeSecrets, FakeTranscripts, MemoryStore,
+    FakeAgents, FakeEvents, FakeHost, FakeOpener, FakeProjectConfig, FakeSecrets, FakeTranscripts,
+    MemoryStore,
 };
 use switchboard::app::Services;
 use switchboard::core::{
@@ -72,6 +73,8 @@ fn record(project: ProjectId, name: &str, kind: SessionKind, order: u32) -> Sess
         last_exit: None,
         not_resumable: false,
         scrollback: None,
+        source: None,
+        approved_hash: None,
     }
 }
 
@@ -148,6 +151,7 @@ fn harness_full(
         opener: Box::new(opener),
         transcripts: Box::new(FakeTranscripts::default()),
         secrets: Box::new(secrets),
+        project_config: Box::new(FakeProjectConfig::default()),
         wake: None,
     };
     let mut harness = Harness::builder()
@@ -1086,6 +1090,7 @@ fn polling_reads_the_transcript_into_the_ui_state() {
             conversation: Some(two_turns()),
         }),
         secrets: Box::new(FakeSecrets::default()),
+        project_config: Box::new(FakeProjectConfig::default()),
         wake: None,
     };
     let mut harness = Harness::builder()

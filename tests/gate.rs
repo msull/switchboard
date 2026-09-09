@@ -38,13 +38,15 @@ use switchboard::SwitchboardApp;
 use switchboard::adapters::agents::Agents;
 use switchboard::adapters::fakes::{FakeOpener, FakeSecrets};
 use switchboard::adapters::hooks::{HookLog, unix_millis, write_hook_settings};
+use switchboard::adapters::project_config::FileConfigReader;
 use switchboard::adapters::store::JsonStore;
 use switchboard::adapters::tmux::TmuxHost;
 use switchboard::adapters::transcript::ClaudeTranscripts;
 use switchboard::app::Services;
 use switchboard::core::{
-    Activity, AgentKind, AppAction, AppCore, CardLayout, CardState, Clock, Effect, Launch, Project,
-    ProjectEnv, ProjectId, RecordId, ResumeHandle, SessionKind, SessionRecord, Workspace,
+    Activity, AgentKind, AppAction, AppCore, Approval, CardLayout, CardState, Clock, Effect,
+    Launch, Project, ProjectEnv, ProjectId, RecordId, ResumeHandle, SessionKind, SessionRecord,
+    Workspace,
 };
 use switchboard::ports::agent::{AgentLaunch, AgentLauncher};
 use switchboard::ports::events::{EventKind, EventSource, SessionEvent};
@@ -113,6 +115,7 @@ impl Gate {
             opener: Box::new(self.opener.clone()),
             transcripts: Box::new(ClaudeTranscripts),
             secrets: Box::new(FakeSecrets::default()),
+            project_config: Box::new(FileConfigReader::new()),
             wake: None,
         })
     }
@@ -290,6 +293,8 @@ fn record(project: ProjectId, name: &str, kind: SessionKind, cwd: &Path) -> Sess
         last_exit: None,
         not_resumable: false,
         scrollback: None,
+        source: None,
+        approved_hash: None,
     }
 }
 
@@ -900,36 +905,31 @@ fn corrupt_record_recovers_from_backup_with_notice() {
     assert!(!app.core().read_only());
 }
 
-// ---- gate item 8: hostile project-local config is ignored ----
+// ---- gate item 8: project-local config is listed, never run unapproved ----
 
 /// Proves: a `<root>/.switchboard/project.json` with an autostart
-/// service is never read, on first add or on a later reconcile. Nothing
-/// under a project root is parsed as configuration in Milestone 1.
+/// service is listed as a record that cannot run, on first add and on a
+/// later restart; approving it makes the next reconcile start it; an
+/// edit to the file drops the approval again; and Switchboard never
+/// writes into `.switchboard/`.
 #[test]
-fn hostile_project_config_is_ignored() {
+fn project_config_is_listed_but_never_run_until_approved() {
     let Some(gate) = Gate::new() else { return };
     let root = gate.work_dir("hostile");
     let marker = gate.tmp.path().join("pwned");
-    let hostile = Workspace {
-        schema_version: 1,
-        project: project(&root),
-        sessions: vec![SessionRecord {
-            kind: SessionKind::Service,
-            launch: Launch::Command {
-                command: format!("touch {}", marker.display()),
-                shell: "/bin/sh".into(),
-            },
-            autostart: true,
-            ..record(ProjectId::new(), "evil", SessionKind::Service, &root)
-        }],
-    };
     let dir = root.join(".switchboard");
     fs::create_dir_all(&dir).unwrap();
-    fs::write(
-        dir.join("project.json"),
-        serde_json::to_vec_pretty(&hostile).unwrap(),
-    )
-    .unwrap();
+    let file = dir.join("project.json");
+    let write = |command: &str| {
+        fs::write(
+            &file,
+            format!(
+                r#"{{"version":1,"services":[{{"name":"evil","command":"{command}","autostart":true}}]}}"#
+            ),
+        )
+        .unwrap();
+    };
+    write(&format!("touch {}", marker.display()));
 
     let mut app = gate.started();
     let project = add_project(&mut app, &root);
@@ -937,20 +937,79 @@ fn hostile_project_config_is_ignored() {
         app.poll_now();
         std::thread::sleep(QUICK);
     }
-    assert!(app.core().workspace(project).unwrap().sessions.is_empty());
+    let listed = |app: &SwitchboardApp| {
+        app.core()
+            .workspace(project)
+            .unwrap()
+            .sessions
+            .iter()
+            .find(|s| s.name == "evil")
+            .cloned()
+            .expect("the entry is listed")
+    };
+    let evil = listed(&app);
+    assert_eq!(evil.kind, SessionKind::Service);
+    assert_eq!(evil.approval(), Approval::Pending);
     assert!(!marker.exists());
     assert!(gate.list().is_empty());
 
-    // The reconcile on a restart sees only the private store.
+    // The reconcile on a restart sees an unapproved entry: still nothing.
     drop(app);
     let mut app = gate.started();
     for _ in 0..5 {
         app.poll_now();
         std::thread::sleep(QUICK);
     }
-    assert!(app.core().workspace(project).unwrap().sessions.is_empty());
+    assert_eq!(listed(&app).id, evil.id, "same record after a restart");
+    assert_eq!(listed(&app).approval(), Approval::Pending);
     assert!(!marker.exists());
     assert!(gate.list().is_empty());
+
+    // Approval alone launches nothing; the reconcile after a restart does.
+    app.dispatch(AppAction::ApproveDefinition(evil.id));
+    for _ in 0..3 {
+        app.poll_now();
+        std::thread::sleep(QUICK);
+    }
+    assert_eq!(listed(&app).approval(), Approval::Approved);
+    assert!(!marker.exists());
+    drop(app);
+    let mut app = gate.started();
+    let launch = Duration::from_secs(10);
+    wait_until(
+        &mut app,
+        "approved autostart service",
+        launch,
+        QUICK,
+        |_| marker.exists(),
+    );
+
+    // An edit to the entry drops the approval: the new command never runs.
+    let marker2 = gate.tmp.path().join("pwned-2");
+    std::thread::sleep(Duration::from_millis(1100));
+    write(&format!("touch {}", marker2.display()));
+    wait_until(&mut app, "changed definition", launch, QUICK, |app| {
+        listed(app).approval() == Approval::Changed
+    });
+    app.dispatch(AppAction::RestartSession(evil.id));
+    for _ in 0..5 {
+        app.poll_now();
+        std::thread::sleep(QUICK);
+    }
+    assert!(!marker2.exists());
+    assert!(
+        app.core()
+            .notices()
+            .iter()
+            .any(|n| n.text.contains("approve"))
+    );
+
+    // Nothing was ever written into the project's `.switchboard/`.
+    let names: Vec<_> = fs::read_dir(&dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .collect();
+    assert_eq!(names, vec![std::ffi::OsString::from("project.json")]);
 }
 
 // ---- gate item 9: hook events while the app was down ----

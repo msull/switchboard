@@ -7,14 +7,16 @@ use std::time::{Duration, SystemTime};
 use uuid::Uuid;
 
 use super::action::{AppAction, AppCore, Clock, Effect, View};
+use super::definitions::entry_hash;
 use super::model::{
-    Activity, AgentKind, CardState, Launch, Project, ProjectEnv, ProjectId, RecordId, ResumeHandle,
-    SessionKind, SessionRecord, Settings, ThemeMode, Workspace,
+    Activity, AgentKind, Approval, CardState, Launch, Project, ProjectEnv, ProjectId, RecordId,
+    ResumeHandle, SessionKind, SessionRecord, Settings, SideTab, ThemeMode, Workspace,
 };
 use super::reconcile::RECORD_ID_ENV;
 use crate::ports::agent::AgentLaunch;
 use crate::ports::events::{EventKind, SessionEvent};
 use crate::ports::host::{HostId, HostStatus, Liveness};
+use crate::ports::project_config::{DefinedEntry, ProjectConfig};
 use crate::ports::store::{Loaded, StoreError};
 
 // --- fixtures
@@ -63,6 +65,8 @@ fn record(project: ProjectId, kind: SessionKind, order: u32) -> SessionRecord {
         last_exit: None,
         not_resumable: false,
         scrollback: None,
+        source: None,
+        approved_hash: None,
     }
 }
 
@@ -350,7 +354,15 @@ fn store_loaded_installs_workspaces_and_notices() {
         })),
         Clock::at(0),
     );
-    assert!(effects.is_empty(), "loading emits nothing: {effects:?}");
+    // Loading launches nothing; it only asks for each definition file.
+    assert_eq!(
+        effects,
+        vec![Effect::ReadProjectConfig {
+            project: w.project.id,
+            root: w.project.root.clone(),
+        }],
+        "{effects:?}"
+    );
     assert_eq!(core.workspaces(), &[w]);
     let n = core.notice().unwrap();
     assert!(n.is_error && n.expires_at.is_none());
@@ -660,7 +672,16 @@ fn add_project_creates_workspace_shows_board_and_saves() {
     assert_eq!(w.project.created, now.wall);
     assert_eq!(w.project.last_active, now.wall);
     assert_eq!(core.view(), View::Board(w.project.id));
-    assert_eq!(effects, vec![Effect::Save(w.clone())]);
+    assert_eq!(
+        effects,
+        vec![
+            Effect::Save(w.clone()),
+            Effect::ReadProjectConfig {
+                project: w.project.id,
+                root: "/r".into(),
+            },
+        ]
+    );
 }
 
 #[test]
@@ -1991,4 +2012,341 @@ fn return_to_an_exited_pane_kills_it_and_resumes() {
     assert!(matches!(effects.first(), Some(Effect::Kill(h)) if h.0 == id.host_name()));
     assert!(effects.iter().any(|e| matches!(e, Effect::Spawn { .. })));
     assert!(!effects.iter().any(|e| matches!(e, Effect::Attach { .. })));
+}
+
+// --- 9. definitions from .switchboard/project.json
+
+fn entry(name: &str, kind: SessionKind, command: &str) -> DefinedEntry {
+    DefinedEntry {
+        name: name.into(),
+        kind,
+        command: command.into(),
+        cwd: None,
+        env: Vec::new(),
+        autostart: false,
+    }
+}
+
+/// The reader's success shape for a file with these entries.
+#[allow(clippy::unnecessary_wraps)]
+fn config(entries: Vec<DefinedEntry>) -> Result<Option<ProjectConfig>, String> {
+    Ok(Some(ProjectConfig {
+        entries,
+        warnings: vec![],
+        shell: "/bin/zsh".into(),
+    }))
+}
+
+fn read(
+    core: &mut AppCore,
+    pid: ProjectId,
+    result: Result<Option<ProjectConfig>, String>,
+    at: u64,
+) -> Vec<Effect> {
+    core.dispatch(
+        AppAction::ProjectConfigRead {
+            project: pid,
+            result,
+        },
+        Clock::at(at),
+    )
+}
+
+fn defined(core: &AppCore, pid: ProjectId, name: &str) -> SessionRecord {
+    core.workspace(pid)
+        .unwrap()
+        .sessions
+        .iter()
+        .find(|s| s.name == name)
+        .unwrap_or_else(|| panic!("no record {name}"))
+        .clone()
+}
+
+#[test]
+fn project_config_read_adds_pending_records_once() {
+    let (mut core, pid, _) = with_records(&[], |_| None);
+    let entries = vec![
+        entry("lint", SessionKind::Command, "cargo clippy"),
+        DefinedEntry {
+            cwd: Some("web".into()),
+            env: vec!["PORT".into()],
+            autostart: true,
+            ..entry("web", SessionKind::Service, "npm run dev")
+        },
+    ];
+    let effects = read(&mut core, pid, config(entries.clone()), 1);
+    assert_eq!(saves(&effects), 1);
+    assert!(spawns(&effects).is_empty(), "listing never runs anything");
+
+    let lint = defined(&core, pid, "lint");
+    assert_eq!(lint.kind, SessionKind::Command);
+    assert_eq!(lint.cwd, PathBuf::from("/tmp/proj"));
+    assert_eq!(
+        lint.launch,
+        Launch::Command {
+            command: "cargo clippy".into(),
+            shell: "/bin/zsh".into()
+        }
+    );
+    assert_eq!(lint.approval(), Approval::Pending);
+    assert!(!lint.runnable());
+    let web = defined(&core, pid, "web");
+    assert_eq!(web.cwd, PathBuf::from("/tmp/proj/web"));
+    let source = web.source.as_ref().unwrap();
+    assert_eq!(source.env, vec!["PORT".to_string()]);
+    assert!(source.autostart);
+    assert!(!web.effective_autostart(), "not approved, so no autostart");
+    assert_eq!(source.hash, entry_hash(&entries[1]));
+    let status = core.config_status(pid).unwrap();
+    assert!(status.present && status.warnings.is_empty() && status.error.is_none());
+
+    // The same file again changes nothing and saves nothing.
+    let ids_before: Vec<_> = core
+        .workspace(pid)
+        .unwrap()
+        .sessions
+        .iter()
+        .map(|s| s.id)
+        .collect();
+    let effects = read(&mut core, pid, config(entries), 2);
+    assert!(effects.is_empty(), "{effects:?}");
+    let ids_after: Vec<_> = core
+        .workspace(pid)
+        .unwrap()
+        .sessions
+        .iter()
+        .map(|s| s.id)
+        .collect();
+    assert_eq!(ids_before, ids_after);
+}
+
+#[test]
+fn approve_and_revoke_save_and_gate_launch() {
+    let (mut core, pid, _) = with_records(&[], |_| None);
+    read(
+        &mut core,
+        pid,
+        config(vec![entry("lint", SessionKind::Command, "cargo clippy")]),
+        1,
+    );
+    let id = defined(&core, pid, "lint").id;
+
+    // Unapproved: Return and Restart refuse with a notice, no spawn.
+    for action in [
+        AppAction::ReturnToSession(id),
+        AppAction::RestartSession(id),
+    ] {
+        let effects = core.dispatch(action, Clock::at(2));
+        assert!(spawns(&effects).is_empty(), "{effects:?}");
+        assert!(
+            core.notices()
+                .iter()
+                .any(|n| n.is_error && n.text.contains("approve"))
+        );
+        assert!(!core.is_in_flight(id));
+    }
+
+    let effects = core.dispatch(AppAction::ApproveDefinition(id), Clock::at(3));
+    assert_eq!(saves(&effects), 1);
+    let lint = defined(&core, pid, "lint");
+    assert_eq!(lint.approval(), Approval::Approved);
+    assert!(lint.runnable());
+
+    // Approved: a Return launches it.
+    let effects = core.dispatch(AppAction::ReturnToSession(id), Clock::at(4));
+    assert_eq!(spawns(&effects).len(), 1);
+
+    let effects = core.dispatch(AppAction::RevokeApproval(id), Clock::at(5));
+    assert_eq!(saves(&effects), 1);
+    assert_eq!(defined(&core, pid, "lint").approval(), Approval::Pending);
+}
+
+#[test]
+fn changed_entry_drops_approval_but_keeps_the_record() {
+    let (mut core, pid, _) = with_records(&[], |_| None);
+    read(
+        &mut core,
+        pid,
+        config(vec![entry("lint", SessionKind::Command, "cargo clippy")]),
+        1,
+    );
+    let id = defined(&core, pid, "lint").id;
+    core.dispatch(AppAction::ApproveDefinition(id), Clock::at(2));
+    core.dispatch(
+        AppAction::HostListed(vec![exited(id, Some(1))]),
+        Clock::at(3),
+    );
+    assert_eq!(defined(&core, pid, "lint").last_exit, Some(1));
+
+    let effects = read(
+        &mut core,
+        pid,
+        config(vec![entry(
+            "lint",
+            SessionKind::Command,
+            "cargo clippy -- -D warnings",
+        )]),
+        4,
+    );
+    assert_eq!(saves(&effects), 1);
+    let lint = defined(&core, pid, "lint");
+    assert_eq!(lint.id, id, "same record");
+    assert_eq!(lint.approval(), Approval::Changed);
+    assert!(!lint.runnable());
+    assert_eq!(lint.last_exit, Some(1), "history kept");
+    assert!(
+        matches!(&lint.launch, Launch::Command { command, .. } if command.ends_with("warnings"))
+    );
+
+    // Reverting the edit restores the approval: it is keyed to content.
+    read(
+        &mut core,
+        pid,
+        config(vec![entry("lint", SessionKind::Command, "cargo clippy")]),
+        5,
+    );
+    assert_eq!(defined(&core, pid, "lint").approval(), Approval::Approved);
+}
+
+#[test]
+fn removed_entry_or_missing_file_orphans_not_deletes() {
+    let (mut core, pid, _) = with_records(&[SessionKind::Shell], |_| None);
+    read(
+        &mut core,
+        pid,
+        config(vec![
+            entry("lint", SessionKind::Command, "x"),
+            entry("web", SessionKind::Service, "y"),
+        ]),
+        1,
+    );
+    let effects = read(
+        &mut core,
+        pid,
+        config(vec![entry("web", SessionKind::Service, "y")]),
+        2,
+    );
+    assert_eq!(saves(&effects), 1);
+    assert_eq!(defined(&core, pid, "lint").approval(), Approval::Orphaned);
+    assert_eq!(defined(&core, pid, "web").approval(), Approval::Pending);
+
+    read(&mut core, pid, Ok(None), 3);
+    assert_eq!(defined(&core, pid, "web").approval(), Approval::Orphaned);
+    assert!(!core.config_status(pid).unwrap().present);
+    // The user's own shell record is untouched and still runnable.
+    let shell = defined(&core, pid, "s0");
+    assert_eq!(shell.approval(), Approval::NotApplicable);
+    assert!(shell.runnable());
+    assert_eq!(core.workspace(pid).unwrap().sessions.len(), 3);
+
+    // An orphan cannot be approved.
+    let id = defined(&core, pid, "web").id;
+    let effects = core.dispatch(AppAction::ApproveDefinition(id), Clock::at(4));
+    assert!(effects.is_empty());
+    assert!(core.notices().iter().any(|n| n.is_error));
+}
+
+#[test]
+fn autostart_from_the_file_needs_approval_and_a_live_definition() {
+    let p = project("p");
+    let pid = p.id;
+    let mut core = AppCore::new();
+    core.dispatch(
+        AppAction::StoreLoaded(Ok(Loaded {
+            workspaces: vec![Workspace::new(p)],
+            ..Loaded::default()
+        })),
+        Clock::at(0),
+    );
+    let web = DefinedEntry {
+        autostart: true,
+        ..entry("web", SessionKind::Service, "npm run dev")
+    };
+    read(&mut core, pid, config(vec![web.clone()]), 1);
+    // First host poll is the reconcile: pending entries never start.
+    let effects = core.dispatch(AppAction::HostListed(vec![]), Clock::at(2));
+    assert!(spawns(&effects).is_empty(), "{effects:?}");
+
+    let id = defined(&core, pid, "web").id;
+    core.dispatch(AppAction::ApproveDefinition(id), Clock::at(3));
+    assert!(defined(&core, pid, "web").effective_autostart());
+    // Approval alone launches nothing; the next reconcile does.
+    core.dispatch(
+        AppAction::StoreLoaded(Ok(Loaded {
+            workspaces: core.workspaces().to_vec(),
+            ..Loaded::default()
+        })),
+        Clock::at(4),
+    );
+    read(&mut core, pid, config(vec![web]), 5);
+    let effects = core.dispatch(AppAction::HostListed(vec![]), Clock::at(6));
+    assert_eq!(spawns(&effects).len(), 1);
+
+    // Orphaned: approved once, but gone from the file, so no autostart.
+    core.dispatch(AppAction::HostListed(vec![]), Clock::at(7));
+    read(&mut core, pid, Ok(None), 8);
+    assert!(!defined(&core, pid, "web").effective_autostart());
+}
+
+#[test]
+fn config_error_is_one_notice_until_it_changes() {
+    let (mut core, pid, _) = with_records(&[], |_| None);
+    read(
+        &mut core,
+        pid,
+        config(vec![entry("lint", SessionKind::Command, "x")]),
+        1,
+    );
+    core.dispatch(AppAction::DismissNotice, Clock::at(1));
+    for at in 2..5 {
+        read(&mut core, pid, Err("project.json: bad".into()), at);
+    }
+    assert_eq!(core.notices().len(), 1);
+    assert!(core.notices()[0].text.contains("project.json: bad"));
+    // The records from the last good read stay as they were.
+    assert_eq!(defined(&core, pid, "lint").approval(), Approval::Pending);
+    let status = core.config_status(pid).unwrap();
+    assert_eq!(status.error.as_deref(), Some("project.json: bad"));
+    read(&mut core, pid, Err("project.json: worse".into()), 5);
+    assert_eq!(core.notices().len(), 2);
+}
+
+#[test]
+fn entry_hash_is_stable_and_order_sensitive() {
+    let e = DefinedEntry {
+        cwd: Some("web".into()),
+        env: vec!["A".into(), "B".into()],
+        ..entry("web", SessionKind::Service, "npm run dev")
+    };
+    let h = entry_hash(&e);
+    assert_eq!(h.len(), 64);
+    assert_eq!(h, entry_hash(&e.clone()));
+    // Pinned: a change here would silently drop every saved approval.
+    assert_eq!(
+        h,
+        "8bb9356dd9ae7d4f35d7078088e284357a0e308721da3e0b3e09e518dd44b436"
+    );
+    let swapped = DefinedEntry {
+        env: vec!["B".into(), "A".into()],
+        ..e.clone()
+    };
+    assert_ne!(h, entry_hash(&swapped));
+    let auto = DefinedEntry {
+        autostart: true,
+        ..e.clone()
+    };
+    assert_ne!(h, entry_hash(&auto));
+    let kind = DefinedEntry {
+        kind: SessionKind::Command,
+        ..e
+    };
+    assert_ne!(h, entry_hash(&kind));
+}
+
+#[test]
+fn set_side_tab_saves_settings() {
+    let mut core = AppCore::new();
+    let effects = core.dispatch(AppAction::SetSideTab(SideTab::Run), Clock::at(1));
+    assert_eq!(core.settings().side_tab, SideTab::Run);
+    assert!(matches!(effects[..], [Effect::SaveSettings(_)]));
 }

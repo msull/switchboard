@@ -17,11 +17,19 @@ pub const QUIET_AFTER: std::time::Duration = std::time::Duration::from_secs(20);
 pub const RECORD_ID_ENV: &str = "SWITCHBOARD_RECORD_ID";
 
 impl AppCore {
-    pub(super) fn store_loaded(&mut self, result: Result<Loaded, StoreError>) {
+    pub(super) fn store_loaded(&mut self, result: Result<Loaded, StoreError>, out: &mut Out) {
         match result {
             Ok(loaded) => {
                 self.workspaces = loaded.workspaces;
                 self.settings = loaded.settings;
+                // Definition files are read before the first host poll, so
+                // the reconcile already knows which entries are approved.
+                for w in &self.workspaces {
+                    out.push(super::definitions::read_config(
+                        w.project.id,
+                        w.project.root.clone(),
+                    ));
+                }
                 for notice in loaded.notices {
                     if notice == StoreError::Locked {
                         self.read_only = true;
@@ -89,7 +97,7 @@ impl AppCore {
             .workspaces
             .iter()
             .flat_map(|w| &w.sessions)
-            .filter(|s| s.kind == SessionKind::Service && s.autostart)
+            .filter(|s| s.kind == SessionKind::Service && s.effective_autostart())
             .filter(|s| self.host_status(s.id).is_none() && !self.is_in_flight(s.id))
             .map(|s| s.id)
             .collect();

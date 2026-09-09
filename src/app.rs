@@ -3,6 +3,7 @@
 //! the event log on a timer; keeps the UI's captions fresh. Rendering
 //! lives in [`crate::ui`].
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime};
 
@@ -14,6 +15,7 @@ use crate::ports::agent::AgentLauncher;
 use crate::ports::events::EventSource;
 use crate::ports::host::{HostId, Liveness, ProcessHost};
 use crate::ports::opener::Opener;
+use crate::ports::project_config::ProjectConfigReader;
 use crate::ports::secrets::SecretStore;
 use crate::ports::store::{Store, StoreError};
 use crate::ports::transcript::TranscriptReader;
@@ -22,6 +24,8 @@ use crate::ui::UiState;
 /// How often the host is listed and the event log read.
 const POLL_INTERVAL: Duration = Duration::from_secs(1);
 /// How often card captions and the session snapshot are refreshed.
+/// How often definition files are checked for a change.
+const CONFIG_INTERVAL: Duration = Duration::from_secs(5);
 const CAPTION_INTERVAL: Duration = Duration::from_secs(2);
 /// How long a Codex id discovery keeps looking. Codex writes its rollout
 /// file on the first prompt, not at launch, so this is generous; a
@@ -36,6 +40,7 @@ pub struct Services {
     pub opener: Box<dyn Opener>,
     pub transcripts: Box<dyn TranscriptReader>,
     pub secrets: Box<dyn SecretStore>,
+    pub project_config: Box<dyn ProjectConfigReader>,
     /// The hook helper's wake-up socket; `None` in tests.
     pub wake: Option<WakeSocket>,
 }
@@ -89,6 +94,10 @@ pub struct SwitchboardApp {
     badge: Option<usize>,
     last_caption: Option<Instant>,
     discoveries: Vec<Discovery>,
+    /// Definition file mtimes as last seen, per project, so the poll
+    /// re-reads only a changed file.
+    config_seen: HashMap<ProjectId, Option<SystemTime>>,
+    last_config: Option<Instant>,
     /// Transient state owned by the UI (dialog drafts, embedded terminals).
     /// Nothing in here is persisted or read by the core.
     pub ui_state: UiState,
@@ -124,6 +133,8 @@ impl SwitchboardApp {
             badge: None,
             last_caption: None,
             discoveries: Vec::new(),
+            config_seen: HashMap::new(),
+            last_config: None,
             ui_state: UiState::default(),
             record_actions: false,
             dispatched: Vec::new(),
@@ -254,6 +265,7 @@ impl SwitchboardApp {
             | Effect::Kill(_)
             | Effect::SendInput { .. }
             | Effect::SendKeys { .. }
+            | Effect::ReadProjectConfig { .. }
             | Effect::OpenPath(_)
             | Effect::Forget(_)
             | Effect::OpenInEditor { .. }
@@ -332,6 +344,14 @@ impl SwitchboardApp {
             Effect::SendKeys { host, bytes } => failed(s.host.write(&host, &bytes), || {
                 format!("send keys to {}", host.0)
             }),
+            Effect::ReadProjectConfig { project, root } => {
+                self.config_seen
+                    .insert(project, s.project_config.modified(&root));
+                Some(AppAction::ProjectConfigRead {
+                    project,
+                    result: s.project_config.read(&root),
+                })
+            }
             Effect::Kill(host) => failed(s.host.kill(&host), || format!("kill {}", host.0)),
             Effect::Forget(host) => {
                 let path = self.scrollback_path(&host);
@@ -393,6 +413,27 @@ impl SwitchboardApp {
                 self.dispatch(AppAction::HostListed(list));
             }
             Err(e) => log::warn!("host list failed: {e}"),
+        }
+    }
+
+    /// Re-read a project's definition file when its mtime moved. One
+    /// `stat` per project, so it runs on the poll tick, not a thread.
+    fn poll_configs(&mut self) {
+        let roots: Vec<(ProjectId, PathBuf)> = self
+            .core
+            .workspaces()
+            .iter()
+            .map(|w| (w.project.id, w.project.root.clone()))
+            .collect();
+        for (project, root) in roots {
+            let now = self.services.project_config.modified(&root);
+            if self.config_seen.get(&project) != Some(&now) {
+                self.config_seen.insert(project, now);
+                self.dispatch(AppAction::ProjectConfigRead {
+                    project,
+                    result: self.services.project_config.read(&root),
+                });
+            }
         }
     }
 
@@ -539,6 +580,7 @@ impl SwitchboardApp {
         self.poll_events();
         self.poll_host();
         self.poll_discoveries();
+        self.poll_configs();
         self.refresh_captions();
     }
 
@@ -561,6 +603,13 @@ impl SwitchboardApp {
         {
             self.last_caption = Some(Instant::now());
             self.refresh_captions();
+        }
+        if self
+            .last_config
+            .is_none_or(|t| t.elapsed() >= CONFIG_INTERVAL)
+        {
+            self.last_config = Some(Instant::now());
+            self.poll_configs();
         }
     }
 }

@@ -261,9 +261,9 @@ pub fn migrate(value: serde_json::Value) -> Result<Workspace, String> {
         .and_then(serde_json::Value::as_u64)
         .ok_or_else(|| "missing schema_version".to_string())?;
     match version {
-        // v2 added optional fields only, so a v1 document reads as v2 with
-        // their defaults; it is written back at the current version.
-        1 | 2 => serde_json::from_value(value)
+        // v2 and v3 added optional fields only, so an older document reads
+        // with their defaults; it is written back at the current version.
+        1..=3 => serde_json::from_value(value)
             .map(|mut w: Workspace| {
                 w.schema_version = SCHEMA_VERSION;
                 w
@@ -402,6 +402,8 @@ mod tests {
             last_exit: None,
             not_resumable: false,
             scrollback: None,
+            source: None,
+            approved_hash: None,
         };
         let mut agent = session(
             "claude",
@@ -453,6 +455,7 @@ mod tests {
             editor: "zed".into(),
             env: Vec::new(),
             files_open: true,
+            side_tab: crate::core::SideTab::Run,
         };
         store.save_settings(&settings).unwrap();
         assert_eq!(store.load_all().unwrap().settings, settings);
@@ -692,9 +695,14 @@ mod tests {
         for s in value["sessions"].as_array_mut().unwrap() {
             s.as_object_mut().unwrap().remove("activity_reason");
         }
+        for s in value["sessions"].as_array_mut().unwrap() {
+            s.as_object_mut().unwrap().remove("source");
+            s.as_object_mut().unwrap().remove("approved_hash");
+        }
         let loaded = migrate(value.clone()).unwrap();
         assert_eq!(loaded.schema_version, SCHEMA_VERSION);
         assert!(loaded.sessions.iter().all(|s| s.activity_reason.is_none()));
+        assert!(loaded.sessions.iter().all(|s| s.source.is_none()));
 
         value["schema_version"] = serde_json::json!(u64::from(SCHEMA_VERSION) + 1);
         assert!(migrate(value).unwrap_err().contains("newer"));

@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 /// Bump when the on-disk shape changes incompatibly.
-pub const SCHEMA_VERSION: u32 = 2;
+pub const SCHEMA_VERSION: u32 = 3;
 
 /// How the UI picks its colours: follow the system, or force one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -84,6 +84,27 @@ pub struct Settings {
     pub env: Vec<EnvVar>,
     /// The file side is shown next to sessions (boards always have it).
     pub files_open: bool,
+    /// Which tab the side panel shows.
+    pub side_tab: SideTab,
+}
+
+/// The tabs of the side panel next to a board or session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum SideTab {
+    #[default]
+    Files,
+    /// Commands and services: definitions, approval, output.
+    Run,
+}
+
+impl SideTab {
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Files => "Files",
+            Self::Run => "Run",
+        }
+    }
 }
 
 /// Switchboard's own id for a project. Never reused.
@@ -249,7 +270,8 @@ pub struct SessionRecord {
     pub notes: String,
     #[serde(default)]
     pub resume: Option<ResumeHandle>,
-    /// Set for services only; honored only for records from the private store.
+    /// Set for services only, by the user. `effective_autostart` is what
+    /// the reconcile honors; a defined record's request lives in `source`.
     #[serde(default)]
     pub autostart: bool,
     #[serde(default)]
@@ -274,6 +296,79 @@ pub struct SessionRecord {
     pub not_resumable: bool,
     #[serde(default)]
     pub scrollback: Option<PathBuf>,
+    /// Set when the record comes from the project's definition file. The
+    /// file owns name, command, and cwd; the record owns everything else.
+    #[serde(default)]
+    pub source: Option<Definition>,
+    /// The definition hash the user approved. The record may run only
+    /// while this equals `source.hash`; an edit to the file changes the
+    /// hash and so drops the approval.
+    #[serde(default)]
+    pub approved_hash: Option<String>,
+}
+
+/// Where a defined record's definition stands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Approval {
+    /// A user-created record: nothing to approve.
+    NotApplicable,
+    /// Listed from the file, never approved.
+    Pending,
+    Approved,
+    /// Approved once, but the definition changed since.
+    Changed,
+    /// No longer in the file.
+    Orphaned,
+}
+
+impl SessionRecord {
+    #[must_use]
+    pub fn approval(&self) -> Approval {
+        match &self.source {
+            None => Approval::NotApplicable,
+            Some(d) if d.orphaned => Approval::Orphaned,
+            Some(d) => match &self.approved_hash {
+                None => Approval::Pending,
+                Some(h) if *h == d.hash => Approval::Approved,
+                Some(_) => Approval::Changed,
+            },
+        }
+    }
+    /// Whether the record may be launched at all.
+    #[must_use]
+    pub fn runnable(&self) -> bool {
+        matches!(
+            self.approval(),
+            Approval::NotApplicable | Approval::Approved
+        )
+    }
+    /// Autostart as the reconcile sees it: the user's own flag for their
+    /// records, the file's request for defined ones once approved.
+    #[must_use]
+    pub fn effective_autostart(&self) -> bool {
+        match &self.source {
+            None => self.autostart,
+            Some(d) => d.autostart && self.runnable(),
+        }
+    }
+}
+
+/// What the definition file said about a record, as last read.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Definition {
+    /// The entry's name in the file; the join key across reads.
+    pub name: String,
+    /// Content hash of the entry (`core::entry_hash`).
+    pub hash: String,
+    /// Variable names the entry asks for (never values).
+    #[serde(default)]
+    pub env: Vec<String>,
+    /// The file asked for autostart; honored only once approved.
+    #[serde(default)]
+    pub autostart: bool,
+    /// The entry is gone from the file; the record stays for its history.
+    #[serde(default)]
+    pub orphaned: bool,
 }
 
 /// One project with its sessions: one file in the store.

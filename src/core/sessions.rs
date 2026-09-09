@@ -60,6 +60,8 @@ impl AppCore {
             last_exit: None,
             not_resumable: false,
             scrollback: None,
+            source: None,
+            approved_hash: None,
         });
         out.touch(project);
         self.launch_fresh(id, now, out);
@@ -71,6 +73,15 @@ impl AppCore {
         let Some(record) = self.session(id) else {
             return;
         };
+        // A defined record runs only the exact definition the user saw and
+        // approved; the file may have been edited since.
+        if !record.runnable() {
+            let name = record.name.clone();
+            self.error(format!(
+                "{name} comes from .switchboard/project.json and is not approved; approve it in the Run tab"
+            ));
+            return;
+        }
         // A fresh agent is a new conversation: a handle left from the old
         // one would stop Codex discovery from binding the new rollout.
         if matches!(record.kind, SessionKind::Agent(_)) && record.resume.is_some() {
