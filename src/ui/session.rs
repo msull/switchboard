@@ -300,6 +300,33 @@ fn agent_body(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord) {
         let draft = cx.state.input_drafts.entry(record.id).or_default();
         append_path(draft, &dropped.0);
     }
+    // The raw pane is its own panel above the message box, so the control
+    // that hides it never scrolls away with the conversation.
+    if cx.state.terminal_open {
+        egui::Panel::bottom("terminal_panel")
+            .resizable(true)
+            .default_size(240.0)
+            .frame(Frame::new().fill(fill).inner_margin(PAD))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("Terminal").weak());
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.small_button("Hide").clicked() {
+                            cx.state.terminal_open = false;
+                        }
+                    });
+                });
+                egui::ScrollArea::both()
+                    .auto_shrink([false, false])
+                    .stick_to_bottom(true)
+                    .show(ui, |ui| match cx.state.snapshots.get(&record.id) {
+                        Some(text) => code_block(ui, text),
+                        None => {
+                            ui.label(RichText::new("No snapshot yet.").weak());
+                        }
+                    });
+            });
+    }
     Frame::new()
         .stroke(border(ui))
         .corner_radius(4)
@@ -314,6 +341,7 @@ fn agent_body(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord) {
                 conversation_errors,
                 expand_activity,
                 expand_applied,
+                terminal_open,
                 markdown,
                 snapshots,
                 ..
@@ -322,12 +350,11 @@ fn agent_body(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord) {
             if let Some((_, conversation)) = conversations.get(&record.id) {
                 conversation_view(
                     ui,
-                    record.id,
                     conversation,
                     expand_activity,
                     expand_applied,
+                    terminal_open,
                     markdown,
-                    snapshot,
                 );
             } else {
                 ui.label(
@@ -337,7 +364,7 @@ fn agent_body(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord) {
                     ui.label(RichText::new(format!("No conversation view: {e}")).weak());
                 }
                 if let Some(text) = snapshot {
-                    egui::ScrollArea::vertical()
+                    egui::ScrollArea::both()
                         .auto_shrink([false, false])
                         .show(ui, |ui| code_block(ui, text));
                 }
@@ -451,17 +478,18 @@ pub(super) fn append_path(draft: &mut String, path: &std::path::Path) {
 /// content, with the raw terminal snapshot folded away at the end.
 fn conversation_view(
     ui: &mut Ui,
-    id: RecordId,
     conversation: &Conversation,
     expand: &mut bool,
     expand_applied: &mut Option<bool>,
+    terminal_open: &mut bool,
     markdown: &mut CommonMarkCache,
-    snapshot: Option<&String>,
 ) {
     ui.horizontal(|ui| {
         ui.strong(conversation.title.as_deref().unwrap_or("(untitled)"));
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.checkbox(expand, "Expand activity");
+            ui.toggle_value(terminal_open, "Terminal")
+                .on_hover_text("Show the raw pane below the conversation (Cmd+T)");
         });
     });
     ui.label(RichText::new(meta_line(conversation)).weak().small());
@@ -477,14 +505,6 @@ fn conversation_view(
             for turn in &conversation.turns {
                 turn_block(ui, turn, open, markdown);
             }
-            egui::CollapsingHeader::new("Terminal")
-                .id_salt(("terminal", id))
-                .show(ui, |ui| match snapshot {
-                    Some(text) => code_block(ui, text),
-                    None => {
-                        ui.label(RichText::new("No snapshot yet.").weak());
-                    }
-                });
         });
 }
 
@@ -694,12 +714,14 @@ fn activity_row(ui: &mut Ui, a: &Activity, salt: (usize, usize)) {
                     .color(color),
             )
             .id_salt(("tool", salt))
-            .show(ui, |ui| tool_detail(ui, detail, salt));
+            .show(ui, |ui| tool_detail(ui, detail, salt))
+            .header_response
+            .on_hover_text(&a.line);
         }
         None => {
             ui.horizontal(|ui| {
                 ui.label(RichText::new(glyph).color(glyph_color));
-                ui.add(egui::Label::new(line).truncate());
+                ui.add(egui::Label::new(line).wrap());
             });
         }
     }

@@ -646,6 +646,18 @@ Items are the ids in `docs/feedback-2026-09.md`.
   against an approximate window for the model, as `ctx 84k / 200k (42%)`.
   Only the session on screen reads its transcript, so cards do not show
   it yet.
+- **B1 Wrapping.** Activity rows wrap instead of being cut at the pane
+  width; tool rows keep one line but show the whole line on hover; pane
+  snapshots scroll both ways, since a capture is a grid.
+- **B2 Terminal size.** The private server runs with `window-size
+  latest` (spike 06): a pane follows whichever client attached last, so
+  the embedded terminal and a Ghostty window both see the whole pane.
+  The option is re-applied on launch because the server outlives the
+  app.
+- **B3 Raw pane panel.** The Terminal toggle in the conversation header
+  (or Cmd+T) opens the pane snapshot as a resizable panel above the
+  message box, with its own Hide button, so closing it never means
+  scrolling back to the top.
 
 ## Open questions
 

@@ -27,6 +27,9 @@ fn main() -> eframe::Result {
     let socket = std::env::var("SWITCHBOARD_TMUX_SOCKET")
         .unwrap_or_else(|_| TmuxHost::default_socket().to_owned());
     let host = TmuxHost::new(&socket, Some(tmux_conf));
+    if let Err(e) = host.apply_options() {
+        log::warn!("tmux options: {e}");
+    }
 
     // The hook helper lives next to this binary.
     let hook_bin = std::env::current_exe()

@@ -54,6 +54,8 @@ pub struct UiState {
     /// headers; they follow the toggle only on the frame it changes, so
     /// individual sections can still be opened and closed by hand.
     pub expand_applied: Option<bool>,
+    /// Show the raw pane as a panel under an agent's conversation.
+    pub terminal_open: bool,
     /// Layout cache for the markdown in final responses.
     pub markdown: egui_commonmark::CommonMarkCache,
     pub add_project: Option<AddProjectDraft>,
@@ -92,6 +94,7 @@ impl Default for UiState {
             conversation_errors: HashMap::new(),
             expand_activity: false,
             expand_applied: None,
+            terminal_open: false,
             markdown: egui_commonmark::CommonMarkCache::default(),
             add_project: None,
             new_session: None,
@@ -204,7 +207,8 @@ fn draw_frame(cx: &mut DrawCtx<'_>, ui: &mut Ui) {
 
 /// Esc goes back, Cmd+1..9 switch project, Cmd+0 shows the switchboard,
 /// Cmd+K opens the quick-switcher, Cmd+B toggles the file side of a
-/// session.
+/// session, Cmd+T the raw pane under a conversation, and Cmd+. sends
+/// Escape to the session's terminal.
 /// Esc is left alone while a text field, a dialog, or the terminal has
 /// focus.
 fn keyboard(cx: &mut DrawCtx<'_>, ui: &Ui, view: &View) {
@@ -240,6 +244,11 @@ fn keyboard(cx: &mut DrawCtx<'_>, ui: &Ui, view: &View) {
         && ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::Period))
     {
         cx.dispatch(AppAction::Interrupt(*id));
+    }
+    if matches!(view, View::Session(_))
+        && ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::T))
+    {
+        cx.state.terminal_open = !cx.state.terminal_open;
     }
 
     if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::Num0)) {

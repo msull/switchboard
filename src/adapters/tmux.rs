@@ -21,14 +21,17 @@ const STATUS_FORMAT: &str = "#{session_name}\t#{pane_dead}\t#{pane_dead_status}\
 
 /// The tmux config the private server runs with. `remain-on-exit` keeps
 /// dead panes around so exit codes are observable; `set-titles` passes
-/// OSC titles (Claude Code sets them) through to `pane_title`.
+/// OSC titles (Claude Code sets them) through to `pane_title`;
+/// `window-size latest` lets a window follow whichever client attached
+/// last (the embedded terminal, a Ghostty window), while a detached
+/// window keeps the size it was created with.
 const DEFAULT_CONFIG: &str = "\
 set -g remain-on-exit on
 set -g history-limit 50000
 set -g default-terminal \"tmux-256color\"
 set -g mouse on
 set -g status off
-set -g window-size manual
+set -g window-size latest
 set -g allow-passthrough on
 set -g escape-time 10
 set -g focus-events on
@@ -99,6 +102,18 @@ impl TmuxHost {
 
     pub fn kill_server(&self) -> io::Result<()> {
         match self.run(&["kill-server"]) {
+            Ok(_) => Ok(()),
+            Err(e) if is_no_server(&e) => Ok(()),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Re-apply the options a running server may have started without.
+    /// The server outlives the app, so a config change only reaches an
+    /// old server this way. No server is fine: the next spawn starts one
+    /// from the config file.
+    pub fn apply_options(&self) -> io::Result<()> {
+        match self.run(&["set-option", "-g", "window-size", "latest"]) {
             Ok(_) => Ok(()),
             Err(e) if is_no_server(&e) => Ok(()),
             Err(e) => Err(e),
@@ -459,6 +474,7 @@ fn shell_quote(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Instant;
 
@@ -628,6 +644,55 @@ mod tests {
             info.description
         );
         assert!(info.persistent);
+    }
+
+    /// A window is created at a fixed size and then follows the size of
+    /// the client that attaches, so an embedded terminal sees the whole
+    /// pane. A control-mode client stands in for the widget here: it has
+    /// no tty, so `refresh-client -C` tells tmux its size.
+    #[test]
+    fn window_follows_the_attached_client_size() {
+        let Some(s) = server() else { return };
+        let dir = tempfile::tempdir().unwrap();
+        let id = HostId("sized".into());
+        s.host
+            .spawn(&shell_spec("sized", dir.path(), None))
+            .unwrap();
+        let size = || {
+            s.host
+                .run(&[
+                    "display-message",
+                    "-p",
+                    "-t",
+                    "=sized:",
+                    "#{window_width}x#{window_height}",
+                ])
+                .unwrap()
+                .trim()
+                .to_owned()
+        };
+        assert_eq!(size(), "200x50");
+        s.host.apply_options().unwrap();
+
+        let mut client = s
+            .host
+            .command()
+            .args(["-C", "attach", "-t", "=sized"])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("control client");
+        {
+            let stdin = client.stdin.as_mut().unwrap();
+            stdin.write_all(b"refresh-client -C 120,40\n").unwrap();
+            stdin.flush().unwrap();
+        }
+        poll("window follows the client", || size() == "120x40");
+        drop(client.stdin.take());
+        let _ = client.kill();
+        let _ = client.wait();
+        s.host.kill(&id).unwrap();
     }
 
     #[test]

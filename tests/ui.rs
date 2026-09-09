@@ -801,6 +801,76 @@ fn claude_session_shows_the_conversation_and_message_box() {
 }
 
 #[test]
+fn terminal_panel_toggles_from_the_header() {
+    let (mut harness, ids) = harness();
+    let id = seed_claude(&mut harness, &ids);
+    harness
+        .state_mut()
+        .ui_state
+        .conversations
+        .insert(id, (None, two_turns()));
+    harness
+        .state_mut()
+        .ui_state
+        .snapshots
+        .insert(id, "$ raw pane text".into());
+    showing(&mut harness, View::Session(id));
+    assert!(
+        harness
+            .query_all_by_value("$ raw pane text")
+            .next()
+            .is_none()
+    );
+    click(&mut harness, "Terminal");
+    assert!(
+        harness
+            .query_all_by_value("$ raw pane text")
+            .next()
+            .is_some()
+    );
+    click(&mut harness, "Hide");
+    assert!(
+        harness
+            .query_all_by_value("$ raw pane text")
+            .next()
+            .is_none()
+    );
+    assert!(!harness.state().ui_state.terminal_open);
+    harness.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::T);
+    harness.run_steps(2);
+    assert!(harness.state().ui_state.terminal_open);
+}
+
+#[test]
+fn long_activity_lines_wrap_instead_of_being_cut() {
+    let (mut harness, ids) = harness();
+    let id = seed_claude(&mut harness, &ids);
+    let long = "word ".repeat(80).trim_end().to_owned();
+    let mut conversation = two_turns();
+    conversation.turns[1].activity.push(TranscriptActivity {
+        kind: ActivityKind::Text,
+        line: long.clone(),
+        at: None,
+        error: false,
+        detail: None,
+    });
+    harness
+        .state_mut()
+        .ui_state
+        .conversations
+        .insert(id, (None, conversation));
+    showing(&mut harness, View::Session(id));
+    click(&mut harness, "Expand activity");
+    let row = harness.get_by_label(long.as_str());
+    let one_line = 14.0 * 2.0;
+    assert!(
+        row.rect().height() > one_line,
+        "a 400-character line should take several rows, got {}",
+        row.rect().height()
+    );
+}
+
+#[test]
 fn stop_button_and_cmd_period_interrupt() {
     let (mut harness, ids) = harness();
     let id = seed_claude(&mut harness, &ids);

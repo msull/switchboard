@@ -55,7 +55,7 @@ Dev aids, all environment variables:
   the app can be put into a known state without clicking. See
   `src/script.rs` for the lines (`add-project`, `new-shell`, `new-claude`,
   `new-codex`, `new-service`, `show-board`, `show-session`, `show-document`,
-  `files`, `select-file`, `set-env`, `set-secret`, `dotenv`, `environment`,
+  `files`, `terminal`, `select-file`, `set-env`, `set-secret`, `dotenv`, `environment`,
   `send`, `interrupt`, `return`, `kill`, `switchboard`, `sleep`).
 - `SWITCHBOARD_TMUX=<path>`: tmux binary to use.
 - `RUST_LOG=switchboard=debug`: verbose logging.
