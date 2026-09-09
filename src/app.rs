@@ -557,7 +557,23 @@ impl SwitchboardApp {
         let run_set: Vec<RecordId> = run_project
             .map(|p| self.core.run_entries(p).iter().map(|s| s.id).collect())
             .unwrap_or_default();
-        for id in &run_set {
+        // The run bar under a session header shows each entry's last
+        // line on hover, so those need captions even with the side closed.
+        let bar_set: Vec<RecordId> = match view {
+            View::Session(id) => self
+                .core
+                .session(id)
+                .map(|s| {
+                    self.core
+                        .run_entries(s.project)
+                        .iter()
+                        .map(|s| s.id)
+                        .collect()
+                })
+                .unwrap_or_default(),
+            View::Board(_) | View::Switchboard | View::Document(..) => Vec::new(),
+        };
+        for id in run_set.iter().chain(&bar_set) {
             if !ids.contains(id) {
                 ids.push(*id);
             }

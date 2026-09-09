@@ -700,7 +700,10 @@ Items are the ids in `docs/feedback-2026-09.md`.
   service, or shows a running command; an unapproved entry opens the Run
   tab instead. On the board, agents and shells stay cards under "Agents
   and shells" while commands and services are rows under "Commands and
-  services" with Start/Stop/Run now, Show, and Remove.
+  services" with Start/Stop/Run now, Show, and Remove. A running
+  command shows a spinner and its latest output line next to its
+  button; once it finished, the line and the exit state are on the
+  button's hover.
 - **Not done.** Pane scraping for states that fire no hook (C1); the
   question text and choices of an `AskUserQuestion` in the summary view
   (C3); arrow keys reaching a picker in the embedded terminal (A2);

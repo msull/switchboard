@@ -328,6 +328,39 @@ fn run_bar_runs_commands_and_toggles_services() {
 }
 
 #[test]
+fn run_bar_shows_a_running_commands_last_line_and_hover_after() {
+    let (mut harness, ids) = harness();
+    harness
+        .state_mut()
+        .ui_state
+        .captions
+        .insert(ids.build, "compiled 12 files".into());
+    showing(&mut harness, View::Session(ids.server));
+    // Finished: the line is on the hover only.
+    assert!(harness.query_by_label("compiled 12 files").is_none());
+    harness
+        .ctx
+        .all_styles_mut(|s| s.interaction.tooltip_delay = 0.0);
+    harness.get_by_label("▶ build").hover();
+    harness.run_steps(3);
+    harness.get_by_label_contains("compiled 12 files");
+    harness.get_by_label_contains("not running: click to run again");
+    // Running: the line sits next to the button with a spinner.
+    let mut host = harness
+        .state()
+        .core()
+        .host_status(ids.server)
+        .unwrap()
+        .clone();
+    host.id = HostId(ids.build.host_name());
+    harness
+        .state_mut()
+        .dispatch(AppAction::HostListed(vec![host]));
+    harness.run_steps(2);
+    harness.get_by_label("compiled 12 files");
+}
+
+#[test]
 fn card_buttons_kill_running_and_remove_stopped_sessions() {
     let (mut harness, ids) = harness();
     showing(&mut harness, View::Board(ids.alpha));

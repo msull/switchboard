@@ -30,6 +30,15 @@ pub fn show(cx: &mut DrawCtx<'_>, ui: &mut Ui, pid: ProjectId, open_side: bool) 
                 Launch::Command { command, .. } => command.clone(),
                 Launch::Shell | Launch::Argv(_) => String::new(),
             };
+            // The last line of output rides along on the hover, live while
+            // it runs and kept after it finished, with the exit state.
+            let last_line = cx
+                .state
+                .captions
+                .get(&record.id)
+                .map(|c| format!("\n{c}"))
+                .unwrap_or_default();
+            let state_text = core.state_text(record.id);
             let (hover, action) = if !record.runnable() {
                 text = text.weak();
                 (
@@ -44,18 +53,27 @@ pub fn show(cx: &mut DrawCtx<'_>, ui: &mut Ui, pid: ProjectId, open_side: bool) 
                 )
             } else if running {
                 text = text.color(state_color(ui, &state));
+                // A command ends on its own, so a running one gets a
+                // spinner and its latest line right here, where it can be
+                // watched without the Run tab; a service is just on.
+                if !service {
+                    ui.add(egui::Spinner::new().size(ui.text_style_height(&egui::TextStyle::Body)));
+                    if let Some(line) = cx.state.captions.get(&record.id) {
+                        ui.add(egui::Label::new(RichText::new(line).weak().small()).truncate());
+                    }
+                }
                 (
-                    format!("{command}\nRunning: click to show"),
+                    format!("{command}\nRunning: click to show{last_line}"),
                     Some(AppAction::ShowSession(record.id)),
                 )
             } else if service {
                 (
-                    format!("{command}\nClick to start"),
+                    format!("{command}\nClick to start{last_line}"),
                     Some(AppAction::RestartSession(record.id)),
                 )
             } else {
                 (
-                    format!("{command}\nClick to run"),
+                    format!("{command}\n{state_text}: click to run again{last_line}"),
                     Some(AppAction::RestartSession(record.id)),
                 )
             };
