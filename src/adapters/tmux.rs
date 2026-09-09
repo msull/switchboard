@@ -42,6 +42,11 @@ set -g set-titles-string \"#{pane_title}\"
 /// Gap between typed text and the Enter that submits it.
 const ENTER_DELAY: std::time::Duration = std::time::Duration::from_millis(150);
 
+/// Bytes per `send-keys` call. Each byte is one hex argument, and tmux
+/// refuses a command past a few thousand arguments ("command too
+/// long"), so a long message goes over in pieces.
+const SEND_CHUNK: usize = 512;
+
 /// A handle to one private tmux server, addressed by socket name.
 #[derive(Debug, Clone)]
 pub struct TmuxHost {
@@ -304,10 +309,12 @@ impl ProcessHost for TmuxHost {
             return Ok(());
         }
         let target = pane_target(id);
-        let hex: Vec<String> = bytes.iter().map(|b| format!("{b:02x}")).collect();
-        let mut args = vec!["send-keys", "-t", &target, "-H"];
-        args.extend(hex.iter().map(String::as_str));
-        self.run(&args)?;
+        for chunk in bytes.chunks(SEND_CHUNK) {
+            let hex: Vec<String> = chunk.iter().map(|b| format!("{b:02x}")).collect();
+            let mut args = vec!["send-keys", "-t", &target, "-H"];
+            args.extend(hex.iter().map(String::as_str));
+            self.run(&args)?;
+        }
         Ok(())
     }
 
@@ -692,6 +699,49 @@ mod tests {
         drop(client.stdin.take());
         let _ = client.kill();
         let _ = client.wait();
+        s.host.kill(&id).unwrap();
+    }
+
+    /// A message of many paragraphs arrives whole: `cat` in the pane
+    /// writes what it was typed to a file.
+    #[test]
+    fn long_input_is_typed_in_full() {
+        let Some(s) = server() else { return };
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("typed.txt");
+        let id = HostId("long".into());
+        s.host
+            .spawn(&SpawnSpec {
+                command: Some(vec![
+                    "/bin/sh".into(),
+                    "-c".into(),
+                    // Canonical mode caps a line at 1024 bytes; a TUI turns it
+                    // off, and so does this.
+                    format!("stty -icanon; cat > {}", out.display()),
+                ]),
+                ..shell_spec("long", dir.path(), None)
+            })
+            .unwrap();
+        let paragraph = "The quick brown fox jumps over the lazy dog. ".repeat(40);
+        let text: String = (0..12)
+            .map(|i| format!("Paragraph {i}: {paragraph}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.len() > 20_000);
+        s.host.write_line(&id, &text).unwrap();
+        // `cat` writes as lines complete; the Enter after the text ends the
+        // last one.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !std::fs::read_to_string(&out).is_ok_and(|got| got.contains("Paragraph 11:")) {
+            assert!(
+                Instant::now() < deadline,
+                "typed text did not arrive; pane:\n{}",
+                s.host.snapshot(&id, Some(20)).unwrap_or_default()
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let got = std::fs::read_to_string(&out).unwrap();
+        assert_eq!(got.trim_end(), text.trim_end());
         s.host.kill(&id).unwrap();
     }
 
