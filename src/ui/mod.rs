@@ -234,6 +234,13 @@ fn keyboard(cx: &mut DrawCtx<'_>, ui: &Ui, view: &View) {
     {
         cx.dispatch(AppAction::SetFilesOpen(!cx.core.settings().files_open));
     }
+    // Cmd+. is the macOS "stop" key; Escape already means Back here and
+    // would also blur the message box.
+    if let View::Session(id) = view
+        && ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::Period))
+    {
+        cx.dispatch(AppAction::Interrupt(*id));
+    }
 
     if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::Num0)) {
         cx.dispatch(AppAction::ShowSwitchboard);

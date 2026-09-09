@@ -760,6 +760,12 @@ fn two_turns() -> Conversation {
             output: 18,
             ..Usage::default()
         },
+        last_usage: Some(Usage {
+            input: 4_000,
+            output: 12,
+            cache_read: 80_000,
+            cache_create: 0,
+        }),
     }
 }
 
@@ -779,8 +785,10 @@ fn claude_session_shows_the_conversation_and_message_box() {
     harness.get_by_label("pong");
     harness.get_by_label("The crate is called switchboard.");
     harness.get_by_label("2 msgs · 1 tools · 2m");
+    harness.get_by_label_contains("ctx 84k / 1000k (8%)");
     harness.get_by_label("Message");
     harness.get_by_role_and_label(Role::Button, "Send");
+    harness.get_by_role_and_label(Role::Button, "Stop");
     harness.get_by_label("Terminal");
     // Activity is folded by default; the toggle opens every turn's list.
     assert!(
@@ -790,6 +798,21 @@ fn claude_session_shows_the_conversation_and_message_box() {
     );
     click(&mut harness, "Expand activity");
     harness.get_by_label_contains("Bash: Read crate name");
+}
+
+#[test]
+fn stop_button_and_cmd_period_interrupt() {
+    let (mut harness, ids) = harness();
+    let id = seed_claude(&mut harness, &ids);
+    showing(&mut harness, View::Session(id));
+    click(&mut harness, "Stop");
+    harness.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Period);
+    harness.run_steps(2);
+    let interrupts = actions(&harness)
+        .iter()
+        .filter(|a| **a == AppAction::Interrupt(id))
+        .count();
+    assert_eq!(interrupts, 2);
 }
 
 #[test]

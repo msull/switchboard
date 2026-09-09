@@ -133,6 +133,9 @@ pub enum AppAction {
         id: RecordId,
         text: String,
     },
+    /// Send Escape to the session's terminal, which stops an agent's
+    /// current turn without leaving the conversation view.
+    Interrupt(RecordId),
     KillSession(RecordId),
     /// Stop a shell, command, or service if it runs, then start it again.
     RestartSession(RecordId),
@@ -212,6 +215,11 @@ pub enum Effect {
     SendInput {
         host: HostId,
         text: String,
+    },
+    /// Raw bytes to the pane, no Enter (Escape, control characters).
+    SendKeys {
+        host: HostId,
+        bytes: Vec<u8>,
     },
     OpenPath(PathBuf),
     /// Drop what the host kept for a removed record (scrollback on disk).
@@ -370,17 +378,22 @@ impl AppCore {
             }),
             AppAction::ReturnToSession(id) => self.return_to_session(id, now, &mut out),
             AppAction::SendInput { id, text } => {
-                let running = self
-                    .host_status(id)
-                    .is_some_and(|h| matches!(h.liveness, Liveness::Running { .. }));
-                if let (true, Some(status)) = (running, self.host_status(id)) {
-                    out.push(Effect::SendInput {
-                        host: status.id.clone(),
-                        text,
-                    });
+                if let Some(host) = self.running_host(id) {
+                    out.push(Effect::SendInput { host, text });
                 } else {
                     let name = self.session_name(id);
                     self.error(format!("{name} is not running; return to it first"));
+                }
+            }
+            AppAction::Interrupt(id) => {
+                if let Some(host) = self.running_host(id) {
+                    out.push(Effect::SendKeys {
+                        host,
+                        bytes: vec![0x1b],
+                    });
+                } else {
+                    let name = self.session_name(id);
+                    self.error(format!("{name} is not running; nothing to interrupt"));
                 }
             }
             AppAction::KillSession(id) => {
@@ -702,6 +715,7 @@ impl AppCore {
             | AppAction::MoveCard { .. }
             | AppAction::ReturnToSession(_)
             | AppAction::SendInput { .. }
+            | AppAction::Interrupt(_)
             | AppAction::KillSession(_)
             | AppAction::RestartSession(_)
             | AppAction::RemoveSession(_)
@@ -730,6 +744,12 @@ impl AppCore {
     pub fn host_status(&self, id: RecordId) -> Option<&HostStatus> {
         let name = id.host_name();
         self.host.iter().find(|h| h.id.0 == name)
+    }
+    /// The host id of a record whose pane is running right now.
+    fn running_host(&self, id: RecordId) -> Option<HostId> {
+        self.host_status(id)
+            .filter(|h| matches!(h.liveness, Liveness::Running { .. }))
+            .map(|h| h.id.clone())
     }
     /// Derived card state for a record: host liveness first, then activity.
     #[must_use]

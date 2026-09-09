@@ -19,7 +19,9 @@ use super::files::DraggedPath;
 use super::{DrawCtx, GAP, PAD, UiState};
 use crate::core::{AppAction, RecordId, SessionKind, SessionRecord};
 use crate::ports::host::HostId;
-use crate::ports::transcript::{Activity, ActivityKind, Conversation, ToolDetail, Turn};
+use crate::ports::transcript::{
+    Activity, ActivityKind, Conversation, ToolDetail, Turn, context_window,
+};
 
 /// An `egui_term` backend attached to one host session, plus the channel
 /// that tells us when its pty closed.
@@ -366,6 +368,7 @@ fn message_box(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord) {
         append_path(draft, &path);
     }
     let mut send = false;
+    let mut interrupt = false;
     let field_id = ui.id().with(("message", record.id));
     ui.horizontal_top(|ui| {
         let label = ui.label("Message");
@@ -385,7 +388,7 @@ fn message_box(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord) {
                                 "Enter sends, Shift+Enter adds a line, drop files for their paths",
                             )
                             .desired_rows(3)
-                            .desired_width(ui.available_width() - 70.0)
+                            .desired_width(ui.available_width() - 120.0)
                             .return_key(egui::KeyboardShortcut::new(
                                 egui::Modifiers::SHIFT,
                                 egui::Key::Enter,
@@ -405,17 +408,27 @@ fn message_box(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord) {
         if ui.add_enabled(running, egui::Button::new("Send")).clicked() {
             send = true;
         }
+        if ui
+            .add_enabled(running, egui::Button::new("Stop"))
+            .on_hover_text("Send Escape to the agent (Cmd+.)")
+            .clicked()
+        {
+            interrupt = true;
+        }
     });
     if send {
         let text = std::mem::take(draft);
-        if text.trim().is_empty() {
-            return;
+        if !text.trim().is_empty() {
+            cx.dispatch(AppAction::SendInput {
+                id: record.id,
+                text,
+            });
+            ui.memory_mut(|m| m.request_focus(field_id));
         }
-        cx.dispatch(AppAction::SendInput {
-            id: record.id,
-            text,
-        });
-        ui.memory_mut(|m| m.request_focus(field_id));
+    }
+    // After the draft's last use, so the borrow of `cx.state` has ended.
+    if interrupt {
+        cx.dispatch(AppAction::Interrupt(record.id));
     }
 }
 
@@ -486,6 +499,15 @@ fn meta_line(c: &Conversation) -> String {
         format!("{} turns", c.turns.len()),
     ];
     parts.extend(c.model.clone());
+    if let (Some(used), Some(model)) = (c.context_tokens(), c.model.as_deref()) {
+        let window = context_window(model);
+        parts.push(format!(
+            "ctx {:.0}k / {:.0}k ({}%)",
+            f64_from(used) / 1000.0,
+            f64_from(window) / 1000.0,
+            used * 100 / window.max(1)
+        ));
+    }
     parts.extend(c.version.as_ref().map(|v| format!("v{v}")));
     parts.extend(c.branch.clone());
     parts.push(format!("out {:.1}k tok", f64_from(c.usage.output) / 1000.0));

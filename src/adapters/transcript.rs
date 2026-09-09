@@ -83,6 +83,7 @@ pub fn parse(text: &str) -> Conversation {
 
     let mut conv = Conversation::default();
     let mut usage = Usage::default();
+    let mut last_usage = None;
     let mut cwd_seen = false;
     for r in &recs {
         let kind = str_field(r, "type");
@@ -136,7 +137,15 @@ pub fn parse(text: &str) -> Conversation {
         };
         match kind {
             Some("assistant") => {
-                assistant_record(cur, &mut conv.model, &mut usage, r, &results, at);
+                assistant_record(
+                    cur,
+                    &mut conv.model,
+                    &mut usage,
+                    &mut last_usage,
+                    r,
+                    &results,
+                    at,
+                );
             }
             Some("system") if str_field(r, "subtype") != Some("bridge_status") => {
                 if let Some(c) = str_field(r, "content").filter(|c| !c.trim().is_empty()) {
@@ -148,6 +157,7 @@ pub fn parse(text: &str) -> Conversation {
         }
     }
     conv.usage = usage;
+    conv.last_usage = last_usage;
 
     // The final response is also the last text activity: show it once.
     // (The viewer only drops it when it is the very last line; a hook
@@ -201,16 +211,26 @@ fn assistant_record(
     cur: &mut Turn,
     model: &mut Option<String>,
     usage: &mut Usage,
+    last_usage: &mut Option<Usage>,
     r: &Value,
     results: &HashMap<String, ToolResult>,
     at: Option<SystemTime>,
 ) {
     let msg = r.get("message").cloned().unwrap_or(Value::Null);
     if let Some(u) = msg.get("usage") {
-        usage.input += num(u, "input_tokens");
-        usage.output += num(u, "output_tokens");
-        usage.cache_read += num(u, "cache_read_input_tokens");
-        usage.cache_create += num(u, "cache_creation_input_tokens");
+        let this = Usage {
+            input: num(u, "input_tokens"),
+            output: num(u, "output_tokens"),
+            cache_read: num(u, "cache_read_input_tokens"),
+            cache_create: num(u, "cache_creation_input_tokens"),
+        };
+        usage.input += this.input;
+        usage.output += this.output;
+        usage.cache_read += this.cache_read;
+        usage.cache_create += this.cache_create;
+        // A multi-block turn is several records with the same usage, so
+        // the last one seen is the current context.
+        *last_usage = Some(this);
     }
     if model.is_none() {
         *model = str_field(&msg, "model").map(str::to_owned);
@@ -502,6 +522,26 @@ mod tests {
         assert_eq!(c.model.as_deref(), Some("claude-fable-5-1"));
         assert!(c.start.unwrap() > UNIX_EPOCH);
         assert!(c.end.unwrap() > c.start.unwrap());
+    }
+
+    #[test]
+    fn last_usage_is_the_final_assistant_message() {
+        let c = conversation();
+        let ctx = c.context_tokens().expect("fixture has assistant messages");
+        assert!(ctx > 0);
+        // One message never exceeds the sum over all of them.
+        assert!(ctx <= c.usage.input + c.usage.cache_read + c.usage.cache_create);
+
+        let text = concat!(
+            r#"{"type":"user","message":{"role":"user","content":"hi"},"timestamp":"2026-01-01T00:00:00Z"}"#,
+            "\n",
+            r#"{"type":"assistant","message":{"role":"assistant","model":"m","content":"a","usage":{"input_tokens":10,"output_tokens":1,"cache_read_input_tokens":100,"cache_creation_input_tokens":5}},"timestamp":"2026-01-01T00:00:01Z"}"#,
+            "\n",
+            r#"{"type":"assistant","message":{"role":"assistant","model":"m","content":"b","usage":{"input_tokens":20,"output_tokens":2,"cache_read_input_tokens":200,"cache_creation_input_tokens":7}},"timestamp":"2026-01-01T00:00:02Z"}"#,
+        );
+        let c = parse(text);
+        assert_eq!(c.usage.input, 30);
+        assert_eq!(c.context_tokens(), Some(20 + 200 + 7));
     }
 
     #[test]

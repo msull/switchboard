@@ -1840,6 +1840,25 @@ fn send_input_targets_a_running_session_only() {
 }
 
 #[test]
+fn interrupt_sends_escape_only_to_a_running_pane() {
+    let (mut core, _, ids) = with_records(&[SessionKind::Shell], |_| None);
+    let id = ids[0];
+    let effects = core.dispatch(AppAction::Interrupt(id), Clock::at(1));
+    assert!(effects.is_empty());
+    assert!(core.notices().iter().any(|n| n.is_error));
+
+    core.dispatch(AppAction::HostListed(vec![running(id)]), Clock::at(2));
+    let effects = core.dispatch(AppAction::Interrupt(id), Clock::at(3));
+    assert_eq!(
+        effects,
+        vec![Effect::SendKeys {
+            host: HostId(id.host_name()),
+            bytes: vec![0x1b],
+        }]
+    );
+}
+
+#[test]
 fn return_to_an_exited_pane_kills_it_and_resumes() {
     let mut core = AppCore::new();
     let root = PathBuf::from("/tmp/p");

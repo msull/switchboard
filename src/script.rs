@@ -7,8 +7,10 @@
 //! `files on|off` (the file side of a session), `select-file <project>
 //! <relative path>` (previewed in that side),
 //! `set-env <project> NAME=VALUE`, `set-secret <project> NAME VALUE`,
-//! `dotenv <project> on|off`, `environment <project>` (opens the dialog), `send <name> <text...>`, `return <name>`,
-//! `kill <name>`, `switchboard`, `sleep <secs>` (then polls).
+//! `dotenv <project> on|off`, `environment <project>` (opens the dialog),
+//! `send <name> <text...>`, `interrupt <name>` (Escape to the pane),
+//! `return <name>`, `kill <name>`, `switchboard`, `sleep <secs>` (then
+//! polls).
 //! Blank lines and `#` comments are ignored; unknown lines are logged.
 
 use std::path::PathBuf;
@@ -129,6 +131,10 @@ fn step(app: &mut SwitchboardApp, w: &[&str]) -> Result<(), String> {
                 id,
                 text: text.join(" "),
             });
+        }
+        ["interrupt", n] => {
+            let id = session(app, n)?;
+            app.dispatch(AppAction::Interrupt(id));
         }
         ["kill", n] => {
             let id = session(app, n)?;

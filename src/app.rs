@@ -253,6 +253,7 @@ impl SwitchboardApp {
             | Effect::Attach { .. }
             | Effect::Kill(_)
             | Effect::SendInput { .. }
+            | Effect::SendKeys { .. }
             | Effect::OpenPath(_)
             | Effect::Forget(_)
             | Effect::OpenInEditor { .. }
@@ -327,6 +328,9 @@ impl SwitchboardApp {
             }),
             Effect::SendInput { host, text } => failed(s.host.write_line(&host, &text), || {
                 format!("send input to {}", host.0)
+            }),
+            Effect::SendKeys { host, bytes } => failed(s.host.write(&host, &bytes), || {
+                format!("send keys to {}", host.0)
             }),
             Effect::Kill(host) => failed(s.host.kill(&host), || format!("kill {}", host.0)),
             Effect::Forget(host) => {

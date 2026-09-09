@@ -633,6 +633,20 @@ environment section on the session view itself.
   view. The toggle is saved in `settings.json`, so it comes back the way
   it was left.
 
+## Milestone 6 progress (2026-09-08)
+
+Items are the ids in `docs/feedback-2026-09.md`.
+
+- **A1 Interrupt.** A Stop button beside Send, and Cmd+. anywhere in a
+  session view, send Escape to the pane (`AppAction::Interrupt`,
+  `Effect::SendKeys`, the existing raw `ProcessHost::write`). Escape
+  itself stays Back: it would also blur the message box.
+- **C2 Context size.** The conversation meta line shows the tokens the
+  last assistant message carried (input plus cache read and write)
+  against an approximate window for the model, as `ctx 84k / 200k (42%)`.
+  Only the session on screen reads its transcript, so cards do not show
+  it yet.
+
 ## Open questions
 
 - When the shareable project config arrives, is a hash-and-approve flow
