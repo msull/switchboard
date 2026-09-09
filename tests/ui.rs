@@ -312,7 +312,7 @@ fn run_bar_runs_commands_and_toggles_services() {
     let (mut harness, ids) = harness();
     showing(&mut harness, View::Session(ids.server));
     click(&mut harness, "▶ build");
-    click(&mut harness, "● deploy");
+    click(&mut harness, "• deploy");
     click(&mut harness, "▶ lint");
     let dispatched = actions(&harness);
     assert!(dispatched.contains(&AppAction::RestartSession(ids.build)));

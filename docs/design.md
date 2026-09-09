@@ -695,7 +695,7 @@ Items are the ids in `docs/feedback-2026-09.md`.
   disk like a gone pane, so a finished command's output is there in the
   session view and the Run tab instead of an empty "Not running".
 - **D1, D2 Run bar and board rows.** Under the board strip and the
-  session header, one button per command (▶ name) and service (● name,
+  session header, one button per command (▶ name) and service (• name,
   colored by state): a click runs the command, starts or stops the
   service, or shows a running command; an unapproved entry opens the Run
   tab instead. On the board, agents and shells stay cards under "Agents

@@ -24,7 +24,7 @@ pub fn show(cx: &mut DrawCtx<'_>, ui: &mut Ui, pid: ProjectId, open_side: bool) 
             let state = core.card_state(record.id);
             let running = is_running(core, record.id);
             let service = record.kind == SessionKind::Service;
-            let glyph = if service { "●" } else { "▶" };
+            let glyph = if service { "•" } else { "▶" };
             let mut text = RichText::new(format!("{glyph} {}", record.name));
             let command = match &record.launch {
                 Launch::Command { command, .. } => command.clone(),

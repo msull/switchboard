@@ -107,7 +107,7 @@ pub fn row(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord) {
     let runnable = record.runnable();
     ui.horizontal(|ui| {
         let glyph = if record.kind == SessionKind::Service {
-            "●"
+            "•"
         } else {
             "▶"
         };
