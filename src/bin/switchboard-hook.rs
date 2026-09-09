@@ -18,13 +18,14 @@ use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// Payload field to log field, in output order.
-const COPIED: [(&str, &str); 7] = [
+const COPIED: [(&str, &str); 8] = [
     ("session_id", "session_id"),
     ("cwd", "cwd"),
     ("transcript_path", "transcript_path"),
     ("notification_type", "notification_type"),
     ("tool_name", "tool_name"),
     ("reason", "reason"),
+    ("error", "error"),
     ("last_assistant_message", "last_message"),
 ];
 
@@ -304,11 +305,13 @@ mod tests {
             ("session_id".to_string(), "s1".to_string()),
             ("last_assistant_message".to_string(), "x".repeat(300)),
             ("reason".to_string(), "say \"hi\"\n".to_string()),
+            ("error".to_string(), "rate_limit".to_string()),
         ];
         let line = build_line("Stop", &fields);
         assert!(line.ends_with("}\n"));
         assert!(line.contains("\"event\":\"Stop\""));
         assert!(line.contains("\"cwd\":null"));
+        assert!(line.contains("\"error\":\"rate_limit\""));
         assert!(line.contains("\"reason\":\"say \\\"hi\\\"\\n\""));
         assert!(line.contains(&format!("\"last_message\":\"{}\"", "x".repeat(200))));
     }

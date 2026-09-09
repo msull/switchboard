@@ -67,6 +67,7 @@ fn record(project: ProjectId, name: &str, kind: SessionKind, order: u32) -> Sess
         autostart: false,
         layout: CardLayout { order, group: None },
         activity: Activity::Unknown,
+        activity_reason: None,
         last_event_at: None,
         last_exit: None,
         not_resumable: false,
@@ -82,6 +83,7 @@ fn seed(app: &mut SwitchboardApp) -> Seeded {
     let build = record(alpha.id, "build", SessionKind::Command, 0);
     let mut server = record(alpha.id, "server", SessionKind::Shell, 1);
     server.activity = Activity::WaitingOnYou;
+    server.activity_reason = Some("permission for Bash".into());
     let deploy = record(alpha.id, "deploy", SessionKind::Service, 2);
     let agent = record(
         beta.id,
@@ -675,8 +677,15 @@ fn command_digits_switch_projects() {
 fn waiting_badge_counts_waiting_sessions() {
     let (harness, _) = harness();
     harness.get_by_label("1 waiting");
-    harness.get_by_label("waiting on you");
+    harness.get_by_label("waiting on you: permission for Bash");
     harness.get_by_label("exited (1)");
+}
+
+#[test]
+fn waiting_reason_is_shown_in_the_session_header() {
+    let (mut harness, ids) = harness();
+    showing(&mut harness, View::Session(ids.server));
+    harness.get_by_label("waiting on you: permission for Bash");
 }
 
 /// A Claude Code session, running, with a resume handle: the shape the

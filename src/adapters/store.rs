@@ -261,7 +261,14 @@ pub fn migrate(value: serde_json::Value) -> Result<Workspace, String> {
         .and_then(serde_json::Value::as_u64)
         .ok_or_else(|| "missing schema_version".to_string())?;
     match version {
-        1 => serde_json::from_value(value).map_err(|e| format!("schema v1: {e}")),
+        // v2 added optional fields only, so a v1 document reads as v2 with
+        // their defaults; it is written back at the current version.
+        1 | 2 => serde_json::from_value(value)
+            .map(|mut w: Workspace| {
+                w.schema_version = SCHEMA_VERSION;
+                w
+            })
+            .map_err(|e| format!("schema v{version}: {e}")),
         v if v > u64::from(SCHEMA_VERSION) => Err(format!(
             "schema version {v} is newer than this build understands ({SCHEMA_VERSION})"
         )),
@@ -390,6 +397,7 @@ mod tests {
             autostart: false,
             layout: CardLayout::default(),
             activity: Activity::Unknown,
+            activity_reason: None,
             last_event_at: None,
             last_exit: None,
             not_resumable: false,
@@ -674,5 +682,21 @@ mod tests {
         let dir = JsonStore::default_dir().unwrap();
         let leaf = dir.file_name().unwrap().to_string_lossy().to_lowercase();
         assert_eq!(leaf, "switchboard", "{}", dir.display());
+    }
+
+    #[test]
+    fn v1_records_load_without_a_reason_and_newer_are_refused() {
+        let mut w = workspace("v1");
+        w.schema_version = 1;
+        let mut value = serde_json::to_value(&w).unwrap();
+        for s in value["sessions"].as_array_mut().unwrap() {
+            s.as_object_mut().unwrap().remove("activity_reason");
+        }
+        let loaded = migrate(value.clone()).unwrap();
+        assert_eq!(loaded.schema_version, SCHEMA_VERSION);
+        assert!(loaded.sessions.iter().all(|s| s.activity_reason.is_none()));
+
+        value["schema_version"] = serde_json::json!(u64::from(SCHEMA_VERSION) + 1);
+        assert!(migrate(value).unwrap_err().contains("newer"));
     }
 }

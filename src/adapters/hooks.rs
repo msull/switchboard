@@ -61,6 +61,8 @@ struct LogLine {
     notification_type: Option<String>,
     tool_name: Option<String>,
     reason: Option<String>,
+    #[serde(default)]
+    error: Option<String>,
     last_message: Option<String>,
 }
 
@@ -74,9 +76,10 @@ impl LogLine {
                 tool: self.tool_name,
             },
             "PermissionDenied" => EventKind::PermissionDenied,
-            "Stop" | "StopFailure" => EventKind::Stopped {
+            "Stop" => EventKind::Stopped {
                 last_message: self.last_message,
             },
+            "StopFailure" => EventKind::StopFailed { reason: self.error },
             "Notification" => EventKind::Notification {
                 kind: self.notification_type.unwrap_or_default(),
             },
@@ -413,7 +416,7 @@ mod tests {
                 .replace("\"tool_name\":null", "\"tool_name\":\"Bash\""),
         );
         text.push_str(&line(4, "PermissionDenied", ""));
-        text.push_str(&line(5, "StopFailure", ""));
+        text.push_str(&line(5, "StopFailure", ",\"error\":\"rate_limit\""));
         text.push_str(&line(6, "Notification", "").replace(
             "\"notification_type\":null",
             "\"notification_type\":\"idle_prompt\"",
@@ -436,7 +439,9 @@ mod tests {
                     tool: Some("Bash".into())
                 },
                 EventKind::PermissionDenied,
-                EventKind::Stopped { last_message: None },
+                EventKind::StopFailed {
+                    reason: Some("rate_limit".into())
+                },
                 EventKind::Notification {
                     kind: "idle_prompt".into()
                 },

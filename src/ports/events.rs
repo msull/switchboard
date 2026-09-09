@@ -13,11 +13,24 @@ pub enum EventKind {
     SessionStart,
     PromptSubmitted,
     ToolFinished,
-    PermissionRequested { tool: Option<String> },
+    PermissionRequested {
+        tool: Option<String>,
+    },
     PermissionDenied,
-    Stopped { last_message: Option<String> },
-    Notification { kind: String },
-    SessionEnded { reason: Option<String> },
+    Stopped {
+        last_message: Option<String>,
+    },
+    /// The turn ended on an API error; `reason` is the provider's short
+    /// code (`rate_limit`, `authentication_failed`, ...).
+    StopFailed {
+        reason: Option<String>,
+    },
+    Notification {
+        kind: String,
+    },
+    SessionEnded {
+        reason: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

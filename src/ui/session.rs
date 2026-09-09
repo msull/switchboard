@@ -140,7 +140,9 @@ fn header(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord) {
             ui.horizontal(|ui| {
                 name_or_editor(cx, ui, record);
                 ui.label(RichText::new(kind_label(record.kind)).weak());
-                ui.label(RichText::new(state.label()).color(state_color(ui, &state)));
+                ui.label(
+                    RichText::new(cx.core.state_text(record.id)).color(state_color(ui, &state)),
+                );
                 ui.label(RichText::new(record.cwd.display().to_string()).weak());
                 if let Some(handle) = &record.resume {
                     ui.label(

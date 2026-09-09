@@ -55,6 +55,7 @@ impl AppCore {
             autostart: false,
             layout: CardLayout { order, group: None },
             activity: Activity::Unknown,
+            activity_reason: None,
             last_event_at: None,
             last_exit: None,
             not_resumable: false,
@@ -318,6 +319,7 @@ impl AppCore {
                 self.edit_session(id, out, |s| {
                     s.last_seen = now.wall;
                     s.activity = Activity::Unknown;
+                    s.activity_reason = None;
                     s.last_exit = None;
                 });
                 // Until the next host poll, treat the session as running so

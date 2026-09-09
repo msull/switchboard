@@ -42,12 +42,13 @@ impl AppCore {
         if record.last_event_at.is_some_and(|last| event.at <= last) {
             return;
         }
-        let activity = activity_for(&event.kind);
+        let change = interpret(&event.kind);
         self.edit_session(id, out, |s| {
             s.last_event_at = Some(event.at);
             s.last_seen = s.last_seen.max(event.at);
-            if let Some(a) = activity {
-                s.activity = a;
+            if let Some((activity, reason)) = change {
+                s.activity = activity;
+                s.activity_reason = reason;
             }
             if event.kind == EventKind::SessionStart
                 && let Some(path) = event.transcript_path
@@ -63,19 +64,41 @@ impl AppCore {
     }
 }
 
-/// What an event says the session is doing; `None` for notifications
-/// the card does not care about.
-fn activity_for(kind: &EventKind) -> Option<Activity> {
-    Some(match kind {
+/// What an event says the session is doing, with a few words of why
+/// when it is waiting; `None` for notifications the card does not care
+/// about. Notification kinds are the ones Claude Code sends (see
+/// `spikes/03-session-state`); an unknown kind changes nothing.
+fn interpret(kind: &EventKind) -> Option<(Activity, Option<String>)> {
+    let waiting = |why: &str| Some((Activity::WaitingOnYou, Some(why.to_owned())));
+    match kind {
         EventKind::SessionStart
         | EventKind::PromptSubmitted
         | EventKind::ToolFinished
-        | EventKind::PermissionDenied => Activity::Working,
-        EventKind::PermissionRequested { .. } => Activity::WaitingOnYou,
-        EventKind::Stopped { .. } => Activity::Idle,
-        EventKind::SessionEnded { .. } => Activity::Ended,
-        EventKind::Notification { kind } if kind.contains("permission") => Activity::WaitingOnYou,
-        EventKind::Notification { kind } if kind.contains("idle") => Activity::Idle,
-        EventKind::Notification { .. } => return None,
-    })
+        | EventKind::PermissionDenied => Some((Activity::Working, None)),
+        EventKind::PermissionRequested { tool } => match tool.as_deref() {
+            Some("AskUserQuestion") => waiting("question"),
+            Some(tool) => waiting(&format!("permission for {tool}")),
+            None => waiting("permission"),
+        },
+        EventKind::StopFailed { reason } => {
+            let why = reason
+                .as_deref()
+                .map_or_else(|| "failed".to_owned(), |r| r.replace('_', " "));
+            waiting(&why)
+        }
+        EventKind::Stopped { .. } => Some((Activity::Idle, None)),
+        EventKind::SessionEnded { .. } => Some((Activity::Ended, None)),
+        EventKind::Notification { kind } => match kind.as_str() {
+            "permission_prompt" => waiting("permission"),
+            "elicitation_dialog" | "elicitation_url_dialog" | "agent_needs_input" => {
+                waiting("input requested")
+            }
+            "quota_auto_resume_stale" | "quota_auto_resume_disabled" => waiting("quota"),
+            "quota_auto_resume_fired" => Some((Activity::Working, None)),
+            "idle_prompt" | "agent_completed" | "elicitation_complete" | "elicitation_response" => {
+                Some((Activity::Idle, None))
+            }
+            _ => None,
+        },
+    }
 }

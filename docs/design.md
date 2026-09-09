@@ -658,6 +658,18 @@ Items are the ids in `docs/feedback-2026-09.md`.
   (or Cmd+T) opens the pane snapshot as a resizable panel above the
   message box, with its own Hide button, so closing it never means
   scrolling back to the top.
+- **C1 Waiting states with a reason.** A session that waits says why
+  next to its state, on the card and in the session header: "waiting on
+  you: question" for `AskUserQuestion`, "permission for Bash" for a
+  tool, "rate limit" (or another provider code) when the turn ended on
+  an API error, "input requested" and "quota" for the matching
+  notifications. `StopFailure` is its own event now instead of reading
+  as idle; notification kinds are matched exactly; and a Claude Code
+  pane reads as *starting* until its first hook, so a session that is
+  still loading is not mistaken for one that is working. The reason is
+  stored with the activity (`activity_reason`, schema v2, older files
+  load with it empty). States that fire no hook are still invisible
+  (pane scraping is an open question).
 
 ## Open questions
 

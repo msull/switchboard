@@ -58,6 +58,7 @@ fn record(project: ProjectId, kind: SessionKind, order: u32) -> SessionRecord {
         autostart: false,
         layout: super::model::CardLayout { order, group: None },
         activity: Activity::Unknown,
+        activity_reason: None,
         last_event_at: None,
         last_exit: None,
         not_resumable: false,
@@ -269,7 +270,8 @@ fn quiet_codex_pane_reads_idle_until_output_resumes() {
     let mut s2 = running(id2);
     s2.last_activity = Some(now.wall - Duration::from_secs(300));
     core2.dispatch(AppAction::HostListed(vec![s2]), now);
-    assert_eq!(core2.card_state(id2), CardState::Working);
+    // Claude Code has hooks, so silence means nothing for it: still starting.
+    assert_eq!(core2.card_state(id2), CardState::Starting);
 }
 
 #[test]
@@ -396,7 +398,7 @@ fn reconcile_marks_warm_exited_and_cold() {
             _ => None,
         }
     });
-    assert_eq!(core.card_state(ids[0]), CardState::Working);
+    assert_eq!(core.card_state(ids[0]), CardState::Starting);
     assert_eq!(core.card_state(ids[1]), CardState::Exited(Some(3)));
     assert_eq!(core.card_state(ids[2]), CardState::NotRunning);
 }
@@ -537,20 +539,74 @@ fn card_state_follows_activity_while_running() {
 }
 
 #[test]
-fn unknown_activity_is_working_for_agents_idle_for_others() {
-    let (core, _, ids) = with_records(
+fn unknown_activity_is_starting_for_claude_working_for_codex_idle_for_others() {
+    let (mut core, _, ids) = with_records(
         &[
             agent(),
+            codex(),
             SessionKind::Shell,
             SessionKind::Service,
             SessionKind::Command,
         ],
         |s| Some(running(s.id)),
     );
-    assert_eq!(core.card_state(ids[0]), CardState::Working);
-    for id in &ids[1..] {
+    assert_eq!(core.card_state(ids[0]), CardState::Starting);
+    assert_eq!(core.state_text(ids[0]), "starting");
+    assert_eq!(core.card_state(ids[1]), CardState::Working);
+    for id in &ids[2..] {
         assert_eq!(core.card_state(*id), CardState::Idle);
     }
+    // The first hook ends the starting state.
+    core.dispatch(
+        AppAction::Events(vec![SessionEvent {
+            record_id: Some(ids[0]),
+            ..event(EventKind::SessionStart, 100)
+        }]),
+        Clock::at(1),
+    );
+    assert_eq!(core.card_state(ids[0]), CardState::Working);
+}
+
+#[test]
+fn waiting_reason_follows_the_event() {
+    let (mut core, _, ids) = with_records(&[agent()], |s| Some(running(s.id)));
+    let cases: [(EventKind, &str); 5] = [
+        (
+            EventKind::PermissionRequested {
+                tool: Some("Bash".into()),
+            },
+            "waiting on you: permission for Bash",
+        ),
+        (
+            EventKind::PermissionRequested {
+                tool: Some("AskUserQuestion".into()),
+            },
+            "waiting on you: question",
+        ),
+        (
+            EventKind::StopFailed {
+                reason: Some("rate_limit".into()),
+            },
+            "waiting on you: rate limit",
+        ),
+        (
+            EventKind::StopFailed { reason: None },
+            "waiting on you: failed",
+        ),
+        (EventKind::PromptSubmitted, "working"),
+    ];
+    for (i, (kind, expected)) in cases.into_iter().enumerate() {
+        core.dispatch(
+            AppAction::Events(vec![SessionEvent {
+                record_id: Some(ids[0]),
+                ..event(kind.clone(), 1_000 * (u64::try_from(i).unwrap() + 1))
+            }]),
+            Clock::at(1),
+        );
+        assert_eq!(core.state_text(ids[0]), expected, "{kind:?}");
+    }
+    // A working session carries no stale reason.
+    assert_eq!(core.session(ids[0]).unwrap().activity_reason, None);
 }
 
 #[test]
@@ -1371,7 +1427,7 @@ fn events_match_by_record_id_not_cwd() {
         Clock::at(1),
     );
     assert_eq!(saves(&e), 1);
-    assert_eq!(core.card_state(ids[0]), CardState::Working);
+    assert_eq!(core.card_state(ids[0]), CardState::Starting);
     assert_eq!(core.card_state(ids[1]), CardState::WaitingOnYou);
     assert_eq!(core.waiting_count(), 1);
     assert_eq!(
@@ -1401,7 +1457,7 @@ fn events_match_by_provider_session_id() {
         }]),
         Clock::at(1),
     );
-    assert_eq!(core.card_state(ida), CardState::Working);
+    assert_eq!(core.card_state(ida), CardState::Starting);
     assert_eq!(core.card_state(idb), CardState::Idle);
 }
 
@@ -1423,7 +1479,7 @@ fn unmatched_events_are_ignored() {
         Clock::at(1),
     );
     assert!(e.is_empty());
-    assert_eq!(core.card_state(ids[0]), CardState::Working);
+    assert_eq!(core.card_state(ids[0]), CardState::Starting);
 }
 
 #[test]
@@ -1484,6 +1540,42 @@ fn event_kinds_map_to_activities() {
                 kind: "other".into(),
             },
             CardState::Working,
+        ),
+        (
+            EventKind::Notification {
+                kind: "agent_needs_input".into(),
+            },
+            CardState::WaitingOnYou,
+        ),
+        (
+            EventKind::Notification {
+                kind: "elicitation_dialog".into(),
+            },
+            CardState::WaitingOnYou,
+        ),
+        (
+            EventKind::Notification {
+                kind: "quota_auto_resume_stale".into(),
+            },
+            CardState::WaitingOnYou,
+        ),
+        (
+            EventKind::Notification {
+                kind: "quota_auto_resume_fired".into(),
+            },
+            CardState::Working,
+        ),
+        (
+            EventKind::Notification {
+                kind: "agent_completed".into(),
+            },
+            CardState::Idle,
+        ),
+        (
+            EventKind::StopFailed {
+                reason: Some("server_error".into()),
+            },
+            CardState::WaitingOnYou,
         ),
         (
             EventKind::Stopped {

@@ -765,10 +765,12 @@ impl AppCore {
                 }
                 Activity::Working => CardState::Working,
                 Activity::Idle | Activity::Ended => CardState::Idle,
-                // Nothing reported yet: an agent that just started is busy
-                // until a hook says otherwise; a shell sits at its prompt.
+                // Nothing reported yet: a Claude Code pane is starting until
+                // its first hook; Codex has no hooks, so it is simply busy;
+                // a shell sits at its prompt.
                 Activity::Unknown => match record.kind {
-                    SessionKind::Agent(_) => CardState::Working,
+                    SessionKind::Agent(AgentKind::ClaudeCode) => CardState::Starting,
+                    SessionKind::Agent(AgentKind::Codex) => CardState::Working,
                     SessionKind::Command | SessionKind::Service | SessionKind::Shell => {
                         CardState::Idle
                     }
@@ -777,6 +779,21 @@ impl AppCore {
             Some(Liveness::Exited { code }) => CardState::Exited(*code),
             Some(Liveness::Missing) | None if record.not_resumable => CardState::NotResumable,
             Some(Liveness::Missing) | None => CardState::NotRunning,
+        }
+    }
+    /// The card state as text, with the reason when the session waits:
+    /// "waiting on you: permission for Bash".
+    #[must_use]
+    pub fn state_text(&self, id: RecordId) -> String {
+        let state = self.card_state(id);
+        let label = state.label();
+        match self
+            .session(id)
+            .filter(|_| state == CardState::WaitingOnYou)
+            .and_then(|s| s.activity_reason.as_deref())
+        {
+            Some(reason) => format!("{label}: {reason}"),
+            None => label,
         }
     }
     /// One project's cards: waiting first, then by the saved order.

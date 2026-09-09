@@ -124,7 +124,9 @@ locations, then screenshot the window with `screencapture -l <window
 id>`. Keep the data dir path short: the wake socket path has a 104-byte
 limit. Hook events can be injected by running `switchboard-hook <EventName>`
 by hand with the hook JSON on stdin and `SWITCHBOARD_RECORD_ID` and
-`SWITCHBOARD_DATA_DIR` set.
+`SWITCHBOARD_DATA_DIR` set, for example
+`echo '{"error":"rate_limit"}' | switchboard-hook StopFailure` or
+`echo '{"tool_name":"AskUserQuestion"}' | switchboard-hook PermissionRequest`.
 
 ## Testing rules
 

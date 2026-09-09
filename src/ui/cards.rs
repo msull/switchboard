@@ -17,7 +17,7 @@ pub const CARD_SIZE: egui::Vec2 = vec2(260.0, 136.0);
 pub fn state_color(ui: &Ui, state: &CardState) -> Color32 {
     match state {
         CardState::WaitingOnYou => Color32::from_rgb(235, 140, 0),
-        CardState::Working => Color32::from_rgb(60, 170, 80),
+        CardState::Working | CardState::Starting => Color32::from_rgb(60, 170, 80),
         CardState::Idle => ui.visuals().text_color(),
         CardState::Exited(Some(code)) if *code != 0 => ui.visuals().error_fg_color,
         CardState::Exited(_) | CardState::NotRunning | CardState::NotResumable => {
@@ -35,7 +35,7 @@ pub fn project_dot_color(core: &AppCore, project: ProjectId) -> Color32 {
         .unwrap_or_default();
     if states.contains(&CardState::WaitingOnYou) {
         Color32::from_rgb(220, 60, 60)
-    } else if states.contains(&CardState::Working) {
+    } else if states.contains(&CardState::Working) || states.contains(&CardState::Starting) {
         Color32::from_rgb(60, 170, 80)
     } else {
         Color32::GRAY
@@ -94,6 +94,7 @@ pub fn card_key(core: &AppCore, record: &SessionRecord) -> (u8, u32) {
 /// on it without opening.
 pub fn session_card(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord) {
     let state = cx.core.card_state(record.id);
+    let state_text = cx.core.state_text(record.id);
     let running = is_running(cx.core, record.id);
     let caption = cx
         .state
@@ -125,7 +126,7 @@ pub fn session_card(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord) {
                         ))
                         .weak(),
                     );
-                    state_line(ui, record, &state, running);
+                    state_line(ui, record, &state, &state_text, running);
                     if let Some(caption) = caption {
                         ui.add(
                             egui::Label::new(RichText::new(last_line(&caption)).weak().small())
@@ -143,9 +144,9 @@ pub fn session_card(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord) {
     }
 }
 
-fn state_line(ui: &mut Ui, record: &SessionRecord, state: &CardState, running: bool) {
+fn state_line(ui: &mut Ui, record: &SessionRecord, state: &CardState, text: &str, running: bool) {
     ui.horizontal(|ui| {
-        let mut label = RichText::new(state.label()).color(state_color(ui, state));
+        let mut label = RichText::new(text).color(state_color(ui, state));
         if *state == CardState::NotResumable {
             label = label.strikethrough();
         }

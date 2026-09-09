@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 /// Bump when the on-disk shape changes incompatibly.
-pub const SCHEMA_VERSION: u32 = 1;
+pub const SCHEMA_VERSION: u32 = 2;
 
 /// How the UI picks its colours: follow the system, or force one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -258,6 +258,11 @@ pub struct SessionRecord {
     /// older than `last_event_at` are ignored (ordering rule).
     #[serde(default)]
     pub activity: Activity,
+    /// Why the activity is what it is, in a few words the card can show:
+    /// "question", "permission for Bash", "rate limit". Set with the
+    /// activity and cleared with it, so it is never stale.
+    #[serde(default)]
+    pub activity_reason: Option<String>,
     #[serde(default)]
     pub last_event_at: Option<SystemTime>,
     /// Last exit code seen from the host.
@@ -298,6 +303,8 @@ pub enum CardState {
     NotRunning,
     /// Provider transcript is gone or a resume failed.
     NotResumable,
+    /// A Claude Code pane is up but no hook has reported yet.
+    Starting,
     Working,
     WaitingOnYou,
     /// Alive at a prompt, nothing pending.
@@ -312,6 +319,7 @@ impl CardState {
         match self {
             Self::NotRunning => "not running".into(),
             Self::NotResumable => "not resumable".into(),
+            Self::Starting => "starting".into(),
             Self::Working => "working".into(),
             Self::WaitingOnYou => "waiting on you".into(),
             Self::Idle => "idle".into(),
@@ -319,16 +327,18 @@ impl CardState {
             Self::Exited(None) => "exited".into(),
         }
     }
-    /// Sort key: waiting first, then working, idle, exited, not running.
+    /// Sort key: waiting first, then working, starting, idle, exited,
+    /// not running.
     #[must_use]
     pub fn rank(&self) -> u8 {
         match self {
             Self::WaitingOnYou => 0,
             Self::Working => 1,
-            Self::Idle => 2,
-            Self::Exited(_) => 3,
-            Self::NotRunning => 4,
-            Self::NotResumable => 5,
+            Self::Starting => 2,
+            Self::Idle => 3,
+            Self::Exited(_) => 4,
+            Self::NotRunning => 5,
+            Self::NotResumable => 6,
         }
     }
 }

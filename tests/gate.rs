@@ -285,6 +285,7 @@ fn record(project: ProjectId, name: &str, kind: SessionKind, cwd: &Path) -> Sess
         autostart: false,
         layout: CardLayout::default(),
         activity: Activity::Unknown,
+        activity_reason: None,
         last_event_at: None,
         last_exit: None,
         not_resumable: false,
