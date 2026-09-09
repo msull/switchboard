@@ -694,6 +694,19 @@ Items are the ids in `docs/feedback-2026-09.md`.
   pane's last output. A pane that exited now reads its output from
   disk like a gone pane, so a finished command's output is there in the
   session view and the Run tab instead of an empty "Not running".
+- **D1, D2 Run bar and board rows.** Under the board strip and the
+  session header, one button per command (▶ name) and service (● name,
+  colored by state): a click runs the command, starts or stops the
+  service, or shows a running command; an unapproved entry opens the Run
+  tab instead. On the board, agents and shells stay cards under "Agents
+  and shells" while commands and services are rows under "Commands and
+  services" with Start/Stop/Run now, Show, and Remove.
+- **Not done.** Pane scraping for states that fire no hook (C1); the
+  question text and choices of an `AskUserQuestion` in the summary view
+  (C3); arrow keys reaching a picker in the embedded terminal (A2);
+  restricting an approved command to the variables it lists; per-run
+  output history; the switchboard view still shows commands and
+  services as cards; the context figure on cards.
 
 ## Open questions
 

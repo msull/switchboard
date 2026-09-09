@@ -136,10 +136,13 @@ pub fn row(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord) {
             {
                 cx.dispatch(AppAction::RestartSession(record.id));
             }
-            if !running
-                && record.approval() == Approval::Orphaned
-                && ui.small_button("Remove").clicked()
-            {
+            // A live defined entry would come back on the next read, so
+            // Remove is for the user's own records and orphans only.
+            let removable = matches!(
+                record.approval(),
+                Approval::NotApplicable | Approval::Orphaned
+            );
+            if !running && removable && ui.small_button("Remove").clicked() {
                 cx.dispatch(AppAction::RemoveSession(record.id));
             }
         });

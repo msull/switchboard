@@ -1,11 +1,12 @@
-//! One project's board: its session cards in a wrapping grid, pinned
-//! documents, and read-only notes.
+//! One project's board: the run bar, its agent and shell cards in a
+//! wrapping grid, its commands and services as rows, pinned documents,
+//! and read-only notes.
 
 use egui::{RichText, Ui};
 
-use super::cards::{card_key, document_card, session_card};
+use super::cards::{document_card, session_card};
 use super::dialogs::NewSessionDraft;
-use super::{DrawCtx, GAP, PAD};
+use super::{DrawCtx, GAP, PAD, run, runbar};
 use crate::core::ProjectId;
 
 /// Branch and change count per repository the project holds, from the
@@ -73,13 +74,14 @@ pub fn show(cx: &mut DrawCtx<'_>, ui: &mut Ui, pid: ProjectId) {
             if !workspace.project.notes.is_empty() {
                 ui.label(&workspace.project.notes);
             }
+            runbar::show(cx, ui, pid, false);
         });
 
-    let mut sessions: Vec<_> = workspace.sessions.iter().collect();
-    sessions.sort_by_key(|s| card_key(cx.core, s));
+    let sessions = core.board_sessions(pid);
+    let entries = core.run_entries(pid);
 
     egui::ScrollArea::vertical().show(ui, |ui| {
-        ui.label(RichText::new("Sessions").strong());
+        ui.label(RichText::new("Agents and shells").strong());
         ui.separator();
         if sessions.is_empty() {
             ui.label(RichText::new("No sessions yet. Start one with New session.").weak());
@@ -89,6 +91,16 @@ pub fn show(cx: &mut DrawCtx<'_>, ui: &mut Ui, pid: ProjectId) {
                 session_card(cx, ui, record);
             }
         });
+        // Commands and services are a checklist, not cards: they have
+        // no conversation to preview, and the run bar starts them.
+        if !entries.is_empty() {
+            ui.add_space(GAP);
+            ui.label(RichText::new("Commands and services").strong());
+            ui.separator();
+            for record in entries {
+                run::row(cx, ui, record);
+            }
+        }
         if !workspace.project.pinned.is_empty() {
             ui.add_space(GAP);
             ui.label(RichText::new("Pinned").strong());

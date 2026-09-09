@@ -285,8 +285,46 @@ fn board_lists_the_projects_sessions_and_notes() {
 fn clicking_a_card_dispatches_show_session() {
     let (mut harness, ids) = harness();
     showing(&mut harness, View::Board(ids.alpha));
-    click(&mut harness, "build");
-    assert_eq!(actions(&harness), vec![AppAction::ShowSession(ids.build)]);
+    click(&mut harness, "server");
+    assert_eq!(actions(&harness), vec![AppAction::ShowSession(ids.server)]);
+}
+
+#[test]
+fn board_separates_commands_and_services_from_sessions() {
+    let (mut harness, ids) = harness();
+    showing(&mut harness, View::Board(ids.alpha));
+    harness.get_by_label("Agents and shells");
+    harness.get_by_label("Commands and services");
+    // The shell is a card with Open and Kill; the command is a row whose
+    // Show button opens it.
+    harness.get_by_role_and_label(Role::Button, "Open");
+    harness.get_all_by_label("Show").next().unwrap().click();
+    harness.run_steps(2);
+    let dispatched = actions(&harness);
+    assert!(matches!(
+        dispatched[0],
+        AppAction::ShowSession(id) if id == ids.build || id == ids.deploy || id == ids.lint
+    ));
+}
+
+#[test]
+fn run_bar_runs_commands_and_toggles_services() {
+    let (mut harness, ids) = harness();
+    showing(&mut harness, View::Session(ids.server));
+    click(&mut harness, "▶ build");
+    click(&mut harness, "● deploy");
+    click(&mut harness, "▶ lint");
+    let dispatched = actions(&harness);
+    assert!(dispatched.contains(&AppAction::RestartSession(ids.build)));
+    assert!(dispatched.contains(&AppAction::RestartSession(ids.deploy)));
+    // Unapproved: the bar opens the Run tab instead of running it.
+    assert!(!dispatched.contains(&AppAction::RestartSession(ids.lint)));
+    assert!(dispatched.contains(&AppAction::SetSideTab(SideTab::Run)));
+    assert!(dispatched.contains(&AppAction::SetFilesOpen(true)));
+    harness.get_by_label("cargo clippy");
+    // The bar is on the board too, without opening anything.
+    showing(&mut harness, View::Board(ids.alpha));
+    harness.get_by_label("▶ build");
 }
 
 #[test]

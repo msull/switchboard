@@ -17,6 +17,7 @@ pub mod env;
 pub mod files;
 pub mod palette;
 mod run;
+mod runbar;
 mod session;
 mod switchboard;
 mod switcher;

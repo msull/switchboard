@@ -199,6 +199,7 @@ fn header(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord) {
                     }
                 });
             });
+            super::runbar::show(cx, ui, record.project, true);
         });
 }
 
