@@ -232,6 +232,26 @@ impl SwitchboardApp {
         }
     }
 
+    /// Type a message into a pane. The message box keeps its draft until
+    /// the pane has the text, so a dead session or a failed write leaves
+    /// it there to resend.
+    fn send_input(&mut self, host: &HostId, text: &str) -> Option<AppAction> {
+        let result = self.services.host.write_line(host, text);
+        if result.is_ok() {
+            let sent = self
+                .core
+                .workspaces()
+                .iter()
+                .flat_map(|w| &w.sessions)
+                .find(|r| r.id.host_name() == host.0)
+                .map(|r| r.id);
+            if let Some(id) = sent {
+                self.ui_state.input_drafts.remove(&id);
+            }
+        }
+        failed(result, || format!("send input to {}", host.0))
+    }
+
     /// The persistence effects; only a workspace save reports back.
     fn run_store_effect(&self, effect: Effect) -> Option<AppAction> {
         let store = &self.services.store;
@@ -338,9 +358,7 @@ impl SwitchboardApp {
                 id,
                 result: self.attach(&host, &title, &cwd),
             }),
-            Effect::SendInput { host, text } => failed(s.host.write_line(&host, &text), || {
-                format!("send input to {}", host.0)
-            }),
+            Effect::SendInput { host, text } => self.send_input(&host, &text),
             Effect::SendKeys { host, bytes } => failed(s.host.write(&host, &bytes), || {
                 format!("send keys to {}", host.0)
             }),

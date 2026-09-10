@@ -129,10 +129,15 @@ pub fn show(cx: &mut DrawCtx<'_>, ui: &mut Ui, pid: ProjectId, path: &Path) {
         return;
     };
     header(cx, ui, pid, path, size);
-    egui::ScrollArea::vertical()
+    // Prose wraps at the visible width, but a table or a wide image
+    // cannot, so the area also scrolls sideways for those. The width
+    // is taken before the scroll area, which offers unbounded room.
+    let width = ui.available_width();
+    egui::ScrollArea::both()
         .id_salt("document")
         .auto_shrink(false)
         .show(ui, |ui| {
+            ui.set_max_width(width);
             Frame::new()
                 .fill(ui.visuals().panel_fill)
                 .stroke(ui.visuals().widgets.noninteractive.bg_stroke)

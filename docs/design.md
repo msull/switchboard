@@ -704,6 +704,12 @@ Items are the ids in `docs/feedback-2026-09.md`.
   command shows a spinner and its latest output line next to its
   button; once it finished, the line and the exit state are on the
   button's hover.
+- **Message box keeps a failed send.** The draft is cleared only after
+  the pane accepted the text; a dead session or a failed write leaves it
+  in the box with the error notice, ready to resend.
+- **Documents scroll sideways for tables.** Prose wraps at the visible
+  width as before, and a Markdown table or a wide image, which cannot
+  wrap, scrolls horizontally instead of being cut off at the edge.
 - **Not done.** Pane scraping for states that fire no hook (C1); the
   question text and choices of an `AskUserQuestion` in the summary view
   (C3); arrow keys reaching a picker in the embedded terminal (A2);

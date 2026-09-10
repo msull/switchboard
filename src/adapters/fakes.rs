@@ -59,6 +59,8 @@ pub struct FakeHostState {
     pub written: Vec<(HostId, Vec<u8>)>,
     pub probe: Option<Result<HostInfo, String>>,
     pub fail_spawn: Option<String>,
+    /// Every write fails with this message (a pane that died).
+    pub fail_write: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -100,6 +102,9 @@ impl ProcessHost for FakeHost {
         Ok(String::new())
     }
     fn write(&self, id: &HostId, bytes: &[u8]) -> std::io::Result<()> {
+        if let Some(e) = &self.state().fail_write {
+            return Err(std::io::Error::other(e.clone()));
+        }
         self.state().written.push((id.clone(), bytes.to_vec()));
         Ok(())
     }

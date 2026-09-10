@@ -451,15 +451,16 @@ fn message_box(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord) {
             interrupt = true;
         }
     });
-    if send {
-        let text = std::mem::take(draft);
-        if !text.trim().is_empty() {
-            cx.dispatch(AppAction::SendInput {
-                id: record.id,
-                text,
-            });
-            ui.memory_mut(|m| m.request_focus(field_id));
-        }
+    // The draft stays in the box until the app reports the pane took it
+    // (`SwitchboardApp` clears it after a successful write), so a dead
+    // session or a failed write does not lose what was typed.
+    if send && !draft.trim().is_empty() {
+        let text = draft.clone();
+        cx.dispatch(AppAction::SendInput {
+            id: record.id,
+            text,
+        });
+        ui.memory_mut(|m| m.request_focus(field_id));
     }
     // After the draft's last use, so the borrow of `cx.state` has ended.
     if interrupt {

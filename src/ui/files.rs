@@ -298,13 +298,17 @@ fn preview_pane(
         .preview
         .as_ref()
         .is_some_and(|p| matches!(p.body, document::Body::Text(_)));
+    let width = ui.available_width();
     egui::ScrollArea::both()
         .id_salt(("files_preview_body", pid, path))
         .auto_shrink(false)
         .show(ui, |ui| {
-            // Code keeps its lines and scrolls sideways; prose wraps.
+            // Code keeps its lines and scrolls sideways; prose wraps at
+            // the side's width, and only a table or image scrolls.
             if is_code {
                 ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
+            } else {
+                ui.set_max_width(width);
             }
             document::body(cx.state, ui);
         });

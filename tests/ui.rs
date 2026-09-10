@@ -156,13 +156,26 @@ fn harness_with(opener: FakeOpener) -> (Harness<'static, SwitchboardApp>, Seeded
     harness_full(opener, FakeSecrets::default())
 }
 
+/// A harness whose host the test scripted (a failing write, say).
+fn harness_with_host(host: FakeHost) -> (Harness<'static, SwitchboardApp>, Seeded) {
+    harness_build(FakeOpener::default(), FakeSecrets::default(), host)
+}
+
 fn harness_full(
     opener: FakeOpener,
     secrets: FakeSecrets,
 ) -> (Harness<'static, SwitchboardApp>, Seeded) {
+    harness_build(opener, secrets, FakeHost::default())
+}
+
+fn harness_build(
+    opener: FakeOpener,
+    secrets: FakeSecrets,
+    host: FakeHost,
+) -> (Harness<'static, SwitchboardApp>, Seeded) {
     let services = Services {
         store: Box::new(MemoryStore::default()),
-        host: Box::new(FakeHost::default()),
+        host: Box::new(host),
         events: Box::new(FakeEvents::default()),
         agents: Box::new(FakeAgents::default()),
         opener: Box::new(opener),
@@ -509,6 +522,44 @@ fn file_project(
         .seed(vec![ws], Vec::new());
     showing(harness, View::Board(pid));
     (dir, pid, sid)
+}
+
+#[test]
+fn a_wide_table_in_a_document_scrolls_sideways_while_prose_wraps() {
+    let (mut harness, _) = harness();
+    let (dir, pid, _) = file_project(&mut harness);
+    let prose = "words that wrap ".repeat(60);
+    let cell = "cell text ".repeat(40);
+    std::fs::write(
+        dir.path().join("README.md"),
+        format!("# T\n\n{prose}\n\n| a | b |\n|---|---|\n| {cell} | last |\n"),
+    )
+    .unwrap();
+    showing(
+        &mut harness,
+        View::Document(pid, dir.path().join("README.md")),
+    );
+    // The side panel begins where the document view ends.
+    let viewport = harness.get_by_label("Find").rect().left();
+    let prose_rect = harness.get_by_label_contains("words that wrap").rect();
+    assert!(
+        prose_rect.right() <= viewport + 1.0,
+        "prose wraps at the view: {prose_rect:?} vs {viewport}"
+    );
+    assert!(prose_rect.height() > 40.0, "prose takes several lines");
+    let before = harness.get_by_label("last").rect().left();
+    assert!(before > viewport, "the far cell starts off screen");
+    // Scroll sideways over the document: the far cell comes closer.
+    harness.event(egui::Event::PointerMoved(prose_rect.center()));
+    harness.event(egui::Event::MouseWheel {
+        unit: egui::MouseWheelUnit::Point,
+        delta: egui::vec2(-400.0, 0.0),
+        phase: egui::TouchPhase::Move,
+        modifiers: egui::Modifiers::NONE,
+    });
+    harness.run_steps(3);
+    let after = harness.get_by_label("last").rect().left();
+    assert!(after < before - 100.0, "{before} -> {after}");
 }
 
 #[test]
@@ -1099,6 +1150,36 @@ fn message_box_is_multiline_and_enter_sends() {
         id,
         text: "first line\nsecond line".into()
     }));
+    // The fake pane took it, so the draft is gone (the box re-creates an
+    // empty one on the next frame).
+    assert_eq!(
+        harness
+            .state()
+            .ui_state
+            .input_drafts
+            .get(&id)
+            .map_or("", String::as_str),
+        ""
+    );
+}
+
+#[test]
+fn a_failed_send_keeps_the_draft() {
+    let host = FakeHost::default();
+    host.state().fail_write = Some("pane is dead".into());
+    let (mut harness, ids) = harness_with_host(host);
+    let id = seed_claude(&mut harness, &ids);
+    showing(&mut harness, View::Session(id));
+    let field = harness.get_by_label("Message");
+    field.focus();
+    field.type_text("do not lose me");
+    harness.run_steps(2);
+    harness.key_press(egui::Key::Enter);
+    harness.run_steps(2);
+    assert!(actions(&harness).contains(&AppAction::SendInput {
+        id,
+        text: "do not lose me".into()
+    }));
     assert_eq!(
         harness
             .state()
@@ -1106,7 +1187,12 @@ fn message_box_is_multiline_and_enter_sends() {
             .input_drafts
             .get(&id)
             .map(String::as_str),
-        Some("")
+        Some("do not lose me")
+    );
+    harness.get_by_label_contains("send input");
+    assert_eq!(
+        harness.get_by_label("Message").value().as_deref(),
+        Some("do not lose me")
     );
 }
 
