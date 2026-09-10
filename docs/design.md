@@ -710,6 +710,9 @@ Items are the ids in `docs/feedback-2026-09.md`.
 - **Documents scroll sideways for tables.** Prose wraps at the visible
   width as before, and a Markdown table or a wide image, which cannot
   wrap, scrolls horizontally instead of being cut off at the edge.
+- **Markdown in GitHub's colors.** Documents and final responses use
+  GitHub's link blue, code block grey with a hairline border, and inline
+  code tint, in light and dark, set on the egui style around the viewer.
 - **Not done.** Pane scraping for states that fire no hook (C1); the
   question text and choices of an `AskUserQuestion` in the summary view
   (C3); arrow keys reaching a picker in the embedded terminal (A2);

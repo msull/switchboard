@@ -646,6 +646,7 @@ fn turn_block(ui: &mut Ui, turn: &Turn, open: Option<bool>, markdown: &mut Commo
                             .italics(),
                     );
                 } else {
+                    super::document::github_markdown_style(ui);
                     CommonMarkViewer::new().show(ui, markdown, &turn.final_text);
                 }
             })

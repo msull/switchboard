@@ -6,7 +6,7 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
-use egui::{Frame, RichText, Ui};
+use egui::{Color32, Frame, RichText, Ui};
 use egui_commonmark::CommonMarkViewer;
 
 use super::{DrawCtx, GAP, PAD, UiState};
@@ -150,6 +150,35 @@ pub fn show(cx: &mut DrawCtx<'_>, ui: &mut Ui, pid: ProjectId, path: &Path) {
         });
 }
 
+/// Give Markdown the colors GitHub renders it with: blue links, a light
+/// grey code block with a hairline border, a tinted inline code
+/// background. The viewer reads these from the egui style, and the
+/// change is scoped to `ui` (a style set on a `Ui` lives only as long
+/// as that `Ui`), so nothing else on screen shifts.
+pub fn github_markdown_style(ui: &mut Ui) {
+    let dark = ui.visuals().dark_mode;
+    let (link, code_block, border, inline) = if dark {
+        (
+            Color32::from_rgb(0x44, 0x93, 0xf8),
+            Color32::from_rgb(0x16, 0x1b, 0x22),
+            Color32::from_rgb(0x30, 0x36, 0x3d),
+            Color32::from_rgb(0x34, 0x39, 0x42),
+        )
+    } else {
+        (
+            Color32::from_rgb(0x09, 0x69, 0xda),
+            Color32::from_rgb(0xf6, 0xf8, 0xfa),
+            Color32::from_rgb(0xd0, 0xd7, 0xde),
+            Color32::from_rgb(0xea, 0xee, 0xf2),
+        )
+    };
+    let visuals = &mut ui.style_mut().visuals;
+    visuals.hyperlink_color = link;
+    visuals.extreme_bg_color = code_block;
+    visuals.code_bg_color = inline;
+    visuals.widgets.noninteractive.bg_stroke.color = border;
+}
+
 /// Draw the loaded preview's contents: Markdown, highlighted text, an
 /// image, or the note for what cannot be shown.
 pub fn body(state: &mut UiState, ui: &mut Ui) {
@@ -164,6 +193,7 @@ pub fn body(state: &mut UiState, ui: &mut Ui) {
     };
     match &preview.body {
         Body::Markdown(text) => {
+            github_markdown_style(ui);
             CommonMarkViewer::new().show(ui, markdown, text);
         }
         Body::Text(text) => {
