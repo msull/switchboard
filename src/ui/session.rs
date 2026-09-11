@@ -433,6 +433,7 @@ fn agent_body(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord) {
                 terminal_open,
                 markdown,
                 snapshots,
+                raw_message,
                 ..
             } = &mut *cx.state;
             let snapshot = snapshots.get(&record.id);
@@ -444,6 +445,7 @@ fn agent_body(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord) {
                     expand_applied,
                     terminal_open,
                     markdown,
+                    raw_message,
                 );
             } else {
                 ui.label(
@@ -596,6 +598,7 @@ fn conversation_view(
     expand_applied: &mut Option<bool>,
     terminal_open: &mut bool,
     markdown: &mut CommonMarkCache,
+    raw_message: &mut Option<String>,
 ) {
     let p = theme::palette(ui);
     ui.horizontal(|ui| {
@@ -646,7 +649,7 @@ fn conversation_view(
             // back per turn would only carry that widening along.
             let width = ui.available_width().min(MAX_READING_WIDTH);
             for turn in &conversation.turns {
-                turn_block(ui, turn, open, markdown, width);
+                turn_block(ui, turn, open, markdown, width, raw_message);
             }
         });
 }
@@ -716,6 +719,7 @@ fn turn_block(
     open: Option<bool>,
     markdown: &mut CommonMarkCache,
     width: f32,
+    raw_message: &mut Option<String>,
 ) {
     let p = theme::palette(ui);
     // Back to the reading width whatever the turns above did to it.
@@ -749,7 +753,7 @@ fn turn_block(
         })
         .response
         .rect;
-    message_menu(ui, user_rect, ("user", turn.n), &turn.user);
+    message_menu(ui, user_rect, ("user", turn.n), &turn.user, raw_message);
     // The activity list: neutral rows, no frame, 4 px inset.
     Frame::new()
         .inner_margin(Margin::symmetric(4, 0))
@@ -799,7 +803,13 @@ fn turn_block(
         .response
         .rect;
     if !turn.final_text.is_empty() {
-        message_menu(ui, final_rect, ("final", turn.n), &turn.final_text);
+        message_menu(
+            ui,
+            final_rect,
+            ("final", turn.n),
+            &turn.final_text,
+            raw_message,
+        );
     }
     ui.add_space(6.0);
 }
@@ -822,12 +832,19 @@ fn scrolls_sideways(ui: &mut Ui, salt: (&str, usize), add: impl FnOnce(&mut Ui))
 }
 
 /// The right-click menu of one message (the user's prompt or the
-/// agent's answer) covering `rect`. Copy for now; more to come.
+/// agent's answer) covering `rect`: Copy, and View raw, which opens the
+/// text unformatted in a dialog for when the Markdown renders badly.
 ///
 /// The block is not made clickable: that would put it above the labels
 /// and links inside it in egui's hit test and take their clicks. The
 /// pointer is checked directly instead, and the menu is opened by hand.
-fn message_menu(ui: &mut Ui, rect: egui::Rect, salt: (&str, usize), text: &str) {
+fn message_menu(
+    ui: &mut Ui,
+    rect: egui::Rect,
+    salt: (&str, usize),
+    text: &str,
+    raw_message: &mut Option<String>,
+) {
     let response = ui.interact(rect, ui.id().with(salt), egui::Sense::hover());
     let right_clicked = ui.input(|i| {
         i.pointer.button_clicked(egui::PointerButton::Secondary)
@@ -839,6 +856,10 @@ fn message_menu(ui: &mut Ui, rect: egui::Rect, salt: (&str, usize), text: &str) 
         .show(|ui| {
             if ui.button("Copy").clicked() {
                 ui.ctx().copy_text(text.to_owned());
+                ui.close();
+            }
+            if ui.button("View raw").clicked() {
+                *raw_message = Some(text.to_owned());
                 ui.close();
             }
         });

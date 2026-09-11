@@ -81,6 +81,9 @@ pub struct UiState {
     pub palette: Option<palette::PaletteDraft>,
     /// The Environment dialog, while open.
     pub env_dialog: Option<env::EnvDraft>,
+    /// One message shown unformatted in a dialog ("View raw"), while
+    /// open. The way to read a message whose Markdown renders badly.
+    pub raw_message: Option<String>,
     /// Messages being composed, one per session, so switching away and
     /// back does not lose a half-written prompt.
     pub input_drafts: HashMap<RecordId, String>,
@@ -113,6 +116,7 @@ impl Default for UiState {
             editor_draft: None,
             palette: None,
             env_dialog: None,
+            raw_message: None,
             input_drafts: HashMap::new(),
             terminals: HashMap::new(),
             applied_theme: None,
@@ -328,7 +332,8 @@ fn keyboard(cx: &mut DrawCtx<'_>, ui: &Ui, view: &View) {
     let has_dialog = cx.state.add_project.is_some()
         || cx.state.new_session.is_some()
         || cx.state.palette.is_some()
-        || cx.state.env_dialog.is_some();
+        || cx.state.env_dialog.is_some()
+        || cx.state.raw_message.is_some();
 
     if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::K)) {
         cx.state.palette = Some(palette::PaletteDraft::default());

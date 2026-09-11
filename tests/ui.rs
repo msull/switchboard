@@ -1332,6 +1332,43 @@ fn messages_have_a_context_menu_with_copy() {
 }
 
 #[test]
+fn view_raw_shows_the_message_unformatted_in_a_dialog() {
+    let (mut harness, ids) = harness();
+    let id = seed_claude(&mut harness, &ids);
+    harness
+        .state_mut()
+        .ui_state
+        .conversations
+        .insert(id, (None, two_turns()));
+    showing(&mut harness, View::Session(id));
+    assert!(harness.query_by_label("Raw message").is_none());
+    harness.get_by_label("pong").click_secondary();
+    harness.run_steps(2);
+    harness.get_by_label("View raw").click();
+    harness.run_steps(2);
+    harness.get_by_label("Raw message");
+    assert_eq!(
+        harness.state().ui_state.raw_message.as_deref(),
+        Some("pong")
+    );
+    // The dialog's Copy puts the same text on the clipboard.
+    harness.get_by_role_and_label(Role::Button, "Copy").click();
+    harness.step();
+    let copied = harness
+        .output()
+        .platform_output
+        .commands
+        .iter()
+        .any(|c| *c == egui::OutputCommand::CopyText("pong".into()));
+    assert!(copied);
+    harness.run_steps(2);
+    harness.get_by_label("Close").click();
+    harness.run_steps(2);
+    assert!(harness.query_by_label("Raw message").is_none());
+    assert!(harness.state().ui_state.raw_message.is_none());
+}
+
+#[test]
 fn claude_session_without_a_conversation_falls_back_to_the_snapshot() {
     let (mut harness, ids) = harness();
     let id = seed_claude(&mut harness, &ids);

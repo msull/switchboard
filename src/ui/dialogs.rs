@@ -59,6 +59,46 @@ impl NewSessionDraft {
 pub fn show(cx: &mut DrawCtx<'_>, ctx: &Context) {
     add_project(cx, ctx);
     new_session(cx, ctx);
+    raw_message(cx, ctx);
+}
+
+/// One message as the transcript holds it, in a monospace box that
+/// scrolls, with nothing rendered: the fallback when Markdown goes
+/// wrong. The text is shown read-only and selectable.
+fn raw_message(cx: &mut DrawCtx<'_>, ctx: &Context) {
+    let Some(text) = cx.state.raw_message.as_deref() else {
+        return;
+    };
+    let mut close = ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
+    let mut shown = text;
+    let screen = ctx.content_rect();
+    dialog(ctx, "Raw message", |ui| {
+        let p = theme::palette(ui);
+        egui::ScrollArea::both()
+            .max_width((screen.width() - 80.0).max(200.0))
+            .max_height((screen.height() - 160.0).max(120.0))
+            .auto_shrink([false, true])
+            .show(ui, |ui| {
+                ui.add(
+                    egui::TextEdit::multiline(&mut shown)
+                        .font(egui::TextStyle::Monospace)
+                        .desired_width(f32::INFINITY)
+                        .frame(egui::Frame::new().fill(p.surface).inner_margin(8)),
+                );
+            });
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            if theme::ghost_muted(ui, "Close").clicked() {
+                close = true;
+            }
+            if theme::secondary(ui, "Copy").clicked() {
+                ui.ctx().copy_text(text.to_owned());
+            }
+        });
+    });
+    if close {
+        cx.state.raw_message = None;
+    }
 }
 
 /// A single-line text field under its label, which tests (and screen
