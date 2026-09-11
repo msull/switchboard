@@ -758,11 +758,17 @@ Built:
 - Dialogs, the Go-to palette, the Environment dialog, and the Run tab
   restyled with the same helpers; notices and the host error are toasts
   at the top centre. Dark theme is the token inversion from the hand-off.
+- The window opens maximized, on the screen it showed last: the current
+  board or session is kept in `settings.json` (`last_view`, written
+  whenever the view moves) and pushed back onto the view stack when the
+  store loads, if the project or record still exists. Restoring is only
+  a view change: nothing is launched or resumed. A document preview
+  remembers its board.
 
 Known gaps:
 
 - The rail width is not persisted across launches (egui keeps it for the
-  process); persisting it needs a settings field and a schema bump.
+  process); persisting it needs a settings field.
 - The rail does not snap to the 56 px dot rail; it draws compact when
   dragged below 120 px.
 - Card kickers show the state and age; the model line on agent cards

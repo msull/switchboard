@@ -24,7 +24,7 @@ Data lives in `~/Library/Application Support/Switchboard/`: one JSON file
 per project under `projects/` (with a `.bak` of the previous version;
 approvals of defined commands live inside these records),
 `settings.json` (theme, exclusive mode, editor, global variables, file
-side shown next to sessions and its tab), the
+side shown next to sessions and its tab, the screen to reopen on), the
 tmux config and socket name, `claude-hooks.json` (passed to Claude Code
 with `--settings`), `events.log` (the hook event log), `wake.sock`, and
 `scrollback/`. Sessions run on a private tmux server (`tmux -L

@@ -86,6 +86,20 @@ pub struct Settings {
     pub files_open: bool,
     /// Which tab the side panel shows.
     pub side_tab: SideTab,
+    /// The screen that was showing when the app last ran, so it reopens
+    /// there. A project or session that no longer exists falls back to
+    /// the switchboard.
+    pub last_view: SavedView,
+}
+
+/// A screen as remembered in `settings.json`: only what can be found
+/// again after a restart. A document preview remembers its board.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum SavedView {
+    #[default]
+    Switchboard,
+    Board(ProjectId),
+    Session(RecordId),
 }
 
 /// The tabs of the side panel next to a board or session.

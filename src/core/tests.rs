@@ -10,7 +10,7 @@ use super::action::{AppAction, AppCore, Clock, Effect, View};
 use super::definitions::entry_hash;
 use super::model::{
     Activity, AgentKind, Approval, CardState, Launch, Project, ProjectEnv, ProjectId, RecordId,
-    ResumeHandle, SessionKind, SessionRecord, Settings, SideTab, ThemeMode, Workspace,
+    ResumeHandle, SavedView, SessionKind, SessionRecord, Settings, SideTab, ThemeMode, Workspace,
 };
 use super::reconcile::RECORD_ID_ENV;
 use crate::ports::agent::AgentLaunch;
@@ -680,6 +680,10 @@ fn add_project_creates_workspace_shows_board_and_saves() {
                 project: w.project.id,
                 root: "/r".into(),
             },
+            Effect::SaveSettings(Settings {
+                last_view: SavedView::Board(w.project.id),
+                ..Settings::default()
+            }),
         ]
     );
 }
@@ -715,7 +719,13 @@ fn remove_rename_pin_unpin_project() {
     assert!(core.workspace(id).unwrap().project.pinned.is_empty());
 
     let e = core.dispatch(AppAction::RemoveProject(id), Clock::at(5));
-    assert_eq!(e, vec![Effect::Delete(id)]);
+    assert_eq!(
+        e,
+        vec![
+            Effect::Delete(id),
+            Effect::SaveSettings(Settings::default())
+        ]
+    );
     assert!(core.workspaces().is_empty());
     assert_eq!(
         core.view(),
@@ -1427,11 +1437,91 @@ fn remove_session_drops_record_and_saves_without_killing() {
     let (mut core, pid, ids) = with_records(&[SessionKind::Shell], |s| Some(running(s.id)));
     core.dispatch(AppAction::ShowSession(ids[0]), Clock::at(1));
     let e = core.dispatch(AppAction::RemoveSession(ids[0]), Clock::at(2));
-    assert_eq!(e.len(), 1);
+    assert_eq!(e.len(), 2);
     assert!(matches!(e[0], Effect::Save(_)));
+    assert!(matches!(e[1], Effect::SaveSettings(_)), "the view moved");
     assert!(core.session(ids[0]).is_none());
     assert!(core.workspace(pid).unwrap().sessions.is_empty());
     assert_ne!(core.view(), View::Session(ids[0]));
+}
+
+#[test]
+fn navigation_is_remembered_in_settings() {
+    let (mut core, pid, ids) = with_records(&[SessionKind::Shell], |_| None);
+    core.dispatch(AppAction::ShowBoard(pid), Clock::at(0));
+    let e = core.dispatch(AppAction::ShowSession(ids[0]), Clock::at(1));
+    assert!(
+        e.iter().any(|e| matches!(
+            e,
+            Effect::SaveSettings(s) if s.last_view == SavedView::Session(ids[0])
+        )),
+        "{e:?}"
+    );
+    let e = core.dispatch(AppAction::Back, Clock::at(2));
+    assert_eq!(
+        e,
+        vec![Effect::SaveSettings(Settings {
+            last_view: SavedView::Board(pid),
+            ..Settings::default()
+        })]
+    );
+    assert!(
+        core.dispatch(AppAction::Tick, Clock::at(3)).is_empty(),
+        "nothing to save when the view did not move"
+    );
+    // A document remembers its board: previews are not restored.
+    core.dispatch(
+        AppAction::ShowDocument(pid, "README.md".into()),
+        Clock::at(4),
+    );
+    assert_eq!(core.settings().last_view, SavedView::Board(pid));
+}
+
+#[test]
+fn the_last_view_is_restored_at_startup_if_it_still_exists() {
+    let p = project("p");
+    let mut w = Workspace::new(p.clone());
+    let r = record(p.id, SessionKind::Shell, 0);
+    let id = r.id;
+    w.sessions.push(r);
+    let load = |last_view: SavedView, workspaces: Vec<Workspace>| {
+        let mut core = AppCore::new();
+        let effects = core.dispatch(
+            AppAction::StoreLoaded(Ok(Loaded {
+                workspaces,
+                settings: Settings {
+                    last_view,
+                    ..Settings::default()
+                },
+                ..Loaded::default()
+            })),
+            Clock::at(0),
+        );
+        (core, effects)
+    };
+    let (core, effects) = load(SavedView::Session(id), vec![w.clone()]);
+    assert_eq!(core.view(), View::Session(id));
+    assert!(
+        !effects.iter().any(|e| matches!(e, Effect::SaveSettings(_))),
+        "restoring changes nothing on disk: {effects:?}"
+    );
+    assert!(
+        !effects.iter().any(|e| matches!(e, Effect::Spawn { .. })),
+        "restoring a view never launches"
+    );
+    let (core, _) = load(SavedView::Board(p.id), vec![w.clone()]);
+    assert_eq!(core.view(), View::Board(p.id));
+
+    // A record that is gone falls back to the switchboard, and the
+    // stale reference is written over.
+    let (core, effects) = load(SavedView::Session(RecordId::new()), vec![w]);
+    assert_eq!(core.view(), View::Switchboard);
+    assert!(
+        effects
+            .iter()
+            .any(|e| matches!(e, Effect::SaveSettings(s) if s.last_view == SavedView::Switchboard)),
+        "{effects:?}"
+    );
 }
 
 // --- 7. events

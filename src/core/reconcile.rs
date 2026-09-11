@@ -3,8 +3,8 @@
 //! `autostart` services whose pane is gone. Agents are never resumed
 //! here: a resume costs money, so it waits for a click.
 
-use crate::core::action::{AppCore, Clock, Effect, FlightKind, Out};
-use crate::core::model::{AgentKind, Launch, RecordId, SessionKind, SessionRecord};
+use crate::core::action::{AppCore, Clock, Effect, FlightKind, Out, View};
+use crate::core::model::{AgentKind, Launch, RecordId, SavedView, SessionKind, SessionRecord};
 use crate::ports::host::{HostId, HostStatus, Liveness, SpawnSpec};
 use crate::ports::store::{Loaded, StoreError};
 
@@ -22,6 +22,7 @@ impl AppCore {
             Ok(loaded) => {
                 self.workspaces = loaded.workspaces;
                 self.settings = loaded.settings;
+                self.restore_view();
                 // Definition files are read before the first host poll, so
                 // the reconcile already knows which entries are approved.
                 for w in &self.workspaces {
@@ -45,6 +46,17 @@ impl AppCore {
         }
         self.store_loaded = true;
         self.reconciled = false;
+    }
+
+    /// Reopen the screen the last run ended on, if what it showed still
+    /// exists. Only the view moves: nothing is launched or resumed.
+    fn restore_view(&mut self) {
+        let view = match self.settings.last_view {
+            SavedView::Board(id) if self.workspace(id).is_some() => View::Board(id),
+            SavedView::Session(id) if self.session(id).is_some() => View::Session(id),
+            _ => return,
+        };
+        self.view_stack.push(view);
     }
 
     /// Replaces the host snapshot. The first poll after the store loaded

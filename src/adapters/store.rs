@@ -456,6 +456,7 @@ mod tests {
             env: Vec::new(),
             files_open: true,
             side_tab: crate::core::SideTab::Run,
+            last_view: crate::core::SavedView::Board(crate::core::ProjectId::new()),
         };
         store.save_settings(&settings).unwrap();
         assert_eq!(store.load_all().unwrap().settings, settings);

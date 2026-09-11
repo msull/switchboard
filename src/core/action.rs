@@ -22,7 +22,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use crate::core::env::SecretScope;
 use crate::core::model::{
     Activity, AgentKind, CardState, EnvVar, Launch, Project, ProjectEnv, ProjectId, RecordId,
-    ResumeHandle, SessionKind, SessionRecord, Settings, SideTab, ThemeMode, Workspace,
+    ResumeHandle, SavedView, SessionKind, SessionRecord, Settings, SideTab, ThemeMode, Workspace,
 };
 use crate::ports::agent::AgentLaunch;
 use crate::ports::events::SessionEvent;
@@ -56,6 +56,18 @@ pub enum View {
     Session(RecordId),
     /// A file of the project, previewed read-only.
     Document(ProjectId, PathBuf),
+}
+
+impl View {
+    /// What to remember of this screen across a restart.
+    #[must_use]
+    pub fn saved(&self) -> SavedView {
+        match self {
+            View::Switchboard => SavedView::Switchboard,
+            View::Board(id) | View::Document(id, _) => SavedView::Board(*id),
+            View::Session(id) => SavedView::Session(*id),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -445,7 +457,16 @@ impl AppCore {
             AppAction::Discovered { id, result } => self.discovered(id, result, now, &mut out),
             AppAction::Events(events) => self.apply_events(events, &mut out),
         }
+        self.remember_view(&mut out);
         self.finish(out)
+    }
+
+    /// Keep `settings.last_view` equal to the screen showing, whatever
+    /// action moved it (navigation, a project added or removed, a
+    /// session deleted), so the next start reopens the same screen.
+    fn remember_view(&mut self, out: &mut Out) {
+        let saved = self.view().saved();
+        self.update_settings(out, |s| s.last_view = saved);
     }
 
     /// Turns the gathered output into the effect list: one `Save` per
