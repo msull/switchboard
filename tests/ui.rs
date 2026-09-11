@@ -1666,3 +1666,72 @@ fn a_long_excerpt_is_clamped_above_the_card_buttons() {
         excerpt.height()
     );
 }
+
+#[test]
+fn a_long_file_name_is_cut_before_the_document_buttons() {
+    let (mut harness, ids) = harness();
+    let root = harness
+        .state()
+        .core()
+        .workspace(ids.beta)
+        .unwrap()
+        .project
+        .root
+        .clone();
+    let path = root.join(
+        "a-really-long-file-name-that-nobody-would-ever-choose-for-a-document-but-here-we-are.md",
+    );
+    showing(&mut harness, View::Document(ids.beta, path));
+    // Wide: the title is cut and every button sits to its right.
+    harness.set_size(egui::vec2(1400.0, 600.0));
+    harness.run_steps(4);
+    let title = harness
+        .query_all_by_label_contains("a-really-long")
+        .map(|n| n.rect())
+        .min_by(|a, b| a.top().total_cmp(&b.top()))
+        .unwrap();
+    let side = harness.get_by_label("Find").rect().left();
+    assert!(
+        title.right() < side,
+        "title {title:?} runs under the side at {side}"
+    );
+    let mut lefts = Vec::new();
+    for label in [
+        "Open",
+        "Open in editor",
+        "Reveal",
+        "Copy path",
+        "Pin",
+        "Back",
+    ] {
+        let r = harness.get_by_label(label).rect();
+        assert!(
+            r.left() >= title.right(),
+            "{label} at {r:?} is under the title {title:?}"
+        );
+        assert!(r.right() <= side, "{label} at {r:?} is under the side");
+        lefts.push(r.left());
+    }
+    assert!(lefts.windows(2).all(|w| w[0] < w[1]), "order {lefts:?}");
+    // Narrow: the buttons take a row of their own, in the same order.
+    harness.set_size(egui::vec2(900.0, 600.0));
+    harness.run_steps(4);
+    let title = harness
+        .query_all_by_label_contains("a-really-long")
+        .map(|n| n.rect())
+        .min_by(|a, b| a.top().total_cmp(&b.top()))
+        .unwrap();
+    let side = harness.get_by_label("Find").rect().left();
+    assert!(title.right() < side);
+    let open = harness.get_by_label("Open").rect();
+    let back = harness.get_by_label("Back").rect();
+    assert!(
+        open.top() >= title.bottom(),
+        "Open {open:?} beside the title {title:?}"
+    );
+    assert!(back.right() <= side);
+    assert!(
+        open.top() < back.top() || open.left() < back.left(),
+        "Open before Back"
+    );
+}

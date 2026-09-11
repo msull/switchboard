@@ -214,6 +214,9 @@ fn weak(ui: &mut Ui, text: &str) {
     ui.label(theme::meta_text(ui, text));
 }
 
+/// Below this width the actions go on their own row under the title.
+const TIGHT_HEADER: f32 = 720.0;
+
 fn header(cx: &mut DrawCtx<'_>, ui: &mut Ui, pid: ProjectId, path: &Path, size: u64) {
     let project = cx.core.workspace(pid).map(|w| &w.project);
     let rel = project.and_then(|p| path.strip_prefix(&p.root).ok());
@@ -225,16 +228,71 @@ fn header(cx: &mut DrawCtx<'_>, ui: &mut Ui, pid: ProjectId, path: &Path, size: 
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
-    let p = theme::palette(ui);
-    ui.horizontal(|ui| {
-        ui.label(RichText::new(&name).text_style(theme::h1()));
+    let title = |ui: &mut Ui| {
+        let p = theme::palette(ui);
+        ui.add(egui::Label::new(RichText::new(&name).text_style(theme::h1())).truncate());
         ui.label(RichText::new(size_text(size)).small().color(p.n600));
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            ui.spacing_mut().item_spacing.x = 2.0;
-            if theme::ghost_muted(ui, "Back").clicked() {
-                cx.dispatch(AppAction::Back);
+    };
+    // The buttons claim the right end first and the title is cut to
+    // what is left, so a long file name never runs under them. When
+    // there is no room for both, the buttons get their own row.
+    if ui.available_width() < TIGHT_HEADER {
+        ui.horizontal(title);
+        ui.horizontal_wrapped(|ui| header_actions(cx, ui, pid, path, rel, pinned, false));
+    } else {
+        ui.horizontal(|ui| {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                header_actions(cx, ui, pid, path, rel, pinned, true);
+                ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), title);
+            });
+        });
+    }
+    let shown = rel.unwrap_or(path);
+    ui.add(egui::Label::new(theme::mono_text(ui, shown.display().to_string())).truncate());
+    ui.add_space(8.0);
+}
+
+/// Open, Open in editor, Reveal, Copy path, Pin, Back. `reversed`
+/// draws them last to first, for a right-to-left row.
+fn header_actions(
+    cx: &mut DrawCtx<'_>,
+    ui: &mut Ui,
+    pid: ProjectId,
+    path: &Path,
+    rel: Option<&Path>,
+    pinned: bool,
+    reversed: bool,
+) {
+    #[derive(Clone, Copy)]
+    enum Item {
+        Open,
+        Editor,
+        Reveal,
+        CopyPath,
+        Pin,
+        Back,
+    }
+    let mut items = vec![
+        Item::Open,
+        Item::Editor,
+        Item::Reveal,
+        Item::CopyPath,
+        Item::Pin,
+        Item::Back,
+    ];
+    if reversed {
+        items.reverse();
+    }
+    ui.spacing_mut().item_spacing.x = 2.0;
+    for item in items {
+        match item {
+            Item::Back => {
+                if theme::ghost_muted(ui, "Back").clicked() {
+                    cx.dispatch(AppAction::Back);
+                }
             }
-            if let Some(rel) = rel {
+            Item::Pin => {
+                let Some(rel) = rel else { continue };
                 let label = if pinned { "Unpin" } else { "Pin" };
                 if theme::ghost(ui, label).clicked() {
                     cx.dispatch(if pinned {
@@ -244,26 +302,31 @@ fn header(cx: &mut DrawCtx<'_>, ui: &mut Ui, pid: ProjectId, path: &Path, size: 
                     });
                 }
             }
-            if theme::ghost(ui, "Copy path").clicked() {
-                ui.ctx().copy_text(path.display().to_string());
+            Item::CopyPath => {
+                if theme::ghost(ui, "Copy path").clicked() {
+                    ui.ctx().copy_text(path.display().to_string());
+                }
             }
-            if theme::ghost(ui, "Reveal").clicked() {
-                cx.dispatch(AppAction::RevealDocument(path.to_path_buf()));
+            Item::Reveal => {
+                if theme::ghost(ui, "Reveal").clicked() {
+                    cx.dispatch(AppAction::RevealDocument(path.to_path_buf()));
+                }
             }
-            if theme::ghost(ui, "Open in editor").clicked() {
-                cx.dispatch(AppAction::OpenInEditor(path.to_path_buf()));
+            Item::Editor => {
+                if theme::ghost(ui, "Open in editor").clicked() {
+                    cx.dispatch(AppAction::OpenInEditor(path.to_path_buf()));
+                }
             }
-            if theme::ghost(ui, "Open")
-                .on_hover_text("Default app")
-                .clicked()
-            {
-                cx.dispatch(AppAction::OpenDocument(path.to_path_buf()));
+            Item::Open => {
+                if theme::ghost(ui, "Open")
+                    .on_hover_text("Default app")
+                    .clicked()
+                {
+                    cx.dispatch(AppAction::OpenDocument(path.to_path_buf()));
+                }
             }
-        });
-    });
-    let shown = rel.unwrap_or(path);
-    ui.label(theme::mono_text(ui, shown.display().to_string()));
-    ui.add_space(8.0);
+        }
+    }
 }
 
 /// `1.2 KB`, `340 B`, `3.0 MB`.
