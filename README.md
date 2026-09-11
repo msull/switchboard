@@ -90,7 +90,7 @@ Dev aids, all environment variables:
   `new-codex`, `new-service`, `show-board`, `show-session`, `show-document`,
   `files`, `terminal`, `select-file`, `set-env`, `set-secret`, `dotenv`, `environment`,
   `send`, `interrupt`, `return`, `kill`, `approve`, `revoke`, `side`,
-  `switchboard`, `sleep`).
+  `switchboard`, `theme`, `sleep`).
 - `SWITCHBOARD_TMUX=<path>`: tmux binary to use.
 - `RUST_LOG=switchboard=debug`: verbose logging.
 
@@ -135,7 +135,9 @@ src/app.rs               SwitchboardApp: owns core + adapters; runs effects; pol
 src/script.rs            SWITCHBOARD_SCRIPT dev aid
 src/ui/
   mod.rs                 UiState, draw loop (collect actions, then dispatch), keyboard, side panel tabs
-  switcher.rs            top bar (project strip, badge, add project) and bottom bar
+  theme.rs               the look: color tokens per theme, Source Serif 4, type scale, shared widgets (dot, kicker, buttons)
+  rail.rs                left project rail (brand, All sessions, projects with dots, Go to, Settings); a session's neighbours beside it
+  switcher.rs            Settings menu and the toasts (notice, host error)
   board.rs               one project's board: run bar, agent and shell cards, command and service rows, pinned documents, notes
   files.rs               Files tab of the side panel: lazy tree, fuzzy finder, bottom preview pane, right-click hand-offs
   run.rs                 Run tab of the side panel: commands and services, definitions, approval, last output
@@ -143,10 +145,11 @@ src/ui/
   document.rs            read-only preview: Markdown, text, images; full view and the side pane's body
   palette.rs             quick-switcher (Cmd+K) over projects and sessions
   env.rs                 Environment dialog: variables, secrets, .env opt-in, masked preview
-  cards.rs               session and document cards, state colors
+  cards.rs               the one card for every entry kind, the card grid, pinned document cards
   session.rs             session view: header, notes, embedded terminal or conversation + message box
   switchboard.rs         every session across projects, waiting first
   dialogs.rs             add project / create session dialogs
+assets/fonts/            Source Serif 4 (Regular, Semibold, Italic; OFL), embedded by theme.rs
 tests/ui.rs              headless flows via egui_kittest with fakes
 tests/fixtures/          a small real Claude Code transcript for the parser tests
 tests/live.rs            ignored: real claude / codex / Ghostty runs

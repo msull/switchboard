@@ -10,14 +10,14 @@ use std::sync::mpsc::{Receiver, channel};
 
 use std::time::SystemTime;
 
-use egui::{Color32, CornerRadius, Frame, Margin, RichText, Stroke, Ui};
+use egui::{CornerRadius, Frame, Margin, RichText, Stroke, Ui};
 use egui_commonmark::{CommonMarkCache, CommonMarkViewer};
 use egui_term::{BackendSettings, PtyEvent, TerminalBackend, TerminalView};
 
-use super::cards::{is_running, kind_label, state_color};
+use super::cards::{is_running, kind_label};
 use super::files::DraggedPath;
-use super::{DrawCtx, GAP, PAD, UiState};
-use crate::core::{AppAction, RecordId, SessionKind, SessionRecord};
+use super::{DrawCtx, GAP, PAD, UiState, theme};
+use crate::core::{AppAction, CardState, RecordId, SessionKind, SessionRecord};
 use crate::ports::host::HostId;
 use crate::ports::transcript::{
     Activity, ActivityKind, Conversation, ToolDetail, Turn, context_window,
@@ -109,102 +109,173 @@ pub fn show(cx: &mut DrawCtx<'_>, ui: &mut Ui, id: RecordId) {
     }
 }
 
-/// `Margin` takes whole pixels as `i8`; these are `PAD` and `GAP` in that
-/// form.
-const PAD_PX: i8 = 12;
+/// `Margin` takes whole pixels as `i8`; this is `GAP` in that form.
 const GAP_PX: i8 = 8;
 
-/// The 1 px line that bounds every region, from the theme so it reads
-/// in light and dark.
-fn border(ui: &Ui) -> Stroke {
-    Stroke::new(1.0, ui.visuals().widgets.noninteractive.bg_stroke.color)
-}
+/// Below this width the header's actions get their own row.
+const TIGHT_HEADER: f32 = 640.0;
 
-/// A fill that hints at `accent` on top of the panel color: a few
-/// percent in light mode, more in dark where the panel is near black.
-fn tint(ui: &Ui, accent: Color32) -> Color32 {
-    let t = if ui.visuals().dark_mode { 0.18 } else { 0.09 };
-    ui.visuals().panel_fill.lerp_to_gamma(accent, t)
-}
-
+/// The header: the name as a title with the state beside it and the
+/// actions at the right, then a meta line (kind, directory, resume
+/// handle), then the run bar. No frame; the whitespace is the edge.
+///
+/// Every row here can shrink: a row that cannot widens everything drawn
+/// after it, and the conversation would then run under the side panel
+/// instead of wrapping. The title truncates, and when the column is
+/// tight the actions move to a wrapped row of their own.
 fn header(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord) {
+    let p = theme::palette(ui);
     let state = cx.core.card_state(record.id);
     let running = is_running(cx.core, record.id);
-    Frame::new()
-        .fill(ui.visuals().faint_bg_color)
-        .stroke(border(ui))
-        .corner_radius(4)
-        .inner_margin(PAD)
-        .show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            ui.horizontal(|ui| {
-                name_or_editor(cx, ui, record);
-                ui.label(RichText::new(kind_label(record.kind)).weak());
-                ui.label(
-                    RichText::new(cx.core.state_text(record.id)).color(state_color(ui, &state)),
-                );
-                ui.label(RichText::new(record.cwd.display().to_string()).weak());
-                if let Some(handle) = &record.resume {
-                    ui.label(
-                        RichText::new(format!("resume {}", handle.provider_id()))
-                            .weak()
-                            .small(),
-                    );
-                }
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.button("Back").clicked() {
-                        cx.dispatch(AppAction::Back);
-                    }
-                    if ui.button("Kill").clicked() {
-                        cx.dispatch(AppAction::KillSession(record.id));
-                    }
-                    if !matches!(record.kind, SessionKind::Agent(_))
-                        && ui
-                            .button("Restart")
-                            .on_hover_text("Stop it if it runs, then start it again")
-                            .clicked()
-                    {
-                        cx.dispatch(AppAction::RestartSession(record.id));
-                    }
-                    // A defined service's autostart is the file's request,
-                    // shown on the Run tab; only the user's own records
-                    // carry the checkbox.
-                    if record.kind == SessionKind::Service && record.source.is_none() {
-                        let mut autostart = record.autostart;
-                        if ui
-                            .checkbox(&mut autostart, "Autostart")
-                            .on_hover_text("Start with Switchboard when its pane is gone")
-                            .changed()
-                        {
-                            cx.dispatch(AppAction::SetAutostart(record.id, autostart));
-                        }
-                    }
-                    let open = if running {
-                        "Open in terminal"
-                    } else {
-                        "Return"
-                    };
-                    if ui.button(open).clicked() {
-                        cx.dispatch(AppAction::ReturnToSession(record.id));
-                    }
-                    let files_open = cx.core.settings().files_open;
-                    if ui
-                        .selectable_label(files_open, "Side")
-                        .on_hover_text(
-                            "Show the project's files and its Run tab beside the session (Cmd+B, Cmd+R)",
-                        )
-                        .clicked()
-                    {
-                        cx.dispatch(AppAction::SetFilesOpen(!files_open));
-                    }
+    if ui.available_width() < TIGHT_HEADER {
+        ui.horizontal(|ui| title_row(cx, ui, record, &state));
+        ui.horizontal_wrapped(|ui| header_actions(cx, ui, record, running, false));
+    } else {
+        ui.horizontal(|ui| {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                header_actions(cx, ui, record, running, true);
+                ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                    title_row(cx, ui, record, &state);
                 });
             });
-            super::runbar::show(cx, ui, record.project, true);
         });
+    }
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 6.0;
+        ui.label(theme::meta_text(ui, kind_label(record.kind)).color(p.n700));
+        ui.label(theme::meta_text(ui, "·"));
+        let mut path = record.cwd.display().to_string();
+        if let Some(handle) = &record.resume {
+            path = format!("{path} · resume {}", handle.provider_id());
+        }
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.spacing_mut().item_spacing.x = 2.0;
+            ui.spacing_mut().button_padding = egui::vec2(6.0, 3.0);
+            let files_open = cx.core.settings().files_open;
+            let side_button = if files_open {
+                theme::ghost(ui, "Side")
+            } else {
+                theme::ghost_muted(ui, "Side")
+            };
+            if side_button
+                .on_hover_text(
+                    "Show the project's files and its Run tab beside the session (Cmd+B, Cmd+R)",
+                )
+                .clicked()
+            {
+                cx.dispatch(AppAction::SetFilesOpen(!files_open));
+            }
+            // A defined service's autostart is the file's request,
+            // shown on the Run tab; only the user's own records
+            // carry the checkbox.
+            if record.kind == SessionKind::Service && record.source.is_none() {
+                let mut autostart = record.autostart;
+                if ui
+                    .checkbox(
+                        &mut autostart,
+                        RichText::new("Autostart").text_style(theme::meta()),
+                    )
+                    .on_hover_text("Start with Switchboard when its pane is gone")
+                    .changed()
+                {
+                    cx.dispatch(AppAction::SetAutostart(record.id, autostart));
+                }
+            }
+            ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                ui.add(egui::Label::new(theme::mono_text(ui, path)).truncate());
+            });
+        });
+    });
+    super::runbar::show(cx, ui, record.project, true);
+    ui.add_space(6.0);
 }
 
-/// The session name as a heading with a Rename button, or, while a
-/// rename is under way, a text field: Enter commits, Esc cancels.
+/// The title, Rename, and the state with its dot. The title truncates to
+/// the room the other three leave, measured first: a truncating label in
+/// a row would otherwise take the whole width and push them past the
+/// edge.
+fn title_row(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord, state: &CardState) {
+    let p = theme::palette(ui);
+    let state_text = cx.core.state_text(record.id);
+    let meta_font = theme::meta().resolve(ui.style());
+    let measure = |ui: &Ui, text: &str, font: egui::FontId| {
+        ui.painter()
+            .layout_no_wrap(text.to_owned(), font, p.text)
+            .size()
+            .x
+    };
+    let button_font = egui::TextStyle::Button.resolve(ui.style());
+    let reserve = measure(ui, "Rename", button_font)
+        + 2.0 * ui.spacing().button_padding.x
+        + 8.0
+        + measure(ui, &state_text, meta_font)
+        + 4.0 * ui.spacing().item_spacing.x;
+    ui.scope(|ui| {
+        ui.set_max_width((ui.available_width() - reserve).max(60.0));
+        name_or_editor(cx, ui, record);
+    });
+    if cx.state.rename_draft.is_none() {
+        ui.spacing_mut().button_padding = egui::vec2(6.0, 3.0);
+        if theme::ghost_muted(ui, "Rename").clicked() {
+            cx.state.rename_draft = Some((record.id, record.name.clone()));
+        }
+    }
+    theme::status_dot(ui, state, 8.0);
+    ui.add(
+        egui::Label::new(
+            RichText::new(state_text)
+                .text_style(theme::meta())
+                .color(p.state_text(state)),
+        )
+        .truncate(),
+    );
+}
+
+/// Open in terminal (or Return), Restart, Kill, Back. `reversed` draws
+/// them last to first, for a right-to-left row.
+fn header_actions(
+    cx: &mut DrawCtx<'_>,
+    ui: &mut Ui,
+    record: &SessionRecord,
+    running: bool,
+    reversed: bool,
+) {
+    ui.spacing_mut().item_spacing.x = 2.0;
+    let agent = matches!(record.kind, SessionKind::Agent(_));
+    let open = if running {
+        "Open in terminal"
+    } else {
+        "Return"
+    };
+    let mut order = vec![open, "Restart", "Kill", "Back"];
+    if agent {
+        order.retain(|b| *b != "Restart");
+    }
+    if reversed {
+        order.reverse();
+    }
+    for button in order {
+        let response = match button {
+            "Restart" => {
+                theme::ghost(ui, button).on_hover_text("Stop it if it runs, then start it again")
+            }
+            "Kill" | "Back" => theme::ghost_muted(ui, button),
+            _ => theme::secondary(ui, button),
+        };
+        if !response.clicked() {
+            continue;
+        }
+        match button {
+            "Restart" => cx.dispatch(AppAction::RestartSession(record.id)),
+            "Kill" => cx.dispatch(AppAction::KillSession(record.id)),
+            "Back" => cx.dispatch(AppAction::Back),
+            _ => cx.dispatch(AppAction::ReturnToSession(record.id)),
+        }
+    }
+}
+
+/// The session name as a heading or, while a rename is under way, a
+/// text field: Enter commits, Esc cancels.
 fn name_or_editor(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord) {
     let editing = cx
         .state
@@ -212,10 +283,7 @@ fn name_or_editor(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord) {
         .as_ref()
         .is_some_and(|(id, _)| *id == record.id);
     if !editing {
-        ui.heading(&record.name);
-        if ui.small_button("Rename").clicked() {
-            cx.state.rename_draft = Some((record.id, record.name.clone()));
-        }
+        ui.add(egui::Label::new(RichText::new(&record.name).text_style(theme::h1())).truncate());
         return;
     }
     let mut done = None;
@@ -262,17 +330,26 @@ fn notes(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord) {
     }
     let mut changed = None;
     if let Some((_, draft)) = cx.state.notes_draft.as_mut() {
+        let p = theme::palette(ui);
         Frame::new()
-            .stroke(border(ui))
-            .corner_radius(4)
-            .inner_margin(Margin::symmetric(PAD_PX, GAP_PX))
+            .inner_margin(Margin::symmetric(0, GAP_PX / 2))
             .show(ui, |ui| {
                 ui.set_width(ui.available_width());
                 ui.horizontal(|ui| {
-                    let label = ui.label("Notes").id;
+                    let label = ui
+                        .label(
+                            RichText::new("Notes")
+                                .text_style(theme::meta())
+                                .color(p.n600),
+                        )
+                        .id;
                     let response = ui.add(
                         egui::TextEdit::multiline(draft)
-                            .desired_rows(2)
+                            .desired_rows(1)
+                            .font(theme::meta())
+                            .text_color(p.n700)
+                            .background_color(p.surface)
+                            .margin(Margin::symmetric(10, 6))
                             .desired_width(f32::INFINITY),
                     );
                     if response.changed() {
@@ -290,18 +367,24 @@ fn notes(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord) {
 /// Chat layout: the message box is a panel docked at the bottom, drawn
 /// first so it claims its space; the conversation fills what is left.
 fn agent_body(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord) {
-    let fill = ui.visuals().widgets.inactive.weak_bg_fill;
+    let p = theme::palette(ui);
+    let fill = p.surface;
     // A file row dragged from the file side lights the panel up and, on
     // release, lands in the draft as its path.
     let hovering = egui::DragAndDrop::has_payload_of_type::<DraggedPath>(ui.ctx());
     let stroke = if hovering {
-        Stroke::new(2.0, ui.visuals().selection.stroke.color)
+        Stroke::new(2.0, p.accent)
     } else {
         Stroke::NONE
     };
     let panel = egui::Panel::bottom("message_panel")
         .resizable(false)
-        .frame(Frame::new().fill(fill).stroke(stroke).inner_margin(PAD))
+        .frame(Frame::new().stroke(stroke).inner_margin(Margin {
+            left: 0,
+            right: 0,
+            top: 12,
+            bottom: 4,
+        }))
         .show(ui, |ui| message_box(cx, ui, record))
         .response;
     if let Some(dropped) = panel.dnd_release_payload::<DraggedPath>() {
@@ -314,12 +397,12 @@ fn agent_body(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord) {
         egui::Panel::bottom("terminal_panel")
             .resizable(true)
             .default_size(240.0)
-            .frame(Frame::new().fill(fill).inner_margin(PAD))
+            .frame(Frame::new().fill(fill).corner_radius(2).inner_margin(PAD))
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new("Terminal").weak());
+                    theme::kicker(ui, "Terminal", p.n600);
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.small_button("Hide").clicked() {
+                        if theme::ghost_muted(ui, "Hide").clicked() {
                             cx.state.terminal_open = false;
                         }
                     });
@@ -336,9 +419,7 @@ fn agent_body(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord) {
             });
     }
     Frame::new()
-        .stroke(border(ui))
-        .corner_radius(4)
-        .inner_margin(GAP)
+        .inner_margin(Margin::symmetric(0, GAP_PX / 2))
         .show(ui, |ui| {
             ui.set_min_size(ui.available_size());
             // Drawing needs several fields of the UI state at once; taking
@@ -366,10 +447,13 @@ fn agent_body(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord) {
                 );
             } else {
                 ui.label(
-                    "This session runs in Ghostty. Use Open in terminal to bring its window up.",
+                    RichText::new(
+                        "This session runs in Ghostty. Use Open in terminal to bring its window up.",
+                    )
+                    .color(p.n700),
                 );
                 if let Some(e) = conversation_errors.get(&record.id) {
-                    ui.label(RichText::new(format!("No conversation view: {e}")).weak());
+                    ui.label(theme::meta_text(ui, format!("No conversation view: {e}")));
                 }
                 if let Some(text) = snapshot {
                     egui::ScrollArea::both()
@@ -405,51 +489,71 @@ fn message_box(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord) {
     let mut send = false;
     let mut interrupt = false;
     let field_id = ui.id().with(("message", record.id));
-    ui.horizontal_top(|ui| {
-        let label = ui.label("Message");
-        let row_height = ui.text_style_height(&egui::TextStyle::Body);
-        #[allow(clippy::cast_precision_loss)]
-        let max_height = row_height * MESSAGE_MAX_ROWS as f32 + GAP;
-        egui::ScrollArea::vertical()
-            .id_salt(("message_scroll", record.id))
-            .max_height(max_height)
-            .show(ui, |ui| {
-                let response = ui
-                    .add_enabled(
-                        running,
-                        egui::TextEdit::multiline(draft)
-                            .id(field_id)
-                            .hint_text(
-                                "Enter sends, Shift+Enter adds a line, drop files for their paths",
-                            )
-                            .desired_rows(3)
-                            .desired_width(ui.available_width() - 120.0)
-                            .return_key(egui::KeyboardShortcut::new(
-                                egui::Modifiers::SHIFT,
-                                egui::Key::Enter,
-                            )),
-                    )
-                    .labelled_by(label.id);
-                // Plain Enter is not the field's return key any more, so it
-                // reaches us here; Cmd+Enter sends too, for the habit.
-                let enter = ui.input(|i| {
-                    i.key_pressed(egui::Key::Enter)
-                        && (i.modifiers.is_none() || i.modifiers.command_only())
-                });
-                if response.has_focus() && enter {
-                    send = true;
-                }
+    let p = theme::palette(ui);
+    // The label is invisible but keeps the field findable by name.
+    let label = ui.add(egui::Label::new(RichText::new("Message").size(0.1)));
+    let row_height = ui.text_style_height(&egui::TextStyle::Body);
+    #[allow(clippy::cast_precision_loss)]
+    let max_height = row_height * MESSAGE_MAX_ROWS as f32 + GAP;
+    egui::ScrollArea::vertical()
+        .id_salt(("message_scroll", record.id))
+        .max_height(max_height)
+        .show(ui, |ui| {
+            let response = ui
+                .add_enabled(
+                    running,
+                    egui::TextEdit::multiline(draft)
+                        .id(field_id)
+                        .hint_text(
+                            "Reply… Enter to send, Shift+Enter for a line, drop files for paths",
+                        )
+                        .desired_rows(3)
+                        .background_color(p.surface)
+                        .margin(Margin::symmetric(12, 10))
+                        .desired_width(f32::INFINITY)
+                        .return_key(egui::KeyboardShortcut::new(
+                            egui::Modifiers::SHIFT,
+                            egui::Key::Enter,
+                        )),
+                )
+                .labelled_by(label.id);
+            // Plain Enter is not the field's return key any more, so it
+            // reaches us here; Cmd+Enter sends too, for the habit.
+            let enter = ui.input(|i| {
+                i.key_pressed(egui::Key::Enter)
+                    && (i.modifiers.is_none() || i.modifiers.command_only())
             });
-        if ui.add_enabled(running, egui::Button::new("Send")).clicked() {
+            if response.has_focus() && enter {
+                send = true;
+            }
+        });
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 6.0;
+        if ui
+            .add_enabled_ui(running, |ui| theme::primary(ui, "Send"))
+            .inner
+            .clicked()
+        {
             send = true;
         }
         if ui
-            .add_enabled(running, egui::Button::new("Stop"))
+            .add_enabled_ui(running, |ui| theme::ghost_muted(ui, "Stop"))
+            .inner
             .on_hover_text("Send Escape to the agent (Cmd+.)")
             .clicked()
         {
             interrupt = true;
         }
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.add(
+                egui::Label::new(
+                    RichText::new("Drag a file from the tree, or Shift+click it, for its path")
+                        .small()
+                        .color(p.n600),
+                )
+                .truncate(),
+            );
+        });
     });
     // The draft stays in the box until the app reports the pane took it
     // (`SwitchboardApp` clears it after a successful write), so a dead
@@ -493,16 +597,42 @@ fn conversation_view(
     terminal_open: &mut bool,
     markdown: &mut CommonMarkCache,
 ) {
+    let p = theme::palette(ui);
     ui.horizontal(|ui| {
-        ui.strong(conversation.title.as_deref().unwrap_or("(untitled)"));
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            ui.checkbox(expand, "Expand activity");
-            ui.toggle_value(terminal_open, "Terminal")
-                .on_hover_text("Show the raw pane below the conversation (Cmd+T)");
+            ui.spacing_mut().item_spacing.x = 2.0;
+            ui.spacing_mut().button_padding = egui::vec2(6.0, 3.0);
+            let terminal = if *terminal_open {
+                theme::ghost(ui, "Terminal")
+            } else {
+                theme::ghost_muted(ui, "Terminal")
+            };
+            if terminal
+                .on_hover_text("Show the raw pane below the conversation (Cmd+T)")
+                .clicked()
+            {
+                *terminal_open = !*terminal_open;
+            }
+            let expand_button = if *expand {
+                theme::ghost(ui, "Expand activity")
+            } else {
+                theme::ghost_muted(ui, "Expand activity")
+            };
+            if expand_button.clicked() {
+                *expand = !*expand;
+            }
+            ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                ui.add(
+                    egui::Label::new(theme::strong_text(
+                        conversation.title.as_deref().unwrap_or("(untitled)"),
+                    ))
+                    .truncate(),
+                );
+            });
         });
     });
-    ui.label(RichText::new(meta_line(conversation)).weak().small());
-    ui.separator();
+    ui.label(theme::meta_text(ui, meta_line(conversation)).color(p.n700));
+    ui.add_space(4.0);
     // Push the toggle into every section only on the frame it changes,
     // so single sections can still be opened and closed by hand.
     let open = (*expand_applied != Some(*expand)).then_some(*expand);
@@ -511,8 +641,12 @@ fn conversation_view(
         .auto_shrink([false, false])
         .stick_to_bottom(true)
         .show(ui, |ui| {
+            // Measured once, before any turn: a word egui cannot break
+            // widens the layout for everything after it, and a cap read
+            // back per turn would only carry that widening along.
+            let width = ui.available_width().min(MAX_READING_WIDTH);
             for turn in &conversation.turns {
-                turn_block(ui, turn, open, markdown);
+                turn_block(ui, turn, open, markdown, width);
             }
         });
 }
@@ -576,86 +710,115 @@ fn duration_text(a: Option<SystemTime>, b: Option<SystemTime>) -> String {
 }
 
 /// One turn: the prompt, the folded activity list, the final answer.
-fn turn_block(ui: &mut Ui, turn: &Turn, open: Option<bool>, markdown: &mut CommonMarkCache) {
-    let user_fill = tint(ui, Color32::from_rgb(80, 110, 230));
-    let final_fill = tint(ui, Color32::from_rgb(60, 170, 80));
-    let activity_fill = ui.visuals().faint_bg_color;
-    let stroke = border(ui);
-    Frame::new().stroke(stroke).corner_radius(6).show(ui, |ui| {
-        ui.set_width(ui.available_width());
-        ui.spacing_mut().item_spacing.y = 0.0;
-        let user_rect = Frame::new()
-            .fill(user_fill)
-            .corner_radius(CornerRadius {
-                nw: 6,
-                ne: 6,
-                sw: 0,
-                se: 0,
-            })
-            .inner_margin(PAD)
-            .show(ui, |ui| {
-                ui.set_width(ui.available_width());
-                ui.spacing_mut().item_spacing = egui::vec2(GAP, GAP / 2.0);
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new(format!("#{}", turn.n)).weak().small());
-                    ui.label(RichText::new(time_text(turn.at)).weak().small());
-                    if let Some(mode) = &turn.permission_mode {
-                        ui.label(RichText::new(mode).weak().small());
-                    }
-                });
-                ui.add(egui::Label::new(RichText::new(&turn.user).monospace()).wrap());
-            })
-            .response
-            .rect;
-        message_menu(ui, user_rect, ("user", turn.n), &turn.user);
-        Frame::new()
-            .fill(activity_fill)
-            .stroke(stroke)
-            .inner_margin(Margin::symmetric(PAD_PX, GAP_PX / 2))
-            .show(ui, |ui| {
-                ui.set_width(ui.available_width());
-                ui.spacing_mut().item_spacing = egui::vec2(GAP, GAP / 2.0);
-                egui::CollapsingHeader::new(RichText::new(stats_line(turn)).weak().small())
-                    .id_salt(("activity", turn.n))
-                    .open(open)
-                    .show(ui, |ui| {
-                        if turn.activity.is_empty() {
-                            ui.label(RichText::new("no tool activity").weak().italics());
-                        }
-                        for (i, a) in turn.activity.iter().enumerate() {
-                            activity_row(ui, a, (turn.n, i));
-                        }
-                    });
-            });
-        let final_rect = Frame::new()
-            .fill(final_fill)
-            .corner_radius(CornerRadius {
-                nw: 0,
-                ne: 0,
-                sw: 6,
-                se: 6,
-            })
-            .inner_margin(PAD)
-            .show(ui, |ui| {
-                ui.set_width(ui.available_width());
-                ui.spacing_mut().item_spacing = egui::vec2(GAP, GAP / 2.0);
-                if turn.final_text.is_empty() {
-                    ui.label(
-                        RichText::new("no final response (interrupted or tool-only)")
-                            .weak()
-                            .italics(),
-                    );
-                } else {
-                    super::document::github_markdown_style(ui);
-                    CommonMarkViewer::new().show(ui, markdown, &turn.final_text);
+fn turn_block(
+    ui: &mut Ui,
+    turn: &Turn,
+    open: Option<bool>,
+    markdown: &mut CommonMarkCache,
+    width: f32,
+) {
+    let p = theme::palette(ui);
+    // Back to the reading width whatever the turns above did to it.
+    ui.set_max_width(width);
+    ui.spacing_mut().item_spacing.y = 10.0;
+    // The user's turn: cyan-tinted block, kicker "YOU · time".
+    let user_rect = Frame::new()
+        .fill(p.accent_fill)
+        .corner_radius(CornerRadius::same(2))
+        .inner_margin(Margin::symmetric(16, 12))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.spacing_mut().item_spacing = egui::vec2(GAP, 6.0);
+            ui.horizontal(|ui| {
+                let mut kicker = format!("You · {}", time_text(turn.at));
+                if let Some(mode) = &turn.permission_mode {
+                    kicker = format!("{kicker} · {mode}");
                 }
-            })
-            .response
-            .rect;
-        if !turn.final_text.is_empty() {
-            message_menu(ui, final_rect, ("final", turn.n), &turn.final_text);
-        }
-    });
+                theme::kicker(ui, &kicker, p.accent_text);
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label(
+                        RichText::new(format!("#{}", turn.n))
+                            .small()
+                            .color(p.accent_on_fill.gamma_multiply(0.6)),
+                    );
+                });
+            });
+            scrolls_sideways(ui, ("user", turn.n), |ui| {
+                ui.add(egui::Label::new(RichText::new(&turn.user).color(p.accent_on_fill)).wrap());
+            });
+        })
+        .response
+        .rect;
+    message_menu(ui, user_rect, ("user", turn.n), &turn.user);
+    // The activity list: neutral rows, no frame, 4 px inset.
+    Frame::new()
+        .inner_margin(Margin::symmetric(4, 0))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.spacing_mut().item_spacing = egui::vec2(GAP, 4.0);
+            egui::CollapsingHeader::new(
+                RichText::new(stats_line(turn))
+                    .text_style(theme::meta())
+                    .color(p.n700),
+            )
+            .id_salt(("activity", turn.n))
+            .open(open)
+            .show(ui, |ui| {
+                if turn.activity.is_empty() {
+                    ui.label(
+                        RichText::new("no tool activity")
+                            .text_style(theme::excerpt())
+                            .color(p.n600),
+                    );
+                }
+                for (i, a) in turn.activity.iter().enumerate() {
+                    activity_row(ui, a, (turn.n, i));
+                }
+            });
+        });
+    // The answer: surface block, kicker "CLAUDE · time", Markdown.
+    let final_rect = theme::surface(ui)
+        .inner_margin(Margin::symmetric(16, 14))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.spacing_mut().item_spacing = egui::vec2(GAP, 6.0);
+            theme::kicker(ui, &format!("Agent · {}", time_text(turn.end)), p.n600);
+            if turn.final_text.is_empty() {
+                ui.label(
+                    RichText::new("no final response (interrupted or tool-only)")
+                        .text_style(theme::excerpt())
+                        .color(p.n600),
+                );
+            } else {
+                scrolls_sideways(ui, ("final", turn.n), |ui| {
+                    super::document::markdown_style(ui);
+                    CommonMarkViewer::new().show(ui, markdown, &turn.final_text);
+                });
+            }
+        })
+        .response
+        .rect;
+    if !turn.final_text.is_empty() {
+        message_menu(ui, final_rect, ("final", turn.n), &turn.final_text);
+    }
+    ui.add_space(6.0);
+}
+
+/// Prose stops here, however wide the window; the mock reads at 860.
+const MAX_READING_WIDTH: f32 = 860.0;
+
+/// Text that wraps at the visible width but, where a word or a table
+/// cannot wrap, scrolls sideways inside its block instead of widening
+/// the block and everything under it.
+fn scrolls_sideways(ui: &mut Ui, salt: (&str, usize), add: impl FnOnce(&mut Ui)) {
+    let width = ui.available_width();
+    egui::ScrollArea::horizontal()
+        .id_salt(salt)
+        .auto_shrink([false, true])
+        .show(ui, |ui| {
+            ui.set_max_width(width);
+            add(ui);
+        });
 }
 
 /// The right-click menu of one message (the user's prompt or the
@@ -700,33 +863,42 @@ fn stats_line(t: &Turn) -> String {
 /// A tool row folds open to its input and result; text and system rows
 /// are single lines.
 fn activity_row(ui: &mut Ui, a: &Activity, salt: (usize, usize)) {
+    let p = theme::palette(ui);
     let (glyph, color) = match (a.error, a.kind) {
-        (true, _) => ("⚙", ui.visuals().error_fg_color),
-        (false, ActivityKind::Tool) => ("⚙", ui.visuals().text_color()),
-        (false, ActivityKind::Text) => ("…", ui.visuals().weak_text_color()),
-        (false, ActivityKind::System) => ("·", ui.visuals().weak_text_color()),
+        (true, _) => ("⚙", p.accent_2_text),
+        (false, ActivityKind::Tool) => ("⚙", p.n700),
+        (false, ActivityKind::Text) => ("…", p.n600),
+        (false, ActivityKind::System) => ("·", p.n600),
     };
-    let glyph_color = if a.error {
-        color
-    } else {
-        ui.visuals().hyperlink_color
-    };
+    let glyph_color = if a.error { color } else { p.accent_text };
     let mut line = RichText::new(&a.line).color(color);
     line = match a.kind {
-        ActivityKind::Text => line.italics(),
-        ActivityKind::Tool | ActivityKind::System => line.monospace(),
+        ActivityKind::Text => line.text_style(theme::excerpt()),
+        ActivityKind::Tool | ActivityKind::System => line.text_style(theme::meta()),
     };
     match &a.detail {
         Some(detail) => {
-            egui::CollapsingHeader::new(
-                RichText::new(format!("{glyph} {}", a.line))
-                    .monospace()
-                    .color(color),
-            )
-            .id_salt(("tool", salt))
-            .show(ui, |ui| tool_detail(ui, detail, salt))
-            .header_response
-            .on_hover_text(&a.line);
+            // Not a `CollapsingHeader`: its title never wraps or truncates,
+            // and a long tool line would widen the whole conversation.
+            let id = ui.make_persistent_id(("tool", salt));
+            let mut open = ui.data(|d| d.get_temp(id).unwrap_or(false));
+            let arrow = if open { "▾" } else { "▸" };
+            let row = ui.add(
+                egui::Button::new(
+                    RichText::new(format!("{arrow} {glyph} {}", a.line))
+                        .text_style(theme::meta())
+                        .color(color),
+                )
+                .frame_when_inactive(false)
+                .truncate(),
+            );
+            if row.on_hover_text(&a.line).clicked() {
+                open = !open;
+                ui.data_mut(|d| d.insert_temp(id, open));
+            }
+            if open {
+                ui.indent(id, |ui| tool_detail(ui, detail, salt));
+            }
         }
         None => {
             ui.horizontal(|ui| {
@@ -738,10 +910,15 @@ fn activity_row(ui: &mut Ui, a: &Activity, salt: (usize, usize)) {
 }
 
 fn tool_detail(ui: &mut Ui, detail: &ToolDetail, salt: (usize, usize)) {
+    let p = theme::palette(ui);
     for (label, text) in [("input", &detail.input), ("result", &detail.result)] {
-        ui.label(RichText::new(label).weak().small());
+        theme::kicker(ui, label, p.n600);
         if text.is_empty() {
-            ui.label(RichText::new("(empty)").weak().italics());
+            ui.label(
+                RichText::new("(empty)")
+                    .text_style(theme::excerpt())
+                    .color(p.n600),
+            );
             continue;
         }
         egui::ScrollArea::both()
@@ -751,11 +928,22 @@ fn tool_detail(ui: &mut Ui, detail: &ToolDetail, salt: (usize, usize)) {
     }
 }
 
-/// Read-only monospace text, selectable.
+/// Read-only monospace text, selectable: the dark code block of the
+/// design on both themes.
 pub(super) fn code_block(ui: &mut Ui, text: &str) {
+    let p = theme::palette(ui);
+    // A read-only `TextEdit` paints no background of its own, so the
+    // dark fill comes from an explicit frame.
     ui.add(
         egui::TextEdit::multiline(&mut { text })
             .code_editor()
+            .text_color(p.code_text)
+            .frame(
+                Frame::new()
+                    .fill(p.code_fill)
+                    .corner_radius(2)
+                    .inner_margin(Margin::symmetric(14, 12)),
+            )
             .desired_width(f32::INFINITY),
     );
 }
@@ -767,7 +955,7 @@ fn terminal_body(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord) {
         } else {
             "Not running. Return starts it again."
         };
-        ui.label(RichText::new(note).weak());
+        ui.label(RichText::new(note).color(theme::palette(ui).n700));
         if let Some(text) = cx.state.snapshots.get(&record.id) {
             egui::ScrollArea::vertical().show(ui, |ui| code_block(ui, text));
         }

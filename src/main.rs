@@ -49,9 +49,12 @@ fn main() -> eframe::Result {
         height: 256,
     };
     let options = eframe::NativeOptions {
+        // Zoomed to the screen from the first frame; the size below is
+        // what the window falls back to when un-zoomed.
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1100.0, 720.0])
             .with_min_inner_size([600.0, 400.0])
+            .with_maximized(true)
             .with_icon(icon),
         ..Default::default()
     };
@@ -62,6 +65,9 @@ fn main() -> eframe::Result {
         Box::new(move |cc| {
             // Image previews decode through egui's loaders.
             egui_extras::install_image_loaders(&cc.egui_ctx);
+            // Fonts and styles apply from the next frame on, so they go
+            // in before the first one is drawn.
+            switchboard::ui::theme::install(&cc.egui_ctx);
             let ctx = cc.egui_ctx.clone();
             let wake = match WakeSocket::bind_with(&data_dir, move || ctx.request_repaint()) {
                 Ok(w) => Some(w),

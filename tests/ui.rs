@@ -186,7 +186,8 @@ fn harness_build(
     };
     let mut harness = Harness::builder()
         .with_size(egui::vec2(1200.0, 900.0))
-        .build_eframe(move |_cc| {
+        .build_eframe(move |cc| {
+            switchboard::ui::theme::install(&cc.egui_ctx);
             let mut app = SwitchboardApp::with_services(services);
             app.record_actions = true;
             app.ui_state.embed_terminals = false;
@@ -258,8 +259,8 @@ fn switcher_lists_projects_most_recent_first() {
     let alpha = harness.get_by_role_and_label(Role::Button, "alpha").rect();
     let beta = harness.get_by_role_and_label(Role::Button, "beta").rect();
     assert!(
-        alpha.min.x < beta.min.x,
-        "alpha was active last, so it comes first"
+        alpha.min.y < beta.min.y,
+        "alpha was active last, so it comes first in the rail"
     );
 }
 
@@ -274,10 +275,14 @@ fn clicking_a_project_dispatches_show_board() {
 #[test]
 fn switchboard_lists_sessions_from_both_projects() {
     let (harness, _) = harness();
-    harness.get_by_label("All sessions");
-    for name in ["build", "server", "deploy", "codex-agent"] {
+    // Once in the rail, once as the page title.
+    assert_eq!(harness.query_all_by_label("All sessions").count(), 2);
+    // Agents and shells only; commands and services stay on the board.
+    for name in ["server", "codex-agent"] {
         harness.get_by_label(name);
     }
+    assert!(harness.query_by_label("build").is_none());
+    assert!(harness.query_by_label("deploy").is_none());
 }
 
 #[test]
@@ -290,8 +295,10 @@ fn board_lists_the_projects_sessions_and_notes() {
     assert!(harness.query_by_label("codex-agent").is_none());
     harness.get_by_label("notes for alpha");
     harness.get_by_label("README.md");
-    // The running session's pane title is its caption.
-    harness.get_by_label("make: all");
+    // The waiting session's card says why it waits; the pane title
+    // would only get in the way of that.
+    harness.get_by_label("permission for Bash");
+    assert!(harness.query_by_label("make: all").is_none());
 }
 
 #[test]
@@ -306,9 +313,9 @@ fn clicking_a_card_dispatches_show_session() {
 fn board_separates_commands_and_services_from_sessions() {
     let (mut harness, ids) = harness();
     showing(&mut harness, View::Board(ids.alpha));
-    harness.get_by_label("Agents and shells");
-    harness.get_by_label("Commands and services");
-    // The shell is a card with Open and Kill; the command is a row whose
+    harness.get_by_label("AGENTS AND SHELLS");
+    harness.get_by_label("COMMANDS AND SERVICES");
+    // The shell is a card with Open and Kill; the command is a card whose
     // Show button opens it.
     harness.get_by_role_and_label(Role::Button, "Open");
     harness.get_all_by_label("Show").next().unwrap().click();
@@ -377,18 +384,19 @@ fn run_bar_shows_a_running_commands_last_line_and_hover_after() {
 fn card_buttons_kill_running_and_remove_stopped_sessions() {
     let (mut harness, ids) = harness();
     showing(&mut harness, View::Board(ids.alpha));
-    // Only `server` is running, so it alone offers Open and Kill.
+    // Only `server` is running, so it alone offers Open and Kill. Open
+    // goes last: it leaves the board for the session.
     click(&mut harness, "Kill");
-    click(&mut harness, "Open");
     harness.get_all_by_label("Remove").next().unwrap().click();
     harness.run_steps(2);
+    click(&mut harness, "Open");
     let dispatched = actions(&harness);
     assert_eq!(dispatched[0], AppAction::KillSession(ids.server));
-    assert_eq!(dispatched[1], AppAction::ReturnToSession(ids.server));
     assert!(matches!(
-        dispatched[2],
+        dispatched[1],
         AppAction::RemoveSession(id) if id == ids.build || id == ids.deploy
     ));
+    assert_eq!(dispatched[2], AppAction::ReturnToSession(ids.server));
 }
 
 #[test]
@@ -453,7 +461,7 @@ fn cancelling_the_session_dialog_dispatches_nothing() {
 #[test]
 fn add_project_dialog_dispatches_add_project() {
     let (mut harness, _) = harness();
-    click(&mut harness, "Add project");
+    click(&mut harness, "+ Add project");
     type_into(&mut harness, "Name", "gamma");
     type_into(&mut harness, "Root path", "/work/gamma");
     click(&mut harness, "Add");
@@ -596,7 +604,6 @@ fn file_tree_previews_a_file_and_hands_off_to_the_editor() {
     assert!(actions(&harness).contains(&AppAction::UnpinDocument(pid, "README.md".into())));
     assert!(actions(&harness).contains(&AppAction::PinDocument(pid, "README.md".into())));
     harness.get_by_label("Unpin");
-    // One Back in the top bar, one in the document header; either works.
     harness
         .get_all_by_role_and_label(Role::Button, "Back")
         .next()
@@ -647,14 +654,15 @@ fn session_view_toggles_the_file_side_with_a_preview() {
     assert!(harness.query_by_label("from the readme").is_none());
     toggle(&mut harness);
     assert!(harness.query_by_label("Find").is_none());
-    // The top bar's folder icon flips the same state.
-    click(&mut harness, "📁");
+    // The rail's Files item flips the same state.
+    click(&mut harness, "Files ⌘B");
     harness.get_by_label("Find");
-    click(&mut harness, "📁");
+    click(&mut harness, "Files ⌘B");
     assert!(harness.query_by_label("Find").is_none());
-    // Only sessions have the toggle; boards always show the side.
+    // Only sessions have the toggle; boards always show the side, where
+    // "Files" is the tab.
     showing(&mut harness, View::Board(pid));
-    assert!(harness.query_by_label("📁").is_none());
+    assert!(harness.query_by_label("Find").is_some());
 }
 
 #[test]
@@ -712,10 +720,12 @@ fn quick_switcher_opens_the_best_match_on_enter() {
 fn run_tab_lists_definitions_and_approves() {
     let (mut harness, ids) = harness();
     showing(&mut harness, View::Board(ids.alpha));
-    assert!(harness.query_by_label("cargo clippy").is_none());
+    // The board's command card shows the command line; the Run tab
+    // shows it again with the definition.
+    assert_eq!(harness.query_all_by_label("cargo clippy").count(), 1);
     click(&mut harness, "Run");
     assert!(actions(&harness).contains(&AppAction::SetSideTab(SideTab::Run)));
-    harness.get_by_label("cargo clippy");
+    assert_eq!(harness.query_all_by_label("cargo clippy").count(), 2);
     harness.get_by_label_contains("RUSTFLAGS (not defined)");
     harness.get_by_label("needs approval");
     // The user's own service is listed too (also on the board's cards).
@@ -818,26 +828,35 @@ fn session_view_renames_on_enter() {
         "{:?}",
         actions(&harness)
     );
-    harness.get_by_label("server v2");
+    // The title and the rail row both carry the new name.
+    assert_eq!(harness.query_all_by_label("server v2").count(), 2);
 }
 
 #[test]
 fn session_view_header_buttons_dispatch() {
     let (mut harness, ids) = harness();
     showing(&mut harness, View::Session(ids.server));
-    harness.get_by_label("server");
+    // The title, and the rail row for the same session.
+    assert_eq!(harness.query_all_by_label("server").count(), 2);
     harness.get_by_label("shell");
     harness.get_by_label("/work/server");
     harness.get_by_label("Embedded terminal disabled.");
     click(&mut harness, "Open in terminal");
     click(&mut harness, "Kill");
-    // One Back in the top bar, one in the session header.
+    // Back lives in the session header; the rail offers the board.
     assert_eq!(
         harness
             .get_all_by_role_and_label(Role::Button, "Back")
             .count(),
-        2
+        1
     );
+    harness.get_by_role_and_label(Role::Button, "← Board");
+    // The rail keeps agents and shells apart from commands and services,
+    // in that order, as the board does.
+    let shell = harness.get_all_by_label("server").last().unwrap().rect();
+    let label = harness.get_by_label("COMMANDS AND SERVICES").rect();
+    let command = harness.get_by_role_and_label(Role::Button, "build").rect();
+    assert!(shell.bottom() <= label.top() && label.bottom() <= command.top());
     assert_eq!(
         actions(&harness),
         vec![
@@ -898,9 +917,11 @@ fn command_digits_switch_projects() {
 #[test]
 fn waiting_badge_counts_waiting_sessions() {
     let (harness, _) = harness();
-    harness.get_by_label("1 waiting");
-    harness.get_by_label("waiting on you: permission for Bash");
-    harness.get_by_label("exited (1)");
+    // The summary line of the all-sessions view.
+    harness.get_by_label("1 waiting on you");
+    // The card's kicker names the state; its body says why.
+    harness.get_by_label_contains("WAITING ON YOU");
+    harness.get_by_label("permission for Bash");
 }
 
 #[test]
@@ -1348,7 +1369,8 @@ fn polling_reads_the_transcript_into_the_ui_state() {
     };
     let mut harness = Harness::builder()
         .with_size(egui::vec2(1200.0, 900.0))
-        .build_eframe(move |_cc| {
+        .build_eframe(move |cc| {
+            switchboard::ui::theme::install(&cc.egui_ctx);
             let mut app = SwitchboardApp::with_services(services);
             app.ui_state.embed_terminals = false;
             app
@@ -1360,4 +1382,250 @@ fn polling_reads_the_transcript_into_the_ui_state() {
     let app = harness.state();
     assert_eq!(app.ui_state.conversations[&id].1.turns.len(), 2);
     assert!(!app.ui_state.conversation_errors.contains_key(&id));
+    // A board reads the transcripts of its agent cards too: the card
+    // excerpts the last answer, never the pane's own chrome.
+    harness.state_mut().ui_state.conversations.clear();
+    harness
+        .state_mut()
+        .ui_state
+        .captions
+        .insert(id, "new task? /clear to save 465.5k tokens".into());
+    showing(&mut harness, View::Board(ids.beta));
+    harness.state_mut().poll_now();
+    harness.run_steps(2);
+    harness.get_by_label("The crate is called switchboard.");
+    assert!(harness.query_by_label_contains("/clear to save").is_none());
+}
+
+#[test]
+fn run_tab_beside_a_session_keeps_the_sides_width() {
+    let (mut harness, ids) = harness();
+    harness
+        .state_mut()
+        .ui_state
+        .snapshots
+        .insert(ids.lint, "a line of output\n".repeat(5));
+    showing(&mut harness, View::Session(ids.server));
+    harness.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::R);
+    harness.run_steps(2);
+    let before = harness.get_by_label("Run").rect().left();
+    harness.run_steps(6);
+    let after = harness.get_by_label("Run").rect().left();
+    assert!(
+        (before - after).abs() < 0.5,
+        "the side grew from {before} to {after}"
+    );
+}
+
+#[test]
+fn conversation_wraps_beside_the_open_side() {
+    let (mut harness, ids) = harness();
+    let id = seed_claude(&mut harness, &ids);
+    let mut conversation = two_turns();
+    conversation.turns[0].final_text = "word ".repeat(120).trim_end().to_owned();
+    harness
+        .state_mut()
+        .ui_state
+        .conversations
+        .insert(id, (None, conversation));
+    showing(&mut harness, View::Session(id));
+    harness.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::B);
+    harness.run_steps(2);
+    let side = harness.get_by_label("Find").rect().left();
+    let answer = harness
+        .get_by_label("The crate is called switchboard.")
+        .rect();
+    let long = harness
+        .query_all_by_label_contains("word word")
+        .map(|n| n.rect().right())
+        .fold(0.0_f32, f32::max);
+    assert!(
+        answer.right() < side,
+        "{answer:?} runs under the side at {side}"
+    );
+    assert!(
+        long < side,
+        "the long answer reaches {long}, past the side at {side}"
+    );
+}
+
+#[test]
+fn rail_item_and_side_tab_open_and_close_the_side_and_the_text_reflows() {
+    let (mut harness, ids) = harness();
+    let id = seed_claude(&mut harness, &ids);
+    let mut conversation = two_turns();
+    conversation.turns[0].final_text = "word ".repeat(120).trim_end().to_owned();
+    harness
+        .state_mut()
+        .ui_state
+        .conversations
+        .insert(id, (None, conversation));
+    showing(&mut harness, View::Session(id));
+    let long_right = |h: &Harness<'static, SwitchboardApp>| {
+        h.query_all_by_label_contains("word word")
+            .map(|n| n.rect().right())
+            .fold(0.0_f32, f32::max)
+    };
+    let is_open = |h: &Harness<'static, SwitchboardApp>| h.state().core().settings().files_open;
+    let wide = long_right(&harness);
+    // The rail's Files item opens the side and the answer wraps to it.
+    click(&mut harness, "Files ⌘B");
+    assert!(is_open(&harness));
+    let side = harness.get_by_label("Find").rect().left();
+    assert!(long_right(&harness) < side);
+    // The same item closes it and the answer takes the width back.
+    click(&mut harness, "Files ⌘B");
+    assert!(!is_open(&harness));
+    assert!((long_right(&harness) - wide).abs() < 1.0);
+    // A click on the tab already showing closes the side too; a click on
+    // the other tab only switches.
+    click(&mut harness, "Files ⌘B");
+    click(&mut harness, "Run");
+    assert!(is_open(&harness));
+    assert_eq!(harness.state().core().settings().side_tab, SideTab::Run);
+    click(&mut harness, "Run");
+    assert!(!is_open(&harness));
+}
+
+#[test]
+fn a_word_that_cannot_break_does_not_widen_the_turns_after_it() {
+    let (mut harness, ids) = harness();
+    let id = seed_claude(&mut harness, &ids);
+    let mut conversation = two_turns();
+    // Roughly 1400 px of one word in the first turn, prose in the second.
+    conversation.turns[0].final_text = "x".repeat(200);
+    conversation.turns[1].final_text = "word ".repeat(120).trim_end().to_owned();
+    harness
+        .state_mut()
+        .ui_state
+        .conversations
+        .insert(id, (None, conversation));
+    showing(&mut harness, View::Session(id));
+    let left = harness.get_by_label("Message").rect().left();
+    let prose = harness
+        .query_all_by_label_contains("word word")
+        .map(|n| n.rect().right())
+        .fold(0.0_f32, f32::max);
+    assert!(prose > 0.0, "the second answer is not on screen");
+    assert!(
+        prose <= left + 860.0 + 40.0,
+        "the second answer wraps at {} from {left}: the first turn's word widened it",
+        prose - left
+    );
+    // And beside a wide side it wraps to what is visible.
+    click(&mut harness, "Files ⌘B");
+    widen_side(&mut harness, 500.0);
+    let edge = harness.get_by_label("Find").rect().left() - 8.0;
+    let prose = harness
+        .query_all_by_label_contains("word word")
+        .map(|n| n.rect().right())
+        .fold(0.0_f32, f32::max);
+    assert!(
+        prose <= edge,
+        "the second answer reaches {prose}, past the side at {edge}"
+    );
+}
+
+/// Set the side panel's stored width, as a drag on its edge would.
+fn widen_side(harness: &mut Harness<'static, SwitchboardApp>, left: f32) {
+    let state = egui::containers::panel::PanelState {
+        outer_rect: egui::Rect::from_min_max(egui::pos2(left, 0.0), egui::pos2(1200.0, 900.0)),
+    };
+    harness
+        .ctx
+        .data_mut(|d| d.insert_persisted(egui::Id::new("files"), state));
+    harness.run_steps(4);
+}
+
+#[test]
+fn a_session_shrinks_to_the_width_a_wide_side_leaves_it() {
+    let (mut harness, ids) = harness();
+    let id = seed_claude(&mut harness, &ids);
+    let mut conversation = two_turns();
+    conversation.turns[0].final_text = "word ".repeat(120).trim_end().to_owned();
+    harness
+        .state_mut()
+        .ui_state
+        .conversations
+        .insert(id, (None, conversation));
+    showing(&mut harness, View::Session(id));
+    click(&mut harness, "Files ⌘B");
+    click(&mut harness, "Expand activity");
+    widen_side(&mut harness, 500.0);
+    let edge = harness.get_by_label("Find").rect().left() - 8.0;
+    assert!(edge < 520.0, "the side did not widen: edge at {edge}");
+    // Nothing in the session view may reach under the side: neither the
+    // header rows, nor the conversation, nor the message box.
+    for label in ["Back", "Open in terminal", "Message", "Send", "Side"] {
+        let right = harness.get_by_label(label).rect().right();
+        assert!(
+            right <= edge,
+            "{label} reaches {right}, past the side at {edge}"
+        );
+    }
+    for needle in ["word word", "ctx 84k", "Bash: Read crate name", "/work/"] {
+        let right = harness
+            .query_all_by_label_contains(needle)
+            .map(|n| n.rect().right())
+            .fold(0.0_f32, f32::max);
+        assert!(right > 0.0, "{needle} is not on screen");
+        assert!(
+            right <= edge,
+            "{needle} reaches {right}, past the side at {edge}"
+        );
+    }
+    // And it takes the room back when the side narrows again.
+    widen_side(&mut harness, 840.0);
+    let wide = harness.get_by_label("Message").rect().right();
+    assert!(wide > 700.0, "the message box stayed narrow at {wide}");
+    // A smaller window squeezes the same way: nothing may reach past it.
+    harness.set_size(egui::vec2(900.0, 600.0));
+    harness.run_steps(4);
+    let edge = harness.get_by_label("Find").rect().left() - 8.0;
+    assert!(edge < 900.0, "the side is off screen at {edge}");
+    for label in ["Back", "Open in terminal", "Message", "Send"] {
+        let right = harness.get_by_label(label).rect().right();
+        assert!(
+            right <= edge,
+            "{label} reaches {right}, past the side at {edge} in a 900 px window"
+        );
+    }
+    let answer = harness
+        .query_all_by_label_contains("word word")
+        .map(|n| n.rect().right())
+        .fold(0.0_f32, f32::max);
+    assert!(
+        answer <= edge,
+        "the answer reaches {answer}, past the side at {edge} in a 900 px window"
+    );
+}
+
+#[test]
+fn a_long_excerpt_is_clamped_above_the_card_buttons() {
+    let (mut harness, ids) = harness();
+    let id = seed_claude(&mut harness, &ids);
+    let mut conversation = two_turns();
+    conversation.turns[1].final_text = "The answer is long ".repeat(20).trim_end().to_owned();
+    harness
+        .state_mut()
+        .ui_state
+        .conversations
+        .insert(id, (None, conversation));
+    showing(&mut harness, View::Board(ids.beta));
+    let excerpt = harness.get_by_label_contains("The answer is long").rect();
+    assert!(
+        harness.query_by_label_contains("…").is_some(),
+        "the excerpt was not clamped"
+    );
+    let open = harness.get_by_role_and_label(Role::Button, "Open").rect();
+    assert!(
+        excerpt.bottom() <= open.top(),
+        "the excerpt ({excerpt:?}) runs into the buttons ({open:?})"
+    );
+    // Two lines of 13 px italic, not three.
+    assert!(
+        excerpt.height() < 3.0 * 13.0,
+        "{} px tall",
+        excerpt.height()
+    );
 }

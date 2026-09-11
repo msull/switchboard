@@ -1,17 +1,20 @@
-//! One project's board: the run bar, its agent and shell cards in a
-//! wrapping grid, its commands and services as rows, pinned documents,
-//! and read-only notes.
+//! One project's board: title, root, run bar, then its agent and shell
+//! cards in a grid with a "+ New session" cell last, its commands and
+//! services in a second grid, and pinned documents.
 
 use egui::{RichText, Ui};
 
-use super::cards::{document_card, session_card};
+use super::cards::{
+    ENTRY_CARD_HEIGHT, SESSION_CARD_HEIGHT, document_card, grid, new_session_cell, session_card,
+};
 use super::dialogs::NewSessionDraft;
-use super::{DrawCtx, GAP, PAD, run, runbar};
+use super::{DrawCtx, runbar, theme};
 use crate::core::ProjectId;
 
 /// Branch and change count per repository the project holds, from the
 /// file side's git state (refreshed there).
 fn git_line(cx: &mut DrawCtx<'_>, ui: &mut Ui, pid: ProjectId) {
+    let p = theme::palette(ui);
     let Some(git) = cx.state.files.get(&pid).and_then(|f| f.git.clone()) else {
         return;
     };
@@ -21,18 +24,23 @@ fn git_line(cx: &mut DrawCtx<'_>, ui: &mut Ui, pid: ProjectId) {
         } else {
             format!("{} ", repo.rel.display())
         };
-        let text = format!("{name}on {}", repo.branch);
-        ui.label(RichText::new(text).weak())
-            .on_hover_text("git branch");
-        if repo.changed > 0 {
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 4.0;
+            ui.label(theme::meta_text(ui, format!("{name}on")));
             ui.label(
-                RichText::new(format!("{} changed", repo.changed))
-                    .color(super::files::change_color(
-                        crate::adapters::git::Change::Modified,
-                    ))
-                    .small(),
-            );
-        }
+                RichText::new(&repo.branch)
+                    .text_style(theme::meta())
+                    .color(p.text),
+            )
+            .on_hover_text("git branch");
+            if repo.changed > 0 {
+                ui.label(
+                    RichText::new(format!("· {} changed", repo.changed))
+                        .text_style(theme::meta())
+                        .color(p.accent_2_text),
+                );
+            }
+        });
     }
 }
 
@@ -45,72 +53,83 @@ pub fn show(cx: &mut DrawCtx<'_>, ui: &mut Ui, pid: ProjectId) {
         ui.label("This project no longer exists.");
         return;
     };
-    ui.spacing_mut().item_spacing = egui::vec2(GAP, GAP);
+    let p = theme::palette(ui);
+    ui.spacing_mut().item_spacing = egui::vec2(10.0, 6.0);
 
-    // The project strip is a framed region so the board's own heading is
-    // told apart from the switcher above it.
-    egui::Frame::new()
-        .fill(ui.visuals().faint_bg_color)
-        .stroke(ui.visuals().widgets.noninteractive.bg_stroke)
-        .corner_radius(4)
-        .inner_margin(PAD)
+    egui::ScrollArea::vertical()
+        .id_salt(("board", pid))
+        .auto_shrink(false)
         .show(ui, |ui| {
-            ui.set_width(ui.available_width());
+            // The buttons claim the right end first; the title gets what
+            // is left and is cut rather than run under them.
             ui.horizontal(|ui| {
-                ui.heading(&workspace.project.name);
-                ui.label(RichText::new(workspace.project.root.display().to_string()).weak());
-                if ui.button("New session").clicked() {
-                    cx.state.new_session = Some(NewSessionDraft::new(&workspace.project));
-                }
-                if ui
-                    .button("Environment")
-                    .on_hover_text("Variables and secrets new sessions get")
-                    .clicked()
-                {
-                    cx.state.env_dialog = super::env::EnvDraft::project(cx.core, cx.services, pid);
-                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if theme::primary(ui, "New session").clicked() {
+                        cx.state.new_session = Some(NewSessionDraft::new(&workspace.project));
+                    }
+                    if theme::secondary(ui, "Environment")
+                        .on_hover_text("Variables and secrets new sessions get")
+                        .clicked()
+                    {
+                        cx.state.env_dialog =
+                            super::env::EnvDraft::project(cx.core, cx.services, pid);
+                    }
+                    ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                        ui.add(
+                            egui::Label::new(
+                                RichText::new(&workspace.project.name).text_style(theme::h1()),
+                            )
+                            .truncate(),
+                        );
+                    });
+                });
+            });
+            ui.horizontal(|ui| {
+                ui.label(theme::mono_text(
+                    ui,
+                    workspace.project.root.display().to_string(),
+                ));
                 git_line(cx, ui, pid);
             });
             if !workspace.project.notes.is_empty() {
-                ui.label(&workspace.project.notes);
+                ui.label(
+                    RichText::new(&workspace.project.notes)
+                        .text_style(theme::meta())
+                        .color(p.n700),
+                );
             }
+            ui.add_space(6.0);
             runbar::show(cx, ui, pid, false);
-        });
 
-    let sessions = core.board_sessions(pid);
-    let entries = core.run_entries(pid);
-
-    egui::ScrollArea::vertical().show(ui, |ui| {
-        ui.label(RichText::new("Agents and shells").strong());
-        ui.separator();
-        if sessions.is_empty() {
-            ui.label(RichText::new("No sessions yet. Start one with New session.").weak());
-        }
-        ui.horizontal_wrapped(|ui| {
-            for record in sessions {
-                session_card(cx, ui, record);
-            }
-        });
-        // Commands and services are a checklist, not cards: they have
-        // no conversation to preview, and the run bar starts them.
-        if !entries.is_empty() {
-            ui.add_space(GAP);
-            ui.label(RichText::new("Commands and services").strong());
-            ui.separator();
-            for record in entries {
-                run::row(cx, ui, record);
-            }
-        }
-        if !workspace.project.pinned.is_empty() {
-            ui.add_space(GAP);
-            ui.label(RichText::new("Pinned").strong());
-            ui.separator();
-            ui.horizontal_wrapped(|ui| {
-                for rel in &workspace.project.pinned {
-                    let path = workspace.project.root.join(rel);
-                    document_card(cx, ui, pid, rel, &path);
+            let sessions = core.board_sessions(pid);
+            theme::section(ui, "Agents and shells");
+            let mut new_session = false;
+            grid(ui, sessions.len() + 1, SESSION_CARD_HEIGHT, |ui, i| {
+                if let Some(record) = sessions.get(i) {
+                    session_card(cx, ui, record);
+                } else {
+                    new_session = new_session_cell(ui);
                 }
             });
-        }
-    });
+            if new_session {
+                cx.state.new_session = Some(NewSessionDraft::new(&workspace.project));
+            }
+
+            let entries = core.run_entries(pid);
+            if !entries.is_empty() {
+                theme::section(ui, "Commands and services");
+                grid(ui, entries.len(), ENTRY_CARD_HEIGHT, |ui, i| {
+                    session_card(cx, ui, entries[i]);
+                });
+            }
+            if !workspace.project.pinned.is_empty() {
+                theme::section(ui, "Pinned");
+                let pinned = &workspace.project.pinned;
+                grid(ui, pinned.len(), 110.0, |ui, i| {
+                    let rel = &pinned[i];
+                    let path = workspace.project.root.join(rel);
+                    document_card(cx, ui, pid, rel, &path);
+                });
+            }
+        });
 }

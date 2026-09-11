@@ -6,10 +6,10 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
-use egui::{Color32, Frame, RichText, Ui};
+use egui::{Frame, RichText, Ui};
 use egui_commonmark::CommonMarkViewer;
 
-use super::{DrawCtx, GAP, PAD, UiState};
+use super::{DrawCtx, GAP, UiState, theme};
 use crate::core::{AppAction, ProjectId};
 
 /// Files above this are not read; the preview says so instead.
@@ -137,12 +137,9 @@ pub fn show(cx: &mut DrawCtx<'_>, ui: &mut Ui, pid: ProjectId, path: &Path) {
         .id_salt("document")
         .auto_shrink(false)
         .show(ui, |ui| {
-            ui.set_max_width(width);
+            ui.set_max_width(width.min(MAX_READING_WIDTH));
             Frame::new()
-                .fill(ui.visuals().panel_fill)
-                .stroke(ui.visuals().widgets.noninteractive.bg_stroke)
-                .corner_radius(4)
-                .inner_margin(PAD)
+                .inner_margin(egui::Margin::symmetric(0, 8))
                 .show(ui, |ui| {
                     ui.set_width(ui.available_width());
                     body(cx.state, ui);
@@ -150,33 +147,25 @@ pub fn show(cx: &mut DrawCtx<'_>, ui: &mut Ui, pid: ProjectId, path: &Path) {
         });
 }
 
-/// Give Markdown the colors GitHub renders it with: blue links, a light
-/// grey code block with a hairline border, a tinted inline code
-/// background. The viewer reads these from the egui style, and the
-/// change is scoped to `ui` (a style set on a `Ui` lives only as long
-/// as that `Ui`), so nothing else on screen shifts.
-pub fn github_markdown_style(ui: &mut Ui) {
-    let dark = ui.visuals().dark_mode;
-    let (link, code_block, border, inline) = if dark {
-        (
-            Color32::from_rgb(0x44, 0x93, 0xf8),
-            Color32::from_rgb(0x16, 0x1b, 0x22),
-            Color32::from_rgb(0x30, 0x36, 0x3d),
-            Color32::from_rgb(0x34, 0x39, 0x42),
-        )
-    } else {
-        (
-            Color32::from_rgb(0x09, 0x69, 0xda),
-            Color32::from_rgb(0xf6, 0xf8, 0xfa),
-            Color32::from_rgb(0xd0, 0xd7, 0xde),
-            Color32::from_rgb(0xea, 0xee, 0xf2),
-        )
-    };
+/// Prose stops here, however wide the window.
+const MAX_READING_WIDTH: f32 = 860.0;
+
+/// Give Markdown the design's colors: cyan links, a dark code block on
+/// both themes, inline code on a neutral tint. The viewer reads these
+/// from the egui style, and the change is scoped to `ui` (a style set
+/// on a `Ui` lives only as long as that `Ui`), so nothing else on
+/// screen shifts.
+pub fn markdown_style(ui: &mut Ui) {
+    let p = theme::palette(ui);
     let visuals = &mut ui.style_mut().visuals;
-    visuals.hyperlink_color = link;
-    visuals.extreme_bg_color = code_block;
-    visuals.code_bg_color = inline;
-    visuals.widgets.noninteractive.bg_stroke.color = border;
+    visuals.hyperlink_color = p.accent_text;
+    visuals.extreme_bg_color = p.code_fill;
+    visuals.code_bg_color = p.n300;
+    visuals.widgets.noninteractive.bg_stroke = egui::Stroke::NONE;
+    // The code block is dark on both themes, so its highlighting has to
+    // be the dark theme's: the highlighter reads this flag, and nothing
+    // else drawn inside the scoped `ui` does.
+    visuals.dark_mode = true;
 }
 
 /// Draw the loaded preview's contents: Markdown, highlighted text, an
@@ -193,7 +182,7 @@ pub fn body(state: &mut UiState, ui: &mut Ui) {
     };
     match &preview.body {
         Body::Markdown(text) => {
-            github_markdown_style(ui);
+            markdown_style(ui);
             CommonMarkViewer::new().show(ui, markdown, text);
         }
         Body::Text(text) => {
@@ -222,7 +211,7 @@ pub fn body(state: &mut UiState, ui: &mut Ui) {
 }
 
 fn weak(ui: &mut Ui, text: &str) {
-    ui.label(RichText::new(text).weak());
+    ui.label(theme::meta_text(ui, text));
 }
 
 fn header(cx: &mut DrawCtx<'_>, ui: &mut Ui, pid: ProjectId, path: &Path, size: u64) {
@@ -236,47 +225,45 @@ fn header(cx: &mut DrawCtx<'_>, ui: &mut Ui, pid: ProjectId, path: &Path, size: 
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
-    Frame::new()
-        .fill(ui.visuals().faint_bg_color)
-        .stroke(ui.visuals().widgets.noninteractive.bg_stroke)
-        .corner_radius(4)
-        .inner_margin(PAD)
-        .show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            ui.horizontal(|ui| {
-                ui.heading(&name);
-                let shown = rel.unwrap_or(path);
-                ui.label(RichText::new(shown.display().to_string()).weak());
-                ui.label(RichText::new(size_text(size)).weak().small());
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.button("Back").clicked() {
-                        cx.dispatch(AppAction::Back);
-                    }
-                    if let Some(rel) = rel {
-                        let label = if pinned { "Unpin" } else { "Pin" };
-                        if ui.button(label).clicked() {
-                            cx.dispatch(if pinned {
-                                AppAction::UnpinDocument(pid, rel.to_path_buf())
-                            } else {
-                                AppAction::PinDocument(pid, rel.to_path_buf())
-                            });
-                        }
-                    }
-                    if ui.button("Copy path").clicked() {
-                        ui.ctx().copy_text(path.display().to_string());
-                    }
-                    if ui.button("Reveal").clicked() {
-                        cx.dispatch(AppAction::RevealDocument(path.to_path_buf()));
-                    }
-                    if ui.button("Open in editor").clicked() {
-                        cx.dispatch(AppAction::OpenInEditor(path.to_path_buf()));
-                    }
-                    if ui.button("Open").on_hover_text("Default app").clicked() {
-                        cx.dispatch(AppAction::OpenDocument(path.to_path_buf()));
-                    }
-                });
-            });
+    let p = theme::palette(ui);
+    ui.horizontal(|ui| {
+        ui.label(RichText::new(&name).text_style(theme::h1()));
+        ui.label(RichText::new(size_text(size)).small().color(p.n600));
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.spacing_mut().item_spacing.x = 2.0;
+            if theme::ghost_muted(ui, "Back").clicked() {
+                cx.dispatch(AppAction::Back);
+            }
+            if let Some(rel) = rel {
+                let label = if pinned { "Unpin" } else { "Pin" };
+                if theme::ghost(ui, label).clicked() {
+                    cx.dispatch(if pinned {
+                        AppAction::UnpinDocument(pid, rel.to_path_buf())
+                    } else {
+                        AppAction::PinDocument(pid, rel.to_path_buf())
+                    });
+                }
+            }
+            if theme::ghost(ui, "Copy path").clicked() {
+                ui.ctx().copy_text(path.display().to_string());
+            }
+            if theme::ghost(ui, "Reveal").clicked() {
+                cx.dispatch(AppAction::RevealDocument(path.to_path_buf()));
+            }
+            if theme::ghost(ui, "Open in editor").clicked() {
+                cx.dispatch(AppAction::OpenInEditor(path.to_path_buf()));
+            }
+            if theme::ghost(ui, "Open")
+                .on_hover_text("Default app")
+                .clicked()
+            {
+                cx.dispatch(AppAction::OpenDocument(path.to_path_buf()));
+            }
         });
+    });
+    let shown = rel.unwrap_or(path);
+    ui.label(theme::mono_text(ui, shown.display().to_string()));
+    ui.add_space(8.0);
 }
 
 /// `1.2 KB`, `340 B`, `3.0 MB`.

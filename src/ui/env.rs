@@ -5,7 +5,7 @@
 
 use egui::{Context, RichText, Ui};
 
-use super::{DrawCtx, GAP};
+use super::{DrawCtx, GAP, theme};
 use crate::app::{Services, resolve_project_env};
 use crate::core::{AppAction, AppCore, EnvVar, ProjectEnv, ProjectId, Resolved, SecretScope};
 
@@ -120,16 +120,21 @@ pub fn show(cx: &mut DrawCtx<'_>, ctx: &Context) {
     };
     let mut keep = true;
     let mut save = false;
-    egui::Window::new(draft.title.clone())
+    egui::Window::new("")
+        .id(egui::Id::new("environment"))
+        .title_bar(false)
         .collapsible(false)
         .resizable(true)
         .default_width(640.0)
         .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
         .show(ctx, |ui| {
+            let p = theme::palette(ui);
             ui.spacing_mut().item_spacing = egui::vec2(GAP, GAP);
+            ui.label(RichText::new(&draft.title).text_style(theme::brand()));
+            ui.add_space(8.0);
             variables(ui, &mut draft);
             if let SecretScope::Project(_) = draft.scope {
-                ui.separator();
+                ui.add_space(8.0);
                 ui.checkbox(
                     &mut draft.load_dotenv,
                     "Read .env files from the project (opt-in)",
@@ -146,22 +151,22 @@ pub fn show(cx: &mut DrawCtx<'_>, ctx: &Context) {
                     .labelled_by(id);
                 });
             }
-            ui.separator();
+            ui.add_space(8.0);
             preview(ui, &mut draft);
-            ui.separator();
+            ui.add_space(8.0);
             ui.horizontal(|ui| {
-                if ui.button("Save").clicked() {
+                ui.label(
+                    RichText::new("Secrets go to the Keychain on Save; records keep names only.")
+                        .small()
+                        .color(p.n600),
+                );
+                if theme::ghost_muted(ui, "Cancel").clicked() {
+                    keep = false;
+                }
+                if theme::primary(ui, "Save").clicked() {
                     save = true;
                     keep = false;
                 }
-                if ui.button("Cancel").clicked() {
-                    keep = false;
-                }
-                ui.label(
-                    RichText::new("Secrets go to the Keychain on Save; records keep names only.")
-                        .weak()
-                        .small(),
-                );
             });
         });
     if save {
@@ -178,9 +183,10 @@ fn variables(ui: &mut Ui, draft: &mut EnvDraft) {
         .num_columns(4)
         .spacing([GAP, GAP])
         .show(ui, |ui| {
-            ui.label(RichText::new("Name").weak());
-            ui.label(RichText::new("Value").weak());
-            ui.label(RichText::new("Secret").weak());
+            let p = theme::palette(ui);
+            theme::kicker(ui, "Name", p.n600);
+            theme::kicker(ui, "Value", p.n600);
+            theme::kicker(ui, "Secret", p.n600);
             ui.end_row();
             for (i, row) in draft.rows.iter_mut().enumerate() {
                 let name_id = ui.label(format!("Name {}", i + 1)).id;
@@ -200,7 +206,7 @@ fn variables(ui: &mut Ui, draft: &mut EnvDraft) {
                 )
                 .labelled_by(value_id);
                 ui.checkbox(&mut row.secret, format!("Secret {}", i + 1));
-                if ui.small_button("Remove").clicked() {
+                if theme::ghost_muted(ui, "Remove").clicked() {
                     remove = Some(i);
                 }
                 ui.end_row();
@@ -212,7 +218,7 @@ fn variables(ui: &mut Ui, draft: &mut EnvDraft) {
             draft.removed.push(row.name.trim().to_owned());
         }
     }
-    if ui.button("Add variable").clicked() {
+    if theme::ghost(ui, "Add variable").clicked() {
         draft.rows.push(RowDraft {
             name: String::new(),
             value: String::new(),
@@ -223,27 +229,27 @@ fn variables(ui: &mut Ui, draft: &mut EnvDraft) {
 }
 
 fn preview(ui: &mut Ui, draft: &mut EnvDraft) {
+    let p = theme::palette(ui);
     ui.horizontal(|ui| {
-        ui.label(RichText::new("New sessions get").strong());
-        ui.label(
-            RichText::new("(as saved; reopen after Save to refresh)")
-                .weak()
-                .small(),
-        );
+        theme::kicker(ui, "New sessions get", p.n600);
+        ui.label(theme::meta_text(
+            ui,
+            "(as saved; reopen after Save to refresh)",
+        ));
         let label = if draft.reveal { "Hide" } else { "Reveal" };
-        if ui.small_button(label).clicked() {
+        if theme::ghost_muted(ui, label).clicked() {
             draft.reveal = !draft.reveal;
         }
     });
     if draft.preview.vars.is_empty() {
-        ui.label(RichText::new("nothing yet").weak());
+        ui.label(theme::meta_text(ui, "nothing yet"));
     }
     for var in &draft.preview.vars {
         ui.horizontal(|ui| {
             ui.monospace(&var.name);
             match &var.value {
                 None => {
-                    ui.label(RichText::new("no value stored").color(ui.visuals().error_fg_color));
+                    ui.label(RichText::new("no value stored").color(p.accent_2_text));
                 }
                 Some(v) if var.secret && !draft.reveal => {
                     ui.monospace("••••••••");
@@ -252,7 +258,7 @@ fn preview(ui: &mut Ui, draft: &mut EnvDraft) {
                     ui.monospace(v);
                 }
             }
-            ui.label(RichText::new(var.source.label()).weak().small());
+            ui.label(theme::meta_text(ui, var.source.label()));
         });
     }
     if !draft.preview.example_missing.is_empty() {
@@ -261,7 +267,7 @@ fn preview(ui: &mut Ui, draft: &mut EnvDraft) {
                 ".env.example also asks for: {}",
                 draft.preview.example_missing.join(", ")
             ))
-            .color(ui.visuals().warn_fg_color),
+            .color(p.accent_2_text),
         );
     }
 }

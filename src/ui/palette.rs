@@ -5,8 +5,7 @@ use std::path::PathBuf;
 
 use egui::{Context, RichText};
 
-use super::cards::state_color;
-use super::{DrawCtx, GAP};
+use super::{DrawCtx, GAP, theme};
 use crate::adapters::files::{Entry, fuzzy};
 use crate::core::{AppAction, CardState, ProjectId, RecordId};
 
@@ -58,18 +57,26 @@ pub fn show(cx: &mut DrawCtx<'_>, ctx: &Context) {
 
     let mut keep = true;
     let mut chosen: Option<Target> = None;
-    egui::Window::new("Go to")
+    egui::Window::new("")
+        .id(egui::Id::new("go-to"))
         .collapsible(false)
         .resizable(false)
-        .anchor(egui::Align2::CENTER_TOP, egui::vec2(0.0, 80.0))
+        .title_bar(false)
+        .anchor(egui::Align2::CENTER_TOP, egui::vec2(0.0, 120.0))
         .show(ctx, |ui| {
+            let p = theme::palette(ui);
             ui.spacing_mut().item_spacing = egui::vec2(GAP, GAP);
-            ui.set_min_width(420.0);
-            let label = ui.label("Search").id;
+            ui.set_min_width(460.0);
+            let label = ui
+                .add(egui::Label::new(RichText::new("Search").size(0.1)))
+                .id;
             let field = ui
                 .add(
                     egui::TextEdit::singleline(&mut draft.query)
-                        .hint_text("project or session")
+                        .hint_text("Go to a project or session")
+                        .font(egui::FontId::new(15.0, egui::FontFamily::Proportional))
+                        .background_color(p.bg)
+                        .margin(egui::Margin::symmetric(10, 8))
                         .desired_width(f32::INFINITY),
                 )
                 .labelled_by(label);
@@ -86,23 +93,32 @@ pub fn show(cx: &mut DrawCtx<'_>, ctx: &Context) {
             if enter && let Some(&first) = shown.first() {
                 chosen = Some(rows[first].target.clone());
             }
-            ui.separator();
             if shown.is_empty() {
-                ui.label(RichText::new("no matches").weak());
+                ui.label(theme::meta_text(ui, "no matches"));
             }
-            for &i in &shown {
+            ui.spacing_mut().item_spacing.y = 2.0;
+            for (n, &i) in shown.iter().enumerate() {
                 let row = &rows[i];
                 ui.horizontal(|ui| {
-                    if ui.selectable_label(false, &row.title).clicked() {
+                    if let Some(state) = &row.state {
+                        theme::status_dot(ui, state, 7.0);
+                    } else {
+                        ui.add_space(7.0);
+                    }
+                    let title = if n == 0 {
+                        theme::strong_text(&row.title)
+                    } else {
+                        RichText::new(&row.title)
+                    };
+                    if ui
+                        .add(egui::Button::new(title).frame_when_inactive(false))
+                        .clicked()
+                    {
                         chosen = Some(row.target.clone());
                     }
-                    ui.label(RichText::new(&row.detail).weak().small());
+                    ui.label(theme::meta_text(ui, &row.detail));
                     if let Some(state) = &row.state {
-                        ui.label(
-                            RichText::new(state.label())
-                                .color(state_color(ui, state))
-                                .small(),
-                        );
+                        ui.label(theme::meta_text(ui, state.label()).color(p.state_text(state)));
                     }
                 });
             }

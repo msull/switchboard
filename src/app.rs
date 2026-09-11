@@ -546,6 +546,8 @@ impl SwitchboardApp {
     }
 
     /// Captions for cards on screen and the snapshot for the open session.
+    /// Agent cards excerpt the transcript rather than the pane, so their
+    /// conversations are kept fresh too (a stat each; a read on change).
     fn refresh_captions(&mut self) {
         let view = self.core.view();
         if let View::Session(id) = view {
@@ -598,6 +600,9 @@ impl SwitchboardApp {
         }
         for id in ids {
             let on_screen = matches!(view, View::Session(sid) if sid == id);
+            if !on_screen {
+                self.refresh_conversation(id);
+            }
             let wants_snapshot = on_screen || run_set.contains(&id);
             // A pane that exited still exists (`remain-on-exit`), but its
             // output on disk is complete, so read that like a gone pane.

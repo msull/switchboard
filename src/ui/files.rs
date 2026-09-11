@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 use egui::{Color32, RichText, Ui};
 
 use super::session::append_path;
-use super::{DrawCtx, GAP, document};
+use super::{DrawCtx, GAP, document, theme};
 use crate::adapters::files::{Entry, Listing, children, fuzzy, scan};
 use crate::adapters::git::{Change, GitState, inspect};
 use crate::core::{AppAction, Launch, ProjectId, RecordId, SessionKind};
@@ -50,7 +50,7 @@ pub struct FilesState {
 }
 
 impl FilesState {
-    fn refresh(&mut self) {
+    pub fn refresh(&mut self) {
         self.children.clear();
         self.listing = None;
         self.scan = None;
@@ -157,6 +157,7 @@ pub fn show(
         let selected = state.selected.clone();
         let outcome = egui::Panel::bottom(egui::Id::new(("files_preview", pid)))
             .resizable(true)
+            .show_separator_line(false)
             .default_size(ui.available_height() / 2.0)
             .show(ui, |ui| {
                 preview_pane(cx, ui, pid, selected.as_deref(), message.is_some())
@@ -168,35 +169,30 @@ pub fn show(
             PaneClick::None => {}
         }
     }
-    ui.horizontal(|ui| {
-        ui.label(RichText::new("Files").strong());
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if ui
-                .small_button("Refresh")
-                .on_hover_text("Re-read the tree and the finder index")
-                .clicked()
-            {
-                state.refresh();
-            }
-        });
-    });
     let mut open_first = false;
     ui.horizontal(|ui| {
-        let label = ui.label("Find").id;
+        // The label is invisible but keeps the field findable by name.
+        let label = ui.add(egui::Label::new(RichText::new("Find").size(0.1))).id;
+        let p = theme::palette(ui);
         let field = ui
             .add(
                 egui::TextEdit::singleline(&mut state.query)
-                    .hint_text("fuzzy path, Enter picks the first hit")
+                    .hint_text("Find a path…")
+                    .font(theme::meta())
+                    .margin(egui::Margin::symmetric(10, 7))
+                    .background_color(p.surface)
                     .desired_width(f32::INFINITY),
             )
             .labelled_by(label);
         open_first = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
     });
-    ui.separator();
+    ui.add_space(6.0);
     egui::ScrollArea::vertical()
         .id_salt(("files", pid))
         .auto_shrink(false)
         .show(ui, |ui| {
+            ui.spacing_mut().item_spacing.y = 2.0;
+            ui.spacing_mut().button_padding = egui::vec2(6.0, 4.0);
             if state.query.trim().is_empty() {
                 let root_dir = root.clone();
                 directory(ui, &mut state, &mut side, &root_dir, 0);
@@ -244,73 +240,92 @@ fn preview_pane(
     // then jump back when a file is selected. Hold the panel's height.
     ui.set_min_height(ui.available_height());
     let Some(path) = path else {
-        ui.label(RichText::new("Select a file to preview it here.").weak());
+        ui.label(theme::meta_text(ui, "Select a file to preview it here."));
         return PaneClick::None;
     };
     let mut click = PaneClick::None;
-    document::ensure_loaded(cx.state, path);
-    let (name, size) = cx.state.preview.as_ref().map_or_else(
-        || (String::new(), 0),
-        |p| {
-            (
-                p.path
-                    .file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_default(),
-                p.size,
-            )
-        },
-    );
-    ui.horizontal(|ui| {
-        ui.label(RichText::new(name).strong());
-        ui.label(RichText::new(document::size_text(size)).weak().small());
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if ui
-                .small_button("×")
-                .on_hover_text("Clear the selection")
-                .clicked()
-            {
-                click = PaneClick::Clear;
-            }
-            if can_message
-                && ui
-                    .small_button("To message")
-                    .on_hover_text("Put the path in the message box")
-                    .clicked()
-            {
-                click = PaneClick::ToMessage;
-            }
-            if ui
-                .small_button("Expand")
-                .on_hover_text("Preview it full size")
-                .clicked()
-            {
-                cx.dispatch(AppAction::ShowDocument(pid, path.to_path_buf()));
-            }
-            if ui.small_button("Open in editor").clicked() {
-                cx.dispatch(AppAction::OpenInEditor(path.to_path_buf()));
-            }
-        });
-    });
-    ui.separator();
-    let is_code = cx
-        .state
-        .preview
-        .as_ref()
-        .is_some_and(|p| matches!(p.body, document::Body::Text(_)));
-    let width = ui.available_width();
-    egui::ScrollArea::both()
-        .id_salt(("files_preview_body", pid, path))
-        .auto_shrink(false)
+    let p = theme::palette(ui);
+    theme::surface(ui)
+        .inner_margin(egui::Margin::symmetric(16, 12))
         .show(ui, |ui| {
-            // Code keeps its lines and scrolls sideways; prose wraps at
-            // the side's width, and only a table or image scrolls.
-            if is_code {
-                ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
-            } else {
-                ui.set_max_width(width);
-            }
-            document::body(cx.state, ui);
+            ui.set_min_size(ui.available_size());
+            ui.spacing_mut().item_spacing = egui::vec2(GAP, GAP);
+            document::ensure_loaded(cx.state, path);
+            let (name, size) = cx.state.preview.as_ref().map_or_else(
+                || (String::new(), 0),
+                |p| {
+                    (
+                        p.path
+                            .file_name()
+                            .map(|n| n.to_string_lossy().into_owned())
+                            .unwrap_or_default(),
+                        p.size,
+                    )
+                },
+            );
+            // The name and size on one line, the actions under them: the
+            // side is too narrow for both in one row.
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 8.0;
+                ui.label(theme::strong_text(name));
+                ui.label(
+                    RichText::new(document::size_text(size))
+                        .small()
+                        .color(p.n600),
+                );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.spacing_mut().button_padding = egui::vec2(6.0, 3.0);
+                    if theme::ghost_muted(ui, "×")
+                        .on_hover_text("Clear the selection")
+                        .clicked()
+                    {
+                        click = PaneClick::Clear;
+                    }
+                });
+            });
+            ui.horizontal(|ui| {
+                // No side padding: the text sits flush with the title above, and a
+
+                // negative space would push the row's edge out and grow the panel.
+
+                ui.spacing_mut().item_spacing.x = 14.0;
+                ui.spacing_mut().button_padding = egui::vec2(0.0, 3.0);
+                if theme::ghost(ui, "Expand")
+                    .on_hover_text("Preview it full size")
+                    .clicked()
+                {
+                    cx.dispatch(AppAction::ShowDocument(pid, path.to_path_buf()));
+                }
+                if theme::ghost(ui, "Open in editor").clicked() {
+                    cx.dispatch(AppAction::OpenInEditor(path.to_path_buf()));
+                }
+                if can_message
+                    && theme::ghost(ui, "To message")
+                        .on_hover_text("Put the path in the message box")
+                        .clicked()
+                {
+                    click = PaneClick::ToMessage;
+                }
+            });
+            let is_code = cx
+                .state
+                .preview
+                .as_ref()
+                .is_some_and(|p| matches!(p.body, document::Body::Text(_)));
+            let width = ui.available_width();
+            egui::ScrollArea::both()
+                .id_salt(("files_preview_body", pid, path))
+                .auto_shrink(false)
+                .show(ui, |ui| {
+                    // Code keeps its lines and scrolls sideways; prose wraps at
+                    // the side's width, and only a table or image scrolls.
+                    if is_code {
+                        ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
+                    } else {
+                        ui.set_max_width(width);
+                    }
+                    document::body(cx.state, ui);
+                });
         });
     click
 }
@@ -330,13 +345,15 @@ struct Side<'a> {
     to_message: &'a mut Vec<PathBuf>,
 }
 
-/// Row colors for git status.
+/// Row colors for git status: cyan for new, magenta for conflicts,
+/// neutral for the everyday edit.
 #[must_use]
-pub fn change_color(change: Change) -> Color32 {
+pub fn change_color(ui: &Ui, change: Change) -> Color32 {
+    let p = theme::palette(ui);
     match change {
-        Change::Modified => Color32::from_rgb(235, 140, 0),
-        Change::Untracked => Color32::from_rgb(60, 170, 80),
-        Change::Conflict => Color32::from_rgb(220, 50, 50),
+        Change::Modified => p.n600,
+        Change::Untracked => p.accent_text,
+        Change::Conflict => p.accent_2_text,
     }
 }
 
@@ -345,7 +362,7 @@ impl Side<'_> {
     fn decoration(&self, ui: &mut Ui, rel: &Path, is_dir: bool) {
         if let Some(change) = self.git.and_then(|g| g.status_of(rel, is_dir)) {
             let glyph = if is_dir { "•" } else { change.glyph() };
-            ui.label(RichText::new(glyph).color(change_color(change)).small())
+            ui.label(RichText::new(glyph).color(change_color(ui, change)).small())
                 .on_hover_text(match change {
                     Change::Modified => "modified",
                     Change::Untracked => "untracked",
@@ -448,7 +465,15 @@ impl Side<'_> {
 /// The row keeps its click; the drag is a second interaction over the
 /// same rect, and egui tells the two apart by pointer movement.
 fn file_row(ui: &mut Ui, selected: bool, text: &str, path: &Path) -> egui::Response {
-    let response = ui.selectable_label(selected, text);
+    let p = theme::palette(ui);
+    let rich = if selected {
+        RichText::new(text)
+            .text_style(theme::strong())
+            .color(p.accent_text)
+    } else {
+        RichText::new(text).text_style(theme::meta()).color(p.n800)
+    };
+    let response = ui.add(egui::Button::new(rich).frame_when_inactive(false));
     response
         .interact(egui::Sense::drag())
         .on_hover_cursor(egui::CursorIcon::Grab)
@@ -483,12 +508,20 @@ fn directory(ui: &mut Ui, state: &mut FilesState, side: &mut Side<'_>, dir: &Pat
             .unwrap_or_default();
         ui.horizontal(|ui| {
             #[allow(clippy::cast_precision_loss)]
-            ui.add_space(depth as f32 * 14.0);
+            ui.add_space(depth as f32 * 13.0);
             if entry.is_dir {
                 let open = state.expanded.contains(&path);
                 // Glyphs from egui's icon font; the text font lacks ▸/▾.
                 let arrow = if open { "⏷" } else { "⏵" };
-                let response = ui.selectable_label(false, format!("{arrow} {name}"));
+                let p = theme::palette(ui);
+                let response = ui.add(
+                    egui::Button::new(
+                        RichText::new(format!("{arrow} {name}"))
+                            .text_style(theme::meta())
+                            .color(p.n800),
+                    )
+                    .frame_when_inactive(false),
+                );
                 if response.clicked() {
                     if open {
                         state.expanded.remove(&path);

@@ -3,9 +3,9 @@
 
 use std::path::PathBuf;
 
-use egui::{Context, Ui};
+use egui::{Context, RichText, Ui};
 
-use super::{DrawCtx, GAP};
+use super::{DrawCtx, GAP, theme};
 use crate::core::{AgentKind, AppAction, Launch, Project, ProjectId, SessionKind};
 
 #[derive(Debug, Default, Clone)]
@@ -61,14 +61,63 @@ pub fn show(cx: &mut DrawCtx<'_>, ctx: &Context) {
     new_session(cx, ctx);
 }
 
-/// A single-line text field that tests (and screen readers) find by its
-/// label.
+/// A single-line text field under its label, which tests (and screen
+/// readers) find it by.
 fn field(ui: &mut Ui, label: &str, value: &mut String) {
+    let p = theme::palette(ui);
+    ui.spacing_mut().item_spacing.y = 4.0;
+    let id = ui
+        .label(RichText::new(label).text_style(theme::meta()).color(p.n600))
+        .id;
+    ui.add(
+        egui::TextEdit::singleline(value)
+            .background_color(p.bg)
+            .margin(egui::Margin::symmetric(10, 7))
+            .desired_width(360.0),
+    )
+    .labelled_by(id);
+    ui.add_space(6.0);
+}
+
+/// A dialog window: no native title bar, the title as a heading, then
+/// `body`. Surface fill and the large shadow come from the theme.
+fn dialog(ctx: &Context, title: &str, body: impl FnOnce(&mut Ui)) {
+    // The window gets no title of its own: the heading below is the one
+    // place the title appears, on screen and in the accessibility tree.
+    egui::Window::new("")
+        .id(egui::Id::new(("dialog", title)))
+        .title_bar(false)
+        .collapsible(false)
+        .resizable(false)
+        .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+        .show(ctx, |ui| {
+            ui.spacing_mut().item_spacing = egui::vec2(GAP, GAP);
+            ui.label(RichText::new(title).text_style(theme::brand()));
+            ui.add_space(8.0);
+            body(ui);
+        });
+}
+
+/// The action row of a dialog: Cancel, then the primary action last.
+/// Drawn left to right: a right-to-left row inside an auto-sized window
+/// never settles on a width.
+fn dialog_actions(ui: &mut Ui, primary: &str, ready: bool) -> (bool, bool) {
+    let mut confirmed = false;
+    let mut cancelled = false;
+    ui.add_space(6.0);
     ui.horizontal(|ui| {
-        let id = ui.label(label).id;
-        ui.add(egui::TextEdit::singleline(value).desired_width(320.0))
-            .labelled_by(id);
+        if theme::ghost_muted(ui, "Cancel").clicked() {
+            cancelled = true;
+        }
+        if ui
+            .add_enabled_ui(ready, |ui| theme::primary(ui, primary))
+            .inner
+            .clicked()
+        {
+            confirmed = true;
+        }
     });
+    (confirmed, cancelled)
 }
 
 fn add_project(cx: &mut DrawCtx<'_>, ctx: &Context) {
@@ -76,28 +125,22 @@ fn add_project(cx: &mut DrawCtx<'_>, ctx: &Context) {
         return;
     };
     let mut keep = true;
-    egui::Window::new("Add a project")
-        .collapsible(false)
-        .resizable(false)
-        .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
-        .show(ctx, |ui| {
-            ui.spacing_mut().item_spacing = egui::vec2(GAP, GAP);
-            field(ui, "Name", &mut draft.name);
-            field(ui, "Root path", &mut draft.root);
-            ui.horizontal(|ui| {
-                let ready = !draft.name.trim().is_empty() && !draft.root.trim().is_empty();
-                if ui.add_enabled(ready, egui::Button::new("Add")).clicked() {
-                    cx.dispatch(AppAction::AddProject {
-                        name: draft.name.trim().to_string(),
-                        root: PathBuf::from(draft.root.trim()),
-                    });
-                    keep = false;
-                }
-                if ui.button("Cancel").clicked() {
-                    keep = false;
-                }
+    dialog(ctx, "Add a project", |ui| {
+        field(ui, "Name", &mut draft.name);
+        field(ui, "Root path", &mut draft.root);
+        let ready = !draft.name.trim().is_empty() && !draft.root.trim().is_empty();
+        let (add, cancel) = dialog_actions(ui, "Add", ready);
+        if add {
+            cx.dispatch(AppAction::AddProject {
+                name: draft.name.trim().to_string(),
+                root: PathBuf::from(draft.root.trim()),
             });
-        });
+            keep = false;
+        }
+        if cancel {
+            keep = false;
+        }
+    });
     if keep {
         cx.state.add_project = Some(draft);
     }
@@ -108,41 +151,40 @@ fn new_session(cx: &mut DrawCtx<'_>, ctx: &Context) {
         return;
     };
     let mut keep = true;
-    egui::Window::new("Create a session")
-        .collapsible(false)
-        .resizable(false)
-        .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
-        .show(ctx, |ui| {
-            ui.spacing_mut().item_spacing = egui::vec2(GAP, GAP);
-            field(ui, "Name", &mut draft.name);
-            kind_radios(ui, &mut draft.kind);
-            field(ui, "Directory", &mut draft.cwd);
-            let needs_command = matches!(draft.kind, SessionKind::Command | SessionKind::Service);
-            if needs_command {
-                field(ui, "Command line", &mut draft.command);
-            }
-            ui.horizontal(|ui| {
-                let ready = !draft.name.trim().is_empty()
-                    && !draft.cwd.trim().is_empty()
-                    && (!needs_command || !draft.command.trim().is_empty());
-                if ui.add_enabled(ready, egui::Button::new("Create")).clicked() {
-                    let action = draft.clone().into_action(super::session::login_shell());
-                    cx.dispatch(action);
-                    keep = false;
-                }
-                if ui.button("Cancel").clicked() {
-                    keep = false;
-                }
-            });
-        });
+    dialog(ctx, "Create a session", |ui| {
+        field(ui, "Name", &mut draft.name);
+        kind_radios(ui, &mut draft.kind);
+        field(ui, "Directory", &mut draft.cwd);
+        let needs_command = matches!(draft.kind, SessionKind::Command | SessionKind::Service);
+        if needs_command {
+            field(ui, "Command line", &mut draft.command);
+        }
+        let ready = !draft.name.trim().is_empty()
+            && !draft.cwd.trim().is_empty()
+            && (!needs_command || !draft.command.trim().is_empty());
+        let (create, cancel) = dialog_actions(ui, "Create", ready);
+        if create {
+            let action = draft.clone().into_action(super::session::login_shell());
+            cx.dispatch(action);
+            keep = false;
+        }
+        if cancel {
+            keep = false;
+        }
+    });
     if keep {
         cx.state.new_session = Some(draft);
     }
 }
 
 fn kind_radios(ui: &mut Ui, kind: &mut SessionKind) {
+    let p = theme::palette(ui);
+    ui.label(
+        RichText::new("Kind")
+            .text_style(theme::meta())
+            .color(p.n600),
+    );
     ui.horizontal(|ui| {
-        ui.label("Kind");
         ui.radio_value(kind, SessionKind::Shell, "Shell");
         ui.radio_value(
             kind,
@@ -153,4 +195,5 @@ fn kind_radios(ui: &mut Ui, kind: &mut SessionKind) {
         ui.radio_value(kind, SessionKind::Command, "Command");
         ui.radio_value(kind, SessionKind::Service, "Service");
     });
+    ui.add_space(6.0);
 }

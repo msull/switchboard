@@ -7,9 +7,9 @@ use std::time::{Duration, Instant};
 
 use egui::{RichText, Ui};
 
-use super::cards::{is_running, state_color};
+use super::cards::{is_running, kind_label};
 use super::session::code_block;
-use super::{DrawCtx, GAP};
+use super::{DrawCtx, theme};
 use crate::app::resolve_project_env;
 use crate::core::{AppAction, Approval, Launch, ProjectId, SessionKind, SessionRecord};
 
@@ -27,10 +27,9 @@ pub fn show(cx: &mut DrawCtx<'_>, ui: &mut Ui, pid: ProjectId) {
     status_lines(cx, ui, pid);
     let entries: Vec<&SessionRecord> = core.run_entries(pid);
     if entries.is_empty() {
-        ui.label(
-            RichText::new("No commands or services yet. Add one with New session, or let an agent write .switchboard/project.json.")
-                .weak(),
-        );
+        ui.label(theme::meta_text(ui,
+            "No commands or services yet. Add one with New session, or let an agent write .switchboard/project.json.",
+        ));
         return;
     }
     let defined = ensure_env(cx, pid);
@@ -38,11 +37,13 @@ pub fn show(cx: &mut DrawCtx<'_>, ui: &mut Ui, pid: ProjectId) {
         .id_salt(("run", pid))
         .auto_shrink([false, false])
         .show(ui, |ui| {
+            ui.spacing_mut().item_spacing.y = 10.0;
             for record in entries {
-                egui::Frame::group(ui.style())
-                    .inner_margin(GAP)
+                theme::surface(ui)
+                    .inner_margin(egui::Margin::symmetric(14, 12))
                     .show(ui, |ui| {
                         ui.set_width(ui.available_width());
+                        ui.spacing_mut().item_spacing.y = 4.0;
                         row(cx, ui, record);
                         definition(cx, ui, record, &defined);
                         output(cx, ui, record);
@@ -53,27 +54,33 @@ pub fn show(cx: &mut DrawCtx<'_>, ui: &mut Ui, pid: ProjectId) {
 
 /// What the definition file said, or that there is none.
 fn status_lines(cx: &mut DrawCtx<'_>, ui: &mut Ui, pid: ProjectId) {
+    let p = theme::palette(ui);
     match cx.core.config_status(pid) {
         Some(status) if status.present => {
-            ui.label(RichText::new(".switchboard/project.json").weak().small());
+            ui.label(theme::mono_text(ui, ".switchboard/project.json"));
             if let Some(e) = &status.error {
-                ui.label(RichText::new(e).color(ui.visuals().error_fg_color).small());
+                ui.label(
+                    RichText::new(e)
+                        .text_style(theme::meta())
+                        .color(p.accent_2_text),
+                );
             }
             for w in &status.warnings {
-                ui.label(RichText::new(w).color(ui.visuals().warn_fg_color).small());
+                ui.label(
+                    RichText::new(w)
+                        .text_style(theme::meta())
+                        .color(p.accent_2_text),
+                );
             }
         }
         _ => {
-            ui.label(
-                RichText::new(
-                    "No .switchboard/project.json. An agent can write one; the README has the format.",
-                )
-                .weak()
-                .small(),
-            );
+            ui.label(theme::meta_text(
+                ui,
+                "No .switchboard/project.json. An agent can write one; the README has the format.",
+            ));
         }
     }
-    ui.separator();
+    ui.add_space(4.0);
 }
 
 /// Names the project's environment defines right now, refreshed every
@@ -102,82 +109,101 @@ fn ensure_env(cx: &mut DrawCtx<'_>, pid: ProjectId) -> Vec<String> {
 /// One entry's line: kind glyph, name, state, and its buttons. Shared
 /// with the board, which lists commands and services the same way.
 pub fn row(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord) {
+    let p = theme::palette(ui);
     let state = cx.core.card_state(record.id);
     let running = is_running(cx.core, record.id);
     let runnable = record.runnable();
     ui.horizontal(|ui| {
-        let glyph = if record.kind == SessionKind::Service {
-            "•"
-        } else {
-            "▶"
-        };
-        ui.label(RichText::new(glyph).color(state_color(ui, &state)));
-        ui.strong(&record.name);
-        ui.label(RichText::new(cx.core.state_text(record.id)).color(state_color(ui, &state)));
+        theme::kicker(
+            ui,
+            &format!(
+                "{} · {}",
+                kind_label(record.kind),
+                cx.core.state_text(record.id)
+            ),
+            p.state_text(&state),
+        );
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if ui.small_button("Show").clicked() {
+            if record.kind == SessionKind::Service {
+                theme::status_dot(ui, &state, 8.0);
+            } else {
+                ui.label(RichText::new("▶").small().color(p.n600));
+            }
+        });
+    });
+    ui.label(RichText::new(&record.name).text_style(theme::card_title()));
+    if let Some(caption) = cx.state.captions.get(&record.id) {
+        ui.add(egui::Label::new(theme::mono_text(ui, caption).color(p.n800)).truncate());
+    }
+    ui.horizontal(|ui| {
+        // No side padding: the text sits flush with the title above, and a
+
+        // negative space would push the row's edge out and grow the panel.
+
+        ui.spacing_mut().item_spacing.x = 14.0;
+        ui.spacing_mut().button_padding = egui::vec2(0.0, 4.0);
+        if record.kind == SessionKind::Service {
+            if theme::ghost(ui, "Show").clicked() {
                 cx.dispatch(AppAction::ShowSession(record.id));
             }
-            if record.kind == SessionKind::Service {
-                if running {
-                    if ui.small_button("Stop").clicked() {
-                        cx.dispatch(AppAction::KillSession(record.id));
-                    }
-                } else if ui
-                    .add_enabled(runnable, egui::Button::new("Start").small())
-                    .clicked()
-                {
-                    cx.dispatch(AppAction::RestartSession(record.id));
+            if running {
+                if theme::ghost_muted(ui, "Stop").clicked() {
+                    cx.dispatch(AppAction::KillSession(record.id));
                 }
             } else if ui
-                .add_enabled(runnable && !running, egui::Button::new("Run now").small())
+                .add_enabled_ui(runnable, |ui| theme::ghost(ui, "Start"))
+                .inner
+                .clicked()
+            {
+                cx.dispatch(AppAction::RestartSession(record.id));
+            }
+        } else {
+            if ui
+                .add_enabled_ui(runnable && !running, |ui| theme::ghost(ui, "Run now"))
+                .inner
                 .on_hover_text("Run it again; the last output is kept until then")
                 .clicked()
             {
                 cx.dispatch(AppAction::RestartSession(record.id));
             }
-            // A live defined entry would come back on the next read, so
-            // Remove is for the user's own records and orphans only.
-            let removable = matches!(
-                record.approval(),
-                Approval::NotApplicable | Approval::Orphaned
-            );
-            if !running && removable && ui.small_button("Remove").clicked() {
-                cx.dispatch(AppAction::RemoveSession(record.id));
+            if theme::ghost(ui, "Show").clicked() {
+                cx.dispatch(AppAction::ShowSession(record.id));
             }
-        });
+        }
+        // A live defined entry would come back on the next read, so
+        // Remove is for the user's own records and orphans only.
+        let removable = matches!(
+            record.approval(),
+            Approval::NotApplicable | Approval::Orphaned
+        );
+        if !running && removable && theme::ghost_muted(ui, "Remove").clicked() {
+            cx.dispatch(AppAction::RemoveSession(record.id));
+        }
     });
-    if let Some(caption) = cx.state.captions.get(&record.id) {
-        ui.label(RichText::new(caption).weak().small());
-    }
 }
 
 /// The command line, directory, and variables, plus where the approval
 /// stands for a defined entry.
 fn definition(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord, defined: &[String]) {
+    let p = theme::palette(ui);
     if let Launch::Command { command, .. } = &record.launch {
-        ui.label(RichText::new(command).monospace());
+        ui.label(RichText::new(command).monospace().color(p.n800));
     }
-    ui.label(
-        RichText::new(record.cwd.display().to_string())
-            .weak()
-            .small(),
-    );
+    ui.label(theme::mono_text(ui, record.cwd.display().to_string()));
     let Some(source) = &record.source else {
         return;
     };
     if !source.env.is_empty() {
         ui.horizontal_wrapped(|ui| {
-            ui.label(RichText::new("env:").weak().small());
+            ui.label(theme::meta_text(ui, "env:"));
             for name in &source.env {
                 if defined.contains(name) {
-                    ui.label(RichText::new(name).monospace().small());
+                    ui.label(theme::mono_text(ui, name).color(p.n800));
                 } else {
                     ui.label(
                         RichText::new(format!("{name} (not defined)"))
                             .monospace()
-                            .small()
-                            .color(ui.visuals().warn_fg_color),
+                            .color(p.accent_2_text),
                     )
                     .on_hover_text("The definition asks for this variable, but the project's environment does not set it");
                 }
@@ -185,18 +211,17 @@ fn definition(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord, defined
         });
     }
     if source.autostart {
-        ui.label(
-            RichText::new("autostart requested by the file")
-                .weak()
-                .small(),
-        );
+        ui.label(theme::meta_text(ui, "autostart requested by the file"));
     }
     ui.horizontal(|ui| match record.approval() {
         Approval::NotApplicable => {}
         Approval::Pending => {
-            ui.label(RichText::new("needs approval").color(ui.visuals().warn_fg_color));
-            if ui
-                .button("Approve")
+            ui.label(
+                RichText::new("needs approval")
+                    .text_style(theme::meta())
+                    .color(p.accent_2_text),
+            );
+            if theme::ghost(ui, "Approve")
                 .on_hover_text("Allow exactly this command to run from this project")
                 .clicked()
             {
@@ -204,22 +229,23 @@ fn definition(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord, defined
             }
         }
         Approval::Approved => {
-            ui.label(RichText::new("approved").weak());
-            if ui.small_button("Revoke").clicked() {
+            ui.label(theme::meta_text(ui, "approved"));
+            if theme::ghost_muted(ui, "Revoke").clicked() {
                 cx.dispatch(AppAction::RevokeApproval(record.id));
             }
         }
         Approval::Changed => {
             ui.label(
                 RichText::new("definition changed since approval")
-                    .color(ui.visuals().warn_fg_color),
+                    .text_style(theme::meta())
+                    .color(p.accent_2_text),
             );
-            if ui.button("Approve").clicked() {
+            if theme::ghost(ui, "Approve").clicked() {
                 cx.dispatch(AppAction::ApproveDefinition(record.id));
             }
         }
         Approval::Orphaned => {
-            ui.label(RichText::new("no longer in project.json").weak());
+            ui.label(theme::meta_text(ui, "no longer in project.json"));
         }
     });
 }
@@ -230,7 +256,7 @@ fn output(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord) {
         return;
     };
     let row = ui.text_style_height(&egui::TextStyle::Monospace);
-    egui::CollapsingHeader::new("Output")
+    egui::CollapsingHeader::new(RichText::new("Output").text_style(theme::meta()))
         .id_salt(("run-output", record.id))
         .default_open(true)
         .show(ui, |ui| {

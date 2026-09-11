@@ -12,7 +12,8 @@
 //! `send <name> <text...>`, `interrupt <name>` (Escape to the pane),
 //! `return <name>`, `kill <name>`, `approve <name>`, `revoke <name>`
 //! (a defined command's approval), `side files|run` (the side panel's
-//! tab), `switchboard`, `sleep <secs>` (then polls).
+//! tab), `switchboard`, `theme light|dark|auto`, `sleep <secs>` (then
+//! polls).
 //! Blank lines and `#` comments are ignored; unknown lines are logged.
 
 use std::path::PathBuf;
@@ -157,6 +158,11 @@ fn step(app: &mut SwitchboardApp, w: &[&str]) -> Result<(), String> {
             app.dispatch(AppAction::KillSession(id));
         }
         ["switchboard"] => app.dispatch(AppAction::ShowSwitchboard),
+        ["theme", mode] => app.dispatch(AppAction::SetTheme(match *mode {
+            "dark" => crate::core::ThemeMode::Dark,
+            "light" => crate::core::ThemeMode::Light,
+            _ => crate::core::ThemeMode::Auto,
+        })),
         ["sleep", secs] => {
             let secs: u64 = secs.parse().map_err(|_| "bad sleep")?;
             std::thread::sleep(std::time::Duration::from_secs(secs));

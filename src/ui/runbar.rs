@@ -6,8 +6,8 @@
 
 use egui::{RichText, Ui};
 
-use super::cards::{is_running, state_color};
-use super::{DrawCtx, GAP};
+use super::cards::is_running;
+use super::{DrawCtx, theme};
 use crate::core::{AppAction, Launch, ProjectId, SessionKind, SideTab};
 
 /// `open_side` is set on a session view, where the side panel may be
@@ -18,14 +18,17 @@ pub fn show(cx: &mut DrawCtx<'_>, ui: &mut Ui, pid: ProjectId, open_side: bool) 
     if entries.is_empty() {
         return;
     }
+    let p = theme::palette(ui);
     ui.horizontal_wrapped(|ui| {
-        ui.spacing_mut().item_spacing.x = GAP;
+        ui.spacing_mut().item_spacing.x = 4.0;
+        ui.spacing_mut().button_padding = egui::vec2(8.0, 5.0);
         for record in entries {
             let state = core.card_state(record.id);
             let running = is_running(core, record.id);
             let service = record.kind == SessionKind::Service;
             let glyph = if service { "•" } else { "▶" };
-            let mut text = RichText::new(format!("{glyph} {}", record.name));
+            let mut text =
+                RichText::new(format!("{glyph} {}", record.name)).text_style(theme::meta());
             let command = match &record.launch {
                 Launch::Command { command, .. } => command.clone(),
                 Launch::Shell | Launch::Argv(_) => String::new(),
@@ -40,26 +43,26 @@ pub fn show(cx: &mut DrawCtx<'_>, ui: &mut Ui, pid: ProjectId, open_side: bool) 
                 .unwrap_or_default();
             let state_text = core.state_text(record.id);
             let (hover, action) = if !record.runnable() {
-                text = text.weak();
+                text = text.color(p.n500);
                 (
                     format!("{command}\nNot approved yet: opens the Run tab"),
                     None,
                 )
             } else if service && running {
-                text = text.color(state_color(ui, &state));
+                text = text.color(p.state_text(&state));
                 (
                     format!("{command}\nRunning: click to stop"),
                     Some(AppAction::KillSession(record.id)),
                 )
             } else if running {
-                text = text.color(state_color(ui, &state));
+                text = text.color(p.state_text(&state));
                 // A command ends on its own, so a running one gets a
                 // spinner and its latest line right here, where it can be
                 // watched without the Run tab; a service is just on.
                 if !service {
                     ui.add(egui::Spinner::new().size(ui.text_style_height(&egui::TextStyle::Body)));
                     if let Some(line) = cx.state.captions.get(&record.id) {
-                        ui.add(egui::Label::new(RichText::new(line).weak().small()).truncate());
+                        ui.add(egui::Label::new(theme::mono_text(ui, line)).truncate());
                     }
                 }
                 (
@@ -77,7 +80,11 @@ pub fn show(cx: &mut DrawCtx<'_>, ui: &mut Ui, pid: ProjectId, open_side: bool) 
                     Some(AppAction::RestartSession(record.id)),
                 )
             };
-            if ui.button(text).on_hover_text(hover).clicked() {
+            if ui
+                .add(egui::Button::new(text).frame_when_inactive(false))
+                .on_hover_text(hover)
+                .clicked()
+            {
                 if let Some(action) = action {
                     cx.dispatch(action);
                 } else {

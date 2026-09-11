@@ -16,16 +16,18 @@ pub mod document;
 pub mod env;
 pub mod files;
 pub mod palette;
+mod rail;
 mod run;
 mod runbar;
 mod session;
 mod switchboard;
 mod switcher;
+pub mod theme;
 
 use std::collections::HashMap;
 use std::time::SystemTime;
 
-use egui::{Key, Modifiers, Ui};
+use egui::{Key, Modifiers, RichText, Ui};
 
 use crate::app::{Services, SwitchboardApp};
 use crate::core::{AppAction, AppCore, ProjectId, RecordId, SideTab, ThemeMode, View};
@@ -174,12 +176,17 @@ fn draw_frame(cx: &mut DrawCtx<'_>, ui: &mut Ui) {
     };
     cx.state.terminals.retain(|id, _| Some(*id) == shown);
 
-    egui::Panel::top("top_bar")
-        .resizable(false)
-        .show(ui, |ui| switcher::top_bar(cx, ui, &view));
-    egui::Panel::bottom("bottom_bar")
-        .resizable(false)
-        .show(ui, |ui| switcher::bottom_bar(cx, ui));
+    // The rail's surface fill is the only edge between the columns.
+    let palette = theme::palette(ui);
+    let rail_fill = palette.surface;
+    let page_fill = palette.bg;
+    egui::Panel::left("rail")
+        .resizable(true)
+        .default_size(rail::DEFAULT_WIDTH)
+        .size_range(56.0..=360.0)
+        .show_separator_line(false)
+        .frame(egui::Frame::new().fill(rail_fill))
+        .show(ui, |ui| rail::show(cx, ui, &view));
     // The file side lives next to the board, next to the full preview it
     // opens, and, when toggled on, next to a session. The full preview
     // shows the selection itself; elsewhere the side previews inline.
@@ -196,33 +203,105 @@ fn draw_frame(cx: &mut DrawCtx<'_>, ui: &mut Ui) {
     if let Some((pid, inline, message)) = files_for {
         egui::Panel::right("files")
             .resizable(true)
-            .default_size(340.0)
+            .default_size(360.0)
+            .show_separator_line(false)
+            .frame(
+                egui::Frame::new()
+                    .fill(page_fill)
+                    .inner_margin(egui::Margin {
+                        left: 8,
+                        right: 20,
+                        top: 22,
+                        bottom: 0,
+                    }),
+            )
             .show(ui, |ui| {
-                let tab = cx.core.settings().side_tab;
-                ui.horizontal(|ui| {
-                    for t in [SideTab::Files, SideTab::Run] {
-                        if ui.selectable_label(tab == t, t.label()).clicked() && tab != t {
-                            cx.dispatch(AppAction::SetSideTab(t));
-                        }
-                    }
-                });
-                ui.separator();
+                let tab = side_tabs(cx, ui, pid, matches!(view, View::Session(_)));
                 match tab {
                     SideTab::Files => files::show(cx, ui, pid, inline, message),
                     SideTab::Run => run::show(cx, ui, pid),
                 }
             });
     }
-    egui::CentralPanel::default().show(ui, |ui| match view {
-        View::Switchboard => switchboard::show(cx, ui),
-        View::Board(pid) => board::show(cx, ui, pid),
-        View::Session(id) => session::show(cx, ui, id),
-        View::Document(pid, path) => document::show(cx, ui, pid, &path),
-    });
+    // Sessions and documents fill their area edge to edge (terminal,
+    // preview); the board and the switchboard get the page margin.
+    let margin = match &view {
+        View::Switchboard | View::Board(_) => egui::Margin {
+            left: 28,
+            right: 28,
+            top: 24,
+            bottom: 20,
+        },
+        View::Session(_) | View::Document(..) => egui::Margin {
+            left: 24,
+            right: 24,
+            top: 20,
+            bottom: 16,
+        },
+    };
+    egui::CentralPanel::default()
+        .frame(egui::Frame::new().fill(page_fill).inner_margin(margin))
+        .show(ui, |ui| match view {
+            View::Switchboard => switchboard::show(cx, ui),
+            View::Board(pid) => board::show(cx, ui, pid),
+            View::Session(id) => session::show(cx, ui, id),
+            View::Document(pid, path) => document::show(cx, ui, pid, &path),
+        });
 
+    switcher::toasts(cx, ui.ctx());
     dialogs::show(cx, ui.ctx());
     palette::show(cx, ui.ctx());
     env::show(cx, ui.ctx());
+}
+
+/// The side panel's tab row: Files and Run, the current one in cyan,
+/// with Refresh at the right of the Files tab. Beside a session a click
+/// on the tab already showing closes the side, as its shortcut does.
+/// Returns the current tab.
+fn side_tabs(cx: &mut DrawCtx<'_>, ui: &mut Ui, pid: ProjectId, closable: bool) -> SideTab {
+    let tab = cx.core.settings().side_tab;
+    let p = theme::palette(ui);
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 16.0;
+        for t in [SideTab::Files, SideTab::Run] {
+            let text = if tab == t {
+                RichText::new(t.label())
+                    .text_style(theme::strong())
+                    .color(p.accent_text)
+            } else {
+                RichText::new(t.label()).color(p.n600)
+            };
+            let hint = if tab == t && closable {
+                "Click again to close the side"
+            } else {
+                ""
+            };
+            if ui
+                .add(egui::Button::new(text).frame_when_inactive(false))
+                .on_hover_text(hint)
+                .clicked()
+            {
+                if tab != t {
+                    cx.dispatch(AppAction::SetSideTab(t));
+                } else if closable {
+                    cx.dispatch(AppAction::SetFilesOpen(false));
+                }
+            }
+        }
+        if tab == SideTab::Files {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let refresh = theme::ghost_muted(ui, "Refresh")
+                    .on_hover_text("Re-read the tree and the finder index");
+                if refresh.clicked()
+                    && let Some(f) = cx.state.files.get_mut(&pid)
+                {
+                    f.refresh();
+                }
+            });
+        }
+    });
+    ui.add_space(6.0);
+    tab
 }
 
 /// Esc goes back, Cmd+1..9 switch project, Cmd+0 shows the switchboard,
@@ -292,7 +371,7 @@ fn keyboard(cx: &mut DrawCtx<'_>, ui: &Ui, view: &View) {
     if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::Num0)) {
         cx.dispatch(AppAction::ShowSwitchboard);
     }
-    let projects: Vec<_> = switcher::projects_by_recency(cx.core)
+    let projects: Vec<_> = rail::projects_by_recency(cx.core)
         .into_iter()
         .map(|p| p.id)
         .collect();
@@ -312,8 +391,8 @@ fn keyboard(cx: &mut DrawCtx<'_>, ui: &Ui, view: &View) {
     }
 }
 
-/// Consistent spacing everywhere: the 8 px grid from the design.
+/// The gap between neighbouring items.
 pub const GAP: f32 = 8.0;
-/// Inner padding of every framed region (header strip, turn blocks,
+/// Inner padding of every filled block (turn blocks, preview pane,
 /// docked message panel), so boundaries line up across views.
-pub const PAD: f32 = 12.0;
+pub const PAD: f32 = 14.0;

@@ -720,6 +720,56 @@ Items are the ids in `docs/feedback-2026-09.md`.
   output history; the switchboard view still shows commands and
   services as cards; the context figure on cards.
 
+## Restyle status (2026-09-11)
+
+The app draws with the "Broadsheet" system from the design hand-off
+(`App styling help.zip`, screens 1b, 1d, 1e, 1f, and 1a's file panel):
+one serif (Source Serif 4, embedded) at a real type scale, a paper
+ground with cyan for interaction and magenta for *waiting on you*,
+hierarchy from size and whitespace rather than frames. Everything lives
+in `src/ui/theme.rs` (tokens for both themes, fonts, text styles, the
+status dot, kicker, and button helpers) and the views draw only through
+it.
+
+Built:
+
+- Left project rail replaces the top bar: brand, *All sessions* with the
+  waiting count, project rows with the project's most urgent state as a
+  dot, *+ Add project*, and *Go to* / *Settings* pinned at the bottom.
+  Beside a session the rail lists that project's entries with *← Board*
+  and *Files ⌘B* / *Terminal ⌘T*. It is resizable and draws dots and
+  initials below about 120 px.
+- One card widget for every entry kind, laid out in a grid that adds
+  columns as the width allows; the agents grid ends in a dashed *+ New
+  session* cell, commands and services have their own grid below.
+  Not-running cards are outlined instead of filled. The title is the
+  click target that opens the session.
+- Board header (title, primary *New session*, secondary *Environment*,
+  mono root path with the branch), run bar as ghost buttons with the
+  service's status dot, all-sessions view with a summary line and
+  *Open board →* per project (sessions only; entries stay on the board).
+- Session header without a frame (title, dot and state, actions; kind,
+  directory, resume handle; run bar), user turns on a cyan tint with a
+  *YOU · time* kicker, activity rows unframed, answers on a surface block,
+  reading width capped at 860 px, composer with a primary *Send*.
+- Files panel: tab row, *Find a path…* input, tree at 13 px, preview as a
+  surface block with the actions under the name. Markdown gets cyan
+  links and a dark code block on both themes.
+- Dialogs, the Go-to palette, the Environment dialog, and the Run tab
+  restyled with the same helpers; notices and the host error are toasts
+  at the top centre. Dark theme is the token inversion from the hand-off.
+
+Known gaps:
+
+- The rail width is not persisted across launches (egui keeps it for the
+  process); persisting it needs a settings field and a schema bump.
+- The rail does not snap to the 56 px dot rail; it draws compact when
+  dragged below 120 px.
+- Card kickers show the state and age; the model line on agent cards
+  only appears once the transcript has been read.
+- egui has no letter-spacing per style, so kickers set it at the call
+  site (`theme::kicker`); there is no keyboard-focus ring beyond egui's.
+
 ## Open questions
 
 - Shared project config runs with a hash-and-approve flow and no
