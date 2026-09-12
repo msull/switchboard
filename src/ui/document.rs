@@ -7,7 +7,6 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
 use egui::{Frame, RichText, Ui};
-use egui_commonmark::CommonMarkViewer;
 
 use super::{DrawCtx, GAP, UiState, theme};
 use crate::core::{AppAction, ProjectId};
@@ -183,7 +182,7 @@ pub fn body(state: &mut UiState, ui: &mut Ui) {
     match &preview.body {
         Body::Markdown(text) => {
             markdown_style(ui);
-            CommonMarkViewer::new().show(ui, markdown, text);
+            super::markdown::show(ui, markdown, text);
         }
         Body::Text(text) => {
             // egui's built-in highlighter knows Rust, C-likes, Python,

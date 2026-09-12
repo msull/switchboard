@@ -11,7 +11,7 @@ use std::sync::mpsc::{Receiver, channel};
 use std::time::SystemTime;
 
 use egui::{CornerRadius, Frame, Margin, RichText, Stroke, Ui};
-use egui_commonmark::{CommonMarkCache, CommonMarkViewer};
+use egui_commonmark::CommonMarkCache;
 use egui_term::{BackendSettings, PtyEvent, TerminalBackend, TerminalView};
 
 use super::cards::{is_running, kind_label};
@@ -796,7 +796,7 @@ fn turn_block(
             } else {
                 scrolls_sideways(ui, ("final", turn.n), |ui| {
                     super::document::markdown_style(ui);
-                    CommonMarkViewer::new().show(ui, markdown, &turn.final_text);
+                    super::markdown::show(ui, markdown, &turn.final_text);
                 });
             }
         })

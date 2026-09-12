@@ -15,6 +15,7 @@ mod dialogs;
 pub mod document;
 pub mod env;
 pub mod files;
+pub mod markdown;
 pub mod palette;
 mod rail;
 mod run;

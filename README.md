@@ -143,6 +143,7 @@ src/ui/
   run.rs                 Run tab of the side panel: commands and services, definitions, approval, last output
   runbar.rs              one button per command and service, under the board strip and the session header
   document.rs            read-only preview: Markdown, text, images; full view and the side pane's body
+  markdown.rs            Markdown: prose through egui_commonmark, tables laid out here with content-sized columns
   palette.rs             quick-switcher (Cmd+K) over projects and sessions
   env.rs                 Environment dialog: variables, secrets, .env opt-in, masked preview
   cards.rs               the one card for every entry kind, the card grid, pinned document cards

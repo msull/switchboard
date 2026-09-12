@@ -538,9 +538,13 @@ fn a_wide_table_in_a_document_scrolls_sideways_while_prose_wraps() {
     let (dir, pid, _) = file_project(&mut harness);
     let prose = "words that wrap ".repeat(60);
     let cell = "cell text ".repeat(40);
+    let unbreakable = "x".repeat(400);
     std::fs::write(
         dir.path().join("README.md"),
-        format!("# T\n\n{prose}\n\n| a | b |\n|---|---|\n| {cell} | last |\n"),
+        format!(
+            "# T\n\n{prose}\n\n| a | b |\n|---|---|\n| {cell} | last |\n\n\
+             | c | d |\n|---|---|\n| {unbreakable} | far |\n"
+        ),
     )
     .unwrap();
     showing(
@@ -555,9 +559,16 @@ fn a_wide_table_in_a_document_scrolls_sideways_while_prose_wraps() {
         "prose wraps at the view: {prose_rect:?} vs {viewport}"
     );
     assert!(prose_rect.height() > 40.0, "prose takes several lines");
-    let before = harness.get_by_label("last").rect().left();
+    // A cell of words wraps inside its column, so the table fits.
+    let cell_rect = harness.get_by_label_contains("cell text").rect();
+    assert!(cell_rect.height() > 40.0, "the cell wraps: {cell_rect:?}");
+    let last = harness.get_by_label("last").rect();
+    assert!(last.right() <= viewport, "the table fits: {last:?}");
+    assert!(last.left() >= cell_rect.right(), "columns apart");
+    // A word that cannot break makes its table wider than the view;
+    // the document scrolls sideways to reach the far cell.
+    let before = harness.get_by_label("far").rect().left();
     assert!(before > viewport, "the far cell starts off screen");
-    // Scroll sideways over the document: the far cell comes closer.
     harness.event(egui::Event::PointerMoved(prose_rect.center()));
     harness.event(egui::Event::MouseWheel {
         unit: egui::MouseWheelUnit::Point,
@@ -566,7 +577,7 @@ fn a_wide_table_in_a_document_scrolls_sideways_while_prose_wraps() {
         modifiers: egui::Modifiers::NONE,
     });
     harness.run_steps(3);
-    let after = harness.get_by_label("last").rect().left();
+    let after = harness.get_by_label("far").rect().left();
     assert!(after < before - 100.0, "{before} -> {after}");
 }
 
@@ -1733,5 +1744,75 @@ fn a_long_file_name_is_cut_before_the_document_buttons() {
     assert!(
         open.top() < back.top() || open.left() < back.left(),
         "Open before Back"
+    );
+}
+
+#[test]
+fn a_markdown_table_keeps_its_columns_apart_and_inside_the_answer() {
+    let (mut harness, ids) = harness();
+    let id = seed_claude(&mut harness, &ids);
+    let mut conversation = two_turns();
+    conversation.turns[0].final_text = "Here is a table:\n\n\
+| Key | Description | N |\n\
+|---|---|---|\n\
+| `alpha` | A description that is long enough to need wrapping when the column is squeezed by its neighbours in the row | 1 |\n\
+| beta | Short | 22 |\n\
+\nAnd a line after it."
+        .to_owned();
+    harness
+        .state_mut()
+        .ui_state
+        .conversations
+        .insert(id, (None, conversation));
+    showing(&mut harness, View::Session(id));
+    click(&mut harness, "Expand activity");
+    harness.set_size(egui::vec2(900.0, 700.0));
+    harness.run_steps(4);
+    let rect = |h: &Harness<'static, SwitchboardApp>, text: &str| {
+        h.query_all_by_label_contains(text)
+            .map(|n| n.rect())
+            .reduce(egui::Rect::union)
+            .unwrap_or_else(|| panic!("{text} is not on screen"))
+    };
+    let answer_left = rect(&harness, "Here is a table").left();
+    let limit = (answer_left + 860.0).min(900.0 - 16.0);
+    for text in [
+        "Key",
+        "Description",
+        "alpha",
+        "wrapping when",
+        "beta",
+        "Short",
+        "22",
+    ] {
+        let r = rect(&harness, text);
+        assert!(r.right() <= limit, "{text} at {r:?} is past {limit}");
+    }
+    // Columns do not overlap: each cell starts after the one before it.
+    let alpha = rect(&harness, "alpha");
+    let desc = rect(&harness, "A description");
+    let one = rect(&harness, "wrapping when");
+    let n = harness
+        .query_all_by_label_contains("22")
+        .map(|n| n.rect())
+        .find(|r| r.top() > alpha.top())
+        .unwrap();
+    assert!(
+        desc.left() >= alpha.right(),
+        "description {desc:?} over key {alpha:?}"
+    );
+    assert!(
+        n.left() >= one.right(),
+        "number {n:?} over description {one:?}"
+    );
+    // The long cell wrapped instead of taking the row; the short
+    // columns stayed narrow.
+    assert!(
+        desc.height() > 30.0,
+        "the description did not wrap: {desc:?}"
+    );
+    assert!(
+        alpha.width() < 120.0,
+        "the key column is too wide: {alpha:?}"
     );
 }
