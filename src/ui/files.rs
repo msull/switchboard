@@ -140,25 +140,13 @@ pub fn show(
     let git = state.git.clone();
     let mut actions = Vec::new();
     let mut to_message = Vec::new();
-    let on_set: Vec<PathBuf> = cx
-        .core
-        .working_set()
-        .map(|s| {
-            s.items
-                .iter()
-                .filter_map(|i| match &i.target {
-                    PinTarget::File(p, rel) if *p == pid => Some(rel.clone()),
-                    _ => None,
-                })
-                .collect()
-        })
-        .unwrap_or_default();
     let columns = cx.state.working_set_columns;
+    let core = cx.core;
     let mut side = Side {
         pid,
         root: &root,
         pinned: &pinned,
-        on_set: &on_set,
+        core,
         columns,
         git: git.as_deref(),
         inline,
@@ -351,8 +339,8 @@ struct Side<'a> {
     pid: ProjectId,
     root: &'a Path,
     pinned: &'a [PathBuf],
-    /// Files of this project on the working set, relative to the root.
-    on_set: &'a [PathBuf],
+    /// For the working-set menu: which sets exist and hold a file.
+    core: &'a crate::core::AppCore,
     /// Grid columns the working set fits, for a new card's place.
     columns: u32,
     git: Option<&'a GitState>,
@@ -466,24 +454,15 @@ impl Side<'_> {
                     });
                     ui.close();
                 }
-                let on_set = self.on_set.contains(rel);
-                let label = if on_set {
-                    "Remove from working set"
-                } else {
-                    "Add to working set"
-                };
-                if ui.button(label).clicked() {
-                    let target = PinTarget::File(self.pid, rel.clone());
-                    self.actions.push(if on_set {
-                        AppAction::RemoveFromWorkingSet(target)
-                    } else {
-                        AppAction::AddToWorkingSet {
-                            target,
-                            columns: self.columns,
-                        }
-                    });
-                    ui.close();
-                }
+                let target = PinTarget::File(self.pid, rel.clone());
+                ui.menu_button("Working sets", |ui| {
+                    let (actions, chosen) =
+                        super::working_set::set_menu_actions(self.core, ui, &target, self.columns);
+                    self.actions.extend(actions);
+                    if chosen {
+                        ui.close();
+                    }
+                });
             }
         }
         if ui.button("Reveal in Finder").clicked() {

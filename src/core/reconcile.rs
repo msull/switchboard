@@ -55,7 +55,11 @@ impl AppCore {
         let view = match self.settings.last_view {
             SavedView::Board(id) if self.workspace(id).is_some() => View::Board(id),
             SavedView::Session(id) if self.session(id).is_some() => View::Session(id),
-            SavedView::WorkingSet => View::WorkingSet,
+            SavedView::WorkingSet => match self.views.sets.first() {
+                Some(set) => View::WorkingSet(set.id),
+                None => return,
+            },
+            SavedView::Set(id) if self.working_set(id).is_some() => View::WorkingSet(id),
             _ => return,
         };
         self.view_stack.push(view);

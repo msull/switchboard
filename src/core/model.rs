@@ -100,15 +100,36 @@ pub enum SavedView {
     Switchboard,
     Board(ProjectId),
     Session(RecordId),
+    /// The first working set, from before sets had ids; kept so an
+    /// older `settings.json` still reads.
     WorkingSet,
+    Set(SetId),
 }
 
 /// Schema of `views.json`, bumped like [`SCHEMA_VERSION`] when a type
-/// below changes shape.
-pub const VIEWS_SCHEMA_VERSION: u32 = 1;
+/// below changes shape. v2 gave every set an id; a v1 file reads with
+/// fresh ids.
+pub const VIEWS_SCHEMA_VERSION: u32 = 2;
+
+/// Switchboard's own id for a working set. Never reused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct SetId(pub Uuid);
+
+impl SetId {
+    #[must_use]
+    pub fn new() -> Self {
+        Self(Uuid::new_v4())
+    }
+}
+
+impl Default for SetId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 /// The user-arranged views, one file for all of them: `views.json` in
-/// the data directory. Only the first working set is shown for now.
+/// the data directory.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Views {
     pub schema_version: u32,
@@ -129,6 +150,8 @@ impl Default for Views {
 /// projects. Items refer to records and files; the set owns nothing.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkingSet {
+    #[serde(default)]
+    pub id: SetId,
     pub name: String,
     #[serde(default)]
     pub items: Vec<PinnedItem>,
@@ -137,7 +160,20 @@ pub struct WorkingSet {
 impl Default for WorkingSet {
     fn default() -> Self {
         Self {
+            id: SetId::new(),
             name: "Working Set".into(),
+            items: Vec::new(),
+        }
+    }
+}
+
+impl WorkingSet {
+    /// An empty set called `name`.
+    #[must_use]
+    pub fn named(name: impl Into<String>) -> Self {
+        Self {
+            id: SetId::new(),
+            name: name.into(),
             items: Vec::new(),
         }
     }

@@ -99,14 +99,14 @@ fn top(cx: &mut DrawCtx<'_>, ui: &mut Ui, view: &View, compact: bool) {
     if all.clicked() {
         cx.dispatch(AppAction::ShowSwitchboard);
     }
-    working_set_row(cx, ui, view, compact);
+    working_set_rows(cx, ui, view, compact);
 
     match view {
         View::Session(id) => session_neighbours(cx, ui, *id, compact),
-        View::Switchboard | View::Board(_) | View::Document(..) | View::WorkingSet => {
+        View::Switchboard | View::Board(_) | View::Document(..) | View::WorkingSet(_) => {
             let active = match view {
                 View::Board(pid) | View::Document(pid, _) => Some(*pid),
-                View::Switchboard | View::Session(_) | View::WorkingSet => None,
+                View::Switchboard | View::Session(_) | View::WorkingSet(_) => None,
             };
             ui.add_space(12.0);
             if !compact {
@@ -165,26 +165,57 @@ fn top(cx: &mut DrawCtx<'_>, ui: &mut Ui, view: &View, compact: bool) {
     }
 }
 
-/// The row for the user's own grid, greyed while it is empty.
-fn working_set_row(cx: &mut DrawCtx<'_>, ui: &mut Ui, view: &View, compact: bool) {
-    let pinned = cx.core.working_set().map_or(0, |s| s.items.len());
-    let set = row(
-        ui,
-        &RowSpec {
-            text: "Working Set",
-            dot: None,
-            selected: *view == View::WorkingSet,
-            muted: pinned == 0,
-            count: 0,
-            compact,
-            initial: "W",
-        },
-    );
-    if set
-        .on_hover_text("Your own grid of sessions and files from any project")
+/// The "Working sets" section: one row per set, the empty ones greyed,
+/// and a way to make another.
+fn working_set_rows(cx: &mut DrawCtx<'_>, ui: &mut Ui, view: &View, compact: bool) {
+    let p = theme::palette(ui);
+    ui.add_space(12.0);
+    if !compact {
+        theme::kicker(ui, "Working sets", p.n600);
+        ui.add_space(4.0);
+    }
+    let sets: Vec<(crate::core::SetId, String, usize)> = cx
+        .core
+        .working_sets()
+        .iter()
+        .map(|s| (s.id, s.name.clone(), s.items.len()))
+        .collect();
+    for (id, name, count) in &sets {
+        let response = row(
+            ui,
+            &RowSpec {
+                text: name,
+                dot: None,
+                selected: *view == View::WorkingSet(*id),
+                muted: *count == 0,
+                count: 0,
+                compact,
+                initial: &initial(name),
+            },
+        );
+        if response.on_hover_text(name).clicked() {
+            cx.dispatch(AppAction::ShowWorkingSet(*id));
+        }
+    }
+    let add = if compact { "+" } else { "+ New working set" };
+    if ui
+        .add(
+            egui::Button::new(
+                RichText::new(add)
+                    .text_style(theme::meta())
+                    .color(p.accent_text),
+            )
+            .frame_when_inactive(false),
+        )
+        .on_hover_text("A new, empty working set")
         .clicked()
     {
-        cx.dispatch(AppAction::ShowWorkingSet);
+        cx.dispatch(AppAction::NewWorkingSet {
+            name: None,
+            clone_of: None,
+            with: None,
+            columns: cx.state.working_set_columns,
+        });
     }
 }
 

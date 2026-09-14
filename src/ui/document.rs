@@ -305,22 +305,13 @@ fn header_actions(
             Item::WorkingSet => {
                 let Some(rel) = rel else { continue };
                 let target = PinTarget::File(pid, rel.to_path_buf());
-                let on = cx.core.in_working_set(&target);
-                let label = if on {
-                    "Remove from working set"
-                } else {
-                    "Add to working set"
-                };
-                if theme::ghost_muted(ui, label).clicked() {
-                    cx.dispatch(if on {
-                        AppAction::RemoveFromWorkingSet(target)
-                    } else {
-                        AppAction::AddToWorkingSet {
-                            target,
-                            columns: cx.state.working_set_columns,
-                        }
-                    });
-                }
+                let response = theme::ghost_muted(ui, "Working sets")
+                    .on_hover_text("Which working sets show this file");
+                egui::Popup::menu(&response).show(|ui| {
+                    if super::working_set::set_menu(cx, ui, &target) {
+                        ui.close();
+                    }
+                });
             }
             Item::Pin => {
                 let Some(rel) = rel else { continue };

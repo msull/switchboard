@@ -33,7 +33,7 @@ use std::time::SystemTime;
 use egui::{Key, Modifiers, RichText, Ui};
 
 use crate::app::{Services, SwitchboardApp};
-use crate::core::{AppAction, AppCore, ProjectId, RecordId, SideTab, ThemeMode, View};
+use crate::core::{AppAction, AppCore, ProjectId, RecordId, SetId, SideTab, ThemeMode, View};
 use crate::ports::transcript::Conversation;
 
 pub use dialogs::{AddProjectDraft, NewSessionDraft};
@@ -99,6 +99,10 @@ pub struct UiState {
     /// How each file card shows its file: rendered or raw, wrapped or
     /// scrolling sideways.
     pub file_modes: HashMap<PathBuf, working_set::FileMode>,
+    /// A working set's name being edited in its header.
+    pub set_rename: Option<(SetId, String)>,
+    /// The working set whose deletion is being confirmed.
+    pub delete_set: Option<SetId>,
     /// Messages being composed, one per session, so switching away and
     /// back does not lose a half-written prompt.
     pub input_drafts: HashMap<RecordId, String>,
@@ -137,6 +141,8 @@ impl Default for UiState {
             arrange: working_set::Arrange::default(),
             previews: HashMap::new(),
             file_modes: HashMap::new(),
+            set_rename: None,
+            delete_set: None,
             input_drafts: HashMap::new(),
             terminals: HashMap::new(),
             applied_theme: None,
@@ -196,7 +202,7 @@ fn draw_frame(cx: &mut DrawCtx<'_>, ui: &mut Ui) {
     // and leaves the session running.
     let shown = match &view {
         View::Session(id) => Some(*id),
-        View::Switchboard | View::Board(_) | View::Document(..) | View::WorkingSet => None,
+        View::Switchboard | View::Board(_) | View::Document(..) | View::WorkingSet(_) => None,
     };
     cx.state.terminals.retain(|id, _| Some(*id) == shown);
 
@@ -222,7 +228,7 @@ fn draw_frame(cx: &mut DrawCtx<'_>, ui: &mut Ui) {
             let message = matches!(s.kind, crate::core::SessionKind::Agent(_)).then_some(*id);
             (s.project, true, message)
         }),
-        View::Session(_) | View::Switchboard | View::WorkingSet => None,
+        View::Session(_) | View::Switchboard | View::WorkingSet(_) => None,
     };
     if let Some((pid, inline, message)) = files_for {
         egui::Panel::right("files")
@@ -250,7 +256,7 @@ fn draw_frame(cx: &mut DrawCtx<'_>, ui: &mut Ui) {
     // Sessions and documents fill their area edge to edge (terminal,
     // preview); the board and the switchboard get the page margin.
     let margin = match &view {
-        View::Switchboard | View::Board(_) | View::WorkingSet => egui::Margin {
+        View::Switchboard | View::Board(_) | View::WorkingSet(_) => egui::Margin {
             left: 28,
             right: 28,
             top: 24,
@@ -269,7 +275,7 @@ fn draw_frame(cx: &mut DrawCtx<'_>, ui: &mut Ui) {
             cx.state.working_set_columns = working_set::columns(ui.available_width());
             match view {
                 View::Switchboard => switchboard::show(cx, ui),
-                View::WorkingSet => working_set::show(cx, ui),
+                View::WorkingSet(set) => working_set::show(cx, ui, set),
                 View::Board(pid) => board::show(cx, ui, pid),
                 View::Session(id) => session::show(cx, ui, id),
                 View::Document(pid, path) => document::show(cx, ui, pid, &path),
@@ -357,7 +363,8 @@ fn keyboard(cx: &mut DrawCtx<'_>, ui: &Ui, view: &View) {
         || cx.state.new_session.is_some()
         || cx.state.palette.is_some()
         || cx.state.env_dialog.is_some()
-        || cx.state.raw_message.is_some();
+        || cx.state.raw_message.is_some()
+        || cx.state.delete_set.is_some();
 
     if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::K)) {
         cx.state.palette = Some(palette::PaletteDraft::default());

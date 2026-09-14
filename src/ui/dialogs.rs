@@ -60,6 +60,36 @@ pub fn show(cx: &mut DrawCtx<'_>, ctx: &Context) {
     add_project(cx, ctx);
     new_session(cx, ctx);
     raw_message(cx, ctx);
+    delete_set(cx, ctx);
+}
+
+/// Confirm dropping a working set. Its cards are only references, so
+/// nothing else is lost.
+fn delete_set(cx: &mut DrawCtx<'_>, ctx: &Context) {
+    let Some(id) = cx.state.delete_set else {
+        return;
+    };
+    let Some(name) = cx.core.working_set(id).map(|s| s.name.clone()) else {
+        cx.state.delete_set = None;
+        return;
+    };
+    let mut done = false;
+    dialog(ctx, "Delete working set", |ui| {
+        ui.label(format!(
+            "Delete \"{name}\"? Its sessions and files stay where they are."
+        ));
+        let (confirmed, cancelled) = dialog_actions(ui, "Delete set", true);
+        if confirmed {
+            cx.dispatch(AppAction::DeleteWorkingSet(id));
+            done = true;
+        }
+        if cancelled {
+            done = true;
+        }
+    });
+    if done || ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
+        cx.state.delete_set = None;
+    }
 }
 
 /// One message as the transcript holds it, in a monospace box that

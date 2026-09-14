@@ -247,13 +247,7 @@ fn header_actions(
     } else {
         "Return"
     };
-    let on_set = cx.core.in_working_set(&PinTarget::Session(record.id));
-    let set = if on_set {
-        "Remove from working set"
-    } else {
-        "Add to working set"
-    };
-    let mut order = vec![open, "Restart", "Kill", set, "Back"];
+    let mut order = vec![open, "Restart", "Kill", "Working sets", "Back"];
     if agent {
         order.retain(|b| *b != "Restart");
     }
@@ -265,9 +259,17 @@ fn header_actions(
             "Restart" => {
                 theme::ghost(ui, button).on_hover_text("Stop it if it runs, then start it again")
             }
-            "Kill" | "Back" | "Add to working set" | "Remove from working set" => {
-                theme::ghost_muted(ui, button)
+            "Working sets" => {
+                let response = theme::ghost_muted(ui, button)
+                    .on_hover_text("Which working sets show this session");
+                egui::Popup::menu(&response).show(|ui| {
+                    if super::working_set::set_menu(cx, ui, &PinTarget::Session(record.id)) {
+                        ui.close();
+                    }
+                });
+                continue;
             }
+            "Kill" | "Back" => theme::ghost_muted(ui, button),
             _ => theme::secondary(ui, button),
         };
         if !response.clicked() {
@@ -277,15 +279,6 @@ fn header_actions(
             "Restart" => cx.dispatch(AppAction::RestartSession(record.id)),
             "Kill" => cx.dispatch(AppAction::KillSession(record.id)),
             "Back" => cx.dispatch(AppAction::Back),
-            "Add to working set" => cx.dispatch(AppAction::AddToWorkingSet {
-                target: PinTarget::Session(record.id),
-                columns: cx.state.working_set_columns,
-            }),
-            "Remove from working set" => {
-                cx.dispatch(AppAction::RemoveFromWorkingSet(PinTarget::Session(
-                    record.id,
-                )));
-            }
             _ => cx.dispatch(AppAction::ReturnToSession(record.id)),
         }
     }

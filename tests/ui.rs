@@ -1835,30 +1835,35 @@ fn a_markdown_table_keeps_its_columns_apart_and_inside_the_answer() {
     );
 }
 
+/// The first working set's id.
+fn first_set(h: &Harness<'static, SwitchboardApp>) -> switchboard::core::SetId {
+    h.state().core().working_sets()[0].id
+}
+
 #[test]
 fn the_working_set_takes_a_session_from_its_header_and_a_file_from_the_tree() {
     let (mut harness, ids) = harness();
     let id = seed_claude(&mut harness, &ids);
     harness.set_size(egui::vec2(1200.0, 800.0));
     harness.run_steps(2);
-    // Empty at first, reachable from the rail.
-    click(&mut harness, "Working Set");
+    // None at first; the rail makes one and shows it, empty.
+    harness.get_by_label("WORKING SETS");
+    click(&mut harness, "+ New working set");
     harness.run_steps(2);
-    assert_eq!(harness.state().core().view(), View::WorkingSet);
+    let set = first_set(&harness);
+    assert_eq!(harness.state().core().view(), View::WorkingSet(set));
     harness.get_by_label("Nothing here yet.");
-    // The session header adds the session; the card appears at the
-    // working set's size, wider than a board card.
+    // The session header's menu lists the set; choosing it adds the
+    // session, and the card appears at the working set's size.
     showing(&mut harness, View::Session(id));
-    click(&mut harness, "Add to working set");
+    click(&mut harness, "Working sets");
+    click(&mut harness, "   Working Set");
     harness.run_steps(2);
-    assert!(
-        harness
-            .state()
-            .core()
-            .in_working_set(&PinTarget::Session(id))
+    assert_eq!(
+        harness.state().core().sets_holding(&PinTarget::Session(id)),
+        vec![set]
     );
-    harness.get_by_label("Remove from working set");
-    showing(&mut harness, View::WorkingSet);
+    showing(&mut harness, View::WorkingSet(set));
     harness.get_by_label("1 card");
     let card = harness.get_by_label("claude-agent").rect();
     let open = harness.get_by_label("Open").rect();
@@ -1866,29 +1871,91 @@ fn the_working_set_takes_a_session_from_its_header_and_a_file_from_the_tree() {
         open.top() > card.bottom() + 150.0,
         "the card is tall: {card:?} {open:?}"
     );
-    // The board's card menu takes it off again.
+    // The card's menu shows the set checked; choosing it takes the
+    // session off again.
     harness.get_by_label("claude-agent").click_secondary();
     harness.run_steps(2);
-    click(&mut harness, "Remove from working set");
+    click(&mut harness, "✓ Working Set");
     harness.run_steps(2);
     harness.get_by_label("Nothing here yet.");
-    // A file joins from the tree's menu and shows as a file card.
+    // A file joins from the tree's submenu and shows as a file card.
     let (_dir, pid, _) = file_project(&mut harness);
     harness.get_by_label("  README.md").click_secondary();
     harness.run_steps(2);
-    click(&mut harness, "Add to working set");
+    // The tree's menu holds the sets as a submenu.
+    harness.get_by_label("Working sets ⏵").hover();
     harness.run_steps(2);
-    assert!(
+    click(&mut harness, "   Working Set");
+    harness.run_steps(2);
+    assert_eq!(
         harness
             .state()
             .core()
-            .in_working_set(&PinTarget::File(pid, "README.md".into()))
+            .sets_holding(&PinTarget::File(pid, "README.md".into())),
+        vec![set]
     );
-    showing(&mut harness, View::WorkingSet);
+    showing(&mut harness, View::WorkingSet(set));
     harness.get_by_label("README.md");
     click(&mut harness, "Take off");
     harness.run_steps(2);
     harness.get_by_label("Nothing here yet.");
+}
+
+#[test]
+fn working_sets_are_renamed_cloned_and_deleted_from_the_header() {
+    let (mut harness, ids) = harness();
+    let (id, _) = working_set_of_two(&mut harness, &ids);
+    let set = first_set(&harness);
+    // "New working set with this" from a card menu makes a second set.
+    harness.get_by_label("claude-agent").click_secondary();
+    harness.run_steps(2);
+    click(&mut harness, "New working set with this");
+    harness.run_steps(2);
+    let sets = harness.state().core().working_sets().to_vec();
+    assert_eq!(sets.len(), 2);
+    assert_eq!(sets[1].name, "Working Set 2");
+    assert_eq!(harness.state().core().view(), View::WorkingSet(sets[1].id));
+    assert_eq!(
+        harness.state().core().sets_holding(&PinTarget::Session(id)),
+        vec![set, sets[1].id]
+    );
+    // Rename in the header: Enter commits.
+    click(&mut harness, "Rename");
+    harness.run_steps(2);
+    let field = harness.get_by_label("Working set name");
+    field.focus();
+    harness.run_steps(1);
+    harness
+        .get_by_label("Working set name")
+        .type_text(" (hotfix)");
+    harness.step();
+    harness.key_press(egui::Key::Enter);
+    harness.run_steps(2);
+    assert_eq!(
+        harness.state().core().working_sets()[1].name,
+        "Working Set 2 (hotfix)"
+    );
+    assert!(harness.query_all_by_label("Working Set 2 (hotfix)").count() >= 1);
+    // Clone copies the cards and shows the copy.
+    click(&mut harness, "Clone");
+    harness.run_steps(2);
+    let sets = harness.state().core().working_sets().to_vec();
+    assert_eq!(sets.len(), 3);
+    assert_eq!(sets[2].name, "Working Set 2 (hotfix) copy");
+    assert_eq!(sets[2].items.len(), 1);
+    assert_eq!(harness.state().core().view(), View::WorkingSet(sets[2].id));
+    // Delete asks first; Cancel keeps it, Delete drops it and goes back.
+    click(&mut harness, "Delete");
+    harness.run_steps(2);
+    harness.get_by_label("Delete working set");
+    click(&mut harness, "Cancel");
+    harness.run_steps(2);
+    assert_eq!(harness.state().core().working_sets().len(), 3);
+    click(&mut harness, "Delete");
+    harness.run_steps(2);
+    click(&mut harness, "Delete set");
+    assert_eq!(harness.state().core().working_sets().len(), 2);
+    assert_eq!(harness.state().core().view(), View::WorkingSet(sets[1].id));
 }
 
 /// Press, move, release with the primary button, a few frames apart.
@@ -1930,17 +1997,26 @@ fn working_set_of_two(
         .unwrap()
         .sessions[0]
         .id;
-    for target in [PinTarget::Session(id), PinTarget::Session(shell)] {
-        harness.state_mut().core_mut_for_seeding().dispatch(
-            AppAction::AddToWorkingSet {
-                target,
-                columns: 30,
-            },
-            switchboard::core::Clock::at(1),
-        );
-    }
+    harness.state_mut().core_mut_for_seeding().dispatch(
+        AppAction::NewWorkingSet {
+            name: None,
+            clone_of: None,
+            with: Some(PinTarget::Session(id)),
+            columns: 30,
+        },
+        switchboard::core::Clock::at(1),
+    );
+    let set = first_set(harness);
+    harness.state_mut().core_mut_for_seeding().dispatch(
+        AppAction::AddToWorkingSet {
+            set,
+            target: PinTarget::Session(shell),
+            columns: 30,
+        },
+        switchboard::core::Clock::at(1),
+    );
     harness.set_size(egui::vec2(1400.0, 900.0));
-    showing(harness, View::WorkingSet);
+    showing(harness, View::WorkingSet(set));
     (id, shell)
 }
 
@@ -1948,10 +2024,7 @@ fn rect_of(
     h: &Harness<'static, SwitchboardApp>,
     target: &PinTarget,
 ) -> switchboard::core::GridRect {
-    h.state()
-        .core()
-        .working_set()
-        .unwrap()
+    h.state().core().working_sets()[0]
         .items
         .iter()
         .find(|i| i.target == *target)
@@ -2137,14 +2210,17 @@ fn a_file_card_previews_the_file_rendered_or_raw() {
     let (mut harness, _) = harness();
     let (_dir, pid, _) = file_project(&mut harness);
     harness.state_mut().core_mut_for_seeding().dispatch(
-        AppAction::AddToWorkingSet {
-            target: PinTarget::File(pid, "README.md".into()),
+        AppAction::NewWorkingSet {
+            name: None,
+            clone_of: None,
+            with: Some(PinTarget::File(pid, "README.md".into())),
             columns: 30,
         },
         switchboard::core::Clock::at(1),
     );
+    let set = first_set(&harness);
     harness.set_size(egui::vec2(1400.0, 900.0));
-    showing(&mut harness, View::WorkingSet);
+    showing(&mut harness, View::WorkingSet(set));
     harness.run_steps(2);
     // Rendered: the heading is text without its mark.
     harness.get_by_label("Hello");

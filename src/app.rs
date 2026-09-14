@@ -565,7 +565,7 @@ impl SwitchboardApp {
             View::Board(p) => self.core.sessions_sorted(p).iter().map(|s| s.id).collect(),
             View::Session(id) => vec![id],
             View::Document(..) => Vec::new(),
-            View::WorkingSet => self.core.working_set_sessions(),
+            View::WorkingSet(set) => self.core.working_set_sessions(set),
         };
         // The Run tab shows every command's and service's output, so
         // those get a snapshot too while it is on screen.
@@ -574,7 +574,7 @@ impl SwitchboardApp {
             View::Session(id) if self.core.settings().files_open => {
                 self.core.session(id).map(|s| s.project)
             }
-            View::Session(_) | View::Switchboard | View::Document(..) | View::WorkingSet => None,
+            View::Session(_) | View::Switchboard | View::Document(..) | View::WorkingSet(_) => None,
         }
         .filter(|_| self.core.settings().side_tab == crate::core::SideTab::Run);
         let run_set: Vec<RecordId> = run_project
@@ -594,7 +594,7 @@ impl SwitchboardApp {
                         .collect()
                 })
                 .unwrap_or_default(),
-            View::Board(_) | View::Switchboard | View::Document(..) | View::WorkingSet => {
+            View::Board(_) | View::Switchboard | View::Document(..) | View::WorkingSet(_) => {
                 Vec::new()
             }
         };
@@ -605,10 +605,9 @@ impl SwitchboardApp {
         }
         // Working-set shell cards show the pane's tail, so they need the
         // snapshot too while the set is on screen.
-        let set_ids: Vec<RecordId> = if view == View::WorkingSet {
-            self.core.working_set_sessions()
-        } else {
-            Vec::new()
+        let set_ids: Vec<RecordId> = match view {
+            View::WorkingSet(set) => self.core.working_set_sessions(set),
+            _ => Vec::new(),
         };
         for id in ids {
             let on_screen = matches!(view, View::Session(sid) if sid == id);

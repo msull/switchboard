@@ -12,7 +12,8 @@ use super::document::{self, Body};
 use super::{DrawCtx, UiState, theme};
 use crate::core::grid::{MIN_HEIGHT, MIN_WIDTH};
 use crate::core::{
-    AppAction, CardState, GridRect, PinTarget, PinnedItem, SessionKind, SessionRecord,
+    AppAction, AppCore, CardState, GridRect, PinTarget, PinnedItem, SessionKind, SessionRecord,
+    SetId,
 };
 
 /// Arrange mode: while on, cards are moved and resized instead of
@@ -95,36 +96,18 @@ pub fn cell_rect(origin: egui::Pos2, rect: GridRect) -> egui::Rect {
     )
 }
 
-pub fn show(cx: &mut DrawCtx<'_>, ui: &mut Ui) {
+pub fn show(cx: &mut DrawCtx<'_>, ui: &mut Ui, set: SetId) {
     let p = theme::palette(ui);
     ui.spacing_mut().item_spacing = egui::vec2(10.0, 6.0);
-    let mut items: Vec<PinnedItem> = cx
+    let Some((name, mut items)) = cx
         .core
-        .working_set()
-        .map(|s| s.items.clone())
-        .unwrap_or_default();
-    ui.horizontal(|ui| {
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if !items.is_empty() {
-                let arranging = cx.state.arrange.on;
-                let button = if arranging {
-                    theme::primary(ui, "Done")
-                } else {
-                    theme::secondary(ui, "Arrange")
-                };
-                if button
-                    .on_hover_text("Drag cards to move them; drag a corner to resize")
-                    .clicked()
-                {
-                    cx.state.arrange.on = !arranging;
-                    cx.state.arrange.drag = None;
-                }
-            }
-            ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                ui.label(RichText::new("Working Set").text_style(theme::h1()));
-            });
-        });
-    });
+        .working_set(set)
+        .map(|s| (s.name.clone(), s.items.clone()))
+    else {
+        ui.label("This working set no longer exists.");
+        return;
+    };
+    header(cx, ui, set, &name, items.is_empty());
     ui.label(theme::meta_text(
         ui,
         match items.len() {
@@ -137,7 +120,7 @@ pub fn show(cx: &mut DrawCtx<'_>, ui: &mut Ui) {
         ui.add_space(8.0);
         ui.label(
             RichText::new(
-                "Add a session from its card's menu or its header, and a file from the file tree's menu.",
+                "Add a session from its card's menu or its header's Working sets button, and a file from the file tree's menu.",
             )
             .color(p.n700),
         );
@@ -183,10 +166,10 @@ pub fn show(cx: &mut DrawCtx<'_>, ui: &mut Ui) {
                     if arranging {
                         ui.disable();
                     }
-                    card(cx, ui, item);
+                    card(cx, ui, set, item);
                 });
                 if arranging {
-                    arrange_handles(cx, ui, item, cell);
+                    arrange_handles(cx, ui, set, item, cell);
                 }
             }
         });
@@ -214,7 +197,13 @@ fn grid_dots(ui: &Ui, rect: egui::Rect, width_units: u32, height_units: u32, cel
 /// cell moves it, the bottom-right corner resizes it. The outline shows
 /// the drop: cyan where it fits, magenta where it would land on
 /// another card and be refused.
-fn arrange_handles(cx: &mut DrawCtx<'_>, ui: &mut Ui, item: &PinnedItem, cell: egui::Rect) {
+fn arrange_handles(
+    cx: &mut DrawCtx<'_>,
+    ui: &mut Ui,
+    set: SetId,
+    item: &PinnedItem,
+    cell: egui::Rect,
+) {
     let p = theme::palette(ui);
     let id = ui.id().with(("arrange", &item.target));
     let handle = egui::Rect::from_min_size(cell.max - vec2(HANDLE, HANDLE), vec2(HANDLE, HANDLE));
@@ -253,6 +242,7 @@ fn arrange_handles(cx: &mut DrawCtx<'_>, ui: &mut Ui, item: &PinnedItem, cell: e
             && let Some(drag) = cx.state.arrange.drag.take()
         {
             cx.dispatch(AppAction::PlacePin {
+                set,
                 target: drag.target,
                 rect: drag.preview,
             });
@@ -260,7 +250,7 @@ fn arrange_handles(cx: &mut DrawCtx<'_>, ui: &mut Ui, item: &PinnedItem, cell: e
     }
     let fits = cx
         .core
-        .working_set()
+        .working_set(set)
         .is_some_and(|s| crate::core::grid::fits(&s.items, &item.target, item.rect));
     let color = if !fits {
         p.accent_2
@@ -279,7 +269,7 @@ fn arrange_handles(cx: &mut DrawCtx<'_>, ui: &mut Ui, item: &PinnedItem, cell: e
     painter.rect_filled(handle, egui::CornerRadius::same(2), color);
 }
 
-fn card(cx: &mut DrawCtx<'_>, ui: &mut Ui, item: &PinnedItem) {
+fn card(cx: &mut DrawCtx<'_>, ui: &mut Ui, set: SetId, item: &PinnedItem) {
     match &item.target {
         PinTarget::Session(id) => {
             let Some(record) = cx.core.session(*id) else {
@@ -291,7 +281,7 @@ fn card(cx: &mut DrawCtx<'_>, ui: &mut Ui, item: &PinnedItem) {
                 SessionKind::Agent(_) | SessionKind::Shell => set_card(cx, ui, record),
             }
         }
-        PinTarget::File(pid, rel) => file_card(cx, ui, *pid, rel),
+        PinTarget::File(pid, rel) => file_card(cx, ui, set, *pid, rel),
     }
 }
 
@@ -432,7 +422,7 @@ fn set_card(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord) {
                 .on_hover_cursor(egui::CursorIcon::PointingHand);
             open = title.clicked();
             title.context_menu(|ui| {
-                if menu_item(cx, ui, PinTarget::Session(record.id)) {
+                if set_menu(cx, ui, &PinTarget::Session(record.id)) {
                     ui.close();
                 }
             });
@@ -552,7 +542,13 @@ fn send_line(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord, running:
 /// A file on the working set: its name and project, the file itself
 /// scrolling inside the card (Markdown rendered, or raw; raw text
 /// wrapped or scrolling sideways), and Open in app and Take off.
-fn file_card(cx: &mut DrawCtx<'_>, ui: &mut Ui, pid: crate::core::ProjectId, rel: &Path) {
+fn file_card(
+    cx: &mut DrawCtx<'_>,
+    ui: &mut Ui,
+    set: SetId,
+    pid: crate::core::ProjectId,
+    rel: &Path,
+) {
     let p = theme::palette(ui);
     let Some(project) = cx.core.workspace(pid).map(|w| &w.project) else {
         return;
@@ -615,7 +611,7 @@ fn file_card(cx: &mut DrawCtx<'_>, ui: &mut Ui, pid: crate::core::ProjectId, rel
                 .on_hover_cursor(egui::CursorIcon::PointingHand);
             open = title.clicked();
             title.context_menu(|ui| {
-                if menu_item(cx, ui, target.clone()) {
+                if set_menu(cx, ui, &target) {
                     ui.close();
                 }
             });
@@ -637,7 +633,10 @@ fn file_card(cx: &mut DrawCtx<'_>, ui: &mut Ui, pid: crate::core::ProjectId, rel
                         .on_hover_text("Take it off the working set")
                         .clicked()
                     {
-                        cx.dispatch(AppAction::RemoveFromWorkingSet(target.clone()));
+                        cx.dispatch(AppAction::RemoveFromWorkingSet {
+                            set,
+                            target: target.clone(),
+                        });
                     }
                 });
             });
@@ -687,27 +686,153 @@ fn file_body(state: &mut UiState, ui: &mut Ui, path: &Path, mode: FileMode) {
         });
 }
 
-/// The menu item that puts `target` on the working set or takes it
-/// off, for card menus and context menus.
-pub fn menu_item(cx: &mut DrawCtx<'_>, ui: &mut Ui, target: PinTarget) -> bool {
-    let on = cx.core.in_working_set(&target);
-    let label = if on {
-        "Remove from working set"
-    } else {
-        "Add to working set"
-    };
-    if ui.button(label).clicked() {
-        cx.dispatch(if on {
-            AppAction::RemoveFromWorkingSet(target)
+/// The working-set menu for `target`: one line per set, checked where
+/// the set holds it (a click toggles), and a line for a new set with
+/// it. Returns the actions and whether a line was chosen.
+#[must_use]
+pub fn set_menu_actions(
+    core: &AppCore,
+    ui: &mut Ui,
+    target: &PinTarget,
+    columns: u32,
+) -> (Vec<AppAction>, bool) {
+    let p = theme::palette(ui);
+    let holding = core.sets_holding(target);
+    let mut actions = Vec::new();
+    ui.label(theme::meta_text(ui, "Working sets").color(p.n600));
+    for set in core.working_sets() {
+        let on = holding.contains(&set.id);
+        let label = if on {
+            format!("✓ {}", set.name)
         } else {
-            AppAction::AddToWorkingSet {
-                target,
-                columns: cx.state.working_set_columns,
-            }
-        });
-        return true;
+            format!("   {}", set.name)
+        };
+        if ui.button(label).clicked() {
+            actions.push(if on {
+                AppAction::RemoveFromWorkingSet {
+                    set: set.id,
+                    target: target.clone(),
+                }
+            } else {
+                AppAction::AddToWorkingSet {
+                    set: set.id,
+                    target: target.clone(),
+                    columns,
+                }
+            });
+        }
     }
-    false
+    if ui.button("New working set with this").clicked() {
+        actions.push(AppAction::NewWorkingSet {
+            name: None,
+            clone_of: None,
+            with: Some(target.clone()),
+            columns,
+        });
+    }
+    let chosen = !actions.is_empty();
+    (actions, chosen)
+}
+
+/// [`set_menu_actions`] dispatched through `cx`. Returns whether a line
+/// was chosen, so the menu can close.
+pub fn set_menu(cx: &mut DrawCtx<'_>, ui: &mut Ui, target: &PinTarget) -> bool {
+    let columns = cx.state.working_set_columns;
+    let (actions, chosen) = set_menu_actions(cx.core, ui, target, columns);
+    for action in actions {
+        cx.dispatch(action);
+    }
+    chosen
+}
+
+/// The set's name (or its editor), with Arrange, Rename, Clone, and
+/// Delete on the right.
+fn header(cx: &mut DrawCtx<'_>, ui: &mut Ui, set: SetId, name: &str, empty: bool) {
+    ui.horizontal(|ui| {
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.spacing_mut().item_spacing.x = 6.0;
+            if !empty {
+                let arranging = cx.state.arrange.on;
+                let button = if arranging {
+                    theme::primary(ui, "Done")
+                } else {
+                    theme::secondary(ui, "Arrange")
+                };
+                if button
+                    .on_hover_text("Drag cards to move them; drag a corner to resize")
+                    .clicked()
+                {
+                    cx.state.arrange.on = !arranging;
+                    cx.state.arrange.drag = None;
+                }
+            }
+            if theme::ghost_muted(ui, "Delete").clicked() {
+                cx.state.delete_set = Some(set);
+            }
+            if theme::ghost(ui, "Clone")
+                .on_hover_text("A new working set with the same cards")
+                .clicked()
+            {
+                cx.dispatch(AppAction::NewWorkingSet {
+                    name: None,
+                    clone_of: Some(set),
+                    with: None,
+                    columns: cx.state.working_set_columns,
+                });
+            }
+            let editing = cx
+                .state
+                .set_rename
+                .as_ref()
+                .is_some_and(|(id, _)| *id == set);
+            if !editing && theme::ghost(ui, "Rename").clicked() {
+                cx.state.set_rename = Some((set, name.to_owned()));
+            }
+            ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                if editing {
+                    name_editor(cx, ui, set);
+                } else {
+                    ui.add(
+                        egui::Label::new(RichText::new(name).text_style(theme::h1())).truncate(),
+                    );
+                }
+            });
+        });
+    });
+}
+
+/// The name field while a rename is under way: Enter commits, Escape
+/// cancels.
+fn name_editor(cx: &mut DrawCtx<'_>, ui: &mut Ui, set: SetId) {
+    let mut done = None;
+    if let Some((_, draft)) = cx.state.set_rename.as_mut() {
+        let label = ui.label("Working set name").id;
+        let response = ui
+            .add(egui::TextEdit::singleline(draft).desired_width(280.0))
+            .labelled_by(label);
+        response.request_focus();
+        let (enter, escape) = ui.input(|i| {
+            (
+                i.key_pressed(egui::Key::Enter),
+                i.key_pressed(egui::Key::Escape),
+            )
+        });
+        if enter {
+            done = Some(Some(draft.trim().to_owned()));
+        } else if escape {
+            done = Some(None);
+        }
+    }
+    match done {
+        Some(Some(name)) => {
+            cx.state.set_rename = None;
+            if !name.is_empty() {
+                cx.dispatch(AppAction::RenameWorkingSet { set, name });
+            }
+        }
+        Some(None) => cx.state.set_rename = None,
+        None => {}
+    }
 }
 
 #[cfg(test)]

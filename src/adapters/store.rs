@@ -287,6 +287,7 @@ impl JsonStore {
                 return Views::default();
             }
         };
+        // v1 sets had no id; serde's default gives each a fresh one.
         let version = value
             .get("schema_version")
             .and_then(serde_json::Value::as_u64)
@@ -554,6 +555,7 @@ mod tests {
         assert_eq!(store.load_all().unwrap().views, Views::default());
         let mut views = Views::default();
         views.sets.push(WorkingSet {
+            id: crate::core::SetId::new(),
             name: "Working Set".into(),
             items: vec![PinnedItem {
                 target: PinTarget::Session(RecordId::new()),
@@ -570,6 +572,15 @@ mod tests {
         // A second save keeps the previous file as the backup.
         store.save_views(&views).unwrap();
         assert!(dir.path().join("views.json.bak").exists());
+        // A v1 file (sets without ids) reads, each set getting an id.
+        std::fs::write(
+            dir.path().join("views.json"),
+            "{\"schema_version\": 1, \"sets\": [{\"name\": \"Old\", \"items\": []}]}",
+        )
+        .unwrap();
+        let old = store.load_all().unwrap().views;
+        assert_eq!(old.schema_version, VIEWS_SCHEMA_VERSION);
+        assert_eq!(old.sets[0].name, "Old");
         // A file from a newer build: nothing shown, and saving over it
         // is refused so it is not lost.
         std::fs::write(

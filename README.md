@@ -25,8 +25,9 @@ per project under `projects/` (with a `.bak` of the previous version;
 approvals of defined commands live inside these records),
 `settings.json` (theme, exclusive mode, editor, global variables, file
 side shown next to sessions and its tab, the screen to reopen on),
-`views.json` (the Working Set: which sessions and files are on it and
-where each card sits on its grid, with a `.bak`), the
+`views.json` (the working sets: each one's name, which sessions and
+files are on it, and where each card sits on its grid, with a `.bak`),
+the
 tmux config and socket name, `claude-hooks.json` (passed to Claude Code
 with `--settings`), `events.log` (the hook event log), `wake.sock`, and
 `scrollback/`. Sessions run on a private tmux server (`tmux -L
@@ -92,7 +93,8 @@ Dev aids, all environment variables:
   `new-codex`, `new-service`, `show-board`, `show-session`, `show-document`,
   `files`, `terminal`, `select-file`, `set-env`, `set-secret`, `dotenv`, `environment`,
   `send`, `interrupt`, `return`, `kill`, `approve`, `revoke`, `side`,
-  `switchboard`, `working-set`, `add-to-working-set`,
+  `switchboard`, `working-set`, `new-working-set`, `clone-working-set`,
+  `rename-working-set`, `delete-working-set`, `add-to-working-set`,
   `add-file-to-working-set`, `arrange`, `show-message`, `theme`, `sleep`).
 - `SWITCHBOARD_TMUX=<path>`: tmux binary to use.
 - `RUST_LOG=switchboard=debug`: verbose logging.
@@ -153,7 +155,7 @@ src/ui/
   cards.rs               the one card for every entry kind, the card grid, pinned document cards
   session.rs             session view: header, notes, embedded terminal or conversation + message box
   switchboard.rs         every session across projects, waiting first
-  working_set.rs         the Working Set: the user's grid of session and file cards from any project
+  working_set.rs         a working set: the user's grid of session and file cards from any project
   dialogs.rs             add project / create session dialogs
 assets/fonts/            Source Serif 4 (Regular, Semibold, Italic; OFL), embedded by theme.rs
 tests/ui.rs              headless flows via egui_kittest with fakes

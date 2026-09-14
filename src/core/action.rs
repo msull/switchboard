@@ -23,8 +23,8 @@ use crate::core::env::SecretScope;
 use crate::core::grid;
 use crate::core::model::{
     Activity, AgentKind, CardState, EnvVar, GridRect, Launch, PinTarget, PinnedItem, Project,
-    ProjectEnv, ProjectId, RecordId, ResumeHandle, SavedView, SessionKind, SessionRecord, Settings,
-    SideTab, ThemeMode, Views, WorkingSet, Workspace,
+    ProjectEnv, ProjectId, RecordId, ResumeHandle, SavedView, SessionKind, SessionRecord, SetId,
+    Settings, SideTab, ThemeMode, Views, WorkingSet, Workspace,
 };
 use crate::ports::agent::AgentLaunch;
 use crate::ports::events::SessionEvent;
@@ -58,8 +58,8 @@ pub enum View {
     Session(RecordId),
     /// A file of the project, previewed read-only.
     Document(ProjectId, PathBuf),
-    /// The user's grid of cards from any project.
-    WorkingSet,
+    /// One of the user's grids of cards from any project.
+    WorkingSet(SetId),
 }
 
 impl View {
@@ -70,7 +70,7 @@ impl View {
             View::Switchboard => SavedView::Switchboard,
             View::Board(id) | View::Document(id, _) => SavedView::Board(*id),
             View::Session(id) => SavedView::Session(*id),
-            View::WorkingSet => SavedView::WorkingSet,
+            View::WorkingSet(id) => SavedView::Set(*id),
         }
     }
 }
@@ -107,20 +107,39 @@ pub enum AppAction {
     UnpinDocument(ProjectId, PathBuf),
     /// Preview a file (absolute path) of the project.
     ShowDocument(ProjectId, PathBuf),
-    ShowWorkingSet,
-    /// Put a session or file on the working set, in the first free
-    /// spot of a grid `columns` wide (what the window fits right now).
+    ShowWorkingSet(SetId),
+    /// Put a session or file on a working set, in the first free spot
+    /// of a grid `columns` wide (what the window fits right now).
     AddToWorkingSet {
+        set: SetId,
         target: PinTarget,
         columns: u32,
     },
-    RemoveFromWorkingSet(PinTarget),
+    RemoveFromWorkingSet {
+        set: SetId,
+        target: PinTarget,
+    },
     /// Move or resize a working-set card. A place that overlaps another
     /// card is refused and the card stays where it was.
     PlacePin {
+        set: SetId,
         target: PinTarget,
         rect: GridRect,
     },
+    /// A new working set, shown at once: empty, or a copy of `clone_of`
+    /// (named after it), and holding `with` if given.
+    NewWorkingSet {
+        name: Option<String>,
+        clone_of: Option<SetId>,
+        with: Option<PinTarget>,
+        columns: u32,
+    },
+    RenameWorkingSet {
+        set: SetId,
+        name: String,
+    },
+    /// Drop a working set; its cards were only references.
+    DeleteWorkingSet(SetId),
     OpenDocument(PathBuf),
     OpenInEditor(PathBuf),
     RevealDocument(PathBuf),
@@ -394,10 +413,13 @@ impl AppCore {
             AppAction::HostListed(statuses) => self.host_listed(statuses, now, &mut out),
 
             AppAction::ShowSwitchboard => self.show(View::Switchboard, now, &mut out),
-            AppAction::ShowWorkingSet
+            AppAction::ShowWorkingSet(_)
             | AppAction::AddToWorkingSet { .. }
-            | AppAction::RemoveFromWorkingSet(_)
-            | AppAction::PlacePin { .. } => self.working_set_action(action, now, &mut out),
+            | AppAction::RemoveFromWorkingSet { .. }
+            | AppAction::PlacePin { .. }
+            | AppAction::NewWorkingSet { .. }
+            | AppAction::RenameWorkingSet { .. }
+            | AppAction::DeleteWorkingSet(_) => self.working_set_action(action, now, &mut out),
             AppAction::ShowBoard(id) => self.show(View::Board(id), now, &mut out),
             AppAction::ShowSession(id) => self.show(View::Session(id), now, &mut out),
             AppAction::RenameProject(..)
@@ -487,38 +509,58 @@ impl AppCore {
         self.finish(out)
     }
 
-    /// The working set's transitions, split out of `dispatch` for length.
+    /// The working sets' transitions, split out of `dispatch` for length.
     fn working_set_action(&mut self, action: AppAction, now: Clock, out: &mut Out) {
         match action {
-            AppAction::ShowWorkingSet => self.show(View::WorkingSet, now, out),
-            AppAction::AddToWorkingSet { target, columns } => {
-                self.add_to_working_set(target, columns, out);
+            AppAction::ShowWorkingSet(id) => {
+                if self.working_set(id).is_some() {
+                    self.show(View::WorkingSet(id), now, out);
+                }
             }
-            AppAction::RemoveFromWorkingSet(target) => {
-                self.update_views(out, |set| set.items.retain(|i| i.target != target));
+            AppAction::AddToWorkingSet {
+                set,
+                target,
+                columns,
+            } => self.add_to_working_set(set, target, columns, out),
+            AppAction::RemoveFromWorkingSet { set, target } => {
+                self.update_set(out, set, |s| s.items.retain(|i| i.target != target));
             }
-            AppAction::PlacePin { target, rect } => {
+            AppAction::PlacePin { set, target, rect } => {
                 let rect = grid::clamp(rect);
-                self.update_views(out, |set| {
-                    if grid::fits(&set.items, &target, rect)
-                        && let Some(item) = set.items.iter_mut().find(|i| i.target == target)
+                self.update_set(out, set, |s| {
+                    if grid::fits(&s.items, &target, rect)
+                        && let Some(item) = s.items.iter_mut().find(|i| i.target == target)
                     {
                         item.rect = rect;
                     }
                 });
             }
+            AppAction::NewWorkingSet {
+                name,
+                clone_of,
+                with,
+                columns,
+            } => self.new_working_set(name, clone_of, with, columns, now, out),
+            AppAction::RenameWorkingSet { set, name } => {
+                let name = name.trim().to_owned();
+                if !name.is_empty() {
+                    self.update_set(out, set, |s| s.name = name);
+                }
+            }
+            AppAction::DeleteWorkingSet(id) => {
+                self.update_views(out, |v| v.sets.retain(|s| s.id != id));
+                self.view_stack
+                    .retain(|v| !matches!(v, View::WorkingSet(s) if *s == id));
+            }
             _ => unreachable!("routed by `dispatch`"),
         }
     }
 
-    /// Change the working set and save it if anything changed. The set
-    /// is made on first use; a read-only instance changes nothing.
-    fn update_views(&mut self, out: &mut Out, change: impl FnOnce(&mut WorkingSet)) {
+    /// Change the views and save them if anything changed. A read-only
+    /// instance changes nothing.
+    fn update_views(&mut self, out: &mut Out, change: impl FnOnce(&mut Views)) {
         let mut next = self.views.clone();
-        if next.sets.is_empty() {
-            next.sets.push(WorkingSet::default());
-        }
-        change(&mut next.sets[0]);
+        change(&mut next);
         if next != self.views {
             self.views = next;
             if !self.read_only {
@@ -527,12 +569,26 @@ impl AppCore {
         }
     }
 
-    fn add_to_working_set(&mut self, target: PinTarget, columns: u32, out: &mut Out) {
-        let exists = match &target {
+    /// Change one working set by id; an unknown id changes nothing.
+    fn update_set(&mut self, out: &mut Out, id: SetId, change: impl FnOnce(&mut WorkingSet)) {
+        self.update_views(out, |v| {
+            if let Some(set) = v.sets.iter_mut().find(|s| s.id == id) {
+                change(set);
+            }
+        });
+    }
+
+    fn target_exists(&self, target: &PinTarget) -> bool {
+        match target {
             PinTarget::Session(id) => self.session(*id).is_some(),
             PinTarget::File(pid, _) => self.workspace(*pid).is_some(),
-        };
-        if !exists {
+        }
+    }
+
+    /// `target`'s card, placed on `set` in the first free spot, if it
+    /// exists and is not there already.
+    fn place_new(&self, set: &mut WorkingSet, target: PinTarget, columns: u32) {
+        if !self.target_exists(&target) || set.items.iter().any(|i| i.target == target) {
             return;
         }
         let kind = match &target {
@@ -540,38 +596,65 @@ impl AppCore {
             PinTarget::File(..) => None,
         };
         let (w, h) = grid::default_size(&target, kind);
-        self.update_views(out, |set| {
-            if set.items.iter().any(|i| i.target == target) {
-                return;
-            }
-            let rect = grid::first_free(&set.items, w, h, columns);
-            set.items.push(PinnedItem { target, rect });
-        });
+        let rect = grid::first_free(&set.items, w, h, columns);
+        set.items.push(PinnedItem { target, rect });
+    }
+
+    fn add_to_working_set(&mut self, id: SetId, target: PinTarget, columns: u32, out: &mut Out) {
+        let Some(mut set) = self.working_set(id).cloned() else {
+            return;
+        };
+        self.place_new(&mut set, target, columns);
+        self.update_set(out, id, |s| *s = set);
+    }
+
+    fn new_working_set(
+        &mut self,
+        name: Option<String>,
+        clone_of: Option<SetId>,
+        with: Option<PinTarget>,
+        columns: u32,
+        now: Clock,
+        out: &mut Out,
+    ) {
+        let source = clone_of.and_then(|id| self.working_set(id).cloned());
+        let name = name
+            .map(|n| n.trim().to_owned())
+            .filter(|n| !n.is_empty())
+            .or_else(|| source.as_ref().map(|s| format!("{} copy", s.name)))
+            .unwrap_or_else(|| match self.views.sets.len() {
+                0 => "Working Set".to_owned(),
+                n => format!("Working Set {}", n + 1),
+            });
+        let mut set = WorkingSet::named(name);
+        if let Some(source) = source {
+            set.items = source.items;
+        }
+        if let Some(target) = with {
+            self.place_new(&mut set, target, columns);
+        }
+        let id = set.id;
+        self.update_views(out, |v| v.sets.push(set));
+        self.show(View::WorkingSet(id), now, out);
     }
 
     /// Drop working-set cards whose session or project is gone, after
     /// whatever action removed it (or the load that found it missing).
     fn prune_working_set(&mut self, out: &mut Out) {
-        let Some(set) = self.views.sets.first() else {
-            return;
-        };
-        let stale = set.items.iter().any(|i| match &i.target {
-            PinTarget::Session(id) => self.session(*id).is_none(),
-            PinTarget::File(pid, _) => self.workspace(*pid).is_none(),
-        });
+        let stale = self
+            .views
+            .sets
+            .iter()
+            .flat_map(|s| &s.items)
+            .any(|i| !self.target_exists(&i.target));
         if !stale {
             return;
         }
-        let keep: Vec<PinTarget> = set
-            .items
-            .iter()
-            .filter(|i| match &i.target {
-                PinTarget::Session(id) => self.session(*id).is_some(),
-                PinTarget::File(pid, _) => self.workspace(*pid).is_some(),
-            })
-            .map(|i| i.target.clone())
-            .collect();
-        self.update_views(out, |set| set.items.retain(|i| keep.contains(&i.target)));
+        let mut next = self.views.clone();
+        for set in &mut next.sets {
+            set.items.retain(|i| self.target_exists(&i.target));
+        }
+        self.update_views(out, |v| *v = next);
     }
 
     /// Keep `settings.last_view` equal to the screen showing, whatever
@@ -684,7 +767,7 @@ impl AppCore {
         self.view_stack.retain(|v| match v {
             View::Board(p) | View::Document(p, _) => *p != id,
             View::Session(r) => !gone(*r),
-            View::Switchboard | View::WorkingSet => true,
+            View::Switchboard | View::WorkingSet(_) => true,
         });
         self.in_flight.retain(|f| !gone(f.id));
         self.codex_queue.retain(|r| !gone(*r));
@@ -800,15 +883,20 @@ impl AppCore {
     pub fn settings(&self) -> &Settings {
         &self.settings
     }
-    /// The working set: its cards and where they sit.
+    /// Every working set, in the user's order.
     #[must_use]
-    pub fn working_set(&self) -> Option<&WorkingSet> {
-        self.views.sets.first()
+    pub fn working_sets(&self) -> &[WorkingSet] {
+        &self.views.sets
     }
-    /// The sessions on the working set, for the card refreshes.
+    /// One working set: its cards and where they sit.
     #[must_use]
-    pub fn working_set_sessions(&self) -> Vec<RecordId> {
-        self.working_set()
+    pub fn working_set(&self, id: SetId) -> Option<&WorkingSet> {
+        self.views.sets.iter().find(|s| s.id == id)
+    }
+    /// The sessions on a working set, for the card refreshes.
+    #[must_use]
+    pub fn working_set_sessions(&self, id: SetId) -> Vec<RecordId> {
+        self.working_set(id)
             .map(|s| {
                 s.items
                     .iter()
@@ -820,11 +908,15 @@ impl AppCore {
             })
             .unwrap_or_default()
     }
-    /// Whether `target` is on the working set.
+    /// The working sets holding `target`.
     #[must_use]
-    pub fn in_working_set(&self, target: &PinTarget) -> bool {
-        self.working_set()
-            .is_some_and(|s| s.items.iter().any(|i| i.target == *target))
+    pub fn sets_holding(&self, target: &PinTarget) -> Vec<SetId> {
+        self.views
+            .sets
+            .iter()
+            .filter(|s| s.items.iter().any(|i| i.target == *target))
+            .map(|s| s.id)
+            .collect()
     }
 
     /// The project last shown (most recent `last_active`); the one
@@ -923,9 +1015,12 @@ impl AppCore {
             | AppAction::Spawned { .. }
             | AppAction::Attached { .. }
             | AppAction::Discovered { .. }
-            | AppAction::ShowWorkingSet
+            | AppAction::ShowWorkingSet(_)
             | AppAction::AddToWorkingSet { .. }
-            | AppAction::RemoveFromWorkingSet(_)
+            | AppAction::RemoveFromWorkingSet { .. }
+            | AppAction::NewWorkingSet { .. }
+            | AppAction::RenameWorkingSet { .. }
+            | AppAction::DeleteWorkingSet(_)
             | AppAction::PlacePin { .. }
             | AppAction::Events(_) => unreachable!("dispatched by `dispatch` itself"),
         }

@@ -21,7 +21,7 @@ use std::path::PathBuf;
 use crate::app::SwitchboardApp;
 use crate::core::{
     AgentKind, AppAction, EnvVar, Launch, PinTarget, ProjectId, RecordId, SecretScope, SessionKind,
-    SideTab,
+    SetId, SideTab,
 };
 
 pub fn run(app: &mut SwitchboardApp, text: &str) {
@@ -77,8 +77,59 @@ fn new_session(
 /// The working-set lines (show it, put a session on it by name, put a
 /// file on it by project and relative path), the message dialog, the
 /// theme, and sleep: what did not fit in `step`.
+/// The lines `working_set_step` handles, kept out of `step` for length.
+const EXTRA_LINES: &[&str] = &[
+    "switchboard",
+    "working-set",
+    "new-working-set",
+    "clone-working-set",
+    "rename-working-set",
+    "delete-working-set",
+    "add-to-working-set",
+    "add-file-to-working-set",
+    "arrange",
+    "show-message",
+    "theme",
+    "sleep",
+];
+
+fn working_set(app: &SwitchboardApp, name: &str) -> Result<SetId, String> {
+    app.core()
+        .working_sets()
+        .iter()
+        .find(|s| s.name == name)
+        .map(|s| s.id)
+        .ok_or_else(|| format!("no working set {name}"))
+}
+
+fn add_to_set(
+    app: &mut SwitchboardApp,
+    name: Option<&str>,
+    target: PinTarget,
+) -> Result<(), String> {
+    let set = match name {
+        Some(name) => Some(working_set(app, name)?),
+        None => app.core().working_sets().first().map(|s| s.id),
+    };
+    match set {
+        Some(set) => app.dispatch(AppAction::AddToWorkingSet {
+            set,
+            target,
+            columns: 24,
+        }),
+        None => app.dispatch(AppAction::NewWorkingSet {
+            name: None,
+            clone_of: None,
+            with: Some(target),
+            columns: 24,
+        }),
+    }
+    Ok(())
+}
+
 fn working_set_step(app: &mut SwitchboardApp, w: &[&str]) -> Result<(), String> {
     match w {
+        ["switchboard"] => app.dispatch(AppAction::ShowSwitchboard),
         ["sleep", secs] => {
             let secs: u64 = secs.parse().map_err(|_| "bad sleep")?;
             std::thread::sleep(std::time::Duration::from_secs(secs));
@@ -89,7 +140,47 @@ fn working_set_step(app: &mut SwitchboardApp, w: &[&str]) -> Result<(), String> 
             "light" => crate::core::ThemeMode::Light,
             _ => crate::core::ThemeMode::Auto,
         })),
-        ["working-set"] => app.dispatch(AppAction::ShowWorkingSet),
+        // `working-set` alone shows the first set (made if none);
+        // with a name, that set.
+        ["working-set"] => match app.core().working_sets().first() {
+            Some(set) => app.dispatch(AppAction::ShowWorkingSet(set.id)),
+            None => app.dispatch(AppAction::NewWorkingSet {
+                name: None,
+                clone_of: None,
+                with: None,
+                columns: 24,
+            }),
+        },
+        ["working-set", name] => {
+            let id = working_set(app, name)?;
+            app.dispatch(AppAction::ShowWorkingSet(id));
+        }
+        ["new-working-set", name] => app.dispatch(AppAction::NewWorkingSet {
+            name: Some((*name).to_owned()),
+            clone_of: None,
+            with: None,
+            columns: 24,
+        }),
+        ["clone-working-set", name] => {
+            let id = working_set(app, name)?;
+            app.dispatch(AppAction::NewWorkingSet {
+                name: None,
+                clone_of: Some(id),
+                with: None,
+                columns: 24,
+            });
+        }
+        ["rename-working-set", name, to] => {
+            let set = working_set(app, name)?;
+            app.dispatch(AppAction::RenameWorkingSet {
+                set,
+                name: (*to).to_owned(),
+            });
+        }
+        ["delete-working-set", name] => {
+            let id = working_set(app, name)?;
+            app.dispatch(AppAction::DeleteWorkingSet(id));
+        }
         ["arrange", on] => app.ui_state.arrange.on = *on == "on",
         // The message dialog with `text` (`\n` for a line break), raw
         // or rendered.
@@ -101,19 +192,18 @@ fn working_set_step(app: &mut SwitchboardApp, w: &[&str]) -> Result<(), String> 
                 crate::ui::dialogs::MessageView::Raw
             };
         }
-        ["add-to-working-set", n] => {
+        // Onto the named set, or the first one (made if none).
+        ["add-to-working-set", n, set @ ..] => {
             let id = session(app, n)?;
-            app.dispatch(AppAction::AddToWorkingSet {
-                target: PinTarget::Session(id),
-                columns: 24,
-            });
+            add_to_set(app, set.first().copied(), PinTarget::Session(id))?;
         }
-        ["add-file-to-working-set", p, rel] => {
+        ["add-file-to-working-set", p, rel, set @ ..] => {
             let (id, _) = project(app, p)?;
-            app.dispatch(AppAction::AddToWorkingSet {
-                target: PinTarget::File(id, PathBuf::from(rel)),
-                columns: 24,
-            });
+            add_to_set(
+                app,
+                set.first().copied(),
+                PinTarget::File(id, PathBuf::from(rel)),
+            )?;
         }
         _ => return Err(format!("unknown line: {}", w.join(" "))),
     }
@@ -204,18 +294,7 @@ fn step(app: &mut SwitchboardApp, w: &[&str]) -> Result<(), String> {
             let id = session(app, n)?;
             app.dispatch(AppAction::KillSession(id));
         }
-        ["switchboard"] => app.dispatch(AppAction::ShowSwitchboard),
-        [
-            "working-set"
-            | "add-to-working-set"
-            | "add-file-to-working-set"
-            | "arrange"
-            | "show-message",
-            ..,
-        ] => {
-            working_set_step(app, w)?;
-        }
-        ["theme" | "sleep", _] => working_set_step(app, w)?,
+        [first, ..] if EXTRA_LINES.contains(first) => working_set_step(app, w)?,
         _ => return Err("unknown line".into()),
     }
     Ok(())

@@ -776,19 +776,26 @@ Known gaps:
 - egui has no letter-spacing per style, so kickers set it at the call
   site (`theme::kicker`); there is no keyboard-focus ring beyond egui's.
 
-## Working Set status (2026-09-13)
+## Working sets status (2026-09-14)
 
-The Working Set is the user's own grid of cards from any project:
-sessions of every kind and files. It lives in `views.json` in the data
-directory (schema version `VIEWS_SCHEMA_VERSION`, atomic write with
-`.bak`; a file from a newer build is kept and never written over), as a
-list of sets of which only the first is shown. An item is a target (a
-record id, or a project id and a relative path) and a rectangle in grid
-units; the set owns nothing, and a card whose session or project is
-gone is dropped on the next dispatch. Cards are added from a board
-card's right-click menu, the session header, the file tree's menu, and
-the document header ("Add to working set" / "Remove from working set");
-adding never launches or resumes anything.
+A working set is the user's own grid of cards from any project:
+sessions of every kind and files. There can be any number; each has an
+id (`SetId`) and a name. They live in `views.json` in the data
+directory (schema version `VIEWS_SCHEMA_VERSION`, now 2: v1 sets had no
+id and get one on load; atomic write with `.bak`; a file from a newer
+build is kept and never written over). An item is a target (a record
+id, or a project id and a relative path) and a rectangle in grid units;
+a set owns nothing, and a card whose session or project is gone is
+dropped from every set on the next dispatch. The rail has a "Working
+sets" section with a row per set and "+ New working set"; a set's
+header has Rename (inline), Clone (a copy named "<name> copy", shown at
+once), Delete (confirmed), and Arrange. A target sits on any number of
+sets: the "Working sets" menu on a board card, the session header, the
+file tree's menu (a submenu), and the document header lists every set
+with a check where it holds the item, a click toggling it, and "New
+working set with this". Adding never launches or resumes anything. The
+last view remembers the set (`SavedView::Set`; the older unit variant
+still reads as the first set).
 
 Built so far: the model, store, core transitions (`AddToWorkingSet`,
 `RemoveFromWorkingSet`, `PlacePin`), the rail row, and the view, which

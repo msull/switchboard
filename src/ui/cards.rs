@@ -196,7 +196,7 @@ pub fn session_card(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord) {
             .on_hover_cursor(egui::CursorIcon::PointingHand);
         open = title.clicked();
         title.context_menu(|ui| {
-            if super::working_set::menu_item(cx, ui, PinTarget::Session(record.id)) {
+            if super::working_set::set_menu(cx, ui, &PinTarget::Session(record.id)) {
                 ui.close();
             }
         });
