@@ -259,6 +259,7 @@ impl SwitchboardApp {
             Effect::SaveSettings(settings) => {
                 failed(store.save_settings(&settings), || "save settings")
             }
+            Effect::SaveViews(views) => failed(store.save_views(&views), || "save views"),
             Effect::Save(ws) => {
                 let id = ws.project.id;
                 let result = store.save(&ws);
@@ -299,6 +300,7 @@ impl SwitchboardApp {
         let s = &self.services;
         match effect {
             Effect::SaveSettings(_)
+            | Effect::SaveViews(_)
             | Effect::Save(_)
             | Effect::Delete(_)
             | Effect::StoreSecret { .. }
@@ -563,6 +565,7 @@ impl SwitchboardApp {
             View::Board(p) => self.core.sessions_sorted(p).iter().map(|s| s.id).collect(),
             View::Session(id) => vec![id],
             View::Document(..) => Vec::new(),
+            View::WorkingSet => self.core.working_set_sessions(),
         };
         // The Run tab shows every command's and service's output, so
         // those get a snapshot too while it is on screen.
@@ -571,7 +574,7 @@ impl SwitchboardApp {
             View::Session(id) if self.core.settings().files_open => {
                 self.core.session(id).map(|s| s.project)
             }
-            View::Session(_) | View::Switchboard | View::Document(..) => None,
+            View::Session(_) | View::Switchboard | View::Document(..) | View::WorkingSet => None,
         }
         .filter(|_| self.core.settings().side_tab == crate::core::SideTab::Run);
         let run_set: Vec<RecordId> = run_project
@@ -591,7 +594,9 @@ impl SwitchboardApp {
                         .collect()
                 })
                 .unwrap_or_default(),
-            View::Board(_) | View::Switchboard | View::Document(..) => Vec::new(),
+            View::Board(_) | View::Switchboard | View::Document(..) | View::WorkingSet => {
+                Vec::new()
+            }
         };
         for id in run_set.iter().chain(&bar_set) {
             if !ids.contains(id) {

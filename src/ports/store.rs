@@ -4,7 +4,7 @@
 
 use std::path::PathBuf;
 
-use crate::core::{ProjectId, Settings, Workspace};
+use crate::core::{ProjectId, Settings, Views, Workspace};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StoreError {
@@ -49,6 +49,7 @@ pub struct Loaded {
     pub workspaces: Vec<Workspace>,
     pub notices: Vec<StoreError>,
     pub settings: Settings,
+    pub views: Views,
 }
 
 pub trait Store: Send {
@@ -60,6 +61,8 @@ pub trait Store: Send {
     fn delete(&self, id: ProjectId) -> Result<(), StoreError>;
     /// Persist the app-wide preferences (loaded as part of `load_all`).
     fn save_settings(&self, settings: &Settings) -> Result<(), StoreError>;
+    /// Persist the user-arranged views (loaded as part of `load_all`).
+    fn save_views(&self, views: &Views) -> Result<(), StoreError>;
     /// Directory for per-session files (scrollback, event log).
     fn data_dir(&self) -> PathBuf;
 }

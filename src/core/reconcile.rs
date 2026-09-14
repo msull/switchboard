@@ -22,6 +22,7 @@ impl AppCore {
             Ok(loaded) => {
                 self.workspaces = loaded.workspaces;
                 self.settings = loaded.settings;
+                self.views = loaded.views;
                 self.restore_view();
                 // Definition files are read before the first host poll, so
                 // the reconcile already knows which entries are approved.
@@ -54,6 +55,7 @@ impl AppCore {
         let view = match self.settings.last_view {
             SavedView::Board(id) if self.workspace(id).is_some() => View::Board(id),
             SavedView::Session(id) if self.session(id).is_some() => View::Session(id),
+            SavedView::WorkingSet => View::WorkingSet,
             _ => return,
         };
         self.view_stack.push(view);

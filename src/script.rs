@@ -20,7 +20,8 @@ use std::path::PathBuf;
 
 use crate::app::SwitchboardApp;
 use crate::core::{
-    AgentKind, AppAction, EnvVar, Launch, ProjectId, RecordId, SecretScope, SessionKind, SideTab,
+    AgentKind, AppAction, EnvVar, Launch, PinTarget, ProjectId, RecordId, SecretScope, SessionKind,
+    SideTab,
 };
 
 pub fn run(app: &mut SwitchboardApp, text: &str) {
@@ -70,6 +71,35 @@ fn new_session(
         cwd,
         launch,
     });
+    Ok(())
+}
+
+/// The working-set lines (show it, put a session on it by name, put a
+/// file on it by project and relative path) and the theme line.
+fn working_set_step(app: &mut SwitchboardApp, w: &[&str]) -> Result<(), String> {
+    match w {
+        ["theme", mode] => app.dispatch(AppAction::SetTheme(match *mode {
+            "dark" => crate::core::ThemeMode::Dark,
+            "light" => crate::core::ThemeMode::Light,
+            _ => crate::core::ThemeMode::Auto,
+        })),
+        ["working-set"] => app.dispatch(AppAction::ShowWorkingSet),
+        ["add-to-working-set", n] => {
+            let id = session(app, n)?;
+            app.dispatch(AppAction::AddToWorkingSet {
+                target: PinTarget::Session(id),
+                columns: 24,
+            });
+        }
+        ["add-file-to-working-set", p, rel] => {
+            let (id, _) = project(app, p)?;
+            app.dispatch(AppAction::AddToWorkingSet {
+                target: PinTarget::File(id, PathBuf::from(rel)),
+                columns: 24,
+            });
+        }
+        _ => return Err(format!("unknown line: {}", w.join(" "))),
+    }
     Ok(())
 }
 
@@ -158,11 +188,13 @@ fn step(app: &mut SwitchboardApp, w: &[&str]) -> Result<(), String> {
             app.dispatch(AppAction::KillSession(id));
         }
         ["switchboard"] => app.dispatch(AppAction::ShowSwitchboard),
-        ["theme", mode] => app.dispatch(AppAction::SetTheme(match *mode {
-            "dark" => crate::core::ThemeMode::Dark,
-            "light" => crate::core::ThemeMode::Light,
-            _ => crate::core::ThemeMode::Auto,
-        })),
+        [
+            "working-set" | "add-to-working-set" | "add-file-to-working-set",
+            ..,
+        ] => {
+            working_set_step(app, w)?;
+        }
+        ["theme", _] => working_set_step(app, w)?,
         ["sleep", secs] => {
             let secs: u64 = secs.parse().map_err(|_| "bad sleep")?;
             std::thread::sleep(std::time::Duration::from_secs(secs));

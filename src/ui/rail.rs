@@ -99,13 +99,14 @@ fn top(cx: &mut DrawCtx<'_>, ui: &mut Ui, view: &View, compact: bool) {
     if all.clicked() {
         cx.dispatch(AppAction::ShowSwitchboard);
     }
+    working_set_row(cx, ui, view, compact);
 
     match view {
         View::Session(id) => session_neighbours(cx, ui, *id, compact),
-        View::Switchboard | View::Board(_) | View::Document(..) => {
+        View::Switchboard | View::Board(_) | View::Document(..) | View::WorkingSet => {
             let active = match view {
                 View::Board(pid) | View::Document(pid, _) => Some(*pid),
-                View::Switchboard | View::Session(_) => None,
+                View::Switchboard | View::Session(_) | View::WorkingSet => None,
             };
             ui.add_space(12.0);
             if !compact {
@@ -161,6 +162,29 @@ fn top(cx: &mut DrawCtx<'_>, ui: &mut Ui, view: &View, compact: bool) {
                 cx.state.add_project = Some(AddProjectDraft::default());
             }
         }
+    }
+}
+
+/// The row for the user's own grid, greyed while it is empty.
+fn working_set_row(cx: &mut DrawCtx<'_>, ui: &mut Ui, view: &View, compact: bool) {
+    let pinned = cx.core.working_set().map_or(0, |s| s.items.len());
+    let set = row(
+        ui,
+        &RowSpec {
+            text: "Working Set",
+            dot: None,
+            selected: *view == View::WorkingSet,
+            muted: pinned == 0,
+            count: 0,
+            compact,
+            initial: "W",
+        },
+    );
+    if set
+        .on_hover_text("Your own grid of sessions and files from any project")
+        .clicked()
+    {
+        cx.dispatch(AppAction::ShowWorkingSet);
     }
 }
 

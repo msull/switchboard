@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
-use crate::core::{AgentKind, ProjectId, RecordId, ResumeHandle, Settings, Workspace};
+use crate::core::{AgentKind, ProjectId, RecordId, ResumeHandle, Settings, Views, Workspace};
 use crate::ports::agent::{AgentLaunch, AgentLauncher};
 use crate::ports::events::{EventSource, SessionEvent};
 use crate::ports::host::{HostId, HostInfo, HostStatus, ProcessHost, SpawnSpec};
@@ -42,6 +42,9 @@ impl Store for MemoryStore {
         Ok(())
     }
     fn save_settings(&self, _settings: &Settings) -> Result<(), StoreError> {
+        Ok(())
+    }
+    fn save_views(&self, _views: &Views) -> Result<(), StoreError> {
         Ok(())
     }
     fn data_dir(&self) -> PathBuf {

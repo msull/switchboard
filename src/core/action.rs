@@ -20,9 +20,11 @@ use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::core::env::SecretScope;
+use crate::core::grid;
 use crate::core::model::{
-    Activity, AgentKind, CardState, EnvVar, Launch, Project, ProjectEnv, ProjectId, RecordId,
-    ResumeHandle, SavedView, SessionKind, SessionRecord, Settings, SideTab, ThemeMode, Workspace,
+    Activity, AgentKind, CardState, EnvVar, GridRect, Launch, PinTarget, PinnedItem, Project,
+    ProjectEnv, ProjectId, RecordId, ResumeHandle, SavedView, SessionKind, SessionRecord, Settings,
+    SideTab, ThemeMode, Views, WorkingSet, Workspace,
 };
 use crate::ports::agent::AgentLaunch;
 use crate::ports::events::SessionEvent;
@@ -56,6 +58,8 @@ pub enum View {
     Session(RecordId),
     /// A file of the project, previewed read-only.
     Document(ProjectId, PathBuf),
+    /// The user's grid of cards from any project.
+    WorkingSet,
 }
 
 impl View {
@@ -66,6 +70,7 @@ impl View {
             View::Switchboard => SavedView::Switchboard,
             View::Board(id) | View::Document(id, _) => SavedView::Board(*id),
             View::Session(id) => SavedView::Session(*id),
+            View::WorkingSet => SavedView::WorkingSet,
         }
     }
 }
@@ -102,6 +107,20 @@ pub enum AppAction {
     UnpinDocument(ProjectId, PathBuf),
     /// Preview a file (absolute path) of the project.
     ShowDocument(ProjectId, PathBuf),
+    ShowWorkingSet,
+    /// Put a session or file on the working set, in the first free
+    /// spot of a grid `columns` wide (what the window fits right now).
+    AddToWorkingSet {
+        target: PinTarget,
+        columns: u32,
+    },
+    RemoveFromWorkingSet(PinTarget),
+    /// Move or resize a working-set card. A place that overlaps another
+    /// card is refused and the card stays where it was.
+    PlacePin {
+        target: PinTarget,
+        rect: GridRect,
+    },
     OpenDocument(PathBuf),
     OpenInEditor(PathBuf),
     RevealDocument(PathBuf),
@@ -200,6 +219,7 @@ pub enum Effect {
     Save(Workspace),
     Delete(ProjectId),
     SaveSettings(Settings),
+    SaveViews(Views),
     /// Compose a fresh launch for an agent record (worker; reports `LaunchPrepared`).
     PrepareLaunch {
         id: RecordId,
@@ -329,6 +349,7 @@ pub struct ConfigStatus {
 #[derive(Debug, Default)]
 pub struct AppCore {
     pub(super) workspaces: Vec<Workspace>,
+    pub(super) views: Views,
     pub(super) view_stack: Vec<View>,
     pub(super) notices: Vec<Notice>,
     pub(super) host_error: Option<String>,
@@ -373,6 +394,10 @@ impl AppCore {
             AppAction::HostListed(statuses) => self.host_listed(statuses, now, &mut out),
 
             AppAction::ShowSwitchboard => self.show(View::Switchboard, now, &mut out),
+            AppAction::ShowWorkingSet
+            | AppAction::AddToWorkingSet { .. }
+            | AppAction::RemoveFromWorkingSet(_)
+            | AppAction::PlacePin { .. } => self.working_set_action(action, now, &mut out),
             AppAction::ShowBoard(id) => self.show(View::Board(id), now, &mut out),
             AppAction::ShowSession(id) => self.show(View::Session(id), now, &mut out),
             AppAction::RenameProject(..)
@@ -458,7 +483,95 @@ impl AppCore {
             AppAction::Events(events) => self.apply_events(events, &mut out),
         }
         self.remember_view(&mut out);
+        self.prune_working_set(&mut out);
         self.finish(out)
+    }
+
+    /// The working set's transitions, split out of `dispatch` for length.
+    fn working_set_action(&mut self, action: AppAction, now: Clock, out: &mut Out) {
+        match action {
+            AppAction::ShowWorkingSet => self.show(View::WorkingSet, now, out),
+            AppAction::AddToWorkingSet { target, columns } => {
+                self.add_to_working_set(target, columns, out);
+            }
+            AppAction::RemoveFromWorkingSet(target) => {
+                self.update_views(out, |set| set.items.retain(|i| i.target != target));
+            }
+            AppAction::PlacePin { target, rect } => {
+                let rect = grid::clamp(rect);
+                self.update_views(out, |set| {
+                    if grid::fits(&set.items, &target, rect)
+                        && let Some(item) = set.items.iter_mut().find(|i| i.target == target)
+                    {
+                        item.rect = rect;
+                    }
+                });
+            }
+            _ => unreachable!("routed by `dispatch`"),
+        }
+    }
+
+    /// Change the working set and save it if anything changed. The set
+    /// is made on first use; a read-only instance changes nothing.
+    fn update_views(&mut self, out: &mut Out, change: impl FnOnce(&mut WorkingSet)) {
+        let mut next = self.views.clone();
+        if next.sets.is_empty() {
+            next.sets.push(WorkingSet::default());
+        }
+        change(&mut next.sets[0]);
+        if next != self.views {
+            self.views = next;
+            if !self.read_only {
+                out.push(Effect::SaveViews(self.views.clone()));
+            }
+        }
+    }
+
+    fn add_to_working_set(&mut self, target: PinTarget, columns: u32, out: &mut Out) {
+        let exists = match &target {
+            PinTarget::Session(id) => self.session(*id).is_some(),
+            PinTarget::File(pid, _) => self.workspace(*pid).is_some(),
+        };
+        if !exists {
+            return;
+        }
+        let kind = match &target {
+            PinTarget::Session(id) => self.session(*id).map(|s| s.kind),
+            PinTarget::File(..) => None,
+        };
+        let (w, h) = grid::default_size(&target, kind);
+        self.update_views(out, |set| {
+            if set.items.iter().any(|i| i.target == target) {
+                return;
+            }
+            let rect = grid::first_free(&set.items, w, h, columns);
+            set.items.push(PinnedItem { target, rect });
+        });
+    }
+
+    /// Drop working-set cards whose session or project is gone, after
+    /// whatever action removed it (or the load that found it missing).
+    fn prune_working_set(&mut self, out: &mut Out) {
+        let Some(set) = self.views.sets.first() else {
+            return;
+        };
+        let stale = set.items.iter().any(|i| match &i.target {
+            PinTarget::Session(id) => self.session(*id).is_none(),
+            PinTarget::File(pid, _) => self.workspace(*pid).is_none(),
+        });
+        if !stale {
+            return;
+        }
+        let keep: Vec<PinTarget> = set
+            .items
+            .iter()
+            .filter(|i| match &i.target {
+                PinTarget::Session(id) => self.session(*id).is_some(),
+                PinTarget::File(pid, _) => self.workspace(*pid).is_some(),
+            })
+            .map(|i| i.target.clone())
+            .collect();
+        self.update_views(out, |set| set.items.retain(|i| keep.contains(&i.target)));
     }
 
     /// Keep `settings.last_view` equal to the screen showing, whatever
@@ -571,7 +684,7 @@ impl AppCore {
         self.view_stack.retain(|v| match v {
             View::Board(p) | View::Document(p, _) => *p != id,
             View::Session(r) => !gone(*r),
-            View::Switchboard => true,
+            View::Switchboard | View::WorkingSet => true,
         });
         self.in_flight.retain(|f| !gone(f.id));
         self.codex_queue.retain(|r| !gone(*r));
@@ -687,6 +800,32 @@ impl AppCore {
     pub fn settings(&self) -> &Settings {
         &self.settings
     }
+    /// The working set: its cards and where they sit.
+    #[must_use]
+    pub fn working_set(&self) -> Option<&WorkingSet> {
+        self.views.sets.first()
+    }
+    /// The sessions on the working set, for the card refreshes.
+    #[must_use]
+    pub fn working_set_sessions(&self) -> Vec<RecordId> {
+        self.working_set()
+            .map(|s| {
+                s.items
+                    .iter()
+                    .filter_map(|i| match &i.target {
+                        PinTarget::Session(id) => Some(*id),
+                        PinTarget::File(..) => None,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+    /// Whether `target` is on the working set.
+    #[must_use]
+    pub fn in_working_set(&self, target: &PinTarget) -> bool {
+        self.working_set()
+            .is_some_and(|s| s.items.iter().any(|i| i.target == *target))
+    }
 
     /// The project last shown (most recent `last_active`); the one
     /// exclusive mode keeps visible.
@@ -784,6 +923,10 @@ impl AppCore {
             | AppAction::Spawned { .. }
             | AppAction::Attached { .. }
             | AppAction::Discovered { .. }
+            | AppAction::ShowWorkingSet
+            | AppAction::AddToWorkingSet { .. }
+            | AppAction::RemoveFromWorkingSet(_)
+            | AppAction::PlacePin { .. }
             | AppAction::Events(_) => unreachable!("dispatched by `dispatch` itself"),
         }
     }

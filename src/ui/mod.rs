@@ -24,6 +24,7 @@ mod session;
 mod switchboard;
 mod switcher;
 pub mod theme;
+pub mod working_set;
 
 use std::collections::HashMap;
 use std::time::SystemTime;
@@ -85,6 +86,9 @@ pub struct UiState {
     /// One message shown unformatted in a dialog ("View raw"), while
     /// open. The way to read a message whose Markdown renders badly.
     pub raw_message: Option<String>,
+    /// How many grid units the working set fits across right now, so
+    /// a card added from another view lands where it will be seen.
+    pub working_set_columns: u32,
     /// Messages being composed, one per session, so switching away and
     /// back does not lose a half-written prompt.
     pub input_drafts: HashMap<RecordId, String>,
@@ -118,6 +122,7 @@ impl Default for UiState {
             palette: None,
             env_dialog: None,
             raw_message: None,
+            working_set_columns: 24,
             input_drafts: HashMap::new(),
             terminals: HashMap::new(),
             applied_theme: None,
@@ -177,7 +182,7 @@ fn draw_frame(cx: &mut DrawCtx<'_>, ui: &mut Ui) {
     // and leaves the session running.
     let shown = match &view {
         View::Session(id) => Some(*id),
-        View::Switchboard | View::Board(_) | View::Document(..) => None,
+        View::Switchboard | View::Board(_) | View::Document(..) | View::WorkingSet => None,
     };
     cx.state.terminals.retain(|id, _| Some(*id) == shown);
 
@@ -203,7 +208,7 @@ fn draw_frame(cx: &mut DrawCtx<'_>, ui: &mut Ui) {
             let message = matches!(s.kind, crate::core::SessionKind::Agent(_)).then_some(*id);
             (s.project, true, message)
         }),
-        View::Session(_) | View::Switchboard => None,
+        View::Session(_) | View::Switchboard | View::WorkingSet => None,
     };
     if let Some((pid, inline, message)) = files_for {
         egui::Panel::right("files")
@@ -231,7 +236,7 @@ fn draw_frame(cx: &mut DrawCtx<'_>, ui: &mut Ui) {
     // Sessions and documents fill their area edge to edge (terminal,
     // preview); the board and the switchboard get the page margin.
     let margin = match &view {
-        View::Switchboard | View::Board(_) => egui::Margin {
+        View::Switchboard | View::Board(_) | View::WorkingSet => egui::Margin {
             left: 28,
             right: 28,
             top: 24,
@@ -246,11 +251,15 @@ fn draw_frame(cx: &mut DrawCtx<'_>, ui: &mut Ui) {
     };
     egui::CentralPanel::default()
         .frame(egui::Frame::new().fill(page_fill).inner_margin(margin))
-        .show(ui, |ui| match view {
-            View::Switchboard => switchboard::show(cx, ui),
-            View::Board(pid) => board::show(cx, ui, pid),
-            View::Session(id) => session::show(cx, ui, id),
-            View::Document(pid, path) => document::show(cx, ui, pid, &path),
+        .show(ui, |ui| {
+            cx.state.working_set_columns = working_set::columns(ui.available_width());
+            match view {
+                View::Switchboard => switchboard::show(cx, ui),
+                View::WorkingSet => working_set::show(cx, ui),
+                View::Board(pid) => board::show(cx, ui, pid),
+                View::Session(id) => session::show(cx, ui, id),
+                View::Document(pid, path) => document::show(cx, ui, pid, &path),
+            }
         });
 
     switcher::toasts(cx, ui.ctx());

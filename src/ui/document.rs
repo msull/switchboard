@@ -9,7 +9,7 @@ use std::time::{Duration, Instant, SystemTime};
 use egui::{Frame, RichText, Ui};
 
 use super::{DrawCtx, GAP, UiState, theme};
-use crate::core::{AppAction, ProjectId};
+use crate::core::{AppAction, PinTarget, ProjectId};
 
 /// Files above this are not read; the preview says so instead.
 pub const MAX_PREVIEW_BYTES: u64 = 2 * 1024 * 1024;
@@ -269,6 +269,7 @@ fn header_actions(
         Reveal,
         CopyPath,
         Pin,
+        WorkingSet,
         Back,
     }
     let mut items = vec![
@@ -277,6 +278,7 @@ fn header_actions(
         Item::Reveal,
         Item::CopyPath,
         Item::Pin,
+        Item::WorkingSet,
         Item::Back,
     ];
     if reversed {
@@ -288,6 +290,26 @@ fn header_actions(
             Item::Back => {
                 if theme::ghost_muted(ui, "Back").clicked() {
                     cx.dispatch(AppAction::Back);
+                }
+            }
+            Item::WorkingSet => {
+                let Some(rel) = rel else { continue };
+                let target = PinTarget::File(pid, rel.to_path_buf());
+                let on = cx.core.in_working_set(&target);
+                let label = if on {
+                    "Remove from working set"
+                } else {
+                    "Add to working set"
+                };
+                if theme::ghost_muted(ui, label).clicked() {
+                    cx.dispatch(if on {
+                        AppAction::RemoveFromWorkingSet(target)
+                    } else {
+                        AppAction::AddToWorkingSet {
+                            target,
+                            columns: cx.state.working_set_columns,
+                        }
+                    });
                 }
             }
             Item::Pin => {

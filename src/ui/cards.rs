@@ -9,7 +9,7 @@ use egui::{RichText, Sense, Ui, vec2};
 
 use super::{DrawCtx, theme};
 use crate::core::{
-    AppAction, AppCore, Approval, CardState, Launch, ProjectId, RecordId, SessionKind,
+    AppAction, AppCore, Approval, CardState, Launch, PinTarget, ProjectId, RecordId, SessionKind,
     SessionRecord,
 };
 use crate::ports::host::Liveness;
@@ -178,7 +178,7 @@ pub fn session_card(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord) {
             });
         });
         let title_color = if hollow { p.n700 } else { p.text };
-        open = ui
+        let title = ui
             .add(
                 egui::Label::new(
                     RichText::new(&record.name)
@@ -188,8 +188,13 @@ pub fn session_card(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord) {
                 .truncate()
                 .sense(Sense::click()),
             )
-            .on_hover_cursor(egui::CursorIcon::PointingHand)
-            .clicked();
+            .on_hover_cursor(egui::CursorIcon::PointingHand);
+        open = title.clicked();
+        title.context_menu(|ui| {
+            if super::working_set::menu_item(cx, ui, PinTarget::Session(record.id)) {
+                ui.close();
+            }
+        });
         card_body(ui, record, entry, model, reason, caption.as_deref());
         if !running && !entry && state == CardState::NotResumable {
             ui.label(

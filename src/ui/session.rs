@@ -17,7 +17,7 @@ use egui_term::{BackendSettings, PtyEvent, TerminalBackend, TerminalView};
 use super::cards::{is_running, kind_label};
 use super::files::DraggedPath;
 use super::{DrawCtx, GAP, PAD, UiState, theme};
-use crate::core::{AppAction, CardState, RecordId, SessionKind, SessionRecord};
+use crate::core::{AppAction, CardState, PinTarget, RecordId, SessionKind, SessionRecord};
 use crate::ports::host::HostId;
 use crate::ports::transcript::{
     Activity, ActivityKind, Conversation, ToolDetail, Turn, context_window,
@@ -247,7 +247,13 @@ fn header_actions(
     } else {
         "Return"
     };
-    let mut order = vec![open, "Restart", "Kill", "Back"];
+    let on_set = cx.core.in_working_set(&PinTarget::Session(record.id));
+    let set = if on_set {
+        "Remove from working set"
+    } else {
+        "Add to working set"
+    };
+    let mut order = vec![open, "Restart", "Kill", set, "Back"];
     if agent {
         order.retain(|b| *b != "Restart");
     }
@@ -259,7 +265,9 @@ fn header_actions(
             "Restart" => {
                 theme::ghost(ui, button).on_hover_text("Stop it if it runs, then start it again")
             }
-            "Kill" | "Back" => theme::ghost_muted(ui, button),
+            "Kill" | "Back" | "Add to working set" | "Remove from working set" => {
+                theme::ghost_muted(ui, button)
+            }
             _ => theme::secondary(ui, button),
         };
         if !response.clicked() {
@@ -269,6 +277,15 @@ fn header_actions(
             "Restart" => cx.dispatch(AppAction::RestartSession(record.id)),
             "Kill" => cx.dispatch(AppAction::KillSession(record.id)),
             "Back" => cx.dispatch(AppAction::Back),
+            "Add to working set" => cx.dispatch(AppAction::AddToWorkingSet {
+                target: PinTarget::Session(record.id),
+                columns: cx.state.working_set_columns,
+            }),
+            "Remove from working set" => {
+                cx.dispatch(AppAction::RemoveFromWorkingSet(PinTarget::Session(
+                    record.id,
+                )));
+            }
             _ => cx.dispatch(AppAction::ReturnToSession(record.id)),
         }
     }

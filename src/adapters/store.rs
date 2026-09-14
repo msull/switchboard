@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 use directories::ProjectDirs;
 use uuid::Uuid;
 
-use crate::core::{ProjectId, SCHEMA_VERSION, Settings, Workspace};
+use crate::core::{ProjectId, SCHEMA_VERSION, Settings, VIEWS_SCHEMA_VERSION, Views, Workspace};
 use crate::ports::store::{Loaded, Store, StoreError};
 
 /// Store backed by JSON files. Construct with [`JsonStore::new`], then
@@ -55,6 +55,10 @@ impl JsonStore {
 
     fn settings_path(&self) -> PathBuf {
         self.dir.join("settings.json")
+    }
+
+    fn views_path(&self) -> PathBuf {
+        self.dir.join("views.json")
     }
 
     fn lock_path(&self) -> PathBuf {
@@ -123,6 +127,7 @@ impl Store for JsonStore {
     fn load_all(&self) -> Result<Loaded, StoreError> {
         let mut loaded = Loaded {
             settings: self.load_settings(),
+            views: self.load_views(),
             ..Loaded::default()
         };
         let dir = self.projects_dir();
@@ -225,12 +230,90 @@ impl Store for JsonStore {
         sync_dir(&self.dir)
     }
 
+    fn save_views(&self, views: &Views) -> Result<(), StoreError> {
+        if self.lock.is_none() {
+            return Err(StoreError::Locked);
+        }
+        if views.schema_version > VIEWS_SCHEMA_VERSION {
+            return Err(StoreError::Io(format!(
+                "refusing to write views schema version {} (this build understands {VIEWS_SCHEMA_VERSION})",
+                views.schema_version
+            )));
+        }
+        let json = serde_json::to_vec_pretty(views)
+            .map_err(|e| StoreError::Io(format!("serialize: {e}")))?;
+        ensure_dir(&self.dir)?;
+        let path = self.views_path();
+        let tmp = Self::temp_path(&path);
+        let bak = Self::backup_path(&path);
+        let mut file = open_private(&tmp, true)?;
+        file.write_all(&json)
+            .and_then(|()| file.sync_all())
+            .map_err(|e| io_err("write", &tmp, &e))?;
+        drop(file);
+        match fs::rename(&path, &bak) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(io_err("back up", &path, &e)),
+        }
+        fs::rename(&tmp, &path).map_err(|e| io_err("rename", &tmp, &e))?;
+        sync_dir(&self.dir)
+    }
+
     fn data_dir(&self) -> PathBuf {
         self.dir.clone()
     }
 }
 
 impl JsonStore {
+    /// The arranged views. An unreadable file is logged and the app
+    /// starts with none, like the preferences; a file from a newer
+    /// build is kept as it is (its version is remembered, and saving
+    /// at that version is refused) so nothing of it is lost.
+    fn load_views(&self) -> Views {
+        let path = self.views_path();
+        let bytes = match fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Views::default(),
+            Err(e) => {
+                log::warn!("{}: {e}; starting without views", path.display());
+                return Views::default();
+            }
+        };
+        let value: serde_json::Value = match serde_json::from_slice(&bytes) {
+            Ok(v) => v,
+            Err(e) => {
+                log::warn!("{}: {e}; starting without views", path.display());
+                return Views::default();
+            }
+        };
+        let version = value
+            .get("schema_version")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
+        if version > u64::from(VIEWS_SCHEMA_VERSION) {
+            log::warn!(
+                "{}: schema version {version} is newer than this build understands; views are not shown",
+                path.display()
+            );
+            #[allow(clippy::cast_possible_truncation)]
+            return Views {
+                schema_version: version as u32,
+                sets: Vec::new(),
+            };
+        }
+        match serde_json::from_value::<Views>(value) {
+            Ok(mut views) => {
+                views.schema_version = VIEWS_SCHEMA_VERSION;
+                views
+            }
+            Err(e) => {
+                log::warn!("{}: {e}; starting without views", path.display());
+                Views::default()
+            }
+        }
+    }
+
     /// Preferences are not worth a recovery notice: an unreadable file
     /// is logged and the defaults apply.
     fn load_settings(&self) -> Settings {
@@ -461,6 +544,46 @@ mod tests {
         store.save_settings(&settings).unwrap();
         assert_eq!(store.load_all().unwrap().settings, settings);
         assert!(!dir.path().join("settings.json.tmp").exists());
+    }
+
+    #[test]
+    fn views_round_trip_default_when_absent_and_a_newer_file_is_kept() {
+        use crate::core::{GridRect, PinTarget, PinnedItem, RecordId, WorkingSet};
+        let dir = tempfile::tempdir().unwrap();
+        let store = locked_store(dir.path());
+        assert_eq!(store.load_all().unwrap().views, Views::default());
+        let mut views = Views::default();
+        views.sets.push(WorkingSet {
+            name: "Working Set".into(),
+            items: vec![PinnedItem {
+                target: PinTarget::Session(RecordId::new()),
+                rect: GridRect {
+                    x: 1,
+                    y: 2,
+                    w: 10,
+                    h: 8,
+                },
+            }],
+        });
+        store.save_views(&views).unwrap();
+        assert_eq!(store.load_all().unwrap().views, views);
+        // A second save keeps the previous file as the backup.
+        store.save_views(&views).unwrap();
+        assert!(dir.path().join("views.json.bak").exists());
+        // A file from a newer build: nothing shown, and saving over it
+        // is refused so it is not lost.
+        std::fs::write(
+            dir.path().join("views.json"),
+            format!(
+                "{{\"schema_version\": {}, \"sets\": []}}",
+                VIEWS_SCHEMA_VERSION + 1
+            ),
+        )
+        .unwrap();
+        let newer = store.load_all().unwrap().views;
+        assert_eq!(newer.schema_version, VIEWS_SCHEMA_VERSION + 1);
+        assert!(newer.sets.is_empty());
+        assert!(store.save_views(&newer).is_err());
     }
 
     #[test]

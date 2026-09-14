@@ -100,6 +100,82 @@ pub enum SavedView {
     Switchboard,
     Board(ProjectId),
     Session(RecordId),
+    WorkingSet,
+}
+
+/// Schema of `views.json`, bumped like [`SCHEMA_VERSION`] when a type
+/// below changes shape.
+pub const VIEWS_SCHEMA_VERSION: u32 = 1;
+
+/// The user-arranged views, one file for all of them: `views.json` in
+/// the data directory. Only the first working set is shown for now.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Views {
+    pub schema_version: u32,
+    #[serde(default)]
+    pub sets: Vec<WorkingSet>,
+}
+
+impl Default for Views {
+    fn default() -> Self {
+        Self {
+            schema_version: VIEWS_SCHEMA_VERSION,
+            sets: Vec::new(),
+        }
+    }
+}
+
+/// A grid of the things the user is working on right now, across
+/// projects. Items refer to records and files; the set owns nothing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkingSet {
+    pub name: String,
+    #[serde(default)]
+    pub items: Vec<PinnedItem>,
+}
+
+impl Default for WorkingSet {
+    fn default() -> Self {
+        Self {
+            name: "Working Set".into(),
+            items: Vec::new(),
+        }
+    }
+}
+
+/// One card of a working set and where it sits on the grid.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PinnedItem {
+    pub target: PinTarget,
+    pub rect: GridRect,
+}
+
+/// What a working-set card shows. A target appears in a set at most
+/// once, so it is also the item's identity.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum PinTarget {
+    Session(RecordId),
+    /// A file of a project, by its path relative to the root.
+    File(ProjectId, PathBuf),
+}
+
+/// A rectangle in grid units: the working set's grid, not pixels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GridRect {
+    pub x: u32,
+    pub y: u32,
+    pub w: u32,
+    pub h: u32,
+}
+
+impl GridRect {
+    #[must_use]
+    pub fn overlaps(self, other: GridRect) -> bool {
+        self.x < other.x + other.w
+            && other.x < self.x + self.w
+            && self.y < other.y + other.h
+            && other.y < self.y + self.h
+    }
 }
 
 /// The tabs of the side panel next to a board or session.

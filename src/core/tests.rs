@@ -9,8 +9,9 @@ use uuid::Uuid;
 use super::action::{AppAction, AppCore, Clock, Effect, View};
 use super::definitions::entry_hash;
 use super::model::{
-    Activity, AgentKind, Approval, CardState, Launch, Project, ProjectEnv, ProjectId, RecordId,
-    ResumeHandle, SavedView, SessionKind, SessionRecord, Settings, SideTab, ThemeMode, Workspace,
+    Activity, AgentKind, Approval, CardState, GridRect, Launch, PinTarget, Project, ProjectEnv,
+    ProjectId, RecordId, ResumeHandle, SavedView, SessionKind, SessionRecord, Settings, SideTab,
+    ThemeMode, Views, Workspace,
 };
 use super::reconcile::RECORD_ID_ENV;
 use crate::ports::agent::AgentLaunch;
@@ -2439,4 +2440,250 @@ fn set_side_tab_saves_settings() {
     let effects = core.dispatch(AppAction::SetSideTab(SideTab::Run), Clock::at(1));
     assert_eq!(core.settings().side_tab, SideTab::Run);
     assert!(matches!(effects[..], [Effect::SaveSettings(_)]));
+}
+
+#[test]
+fn working_set_adds_places_removes_and_saves() {
+    let (mut core, pid, ids) = with_records(&[SessionKind::Shell, SessionKind::Command], |_| None);
+    assert!(core.working_set().is_none());
+    let shell = PinTarget::Session(ids[0]);
+    let e = core.dispatch(
+        AppAction::AddToWorkingSet {
+            target: shell.clone(),
+            columns: 24,
+        },
+        Clock::at(1),
+    );
+    let saved = e.iter().find_map(|e| match e {
+        Effect::SaveViews(v) => Some(v.clone()),
+        _ => None,
+    });
+    let views = saved.expect("the set is saved");
+    let set = &views.sets[0];
+    assert_eq!(set.name, "Working Set");
+    assert_eq!(set.items[0].target, shell);
+    assert_eq!(
+        set.items[0].rect,
+        GridRect {
+            x: 0,
+            y: 0,
+            w: 10,
+            h: 8
+        }
+    );
+    assert!(core.in_working_set(&shell));
+    // Twice is once.
+    let e = core.dispatch(
+        AppAction::AddToWorkingSet {
+            target: shell.clone(),
+            columns: 24,
+        },
+        Clock::at(2),
+    );
+    assert!(e.is_empty(), "{e:?}");
+    // A command card is smaller and lands beside the first.
+    let command = PinTarget::Session(ids[1]);
+    core.dispatch(
+        AppAction::AddToWorkingSet {
+            target: command.clone(),
+            columns: 24,
+        },
+        Clock::at(3),
+    );
+    let file = PinTarget::File(pid, "README.md".into());
+    core.dispatch(
+        AppAction::AddToWorkingSet {
+            target: file.clone(),
+            columns: 24,
+        },
+        Clock::at(4),
+    );
+    let rects: Vec<GridRect> = core
+        .working_set()
+        .unwrap()
+        .items
+        .iter()
+        .map(|i| i.rect)
+        .collect();
+    assert_eq!(
+        rects[1],
+        GridRect {
+            x: 10,
+            y: 0,
+            w: 7,
+            h: 5
+        }
+    );
+    assert_eq!(
+        rects[2],
+        GridRect {
+            x: 10,
+            y: 5,
+            w: 10,
+            h: 10
+        },
+        "under the command card, the first spot scanning rows"
+    );
+    let e = core.dispatch(
+        AppAction::RemoveFromWorkingSet(command.clone()),
+        Clock::at(7),
+    );
+    assert!(matches!(e[0], Effect::SaveViews(_)));
+    assert!(!core.in_working_set(&command));
+    // A target that does not exist is not added.
+    let e = core.dispatch(
+        AppAction::AddToWorkingSet {
+            target: PinTarget::Session(RecordId::new()),
+            columns: 24,
+        },
+        Clock::at(8),
+    );
+    assert!(e.is_empty());
+}
+
+#[test]
+fn working_set_places_a_card_only_where_it_fits() {
+    let (mut core, pid, ids) = with_records(&[SessionKind::Shell], |_| None);
+    let file = PinTarget::File(pid, "README.md".into());
+    for target in [PinTarget::Session(ids[0]), file.clone()] {
+        core.dispatch(
+            AppAction::AddToWorkingSet {
+                target,
+                columns: 24,
+            },
+            Clock::at(1),
+        );
+    }
+    assert_eq!(
+        core.working_set().unwrap().items[1].rect,
+        GridRect {
+            x: 10,
+            y: 0,
+            w: 10,
+            h: 10
+        }
+    );
+    // A move onto another card is refused; a move into free space is kept.
+    let e = core.dispatch(
+        AppAction::PlacePin {
+            target: file.clone(),
+            rect: GridRect {
+                x: 5,
+                y: 2,
+                w: 10,
+                h: 10,
+            },
+        },
+        Clock::at(5),
+    );
+    assert!(e.is_empty(), "{e:?}");
+    let e = core.dispatch(
+        AppAction::PlacePin {
+            target: file.clone(),
+            rect: GridRect {
+                x: 17,
+                y: 0,
+                w: 1,
+                h: 1,
+            },
+        },
+        Clock::at(6),
+    );
+    assert_eq!(e.len(), 1);
+    let placed = core.working_set().unwrap().items[1].rect;
+    assert_eq!(
+        placed,
+        GridRect {
+            x: 17,
+            y: 0,
+            w: 3,
+            h: 2
+        },
+        "clamped to the minimum"
+    );
+}
+
+#[test]
+fn working_set_drops_cards_whose_session_or_project_is_gone() {
+    let (mut core, pid, ids) = with_records(&[SessionKind::Shell], |_| None);
+    let shell = PinTarget::Session(ids[0]);
+    let file = PinTarget::File(pid, "a.md".into());
+    for target in [shell.clone(), file.clone()] {
+        core.dispatch(
+            AppAction::AddToWorkingSet {
+                target,
+                columns: 24,
+            },
+            Clock::at(1),
+        );
+    }
+    let e = core.dispatch(AppAction::RemoveSession(ids[0]), Clock::at(2));
+    assert!(
+        e.iter()
+            .any(|e| matches!(e, Effect::SaveViews(v) if v.sets[0].items.len() == 1)),
+        "{e:?}"
+    );
+    assert!(!core.in_working_set(&shell));
+    assert!(core.in_working_set(&file));
+    core.dispatch(AppAction::RemoveProject(pid), Clock::at(3));
+    assert!(core.working_set().unwrap().items.is_empty());
+}
+
+#[test]
+fn working_set_loads_and_is_pruned_and_the_view_is_restored() {
+    let p = project("p");
+    let mut w = Workspace::new(p.clone());
+    let r = record(p.id, SessionKind::Shell, 0);
+    let id = r.id;
+    w.sessions.push(r);
+    let mut views = Views::default();
+    views.sets.push(crate::core::WorkingSet {
+        name: "Working Set".into(),
+        items: vec![
+            crate::core::PinnedItem {
+                target: PinTarget::Session(id),
+                rect: GridRect {
+                    x: 0,
+                    y: 0,
+                    w: 10,
+                    h: 8,
+                },
+            },
+            crate::core::PinnedItem {
+                target: PinTarget::Session(RecordId::new()),
+                rect: GridRect {
+                    x: 10,
+                    y: 0,
+                    w: 10,
+                    h: 8,
+                },
+            },
+        ],
+    });
+    let mut core = AppCore::new();
+    let effects = core.dispatch(
+        AppAction::StoreLoaded(Ok(Loaded {
+            workspaces: vec![w],
+            settings: Settings {
+                last_view: SavedView::WorkingSet,
+                ..Settings::default()
+            },
+            views,
+            ..Loaded::default()
+        })),
+        Clock::at(0),
+    );
+    assert_eq!(core.view(), View::WorkingSet);
+    assert_eq!(
+        core.working_set().unwrap().items.len(),
+        1,
+        "the stale card is dropped"
+    );
+    assert!(
+        effects
+            .iter()
+            .any(|e| matches!(e, Effect::SaveViews(v) if v.sets[0].items.len() == 1)),
+        "{effects:?}"
+    );
+    assert!(!effects.iter().any(|e| matches!(e, Effect::Spawn { .. })));
 }

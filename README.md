@@ -24,7 +24,9 @@ Data lives in `~/Library/Application Support/Switchboard/`: one JSON file
 per project under `projects/` (with a `.bak` of the previous version;
 approvals of defined commands live inside these records),
 `settings.json` (theme, exclusive mode, editor, global variables, file
-side shown next to sessions and its tab, the screen to reopen on), the
+side shown next to sessions and its tab, the screen to reopen on),
+`views.json` (the Working Set: which sessions and files are on it and
+where each card sits on its grid, with a `.bak`), the
 tmux config and socket name, `claude-hooks.json` (passed to Claude Code
 with `--settings`), `events.log` (the hook event log), `wake.sock`, and
 `scrollback/`. Sessions run on a private tmux server (`tmux -L
@@ -90,7 +92,8 @@ Dev aids, all environment variables:
   `new-codex`, `new-service`, `show-board`, `show-session`, `show-document`,
   `files`, `terminal`, `select-file`, `set-env`, `set-secret`, `dotenv`, `environment`,
   `send`, `interrupt`, `return`, `kill`, `approve`, `revoke`, `side`,
-  `switchboard`, `theme`, `sleep`).
+  `switchboard`, `working-set`, `add-to-working-set`,
+  `add-file-to-working-set`, `theme`, `sleep`).
 - `SWITCHBOARD_TMUX=<path>`: tmux binary to use.
 - `RUST_LOG=switchboard=debug`: verbose logging.
 
@@ -112,6 +115,7 @@ src/core/
   action.rs              AppAction, Effect, Clock, AppCore::dispatch, read model for the UI
   reconcile.rs           StoreLoaded / HostListed: card states, autostart services, spawn specs
   sessions.rs            launch, idempotent return, resume preflight, Codex serialization
+  grid.rs                Working Set placement: default card sizes, first free spot, overlap, minimum size
   definitions.rs         .switchboard/project.json entries -> records; hash-keyed approval
   events.rs              hook events -> record activity (matched by record id, ordered by time)
   tests.rs               state-transition tests for the core
@@ -149,6 +153,7 @@ src/ui/
   cards.rs               the one card for every entry kind, the card grid, pinned document cards
   session.rs             session view: header, notes, embedded terminal or conversation + message box
   switchboard.rs         every session across projects, waiting first
+  working_set.rs         the Working Set: the user's grid of session and file cards from any project
   dialogs.rs             add project / create session dialogs
 assets/fonts/            Source Serif 4 (Regular, Semibold, Italic; OFL), embedded by theme.rs
 tests/ui.rs              headless flows via egui_kittest with fakes

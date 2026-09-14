@@ -4,6 +4,7 @@ pub mod action;
 mod definitions;
 pub mod env;
 mod events;
+pub mod grid;
 pub mod model;
 pub mod reconcile;
 mod sessions;

@@ -776,6 +776,33 @@ Known gaps:
 - egui has no letter-spacing per style, so kickers set it at the call
   site (`theme::kicker`); there is no keyboard-focus ring beyond egui's.
 
+## Working Set status (2026-09-13)
+
+The Working Set is the user's own grid of cards from any project:
+sessions of every kind and files. It lives in `views.json` in the data
+directory (schema version `VIEWS_SCHEMA_VERSION`, atomic write with
+`.bak`; a file from a newer build is kept and never written over), as a
+list of sets of which only the first is shown. An item is a target (a
+record id, or a project id and a relative path) and a rectangle in grid
+units; the set owns nothing, and a card whose session or project is
+gone is dropped on the next dispatch. Cards are added from a board
+card's right-click menu, the session header, the file tree's menu, and
+the document header ("Add to working set" / "Remove from working set");
+adding never launches or resumes anything.
+
+Built so far: the model, store, core transitions (`AddToWorkingSet`,
+`RemoveFromWorkingSet`, `PlacePin`), the rail row, and the view, which
+draws today's cards at the working-set sizes (a unit is 34 px, so a
+board card is 7 units; sessions start at 10 by 8, commands and services
+at 7 by 5, files at 10 by 10). Columns come from the window width and a
+card past the right edge is reached by scrolling.
+
+Not built yet: the Arrange mode (drag, corner resize, snap to units, a
+drop over another card snaps back; `PlacePin` is ready for it), and the
+working-set card bodies (an agent's last prompt and answer with a
+quick-send line, a shell's pane tail with the same, a file's rendered
+preview with a raw/wrap toggle).
+
 ## Open questions
 
 - Shared project config runs with a hash-and-approve flow and no

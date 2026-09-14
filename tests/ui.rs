@@ -16,9 +16,9 @@ use switchboard::adapters::fakes::{
 };
 use switchboard::app::Services;
 use switchboard::core::{
-    Activity, AgentKind, AppAction, Approval, CardLayout, Definition, Launch, Notice, Project,
-    ProjectEnv, ProjectId, RecordId, ResumeHandle, SessionKind, SessionRecord, SideTab, ThemeMode,
-    View, Workspace,
+    Activity, AgentKind, AppAction, Approval, CardLayout, Definition, Launch, Notice, PinTarget,
+    Project, ProjectEnv, ProjectId, RecordId, ResumeHandle, SessionKind, SessionRecord, SideTab,
+    ThemeMode, View, Workspace,
 };
 use switchboard::ports::host::{HostId, HostStatus, Liveness};
 use switchboard::ports::store::Store;
@@ -1815,4 +1815,60 @@ fn a_markdown_table_keeps_its_columns_apart_and_inside_the_answer() {
         alpha.width() < 120.0,
         "the key column is too wide: {alpha:?}"
     );
+}
+
+#[test]
+fn the_working_set_takes_a_session_from_its_header_and_a_file_from_the_tree() {
+    let (mut harness, ids) = harness();
+    let id = seed_claude(&mut harness, &ids);
+    harness.set_size(egui::vec2(1200.0, 800.0));
+    harness.run_steps(2);
+    // Empty at first, reachable from the rail.
+    click(&mut harness, "Working Set");
+    harness.run_steps(2);
+    assert_eq!(harness.state().core().view(), View::WorkingSet);
+    harness.get_by_label("Nothing here yet.");
+    // The session header adds the session; the card appears at the
+    // working set's size, wider than a board card.
+    showing(&mut harness, View::Session(id));
+    click(&mut harness, "Add to working set");
+    harness.run_steps(2);
+    assert!(
+        harness
+            .state()
+            .core()
+            .in_working_set(&PinTarget::Session(id))
+    );
+    harness.get_by_label("Remove from working set");
+    showing(&mut harness, View::WorkingSet);
+    harness.get_by_label("1 card");
+    let card = harness.get_by_label("claude-agent").rect();
+    let open = harness.get_by_label("Open").rect();
+    assert!(
+        open.top() > card.bottom() + 150.0,
+        "the card is tall: {card:?} {open:?}"
+    );
+    // The board's card menu takes it off again.
+    harness.get_by_label("claude-agent").click_secondary();
+    harness.run_steps(2);
+    click(&mut harness, "Remove from working set");
+    harness.run_steps(2);
+    harness.get_by_label("Nothing here yet.");
+    // A file joins from the tree's menu and shows as a file card.
+    let (_dir, pid, _) = file_project(&mut harness);
+    harness.get_by_label("  README.md").click_secondary();
+    harness.run_steps(2);
+    click(&mut harness, "Add to working set");
+    harness.run_steps(2);
+    assert!(
+        harness
+            .state()
+            .core()
+            .in_working_set(&PinTarget::File(pid, "README.md".into()))
+    );
+    showing(&mut harness, View::WorkingSet);
+    harness.get_by_label("README.md");
+    click(&mut harness, "Remove");
+    harness.run_steps(2);
+    harness.get_by_label("Nothing here yet.");
 }
