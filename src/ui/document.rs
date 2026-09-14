@@ -103,7 +103,12 @@ fn body_of(path: &Path, bytes: Vec<u8>) -> Body {
 /// Load `path` into the state's preview slot unless the copy there is
 /// still current.
 pub fn ensure_loaded(state: &mut UiState, path: &Path) {
-    let fresh = state.preview.as_mut().is_some_and(|p| {
+    ensure_in(&mut state.preview, path);
+}
+
+/// Load `path` into `slot` unless the copy there is still current.
+pub fn ensure_in(slot: &mut Option<Preview>, path: &Path) {
+    let fresh = slot.as_mut().is_some_and(|p| {
         if p.path != path {
             return false;
         }
@@ -114,7 +119,7 @@ pub fn ensure_loaded(state: &mut UiState, path: &Path) {
         !p.stale()
     });
     if !fresh {
-        state.preview = Some(Preview::load(path));
+        *slot = Some(Preview::load(path));
     }
 }
 
@@ -179,6 +184,11 @@ pub fn body(state: &mut UiState, ui: &mut Ui) {
     let Some(preview) = preview else {
         return;
     };
+    draw_body(preview, markdown, ui);
+}
+
+/// Draw one loaded preview's contents.
+pub fn draw_body(preview: &Preview, markdown: &mut egui_commonmark::CommonMarkCache, ui: &mut Ui) {
     match &preview.body {
         Body::Markdown(text) => {
             markdown_style(ui);

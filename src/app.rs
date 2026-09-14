@@ -603,12 +603,19 @@ impl SwitchboardApp {
                 ids.push(*id);
             }
         }
+        // Working-set shell cards show the pane's tail, so they need the
+        // snapshot too while the set is on screen.
+        let set_ids: Vec<RecordId> = if view == View::WorkingSet {
+            self.core.working_set_sessions()
+        } else {
+            Vec::new()
+        };
         for id in ids {
             let on_screen = matches!(view, View::Session(sid) if sid == id);
             if !on_screen {
                 self.refresh_conversation(id);
             }
-            let wants_snapshot = on_screen || run_set.contains(&id);
+            let wants_snapshot = on_screen || run_set.contains(&id) || set_ids.contains(&id);
             // A pane that exited still exists (`remain-on-exit`), but its
             // output on disk is complete, so read that like a gone pane.
             let running = self

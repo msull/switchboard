@@ -805,9 +805,17 @@ where that overlaps another card. Release dispatches `PlacePin`, which
 the core refuses on an overlap, so a bad drop snaps back. Minimum size
 is 3 by 2 units.
 
-Not built yet: the working-set card bodies (an agent's last prompt and
-answer with a quick-send line, a shell's pane tail with the same, a
-file's rendered preview with a raw/wrap toggle).
+Cards: an agent or shell card shows state and project, the name, the
+last prompt on one line ("You: …", hover for the whole prompt), then
+as much of the last answer (a shell: the pane's tail, refreshed with
+the captions while the set is on screen) as fits above a one-line send
+box; hovering the answer shows up to a screenful and clicking it opens
+the raw message dialog. Enter in the send box dispatches `SendInput`;
+the box is off while the session is not running. Commands and services
+keep the board card. A file card shows the file inside the card,
+scrolling: Markdown rendered with a Raw toggle, raw and plain text with
+a Wrap/Sideways toggle, plus Open in app and Take off. Previews for
+file cards are loaded per path and reloaded when the file changes.
 
 ## Open questions
 

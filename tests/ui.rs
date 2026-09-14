@@ -2037,3 +2037,69 @@ fn arranging_moves_and_resizes_cards_in_units_and_refuses_an_overlap() {
     click(&mut harness, "Done");
     harness.get_by_label("Arrange");
 }
+
+#[test]
+fn working_set_cards_show_the_last_exchange_and_send_a_line() {
+    let (mut harness, ids) = harness();
+    let (id, _) = working_set_of_two(&mut harness, &ids);
+    let mut conversation = two_turns();
+    conversation.turns[1].user = "second question, please".into();
+    conversation.turns[1].final_text = "A full answer that is the agent's latest.".into();
+    harness
+        .state_mut()
+        .ui_state
+        .conversations
+        .insert(id, (None, conversation));
+    harness.run_steps(2);
+    harness.get_by_label("You: second question, please");
+    harness.get_by_label("A full answer that is the agent's latest.");
+    // The one-line box sends on Enter and asks for nothing else.
+    harness.get_by_label("Line to send").focus();
+    harness.run_steps(2);
+    harness.state_mut().dispatched.clear();
+    harness.get_by_label("Line to send").type_text("ls -la");
+    harness.step();
+    harness.key_press(egui::Key::Enter);
+    harness.run_steps(2);
+    assert!(
+        harness.state().dispatched.iter().any(|a| matches!(
+            a,
+            AppAction::SendInput { id: sid, text } if *sid == id && text == "ls -la"
+        )),
+        "{:?}",
+        harness.state().dispatched
+    );
+    // Clicking the answer opens it unformatted.
+    harness
+        .get_by_label("A full answer that is the agent's latest.")
+        .click();
+    harness.run_steps(2);
+    harness.get_by_label("Raw message");
+}
+
+#[test]
+fn a_file_card_previews_the_file_rendered_or_raw() {
+    let (mut harness, _) = harness();
+    let (_dir, pid, _) = file_project(&mut harness);
+    harness.state_mut().core_mut_for_seeding().dispatch(
+        AppAction::AddToWorkingSet {
+            target: PinTarget::File(pid, "README.md".into()),
+            columns: 30,
+        },
+        switchboard::core::Clock::at(1),
+    );
+    harness.set_size(egui::vec2(1400.0, 900.0));
+    showing(&mut harness, View::WorkingSet);
+    harness.run_steps(2);
+    // Rendered: the heading is text without its mark.
+    harness.get_by_label("Hello");
+    harness.get_by_label("from the readme");
+    click(&mut harness, "Raw");
+    harness.get_by_label_contains("# Hello");
+    harness.get_by_label("Rendered");
+    // Raw text wraps by default and can be set to scroll sideways.
+    click(&mut harness, "Sideways");
+    harness.get_by_label("Wrap");
+    click(&mut harness, "Rendered");
+    harness.get_by_label("Hello");
+}

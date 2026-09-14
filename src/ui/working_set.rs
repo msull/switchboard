@@ -7,10 +7,13 @@ use std::path::Path;
 
 use egui::{Pos2, RichText, Sense, Ui, UiBuilder, vec2};
 
-use super::cards::{file_name, session_card};
-use super::{DrawCtx, theme};
+use super::cards::{actions, file_name, is_running, kicker_text, kind_label, session_card};
+use super::document::{self, Body};
+use super::{DrawCtx, UiState, theme};
 use crate::core::grid::{MIN_HEIGHT, MIN_WIDTH};
-use crate::core::{AppAction, GridRect, PinTarget, PinnedItem};
+use crate::core::{
+    AppAction, CardState, GridRect, PinTarget, PinnedItem, SessionKind, SessionRecord,
+};
 
 /// Arrange mode: while on, cards are moved and resized instead of
 /// used, and the one being dragged follows the pointer in whole units.
@@ -279,16 +282,273 @@ fn arrange_handles(cx: &mut DrawCtx<'_>, ui: &mut Ui, item: &PinnedItem, cell: e
 fn card(cx: &mut DrawCtx<'_>, ui: &mut Ui, item: &PinnedItem) {
     match &item.target {
         PinTarget::Session(id) => {
-            if let Some(record) = cx.core.session(*id) {
-                session_card(cx, ui, record);
+            let Some(record) = cx.core.session(*id) else {
+                return;
+            };
+            match record.kind {
+                // Commands and services keep their controls and output.
+                SessionKind::Command | SessionKind::Service => session_card(cx, ui, record),
+                SessionKind::Agent(_) | SessionKind::Shell => set_card(cx, ui, record),
             }
         }
         PinTarget::File(pid, rel) => file_card(cx, ui, *pid, rel),
     }
 }
 
-/// A file on the working set: its name, folder, and project, with
-/// Preview, Open in app, and Remove.
+/// How a file card shows its file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FileMode {
+    /// The source as it is, instead of Markdown rendered.
+    pub raw: bool,
+    /// Raw text wraps at the card; off, it scrolls sideways.
+    pub wrap: bool,
+}
+
+impl Default for FileMode {
+    fn default() -> Self {
+        Self {
+            raw: false,
+            wrap: true,
+        }
+    }
+}
+
+/// A tooltip is a screenful at most; the rest is a click away in the
+/// raw message dialog.
+const HOVER_CHARS: usize = 1500;
+
+fn capped(text: &str) -> String {
+    let mut out: String = text.chars().take(HOVER_CHARS).collect();
+    if out.len() < text.len() {
+        out.push_str("\n…");
+    }
+    out
+}
+
+/// Height kept under the body for the send line and the action row.
+const FOOTER: f32 = 62.0;
+
+/// An agent or shell on the working set: state and project, name, the
+/// last prompt on one line, as much of the last answer (a shell: the
+/// pane's tail) as fits, a one-line send box, and the usual actions.
+/// Hovering the prompt or the answer shows more; clicking the answer
+/// opens it unformatted.
+/// What an agent or shell card says, gathered before drawing.
+struct SetCardText {
+    kicker: String,
+    meta: String,
+    prompt: Option<String>,
+    answer: Option<String>,
+    reason: Option<String>,
+    agent: bool,
+    state: CardState,
+    running: bool,
+}
+
+fn set_card_text(cx: &DrawCtx<'_>, record: &SessionRecord) -> SetCardText {
+    let state = cx.core.card_state(record.id);
+    let running = is_running(cx.core, record.id);
+    let agent = matches!(record.kind, SessionKind::Agent(_));
+    let project = cx
+        .core
+        .workspace(record.project)
+        .map(|w| w.project.name.clone())
+        .unwrap_or_default();
+    let conversation = cx.state.conversations.get(&record.id).map(|(_, c)| c);
+    let last = conversation.and_then(|c| c.turns.last());
+    let prompt = last.map(|t| t.user.clone()).filter(|u| !u.is_empty());
+    let answer = if agent {
+        last.map(|t| {
+            if t.final_text.is_empty() {
+                t.activity
+                    .last()
+                    .map(|a| a.line.clone())
+                    .unwrap_or_default()
+            } else {
+                t.final_text.clone()
+            }
+        })
+    } else {
+        cx.state
+            .snapshots
+            .get(&record.id)
+            .map(|s| pane_tail(s, 40))
+            .or_else(|| cx.state.captions.get(&record.id).cloned())
+    }
+    .filter(|a| !a.trim().is_empty());
+    let reason = (state == CardState::WaitingOnYou)
+        .then(|| record.activity_reason.clone())
+        .flatten();
+    let mut parts = vec![kind_label(record.kind).to_owned()];
+    parts.extend(conversation.and_then(|c| c.model.clone()));
+    parts.push(file_name(&record.cwd));
+    SetCardText {
+        kicker: format!(
+            "{} · {project}",
+            kicker_text(cx.core, record, &state, running)
+        ),
+        meta: parts.join(" · "),
+        prompt,
+        answer,
+        reason,
+        agent,
+        state,
+        running,
+    }
+}
+
+fn set_card(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord) {
+    let p = theme::palette(ui);
+    let SetCardText {
+        kicker,
+        meta,
+        prompt,
+        answer,
+        reason,
+        agent,
+        state,
+        running,
+    } = set_card_text(cx, record);
+    let mut open = false;
+    let mut show_raw = None;
+    theme::surface(ui)
+        .inner_margin(egui::Margin::symmetric(14, 12))
+        .show(ui, |ui| {
+            ui.set_min_size(ui.available_size());
+            ui.spacing_mut().item_spacing = vec2(6.0, 4.0);
+            ui.style_mut().interaction.selectable_labels = false;
+            ui.horizontal(|ui| {
+                theme::kicker(ui, &kicker, p.state_text(&state));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    theme::status_dot(ui, &state, 8.0);
+                });
+            });
+            let title = ui
+                .add(
+                    egui::Label::new(RichText::new(&record.name).text_style(theme::card_title()))
+                        .truncate()
+                        .sense(Sense::click()),
+                )
+                .on_hover_cursor(egui::CursorIcon::PointingHand);
+            open = title.clicked();
+            title.context_menu(|ui| {
+                if menu_item(cx, ui, PinTarget::Session(record.id)) {
+                    ui.close();
+                }
+            });
+            ui.add(egui::Label::new(RichText::new(&meta).small().color(p.n600)).truncate());
+            if let Some(prompt) = &prompt {
+                let line = prompt.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(format!("You: {line}"))
+                            .text_style(theme::meta())
+                            .color(p.accent_text),
+                    )
+                    .truncate(),
+                )
+                .on_hover_text(capped(prompt));
+            }
+            // The body takes what is left above the footer and is cut
+            // there; the card's clip rectangle does the cutting.
+            let body_height = (ui.available_height() - FOOTER).max(20.0);
+            let body_rect =
+                egui::Rect::from_min_size(ui.cursor().min, vec2(ui.available_width(), body_height));
+            ui.scope_builder(UiBuilder::new().max_rect(body_rect), |ui| {
+                ui.set_clip_rect(body_rect.intersect(ui.clip_rect()));
+                ui.set_min_height(body_height);
+                if let Some(reason) = &reason {
+                    ui.label(
+                        RichText::new(reason)
+                            .text_style(theme::meta())
+                            .color(p.accent_2_text),
+                    );
+                }
+                if let Some(answer) = &answer {
+                    let text = if agent {
+                        RichText::new(answer)
+                            .text_style(theme::excerpt())
+                            .color(p.n800)
+                    } else {
+                        RichText::new(answer).monospace().color(p.n800)
+                    };
+                    ui.add(egui::Label::new(text).wrap());
+                }
+            });
+            ui.advance_cursor_after_rect(body_rect);
+            if let Some(answer) = &answer {
+                let hover = ui
+                    .interact(body_rect, ui.id().with(("body", record.id)), Sense::click())
+                    .on_hover_text(capped(answer))
+                    .on_hover_cursor(egui::CursorIcon::PointingHand);
+                if hover.clicked() {
+                    show_raw = Some(answer.clone());
+                }
+            }
+            ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
+                actions(cx, ui, record, running);
+                send_line(cx, ui, record, running);
+            });
+        });
+    if let Some(text) = show_raw {
+        cx.state.raw_message = Some(text);
+    }
+    if open {
+        cx.dispatch(AppAction::ShowSession(record.id));
+    }
+}
+
+/// The last `lines` lines of a pane with something on them.
+fn pane_tail(snapshot: &str, lines: usize) -> String {
+    let kept: Vec<&str> = snapshot
+        .lines()
+        .rev()
+        .skip_while(|l| l.trim().is_empty())
+        .take(lines)
+        .collect();
+    kept.into_iter().rev().collect::<Vec<_>>().join("\n")
+}
+
+/// One line to type into the session without opening it: Enter sends
+/// it as a line to the pane. Off while the session is not running.
+fn send_line(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord, running: bool) {
+    let p = theme::palette(ui);
+    let field_id = ui.id().with(("quick-send", record.id));
+    let draft = cx.state.input_drafts.entry(record.id).or_default();
+    let hint = if running {
+        "Send a line…"
+    } else {
+        "Not running"
+    };
+    // The label is invisible but names the field for tests and screen
+    // readers, as the session view's message box does.
+    let label = ui.add(egui::Label::new(RichText::new("Line to send").size(0.1)));
+    let response = ui
+        .add_enabled(
+            running,
+            egui::TextEdit::singleline(draft)
+                .id(field_id)
+                .hint_text(hint)
+                .font(egui::TextStyle::Body)
+                .background_color(p.bg)
+                .margin(egui::Margin::symmetric(8, 5))
+                .desired_width(f32::INFINITY),
+        )
+        .labelled_by(label.id);
+    let enter = ui.input(|i| i.key_pressed(egui::Key::Enter) && i.modifiers.is_none());
+    if response.lost_focus() && enter && !draft.trim().is_empty() {
+        let text = draft.clone();
+        cx.dispatch(AppAction::SendInput {
+            id: record.id,
+            text,
+        });
+        ui.memory_mut(|m| m.request_focus(field_id));
+    }
+}
+
+/// A file on the working set: its name and project, the file itself
+/// scrolling inside the card (Markdown rendered, or raw; raw text
+/// wrapped or scrolling sideways), and Open in app and Take off.
 fn file_card(cx: &mut DrawCtx<'_>, ui: &mut Ui, pid: crate::core::ProjectId, rel: &Path) {
     let p = theme::palette(ui);
     let Some(project) = cx.core.workspace(pid).map(|w| &w.project) else {
@@ -296,15 +556,52 @@ fn file_card(cx: &mut DrawCtx<'_>, ui: &mut Ui, pid: crate::core::ProjectId, rel
     };
     let path = project.root.join(rel);
     let target = PinTarget::File(pid, rel.to_path_buf());
+    let project_name = project.name.clone();
     let mut open = false;
+    let mut mode = cx.state.file_modes.get(&path).copied().unwrap_or_default();
+    let text_file = {
+        let slot = cx.state.previews.entry(path.clone()).or_insert(None);
+        document::ensure_in(slot, &path);
+        slot.as_ref()
+            .is_some_and(|pr| matches!(pr.body, Body::Text(_) | Body::Markdown(_)))
+    };
+    let is_markdown = cx
+        .state
+        .previews
+        .get(&path)
+        .and_then(Option::as_ref)
+        .is_some_and(|pr| matches!(pr.body, Body::Markdown(_)));
     theme::surface(ui)
         .inner_margin(egui::Margin::symmetric(14, 12))
         .show(ui, |ui| {
             ui.set_min_size(ui.available_size());
             ui.spacing_mut().item_spacing = vec2(6.0, 4.0);
-            ui.style_mut().interaction.selectable_labels = false;
-            theme::kicker(ui, &format!("File · {}", project.name), p.n600);
-            open = ui
+            ui.horizontal(|ui| {
+                theme::kicker(ui, &format!("File · {project_name}"), p.n600);
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.spacing_mut().item_spacing.x = 8.0;
+                    ui.spacing_mut().button_padding = vec2(0.0, 2.0);
+                    if text_file && (mode.raw || !is_markdown) {
+                        let wrap = if mode.wrap { "Sideways" } else { "Wrap" };
+                        if theme::ghost_muted(ui, wrap)
+                            .on_hover_text("Wrap long lines, or scroll sideways for them")
+                            .clicked()
+                        {
+                            mode.wrap = !mode.wrap;
+                        }
+                    }
+                    if is_markdown {
+                        let raw = if mode.raw { "Rendered" } else { "Raw" };
+                        if theme::ghost_muted(ui, raw)
+                            .on_hover_text("Markdown rendered, or the source as it is")
+                            .clicked()
+                        {
+                            mode.raw = !mode.raw;
+                        }
+                    }
+                });
+            });
+            let title = ui
                 .add(
                     egui::Label::new(
                         RichText::new(file_name(&path)).text_style(theme::card_title()),
@@ -312,13 +609,22 @@ fn file_card(cx: &mut DrawCtx<'_>, ui: &mut Ui, pid: crate::core::ProjectId, rel
                     .truncate()
                     .sense(Sense::click()),
                 )
-                .on_hover_cursor(egui::CursorIcon::PointingHand)
-                .clicked();
-            if let Some(dir) = rel.parent().filter(|d| !d.as_os_str().is_empty()) {
-                ui.add(
-                    egui::Label::new(theme::mono_text(ui, dir.display().to_string())).truncate(),
-                );
-            }
+                .on_hover_cursor(egui::CursorIcon::PointingHand);
+            open = title.clicked();
+            title.context_menu(|ui| {
+                if menu_item(cx, ui, target.clone()) {
+                    ui.close();
+                }
+            });
+            let body_height = (ui.available_height() - 34.0).max(20.0);
+            let body_rect =
+                egui::Rect::from_min_size(ui.cursor().min, vec2(ui.available_width(), body_height));
+            ui.scope_builder(UiBuilder::new().max_rect(body_rect), |ui| {
+                ui.set_clip_rect(body_rect.intersect(ui.clip_rect()));
+                ui.set_min_height(body_height);
+                file_body(cx.state, ui, &path, mode);
+            });
+            ui.advance_cursor_after_rect(body_rect);
             ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 14.0;
@@ -335,9 +641,49 @@ fn file_card(cx: &mut DrawCtx<'_>, ui: &mut Ui, pid: crate::core::ProjectId, rel
                 });
             });
         });
+    cx.state.file_modes.insert(path.clone(), mode);
     if open {
         cx.dispatch(AppAction::ShowDocument(pid, path));
     }
+}
+
+/// The file inside its card: a scroll area, wrapped or sideways, with
+/// the preview rendered or its source.
+fn file_body(state: &mut UiState, ui: &mut Ui, path: &Path, mode: FileMode) {
+    let UiState {
+        previews, markdown, ..
+    } = state;
+    let Some(preview) = previews.get(path).and_then(Option::as_ref) else {
+        return;
+    };
+    let raw = match &preview.body {
+        Body::Markdown(text) if mode.raw => Some(text),
+        Body::Text(text) => Some(text),
+        _ => None,
+    };
+    let width = ui.available_width();
+    let scroll = if raw.is_some() && !mode.wrap {
+        egui::ScrollArea::both()
+    } else {
+        egui::ScrollArea::vertical()
+    };
+    scroll
+        .id_salt(("file-card", path))
+        .auto_shrink(false)
+        .show(ui, |ui| {
+            if let Some(text) = raw {
+                let label = egui::Label::new(RichText::new(text).monospace());
+                if mode.wrap {
+                    ui.set_max_width(width);
+                    ui.add(label.wrap());
+                } else {
+                    ui.add(label.wrap_mode(egui::TextWrapMode::Extend));
+                }
+            } else {
+                ui.set_max_width(width);
+                document::draw_body(preview, markdown, ui);
+            }
+        });
 }
 
 /// The menu item that puts `target` on the working set or takes it
@@ -403,6 +749,15 @@ mod tests {
                 ..from
             }
         );
+    }
+
+    #[test]
+    fn the_pane_tail_keeps_the_last_lines_with_text() {
+        assert_eq!(pane_tail("a\nb\nc\n\n\n", 2), "b\nc");
+        assert_eq!(pane_tail("", 3), "");
+        assert_eq!(capped("short"), "short");
+        let long = "x".repeat(HOVER_CHARS + 5);
+        assert!(capped(&long).ends_with('…'));
     }
 
     #[test]

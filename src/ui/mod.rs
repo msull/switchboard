@@ -27,6 +27,7 @@ pub mod theme;
 pub mod working_set;
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::time::SystemTime;
 
 use egui::{Key, Modifiers, RichText, Ui};
@@ -91,6 +92,11 @@ pub struct UiState {
     pub working_set_columns: u32,
     /// Arrange mode of the working set and the drag under way.
     pub arrange: working_set::Arrange,
+    /// Previews for the working set's file cards, one per path.
+    pub previews: HashMap<PathBuf, Option<document::Preview>>,
+    /// How each file card shows its file: rendered or raw, wrapped or
+    /// scrolling sideways.
+    pub file_modes: HashMap<PathBuf, working_set::FileMode>,
     /// Messages being composed, one per session, so switching away and
     /// back does not lose a half-written prompt.
     pub input_drafts: HashMap<RecordId, String>,
@@ -126,6 +132,8 @@ impl Default for UiState {
             raw_message: None,
             working_set_columns: 24,
             arrange: working_set::Arrange::default(),
+            previews: HashMap::new(),
+            file_modes: HashMap::new(),
             input_drafts: HashMap::new(),
             terminals: HashMap::new(),
             applied_theme: None,

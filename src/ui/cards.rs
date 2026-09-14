@@ -105,7 +105,12 @@ pub fn grid(ui: &mut Ui, count: usize, height: f32, mut cell: impl FnMut(&mut Ui
 
 /// The kicker line of a card: the state, and for commands and services
 /// the kind before it. The reason a session waits is the body instead.
-fn kicker_text(core: &AppCore, record: &SessionRecord, state: &CardState, running: bool) -> String {
+pub(super) fn kicker_text(
+    core: &AppCore,
+    record: &SessionRecord,
+    state: &CardState,
+    running: bool,
+) -> String {
     let age = if running {
         since_text(record.last_seen)
     } else {
@@ -287,7 +292,7 @@ fn clamp_lines(ui: &Ui, text: &str, style: &egui::TextStyle, lines: usize) -> St
 
 /// The action row: ghost buttons flush left, destructive ones last in
 /// neutral.
-fn actions(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord, running: bool) {
+pub(super) fn actions(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord, running: bool) {
     ui.horizontal(|ui| {
         // No side padding: the text sits flush with the title above, and a
         // negative space would push the row's edge out and grow the panel.
