@@ -1809,8 +1809,9 @@ fn a_markdown_table_keeps_its_columns_apart_and_inside_the_answer() {
     let alpha = rect(&harness, "alpha");
     let desc = rect(&harness, "A description");
     let one = rect(&harness, "wrapping when");
+    // The exact cell: a looser match can pick a row-wide node.
     let n = harness
-        .query_all_by_label_contains("22")
+        .query_all_by_label("22")
         .map(|n| n.rect())
         .find(|r| r.top() > alpha.top())
         .unwrap();
