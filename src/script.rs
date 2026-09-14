@@ -84,6 +84,7 @@ fn working_set_step(app: &mut SwitchboardApp, w: &[&str]) -> Result<(), String> 
             _ => crate::core::ThemeMode::Auto,
         })),
         ["working-set"] => app.dispatch(AppAction::ShowWorkingSet),
+        ["arrange", on] => app.ui_state.arrange.on = *on == "on",
         ["add-to-working-set", n] => {
             let id = session(app, n)?;
             app.dispatch(AppAction::AddToWorkingSet {
@@ -189,7 +190,7 @@ fn step(app: &mut SwitchboardApp, w: &[&str]) -> Result<(), String> {
         }
         ["switchboard"] => app.dispatch(AppAction::ShowSwitchboard),
         [
-            "working-set" | "add-to-working-set" | "add-file-to-working-set",
+            "working-set" | "add-to-working-set" | "add-file-to-working-set" | "arrange",
             ..,
         ] => {
             working_set_step(app, w)?;

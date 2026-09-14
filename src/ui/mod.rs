@@ -89,6 +89,8 @@ pub struct UiState {
     /// How many grid units the working set fits across right now, so
     /// a card added from another view lands where it will be seen.
     pub working_set_columns: u32,
+    /// Arrange mode of the working set and the drag under way.
+    pub arrange: working_set::Arrange,
     /// Messages being composed, one per session, so switching away and
     /// back does not lose a half-written prompt.
     pub input_drafts: HashMap<RecordId, String>,
@@ -123,6 +125,7 @@ impl Default for UiState {
             env_dialog: None,
             raw_message: None,
             working_set_columns: 24,
+            arrange: working_set::Arrange::default(),
             input_drafts: HashMap::new(),
             terminals: HashMap::new(),
             applied_theme: None,

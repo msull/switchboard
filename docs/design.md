@@ -797,11 +797,17 @@ board card is 7 units; sessions start at 10 by 8, commands and services
 at 7 by 5, files at 10 by 10). Columns come from the window width and a
 card past the right edge is reached by scrolling.
 
-Not built yet: the Arrange mode (drag, corner resize, snap to units, a
-drop over another card snaps back; `PlacePin` is ready for it), and the
-working-set card bodies (an agent's last prompt and answer with a
-quick-send line, a shell's pane tail with the same, a file's rendered
-preview with a raw/wrap toggle).
+Arrange mode: the Arrange button in the header (Done to leave it)
+disables the cards and shows the unit grid as dots; dragging a card
+moves it and dragging its bottom-right handle resizes it, both in whole
+units, with the card drawn where it would land and its outline magenta
+where that overlaps another card. Release dispatches `PlacePin`, which
+the core refuses on an overlap, so a bad drop snaps back. Minimum size
+is 3 by 2 units.
+
+Not built yet: the working-set card bodies (an agent's last prompt and
+answer with a quick-send line, a shell's pane tail with the same, a
+file's rendered preview with a raw/wrap toggle).
 
 ## Open questions
 

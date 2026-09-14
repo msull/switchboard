@@ -1868,7 +1868,172 @@ fn the_working_set_takes_a_session_from_its_header_and_a_file_from_the_tree() {
     );
     showing(&mut harness, View::WorkingSet);
     harness.get_by_label("README.md");
-    click(&mut harness, "Remove");
+    click(&mut harness, "Take off");
     harness.run_steps(2);
     harness.get_by_label("Nothing here yet.");
+}
+
+/// Press, move, release with the primary button, a few frames apart.
+fn drag(harness: &mut Harness<'static, SwitchboardApp>, from: egui::Pos2, to: egui::Pos2) {
+    harness.event(egui::Event::PointerMoved(from));
+    harness.step();
+    harness.event(egui::Event::PointerButton {
+        pos: from,
+        button: egui::PointerButton::Primary,
+        pressed: true,
+        modifiers: egui::Modifiers::NONE,
+    });
+    harness.step();
+    let mid = from.lerp(to, 0.5);
+    harness.event(egui::Event::PointerMoved(mid));
+    harness.step();
+    harness.event(egui::Event::PointerMoved(to));
+    harness.run_steps(2);
+    harness.event(egui::Event::PointerButton {
+        pos: to,
+        button: egui::PointerButton::Primary,
+        pressed: false,
+        modifiers: egui::Modifiers::NONE,
+    });
+    harness.run_steps(3);
+}
+
+/// The claude agent and alpha's command on the working set, at 30
+/// columns, the view showing in a large window.
+fn working_set_of_two(
+    harness: &mut Harness<'static, SwitchboardApp>,
+    ids: &Seeded,
+) -> (RecordId, RecordId) {
+    let id = seed_claude(harness, ids);
+    let shell = harness
+        .state()
+        .core()
+        .workspace(ids.alpha)
+        .unwrap()
+        .sessions[0]
+        .id;
+    for target in [PinTarget::Session(id), PinTarget::Session(shell)] {
+        harness.state_mut().core_mut_for_seeding().dispatch(
+            AppAction::AddToWorkingSet {
+                target,
+                columns: 30,
+            },
+            switchboard::core::Clock::at(1),
+        );
+    }
+    harness.set_size(egui::vec2(1400.0, 900.0));
+    showing(harness, View::WorkingSet);
+    (id, shell)
+}
+
+fn rect_of(
+    h: &Harness<'static, SwitchboardApp>,
+    target: &PinTarget,
+) -> switchboard::core::GridRect {
+    h.state()
+        .core()
+        .working_set()
+        .unwrap()
+        .items
+        .iter()
+        .find(|i| i.target == *target)
+        .unwrap()
+        .rect
+}
+
+#[test]
+fn arranging_moves_and_resizes_cards_in_units_and_refuses_an_overlap() {
+    use switchboard::core::GridRect;
+    use switchboard::ui::working_set::UNIT;
+    let (mut harness, ids) = harness();
+    let (id, shell) = working_set_of_two(&mut harness, &ids);
+    let me = PinTarget::Session(id);
+    assert_eq!(
+        rect_of(&harness, &me),
+        GridRect {
+            x: 0,
+            y: 0,
+            w: 10,
+            h: 8
+        }
+    );
+    assert_eq!(
+        rect_of(&harness, &PinTarget::Session(shell)),
+        GridRect {
+            x: 10,
+            y: 0,
+            w: 7,
+            h: 5
+        },
+        "a command card is smaller"
+    );
+    // Outside arrange mode a drag does nothing.
+    let title = harness.get_by_label("claude-agent").rect();
+    drag(
+        &mut harness,
+        title.center(),
+        title.center() + egui::vec2(UNIT * 12.0, 0.0),
+    );
+    assert_eq!(rect_of(&harness, &me).x, 0);
+    click(&mut harness, "Arrange");
+    harness.get_by_label("Done");
+    // Twelve units right lands on the shell's card: refused, back home.
+    let title = harness.get_by_label("claude-agent").rect();
+    drag(
+        &mut harness,
+        title.center(),
+        title.center() + egui::vec2(UNIT * 12.0, 0.0),
+    );
+    assert_eq!(
+        rect_of(&harness, &me),
+        GridRect {
+            x: 0,
+            y: 0,
+            w: 10,
+            h: 8
+        }
+    );
+    // Twenty units right is free.
+    let title = harness.get_by_label("claude-agent").rect();
+    drag(
+        &mut harness,
+        title.center(),
+        title.center() + egui::vec2(UNIT * 20.0, 0.0),
+    );
+    assert_eq!(
+        rect_of(&harness, &me),
+        GridRect {
+            x: 20,
+            y: 0,
+            w: 10,
+            h: 8
+        }
+    );
+    // The corner handle resizes: the card is 10 by 8 units and its
+    // title sits 14 px in from the left and about 30 px under the top.
+    let title = harness.get_by_label("claude-agent").rect();
+    let open = harness
+        .query_all_by_label("Open")
+        .map(|n| n.rect())
+        .find(|r| r.left() >= title.left() - 1.0 && r.left() < title.left() + 40.0)
+        .expect("the card's Open button");
+    let right = title.left() - 14.0 + 10.0 * UNIT - 8.0;
+    let bottom = open.bottom() + 12.0;
+    let corner = egui::pos2(right - 6.0, bottom - 6.0);
+    drag(
+        &mut harness,
+        corner,
+        corner + egui::vec2(-UNIT * 3.0, UNIT * 2.0),
+    );
+    assert_eq!(
+        rect_of(&harness, &me),
+        GridRect {
+            x: 20,
+            y: 0,
+            w: 7,
+            h: 10
+        }
+    );
+    click(&mut harness, "Done");
+    harness.get_by_label("Arrange");
 }
