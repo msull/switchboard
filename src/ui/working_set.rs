@@ -454,9 +454,12 @@ fn set_card(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord) {
             let body_height = (ui.available_height() - FOOTER).max(20.0);
             let body_rect =
                 egui::Rect::from_min_size(ui.cursor().min, vec2(ui.available_width(), body_height));
-            ui.scope_builder(UiBuilder::new().max_rect(body_rect), |ui| {
-                ui.set_clip_rect(body_rect.intersect(ui.clip_rect()));
-                ui.set_min_height(body_height);
+            // A child that allocates nothing in the card: text taller
+            // than the body is cut, not allowed to push the footer down.
+            let mut body = ui.new_child(UiBuilder::new().max_rect(body_rect));
+            body.set_clip_rect(body_rect.intersect(ui.clip_rect()));
+            {
+                let ui = &mut body;
                 if let Some(reason) = &reason {
                     ui.label(
                         RichText::new(reason)
@@ -474,7 +477,7 @@ fn set_card(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord) {
                     };
                     ui.add(egui::Label::new(text).wrap());
                 }
-            });
+            }
             ui.advance_cursor_after_rect(body_rect);
             if let Some(answer) = &answer {
                 let hover = ui
@@ -619,11 +622,9 @@ fn file_card(cx: &mut DrawCtx<'_>, ui: &mut Ui, pid: crate::core::ProjectId, rel
             let body_height = (ui.available_height() - 34.0).max(20.0);
             let body_rect =
                 egui::Rect::from_min_size(ui.cursor().min, vec2(ui.available_width(), body_height));
-            ui.scope_builder(UiBuilder::new().max_rect(body_rect), |ui| {
-                ui.set_clip_rect(body_rect.intersect(ui.clip_rect()));
-                ui.set_min_height(body_height);
-                file_body(cx.state, ui, &path, mode);
-            });
+            let mut body = ui.new_child(UiBuilder::new().max_rect(body_rect));
+            body.set_clip_rect(body_rect.intersect(ui.clip_rect()));
+            file_body(cx.state, &mut body, &path, mode);
             ui.advance_cursor_after_rect(body_rect);
             ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
                 ui.horizontal(|ui| {

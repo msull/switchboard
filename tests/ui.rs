@@ -2053,6 +2053,43 @@ fn working_set_cards_show_the_last_exchange_and_send_a_line() {
     harness.run_steps(2);
     harness.get_by_label("You: second question, please");
     harness.get_by_label("A full answer that is the agent's latest.");
+    // A long answer is cut at the body, not allowed to push the send
+    // box and the actions out of the card.
+    let card_top = harness.get_by_label("claude-agent").rect().top();
+    let field_top = harness.get_by_label("Line to send").rect().top();
+    let long = "A long answer that goes on and on. ".repeat(60);
+    harness
+        .state_mut()
+        .ui_state
+        .conversations
+        .get_mut(&id)
+        .unwrap()
+        .1
+        .turns[1]
+        .final_text = long;
+    harness.run_steps(2);
+    let after = harness.get_by_label("Line to send").rect().top();
+    assert!(
+        (after - field_top).abs() < 0.5,
+        "the send box moved: {field_top} -> {after}"
+    );
+    let card_bottom = card_top + 8.0 * switchboard::ui::working_set::UNIT;
+    let open = harness
+        .query_all_by_label("Open")
+        .map(|n| n.rect())
+        .find(|r| r.top() > card_top && r.top() < card_bottom)
+        .expect("the card's Open button is inside the card");
+    assert!(open.bottom() <= card_bottom, "{open:?} past {card_bottom}");
+    harness
+        .state_mut()
+        .ui_state
+        .conversations
+        .get_mut(&id)
+        .unwrap()
+        .1
+        .turns[1]
+        .final_text = "A full answer that is the agent's latest.".into();
+    harness.run_steps(2);
     // The one-line box sends on Enter and asks for nothing else.
     harness.get_by_label("Line to send").focus();
     harness.run_steps(2);
