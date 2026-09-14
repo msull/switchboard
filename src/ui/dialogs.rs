@@ -83,7 +83,7 @@ fn raw_message(cx: &mut DrawCtx<'_>, ctx: &Context) {
     let mut view = cx.state.message_view;
     let screen = ctx.content_rect();
     // Most of the window, so a long answer reads like a page.
-    let width = (screen.width() * 0.8).clamp(320.0, 1200.0);
+    let width = (screen.width() * 0.72).clamp(320.0, 1080.0);
     let height = (screen.height() - 180.0).max(160.0);
     dialog(ctx, "Full message", |ui| {
         let p = theme::palette(ui);
