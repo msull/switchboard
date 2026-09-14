@@ -65,26 +65,71 @@ pub fn show(cx: &mut DrawCtx<'_>, ctx: &Context) {
 /// One message as the transcript holds it, in a monospace box that
 /// scrolls, with nothing rendered: the fallback when Markdown goes
 /// wrong. The text is shown read-only and selectable.
+/// The two ways the message dialog shows a message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MessageView {
+    /// The text as it is, in monospace.
+    #[default]
+    Raw,
+    /// Markdown drawn, as in the session view.
+    Rendered,
+}
+
 fn raw_message(cx: &mut DrawCtx<'_>, ctx: &Context) {
-    let Some(text) = cx.state.raw_message.as_deref() else {
+    let Some(text) = cx.state.raw_message.clone() else {
         return;
     };
     let mut close = ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
-    let mut shown = text;
+    let mut view = cx.state.message_view;
     let screen = ctx.content_rect();
-    dialog(ctx, "Raw message", |ui| {
+    // Most of the window, so a long answer reads like a page.
+    let width = (screen.width() * 0.8).clamp(320.0, 1200.0);
+    let height = (screen.height() - 180.0).max(160.0);
+    dialog(ctx, "Full message", |ui| {
         let p = theme::palette(ui);
+        ui.set_width(width);
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 2.0;
+            for (label, mode) in [
+                ("Raw", MessageView::Raw),
+                ("Rendered", MessageView::Rendered),
+            ] {
+                let button = if view == mode {
+                    theme::ghost(ui, label)
+                } else {
+                    theme::ghost_muted(ui, label)
+                };
+                if button.clicked() {
+                    view = mode;
+                }
+            }
+        });
         egui::ScrollArea::both()
-            .max_width((screen.width() - 80.0).max(200.0))
-            .max_height((screen.height() - 160.0).max(120.0))
+            .id_salt(("message-dialog", view == MessageView::Rendered))
+            .max_height(height)
             .auto_shrink([false, true])
             .show(ui, |ui| {
-                ui.add(
-                    egui::TextEdit::multiline(&mut shown)
-                        .font(egui::TextStyle::Monospace)
-                        .desired_width(f32::INFINITY)
-                        .frame(egui::Frame::new().fill(p.surface).inner_margin(8)),
-                );
+                if view == MessageView::Rendered {
+                    // Prose wraps at the dialog; a table wider than it
+                    // scrolls sideways, as in the session view.
+                    ui.set_max_width(width);
+                    egui::Frame::new()
+                        .fill(p.surface)
+                        .inner_margin(egui::Margin::symmetric(16, 12))
+                        .show(ui, |ui| {
+                            ui.set_width(width - 32.0);
+                            super::document::markdown_style(ui);
+                            super::markdown::show(ui, &mut cx.state.markdown, &text);
+                        });
+                } else {
+                    let mut shown = text.as_str();
+                    ui.add(
+                        egui::TextEdit::multiline(&mut shown)
+                            .font(egui::TextStyle::Monospace)
+                            .desired_width(width)
+                            .frame(egui::Frame::new().fill(p.surface).inner_margin(8)),
+                    );
+                }
             });
         ui.add_space(6.0);
         ui.horizontal(|ui| {
@@ -92,10 +137,11 @@ fn raw_message(cx: &mut DrawCtx<'_>, ctx: &Context) {
                 close = true;
             }
             if theme::secondary(ui, "Copy").clicked() {
-                ui.ctx().copy_text(text.to_owned());
+                ui.ctx().copy_text(text.clone());
             }
         });
     });
+    cx.state.message_view = view;
     if close {
         cx.state.raw_message = None;
     }

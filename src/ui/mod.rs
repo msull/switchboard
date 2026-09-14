@@ -11,7 +11,7 @@
 
 mod board;
 mod cards;
-mod dialogs;
+pub mod dialogs;
 pub mod document;
 pub mod env;
 pub mod files;
@@ -87,6 +87,8 @@ pub struct UiState {
     /// One message shown unformatted in a dialog ("View raw"), while
     /// open. The way to read a message whose Markdown renders badly.
     pub raw_message: Option<String>,
+    /// How the message dialog shows its text; kept between openings.
+    pub message_view: dialogs::MessageView,
     /// How many grid units the working set fits across right now, so
     /// a card added from another view lands where it will be seen.
     pub working_set_columns: u32,
@@ -130,6 +132,7 @@ impl Default for UiState {
             palette: None,
             env_dialog: None,
             raw_message: None,
+            message_view: dialogs::MessageView::Raw,
             working_set_columns: 24,
             arrange: working_set::Arrange::default(),
             previews: HashMap::new(),

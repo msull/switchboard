@@ -75,9 +75,15 @@ fn new_session(
 }
 
 /// The working-set lines (show it, put a session on it by name, put a
-/// file on it by project and relative path) and the theme line.
+/// file on it by project and relative path), the message dialog, the
+/// theme, and sleep: what did not fit in `step`.
 fn working_set_step(app: &mut SwitchboardApp, w: &[&str]) -> Result<(), String> {
     match w {
+        ["sleep", secs] => {
+            let secs: u64 = secs.parse().map_err(|_| "bad sleep")?;
+            std::thread::sleep(std::time::Duration::from_secs(secs));
+            app.poll_now();
+        }
         ["theme", mode] => app.dispatch(AppAction::SetTheme(match *mode {
             "dark" => crate::core::ThemeMode::Dark,
             "light" => crate::core::ThemeMode::Light,
@@ -85,6 +91,16 @@ fn working_set_step(app: &mut SwitchboardApp, w: &[&str]) -> Result<(), String> 
         })),
         ["working-set"] => app.dispatch(AppAction::ShowWorkingSet),
         ["arrange", on] => app.ui_state.arrange.on = *on == "on",
+        // The message dialog with `text` (`\n` for a line break), raw
+        // or rendered.
+        ["show-message", mode, text @ ..] => {
+            app.ui_state.raw_message = Some(text.join(" ").replace("\\n", "\n"));
+            app.ui_state.message_view = if *mode == "rendered" {
+                crate::ui::dialogs::MessageView::Rendered
+            } else {
+                crate::ui::dialogs::MessageView::Raw
+            };
+        }
         ["add-to-working-set", n] => {
             let id = session(app, n)?;
             app.dispatch(AppAction::AddToWorkingSet {
@@ -190,17 +206,16 @@ fn step(app: &mut SwitchboardApp, w: &[&str]) -> Result<(), String> {
         }
         ["switchboard"] => app.dispatch(AppAction::ShowSwitchboard),
         [
-            "working-set" | "add-to-working-set" | "add-file-to-working-set" | "arrange",
+            "working-set"
+            | "add-to-working-set"
+            | "add-file-to-working-set"
+            | "arrange"
+            | "show-message",
             ..,
         ] => {
             working_set_step(app, w)?;
         }
-        ["theme", _] => working_set_step(app, w)?,
-        ["sleep", secs] => {
-            let secs: u64 = secs.parse().map_err(|_| "bad sleep")?;
-            std::thread::sleep(std::time::Duration::from_secs(secs));
-            app.poll_now();
-        }
+        ["theme" | "sleep", _] => working_set_step(app, w)?,
         _ => return Err("unknown line".into()),
     }
     Ok(())

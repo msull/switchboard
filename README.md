@@ -93,7 +93,7 @@ Dev aids, all environment variables:
   `files`, `terminal`, `select-file`, `set-env`, `set-secret`, `dotenv`, `environment`,
   `send`, `interrupt`, `return`, `kill`, `approve`, `revoke`, `side`,
   `switchboard`, `working-set`, `add-to-working-set`,
-  `add-file-to-working-set`, `arrange`, `theme`, `sleep`).
+  `add-file-to-working-set`, `arrange`, `show-message`, `theme`, `sleep`).
 - `SWITCHBOARD_TMUX=<path>`: tmux binary to use.
 - `RUST_LOG=switchboard=debug`: verbose logging.
 
