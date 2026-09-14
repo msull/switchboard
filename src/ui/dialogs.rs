@@ -69,9 +69,9 @@ pub fn show(cx: &mut DrawCtx<'_>, ctx: &Context) {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum MessageView {
     /// The text as it is, in monospace.
-    #[default]
     Raw,
     /// Markdown drawn, as in the session view.
+    #[default]
     Rendered,
 }
 

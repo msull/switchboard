@@ -132,7 +132,7 @@ impl Default for UiState {
             palette: None,
             env_dialog: None,
             raw_message: None,
-            message_view: dialogs::MessageView::Raw,
+            message_view: dialogs::MessageView::Rendered,
             working_set_columns: 24,
             arrange: working_set::Arrange::default(),
             previews: HashMap::new(),

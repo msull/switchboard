@@ -1364,15 +1364,20 @@ fn view_raw_shows_the_message_unformatted_in_a_dialog() {
     );
     // Rendered shows the Markdown drawn; Raw the text as it is. The
     // choice is kept for the next message.
-    click(&mut harness, "Rendered");
     assert_eq!(
         harness.state().ui_state.message_view,
-        switchboard::ui::dialogs::MessageView::Rendered
+        switchboard::ui::dialogs::MessageView::Rendered,
+        "rendered by default"
     );
     click(&mut harness, "Raw");
     assert_eq!(
         harness.state().ui_state.message_view,
         switchboard::ui::dialogs::MessageView::Raw
+    );
+    click(&mut harness, "Rendered");
+    assert_eq!(
+        harness.state().ui_state.message_view,
+        switchboard::ui::dialogs::MessageView::Rendered
     );
     // The dialog's Copy puts the same text on the clipboard.
     harness.get_by_role_and_label(Role::Button, "Copy").click();
