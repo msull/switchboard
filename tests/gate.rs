@@ -450,6 +450,24 @@ fn claude_sessions_map_to_their_cards() {
 
 // ---- gate item 2: closing the terminal window detaches ----
 
+/// `argv` under a pty, through `script`. The BSD `script` on macOS
+/// takes the command as trailing arguments; util-linux's takes it as
+/// one shell string after `-c`, and would otherwise start a plain
+/// shell in the pty and never attach.
+fn script_client(argv: &[String]) -> Command {
+    let mut cmd = Command::new("script");
+    if cfg!(target_os = "macos") {
+        cmd.args(["-q", "/dev/null"]).args(argv);
+    } else {
+        let quoted: Vec<String> = argv
+            .iter()
+            .map(|a| format!("'{}'", a.replace('\'', "'\\''")))
+            .collect();
+        cmd.args(["-q", "-c", &quoted.join(" "), "/dev/null"]);
+    }
+    cmd
+}
+
 /// Proves the host-level property behind "closing the Ghostty window":
 /// a terminal is only a tmux client, so killing it (here a `script`-
 /// wrapped `attach-session`, exactly the argv Ghostty would run) leaves
@@ -474,9 +492,7 @@ fn killing_the_attached_client_keeps_the_session() {
     };
 
     let argv = gate.host.attach_command(&HostId(id.host_name()));
-    let mut client = Command::new("script")
-        .args(["-q", "/dev/null"])
-        .args(&argv)
+    let mut client = script_client(&argv)
         .env("TERM", "xterm-256color")
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
