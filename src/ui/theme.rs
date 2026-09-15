@@ -275,7 +275,9 @@ fn visuals(p: &Palette) -> Visuals {
     };
     let radius = CornerRadius::same(2);
     v.panel_fill = p.bg;
-    v.window_fill = p.surface;
+    // Dialogs and popups float on paper with a hairline: the same
+    // surface as the rail and the cards would blend into them.
+    v.window_fill = p.bg;
     v.faint_bg_color = p.surface;
     v.extreme_bg_color = p.surface;
     v.text_edit_bg_color = Some(p.surface);
@@ -287,12 +289,12 @@ fn visuals(p: &Palette) -> Visuals {
     v.selection.bg_fill = p.accent.gamma_multiply(0.3);
     v.selection.stroke = Stroke::new(1.0, p.text);
     v.window_corner_radius = CornerRadius::same(4);
-    v.window_stroke = Stroke::NONE;
+    v.window_stroke = Stroke::new(1.0, p.n400);
     v.window_shadow = egui::Shadow {
         offset: [0, 12],
-        blur: 32,
+        blur: 40,
         spread: 0,
-        color: rgb(0x2d2b2b).gamma_multiply(0.22),
+        color: rgb(0x2d2b2b).gamma_multiply(0.35),
     };
     v.popup_shadow = egui::Shadow {
         offset: [0, 3],

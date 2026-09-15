@@ -198,6 +198,7 @@ fn field(ui: &mut Ui, label: &str, value: &mut String) {
 /// A dialog window: no native title bar, the title as a heading, then
 /// `body`. Surface fill and the large shadow come from the theme.
 fn dialog(ctx: &Context, title: &str, body: impl FnOnce(&mut Ui)) {
+    scrim(ctx);
     // The window gets no title of its own: the heading below is the one
     // place the title appears, on screen and in the accessibility tree.
     egui::Window::new("")
@@ -211,6 +212,27 @@ fn dialog(ctx: &Context, title: &str, body: impl FnOnce(&mut Ui)) {
             ui.label(RichText::new(title).text_style(theme::brand()));
             ui.add_space(8.0);
             body(ui);
+        });
+}
+
+/// A translucent sheet over the page under a dialog, so the dialog
+/// reads as the thing in front. Drawn as an area below the window and
+/// not interactable, so it takes no clicks itself.
+fn scrim(ctx: &Context) {
+    let dark = ctx.theme() == egui::Theme::Dark;
+    let color = if dark {
+        egui::Color32::from_black_alpha(120)
+    } else {
+        egui::Color32::from_black_alpha(60)
+    };
+    egui::Area::new(egui::Id::new("dialog-scrim"))
+        .order(egui::Order::Middle)
+        .interactable(false)
+        .fixed_pos(egui::Pos2::ZERO)
+        .show(ctx, |ui| {
+            let screen = ui.ctx().content_rect();
+            ui.painter().rect_filled(screen, 0.0, color);
+            ui.allocate_rect(screen, egui::Sense::hover());
         });
 }
 
