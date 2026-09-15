@@ -231,7 +231,7 @@ fn draw_frame(cx: &mut DrawCtx<'_>, ui: &mut Ui) {
         View::Session(_) | View::Switchboard | View::WorkingSet(_) => None,
     };
     if let Some((pid, inline, message)) = files_for {
-        egui::Panel::right("files")
+        let side = egui::Panel::right("files")
             .resizable(true)
             .default_size(360.0)
             .show_separator_line(false)
@@ -239,7 +239,7 @@ fn draw_frame(cx: &mut DrawCtx<'_>, ui: &mut Ui) {
                 egui::Frame::new()
                     .fill(page_fill)
                     .inner_margin(egui::Margin {
-                        left: 8,
+                        left: 12,
                         right: 20,
                         top: 22,
                         bottom: 0,
@@ -252,6 +252,11 @@ fn draw_frame(cx: &mut DrawCtx<'_>, ui: &mut Ui) {
                     SideTab::Run => run::show(cx, ui, pid),
                 }
             });
+        // The side shares the page's ground, so a hairline on its left
+        // edge is what marks it off from the content beside it.
+        let rect = side.response.rect;
+        ui.painter()
+            .vline(rect.left(), rect.y_range(), palette.hairline());
     }
     // Sessions and documents fill their area edge to edge (terminal,
     // preview); the board and the switchboard get the page margin.
