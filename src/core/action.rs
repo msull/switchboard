@@ -203,6 +203,14 @@ pub enum AppAction {
     /// Stop a shell, command, or service if it runs, then start it again.
     RestartSession(RecordId),
     RemoveSession(RecordId),
+    /// Fork an agent session at one of the user's prompts: a new record
+    /// whose conversation is everything before turn `before`, with
+    /// `prompt` (that turn's text) primed as its draft. Never launches.
+    CloneSession {
+        id: RecordId,
+        before: usize,
+        prompt: String,
+    },
     // --- results from effects / workers
     /// An effect with no result of its own failed; the user is told.
     Failed(String),
@@ -221,6 +229,12 @@ pub enum AppAction {
     TranscriptChecked {
         id: RecordId,
         exists: bool,
+    },
+    /// The provider-side copy for `CloneSession` was made (or not).
+    TranscriptCloned {
+        source: RecordId,
+        prompt: String,
+        result: Result<ResumeHandle, String>,
     },
     Discovered {
         id: RecordId,
@@ -255,6 +269,15 @@ pub enum Effect {
     CheckTranscript {
         id: RecordId,
         handle: ResumeHandle,
+    },
+    /// Copy the transcript behind `handle` up to (not including) the
+    /// `before`th prompt under a fresh provider id (reports
+    /// `TranscriptCloned`).
+    CloneTranscript {
+        source: RecordId,
+        handle: ResumeHandle,
+        before: usize,
+        prompt: String,
     },
     /// Discover a Codex id created in `cwd` after `since`.
     Discover {
@@ -377,6 +400,9 @@ pub struct AppCore {
     pub(super) host: Vec<HostStatus>,
     /// Records with a launch or resume in flight (idempotent return).
     pub(super) in_flight: Vec<Flight>,
+    /// Text a new record's message box should start with, waiting for
+    /// the shell to hand it to the UI (`take_primed`).
+    pub(super) primed: Vec<(RecordId, String)>,
     /// What the last read of each project's definition file said.
     /// Transient: it is re-read at startup.
     pub(super) config_status: Vec<(ProjectId, ConfigStatus)>,
@@ -397,6 +423,13 @@ impl AppCore {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Drafts queued for records the core just made (a cloned session's
+    /// chosen prompt). The shell moves them into the UI's drafts; the
+    /// core never reads them back.
+    pub fn take_primed(&mut self) -> Vec<(RecordId, String)> {
+        std::mem::take(&mut self.primed)
     }
 
     /// The single entry point: applies one action at `now` and returns
@@ -452,41 +485,19 @@ impl AppCore {
             AppAction::AddProject { name, root } => self.add_project(name, root, now, &mut out),
             AppAction::RemoveProject(id) => self.remove_project(id, now, &mut out),
 
-            AppAction::NewSession {
-                project,
-                name,
-                kind,
-                cwd,
-                launch,
-            } => self.new_session(project, name, kind, cwd, launch, now, &mut out),
-            AppAction::RenameSession(id, name) => {
-                self.edit_session(id, &mut out, |s| s.name = name);
-            }
-            AppAction::SetSessionNotes(id, notes) => {
-                self.edit_session(id, &mut out, |s| s.notes = notes);
-            }
-            AppAction::SetAutostart(id, on) => {
-                self.edit_session(id, &mut out, |s| s.autostart = on);
-            }
-            AppAction::MoveCard { id, order, group } => self.edit_session(id, &mut out, |s| {
-                s.layout.order = order;
-                s.layout.group = group;
-            }),
-            AppAction::ReturnToSession(id) => self.return_to_session(id, now, &mut out),
-            AppAction::SendInput { id, text } => {
-                self.aim_at_pane(id, &mut out, |host| Effect::SendInput { host, text });
-            }
-            AppAction::Interrupt(id) => self.aim_at_pane(id, &mut out, |host| Effect::SendKeys {
-                host,
-                bytes: vec![0x1b],
-            }),
-            AppAction::KillSession(id) => {
-                if let Some(status) = self.host_status(id) {
-                    out.push(Effect::Kill(status.id.clone()));
-                }
-            }
-            AppAction::RemoveSession(id) => self.remove_session(id, &mut out),
-            AppAction::RestartSession(id) => self.restart_session(id, now, &mut out),
+            AppAction::NewSession { .. }
+            | AppAction::RenameSession(..)
+            | AppAction::SetSessionNotes(..)
+            | AppAction::SetAutostart(..)
+            | AppAction::MoveCard { .. }
+            | AppAction::ReturnToSession(_)
+            | AppAction::SendInput { .. }
+            | AppAction::Interrupt(_)
+            | AppAction::KillSession(_)
+            | AppAction::RemoveSession(_)
+            | AppAction::RestartSession(_)
+            | AppAction::CloneSession { .. }
+            | AppAction::TranscriptCloned { .. } => self.session_action(action, now, &mut out),
 
             AppAction::LaunchPrepared { id, result } => {
                 self.launch_prepared(id, result, now, &mut out);
@@ -507,6 +518,56 @@ impl AppCore {
         self.remember_view(&mut out);
         self.prune_working_set(&mut out);
         self.finish(out)
+    }
+
+    /// The session records' transitions, split out of `dispatch` for length.
+    fn session_action(&mut self, action: AppAction, now: Clock, out: &mut Out) {
+        match action {
+            AppAction::NewSession {
+                project,
+                name,
+                kind,
+                cwd,
+                launch,
+            } => self.new_session(project, name, kind, cwd, launch, now, out),
+            AppAction::RenameSession(id, name) => {
+                self.edit_session(id, out, |s| s.name = name);
+            }
+            AppAction::SetSessionNotes(id, notes) => {
+                self.edit_session(id, out, |s| s.notes = notes);
+            }
+            AppAction::SetAutostart(id, on) => {
+                self.edit_session(id, out, |s| s.autostart = on);
+            }
+            AppAction::MoveCard { id, order, group } => self.edit_session(id, out, |s| {
+                s.layout.order = order;
+                s.layout.group = group;
+            }),
+            AppAction::ReturnToSession(id) => self.return_to_session(id, now, out),
+            AppAction::SendInput { id, text } => {
+                self.aim_at_pane(id, out, |host| Effect::SendInput { host, text });
+            }
+            AppAction::Interrupt(id) => self.aim_at_pane(id, out, |host| Effect::SendKeys {
+                host,
+                bytes: vec![0x1b],
+            }),
+            AppAction::KillSession(id) => {
+                if let Some(status) = self.host_status(id) {
+                    out.push(Effect::Kill(status.id.clone()));
+                }
+            }
+            AppAction::RemoveSession(id) => self.remove_session(id, out),
+            AppAction::RestartSession(id) => self.restart_session(id, now, out),
+            AppAction::CloneSession { id, before, prompt } => {
+                self.clone_session(id, before, prompt, out);
+            }
+            AppAction::TranscriptCloned {
+                source,
+                prompt,
+                result,
+            } => self.transcript_cloned(source, prompt, result, now, out),
+            _ => unreachable!("not a session action"),
+        }
     }
 
     /// The working sets' transitions, split out of `dispatch` for length.
@@ -717,7 +778,7 @@ impl AppCore {
             .retain(|n| n.expires_at.is_none_or(|t| t > now.mono));
     }
 
-    fn show(&mut self, view: View, now: Clock, out: &mut Out) {
+    pub(super) fn show(&mut self, view: View, now: Clock, out: &mut Out) {
         if let View::Board(id) | View::Document(id, _) = &view {
             let id = *id;
             self.edit_project(id, out, |p| p.last_active = now.wall);
@@ -1012,6 +1073,8 @@ impl AppCore {
             | AppAction::Failed(_)
             | AppAction::LaunchPrepared { .. }
             | AppAction::TranscriptChecked { .. }
+            | AppAction::CloneSession { .. }
+            | AppAction::TranscriptCloned { .. }
             | AppAction::Spawned { .. }
             | AppAction::Attached { .. }
             | AppAction::Discovered { .. }

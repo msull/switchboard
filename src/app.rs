@@ -225,6 +225,9 @@ impl SwitchboardApp {
     fn dispatch_inner(&mut self, action: AppAction) {
         let now = self.clock();
         let effects = self.core.dispatch(action, now);
+        for (id, text) in self.core.take_primed() {
+            self.ui_state.input_drafts.insert(id, text);
+        }
         for effect in effects {
             if let Some(result) = self.run_effect(effect) {
                 self.dispatch_inner(result);
@@ -280,6 +283,7 @@ impl SwitchboardApp {
             Effect::PrepareLaunch { .. }
             | Effect::PrepareResume { .. }
             | Effect::CheckTranscript { .. }
+            | Effect::CloneTranscript { .. }
             | Effect::Discover { .. }
             | Effect::Spawn { .. }
             | Effect::Attach { .. }
@@ -296,6 +300,47 @@ impl SwitchboardApp {
 
     /// Performs one effect; returns the action reporting its result, or
     /// `None` when the result arrives later (discovery) or has no report.
+    /// The effects answered by the agent launcher and the transcript
+    /// reader, kept out of `run_effect` for length.
+    fn run_agent_effect(&self, effect: Effect) -> AppAction {
+        let s = &self.services;
+        match effect {
+            Effect::PrepareLaunch {
+                id,
+                kind,
+                name,
+                cwd,
+            } => AppAction::LaunchPrepared {
+                id,
+                result: s.agents.prepare_launch(kind, id, &name, &cwd),
+            },
+            Effect::PrepareResume {
+                id,
+                handle,
+                name,
+                cwd,
+            } => AppAction::LaunchPrepared {
+                id,
+                result: s.agents.prepare_resume(&handle, id, &name, &cwd),
+            },
+            Effect::CheckTranscript { id, handle } => AppAction::TranscriptChecked {
+                id,
+                exists: s.agents.transcript_exists(&handle),
+            },
+            Effect::CloneTranscript {
+                source,
+                handle,
+                before,
+                prompt,
+            } => AppAction::TranscriptCloned {
+                source,
+                prompt,
+                result: s.transcripts.clone_before(&handle, before),
+            },
+            _ => unreachable!("not an agent effect"),
+        }
+    }
+
     fn run_effect(&mut self, effect: Effect) -> Option<AppAction> {
         let s = &self.services;
         match effect {
@@ -305,28 +350,10 @@ impl SwitchboardApp {
             | Effect::Delete(_)
             | Effect::StoreSecret { .. }
             | Effect::DeleteSecret(_) => self.run_store_effect(effect),
-            Effect::PrepareLaunch {
-                id,
-                kind,
-                name,
-                cwd,
-            } => Some(AppAction::LaunchPrepared {
-                id,
-                result: s.agents.prepare_launch(kind, id, &name, &cwd),
-            }),
-            Effect::PrepareResume {
-                id,
-                handle,
-                name,
-                cwd,
-            } => Some(AppAction::LaunchPrepared {
-                id,
-                result: s.agents.prepare_resume(&handle, id, &name, &cwd),
-            }),
-            Effect::CheckTranscript { id, handle } => Some(AppAction::TranscriptChecked {
-                id,
-                exists: s.agents.transcript_exists(&handle),
-            }),
+            Effect::PrepareLaunch { .. }
+            | Effect::PrepareResume { .. }
+            | Effect::CheckTranscript { .. }
+            | Effect::CloneTranscript { .. } => Some(self.run_agent_effect(effect)),
             Effect::Discover {
                 id,
                 kind,

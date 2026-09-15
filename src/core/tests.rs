@@ -1216,6 +1216,111 @@ fn session_edits_save() {
     assert_eq!((s.layout.order, s.layout.group.as_deref()), (7, Some("g")));
 }
 
+#[test]
+fn cloning_a_session_asks_for_a_transcript_copy_then_makes_a_cold_record() {
+    let (mut core, id) = resumable_agent();
+    let handle = core.session(id).unwrap().resume.clone().unwrap();
+    let e = core.dispatch(
+        AppAction::CloneSession {
+            id,
+            before: 3,
+            prompt: "third prompt".into(),
+        },
+        Clock::at(1),
+    );
+    assert_eq!(
+        e,
+        vec![Effect::CloneTranscript {
+            source: id,
+            handle,
+            before: 3,
+            prompt: "third prompt".into(),
+        }],
+        "nothing is made until the copy exists"
+    );
+    let forked = ResumeHandle::ClaudeCode {
+        session_id: Uuid::new_v4(),
+        transcript: Some(PathBuf::from("/tmp/forked.jsonl")),
+    };
+    let e = core.dispatch(
+        AppAction::TranscriptCloned {
+            source: id,
+            prompt: "third prompt".into(),
+            result: Ok(forked.clone()),
+        },
+        Clock::at(2),
+    );
+    assert_eq!(saves(&e), 1);
+    assert!(
+        !e.iter().any(|e| matches!(
+            e,
+            Effect::PrepareResume { .. } | Effect::PrepareLaunch { .. } | Effect::Spawn { .. }
+        )),
+        "a clone is never launched on its own"
+    );
+    let source = core.session(id).unwrap().clone();
+    let clone = core
+        .workspace(source.project)
+        .unwrap()
+        .sessions
+        .iter()
+        .find(|s| s.id != id)
+        .unwrap()
+        .clone();
+    assert_eq!(clone.name, "s0 clone");
+    assert_eq!(clone.kind, source.kind);
+    assert_eq!(clone.cwd, source.cwd);
+    assert_eq!(clone.resume, Some(forked));
+    assert_eq!(clone.layout.order, source.layout.order + 1);
+    assert_eq!(clone.created, Clock::at(2).wall);
+    assert!(!clone.not_resumable && !core.is_in_flight(clone.id));
+    assert_eq!(core.view(), View::Session(clone.id));
+    assert_eq!(
+        core.take_primed(),
+        vec![(clone.id, "third prompt".to_owned())]
+    );
+    assert!(core.take_primed().is_empty(), "handed over once");
+}
+
+#[test]
+fn cloning_refuses_codex_and_transcript_less_sessions_and_reports_a_failed_copy() {
+    let (mut core, pid, ids) = with_records(&[codex(), agent()], |_| None);
+    let clone = |core: &mut AppCore, id| {
+        core.dispatch(
+            AppAction::CloneSession {
+                id,
+                before: 1,
+                prompt: String::new(),
+            },
+            Clock::at(1),
+        )
+    };
+    assert!(clone(&mut core, ids[0]).is_empty());
+    assert!(core.notice().unwrap().text.contains("only Claude Code"));
+    assert!(clone(&mut core, ids[1]).is_empty());
+    assert!(
+        core.notices()
+            .last()
+            .unwrap()
+            .text
+            .contains("no transcript")
+    );
+
+    let (mut core2, id) = resumable_agent();
+    let e = core2.dispatch(
+        AppAction::TranscriptCloned {
+            source: id,
+            prompt: String::new(),
+            result: Err("disk full".into()),
+        },
+        Clock::at(2),
+    );
+    assert!(e.is_empty());
+    assert!(core2.notice().unwrap().text.contains("disk full"));
+    assert_eq!(core2.workspaces()[0].sessions.len(), 1);
+    assert_eq!(core.workspace(pid).unwrap().sessions.len(), 2);
+}
+
 // --- 5. return (idempotent)
 
 #[test]

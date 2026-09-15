@@ -89,6 +89,7 @@ const EXTRA_LINES: &[&str] = &[
     "add-file-to-working-set",
     "arrange",
     "show-message",
+    "clone-session",
     "theme",
     "sleep",
 ];
@@ -130,6 +131,18 @@ fn add_to_set(
 fn working_set_step(app: &mut SwitchboardApp, w: &[&str]) -> Result<(), String> {
     match w {
         ["switchboard"] => app.dispatch(AppAction::ShowSwitchboard),
+        ["clone-session", name, turn] => {
+            let id = session(app, name)?;
+            let before: usize = turn.parse().map_err(|_| "bad turn number")?;
+            let prompt = app
+                .ui_state
+                .conversations
+                .get(&id)
+                .and_then(|(_, c)| c.turns.iter().find(|t| t.n == before))
+                .map(|t| t.user.clone())
+                .unwrap_or_default();
+            app.dispatch(AppAction::CloneSession { id, before, prompt });
+        }
         ["sleep", secs] => {
             let secs: u64 = secs.parse().map_err(|_| "bad sleep")?;
             std::thread::sleep(std::time::Duration::from_secs(secs));

@@ -127,6 +127,11 @@ pub trait TranscriptReader: Send + Sync {
     /// The transcript file's modification time, so callers can skip
     /// re-reading an unchanged file. `None` when there is no file.
     fn modified(&self, handle: &ResumeHandle) -> Option<SystemTime>;
+    /// Copy the conversation up to (not including) the `before`th human
+    /// prompt into a new provider session, beside the original, and
+    /// return its handle. The original is never touched. This is the one
+    /// place Switchboard writes into a provider's session directory.
+    fn clone_before(&self, handle: &ResumeHandle, before: usize) -> Result<ResumeHandle, String>;
 }
 
 #[cfg(test)]

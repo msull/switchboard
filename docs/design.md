@@ -233,7 +233,10 @@ never run anything on its own.
   already owns; Switchboard never writes them elsewhere. Scrollback can
   contain secrets that a process printed; it is stored privately, capped,
   rotatable, and deletable, and the UI says so. Agent transcripts stay
-  where the provider keeps them; Switchboard reads but never copies them.
+  where the provider keeps them; Switchboard reads them and never edits
+  one. The one write is cloning a session, which puts a *new* transcript
+  (a prefix of the original under a fresh id, owner-readable only)
+  beside the original; spike 7 has the mechanism.
 
 ## How it looks
 
@@ -823,6 +826,30 @@ keep the board card. A file card shows the file inside the card,
 scrolling: Markdown rendered with a Raw toggle, raw and plain text with
 a Wrap/Sideways toggle, plus Open in app and Take off. Previews for
 file cards are loaded per path and reloaded when the file changes.
+
+## Clone session status (2026-09-15)
+
+Right-clicking one of the user's own prompts in a Claude Code session's
+conversation offers "Clone session". It dispatches `CloneSession { id,
+before, prompt }`; the core answers with `Effect::CloneTranscript` and
+nothing else, so no record exists until the copy does. The transcript
+reader's `clone_before` writes the records before that prompt (the
+turn numbering the reader itself uses; a stale number past the end is
+an error, never the whole file) under a fresh session UUID, mode 0600,
+beside the original, and returns the new handle. `TranscriptCloned`
+then adds a cold record beside the source ("<name> clone", same
+project, cwd, kind, and launch, next order on the board, resumable
+through the new handle), shows it, and queues the prompt as that
+record's draft; the shell moves queued drafts into the UI after each
+dispatch (`take_primed`). Nothing is launched: opening the clone is a
+Return, which resumes it as any cold agent record, and the primed
+message is sent when the user says so. Codex sessions and sessions
+without a transcript get a notice instead. Dev aid: `clone-session
+<session> <turn>`.
+
+Known gaps: Codex rollouts are not cloned (unverified format); a
+subagent directory beside the original is not copied (the resume did
+not need it in the spike); the clone's card shows no link to its source.
 
 ## Open questions
 

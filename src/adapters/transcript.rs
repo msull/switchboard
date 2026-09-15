@@ -10,6 +10,8 @@
 //! the last line may be half-written.
 
 use std::collections::HashMap;
+use std::io::Write;
+use std::path::Path;
 use std::time::SystemTime;
 
 use serde_json::Value;
@@ -50,6 +52,77 @@ impl TranscriptReader for ClaudeTranscripts {
             ResumeHandle::ClaudeCode { .. } | ResumeHandle::Codex { .. } => None,
         }
     }
+
+    fn clone_before(&self, handle: &ResumeHandle, before: usize) -> Result<ResumeHandle, String> {
+        let ResumeHandle::ClaudeCode {
+            session_id,
+            transcript: Some(path),
+        } = handle
+        else {
+            return Err("only Claude Code sessions with a transcript can be cloned".into());
+        };
+        let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let new_id = uuid::Uuid::new_v4();
+        let forked = fork(&text, before, &session_id.to_string(), &new_id.to_string())
+            .ok_or_else(|| format!("the transcript has no prompt #{before}"))?;
+        let dir = path
+            .parent()
+            .ok_or_else(|| format!("{}: no parent directory", path.display()))?;
+        let dst = dir.join(format!("{new_id}.jsonl"));
+        write_private(&dst, &forked).map_err(|e| format!("{}: {e}", dst.display()))?;
+        Ok(ResumeHandle::ClaudeCode {
+            session_id: new_id,
+            transcript: Some(dst),
+        })
+    }
+}
+
+/// The transcript's records before the `before`th typed prompt (the
+/// turn numbering of [`parse`]), re-labelled with `new_id` wherever the
+/// old session id appears. `None` when the prompt does not exist, so a
+/// stale turn number never clones the whole conversation. The cut is a
+/// prefix, so the `parentUuid` chain needs no repair.
+#[must_use]
+pub fn fork(text: &str, before: usize, old_id: &str, new_id: &str) -> Option<String> {
+    let mut out = String::new();
+    let mut seen = 0;
+    for line in text.lines().filter(|l| !l.trim().is_empty()) {
+        // A half-written last line is dropped, as `parse` drops it.
+        let Ok(r) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        if is_human_prompt(&r) {
+            let content = r
+                .pointer("/message/content")
+                .map_or_else(String::new, text_of);
+            if !systemish(&content) {
+                seen += 1;
+                if seen == before {
+                    return Some(out);
+                }
+            }
+        }
+        out.push_str(&line.replace(old_id, new_id));
+        out.push('\n');
+    }
+    None
+}
+
+/// Write a transcript the way the provider does: readable by the owner
+/// only, and complete before it carries the final name.
+fn write_private(dst: &Path, text: &str) -> std::io::Result<()> {
+    let tmp = dst.with_extension("jsonl.tmp");
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    let mut f = opts.open(&tmp)?;
+    f.write_all(text.as_bytes())?;
+    f.sync_all()?;
+    std::fs::rename(&tmp, dst)
 }
 
 /// Prompts that start with one of these tags are notifications or
@@ -477,6 +550,69 @@ mod tests {
         assert_eq!(c.title.as_deref(), Some("explain-repo"));
         assert_eq!(c.branch.as_deref(), Some("main"));
         assert_eq!(c.version.as_deref(), Some("2.1.263"));
+    }
+
+    #[test]
+    fn fork_keeps_the_turns_before_the_cut_under_the_new_id() {
+        let text = std::fs::read_to_string(fixture()).unwrap();
+        let old = &conversation_id(&text);
+        let forked = fork(&text, 2, old, "new-id").unwrap();
+        let c = parse(&forked);
+        assert_eq!(c.turns.len(), 1);
+        assert_eq!(c.turns[0].user, "reply with the single word pong");
+        assert_eq!(c.turns[0].final_text, "pong");
+        assert!(!forked.contains(old), "the old id is gone");
+        assert!(forked.contains("\"sessionId\":\"new-id\""));
+        // Before the first prompt: only the preamble. Past the end: nothing.
+        assert_eq!(parse(&fork(&text, 1, old, "n").unwrap()).turns.len(), 0);
+        assert!(fork(&text, 99, old, "n").is_none());
+    }
+
+    fn conversation_id(text: &str) -> String {
+        text.lines()
+            .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+            .find_map(|r| str_field(&r, "sessionId").map(str::to_owned))
+            .unwrap()
+    }
+
+    #[test]
+    fn clone_before_writes_a_private_sibling_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("a.jsonl");
+        std::fs::copy(fixture(), &src).unwrap();
+        let text = std::fs::read_to_string(&src).unwrap();
+        let handle = ResumeHandle::ClaudeCode {
+            session_id: conversation_id(&text).parse().unwrap(),
+            transcript: Some(src.clone()),
+        };
+        let cloned = ClaudeTranscripts.clone_before(&handle, 3).unwrap();
+        let ResumeHandle::ClaudeCode {
+            session_id,
+            transcript: Some(path),
+        } = &cloned
+        else {
+            panic!("{cloned:?}")
+        };
+        assert_eq!(path.parent(), src.parent());
+        assert_eq!(
+            path.file_name().unwrap().to_str().unwrap(),
+            format!("{session_id}.jsonl")
+        );
+        assert_eq!(ClaudeTranscripts.read(&cloned).unwrap().turns.len(), 2);
+        assert_eq!(
+            std::fs::read_to_string(&src).unwrap(),
+            text,
+            "source untouched"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+        assert!(ClaudeTranscripts.clone_before(&handle, 99).is_err());
     }
 
     #[test]

@@ -1343,6 +1343,56 @@ fn messages_have_a_context_menu_with_copy() {
 }
 
 #[test]
+fn clone_session_on_a_prompt_makes_a_new_session_with_that_prompt_primed() {
+    let (mut harness, ids) = harness();
+    let id = seed_claude(&mut harness, &ids);
+    harness
+        .state_mut()
+        .ui_state
+        .conversations
+        .insert(id, (None, two_turns()));
+    showing(&mut harness, View::Session(id));
+    // The agent's answers only copy or show raw; the user's prompts fork.
+    harness.get_by_label("pong").click_secondary();
+    harness.run_steps(2);
+    assert!(harness.query_by_label("Clone session").is_none());
+    harness.get_by_label("View raw").click();
+    harness.run_steps(2);
+    harness.state_mut().ui_state.raw_message = None;
+    harness.run_steps(2);
+    harness
+        .get_by_label("What is the crate called?")
+        .click_secondary();
+    harness.run_steps(2);
+    click(&mut harness, "Clone session");
+    let prompt = "What is the crate called?".to_owned();
+    assert_eq!(
+        actions(&harness),
+        vec![AppAction::CloneSession {
+            id,
+            before: 2,
+            prompt: prompt.clone(),
+        }]
+    );
+    let app = harness.state();
+    let clone = app
+        .core()
+        .workspaces()
+        .iter()
+        .flat_map(|w| &w.sessions)
+        .find(|s| s.name == "claude-agent clone")
+        .expect("the clone record");
+    assert_eq!(app.core().view(), View::Session(clone.id));
+    assert_ne!(clone.resume, app.core().session(id).unwrap().resume);
+    assert_eq!(app.ui_state.input_drafts.get(&clone.id), Some(&prompt));
+    harness.run_steps(2);
+    assert!(
+        harness.query_all_by_value(prompt.as_str()).next().is_some(),
+        "the message box shows the primed prompt"
+    );
+}
+
+#[test]
 fn view_raw_shows_the_message_unformatted_in_a_dialog() {
     let (mut harness, ids) = harness();
     let id = seed_claude(&mut harness, &ids);

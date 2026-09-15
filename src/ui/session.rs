@@ -17,7 +17,9 @@ use egui_term::{BackendSettings, PtyEvent, TerminalBackend, TerminalView};
 use super::cards::{is_running, kind_label};
 use super::files::DraggedPath;
 use super::{DrawCtx, GAP, PAD, UiState, theme};
-use crate::core::{AppAction, CardState, PinTarget, RecordId, SessionKind, SessionRecord};
+use crate::core::{
+    AgentKind, AppAction, CardState, PinTarget, RecordId, SessionKind, SessionRecord,
+};
 use crate::ports::host::HostId;
 use crate::ports::transcript::{
     Activity, ActivityKind, Conversation, ToolDetail, Turn, context_window,
@@ -430,50 +432,79 @@ fn agent_body(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord) {
     }
     Frame::new()
         .inner_margin(Margin::symmetric(0, GAP_PX / 2))
-        .show(ui, |ui| {
-            ui.set_min_size(ui.available_size());
-            // Drawing needs several fields of the UI state at once; taking
-            // them apart borrows each on its own, which the borrow checker
-            // allows where `cx.state.x` next to `cx.state.y` would not.
-            let UiState {
-                conversations,
-                conversation_errors,
-                expand_activity,
-                expand_applied,
-                terminal_open,
-                markdown,
-                snapshots,
-                raw_message,
-                ..
-            } = &mut *cx.state;
-            let snapshot = snapshots.get(&record.id);
-            if let Some((_, conversation)) = conversations.get(&record.id) {
-                conversation_view(
-                    ui,
-                    conversation,
-                    expand_activity,
-                    expand_applied,
-                    terminal_open,
-                    markdown,
-                    raw_message,
-                );
-            } else {
-                ui.label(
-                    RichText::new(
-                        "This session runs in Ghostty. Use Open in terminal to bring its window up.",
-                    )
-                    .color(p.n700),
-                );
-                if let Some(e) = conversation_errors.get(&record.id) {
-                    ui.label(theme::meta_text(ui, format!("No conversation view: {e}")));
-                }
-                if let Some(text) = snapshot {
-                    egui::ScrollArea::both()
-                        .auto_shrink([false, false])
-                        .show(ui, |ui| code_block(ui, text));
-                }
-            }
+        .show(ui, |ui| conversation_or_pane(cx, ui, record));
+}
+
+/// The conversation when the transcript is readable, otherwise the
+/// pointer to the terminal and the pane snapshot. Fills what is left.
+fn conversation_or_pane(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord) {
+    let p = theme::palette(ui);
+    // Cloning is offered on the user's own messages of a Claude Code
+    // session that has a transcript; the core refuses the rest anyway.
+    let cloneable = matches!(record.kind, SessionKind::Agent(AgentKind::ClaudeCode))
+        && record
+            .resume
+            .as_ref()
+            .is_some_and(|h| h.transcript().is_some());
+    let mut clone_at: Option<usize> = None;
+    ui.set_min_size(ui.available_size());
+    // Drawing needs several fields of the UI state at once; taking
+    // them apart borrows each on its own, which the borrow checker
+    // allows where `cx.state.x` next to `cx.state.y` would not.
+    let UiState {
+        conversations,
+        conversation_errors,
+        expand_activity,
+        expand_applied,
+        terminal_open,
+        markdown,
+        snapshots,
+        raw_message,
+        ..
+    } = &mut *cx.state;
+    let snapshot = snapshots.get(&record.id);
+    let Some((_, conversation)) = conversations.get(&record.id) else {
+        ui.label(
+            RichText::new(
+                "This session runs in Ghostty. Use Open in terminal to bring its window up.",
+            )
+            .color(p.n700),
+        );
+        if let Some(e) = conversation_errors.get(&record.id) {
+            ui.label(theme::meta_text(ui, format!("No conversation view: {e}")));
+        }
+        if let Some(text) = snapshot {
+            egui::ScrollArea::both()
+                .auto_shrink([false, false])
+                .show(ui, |ui| code_block(ui, text));
+        }
+        return;
+    };
+    conversation_view(
+        ui,
+        conversation,
+        expand_activity,
+        expand_applied,
+        terminal_open,
+        markdown,
+        Menus {
+            raw_message,
+            clone_at: cloneable.then_some(&mut clone_at),
+        },
+    );
+    if let Some(before) = clone_at {
+        let prompt = conversation
+            .turns
+            .iter()
+            .find(|t| t.n == before)
+            .map(|t| t.user.clone())
+            .unwrap_or_default();
+        cx.dispatch(AppAction::CloneSession {
+            id: record.id,
+            before,
+            prompt,
         });
+    }
 }
 
 /// Rows the message box shows before it scrolls.
@@ -608,7 +639,7 @@ fn conversation_view(
     expand_applied: &mut Option<bool>,
     terminal_open: &mut bool,
     markdown: &mut CommonMarkCache,
-    raw_message: &mut Option<String>,
+    mut menus: Menus<'_>,
 ) {
     let p = theme::palette(ui);
     ui.horizontal(|ui| {
@@ -659,7 +690,7 @@ fn conversation_view(
             // back per turn would only carry that widening along.
             let width = ui.available_width().min(MAX_READING_WIDTH);
             for turn in &conversation.turns {
-                turn_block(ui, turn, open, markdown, width, raw_message);
+                turn_block(ui, turn, open, markdown, width, menus.reborrow());
             }
         });
 }
@@ -729,7 +760,7 @@ fn turn_block(
     open: Option<bool>,
     markdown: &mut CommonMarkCache,
     width: f32,
-    raw_message: &mut Option<String>,
+    mut menus: Menus<'_>,
 ) {
     let p = theme::palette(ui);
     // Back to the reading width whatever the turns above did to it.
@@ -763,7 +794,13 @@ fn turn_block(
         })
         .response
         .rect;
-    message_menu(ui, user_rect, ("user", turn.n), &turn.user, raw_message);
+    message_menu(
+        ui,
+        user_rect,
+        ("user", turn.n),
+        &turn.user,
+        menus.reborrow(),
+    );
     // The activity list: neutral rows, no frame, 4 px inset.
     Frame::new()
         .inner_margin(Margin::symmetric(4, 0))
@@ -818,7 +855,7 @@ fn turn_block(
             final_rect,
             ("final", turn.n),
             &turn.final_text,
-            raw_message,
+            menus.without_clone(),
         );
     }
     ui.add_space(6.0);
@@ -848,13 +885,33 @@ fn scrolls_sideways(ui: &mut Ui, salt: (&str, usize), add: impl FnOnce(&mut Ui))
 /// The block is not made clickable: that would put it above the labels
 /// and links inside it in egui's hit test and take their clicks. The
 /// pointer is checked directly instead, and the menu is opened by hand.
-fn message_menu(
-    ui: &mut Ui,
-    rect: egui::Rect,
-    salt: (&str, usize),
-    text: &str,
-    raw_message: &mut Option<String>,
-) {
+/// What the message menus write back: the text to show in the raw
+/// dialog, and (when the session can be cloned) the turn number the
+/// user chose to fork before.
+struct Menus<'a> {
+    raw_message: &'a mut Option<String>,
+    clone_at: Option<&'a mut Option<usize>>,
+}
+
+impl Menus<'_> {
+    fn reborrow(&mut self) -> Menus<'_> {
+        Menus {
+            raw_message: self.raw_message,
+            clone_at: self.clone_at.as_deref_mut(),
+        }
+    }
+    /// The same menus without the clone item, for the agent's messages.
+    fn without_clone(&mut self) -> Menus<'_> {
+        Menus {
+            raw_message: self.raw_message,
+            clone_at: None,
+        }
+    }
+}
+
+/// The right-click menu on a message. "Clone session" is offered on the
+/// user's own messages of a cloneable session.
+fn message_menu(ui: &mut Ui, rect: egui::Rect, salt: (&str, usize), text: &str, menus: Menus<'_>) {
     let response = ui.interact(rect, ui.id().with(salt), egui::Sense::hover());
     let right_clicked = ui.input(|i| {
         i.pointer.button_clicked(egui::PointerButton::Secondary)
@@ -869,7 +926,20 @@ fn message_menu(
                 ui.close();
             }
             if ui.button("View raw").clicked() {
-                *raw_message = Some(text.to_owned());
+                *menus.raw_message = Some(text.to_owned());
+                ui.close();
+            }
+            let Some(clone_at) = menus.clone_at else {
+                return;
+            };
+            if ui
+                .button("Clone session")
+                .on_hover_text(
+                    "A new session with the conversation up to here, this message ready to send",
+                )
+                .clicked()
+            {
+                *clone_at = Some(salt.1);
                 ui.close();
             }
         });

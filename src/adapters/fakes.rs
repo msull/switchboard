@@ -290,6 +290,15 @@ impl TranscriptReader for FakeTranscripts {
         // A fixed time: the fake never changes, so the app reads it once.
         self.conversation.as_ref().map(|_| std::time::UNIX_EPOCH)
     }
+    fn clone_before(&self, handle: &ResumeHandle, _before: usize) -> Result<ResumeHandle, String> {
+        match handle {
+            ResumeHandle::ClaudeCode { transcript, .. } => Ok(ResumeHandle::ClaudeCode {
+                session_id: uuid::Uuid::new_v4(),
+                transcript: transcript.clone(),
+            }),
+            ResumeHandle::Codex { .. } => Err("Codex sessions cannot be cloned".into()),
+        }
+    }
 }
 
 /// Scripted definition file: `config` is what every project's read

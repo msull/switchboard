@@ -4,7 +4,7 @@
 
 use std::path::PathBuf;
 
-use crate::core::action::{AppCore, Clock, Effect, Flight, FlightKind, Out};
+use crate::core::action::{AppCore, Clock, Effect, Flight, FlightKind, Out, View};
 use crate::core::model::{
     Activity, AgentKind, CardLayout, Launch, ProjectId, RecordId, ResumeHandle, SessionKind,
     SessionRecord,
@@ -265,6 +265,97 @@ impl AppCore {
                 self.mark_not_resumable(id, now, out);
             }
         }
+    }
+
+    /// Ask the shell for a provider-side copy of the conversation up to
+    /// turn `before`. Only Claude Code sessions with a transcript can be
+    /// cloned; anything else is a notice, not a record.
+    pub(super) fn clone_session(
+        &mut self,
+        id: RecordId,
+        before: usize,
+        prompt: String,
+        out: &mut Out,
+    ) {
+        let Some(record) = self.session(id) else {
+            return;
+        };
+        let name = record.name.clone();
+        match (&record.kind, record.resume.clone()) {
+            (SessionKind::Agent(AgentKind::ClaudeCode), Some(handle))
+                if handle.transcript().is_some() && before >= 1 =>
+            {
+                out.push(Effect::CloneTranscript {
+                    source: id,
+                    handle,
+                    before,
+                    prompt,
+                });
+            }
+            (SessionKind::Agent(AgentKind::ClaudeCode), _) => {
+                self.error(format!("cannot clone {name}: it has no transcript yet"));
+            }
+            _ => self.error(format!(
+                "cannot clone {name}: only Claude Code sessions can be cloned"
+            )),
+        }
+    }
+
+    /// The copy exists: a new cold record beside the source, resumable
+    /// through the new handle, shown with the chosen prompt primed.
+    pub(super) fn transcript_cloned(
+        &mut self,
+        source: RecordId,
+        prompt: String,
+        result: Result<ResumeHandle, String>,
+        now: Clock,
+        out: &mut Out,
+    ) {
+        let Some(record) = self.session(source).cloned() else {
+            return;
+        };
+        let handle = match result {
+            Ok(handle) => handle,
+            Err(e) => {
+                self.error(format!("could not clone {}: {e}", record.name));
+                return;
+            }
+        };
+        let Some(workspace) = self
+            .workspaces
+            .iter_mut()
+            .find(|w| w.project.id == record.project)
+        else {
+            return;
+        };
+        let order = workspace
+            .sessions
+            .iter()
+            .map(|s| s.layout.order + 1)
+            .max()
+            .unwrap_or(0);
+        let id = RecordId::new();
+        workspace.sessions.push(SessionRecord {
+            id,
+            name: format!("{} clone", record.name),
+            created: now.wall,
+            last_seen: now.wall,
+            resume: Some(handle),
+            autostart: false,
+            layout: CardLayout { order, group: None },
+            activity: Activity::Unknown,
+            activity_reason: None,
+            last_event_at: None,
+            last_exit: None,
+            not_resumable: false,
+            scrollback: None,
+            source: None,
+            approved_hash: None,
+            ..record
+        });
+        out.touch(record.project);
+        self.primed.push((id, prompt));
+        self.show(View::Session(id), now, out);
     }
 
     fn mark_not_resumable(&mut self, id: RecordId, now: Clock, out: &mut Out) {
