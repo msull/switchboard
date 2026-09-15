@@ -12,6 +12,7 @@ kept for reference and are not built by the main crate.
 | `03-session-state` | How to know "waiting on you"? | Claude Code hooks (`PermissionRequest`, `Stop`, `SessionEnd`) via a tiny `switchboard-hook` binary and a Unix socket; OSC 777 text from the raw stream as the hook-free fallback. |
 | `05-keychain` | Can secrets live in the Keychain without prompts? | Yes for a bundle signed with a stable identity and identifier: the item ACL is `identifier + certificate`, so rebuilds read silently. Ad-hoc builds prompt per rebuild. |
 | `06-pane-size` | Why is the embedded pane wider than the widget? | `window-size manual` ignored the client; `latest` makes the window follow whichever client attached last. Re-applied on launch for servers that outlive the app. |
+| `07-clone-session` | Can a session be cloned up to a chosen message? | Yes: copy the transcript prefix before the chosen prompt, substitute a fresh UUID for `sessionId`, save it `0600` beside the original; `--resume <new>` opens the truncated history and the original is untouched. |
 | `04-terminal-view` | Embedded terminal or hand-off? | Hand off agents to Ghostty (`open -na Ghostty --args ... -e cmd`, raise by title); embed `egui_term` for shells, commands, services. |
 
 Findings are folded into `docs/design.md` under "Spike 0 results".
