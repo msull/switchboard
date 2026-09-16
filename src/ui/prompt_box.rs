@@ -198,14 +198,15 @@ fn editor_for<'a>(cx: &'a mut DrawCtx<'_>, record: &SessionRecord) -> &'a mut Ed
         .clone();
     let native = boxes.native;
     let outbox = boxes.outbox.clone();
-    // A draft primed before the editor existed (a cloned session's
-    // prompt) becomes the editor's first text.
-    let primed = if boxes.editors.contains_key(&record.id) {
-        None
-    } else {
-        cx.state.input_drafts.remove(&record.id)
-    };
+    // A primed draft (a cloned session's prompt, or the one a discard
+    // cut back to) becomes the editor's text, first or replacing.
+    let primed = cx.state.input_drafts.remove(&record.id);
     let boxes = &mut cx.state.prompt_boxes;
+    if let Some(text) = &primed
+        && let Some(editor) = boxes.editors.get_mut(&record.id)
+    {
+        editor.set_text(text);
+    }
     let key = match &boxes.key {
         KeyState::Read(key) => key.clone(),
         KeyState::Unread => None,

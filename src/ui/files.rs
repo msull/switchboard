@@ -212,9 +212,21 @@ pub fn show(
         });
     cx.state.files.insert(pid, state);
     if let Some(id) = message {
-        let draft = cx.state.input_drafts.entry(id).or_default();
-        for path in to_message {
-            append_path(draft, &path);
+        // Into the Prompt Box editor when the session has one, else the
+        // plain box's draft.
+        if let Some(editor) = cx.state.prompt_boxes.editors.get_mut(&id) {
+            let mut text = editor.core().doc().rendered();
+            for path in &to_message {
+                append_path(&mut text, path);
+            }
+            if !to_message.is_empty() {
+                editor.set_text(&text);
+            }
+        } else {
+            let draft = cx.state.input_drafts.entry(id).or_default();
+            for path in &to_message {
+                append_path(draft, path);
+            }
         }
     }
     for action in actions {

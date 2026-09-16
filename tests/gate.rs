@@ -295,6 +295,7 @@ fn record(project: ProjectId, name: &str, kind: SessionKind, cwd: &Path) -> Sess
         scrollback: None,
         source: None,
         approved_hash: None,
+        discard: None,
     }
 }
 

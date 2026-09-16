@@ -252,6 +252,18 @@ fn header_actions(
     if agent {
         order.retain(|b| *b != "Restart");
     }
+    // Undo stays offered while the conversation is still the cut one: a
+    // message sent from Switchboard clears it in the record, one typed
+    // in the terminal shows as a turn past the cut.
+    let undo = record.discard.as_ref().is_some_and(|d| {
+        cx.state
+            .conversations
+            .get(&record.id)
+            .is_none_or(|(_, c)| c.turns.len() < d.before)
+    });
+    if undo {
+        order.insert(1, "Undo discard");
+    }
     if reversed {
         order.reverse();
     }
@@ -271,6 +283,8 @@ fn header_actions(
                 continue;
             }
             "Kill" | "Back" => theme::ghost_muted(ui, button),
+            "Undo discard" => theme::ghost(ui, button)
+                .on_hover_text("Put back the conversation the last discard cut away"),
             _ => theme::secondary(ui, button),
         };
         if !response.clicked() {
@@ -279,6 +293,7 @@ fn header_actions(
         match button {
             "Restart" => cx.dispatch(AppAction::RestartSession(record.id)),
             "Kill" => cx.dispatch(AppAction::KillSession(record.id)),
+            "Undo discard" => cx.dispatch(AppAction::UndoDiscard(record.id)),
             "Back" => cx.dispatch(AppAction::Back),
             _ => cx.dispatch(AppAction::ReturnToSession(record.id)),
         }
@@ -417,6 +432,7 @@ fn conversation_or_pane(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecor
             .as_ref()
             .is_some_and(|h| h.transcript().is_some());
     let mut clone_at: Option<usize> = None;
+    let mut discard_at: Option<usize> = None;
     ui.set_min_size(ui.available_size());
     // Drawing needs several fields of the UI state at once; taking
     // them apart borrows each on its own, which the borrow checker
@@ -460,16 +476,30 @@ fn conversation_or_pane(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecor
         Menus {
             raw_message,
             clone_at: cloneable.then_some(&mut clone_at),
+            discard_at: cloneable.then_some(&mut discard_at),
         },
     );
-    if let Some(before) = clone_at {
-        let prompt = conversation
+    // Both borrow the conversation, so the prompts are looked up before
+    // dispatching, which needs the whole context again.
+    let prompt_of = |before: usize| {
+        conversation
             .turns
             .iter()
             .find(|t| t.n == before)
             .map(|t| t.user.clone())
-            .unwrap_or_default();
+            .unwrap_or_default()
+    };
+    let clone = clone_at.map(|before| (before, prompt_of(before)));
+    let discard = discard_at.map(|before| (before, prompt_of(before)));
+    if let Some((before, prompt)) = clone {
         cx.dispatch(AppAction::CloneSession {
+            id: record.id,
+            before,
+            prompt,
+        });
+    }
+    if let Some((before, prompt)) = discard {
+        cx.dispatch(AppAction::DiscardTo {
             id: record.id,
             before,
             prompt,
@@ -943,6 +973,7 @@ fn scrolls_sideways(ui: &mut Ui, salt: impl egui::AsIdSalt, add: impl FnOnce(&mu
 struct Menus<'a> {
     raw_message: &'a mut Option<String>,
     clone_at: Option<&'a mut Option<usize>>,
+    discard_at: Option<&'a mut Option<usize>>,
 }
 
 impl Menus<'_> {
@@ -950,13 +981,16 @@ impl Menus<'_> {
         Menus {
             raw_message: self.raw_message,
             clone_at: self.clone_at.as_deref_mut(),
+            discard_at: self.discard_at.as_deref_mut(),
         }
     }
-    /// The same menus without the clone item, for the agent's messages.
+    /// The same menus without the clone and discard items, for the
+    /// agent's messages.
     fn without_clone(&mut self) -> Menus<'_> {
         Menus {
             raw_message: self.raw_message,
             clone_at: None,
+            discard_at: None,
         }
     }
 }
@@ -988,17 +1022,27 @@ fn message_menu(
                 *menus.raw_message = Some(text.to_owned());
                 ui.close();
             }
-            let Some(clone_at) = menus.clone_at else {
-                return;
-            };
-            if ui
-                .button("Clone session")
-                .on_hover_text(
-                    "A new session with the conversation up to here, this message ready to send",
-                )
-                .clicked()
+            if let Some(clone_at) = menus.clone_at
+                && ui
+                    .button("Clone session")
+                    .on_hover_text(
+                        "A new session with the conversation up to here, this message ready to send",
+                    )
+                    .clicked()
             {
                 *clone_at = Some(turn);
+                ui.close();
+            }
+            if let Some(discard_at) = menus.discard_at
+                && ui
+                    .button("Discard to here")
+                    .on_hover_text(
+                        "Cut this session back to before this message, with it ready to send \
+                         again; Undo discard puts everything back until the next message is sent",
+                    )
+                    .clicked()
+            {
+                *discard_at = Some(turn);
                 ui.close();
             }
         });

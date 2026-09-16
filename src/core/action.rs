@@ -220,6 +220,19 @@ pub enum AppAction {
         before: usize,
         prompt: String,
     },
+    /// Cut an agent session's conversation back to before turn `before`,
+    /// in place: the record resumes through a copy up to there, with
+    /// `prompt` primed, and keeps what it resumed through before so
+    /// `UndoDiscard` can put it back. A running agent is stopped. Never
+    /// launches.
+    DiscardTo {
+        id: RecordId,
+        before: usize,
+        prompt: String,
+    },
+    /// Put back what the last `DiscardTo` replaced. Offered until the
+    /// next message goes into the session.
+    UndoDiscard(RecordId),
     // --- results from effects / workers
     /// An effect with no result of its own failed; the user is told.
     Failed(String),
@@ -242,6 +255,13 @@ pub enum AppAction {
     /// The provider-side copy for `CloneSession` was made (or not).
     TranscriptCloned {
         source: RecordId,
+        prompt: String,
+        result: Result<ResumeHandle, String>,
+    },
+    /// The provider-side copy for `DiscardTo` was made (or not).
+    TranscriptDiscarded {
+        id: RecordId,
+        before: usize,
         prompt: String,
         result: Result<ResumeHandle, String>,
     },
@@ -284,6 +304,13 @@ pub enum Effect {
     /// `TranscriptCloned`).
     CloneTranscript {
         source: RecordId,
+        handle: ResumeHandle,
+        before: usize,
+        prompt: String,
+    },
+    /// The same copy for `DiscardTo` (reports `TranscriptDiscarded`).
+    DiscardTranscript {
+        id: RecordId,
         handle: ResumeHandle,
         before: usize,
         prompt: String,
@@ -510,7 +537,10 @@ impl AppCore {
             | AppAction::RemoveSession(_)
             | AppAction::RestartSession(_)
             | AppAction::CloneSession { .. }
-            | AppAction::TranscriptCloned { .. } => self.session_action(action, now, &mut out),
+            | AppAction::TranscriptCloned { .. }
+            | AppAction::DiscardTo { .. }
+            | AppAction::UndoDiscard(_)
+            | AppAction::TranscriptDiscarded { .. } => self.session_action(action, now, &mut out),
 
             AppAction::LaunchPrepared { id, result } => {
                 self.launch_prepared(id, result, now, &mut out);
@@ -558,6 +588,13 @@ impl AppCore {
             }),
             AppAction::ReturnToSession(id) => self.return_to_session(id, now, out),
             AppAction::SendInput { id, text } => {
+                // A message that reaches the pane ends the chance to undo
+                // a discard; one that finds no pane does not.
+                if self.host_status(id).is_some()
+                    && self.session(id).is_some_and(|s| s.discard.is_some())
+                {
+                    self.edit_session(id, out, |s| s.discard = None);
+                }
                 self.aim_at_pane(id, out, |host| Effect::SendInput { host, text });
             }
             AppAction::Interrupt(id) => self.aim_at_pane(id, out, |host| Effect::SendKeys {
@@ -579,6 +616,16 @@ impl AppCore {
                 prompt,
                 result,
             } => self.transcript_cloned(source, prompt, result, now, out),
+            AppAction::DiscardTo { id, before, prompt } => {
+                self.discard_to(id, before, prompt, out);
+            }
+            AppAction::TranscriptDiscarded {
+                id,
+                before,
+                prompt,
+                result,
+            } => self.transcript_discarded(id, before, prompt, result, now, out),
+            AppAction::UndoDiscard(id) => self.undo_discard(id, now, out),
             _ => unreachable!("not a session action"),
         }
     }
@@ -1104,6 +1151,9 @@ impl AppCore {
             | AppAction::TranscriptChecked { .. }
             | AppAction::CloneSession { .. }
             | AppAction::TranscriptCloned { .. }
+            | AppAction::DiscardTo { .. }
+            | AppAction::UndoDiscard(_)
+            | AppAction::TranscriptDiscarded { .. }
             | AppAction::Spawned { .. }
             | AppAction::Attached { .. }
             | AppAction::Discovered { .. }

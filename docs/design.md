@@ -915,6 +915,19 @@ turn's totals. `Activity::text` holds the whole message (the line stays
 the excerpt for cards and lists), and a message written in the same
 assistant record as a tool call is placed before that call.
 
+## Discard to a prompt (2026-09-16)
+
+"Discard to here" on one of the user's messages does what Clone session
+does, in place: the provider-side copy of the conversation up to that
+turn becomes what the record resumes through, the message is primed
+again, and a running agent is stopped because it sits on the old
+conversation. The record keeps the handle it replaced in `discard`
+(`Discarded { previous, before, prompt }`), so "Undo discard" in the
+session header swaps it back, across restarts, until a message reaches
+the pane: `SendInput` with a live pane clears it, and a prompt typed in
+the terminal shows as a turn past the cut and hides the button. Neither
+transcript file is ever modified; the unused copy stays on disk.
+
 ## Open questions
 
 - Shared project config runs with a hash-and-approve flow and no

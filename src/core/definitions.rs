@@ -204,6 +204,7 @@ fn upsert(
         scrollback: None,
         source: Some(definition),
         approved_hash: None,
+        discard: None,
     });
     id
 }

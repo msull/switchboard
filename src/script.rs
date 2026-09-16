@@ -90,6 +90,8 @@ const EXTRA_LINES: &[&str] = &[
     "arrange",
     "show-message",
     "clone-session",
+    "discard-to",
+    "undo-discard",
     "open-terminal",
     "prompt-box",
     "theme",
@@ -130,6 +132,25 @@ fn add_to_set(
     Ok(())
 }
 
+/// A session and one of its turns, with that turn's prompt (empty when
+/// the conversation is not loaded yet).
+fn turn_of(
+    app: &SwitchboardApp,
+    name: &str,
+    turn: &str,
+) -> Result<(RecordId, usize, String), String> {
+    let id = session(app, name)?;
+    let before: usize = turn.parse().map_err(|_| "bad turn number")?;
+    let prompt = app
+        .ui_state
+        .conversations
+        .get(&id)
+        .and_then(|(_, c)| c.turns.iter().find(|t| t.n == before))
+        .map(|t| t.user.clone())
+        .unwrap_or_default();
+    Ok((id, before, prompt))
+}
+
 fn working_set_step(app: &mut SwitchboardApp, w: &[&str]) -> Result<(), String> {
     match w {
         ["switchboard"] => app.dispatch(AppAction::ShowSwitchboard),
@@ -138,16 +159,16 @@ fn working_set_step(app: &mut SwitchboardApp, w: &[&str]) -> Result<(), String> 
         }
         ["prompt-box", on] => app.dispatch(AppAction::SetPromptBox(*on == "on")),
         ["clone-session", name, turn] => {
-            let id = session(app, name)?;
-            let before: usize = turn.parse().map_err(|_| "bad turn number")?;
-            let prompt = app
-                .ui_state
-                .conversations
-                .get(&id)
-                .and_then(|(_, c)| c.turns.iter().find(|t| t.n == before))
-                .map(|t| t.user.clone())
-                .unwrap_or_default();
+            let (id, before, prompt) = turn_of(app, name, turn)?;
             app.dispatch(AppAction::CloneSession { id, before, prompt });
+        }
+        ["discard-to", name, turn] => {
+            let (id, before, prompt) = turn_of(app, name, turn)?;
+            app.dispatch(AppAction::DiscardTo { id, before, prompt });
+        }
+        ["undo-discard", name] => {
+            let id = session(app, name)?;
+            app.dispatch(AppAction::UndoDiscard(id));
         }
         ["sleep", secs] => {
             let secs: u64 = secs.parse().map_err(|_| "bad sleep")?;

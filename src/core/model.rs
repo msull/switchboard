@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 /// Bump when the on-disk shape changes incompatibly.
-pub const SCHEMA_VERSION: u32 = 3;
+pub const SCHEMA_VERSION: u32 = 4;
 
 /// How the UI picks its colours: follow the system, or force one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -488,6 +488,24 @@ pub struct SessionRecord {
     /// hash and so drops the approval.
     #[serde(default)]
     pub approved_hash: Option<String>,
+    /// What the last discard replaced, so it can be undone until the
+    /// next message goes into the session.
+    #[serde(default)]
+    pub discard: Option<Discarded>,
+}
+
+/// A discard cut the conversation back to before one of the user's
+/// prompts, in place: the record resumes through a copy and this keeps
+/// what it resumed through before.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Discarded {
+    /// The handle the session resumed through before the discard; the
+    /// provider's file behind it is never touched.
+    pub previous: ResumeHandle,
+    /// The turn the conversation was cut before.
+    pub before: usize,
+    /// That turn's prompt, primed as the draft.
+    pub prompt: String,
 }
 
 /// Where a defined record's definition stands.

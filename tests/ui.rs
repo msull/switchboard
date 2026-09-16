@@ -79,6 +79,7 @@ fn record(project: ProjectId, name: &str, kind: SessionKind, order: u32) -> Sess
         scrollback: None,
         source: None,
         approved_hash: None,
+        discard: None,
     }
 }
 
@@ -1398,6 +1399,7 @@ fn a_file_row_dragged_onto_the_message_box_adds_its_path() {
 #[test]
 fn shift_click_the_menu_and_the_pane_put_a_path_in_the_message() {
     let (mut harness, _) = harness();
+    plain_message_box(&mut harness);
     let (dir, pid, sid) = file_project(&mut harness);
     let readme = dir.path().join("README.md").display().to_string();
     // On a board there is no message box, so none of the ways show up.
@@ -1437,6 +1439,26 @@ fn shift_click_the_menu_and_the_pane_put_a_path_in_the_message() {
 }
 
 #[test]
+fn the_file_side_hands_a_path_to_the_prompt_box_editor() {
+    let (mut harness, _) = harness();
+    let (dir, _, sid) = file_project(&mut harness);
+    let readme = dir.path().join("README.md").display().to_string();
+    showing(&mut harness, View::Session(sid));
+    harness.get_by_role_and_label(Role::Button, "Side").click();
+    harness.run_steps(2);
+    click(&mut harness, "  README.md");
+    click(&mut harness, "To message");
+    assert_eq!(
+        prompt_field(&mut harness).value().as_deref(),
+        Some(readme.as_str())
+    );
+    assert!(
+        !harness.state().ui_state.input_drafts.contains_key(&sid),
+        "nothing left in the plain draft"
+    );
+}
+
+#[test]
 fn messages_have_a_context_menu_with_copy() {
     let (mut harness, ids) = harness();
     plain_message_box(&mut harness);
@@ -1467,6 +1489,67 @@ fn messages_have_a_context_menu_with_copy() {
     harness.get_by_label("pong").click_secondary();
     harness.run_steps(2);
     harness.get_by_role_and_label(Role::Button, "Copy");
+}
+
+#[test]
+fn discard_to_a_prompt_cuts_in_place_and_the_header_offers_undo() {
+    let (mut harness, ids) = harness();
+    let id = seed_claude(&mut harness, &ids);
+    harness
+        .state_mut()
+        .ui_state
+        .conversations
+        .insert(id, (None, two_turns()));
+    showing(&mut harness, View::Session(id));
+    assert!(harness.query_by_label("Undo discard").is_none());
+    let original = harness.state().core().session(id).unwrap().resume.clone();
+    harness
+        .get_by_label("What is the crate called?")
+        .click_secondary();
+    harness.run_steps(2);
+    click(&mut harness, "Discard to here");
+    assert_eq!(
+        actions(&harness),
+        vec![AppAction::DiscardTo {
+            id,
+            before: 2,
+            prompt: "What is the crate called?".into(),
+        }]
+    );
+    {
+        let app = harness.state();
+        let record = app.core().session(id).unwrap();
+        assert_ne!(record.resume, original, "resumes through the cut copy");
+        assert_eq!(record.discard.as_ref().map(|d| d.before), Some(2));
+        assert_eq!(app.core().view(), View::Session(id), "same session");
+        assert!(
+            !app.ui_state.conversations.contains_key(&id),
+            "cache dropped"
+        );
+    }
+    // The cut conversation, as the next read would load it.
+    let mut cut = two_turns();
+    cut.turns.truncate(1);
+    harness
+        .state_mut()
+        .ui_state
+        .conversations
+        .insert(id, (None, cut));
+    harness.run_steps(2);
+    assert_eq!(
+        prompt_field(&mut harness).value().as_deref(),
+        Some("What is the crate called?"),
+        "the prompt is ready to send again"
+    );
+    harness.state_mut().dispatched.clear();
+    click(&mut harness, "Undo discard");
+    assert_eq!(actions(&harness), vec![AppAction::UndoDiscard(id)]);
+    let app = harness.state();
+    let record = app.core().session(id).unwrap();
+    assert_eq!(record.resume, original);
+    assert!(record.discard.is_none());
+    harness.run_steps(2);
+    assert!(harness.query_by_label("Undo discard").is_none());
 }
 
 #[test]

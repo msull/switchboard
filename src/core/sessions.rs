@@ -6,8 +6,8 @@ use std::path::PathBuf;
 
 use crate::core::action::{AppCore, Clock, Effect, Flight, FlightKind, Out, View};
 use crate::core::model::{
-    Activity, AgentKind, CardLayout, Launch, ProjectId, RecordId, ResumeHandle, SessionKind,
-    SessionRecord,
+    Activity, AgentKind, CardLayout, Discarded, Launch, ProjectId, RecordId, ResumeHandle,
+    SessionKind, SessionRecord,
 };
 use crate::core::reconcile::env_with_record_id;
 use crate::ports::agent::AgentLaunch;
@@ -62,6 +62,7 @@ impl AppCore {
             scrollback: None,
             source: None,
             approved_hash: None,
+            discard: None,
         });
         out.touch(project);
         self.launch_fresh(id, now, out);
@@ -277,27 +278,127 @@ impl AppCore {
         prompt: String,
         out: &mut Out,
     ) {
-        let Some(record) = self.session(id) else {
-            return;
-        };
+        if let Some(handle) = self.forkable(id, before, "clone") {
+            out.push(Effect::CloneTranscript {
+                source: id,
+                handle,
+                before,
+                prompt,
+            });
+        }
+    }
+
+    /// The handle a copy up to `before` can be made from, or a notice
+    /// saying why not (`verb` names the operation in it).
+    fn forkable(&mut self, id: RecordId, before: usize, verb: &str) -> Option<ResumeHandle> {
+        let record = self.session(id)?;
         let name = record.name.clone();
         match (&record.kind, record.resume.clone()) {
             (SessionKind::Agent(AgentKind::ClaudeCode), Some(handle))
                 if handle.transcript().is_some() && before >= 1 =>
             {
-                out.push(Effect::CloneTranscript {
-                    source: id,
-                    handle,
-                    before,
-                    prompt,
-                });
+                Some(handle)
             }
             (SessionKind::Agent(AgentKind::ClaudeCode), _) => {
-                self.error(format!("cannot clone {name}: it has no transcript yet"));
+                self.error(format!("cannot {verb} {name}: it has no transcript yet"));
+                None
             }
-            _ => self.error(format!(
-                "cannot clone {name}: only Claude Code sessions can be cloned"
-            )),
+            _ => {
+                self.error(format!(
+                    "cannot {verb} {name}: only Claude Code sessions can be {verb}d"
+                ));
+                None
+            }
+        }
+    }
+
+    /// The in-place counterpart of `clone_session`: the same copy, to
+    /// become this record's own conversation.
+    pub(super) fn discard_to(
+        &mut self,
+        id: RecordId,
+        before: usize,
+        prompt: String,
+        out: &mut Out,
+    ) {
+        if let Some(handle) = self.forkable(id, before, "discard") {
+            out.push(Effect::DiscardTranscript {
+                id,
+                handle,
+                before,
+                prompt,
+            });
+        }
+    }
+
+    /// The copy exists: the record resumes through it from now on and
+    /// remembers the handle it replaced. A running agent is on the old
+    /// conversation, so it is stopped; the session is cold until the user
+    /// returns to it, with the chosen prompt primed.
+    pub(super) fn transcript_discarded(
+        &mut self,
+        id: RecordId,
+        before: usize,
+        prompt: String,
+        result: Result<ResumeHandle, String>,
+        now: Clock,
+        out: &mut Out,
+    ) {
+        let Some(record) = self.session(id).cloned() else {
+            return;
+        };
+        let handle = match result {
+            Ok(handle) => handle,
+            Err(e) => {
+                self.error(format!("could not discard in {}: {e}", record.name));
+                return;
+            }
+        };
+        let Some(previous) = record.resume else {
+            return;
+        };
+        self.stop_if_running(id, out);
+        self.edit_session(id, out, |s| {
+            s.resume = Some(handle);
+            s.not_resumable = false;
+            s.discard = Some(Discarded {
+                previous,
+                before,
+                prompt: prompt.clone(),
+            });
+        });
+        self.primed.push((id, prompt));
+        self.info(
+            format!(
+                "{}: conversation cut back to before turn {before}; Undo discard puts it back",
+                record.name
+            ),
+            now,
+        );
+    }
+
+    /// Back to the handle the discard replaced. Its file was never
+    /// touched, so nothing is copied; the copy stays on disk unused.
+    pub(super) fn undo_discard(&mut self, id: RecordId, now: Clock, out: &mut Out) {
+        let Some(record) = self.session(id).cloned() else {
+            return;
+        };
+        let Some(discarded) = record.discard else {
+            self.error(format!("{}: nothing to undo", record.name));
+            return;
+        };
+        self.stop_if_running(id, out);
+        self.edit_session(id, out, |s| {
+            s.resume = Some(discarded.previous);
+            s.not_resumable = false;
+            s.discard = None;
+        });
+        self.info(format!("{}: discard undone", record.name), now);
+    }
+
+    fn stop_if_running(&mut self, id: RecordId, out: &mut Out) {
+        if let Some(status) = self.host_status(id) {
+            out.push(Effect::Kill(status.id.clone()));
         }
     }
 
@@ -351,6 +452,7 @@ impl AppCore {
             scrollback: None,
             source: None,
             approved_hash: None,
+            discard: None,
             ..record
         });
         out.touch(record.project);

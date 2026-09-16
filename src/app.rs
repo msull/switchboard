@@ -224,6 +224,11 @@ impl SwitchboardApp {
     /// what the UI asked for.
     fn dispatch_inner(&mut self, action: AppAction) {
         let now = self.clock();
+        // The conversation cache is keyed on the file's modification
+        // time; a swap of the handle behind it needs a fresh read.
+        if let AppAction::TranscriptDiscarded { id, .. } | AppAction::UndoDiscard(id) = &action {
+            self.ui_state.conversations.remove(id);
+        }
         let effects = self.core.dispatch(action, now);
         for (id, text) in self.core.take_primed() {
             self.ui_state.input_drafts.insert(id, text);
@@ -284,6 +289,7 @@ impl SwitchboardApp {
             | Effect::PrepareResume { .. }
             | Effect::CheckTranscript { .. }
             | Effect::CloneTranscript { .. }
+            | Effect::DiscardTranscript { .. }
             | Effect::Discover { .. }
             | Effect::Spawn { .. }
             | Effect::Attach { .. }
@@ -337,6 +343,17 @@ impl SwitchboardApp {
                 prompt,
                 result: s.transcripts.clone_before(&handle, before),
             },
+            Effect::DiscardTranscript {
+                id,
+                handle,
+                before,
+                prompt,
+            } => AppAction::TranscriptDiscarded {
+                id,
+                before,
+                prompt,
+                result: s.transcripts.clone_before(&handle, before),
+            },
             _ => unreachable!("not an agent effect"),
         }
     }
@@ -353,7 +370,8 @@ impl SwitchboardApp {
             Effect::PrepareLaunch { .. }
             | Effect::PrepareResume { .. }
             | Effect::CheckTranscript { .. }
-            | Effect::CloneTranscript { .. } => Some(self.run_agent_effect(effect)),
+            | Effect::CloneTranscript { .. }
+            | Effect::DiscardTranscript { .. } => Some(self.run_agent_effect(effect)),
             Effect::Discover {
                 id,
                 kind,

@@ -9,9 +9,9 @@ use uuid::Uuid;
 use super::action::{AppAction, AppCore, Clock, Effect, View};
 use super::definitions::entry_hash;
 use super::model::{
-    Activity, AgentKind, Approval, CardState, GridRect, Launch, PinTarget, Project, ProjectEnv,
-    ProjectId, RecordId, ResumeHandle, SavedView, SessionKind, SessionRecord, Settings, SideTab,
-    ThemeMode, Views, Workspace,
+    Activity, AgentKind, Approval, CardState, Discarded, GridRect, Launch, PinTarget, Project,
+    ProjectEnv, ProjectId, RecordId, ResumeHandle, SavedView, SessionKind, SessionRecord, Settings,
+    SideTab, ThemeMode, Views, Workspace,
 };
 use super::reconcile::RECORD_ID_ENV;
 use crate::ports::agent::AgentLaunch;
@@ -68,6 +68,7 @@ fn record(project: ProjectId, kind: SessionKind, order: u32) -> SessionRecord {
         scrollback: None,
         source: None,
         approved_hash: None,
+        discard: None,
     }
 }
 
@@ -1296,6 +1297,119 @@ fn cloning_a_session_asks_for_a_transcript_copy_then_makes_a_cold_record() {
         vec![(clone.id, "third prompt".to_owned())]
     );
     assert!(core.take_primed().is_empty(), "handed over once");
+}
+
+#[test]
+fn discarding_cuts_the_session_in_place_and_undo_puts_it_back() {
+    let (mut core, id) = resumable_agent();
+    let original = core.session(id).unwrap().resume.clone().unwrap();
+    let e = core.dispatch(
+        AppAction::DiscardTo {
+            id,
+            before: 2,
+            prompt: "second prompt".into(),
+        },
+        Clock::at(1),
+    );
+    assert_eq!(
+        e,
+        vec![Effect::DiscardTranscript {
+            id,
+            handle: original.clone(),
+            before: 2,
+            prompt: "second prompt".into(),
+        }]
+    );
+    let cut = ResumeHandle::ClaudeCode {
+        session_id: Uuid::new_v4(),
+        transcript: Some(PathBuf::from("/tmp/cut.jsonl")),
+    };
+    let e = core.dispatch(
+        AppAction::TranscriptDiscarded {
+            id,
+            before: 2,
+            prompt: "second prompt".into(),
+            result: Ok(cut.clone()),
+        },
+        Clock::at(2),
+    );
+    assert_eq!(saves(&e), 1);
+    assert!(
+        !e.iter().any(|e| matches!(e, Effect::Kill(_))),
+        "nothing ran, nothing to stop"
+    );
+    let s = core.session(id).unwrap();
+    assert_eq!(s.resume, Some(cut.clone()));
+    assert_eq!(
+        s.discard,
+        Some(Discarded {
+            previous: original.clone(),
+            before: 2,
+            prompt: "second prompt".into(),
+        })
+    );
+    assert_eq!(core.workspaces()[0].sessions.len(), 1, "no new record");
+    assert_eq!(core.take_primed(), vec![(id, "second prompt".to_owned())]);
+
+    let e = core.dispatch(AppAction::UndoDiscard(id), Clock::at(3));
+    assert_eq!(saves(&e), 1);
+    let s = core.session(id).unwrap();
+    assert_eq!(s.resume, Some(original));
+    assert_eq!(s.discard, None);
+    assert!(
+        core.dispatch(AppAction::UndoDiscard(id), Clock::at(4))
+            .is_empty()
+    );
+    assert!(
+        core.notices()
+            .last()
+            .unwrap()
+            .text
+            .contains("nothing to undo")
+    );
+}
+
+#[test]
+fn a_discard_stops_a_running_agent_and_a_sent_message_ends_the_undo() {
+    let project = project("p");
+    let mut workspace = Workspace::new(project.clone());
+    let mut record = record(project.id, agent(), 0);
+    let original = claude_handle();
+    record.resume = Some(original.clone());
+    let id = record.id;
+    workspace.sessions.push(record);
+    let (mut core, _) = loaded(vec![workspace], vec![running(id)]);
+    let cut = ResumeHandle::ClaudeCode {
+        session_id: Uuid::new_v4(),
+        transcript: Some(PathBuf::from("/tmp/cut.jsonl")),
+    };
+    let e = core.dispatch(
+        AppAction::TranscriptDiscarded {
+            id,
+            before: 1,
+            prompt: String::new(),
+            result: Ok(cut.clone()),
+        },
+        Clock::at(2),
+    );
+    assert!(
+        e.iter()
+            .any(|e| matches!(e, Effect::Kill(h) if h.0 == id.host_name())),
+        "the running agent is on the old conversation: {e:?}"
+    );
+    assert!(core.session(id).unwrap().discard.is_some());
+    // A message into the pane is the point of no return.
+    let e = core.dispatch(
+        AppAction::SendInput {
+            id,
+            text: "go".into(),
+        },
+        Clock::at(3),
+    );
+    assert_eq!(saves(&e), 1);
+    assert!(e.iter().any(|e| matches!(e, Effect::SendInput { .. })));
+    assert_eq!(core.session(id).unwrap().discard, None);
+    assert_eq!(core.session(id).unwrap().resume, Some(cut));
 }
 
 #[test]
