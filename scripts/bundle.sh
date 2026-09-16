@@ -43,6 +43,8 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>NSHighResolutionCapable</key> <true/>
   <key>NSAppleEventsUsageDescription</key>
   <string>Switchboard raises the terminal window of a session you return to.</string>
+  <key>NSMicrophoneUsageDescription</key>
+  <string>Switchboard listens to your voice to dictate prompts to an agent.</string>
 </dict>
 </plist>
 PLIST

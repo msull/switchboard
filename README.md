@@ -23,7 +23,10 @@ you at the bottom of the window when tmux is missing. Prompt Box is a git
 dependency pinned by revision; if cargo cannot fetch it because a git
 `insteadOf` rule turns the URL into ssh, run with
 `CARGO_NET_GIT_FETCH_WITH_CLI=true` (or set `net.git-fetch-with-cli` in
-`~/.cargo/config.toml`) so the git CLI's credentials are used.
+`~/.cargo/config.toml`) so the git CLI's credentials are used. The
+bundle declares microphone use (`NSMicrophoneUsageDescription`): a
+bundled app without it gets silence from the microphone, no prompt and
+no error, so listening looks dead.
 
 Data lives in `~/Library/Application Support/Switchboard/`: one JSON file
 per project under `projects/` (with a `.bak` of the previous version;
