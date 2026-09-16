@@ -21,6 +21,13 @@ APP="$DEST/Switchboard.app"
 ID="com.sadburger.switchboard"
 VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
 
+# The signature the installed app had, so a change of identity below can
+# clear the grants macOS keyed on it (otherwise it denies silently).
+OLD_AUTHORITY=""
+if [ -d "$APP" ]; then
+  OLD_AUTHORITY=$(codesign -dvv "$APP" 2>&1 | sed -n 's/^Authority=//p' | head -1)
+fi
+
 cargo build --locked --release
 
 # The build output may live outside the project (a shared target-dir in
@@ -74,6 +81,12 @@ if [ -n "$IDENTITY" ]; then
   echo "Signed with \"$IDENTITY\"; Accessibility grants persist across rebuilds."
   if ! codesign -dvv "$APP" 2>&1 | grep -q '^TeamIdentifier=[A-Z0-9]'; then
     echo "No Team ID in this identity: the Keychain asks again after each build."
+  fi
+  NEW_AUTHORITY=$(codesign -dvv "$APP" 2>&1 | sed -n 's/^Authority=//p' | head -1)
+  if [ -n "$OLD_AUTHORITY" ] && [ "$OLD_AUTHORITY" != "$NEW_AUTHORITY" ]; then
+    tccutil reset Accessibility "$ID" >/dev/null 2>&1 || true
+    tccutil reset AppleEvents "$ID" >/dev/null 2>&1 || true
+    echo "Signing identity changed: re-grant Accessibility when the app next asks."
   fi
 else
   codesign --force --deep --sign - "$APP"
