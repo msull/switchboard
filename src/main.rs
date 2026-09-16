@@ -55,7 +55,11 @@ fn main() -> eframe::Result {
             .with_inner_size([1100.0, 720.0])
             .with_min_inner_size([600.0, 400.0])
             .with_maximized(true)
-            .with_icon(icon),
+            .with_icon(icon)
+            // Transparency is decided once, here, for every viewport: the
+            // caption overlay of the embedded Prompt Box needs it. The
+            // window's own panels paint opaque backgrounds regardless.
+            .with_transparent(true),
         ..Default::default()
     };
 

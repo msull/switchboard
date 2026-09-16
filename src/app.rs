@@ -723,4 +723,11 @@ impl eframe::App for SwitchboardApp {
         }
         crate::ui::draw(self, ui);
     }
+
+    /// Fully transparent: the rail, side, and central panels paint their
+    /// own opaque fills, and the caption overlay viewport needs a
+    /// transparent backbuffer, which eframe enables from the root's.
+    fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
+        [0.0, 0.0, 0.0, 0.0]
+    }
 }
