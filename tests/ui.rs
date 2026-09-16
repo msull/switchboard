@@ -2481,6 +2481,31 @@ fn listening_is_bound_to_one_session_and_shown_in_the_rail() {
 }
 
 #[test]
+fn the_cc_button_turns_captions_off_and_the_setting_follows() {
+    let (mut harness, ids) = harness();
+    let id = seed_claude(&mut harness, &ids);
+    showing(&mut harness, View::Session(id));
+    assert!(harness.state().core().settings().voice.captions);
+    click(&mut harness, "CC");
+    assert!(
+        !harness.state().core().settings().voice.captions,
+        "written back"
+    );
+    harness.run_steps(2);
+    assert!(
+        !harness
+            .state()
+            .ui_state
+            .prompt_boxes
+            .voice
+            .captions_enabled(),
+        "and not overwritten by the next frame"
+    );
+    click(&mut harness, "CC");
+    assert!(harness.state().core().settings().voice.captions);
+}
+
+#[test]
 fn the_settings_menu_turns_the_prompt_box_off_and_on() {
     let (mut harness, ids) = harness();
     let id = seed_claude(&mut harness, &ids);

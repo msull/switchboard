@@ -65,6 +65,9 @@ pub struct PromptBoxes {
     key: KeyState,
     /// Use the real clipboard and save dialog. Tests turn this off.
     pub native: bool,
+    /// The captions setting last pushed into the runtime, so the CC
+    /// button's own change is not overwritten on the next frame.
+    applied_captions: Option<bool>,
 }
 
 impl Default for PromptBoxes {
@@ -77,6 +80,7 @@ impl Default for PromptBoxes {
             outbox: Outbox::default(),
             key: KeyState::Unread,
             native: true,
+            applied_captions: None,
         }
     }
 }
@@ -286,7 +290,12 @@ pub fn panel(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord) {
     if let Some(flag) = boxes.running.get(&record.id) {
         flag.store(running, Ordering::Relaxed);
     }
-    boxes.voice.set_captions_enabled(captions);
+    // The stored setting reaches the runtime when it changes; the CC
+    // button changes the runtime and is written back below.
+    if boxes.applied_captions != Some(captions) {
+        boxes.voice.set_captions_enabled(captions);
+        boxes.applied_captions = Some(captions);
+    }
     let bound = boxes.bound == Some(record.id);
     let mut listen = None;
     if let Some(editor) = boxes.editors.get_mut(&record.id) {
@@ -304,6 +313,15 @@ pub fn panel(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord) {
         Some(true) => boxes.listen_into(record.id),
         Some(false) if bound => boxes.stop(),
         _ => {}
+    }
+    let toggled = boxes.voice.captions_enabled();
+    if toggled != captions {
+        boxes.applied_captions = Some(toggled);
+        let voice = cx.core.settings().voice.clone();
+        cx.dispatch(AppAction::SetVoiceSettings(crate::core::VoiceSettings {
+            captions: toggled,
+            ..voice
+        }));
     }
     if interrupt {
         cx.dispatch(AppAction::Interrupt(record.id));
