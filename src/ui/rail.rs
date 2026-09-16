@@ -82,6 +82,7 @@ fn top(cx: &mut DrawCtx<'_>, ui: &mut Ui, view: &View, compact: bool) {
         cx.dispatch(AppAction::ShowSwitchboard);
     }
     ui.add_space(14.0);
+    super::prompt_box::rail_indicator(cx, ui, compact);
 
     let waiting = cx.core.waiting_count();
     let all = row(

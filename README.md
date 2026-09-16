@@ -17,14 +17,20 @@ cargo fmt --all                                      # format
 ```
 
 Requirements: macOS, `tmux` 3.2 or newer (`brew install tmux`), Ghostty
-for agent sessions, and `claude` and/or `codex` on `PATH`. The app tells
-you at the bottom of the window when tmux is missing.
+for agent sessions, `cmake` (`brew install cmake`; the embedded Prompt Box
+builds whisper.cpp), and `claude` and/or `codex` on `PATH`. The app tells
+you at the bottom of the window when tmux is missing. Prompt Box is a git
+dependency pinned by revision; if cargo cannot fetch it because a git
+`insteadOf` rule turns the URL into ssh, run with
+`CARGO_NET_GIT_FETCH_WITH_CLI=true` (or set `net.git-fetch-with-cli` in
+`~/.cargo/config.toml`) so the git CLI's credentials are used.
 
 Data lives in `~/Library/Application Support/Switchboard/`: one JSON file
 per project under `projects/` (with a `.bak` of the previous version;
 approvals of defined commands live inside these records),
 `settings.json` (theme, exclusive mode, editor, global variables, file
-side shown next to sessions and its tab, the screen to reopen on),
+side shown next to sessions and its tab, the screen to reopen on, the
+Prompt Box switch and its trigger word, model, and captions),
 `views.json` (the working sets: each one's name, which sessions and
 files are on it, and where each card sits on its grid, with a `.bak`),
 the
@@ -96,7 +102,7 @@ Dev aids, all environment variables:
   `switchboard`, `working-set`, `new-working-set`, `clone-working-set`,
   `rename-working-set`, `delete-working-set`, `add-to-working-set`,
   `add-file-to-working-set`, `arrange`, `show-message`, `clone-session`,
-  `open-terminal`, `theme`, `sleep`).
+  `open-terminal`, `prompt-box`, `theme`, `sleep`).
 - `SWITCHBOARD_TMUX=<path>`: tmux binary to use.
 - `RUST_LOG=switchboard=debug`: verbose logging.
 
@@ -142,6 +148,7 @@ src/app.rs               SwitchboardApp: owns core + adapters; runs effects; pol
 src/script.rs            SWITCHBOARD_SCRIPT dev aid
 src/ui/
   mod.rs                 UiState, draw loop (collect actions, then dispatch), keyboard, side panel tabs
+  prompt_box.rs          the Prompt Box editor per agent session, one voice runtime bound to one of them
   theme.rs               the look: color tokens per theme, Source Serif 4, type scale, shared widgets (dot, kicker, buttons)
   rail.rs                left project rail (brand, All sessions, projects with dots, Go to, Settings); a session's neighbours beside it
   switcher.rs            Settings menu and the toasts (notice, host error)

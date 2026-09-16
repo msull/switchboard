@@ -542,6 +542,7 @@ mod tests {
             side_tab: crate::core::SideTab::Run,
             last_view: crate::core::SavedView::Board(crate::core::ProjectId::new()),
             open_terminal_on_launch: true,
+            ..Settings::default()
         };
         store.save_settings(&settings).unwrap();
         assert_eq!(store.load_all().unwrap().settings, settings);

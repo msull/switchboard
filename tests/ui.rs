@@ -191,11 +191,18 @@ fn harness_build(
             let mut app = SwitchboardApp::with_services(services);
             app.record_actions = true;
             app.ui_state.embed_terminals = false;
+            app.ui_state.prompt_boxes.native = false;
             app
         });
     let ids = seed(harness.state_mut());
     harness.run_steps(2);
     (harness, ids)
+}
+
+/// Turns the Prompt Box editor off so the plain message box is drawn.
+fn plain_message_box(harness: &mut Harness<'static, SwitchboardApp>) {
+    harness.state_mut().dispatch(AppAction::SetPromptBox(false));
+    harness.state_mut().dispatched.clear();
 }
 
 fn showing(harness: &mut Harness<'static, SwitchboardApp>, view: View) {
@@ -1045,6 +1052,7 @@ fn two_turns() -> Conversation {
 #[test]
 fn claude_session_shows_the_conversation_and_message_box() {
     let (mut harness, ids) = harness();
+    plain_message_box(&mut harness);
     let id = seed_claude(&mut harness, &ids);
     harness
         .state_mut()
@@ -1146,6 +1154,7 @@ fn long_activity_lines_wrap_instead_of_being_cut() {
 #[test]
 fn stop_button_and_cmd_period_interrupt() {
     let (mut harness, ids) = harness();
+    plain_message_box(&mut harness);
     let id = seed_claude(&mut harness, &ids);
     showing(&mut harness, View::Session(id));
     click(&mut harness, "Stop");
@@ -1161,6 +1170,7 @@ fn stop_button_and_cmd_period_interrupt() {
 #[test]
 fn message_box_is_multiline_and_enter_sends() {
     let (mut harness, ids) = harness();
+    plain_message_box(&mut harness);
     let id = seed_claude(&mut harness, &ids);
     showing(&mut harness, View::Session(id));
     let field = harness.get_by_label("Message");
@@ -1210,6 +1220,7 @@ fn a_failed_send_keeps_the_draft() {
     let host = FakeHost::default();
     host.state().fail_write = Some("pane is dead".into());
     let (mut harness, ids) = harness_with_host(host);
+    plain_message_box(&mut harness);
     let id = seed_claude(&mut harness, &ids);
     showing(&mut harness, View::Session(id));
     let field = harness.get_by_label("Message");
@@ -1241,6 +1252,7 @@ fn a_failed_send_keeps_the_draft() {
 #[test]
 fn a_file_row_dragged_onto_the_message_box_adds_its_path() {
     let (mut harness, _) = harness();
+    plain_message_box(&mut harness);
     let (dir, _pid, sid) = file_project(&mut harness);
     showing(&mut harness, View::Session(sid));
     harness.get_by_role_and_label(Role::Button, "Side").click();
@@ -1323,6 +1335,7 @@ fn shift_click_the_menu_and_the_pane_put_a_path_in_the_message() {
 #[test]
 fn messages_have_a_context_menu_with_copy() {
     let (mut harness, ids) = harness();
+    plain_message_box(&mut harness);
     let id = seed_claude(&mut harness, &ids);
     harness
         .state_mut()
@@ -1394,17 +1407,21 @@ fn clone_session_on_a_prompt_makes_a_new_session_with_that_prompt_primed() {
         .expect("the clone record");
     assert_eq!(app.core().view(), View::Session(clone.id));
     assert_ne!(clone.resume, app.core().session(id).unwrap().resume);
-    assert_eq!(app.ui_state.input_drafts.get(&clone.id), Some(&prompt));
+    let clone_id = clone.id;
     harness.run_steps(2);
     assert!(
         harness.query_all_by_value(prompt.as_str()).next().is_some(),
         "the message box shows the primed prompt"
     );
+    // The Prompt Box editor took the primed draft as its text.
+    let boxes = &harness.state().ui_state.prompt_boxes;
+    assert_eq!(boxes.editors[&clone_id].core().doc().committed(), prompt);
 }
 
 #[test]
 fn view_raw_shows_the_message_unformatted_in_a_dialog() {
     let (mut harness, ids) = harness();
+    plain_message_box(&mut harness);
     let id = seed_claude(&mut harness, &ids);
     harness
         .state_mut()
@@ -1459,6 +1476,7 @@ fn view_raw_shows_the_message_unformatted_in_a_dialog() {
 #[test]
 fn claude_session_without_a_conversation_falls_back_to_the_snapshot() {
     let (mut harness, ids) = harness();
+    plain_message_box(&mut harness);
     let id = seed_claude(&mut harness, &ids);
     harness
         .state_mut()
@@ -1615,6 +1633,7 @@ fn rail_item_and_side_tab_open_and_close_the_side_and_the_text_reflows() {
 #[test]
 fn a_word_that_cannot_break_does_not_widen_the_turns_after_it() {
     let (mut harness, ids) = harness();
+    plain_message_box(&mut harness);
     let id = seed_claude(&mut harness, &ids);
     let mut conversation = two_turns();
     // Roughly 1400 px of one word in the first turn, prose in the second.
@@ -1665,6 +1684,7 @@ fn widen_side(harness: &mut Harness<'static, SwitchboardApp>, left: f32) {
 #[test]
 fn a_session_shrinks_to_the_width_a_wide_side_leaves_it() {
     let (mut harness, ids) = harness();
+    plain_message_box(&mut harness);
     let id = seed_claude(&mut harness, &ids);
     let mut conversation = two_turns();
     conversation.turns[0].final_text = "word ".repeat(120).trim_end().to_owned();
@@ -2326,4 +2346,148 @@ fn a_file_card_previews_the_file_rendered_or_raw() {
     harness.get_by_label("Wrap");
     click(&mut harness, "Rendered");
     harness.get_by_label("Hello");
+}
+
+// ---- the Prompt Box editor -----------------------------------------------
+
+/// The embedded editor's prompt field.
+fn prompt_field<'h>(harness: &'h mut Harness<'static, SwitchboardApp>) -> egui_kittest::Node<'h> {
+    harness.get_by_role_and_label(Role::MultilineTextInput, "Prompt")
+}
+
+#[test]
+fn agent_sessions_get_the_prompt_box_and_send_goes_to_the_pane() {
+    let (mut harness, ids) = harness();
+    let id = seed_claude(&mut harness, &ids);
+    showing(&mut harness, View::Session(id));
+    assert!(harness.query_by_label("Message").is_none(), "no plain box");
+    harness.get_by_label("Send →");
+    harness.get_by_label("Undo");
+    harness.get_by_label("Stop agent");
+    assert!(
+        harness.query_by_label("⚙").is_none(),
+        "embedded: no settings gear"
+    );
+    let field = prompt_field(&mut harness);
+    field.focus();
+    field.type_text("fix the failing test");
+    harness.run_steps(2);
+    harness.get_by_label("Send →").click();
+    harness.run_steps(3);
+    assert!(actions(&harness).contains(&AppAction::SendInput {
+        id,
+        text: "fix the failing test".into(),
+    }));
+    let editor = &harness.state().ui_state.prompt_boxes.editors[&id];
+    assert_eq!(
+        editor.core().doc().committed(),
+        "",
+        "cleared after the send"
+    );
+    // Sending never touched the clipboard: nothing was copied.
+    harness.get_by_label("Prompt sent");
+}
+
+#[test]
+fn a_send_into_a_cold_session_fails_and_keeps_the_prompt() {
+    let (mut harness, ids) = harness();
+    // codex-agent is seeded without a running pane.
+    showing(&mut harness, View::Session(ids.agent));
+    let field = prompt_field(&mut harness);
+    field.focus();
+    field.type_text("hello");
+    harness.run_steps(2);
+    harness.get_by_label("Send →").click();
+    harness.run_steps(3);
+    assert!(
+        !actions(&harness)
+            .iter()
+            .any(|a| matches!(a, AppAction::SendInput { .. }))
+    );
+    harness.get_by_label("Send failed: the session is not running. Prompt kept.");
+    let editor = &harness.state().ui_state.prompt_boxes.editors[&ids.agent];
+    assert_eq!(editor.core().doc().committed(), "hello");
+}
+
+#[test]
+fn each_session_keeps_its_own_prompt() {
+    let (mut harness, ids) = harness();
+    let claude = seed_claude(&mut harness, &ids);
+    showing(&mut harness, View::Session(claude));
+    let field = prompt_field(&mut harness);
+    field.focus();
+    field.type_text("for claude");
+    harness.run_steps(2);
+    showing(&mut harness, View::Session(ids.agent));
+    let field = prompt_field(&mut harness);
+    field.focus();
+    field.type_text("for codex");
+    harness.run_steps(2);
+    showing(&mut harness, View::Session(claude));
+    let boxes = &harness.state().ui_state.prompt_boxes;
+    assert_eq!(
+        boxes.editors[&claude].core().doc().committed(),
+        "for claude"
+    );
+    assert_eq!(
+        boxes.editors[&ids.agent].core().doc().committed(),
+        "for codex"
+    );
+    // Removing the session drops its editor on the next frame.
+    harness
+        .state_mut()
+        .dispatch(AppAction::RemoveSession(ids.agent));
+    harness.run_steps(2);
+    assert!(
+        !harness
+            .state()
+            .ui_state
+            .prompt_boxes
+            .editors
+            .contains_key(&ids.agent)
+    );
+}
+
+#[test]
+fn listening_is_bound_to_one_session_and_shown_in_the_rail() {
+    let (mut harness, ids) = harness();
+    let claude = seed_claude(&mut harness, &ids);
+    showing(&mut harness, View::Session(claude));
+    assert!(harness.query_by_label_contains("Listening ·").is_none());
+    // No speech model in tests: the demo stands in for the microphone.
+    {
+        let boxes = &mut harness.state_mut().ui_state.prompt_boxes;
+        boxes.bound = Some(claude);
+        let started = boxes.voice.start_demo(false);
+        boxes.editors.get_mut(&claude).unwrap().apply(started);
+    }
+    harness.run_steps(2);
+    harness.get_by_label_contains("Listening · claude-agent");
+    // Still listening while another view is up, and the rail still says so.
+    showing(&mut harness, View::Session(ids.agent));
+    harness.get_by_label_contains("Listening · claude-agent");
+    harness.get_by_label("Start listening");
+    // Stop from the rail ends it wherever we are.
+    click(&mut harness, "Stop listening");
+    assert!(harness.query_by_label_contains("Listening ·").is_none());
+    assert!(
+        !harness
+            .state()
+            .ui_state
+            .prompt_boxes
+            .voice
+            .is_demo_running()
+    );
+}
+
+#[test]
+fn the_settings_menu_turns_the_prompt_box_off_and_on() {
+    let (mut harness, ids) = harness();
+    let id = seed_claude(&mut harness, &ids);
+    showing(&mut harness, View::Session(id));
+    click(&mut harness, "Settings");
+    click(&mut harness, "Prompt Box editor for agent sessions");
+    assert!(actions(&harness).contains(&AppAction::SetPromptBox(false)));
+    harness.get_by_label("Message");
+    assert!(harness.query_by_label("Send →").is_none());
 }

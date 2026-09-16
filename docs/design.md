@@ -864,6 +864,37 @@ settings menu, `open-terminal on|off` in scripts) restores the old
 behaviour of attaching right after the spawn. Shells, commands, and
 services are unchanged: they are embedded and never opened a window.
 
+## Prompt Box status (2026-09-15)
+
+Agent sessions' message box is the Prompt Box editor
+(`github.com/msull/promptbox`, a git dependency pinned by revision; spike
+8 has the mechanism). One `promptbox::Editor` per agent session lives in
+`UiState.prompt_boxes`, made on the first draw of the session with its
+own sink, save directory (the project root), and the shared key and
+settings; drafts and undo history are per session and in memory only. One
+`promptbox::Voice` runtime is bound to at most one session: Start
+listening on a session (re)binds it, finishing another session's
+utterance into that session first; the rail shows "● Listening · name"
+with Stop listening while the runtime is live, whatever view is up, and
+the click goes to that session. Send hands the prompt to the session's
+pane (`SendInput`) through the editor's sink; a session that is not
+running refuses it and the prompt stays. The clipboard is never touched
+by Send; Copy still copies.
+
+Nothing is shared with the standalone Prompt Box app: settings are
+`Settings.prompt_box` and `Settings.voice` (trigger, model, captions) in
+Switchboard's `settings.json`; the `OpenAI` key is a Keychain item under
+`VOICE_KEY_ACCOUNT`, read once per run and passed into every editor;
+history and drafts use Prompt Box's in-memory store and vanish on exit;
+tools have no folder. The one file in common is the whisper model, at
+Prompt Box's own path, downloaded once by either app.
+
+`Settings.prompt_box` (default on; the settings menu, `prompt-box on|off`
+in scripts) falls back to the plain message box. Known gaps: no Dock
+badge while recording (Switchboard's badge is the waiting count); the
+level meter and status glyphs rely on the fallback fonts; the standalone
+app's project vocabulary is not available to embedded editors.
+
 ## Open questions
 
 - Shared project config runs with a hash-and-approve flow and no

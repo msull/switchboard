@@ -4,7 +4,15 @@
 use egui::{Context, RichText, Ui};
 
 use super::{DrawCtx, theme};
-use crate::core::{AppAction, ThemeMode};
+use crate::core::{AppAction, ThemeMode, VoiceSettings};
+
+/// The Prompt Box fields as typed in the menu, until each loses focus.
+#[derive(Debug, Clone, Default)]
+pub struct VoiceDraft {
+    pub trigger: String,
+    pub model: String,
+    pub key: String,
+}
 
 /// The Settings menu: theme, editor command, environment, exclusive.
 /// Compact draws only a glyph, for the narrow rail.
@@ -70,8 +78,81 @@ pub fn settings_menu(
                 cx.dispatch(AppAction::SetOpenTerminalOnLaunch(open_terminal));
                 ui.close();
             }
+            ui.add_space(6.0);
+            prompt_box_settings(cx, ui, settings);
         },
     );
+}
+
+/// The embedded Prompt Box: on or off, and what it needs. Its state is
+/// Switchboard's own (this file and the Keychain), never the standalone
+/// app's.
+fn prompt_box_settings(cx: &mut DrawCtx<'_>, ui: &mut Ui, settings: &crate::core::Settings) {
+    let p = theme::palette(ui);
+    theme::kicker(ui, "Prompt Box", p.n600);
+    let mut on = settings.prompt_box;
+    if ui
+        .checkbox(&mut on, "Prompt Box editor for agent sessions")
+        .on_hover_text("Voice dictation, AI clean-up, and Save in the message box")
+        .changed()
+    {
+        cx.dispatch(AppAction::SetPromptBox(on));
+        ui.close();
+    }
+    let voice = settings.voice.clone();
+    let mut captions = voice.captions;
+    if ui
+        .checkbox(&mut captions, "Captions while listening")
+        .changed()
+    {
+        cx.dispatch(AppAction::SetVoiceSettings(VoiceSettings {
+            captions,
+            ..voice.clone()
+        }));
+    }
+    let draft = cx.state.voice_draft.get_or_insert_with(|| VoiceDraft {
+        trigger: voice.trigger.clone(),
+        model: voice.openai_model.clone(),
+        key: String::new(),
+    });
+    let trigger = ui.add(
+        egui::TextEdit::singleline(&mut draft.trigger)
+            .hint_text("Trigger word (blank: Zevro)")
+            .desired_width(220.0),
+    );
+    let model = ui.add(
+        egui::TextEdit::singleline(&mut draft.model)
+            .hint_text("OpenAI model (blank: Prompt Box's default)")
+            .desired_width(220.0),
+    );
+    let key = ui.add(
+        egui::TextEdit::singleline(&mut draft.key)
+            .password(true)
+            .hint_text("OpenAI API key (kept in the Keychain)")
+            .desired_width(220.0),
+    );
+    // Read what changed while the draft is borrowed, act once it is not.
+    let words = ((trigger.lost_focus() || model.lost_focus())
+        && (draft.trigger.trim() != voice.trigger || draft.model.trim() != voice.openai_model))
+        .then(|| {
+            (
+                draft.trigger.trim().to_owned(),
+                draft.model.trim().to_owned(),
+            )
+        });
+    let new_key = (key.lost_focus() && !draft.key.trim().is_empty())
+        .then(|| std::mem::take(&mut draft.key).trim().to_owned());
+    if let Some((trigger, openai_model)) = words {
+        cx.dispatch(AppAction::SetVoiceSettings(VoiceSettings {
+            trigger,
+            openai_model,
+            captions: voice.captions,
+        }));
+    }
+    if let Some(value) = new_key {
+        cx.state.prompt_boxes.set_key(Some(value.clone()));
+        cx.dispatch(AppAction::StoreVoiceKey(value));
+    }
 }
 
 /// Notices and the host error as toasts at the top centre: surface

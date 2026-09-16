@@ -24,7 +24,7 @@ use crate::core::grid;
 use crate::core::model::{
     Activity, AgentKind, CardState, EnvVar, GridRect, Launch, PinTarget, PinnedItem, Project,
     ProjectEnv, ProjectId, RecordId, ResumeHandle, SavedView, SessionKind, SessionRecord, SetId,
-    Settings, SideTab, ThemeMode, Views, WorkingSet, Workspace,
+    Settings, SideTab, ThemeMode, VOICE_KEY_ACCOUNT, Views, VoiceSettings, WorkingSet, Workspace,
 };
 use crate::ports::agent::AgentLaunch;
 use crate::ports::events::SessionEvent;
@@ -180,6 +180,13 @@ pub enum AppAction {
     SetFilesOpen(bool),
     /// Whether an agent's terminal window opens as it starts or resumes.
     SetOpenTerminalOnLaunch(bool),
+    /// Whether agent sessions get the Prompt Box editor as their message box.
+    SetPromptBox(bool),
+    /// The embedded Prompt Box's trigger word, model, and captions.
+    SetVoiceSettings(VoiceSettings),
+    /// The `OpenAI` key for the embedded Prompt Box, into the Keychain
+    /// under `VOICE_KEY_ACCOUNT`; blank deletes it.
+    StoreVoiceKey(String),
     /// Which tab the side panel shows.
     SetSideTab(SideTab),
     /// The project's `.switchboard/project.json` was read (or is absent,
@@ -473,6 +480,9 @@ impl AppCore {
             | AppAction::SetExclusive(_)
             | AppAction::SetFilesOpen(_)
             | AppAction::SetOpenTerminalOnLaunch(_)
+            | AppAction::SetPromptBox(_)
+            | AppAction::SetVoiceSettings(_)
+            | AppAction::StoreVoiceKey(_)
             | AppAction::SetSideTab(_)
             | AppAction::ProjectConfigRead { .. }
             | AppAction::ApproveDefinition(_)
@@ -1046,6 +1056,19 @@ impl AppCore {
             AppAction::SetFilesOpen(on) => self.update_settings(out, |s| s.files_open = on),
             AppAction::SetOpenTerminalOnLaunch(on) => {
                 self.update_settings(out, |s| s.open_terminal_on_launch = on);
+            }
+            AppAction::SetPromptBox(on) => self.update_settings(out, |s| s.prompt_box = on),
+            AppAction::SetVoiceSettings(voice) => self.update_settings(out, |s| s.voice = voice),
+            AppAction::StoreVoiceKey(value) => {
+                let account = VOICE_KEY_ACCOUNT.to_owned();
+                if value.trim().is_empty() {
+                    out.push(Effect::DeleteSecret(account));
+                } else {
+                    out.push(Effect::StoreSecret {
+                        account,
+                        value: value.trim().to_owned(),
+                    });
+                }
             }
             AppAction::SetSideTab(tab) => self.update_settings(out, |s| s.side_tab = tab),
             AppAction::ProjectConfigRead { project, result } => {

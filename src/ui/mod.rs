@@ -17,6 +17,7 @@ pub mod env;
 pub mod files;
 pub mod markdown;
 pub mod palette;
+pub mod prompt_box;
 mod rail;
 mod run;
 mod runbar;
@@ -110,6 +111,10 @@ pub struct UiState {
     pub terminals: HashMap<RecordId, EmbeddedTerminal>,
     /// The theme last pushed into egui; pushed again only when it changes.
     pub applied_theme: Option<ThemeMode>,
+    /// The Prompt Box editors of agent sessions and the voice runtime.
+    pub prompt_boxes: prompt_box::PromptBoxes,
+    /// The Prompt Box settings being edited in the settings menu.
+    pub voice_draft: Option<switcher::VoiceDraft>,
     next_terminal_id: u64,
 }
 
@@ -146,6 +151,8 @@ impl Default for UiState {
             input_drafts: HashMap::new(),
             terminals: HashMap::new(),
             applied_theme: None,
+            prompt_boxes: prompt_box::PromptBoxes::default(),
+            voice_draft: None,
             next_terminal_id: 0,
         }
     }
@@ -178,9 +185,16 @@ pub fn draw(app: &mut SwitchboardApp, ui: &mut Ui) {
         draw_frame(&mut cx, ui);
         cx.actions
     };
+    // Prompts the editors sent this frame go to their panes now that the
+    // app is free to dispatch.
+    let sent: Vec<(RecordId, String)> =
+        std::mem::take(&mut *state.prompt_boxes.outbox.lock().expect("outbox mutex"));
     app.ui_state = state;
     for action in actions {
         app.dispatch(action);
+    }
+    for (id, text) in sent {
+        app.dispatch(AppAction::SendInput { id, text });
     }
 }
 
@@ -196,6 +210,9 @@ fn draw_frame(cx: &mut DrawCtx<'_>, ui: &mut Ui) {
     }
     let view = cx.core.view();
     keyboard(cx, ui, &view);
+    if let Some(delay) = prompt_box::pump(cx) {
+        ui.ctx().request_repaint_after(delay);
+    }
 
     // An embedded terminal only lives while its session is on screen.
     // Dropping the backend closes the pty, which detaches the tmux client
@@ -288,6 +305,7 @@ fn draw_frame(cx: &mut DrawCtx<'_>, ui: &mut Ui) {
         });
 
     switcher::toasts(cx, ui.ctx());
+    prompt_box::overlays(cx.state, ui.ctx());
     dialogs::show(cx, ui.ctx());
     palette::show(cx, ui.ctx());
     env::show(cx, ui.ctx());

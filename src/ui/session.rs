@@ -389,19 +389,37 @@ fn agent_body(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord) {
     } else {
         Stroke::NONE
     };
-    let panel = egui::Panel::bottom("message_panel")
-        .resizable(false)
+    let prompt_box = cx.core.settings().prompt_box;
+    let mut panel = egui::Panel::bottom("message_panel").resizable(prompt_box);
+    if prompt_box {
+        panel = panel.default_size(super::prompt_box::default_height());
+    }
+    let panel = panel
         .frame(Frame::new().stroke(stroke).inner_margin(Margin {
             left: 0,
             right: 0,
             top: 12,
             bottom: 4,
         }))
-        .show(ui, |ui| message_box(cx, ui, record))
+        .show(ui, |ui| {
+            if prompt_box {
+                super::prompt_box::panel(cx, ui, record);
+            } else {
+                message_box(cx, ui, record);
+            }
+        })
         .response;
     if let Some(dropped) = panel.dnd_release_payload::<DraggedPath>() {
-        let draft = cx.state.input_drafts.entry(record.id).or_default();
-        append_path(draft, &dropped.0);
+        if prompt_box {
+            if let Some(editor) = cx.state.prompt_boxes.editors.get_mut(&record.id) {
+                let mut text = editor.core().doc().rendered();
+                append_path(&mut text, &dropped.0);
+                editor.set_text(&text);
+            }
+        } else {
+            let draft = cx.state.input_drafts.entry(record.id).or_default();
+            append_path(draft, &dropped.0);
+        }
     }
     // The raw pane is its own panel above the message box, so the control
     // that hides it never scrolls away with the conversation.

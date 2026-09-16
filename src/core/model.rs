@@ -70,8 +70,9 @@ impl ProjectEnv {
 /// App-wide preferences: one `settings.json` per data directory, not per
 /// project. Unknown fields are kept out and missing ones default, so the
 /// file needs no schema version.
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
+#[allow(clippy::struct_excessive_bools)] // independent preferences
 pub struct Settings {
     pub theme: ThemeMode,
     /// Show only the active project, for screen sharing.
@@ -93,7 +94,56 @@ pub struct Settings {
     /// Open the terminal window when an agent starts or resumes. Off,
     /// the agent runs in its pane and the window opens only on Open.
     pub open_terminal_on_launch: bool,
+    /// Agent sessions get the Prompt Box editor (voice, AI tools, Save)
+    /// as their message box instead of the plain one.
+    pub prompt_box: bool,
+    /// What the embedded Prompt Box needs beyond the key.
+    pub voice: VoiceSettings,
 }
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            theme: ThemeMode::default(),
+            exclusive: false,
+            editor: String::new(),
+            env: Vec::new(),
+            files_open: false,
+            side_tab: SideTab::default(),
+            last_view: SavedView::default(),
+            open_terminal_on_launch: false,
+            prompt_box: true,
+            voice: VoiceSettings::default(),
+        }
+    }
+}
+
+/// Settings for the embedded Prompt Box, kept here rather than in the
+/// standalone app's file so the two never share state. The `OpenAI` key
+/// is in the Keychain under [`VOICE_KEY_ACCOUNT`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct VoiceSettings {
+    /// The word that starts a voice command; blank means Prompt Box's own.
+    pub trigger: String,
+    /// The `OpenAI` model for AI rewrites; blank means Prompt Box's own.
+    pub openai_model: String,
+    /// Show the on-screen captions while listening.
+    pub captions: bool,
+}
+
+impl Default for VoiceSettings {
+    fn default() -> Self {
+        Self {
+            trigger: String::new(),
+            openai_model: String::new(),
+            captions: true,
+        }
+    }
+}
+
+/// Keychain account of the `OpenAI` key the embedded Prompt Box uses.
+pub const VOICE_KEY_ACCOUNT: &str = "switchboard/openai-api-key";
 
 /// A screen as remembered in `settings.json`: only what can be found
 /// again after a restart. A document preview remembers its board.
