@@ -2180,6 +2180,39 @@ fn arranging_moves_and_resizes_cards_in_units_and_refuses_an_overlap() {
 }
 
 #[test]
+fn hovering_terminal_on_an_agent_card_shows_the_panes_tail() {
+    let (mut harness, ids) = harness();
+    let (id, _) = working_set_of_two(&mut harness, &ids);
+    harness
+        .state_mut()
+        .ui_state
+        .conversations
+        .insert(id, (None, two_turns()));
+    harness.run_steps(2);
+    harness
+        .ctx
+        .all_styles_mut(|s| s.interaction.tooltip_delay = 0.0);
+    harness.get_by_label("Terminal").hover();
+    harness.run_steps(3);
+    harness.get_by_label("No terminal output yet");
+    harness
+        .state_mut()
+        .ui_state
+        .snapshots
+        .insert(id, "⏺ Reading Cargo.toml\n\n❯ █\n\n".into());
+    harness.run_steps(2);
+    harness.get_by_label("Terminal").hover();
+    harness.run_steps(3);
+    assert!(
+        harness
+            .query_all_by_value("⏺ Reading Cargo.toml\n\n❯ █")
+            .next()
+            .is_some(),
+        "the peek shows the pane's tail without its trailing blank lines"
+    );
+}
+
+#[test]
 fn working_set_cards_show_the_last_exchange_and_send_a_line() {
     let (mut harness, ids) = harness();
     let (id, _) = working_set_of_two(&mut harness, &ids);

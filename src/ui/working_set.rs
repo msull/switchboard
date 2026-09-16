@@ -478,10 +478,7 @@ fn set_card(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord) {
                     show_raw = Some(answer.clone());
                 }
             }
-            ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
-                actions(cx, ui, record, running);
-                send_line(cx, ui, record, running);
-            });
+            set_footer(cx, ui, record, running, agent);
         });
     if let Some(text) = show_raw {
         cx.state.raw_message = Some(text);
@@ -490,6 +487,53 @@ fn set_card(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord) {
         cx.dispatch(AppAction::ShowSession(record.id));
     }
 }
+
+/// The card's bottom: the actions row (with the terminal peek at its
+/// right for agents) above the send box, laid out from the bottom so
+/// they stay put whatever the body holds.
+fn set_footer(
+    cx: &mut DrawCtx<'_>,
+    ui: &mut Ui,
+    record: &SessionRecord,
+    running: bool,
+    agent: bool,
+) {
+    ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
+        ui.horizontal(|ui| {
+            actions(cx, ui, record, running);
+            if agent {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    pane_peek(ui, cx.state.snapshots.get(&record.id));
+                });
+            }
+        });
+        send_line(cx, ui, record, running);
+    });
+}
+
+/// Lines of the pane a hover over "Terminal" shows.
+const PEEK_LINES: usize = 40;
+
+/// A muted "Terminal" at the card's bottom right; hovering it shows the
+/// pane's tail, so an agent's raw output is a glance away without
+/// opening the session. The snapshot is the one the captions refresh.
+fn pane_peek(ui: &mut Ui, snapshot: Option<&String>) {
+    let response = theme::ghost_muted(ui, "Terminal");
+    match snapshot.map(|s| pane_tail(s, PEEK_LINES)) {
+        Some(tail) if !tail.is_empty() => {
+            response.on_hover_ui(|ui| {
+                ui.set_min_width(PEEK_WIDTH.min(ui.ctx().content_rect().width() - 40.0));
+                super::session::code_block(ui, &tail);
+            });
+        }
+        _ => {
+            response.on_hover_text("No terminal output yet");
+        }
+    }
+}
+
+/// How wide the terminal peek is when the window allows it.
+const PEEK_WIDTH: f32 = 720.0;
 
 /// The last `lines` lines of a pane with something on them.
 fn pane_tail(snapshot: &str, lines: usize) -> String {

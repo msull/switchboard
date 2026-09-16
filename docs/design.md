@@ -820,7 +820,10 @@ last prompt on one line ("You: …", hover for the whole prompt), then
 as much of the last answer (a shell: the pane's tail, refreshed with
 the captions while the set is on screen) as fits above a one-line send
 box; hovering the answer shows up to a screenful and clicking it opens
-the raw message dialog. Enter in the send box dispatches `SendInput`;
+the raw message dialog. An agent card has "Terminal" at the bottom
+right of its actions row: hovering it shows the pane's last 40 lines
+in a code block, so the raw output is a glance away without opening the
+session. Enter in the send box dispatches `SendInput`;
 the box is off while the session is not running. Commands and services
 keep the board card. A file card shows the file inside the card,
 scrolling: Markdown rendered with a Raw toggle, raw and plain text with
