@@ -398,7 +398,7 @@ fn agent_body(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord) {
         .frame(Frame::new().stroke(stroke).inner_margin(Margin {
             left: 0,
             right: 0,
-            top: 12,
+            top: if prompt_box { 2 } else { 12 },
             bottom: 4,
         }))
         .show(ui, |ui| {

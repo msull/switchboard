@@ -15,7 +15,7 @@ use promptbox::ports::sink::PromptSink;
 use promptbox::{Editor, Voice};
 
 use super::cards::is_running;
-use super::{DrawCtx, GAP, UiState, theme};
+use super::{DrawCtx, UiState, theme};
 use crate::core::{AppAction, RecordId, SessionRecord, VOICE_KEY_ACCOUNT};
 
 /// Prompts sent from editors, waiting for the frame to end so they can
@@ -251,7 +251,6 @@ const DEFAULT_HEIGHT: f32 = 300.0;
 /// Prompt Box editor. Files dropped on it land in the prompt as paths.
 pub fn panel(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord) {
     let running = is_running(cx.core, record.id);
-    let p = theme::palette(ui);
     let captions = cx.core.settings().voice.captions;
     let dropped: Vec<std::path::PathBuf> = ui.input(|i| {
         i.raw
@@ -260,10 +259,12 @@ pub fn panel(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord) {
             .map(|f| f.path().to_path_buf())
             .collect()
     });
+    // One slim row of the host's own controls; everything else is
+    // Prompt Box's, so the editor gets the height.
     let mut interrupt = false;
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 6.0;
-        theme::kicker(ui, "Prompt Box", p.n600);
+        ui.spacing_mut().button_padding = egui::vec2(6.0, 2.0);
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if ui
                 .add_enabled_ui(running, |ui| theme::ghost_muted(ui, "Stop agent"))
@@ -273,17 +274,8 @@ pub fn panel(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord) {
             {
                 interrupt = true;
             }
-            ui.add(
-                egui::Label::new(
-                    RichText::new("Enter sends through Prompt Box's Send; drop files for paths")
-                        .small()
-                        .color(p.n600),
-                )
-                .truncate(),
-            );
         });
     });
-    ui.add_space(GAP / 2.0);
     let editor = editor_for(cx, record);
     for path in dropped {
         let mut text = editor.core().doc().rendered();
