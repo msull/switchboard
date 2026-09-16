@@ -169,7 +169,8 @@ pub fn italic() -> FontFamily {
 }
 
 /// Source Serif 4 in front of egui's own fonts, which stay as fallbacks
-/// for the glyphs the serif lacks (dots, arrows, emoji).
+/// for the glyphs the serif lacks (dots, arrows, emoji), with a system
+/// symbol font after them.
 #[must_use]
 pub fn fonts() -> FontDefinitions {
     let mut fonts = FontDefinitions::default();
@@ -205,8 +206,29 @@ pub fn fonts() -> FontDefinitions {
         faces.extend(fallback.iter().cloned());
         fonts.families.insert(family, faces);
     }
+    // egui's own fonts still lack the geometric symbols the embedded
+    // Prompt Box draws (its status dot, level-meter bars, ⇧ and ⌫); a
+    // system font that has them goes last in every family. Without one
+    // those glyphs are boxes and everything else still works.
+    if let Some(bytes) = SYMBOL_FONTS.iter().find_map(|p| std::fs::read(p).ok()) {
+        fonts
+            .font_data
+            .insert(SYMBOLS.to_owned(), Arc::new(FontData::from_owned(bytes)));
+        for faces in fonts.families.values_mut() {
+            faces.push(SYMBOLS.to_owned());
+        }
+    }
     fonts
 }
+
+const SYMBOLS: &str = "symbols";
+
+/// Where a font with the geometric symbols lives, per platform.
+const SYMBOL_FONTS: &[&str] = &[
+    "/System/Library/Fonts/Apple Symbols.ttf",
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    "/usr/share/fonts/TTF/DejaVuSans.ttf",
+];
 
 // Text styles beyond egui's five. `TextStyle::Name` takes an `Arc<str>`,
 // which cannot be built in a `const`, so these are functions.
