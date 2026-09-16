@@ -171,6 +171,8 @@ impl Opener for MacOpener {
     }
 
     fn raise_terminal(&self, title: &str) -> Result<bool, String> {
+        const ACCESSIBILITY_PANE: &str =
+            "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility";
         let out = Command::new("osascript")
             .arg("-e")
             .arg(Self::raise_script(title))
@@ -178,6 +180,21 @@ impl Opener for MacOpener {
             .map_err(|e| format!("osascript: {e}"))?;
         if !out.status.success() {
             let err = String::from_utf8_lossy(&out.stderr);
+            // macOS asks for Automation on its own but never for
+            // Accessibility: open that pane and say what to do there.
+            if err.contains("assistive access") {
+                let _ = Command::new("open")
+                    .arg(ACCESSIBILITY_PANE)
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .status();
+                return Err(
+                    "Switchboard needs Accessibility to raise the window: turn it on in the \
+                     System Settings pane just opened (add ~/Applications/Switchboard.app with \
+                     + if it is not listed), then try again"
+                        .into(),
+                );
+            }
             return Err(format!("osascript failed: {}", err.trim()));
         }
         Ok(String::from_utf8_lossy(&out.stdout)
