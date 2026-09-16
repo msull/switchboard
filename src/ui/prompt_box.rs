@@ -329,7 +329,7 @@ pub fn panel(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord) {
 }
 
 /// The rail's listening row, always the same one row so nothing else
-/// moves: "● Listening · <session>" in green with a Stop beside it while
+/// moves: a green dot and "Listening · <session>" with a Stop beside it while
 /// the runtime is live (the name goes to the session), a muted "Not
 /// listening" that does nothing otherwise. The name truncates rather
 /// than widening the rail.
@@ -347,12 +347,22 @@ pub fn rail_indicator(cx: &mut DrawCtx<'_>, ui: &mut Ui, compact: bool) {
     ui.horizontal(|ui| {
         ui.set_height(height);
         ui.spacing_mut().item_spacing.x = 6.0;
+        // A painted dot, as on the cards: the text font has no circle glyph.
+        let fill = if listening.is_some() { green } else { p.n400 };
+        let (dot, _) = ui.allocate_exact_size(egui::Vec2::splat(8.0), egui::Sense::hover());
+        ui.painter().circle_filled(dot.center(), 4.0, fill);
+        if compact {
+            return;
+        }
         let Some((id, name)) = listening else {
-            let label = if compact { "●" } else { "● Not listening" };
             ui.add_sized(
                 [ui.available_width(), height],
-                egui::Label::new(RichText::new(label).text_style(theme::meta()).color(p.n500))
-                    .truncate(),
+                egui::Label::new(
+                    RichText::new("Not listening")
+                        .text_style(theme::meta())
+                        .color(p.n500),
+                )
+                .truncate(),
             );
             return;
         };
@@ -365,18 +375,16 @@ pub fn rail_indicator(cx: &mut DrawCtx<'_>, ui: &mut Ui, compact: bool) {
                     .color(p.n600),
             )
             .frame(false);
-            if !compact && ui.add(stop).clicked() {
+            if ui.add(stop).clicked() {
                 cx.state.prompt_boxes.stop();
             }
-            let label = if compact {
-                "●".to_owned()
-            } else {
-                format!("● Listening · {name}")
-            };
-            let button =
-                egui::Button::new(RichText::new(label).color(green).text_style(theme::meta()))
-                    .frame(false)
-                    .truncate();
+            let button = egui::Button::new(
+                RichText::new(format!("Listening · {name}"))
+                    .color(green)
+                    .text_style(theme::meta()),
+            )
+            .frame(false)
+            .truncate();
             if ui
                 .add_sized([ui.available_width(), height], button)
                 .on_hover_text(format!("Dictating into {name}; click to go there"))

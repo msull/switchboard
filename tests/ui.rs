@@ -2559,7 +2559,7 @@ fn listening_is_bound_to_one_session_and_shown_in_the_rail() {
     showing(&mut harness, View::Session(claude));
     assert!(harness.query_by_label_contains("Listening ·").is_none());
     // The row is there before listening starts, so nothing shifts later.
-    let idle = harness.get_by_label("● Not listening").rect();
+    let idle = harness.get_by_label("Not listening").rect();
     // No speech model in tests: the demo stands in for the microphone.
     {
         let boxes = &mut harness.state_mut().ui_state.prompt_boxes;
