@@ -108,6 +108,10 @@ pub struct UiState {
     /// Messages being composed, one per session, so switching away and
     /// back does not lose a half-written prompt.
     pub input_drafts: HashMap<RecordId, String>,
+    /// Prompts the core primed for a session's Prompt Box editor (a
+    /// clone's or a discard's), taken when that editor is next drawn.
+    /// Separate from the drafts, which the cards' quick-send lines share.
+    pub primed: HashMap<RecordId, String>,
     /// Embedded terminals, only ever the one for the session on screen.
     pub terminals: HashMap<RecordId, EmbeddedTerminal>,
     /// The theme last pushed into egui; pushed again only when it changes.
@@ -150,6 +154,7 @@ impl Default for UiState {
             set_rename: None,
             delete_set: None,
             input_drafts: HashMap::new(),
+            primed: HashMap::new(),
             terminals: HashMap::new(),
             applied_theme: None,
             prompt_boxes: prompt_box::PromptBoxes::default(),

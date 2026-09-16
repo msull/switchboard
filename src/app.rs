@@ -230,8 +230,13 @@ impl SwitchboardApp {
             self.ui_state.conversations.remove(id);
         }
         let effects = self.core.dispatch(action, now);
+        let prompt_box = self.core.settings().prompt_box;
         for (id, text) in self.core.take_primed() {
-            self.ui_state.input_drafts.insert(id, text);
+            if prompt_box {
+                self.ui_state.primed.insert(id, text);
+            } else {
+                self.ui_state.input_drafts.insert(id, text);
+            }
         }
         for effect in effects {
             if let Some(result) = self.run_effect(effect) {

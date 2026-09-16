@@ -2610,6 +2610,13 @@ fn each_session_keeps_its_own_prompt() {
     field.focus();
     field.type_text("for codex");
     harness.run_steps(2);
+    // A card's quick-send line leaves an empty draft behind; it is not
+    // the editor's.
+    harness
+        .state_mut()
+        .ui_state
+        .input_drafts
+        .insert(claude, String::new());
     showing(&mut harness, View::Session(claude));
     let boxes = &harness.state().ui_state.prompt_boxes;
     assert_eq!(

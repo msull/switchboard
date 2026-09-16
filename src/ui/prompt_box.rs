@@ -200,7 +200,7 @@ fn editor_for<'a>(cx: &'a mut DrawCtx<'_>, record: &SessionRecord) -> &'a mut Ed
     let outbox = boxes.outbox.clone();
     // A primed draft (a cloned session's prompt, or the one a discard
     // cut back to) becomes the editor's text, first or replacing.
-    let primed = cx.state.input_drafts.remove(&record.id);
+    let primed = cx.state.primed.remove(&record.id);
     let boxes = &mut cx.state.prompt_boxes;
     if let Some(text) = &primed
         && let Some(editor) = boxes.editors.get_mut(&record.id)
