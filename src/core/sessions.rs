@@ -447,7 +447,12 @@ impl AppCore {
                 let needs_discovery =
                     record.kind == SessionKind::Agent(AgentKind::Codex) && record.resume.is_none();
                 if let SessionKind::Agent(kind) = record.kind {
-                    out.push(attach(record));
+                    // The window is the user's to open: most of the time
+                    // the session is driven from here, so it stays closed
+                    // unless asked for.
+                    if self.settings.open_terminal_on_launch {
+                        out.push(attach(record));
+                    }
                     if needs_discovery {
                         out.push(Effect::Discover {
                             id,

@@ -90,6 +90,7 @@ const EXTRA_LINES: &[&str] = &[
     "arrange",
     "show-message",
     "clone-session",
+    "open-terminal",
     "theme",
     "sleep",
 ];
@@ -131,6 +132,9 @@ fn add_to_set(
 fn working_set_step(app: &mut SwitchboardApp, w: &[&str]) -> Result<(), String> {
     match w {
         ["switchboard"] => app.dispatch(AppAction::ShowSwitchboard),
+        ["open-terminal", on] => {
+            app.dispatch(AppAction::SetOpenTerminalOnLaunch(*on == "on"));
+        }
         ["clone-session", name, turn] => {
             let id = session(app, name)?;
             let before: usize = turn.parse().map_err(|_| "bad turn number")?;

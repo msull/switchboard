@@ -178,6 +178,8 @@ pub enum AppAction {
     SetExclusive(bool),
     /// Show or hide the file side next to sessions.
     SetFilesOpen(bool),
+    /// Whether an agent's terminal window opens as it starts or resumes.
+    SetOpenTerminalOnLaunch(bool),
     /// Which tab the side panel shows.
     SetSideTab(SideTab),
     /// The project's `.switchboard/project.json` was read (or is absent,
@@ -470,6 +472,7 @@ impl AppCore {
             | AppAction::SetTheme(_)
             | AppAction::SetExclusive(_)
             | AppAction::SetFilesOpen(_)
+            | AppAction::SetOpenTerminalOnLaunch(_)
             | AppAction::SetSideTab(_)
             | AppAction::ProjectConfigRead { .. }
             | AppAction::ApproveDefinition(_)
@@ -1041,6 +1044,9 @@ impl AppCore {
             AppAction::SetTheme(theme) => self.update_settings(out, |s| s.theme = theme),
             AppAction::SetExclusive(on) => self.update_settings(out, |s| s.exclusive = on),
             AppAction::SetFilesOpen(on) => self.update_settings(out, |s| s.files_open = on),
+            AppAction::SetOpenTerminalOnLaunch(on) => {
+                self.update_settings(out, |s| s.open_terminal_on_launch = on);
+            }
             AppAction::SetSideTab(tab) => self.update_settings(out, |s| s.side_tab = tab),
             AppAction::ProjectConfigRead { project, result } => {
                 self.project_config_read(project, result, now, out);

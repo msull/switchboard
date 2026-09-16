@@ -59,6 +59,17 @@ pub fn settings_menu(
                 cx.dispatch(AppAction::SetExclusive(exclusive));
                 ui.close();
             }
+            let mut open_terminal = settings.open_terminal_on_launch;
+            if ui
+                .checkbox(&mut open_terminal, "Open the terminal when an agent starts")
+                .on_hover_text(
+                    "Off, a started or resumed agent runs in its pane and the window opens only from Open",
+                )
+                .changed()
+            {
+                cx.dispatch(AppAction::SetOpenTerminalOnLaunch(open_terminal));
+                ui.close();
+            }
         },
     );
 }

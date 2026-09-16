@@ -875,20 +875,36 @@ fn launch_prepared_error_clears_flight_with_notice() {
 }
 
 #[test]
-fn spawned_agent_attaches_and_updates_last_seen() {
+fn spawned_agent_stays_in_its_pane_and_updates_last_seen() {
     let (mut core, pid, _) = with_records(&[], |_| None);
     let (id, _) = new_session(&mut core, pid, agent(), Launch::Argv(vec![]));
     let effects = launch_agent(&mut core, id, Some(claude_handle()));
     assert_eq!(saves(&effects), 1);
+    assert!(
+        !effects.iter().any(|e| matches!(e, Effect::Attach { .. })),
+        "the window is opened from Open, not by the launch: {effects:?}"
+    );
+    assert!(!effects.iter().any(|e| matches!(e, Effect::Discover { .. })));
+    assert_eq!(core.session(id).unwrap().last_seen, Clock::at(20).wall);
+    assert!(!core.is_in_flight(id));
+    // Open on the running session still brings the window up.
+    let e = core.dispatch(AppAction::ReturnToSession(id), Clock::at(21));
+    assert!(matches!(&e[0], Effect::Attach { id: i, .. } if *i == id));
+}
+
+#[test]
+fn spawned_agent_attaches_when_the_setting_asks_for_it() {
+    let (mut core, pid, _) = with_records(&[], |_| None);
+    let e = core.dispatch(AppAction::SetOpenTerminalOnLaunch(true), Clock::at(0));
+    assert!(matches!(&e[0], Effect::SaveSettings(s) if s.open_terminal_on_launch));
+    let (id, _) = new_session(&mut core, pid, agent(), Launch::Argv(vec![]));
+    let effects = launch_agent(&mut core, id, Some(claude_handle()));
     assert!(effects.contains(&Effect::Attach {
         id,
         host: HostId(id.host_name()),
         title: id.host_name(),
         cwd: "/tmp/proj".into(),
     }));
-    assert!(!effects.iter().any(|e| matches!(e, Effect::Discover { .. })));
-    assert_eq!(core.session(id).unwrap().last_seen, Clock::at(20).wall);
-    assert!(!core.is_in_flight(id));
 }
 
 #[test]
@@ -924,7 +940,7 @@ fn codex_spawn_discovers_id_then_binds_it() {
     let (mut core, pid, _) = with_records(&[], |_| None);
     let (id, _) = new_session(&mut core, pid, codex(), Launch::Argv(vec![]));
     let effects = launch_agent(&mut core, id, None);
-    assert!(effects.iter().any(|e| matches!(e, Effect::Attach { .. })));
+    assert!(!effects.iter().any(|e| matches!(e, Effect::Attach { .. })));
     assert!(effects.contains(&Effect::Discover {
         id,
         kind: AgentKind::Codex,
@@ -1401,7 +1417,7 @@ fn repeated_return_during_agent_resume_is_ignored() {
             .is_empty()
     );
     let e4 = core.dispatch(AppAction::Spawned { id, result: Ok(()) }, Clock::at(7));
-    assert!(e4.iter().any(|e| matches!(e, Effect::Attach { .. })));
+    assert!(!e4.iter().any(|e| matches!(e, Effect::Attach { .. })));
     assert!(!core.is_in_flight(id));
     assert!(
         core.session(id).unwrap().resume.is_some(),

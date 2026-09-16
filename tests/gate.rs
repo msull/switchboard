@@ -661,7 +661,10 @@ fn return_while_in_flight_spawns_once() {
         AppAction::Spawned { id, result: Ok(()) },
         8,
     );
-    assert!(effects.iter().any(|e| matches!(e, Effect::Attach { .. })));
+    assert!(
+        !effects.iter().any(|e| matches!(e, Effect::Attach { .. })),
+        "the window opens from Open, not from the spawn"
+    );
     step(
         &mut core,
         &mut spawns,

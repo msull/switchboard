@@ -240,6 +240,16 @@ fn exclusive_mode_hides_the_other_projects() {
     assert_eq!(harness.query_all_by_label("beta").count(), 0);
 }
 
+#[test]
+fn the_settings_menu_toggles_opening_the_terminal_on_launch() {
+    let (mut harness, _) = harness();
+    assert!(!harness.state().core().settings().open_terminal_on_launch);
+    click(&mut harness, "Settings");
+    click(&mut harness, "Open the terminal when an agent starts");
+    assert!(actions(&harness).contains(&AppAction::SetOpenTerminalOnLaunch(true)));
+    assert!(harness.state().core().settings().open_terminal_on_launch);
+}
+
 fn type_into(harness: &mut Harness<'static, SwitchboardApp>, label: &str, text: &str) {
     let field = harness.get_by_label(label);
     field.focus();

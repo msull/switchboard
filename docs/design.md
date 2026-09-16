@@ -854,6 +854,16 @@ Known gaps: Codex rollouts are not cloned (unverified format); a
 subagent directory beside the original is not copied (the resume did
 not need it in the spike); the clone's card shows no link to its source.
 
+## Terminal on launch (2026-09-15)
+
+Starting or resuming an agent no longer opens its Ghostty window: the
+agent runs in its tmux pane and the conversation view follows the
+transcript, so the window is opened only by Open (a Return on a running
+session). `Settings.open_terminal_on_launch` (default off, set from the
+settings menu, `open-terminal on|off` in scripts) restores the old
+behaviour of attaching right after the spawn. Shells, commands, and
+services are unchanged: they are embedded and never opened a window.
+
 ## Open questions
 
 - Shared project config runs with a hash-and-approve flow and no

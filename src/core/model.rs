@@ -90,6 +90,9 @@ pub struct Settings {
     /// there. A project or session that no longer exists falls back to
     /// the switchboard.
     pub last_view: SavedView,
+    /// Open the terminal window when an agent starts or resumes. Off,
+    /// the agent runs in its pane and the window opens only on Open.
+    pub open_terminal_on_launch: bool,
 }
 
 /// A screen as remembered in `settings.json`: only what can be found
