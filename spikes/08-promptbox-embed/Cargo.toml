@@ -1,0 +1,16 @@
+[package]
+name = "promptbox-embed-spike"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+eframe = "0.36"
+egui = "0.36"
+env_logger = "0.11"
+promptbox = { path = "../../../promptbox" }
+
+[dev-dependencies]
+egui_kittest = { version = "0.36", features = ["eframe"] }
