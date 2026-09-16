@@ -85,9 +85,13 @@ only for approved services. Switchboard never writes into
 The bundle carries both binaries (`switchboard` and `switchboard-hook`,
 which the app locates next to its own executable). Raising a Ghostty
 window needs Accessibility, and macOS ties that grant to the code
-signature: the script signs with `CODESIGN_IDENTITY`, else a "Switchboard
-Dev" or "Prompt Box Dev" certificate from Keychain Access, else ad-hoc
-(in which case the grant is reset each rebuild). `scripts/icon.sh`
+signature, and the Keychain ties its per-item "always allow" to the
+signer's Team ID. The script signs with `CODESIGN_IDENTITY`, else the
+first "Developer ID Application" identity (has a Team ID, so Keychain
+items stay allowed across rebuilds), else a "Switchboard Dev" or "Prompt
+Box Dev" certificate from Keychain Access (keeps the Accessibility grant,
+but the Keychain asks for its items again after each build), else ad-hoc
+(the grant is reset each rebuild). `scripts/icon.sh`
 renders the SVG with AppKit into `assets/Switchboard.icns` for Finder and
 `assets/icon-256.rgba`, which `src/main.rs` embeds for the Dock.
 

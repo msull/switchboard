@@ -5,10 +5,15 @@
 # executable path.
 #
 # Signing: macOS ties the Accessibility grant (needed to raise Ghostty
-# windows) to the app's code signature. With a real identity (set
-# CODESIGN_IDENTITY, or a "Code Signing" certificate named "Switchboard
-# Dev" or "Prompt Box Dev" in Keychain Access) the grant survives rebuilds.
-# Without one the app is ad-hoc signed and the grant is reset each build.
+# windows) and Keychain access to the app's code signature. The Keychain
+# keys its per-item "always allow" on the signer's Team ID, and without
+# one on the hash of the binary, which changes every build; so an
+# identity with a Team ID (a "Developer ID Application" certificate) is
+# preferred, then a self-signed "Code Signing" certificate named
+# "Switchboard Dev" or "Prompt Box Dev" from Keychain Access (which keeps
+# the Accessibility grant but asks for Keychain items after each build),
+# then ad-hoc, which resets the grant each build. CODESIGN_IDENTITY
+# overrides the search.
 set -eu
 cd "$(dirname "$0")/.."
 DEST="${1:-$HOME/Applications}"
@@ -54,8 +59,12 @@ if [ -f assets/Switchboard.icns ]; then
 fi
 IDENTITY="${CODESIGN_IDENTITY:-}"
 if [ -z "$IDENTITY" ]; then
+  IDENTITIES=$(security find-identity -v -p codesigning 2>/dev/null)
+  IDENTITY=$(printf '%s\n' "$IDENTITIES" | sed -n 's/.*"\(Developer ID Application: [^"]*\)".*/\1/p' | head -1)
+fi
+if [ -z "$IDENTITY" ]; then
   for name in "Switchboard Dev" "Prompt Box Dev"; do
-    if security find-identity -v -p codesigning 2>/dev/null | grep -q "\"$name\""; then
+    if printf '%s\n' "$IDENTITIES" | grep -q "\"$name\""; then
       IDENTITY="$name"; break
     fi
   done
@@ -63,6 +72,9 @@ fi
 if [ -n "$IDENTITY" ]; then
   codesign --force --deep --sign "$IDENTITY" "$APP"
   echo "Signed with \"$IDENTITY\"; Accessibility grants persist across rebuilds."
+  if ! codesign -dvv "$APP" 2>&1 | grep -q '^TeamIdentifier=[A-Z0-9]'; then
+    echo "No Team ID in this identity: the Keychain asks again after each build."
+  fi
 else
   codesign --force --deep --sign - "$APP"
   tccutil reset Accessibility "$ID" >/dev/null 2>&1 || true
