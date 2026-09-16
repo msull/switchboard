@@ -1,4 +1,4 @@
-//! The session view: header and notes for one record, and either an
+//! The session view: header for one record, and either an
 //! embedded terminal (shells, commands, services) or, for agents, the
 //! conversation read from the transcript with a message box docked at
 //! the bottom. Agents run in Ghostty; the raw screen snapshot is kept
@@ -102,7 +102,6 @@ pub fn show(cx: &mut DrawCtx<'_>, ui: &mut Ui, id: RecordId) {
     };
     ui.spacing_mut().item_spacing = egui::vec2(GAP, GAP);
     header(cx, ui, &record);
-    notes(cx, ui, &record);
     match record.kind {
         SessionKind::Agent(_) => agent_body(cx, ui, &record),
         SessionKind::Shell | SessionKind::Command | SessionKind::Service => {
@@ -326,53 +325,6 @@ fn name_or_editor(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord) {
         }
         Some(None) => cx.state.rename_draft = None,
         None => {}
-    }
-}
-
-fn notes(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord) {
-    // The draft follows the record on screen; a different record means a
-    // fresh draft from its stored notes.
-    let stale = cx
-        .state
-        .notes_draft
-        .as_ref()
-        .is_none_or(|(id, _)| *id != record.id);
-    if stale {
-        cx.state.notes_draft = Some((record.id, record.notes.clone()));
-    }
-    let mut changed = None;
-    if let Some((_, draft)) = cx.state.notes_draft.as_mut() {
-        let p = theme::palette(ui);
-        Frame::new()
-            .inner_margin(Margin::symmetric(0, GAP_PX / 2))
-            .show(ui, |ui| {
-                ui.set_width(ui.available_width());
-                ui.horizontal(|ui| {
-                    let label = ui
-                        .label(
-                            RichText::new("Notes")
-                                .text_style(theme::meta())
-                                .color(p.n600),
-                        )
-                        .id;
-                    let response = ui.add(
-                        egui::TextEdit::multiline(draft)
-                            .desired_rows(1)
-                            .font(theme::meta())
-                            .text_color(p.n700)
-                            .background_color(p.surface)
-                            .margin(Margin::symmetric(10, 6))
-                            .desired_width(f32::INFINITY),
-                    );
-                    if response.changed() {
-                        changed = Some(draft.clone());
-                    }
-                    response.labelled_by(label);
-                });
-            });
-    }
-    if let Some(text) = changed {
-        cx.dispatch(AppAction::SetSessionNotes(record.id, text));
     }
 }
 

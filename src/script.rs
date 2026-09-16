@@ -11,7 +11,7 @@
 //! `dotenv <project> on|off`, `environment <project>` (opens the dialog),
 //! `send <name> <text...>`, `interrupt <name>` (Escape to the pane),
 //! `return <name>`, `kill <name>`, `approve <name>`, `revoke <name>`
-//! (a defined command's approval), `side files|run` (the side panel's
+//! (a defined command's approval), `side files|run|notes` (the side panel's
 //! tab), `switchboard`, `theme light|dark|auto`, `sleep <secs>` (then
 //! polls).
 //! Blank lines and `#` comments are ignored; unknown lines are logged.
@@ -304,10 +304,10 @@ fn step(app: &mut SwitchboardApp, w: &[&str]) -> Result<(), String> {
             let id = session(app, n)?;
             app.dispatch(AppAction::RevokeApproval(id));
         }
-        ["side", tab] => app.dispatch(AppAction::SetSideTab(if *tab == "run" {
-            SideTab::Run
-        } else {
-            SideTab::Files
+        ["side", tab] => app.dispatch(AppAction::SetSideTab(match *tab {
+            "run" => SideTab::Run,
+            "notes" => SideTab::Notes,
+            _ => SideTab::Files,
         })),
         ["kill", n] => {
             let id = session(app, n)?;

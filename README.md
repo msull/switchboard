@@ -158,13 +158,14 @@ src/ui/
   board.rs               one project's board: run bar, agent and shell cards, command and service rows, pinned documents, notes
   files.rs               Files tab of the side panel: lazy tree, fuzzy finder, bottom preview pane, right-click hand-offs
   run.rs                 Run tab of the side panel: commands and services, definitions, approval, last output
+  notes.rs               Notes tab of the side panel: the session's notes, edited in place
   runbar.rs              one button per command and service, under the board strip and the session header
   document.rs            read-only preview: Markdown, text, images; full view and the side pane's body
   markdown.rs            Markdown: prose through egui_commonmark, tables laid out here with content-sized columns
   palette.rs             quick-switcher (Cmd+K) over projects and sessions
   env.rs                 Environment dialog: variables, secrets, .env opt-in, masked preview
   cards.rs               the one card for every entry kind, the card grid, pinned document cards
-  session.rs             session view: header, notes, embedded terminal or conversation + message box
+  session.rs             session view: header, embedded terminal or conversation + message box
   switchboard.rs         every session across projects, waiting first
   working_set.rs         a working set: the user's grid of session and file cards from any project
   dialogs.rs             add project / create session dialogs

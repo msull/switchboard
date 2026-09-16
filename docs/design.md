@@ -895,6 +895,16 @@ badge while recording (Switchboard's badge is the waiting count); the
 level meter and status glyphs rely on the fallback fonts; the standalone
 app's project vocabulary is not available to embedded editors.
 
+## Notes in the side (2026-09-16)
+
+A session's notes are a tab of the side panel (Files, Run, Notes) rather
+than a row under the session header, so the terminal or conversation
+gets the full height. The tab exists only beside a session: Cmd+N, the
+rail's Notes item, or the tab shows it, and a second press closes the
+side as Files and Run do. A board keeps a Notes choice in settings but
+draws Files. The field is the whole side; every edit goes to
+`SetSessionNotes` and is saved with the record.
+
 ## Open questions
 
 - Shared project config runs with a hash-and-approve flow and no

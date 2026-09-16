@@ -274,6 +274,9 @@ pub enum SideTab {
     Files,
     /// Commands and services: definitions, approval, output.
     Run,
+    /// The session's notes. Only beside a session; elsewhere the side
+    /// shows Files instead.
+    Notes,
 }
 
 impl SideTab {
@@ -282,6 +285,7 @@ impl SideTab {
         match self {
             Self::Files => "Files",
             Self::Run => "Run",
+            Self::Notes => "Notes",
         }
     }
 }

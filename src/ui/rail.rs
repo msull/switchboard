@@ -10,7 +10,7 @@ use egui::{
 
 use super::dialogs::AddProjectDraft;
 use super::{DrawCtx, theme};
-use crate::core::{AppAction, AppCore, CardState, ProjectId, RecordId, View};
+use crate::core::{AppAction, AppCore, CardState, ProjectId, RecordId, SideTab, View};
 
 /// The rail's width when it opens; the user may drag it.
 pub const DEFAULT_WIDTH: f32 = 200.0;
@@ -348,6 +348,18 @@ fn bottom(cx: &mut DrawCtx<'_>, ui: &mut Ui, view: &View, compact: bool) {
             .clicked()
         {
             cx.dispatch(AppAction::SetFilesOpen(!settings.files_open));
+        }
+        let notes_showing = settings.files_open && settings.side_tab == SideTab::Notes;
+        if bottom_item(ui, "Notes", "⌘N", compact)
+            .on_hover_text("Show the session's notes beside it (Cmd+N)")
+            .clicked()
+        {
+            if notes_showing {
+                cx.dispatch(AppAction::SetFilesOpen(false));
+            } else {
+                cx.dispatch(AppAction::SetSideTab(SideTab::Notes));
+                cx.dispatch(AppAction::SetFilesOpen(true));
+            }
         }
     }
 }

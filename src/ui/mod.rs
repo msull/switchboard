@@ -16,6 +16,7 @@ pub mod document;
 pub mod env;
 pub mod files;
 pub mod markdown;
+pub mod notes;
 pub mod palette;
 pub mod prompt_box;
 mod rail;
@@ -239,15 +240,15 @@ fn draw_frame(cx: &mut DrawCtx<'_>, ui: &mut Ui) {
     // shows the selection itself; elsewhere the side previews inline.
     // Only an agent session has a message box for paths to go to.
     let files_for = match &view {
-        View::Board(pid) => Some((*pid, true, None)),
-        View::Document(pid, _) => Some((*pid, false, None)),
+        View::Board(pid) => Some((*pid, true, None, None)),
+        View::Document(pid, _) => Some((*pid, false, None, None)),
         View::Session(id) if cx.core.settings().files_open => cx.core.session(*id).map(|s| {
             let message = matches!(s.kind, crate::core::SessionKind::Agent(_)).then_some(*id);
-            (s.project, true, message)
+            (s.project, true, message, Some(*id))
         }),
         View::Session(_) | View::Switchboard | View::WorkingSet(_) => None,
     };
-    if let Some((pid, inline, message)) = files_for {
+    if let Some((pid, inline, message, session)) = files_for {
         let side = egui::Panel::right("files")
             .resizable(true)
             .default_size(360.0)
@@ -263,10 +264,13 @@ fn draw_frame(cx: &mut DrawCtx<'_>, ui: &mut Ui) {
                     }),
             )
             .show(ui, |ui| {
-                let tab = side_tabs(cx, ui, pid, matches!(view, View::Session(_)));
-                match tab {
-                    SideTab::Files => files::show(cx, ui, pid, inline, message),
-                    SideTab::Run => run::show(cx, ui, pid),
+                let tab = side_tabs(cx, ui, pid, session);
+                match (tab, session) {
+                    (SideTab::Notes, Some(id)) => notes::show(cx, ui, id),
+                    (SideTab::Files | SideTab::Notes, _) => {
+                        files::show(cx, ui, pid, inline, message);
+                    }
+                    (SideTab::Run, _) => run::show(cx, ui, pid),
                 }
             });
         // The side shares the page's ground, so a hairline on its left
@@ -311,16 +315,31 @@ fn draw_frame(cx: &mut DrawCtx<'_>, ui: &mut Ui) {
     env::show(cx, ui.ctx());
 }
 
-/// The side panel's tab row: Files and Run, the current one in cyan,
-/// with Refresh at the right of the Files tab. Beside a session a click
-/// on the tab already showing closes the side, as its shortcut does.
-/// Returns the current tab.
-fn side_tabs(cx: &mut DrawCtx<'_>, ui: &mut Ui, pid: ProjectId, closable: bool) -> SideTab {
-    let tab = cx.core.settings().side_tab;
+/// The side panel's tab row: Files, Run, and beside a session Notes,
+/// the current one in cyan, with Refresh at the right of the Files tab.
+/// Beside a session a click on the tab already showing closes the side,
+/// as its shortcut does. Returns the tab to draw: Notes stays chosen
+/// while a board is on screen but the board's side shows Files.
+fn side_tabs(
+    cx: &mut DrawCtx<'_>,
+    ui: &mut Ui,
+    pid: ProjectId,
+    session: Option<RecordId>,
+) -> SideTab {
+    let closable = session.is_some();
+    let tab = match cx.core.settings().side_tab {
+        SideTab::Notes if session.is_none() => SideTab::Files,
+        tab => tab,
+    };
     let p = theme::palette(ui);
+    let tabs: &[SideTab] = if closable {
+        &[SideTab::Files, SideTab::Run, SideTab::Notes]
+    } else {
+        &[SideTab::Files, SideTab::Run]
+    };
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 16.0;
-        for t in [SideTab::Files, SideTab::Run] {
+        for &t in tabs {
             let text = if tab == t {
                 RichText::new(t.label())
                     .text_style(theme::strong())
@@ -362,8 +381,9 @@ fn side_tabs(cx: &mut DrawCtx<'_>, ui: &mut Ui, pid: ProjectId, closable: bool) 
 }
 
 /// Esc goes back, Cmd+1..9 switch project, Cmd+0 shows the switchboard,
-/// Cmd+K opens the quick-switcher, Cmd+B and Cmd+R show the Files and
-/// Run tabs of the side panel (again to close it beside a session),
+/// Cmd+K opens the quick-switcher, Cmd+B, Cmd+R, and Cmd+N show the
+/// Files, Run, and Notes tabs of the side panel (again to close it
+/// beside a session; Notes only there),
 /// Cmd+T the raw pane under a conversation, and Cmd+. sends Escape to
 /// the session's terminal.
 /// Esc is left alone while a text field, a dialog, or the terminal has
@@ -392,14 +412,22 @@ fn keyboard(cx: &mut DrawCtx<'_>, ui: &Ui, view: &View) {
     if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::K)) {
         cx.state.palette = Some(palette::PaletteDraft::default());
     }
-    // Cmd+B and Cmd+R each name a tab of the side panel: they show it,
-    // opening the side beside a session if it is closed, and a second
-    // press on the tab already showing closes the side again. Boards
-    // always have the side, so there the keys only switch tabs.
-    for (key, tab) in [(Key::B, SideTab::Files), (Key::R, SideTab::Run)] {
-        if !matches!(view, View::Session(_) | View::Board(_))
-            || !ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, key))
-        {
+    // Cmd+B, Cmd+R, and Cmd+N each name a tab of the side panel: they
+    // show it, opening the side beside a session if it is closed, and a
+    // second press on the tab already showing closes the side again.
+    // Boards always have the side, so there the keys only switch tabs,
+    // and Notes belongs to a session alone.
+    for (key, tab) in [
+        (Key::B, SideTab::Files),
+        (Key::R, SideTab::Run),
+        (Key::N, SideTab::Notes),
+    ] {
+        let allowed = match view {
+            View::Session(_) => true,
+            View::Board(_) => tab != SideTab::Notes,
+            _ => false,
+        };
+        if !allowed || !ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, key)) {
             continue;
         }
         let settings = cx.core.settings();

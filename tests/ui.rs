@@ -939,12 +939,40 @@ fn agent_session_runs_in_ghostty_and_shows_its_snapshot() {
 fn editing_notes_dispatches_set_session_notes() {
     let (mut harness, ids) = harness();
     showing(&mut harness, View::Session(ids.build));
-    type_into(&mut harness, "Notes", "flaky on CI");
+    assert!(
+        harness.query_by_label("Session notes").is_none(),
+        "notes live in the side"
+    );
+    // The rail item opens the side on the Notes tab.
+    click(&mut harness, "Notes ⌘N");
+    harness.get_by_label("Session notes");
+    type_into(&mut harness, "Session notes", "flaky on CI");
     let dispatched = actions(&harness);
     assert!(
-        dispatched.contains(&AppAction::SetSessionNotes(ids.build, "flaky on CI".into())),
+        dispatched
+            .iter()
+            .any(|a| matches!(a, AppAction::SetSessionNotes(id, text) if *id == ids.build && text.ends_with("flaky on CI"))),
         "got {dispatched:?}"
     );
+    // The same item closes the side again.
+    click(&mut harness, "Notes ⌘N");
+    assert!(!harness.state().core().settings().files_open);
+}
+
+#[test]
+fn the_notes_tab_is_only_offered_beside_a_session() {
+    let (mut harness, ids) = harness();
+    harness
+        .state_mut()
+        .dispatch(AppAction::SetSideTab(SideTab::Notes));
+    harness.state_mut().dispatch(AppAction::SetFilesOpen(true));
+    showing(&mut harness, View::Session(ids.build));
+    harness.get_by_label("Session notes");
+    // A board keeps the choice but shows Files.
+    showing(&mut harness, View::Board(ids.alpha));
+    assert!(harness.query_by_label("Notes").is_none());
+    harness.get_by_label("Find");
+    assert_eq!(harness.state().core().settings().side_tab, SideTab::Notes);
 }
 
 #[test]
