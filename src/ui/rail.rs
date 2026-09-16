@@ -82,7 +82,6 @@ fn top(cx: &mut DrawCtx<'_>, ui: &mut Ui, view: &View, compact: bool) {
         cx.dispatch(AppAction::ShowSwitchboard);
     }
     ui.add_space(14.0);
-    super::prompt_box::rail_indicator(cx, ui, compact);
 
     let waiting = cx.core.waiting_count();
     let all = row(
@@ -313,6 +312,7 @@ fn bottom(cx: &mut DrawCtx<'_>, ui: &mut Ui, view: &View, compact: bool) {
     ui.spacing_mut().item_spacing.y = 4.0;
     let settings = cx.core.settings().clone();
     // Bottom-up layout: the first item drawn is the lowest.
+    super::prompt_box::rail_indicator(cx, ui, compact);
     if cx.core.read_only() {
         ui.label(
             RichText::new("read-only")

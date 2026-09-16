@@ -2558,6 +2558,8 @@ fn listening_is_bound_to_one_session_and_shown_in_the_rail() {
     let claude = seed_claude(&mut harness, &ids);
     showing(&mut harness, View::Session(claude));
     assert!(harness.query_by_label_contains("Listening ·").is_none());
+    // The row is there before listening starts, so nothing shifts later.
+    let idle = harness.get_by_label("● Not listening").rect();
     // No speech model in tests: the demo stands in for the microphone.
     {
         let boxes = &mut harness.state_mut().ui_state.prompt_boxes;
@@ -2566,7 +2568,18 @@ fn listening_is_bound_to_one_session_and_shown_in_the_rail() {
         boxes.editors.get_mut(&claude).unwrap().apply(started);
     }
     harness.run_steps(2);
-    harness.get_by_label_contains("Listening · claude-agent");
+    let live = harness
+        .get_by_label_contains("Listening · claude-agent")
+        .rect();
+    assert!(
+        (live.top() - idle.top()).abs() < 1.0,
+        "the row stays put: idle {idle:?}, live {live:?}"
+    );
+    assert!(
+        harness
+            .query_by_label("Settings")
+            .is_some_and(|n| n.rect().bottom() <= live.top())
+    );
     // Still listening while another view is up, and the rail still says so.
     showing(&mut harness, View::Session(ids.agent));
     harness.get_by_label_contains("Listening · claude-agent");

@@ -328,41 +328,64 @@ pub fn panel(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord) {
     }
 }
 
-/// The rail's "Listening" line: which session the voice goes into, a
-/// click to go there, and Stop.
+/// The rail's listening row, always the same one row so nothing else
+/// moves: "● Listening · <session>" in green with a Stop beside it while
+/// the runtime is live (the name goes to the session), a muted "Not
+/// listening" that does nothing otherwise. The name truncates rather
+/// than widening the rail.
 pub fn rail_indicator(cx: &mut DrawCtx<'_>, ui: &mut Ui, compact: bool) {
-    let Some(id) = cx.state.prompt_boxes.listening() else {
-        return;
-    };
-    let name = cx
-        .core
-        .session(id)
-        .map_or_else(|| "?".to_owned(), |s| s.name.clone());
     let p = theme::palette(ui);
     let green = egui::Color32::from_rgb(0x2e, 0xb8, 0x5c);
-    ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = 6.0;
-        let label = if compact {
-            "●".to_owned()
-        } else {
-            format!("● Listening · {name}")
-        };
-        if ui
-            .add(
-                egui::Button::new(RichText::new(label).color(green).text_style(theme::meta()))
-                    .frame(false),
-            )
-            .on_hover_text(format!("Dictating into {name}; click to go there"))
-            .clicked()
-        {
-            cx.dispatch(AppAction::ShowSession(id));
-        }
-        if !compact && theme::ghost_muted(ui, "Stop listening").clicked() {
-            cx.state.prompt_boxes.stop();
-        }
+    let listening = cx.state.prompt_boxes.listening().map(|id| {
+        let name = cx
+            .core
+            .session(id)
+            .map_or_else(|| "?".to_owned(), |s| s.name.clone());
+        (id, name)
     });
-    let _ = p;
-    ui.add_space(6.0);
+    let height = ui.spacing().interact_size.y;
+    ui.horizontal(|ui| {
+        ui.set_height(height);
+        ui.spacing_mut().item_spacing.x = 6.0;
+        let Some((id, name)) = listening else {
+            let label = if compact { "●" } else { "● Not listening" };
+            ui.add_sized(
+                [ui.available_width(), height],
+                egui::Label::new(RichText::new(label).text_style(theme::meta()).color(p.n500))
+                    .truncate(),
+            );
+            return;
+        };
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            // Frameless like the name beside it, so the row is one height
+            // whether or not it is listening.
+            let stop = egui::Button::new(
+                RichText::new("Stop listening")
+                    .text_style(theme::meta())
+                    .color(p.n600),
+            )
+            .frame(false);
+            if !compact && ui.add(stop).clicked() {
+                cx.state.prompt_boxes.stop();
+            }
+            let label = if compact {
+                "●".to_owned()
+            } else {
+                format!("● Listening · {name}")
+            };
+            let button =
+                egui::Button::new(RichText::new(label).color(green).text_style(theme::meta()))
+                    .frame(false)
+                    .truncate();
+            if ui
+                .add_sized([ui.available_width(), height], button)
+                .on_hover_text(format!("Dictating into {name}; click to go there"))
+                .clicked()
+            {
+                cx.dispatch(AppAction::ShowSession(id));
+            }
+        });
+    });
 }
 
 /// Panel height when it first opens; the user drags it afterwards.
