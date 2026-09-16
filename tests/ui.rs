@@ -257,6 +257,33 @@ fn the_settings_menu_toggles_opening_the_terminal_on_launch() {
     assert!(harness.state().core().settings().open_terminal_on_launch);
 }
 
+/// The Settings menu's trigger word field. The fields carry hint text,
+/// not labels: editor command, then the trigger word, then the model.
+fn trigger_field<'h>(h: &'h mut Harness<'static, SwitchboardApp>) -> egui_kittest::Node<'h> {
+    h.query_all_by_role(Role::TextInput)
+        .nth(1)
+        .expect("the trigger word field")
+}
+
+#[test]
+fn clicking_into_a_settings_field_keeps_the_menu_open() {
+    let (mut harness, _) = harness();
+    click(&mut harness, "Settings");
+    harness.get_by_label("Captions while listening");
+    trigger_field(&mut harness).click();
+    harness.run_steps(2);
+    harness.get_by_label("Captions while listening");
+    let field = trigger_field(&mut harness);
+    field.focus();
+    field.type_text("Jarvis");
+    harness.run_steps(2);
+    // Leaving the field commits the trigger word.
+    harness.get_by_label("Captions while listening").focus();
+    harness.run_steps(2);
+    assert_eq!(harness.state().core().settings().voice.trigger, "Jarvis");
+    harness.get_by_label("Captions while listening");
+}
+
 fn type_into(harness: &mut Harness<'static, SwitchboardApp>, label: &str, text: &str) {
     let field = harness.get_by_label(label);
     field.focus();

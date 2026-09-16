@@ -24,9 +24,15 @@ pub fn settings_menu(
 ) {
     let p = theme::palette(ui);
     let label = if compact { "⚙" } else { "Settings" };
-    ui.menu_button(
+    // A click into one of the text fields must not close the menu; the
+    // items that close it call `ui.close()` themselves.
+    let config = egui::containers::menu::MenuConfig::new()
+        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside);
+    egui::containers::menu::MenuButton::new(
         RichText::new(label).text_style(theme::meta()).color(p.n700),
-        |ui| {
+    )
+    .config(config)
+    .ui(ui, |ui| {
             ui.spacing_mut().item_spacing.y = 6.0;
             theme::kicker(ui, "Theme", p.n600);
             for mode in ThemeMode::ALL {
@@ -80,8 +86,7 @@ pub fn settings_menu(
             }
             ui.add_space(6.0);
             prompt_box_settings(cx, ui, settings);
-        },
-    );
+    });
 }
 
 /// The embedded Prompt Box: on or off, and what it needs. Its state is
