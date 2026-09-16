@@ -3572,7 +3572,7 @@ checksum = "3d595e54a326bc53c1c197b32d295e14b169e3cfeaa8dc82b529f947fba6bcf5"
 [[package]]
 name = "promptbox"
 version = "0.1.0"
-source = "git+https://github.com/msull/promptbox?rev=19fff47636a4ed8f6cbda684ef48dadbcb3865e4#19fff47636a4ed8f6cbda684ef48dadbcb3865e4"
+source = "git+https://github.com/msull/promptbox?rev=65c607e6487b346c5d62a0c255d94bc9a5d1423e#65c607e6487b346c5d62a0c255d94bc9a5d1423e"
 dependencies = [
  "anyhow",
  "arboard",

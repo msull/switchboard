@@ -34,7 +34,7 @@ fd-lock = "4"
 ignore = "0.4"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
 log = "0.4"
-promptbox = { git = "https://github.com/msull/promptbox", rev = "19fff47636a4ed8f6cbda684ef48dadbcb3865e4" }
+promptbox = { git = "https://github.com/msull/promptbox", rev = "65c607e6487b346c5d62a0c255d94bc9a5d1423e" }
 pulldown-cmark = { version = "0.13", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
