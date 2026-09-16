@@ -905,6 +905,16 @@ side as Files and Run do. A board keeps a Notes choice in settings but
 draws Files. The field is the whole side; every edit goes to
 `SetSessionNotes` and is saved with the record.
 
+## Agent messages along the way (2026-09-16)
+
+An agent often writes text between tool calls before its final answer
+(findings, a plan, a status line). Each such message is its own Agent
+block in the conversation, in order, with the tool calls that preceded
+it folded under a count between the blocks; the first fold carries the
+turn's totals. `Activity::text` holds the whole message (the line stays
+the excerpt for cards and lists), and a message written in the same
+assistant record as a tool call is placed before that call.
+
 ## Open questions
 
 - Shared project config runs with a hash-and-approve flow and no

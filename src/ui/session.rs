@@ -723,7 +723,8 @@ fn duration_text(a: Option<SystemTime>, b: Option<SystemTime>) -> String {
     }
 }
 
-/// One turn: the prompt, the folded activity list, the final answer.
+/// One turn: the prompt, then the agent's messages in order, each with
+/// the folded tool activity that led to it, and the final answer.
 fn turn_block(
     ui: &mut Ui,
     turn: &Turn,
@@ -768,35 +769,34 @@ fn turn_block(
         ui,
         user_rect,
         ("user", turn.n),
+        turn.n,
         &turn.user,
         menus.reborrow(),
     );
-    // The activity list: neutral rows, no frame, 4 px inset.
-    Frame::new()
-        .inner_margin(Margin::symmetric(4, 0))
-        .show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            ui.spacing_mut().item_spacing = egui::vec2(GAP, 4.0);
-            egui::CollapsingHeader::new(
-                RichText::new(stats_line(turn))
-                    .text_style(theme::meta())
-                    .color(p.n700),
-            )
-            .id_salt(("activity", turn.n))
-            .open(open)
-            .show(ui, |ui| {
-                if turn.activity.is_empty() {
-                    ui.label(
-                        RichText::new("no tool activity")
-                            .text_style(theme::excerpt())
-                            .color(p.n600),
-                    );
-                }
-                for (i, a) in turn.activity.iter().enumerate() {
-                    activity_row(ui, a, (turn.n, i));
-                }
-            });
-        });
+    // Text the agent wrote along the way splits the activity into groups:
+    // the tools before each message fold under it, the message itself
+    // reads like the answer. The first group carries the turn's totals.
+    let mut group_start = 0;
+    let mut groups = 0;
+    for (i, a) in turn.activity.iter().enumerate() {
+        if a.kind != ActivityKind::Text {
+            continue;
+        }
+        activity_group(ui, turn, group_start..i, groups, open);
+        groups += 1;
+        group_start = i + 1;
+        let text = a.text.as_deref().unwrap_or(&a.line);
+        let rect = agent_block(ui, &time_text(a.at), text, ("agent", turn.n, i), markdown);
+        message_menu(
+            ui,
+            rect,
+            ("agent", turn.n, i),
+            turn.n,
+            text,
+            menus.without_clone(),
+        );
+    }
+    activity_group(ui, turn, group_start..turn.activity.len(), groups, open);
     // The answer: surface block, kicker "CLAUDE · time", Markdown.
     let final_rect = theme::surface(ui)
         .inner_margin(Margin::symmetric(16, 14))
@@ -824,11 +824,93 @@ fn turn_block(
             ui,
             final_rect,
             ("final", turn.n),
+            turn.n,
             &turn.final_text,
             menus.without_clone(),
         );
     }
     ui.add_space(6.0);
+}
+
+/// One folded list of activity rows. The first group of a turn shows
+/// the turn's totals and appears even when empty; a later group shows
+/// its own count and appears only with rows to show.
+fn activity_group(
+    ui: &mut Ui,
+    turn: &Turn,
+    range: std::ops::Range<usize>,
+    group: usize,
+    open: Option<bool>,
+) {
+    if group > 0 && range.is_empty() {
+        return;
+    }
+    let p = theme::palette(ui);
+    let rows = &turn.activity[range.clone()];
+    let title = if group == 0 {
+        stats_line(turn)
+    } else {
+        group_line(rows)
+    };
+    Frame::new()
+        .inner_margin(Margin::symmetric(4, 0))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.spacing_mut().item_spacing = egui::vec2(GAP, 4.0);
+            egui::CollapsingHeader::new(
+                RichText::new(title).text_style(theme::meta()).color(p.n700),
+            )
+            .id_salt(("activity", turn.n, group))
+            .open(open)
+            .show(ui, |ui| {
+                if rows.is_empty() {
+                    ui.label(
+                        RichText::new("no tool activity")
+                            .text_style(theme::excerpt())
+                            .color(p.n600),
+                    );
+                }
+                for (i, a) in rows.iter().enumerate() {
+                    activity_row(ui, a, (turn.n, range.start + i));
+                }
+            });
+        });
+}
+
+/// "3 tools · 1 error" for one group of activity rows.
+fn group_line(rows: &[Activity]) -> String {
+    let tools = rows.iter().filter(|a| a.kind == ActivityKind::Tool).count();
+    let errors = rows.iter().filter(|a| a.error).count();
+    let mut parts = vec![format!("{tools} tools")];
+    if errors > 0 {
+        parts.push(format!("{errors} errors"));
+    }
+    parts.join(" · ")
+}
+
+/// A message from the agent: surface block, kicker "AGENT · time",
+/// Markdown. Returns its rect for the context menu.
+fn agent_block(
+    ui: &mut Ui,
+    when: &str,
+    text: &str,
+    salt: (&str, usize, usize),
+    markdown: &mut CommonMarkCache,
+) -> egui::Rect {
+    let p = theme::palette(ui);
+    theme::surface(ui)
+        .inner_margin(Margin::symmetric(16, 14))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.spacing_mut().item_spacing = egui::vec2(GAP, 6.0);
+            theme::kicker(ui, &format!("Agent · {when}"), p.n600);
+            scrolls_sideways(ui, salt, |ui| {
+                super::document::markdown_style(ui);
+                super::markdown::show(ui, markdown, text);
+            });
+        })
+        .response
+        .rect
 }
 
 /// Prose stops here, however wide the window; the mock reads at 860.
@@ -837,7 +919,7 @@ const MAX_READING_WIDTH: f32 = 860.0;
 /// Text that wraps at the visible width but, where a word or a table
 /// cannot wrap, scrolls sideways inside its block instead of widening
 /// the block and everything under it.
-fn scrolls_sideways(ui: &mut Ui, salt: (&str, usize), add: impl FnOnce(&mut Ui)) {
+fn scrolls_sideways(ui: &mut Ui, salt: impl egui::AsIdSalt, add: impl FnOnce(&mut Ui)) {
     let width = ui.available_width();
     egui::ScrollArea::horizontal()
         .id_salt(salt)
@@ -881,7 +963,14 @@ impl Menus<'_> {
 
 /// The right-click menu on a message. "Clone session" is offered on the
 /// user's own messages of a cloneable session.
-fn message_menu(ui: &mut Ui, rect: egui::Rect, salt: (&str, usize), text: &str, menus: Menus<'_>) {
+fn message_menu(
+    ui: &mut Ui,
+    rect: egui::Rect,
+    salt: impl egui::AsIdSalt,
+    turn: usize,
+    text: &str,
+    menus: Menus<'_>,
+) {
     let response = ui.interact(rect, ui.id().with(salt), egui::Sense::hover());
     let right_clicked = ui.input(|i| {
         i.pointer.button_clicked(egui::PointerButton::Secondary)
@@ -909,7 +998,7 @@ fn message_menu(ui: &mut Ui, rect: egui::Rect, salt: (&str, usize), text: &str, 
                 )
                 .clicked()
             {
-                *clone_at = Some(salt.1);
+                *clone_at = Some(turn);
                 ui.close();
             }
         });

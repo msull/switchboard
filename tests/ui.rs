@@ -1061,6 +1061,7 @@ fn two_turns() -> Conversation {
             input: "{\"command\": \"grep name Cargo.toml\"}".into(),
             result: "name = \"switchboard\"".into(),
         }),
+        text: None,
     };
     Conversation {
         title: Some("explain-repo".into()),
@@ -1178,6 +1179,53 @@ fn terminal_panel_toggles_from_the_header() {
 }
 
 #[test]
+fn messages_before_the_answer_are_their_own_blocks_with_the_tools_between() {
+    let (mut harness, ids) = harness();
+    let id = seed_claude(&mut harness, &ids);
+    let mut conversation = two_turns();
+    let tool = conversation.turns[1].activity[0].clone();
+    let mut later = tool.clone();
+    later.line = "Edit: src/lib.rs".into();
+    let message = "Findings so far: the crate is named switchboard.".to_owned();
+    conversation.turns[1].activity = vec![
+        tool,
+        TranscriptActivity {
+            kind: ActivityKind::Text,
+            line: "Findings so far: …".into(),
+            at: Some(at(11)),
+            error: false,
+            detail: None,
+            text: Some(message.clone()),
+        },
+        later,
+    ];
+    harness
+        .state_mut()
+        .ui_state
+        .conversations
+        .insert(id, (None, conversation));
+    showing(&mut harness, View::Session(id));
+    // The message reads in full without expanding anything; the tools
+    // around it stay folded in two groups.
+    harness.get_by_label(message.as_str());
+    assert!(harness.query_by_label("Findings so far: …").is_none());
+    assert!(
+        harness
+            .query_by_label_contains("Bash: Read crate name")
+            .is_none()
+    );
+    assert!(
+        harness
+            .query_by_label_contains("Edit: src/lib.rs")
+            .is_none()
+    );
+    assert_eq!(harness.query_all_by_label_contains("1 tools").count(), 2);
+    click(&mut harness, "Expand activity");
+    harness.get_by_label_contains("Bash: Read crate name");
+    harness.get_by_label_contains("Edit: src/lib.rs");
+}
+
+#[test]
 fn long_activity_lines_wrap_instead_of_being_cut() {
     let (mut harness, ids) = harness();
     let id = seed_claude(&mut harness, &ids);
@@ -1189,6 +1237,7 @@ fn long_activity_lines_wrap_instead_of_being_cut() {
         at: None,
         error: false,
         detail: None,
+        text: Some(long.clone()),
     });
     harness
         .state_mut()

@@ -87,6 +87,9 @@ pub struct Activity {
     pub error: bool,
     /// Full input and result, for tool calls only.
     pub detail: Option<ToolDetail>,
+    /// The whole message, for text the agent wrote before its final
+    /// answer; `line` is its excerpt.
+    pub text: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -316,11 +316,15 @@ fn assistant_record(
         _ => Vec::new(),
     };
     let mut texts = Vec::new();
+    // Where the message's text goes in the activity list: before any
+    // tool call that followed it in the same message.
+    let mut text_at = None;
     for b in &blocks {
         match str_field(b, "type") {
             Some("thinking") => cur.thinking += 1,
             Some("text") => {
                 if let Some(t) = str_field(b, "text").filter(|t| !t.trim().is_empty()) {
+                    text_at.get_or_insert(cur.activity.len());
                     texts.push(t.to_owned());
                 }
             }
@@ -345,6 +349,7 @@ fn assistant_record(
                         input: cap(&input, DETAIL_CAP),
                         result: outcome.map(|o| o.text.clone()).unwrap_or_default(),
                     }),
+                    text: None,
                 });
             }
             _ => {}
@@ -353,8 +358,10 @@ fn assistant_record(
     if !texts.is_empty() {
         let joined = texts.join("\n\n");
         // Last text wins: it is the turn's final response.
-        cur.activity
-            .push(activity(ActivityKind::Text, short(&joined, 140), at));
+        let mut a = activity(ActivityKind::Text, short(&joined, 140), at);
+        a.text = Some(joined.clone());
+        let at_index = text_at.unwrap_or(cur.activity.len());
+        cur.activity.insert(at_index, a);
         cur.final_text = joined;
     }
 }
@@ -366,6 +373,7 @@ fn activity(kind: ActivityKind, line: String, at: Option<SystemTime>) -> Activit
         at,
         error: false,
         detail: None,
+        text: None,
     }
 }
 
@@ -678,6 +686,33 @@ mod tests {
         let c = parse(text);
         assert_eq!(c.usage.input, 30);
         assert_eq!(c.context_tokens(), Some(20 + 200 + 7));
+    }
+
+    #[test]
+    fn text_before_the_answer_keeps_its_whole_message_in_order() {
+        let long = "x".repeat(300);
+        let text = format!(
+            concat!(
+                r#"{{"type":"user","message":{{"role":"user","content":"hi"}}}}"#,
+                "\n",
+                r#"{{"type":"assistant","message":{{"model":"m","content":[{{"type":"text","text":"{long}"}},{{"type":"tool_use","id":"t1","name":"Read","input":{{"file_path":"/a"}}}}]}}}}"#,
+                "\n",
+                r#"{{"type":"user","message":{{"role":"user","content":[{{"type":"tool_result","tool_use_id":"t1","content":"ok"}}]}}}}"#,
+                "\n",
+                r#"{{"type":"assistant","message":{{"model":"m","content":[{{"type":"text","text":"done"}}]}}}}"#,
+            ),
+            long = long
+        );
+        let c = parse(&text);
+        let t = &c.turns[0];
+        assert_eq!(t.final_text, "done");
+        // The text comes before the tool call it was written with, as an
+        // excerpt on the line and the whole message beside it.
+        assert_eq!(t.activity.len(), 2);
+        assert_eq!(t.activity[0].kind, ActivityKind::Text);
+        assert!(t.activity[0].line.len() < long.len());
+        assert_eq!(t.activity[0].text.as_deref(), Some(long.as_str()));
+        assert_eq!(t.activity[1].kind, ActivityKind::Tool);
     }
 
     #[test]
