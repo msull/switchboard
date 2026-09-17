@@ -356,41 +356,58 @@ pub fn rail_indicator(cx: &mut DrawCtx<'_>, ui: &mut Ui, compact: bool) {
             return;
         }
         let Some((id, name)) = listening else {
-            ui.add_sized(
-                [ui.available_width(), height],
-                egui::Label::new(
-                    RichText::new("Not listening")
-                        .text_style(theme::meta())
-                        .color(p.n500),
-                )
-                .truncate(),
+            // Left-aligned in the row's full width, as the live label is.
+            let label = egui::Label::new(
+                RichText::new("Not listening")
+                    .text_style(theme::meta())
+                    .color(p.n500),
+            )
+            .truncate();
+            let size = egui::vec2(ui.available_width(), height);
+            ui.allocate_ui_with_layout(
+                size,
+                egui::Layout::left_to_right(egui::Align::Center),
+                |ui| ui.add(label),
             );
             return;
         };
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            // Frameless like the name beside it, so the row is one height
-            // whether or not it is listening.
-            let stop = egui::Button::new(
+            // A label like the idle one, so the row is one height whether
+            // or not it is listening.
+            let stop = egui::Label::new(
                 RichText::new("Stop listening")
                     .text_style(theme::meta())
                     .color(p.n600),
             )
-            .frame(false);
-            if ui.add(stop).clicked() {
+            .sense(egui::Sense::click());
+            if ui
+                .add(stop)
+                .on_hover_cursor(egui::CursorIcon::PointingHand)
+                .clicked()
+            {
                 cx.state.prompt_boxes.stop();
             }
-            let button = egui::Button::new(
+            let live = egui::Label::new(
                 RichText::new(format!("Listening · {name}"))
                     .color(green)
                     .text_style(theme::meta()),
             )
-            .frame(false)
-            .truncate();
-            if ui
-                .add_sized([ui.available_width(), height], button)
-                .on_hover_text(format!("Dictating into {name}; click to go there"))
-                .clicked()
-            {
+            .truncate()
+            .sense(egui::Sense::click());
+            let size = egui::vec2(ui.available_width(), height);
+            let clicked = ui
+                .allocate_ui_with_layout(
+                    size,
+                    egui::Layout::left_to_right(egui::Align::Center),
+                    |ui| {
+                        ui.add(live)
+                            .on_hover_cursor(egui::CursorIcon::PointingHand)
+                            .on_hover_text(format!("Dictating into {name}; click to go there"))
+                            .clicked()
+                    },
+                )
+                .inner;
+            if clicked {
                 cx.dispatch(AppAction::ShowSession(id));
             }
         });
