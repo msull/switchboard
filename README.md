@@ -79,7 +79,9 @@ load. The file is limited to 64 KiB and must not be a symlink.
 Nothing in the file runs until you approve the entry in the Run tab,
 where you see the command, its directory, and the variables it asks
 for. Any change to an entry drops its approval; `autostart` is honored
-only for approved services. Switchboard never writes into
+only for approved services. The board's Config button opens the file
+for editing, with the options listed beside it and the parse result shown
+as you type; Save is the only time Switchboard writes into
 `.switchboard/`.
 
 ## App bundle
@@ -111,7 +113,7 @@ Dev aids, all environment variables:
   the app can be put into a known state without clicking. See
   `src/script.rs` for the lines (`add-project`, `new-shell`, `new-claude`,
   `new-codex`, `new-service`, `show-board`, `show-session`, `show-document`,
-  `files`, `terminal`, `select-file`, `set-env`, `set-secret`, `dotenv`, `environment`,
+  `files`, `terminal`, `select-file`, `set-env`, `set-secret`, `dotenv`, `environment`, `config`,
   `send`, `interrupt`, `return`, `kill`, `approve`, `revoke`, `side`,
   `switchboard`, `working-set`, `new-working-set`, `clone-working-set`,
   `rename-working-set`, `delete-working-set`, `add-to-working-set`,
@@ -176,6 +178,7 @@ src/ui/
   markdown.rs            Markdown: prose through egui_commonmark, tables laid out here with content-sized columns
   palette.rs             quick-switcher (Cmd+K) over projects and sessions
   env.rs                 Environment dialog: variables, secrets, .env opt-in, masked preview
+  config.rs              project config editor: .switchboard/project.json as text, options listed, parse shown
   cards.rs               the one card for every entry kind, the card grid, pinned document cards
   session.rs             session view: header, embedded terminal or conversation + message box
   switchboard.rs         every session across projects, waiting first

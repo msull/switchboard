@@ -308,6 +308,10 @@ pub struct FakeProjectConfig {
     pub config: Option<ProjectConfig>,
     pub error: Option<String>,
     pub modified: Option<SystemTime>,
+    /// The file's text: what `read_text` gives and `write_text` replaces.
+    pub text: Arc<Mutex<Option<String>>>,
+    /// Every text written, in order.
+    pub written: Arc<Mutex<Vec<String>>>,
 }
 
 impl ProjectConfigReader for FakeProjectConfig {
@@ -316,6 +320,23 @@ impl ProjectConfigReader for FakeProjectConfig {
             Some(e) => Err(e.clone()),
             None => Ok(self.config.clone()),
         }
+    }
+    fn read_text(&self, _root: &Path) -> Result<Option<String>, String> {
+        match &self.error {
+            Some(e) => Err(e.clone()),
+            None => Ok(self.text.lock().expect("fake config text").clone()),
+        }
+    }
+    fn write_text(&self, _root: &Path, text: &str) -> Result<(), String> {
+        if let Some(e) = &self.error {
+            return Err(e.clone());
+        }
+        self.written
+            .lock()
+            .expect("fake config writes")
+            .push(text.to_owned());
+        *self.text.lock().expect("fake config text") = Some(text.to_owned());
+        Ok(())
     }
     fn modified(&self, _root: &Path) -> Option<SystemTime> {
         self.modified

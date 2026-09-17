@@ -46,9 +46,12 @@ outside a `cfg(target_os = "macos")` table may need macOS to compile.
 - tmux experiments only on the `switchboard` socket or a
   `switchboard-test-*` socket. Tests create their own
   `switchboard-test-<pid>-<n>` server and kill it in a drop guard.
-- Never write into a project directory's `.claude/` or `.switchboard/`.
-  The one thing read from a project directory as configuration is
-  `<root>/.switchboard/project.json`: its entries are parsed and listed
+- Never write into a project directory's `.claude/` or `.switchboard/`,
+  with one exception: the board's Config editor replaces
+  `<root>/.switchboard/project.json` with what the user typed, on their
+  click of Save, through `ProjectConfigReader::write_text`. Nothing else
+  writes there. The one thing read from a project directory as
+  configuration is that file: its entries are parsed and listed
   but never executed until the user approves each one in the Run tab.
   Approvals are a content hash of the entry stored on the record in
   Switchboard's data directory, so any change to an entry drops its

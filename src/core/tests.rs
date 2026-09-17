@@ -2357,6 +2357,50 @@ fn entry(name: &str, kind: SessionKind, command: &str) -> DefinedEntry {
 /// The reader's success shape for a file with these entries.
 #[allow(clippy::unnecessary_wraps)]
 #[test]
+fn saving_the_config_writes_it_then_reads_it_back() {
+    let (mut core, pid, _) = with_records(&[], |_| None);
+    let e = core.dispatch(
+        AppAction::SaveProjectConfig {
+            project: pid,
+            text: "{}".into(),
+        },
+        Clock::at(1),
+    );
+    assert_eq!(
+        e,
+        vec![Effect::WriteProjectConfig {
+            project: pid,
+            root: PathBuf::from("/tmp/proj"),
+            text: "{}".into(),
+        }]
+    );
+    let e = core.dispatch(
+        AppAction::ProjectConfigWritten {
+            project: pid,
+            result: Ok(()),
+        },
+        Clock::at(2),
+    );
+    assert_eq!(
+        e,
+        vec![Effect::ReadProjectConfig {
+            project: pid,
+            root: PathBuf::from("/tmp/proj"),
+        }]
+    );
+    assert!(core.notices().last().unwrap().text.contains("saved"));
+    let e = core.dispatch(
+        AppAction::ProjectConfigWritten {
+            project: pid,
+            result: Err("read-only".into()),
+        },
+        Clock::at(3),
+    );
+    assert!(e.is_empty());
+    assert!(core.notices().last().unwrap().text.contains("read-only"));
+}
+
+#[test]
 fn the_config_files_show_list_lands_on_the_project_record() {
     let (mut core, pid, _) = with_records(&[], |_| None);
     let mut cfg = ProjectConfig {

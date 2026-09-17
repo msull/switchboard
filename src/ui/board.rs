@@ -74,6 +74,14 @@ pub fn show(cx: &mut DrawCtx<'_>, ui: &mut Ui, pid: ProjectId) {
                         cx.state.env_dialog =
                             super::env::EnvDraft::project(cx.core, cx.services, pid);
                     }
+                    if theme::secondary(ui, "Config")
+                        .on_hover_text(
+                            "Edit .switchboard/project.json: commands, services, shown folders",
+                        )
+                        .clicked()
+                    {
+                        cx.state.config_dialog = super::config::ConfigDraft::open(cx, pid);
+                    }
                     ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
                         ui.add(
                             egui::Label::new(

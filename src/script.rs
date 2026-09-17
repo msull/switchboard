@@ -9,6 +9,7 @@
 //! <relative path>` (previewed in that side),
 //! `set-env <project> NAME=VALUE`, `set-secret <project> NAME VALUE`,
 //! `dotenv <project> on|off`, `environment <project>` (opens the dialog),
+//! `config <project>` (opens the config editor),
 //! `send <name> <text...>`, `interrupt <name>` (Escape to the pane),
 //! `return <name>`, `kill <name>`, `approve <name>`, `revoke <name>`
 //! (a defined command's approval), `side files|run|notes` (the side panel's
@@ -297,7 +298,12 @@ fn step(app: &mut SwitchboardApp, w: &[&str]) -> Result<(), String> {
             let (id, root) = project(app, p)?;
             app.ui_state.files.entry(id).or_default().selected = Some(root.join(rel));
         }
-        ["set-env" | "set-secret" | "dotenv" | "environment", ..] => env_step(app, w)?,
+        [
+            "set-env" | "set-secret" | "dotenv" | "environment" | "config",
+            ..,
+        ] => {
+            env_step(app, w)?;
+        }
         ["show-session", n] => {
             let id = session(app, n)?;
             app.dispatch(AppAction::ShowSession(id));
@@ -395,6 +401,11 @@ fn env_step(app: &mut SwitchboardApp, w: &[&str]) -> Result<(), String> {
             let (id, _) = project(app, p)?;
             app.ui_state.env_dialog =
                 crate::ui::env::EnvDraft::project(app.core(), app.services(), id);
+        }
+        ["config", p] => {
+            let (id, _) = project(app, p)?;
+            app.ui_state.config_dialog =
+                crate::ui::config::ConfigDraft::read(app.core(), app.services(), id);
         }
         _ => return Err(format!("unknown environment line: {}", w.join(" "))),
     }

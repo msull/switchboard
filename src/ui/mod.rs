@@ -11,6 +11,7 @@
 
 mod board;
 mod cards;
+pub mod config;
 pub mod dialogs;
 pub mod document;
 pub mod env;
@@ -86,6 +87,8 @@ pub struct UiState {
     pub palette: Option<palette::PaletteDraft>,
     /// The Environment dialog, while open.
     pub env_dialog: Option<env::EnvDraft>,
+    /// The project config editor, while open.
+    pub config_dialog: Option<config::ConfigDraft>,
     /// One message shown unformatted in a dialog ("View raw"), while
     /// open. The way to read a message whose Markdown renders badly.
     pub raw_message: Option<String>,
@@ -145,6 +148,7 @@ impl Default for UiState {
             editor_draft: None,
             palette: None,
             env_dialog: None,
+            config_dialog: None,
             raw_message: None,
             message_view: dialogs::MessageView::Rendered,
             working_set_columns: 24,
@@ -318,6 +322,7 @@ fn draw_frame(cx: &mut DrawCtx<'_>, ui: &mut Ui) {
     dialogs::show(cx, ui.ctx());
     palette::show(cx, ui.ctx());
     env::show(cx, ui.ctx());
+    config::show(cx, ui.ctx());
 }
 
 /// The side panel's tab row: Files, Run, and beside a session Notes,
@@ -411,6 +416,7 @@ fn keyboard(cx: &mut DrawCtx<'_>, ui: &Ui, view: &View) {
         || cx.state.new_session.is_some()
         || cx.state.palette.is_some()
         || cx.state.env_dialog.is_some()
+        || cx.state.config_dialog.is_some()
         || cx.state.raw_message.is_some()
         || cx.state.delete_set.is_some();
 

@@ -192,6 +192,18 @@ pub enum AppAction {
     /// The project's `.switchboard/project.json` was read (or is absent,
     /// or unusable). Entries become records that cannot run until
     /// approved.
+    /// Replace `<root>/.switchboard/project.json` with `text`: the config
+    /// editor's Save, the one write into a project directory.
+    SaveProjectConfig {
+        project: ProjectId,
+        text: String,
+    },
+    /// The write for `SaveProjectConfig` finished; on success the file
+    /// is read again.
+    ProjectConfigWritten {
+        project: ProjectId,
+        result: Result<(), String>,
+    },
     ProjectConfigRead {
         project: ProjectId,
         result: Result<Option<ProjectConfig>, String>,
@@ -346,6 +358,12 @@ pub enum Effect {
     },
     /// Read `<root>/.switchboard/project.json`; answered with
     /// `ProjectConfigRead`.
+    /// Write the config file's text (reports `ProjectConfigWritten`).
+    WriteProjectConfig {
+        project: ProjectId,
+        root: PathBuf,
+        text: String,
+    },
     ReadProjectConfig {
         project: ProjectId,
         root: PathBuf,
@@ -510,10 +528,12 @@ impl AppCore {
             | AppAction::SetPromptBox(_)
             | AppAction::SetVoiceSettings(_)
             | AppAction::StoreVoiceKey(_)
-            | AppAction::SetSideTab(_)
-            | AppAction::ProjectConfigRead { .. }
+            | AppAction::SetSideTab(_) => self.files_and_settings(action, now, &mut out),
+            AppAction::ProjectConfigRead { .. }
+            | AppAction::SaveProjectConfig { .. }
+            | AppAction::ProjectConfigWritten { .. }
             | AppAction::ApproveDefinition(_)
-            | AppAction::RevokeApproval(_) => self.files_and_settings(action, now, &mut out),
+            | AppAction::RevokeApproval(_) => self.definition_action(action, now, &mut out),
             AppAction::Back => drop(self.view_stack.pop()),
             AppAction::DismissNotice => {
                 if !self.notices.is_empty() {
@@ -1065,6 +1085,25 @@ impl AppCore {
             .filter(|w| self.project_visible(w.project.id))
     }
 
+    /// The project config file: read, edited and saved, and its entries'
+    /// approvals.
+    fn definition_action(&mut self, action: AppAction, now: Clock, out: &mut Out) {
+        match action {
+            AppAction::ProjectConfigRead { project, result } => {
+                self.project_config_read(project, result, now, out);
+            }
+            AppAction::SaveProjectConfig { project, text } => {
+                self.save_project_config(project, text, out);
+            }
+            AppAction::ProjectConfigWritten { project, result } => {
+                self.project_config_written(project, result, now, out);
+            }
+            AppAction::ApproveDefinition(id) => self.approve_definition(id, out),
+            AppAction::RevokeApproval(id) => self.revoke_approval(id, out),
+            _ => unreachable!("not a definition action"),
+        }
+    }
+
     /// Project edits, the document hand-offs, and the preferences, split
     /// out of `dispatch` for length.
     fn files_and_settings(&mut self, action: AppAction, now: Clock, out: &mut Out) {
@@ -1119,12 +1158,12 @@ impl AppCore {
                 }
             }
             AppAction::SetSideTab(tab) => self.update_settings(out, |s| s.side_tab = tab),
-            AppAction::ProjectConfigRead { project, result } => {
-                self.project_config_read(project, result, now, out);
-            }
-            AppAction::ApproveDefinition(id) => self.approve_definition(id, out),
-            AppAction::RevokeApproval(id) => self.revoke_approval(id, out),
-            AppAction::StoreLoaded(_)
+            AppAction::ProjectConfigRead { .. }
+            | AppAction::SaveProjectConfig { .. }
+            | AppAction::ProjectConfigWritten { .. }
+            | AppAction::ApproveDefinition(_)
+            | AppAction::RevokeApproval(_)
+            | AppAction::StoreLoaded(_)
             | AppAction::SaveFinished(..)
             | AppAction::HostUnavailable(_)
             | AppAction::HostListed(_)

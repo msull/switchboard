@@ -733,6 +733,35 @@ fn pinned_card_previews_and_opens() {
 }
 
 #[test]
+fn the_boards_config_button_edits_project_json_and_save_writes_it() {
+    let (mut harness, ids) = harness();
+    showing(&mut harness, View::Board(ids.alpha));
+    click(&mut harness, "Config");
+    // No file: the template, and a note that Save creates it.
+    harness.get_by_label("No file yet; Save creates it.");
+    harness.get_by_label_contains("Valid: 0 commands");
+    {
+        let draft = harness.state_mut().ui_state.config_dialog.as_mut().unwrap();
+        draft.text = "{\"version\":1,\"show\":[\"manager\", \"../up\"]".into();
+    }
+    harness.run_steps(2);
+    harness.get_by_label_contains("Not valid:");
+    {
+        let draft = harness.state_mut().ui_state.config_dialog.as_mut().unwrap();
+        draft.text = "{\"version\":1,\"show\":[\"manager\", \"../up\"]}".into();
+    }
+    harness.run_steps(2);
+    harness.get_by_label_contains("1 shown folders");
+    harness.get_by_label_contains("show: \"../up\" skipped");
+    click(&mut harness, "Save");
+    assert!(harness.state().ui_state.config_dialog.is_none());
+    assert!(actions(&harness).iter().any(|a| matches!(
+        a,
+        AppAction::SaveProjectConfig { project, text } if *project == ids.alpha && text.contains("manager")
+    )));
+}
+
+#[test]
 fn environment_dialog_saves_variables_and_stores_secrets() {
     let secrets = FakeSecrets::default();
     let (mut harness, ids) = harness_full(FakeOpener::default(), secrets.clone());

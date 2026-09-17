@@ -938,6 +938,18 @@ walks each shown folder as its own tree with parent ignore files off, so
 the folder's own rules still hold, and lists the folder among its
 parent's children whatever the rules say.
 
+## Config editor (2026-09-16)
+
+The board's Config button opens `.switchboard/project.json` as text in
+a dialog, with the options listed beside it and the parse result (or the
+error) shown as it is typed; Save is disabled while the text does not
+parse. Save dispatches `SaveProjectConfig`, the core emits
+`WriteProjectConfig`, the adapter writes atomically (temp file and
+rename, never through a symlink, under the size cap), and the core reads
+the file again on success so entries and shown folders follow. This is
+the one write into a project directory, and only on the user's click;
+approvals are unchanged, so a saved entry still needs approving.
+
 ## Open questions
 
 - Shared project config runs with a hash-and-approve flow and no

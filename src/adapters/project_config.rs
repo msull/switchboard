@@ -45,27 +45,61 @@ impl Default for FileConfigReader {
     }
 }
 
+/// The file's text, with the checks every read makes.
+fn read_raw(root: &Path) -> Result<Option<String>, String> {
+    let path = root.join(CONFIG_PATH);
+    // `symlink_metadata` does not follow links: a link pointing outside
+    // the project would let it read (and present) any file.
+    let meta = match std::fs::symlink_metadata(&path) {
+        Ok(m) => m,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(format!("{CONFIG_PATH}: {e}")),
+    };
+    if meta.file_type().is_symlink() {
+        return Err(format!("{CONFIG_PATH} is a symlink; refusing to read it"));
+    }
+    if meta.len() > MAX_CONFIG_BYTES {
+        return Err(format!(
+            "{CONFIG_PATH} is {} bytes; the limit is {MAX_CONFIG_BYTES}",
+            meta.len()
+        ));
+    }
+    std::fs::read_to_string(&path)
+        .map(Some)
+        .map_err(|e| format!("{CONFIG_PATH}: {e}"))
+}
+
 impl ProjectConfigReader for FileConfigReader {
     fn read(&self, root: &Path) -> Result<Option<ProjectConfig>, String> {
-        let path = root.join(CONFIG_PATH);
-        // `symlink_metadata` does not follow links: a link pointing outside
-        // the project would let it read (and present) any file.
-        let meta = match std::fs::symlink_metadata(&path) {
-            Ok(m) => m,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
-            Err(e) => return Err(format!("{CONFIG_PATH}: {e}")),
-        };
-        if meta.file_type().is_symlink() {
-            return Err(format!("{CONFIG_PATH} is a symlink; refusing to read it"));
+        match read_raw(root)? {
+            Some(text) => parse(&text, self.shell.clone()).map(Some),
+            None => Ok(None),
         }
-        if meta.len() > MAX_CONFIG_BYTES {
+    }
+
+    fn read_text(&self, root: &Path) -> Result<Option<String>, String> {
+        read_raw(root)
+    }
+
+    fn write_text(&self, root: &Path, text: &str) -> Result<(), String> {
+        let path = root.join(CONFIG_PATH);
+        let dir = path.parent().ok_or("no parent directory")?;
+        std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+        if let Ok(meta) = std::fs::symlink_metadata(&path)
+            && meta.file_type().is_symlink()
+        {
+            return Err(format!("{CONFIG_PATH} is a symlink; refusing to write it"));
+        }
+        if u64::try_from(text.len()).unwrap_or(u64::MAX) > MAX_CONFIG_BYTES {
             return Err(format!(
-                "{CONFIG_PATH} is {} bytes; the limit is {MAX_CONFIG_BYTES}",
-                meta.len()
+                "the text is over the {MAX_CONFIG_BYTES} byte limit"
             ));
         }
-        let text = std::fs::read_to_string(&path).map_err(|e| format!("{CONFIG_PATH}: {e}"))?;
-        parse(&text, self.shell.clone()).map(Some)
+        // A temp file beside it and a rename, so a crash leaves either the
+        // old file or the new one.
+        let tmp = dir.join(".project.json.tmp");
+        std::fs::write(&tmp, text).map_err(|e| format!("{}: {e}", tmp.display()))?;
+        std::fs::rename(&tmp, &path).map_err(|e| format!("{CONFIG_PATH}: {e}"))
     }
 
     fn modified(&self, root: &Path) -> Option<SystemTime> {
@@ -311,6 +345,36 @@ mod tests {
         assert!(parse("[]", String::new()).is_err());
         assert!(parse("{\"version\":1,\"extra\":1}", String::new()).is_err());
         assert!(parse("not json", String::new()).is_err());
+    }
+
+    #[test]
+    fn write_text_creates_the_directory_and_read_text_gives_it_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let reader = FileConfigReader {
+            shell: "/bin/sh".into(),
+        };
+        assert_eq!(reader.read_text(dir.path()).unwrap(), None);
+        let text = "{\"version\":1,\"show\":[\"a\"]}";
+        reader.write_text(dir.path(), text).unwrap();
+        assert_eq!(reader.read_text(dir.path()).unwrap().as_deref(), Some(text));
+        assert_eq!(
+            reader.read(dir.path()).unwrap().unwrap().show,
+            [std::path::PathBuf::from("a")]
+        );
+        assert!(!dir.path().join(".switchboard/.project.json.tmp").exists());
+        // A symlink in the way is never followed, for writing either.
+        let sub = dir.path().join(".switchboard");
+        std::fs::remove_file(sub.join("project.json")).unwrap();
+        let real = dir.path().join("real.json");
+        std::fs::write(&real, "{}").unwrap();
+        std::os::unix::fs::symlink(&real, sub.join("project.json")).unwrap();
+        assert!(
+            reader
+                .write_text(dir.path(), "{}")
+                .unwrap_err()
+                .contains("symlink")
+        );
+        assert_eq!(std::fs::read_to_string(&real).unwrap(), "{}");
     }
 
     #[test]

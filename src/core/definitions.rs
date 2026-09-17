@@ -122,6 +122,37 @@ impl AppCore {
         }
     }
 
+    /// The editor's Save: the shell writes the text, then reads the file
+    /// back so entries and shown folders follow.
+    pub(super) fn save_project_config(&mut self, project: ProjectId, text: String, out: &mut Out) {
+        if let Some(root) = self.workspace(project).map(|w| w.project.root.clone()) {
+            out.push(Effect::WriteProjectConfig {
+                project,
+                root,
+                text,
+            });
+        }
+    }
+
+    pub(super) fn project_config_written(
+        &mut self,
+        project: ProjectId,
+        result: Result<(), String>,
+        now: Clock,
+        out: &mut Out,
+    ) {
+        let name = self.project_name(project);
+        match result {
+            Ok(()) => {
+                if let Some(root) = self.workspace(project).map(|w| w.project.root.clone()) {
+                    self.info(format!("{name}: project.json saved"), now);
+                    out.push(Effect::ReadProjectConfig { project, root });
+                }
+            }
+            Err(e) => self.error(format!("{name}: project.json not saved: {e}")),
+        }
+    }
+
     pub(super) fn approve_definition(&mut self, id: RecordId, out: &mut Out) {
         let hash = self
             .session(id)
@@ -147,7 +178,7 @@ impl AppCore {
         }
     }
 
-    fn project_name(&self, project: ProjectId) -> String {
+    pub(super) fn project_name(&self, project: ProjectId) -> String {
         self.workspace(project)
             .map_or_else(|| "project".into(), |w| w.project.name.clone())
     }

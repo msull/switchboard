@@ -302,6 +302,7 @@ impl SwitchboardApp {
             | Effect::SendInput { .. }
             | Effect::SendKeys { .. }
             | Effect::ReadProjectConfig { .. }
+            | Effect::WriteProjectConfig { .. }
             | Effect::OpenPath(_)
             | Effect::Forget(_)
             | Effect::OpenInEditor { .. }
@@ -422,6 +423,14 @@ impl SwitchboardApp {
                     result: s.project_config.read(&root),
                 })
             }
+            Effect::WriteProjectConfig {
+                project,
+                root,
+                text,
+            } => Some(AppAction::ProjectConfigWritten {
+                project,
+                result: s.project_config.write_text(&root, &text),
+            }),
             Effect::Kill(host) => failed(s.host.kill(&host), || format!("kill {}", host.0)),
             Effect::Forget(host) => {
                 let path = self.scrollback_path(&host);
