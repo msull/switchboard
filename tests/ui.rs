@@ -1469,6 +1469,34 @@ fn shift_click_the_menu_and_the_pane_put_a_path_in_the_message() {
 }
 
 #[test]
+fn saving_from_the_prompt_box_refreshes_the_projects_file_tree() {
+    let (mut harness, _) = harness();
+    let (dir, pid, sid) = file_project(&mut harness);
+    let target = dir.path().join("notes.md");
+    harness.state_mut().ui_state.prompt_boxes.test_save_path = Some(target);
+    showing(&mut harness, View::Session(sid));
+    harness.get_by_role_and_label(Role::Button, "Side").click();
+    harness.run_steps(2);
+    harness.get_by_label("  README.md");
+    let field = prompt_field(&mut harness);
+    field.focus();
+    field.type_text("a note");
+    harness.run_steps(2);
+    assert!(
+        !harness.state().ui_state.files[&pid].children.is_empty(),
+        "the tree was read"
+    );
+    // The fake saver does not write; the file appears as a real save
+    // would leave it, and the cached tree does not know it yet.
+    std::fs::write(dir.path().join("notes.md"), "a note").unwrap();
+    harness.run_steps(2);
+    assert!(harness.query_by_label("  notes.md").is_none());
+    click(&mut harness, "Save…");
+    harness.get_by_label("  notes.md");
+    harness.get_by_label("  README.md");
+}
+
+#[test]
 fn the_file_side_hands_a_path_to_the_prompt_box_editor() {
     let (mut harness, _) = harness();
     let (dir, _, sid) = file_project(&mut harness);

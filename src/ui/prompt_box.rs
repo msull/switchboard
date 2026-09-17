@@ -11,6 +11,7 @@ use std::sync::{Arc, Mutex};
 use egui::{RichText, Ui};
 use promptbox::adapters::clipboard::{FakeClipboard, SystemClipboard};
 use promptbox::adapters::persistence::MemoryStore;
+use promptbox::ports::saver::FileSaver;
 use promptbox::ports::sink::PromptSink;
 use promptbox::{Editor, Voice};
 
@@ -44,6 +45,31 @@ impl PromptSink for PaneSink {
     }
 }
 
+/// Paths the editors saved to, waiting for the frame to refresh the file
+/// side of the project they landed in.
+pub type SavedPaths = Arc<Mutex<Vec<std::path::PathBuf>>>;
+
+/// The saver the editors get: the native dialog (or the fake in tests)
+/// with every saved path noted, so the file tree can pick it up.
+struct NotingSaver {
+    inner: Box<dyn FileSaver>,
+    saved: SavedPaths,
+}
+
+impl FileSaver for NotingSaver {
+    fn save(
+        &mut self,
+        seed: &std::path::Path,
+        text: &str,
+    ) -> Result<Option<std::path::PathBuf>, String> {
+        let result = self.inner.save(seed, text)?;
+        if let Some(path) = &result {
+            self.saved.lock().expect("saved paths").push(path.clone());
+        }
+        Ok(result)
+    }
+}
+
 /// The Keychain is read once per run, on the first editor.
 #[derive(Debug, Clone, Default)]
 enum KeyState {
@@ -63,8 +89,12 @@ pub struct PromptBoxes {
     pub outbox: Outbox,
     /// The `OpenAI` key as last read from the Keychain.
     key: KeyState,
-    /// Use the real clipboard and save dialog. Tests turn this off.
+    /// Use the real clipboard and save dialog. Tests turn this off and
+    /// get a fake saver that saves to `test_save_path` without asking.
     pub native: bool,
+    pub test_save_path: Option<std::path::PathBuf>,
+    /// Files saved from the editors since the last frame.
+    pub saved: SavedPaths,
     /// The captions setting last pushed into the runtime, so the CC
     /// button's own change is not overwritten on the next frame.
     applied_captions: Option<bool>,
@@ -80,6 +110,8 @@ impl Default for PromptBoxes {
             outbox: Outbox::default(),
             key: KeyState::Unread,
             native: true,
+            test_save_path: None,
+            saved: SavedPaths::default(),
             applied_captions: None,
         }
     }
@@ -130,6 +162,18 @@ impl PromptBoxes {
 /// dropped. Returns how soon a repaint is wanted.
 pub fn pump(cx: &mut DrawCtx<'_>) -> Option<std::time::Duration> {
     let core = cx.core;
+    // A file saved from an editor shows up in its project's tree at once.
+    let saved: Vec<std::path::PathBuf> =
+        std::mem::take(&mut *cx.state.prompt_boxes.saved.lock().expect("saved paths"));
+    for path in saved {
+        for workspace in core.workspaces() {
+            if path.starts_with(&workspace.project.root)
+                && let Some(files) = cx.state.files.get_mut(&workspace.project.id)
+            {
+                files.refresh();
+            }
+        }
+    }
     let boxes = &mut cx.state.prompt_boxes;
     boxes.editors.retain(|id, _| core.session(*id).is_some());
     boxes.running.retain(|id, _| core.session(*id).is_some());
@@ -198,6 +242,8 @@ fn editor_for<'a>(cx: &'a mut DrawCtx<'_>, record: &SessionRecord) -> &'a mut Ed
         .clone();
     let native = boxes.native;
     let outbox = boxes.outbox.clone();
+    let saved = boxes.saved.clone();
+    let test_save_path = boxes.test_save_path.clone();
     // A primed draft (a cloned session's prompt, or the one a discard
     // cut back to) becomes the editor's text, first or replacing.
     let primed = cx.state.primed.remove(&record.id);
@@ -225,9 +271,15 @@ fn editor_for<'a>(cx: &'a mut DrawCtx<'_>, record: &SessionRecord) -> &'a mut Ed
             running,
             outbox,
         }));
-        if native {
-            editor.set_saver(Box::new(promptbox::adapters::saver::NativeSaver));
-        }
+        let inner: Box<dyn FileSaver> = if native {
+            Box::new(promptbox::adapters::saver::NativeSaver)
+        } else {
+            Box::new(promptbox::adapters::saver::FakeSaver {
+                choose: test_save_path,
+                ..Default::default()
+            })
+        };
+        editor.set_saver(Box::new(NotingSaver { inner, saved }));
         editor.set_save_dir(root);
         editor.set_api_key(key);
         if let Some(text) = primed {
