@@ -51,6 +51,7 @@ fn project(name: &str, last_active: SystemTime) -> Project {
         notes: format!("notes for {name}"),
         pinned: vec![PathBuf::from("README.md")],
         env: ProjectEnv::default(),
+        shown: Vec::new(),
         created: at(0),
         last_active,
     }

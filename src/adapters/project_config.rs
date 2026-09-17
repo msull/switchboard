@@ -85,6 +85,9 @@ struct File {
     commands: Vec<serde_json::Value>,
     #[serde(default)]
     services: Vec<serde_json::Value>,
+    /// Folders to show in the file side despite `.gitignore`.
+    #[serde(default)]
+    show: Vec<String>,
 }
 
 /// `deny_unknown_fields` turns a typo like `comand` into an error for
@@ -113,6 +116,18 @@ struct ServiceEntry {
     autostart: bool,
 }
 
+/// A `show` entry as a path under the root, or `None` when it could
+/// point elsewhere.
+fn shown_path(raw: &str) -> Option<std::path::PathBuf> {
+    let path = std::path::Path::new(raw.trim());
+    let ok = !raw.trim().is_empty()
+        && path.is_relative()
+        && path
+            .components()
+            .all(|c| matches!(c, std::path::Component::Normal(_)));
+    ok.then(|| path.to_path_buf())
+}
+
 /// Parse the file text. Pure, so the rules are unit-tested without a
 /// file system.
 ///
@@ -131,6 +146,14 @@ pub fn parse(text: &str, shell: String) -> Result<ProjectConfig, String> {
         shell,
         ..ProjectConfig::default()
     };
+    for raw in &file.show {
+        match shown_path(raw) {
+            Some(path) => config.show.push(path),
+            None => config.warnings.push(format!(
+                "show: {raw:?} skipped (a relative path under the root, without ..)"
+            )),
+        }
+    }
     for (i, raw) in file.commands.iter().enumerate() {
         match serde_json::from_value::<CommandEntry>(raw.clone()) {
             Ok(e) => config.add(
@@ -258,6 +281,24 @@ mod tests {
         assert!(c.warnings[2].contains("twice"));
         assert!(c.warnings[3].contains("relative"));
         assert!(c.warnings[5].contains("1BAD"));
+    }
+
+    #[test]
+    fn show_lists_folders_under_the_root_and_skips_the_rest() {
+        let c = parse(
+            r#"{"version":1,"show":["manager","tools/gen","../up","/abs","","a/../b"]}"#,
+            String::new(),
+        )
+        .unwrap();
+        assert_eq!(
+            c.show,
+            [
+                std::path::PathBuf::from("manager"),
+                std::path::PathBuf::from("tools/gen")
+            ]
+        );
+        assert_eq!(c.warnings.len(), 4);
+        assert!(c.warnings.iter().all(|w| w.starts_with("show: ")));
     }
 
     #[test]

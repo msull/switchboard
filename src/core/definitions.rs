@@ -77,6 +77,20 @@ impl AppCore {
         }
         self.set_config_status(project, status);
 
+        // The folders to show despite .gitignore follow the file; an
+        // absent file shows none.
+        let shown = match &result {
+            Ok(Some(cfg)) => cfg.show.clone(),
+            Ok(None) | Err(_) => Vec::new(),
+        };
+        if result.is_ok()
+            && let Some(workspace) = self.workspaces.iter_mut().find(|w| w.project.id == project)
+            && workspace.project.shown != shown
+        {
+            workspace.project.shown = shown;
+            out.touch(project);
+        }
+
         let entries = match result {
             Ok(Some(cfg)) => cfg
                 .entries

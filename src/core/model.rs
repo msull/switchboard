@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 /// Bump when the on-disk shape changes incompatibly.
-pub const SCHEMA_VERSION: u32 = 4;
+pub const SCHEMA_VERSION: u32 = 5;
 
 /// How the UI picks its colours: follow the system, or force one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -344,6 +344,10 @@ pub struct Project {
     pub pinned: Vec<PathBuf>,
     #[serde(default)]
     pub env: ProjectEnv,
+    /// Folders the file side shows despite the root's `.gitignore`, as
+    /// `.switchboard/project.json` last declared them (`show`).
+    #[serde(default)]
+    pub shown: Vec<PathBuf>,
     pub created: SystemTime,
     /// Most recent time this project was active; drives switcher order.
     pub last_active: SystemTime,

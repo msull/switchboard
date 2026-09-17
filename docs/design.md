@@ -928,6 +928,16 @@ the pane: `SendInput` with a live pane clears it, and a prompt typed in
 the terminal shows as a turn past the cut and hides the button. Neither
 transcript file is ever modified; the unused copy stays on disk.
 
+## Shown folders (2026-09-16)
+
+`show` in `.switchboard/project.json` names folders the file side lists
+despite the root's `.gitignore`, for a workspace root whose sub-repos are
+ignored. The core copies the list onto the project record (`shown`) when
+the file is read, so the side has it without re-reading; the file index
+walks each shown folder as its own tree with parent ignore files off, so
+the folder's own rules still hold, and lists the folder among its
+parent's children whatever the rules say.
+
 ## Open questions
 
 - Shared project config runs with a hash-and-approve flow and no

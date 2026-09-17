@@ -860,6 +860,7 @@ impl AppCore {
             notes: String::new(),
             pinned: Vec::new(),
             env: ProjectEnv::default(),
+            shown: Vec::new(),
             created: now.wall,
             last_active: now.wall,
         }));

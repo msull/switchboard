@@ -32,6 +32,7 @@ fn project(name: &str) -> Project {
         notes: String::new(),
         pinned: vec![],
         env: ProjectEnv::default(),
+        shown: Vec::new(),
         created: t,
         last_active: t,
     }
@@ -2355,11 +2356,64 @@ fn entry(name: &str, kind: SessionKind, command: &str) -> DefinedEntry {
 
 /// The reader's success shape for a file with these entries.
 #[allow(clippy::unnecessary_wraps)]
+#[test]
+fn the_config_files_show_list_lands_on_the_project_record() {
+    let (mut core, pid, _) = with_records(&[], |_| None);
+    let mut cfg = ProjectConfig {
+        shell: "/bin/zsh".into(),
+        show: vec![PathBuf::from("manager")],
+        ..ProjectConfig::default()
+    };
+    let e = core.dispatch(
+        AppAction::ProjectConfigRead {
+            project: pid,
+            result: Ok(Some(cfg.clone())),
+        },
+        Clock::at(1),
+    );
+    assert_eq!(saves(&e), 1);
+    assert_eq!(
+        core.workspace(pid).unwrap().project.shown,
+        [PathBuf::from("manager")]
+    );
+    // The same list again is not a change; an unreadable file keeps it;
+    // a removed file clears it.
+    let e = core.dispatch(
+        AppAction::ProjectConfigRead {
+            project: pid,
+            result: Ok(Some(cfg.clone())),
+        },
+        Clock::at(2),
+    );
+    assert_eq!(saves(&e), 0);
+    cfg.show.clear();
+    let e = core.dispatch(
+        AppAction::ProjectConfigRead {
+            project: pid,
+            result: Err("unreadable".into()),
+        },
+        Clock::at(3),
+    );
+    assert_eq!(saves(&e), 0);
+    assert_eq!(core.workspace(pid).unwrap().project.shown.len(), 1);
+    let e = core.dispatch(
+        AppAction::ProjectConfigRead {
+            project: pid,
+            result: Ok(None),
+        },
+        Clock::at(4),
+    );
+    assert_eq!(saves(&e), 1);
+    assert!(core.workspace(pid).unwrap().project.shown.is_empty());
+}
+
+#[allow(clippy::unnecessary_wraps)]
 fn config(entries: Vec<DefinedEntry>) -> Result<Option<ProjectConfig>, String> {
     Ok(Some(ProjectConfig {
         entries,
         warnings: vec![],
         shell: "/bin/zsh".into(),
+        show: vec![],
     }))
 }
 

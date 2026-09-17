@@ -58,31 +58,54 @@ pub struct Hit<'a> {
 /// The root directory itself is not included. Entries that cannot be read
 /// (permission errors, races with deletion) are skipped rather than failing
 /// the whole scan; only an unreadable or missing root is an error.
-pub fn scan(root: &Path, max_entries: usize) -> io::Result<Listing> {
+/// `shown` names folders under `root` to list even when the root's
+/// ignore rules hide them: each is walked as its own tree, honoring its
+/// own `.gitignore` but none above it.
+pub fn scan(root: &Path, max_entries: usize, shown: &[PathBuf]) -> io::Result<Listing> {
     let scanned_at = SystemTime::now();
     check_dir(root)?;
 
     let mut entries = Vec::new();
     let mut truncated = false;
-    for item in walker(root).build() {
-        if entries.len() >= max_entries {
-            truncated = true;
-            break;
-        }
-        let Some(dent) = readable(item) else { continue };
-        if dent.depth() == 0 {
-            continue;
-        }
-        if let Some(entry) = to_entry(root, &dent) {
-            entries.push(entry);
+    let mut walks = vec![(walker(root), 1)];
+    for dir in shown_dirs(root, shown) {
+        let mut builder = walker(&dir);
+        builder.parents(false);
+        walks.push((builder, 0));
+    }
+    'walks: for (builder, min_depth) in walks {
+        for item in builder.build() {
+            if entries.len() >= max_entries {
+                truncated = true;
+                break 'walks;
+            }
+            let Some(dent) = readable(item) else { continue };
+            if dent.depth() < min_depth {
+                continue;
+            }
+            if let Some(entry) = to_entry(root, &dent) {
+                entries.push(entry);
+            }
         }
     }
     entries.sort_unstable_by(|a, b| a.rel.cmp(&b.rel));
+    // A shown folder the root's rules did not hide was listed twice.
+    entries.dedup_by(|a, b| a.rel == b.rel);
     Ok(Listing {
         entries,
         truncated,
         scanned_at,
     })
+}
+
+/// The shown folders that exist as directories under `root`, absolute.
+fn shown_dirs(root: &Path, shown: &[PathBuf]) -> Vec<PathBuf> {
+    shown
+        .iter()
+        .filter(|p| p.is_relative())
+        .map(|p| root.join(p))
+        .filter(|p| p.is_dir())
+        .collect()
 }
 
 /// Immediate children of `dir`, which must be `root` or somewhere under it.
@@ -91,7 +114,11 @@ pub fn scan(root: &Path, max_entries: usize) -> io::Result<Listing> {
 /// case. Hidden entries are skipped and `.gitignore` rules from `root` down
 /// to `dir` apply, so the lazily loaded tree agrees with [`scan`]. Each
 /// entry's `rel` is relative to `root`, not to `dir`.
-pub fn children(root: &Path, dir: &Path) -> io::Result<Vec<Entry>> {
+///
+/// `shown` is as for [`scan`]: a shown folder appears among its parent's
+/// children whatever the ignore rules say, and inside one only its own
+/// rules apply.
+pub fn children(root: &Path, dir: &Path, shown: &[PathBuf]) -> io::Result<Vec<Entry>> {
     if dir.strip_prefix(root).is_err() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -100,13 +127,48 @@ pub fn children(root: &Path, dir: &Path) -> io::Result<Vec<Entry>> {
     }
     check_dir(dir)?;
 
-    let mut out: Vec<Entry> = walker(dir)
-        .max_depth(Some(1))
-        .build()
-        .filter_map(readable)
-        .filter(|dent| dent.depth() == 1)
-        .filter_map(|dent| to_entry(root, &dent))
-        .collect();
+    let shown_dirs = shown_dirs(root, shown);
+    // Inside a shown folder the walk starts there, so the rules above it
+    // never apply; one level under `dir` is kept.
+    let inside = shown_dirs
+        .iter()
+        .filter(|s| dir.starts_with(s))
+        .max_by_key(|s| s.components().count())
+        .cloned();
+    let mut out: Vec<Entry> = match inside {
+        Some(start) => {
+            let depth = dir
+                .strip_prefix(&start)
+                .map_or(0, |r| r.components().count());
+            let mut builder = walker(&start);
+            builder.parents(false).max_depth(Some(depth + 1));
+            builder
+                .build()
+                .filter_map(readable)
+                .filter(|dent| dent.depth() == depth + 1 && dent.path().parent() == Some(dir))
+                .filter_map(|dent| to_entry(root, &dent))
+                .collect()
+        }
+        None => walker(dir)
+            .max_depth(Some(1))
+            .build()
+            .filter_map(readable)
+            .filter(|dent| dent.depth() == 1)
+            .filter_map(|dent| to_entry(root, &dent))
+            .collect(),
+    };
+    for shown_dir in shown_dirs {
+        if shown_dir.parent() == Some(dir)
+            && let Ok(rel) = shown_dir.strip_prefix(root)
+            && !out.iter().any(|e| e.rel == rel)
+        {
+            out.push(Entry {
+                rel: rel.to_path_buf(),
+                is_dir: true,
+                size: 0,
+            });
+        }
+    }
     out.sort_by(|a, b| {
         b.is_dir
             .cmp(&a.is_dir)
@@ -324,7 +386,7 @@ mod tests {
     #[test]
     fn scan_honors_gitignore_and_skips_hidden() {
         let tmp = fixture();
-        let listing = scan(tmp.path(), 1000).unwrap();
+        let listing = scan(tmp.path(), 1000, &[]).unwrap();
         assert!(!listing.truncated);
         assert_eq!(
             rels(&listing.entries),
@@ -356,9 +418,59 @@ mod tests {
     }
 
     #[test]
+    fn shown_folders_appear_despite_the_roots_ignore_with_their_own_rules() {
+        let tmp = fixture();
+        let root = tmp.path();
+        write(
+            &root.join(".gitignore"),
+            "target/\nnested/ignored.txt\nsub/\n",
+        );
+        write(&root.join("sub/.gitignore"), "build/\n");
+        write(&root.join("sub/src/lib.rs"), "");
+        write(&root.join("sub/build/out"), "");
+        write(&root.join("sub/target/keep"), "");
+        assert!(
+            !rels(&scan(root, 1000, &[]).unwrap().entries)
+                .iter()
+                .any(|r| r.starts_with("sub")),
+            "hidden without show"
+        );
+        let shown = [PathBuf::from("sub")];
+        let listing = scan(root, 1000, &shown).unwrap();
+        let got = rels(&listing.entries);
+        assert!(got.contains(&"sub".to_owned()));
+        assert!(got.contains(&"sub/src/lib.rs".to_owned()));
+        assert!(
+            !got.contains(&"sub/build/out".to_owned()),
+            "sub's own rules"
+        );
+        assert!(
+            got.contains(&"sub/target/keep".to_owned()),
+            "root's rules stop"
+        );
+        assert_eq!(got.iter().filter(|r| *r == "src").count(), 1);
+        // The tree agrees: sub is a child of the root, its children obey
+        // only its rules, and deeper levels still list.
+        let top = rels(&children(root, root, &shown).unwrap());
+        assert!(top.contains(&"sub".to_owned()));
+        let inside = rels(&children(root, &root.join("sub"), &shown).unwrap());
+        assert_eq!(inside, ["sub/src", "sub/target"]);
+        let deeper = rels(&children(root, &root.join("sub/src"), &shown).unwrap());
+        assert_eq!(deeper, ["sub/src/lib.rs"]);
+        // A shown folder the rules never hid lists once.
+        let twice = scan(root, 1000, &[PathBuf::from("docs")]).unwrap();
+        assert_eq!(
+            rels(&twice.entries).iter().filter(|r| *r == "docs").count(),
+            1
+        );
+        // Missing folders are ignored.
+        assert!(scan(root, 1000, &[PathBuf::from("nope")]).is_ok());
+    }
+
+    #[test]
     fn scan_truncates_at_cap() {
         let tmp = fixture();
-        let listing = scan(tmp.path(), 3).unwrap();
+        let listing = scan(tmp.path(), 3, &[]).unwrap();
         assert!(listing.truncated);
         assert_eq!(listing.entries.len(), 3);
     }
@@ -366,7 +478,7 @@ mod tests {
     #[test]
     fn scan_rejects_missing_root() {
         let tmp = fixture();
-        assert!(scan(&tmp.path().join("nope"), 10).is_err());
+        assert!(scan(&tmp.path().join("nope"), 10, &[]).is_err());
     }
 
     #[test]
@@ -374,22 +486,22 @@ mod tests {
         let tmp = fixture();
         let root = tmp.path();
         assert_eq!(
-            rels(&children(root, root).unwrap()),
+            rels(&children(root, root, &[]).unwrap()),
             ["docs", "nested", "src"]
         );
         // Ignore rules from the root apply to a nested directory, and the
         // sort ignores case.
         assert_eq!(
-            rels(&children(root, &root.join("nested")).unwrap()),
+            rels(&children(root, &root.join("nested"), &[]).unwrap()),
             ["nested/deeper", "nested/Zeta.txt"]
         );
-        assert!(children(root, Path::new("/")).is_err());
+        assert!(children(root, Path::new("/"), &[]).is_err());
     }
 
     #[test]
     fn fuzzy_ranks_file_name_matches_first() {
         let tmp = fixture();
-        let listing = scan(tmp.path(), 1000).unwrap();
+        let listing = scan(tmp.path(), 1000, &[]).unwrap();
         let hits = fuzzy(&listing.entries, "dsgn", 10, false);
         assert_eq!(hits[0].entry.rel, Path::new("docs/design.md"));
         assert_eq!(hits[0].positions, [5, 7, 9, 10]);

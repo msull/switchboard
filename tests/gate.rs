@@ -266,6 +266,7 @@ fn project(root: &Path) -> Project {
         notes: String::new(),
         pinned: Vec::new(),
         env: ProjectEnv::default(),
+        shown: Vec::new(),
         created: now,
         last_active: now,
     }

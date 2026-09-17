@@ -4,7 +4,7 @@
 //! (see "Trust boundary" in the design). The adapter parses; the core
 //! decides what becomes a record and what may run.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use crate::core::SessionKind;
@@ -32,6 +32,10 @@ pub struct ProjectConfig {
     pub warnings: Vec<String>,
     /// The shell that will run the commands (the user's login shell).
     pub shell: String,
+    /// Folders under the root the file side shows even when the root's
+    /// `.gitignore` hides them (sub-repositories, generated trees).
+    /// Relative, validated: no absolute paths, no `..`.
+    pub show: Vec<PathBuf>,
 }
 
 pub trait ProjectConfigReader: Send + Sync {

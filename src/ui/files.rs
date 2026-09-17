@@ -80,7 +80,7 @@ impl FilesState {
     }
 
     /// Start (once) and poll the background scan.
-    fn ensure_listing(&mut self, root: &Path, ctx: &egui::Context) {
+    fn ensure_listing(&mut self, root: &Path, shown: &[PathBuf], ctx: &egui::Context) {
         if self.listing.is_some() {
             return;
         }
@@ -105,9 +105,10 @@ impl FilesState {
         }
         let (tx, rx) = channel();
         let root = root.to_path_buf();
+        let shown = shown.to_vec();
         let ctx = ctx.clone();
         std::thread::spawn(move || {
-            let result = scan(&root, MAX_INDEX_ENTRIES);
+            let result = scan(&root, MAX_INDEX_ENTRIES, &shown);
             let _ = tx.send(result);
             ctx.request_repaint();
         });
@@ -130,11 +131,10 @@ pub fn show(
     let Some(root) = cx.core.workspace(pid).map(|w| w.project.root.clone()) else {
         return;
     };
-    let pinned: Vec<PathBuf> = cx
-        .core
-        .workspace(pid)
-        .map(|w| w.project.pinned.clone())
-        .unwrap_or_default();
+    let (pinned, shown) = cx.core.workspace(pid).map_or_else(
+        || (Vec::new(), Vec::new()),
+        |w| (w.project.pinned.clone(), w.project.shown.clone()),
+    );
     let mut state = cx.state.files.remove(&pid).unwrap_or_default();
     state.poll_git(&root, ui.ctx());
     let git = state.git.clone();
@@ -145,6 +145,7 @@ pub fn show(
     let mut side = Side {
         pid,
         root: &root,
+        shown: &shown,
         pinned: &pinned,
         core,
         columns,
@@ -350,6 +351,8 @@ fn preview_pane(
 struct Side<'a> {
     pid: ProjectId,
     root: &'a Path,
+    /// Folders listed despite the root's ignore rules.
+    shown: &'a [PathBuf],
     pinned: &'a [PathBuf],
     /// For the working-set menu: which sets exist and hold a file.
     core: &'a crate::core::AppCore,
@@ -516,7 +519,7 @@ fn directory(ui: &mut Ui, state: &mut FilesState, side: &mut Side<'_>, dir: &Pat
     let entries = state
         .children
         .entry(dir.to_path_buf())
-        .or_insert_with(|| children(&root, dir).map_err(|e| e.to_string()))
+        .or_insert_with(|| children(&root, dir, side.shown).map_err(|e| e.to_string()))
         .clone();
     let entries = match entries {
         Ok(entries) => entries,
@@ -578,7 +581,7 @@ fn directory(ui: &mut Ui, state: &mut FilesState, side: &mut Side<'_>, dir: &Pat
 
 /// Finder results for the current query.
 fn finder(ui: &mut Ui, state: &mut FilesState, side: &mut Side<'_>, open_first: bool) {
-    state.ensure_listing(side.root, ui.ctx());
+    state.ensure_listing(side.root, side.shown, ui.ctx());
     let Some(listing) = state.listing.clone() else {
         ui.label(RichText::new("indexing…").weak());
         return;

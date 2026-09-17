@@ -58,9 +58,16 @@ can set them up for you:
   ],
   "services": [
     { "name": "web", "command": "npm run dev", "autostart": true }
-  ]
+  ],
+  "show": ["manager", "delta-backend"]
 }
 ```
+
+`show` lists folders under the root that the file side lists even when
+the root's `.gitignore` hides them, such as sub-repositories checked out
+inside a workspace directory. Each is walked as its own tree: its own
+`.gitignore` applies, the root's does not. Entries must be relative
+paths without `..`; others are skipped with a warning.
 
 Names are 1 to 64 characters and unique across both lists; `cwd` is
 relative to the project root and may not use `..`; `env` lists the
