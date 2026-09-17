@@ -2397,6 +2397,39 @@ fn arranging_moves_and_resizes_cards_in_units_and_refuses_an_overlap() {
 }
 
 #[test]
+fn the_microphone_on_a_working_set_card_binds_listening_to_that_session() {
+    let (mut harness, ids) = harness();
+    let (id, _) = working_set_of_two(&mut harness, &ids);
+    harness.run_steps(2);
+    assert!(
+        !harness
+            .state()
+            .ui_state
+            .prompt_boxes
+            .editors
+            .contains_key(&id),
+        "the session was never opened"
+    );
+    click(&mut harness, "Listen here");
+    {
+        let boxes = &harness.state().ui_state.prompt_boxes;
+        assert_eq!(boxes.bound, Some(id), "bound without opening the session");
+        assert!(boxes.editors.contains_key(&id), "its editor was made");
+    }
+    // No speech model in tests: the demo stands in for the microphone.
+    {
+        let boxes = &mut harness.state_mut().ui_state.prompt_boxes;
+        let started = boxes.voice.start_demo(false);
+        boxes.editors.get_mut(&id).unwrap().apply(started);
+    }
+    harness.run_steps(2);
+    harness.get_by_label_contains("Listening · ");
+    click(&mut harness, "Listening here");
+    assert!(harness.state().ui_state.prompt_boxes.listening().is_none());
+    assert!(harness.query_by_label_contains("Listening · ").is_none());
+}
+
+#[test]
 fn hovering_terminal_on_an_agent_card_shows_the_panes_tail() {
     let (mut harness, ids) = harness();
     let (id, _) = working_set_of_two(&mut harness, &ids);

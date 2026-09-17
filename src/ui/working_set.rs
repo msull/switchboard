@@ -387,6 +387,39 @@ fn set_card_text(cx: &DrawCtx<'_>, record: &SessionRecord) -> SetCardText {
     }
 }
 
+/// The card's top row: kicker, status dot, and on an agent card with the
+/// Prompt Box a microphone that binds the one voice runtime to this
+/// session's editor. Returns whether the microphone was clicked.
+fn set_card_top(
+    cx: &mut DrawCtx<'_>,
+    ui: &mut Ui,
+    record: &SessionRecord,
+    kicker: &str,
+    state: &CardState,
+    agent: bool,
+) -> bool {
+    let p = theme::palette(ui);
+    let mut listen = false;
+    ui.horizontal(|ui| {
+        theme::kicker(ui, kicker, p.state_text(state));
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            theme::status_dot(ui, state, 8.0);
+            if agent && cx.core.settings().prompt_box {
+                let listening = cx.state.prompt_boxes.listening() == Some(record.id);
+                let hint = if listening {
+                    "Listening into this session; click to stop"
+                } else {
+                    "Dictate into this session's prompt"
+                };
+                listen = super::prompt_box::mic_button(ui, listening)
+                    .on_hover_text(hint)
+                    .clicked();
+            }
+        });
+    });
+    listen
+}
+
 fn set_card(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord) {
     let p = theme::palette(ui);
     let SetCardText {
@@ -407,12 +440,9 @@ fn set_card(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord) {
             ui.set_min_size(ui.available_size());
             ui.spacing_mut().item_spacing = vec2(6.0, 4.0);
             ui.style_mut().interaction.selectable_labels = false;
-            ui.horizontal(|ui| {
-                theme::kicker(ui, &kicker, p.state_text(&state));
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    theme::status_dot(ui, &state, 8.0);
-                });
-            });
+            if set_card_top(cx, ui, record, &kicker, &state, agent) {
+                super::prompt_box::toggle_listening(cx, record);
+            }
             let title = ui
                 .add(
                     egui::Label::new(RichText::new(&record.name).text_style(theme::card_title()))

@@ -397,6 +397,76 @@ pub fn rail_indicator(cx: &mut DrawCtx<'_>, ui: &mut Ui, compact: bool) {
     });
 }
 
+/// Start listening into `record`'s editor from anywhere (a card), making
+/// the editor first if the session has not been opened yet; a second
+/// call while listening there stops it.
+pub fn toggle_listening(cx: &mut DrawCtx<'_>, record: &SessionRecord) {
+    if cx.state.prompt_boxes.listening() == Some(record.id) {
+        cx.state.prompt_boxes.stop();
+        return;
+    }
+    editor_for(cx, record);
+    cx.state.prompt_boxes.listen_into(record.id);
+}
+
+/// A small painted microphone (the text fonts have none): green while
+/// listening into the session, muted otherwise. Named for tests and
+/// screen readers as "Listen here" or "Listening here".
+pub fn mic_button(ui: &mut Ui, listening: bool) -> egui::Response {
+    let p = theme::palette(ui);
+    let size = egui::vec2(14.0, 16.0);
+    let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
+    let label = if listening {
+        "Listening here"
+    } else {
+        "Listen here"
+    };
+    response.widget_info(|| {
+        egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), label)
+    });
+    let color = if listening {
+        egui::Color32::from_rgb(0x2e, 0xb8, 0x5c)
+    } else if response.hovered() {
+        p.n700
+    } else {
+        p.n500
+    };
+    let painter = ui.painter();
+    let c = rect.center();
+    // Capsule head, a cradle under it, and the stand.
+    let head =
+        egui::Rect::from_center_size(egui::pos2(c.x, rect.top() + 5.0), egui::vec2(5.0, 9.0));
+    painter.rect_filled(head, 2.5, color);
+    let cradle =
+        egui::Rect::from_center_size(egui::pos2(c.x, rect.top() + 6.5), egui::vec2(10.0, 9.5));
+    painter.rect_stroke(
+        cradle,
+        egui::CornerRadius {
+            nw: 0,
+            ne: 0,
+            sw: 5,
+            se: 5,
+        },
+        egui::Stroke::new(1.2, color),
+        egui::StrokeKind::Middle,
+    );
+    painter.line_segment(
+        [
+            egui::pos2(c.x, cradle.bottom()),
+            egui::pos2(c.x, rect.bottom() - 1.0),
+        ],
+        egui::Stroke::new(1.2, color),
+    );
+    painter.line_segment(
+        [
+            egui::pos2(c.x - 3.0, rect.bottom() - 1.0),
+            egui::pos2(c.x + 3.0, rect.bottom() - 1.0),
+        ],
+        egui::Stroke::new(1.2, color),
+    );
+    response.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
 /// Panel height when it first opens; the user drags it afterwards.
 #[must_use]
 pub fn default_height() -> f32 {
