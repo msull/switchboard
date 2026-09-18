@@ -32,11 +32,16 @@ impl ReviewDraft {
     /// newest is the starting value.
     #[must_use]
     pub fn open(cx: &DrawCtx<'_>, source: RecordId) -> Self {
+        let cwd = cx
+            .core
+            .session(source)
+            .map(|s| s.cwd.clone())
+            .unwrap_or_default();
         let candidates = cx
             .state
             .conversations
             .get(&source)
-            .map(|(_, c)| written_markdown(c))
+            .map(|(_, c)| written_markdown(c, &cwd))
             .unwrap_or_default();
         let plan = candidates
             .first()
@@ -51,13 +56,14 @@ impl ReviewDraft {
     }
 }
 
-/// Tools whose input names the file they change.
-const WRITING_TOOLS: [&str; 4] = ["Write", "Edit", "MultiEdit", "NotebookEdit"];
+/// Tools whose input names the file they change; Bash counts when the
+/// reader found a redirection target in the command.
+const WRITING_TOOLS: [&str; 5] = ["Write", "Edit", "MultiEdit", "NotebookEdit", "Bash"];
 
 /// Markdown files the conversation's file-writing tool calls name,
 /// newest first, each once.
 #[must_use]
-pub fn written_markdown(conversation: &Conversation) -> Vec<PathBuf> {
+pub fn written_markdown(conversation: &Conversation, cwd: &Path) -> Vec<PathBuf> {
     let mut out: Vec<PathBuf> = Vec::new();
     for turn in conversation.turns.iter().rev() {
         for activity in turn.activity.iter().rev() {
@@ -73,6 +79,11 @@ pub fn written_markdown(conversation: &Conversation) -> Vec<PathBuf> {
                 .or_else(|| file_path_in(&detail.input).map(PathBuf::from))
             else {
                 continue;
+            };
+            let path = if path.is_absolute() {
+                path
+            } else {
+                cwd.join(path)
             };
             let markdown = path
                 .extension()

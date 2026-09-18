@@ -138,6 +138,59 @@ pub fn fork(text: &str, before: usize, old_id: &str, new_id: &str) -> Option<Str
     None
 }
 
+/// The file a shell command writes with `>`/`>>` or `tee`, as agents
+/// often do with a heredoc (`cat > plan.md <<'EOF'`). A `cd` earlier in
+/// the command line resolves a relative target; otherwise it stays
+/// relative for the caller's directory. `None` for a command that
+/// redirects nowhere, or only to `/dev/null`.
+#[must_use]
+pub fn shell_write_target(command: &str) -> Option<PathBuf> {
+    let first_line = command.lines().next().unwrap_or("");
+    let tokens: Vec<&str> = first_line.split_whitespace().collect();
+    let mut dir: Option<PathBuf> = None;
+    let mut target: Option<&str> = None;
+    let mut i = 0;
+    while i < tokens.len() && target.is_none() {
+        let tok = tokens[i];
+        let starts_command = i == 0 || matches!(tokens[i - 1], "&&" | ";" | "||" | "|");
+        if starts_command
+            && tok == "cd"
+            && let Some(d) = tokens.get(i + 1)
+        {
+            dir = Some(PathBuf::from(unquote(d)));
+            i += 2;
+            continue;
+        }
+        if tok == ">" || tok == ">>" {
+            target = tokens.get(i + 1).copied();
+        } else if let Some(rest) = tok.strip_prefix(">>").or_else(|| tok.strip_prefix('>'))
+            && !rest.is_empty()
+            && !matches!(tok.chars().next(), Some('2' | '&'))
+        {
+            target = Some(rest);
+        } else if starts_command && tok == "tee" {
+            target = tokens[i + 1..]
+                .iter()
+                .find(|t| !t.starts_with('-'))
+                .copied();
+        }
+        i += 1;
+    }
+    let target = unquote(target?);
+    if target.is_empty() || target == "/dev/null" || target.starts_with('&') {
+        return None;
+    }
+    let path = PathBuf::from(target);
+    Some(match dir {
+        Some(d) if !path.is_absolute() => d.join(path),
+        _ => path,
+    })
+}
+
+fn unquote(s: &str) -> &str {
+    s.trim_matches(|c| c == '\'' || c == '"')
+}
+
 /// Write a transcript the way the provider does: readable by the owner
 /// only, and complete before it carries the final name.
 fn write_private(dst: &Path, text: &str) -> std::io::Result<()> {
@@ -369,14 +422,18 @@ fn assistant_record(
                 let input = b.get("input").map_or_else(String::new, |i| {
                     serde_json::to_string_pretty(i).unwrap_or_default()
                 });
-                let path = b
-                    .get("input")
-                    .and_then(|i| {
+                let path = b.get("input").and_then(|i| {
+                    if name == "Bash" {
+                        i.get("command")
+                            .and_then(Value::as_str)
+                            .and_then(shell_write_target)
+                    } else {
                         i.get("file_path")
                             .or_else(|| i.get("notebook_path"))
                             .and_then(Value::as_str)
-                    })
-                    .map(PathBuf::from);
+                            .map(PathBuf::from)
+                    }
+                });
                 cur.activity.push(Activity {
                     kind: ActivityKind::Tool,
                     line: tool_line(b),
@@ -620,6 +677,21 @@ mod tests {
             .filter_map(|l| serde_json::from_str::<Value>(l).ok())
             .find_map(|r| str_field(&r, "sessionId").map(str::to_owned))
             .unwrap()
+    }
+
+    #[test]
+    fn shell_write_targets() {
+        let t = |c: &str| shell_write_target(c).map(|p| p.display().to_string());
+        assert_eq!(
+            t("cd /w/delta && cat > plans/a.md <<'EOF'\n# hi\nEOF"),
+            Some("/w/delta/plans/a.md".into())
+        );
+        assert_eq!(t("cat >plans/a.md <<EOF"), Some("plans/a.md".into()));
+        assert_eq!(t("echo x >> \"/abs/b.md\""), Some("/abs/b.md".into()));
+        assert_eq!(t("printf x | tee -a notes.md"), Some("notes.md".into()));
+        assert_eq!(t("cargo test 2>/dev/null"), None);
+        assert_eq!(t("cargo test 2>&1 | head"), None);
+        assert_eq!(t("ls -la"), None);
     }
 
     #[test]
