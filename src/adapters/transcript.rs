@@ -11,7 +11,7 @@
 
 use std::collections::HashMap;
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use serde_json::Value;
@@ -369,6 +369,14 @@ fn assistant_record(
                 let input = b.get("input").map_or_else(String::new, |i| {
                     serde_json::to_string_pretty(i).unwrap_or_default()
                 });
+                let path = b
+                    .get("input")
+                    .and_then(|i| {
+                        i.get("file_path")
+                            .or_else(|| i.get("notebook_path"))
+                            .and_then(Value::as_str)
+                    })
+                    .map(PathBuf::from);
                 cur.activity.push(Activity {
                     kind: ActivityKind::Tool,
                     line: tool_line(b),
@@ -378,6 +386,7 @@ fn assistant_record(
                         name: name.to_owned(),
                         input: cap(&input, DETAIL_CAP),
                         result: outcome.map(|o| o.text.clone()).unwrap_or_default(),
+                        path,
                     }),
                     text: None,
                 });
@@ -749,6 +758,10 @@ mod tests {
         assert!(t.activity[0].line.len() < long.len());
         assert_eq!(t.activity[0].text.as_deref(), Some(long.as_str()));
         assert_eq!(t.activity[1].kind, ActivityKind::Tool);
+        assert_eq!(
+            t.activity[1].detail.as_ref().and_then(|d| d.path.clone()),
+            Some(PathBuf::from("/a"))
+        );
     }
 
     #[test]

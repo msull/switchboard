@@ -1093,6 +1093,7 @@ fn two_turns() -> Conversation {
             name: "Bash".into(),
             input: "{\"command\": \"grep name Cargo.toml\"}".into(),
             result: "name = \"switchboard\"".into(),
+            path: None,
         }),
         text: None,
     };
@@ -2897,9 +2898,11 @@ fn review_plan_starts_from_the_session_header_with_a_file_the_session_wrote() {
         error: false,
         detail: Some(ToolDetail {
             name: "Write".into(),
-            input: "{\n  \"file_path\": \"/nowhere/docs/plan.md\",\n  \"content\": \"# Plan\"\n}"
-                .into(),
+            // A long `content` sorts before `file_path` in the printed
+            // input and is cut at the cap; `path` was read before that.
+            input: "{\n  \"content\": \"# Plan…\"".into(),
             result: "ok".into(),
+            path: Some(PathBuf::from("/nowhere/docs/plan.md")),
         }),
         text: None,
     });

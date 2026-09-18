@@ -110,6 +110,10 @@ pub struct ToolDetail {
     pub input: String,
     /// Result text, at most `DETAIL_CAP` characters.
     pub result: String,
+    /// The file the tool was pointed at (`file_path`, `notebook_path`),
+    /// read before the cap: a long `content` sorts ahead of it in the
+    /// printed input and would cut it off.
+    pub path: Option<std::path::PathBuf>,
 }
 
 /// Character cap for [`ToolDetail`] input and result.

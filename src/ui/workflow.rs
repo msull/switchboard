@@ -67,10 +67,13 @@ pub fn written_markdown(conversation: &Conversation) -> Vec<PathBuf> {
             if !WRITING_TOOLS.contains(&detail.name.as_str()) {
                 continue;
             }
-            let Some(path) = file_path_in(&detail.input) else {
+            let Some(path) = detail
+                .path
+                .clone()
+                .or_else(|| file_path_in(&detail.input).map(PathBuf::from))
+            else {
                 continue;
             };
-            let path = PathBuf::from(path);
             let markdown = path
                 .extension()
                 .and_then(|e| e.to_str())
@@ -97,6 +100,27 @@ fn file_path_in(input: &str) -> Option<String> {
     let rest = rest.strip_prefix('"')?;
     let end = rest.find('"')?;
     Some(rest[..end].to_owned())
+}
+
+/// The typed path as an absolute one: `~` is the home directory and a
+/// relative path is under the session's directory. `None` for blank.
+#[must_use]
+pub fn resolve_plan(typed: &str, cwd: &Path) -> Option<PathBuf> {
+    if typed.is_empty() {
+        return None;
+    }
+    let path = if let Some(rest) = typed.strip_prefix("~/") {
+        std::env::var_os("HOME").map(|h| PathBuf::from(h).join(rest))?
+    } else if typed == "~" {
+        return None;
+    } else {
+        PathBuf::from(typed)
+    };
+    Some(if path.is_absolute() {
+        path
+    } else {
+        cwd.join(path)
+    })
 }
 
 /// The dialog, while a draft exists.
@@ -152,6 +176,10 @@ pub fn dialog_show(cx: &mut DrawCtx<'_>, ctx: &Context) {
             }
         }
         field(ui, "Plan path", &mut draft.plan);
+        ui.label(theme::meta_text(
+            ui,
+            format!("Absolute, or relative to {}", source.cwd.display()),
+        ));
         if names.len() > 1 {
             ui.horizontal_wrapped(|ui| {
                 for name in &names {
@@ -163,12 +191,12 @@ pub fn dialog_show(cx: &mut DrawCtx<'_>, ctx: &Context) {
             ui,
             format!("Up to {cap} rounds before it stops to ask (Settings)"),
         ));
-        let ready = Path::new(draft.plan.trim()).is_absolute();
-        let (confirmed, cancelled) = dialog_actions(ui, "Start review", ready);
-        if confirmed {
+        let plan = resolve_plan(draft.plan.trim(), &source.cwd);
+        let (confirmed, cancelled) = dialog_actions(ui, "Start review", plan.is_some());
+        if confirmed && let Some(plan) = plan {
             cx.dispatch(AppAction::StartWorkflow {
                 source: draft.source,
-                plan: PathBuf::from(draft.plan.trim()),
+                plan,
                 definition: draft.definition.clone(),
             });
             keep = false;
@@ -712,5 +740,24 @@ mod tests {
             Some("/p/plan.md")
         );
         assert_eq!(file_path_in("{\"command\": \"ls\"}"), None);
+    }
+
+    #[test]
+    fn typed_plan_paths_resolve_against_the_session_directory() {
+        let cwd = Path::new("/w/proj");
+        assert_eq!(resolve_plan("", cwd), None);
+        assert_eq!(
+            resolve_plan("docs/plan.md", cwd),
+            Some(PathBuf::from("/w/proj/docs/plan.md"))
+        );
+        assert_eq!(
+            resolve_plan("/abs/plan.md", cwd),
+            Some(PathBuf::from("/abs/plan.md"))
+        );
+        let home = std::env::var("HOME").unwrap();
+        assert_eq!(
+            resolve_plan("~/p.md", cwd),
+            Some(PathBuf::from(home).join("p.md"))
+        );
     }
 }
