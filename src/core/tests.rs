@@ -1997,6 +1997,77 @@ fn session_start_fills_in_transcript_path() {
 }
 
 #[test]
+fn a_new_session_id_from_the_pane_rebinds_the_record_after_clear() {
+    let p = project("p");
+    let mut w = Workspace::new(p.clone());
+    let mut r = record(p.id, agent(), 0);
+    let old = Uuid::new_v4();
+    r.resume = Some(ResumeHandle::ClaudeCode {
+        session_id: old,
+        transcript: Some("/t/old.jsonl".into()),
+    });
+    r.discard = Some(Discarded {
+        previous: claude_handle(),
+        before: 2,
+        prompt: "x".into(),
+    });
+    let id = r.id;
+    w.sessions.push(r);
+    let (mut core, _) = loaded(vec![w], vec![]);
+    // The same id again changes nothing, and a different id without the
+    // record id (another process in the cwd) is not even matched.
+    let new = Uuid::new_v4();
+    core.dispatch(
+        AppAction::Events(vec![
+            SessionEvent {
+                record_id: Some(id),
+                provider_session_id: Some(old.to_string()),
+                ..event(EventKind::PromptSubmitted, 1000)
+            },
+            SessionEvent {
+                provider_session_id: Some(new.to_string()),
+                transcript_path: Some("/t/new.jsonl".into()),
+                ..event(EventKind::SessionStart, 1500)
+            },
+        ]),
+        Clock::at(1),
+    );
+    assert_eq!(
+        core.session(id)
+            .unwrap()
+            .resume
+            .as_ref()
+            .unwrap()
+            .provider_id(),
+        old.to_string()
+    );
+    let effects = core.dispatch(
+        AppAction::Events(vec![SessionEvent {
+            record_id: Some(id),
+            provider_session_id: Some(new.to_string()),
+            transcript_path: Some("/t/new.jsonl".into()),
+            ..event(EventKind::SessionStart, 2000)
+        }]),
+        Clock::at(2),
+    );
+    let record = core.session(id).unwrap();
+    assert_eq!(
+        record.resume,
+        Some(ResumeHandle::ClaudeCode {
+            session_id: new,
+            transcript: Some("/t/new.jsonl".into()),
+        })
+    );
+    assert!(record.discard.is_none(), "the cut conversation is gone too");
+    assert_eq!(saves(&effects), 1);
+    assert!(
+        core.notices()
+            .iter()
+            .any(|n| n.text.contains("new conversation"))
+    );
+}
+
+#[test]
 fn events_coalesce_saves_per_workspace() {
     let pa = project("a");
     let pb = project("b");

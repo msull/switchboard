@@ -675,7 +675,7 @@ impl AppCore {
             | AppAction::TranscriptChecked { .. }
             | AppAction::Discovered { .. } => self.session_action(action, now, &mut out),
 
-            AppAction::Events(events) => self.apply_events(events, &mut out),
+            AppAction::Events(events) => self.apply_events(events, now, &mut out),
         }
         self.remember_view(&mut out);
         self.prune_working_set(&mut out);

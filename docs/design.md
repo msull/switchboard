@@ -1112,6 +1112,19 @@ show what is actually shared.
   for the round in progress and from the snapshot directory once a
   round was copied, so a cleaned-up run still shows every version.
 
+## Following /clear (2026-09-18)
+
+`/clear` keeps the Claude Code process and starts a fresh conversation
+under a new session id and transcript, so a record bound to the old id
+went quiet: the view read the old file and a resume would have brought
+the old conversation back. An event that carries the pane's record id
+(from `SWITCHBOARD_RECORD_ID`, so it is that pane and no other process
+in the cwd) and a Claude Code session id other than the record's now
+rebinds the record to the new id and transcript, clears any pending
+discard undo, and says so in a notice; the shell drops the cached
+conversation when a handle changes under an event. The old transcript
+stays on disk.
+
 ## Open questions
 
 - Shared project config runs with a hash-and-approve flow and no

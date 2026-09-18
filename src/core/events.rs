@@ -4,16 +4,39 @@
 //! no newer than the record's last applied one is ignored rather than
 //! applied out of order.
 
-use crate::core::action::{AppCore, Out};
+use uuid::Uuid;
+
+use crate::core::action::{AppCore, Clock, Out};
 use crate::core::model::{Activity, RecordId, ResumeHandle};
 use crate::ports::events::{EventKind, SessionEvent};
 
 impl AppCore {
-    pub(super) fn apply_events(&mut self, events: Vec<SessionEvent>, out: &mut Out) {
+    pub(super) fn apply_events(&mut self, events: Vec<SessionEvent>, now: Clock, out: &mut Out) {
         for event in events {
             if let Some(id) = self.match_event(&event) {
-                self.apply_event(id, event, out);
+                self.apply_event(id, event, now, out);
             }
+        }
+    }
+
+    /// The new Claude Code session id an event carries for a pane that
+    /// Switchboard started, when it differs from the record's: `/clear`
+    /// keeps the process and starts a fresh conversation under a new
+    /// id, and the record must follow it or keep reading (and resuming)
+    /// the old one. Only an event tied to the pane by record id counts;
+    /// a provider id alone could be another process in the same cwd.
+    fn rebound_session(
+        record_id: RecordId,
+        event: &SessionEvent,
+        resume: Option<&ResumeHandle>,
+    ) -> Option<Uuid> {
+        if event.record_id != Some(record_id) {
+            return None;
+        }
+        let new = Uuid::parse_str(event.provider_session_id.as_deref()?).ok()?;
+        match resume {
+            Some(ResumeHandle::ClaudeCode { session_id, .. }) if *session_id != new => Some(new),
+            _ => None,
         }
     }
 
@@ -35,7 +58,7 @@ impl AppCore {
             .map(|s| s.id)
     }
 
-    fn apply_event(&mut self, id: RecordId, event: SessionEvent, out: &mut Out) {
+    fn apply_event(&mut self, id: RecordId, event: SessionEvent, now: Clock, out: &mut Out) {
         let Some(record) = self.session(id) else {
             return;
         };
@@ -43,6 +66,21 @@ impl AppCore {
             return;
         }
         let change = interpret(&event.kind);
+        if let Some(new) = Self::rebound_session(id, &event, record.resume.as_ref()) {
+            let name = record.name.clone();
+            self.edit_session(id, out, |s| {
+                s.resume = Some(ResumeHandle::ClaudeCode {
+                    session_id: new,
+                    transcript: event.transcript_path.clone(),
+                });
+                // The cut conversation is gone from the process too.
+                s.discard = None;
+            });
+            self.info(
+                format!("{name} started a new conversation; the old one stays on disk"),
+                now,
+            );
+        }
         self.edit_session(id, out, |s| {
             s.last_event_at = Some(event.at);
             s.last_seen = s.last_seen.max(event.at);

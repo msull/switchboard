@@ -9,7 +9,8 @@ use std::time::{Duration, Instant, SystemTime};
 
 use crate::adapters::hooks::WakeSocket;
 use crate::core::{
-    AgentKind, AppAction, AppCore, Clock, Effect, ProjectId, RecordId, Resolved, SessionKind, View,
+    AgentKind, AppAction, AppCore, Clock, Effect, ProjectId, RecordId, Resolved, ResumeHandle,
+    SessionKind, View,
 };
 use crate::ports::agent::AgentLauncher;
 use crate::ports::events::EventSource;
@@ -222,6 +223,20 @@ impl SwitchboardApp {
         self.dispatch_inner(action);
     }
 
+    /// The resume handles of the records an `Events` action names, so a
+    /// handle swapped by an event (`/clear`) drops the cached
+    /// conversation the way a discard does.
+    fn resume_handles(&self, action: &AppAction) -> Vec<(RecordId, Option<ResumeHandle>)> {
+        let AppAction::Events(events) = action else {
+            return Vec::new();
+        };
+        events
+            .iter()
+            .filter_map(|e| e.record_id)
+            .filter_map(|id| self.core.session(id).map(|s| (id, s.resume.clone())))
+            .collect()
+    }
+
     /// Dispatch without recording: effect results are consequences, not
     /// what the UI asked for.
     fn dispatch_inner(&mut self, action: AppAction) {
@@ -231,7 +246,13 @@ impl SwitchboardApp {
         if let AppAction::TranscriptDiscarded { id, .. } | AppAction::UndoDiscard(id) = &action {
             self.ui_state.conversations.remove(id);
         }
+        let handles_before = self.resume_handles(&action);
         let effects = self.core.dispatch(action, now);
+        for (id, before) in handles_before {
+            if self.core.session(id).map(|s| s.resume.clone()) != Some(before) {
+                self.ui_state.conversations.remove(&id);
+            }
+        }
         let prompt_box = self.core.settings().prompt_box;
         for (id, text) in self.core.take_primed() {
             if prompt_box {
