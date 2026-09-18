@@ -18,7 +18,7 @@ use super::cards::{is_running, kind_label};
 use super::files::DraggedPath;
 use super::{DrawCtx, GAP, PAD, UiState, theme};
 use crate::core::{
-    AgentKind, AppAction, CardState, PinTarget, RecordId, SessionKind, SessionRecord,
+    AgentKind, AppAction, CardState, PinTarget, RecordId, ResumeHandle, SessionKind, SessionRecord,
 };
 use crate::ports::host::HostId;
 use crate::ports::transcript::{
@@ -252,6 +252,13 @@ fn header_actions(
     if agent {
         order.retain(|b| *b != "Restart");
     }
+    // A plan review clones the conversation, so only a Claude Code
+    // session with one to clone can start it.
+    let reviewable = record.kind == SessionKind::Agent(AgentKind::ClaudeCode)
+        && matches!(record.resume, Some(ResumeHandle::ClaudeCode { .. }));
+    if reviewable {
+        order.insert(1, "Review plan");
+    }
     // Undo stays offered while the conversation is still the cut one: a
     // message sent from Switchboard clears it in the record, one typed
     // in the terminal shows as a turn past the cut.
@@ -285,6 +292,9 @@ fn header_actions(
             "Kill" | "Back" => theme::ghost_muted(ui, button),
             "Undo discard" => theme::ghost(ui, button)
                 .on_hover_text("Put back the conversation the last discard cut away"),
+            "Review plan" => theme::ghost(ui, button).on_hover_text(
+                "Have a fresh reviewer and a clone of this session revise a plan it wrote",
+            ),
             _ => theme::secondary(ui, button),
         };
         if !response.clicked() {
@@ -292,6 +302,10 @@ fn header_actions(
         }
         match button {
             "Restart" => cx.dispatch(AppAction::RestartSession(record.id)),
+            "Review plan" => {
+                let draft = super::workflow::ReviewDraft::open(cx, record.id);
+                cx.state.review_dialog = Some(draft);
+            }
             "Kill" => cx.dispatch(AppAction::KillSession(record.id)),
             "Undo discard" => cx.dispatch(AppAction::UndoDiscard(record.id)),
             "Back" => cx.dispatch(AppAction::Back),

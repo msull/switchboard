@@ -485,12 +485,7 @@ impl SwitchboardApp {
                 files,
                 note,
             } => {
-                let dir = s
-                    .store
-                    .data_dir()
-                    .join("workflows")
-                    .join(run.0.to_string())
-                    .join(format!("round-{n}"));
+                let dir = crate::core::snapshot_dir(&s.store.data_dir(), run, n);
                 AppAction::RoundSnapshotted {
                     run,
                     n,

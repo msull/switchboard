@@ -1073,9 +1073,20 @@ show what is actually shared.
    state machine and tests with faked file signals. **Built.**
 2. Round files port, adapter, fake; snapshot and cleanup effects.
    **Built** (`ports::round_files`, `adapters::round_files`).
-3. Launch dialog and the review page, headless UI tests, script lines
-   (`review-plan <session> <path>`, `workflow-file <run> <n> feedback|response`).
-4. Handoff panel. Bundle and run one real loop on a throwaway plan.
+3. Launch dialog and the review page, headless UI tests, script lines.
+   **Built**: "Review plan" in a Claude Code session's header offers
+   the Markdown files its transcript shows it wrote; the page has the
+   rounds at the left, the plan (with a line diff against the previous
+   round's snapshot) in the middle, feedback beside response at the
+   right, the note box for the user's own round, and the controls the
+   state allows, with cleanup behind a confirmation that lists the
+   files; the board lists the project's reviews. Dev aids:
+   `review-plan`, `show-review`, `review-file`, `review-continue`,
+   `review-finalize`.
+4. Handoff panel: **built** as a menu on the page (as is, compact
+   first, fresh session). Still to do: one real loop on a throwaway
+   plan, and the definitions editor (the built-in prompts can only be
+   changed by editing `settings.json` until then).
 
 ### As built (steps 1 and 2)
 
@@ -1097,7 +1108,9 @@ show what is actually shared.
   one more reviewer round and raises the cap to match.
 - The planner clone is `clone_all` on the transcript port: the whole
   conversation under a fresh id, the same private write as a clone.
-- The page (`ui/workflow.rs`) shows the run's state only until step 3.
+- The page reads round files itself through the preview cache, live
+  for the round in progress and from the snapshot directory once a
+  round was copied, so a cleaned-up run still shows every version.
 
 ## Open questions
 

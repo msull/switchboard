@@ -24,6 +24,15 @@ pub struct Probe {
     pub streak: u8,
 }
 
+/// Where a round's copies go: `<data dir>/workflows/<run>/round-<n>/`.
+#[must_use]
+pub fn snapshot_dir(data_dir: &Path, run: WorkflowId, n: u32) -> PathBuf {
+    data_dir
+        .join("workflows")
+        .join(run.0.to_string())
+        .join(format!("round-{n}"))
+}
+
 fn round_count(run: &WorkflowRun) -> u32 {
     u32::try_from(run.rounds.len()).unwrap_or(u32::MAX)
 }

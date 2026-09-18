@@ -121,7 +121,8 @@ Dev aids, all environment variables:
   `switchboard`, `working-set`, `new-working-set`, `clone-working-set`,
   `rename-working-set`, `delete-working-set`, `add-to-working-set`,
   `add-file-to-working-set`, `arrange`, `show-message`, `clone-session`,
-  `discard-to`, `undo-discard`,
+  `discard-to`, `undo-discard`, `review-plan`, `show-review`,
+  `review-file`, `review-continue`, `review-finalize`,
   `open-terminal`, `prompt-box`, `theme`, `sleep`).
 - `SWITCHBOARD_TMUX=<path>`: tmux binary to use.
 - `RUST_LOG=switchboard=debug`: verbose logging.
@@ -184,7 +185,7 @@ src/ui/
   palette.rs             quick-switcher (Cmd+K) over projects and sessions
   env.rs                 Environment dialog: variables, secrets, .env opt-in, masked preview
   config.rs              project config editor: .switchboard/project.json as text, options listed, parse shown
-  workflow.rs            a plan review run: state and rounds (page in progress)
+  workflow.rs            plan review: the Review plan dialog, the run's page (rounds, plan with diff, feedback beside response, controls)
   cards.rs               the one card for every entry kind, the card grid, pinned document cards
   session.rs             session view: header, embedded terminal or conversation + message box
   switchboard.rs         every session across projects, waiting first

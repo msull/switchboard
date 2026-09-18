@@ -9,7 +9,7 @@ use super::cards::{
 };
 use super::dialogs::NewSessionDraft;
 use super::{DrawCtx, runbar, theme};
-use crate::core::ProjectId;
+use crate::core::{AppAction, ProjectId, WorkflowRun};
 
 /// Branch and change count per repository the project holds, from the
 /// file side's git state (refreshed there).
@@ -40,6 +40,32 @@ fn git_line(cx: &mut DrawCtx<'_>, ui: &mut Ui, pid: ProjectId) {
                         .color(p.accent_2_text),
                 );
             }
+        });
+    }
+}
+
+/// The project's plan reviews, newest first, each a link to its page.
+fn reviews(cx: &mut DrawCtx<'_>, ui: &mut Ui, runs: &[WorkflowRun]) {
+    if runs.is_empty() {
+        return;
+    }
+    let p = theme::palette(ui);
+    theme::section(ui, "Plan reviews");
+    for run in runs.iter().rev() {
+        let name = run
+            .plan
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("plan");
+        ui.horizontal(|ui| {
+            if theme::ghost(ui, &format!("Review: {name}")).clicked() {
+                cx.dispatch(AppAction::ShowWorkflow(run.id));
+            }
+            ui.label(
+                RichText::new(run.state.label())
+                    .text_style(theme::meta())
+                    .color(p.n700),
+            );
         });
     }
 }
@@ -130,6 +156,7 @@ pub fn show(cx: &mut DrawCtx<'_>, ui: &mut Ui, pid: ProjectId) {
                     session_card(cx, ui, entries[i]);
                 });
             }
+            reviews(cx, ui, &workspace.workflows);
             if !workspace.project.pinned.is_empty() {
                 theme::section(ui, "Pinned");
                 let pinned = &workspace.project.pinned;

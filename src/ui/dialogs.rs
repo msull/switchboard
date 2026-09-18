@@ -179,7 +179,7 @@ fn raw_message(cx: &mut DrawCtx<'_>, ctx: &Context) {
 
 /// A single-line text field under its label, which tests (and screen
 /// readers) find it by.
-fn field(ui: &mut Ui, label: &str, value: &mut String) {
+pub(super) fn field(ui: &mut Ui, label: &str, value: &mut String) {
     let p = theme::palette(ui);
     ui.spacing_mut().item_spacing.y = 4.0;
     let id = ui
@@ -197,7 +197,7 @@ fn field(ui: &mut Ui, label: &str, value: &mut String) {
 
 /// A dialog window: no native title bar, the title as a heading, then
 /// `body`. Surface fill and the large shadow come from the theme.
-fn dialog(ctx: &Context, title: &str, body: impl FnOnce(&mut Ui)) {
+pub(super) fn dialog(ctx: &Context, title: &str, body: impl FnOnce(&mut Ui)) {
     scrim(ctx);
     // The window gets no title of its own: the heading below is the one
     // place the title appears, on screen and in the accessibility tree.
@@ -239,7 +239,7 @@ fn scrim(ctx: &Context) {
 /// The action row of a dialog: Cancel, then the primary action last.
 /// Drawn left to right: a right-to-left row inside an auto-sized window
 /// never settles on a width.
-fn dialog_actions(ui: &mut Ui, primary: &str, ready: bool) -> (bool, bool) {
+pub(super) fn dialog_actions(ui: &mut Ui, primary: &str, ready: bool) -> (bool, bool) {
     let mut confirmed = false;
     let mut cancelled = false;
     ui.add_space(6.0);

@@ -10,6 +10,11 @@
 //! `set-env <project> NAME=VALUE`, `set-secret <project> NAME VALUE`,
 //! `dotenv <project> on|off`, `environment <project>` (opens the dialog),
 //! `config <project>` (opens the config editor),
+//! `review-plan <session> <absolute plan path>` (starts a plan review),
+//! `show-review` (the newest review's page), `review-file
+//! feedback|response <first line...>` (writes the newest review's
+//! awaited file to disk, as its agent would), `review-continue`,
+//! `review-finalize`,
 //! `send <name> <text...>`, `interrupt <name>` (Escape to the pane),
 //! `return <name>`, `kill <name>`, `approve <name>`, `revoke <name>`
 //! (a defined command's approval), `side files|run|notes` (the side panel's
@@ -98,6 +103,63 @@ const EXTRA_LINES: &[&str] = &[
     "theme",
     "sleep",
 ];
+
+/// The lines `review_step` handles.
+const REVIEW_LINES: &[&str] = &[
+    "review-plan",
+    "show-review",
+    "review-file",
+    "review-continue",
+    "review-finalize",
+];
+
+/// The plan review lines, kept out of `working_set_step` for length.
+fn review_step(app: &mut SwitchboardApp, w: &[&str]) -> Result<(), String> {
+    match w {
+        ["review-plan", name, path] => {
+            let source = session(app, name)?;
+            app.dispatch(AppAction::StartWorkflow {
+                source,
+                plan: PathBuf::from(path),
+                definition: crate::core::BUILTIN_WORKFLOW.into(),
+            });
+        }
+        ["show-review"] => {
+            let id = newest_review(app)?;
+            app.dispatch(AppAction::ShowWorkflow(id));
+        }
+        ["review-continue"] => {
+            let id = newest_review(app)?;
+            app.dispatch(AppAction::ContinueWorkflow(id));
+        }
+        ["review-finalize"] => {
+            let id = newest_review(app)?;
+            app.dispatch(AppAction::FinalizeWorkflow(id));
+        }
+        ["review-file", which, text @ ..] => {
+            let id = newest_review(app)?;
+            let run = app.core().workflow(id).ok_or("no review")?;
+            let round = run.current().ok_or("no round")?;
+            let path = match *which {
+                "feedback" => round.feedback.clone(),
+                "response" => round.response.clone(),
+                _ => return Err("review-file feedback|response".into()),
+            };
+            let body = format!("{}\n", text.join(" "));
+            std::fs::write(&path, body).map_err(|e| format!("{}: {e}", path.display()))?;
+        }
+        _ => return Err("unknown review line".into()),
+    }
+    Ok(())
+}
+
+fn newest_review(app: &SwitchboardApp) -> Result<crate::core::WorkflowId, String> {
+    app.core()
+        .workflows()
+        .max_by_key(|r| r.created)
+        .map(|r| r.id)
+        .ok_or_else(|| "no plan review".to_owned())
+}
 
 fn working_set(app: &SwitchboardApp, name: &str) -> Result<SetId, String> {
     app.core()
@@ -340,6 +402,7 @@ fn step(app: &mut SwitchboardApp, w: &[&str]) -> Result<(), String> {
             let id = session(app, n)?;
             app.dispatch(AppAction::KillSession(id));
         }
+        [first, ..] if REVIEW_LINES.contains(first) => review_step(app, w)?,
         [first, ..] if EXTRA_LINES.contains(first) => working_set_step(app, w)?,
         _ => return Err("unknown line".into()),
     }

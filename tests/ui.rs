@@ -3,7 +3,7 @@
 //! exercised by the core tests), the widgets are found by label, and the
 //! assertions are on what is drawn and which actions a click dispatched.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use egui::accesskit::Role;
@@ -16,9 +16,10 @@ use switchboard::adapters::fakes::{
 };
 use switchboard::app::Services;
 use switchboard::core::{
-    Activity, AgentKind, AppAction, Approval, CardLayout, Definition, Launch, Notice, PinTarget,
-    Project, ProjectEnv, ProjectId, RecordId, ResumeHandle, SessionKind, SessionRecord, SideTab,
-    ThemeMode, View, Workspace,
+    Activity, AgentKind, AppAction, Approval, BUILTIN_WORKFLOW, CardLayout, Definition,
+    HandoffMode, Launch, Notice, PinTarget, Project, ProjectEnv, ProjectId, RecordId, ResumeHandle,
+    Round, RunState, SessionKind, SessionRecord, SideTab, ThemeMode, Verdict, View, WorkflowId,
+    WorkflowRun, Workspace, round_paths,
 };
 use switchboard::ports::host::{HostId, HostStatus, Liveness};
 use switchboard::ports::store::Store;
@@ -1600,6 +1601,10 @@ fn discard_to_a_prompt_cuts_in_place_and_the_header_offers_undo() {
         Some("What is the crate called?"),
         "the prompt is ready to send again"
     );
+    // The discard's toast sits over the header's right end, where the
+    // button now is; a real user waits it out or dismisses it.
+    harness.state_mut().dispatch(AppAction::DismissNotice);
+    harness.run_steps(2);
     harness.state_mut().dispatched.clear();
     click(&mut harness, "Undo discard");
     assert_eq!(actions(&harness), vec![AppAction::UndoDiscard(id)]);
@@ -2815,4 +2820,168 @@ fn the_settings_menu_turns_the_prompt_box_off_and_on() {
     assert!(actions(&harness).contains(&AppAction::SetPromptBox(false)));
     harness.get_by_label("Message");
     assert!(harness.query_by_label("Send →").is_none());
+}
+
+// --- plan review
+
+/// A converged one-round review on beta, driven by the seeded Claude
+/// session, with its reviewer and planner records.
+fn seed_review(
+    harness: &mut Harness<'static, SwitchboardApp>,
+    ids: &Seeded,
+    source: RecordId,
+) -> WorkflowId {
+    let reviewer = record(
+        ids.beta,
+        "plan review",
+        SessionKind::Agent(AgentKind::Codex),
+        2,
+    );
+    let mut planner = record(
+        ids.beta,
+        "claude-agent planner",
+        SessionKind::Agent(AgentKind::ClaudeCode),
+        3,
+    );
+    planner.resume = Some(ResumeHandle::ClaudeCode {
+        session_id: uuid::Uuid::new_v4(),
+        transcript: Some(PathBuf::from("/nowhere/y.jsonl")),
+    });
+    let (feedback, response) = round_paths(Path::new("/nowhere/docs/plan.md"), 1);
+    let run = WorkflowRun {
+        id: WorkflowId::new(),
+        project: ids.beta,
+        definition: BUILTIN_WORKFLOW.into(),
+        source,
+        plan: PathBuf::from("/nowhere/docs/plan.md"),
+        planner: Some(planner.id),
+        reviewer: reviewer.id,
+        rounds: vec![Round {
+            n: 1,
+            feedback,
+            response,
+            verdict: Some(Verdict::Nothing),
+            user_feedback: None,
+            responded: false,
+            snapshot: false,
+        }],
+        state: RunState::Converged,
+        cap: 4,
+        cleaned: false,
+        created: at(200),
+        updated: at(200),
+    };
+    let id = run.id;
+    let core = harness.state_mut().core_mut_for_seeding();
+    let mut workspaces = core.workspaces().to_vec();
+    let beta = workspaces
+        .iter_mut()
+        .find(|w| w.project.id == ids.beta)
+        .unwrap();
+    beta.sessions.push(reviewer);
+    beta.sessions.push(planner);
+    beta.workflows.push(run);
+    core.seed(workspaces, vec![]);
+    id
+}
+
+#[test]
+fn review_plan_starts_from_the_session_header_with_a_file_the_session_wrote() {
+    let (mut harness, ids) = harness();
+    let id = seed_claude(&mut harness, &ids);
+    let mut conversation = two_turns();
+    conversation.turns[1].activity.push(TranscriptActivity {
+        kind: ActivityKind::Tool,
+        line: "Write docs/plan.md".into(),
+        at: None,
+        error: false,
+        detail: Some(ToolDetail {
+            name: "Write".into(),
+            input: "{\n  \"file_path\": \"/nowhere/docs/plan.md\",\n  \"content\": \"# Plan\"\n}"
+                .into(),
+            result: "ok".into(),
+        }),
+        text: None,
+    });
+    harness
+        .state_mut()
+        .ui_state
+        .conversations
+        .insert(id, (None, conversation));
+    showing(&mut harness, View::Session(id));
+    click(&mut harness, "Review plan");
+    harness.get_by_label("Review a plan");
+    // The session's cwd is /tmp/proj, so the path shows in full.
+    click(&mut harness, "/nowhere/docs/plan.md");
+    click(&mut harness, "Start review");
+    assert!(actions(&harness).contains(&AppAction::StartWorkflow {
+        source: id,
+        plan: PathBuf::from("/nowhere/docs/plan.md"),
+        definition: BUILTIN_WORKFLOW.into(),
+    }));
+    let core = harness.state().core();
+    let run = core.workflows().next().expect("a run");
+    assert_eq!(run.source, id);
+    assert_eq!(core.view(), View::Workflow(run.id));
+    assert!(core.session(run.reviewer).unwrap().name.ends_with("review"));
+    harness.get_by_label("PLAN REVIEW");
+    harness.get_by_label("Round 1");
+}
+
+#[test]
+fn the_review_page_lists_rounds_and_its_controls_dispatch() {
+    let (mut harness, ids) = harness();
+    let source = seed_claude(&mut harness, &ids);
+    let run = seed_review(&mut harness, &ids, source);
+    showing(&mut harness, View::Workflow(run));
+    harness.get_by_label("Round 1");
+    harness.get_by_label("nothing further");
+    harness.get_by_label("converged");
+    // The user's own feedback becomes a round for the planner.
+    let field = harness.get_by_label("Your feedback");
+    field.focus();
+    field.type_text("Split step 3");
+    harness.run_steps(2);
+    click(&mut harness, "Send my feedback");
+    assert!(actions(&harness).contains(&AppAction::UserFeedback {
+        run,
+        text: "Split step 3".into(),
+    }));
+    assert_eq!(
+        harness.state().core().workflow(run).unwrap().state,
+        RunState::AwaitingResponse
+    );
+    harness.get_by_label("Round 2");
+    click(&mut harness, "Pause");
+    assert!(actions(&harness).contains(&AppAction::PauseWorkflow(run)));
+    click(&mut harness, "Finalize");
+    assert!(actions(&harness).contains(&AppAction::FinalizeWorkflow(run)));
+    assert_eq!(
+        harness.state().core().workflow(run).unwrap().state,
+        RunState::Finalized
+    );
+    click(&mut harness, "Hand off");
+    click(&mut harness, "As is");
+    assert!(actions(&harness).contains(&AppAction::HandOffWorkflow {
+        run,
+        mode: HandoffMode::AsIs,
+    }));
+    assert_eq!(harness.state().core().view(), View::Session(source));
+    // The board lists the review.
+    showing(&mut harness, View::Board(ids.beta));
+    harness.get_by_label("Review: plan.md");
+}
+
+#[test]
+fn cleaning_up_asks_first_and_lists_the_files() {
+    let (mut harness, ids) = harness();
+    let source = seed_claude(&mut harness, &ids);
+    let run = seed_review(&mut harness, &ids, source);
+    showing(&mut harness, View::Workflow(run));
+    click(&mut harness, "Clean up");
+    harness.get_by_label("Delete the round files");
+    harness.get_by_label("/nowhere/docs/plan.feedback-1.md");
+    click(&mut harness, "Delete files");
+    assert!(actions(&harness).contains(&AppAction::CleanUpWorkflow(run)));
+    assert!(harness.state().core().workflow(run).unwrap().cleaned);
 }

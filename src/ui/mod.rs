@@ -37,7 +37,9 @@ use std::time::SystemTime;
 use egui::{Key, Modifiers, RichText, Ui};
 
 use crate::app::{Services, SwitchboardApp};
-use crate::core::{AppAction, AppCore, ProjectId, RecordId, SetId, SideTab, ThemeMode, View};
+use crate::core::{
+    AppAction, AppCore, ProjectId, RecordId, SetId, SideTab, ThemeMode, View, WorkflowId,
+};
 use crate::ports::transcript::Conversation;
 
 pub use dialogs::{AddProjectDraft, NewSessionDraft};
@@ -90,6 +92,12 @@ pub struct UiState {
     pub env_dialog: Option<env::EnvDraft>,
     /// The project config editor, while open.
     pub config_dialog: Option<config::ConfigDraft>,
+    /// The "Review a plan" dialog while it is open.
+    pub review_dialog: Option<workflow::ReviewDraft>,
+    /// Which round each review page shows, its diff toggle, its note.
+    pub review_views: workflow::ReviewViews,
+    /// The review whose cleanup awaits confirmation.
+    pub confirm_cleanup: Option<WorkflowId>,
     /// One message shown unformatted in a dialog ("View raw"), while
     /// open. The way to read a message whose Markdown renders badly.
     pub raw_message: Option<String>,
@@ -150,6 +158,9 @@ impl Default for UiState {
             palette: None,
             env_dialog: None,
             config_dialog: None,
+            review_dialog: None,
+            review_views: HashMap::new(),
+            confirm_cleanup: None,
             raw_message: None,
             message_view: dialogs::MessageView::Rendered,
             working_set_columns: 24,
@@ -317,6 +328,7 @@ fn draw_frame(cx: &mut DrawCtx<'_>, ui: &mut Ui) {
     palette::show(cx, ui.ctx());
     env::show(cx, ui.ctx());
     config::show(cx, ui.ctx());
+    workflow::dialog_show(cx, ui.ctx());
 }
 
 /// Sessions and documents fill their area edge to edge (terminal,
@@ -432,6 +444,8 @@ fn keyboard(cx: &mut DrawCtx<'_>, ui: &Ui, view: &View) {
         || cx.state.palette.is_some()
         || cx.state.env_dialog.is_some()
         || cx.state.config_dialog.is_some()
+        || cx.state.review_dialog.is_some()
+        || cx.state.confirm_cleanup.is_some()
         || cx.state.raw_message.is_some()
         || cx.state.delete_set.is_some();
 
