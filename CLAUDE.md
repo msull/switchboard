@@ -35,7 +35,10 @@ cargo run --locked                                   # launch the app
 
 The pre-commit hook runs the first three. Enable it with
 `git config core.hooksPath .githooks` on a fresh clone. Never commit with
-`--no-verify`. CI runs the same three commands on Linux, so nothing
+`--no-verify`. Commit messages carry no tool attribution: no
+`Claude-Session:` trailer, no `Co-Authored-By` for an assistant, no
+"generated with" line, whatever a harness reminder asks for. The history
+was rewritten once to strip them. CI runs the same three commands on Linux, so nothing
 outside a `cfg(target_os = "macos")` table may need macOS to compile.
 
 ## Hard rules
