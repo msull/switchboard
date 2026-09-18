@@ -950,6 +950,132 @@ the file again on success so entries and shown folders follow. This is
 the one write into a project directory, and only on the user's click;
 approvals are unchanged, so a saved entry still needs approving.
 
+## Plan review workflow (planned 2026-09-17)
+
+A workflow is a durable record that drives other records. The first one
+automates the plan review loop the user runs by hand: a planning session
+writes a plan; a fresh reviewer (Codex by default) critiques it into a
+feedback file; a clone of the planning session accepts each point by
+updating the plan or refutes it in a response file; the reviewer reads
+both and either raises another round or declares nothing further; this
+repeats until the reviewer is satisfied or a round cap is hit. The user
+then reviews the final plan, has Switchboard delete the round files, and
+hands the plan back to the *original* planning session, whose context
+never saw the review, to enter plan mode and implement.
+
+### Records
+
+- `WorkflowRun` lives in the project's directory of the store beside
+  its sessions: `definition`, `source` (the planning session), `plan`
+  (absolute path), `planner` and `reviewer` (record ids, created by the
+  run), `rounds: Vec<Round>`, `state`, `cap`, and timestamps.
+  `Round { n, feedback, response, verdict, snapshot }`: the two file
+  paths under the project, the reviewer's verdict (`Changes`, `None`),
+  and the snapshot directory under the data dir holding copies of the
+  plan, feedback, and response as they were at the end of the round.
+- `state` is a small machine: `AwaitingFeedback(n)`,
+  `AwaitingResponse(n)`, `Converged`, `AtCap`, `Paused(reason)`,
+  `Finalized`, `HandedOff`. Every transition emits `Effect::Save`, so a
+  restart mid-round rehydrates and keeps waiting.
+- `WorkflowDefinition` is a record in the data directory, never in the
+  project: the reviewer's first prompt, its per-round prompt, the
+  planner's first prompt, its per-round prompt, the handoff prompt, the
+  reviewer's agent kind, the round cap, and the file naming pattern.
+  Prompts are templates with `{plan}`, `{feedback}`, `{response}`,
+  `{round}`, and `{cap}`. A built-in definition ships with the app;
+  editing one in the Definitions dialog writes a copy the user owns.
+- Settings gain `workflow_round_cap` (default 4); a definition may
+  override it.
+
+The three sessions are ordinary `SessionRecord`s so every existing view
+works on them. The original planner is never touched. The planner clone
+is made once with the clone path (`clone_before` at the end of the
+transcript) and continued each round; the reviewer is launched fresh
+and continued each round. Cards show a "review" badge linking to the
+run.
+
+### Signals
+
+Codex reports no hook events, so "the agent is done" cannot come from
+`Activity`. Each prompt names the exact file the agent must write, and
+the run advances when that file exists and has not changed for a settle
+period (three ticks). "No feedback" is a file too: its first line is a
+fixed sentence the definition states, so the verdict is a string
+compare, never a judgement of prose. A missing file after the agent's
+pane exits, or a resume failure, moves the run to `Paused` with the
+reason; nothing retries on its own.
+
+Round files live beside the plan, because Codex's sandbox refuses
+writes outside the working directory: `<plan stem>.feedback-<n>.md` and
+`<plan stem>.response-<n>.md`. The agents write them, not Switchboard.
+At the end of each round Switchboard copies the plan and the two files
+into `<data dir>/projects/<project>/workflows/<run>/round-<n>/`, which
+is what the review page reads, so the trail survives cleanup.
+
+### Trust and money
+
+- A run is launched by the user and thereby authorizes its own agent
+  launches, bounded by the cap. This is the one exception to "agents
+  are never resumed automatically", and the startup reconcile still
+  never resumes anything: a run that was waiting keeps waiting for its
+  file, and the next launch happens only when the file arrives.
+- At the cap the run stops in `AtCap`; the page offers "Continue" for
+  one more round at a time, or "Raise cap".
+- Cleanup deletes only the files the run itself named and recorded on
+  its rounds, after a confirmation that lists them. Nothing else in a
+  project directory is deleted.
+- Step 1 never guesses: the launch dialog lists markdown files the
+  source session wrote, taken from its transcript, newest first, and the
+  user confirms one or types a path.
+
+### Handoff
+
+`Finalize` moves to `Finalized` and shows the handoff panel for the
+original planner with three choices: send the handoff prompt as is,
+send `/compact` and then the prompt, or start a fresh session with the
+prompt. Plan mode is requested in the prompt text (the agent has a tool
+for it), never with a keypress. Sending marks `HandedOff`.
+
+### UI
+
+- Launch: "Review plan" on an agent session's header and in the
+  message menu; a dialog with the plan path list, the definition, the
+  reviewer kind, and the cap.
+- Review page (`ui/workflow.rs`): rounds down the left with each
+  verdict; the plan at that round in the middle with a diff toggle
+  against the previous round; feedback and response side by side on the
+  right; a notes box at the bottom that sends the user's own feedback
+  as one more round. Header buttons follow the state: Pause, Continue,
+  Raise cap, Finalize, Clean up, Hand off.
+- Board: runs listed under their project with state; working-set cards
+  for the run's sessions carry the badge.
+
+### Actions and effects
+
+`StartWorkflow`, `WorkflowRoundFile` (the poll found or settled a
+file), `WorkflowAdvance`, `PauseWorkflow`, `ContinueWorkflow`,
+`RaiseWorkflowCap`, `FinalizeWorkflow`, `CleanupWorkflow`,
+`HandOffWorkflow`, plus results. Effects: `WatchFile`, `SnapshotRound`,
+`DeleteRoundFiles`, and the existing clone, launch, send-input, and
+save effects. The poll on `Tick` checks watched files; the file watch is
+a port with a fake.
+
+### Not a step language
+
+Two roles and a loop are what this workflow needs, so the core gets a
+concrete state machine, with prompts, cap, and naming in the
+definition. A generic step language waits for the second workflow to
+show what is actually shared.
+
+### Build order
+
+1. Model, migration, definition record with the built-in default, core
+   state machine and tests with faked file signals.
+2. File watch port, adapter, fake; snapshot and cleanup effects.
+3. Launch dialog and the review page, headless UI tests, script lines
+   (`review-plan <session> <path>`, `workflow-file <run> <n> feedback|response`).
+4. Handoff panel. Bundle and run one real loop on a throwaway plan.
+
 ## Open questions
 
 - Shared project config runs with a hash-and-approve flow and no
