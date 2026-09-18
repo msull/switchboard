@@ -27,6 +27,7 @@ mod session;
 mod switchboard;
 mod switcher;
 pub mod theme;
+pub mod workflow;
 pub mod working_set;
 
 use std::collections::HashMap;
@@ -229,7 +230,11 @@ fn draw_frame(cx: &mut DrawCtx<'_>, ui: &mut Ui) {
     // and leaves the session running.
     let shown = match &view {
         View::Session(id) => Some(*id),
-        View::Switchboard | View::Board(_) | View::Document(..) | View::WorkingSet(_) => None,
+        View::Switchboard
+        | View::Board(_)
+        | View::Document(..)
+        | View::WorkingSet(_)
+        | View::Workflow(_) => None,
     };
     cx.state.terminals.retain(|id, _| Some(*id) == shown);
 
@@ -255,7 +260,7 @@ fn draw_frame(cx: &mut DrawCtx<'_>, ui: &mut Ui) {
             let message = matches!(s.kind, crate::core::SessionKind::Agent(_)).then_some(*id);
             (s.project, true, message, Some(*id))
         }),
-        View::Session(_) | View::Switchboard | View::WorkingSet(_) => None,
+        View::Session(_) | View::Switchboard | View::WorkingSet(_) | View::Workflow(_) => None,
     };
     if let Some((pid, inline, message, session)) = files_for {
         let side = egui::Panel::right("files")
@@ -288,24 +293,12 @@ fn draw_frame(cx: &mut DrawCtx<'_>, ui: &mut Ui) {
         ui.painter()
             .vline(rect.left(), rect.y_range(), palette.hairline());
     }
-    // Sessions and documents fill their area edge to edge (terminal,
-    // preview); the board and the switchboard get the page margin.
-    let margin = match &view {
-        View::Switchboard | View::Board(_) | View::WorkingSet(_) => egui::Margin {
-            left: 28,
-            right: 28,
-            top: 24,
-            bottom: 20,
-        },
-        View::Session(_) | View::Document(..) => egui::Margin {
-            left: 24,
-            right: 24,
-            top: 20,
-            bottom: 16,
-        },
-    };
     egui::CentralPanel::default()
-        .frame(egui::Frame::new().fill(page_fill).inner_margin(margin))
+        .frame(
+            egui::Frame::new()
+                .fill(page_fill)
+                .inner_margin(page_margin(&view)),
+        )
         .show(ui, |ui| {
             cx.state.working_set_columns = working_set::columns(ui.available_width());
             match view {
@@ -314,6 +307,7 @@ fn draw_frame(cx: &mut DrawCtx<'_>, ui: &mut Ui) {
                 View::Board(pid) => board::show(cx, ui, pid),
                 View::Session(id) => session::show(cx, ui, id),
                 View::Document(pid, path) => document::show(cx, ui, pid, &path),
+                View::Workflow(id) => workflow::show(cx, ui, id),
             }
         });
 
@@ -323,6 +317,27 @@ fn draw_frame(cx: &mut DrawCtx<'_>, ui: &mut Ui) {
     palette::show(cx, ui.ctx());
     env::show(cx, ui.ctx());
     config::show(cx, ui.ctx());
+}
+
+/// Sessions and documents fill their area edge to edge (terminal,
+/// preview); the board and the switchboard get the page margin.
+fn page_margin(view: &View) -> egui::Margin {
+    match view {
+        View::Switchboard | View::Board(_) | View::WorkingSet(_) | View::Workflow(_) => {
+            egui::Margin {
+                left: 28,
+                right: 28,
+                top: 24,
+                bottom: 20,
+            }
+        }
+        View::Session(_) | View::Document(..) => egui::Margin {
+            left: 24,
+            right: 24,
+            top: 20,
+            bottom: 16,
+        },
+    }
 }
 
 /// The side panel's tab row: Files, Run, and beside a session Notes,

@@ -950,7 +950,7 @@ the file again on success so entries and shown folders follow. This is
 the one write into a project directory, and only on the user's click;
 approvals are unchanged, so a saved entry still needs approving.
 
-## Plan review workflow (planned 2026-09-17)
+## Plan review workflow (2026-09-17, core built)
 
 A workflow is a durable record that drives other records. The first one
 automates the plan review loop the user runs by hand: a planning session
@@ -1070,11 +1070,34 @@ show what is actually shared.
 ### Build order
 
 1. Model, migration, definition record with the built-in default, core
-   state machine and tests with faked file signals.
-2. File watch port, adapter, fake; snapshot and cleanup effects.
+   state machine and tests with faked file signals. **Built.**
+2. Round files port, adapter, fake; snapshot and cleanup effects.
+   **Built** (`ports::round_files`, `adapters::round_files`).
 3. Launch dialog and the review page, headless UI tests, script lines
    (`review-plan <session> <path>`, `workflow-file <run> <n> feedback|response`).
 4. Handoff panel. Bundle and run one real loop on a throwaway plan.
+
+### As built (steps 1 and 2)
+
+- The first prompt of a launch rides on the agent's command line
+  (`first_prompts`, consumed by `launch_prepared`): `claude --resume
+  <id> "<prompt>"` for the planner clone and `codex "<prompt>"` for a
+  fresh reviewer. No key is ever sent into a pane that is still
+  starting. A later round goes in as `SendInput` when the pane is
+  running and rides on a resume when it is not. **Unverified:** `codex
+  resume <id> "<prompt>"` for a reviewer whose pane died; a spike is
+  due before relying on it.
+- The definitions live in `settings.json` (`workflows`), with the
+  built-in one (`WorkflowDefinition::default`) always available by name
+  and never stored; `workflow_round_cap` is the setting. A user round
+  (`UserFeedback`) sends the text in the prompt and keeps it on the
+  round, so Switchboard still writes nothing into the project.
+- `Continue` from `Paused` re-enters the interrupted wait and re-prompts
+  only an agent whose pane is gone; from `AtCap` or `Converged` it opens
+  one more reviewer round and raises the cap to match.
+- The planner clone is `clone_all` on the transcript port: the whole
+  conversation under a fresh id, the same private write as a clone.
+- The page (`ui/workflow.rs`) shows the run's state only until step 3.
 
 ## Open questions
 

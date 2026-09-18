@@ -16,6 +16,7 @@ use crate::ports::events::EventSource;
 use crate::ports::host::{HostId, Liveness, ProcessHost};
 use crate::ports::opener::Opener;
 use crate::ports::project_config::ProjectConfigReader;
+use crate::ports::round_files::RoundFiles;
 use crate::ports::secrets::SecretStore;
 use crate::ports::store::{Store, StoreError};
 use crate::ports::transcript::TranscriptReader;
@@ -41,6 +42,7 @@ pub struct Services {
     pub transcripts: Box<dyn TranscriptReader>,
     pub secrets: Box<dyn SecretStore>,
     pub project_config: Box<dyn ProjectConfigReader>,
+    pub round_files: Box<dyn RoundFiles>,
     /// The hook helper's wake-up socket; `None` in tests.
     pub wake: Option<WakeSocket>,
 }
@@ -294,6 +296,7 @@ impl SwitchboardApp {
             | Effect::PrepareResume { .. }
             | Effect::CheckTranscript { .. }
             | Effect::CloneTranscript { .. }
+            | Effect::CloneAllTranscript { .. }
             | Effect::DiscardTranscript { .. }
             | Effect::Discover { .. }
             | Effect::Spawn { .. }
@@ -303,6 +306,9 @@ impl SwitchboardApp {
             | Effect::SendKeys { .. }
             | Effect::ReadProjectConfig { .. }
             | Effect::WriteProjectConfig { .. }
+            | Effect::ProbeRoundFile { .. }
+            | Effect::SnapshotRound { .. }
+            | Effect::RemoveRoundFiles { .. }
             | Effect::OpenPath(_)
             | Effect::Forget(_)
             | Effect::OpenInEditor { .. }
@@ -349,6 +355,10 @@ impl SwitchboardApp {
                 prompt,
                 result: s.transcripts.clone_before(&handle, before),
             },
+            Effect::CloneAllTranscript { run, handle } => AppAction::WorkflowCloned {
+                run,
+                result: s.transcripts.clone_all(&handle),
+            },
             Effect::DiscardTranscript {
                 id,
                 handle,
@@ -377,7 +387,11 @@ impl SwitchboardApp {
             | Effect::PrepareResume { .. }
             | Effect::CheckTranscript { .. }
             | Effect::CloneTranscript { .. }
+            | Effect::CloneAllTranscript { .. }
             | Effect::DiscardTranscript { .. } => Some(self.run_agent_effect(effect)),
+            Effect::ProbeRoundFile { .. }
+            | Effect::SnapshotRound { .. }
+            | Effect::RemoveRoundFiles { .. } => Some(self.run_round_files(effect)),
             Effect::Discover {
                 id,
                 kind,
@@ -452,6 +466,42 @@ impl SwitchboardApp {
             Effect::Reveal(path) => failed(s.opener.reveal(&path), || {
                 format!("reveal {}", path.display())
             }),
+        }
+    }
+
+    /// The effects answered by the round files adapter. Snapshots go
+    /// under `<data dir>/workflows/<run>/round-<n>/`.
+    fn run_round_files(&self, effect: Effect) -> AppAction {
+        let s = &self.services;
+        match effect {
+            Effect::ProbeRoundFile { run, path } => AppAction::RoundFileProbed {
+                run,
+                found: s.round_files.probe(&path),
+                path,
+            },
+            Effect::SnapshotRound {
+                run,
+                n,
+                files,
+                note,
+            } => {
+                let dir = s
+                    .store
+                    .data_dir()
+                    .join("workflows")
+                    .join(run.0.to_string())
+                    .join(format!("round-{n}"));
+                AppAction::RoundSnapshotted {
+                    run,
+                    n,
+                    result: s.round_files.snapshot(&files, &dir, note.as_deref()),
+                }
+            }
+            Effect::RemoveRoundFiles { run, files } => AppAction::RoundFilesRemoved {
+                run,
+                result: s.round_files.remove(&files),
+            },
+            _ => unreachable!("not a round files effect"),
         }
     }
 
@@ -623,7 +673,7 @@ impl SwitchboardApp {
                 .collect(),
             View::Board(p) => self.core.sessions_sorted(p).iter().map(|s| s.id).collect(),
             View::Session(id) => vec![id],
-            View::Document(..) => Vec::new(),
+            View::Document(..) | View::Workflow(_) => Vec::new(),
             View::WorkingSet(set) => self.core.working_set_sessions(set),
         };
         // The Run tab shows every command's and service's output, so
@@ -633,7 +683,11 @@ impl SwitchboardApp {
             View::Session(id) if self.core.settings().files_open => {
                 self.core.session(id).map(|s| s.project)
             }
-            View::Session(_) | View::Switchboard | View::Document(..) | View::WorkingSet(_) => None,
+            View::Session(_)
+            | View::Switchboard
+            | View::Document(..)
+            | View::WorkingSet(_)
+            | View::Workflow(_) => None,
         }
         .filter(|_| self.core.settings().side_tab == crate::core::SideTab::Run);
         let run_set: Vec<RecordId> = run_project
@@ -653,9 +707,11 @@ impl SwitchboardApp {
                         .collect()
                 })
                 .unwrap_or_default(),
-            View::Board(_) | View::Switchboard | View::Document(..) | View::WorkingSet(_) => {
-                Vec::new()
-            }
+            View::Board(_)
+            | View::Switchboard
+            | View::Document(..)
+            | View::WorkingSet(_)
+            | View::Workflow(_) => Vec::new(),
         };
         for id in run_set.iter().chain(&bar_set) {
             if !ids.contains(id) {

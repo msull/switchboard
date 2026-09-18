@@ -116,6 +116,7 @@ impl Gate {
             transcripts: Box::new(ClaudeTranscripts),
             secrets: Box::new(FakeSecrets::default()),
             project_config: Box::new(FileConfigReader::new()),
+            round_files: Box::new(switchboard::adapters::round_files::DiskRoundFiles),
             wake: None,
         })
     }

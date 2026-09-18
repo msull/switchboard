@@ -60,6 +60,7 @@ impl AppCore {
                 None => return,
             },
             SavedView::Set(id) if self.working_set(id).is_some() => View::WorkingSet(id),
+            SavedView::Workflow(id) if self.workflow(id).is_some() => View::Workflow(id),
             _ => return,
         };
         self.view_stack.push(view);

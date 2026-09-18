@@ -11,8 +11,8 @@ use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;
 use switchboard::SwitchboardApp;
 use switchboard::adapters::fakes::{
-    FakeAgents, FakeEvents, FakeHost, FakeOpener, FakeProjectConfig, FakeSecrets, FakeTranscripts,
-    MemoryStore,
+    FakeAgents, FakeEvents, FakeHost, FakeOpener, FakeProjectConfig, FakeRoundFiles, FakeSecrets,
+    FakeTranscripts, MemoryStore,
 };
 use switchboard::app::Services;
 use switchboard::core::{
@@ -184,6 +184,7 @@ fn harness_build(
         transcripts: Box::new(FakeTranscripts::default()),
         secrets: Box::new(secrets),
         project_config: Box::new(FakeProjectConfig::default()),
+        round_files: Box::new(FakeRoundFiles::default()),
         wake: None,
     };
     let mut harness = Harness::builder()
@@ -1753,6 +1754,7 @@ fn polling_reads_the_transcript_into_the_ui_state() {
         }),
         secrets: Box::new(FakeSecrets::default()),
         project_config: Box::new(FakeProjectConfig::default()),
+        round_files: Box::new(FakeRoundFiles::default()),
         wake: None,
     };
     let mut harness = Harness::builder()

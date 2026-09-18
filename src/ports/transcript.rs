@@ -135,6 +135,9 @@ pub trait TranscriptReader: Send + Sync {
     /// return its handle. The original is never touched. This is the one
     /// place Switchboard writes into a provider's session directory.
     fn clone_before(&self, handle: &ResumeHandle, before: usize) -> Result<ResumeHandle, String>;
+    /// The same copy of the whole conversation, for a fork that keeps
+    /// everything (a workflow's planner clone).
+    fn clone_all(&self, handle: &ResumeHandle) -> Result<ResumeHandle, String>;
 }
 
 #[cfg(test)]

@@ -6,6 +6,7 @@ pub mod events;
 pub mod host;
 pub mod opener;
 pub mod project_config;
+pub mod round_files;
 pub mod secrets;
 pub mod store;
 pub mod transcript;

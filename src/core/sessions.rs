@@ -29,9 +29,27 @@ impl AppCore {
             self.error(format!("cannot start {name}: {reason}"));
             return;
         }
+        if let Some(id) = self.add_record(project, name, kind, cwd, launch, now, out) {
+            self.launch_fresh(id, now, out);
+        }
+    }
+
+    /// A new cold record at the end of the project's board. `None` for
+    /// an unknown project.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn add_record(
+        &mut self,
+        project: ProjectId,
+        name: String,
+        kind: SessionKind,
+        cwd: PathBuf,
+        launch: Launch,
+        now: Clock,
+        out: &mut Out,
+    ) -> Option<RecordId> {
         let Some(workspace) = self.workspaces.iter_mut().find(|w| w.project.id == project) else {
             self.error("cannot start a session: unknown project");
-            return;
+            return None;
         };
         let order = workspace
             .sessions
@@ -65,12 +83,12 @@ impl AppCore {
             discard: None,
         });
         out.touch(project);
-        self.launch_fresh(id, now, out);
+        Some(id)
     }
 
     /// Starts a record from scratch: agents get a composed launch (Codex
     /// waits its turn), everything else spawns its own `Launch`.
-    fn launch_fresh(&mut self, id: RecordId, now: Clock, out: &mut Out) {
+    pub(super) fn launch_fresh(&mut self, id: RecordId, now: Clock, out: &mut Out) {
         let Some(record) = self.session(id) else {
             return;
         };
@@ -460,6 +478,12 @@ impl AppCore {
         self.show(View::Session(id), now, out);
     }
 
+    /// The text queued as `id`'s first prompt, if any.
+    fn take_first_prompt(&mut self, id: RecordId) -> Option<String> {
+        let i = self.first_prompts.iter().position(|(r, _)| *r == id)?;
+        Some(self.first_prompts.remove(i).1)
+    }
+
     fn mark_not_resumable(&mut self, id: RecordId, now: Clock, out: &mut Out) {
         self.edit_session(id, out, |s| s.not_resumable = true);
         let name = self.session_name(id);
@@ -479,8 +503,12 @@ impl AppCore {
         if !self.is_in_flight(id) {
             return;
         }
+        let first_prompt = self.take_first_prompt(id);
         match result {
-            Ok(launch) => {
+            Ok(mut launch) => {
+                // A prompt on the command line is submitted as soon as the
+                // agent is up, which no key sent into the pane could time.
+                launch.argv.extend(first_prompt);
                 let Some(record) = self.session_mut(id) else {
                     self.end_flight(id);
                     return;

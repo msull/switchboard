@@ -11,6 +11,7 @@ pub mod hooks;
 #[cfg(target_os = "macos")]
 pub mod keychain;
 pub mod project_config;
+pub mod round_files;
 pub mod scrollback;
 pub mod store;
 pub mod tmux;

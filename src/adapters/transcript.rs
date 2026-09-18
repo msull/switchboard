@@ -54,6 +54,18 @@ impl TranscriptReader for ClaudeTranscripts {
     }
 
     fn clone_before(&self, handle: &ResumeHandle, before: usize) -> Result<ResumeHandle, String> {
+        write_fork(handle, Some(before))
+    }
+
+    fn clone_all(&self, handle: &ResumeHandle) -> Result<ResumeHandle, String> {
+        write_fork(handle, None)
+    }
+}
+
+/// The copy behind both clones: up to a prompt, or (`None`) the whole
+/// conversation.
+fn write_fork(handle: &ResumeHandle, before: Option<usize>) -> Result<ResumeHandle, String> {
+    {
         let ResumeHandle::ClaudeCode {
             session_id,
             transcript: Some(path),
@@ -63,8 +75,12 @@ impl TranscriptReader for ClaudeTranscripts {
         };
         let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
         let new_id = uuid::Uuid::new_v4();
-        let forked = fork(&text, before, &session_id.to_string(), &new_id.to_string())
-            .ok_or_else(|| format!("the transcript has no prompt #{before}"))?;
+        let (old_id, new) = (session_id.to_string(), new_id.to_string());
+        let forked = match before {
+            Some(before) => fork(&text, before, &old_id, &new)
+                .ok_or_else(|| format!("the transcript has no prompt #{before}"))?,
+            None => relabel(&text, &old_id, &new),
+        };
         let dir = path
             .parent()
             .ok_or_else(|| format!("{}: no parent directory", path.display()))?;
@@ -75,6 +91,20 @@ impl TranscriptReader for ClaudeTranscripts {
             transcript: Some(dst),
         })
     }
+}
+
+/// Every record, re-labelled; half-written last lines dropped as in
+/// [`fork`].
+fn relabel(text: &str, old_id: &str, new_id: &str) -> String {
+    let mut out = String::new();
+    for line in text.lines().filter(|l| !l.trim().is_empty()) {
+        if serde_json::from_str::<Value>(line).is_err() {
+            continue;
+        }
+        out.push_str(&line.replace(old_id, new_id));
+        out.push('\n');
+    }
+    out
 }
 
 /// The transcript's records before the `before`th typed prompt (the
@@ -621,6 +651,12 @@ mod tests {
             );
         }
         assert!(ClaudeTranscripts.clone_before(&handle, 99).is_err());
+        let whole = ClaudeTranscripts.clone_all(&handle).unwrap();
+        assert_eq!(
+            ClaudeTranscripts.read(&whole).unwrap().turns.len(),
+            ClaudeTranscripts.read(&handle).unwrap().turns.len()
+        );
+        assert_ne!(whole.provider_id(), handle.provider_id());
     }
 
     #[test]

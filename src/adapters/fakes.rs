@@ -290,6 +290,9 @@ impl TranscriptReader for FakeTranscripts {
         // A fixed time: the fake never changes, so the app reads it once.
         self.conversation.as_ref().map(|_| std::time::UNIX_EPOCH)
     }
+    fn clone_all(&self, handle: &ResumeHandle) -> Result<ResumeHandle, String> {
+        self.clone_before(handle, 0)
+    }
     fn clone_before(&self, handle: &ResumeHandle, _before: usize) -> Result<ResumeHandle, String> {
         match handle {
             ResumeHandle::ClaudeCode { transcript, .. } => Ok(ResumeHandle::ClaudeCode {
@@ -340,5 +343,64 @@ impl ProjectConfigReader for FakeProjectConfig {
     }
     fn modified(&self, _root: &Path) -> Option<SystemTime> {
         self.modified
+    }
+}
+
+/// One recorded snapshot: the directory, the files, and the user's note.
+pub type Snapshot = (PathBuf, Vec<PathBuf>, Option<String>);
+
+/// Round files in memory: `files` is what a probe finds, `snapshots`
+/// and `removed` record what the run asked for.
+#[derive(Debug, Default, Clone)]
+pub struct FakeRoundFiles {
+    pub files: Arc<Mutex<HashMap<PathBuf, crate::ports::round_files::Probed>>>,
+    pub snapshots: Arc<Mutex<Vec<Snapshot>>>,
+    pub removed: Arc<Mutex<Vec<PathBuf>>>,
+    /// Every snapshot and remove fails with this when set.
+    pub error: Option<String>,
+}
+
+impl FakeRoundFiles {
+    /// Make `path` exist with `first_line`, as if an agent wrote it.
+    pub fn write(&self, path: &Path, first_line: &str) {
+        let stamp = crate::ports::round_files::FileStamp {
+            modified: SystemTime::now(),
+            len: first_line.len() as u64,
+        };
+        self.files.lock().unwrap().insert(
+            path.to_path_buf(),
+            crate::ports::round_files::Probed {
+                stamp,
+                first_line: first_line.to_owned(),
+            },
+        );
+    }
+}
+
+impl crate::ports::round_files::RoundFiles for FakeRoundFiles {
+    fn probe(&self, path: &Path) -> Option<crate::ports::round_files::Probed> {
+        self.files.lock().unwrap().get(path).cloned()
+    }
+    fn snapshot(&self, files: &[PathBuf], dir: &Path, note: Option<&str>) -> Result<(), String> {
+        if let Some(e) = &self.error {
+            return Err(e.clone());
+        }
+        self.snapshots.lock().unwrap().push((
+            dir.to_path_buf(),
+            files.to_vec(),
+            note.map(str::to_owned),
+        ));
+        Ok(())
+    }
+    fn remove(&self, files: &[PathBuf]) -> Result<(), String> {
+        if let Some(e) = &self.error {
+            return Err(e.clone());
+        }
+        let mut have = self.files.lock().unwrap();
+        for f in files {
+            have.remove(f);
+        }
+        self.removed.lock().unwrap().extend(files.iter().cloned());
+        Ok(())
     }
 }

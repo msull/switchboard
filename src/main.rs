@@ -89,6 +89,7 @@ fn main() -> eframe::Result {
                 transcripts: Box::new(ClaudeTranscripts),
                 secrets: secret_store(),
                 project_config: Box::new(FileConfigReader::new()),
+                round_files: Box::new(switchboard::adapters::round_files::DiskRoundFiles),
                 wake,
             };
             let mut app = SwitchboardApp::with_services(services);

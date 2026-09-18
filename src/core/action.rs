@@ -22,14 +22,16 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use crate::core::env::SecretScope;
 use crate::core::grid;
 use crate::core::model::{
-    Activity, AgentKind, CardState, EnvVar, GridRect, Launch, PinTarget, PinnedItem, Project,
-    ProjectEnv, ProjectId, RecordId, ResumeHandle, SavedView, SessionKind, SessionRecord, SetId,
-    Settings, SideTab, ThemeMode, VOICE_KEY_ACCOUNT, Views, VoiceSettings, WorkingSet, Workspace,
+    Activity, AgentKind, CardState, EnvVar, GridRect, HandoffMode, Launch, PinTarget, PinnedItem,
+    Project, ProjectEnv, ProjectId, RecordId, ResumeHandle, SavedView, SessionKind, SessionRecord,
+    SetId, Settings, SideTab, ThemeMode, VOICE_KEY_ACCOUNT, Views, VoiceSettings,
+    WorkflowDefinition, WorkflowId, WorkingSet, Workspace,
 };
 use crate::ports::agent::AgentLaunch;
 use crate::ports::events::SessionEvent;
 use crate::ports::host::{HostId, HostStatus, Liveness, SpawnSpec};
 use crate::ports::project_config::ProjectConfig;
+use crate::ports::round_files::Probed;
 use crate::ports::store::{Loaded, StoreError};
 
 /// The current time as the core sees it.
@@ -60,6 +62,8 @@ pub enum View {
     Document(ProjectId, PathBuf),
     /// One of the user's grids of cards from any project.
     WorkingSet(SetId),
+    /// A workflow run: its rounds, plan versions, and controls.
+    Workflow(WorkflowId),
 }
 
 impl View {
@@ -71,6 +75,7 @@ impl View {
             View::Board(id) | View::Document(id, _) => SavedView::Board(*id),
             View::Session(id) => SavedView::Session(*id),
             View::WorkingSet(id) => SavedView::Set(*id),
+            View::Workflow(id) => SavedView::Workflow(*id),
         }
     }
 }
@@ -245,6 +250,63 @@ pub enum AppAction {
     /// Put back what the last `DiscardTo` replaced. Offered until the
     /// next message goes into the session.
     UndoDiscard(RecordId),
+    // --- workflows
+    /// Begin a plan review: a fresh reviewer is launched with the first
+    /// prompt, and `source` is cloned whole as the planner. `plan` is
+    /// absolute.
+    StartWorkflow {
+        source: RecordId,
+        plan: PathBuf,
+        definition: String,
+    },
+    ShowWorkflow(WorkflowId),
+    /// Stop waiting; nothing is launched until `ContinueWorkflow`.
+    PauseWorkflow(WorkflowId),
+    /// From `Paused`: wait again, relaunching the agent if its pane is
+    /// gone. From `AtCap` or `Converged`: one more reviewer round.
+    ContinueWorkflow(WorkflowId),
+    RaiseWorkflowCap {
+        run: WorkflowId,
+        cap: u32,
+    },
+    /// The user has reviewed the plan.
+    FinalizeWorkflow(WorkflowId),
+    /// Delete the round files the run named (the user confirmed).
+    CleanUpWorkflow(WorkflowId),
+    /// Send the finished plan back to the source session.
+    HandOffWorkflow {
+        run: WorkflowId,
+        mode: HandoffMode,
+    },
+    /// The user's own feedback as one more round for the planner.
+    UserFeedback {
+        run: WorkflowId,
+        text: String,
+    },
+    /// Forget the run; its sessions stay.
+    RemoveWorkflow(WorkflowId),
+    SetWorkflowRoundCap(u32),
+    SetWorkflowDefinitions(Vec<WorkflowDefinition>),
+    /// The planner clone's transcript was made (or not).
+    WorkflowCloned {
+        run: WorkflowId,
+        result: Result<ResumeHandle, String>,
+    },
+    /// One probe of the file a run waits on.
+    RoundFileProbed {
+        run: WorkflowId,
+        path: PathBuf,
+        found: Option<Probed>,
+    },
+    RoundSnapshotted {
+        run: WorkflowId,
+        n: u32,
+        result: Result<(), String>,
+    },
+    RoundFilesRemoved {
+        run: WorkflowId,
+        result: Result<(), String>,
+    },
     // --- results from effects / workers
     /// An effect with no result of its own failed; the user is told.
     Failed(String),
@@ -319,6 +381,30 @@ pub enum Effect {
         handle: ResumeHandle,
         before: usize,
         prompt: String,
+    },
+    /// The whole conversation copied under a fresh id, for a workflow's
+    /// planner (reports `WorkflowCloned`).
+    CloneAllTranscript {
+        run: WorkflowId,
+        handle: ResumeHandle,
+    },
+    /// Look for the file a run waits on (reports `RoundFileProbed`).
+    ProbeRoundFile {
+        run: WorkflowId,
+        path: PathBuf,
+    },
+    /// Copy the round's files into the run's snapshot directory under
+    /// the data dir (reports `RoundSnapshotted`).
+    SnapshotRound {
+        run: WorkflowId,
+        n: u32,
+        files: Vec<PathBuf>,
+        note: Option<String>,
+    },
+    /// Delete the round files (reports `RoundFilesRemoved`).
+    RemoveRoundFiles {
+        run: WorkflowId,
+        files: Vec<PathBuf>,
     },
     /// The same copy for `DiscardTo` (reports `TranscriptDiscarded`).
     DiscardTranscript {
@@ -471,6 +557,11 @@ pub struct AppCore {
     /// Agents without hooks (Codex) whose pane has been quiet for a
     /// while, per the last host poll: shown idle instead of working.
     pub(super) quiet: Vec<RecordId>,
+    /// Text to submit as the first prompt of a record's next launch,
+    /// on its command line. Consumed by `launch_prepared`.
+    pub(super) first_prompts: Vec<(RecordId, String)>,
+    /// How long each waiting run's file has looked the same.
+    pub(super) probes: Vec<crate::core::workflow::Probe>,
 }
 
 impl AppCore {
@@ -540,7 +631,24 @@ impl AppCore {
                     self.notices.remove(0);
                 }
             }
-            AppAction::Tick => self.expire_notices(now),
+            AppAction::Tick => self.tick(now, &mut out),
+
+            AppAction::StartWorkflow { .. }
+            | AppAction::ShowWorkflow(_)
+            | AppAction::PauseWorkflow(_)
+            | AppAction::ContinueWorkflow(_)
+            | AppAction::RaiseWorkflowCap { .. }
+            | AppAction::FinalizeWorkflow(_)
+            | AppAction::CleanUpWorkflow(_)
+            | AppAction::HandOffWorkflow { .. }
+            | AppAction::UserFeedback { .. }
+            | AppAction::RemoveWorkflow(_)
+            | AppAction::SetWorkflowRoundCap(_)
+            | AppAction::SetWorkflowDefinitions(_)
+            | AppAction::WorkflowCloned { .. }
+            | AppAction::RoundFileProbed { .. }
+            | AppAction::RoundSnapshotted { .. }
+            | AppAction::RoundFilesRemoved { .. } => self.workflow_action(action, now, &mut out),
 
             AppAction::AddProject { name, root } => self.add_project(name, root, now, &mut out),
             AppAction::RemoveProject(id) => self.remove_project(id, now, &mut out),
@@ -560,22 +668,13 @@ impl AppCore {
             | AppAction::TranscriptCloned { .. }
             | AppAction::DiscardTo { .. }
             | AppAction::UndoDiscard(_)
-            | AppAction::TranscriptDiscarded { .. } => self.session_action(action, now, &mut out),
+            | AppAction::TranscriptDiscarded { .. }
+            | AppAction::LaunchPrepared { .. }
+            | AppAction::Spawned { .. }
+            | AppAction::Attached { .. }
+            | AppAction::TranscriptChecked { .. }
+            | AppAction::Discovered { .. } => self.session_action(action, now, &mut out),
 
-            AppAction::LaunchPrepared { id, result } => {
-                self.launch_prepared(id, result, now, &mut out);
-            }
-            AppAction::Spawned { id, result } => self.spawned(id, result, now, &mut out),
-            AppAction::Attached { id, result } => {
-                if let Err(e) = result {
-                    let name = self.session_name(id);
-                    self.error(format!("could not attach to {name}: {e}"));
-                }
-            }
-            AppAction::TranscriptChecked { id, exists } => {
-                self.transcript_checked(id, exists, now, &mut out);
-            }
-            AppAction::Discovered { id, result } => self.discovered(id, result, now, &mut out),
             AppAction::Events(events) => self.apply_events(events, &mut out),
         }
         self.remember_view(&mut out);
@@ -646,6 +745,20 @@ impl AppCore {
                 result,
             } => self.transcript_discarded(id, before, prompt, result, now, out),
             AppAction::UndoDiscard(id) => self.undo_discard(id, now, out),
+            AppAction::LaunchPrepared { id, result } => {
+                self.launch_prepared(id, result, now, out);
+            }
+            AppAction::Spawned { id, result } => self.spawned(id, result, now, out),
+            AppAction::Attached { id, result } => {
+                if let Err(e) = result {
+                    let name = self.session_name(id);
+                    self.error(format!("could not attach to {name}: {e}"));
+                }
+            }
+            AppAction::TranscriptChecked { id, exists } => {
+                self.transcript_checked(id, exists, now, out);
+            }
+            AppAction::Discovered { id, result } => self.discovered(id, result, now, out),
             _ => unreachable!("not a session action"),
         }
     }
@@ -853,6 +966,12 @@ impl AppCore {
         });
     }
 
+    /// Once a second: notices age out and waiting workflows probe.
+    fn tick(&mut self, now: Clock, out: &mut Out) {
+        self.expire_notices(now);
+        self.workflow_tick(now, out);
+    }
+
     fn expire_notices(&mut self, now: Clock) {
         self.notices
             .retain(|n| n.expires_at.is_none_or(|t| t > now.mono));
@@ -909,6 +1028,7 @@ impl AppCore {
         self.view_stack.retain(|v| match v {
             View::Board(p) | View::Document(p, _) => *p != id,
             View::Session(r) => !gone(*r),
+            View::Workflow(w) => !workspace.workflows.iter().any(|r| r.id == *w),
             View::Switchboard | View::WorkingSet(_) => true,
         });
         self.in_flight.retain(|f| !gone(f.id));
@@ -1158,57 +1278,12 @@ impl AppCore {
                 }
             }
             AppAction::SetSideTab(tab) => self.update_settings(out, |s| s.side_tab = tab),
-            AppAction::ProjectConfigRead { .. }
-            | AppAction::SaveProjectConfig { .. }
-            | AppAction::ProjectConfigWritten { .. }
-            | AppAction::ApproveDefinition(_)
-            | AppAction::RevokeApproval(_)
-            | AppAction::StoreLoaded(_)
-            | AppAction::SaveFinished(..)
-            | AppAction::HostUnavailable(_)
-            | AppAction::HostListed(_)
-            | AppAction::ShowSwitchboard
-            | AppAction::ShowBoard(_)
-            | AppAction::ShowSession(_)
-            | AppAction::Back
-            | AppAction::DismissNotice
-            | AppAction::Tick
-            | AppAction::AddProject { .. }
-            | AppAction::RemoveProject(_)
-            | AppAction::NewSession { .. }
-            | AppAction::RenameSession(..)
-            | AppAction::SetSessionNotes(..)
-            | AppAction::SetAutostart(..)
-            | AppAction::MoveCard { .. }
-            | AppAction::ReturnToSession(_)
-            | AppAction::SendInput { .. }
-            | AppAction::Interrupt(_)
-            | AppAction::KillSession(_)
-            | AppAction::RestartSession(_)
-            | AppAction::RemoveSession(_)
-            | AppAction::Failed(_)
-            | AppAction::LaunchPrepared { .. }
-            | AppAction::TranscriptChecked { .. }
-            | AppAction::CloneSession { .. }
-            | AppAction::TranscriptCloned { .. }
-            | AppAction::DiscardTo { .. }
-            | AppAction::UndoDiscard(_)
-            | AppAction::TranscriptDiscarded { .. }
-            | AppAction::Spawned { .. }
-            | AppAction::Attached { .. }
-            | AppAction::Discovered { .. }
-            | AppAction::ShowWorkingSet(_)
-            | AppAction::AddToWorkingSet { .. }
-            | AppAction::RemoveFromWorkingSet { .. }
-            | AppAction::NewWorkingSet { .. }
-            | AppAction::RenameWorkingSet { .. }
-            | AppAction::DeleteWorkingSet(_)
-            | AppAction::PlacePin { .. }
-            | AppAction::Events(_) => unreachable!("dispatched by `dispatch` itself"),
+            // Everything else is routed by `dispatch` itself.
+            _ => unreachable!("dispatched by `dispatch` itself"),
         }
     }
 
-    fn update_settings(&mut self, out: &mut Out, change: impl FnOnce(&mut Settings)) {
+    pub(super) fn update_settings(&mut self, out: &mut Out, change: impl FnOnce(&mut Settings)) {
         let mut next = self.settings.clone();
         change(&mut next);
         if next != self.settings {

@@ -33,15 +33,18 @@ per project under `projects/` (with a `.bak` of the previous version;
 approvals of defined commands live inside these records),
 `settings.json` (theme, exclusive mode, editor, global variables, file
 side shown next to sessions and its tab, the screen to reopen on, the
-Prompt Box switch and its trigger word, model, and captions),
+Prompt Box switch and its trigger word, model, and captions, the
+workflow round cap and the user's workflow definitions),
 `views.json` (the working sets: each one's name, which sessions and
 files are on it, and where each card sits on its grid, with a `.bak`),
 the
 tmux config and socket name, `claude-hooks.json` (passed to Claude Code
 with `--settings`), `events.log` (the hook event log), `wake.sock`, and
-`scrollback/`. Sessions run on a private tmux server (`tmux -L
-switchboard`), never on your default one. Nothing is written into a
-project directory.
+`scrollback/`, and `workflows/<run>/round-<n>/` (copies of the plan,
+feedback, and response at the end of each review round). Sessions run
+on a private tmux server (`tmux -L switchboard`), never on your default
+one. Nothing is written into a project directory except what the Config
+editor saves on your click.
 
 ### Defining commands and services
 
@@ -144,8 +147,9 @@ src/core/
   grid.rs                Working Set placement: default card sizes, first free spot, overlap, minimum size
   definitions.rs         .switchboard/project.json entries -> records; hash-keyed approval
   events.rs              hook events -> record activity (matched by record id, ordered by time)
+  workflow.rs            plan review runs: reviewer and planner rounds as a state machine over records
   tests.rs               state-transition tests for the core
-src/ports/               traits: store, host, events, agent, opener, transcript, secrets, project_config
+src/ports/               traits: store, host, events, agent, opener, transcript, secrets, project_config, round_files
 src/adapters/
   store.rs               JSON store: atomic writes, .bak, flock
   tmux.rs                tmux process host on the private socket
@@ -156,6 +160,7 @@ src/adapters/
   keychain.rs            secrets as generic-password items in the login Keychain (tests use a temp keychain)
   dotenv.rs              .env parser (opt-in per project) and .env.example names
   project_config.rs      reads and validates .switchboard/project.json (capped, no symlinks)
+  round_files.rs         a workflow's round files on disk: probe, snapshot into the data dir, delete
   scrollback.rs          read the pipe-pane stream back as plain text (cold sessions)
   agents.rs              Claude Code / Codex launch, resume, preflight, discovery
   transcript.rs          Claude Code transcript (JSONL) -> Conversation turns
@@ -179,6 +184,7 @@ src/ui/
   palette.rs             quick-switcher (Cmd+K) over projects and sessions
   env.rs                 Environment dialog: variables, secrets, .env opt-in, masked preview
   config.rs              project config editor: .switchboard/project.json as text, options listed, parse shown
+  workflow.rs            a plan review run: state and rounds (page in progress)
   cards.rs               the one card for every entry kind, the card grid, pinned document cards
   session.rs             session view: header, embedded terminal or conversation + message box
   switchboard.rs         every session across projects, waiting first

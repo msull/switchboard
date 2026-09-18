@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 /// Bump when the on-disk shape changes incompatibly.
-pub const SCHEMA_VERSION: u32 = 5;
+pub const SCHEMA_VERSION: u32 = 6;
 
 /// How the UI picks its colours: follow the system, or force one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -99,6 +99,13 @@ pub struct Settings {
     pub prompt_box: bool,
     /// What the embedded Prompt Box needs beyond the key.
     pub voice: VoiceSettings,
+    /// How many review rounds a plan review workflow runs before it
+    /// stops and asks; a definition may override it.
+    pub workflow_round_cap: u32,
+    /// The user's own workflow definitions, by name. The built-in one
+    /// (`WorkflowDefinition::default`) is always available under its
+    /// own name and never stored.
+    pub workflows: Vec<WorkflowDefinition>,
 }
 
 impl Default for Settings {
@@ -114,8 +121,278 @@ impl Default for Settings {
             open_terminal_on_launch: false,
             prompt_box: true,
             voice: VoiceSettings::default(),
+            workflow_round_cap: DEFAULT_ROUND_CAP,
+            workflows: Vec::new(),
         }
     }
+}
+
+impl Settings {
+    /// The definition called `name`: the user's copy when they have one,
+    /// the built-in when the name is its, otherwise none.
+    #[must_use]
+    pub fn workflow(&self, name: &str) -> Option<WorkflowDefinition> {
+        self.workflows
+            .iter()
+            .find(|d| d.name == name)
+            .cloned()
+            .or_else(|| (name == BUILTIN_WORKFLOW).then(WorkflowDefinition::default))
+    }
+}
+
+/// Rounds a review runs before stopping to ask, unless a definition
+/// says otherwise.
+pub const DEFAULT_ROUND_CAP: u32 = 4;
+
+/// Name of the definition that ships with the app.
+pub const BUILTIN_WORKFLOW: &str = "Plan review";
+
+/// The first line a reviewer writes when it has nothing further to say.
+/// A string compare, never a reading of prose.
+pub const NO_FEEDBACK_LINE: &str = "No further feedback.";
+
+/// What a workflow says to its agents and how far it goes. Prompts are
+/// templates: `{plan}`, `{feedback}`, `{response}`, `{round}`, `{cap}`,
+/// and `{no_feedback}` are filled per round.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WorkflowDefinition {
+    pub name: String,
+    /// What the reviewer runs as; the planner is always a clone.
+    pub reviewer: AgentKind,
+    /// The reviewer's first prompt.
+    pub review_first: String,
+    /// The reviewer's prompt for every later round.
+    pub review_round: String,
+    /// The planner clone's prompt, every round.
+    pub respond: String,
+    /// The planner clone's prompt for a round of the user's own
+    /// feedback; `{text}` is what they wrote.
+    pub respond_to_user: String,
+    /// What the original planning session is told at the end.
+    pub handoff: String,
+    /// The reviewer's "nothing further" first line.
+    pub no_feedback: String,
+    /// Overrides the setting when set.
+    pub cap: Option<u32>,
+}
+
+impl Default for WorkflowDefinition {
+    fn default() -> Self {
+        Self {
+            name: BUILTIN_WORKFLOW.into(),
+            reviewer: AgentKind::Codex,
+            review_first: "Review the plan at {plan}. Write all of your feedback into {feedback} \
+                (it is not committed). If the plan needs no changes, write {feedback} with \
+                exactly this first line and nothing else: {no_feedback}"
+                .into(),
+            review_round: "The plan's author responded to your feedback in {response} and updated \
+                {plan} where they agreed. Read the response, re-review the plan, and write any \
+                further feedback into {feedback}. If nothing further is needed, write {feedback} \
+                with exactly this first line and nothing else: {no_feedback}"
+                .into(),
+            respond: "I've used an external reviewer on the plan at {plan}. Their feedback is in \
+                {feedback}. Look at it and provide a response in markdown at {response}. Accept \
+                valid items by updating the plan; reject the rest with your reasoning in the \
+                response. Never mention the reviewer in the plan."
+                .into(),
+            respond_to_user: "I've reviewed the plan at {plan} myself. My feedback:\n\n{text}\n\n\
+                Provide a response in markdown at {response}. Accept valid items by updating \
+                the plan; reject the rest with your reasoning in the response."
+                .into(),
+            handoff:
+                "I've revised the plan at {plan}. Enter plan mode and prepare to implement it."
+                    .into(),
+            no_feedback: NO_FEEDBACK_LINE.into(),
+            cap: None,
+        }
+    }
+}
+
+impl WorkflowDefinition {
+    /// Fill a template for one round.
+    #[must_use]
+    pub fn render(
+        &self,
+        template: &str,
+        round: &Round,
+        plan: &std::path::Path,
+        cap: u32,
+    ) -> String {
+        template
+            .replace("{plan}", &plan.display().to_string())
+            .replace("{feedback}", &round.feedback.display().to_string())
+            .replace("{response}", &round.response.display().to_string())
+            .replace("{round}", &round.n.to_string())
+            .replace("{cap}", &cap.to_string())
+            .replace("{no_feedback}", &self.no_feedback)
+    }
+}
+
+/// Switchboard's own id for a workflow run. Never reused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct WorkflowId(pub Uuid);
+
+impl WorkflowId {
+    #[must_use]
+    pub fn new() -> Self {
+        Self(Uuid::new_v4())
+    }
+}
+
+impl Default for WorkflowId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// One plan review in progress or finished: which sessions it drives,
+/// which file it is about, and every round so far. Lives in the
+/// project's workspace file beside the sessions.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkflowRun {
+    pub id: WorkflowId,
+    pub project: ProjectId,
+    /// Name of the definition used; its prompts are read each round, so
+    /// an edit applies to the next one.
+    pub definition: String,
+    /// The planning session, never touched until the handoff.
+    pub source: RecordId,
+    pub plan: PathBuf,
+    /// The clone of `source` that answers feedback; `None` until the
+    /// provider-side copy exists.
+    #[serde(default)]
+    pub planner: Option<RecordId>,
+    pub reviewer: RecordId,
+    #[serde(default)]
+    pub rounds: Vec<Round>,
+    pub state: RunState,
+    pub cap: u32,
+    /// The round files have been deleted from the project.
+    #[serde(default)]
+    pub cleaned: bool,
+    pub created: SystemTime,
+    pub updated: SystemTime,
+}
+
+impl WorkflowRun {
+    /// The round in progress or last finished.
+    #[must_use]
+    pub fn current(&self) -> Option<&Round> {
+        self.rounds.last()
+    }
+    /// Which record the run is waiting on, if any.
+    #[must_use]
+    pub fn awaiting(&self) -> Option<RecordId> {
+        match self.state {
+            RunState::AwaitingFeedback => Some(self.reviewer),
+            RunState::AwaitingResponse => self.planner,
+            _ => None,
+        }
+    }
+    /// The file the run is waiting for, if any.
+    #[must_use]
+    pub fn awaited_file(&self) -> Option<&PathBuf> {
+        let round = self.current()?;
+        match self.state {
+            RunState::AwaitingFeedback => Some(&round.feedback),
+            RunState::AwaitingResponse => Some(&round.response),
+            _ => None,
+        }
+    }
+    /// Every round file the run named, for cleanup.
+    #[must_use]
+    pub fn round_files(&self) -> Vec<PathBuf> {
+        self.rounds
+            .iter()
+            .flat_map(|r| [r.feedback.clone(), r.response.clone()])
+            .collect()
+    }
+}
+
+/// One exchange: feedback from the reviewer (or the user), the planner's
+/// response, and what the reviewer decided.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Round {
+    /// 1-based.
+    pub n: u32,
+    pub feedback: PathBuf,
+    pub response: PathBuf,
+    /// The reviewer's decision once the feedback file settled.
+    #[serde(default)]
+    pub verdict: Option<Verdict>,
+    /// The user wrote this round's feedback themselves; it is sent in
+    /// the prompt and kept here rather than in a file.
+    #[serde(default)]
+    pub user_feedback: Option<String>,
+    /// The response file settled.
+    #[serde(default)]
+    pub responded: bool,
+    /// The plan, feedback, and response were copied into the data
+    /// directory at the end of the round.
+    #[serde(default)]
+    pub snapshot: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Verdict {
+    /// The feedback file has points to answer.
+    Changes,
+    /// The reviewer wrote the no-feedback line.
+    Nothing,
+}
+
+/// Where a run stands. The round in question is the last of `rounds`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RunState {
+    /// The reviewer was launched; the planner clone is being made.
+    Starting,
+    /// The reviewer is writing this round's feedback.
+    AwaitingFeedback,
+    /// The planner is writing this round's response.
+    AwaitingResponse,
+    /// The reviewer said nothing further.
+    Converged,
+    /// The cap was reached with feedback still coming.
+    AtCap,
+    /// Stopped by the user or by a failure; the reason is shown.
+    Paused(String),
+    /// The user has reviewed the plan.
+    Finalized,
+    /// The plan went back to the source session.
+    HandedOff,
+}
+
+impl RunState {
+    #[must_use]
+    pub fn label(&self) -> String {
+        match self {
+            Self::Starting => "starting".into(),
+            Self::AwaitingFeedback => "reviewing".into(),
+            Self::AwaitingResponse => "responding".into(),
+            Self::Converged => "converged".into(),
+            Self::AtCap => "at cap".into(),
+            Self::Paused(why) => format!("paused: {why}"),
+            Self::Finalized => "finalized".into(),
+            Self::HandedOff => "handed off".into(),
+        }
+    }
+    /// The run is waiting on an agent.
+    #[must_use]
+    pub fn waiting(&self) -> bool {
+        matches!(self, Self::AwaitingFeedback | Self::AwaitingResponse)
+    }
+}
+
+/// How the finished plan goes back to the source session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum HandoffMode {
+    /// Send the handoff prompt as is.
+    AsIs,
+    /// Send `/compact` first, then the prompt.
+    Compact,
+    /// A fresh session in the same directory with the prompt.
+    Fresh,
 }
 
 /// Settings for the embedded Prompt Box, kept here rather than in the
@@ -157,6 +434,7 @@ pub enum SavedView {
     /// older `settings.json` still reads.
     WorkingSet,
     Set(SetId),
+    Workflow(WorkflowId),
 }
 
 /// Schema of `views.json`, bumped like [`SCHEMA_VERSION`] when a type
@@ -583,6 +861,8 @@ pub struct Workspace {
     pub project: Project,
     #[serde(default)]
     pub sessions: Vec<SessionRecord>,
+    #[serde(default)]
+    pub workflows: Vec<WorkflowRun>,
 }
 
 impl Workspace {
@@ -592,6 +872,7 @@ impl Workspace {
             schema_version: SCHEMA_VERSION,
             project,
             sessions: Vec::new(),
+            workflows: Vec::new(),
         }
     }
 }

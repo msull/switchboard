@@ -3135,3 +3135,585 @@ fn working_set_loads_and_is_pruned_and_the_view_is_restored() {
     let (core, _) = load(SavedView::Set(crate::core::SetId::new()));
     assert_eq!(core.view(), View::Switchboard);
 }
+
+// --- workflows: the plan review loop
+
+mod workflow {
+    use super::*;
+    use crate::core::model::{
+        BUILTIN_WORKFLOW, HandoffMode, RunState, Verdict, WorkflowDefinition, WorkflowId,
+    };
+    use crate::core::{SETTLE_PROBES, round_paths};
+    use crate::ports::round_files::{FileStamp, Probed};
+
+    const PLAN: &str = "/tmp/proj/docs/plan.md";
+
+    #[allow(clippy::unnecessary_wraps)] // the shape `found` takes
+    fn probed(first_line: &str, version: u64) -> Option<Probed> {
+        Some(Probed {
+            stamp: FileStamp {
+                modified: std::time::UNIX_EPOCH + Duration::from_secs(version),
+                len: version,
+            },
+            first_line: first_line.into(),
+        })
+    }
+
+    fn run_of(core: &AppCore) -> &crate::core::WorkflowRun {
+        core.workflows().next().expect("a run")
+    }
+
+    fn spawn_argv(effects: &[Effect]) -> Vec<String> {
+        effects
+            .iter()
+            .find_map(|e| match e {
+                Effect::Spawn { spec, .. } => spec.command.clone(),
+                _ => None,
+            })
+            .expect("a spawn")
+    }
+
+    fn sent(effects: &[Effect]) -> Vec<(HostId, String)> {
+        effects
+            .iter()
+            .filter_map(|e| match e {
+                Effect::SendInput { host, text } => Some((host.clone(), text.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Settle the awaited file with `first_line`; returns the effects of
+    /// the probe that settled it.
+    fn settle(core: &mut AppCore, run: WorkflowId, first_line: &str, at: u64) -> Vec<Effect> {
+        let path = core.workflow(run).unwrap().awaited_file().unwrap().clone();
+        let mut last = Vec::new();
+        for i in 0..SETTLE_PROBES {
+            last = core.dispatch(
+                AppAction::RoundFileProbed {
+                    run,
+                    path: path.clone(),
+                    found: probed(first_line, 7),
+                },
+                Clock::at(at + u64::from(i)),
+            );
+        }
+        last
+    }
+
+    /// A run past its start: the reviewer spawned (so its pane counts as
+    /// running), the planner cloned, the first feedback awaited.
+    fn started() -> (AppCore, WorkflowId, RecordId, RecordId, RecordId) {
+        let (mut core, source) = resumable_agent();
+        let effects = core.dispatch(
+            AppAction::StartWorkflow {
+                source,
+                plan: PLAN.into(),
+                definition: BUILTIN_WORKFLOW.into(),
+            },
+            Clock::at(100),
+        );
+        let run = run_of(&core).id;
+        let reviewer = run_of(&core).reviewer;
+        assert!(matches!(
+            effects.iter().find(|e| matches!(e, Effect::PrepareLaunch { .. })),
+            Some(Effect::PrepareLaunch { id, kind: AgentKind::Codex, .. }) if *id == reviewer
+        ));
+        assert!(
+            effects
+                .iter()
+                .any(|e| matches!(e, Effect::CloneAllTranscript { run: r, .. } if *r == run))
+        );
+        let effects = core.dispatch(
+            AppAction::LaunchPrepared {
+                id: reviewer,
+                result: Ok(AgentLaunch {
+                    argv: vec!["codex".into()],
+                    env: vec![],
+                    resume: None,
+                }),
+            },
+            Clock::at(110),
+        );
+        let argv = spawn_argv(&effects);
+        assert_eq!(argv[0], "codex");
+        assert!(
+            argv[1].contains("/tmp/proj/docs/plan.feedback-1.md"),
+            "{argv:?}"
+        );
+        assert!(argv[1].contains("No further feedback."), "{argv:?}");
+        core.dispatch(
+            AppAction::Spawned {
+                id: reviewer,
+                result: Ok(()),
+            },
+            Clock::at(120),
+        );
+        // Codex ids are discovered after the spawn; until then the
+        // reviewer is in flight.
+        core.dispatch(
+            AppAction::Discovered {
+                id: reviewer,
+                result: Ok(Some(ResumeHandle::Codex {
+                    rollout_id: "r-1".into(),
+                    transcript: None,
+                })),
+            },
+            Clock::at(125),
+        );
+        core.dispatch(
+            AppAction::WorkflowCloned {
+                run,
+                result: Ok(claude_handle()),
+            },
+            Clock::at(130),
+        );
+        let r = run_of(&core);
+        assert_eq!(r.state, RunState::AwaitingFeedback);
+        let planner = r.planner.expect("planner");
+        assert!(core.session(planner).unwrap().resume.is_some());
+        assert_eq!(core.view(), View::Workflow(run));
+        (core, run, source, reviewer, planner)
+    }
+
+    #[test]
+    fn start_needs_a_clonable_planner_and_an_absolute_plan() {
+        let (mut core, _, ids) = with_records(&[codex()], |_| None);
+        core.dispatch(
+            AppAction::StartWorkflow {
+                source: ids[0],
+                plan: PLAN.into(),
+                definition: BUILTIN_WORKFLOW.into(),
+            },
+            Clock::at(1),
+        );
+        assert_eq!(core.workflows().count(), 0);
+        assert!(core.notices().iter().any(|n| n.is_error));
+        let (mut core, source) = resumable_agent();
+        core.dispatch(
+            AppAction::StartWorkflow {
+                source,
+                plan: "docs/plan.md".into(),
+                definition: BUILTIN_WORKFLOW.into(),
+            },
+            Clock::at(1),
+        );
+        assert_eq!(core.workflows().count(), 0);
+    }
+
+    #[test]
+    fn the_run_probes_once_a_tick_and_ignores_the_missing_file() {
+        let (mut core, run, ..) = started();
+        let (feedback, _) = round_paths(std::path::Path::new(PLAN), 1);
+        let effects = core.dispatch(AppAction::Tick, Clock::at(200));
+        assert_eq!(
+            effects,
+            vec![Effect::ProbeRoundFile {
+                run,
+                path: feedback.clone()
+            }]
+        );
+        core.dispatch(
+            AppAction::RoundFileProbed {
+                run,
+                path: feedback,
+                found: None,
+            },
+            Clock::at(201),
+        );
+        assert_eq!(run_of(&core).state, RunState::AwaitingFeedback);
+    }
+
+    #[test]
+    fn feedback_settles_after_unchanged_probes_and_the_planner_is_resumed_with_the_prompt() {
+        let (mut core, run, _, _, planner) = started();
+        let (feedback, response) = round_paths(std::path::Path::new(PLAN), 1);
+        // A file still being written does not count.
+        for v in 0..2 {
+            core.dispatch(
+                AppAction::RoundFileProbed {
+                    run,
+                    path: feedback.clone(),
+                    found: probed("- item", v),
+                },
+                Clock::at(300 + v),
+            );
+        }
+        assert_eq!(run_of(&core).state, RunState::AwaitingFeedback);
+        let effects = settle(&mut core, run, "- item", 400);
+        let r = run_of(&core);
+        assert_eq!(r.state, RunState::AwaitingResponse);
+        assert_eq!(r.rounds[0].verdict, Some(Verdict::Changes));
+        assert!(effects.iter().any(|e| matches!(
+            e,
+            Effect::SnapshotRound { n: 1, files, note: None, .. } if files.len() == 3
+        )));
+        // The planner is cold, so the prompt rides on its resume.
+        assert!(
+            effects
+                .iter()
+                .any(|e| matches!(e, Effect::CheckTranscript { id, .. } if *id == planner))
+        );
+        core.dispatch(
+            AppAction::TranscriptChecked {
+                id: planner,
+                exists: true,
+            },
+            Clock::at(410),
+        );
+        let effects = core.dispatch(
+            AppAction::LaunchPrepared {
+                id: planner,
+                result: Ok(AgentLaunch {
+                    argv: vec!["claude".into(), "--resume".into(), "x".into()],
+                    env: vec![],
+                    resume: Some(claude_handle()),
+                }),
+            },
+            Clock::at(420),
+        );
+        let argv = spawn_argv(&effects);
+        assert_eq!(argv.len(), 4);
+        assert!(argv[3].contains(&feedback.display().to_string()));
+        assert!(argv[3].contains(&response.display().to_string()));
+        assert!(argv[3].contains("Never mention the reviewer"));
+    }
+
+    #[test]
+    fn a_response_opens_the_next_round_for_the_running_reviewer() {
+        let (mut core, run, _, reviewer, _) = started();
+        settle(&mut core, run, "- item", 400);
+        let effects = settle(&mut core, run, "accepted", 500);
+        let r = run_of(&core);
+        assert_eq!(r.state, RunState::AwaitingFeedback);
+        assert_eq!(r.rounds.len(), 2);
+        assert!(r.rounds[0].responded);
+        let sent = sent(&effects);
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0].0, HostId(reviewer.host_name()));
+        assert!(sent[0].1.contains("plan.response-1.md"), "{}", sent[0].1);
+        assert!(sent[0].1.contains("plan.feedback-2.md"), "{}", sent[0].1);
+    }
+
+    #[test]
+    fn the_no_feedback_line_converges_the_run() {
+        let (mut core, run, ..) = started();
+        let effects = settle(&mut core, run, "  No further feedback.  ", 400);
+        let r = run_of(&core);
+        assert_eq!(r.state, RunState::Converged);
+        assert_eq!(r.rounds[0].verdict, Some(Verdict::Nothing));
+        assert!(
+            effects
+                .iter()
+                .any(|e| matches!(e, Effect::SnapshotRound { .. }))
+        );
+        assert!(sent(&effects).is_empty());
+        core.dispatch(
+            AppAction::RoundSnapshotted {
+                run,
+                n: 1,
+                result: Ok(()),
+            },
+            Clock::at(401),
+        );
+        assert!(run_of(&core).rounds[0].snapshot);
+    }
+
+    #[test]
+    fn the_cap_stops_the_loop_and_continue_runs_one_more_round() {
+        let (mut core, source) = resumable_agent();
+        core.dispatch(AppAction::SetWorkflowRoundCap(1), Clock::at(1));
+        assert_eq!(core.settings().workflow_round_cap, 1);
+        core.dispatch(
+            AppAction::StartWorkflow {
+                source,
+                plan: PLAN.into(),
+                definition: BUILTIN_WORKFLOW.into(),
+            },
+            Clock::at(100),
+        );
+        let run = run_of(&core).id;
+        let reviewer = run_of(&core).reviewer;
+        launch_agent(&mut core, reviewer, None);
+        core.dispatch(
+            AppAction::WorkflowCloned {
+                run,
+                result: Ok(claude_handle()),
+            },
+            Clock::at(130),
+        );
+        settle(&mut core, run, "- item", 400);
+        settle(&mut core, run, "accepted", 500);
+        assert_eq!(run_of(&core).state, RunState::AtCap);
+        let effects = core.dispatch(AppAction::ContinueWorkflow(run), Clock::at(600));
+        let r = run_of(&core);
+        assert_eq!(r.state, RunState::AwaitingFeedback);
+        assert_eq!((r.rounds.len(), r.cap), (2, 2));
+        assert_eq!(sent(&effects).len(), 1);
+    }
+
+    #[test]
+    fn an_exited_agent_pauses_the_run_and_continue_relaunches_it() {
+        let (mut core, run, _, reviewer, _) = started();
+        core.dispatch(
+            AppAction::HostListed(vec![exited(reviewer, Some(1))]),
+            Clock::at(200),
+        );
+        let effects = core.dispatch(AppAction::Tick, Clock::at(201));
+        assert!(matches!(run_of(&core).state, RunState::Paused(ref why) if why.contains("exited")));
+        assert!(
+            effects.is_empty()
+                || !effects
+                    .iter()
+                    .any(|e| matches!(e, Effect::ProbeRoundFile { .. }))
+        );
+        let effects = core.dispatch(AppAction::ContinueWorkflow(run), Clock::at(300));
+        assert_eq!(run_of(&core).state, RunState::AwaitingFeedback);
+        // The dead pane is cleared and the reviewer resumed, with the
+        // first prompt on its command line again.
+        assert!(effects.iter().any(|e| matches!(e, Effect::Kill(_))));
+        assert!(
+            effects
+                .iter()
+                .any(|e| matches!(e, Effect::CheckTranscript { id, .. } if *id == reviewer))
+        );
+        core.dispatch(
+            AppAction::TranscriptChecked {
+                id: reviewer,
+                exists: true,
+            },
+            Clock::at(310),
+        );
+        let effects = core.dispatch(
+            AppAction::LaunchPrepared {
+                id: reviewer,
+                result: Ok(AgentLaunch {
+                    argv: vec!["codex".into(), "resume".into(), "r-1".into()],
+                    env: vec![],
+                    resume: None,
+                }),
+            },
+            Clock::at(320),
+        );
+        let argv = spawn_argv(&effects);
+        assert_eq!(argv.len(), 4);
+        assert!(argv[3].contains("plan.feedback-1.md"), "{argv:?}");
+    }
+
+    #[test]
+    fn pause_by_hand_then_continue_waits_without_re_prompting_a_running_agent() {
+        let (mut core, run, ..) = started();
+        core.dispatch(AppAction::PauseWorkflow(run), Clock::at(200));
+        assert_eq!(
+            run_of(&core).state,
+            RunState::Paused("paused by you".into())
+        );
+        assert!(core.dispatch(AppAction::Tick, Clock::at(201)).is_empty());
+        let effects = core.dispatch(AppAction::ContinueWorkflow(run), Clock::at(300));
+        assert_eq!(run_of(&core).state, RunState::AwaitingFeedback);
+        assert!(sent(&effects).is_empty());
+        assert!(
+            !effects
+                .iter()
+                .any(|e| matches!(e, Effect::PrepareLaunch { .. }))
+        );
+    }
+
+    #[test]
+    fn finalize_clean_up_and_hand_off() {
+        let (mut core, run, source, ..) = started();
+        settle(&mut core, run, "No further feedback.", 400);
+        core.dispatch(AppAction::CleanUpWorkflow(run), Clock::at(410));
+        core.dispatch(AppAction::FinalizeWorkflow(run), Clock::at(420));
+        assert_eq!(run_of(&core).state, RunState::Finalized);
+        let (feedback, response) = round_paths(std::path::Path::new(PLAN), 1);
+        let effects = core.dispatch(AppAction::CleanUpWorkflow(run), Clock::at(430));
+        assert_eq!(
+            effects,
+            vec![Effect::RemoveRoundFiles {
+                run,
+                files: vec![feedback, response]
+            }]
+        );
+        core.dispatch(
+            AppAction::RoundFilesRemoved {
+                run,
+                result: Ok(()),
+            },
+            Clock::at(431),
+        );
+        assert!(run_of(&core).cleaned);
+        // Compact needs a live pane; as-is rides on the resume.
+        core.dispatch(
+            AppAction::HandOffWorkflow {
+                run,
+                mode: HandoffMode::Compact,
+            },
+            Clock::at(440),
+        );
+        assert_eq!(run_of(&core).state, RunState::Finalized);
+        let effects = core.dispatch(
+            AppAction::HandOffWorkflow {
+                run,
+                mode: HandoffMode::AsIs,
+            },
+            Clock::at(450),
+        );
+        assert_eq!(run_of(&core).state, RunState::HandedOff);
+        assert!(
+            effects
+                .iter()
+                .any(|e| matches!(e, Effect::CheckTranscript { id, .. } if *id == source))
+        );
+        assert_eq!(core.view(), View::Session(source));
+        core.dispatch(
+            AppAction::TranscriptChecked {
+                id: source,
+                exists: true,
+            },
+            Clock::at(460),
+        );
+        let effects = core.dispatch(
+            AppAction::LaunchPrepared {
+                id: source,
+                result: Ok(AgentLaunch {
+                    argv: vec!["claude".into()],
+                    env: vec![],
+                    resume: Some(claude_handle()),
+                }),
+            },
+            Clock::at(470),
+        );
+        let argv = spawn_argv(&effects);
+        assert!(argv[1].contains("Enter plan mode"), "{argv:?}");
+    }
+
+    #[test]
+    fn compact_hand_off_sends_the_command_then_the_prompt() {
+        let (mut core, run, source, ..) = started();
+        settle(&mut core, run, "No further feedback.", 400);
+        core.dispatch(AppAction::HostListed(vec![running(source)]), Clock::at(410));
+        let effects = core.dispatch(
+            AppAction::HandOffWorkflow {
+                run,
+                mode: HandoffMode::Compact,
+            },
+            Clock::at(420),
+        );
+        let sent = sent(&effects);
+        assert_eq!(sent.len(), 2);
+        assert_eq!(sent[0].1, "/compact");
+        assert!(sent[1].1.contains(PLAN));
+    }
+
+    #[test]
+    fn fresh_hand_off_launches_a_new_session_with_the_prompt() {
+        let (mut core, run, source, ..) = started();
+        settle(&mut core, run, "No further feedback.", 400);
+        let before = core.all_sessions_sorted().len();
+        let effects = core.dispatch(
+            AppAction::HandOffWorkflow {
+                run,
+                mode: HandoffMode::Fresh,
+            },
+            Clock::at(420),
+        );
+        assert_eq!(core.all_sessions_sorted().len(), before + 1);
+        let fresh = effects
+            .iter()
+            .find_map(|e| match e {
+                Effect::PrepareLaunch { id, .. } => Some(*id),
+                _ => None,
+            })
+            .expect("launch");
+        assert_ne!(fresh, source);
+        assert!(core.session(fresh).unwrap().name.ends_with("implement"));
+    }
+
+    #[test]
+    fn the_users_own_feedback_is_a_round_for_the_planner_only() {
+        let (mut core, run, _, _, planner) = started();
+        settle(&mut core, run, "No further feedback.", 400);
+        core.dispatch(
+            AppAction::HostListed(vec![running(planner)]),
+            Clock::at(410),
+        );
+        let effects = core.dispatch(
+            AppAction::UserFeedback {
+                run,
+                text: "  Split step 3.  ".into(),
+            },
+            Clock::at(420),
+        );
+        let r = run_of(&core);
+        assert_eq!(r.state, RunState::AwaitingResponse);
+        assert_eq!(r.rounds.len(), 2);
+        assert_eq!(r.rounds[1].user_feedback.as_deref(), Some("Split step 3."));
+        let sent = sent(&effects);
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0].0, HostId(planner.host_name()));
+        assert!(sent[0].1.contains("Split step 3."));
+        assert!(sent[0].1.contains("plan.response-2.md"));
+        let effects = settle(&mut core, run, "ok", 500);
+        assert_eq!(run_of(&core).state, RunState::Converged);
+        assert!(effects.iter().any(|e| matches!(
+            e,
+            Effect::SnapshotRound { n: 2, note: Some(t), .. } if t == "Split step 3."
+        )));
+    }
+
+    #[test]
+    fn a_loaded_run_keeps_waiting_and_removal_leaves_its_sessions() {
+        let (mut core, run, _, reviewer, planner) = started();
+        let workspace = core.workspaces()[0].clone();
+        let (mut fresh, _) = loaded(vec![workspace], vec![]);
+        let effects = fresh.dispatch(AppAction::Tick, Clock::at(5));
+        assert!(
+            effects
+                .iter()
+                .any(|e| matches!(e, Effect::ProbeRoundFile { run: r, .. } if *r == run))
+        );
+        fresh.dispatch(AppAction::RemoveWorkflow(run), Clock::at(6));
+        assert_eq!(fresh.workflows().count(), 1, "a waiting run is not removed");
+        fresh.dispatch(AppAction::PauseWorkflow(run), Clock::at(7));
+        let effects = fresh.dispatch(AppAction::RemoveWorkflow(run), Clock::at(8));
+        assert_eq!(fresh.workflows().count(), 0);
+        assert_eq!(saves(&effects), 1);
+        assert!(fresh.session(reviewer).is_some() && fresh.session(planner).is_some());
+        let _ = &mut core;
+    }
+
+    #[test]
+    fn definitions_are_the_builtin_or_the_users_copy() {
+        let mut settings = Settings::default();
+        assert_eq!(settings.workflow("nope"), None);
+        let builtin = settings.workflow(BUILTIN_WORKFLOW).unwrap();
+        assert_eq!(builtin, WorkflowDefinition::default());
+        let mine = WorkflowDefinition {
+            name: BUILTIN_WORKFLOW.into(),
+            cap: Some(9),
+            ..WorkflowDefinition::default()
+        };
+        settings.workflows.push(mine.clone());
+        assert_eq!(settings.workflow(BUILTIN_WORKFLOW), Some(mine));
+        let round = crate::core::Round {
+            n: 2,
+            feedback: "/p/plan.feedback-2.md".into(),
+            response: "/p/plan.response-2.md".into(),
+            verdict: None,
+            user_feedback: None,
+            responded: false,
+            snapshot: false,
+        };
+        let text = builtin.render(
+            "{plan} {feedback} {response} {round}/{cap} {no_feedback}",
+            &round,
+            std::path::Path::new("/p/plan.md"),
+            4,
+        );
+        assert_eq!(
+            text,
+            "/p/plan.md /p/plan.feedback-2.md /p/plan.response-2.md 2/4 No further feedback."
+        );
+    }
+}

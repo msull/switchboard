@@ -103,9 +103,14 @@ fn top(cx: &mut DrawCtx<'_>, ui: &mut Ui, view: &View, compact: bool) {
 
     match view {
         View::Session(id) => session_neighbours(cx, ui, *id, compact),
-        View::Switchboard | View::Board(_) | View::Document(..) | View::WorkingSet(_) => {
+        View::Switchboard
+        | View::Board(_)
+        | View::Document(..)
+        | View::WorkingSet(_)
+        | View::Workflow(_) => {
             let active = match view {
                 View::Board(pid) | View::Document(pid, _) => Some(*pid),
+                View::Workflow(id) => cx.core.workflow(*id).map(|r| r.project),
                 View::Switchboard | View::Session(_) | View::WorkingSet(_) => None,
             };
             ui.add_space(12.0);
