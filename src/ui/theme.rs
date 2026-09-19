@@ -100,10 +100,13 @@ pub const DARK: Palette = Palette {
     code_text: rgb(0xf8f4f4),
 };
 
-/// The palette of the theme `ui` is drawing in.
+/// The palette of the theme the window is drawing in. Read from the
+/// context, not the `Ui`'s visuals: a scope can flip `dark_mode` for one
+/// widget (the Markdown body does, for its code highlighter) and must
+/// not drag every color drawn inside it to the other theme.
 #[must_use]
 pub fn palette(ui: &Ui) -> &'static Palette {
-    if ui.visuals().dark_mode {
+    if ui.ctx().theme() == egui::Theme::Dark {
         &DARK
     } else {
         &LIGHT
