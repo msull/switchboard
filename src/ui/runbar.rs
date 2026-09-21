@@ -26,67 +26,31 @@ pub fn show(cx: &mut DrawCtx<'_>, ui: &mut Ui, pid: ProjectId, open_side: bool) 
             let state = core.card_state(record.id);
             let running = is_running(core, record.id);
             let service = record.kind == SessionKind::Service;
-            let glyph = if service { "•" } else { "▶" };
-            let mut text =
-                RichText::new(format!("{glyph} {}", record.name)).text_style(theme::meta());
             let command = match &record.launch {
                 Launch::Command { command, .. } => command.clone(),
                 Launch::Shell | Launch::Argv(_) => String::new(),
             };
-            // The last line of output rides along on the hover, live while
-            // it runs and kept after it finished, with the exit state.
-            let last_line = cx
-                .state
-                .captions
-                .get(&record.id)
-                .map(|c| format!("\n{c}"))
-                .unwrap_or_default();
-            let state_text = core.state_text(record.id);
-            let (hover, action) = if !record.runnable() {
-                text = text.color(p.n500);
-                (
-                    format!("{command}\nNot approved yet: opens the Run tab"),
-                    None,
-                )
-            } else if service && running {
-                text = text.color(p.state_text(&state));
-                (
-                    format!("{command}\nRunning: click to stop"),
-                    Some(AppAction::KillSession(record.id)),
-                )
+            let last = super::runs::kicker(record, running, std::time::SystemTime::now());
+            // The name opens the entry's page; the glyph beside it is the
+            // one thing here that starts or stops a run.
+            let mut name = RichText::new(&record.name).text_style(theme::meta());
+            if !record.runnable() {
+                name = name.color(p.n500);
             } else if running {
-                text = text.color(p.state_text(&state));
-                // A command ends on its own, so a running one gets a
-                // spinner and its latest line right here, where it can be
-                // watched without the Run tab; a service is just on.
-                if !service {
-                    ui.add(egui::Spinner::new().size(ui.text_style_height(&egui::TextStyle::Body)));
-                    if let Some(line) = cx.state.captions.get(&record.id) {
-                        ui.add(egui::Label::new(theme::mono_text(ui, line)).truncate());
-                    }
-                }
-                (
-                    format!("{command}\nRunning: click to show{last_line}"),
-                    Some(AppAction::ShowSession(record.id)),
-                )
-            } else if service {
-                (
-                    format!("{command}\nClick to start{last_line}"),
-                    Some(AppAction::RestartSession(record.id)),
-                )
-            } else {
-                (
-                    format!("{command}\n{state_text}: click to run again{last_line}"),
-                    Some(AppAction::RestartSession(record.id)),
-                )
-            };
-            if ui
-                .add(egui::Button::new(text).frame_when_inactive(false))
-                .on_hover_text(hover)
-                .clicked()
-            {
-                if let Some(action) = action {
-                    cx.dispatch(action);
+                name = name.color(p.state_text(&state));
+            }
+            let name_button = ui
+                .add(egui::Button::new(name).frame_when_inactive(false))
+                .on_hover_text(format!("{command}\n{last}\nOpen: runs and output"));
+            // Screen readers and tests tell the two buttons apart by
+            // what they do, not by the glyph.
+            ui.ctx().accesskit_node_builder(name_button.id, |node| {
+                node.set_label(format!("Open {}", record.name));
+            });
+            let opened = name_button.clicked();
+            if opened {
+                if record.runnable() {
+                    cx.dispatch(AppAction::ShowSession(record.id));
                 } else {
                     cx.dispatch(AppAction::SetSideTab(SideTab::Run));
                     if open_side && !core.settings().files_open {
@@ -94,6 +58,50 @@ pub fn show(cx: &mut DrawCtx<'_>, ui: &mut Ui, pid: ProjectId, open_side: bool) 
                     }
                 }
             }
+            let (glyph, hint, action) = if running {
+                ("■", "Stop", Some(AppAction::KillSession(record.id)))
+            } else if !record.runnable() {
+                ("▶", "Not approved yet: open it on the Run tab", None)
+            } else if service {
+                ("▶", "Start", Some(AppAction::RestartSession(record.id)))
+            } else {
+                ("▶", "Run", Some(AppAction::RestartSession(record.id)))
+            };
+            let glyph_text =
+                RichText::new(glyph)
+                    .text_style(theme::meta())
+                    .color(if action.is_some() {
+                        p.accent_text
+                    } else {
+                        p.n500
+                    });
+            let glyph_button = ui
+                .add(egui::Button::new(glyph_text).frame_when_inactive(false))
+                .on_hover_text(hint);
+            let verb = if running {
+                "Stop"
+            } else if service {
+                "Start"
+            } else {
+                "Run"
+            };
+            ui.ctx().accesskit_node_builder(glyph_button.id, |node| {
+                node.set_label(format!("{verb} {}", record.name));
+            });
+            if glyph_button.clicked()
+                && let Some(action) = action
+            {
+                cx.dispatch(action);
+            }
+            // A command ends on its own, so a running one gets a spinner
+            // and its latest line right here; a service is just on.
+            if running && !service {
+                ui.add(egui::Spinner::new().size(ui.text_style_height(&egui::TextStyle::Body)));
+                if let Some(line) = cx.state.captions.get(&record.id) {
+                    ui.add(egui::Label::new(theme::mono_text(ui, line)).truncate());
+                }
+            }
+            ui.add_space(6.0);
         }
     });
 }

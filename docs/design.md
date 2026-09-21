@@ -1125,6 +1125,41 @@ discard undo, and says so in a notice; the shell drops the cached
 conversation when a handle changes under an event. The old transcript
 stays on disk.
 
+## Commands as runs (2026-09-21)
+
+A command used to be one pane and one scrollback file, so two runs
+blurred together and nothing said when a run happened or how it ended.
+Now every launch of a command or service opens a `Run` on the record
+(number, start time, log path) and the host poll that sees the pane
+exit closes it with the exit code and the end time; a pane found gone
+closes it without a code. Each run has its own log,
+`scrollback/<host>-r<n>.vt`, and the last twenty runs are kept with
+their logs. Cards show the last run's verdict as the kicker (`ok · 1.2 s
+· 3m ago`, `exit 2 · …`, `running · 12 s`, `never run`) and keep its
+output on the card after it finishes; the command's page lists the runs
+on the left with the chosen run's log or live pane in the middle.
+
+Outputs are declared, never guessed: a command's `output` in
+`project.json` (or the Output files field of the New session dialog) is
+a glob or a list of globs relative to the command's directory. When a
+run closes, the files matching those patterns that were modified during
+the run become the run's artifacts. They appear as chips on the card
+and in a Files column on the page; a Markdown file renders in place, a
+PDF's first page is rasterized by Quick Look (`qlmanage`) into
+`renders/` on a thread and shown on the card and the page, and anything
+can be opened in its app or revealed. The artifact list is capped at
+fifty per run and the finder is a port so the core never touches the
+disk.
+
+One vocabulary everywhere a command appears: its name opens its page
+(or the Run tab when it is not yet approved), `▶ Run` or `▶ Start` runs
+it, `Stop` stops it. Board card, working-set card, run bar, Run tab,
+and the page header all use these three.
+
+Known gaps: only a PDF's first page is shown; a service's run closes
+only when its pane exits, so a long-lived service is one run until it
+is stopped.
+
 ## Open questions
 
 - Shared project config runs with a hash-and-approve flow and no

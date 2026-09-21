@@ -23,6 +23,7 @@ pub mod prompt_box;
 mod rail;
 mod run;
 mod runbar;
+pub mod runs;
 mod session;
 mod switchboard;
 mod switcher;
@@ -98,6 +99,15 @@ pub struct UiState {
     pub review_views: workflow::ReviewViews,
     /// The review whose cleanup awaits confirmation.
     pub confirm_cleanup: Option<WorkflowId>,
+    /// Run logs read from disk, by record and run, with the file time
+    /// they were read at.
+    pub run_logs: HashMap<(RecordId, u32), (Option<SystemTime>, String)>,
+    /// The run a command's page shows; the latest when unset.
+    pub run_selected: HashMap<RecordId, u32>,
+    /// What a command's card body shows: its output or one artifact.
+    pub run_modes: HashMap<RecordId, runs::RunCardMode>,
+    /// PDF pages rasterized for preview, by file.
+    pub pdf_renders: HashMap<PathBuf, document::PdfRender>,
     /// One message shown unformatted in a dialog ("View raw"), while
     /// open. The way to read a message whose Markdown renders badly.
     pub raw_message: Option<String>,
@@ -161,6 +171,10 @@ impl Default for UiState {
             review_dialog: None,
             review_views: HashMap::new(),
             confirm_cleanup: None,
+            run_logs: HashMap::new(),
+            run_selected: HashMap::new(),
+            run_modes: HashMap::new(),
+            pdf_renders: HashMap::new(),
             raw_message: None,
             message_view: dialogs::MessageView::Rendered,
             working_set_columns: 24,

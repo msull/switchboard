@@ -19,7 +19,7 @@ use crate::ports::transcript::Conversation;
 pub const MIN_CARD_WIDTH: f32 = 230.0;
 /// Agent and shell cards; command and service cards are shorter.
 pub const SESSION_CARD_HEIGHT: f32 = 172.0;
-pub const ENTRY_CARD_HEIGHT: f32 = 150.0;
+pub const ENTRY_CARD_HEIGHT: f32 = 184.0;
 const GRID_GAP: f32 = 14.0;
 
 #[must_use]
@@ -152,7 +152,15 @@ pub fn session_card(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord) {
             .or_else(|| cx.core.host_status(record.id).and_then(|h| h.title.clone()))
     };
     let model = conversation.and_then(|c| c.model.clone());
-    let kicker = kicker_text(cx.core, record, &state, running);
+    let kicker = if entry {
+        format!(
+            "{} · {}",
+            kind_label(record.kind),
+            super::runs::kicker(record, running, SystemTime::now())
+        )
+    } else {
+        kicker_text(cx.core, record, &state, running)
+    };
     let reason = (state == CardState::WaitingOnYou)
         .then(|| record.activity_reason.clone())
         .flatten();
@@ -200,7 +208,11 @@ pub fn session_card(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord) {
                 ui.close();
             }
         });
-        card_body(ui, record, entry, model, reason, caption.as_deref());
+        if entry {
+            super::runs::card_body(cx, ui, record);
+        } else {
+            card_body(ui, record, entry, model, reason, caption.as_deref());
+        }
         if !running && !entry && state == CardState::NotResumable {
             ui.label(
                 RichText::new("not resumable")
@@ -299,7 +311,6 @@ pub(super) fn actions(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord,
         ui.spacing_mut().item_spacing.x = 14.0;
         ui.spacing_mut().button_padding = vec2(0.0, 4.0);
         let id = record.id;
-        let runnable = record.runnable();
         match record.kind {
             SessionKind::Agent(_) | SessionKind::Shell => {
                 if running {
@@ -318,42 +329,8 @@ pub(super) fn actions(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord,
                     }
                 }
             }
-            SessionKind::Command => {
-                if ui
-                    .add_enabled_ui(runnable && !running, |ui| theme::ghost(ui, "Run now"))
-                    .inner
-                    .on_hover_text("Run it again; the last output is kept until then")
-                    .clicked()
-                {
-                    cx.dispatch(AppAction::RestartSession(id));
-                }
-                if theme::ghost(ui, "Show").clicked() {
-                    cx.dispatch(AppAction::ShowSession(id));
-                }
-                if !running && removable(record) && theme::ghost_muted(ui, "Remove").clicked() {
-                    cx.dispatch(AppAction::RemoveSession(id));
-                }
-            }
-            SessionKind::Service => {
-                if theme::ghost(ui, "Show").clicked() {
-                    cx.dispatch(AppAction::ShowSession(id));
-                }
-                if running {
-                    if theme::ghost_muted(ui, "Stop").clicked() {
-                        cx.dispatch(AppAction::KillSession(id));
-                    }
-                } else {
-                    if ui
-                        .add_enabled_ui(runnable, |ui| theme::ghost(ui, "Start"))
-                        .inner
-                        .clicked()
-                    {
-                        cx.dispatch(AppAction::RestartSession(id));
-                    }
-                    if removable(record) && theme::ghost_muted(ui, "Remove").clicked() {
-                        cx.dispatch(AppAction::RemoveSession(id));
-                    }
-                }
+            SessionKind::Command | SessionKind::Service => {
+                super::runs::actions(cx, ui, record, running);
             }
         }
     });
@@ -361,7 +338,7 @@ pub(super) fn actions(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord,
 
 /// A live defined entry would come back on the next read, so Remove is
 /// for the user's own records and orphans only.
-fn removable(record: &SessionRecord) -> bool {
+pub(super) fn removable(record: &SessionRecord) -> bool {
     matches!(
         record.approval(),
         Approval::NotApplicable | Approval::Orphaned

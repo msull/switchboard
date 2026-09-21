@@ -40,8 +40,10 @@ files are on it, and where each card sits on its grid, with a `.bak`),
 the
 tmux config and socket name, `claude-hooks.json` (passed to Claude Code
 with `--settings`), `events.log` (the hook event log), `wake.sock`, and
-`scrollback/`, and `workflows/<run>/round-<n>/` (copies of the plan,
-feedback, and response at the end of each review round). Sessions run
+`scrollback/` (one `<host>-r<n>.vt` per run of a command or service,
+the last 20 runs kept), `renders/` (first pages of PDFs shown on cards,
+rasterized by Quick Look), and `workflows/<run>/round-<n>/` (copies of
+the plan, feedback, and response at the end of each review round). Sessions run
 on a private tmux server (`tmux -L switchboard`), never on your default
 one. Nothing is written into a project directory except what the Config
 editor saves on your click.
@@ -57,7 +59,8 @@ can set them up for you:
   "version": 1,
   "commands": [
     { "name": "rebundle", "command": "./scripts/bundle.sh" },
-    { "name": "lint", "command": "cargo clippy", "cwd": "crates/app", "env": ["RUSTFLAGS"] }
+    { "name": "lint", "command": "cargo clippy", "cwd": "crates/app", "env": ["RUSTFLAGS"] },
+    { "name": "report", "command": "make report", "output": ["out/report.pdf", "out/*.md"] }
   ],
   "services": [
     { "name": "web", "command": "npm run dev", "autostart": true }
@@ -75,7 +78,11 @@ paths without `..`; others are skipped with a warning.
 Names are 1 to 64 characters and unique across both lists; `cwd` is
 relative to the project root and may not use `..`; `env` lists the
 variable names the command expects (values come from the project's
-environment, never from this file). An entry with an unknown field or
+environment, never from this file); `output` is a glob pattern or a
+list of them, relative to the command's directory, naming the files a
+run produces: those written during the run are listed on the command's
+card and page afterwards, with a Markdown or PDF file shown in place.
+An entry with an unknown field or
 a bad value is skipped with a warning that names it; the rest still
 load. The file is limited to 64 KiB and must not be a symlink.
 
@@ -122,7 +129,7 @@ Dev aids, all environment variables:
   `rename-working-set`, `delete-working-set`, `add-to-working-set`,
   `add-file-to-working-set`, `arrange`, `show-message`, `clone-session`,
   `discard-to`, `undo-discard`, `review-plan`, `show-review`,
-  `review-file`, `review-continue`, `review-finalize`,
+  `review-file`, `review-continue`, `review-finalize`, `show-artifact`,
   `open-terminal`, `prompt-box`, `theme`, `sleep`).
 - `SWITCHBOARD_TMUX=<path>`: tmux binary to use.
 - `RUST_LOG=switchboard=debug`: verbose logging.
@@ -150,7 +157,7 @@ src/core/
   events.rs              hook events -> record activity (matched by record id, ordered by time)
   workflow.rs            plan review runs: reviewer and planner rounds as a state machine over records
   tests.rs               state-transition tests for the core
-src/ports/               traits: store, host, events, agent, opener, transcript, secrets, project_config, round_files
+src/ports/               traits: store, host, events, agent, opener, transcript, secrets, project_config, round_files, artifacts
 src/adapters/
   store.rs               JSON store: atomic writes, .bak, flock
   tmux.rs                tmux process host on the private socket
@@ -163,6 +170,7 @@ src/adapters/
   project_config.rs      reads and validates .switchboard/project.json (capped, no symlinks)
   round_files.rs         a workflow's round files on disk: probe, snapshot into the data dir, delete
   scrollback.rs          read the pipe-pane stream back as plain text (cold sessions)
+  artifacts.rs           a run's declared outputs: glob under the cwd, modified since the run began
   agents.rs              Claude Code / Codex launch, resume, preflight, discovery
   transcript.rs          Claude Code transcript (JSONL) -> Conversation turns
   ghostty.rs             open, reveal, Ghostty window launch and raise
@@ -177,10 +185,11 @@ src/ui/
   switcher.rs            Settings menu and the toasts (notice, host error)
   board.rs               one project's board: run bar, agent and shell cards, command and service rows, pinned documents, notes
   files.rs               Files tab of the side panel: lazy tree, fuzzy finder, bottom preview pane, right-click hand-offs
-  run.rs                 Run tab of the side panel: commands and services, definitions, approval, last output
+  run.rs                 Run tab of the side panel: commands and services, definitions, approval, last run
+  runs.rs                a command or service as runs: the kicker (exit, duration, when), the card body with output or an artifact, the page with run history
   notes.rs               Notes tab of the side panel: the session's notes, edited in place
   runbar.rs              one button per command and service, under the board strip and the session header
-  document.rs            read-only preview: Markdown, text, images; full view and the side pane's body
+  document.rs            read-only preview: Markdown, text, images, a PDF's first page; full view and the side pane's body
   markdown.rs            Markdown: prose through egui_commonmark, tables laid out here with content-sized columns
   palette.rs             quick-switcher (Cmd+K) over projects and sessions
   env.rs                 Environment dialog: variables, secrets, .env opt-in, masked preview

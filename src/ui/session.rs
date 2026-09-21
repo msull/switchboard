@@ -104,9 +104,8 @@ pub fn show(cx: &mut DrawCtx<'_>, ui: &mut Ui, id: RecordId) {
     header(cx, ui, &record);
     match record.kind {
         SessionKind::Agent(_) => agent_body(cx, ui, &record),
-        SessionKind::Shell | SessionKind::Command | SessionKind::Service => {
-            terminal_body(cx, ui, &record);
-        }
+        SessionKind::Shell => terminal_body(cx, ui, &record),
+        SessionKind::Command | SessionKind::Service => super::runs::page(cx, ui, &record),
     }
 }
 
@@ -248,9 +247,24 @@ fn header_actions(
     } else {
         "Return"
     };
+    let entry = matches!(record.kind, SessionKind::Command | SessionKind::Service);
     let mut order = vec![open, "Restart", "Kill", "Working sets", "Back"];
     if agent {
         order.retain(|b| *b != "Restart");
+    }
+    // A command's page speaks the card's language: ▶ Run (or Start) and
+    // Stop, never Return or Restart, which read as something else.
+    if entry {
+        let run = if record.kind == SessionKind::Service {
+            "▶ Start"
+        } else {
+            "▶ Run"
+        };
+        order = if running {
+            vec!["Stop", "Working sets", "Back"]
+        } else {
+            vec![run, "Working sets", "Back"]
+        };
     }
     // A plan review clones the conversation, so only a Claude Code
     // session with one to clone can start it.
@@ -295,18 +309,25 @@ fn header_actions(
             "Review plan" => theme::ghost(ui, button).on_hover_text(
                 "Have a fresh reviewer and a clone of this session revise a plan it wrote",
             ),
+            "Stop" => theme::ghost_muted(ui, button).on_hover_text("Kill the process"),
+            "▶ Run" | "▶ Start" => ui
+                .add_enabled_ui(record.runnable(), |ui| theme::secondary(ui, button))
+                .inner
+                .on_hover_text("Run it now; every run keeps its own output"),
             _ => theme::secondary(ui, button),
         };
         if !response.clicked() {
             continue;
         }
         match button {
-            "Restart" => cx.dispatch(AppAction::RestartSession(record.id)),
+            "Restart" | "▶ Run" | "▶ Start" => {
+                cx.dispatch(AppAction::RestartSession(record.id));
+            }
             "Review plan" => {
                 let draft = super::workflow::ReviewDraft::open(cx, record.id);
                 cx.state.review_dialog = Some(draft);
             }
-            "Kill" => cx.dispatch(AppAction::KillSession(record.id)),
+            "Kill" | "Stop" => cx.dispatch(AppAction::KillSession(record.id)),
             "Undo discard" => cx.dispatch(AppAction::UndoDiscard(record.id)),
             "Back" => cx.dispatch(AppAction::Back),
             _ => cx.dispatch(AppAction::ReturnToSession(record.id)),
@@ -1148,7 +1169,7 @@ fn tool_detail(ui: &mut Ui, detail: &ToolDetail, salt: (usize, usize)) {
 
 /// Read-only monospace text, selectable: the dark code block of the
 /// design on both themes.
-pub(super) fn code_block(ui: &mut Ui, text: &str) {
+pub fn code_block(ui: &mut Ui, text: &str) {
     let p = theme::palette(ui);
     // A read-only `TextEdit` paints no background of its own, so the
     // dark fill comes from an explicit frame.
@@ -1179,6 +1200,11 @@ fn terminal_body(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord) {
         }
         return;
     }
+    live_pane(cx, ui, record);
+}
+
+/// The embedded terminal attached to the record's running pane.
+pub(super) fn live_pane(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord) {
     if !cx.state.embed_terminals {
         ui.label(RichText::new("Embedded terminal disabled.").weak());
         return;

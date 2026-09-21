@@ -35,6 +35,8 @@ pub enum Body {
     Text(String),
     /// Raw bytes of a PNG, JPEG, GIF, or WebP; egui decodes them.
     Image(Vec<u8>),
+    /// A PDF: its first page is rasterized on demand (`pdf_page`).
+    Pdf,
     Binary,
     TooLarge,
     Missing(String),
@@ -87,6 +89,9 @@ fn body_of(path: &Path, bytes: Vec<u8>) -> Body {
         Some("png" | "jpg" | "jpeg" | "gif" | "webp")
     ) {
         return Body::Image(bytes);
+    }
+    if ext.as_deref() == Some("pdf") {
+        return Body::Pdf;
     }
     let Ok(text) = String::from_utf8(bytes) else {
         return Body::Binary;
@@ -187,6 +192,105 @@ pub fn body(state: &mut UiState, ui: &mut Ui) {
     draw_body(preview, markdown, ui);
 }
 
+/// A file drawn wherever a state is at hand: loaded through the preview
+/// cache, with a PDF's first page rasterized into `renders`.
+pub fn show_file(state: &mut UiState, ui: &mut Ui, path: &Path, renders: &Path) {
+    let slot = state.previews.entry(path.to_path_buf()).or_insert(None);
+    ensure_in(slot, path);
+    let is_pdf = slot.as_ref().is_some_and(|p| p.body == Body::Pdf);
+    if is_pdf {
+        pdf_page(state, ui, path, renders);
+        return;
+    }
+    let UiState {
+        previews, markdown, ..
+    } = state;
+    if let Some(preview) = previews.get(path).and_then(Option::as_ref) {
+        draw_body(preview, markdown, ui);
+    }
+}
+
+/// A PDF page being rasterized, or done.
+#[derive(Debug)]
+pub enum PdfRender {
+    Pending(std::sync::mpsc::Receiver<Result<Vec<u8>, String>>),
+    Ready(Vec<u8>),
+    Failed(String),
+}
+
+/// Pixels across the rendered page.
+const PDF_RENDER_SIZE: u32 = 1400;
+
+/// The first page of the PDF at `path` as an image, rasterized once on
+/// a thread by the system's Quick Look (`qlmanage`) into `renders` and
+/// kept in memory after. Until then, a spinner.
+pub fn pdf_page(state: &mut UiState, ui: &mut Ui, path: &Path, renders: &Path) {
+    let entry = state
+        .pdf_renders
+        .entry(path.to_path_buf())
+        .or_insert_with(|| PdfRender::Pending(rasterize(path, renders)));
+    if let PdfRender::Pending(rx) = entry
+        && let Ok(result) = rx.try_recv()
+    {
+        *entry = match result {
+            Ok(bytes) => PdfRender::Ready(bytes),
+            Err(e) => PdfRender::Failed(e),
+        };
+    }
+    match entry {
+        PdfRender::Pending(_) => {
+            ui.spinner();
+            ui.ctx().request_repaint_after(Duration::from_millis(200));
+        }
+        PdfRender::Ready(bytes) => {
+            let uri = format!("bytes://pdf-{}", path.display());
+            ui.add(
+                egui::Image::from_bytes(uri, bytes.clone())
+                    .max_width(ui.available_width())
+                    .fit_to_original_size(1.0),
+            );
+        }
+        PdfRender::Failed(e) => weak(ui, &format!("Cannot render this PDF: {e}")),
+    }
+}
+
+/// Start the rasterization; the receiver gets the PNG bytes.
+fn rasterize(path: &Path, renders: &Path) -> std::sync::mpsc::Receiver<Result<Vec<u8>, String>> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let (path, renders) = (path.to_path_buf(), renders.to_path_buf());
+    std::thread::spawn(move || {
+        let _ = tx.send(rasterize_now(&path, &renders));
+    });
+    rx
+}
+
+fn rasterize_now(path: &Path, renders: &Path) -> Result<Vec<u8>, String> {
+    std::fs::create_dir_all(renders).map_err(|e| format!("{}: {e}", renders.display()))?;
+    let status = std::process::Command::new("qlmanage")
+        .arg("-t")
+        .arg("-s")
+        .arg(PDF_RENDER_SIZE.to_string())
+        .arg("-o")
+        .arg(renders)
+        .arg(path)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map_err(|e| format!("qlmanage: {e}"))?;
+    if !status.success() {
+        return Err(format!("qlmanage exited with {status}"));
+    }
+    let name = path
+        .file_name()
+        .ok_or_else(|| "no file name".to_owned())?
+        .to_string_lossy()
+        .to_string();
+    let png = renders.join(format!("{name}.png"));
+    let bytes = std::fs::read(&png).map_err(|e| format!("{}: {e}", png.display()))?;
+    let _ = std::fs::remove_file(&png);
+    Ok(bytes)
+}
+
 /// Draw one loaded preview's contents.
 pub fn draw_body(preview: &Preview, markdown: &mut egui_commonmark::CommonMarkCache, ui: &mut Ui) {
     match &preview.body {
@@ -213,6 +317,7 @@ pub fn draw_body(preview: &Preview, markdown: &mut egui_commonmark::CommonMarkCa
                     .fit_to_original_size(1.0),
             );
         }
+        Body::Pdf => weak(ui, "PDF; its page shows where a card can render it."),
         Body::Binary => weak(ui, "Binary file; open it in another app."),
         Body::TooLarge => weak(ui, "Too large to preview; open it in another app."),
         Body::Missing(why) => weak(ui, &format!("Cannot read this file: {why}")),

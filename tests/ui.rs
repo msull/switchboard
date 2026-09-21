@@ -366,10 +366,11 @@ fn board_separates_commands_and_services_from_sessions() {
     showing(&mut harness, View::Board(ids.alpha));
     harness.get_by_label("AGENTS AND SHELLS");
     harness.get_by_label("COMMANDS AND SERVICES");
-    // The shell is a card with Open and Kill; the command is a card whose
-    // Show button opens it.
-    harness.get_by_role_and_label(Role::Button, "Open");
-    harness.get_all_by_label("Show").next().unwrap().click();
+    // The shell is a card with Open and Kill; a command's card has Open
+    // too (its page), and ▶ Run is the only thing that runs it.
+    assert!(harness.get_all_by_label("Open").count() >= 2);
+    harness.get_all_by_label("▶ Run").next().unwrap();
+    harness.get_all_by_label("Open").nth(1).unwrap().click();
     harness.run_steps(2);
     let dispatched = actions(&harness);
     assert!(matches!(
@@ -382,20 +383,30 @@ fn board_separates_commands_and_services_from_sessions() {
 fn run_bar_runs_commands_and_toggles_services() {
     let (mut harness, ids) = harness();
     showing(&mut harness, View::Session(ids.server));
-    click(&mut harness, "▶ build");
-    click(&mut harness, "• deploy");
-    click(&mut harness, "▶ lint");
+    // The glyph runs or starts; the name opens.
+    click(&mut harness, "Run build");
+    click(&mut harness, "Start deploy");
+    click(&mut harness, "Open lint");
     let dispatched = actions(&harness);
     assert!(dispatched.contains(&AppAction::RestartSession(ids.build)));
     assert!(dispatched.contains(&AppAction::RestartSession(ids.deploy)));
-    // Unapproved: the bar opens the Run tab instead of running it.
+    // Unapproved: the bar opens the Run tab instead of the page, and
+    // its glyph does nothing.
     assert!(!dispatched.contains(&AppAction::RestartSession(ids.lint)));
+    assert!(!dispatched.contains(&AppAction::ShowSession(ids.lint)));
     assert!(dispatched.contains(&AppAction::SetSideTab(SideTab::Run)));
     assert!(dispatched.contains(&AppAction::SetFilesOpen(true)));
     harness.get_by_label("cargo clippy");
-    // The bar is on the board too, without opening anything.
+    harness.state_mut().dispatched.clear();
+    click(&mut harness, "Run lint");
+    assert!(actions(&harness).is_empty());
+    click(&mut harness, "Open build");
+    assert_eq!(actions(&harness), vec![AppAction::ShowSession(ids.build)]);
+    // The bar is on the board too, without opening anything; build is
+    // running since the click, so its glyph now stops it.
     showing(&mut harness, View::Board(ids.alpha));
-    harness.get_by_label("▶ build");
+    harness.get_by_label("Open build");
+    harness.get_by_label("Stop build");
 }
 
 #[test]
@@ -412,10 +423,10 @@ fn run_bar_shows_a_running_commands_last_line_and_hover_after() {
     harness
         .ctx
         .all_styles_mut(|s| s.interaction.tooltip_delay = 0.0);
-    harness.get_by_label("▶ build").hover();
+    harness.get_by_label("Open build").hover();
     harness.run_steps(3);
-    harness.get_by_label_contains("compiled 12 files");
-    harness.get_by_label_contains("not running: click to run again");
+    harness.get_by_label_contains("never run");
+    harness.get_by_label_contains("Open: runs and output");
     // Running: the line sits next to the button with a spinner.
     let mut host = harness
         .state()
@@ -435,12 +446,14 @@ fn run_bar_shows_a_running_commands_last_line_and_hover_after() {
 fn card_buttons_kill_running_and_remove_stopped_sessions() {
     let (mut harness, ids) = harness();
     showing(&mut harness, View::Board(ids.alpha));
-    // Only `server` is running, so it alone offers Open and Kill. Open
-    // goes last: it leaves the board for the session.
+    // Only `server` is running, so it alone offers Kill; its Open (the
+    // first on the board, in the sessions grid) goes last: it leaves the
+    // board for the session.
     click(&mut harness, "Kill");
     harness.get_all_by_label("Remove").next().unwrap().click();
     harness.run_steps(2);
-    click(&mut harness, "Open");
+    harness.get_all_by_label("Open").next().unwrap().click();
+    harness.run_steps(2);
     let dispatched = actions(&harness);
     assert_eq!(dispatched[0], AppAction::KillSession(ids.server));
     assert!(matches!(
@@ -894,7 +907,7 @@ fn exited_command_shows_its_last_output() {
 fn service_header_offers_restart_and_autostart() {
     let (mut harness, ids) = harness();
     showing(&mut harness, View::Session(ids.deploy));
-    click(&mut harness, "Restart");
+    click(&mut harness, "▶ Start");
     click(&mut harness, "Autostart");
     let dispatched = actions(&harness);
     assert!(dispatched.contains(&AppAction::RestartSession(ids.deploy)));
@@ -2391,10 +2404,10 @@ fn arranging_moves_and_resizes_cards_in_units_and_refuses_an_overlap() {
         GridRect {
             x: 10,
             y: 0,
-            w: 7,
-            h: 5
+            w: 10,
+            h: 7
         },
-        "a command card is smaller"
+        "a command card is shorter: it shows output, not a conversation"
     );
     // Outside arrange mode a drag does nothing.
     let title = harness.get_by_label("claude-agent").rect();

@@ -7,7 +7,7 @@ use std::path::Path;
 
 use egui::{Pos2, RichText, Sense, Ui, UiBuilder, vec2};
 
-use super::cards::{actions, file_name, is_running, kicker_text, kind_label, session_card};
+use super::cards::{actions, file_name, is_running, kicker_text, kind_label};
 use super::document::{self, Body};
 use super::{DrawCtx, UiState, theme};
 use crate::core::grid::{MIN_HEIGHT, MIN_WIDTH};
@@ -276,8 +276,9 @@ fn card(cx: &mut DrawCtx<'_>, ui: &mut Ui, set: SetId, item: &PinnedItem) {
                 return;
             };
             match record.kind {
-                // Commands and services keep their controls and output.
-                SessionKind::Command | SessionKind::Service => session_card(cx, ui, record),
+                SessionKind::Command | SessionKind::Service => {
+                    super::runs::set_card(cx, ui, record);
+                }
                 SessionKind::Agent(_) | SessionKind::Shell => set_card(cx, ui, record),
             }
         }
@@ -566,7 +567,7 @@ fn pane_peek(ui: &mut Ui, snapshot: Option<&String>) {
 const PEEK_WIDTH: f32 = 720.0;
 
 /// The last `lines` lines of a pane with something on them.
-fn pane_tail(snapshot: &str, lines: usize) -> String {
+pub(super) fn pane_tail(snapshot: &str, lines: usize) -> String {
     let kept: Vec<&str> = snapshot
         .lines()
         .rev()
@@ -694,7 +695,8 @@ fn file_card(
                 egui::Rect::from_min_size(ui.cursor().min, vec2(ui.available_width(), body_height));
             let mut body = ui.new_child(UiBuilder::new().max_rect(body_rect));
             body.set_clip_rect(body_rect.intersect(ui.clip_rect()));
-            file_body(cx.state, &mut body, &path, mode);
+            let renders = cx.services.store.data_dir().join("renders");
+            file_body(cx.state, &mut body, &path, mode, &renders);
             ui.advance_cursor_after_rect(body_rect);
             ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
                 ui.horizontal(|ui| {
@@ -723,7 +725,19 @@ fn file_card(
 
 /// The file inside its card: a scroll area, wrapped or sideways, with
 /// the preview rendered or its source.
-fn file_body(state: &mut UiState, ui: &mut Ui, path: &Path, mode: FileMode) {
+fn file_body(state: &mut UiState, ui: &mut Ui, path: &Path, mode: FileMode, renders: &Path) {
+    let is_pdf = state
+        .previews
+        .get(path)
+        .and_then(Option::as_ref)
+        .is_some_and(|p| p.body == Body::Pdf);
+    if is_pdf {
+        egui::ScrollArea::vertical()
+            .id_salt(("file-card", path))
+            .auto_shrink(false)
+            .show(ui, |ui| document::pdf_page(state, ui, path, renders));
+        return;
+    }
     let UiState {
         previews, markdown, ..
     } = state;

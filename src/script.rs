@@ -14,7 +14,8 @@
 //! `show-review` (the newest review's page), `review-file
 //! feedback|response <first line...>` (writes the newest review's
 //! awaited file to disk, as its agent would), `review-continue`,
-//! `review-finalize`,
+//! `review-finalize`, `show-artifact <name> <index>` (a command's card
+//! and page show that file of its last run),
 //! `send <name> <text...>`, `interrupt <name>` (Escape to the pane),
 //! `return <name>`, `kill <name>`, `approve <name>`, `revoke <name>`
 //! (a defined command's approval), `side files|run|notes` (the side panel's
@@ -112,6 +113,7 @@ const REVIEW_LINES: &[&str] = &[
     "review-file",
     "review-continue",
     "review-finalize",
+    "show-artifact",
 ];
 
 /// The plan review lines, kept out of `working_set_step` for length.
@@ -148,6 +150,13 @@ fn review_step(app: &mut SwitchboardApp, w: &[&str]) -> Result<(), String> {
             };
             let body = format!("{}\n", text.join(" "));
             std::fs::write(&path, body).map_err(|e| format!("{}: {e}", path.display()))?;
+        }
+        ["show-artifact", name, index] => {
+            let id = session(app, name)?;
+            let index: usize = index.parse().map_err(|_| "bad index")?;
+            app.ui_state
+                .run_modes
+                .insert(id, crate::ui::runs::RunCardMode::Artifact(index));
         }
         _ => return Err("unknown review line".into()),
     }

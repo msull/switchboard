@@ -19,7 +19,7 @@ const OPTIONS: &[(&str, &str)] = &[
     ("version", "1, the only version this build reads"),
     (
         "commands",
-        "[{ name, command, cwd?, env? }]: one-shot commands on the Run tab; run after you approve them",
+        "[{ name, command, cwd?, env?, output? }]: one-shot commands on the Run tab; run after you approve them",
     ),
     (
         "services",
@@ -28,6 +28,10 @@ const OPTIONS: &[(&str, &str)] = &[
     (
         "show",
         "[\"folder\", …]: folders the file side lists despite the root's .gitignore",
+    ),
+    (
+        "output",
+        "\"reports/*.pdf\" or a list: files a command produces, shown on its card after each run",
     ),
     (
         "cwd",

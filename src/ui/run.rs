@@ -112,14 +112,13 @@ pub fn row(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord) {
     let p = theme::palette(ui);
     let state = cx.core.card_state(record.id);
     let running = is_running(cx.core, record.id);
-    let runnable = record.runnable();
     ui.horizontal(|ui| {
         theme::kicker(
             ui,
             &format!(
                 "{} · {}",
                 kind_label(record.kind),
-                cx.core.state_text(record.id)
+                super::runs::kicker(record, running, std::time::SystemTime::now())
             ),
             p.state_text(&state),
         );
@@ -135,51 +134,7 @@ pub fn row(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord) {
     if let Some(caption) = cx.state.captions.get(&record.id) {
         ui.add(egui::Label::new(theme::mono_text(ui, caption).color(p.n800)).truncate());
     }
-    ui.horizontal(|ui| {
-        // No side padding: the text sits flush with the title above, and a
-
-        // negative space would push the row's edge out and grow the panel.
-
-        ui.spacing_mut().item_spacing.x = 14.0;
-        ui.spacing_mut().button_padding = egui::vec2(0.0, 4.0);
-        if record.kind == SessionKind::Service {
-            if theme::ghost(ui, "Show").clicked() {
-                cx.dispatch(AppAction::ShowSession(record.id));
-            }
-            if running {
-                if theme::ghost_muted(ui, "Stop").clicked() {
-                    cx.dispatch(AppAction::KillSession(record.id));
-                }
-            } else if ui
-                .add_enabled_ui(runnable, |ui| theme::ghost(ui, "Start"))
-                .inner
-                .clicked()
-            {
-                cx.dispatch(AppAction::RestartSession(record.id));
-            }
-        } else {
-            if ui
-                .add_enabled_ui(runnable && !running, |ui| theme::ghost(ui, "Run now"))
-                .inner
-                .on_hover_text("Run it again; the last output is kept until then")
-                .clicked()
-            {
-                cx.dispatch(AppAction::RestartSession(record.id));
-            }
-            if theme::ghost(ui, "Show").clicked() {
-                cx.dispatch(AppAction::ShowSession(record.id));
-            }
-        }
-        // A live defined entry would come back on the next read, so
-        // Remove is for the user's own records and orphans only.
-        let removable = matches!(
-            record.approval(),
-            Approval::NotApplicable | Approval::Orphaned
-        );
-        if !running && removable && theme::ghost_muted(ui, "Remove").clicked() {
-            cx.dispatch(AppAction::RemoveSession(record.id));
-        }
-    });
+    ui.horizontal(|ui| super::runs::actions(cx, ui, record, running));
 }
 
 /// The command line, directory, and variables, plus where the approval

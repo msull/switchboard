@@ -15,7 +15,7 @@ pub const MIN_HEIGHT: u32 = 2;
 pub fn default_size(target: &PinTarget, kind: Option<SessionKind>) -> (u32, u32) {
     match (target, kind) {
         (PinTarget::File(..), _) => (10, 10),
-        (PinTarget::Session(_), Some(SessionKind::Command | SessionKind::Service)) => (7, 5),
+        (PinTarget::Session(_), Some(SessionKind::Command | SessionKind::Service)) => (10, 7),
         (PinTarget::Session(_), _) => (10, 8),
     }
 }

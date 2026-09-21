@@ -2922,8 +2922,8 @@ fn working_sets_are_made_and_take_cards_once() {
         GridRect {
             x: 10,
             y: 0,
-            w: 7,
-            h: 5
+            w: 10,
+            h: 7
         }
     );
     // A target that does not exist is not added; a file needs its project.
