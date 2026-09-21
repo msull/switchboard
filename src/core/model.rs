@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 /// Bump when the on-disk shape changes incompatibly.
-pub const SCHEMA_VERSION: u32 = 6;
+pub const SCHEMA_VERSION: u32 = 7;
 
 /// How the UI picks its colours: follow the system, or force one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -774,6 +774,54 @@ pub struct SessionRecord {
     /// next message goes into the session.
     #[serde(default)]
     pub discard: Option<Discarded>,
+    /// Every execution of a command or service, oldest first, the last
+    /// `RUNS_KEPT` of them. Empty for agents and shells.
+    #[serde(default)]
+    pub runs: Vec<Run>,
+    /// Glob patterns, relative to `cwd`, of the files a command
+    /// produces; what a run's `artifacts` are matched against when it
+    /// ends. A defined entry's come from the file (`output`).
+    #[serde(default)]
+    pub outputs: Vec<String>,
+}
+
+/// How many runs a record keeps; the logs of older ones are deleted
+/// with them.
+pub const RUNS_KEPT: usize = 20;
+
+/// One execution of a command or service: when it ran, how it ended,
+/// where its output is, and the files it declared and produced.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Run {
+    /// 1-based, counting up for the record's life.
+    pub n: u32,
+    pub started: SystemTime,
+    /// Set by the host poll that sees the pane exit, or the reconcile
+    /// that finds it gone.
+    #[serde(default)]
+    pub ended: Option<SystemTime>,
+    /// The exit code, when the host reported one.
+    #[serde(default)]
+    pub exit: Option<i32>,
+    /// The run's log file name under the data directory's `scrollback/`.
+    pub log: String,
+    /// Files matching the record's `outputs` that were modified during
+    /// the run, absolute, found when the run ended.
+    #[serde(default)]
+    pub artifacts: Vec<PathBuf>,
+}
+
+impl Run {
+    /// How long the run took, or has been running as of `now`.
+    #[must_use]
+    pub fn duration(&self, now: SystemTime) -> Option<std::time::Duration> {
+        self.ended.unwrap_or(now).duration_since(self.started).ok()
+    }
+    /// Still running as far as the record knows.
+    #[must_use]
+    pub fn open(&self) -> bool {
+        self.ended.is_none()
+    }
 }
 
 /// A discard cut the conversation back to before one of the user's
@@ -805,6 +853,11 @@ pub enum Approval {
 }
 
 impl SessionRecord {
+    /// The most recent run, if the record ever ran.
+    #[must_use]
+    pub fn last_run(&self) -> Option<&Run> {
+        self.runs.last()
+    }
     #[must_use]
     pub fn approval(&self) -> Approval {
         match &self.source {

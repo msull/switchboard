@@ -4304,6 +4304,7 @@ dependencies = [
  "egui_term",
  "env_logger",
  "fd-lock",
+ "glob",
  "ignore",
  "image",
  "log",

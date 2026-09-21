@@ -168,8 +168,19 @@ pub enum AppAction {
         kind: SessionKind,
         cwd: PathBuf,
         launch: Launch,
+        /// Glob patterns of the files a command produces (see
+        /// `SessionRecord::outputs`).
+        outputs: Vec<String>,
     },
     RenameSession(RecordId, String),
+    /// Replace a command's declared output patterns.
+    SetOutputs(RecordId, Vec<String>),
+    /// The files a finished run produced (from `Effect::FindArtifacts`).
+    ArtifactsFound {
+        id: RecordId,
+        n: u32,
+        paths: Vec<PathBuf>,
+    },
     SetSessionNotes(RecordId, String),
     SetAutostart(RecordId, bool),
     MoveCard {
@@ -413,6 +424,17 @@ pub enum Effect {
         before: usize,
         prompt: String,
     },
+    /// Match a finished run's declared outputs under its directory
+    /// (reports `ArtifactsFound`).
+    FindArtifacts {
+        id: RecordId,
+        n: u32,
+        cwd: PathBuf,
+        patterns: Vec<String>,
+        since: SystemTime,
+    },
+    /// Delete a run's log (`scrollback/<name>`) that fell off the record.
+    RemoveLog(String),
     /// Discover a Codex id created in `cwd` after `since`.
     Discover {
         id: RecordId,
@@ -654,6 +676,8 @@ impl AppCore {
             AppAction::RemoveProject(id) => self.remove_project(id, now, &mut out),
 
             AppAction::NewSession { .. }
+            | AppAction::SetOutputs(..)
+            | AppAction::ArtifactsFound { .. }
             | AppAction::RenameSession(..)
             | AppAction::SetSessionNotes(..)
             | AppAction::SetAutostart(..)
@@ -691,7 +715,18 @@ impl AppCore {
                 kind,
                 cwd,
                 launch,
-            } => self.new_session(project, name, kind, cwd, launch, now, out),
+                outputs,
+            } => {
+                self.new_session(project, name, kind, cwd, launch, outputs, now, out);
+            }
+            AppAction::SetOutputs(id, outputs) => {
+                self.edit_session(id, out, |s| s.outputs = outputs);
+            }
+            AppAction::ArtifactsFound { id, n, paths } => self.edit_session(id, out, |s| {
+                if let Some(run) = s.runs.iter_mut().find(|r| r.n == n) {
+                    run.artifacts = paths;
+                }
+            }),
             AppAction::RenameSession(id, name) => {
                 self.edit_session(id, out, |s| s.name = name);
             }

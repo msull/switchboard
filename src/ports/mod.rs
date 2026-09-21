@@ -2,6 +2,7 @@
 //! adapter ships a fake next to it (see `adapters::fakes`).
 
 pub mod agent;
+pub mod artifacts;
 pub mod events;
 pub mod host;
 pub mod opener;

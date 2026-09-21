@@ -218,6 +218,7 @@ fn upsert(
         record.cwd = cwd;
         record.launch = launch;
         record.source = Some(definition);
+        record.outputs.clone_from(&entry.outputs);
         return record.id;
     }
     let order = workspace
@@ -250,6 +251,8 @@ fn upsert(
         source: Some(definition),
         approved_hash: None,
         discard: None,
+        runs: Vec::new(),
+        outputs: entry.outputs,
     });
     id
 }

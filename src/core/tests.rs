@@ -70,6 +70,8 @@ fn record(project: ProjectId, kind: SessionKind, order: u32) -> SessionRecord {
         source: None,
         approved_hash: None,
         discard: None,
+        runs: Vec::new(),
+        outputs: Vec::new(),
     }
 }
 
@@ -224,9 +226,12 @@ fn restart_kills_the_pane_and_spawns_again() {
     w.sessions.push(r);
     let (mut core, _) = loaded(vec![w], vec![running(id)]);
     let effects = core.dispatch(AppAction::RestartSession(id), Clock::at(1));
-    assert!(matches!(effects[0], Effect::Kill(ref h) if h.0 == id.host_name()));
-    assert!(matches!(effects[1], Effect::Spawn { id: sid, .. } if sid == id));
-    assert_eq!(effects.len(), 2);
+    // The run opened on the record is saved first.
+    assert_eq!(saves(&effects), 1);
+    assert!(matches!(effects[1], Effect::Kill(ref h) if h.0 == id.host_name()));
+    assert!(matches!(effects[2], Effect::Spawn { id: sid, .. } if sid == id));
+    assert_eq!(effects.len(), 3);
+    assert_eq!(core.session(id).unwrap().runs.len(), 1);
     // While the relaunch is in flight a second restart does nothing.
     assert!(
         core.dispatch(AppAction::RestartSession(id), Clock::at(2))
@@ -517,6 +522,7 @@ fn host_unavailable_blocks_launches_with_a_notice() {
             kind: SessionKind::Shell,
             cwd: "/tmp".into(),
             launch: Launch::Shell,
+            outputs: Vec::new(),
         },
         Clock::at(3),
     );
@@ -761,6 +767,7 @@ fn new_session(
             kind,
             cwd: "/tmp/proj".into(),
             launch,
+            outputs: Vec::new(),
         },
         Clock::at(7_000),
     );
@@ -1617,7 +1624,8 @@ fn return_to_agent_without_resume_starts_fresh() {
 fn return_to_missing_service_reruns_it() {
     let (mut core, _, ids) = with_records(&[SessionKind::Service], |_| None);
     let e = core.dispatch(AppAction::ReturnToSession(ids[0]), Clock::at(1));
-    let Effect::Spawn { spec, .. } = &e[0] else {
+    let Some(Effect::Spawn { spec, .. }) = e.iter().find(|e| matches!(e, Effect::Spawn { .. }))
+    else {
         panic!("{e:?}")
     };
     assert_eq!(spec.command.as_ref().unwrap()[2], "npm run dev");
@@ -2271,6 +2279,7 @@ fn return_right_after_spawn_attaches_instead_of_spawning_again() {
             kind: SessionKind::Shell,
             cwd: root,
             launch: Launch::Shell,
+            outputs: Vec::new(),
         },
         Clock::at(3),
     );
@@ -2307,6 +2316,7 @@ fn send_input_targets_a_running_session_only() {
             kind: SessionKind::Shell,
             cwd: root,
             launch: Launch::Shell,
+            outputs: Vec::new(),
         },
         Clock::at(3),
     );
@@ -2390,6 +2400,7 @@ fn return_to_an_exited_pane_kills_it_and_resumes() {
             kind: SessionKind::Shell,
             cwd: root,
             launch: Launch::Shell,
+            outputs: Vec::new(),
         },
         Clock::at(3),
     );
@@ -2422,6 +2433,7 @@ fn entry(name: &str, kind: SessionKind, command: &str) -> DefinedEntry {
         cwd: None,
         env: Vec::new(),
         autostart: false,
+        outputs: Vec::new(),
     }
 }
 
@@ -3786,5 +3798,153 @@ mod workflow {
             text,
             "/p/plan.md /p/plan.feedback-2.md /p/plan.response-2.md 2/4 No further feedback."
         );
+    }
+}
+
+// --- runs: one record per execution of a command
+
+mod runs {
+    use super::*;
+    use crate::core::model::RUNS_KEPT;
+
+    fn command_with_outputs() -> (AppCore, RecordId) {
+        let p = project("p");
+        let mut w = Workspace::new(p.clone());
+        let mut r = record(p.id, SessionKind::Command, 0);
+        r.outputs = vec!["reports/*.pdf".into()];
+        let id = r.id;
+        w.sessions.push(r);
+        let (core, _) = loaded(vec![w], vec![]);
+        (core, id)
+    }
+
+    #[test]
+    fn a_launch_opens_a_run_with_its_own_log() {
+        let (mut core, id) = command_with_outputs();
+        let effects = core.dispatch(AppAction::ReturnToSession(id), Clock::at(5_000));
+        let run = core.session(id).unwrap().last_run().unwrap().clone();
+        assert_eq!(run.n, 1);
+        assert_eq!(run.started, Clock::at(5_000).wall);
+        assert!(run.open());
+        assert_eq!(run.log, format!("{}-r1.vt", id.host_name()));
+        assert!(effects.iter().any(|e| matches!(e, Effect::Spawn { .. })));
+        assert!(
+            !effects
+                .iter()
+                .any(|e| matches!(e, Effect::FindArtifacts { .. }))
+        );
+    }
+
+    #[test]
+    fn the_host_poll_closes_the_run_with_its_exit_code_and_asks_for_artifacts() {
+        let (mut core, id) = command_with_outputs();
+        core.dispatch(AppAction::ReturnToSession(id), Clock::at(5_000));
+        core.dispatch(AppAction::Spawned { id, result: Ok(()) }, Clock::at(5_100));
+        // Still running: nothing closes.
+        core.dispatch(AppAction::HostListed(vec![running(id)]), Clock::at(6_000));
+        assert!(core.session(id).unwrap().last_run().unwrap().open());
+        let effects = core.dispatch(
+            AppAction::HostListed(vec![exited(id, Some(0))]),
+            Clock::at(9_000),
+        );
+        let run = core.session(id).unwrap().last_run().unwrap().clone();
+        assert_eq!(run.ended, Some(Clock::at(9_000).wall));
+        assert_eq!(run.exit, Some(0));
+        assert_eq!(
+            run.duration(Clock::at(20_000).wall),
+            Some(Duration::from_secs(4))
+        );
+        assert!(effects.iter().any(|e| matches!(
+            e,
+            Effect::FindArtifacts { id: i, n: 1, patterns, since, .. }
+                if *i == id && patterns == &vec!["reports/*.pdf".to_owned()] && *since == run.started
+        )));
+        // A second poll with the same exit changes nothing more.
+        let effects = core.dispatch(
+            AppAction::HostListed(vec![exited(id, Some(0))]),
+            Clock::at(10_000),
+        );
+        assert!(effects.is_empty());
+        let effects = core.dispatch(
+            AppAction::ArtifactsFound {
+                id,
+                n: 1,
+                paths: vec!["/tmp/proj/reports/a.pdf".into()],
+            },
+            Clock::at(11_000),
+        );
+        assert_eq!(saves(&effects), 1);
+        assert_eq!(
+            core.session(id).unwrap().last_run().unwrap().artifacts,
+            vec![PathBuf::from("/tmp/proj/reports/a.pdf")]
+        );
+    }
+
+    #[test]
+    fn a_run_whose_pane_is_gone_closes_without_a_code_and_no_outputs_means_no_search() {
+        let (mut core, _, ids) = with_records(&[SessionKind::Command], |_| None);
+        let id = ids[0];
+        core.dispatch(AppAction::ReturnToSession(id), Clock::at(5_000));
+        core.dispatch(AppAction::Spawned { id, result: Ok(()) }, Clock::at(5_100));
+        let effects = core.dispatch(AppAction::HostListed(vec![]), Clock::at(7_000));
+        let run = core.session(id).unwrap().last_run().unwrap().clone();
+        assert_eq!(run.ended, Some(Clock::at(7_000).wall));
+        assert_eq!(run.exit, None);
+        assert!(
+            !effects
+                .iter()
+                .any(|e| matches!(e, Effect::FindArtifacts { .. }))
+        );
+    }
+
+    #[test]
+    fn only_the_last_runs_are_kept_and_the_older_logs_are_removed() {
+        let (mut core, _, ids) = with_records(&[SessionKind::Command], |_| None);
+        let id = ids[0];
+        let mut removed = Vec::new();
+        for i in 0..=RUNS_KEPT {
+            let at = 1_000 * (u64::try_from(i).unwrap() + 1);
+            let effects = core.dispatch(AppAction::RestartSession(id), Clock::at(at));
+            removed.extend(effects.iter().filter_map(|e| match e {
+                Effect::RemoveLog(name) => Some(name.clone()),
+                _ => None,
+            }));
+            core.dispatch(AppAction::Spawned { id, result: Ok(()) }, Clock::at(at + 1));
+            core.dispatch(
+                AppAction::HostListed(vec![exited(id, Some(0))]),
+                Clock::at(at + 500),
+            );
+        }
+        let runs = &core.session(id).unwrap().runs;
+        assert_eq!(runs.len(), RUNS_KEPT);
+        assert_eq!(runs.first().unwrap().n, 2);
+        assert_eq!(removed, vec![format!("{}-r1.vt", id.host_name())]);
+    }
+
+    #[test]
+    fn a_new_command_carries_its_output_patterns_and_they_can_be_changed() {
+        let (mut core, pid, _) = with_records(&[], |_| None);
+        core.dispatch(
+            AppAction::NewSession {
+                project: pid,
+                name: "report".into(),
+                kind: SessionKind::Command,
+                cwd: "/tmp/proj".into(),
+                launch: Launch::Command {
+                    command: "make report".into(),
+                    shell: "/bin/zsh".into(),
+                },
+                outputs: vec!["out/*.pdf".into()],
+            },
+            Clock::at(1),
+        );
+        let id = core.workspace(pid).unwrap().sessions[0].id;
+        assert_eq!(
+            core.session(id).unwrap().outputs,
+            vec!["out/*.pdf".to_owned()]
+        );
+        let effects = core.dispatch(AppAction::SetOutputs(id, vec!["a.md".into()]), Clock::at(2));
+        assert_eq!(saves(&effects), 1);
+        assert_eq!(core.session(id).unwrap().outputs, vec!["a.md".to_owned()]);
     }
 }

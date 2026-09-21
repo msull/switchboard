@@ -4,7 +4,9 @@
 //! here: a resume costs money, so it waits for a click.
 
 use crate::core::action::{AppCore, Clock, Effect, FlightKind, Out, View};
-use crate::core::model::{AgentKind, Launch, RecordId, SavedView, SessionKind, SessionRecord};
+use crate::core::model::{
+    AgentKind, Launch, RUNS_KEPT, RecordId, Run, SavedView, SessionKind, SessionRecord,
+};
 use crate::ports::host::{HostId, HostStatus, Liveness, SpawnSpec};
 use crate::ports::store::{Loaded, StoreError};
 
@@ -85,6 +87,7 @@ impl AppCore {
             .map(|s| s.id)
             .collect();
         self.record_exit_codes(out);
+        self.close_runs(now, out);
         if self.store_loaded && !self.reconciled {
             self.reconciled = true;
             self.autostart_services(now, out);
@@ -134,10 +137,84 @@ impl AppCore {
         now: Clock,
         out: &mut Out,
     ) {
-        if let Some(record) = self.session(id) {
-            let spec = spawn_spec(record);
-            self.start_flight(id, kind, now);
-            out.push(Effect::Spawn { id, spec });
+        let Some(record) = self.session(id) else {
+            return;
+        };
+        let entry = matches!(record.kind, SessionKind::Command | SessionKind::Service);
+        if entry {
+            self.open_run(id, now, out);
+        }
+        let Some(record) = self.session(id) else {
+            return;
+        };
+        let spec = spawn_spec(record);
+        self.start_flight(id, kind, now);
+        out.push(Effect::Spawn { id, spec });
+    }
+
+    /// A new run on the record, its log named after the record and the
+    /// run number; runs past `RUNS_KEPT` fall off with their logs.
+    fn open_run(&mut self, id: RecordId, now: Clock, out: &mut Out) {
+        let mut dropped = Vec::new();
+        self.edit_session(id, out, |s| {
+            let n = s.runs.last().map_or(1, |r| r.n + 1);
+            s.runs.push(Run {
+                n,
+                started: now.wall,
+                ended: None,
+                exit: None,
+                log: format!("{}-r{n}.vt", s.id.host_name()),
+                artifacts: Vec::new(),
+            });
+            while s.runs.len() > RUNS_KEPT {
+                dropped.push(s.runs.remove(0).log);
+            }
+        });
+        for log in dropped {
+            out.push(Effect::RemoveLog(log));
+        }
+    }
+
+    /// Runs the host shows over: exited (with the code) or gone. The
+    /// declared outputs are matched once the run has an end.
+    fn close_runs(&mut self, now: Clock, out: &mut Out) {
+        let over: Vec<(RecordId, Option<i32>)> = self
+            .workspaces
+            .iter()
+            .flat_map(|w| &w.sessions)
+            .filter(|s| s.runs.last().is_some_and(Run::open))
+            .filter(|s| !self.is_in_flight(s.id))
+            .filter_map(|s| match self.host_status(s.id) {
+                Some(HostStatus {
+                    liveness: Liveness::Exited { code },
+                    ..
+                }) => Some((s.id, *code)),
+                Some(_) => None,
+                None => Some((s.id, None)),
+            })
+            .collect();
+        for (id, code) in over {
+            let mut find = None;
+            self.edit_session(id, out, |s| {
+                let cwd = s.cwd.clone();
+                let patterns = s.outputs.clone();
+                if let Some(run) = s.runs.last_mut() {
+                    run.ended = Some(now.wall);
+                    run.exit = code;
+                    if !patterns.is_empty() {
+                        find = Some(Effect::FindArtifacts {
+                            id,
+                            n: run.n,
+                            cwd,
+                            patterns,
+                            since: run.started,
+                        });
+                    }
+                }
+            });
+            if let Some(find) = find {
+                out.push(find);
+            }
         }
     }
 }

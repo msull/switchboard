@@ -21,6 +21,8 @@ pub struct NewSessionDraft {
     pub kind: SessionKind,
     pub cwd: String,
     pub command: String,
+    /// Output patterns for a command, one per line or comma-separated.
+    pub outputs: String,
 }
 
 impl NewSessionDraft {
@@ -32,6 +34,7 @@ impl NewSessionDraft {
             kind: SessionKind::Shell,
             cwd: project.root.display().to_string(),
             command: String::new(),
+            outputs: String::new(),
         }
     }
 
@@ -46,13 +49,37 @@ impl NewSessionDraft {
                 shell,
             },
         };
+        let outputs = if self.kind == SessionKind::Command {
+            split_patterns(&self.outputs)
+        } else {
+            Vec::new()
+        };
         AppAction::NewSession {
             project: self.project,
             name: self.name.trim().to_string(),
             kind: self.kind,
             cwd: PathBuf::from(self.cwd.trim()),
             launch,
+            outputs,
         }
+    }
+}
+
+/// Patterns as typed: separated by newlines or commas, blanks dropped.
+#[must_use]
+pub fn split_patterns(text: &str) -> Vec<String> {
+    text.split(['\n', ','])
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
+impl NewSessionDraft {
+    /// Kept for symmetry with `into_action`; nothing else yet.
+    #[must_use]
+    pub fn is_command(&self) -> bool {
+        self.kind == SessionKind::Command
     }
 }
 
@@ -296,6 +323,13 @@ fn new_session(cx: &mut DrawCtx<'_>, ctx: &Context) {
         let needs_command = matches!(draft.kind, SessionKind::Command | SessionKind::Service);
         if needs_command {
             field(ui, "Command line", &mut draft.command);
+        }
+        if draft.is_command() {
+            field(ui, "Output files", &mut draft.outputs);
+            ui.label(theme::meta_text(
+                ui,
+                "Patterns relative to the directory, comma-separated: reports/*.pdf",
+            ));
         }
         let ready = !draft.name.trim().is_empty()
             && !draft.cwd.trim().is_empty()

@@ -117,6 +117,7 @@ impl Gate {
             secrets: Box::new(FakeSecrets::default()),
             project_config: Box::new(FileConfigReader::new()),
             round_files: Box::new(switchboard::adapters::round_files::DiskRoundFiles),
+            artifacts: Box::new(switchboard::adapters::artifacts::DiskArtifacts),
             wake: None,
         })
     }
@@ -236,6 +237,7 @@ fn new_session(
         kind,
         cwd: cwd.to_path_buf(),
         launch: Launch::Shell,
+        outputs: Vec::new(),
     });
     app.core()
         .workspace(project)
@@ -298,6 +300,8 @@ fn record(project: ProjectId, name: &str, kind: SessionKind, cwd: &Path) -> Sess
         source: None,
         approved_hash: None,
         discard: None,
+        runs: Vec::new(),
+        outputs: Vec::new(),
     }
 }
 
@@ -627,6 +631,7 @@ fn return_while_in_flight_spawns_once() {
             kind: SessionKind::Agent(AgentKind::ClaudeCode),
             cwd: "/work".into(),
             launch: Launch::Shell,
+            outputs: Vec::new(),
         },
         3,
     );

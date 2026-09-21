@@ -76,6 +76,7 @@ fn new_session(
         kind,
         cwd,
         launch,
+        outputs: Vec::new(),
     });
     Ok(())
 }

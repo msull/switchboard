@@ -11,8 +11,8 @@ use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;
 use switchboard::SwitchboardApp;
 use switchboard::adapters::fakes::{
-    FakeAgents, FakeEvents, FakeHost, FakeOpener, FakeProjectConfig, FakeRoundFiles, FakeSecrets,
-    FakeTranscripts, MemoryStore,
+    FakeAgents, FakeArtifacts, FakeEvents, FakeHost, FakeOpener, FakeProjectConfig, FakeRoundFiles,
+    FakeSecrets, FakeTranscripts, MemoryStore,
 };
 use switchboard::app::Services;
 use switchboard::core::{
@@ -82,6 +82,8 @@ fn record(project: ProjectId, name: &str, kind: SessionKind, order: u32) -> Sess
         source: None,
         approved_hash: None,
         discard: None,
+        runs: Vec::new(),
+        outputs: Vec::new(),
     }
 }
 
@@ -186,6 +188,7 @@ fn harness_build(
         secrets: Box::new(secrets),
         project_config: Box::new(FakeProjectConfig::default()),
         round_files: Box::new(FakeRoundFiles::default()),
+        artifacts: Box::new(FakeArtifacts::default()),
         wake: None,
     };
     let mut harness = Harness::builder()
@@ -464,6 +467,7 @@ fn new_session_dialog_dispatches_new_session() {
             kind: SessionKind::Agent(AgentKind::Codex),
             cwd: PathBuf::from("/work/alpha"),
             launch: Launch::Shell,
+            outputs: Vec::new(),
         }]
     );
     assert!(harness.query_by_label("Create a session").is_none());
@@ -1761,6 +1765,7 @@ fn polling_reads_the_transcript_into_the_ui_state() {
         secrets: Box::new(FakeSecrets::default()),
         project_config: Box::new(FakeProjectConfig::default()),
         round_files: Box::new(FakeRoundFiles::default()),
+        artifacts: Box::new(FakeArtifacts::default()),
         wake: None,
     };
     let mut harness = Harness::builder()

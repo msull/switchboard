@@ -432,6 +432,7 @@ impl Side<'_> {
                     kind: SessionKind::Shell,
                     cwd: path.to_path_buf(),
                     launch: Launch::Shell,
+                    outputs: Vec::new(),
                 });
                 ui.close();
             }

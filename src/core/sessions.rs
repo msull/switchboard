@@ -22,6 +22,7 @@ impl AppCore {
         kind: SessionKind,
         cwd: PathBuf,
         launch: Launch,
+        outputs: Vec<String>,
         now: Clock,
         out: &mut Out,
     ) {
@@ -30,6 +31,7 @@ impl AppCore {
             return;
         }
         if let Some(id) = self.add_record(project, name, kind, cwd, launch, now, out) {
+            self.edit_session(id, out, |s| s.outputs = outputs);
             self.launch_fresh(id, now, out);
         }
     }
@@ -81,6 +83,8 @@ impl AppCore {
             source: None,
             approved_hash: None,
             discard: None,
+            runs: Vec::new(),
+            outputs: Vec::new(),
         });
         out.touch(project);
         Some(id)
@@ -471,6 +475,8 @@ impl AppCore {
             source: None,
             approved_hash: None,
             discard: None,
+            runs: Vec::new(),
+            outputs: Vec::new(),
             ..record
         });
         out.touch(record.project);

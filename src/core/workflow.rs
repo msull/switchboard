@@ -305,6 +305,8 @@ impl AppCore {
             source: None,
             approved_hash: None,
             discard: None,
+            runs: Vec::new(),
+            outputs: Vec::new(),
             ..source
         });
         self.edit_run(id, now, out, |r| {

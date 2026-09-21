@@ -404,3 +404,18 @@ impl crate::ports::round_files::RoundFiles for FakeRoundFiles {
         Ok(())
     }
 }
+
+/// Declared outputs as the test says they were produced.
+#[derive(Debug, Default, Clone)]
+pub struct FakeArtifacts {
+    pub found: Arc<Mutex<Vec<PathBuf>>>,
+}
+
+impl crate::ports::artifacts::ArtifactFinder for FakeArtifacts {
+    fn find(&self, _cwd: &Path, patterns: &[String], _since: SystemTime) -> Vec<PathBuf> {
+        if patterns.is_empty() {
+            return Vec::new();
+        }
+        self.found.lock().unwrap().clone()
+    }
+}

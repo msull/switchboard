@@ -22,6 +22,9 @@ pub struct DefinedEntry {
     pub env: Vec<String>,
     /// Requested for services; honored only once approved.
     pub autostart: bool,
+    /// Glob patterns, relative to the entry's directory, of the files a
+    /// command produces (`output`: a string or a list).
+    pub outputs: Vec<String>,
 }
 
 /// The parsed file: the entries it declares plus a warning per entry

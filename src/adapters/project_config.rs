@@ -135,6 +135,27 @@ struct CommandEntry {
     cwd: Option<String>,
     #[serde(default)]
     env: Vec<String>,
+    /// A pattern or a list of them.
+    #[serde(default)]
+    output: Option<serde_json::Value>,
+}
+
+/// `output` as patterns: a string is one, a list of strings is several,
+/// anything else is none (and a warning).
+fn output_patterns(value: Option<&serde_json::Value>) -> Result<Vec<String>, String> {
+    match value {
+        None => Ok(Vec::new()),
+        Some(serde_json::Value::String(s)) => Ok(vec![s.clone()]),
+        Some(serde_json::Value::Array(items)) => items
+            .iter()
+            .map(|v| {
+                v.as_str()
+                    .map(str::to_owned)
+                    .ok_or_else(|| "output: every item must be a string".to_owned())
+            })
+            .collect(),
+        Some(_) => Err("output: a string or a list of strings".into()),
+    }
 }
 
 #[derive(Deserialize)]
@@ -190,18 +211,24 @@ pub fn parse(text: &str, shell: String) -> Result<ProjectConfig, String> {
     }
     for (i, raw) in file.commands.iter().enumerate() {
         match serde_json::from_value::<CommandEntry>(raw.clone()) {
-            Ok(e) => config.add(
-                DefinedEntry {
-                    name: e.name,
-                    kind: SessionKind::Command,
-                    command: e.command,
-                    cwd: e.cwd,
-                    env: e.env,
-                    autostart: false,
-                },
-                "commands",
-                i,
-            ),
+            Ok(e) => match output_patterns(e.output.as_ref()) {
+                Ok(outputs) => config.add(
+                    DefinedEntry {
+                        name: e.name,
+                        kind: SessionKind::Command,
+                        command: e.command,
+                        cwd: e.cwd,
+                        env: e.env,
+                        autostart: false,
+                        outputs,
+                    },
+                    "commands",
+                    i,
+                ),
+                Err(why) => config
+                    .warnings
+                    .push(format!("commands[{i}] skipped: {why}")),
+            },
             Err(e) => config.warnings.push(format!("commands[{i}] skipped: {e}")),
         }
     }
@@ -215,6 +242,7 @@ pub fn parse(text: &str, shell: String) -> Result<ProjectConfig, String> {
                     cwd: e.cwd,
                     env: e.env,
                     autostart: e.autostart,
+                    outputs: Vec::new(),
                 },
                 "services",
                 i,
@@ -270,6 +298,32 @@ fn validate(entry: &DefinedEntry, seen: &[DefinedEntry]) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn output_is_a_pattern_or_a_list_and_nothing_else() {
+        let c = parsed(
+            r#"{"version":1,"commands":[
+                {"name":"one","command":"a","output":"reports/*.pdf"},
+                {"name":"two","command":"b","output":["a.md","b/*.png"]},
+                {"name":"bad","command":"c","output":7},
+                {"name":"none","command":"d"}
+            ]}"#,
+        );
+        let outputs: Vec<_> = c.entries.iter().map(|e| e.outputs.clone()).collect();
+        assert_eq!(
+            outputs,
+            vec![
+                vec!["reports/*.pdf".to_owned()],
+                vec!["a.md".to_owned(), "b/*.png".to_owned()],
+                vec![],
+            ]
+        );
+        assert!(
+            c.warnings
+                .iter()
+                .any(|w| w.contains("commands[2]") && w.contains("output"))
+        );
+    }
 
     fn parsed(text: &str) -> ProjectConfig {
         parse(text, "/bin/zsh".into()).unwrap()

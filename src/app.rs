@@ -13,6 +13,7 @@ use crate::core::{
     SessionKind, View,
 };
 use crate::ports::agent::AgentLauncher;
+use crate::ports::artifacts::ArtifactFinder;
 use crate::ports::events::EventSource;
 use crate::ports::host::{HostId, Liveness, ProcessHost};
 use crate::ports::opener::Opener;
@@ -44,6 +45,7 @@ pub struct Services {
     pub secrets: Box<dyn SecretStore>,
     pub project_config: Box<dyn ProjectConfigReader>,
     pub round_files: Box<dyn RoundFiles>,
+    pub artifacts: Box<dyn ArtifactFinder>,
     /// The hook helper's wake-up socket; `None` in tests.
     pub wake: Option<WakeSocket>,
 }
@@ -330,6 +332,8 @@ impl SwitchboardApp {
             | Effect::ProbeRoundFile { .. }
             | Effect::SnapshotRound { .. }
             | Effect::RemoveRoundFiles { .. }
+            | Effect::FindArtifacts { .. }
+            | Effect::RemoveLog(_)
             | Effect::OpenPath(_)
             | Effect::Forget(_)
             | Effect::OpenInEditor { .. }
@@ -429,7 +433,7 @@ impl SwitchboardApp {
                 None
             }
             Effect::Spawn { id, mut spec } => {
-                spec.scrollback = Some(self.scrollback_path(&spec.id));
+                spec.scrollback = Some(self.log_path(id, &spec.id));
                 spec.env = self.spawn_env(id, spec.env);
                 let result = s.host.spawn(&spec).map_err(|e| e.to_string());
                 if let Err(e) = &result {
@@ -467,14 +471,8 @@ impl SwitchboardApp {
                 result: s.project_config.write_text(&root, &text),
             }),
             Effect::Kill(host) => failed(s.host.kill(&host), || format!("kill {}", host.0)),
-            Effect::Forget(host) => {
-                let path = self.scrollback_path(&host);
-                if let Err(e) = std::fs::remove_file(&path)
-                    && e.kind() != std::io::ErrorKind::NotFound
-                {
-                    log::warn!("remove {}: {e}", path.display());
-                }
-                None
+            Effect::Forget(_) | Effect::RemoveLog(_) | Effect::FindArtifacts { .. } => {
+                self.run_log_effect(effect)
             }
             Effect::OpenPath(path) => failed(s.opener.open_default(&path), || {
                 format!("open {}", path.display())
@@ -487,6 +485,47 @@ impl SwitchboardApp {
             Effect::Reveal(path) => failed(s.opener.reveal(&path), || {
                 format!("reveal {}", path.display())
             }),
+        }
+    }
+
+    /// The effects on run logs and artifacts, kept out of `run_effect`
+    /// for length.
+    fn run_log_effect(&self, effect: Effect) -> Option<AppAction> {
+        let s = &self.services;
+        match effect {
+            Effect::Forget(host) => {
+                // The record's own log and every run's (`<host>-r<n>.vt`).
+                let dir = self.services.store.data_dir().join("scrollback");
+                let prefix = format!("{}-r", host.0);
+                let mut paths = vec![self.scrollback_path(&host)];
+                if let Ok(entries) = std::fs::read_dir(&dir) {
+                    paths.extend(entries.flatten().map(|e| e.path()).filter(|p| {
+                        p.file_name()
+                            .and_then(|n| n.to_str())
+                            .is_some_and(|n| n.starts_with(&prefix))
+                    }));
+                }
+                for path in paths {
+                    remove_quietly(&path);
+                }
+                None
+            }
+            Effect::RemoveLog(name) => {
+                remove_quietly(&self.services.store.data_dir().join("scrollback").join(name));
+                None
+            }
+            Effect::FindArtifacts {
+                id,
+                n,
+                cwd,
+                patterns,
+                since,
+            } => Some(AppAction::ArtifactsFound {
+                id,
+                n,
+                paths: s.artifacts.find(&cwd, &patterns, since),
+            }),
+            _ => unreachable!("not a log effect"),
         }
     }
 
@@ -539,7 +578,7 @@ impl SwitchboardApp {
         if !on_screen && self.ui_state.captions.contains_key(&id) {
             return;
         }
-        let path = self.scrollback_path(host);
+        let path = self.log_path(id, host);
         let Ok(text) = crate::adapters::scrollback::tail_text(&path, 200) else {
             return;
         };
@@ -670,6 +709,20 @@ impl SwitchboardApp {
             .data_dir()
             .join("scrollback")
             .join(format!("{}.vt", host.0))
+    }
+
+    /// Where a record's output goes and is read from: its latest run's
+    /// log when it has runs, else the one file named after the host.
+    fn log_path(&self, id: RecordId, host: &HostId) -> PathBuf {
+        match self.core.session(id).and_then(|s| s.runs.last()) {
+            Some(run) => self
+                .services
+                .store
+                .data_dir()
+                .join("scrollback")
+                .join(&run.log),
+            None => self.scrollback_path(host),
+        }
     }
 
     /// Captions for cards on screen and the snapshot for the open session.
@@ -833,5 +886,14 @@ impl eframe::App for SwitchboardApp {
     /// transparent backbuffer, which eframe enables from the root's.
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
         [0.0, 0.0, 0.0, 0.0]
+    }
+}
+
+/// Delete a file that may already be gone.
+fn remove_quietly(path: &std::path::Path) {
+    if let Err(e) = std::fs::remove_file(path)
+        && e.kind() != std::io::ErrorKind::NotFound
+    {
+        log::warn!("remove {}: {e}", path.display());
     }
 }

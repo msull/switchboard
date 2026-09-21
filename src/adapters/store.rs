@@ -345,9 +345,9 @@ pub fn migrate(value: serde_json::Value) -> Result<Workspace, String> {
         .and_then(serde_json::Value::as_u64)
         .ok_or_else(|| "missing schema_version".to_string())?;
     match version {
-        // v2 to v6 added optional fields only, so an older document reads
+        // v2 to v7 added optional fields only, so an older document reads
         // with their defaults; it is written back at the current version.
-        1..=6 => serde_json::from_value(value)
+        1..=7 => serde_json::from_value(value)
             .map(|mut w: Workspace| {
                 w.schema_version = SCHEMA_VERSION;
                 w
@@ -489,6 +489,8 @@ mod tests {
             source: None,
             approved_hash: None,
             discard: None,
+            runs: Vec::new(),
+            outputs: Vec::new(),
         };
         let mut agent = session(
             "claude",

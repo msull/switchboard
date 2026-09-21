@@ -90,6 +90,7 @@ fn main() -> eframe::Result {
                 secrets: secret_store(),
                 project_config: Box::new(FileConfigReader::new()),
                 round_files: Box::new(switchboard::adapters::round_files::DiskRoundFiles),
+                artifacts: Box::new(switchboard::adapters::artifacts::DiskArtifacts),
                 wake,
             };
             let mut app = SwitchboardApp::with_services(services);
