@@ -199,7 +199,7 @@ src/ui/
   session.rs             session view: header, embedded terminal or conversation + message box
   switchboard.rs         every session across projects, waiting first
   working_set.rs         a working set: the user's grid of session and file cards from any project
-  dialogs.rs             add project / create session dialogs
+  dialogs.rs             add project / create session dialogs, the full-message and links-in-message dialogs
 assets/fonts/            Source Serif 4 (Regular, Semibold, Italic; OFL), embedded by theme.rs
 tests/ui.rs              headless flows via egui_kittest with fakes
 tests/fixtures/          a small real Claude Code transcript for the parser tests

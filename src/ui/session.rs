@@ -481,6 +481,7 @@ fn conversation_or_pane(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecor
         markdown,
         snapshots,
         raw_message,
+        message_links,
         ..
     } = &mut *cx.state;
     let snapshot = snapshots.get(&record.id);
@@ -510,6 +511,7 @@ fn conversation_or_pane(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecor
         markdown,
         Menus {
             raw_message,
+            message_links,
             clone_at: cloneable.then_some(&mut clone_at),
             discard_at: cloneable.then_some(&mut discard_at),
         },
@@ -996,17 +998,19 @@ fn scrolls_sideways(ui: &mut Ui, salt: impl egui::AsIdSalt, add: impl FnOnce(&mu
 }
 
 /// The right-click menu of one message (the user's prompt or the
-/// agent's answer) covering `rect`: Copy, and View raw, which opens the
-/// text unformatted in a dialog for when the Markdown renders badly.
+/// agent's answer) covering `rect`: Copy; View raw, which opens the
+/// text unformatted in a dialog for when the Markdown renders badly;
+/// and View links, which lists the message's web links to click.
 ///
 /// The block is not made clickable: that would put it above the labels
 /// and links inside it in egui's hit test and take their clicks. The
 /// pointer is checked directly instead, and the menu is opened by hand.
 /// What the message menus write back: the text to show in the raw
-/// dialog, and (when the session can be cloned) the turn number the
-/// user chose to fork before.
+/// dialog, the links to list, and (when the session can be cloned) the
+/// turn number the user chose to fork before.
 struct Menus<'a> {
     raw_message: &'a mut Option<String>,
+    message_links: &'a mut Option<Vec<String>>,
     clone_at: Option<&'a mut Option<usize>>,
     discard_at: Option<&'a mut Option<usize>>,
 }
@@ -1015,6 +1019,7 @@ impl Menus<'_> {
     fn reborrow(&mut self) -> Menus<'_> {
         Menus {
             raw_message: self.raw_message,
+            message_links: self.message_links,
             clone_at: self.clone_at.as_deref_mut(),
             discard_at: self.discard_at.as_deref_mut(),
         }
@@ -1024,6 +1029,7 @@ impl Menus<'_> {
     fn without_clone(&mut self) -> Menus<'_> {
         Menus {
             raw_message: self.raw_message,
+            message_links: self.message_links,
             clone_at: None,
             discard_at: None,
         }
@@ -1055,6 +1061,13 @@ fn message_menu(
             }
             if ui.button("View raw").clicked() {
                 *menus.raw_message = Some(text.to_owned());
+                ui.close();
+            }
+            // Offered only when there is something to list: an empty
+            // dialog would say less than a missing item.
+            let links = super::dialogs::web_links(text);
+            if !links.is_empty() && ui.button("View links").clicked() {
+                *menus.message_links = Some(links);
                 ui.close();
             }
             if let Some(clone_at) = menus.clone_at

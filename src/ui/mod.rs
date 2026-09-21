@@ -111,6 +111,9 @@ pub struct UiState {
     /// One message shown unformatted in a dialog ("View raw"), while
     /// open. The way to read a message whose Markdown renders badly.
     pub raw_message: Option<String>,
+    /// The web links of one message, shown as a clickable list in a
+    /// dialog ("View links"), while open.
+    pub message_links: Option<Vec<String>>,
     /// How the message dialog shows its text; kept between openings.
     pub message_view: dialogs::MessageView,
     /// How many grid units the working set fits across right now, so
@@ -176,6 +179,7 @@ impl Default for UiState {
             run_modes: HashMap::new(),
             pdf_renders: HashMap::new(),
             raw_message: None,
+            message_links: None,
             message_view: dialogs::MessageView::Rendered,
             working_set_columns: 24,
             arrange: working_set::Arrange::default(),
@@ -461,6 +465,7 @@ fn keyboard(cx: &mut DrawCtx<'_>, ui: &Ui, view: &View) {
         || cx.state.review_dialog.is_some()
         || cx.state.confirm_cleanup.is_some()
         || cx.state.raw_message.is_some()
+        || cx.state.message_links.is_some()
         || cx.state.delete_set.is_some();
 
     if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::K)) {

@@ -1688,6 +1688,62 @@ fn clone_session_on_a_prompt_makes_a_new_session_with_that_prompt_primed() {
 }
 
 #[test]
+fn view_links_lists_a_messages_urls_in_a_dialog() {
+    let (mut harness, ids) = harness();
+    plain_message_box(&mut harness);
+    let id = seed_claude(&mut harness, &ids);
+    let mut conversation = two_turns();
+    conversation.turns[0].final_text =
+        "Read https://docs.rs/egui and [the repo](https://github.com/emilk/egui).".into();
+    harness
+        .state_mut()
+        .ui_state
+        .conversations
+        .insert(id, (None, conversation));
+    showing(&mut harness, View::Session(id));
+    // A message without a link does not offer the item.
+    harness
+        .get_by_label("The crate is called switchboard.")
+        .click_secondary();
+    harness.run_steps(2);
+    assert!(harness.query_by_label("View links").is_none());
+    harness.get_by_label("Copy").click();
+    harness.run_steps(2);
+    harness
+        .query_all_by_label_contains("docs.rs/egui")
+        .next()
+        .expect("the answer")
+        .click_secondary();
+    harness.run_steps(2);
+    harness.get_by_label("View links").click();
+    harness.run_steps(2);
+    harness.get_by_label("Links in message");
+    assert_eq!(
+        harness.state().ui_state.message_links.as_deref(),
+        Some(
+            &[
+                "https://docs.rs/egui".to_owned(),
+                "https://github.com/emilk/egui".to_owned()
+            ][..]
+        )
+    );
+    harness.get_by_role_and_label(Role::Link, "https://docs.rs/egui");
+    harness.get_by_label("Copy all").click();
+    harness.step();
+    let copied = harness.output().platform_output.commands.iter().any(|c| {
+        *c == egui::OutputCommand::CopyText(
+            "https://docs.rs/egui\nhttps://github.com/emilk/egui".into(),
+        )
+    });
+    assert!(copied);
+    harness.run_steps(2);
+    harness.get_by_label("Close").click();
+    harness.run_steps(2);
+    assert!(harness.query_by_label("Links in message").is_none());
+    assert!(harness.state().ui_state.message_links.is_none());
+}
+
+#[test]
 fn view_raw_shows_the_message_unformatted_in_a_dialog() {
     let (mut harness, ids) = harness();
     plain_message_box(&mut harness);

@@ -87,6 +87,7 @@ pub fn show(cx: &mut DrawCtx<'_>, ctx: &Context) {
     add_project(cx, ctx);
     new_session(cx, ctx);
     raw_message(cx, ctx);
+    message_links(cx, ctx);
     delete_set(cx, ctx);
 }
 
@@ -202,6 +203,95 @@ fn raw_message(cx: &mut DrawCtx<'_>, ctx: &Context) {
     if close {
         cx.state.raw_message = None;
     }
+}
+
+/// The web links of one message as a list to click, with the dialog's
+/// scroll for a long one; each opens in the browser.
+fn message_links(cx: &mut DrawCtx<'_>, ctx: &Context) {
+    let Some(links) = cx.state.message_links.clone() else {
+        return;
+    };
+    let mut close = ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
+    let screen = ctx.content_rect();
+    let width = (screen.width() * 0.5).clamp(320.0, 720.0);
+    let height = (screen.height() - 220.0).max(120.0);
+    dialog(ctx, "Links in message", |ui| {
+        ui.set_width(width);
+        egui::ScrollArea::vertical()
+            .id_salt("message-links")
+            .max_height(height)
+            .auto_shrink([false, true])
+            .show(ui, |ui| {
+                for url in &links {
+                    ui.horizontal(|ui| {
+                        ui.hyperlink(url);
+                        if theme::ghost_muted(ui, "Copy")
+                            .on_hover_text("Copy this link")
+                            .clicked()
+                        {
+                            ui.ctx().copy_text(url.clone());
+                        }
+                    });
+                }
+            });
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            if theme::ghost_muted(ui, "Close").clicked() {
+                close = true;
+            }
+            if theme::secondary(ui, "Copy all").clicked() {
+                ui.ctx().copy_text(links.join("\n"));
+            }
+        });
+    });
+    if close {
+        cx.state.message_links = None;
+    }
+}
+
+/// The `http` and `https` URLs in `text`, in order of first appearance,
+/// each once. A URL runs to whitespace or a quote or angle bracket, and
+/// loses the punctuation prose or Markdown hangs on its end (a period,
+/// a comma, the `)` of a `[text](url)` link) so the link still opens.
+#[must_use]
+pub fn web_links(text: &str) -> Vec<String> {
+    let mut found: Vec<String> = Vec::new();
+    let mut rest = text;
+    while let Some(start) = rest.find("http") {
+        let candidate = &rest[start..];
+        let Some(after_scheme) = candidate
+            .strip_prefix("https://")
+            .or_else(|| candidate.strip_prefix("http://"))
+        else {
+            rest = &candidate[4..];
+            continue;
+        };
+        let end = after_scheme
+            .find(|c: char| c.is_whitespace() || matches!(c, '<' | '>' | '"' | '\'' | '`'))
+            .unwrap_or(after_scheme.len());
+        let mut url = &candidate[..candidate.len() - after_scheme.len() + end];
+        // Trailing punctuation belongs to the sentence, not the link,
+        // except a `)` that closes a `(` inside the URL (Wikipedia).
+        loop {
+            let trimmed = url.trim_end_matches(['.', ',', ';', ':', '!', '?', ']', '}', '*']);
+            let unbalanced = trimmed.ends_with(')')
+                && trimmed.matches('(').count() < trimmed.matches(')').count();
+            let next = if unbalanced {
+                &trimmed[..trimmed.len() - 1]
+            } else {
+                trimmed
+            };
+            if next.len() == url.len() {
+                break;
+            }
+            url = next;
+        }
+        if url.len() > "https://".len() && !found.iter().any(|f| f == url) {
+            found.push(url.to_owned());
+        }
+        rest = &candidate[candidate.len() - after_scheme.len() + end..];
+    }
+    found
 }
 
 /// A single-line text field under its label, which tests (and screen
@@ -368,4 +458,35 @@ fn kind_radios(ui: &mut Ui, kind: &mut SessionKind) {
         ui.radio_value(kind, SessionKind::Service, "Service");
     });
     ui.add_space(6.0);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::web_links;
+
+    #[test]
+    fn web_links_finds_each_url_once_in_order_without_trailing_punctuation() {
+        let text = "See https://example.com/a. Also [docs](https://docs.rs/egui), \
+                    then <http://old.example.org/path?q=1&r=2>, and https://example.com/a again. \
+                    Not a link: httpsomething, ftp://x.y. Wikipedia keeps its paren: \
+                    https://en.wikipedia.org/wiki/Rust_(programming_language).";
+        assert_eq!(
+            web_links(text),
+            vec![
+                "https://example.com/a",
+                "https://docs.rs/egui",
+                "http://old.example.org/path?q=1&r=2",
+                "https://en.wikipedia.org/wiki/Rust_(programming_language)",
+            ]
+        );
+    }
+
+    #[test]
+    fn web_links_ignores_a_bare_scheme_and_quotes() {
+        assert!(web_links("https:// and http:// alone").is_empty());
+        assert_eq!(
+            web_links("url=\"https://a.b/c\" 'https://d.e/f'"),
+            vec!["https://a.b/c", "https://d.e/f"]
+        );
+    }
 }
