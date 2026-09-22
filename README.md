@@ -33,7 +33,8 @@ per project under `projects/` (with a `.bak` of the previous version;
 approvals of defined commands live inside these records),
 `settings.json` (theme, exclusive mode, editor, global variables, file
 side shown next to sessions and its tab, the screen to reopen on, the
-Prompt Box switch and its trigger word, model, and captions, the
+Prompt Box switch and its trigger word, model, captions, and the screen
+its caption bar and preview panel appear on, the
 workflow round cap and the user's workflow definitions),
 `views.json` (the working sets: each one's name, which sessions and
 files are on it, and where each card sits on its grid, with a `.bak`),

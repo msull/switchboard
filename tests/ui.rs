@@ -18,8 +18,8 @@ use switchboard::app::Services;
 use switchboard::core::{
     Activity, AgentKind, AppAction, Approval, BUILTIN_WORKFLOW, CardLayout, Definition,
     HandoffMode, Launch, Notice, PinTarget, Project, ProjectEnv, ProjectId, RecordId, ResumeHandle,
-    Round, RunState, SessionKind, SessionRecord, SideTab, ThemeMode, Verdict, View, WorkflowId,
-    WorkflowRun, Workspace, round_paths,
+    Round, RunState, SessionKind, SessionRecord, SideTab, ThemeMode, Verdict, View, VoiceSettings,
+    WorkflowId, WorkflowRun, Workspace, round_paths,
 };
 use switchboard::ports::host::{HostId, HostStatus, Liveness};
 use switchboard::ports::store::Store;
@@ -2883,6 +2883,38 @@ fn the_cc_button_turns_captions_off_and_the_setting_follows() {
     );
     click(&mut harness, "CC");
     assert!(harness.state().core().settings().voice.captions);
+}
+
+#[test]
+fn the_settings_menu_picks_the_screen_for_the_overlays_and_the_editor_follows() {
+    let (mut harness, ids) = harness();
+    let id = seed_claude(&mut harness, &ids);
+    showing(&mut harness, View::Session(id));
+    click(&mut harness, "Settings");
+    harness.get_by_label("Overlays on");
+    // Headless there is no screen list, so the choice arrives as a
+    // setting; the menu shows an unplugged choice as not connected.
+    assert!(
+        harness
+            .query_all_by_value("Same screen as Switchboard")
+            .next()
+            .is_some()
+    );
+    harness
+        .state_mut()
+        .dispatch(AppAction::SetVoiceSettings(VoiceSettings {
+            overlay_screen: "DELL U3415W".into(),
+            ..VoiceSettings::default()
+        }));
+    harness.run_steps(2);
+    assert!(
+        harness
+            .query_all_by_value("DELL U3415W (not connected)")
+            .next()
+            .is_some()
+    );
+    let editor = &harness.state().ui_state.prompt_boxes.editors[&id];
+    assert_eq!(editor.settings().overlay_screen, "DELL U3415W");
 }
 
 #[test]

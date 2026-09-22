@@ -407,6 +407,9 @@ pub struct VoiceSettings {
     pub openai_model: String,
     /// Show the on-screen captions while listening.
     pub captions: bool,
+    /// Display name of the screen for the caption bar and the preview
+    /// panel; blank means the screen the window is on.
+    pub overlay_screen: String,
 }
 
 impl Default for VoiceSettings {
@@ -415,6 +418,7 @@ impl Default for VoiceSettings {
             trigger: String::new(),
             openai_model: String::new(),
             captions: true,
+            overlay_screen: String::new(),
         }
     }
 }

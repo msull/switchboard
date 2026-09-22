@@ -92,6 +92,42 @@ pub fn settings_menu(
 /// The embedded Prompt Box: on or off, and what it needs. Its state is
 /// Switchboard's own (this file and the Keychain), never the standalone
 /// app's.
+/// Which screen the caption bar and the preview panel use: the one the
+/// window is on, or a display by name. The names come from the system
+/// (empty off macOS), so a chosen display that is unplugged is shown as
+/// not connected and Prompt Box falls back to the window's screen.
+fn overlay_screen_picker(cx: &mut DrawCtx<'_>, ui: &mut Ui, voice: &VoiceSettings) {
+    const SAME: &str = "Same screen as Switchboard";
+    let current = voice.overlay_screen.clone();
+    let screens = promptbox::adapters::screens::screens();
+    let shown = if current.is_empty() {
+        SAME.to_owned()
+    } else if screens.iter().any(|s| s.name == current) {
+        current.clone()
+    } else {
+        format!("{current} (not connected)")
+    };
+    let mut chosen = current.clone();
+    ui.horizontal(|ui| {
+        ui.label("Overlays on");
+        egui::ComboBox::from_id_salt("overlay-screen")
+            .selected_text(shown)
+            .width(220.0)
+            .show_ui(ui, |ui| {
+                ui.selectable_value(&mut chosen, String::new(), SAME);
+                for s in &screens {
+                    ui.selectable_value(&mut chosen, s.name.clone(), &s.name);
+                }
+            });
+    });
+    if chosen != current {
+        cx.dispatch(AppAction::SetVoiceSettings(VoiceSettings {
+            overlay_screen: chosen,
+            ..voice.clone()
+        }));
+    }
+}
+
 fn prompt_box_settings(cx: &mut DrawCtx<'_>, ui: &mut Ui, settings: &crate::core::Settings) {
     let p = theme::palette(ui);
     theme::kicker(ui, "Prompt Box", p.n600);
@@ -115,6 +151,7 @@ fn prompt_box_settings(cx: &mut DrawCtx<'_>, ui: &mut Ui, settings: &crate::core
             ..voice.clone()
         }));
     }
+    overlay_screen_picker(cx, ui, &voice);
     let draft = cx.state.voice_draft.get_or_insert_with(|| VoiceDraft {
         trigger: voice.trigger.clone(),
         model: voice.openai_model.clone(),
@@ -151,7 +188,7 @@ fn prompt_box_settings(cx: &mut DrawCtx<'_>, ui: &mut Ui, settings: &crate::core
         cx.dispatch(AppAction::SetVoiceSettings(VoiceSettings {
             trigger,
             openai_model,
-            captions: voice.captions,
+            ..voice.clone()
         }));
     }
     if let Some(value) = new_key {

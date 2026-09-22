@@ -205,14 +205,26 @@ pub fn pump(cx: &mut DrawCtx<'_>) -> Option<std::time::Duration> {
     repaint
 }
 
-/// The caption and preview overlays of the bound editor.
+/// The caption and preview overlays of the bound editor, on the screen
+/// chosen in Settings, else the one this window is on.
 pub fn overlays(state: &mut UiState, ctx: &egui::Context) {
     let boxes = &mut state.prompt_boxes;
     let Some(editor) = boxes.bound.and_then(|id| boxes.editors.get_mut(&id)) else {
         return;
     };
-    promptbox::caption::draw(&mut boxes.voice, editor.core(), ctx);
-    promptbox::preview::draw(editor, ctx);
+    let (root, monitor) = ctx.input(|i| (i.viewport().outer_rect, i.viewport().monitor_size));
+    let fallback = egui::Rect::from_min_size(
+        egui::Pos2::ZERO,
+        monitor.unwrap_or(egui::Vec2::new(1920.0, 1080.0)),
+    );
+    let area = promptbox::adapters::screens::overlay_area(
+        &promptbox::adapters::screens::screens(),
+        &editor.settings().overlay_screen,
+        root,
+        fallback,
+    );
+    promptbox::caption::draw(&mut boxes.voice, editor.core(), ctx, area);
+    promptbox::preview::draw(editor, ctx, area);
 }
 
 /// The session's editor, made on first sight with the session's own
@@ -292,10 +304,12 @@ fn editor_for<'a>(cx: &'a mut DrawCtx<'_>, record: &SessionRecord) -> &'a mut Ed
     if current.trigger != settings.trigger
         || current.openai_model != settings.openai_model
         || current.captions != settings.captions
+        || current.overlay_screen != settings.overlay_screen
     {
         editor.settings_draft.trigger = settings.trigger;
         editor.settings_draft.openai_model = settings.openai_model;
         editor.settings_draft.captions = settings.captions;
+        editor.settings_draft.overlay_screen = settings.overlay_screen;
         editor.save_settings_draft();
     }
     editor
