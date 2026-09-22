@@ -68,8 +68,14 @@ pub fn strip_escapes(text: &str) -> String {
                 out.push('\n');
                 line.clear();
             }
-            // CR LF is a plain newline; a lone CR overwrites the line.
+            // CR LF is a plain newline, and so is CR CR LF, which a
+            // program under a pty writes for every line (the pty adds a
+            // CR to the one it printed). Only a CR with text after it
+            // overwrites the line, as a terminal would.
             '\r' => {
+                while chars.peek() == Some(&'\r') {
+                    chars.next();
+                }
                 if chars.peek() != Some(&'\n') {
                     line.clear();
                 }
@@ -91,6 +97,12 @@ mod tests {
     fn strips_csi_osc_and_honors_carriage_return() {
         let raw = "\u{1b}[32mgreen\u{1b}[0m text\n\u{1b}]0;title\u{7}progress 10%\rprogress 100%\n\u{1b}(Bdone";
         assert_eq!(strip_escapes(raw), "green text\nprogress 100%\ndone");
+        // A pty doubles the CR before each LF; nothing is overwritten.
+        assert_eq!(
+            strip_escapes("Build Succeeded\r\r\nUploading\r\r\n"),
+            "Build Succeeded\nUploading\n"
+        );
+        assert_eq!(strip_escapes("10%\r\r20%\r\n"), "20%\n");
     }
 
     #[test]
