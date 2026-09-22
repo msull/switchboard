@@ -1167,7 +1167,18 @@ fn claude_session_shows_the_conversation_and_message_box() {
         .conversations
         .insert(id, (None, two_turns()));
     showing(&mut harness, View::Session(id));
-    harness.get_by_label("explain-repo");
+    // Claude's own name for the conversation is shown only while it
+    // differs from the record's name.
+    harness.get_by_label("Claude: explain-repo");
+    harness
+        .state_mut()
+        .dispatch(AppAction::RenameSession(id, "explain-repo".into()));
+    harness.run_steps(2);
+    assert!(harness.query_by_label_contains("Claude: ").is_none());
+    harness
+        .state_mut()
+        .dispatch(AppAction::RenameSession(id, "claude-agent".into()));
+    harness.run_steps(2);
     harness.get_by_label("reply with the single word pong");
     harness.get_by_label("What is the crate called?");
     harness.get_by_label("pong");

@@ -504,10 +504,13 @@ fn conversation_or_pane(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecor
     };
     conversation_view(
         ui,
+        &record.name,
         conversation,
-        expand_activity,
-        expand_applied,
-        terminal_open,
+        Toggles {
+            expand: expand_activity,
+            expand_applied,
+            terminal_open,
+        },
         markdown,
         Menus {
             raw_message,
@@ -669,15 +672,30 @@ pub(super) fn append_path(draft: &mut String, path: &std::path::Path) {
 
 /// Header line, then the turns in a scroll area that follows new
 /// content, with the raw terminal snapshot folded away at the end.
+/// The toggles above the conversation, written back to the UI state.
+struct Toggles<'a> {
+    expand: &'a mut bool,
+    expand_applied: &'a mut Option<bool>,
+    terminal_open: &'a mut bool,
+}
+
+/// The conversation under its toggles. Claude Code's own name for the
+/// conversation (`/rename`) is shown only when it differs from the
+/// record's name, marked as Claude's, so a rename in Switchboard does
+/// not leave the old name sitting under the new one.
 fn conversation_view(
     ui: &mut Ui,
+    name: &str,
     conversation: &Conversation,
-    expand: &mut bool,
-    expand_applied: &mut Option<bool>,
-    terminal_open: &mut bool,
+    toggles: Toggles<'_>,
     markdown: &mut CommonMarkCache,
     mut menus: Menus<'_>,
 ) {
+    let Toggles {
+        expand,
+        expand_applied,
+        terminal_open,
+    } = toggles;
     let p = theme::palette(ui);
     ui.horizontal(|ui| {
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -702,14 +720,18 @@ fn conversation_view(
             if expand_button.clicked() {
                 *expand = !*expand;
             }
-            ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                ui.add(
-                    egui::Label::new(theme::strong_text(
-                        conversation.title.as_deref().unwrap_or("(untitled)"),
-                    ))
-                    .truncate(),
-                );
-            });
+            if let Some(title) = conversation.title.as_deref().filter(|t| *t != name) {
+                ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                    ui.add(
+                        egui::Label::new(theme::meta_text(ui, format!("Claude: {title}")))
+                            .truncate(),
+                    )
+                    .on_hover_text(
+                        "The conversation's name inside Claude Code (/rename); Rename above \
+                             changes only Switchboard's name for the session",
+                    );
+                });
+            }
         });
     });
     ui.label(theme::meta_text(ui, meta_line(conversation)).color(p.n700));

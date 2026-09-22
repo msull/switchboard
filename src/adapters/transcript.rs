@@ -243,8 +243,11 @@ pub fn parse(text: &str) -> Conversation {
     let mut cwd_seen = false;
     for r in &recs {
         let kind = str_field(r, "type");
-        if kind == Some("custom-title") && conv.title.is_none() {
-            conv.title = str_field(r, "customTitle").map(str::to_owned);
+        // Each `/rename` appends one; the latest is the current name.
+        if kind == Some("custom-title")
+            && let Some(title) = str_field(r, "customTitle")
+        {
+            conv.title = Some(title.to_owned());
         }
         if r.get("isSidechain").and_then(Value::as_bool) == Some(true) {
             continue;
@@ -637,6 +640,15 @@ mod tests {
 
     fn conversation() -> Conversation {
         parse(&std::fs::read_to_string(fixture()).unwrap())
+    }
+
+    #[test]
+    fn the_latest_rename_is_the_title() {
+        let mut text = std::fs::read_to_string(fixture()).unwrap();
+        text.push_str(
+            "{\"type\":\"custom-title\",\"customTitle\":\"renamed-later\",\"sessionId\":\"x\"}\n",
+        );
+        assert_eq!(parse(&text).title.as_deref(), Some("renamed-later"));
     }
 
     #[test]
