@@ -508,12 +508,24 @@ fn rounds_list(cx: &mut DrawCtx<'_>, ui: &mut Ui, run: &WorkflowRun) {
         }
         match at_work {
             Some(agent) => {
-                let text = RichText::new(format!("{verdict} ↗"))
+                // Quiet past the stall threshold: most likely a prompt of
+                // its own that needs answering, so it reads as waiting.
+                let stalled = cx.core.stalled(run.id);
+                let (word, color) = if stalled {
+                    ("quiet, check it", p.accent_2_text)
+                } else {
+                    (verdict, p.accent_text)
+                };
+                let text = RichText::new(format!("{word} ↗"))
                     .text_style(theme::meta())
-                    .color(p.accent_text);
+                    .color(color);
                 if ui
                     .add(egui::Button::new(text).frame(false))
-                    .on_hover_text("Open this session")
+                    .on_hover_text(if stalled {
+                        "No output for a while; it may be waiting on an approval. Open it"
+                    } else {
+                        "Open this session"
+                    })
                     .clicked()
                 {
                     cx.dispatch(AppAction::ShowSession(agent));

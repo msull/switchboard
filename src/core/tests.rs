@@ -3550,6 +3550,47 @@ mod workflow {
     }
 
     #[test]
+    fn a_quiet_agent_stalls_the_run_once_and_the_mark_lifts_when_it_moves() {
+        let (mut core, run, _, reviewer, _) = started();
+        let quiet_since = |secs: u64| HostStatus {
+            last_activity: Some(Clock::at(secs * 1000).wall),
+            ..running(reviewer)
+        };
+        // Quiet for a minute: still working as far as anyone can tell.
+        core.dispatch(
+            AppAction::HostListed(vec![quiet_since(140)]),
+            Clock::at(200_000),
+        );
+        core.dispatch(AppAction::Tick, Clock::at(200_000));
+        assert!(!core.stalled(run));
+        assert!(core.notice().is_none());
+        // Past the stall threshold: noticed once, the agent reads as
+        // waiting on the user.
+        core.dispatch(AppAction::Tick, Clock::at(261_000));
+        assert!(core.stalled(run));
+        let text = core.notice().expect("a notice").text.clone();
+        assert!(
+            text.contains("plan review") && text.contains("2 min"),
+            "{text}"
+        );
+        assert_eq!(core.card_state(reviewer), CardState::WaitingOnYou);
+        core.dispatch(AppAction::DismissNotice, Clock::at(262_000));
+        core.dispatch(AppAction::Tick, Clock::at(263_000));
+        assert!(core.notice().is_none(), "said once");
+        // Output again: the mark lifts, and a later stall is noticed anew.
+        core.dispatch(
+            AppAction::HostListed(vec![quiet_since(262)]),
+            Clock::at(264_000),
+        );
+        core.dispatch(AppAction::Tick, Clock::at(264_000));
+        assert!(!core.stalled(run));
+        assert_eq!(core.card_state(reviewer), CardState::Working);
+        core.dispatch(AppAction::Tick, Clock::at(400_000));
+        assert!(core.stalled(run));
+        assert!(core.notice().is_some());
+    }
+
+    #[test]
     fn an_exited_agent_pauses_the_run_and_continue_relaunches_it() {
         let (mut core, run, _, reviewer, _) = started();
         core.dispatch(

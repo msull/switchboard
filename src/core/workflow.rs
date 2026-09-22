@@ -3,6 +3,7 @@
 //! waits for a file, prompts an agent, or stops. Nothing here retries.
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use crate::core::action::{AppAction, AppCore, Clock, Effect, Out, View};
 use crate::core::model::{
@@ -15,6 +16,10 @@ use crate::ports::round_files::{FileStamp, Probed};
 /// Probes in a row that must find the file unchanged before it counts
 /// as written. The poll is once a second.
 pub const SETTLE_PROBES: u8 = 3;
+/// A waiting round's agent that has printed nothing for this long is
+/// most likely at an approval prompt: the run is marked stalled and the
+/// user told once.
+pub const STALL_AFTER: Duration = Duration::from_secs(120);
 
 /// How long a run's awaited file has looked the same.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -319,6 +324,21 @@ impl AppCore {
 
     // --- waiting
 
+    /// The agents of stalled runs: quiet mid-round, most likely at a
+    /// prompt of their own.
+    pub(super) fn stalled_agents(&self) -> impl Iterator<Item = RecordId> + '_ {
+        self.stalled
+            .iter()
+            .filter_map(|id| self.workflow(*id).and_then(WorkflowRun::awaiting))
+    }
+
+    /// Whether the run's agent has been quiet for [`STALL_AFTER`] while
+    /// the round waits on it.
+    #[must_use]
+    pub fn stalled(&self, id: WorkflowId) -> bool {
+        self.stalled.contains(&id)
+    }
+
     /// Once a second: probe each waiting run's file, and notice an
     /// awaited agent whose pane has exited without writing it.
     pub(super) fn workflow_tick(&mut self, now: Clock, out: &mut Out) {
@@ -327,7 +347,10 @@ impl AppCore {
             .filter(|r| r.state.waiting())
             .filter_map(|r| Some((r.id, r.awaited_file()?.clone(), r.awaiting()?)))
             .collect();
+        self.stalled
+            .retain(|id| waiting.iter().any(|(run, _, _)| run == id));
         for (run, path, agent) in waiting {
+            self.watch_for_stall(run, agent, &path, now);
             let exited = self
                 .host_status(agent)
                 .is_some_and(|h| matches!(h.liveness, Liveness::Exited { .. }));
@@ -343,6 +366,38 @@ impl AppCore {
                 continue;
             }
             out.push(Effect::ProbeRoundFile { run, path });
+        }
+    }
+
+    /// An agent that has printed nothing for [`STALL_AFTER`] while its
+    /// file is awaited is most likely at an approval prompt Switchboard
+    /// cannot see (Codex has no hooks). Say so once; a pane that moves
+    /// again clears the mark, so a later stall is noticed again.
+    fn watch_for_stall(&mut self, run: WorkflowId, agent: RecordId, path: &Path, now: Clock) {
+        let quiet = self
+            .host_status(agent)
+            .filter(|h| matches!(h.liveness, Liveness::Running { .. }))
+            .and_then(|h| h.last_activity)
+            .and_then(|t| now.wall.duration_since(t).ok());
+        let stalled = quiet.is_some_and(|q| q >= STALL_AFTER);
+        let marked = self.stalled.contains(&run);
+        if stalled && !marked {
+            self.stalled.push(run);
+            let name = self.session_name(agent);
+            let file = path
+                .file_name()
+                .map(|f| f.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let mins = quiet.map_or(0, |q| q.as_secs() / 60);
+            self.info(
+                format!(
+                    "{name} has been quiet for {mins} min while the review waits on {file}; \
+                     it may be waiting on an approval"
+                ),
+                now,
+            );
+        } else if !stalled && marked {
+            self.stalled.retain(|id| *id != run);
         }
     }
 

@@ -586,6 +586,10 @@ pub struct AppCore {
     pub(super) first_prompts: Vec<(RecordId, String)>,
     /// How long each waiting run's file has looked the same.
     pub(super) probes: Vec<crate::core::workflow::Probe>,
+    /// Waiting runs whose agent's pane has printed nothing for
+    /// [`crate::core::STALL_AFTER`]: noticed once, and shown as waiting
+    /// on the user until the pane moves again. Transient.
+    pub(super) stalled: Vec<WorkflowId>,
 }
 
 impl AppCore {
@@ -1361,6 +1365,9 @@ impl AppCore {
         match self.host_status(id).map(|h| &h.liveness) {
             Some(Liveness::Running { .. }) => match record.activity {
                 Activity::WaitingOnYou => CardState::WaitingOnYou,
+                // A review's agent gone quiet mid-round is most likely
+                // sitting at an approval prompt: the user's turn.
+                _ if self.stalled_agents().any(|a| a == id) => CardState::WaitingOnYou,
                 Activity::Working | Activity::Unknown if self.quiet.contains(&id) => {
                     CardState::Idle
                 }

@@ -1005,6 +1005,18 @@ compare, never a judgement of prose. A missing file after the agent's
 pane exits, or a resume failure, moves the run to `Paused` with the
 reason; nothing retries on its own.
 
+An approval prompt inside the agent (Codex asking to run `gh`, say) is
+invisible the same way, and a round can sit on it for as long as nobody
+looks. So a waiting run whose agent's pane has printed nothing for two
+minutes (`STALL_AFTER`) is marked stalled: one notice names the agent
+and the file, the agent reads as *waiting on you* in the rail and the
+Dock count, and the round's word on the review page turns to "quiet,
+check it". Output again lifts the mark, so a later stall is noticed
+again. It is a guess from silence, so a long quiet think trips it too;
+the cost is a glance. Commands the reviewer needs without asking (issue
+and PR reads through `gh`) belong in Codex's own rules file as
+`prefix_rule` allows, not in Switchboard.
+
 Round files live beside the plan, because Codex's sandbox refuses
 writes outside the working directory: `<plan stem>.feedback-<n>.md` and
 `<plan stem>.response-<n>.md`. The agents write them, not Switchboard.

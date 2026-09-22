@@ -18,4 +18,4 @@ pub use definitions::entry_hash;
 pub use env::{Resolved, ResolvedVar, SecretScope, Source};
 pub use model::*;
 pub use reconcile::{RECORD_ID_ENV, spawn_spec};
-pub use workflow::{SETTLE_PROBES, round_paths, snapshot_dir};
+pub use workflow::{SETTLE_PROBES, STALL_AFTER, round_paths, snapshot_dir};
