@@ -210,12 +210,49 @@ pub fn show_file(state: &mut UiState, ui: &mut Ui, path: &Path, renders: &Path) 
     }
 }
 
-/// A PDF page being rasterized, or done.
+/// A PDF's first page as last rasterized, with the file stamp it came
+/// from, so a file rewritten by a later run is rendered again.
 #[derive(Debug)]
-pub enum PdfRender {
+pub struct PdfRender {
+    stamp: FileStamp,
+    checked: Instant,
+    state: PdfState,
+}
+
+#[derive(Debug)]
+enum PdfState {
     Pending(std::sync::mpsc::Receiver<Result<Vec<u8>, String>>),
     Ready(Vec<u8>),
     Failed(String),
+}
+
+/// What tells one version of a file from the next.
+type FileStamp = (Option<std::time::SystemTime>, u64);
+
+fn file_stamp(path: &Path) -> FileStamp {
+    std::fs::metadata(path)
+        .map(|m| (m.modified().ok(), m.len()))
+        .unwrap_or_default()
+}
+
+impl PdfRender {
+    fn start(path: &Path, renders: &Path) -> Self {
+        Self {
+            stamp: file_stamp(path),
+            checked: Instant::now(),
+            state: PdfState::Pending(rasterize(path, renders)),
+        }
+    }
+    /// The image's name for egui's texture cache: one per version of
+    /// the file, so new bytes are not shown through the old texture.
+    fn uri(&self, path: &Path) -> String {
+        let modified = self
+            .stamp
+            .0
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map_or(0, |d| d.as_secs());
+        format!("bytes://pdf-{}-{modified}-{}", path.display(), self.stamp.1)
+    }
 }
 
 /// Pixels across the rendered page.
@@ -228,22 +265,31 @@ pub fn pdf_page(state: &mut UiState, ui: &mut Ui, path: &Path, renders: &Path) {
     let entry = state
         .pdf_renders
         .entry(path.to_path_buf())
-        .or_insert_with(|| PdfRender::Pending(rasterize(path, renders)));
-    if let PdfRender::Pending(rx) = entry
+        .or_insert_with(|| PdfRender::start(path, renders));
+    // A rewritten file (the command ran again) is rendered afresh; the
+    // old texture is dropped by name so the new bytes show.
+    if entry.checked.elapsed() >= STALE_CHECK_EVERY {
+        entry.checked = Instant::now();
+        if !matches!(entry.state, PdfState::Pending(_)) && file_stamp(path) != entry.stamp {
+            ui.ctx().forget_image(&entry.uri(path));
+            *entry = PdfRender::start(path, renders);
+        }
+    }
+    if let PdfState::Pending(rx) = &entry.state
         && let Ok(result) = rx.try_recv()
     {
-        *entry = match result {
-            Ok(bytes) => PdfRender::Ready(bytes),
-            Err(e) => PdfRender::Failed(e),
+        entry.state = match result {
+            Ok(bytes) => PdfState::Ready(bytes),
+            Err(e) => PdfState::Failed(e),
         };
     }
-    match entry {
-        PdfRender::Pending(_) => {
+    let uri = entry.uri(path);
+    match &entry.state {
+        PdfState::Pending(_) => {
             ui.spinner();
             ui.ctx().request_repaint_after(Duration::from_millis(200));
         }
-        PdfRender::Ready(bytes) => {
-            let uri = format!("bytes://pdf-{}", path.display());
+        PdfState::Ready(bytes) => {
             // The page fills the width it is given, however wide: a
             // narrow page is unreadable and a card or column sets the
             // width, not the raster.
@@ -252,7 +298,7 @@ pub fn pdf_page(state: &mut UiState, ui: &mut Ui, path: &Path, renders: &Path) {
                     .fit_to_fraction(egui::vec2(1.0, f32::INFINITY)),
             );
         }
-        PdfRender::Failed(e) => weak(ui, &format!("Cannot render this PDF: {e}")),
+        PdfState::Failed(e) => weak(ui, &format!("Cannot render this PDF: {e}")),
     }
 }
 
@@ -312,7 +358,17 @@ pub fn draw_body(preview: &Preview, markdown: &mut egui_commonmark::CommonMarkCa
             egui_extras::syntax_highlighting::code_view_ui(ui, &theme, text, lang);
         }
         Body::Image(bytes) => {
-            let uri = format!("bytes://{}", preview.path.display());
+            // Named per version of the file, so a rewritten image is
+            // not shown through the texture of the old one.
+            let modified = preview
+                .modified
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map_or(0, |d| d.as_secs());
+            let uri = format!(
+                "bytes://{}-{modified}-{}",
+                preview.path.display(),
+                preview.size
+            );
             ui.add(
                 egui::Image::from_bytes(uri, bytes.clone())
                     .max_width(ui.available_width())
