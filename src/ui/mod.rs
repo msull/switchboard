@@ -292,35 +292,7 @@ fn draw_frame(cx: &mut DrawCtx<'_>, ui: &mut Ui) {
         View::Session(_) | View::Switchboard | View::WorkingSet(_) | View::Workflow(_) => None,
     };
     if let Some((pid, inline, message, session)) = files_for {
-        let side = egui::Panel::right("files")
-            .resizable(true)
-            .default_size(360.0)
-            .show_separator_line(false)
-            .frame(
-                egui::Frame::new()
-                    .fill(page_fill)
-                    .inner_margin(egui::Margin {
-                        left: 12,
-                        right: 20,
-                        top: 22,
-                        bottom: 0,
-                    }),
-            )
-            .show(ui, |ui| {
-                let tab = side_tabs(cx, ui, pid, session);
-                match (tab, session) {
-                    (SideTab::Notes, Some(id)) => notes::show(cx, ui, id),
-                    (SideTab::Files | SideTab::Notes, _) => {
-                        files::show(cx, ui, pid, inline, message);
-                    }
-                    (SideTab::Run, _) => run::show(cx, ui, pid),
-                }
-            });
-        // The side shares the page's ground, so a hairline on its left
-        // edge is what marks it off from the content beside it.
-        let rect = side.response.rect;
-        ui.painter()
-            .vline(rect.left(), rect.y_range(), palette.hairline());
+        side_panel(cx, ui, pid, inline, message, session);
     }
     egui::CentralPanel::default()
         .frame(
@@ -347,6 +319,57 @@ fn draw_frame(cx: &mut DrawCtx<'_>, ui: &mut Ui) {
     env::show(cx, ui.ctx());
     config::show(cx, ui.ctx());
     workflow::dialog_show(cx, ui.ctx());
+}
+
+/// The side panel (Files, Run, Notes) beside the page: on its right by
+/// default, or on its left between the rail and the page.
+fn side_panel(
+    cx: &mut DrawCtx<'_>,
+    ui: &mut Ui,
+    pid: ProjectId,
+    inline: bool,
+    message: Option<RecordId>,
+    session: Option<RecordId>,
+) {
+    // On the left the side sits between the rail and the page, so
+    // its wider margin faces the page either way.
+    let on_left = cx.core.settings().side_left;
+    let panel = if on_left {
+        egui::Panel::left("files-left")
+    } else {
+        egui::Panel::right("files")
+    };
+    let (left_margin, right_margin) = if on_left { (20, 12) } else { (12, 20) };
+    let side = panel
+        .resizable(true)
+        .default_size(360.0)
+        .show_separator_line(false)
+        .frame(
+            egui::Frame::new()
+                .fill(theme::palette(ui).bg)
+                .inner_margin(egui::Margin {
+                    left: left_margin,
+                    right: right_margin,
+                    top: 22,
+                    bottom: 0,
+                }),
+        )
+        .show(ui, |ui| {
+            let tab = side_tabs(cx, ui, pid, session);
+            match (tab, session) {
+                (SideTab::Notes, Some(id)) => notes::show(cx, ui, id),
+                (SideTab::Files | SideTab::Notes, _) => {
+                    files::show(cx, ui, pid, inline, message);
+                }
+                (SideTab::Run, _) => run::show(cx, ui, pid),
+            }
+        });
+    // The side shares the page's ground, so a hairline on the edge
+    // facing the content is what marks it off from it.
+    let rect = side.response.rect;
+    let edge = if on_left { rect.right() } else { rect.left() };
+    ui.painter()
+        .vline(edge, rect.y_range(), theme::palette(ui).hairline());
 }
 
 /// Sessions and documents fill their area edge to edge (terminal,

@@ -205,6 +205,8 @@ pub enum AppAction {
     StoreVoiceKey(String),
     /// Which tab the side panel shows.
     SetSideTab(SideTab),
+    /// The side panel on the left of the content (true) or the right.
+    SetSideLeft(bool),
     /// The project's `.switchboard/project.json` was read (or is absent,
     /// or unusable). Entries become records that cannot run until
     /// approved.
@@ -641,7 +643,8 @@ impl AppCore {
             | AppAction::SetPromptBox(_)
             | AppAction::SetVoiceSettings(_)
             | AppAction::StoreVoiceKey(_)
-            | AppAction::SetSideTab(_) => self.files_and_settings(action, now, &mut out),
+            | AppAction::SetSideTab(_)
+            | AppAction::SetSideLeft(_) => self.files_and_settings(action, now, &mut out),
             AppAction::ProjectConfigRead { .. }
             | AppAction::SaveProjectConfig { .. }
             | AppAction::ProjectConfigWritten { .. }
@@ -1313,6 +1316,7 @@ impl AppCore {
                 }
             }
             AppAction::SetSideTab(tab) => self.update_settings(out, |s| s.side_tab = tab),
+            AppAction::SetSideLeft(left) => self.update_settings(out, |s| s.side_left = left),
             // Everything else is routed by `dispatch` itself.
             _ => unreachable!("dispatched by `dispatch` itself"),
         }

@@ -219,7 +219,7 @@ pub enum PdfRender {
 }
 
 /// Pixels across the rendered page.
-const PDF_RENDER_SIZE: u32 = 1400;
+const PDF_RENDER_SIZE: u32 = 2000;
 
 /// The first page of the PDF at `path` as an image, rasterized once on
 /// a thread by the system's Quick Look (`qlmanage`) into `renders` and
@@ -244,10 +244,12 @@ pub fn pdf_page(state: &mut UiState, ui: &mut Ui, path: &Path, renders: &Path) {
         }
         PdfRender::Ready(bytes) => {
             let uri = format!("bytes://pdf-{}", path.display());
+            // The page fills the width it is given, however wide: a
+            // narrow page is unreadable and a card or column sets the
+            // width, not the raster.
             ui.add(
                 egui::Image::from_bytes(uri, bytes.clone())
-                    .max_width(ui.available_width())
-                    .fit_to_original_size(1.0),
+                    .fit_to_fraction(egui::vec2(1.0, f32::INFINITY)),
             );
         }
         PdfRender::Failed(e) => weak(ui, &format!("Cannot render this PDF: {e}")),

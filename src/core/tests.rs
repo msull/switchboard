@@ -347,6 +347,20 @@ fn the_file_side_toggle_is_a_saved_setting() {
 }
 
 #[test]
+fn the_side_position_is_a_saved_setting() {
+    let mut core = AppCore::new();
+    core.seed(Vec::new(), Vec::new());
+    assert!(!core.settings().side_left);
+    let effects = core.dispatch(AppAction::SetSideLeft(true), Clock::at(1));
+    assert!(core.settings().side_left);
+    assert!(
+        effects
+            .iter()
+            .any(|e| matches!(e, Effect::SaveSettings(s) if s.side_left))
+    );
+}
+
+#[test]
 fn store_loaded_installs_workspaces_and_notices() {
     let mut core = AppCore::new();
     let w = Workspace::new(project("a"));

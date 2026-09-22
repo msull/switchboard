@@ -73,6 +73,15 @@ pub fn settings_menu(
                 cx.dispatch(AppAction::SetExclusive(exclusive));
                 ui.close();
             }
+            let mut side_left = settings.side_left;
+            if ui
+                .checkbox(&mut side_left, "Side panel on the left")
+                .on_hover_text("Files, Run, and Notes between the project rail and the page")
+                .changed()
+            {
+                cx.dispatch(AppAction::SetSideLeft(side_left));
+                ui.close();
+            }
             let mut open_terminal = settings.open_terminal_on_launch;
             if ui
                 .checkbox(&mut open_terminal, "Open the terminal when an agent starts")

@@ -4,7 +4,8 @@
 //! <name>`, `new-claude <project> <name>`, `new-codex <project> <name>`,
 //! `new-service <project> <name> <command...>`, `show-board <project>`,
 //! `show-session <name>`, `show-document <project> <relative path>`,
-//! `files on|off` (the file side of a session), `terminal on|off` (the
+//! `files on|off` (the file side of a session), `side-position left|right`
+//! (where the side panel sits), `terminal on|off` (the
 //! raw pane under a conversation), `select-file <project>
 //! <relative path>` (previewed in that side),
 //! `set-env <project> NAME=VALUE`, `set-secret <project> NAME VALUE`,
@@ -365,6 +366,7 @@ fn step(app: &mut SwitchboardApp, w: &[&str]) -> Result<(), String> {
             app.dispatch(AppAction::ShowDocument(id, root.join(rel)));
         }
         ["files", on] => app.dispatch(AppAction::SetFilesOpen(*on == "on")),
+        ["side-position", at] => app.dispatch(AppAction::SetSideLeft(*at == "left")),
         ["terminal", on] => app.ui_state.terminal_open = *on == "on",
         ["select-file", p, rel] => {
             let (id, root) = project(app, p)?;

@@ -1125,6 +1125,14 @@ discard undo, and says so in a notice; the shell drops the cached
 conversation when a handle changes under an event. The old transcript
 stays on disk.
 
+## Side panel position (2026-09-22)
+
+The side panel (Files, Run, Notes) sits on the right of the page by
+default; the Settings menu's "Side panel on the left" puts it between
+the project rail and the page instead, as `Settings.side_left`. Either
+way it is dragged to size at its edge facing the page, and the hairline
+marking it off is drawn on that edge.
+
 ## Commands as runs (2026-09-21)
 
 A command used to be one pane and one scrollback file, so two runs
@@ -1144,9 +1152,11 @@ Outputs are declared, never guessed: a command's `output` in
 a glob or a list of globs relative to the command's directory. When a
 run closes, the files matching those patterns that were modified during
 the run become the run's artifacts. They appear as chips on the card
-and in a Files column on the page; a Markdown file renders in place, a
-PDF's first page is rasterized by Quick Look (`qlmanage`) into
-`renders/` on a thread and shown on the card and the page, and anything
+and in a Files section under the output on the page, each the full
+width of the page with a dragged split between them, so a page of a
+PDF reads; a Markdown file renders in place, a PDF's first page is
+rasterized by Quick Look (`qlmanage`) into `renders/` on a thread and
+shown at the width it is given on the card and the page, and anything
 can be opened in its app or revealed. The artifact list is capped at
 fifty per run and the finder is a port so the core never touches the
 disk.

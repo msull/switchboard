@@ -87,6 +87,9 @@ pub struct Settings {
     pub files_open: bool,
     /// Which tab the side panel shows.
     pub side_tab: SideTab,
+    /// The side panel sits on the left of the content, between the
+    /// rail and the page, instead of on the right.
+    pub side_left: bool,
     /// The screen that was showing when the app last ran, so it reopens
     /// there. A project or session that no longer exists falls back to
     /// the switchboard.
@@ -117,6 +120,7 @@ impl Default for Settings {
             env: Vec::new(),
             files_open: false,
             side_tab: SideTab::default(),
+            side_left: false,
             last_view: SavedView::default(),
             open_terminal_on_launch: false,
             prompt_box: true,

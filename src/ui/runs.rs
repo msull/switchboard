@@ -363,31 +363,45 @@ pub fn page(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord) {
             egui::Layout::top_down(egui::Align::Min),
             |ui| run_list(cx, ui, record, run.n),
         );
-        let artifacts_width = if run.artifacts.is_empty() {
-            0.0
-        } else {
-            (ui.available_width() * 0.4).max(240.0)
-        };
-        let log_width = ui.available_width() - artifacts_width - GAP;
-        ui.allocate_ui_with_layout(
-            vec2(log_width, ui.available_height()),
-            egui::Layout::top_down(egui::Align::Min),
-            |ui| {
-                if is_latest && running && run.open() {
-                    super::session::live_pane(cx, ui, record);
-                } else {
-                    log_view(cx, ui, record, &run);
-                }
-            },
-        );
-        if artifacts_width > 0.0 {
+        ui.add_space(GAP);
+        let live = is_latest && running && run.open();
+        if run.artifacts.is_empty() {
             ui.allocate_ui_with_layout(
                 vec2(ui.available_width(), ui.available_height()),
                 egui::Layout::top_down(egui::Align::Min),
-                |ui| artifacts_view(cx, ui, record, &run),
+                |ui| output_view(cx, ui, record, &run, live),
             );
+            return;
         }
+        // Output above the files, the full width for each, so a page of
+        // a PDF or a wide table reads; the split is dragged to taste.
+        ui.allocate_ui_with_layout(
+            vec2(ui.available_width(), ui.available_height()),
+            egui::Layout::top_down(egui::Align::Min),
+            |ui| {
+                let total = ui.available_height();
+                egui::Panel::top(egui::Id::new(("run-output", record.id)))
+                    .resizable(true)
+                    .default_size((total * 0.35).max(120.0))
+                    .size_range(80.0..=(total - 120.0).max(80.0))
+                    .show_separator_line(false)
+                    .frame(egui::Frame::new().inner_margin(egui::Margin::ZERO))
+                    .show(ui, |ui| output_view(cx, ui, record, &run, live));
+                ui.add_space(GAP);
+                artifacts_view(cx, ui, record, &run);
+            },
+        );
     });
+}
+
+/// The run's output: the live pane while it is the run in progress,
+/// else its kept log.
+fn output_view(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord, run: &Run, live: bool) {
+    if live {
+        super::session::live_pane(cx, ui, record);
+    } else {
+        log_view(cx, ui, record, run);
+    }
 }
 
 fn run_list(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord, selected: u32) {

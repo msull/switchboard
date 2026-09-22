@@ -2929,6 +2929,33 @@ fn the_settings_menu_picks_the_screen_for_the_overlays_and_the_editor_follows() 
 }
 
 #[test]
+fn the_settings_menu_moves_the_side_panel_to_the_left() {
+    let (mut harness, ids) = harness();
+    showing(&mut harness, View::Board(ids.alpha));
+    let right_of = |h: &Harness<'static, SwitchboardApp>| {
+        let files = h.get_by_label("Files").rect().left();
+        let all = h.get_by_label("All sessions").rect().left();
+        files > all
+    };
+    assert!(
+        right_of(&harness),
+        "the side starts on the right of the rail"
+    );
+    click(&mut harness, "Settings");
+    click(&mut harness, "Side panel on the left");
+    assert!(actions(&harness).contains(&AppAction::SetSideLeft(true)));
+    harness.run_steps(2);
+    let files = harness.get_by_label("Files").rect();
+    let rail = harness.get_by_label("All sessions").rect();
+    assert!(files.left() > rail.left(), "still right of the rail");
+    let page_x = harness
+        .get_by_role_and_label(Role::Button, "Config")
+        .rect()
+        .left();
+    assert!(files.left() < page_x, "and left of the board's content");
+}
+
+#[test]
 fn the_settings_menu_turns_the_prompt_box_off_and_on() {
     let (mut harness, ids) = harness();
     let id = seed_claude(&mut harness, &ids);

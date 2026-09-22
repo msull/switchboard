@@ -124,7 +124,7 @@ Dev aids, all environment variables:
   the app can be put into a known state without clicking. See
   `src/script.rs` for the lines (`add-project`, `new-shell`, `new-claude`,
   `new-codex`, `new-service`, `show-board`, `show-session`, `show-document`,
-  `files`, `terminal`, `select-file`, `set-env`, `set-secret`, `dotenv`, `environment`, `config`,
+  `files`, `side-position`, `terminal`, `select-file`, `set-env`, `set-secret`, `dotenv`, `environment`, `config`,
   `send`, `interrupt`, `return`, `kill`, `approve`, `revoke`, `side`,
   `switchboard`, `working-set`, `new-working-set`, `clone-working-set`,
   `rename-working-set`, `delete-working-set`, `add-to-working-set`,
