@@ -482,13 +482,19 @@ fn rounds_list(cx: &mut DrawCtx<'_>, ui: &mut Ui, run: &WorkflowRun) {
     let p = theme::palette(ui);
     theme::section(ui, "Rounds");
     let selected = selected_round(cx.state, run).map(|r| r.n);
+    let current = run.current().map(|r| r.n);
     for round in &run.rounds {
-        let verdict = match (round.user_feedback.is_some(), round.verdict) {
-            (true, _) => "your feedback",
-            (false, Some(Verdict::Nothing)) => "nothing further",
-            (false, Some(Verdict::Changes)) if round.responded => "answered",
-            (false, Some(Verdict::Changes)) => "changes asked",
-            (false, None) => "reviewing",
+        // The round in progress says who is at work; its word opens that
+        // session, so the work can be watched and nudged.
+        let at_work = (Some(round.n) == current).then(|| run.awaiting()).flatten();
+        let verdict = match (round.user_feedback.is_some(), round.verdict, &run.state) {
+            (_, _, RunState::AwaitingResponse) if at_work.is_some() => "answering",
+            (true, _, _) => "your feedback",
+            (false, Some(Verdict::Nothing), _) => "nothing further",
+            (false, Some(Verdict::Changes), _) if round.responded => "answered",
+            (false, Some(Verdict::Changes), _) => "changes asked",
+            (false, None, RunState::Starting) => "starting",
+            (false, None, _) => "reviewing",
         };
         let label = format!("Round {}", round.n);
         let is_selected = selected == Some(round.n);
@@ -500,11 +506,27 @@ fn rounds_list(cx: &mut DrawCtx<'_>, ui: &mut Ui, run: &WorkflowRun) {
         if ui.add(egui::Button::new(text).frame(false)).clicked() {
             cx.state.review_views.entry(run.id).or_default().round = Some(round.n);
         }
-        ui.label(
-            RichText::new(verdict)
-                .text_style(theme::meta())
-                .color(p.n600),
-        );
+        match at_work {
+            Some(agent) => {
+                let text = RichText::new(format!("{verdict} ↗"))
+                    .text_style(theme::meta())
+                    .color(p.accent_text);
+                if ui
+                    .add(egui::Button::new(text).frame(false))
+                    .on_hover_text("Open this session")
+                    .clicked()
+                {
+                    cx.dispatch(AppAction::ShowSession(agent));
+                }
+            }
+            None => {
+                ui.label(
+                    RichText::new(verdict)
+                        .text_style(theme::meta())
+                        .color(p.n600),
+                );
+            }
+        }
         ui.add_space(4.0);
     }
 }
@@ -547,30 +569,74 @@ fn exchange_column(
     // of the height before it is split between the two panes.
     let reserve = 2.0 * SECTION_HEIGHT + if note { NOTE_HEIGHT } else { 0.0 };
     let half = ((ui.available_height() - reserve) * 0.5).max(80.0);
+    // While the round waits on an agent, the pane its file will fill
+    // shows that agent's terminal instead of a missing file, so the
+    // work is visible as it happens.
+    let is_current = run.current().is_some_and(|r| r.n == round.n);
+    let at_work = is_current.then(|| run.awaiting()).flatten();
+    let live = |cx: &mut DrawCtx<'_>, ui: &mut Ui, agent: RecordId| {
+        let Some(record) = cx.core.session(agent).cloned() else {
+            ui.label(theme::meta_text(ui, "This session no longer exists."));
+            return;
+        };
+        ui.horizontal(|ui| {
+            ui.spacing_mut().button_padding = egui::vec2(6.0, 3.0);
+            ui.label(theme::meta_text(ui, format!("{} at work", record.name)));
+            if theme::ghost(ui, "Open session").clicked() {
+                cx.dispatch(AppAction::ShowSession(agent));
+            }
+        });
+        super::session::live_pane(cx, ui, &record);
+    };
     theme::section(ui, "Feedback");
-    egui::ScrollArea::vertical()
-        .id_salt(("feedback", run.id, round.n))
-        .max_height(half)
-        .auto_shrink(false)
-        .show(ui, |ui| match &round.user_feedback {
-            Some(text) => {
-                document::markdown_style(ui);
-                super::markdown::show(ui, &mut cx.state.markdown, text);
-            }
-            None => file_body(cx.state, ui, feedback),
-        });
+    match (&run.state, at_work) {
+        (RunState::AwaitingFeedback, Some(agent)) => {
+            ui.allocate_ui_with_layout(
+                egui::vec2(ui.available_width(), half),
+                egui::Layout::top_down(egui::Align::Min),
+                |ui| live(cx, ui, agent),
+            );
+        }
+        _ => {
+            egui::ScrollArea::vertical()
+                .id_salt(("feedback", run.id, round.n))
+                .max_height(half)
+                .auto_shrink(false)
+                .show(ui, |ui| match &round.user_feedback {
+                    Some(text) => {
+                        document::markdown_style(ui);
+                        super::markdown::show(ui, &mut cx.state.markdown, text);
+                    }
+                    None if is_current && run.state == RunState::Starting => {
+                        ui.label(theme::meta_text(ui, "Starting the reviewer…"));
+                    }
+                    None => file_body(cx.state, ui, feedback),
+                });
+        }
+    }
     theme::section(ui, "Response");
-    egui::ScrollArea::vertical()
-        .id_salt(("response", run.id, round.n))
-        .max_height(half)
-        .auto_shrink(false)
-        .show(ui, |ui| {
-            if round.verdict == Some(Verdict::Nothing) {
-                ui.label(theme::meta_text(ui, "Nothing to answer."));
-            } else {
-                file_body(cx.state, ui, response);
-            }
-        });
+    match (&run.state, at_work) {
+        (RunState::AwaitingResponse, Some(agent)) => {
+            ui.allocate_ui_with_layout(
+                egui::vec2(ui.available_width(), half),
+                egui::Layout::top_down(egui::Align::Min),
+                |ui| live(cx, ui, agent),
+            );
+        }
+        _ => {
+            egui::ScrollArea::vertical()
+                .id_salt(("response", run.id, round.n))
+                .max_height(half)
+                .auto_shrink(false)
+                .show(ui, |ui| {
+                    if round.verdict == Some(Verdict::Nothing) {
+                        ui.label(theme::meta_text(ui, "Nothing to answer."));
+                    } else {
+                        file_body(cx.state, ui, response);
+                    }
+                });
+        }
+    }
     if note {
         note_box(cx, ui, run);
     }

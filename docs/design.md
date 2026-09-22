@@ -1112,6 +1112,16 @@ show what is actually shared.
   for the round in progress and from the snapshot directory once a
   round was copied, so a cleaned-up run still shows every version.
 
+## Watching a review round (2026-09-22)
+
+A round in progress used to be a word ("reviewing") and an empty pane
+until the file arrived. Now the pane that round's file will fill (the
+Feedback pane while the reviewer works, the Response pane while the
+planner answers) shows that agent's live terminal with an Open session
+button, and the word under the round in the list ("reviewing ↗",
+"answering ↗") opens the session itself, so the work can be watched and
+nudged. A run that is still starting says so in the pane.
+
 ## Following /clear (2026-09-18)
 
 `/clear` keeps the Claude Code process and starts a fresh conversation

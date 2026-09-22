@@ -3120,6 +3120,52 @@ fn the_review_page_lists_rounds_and_its_controls_dispatch() {
 }
 
 #[test]
+fn a_round_in_progress_shows_the_working_agents_terminal_and_opens_its_session() {
+    let (mut harness, ids) = harness();
+    let source = seed_claude(&mut harness, &ids);
+    let run = seed_review(&mut harness, &ids, source);
+    // Back to the first round in progress: the reviewer is at work.
+    let (reviewer, planner) = {
+        let core = harness.state_mut().core_mut_for_seeding();
+        let mut workspaces = core.workspaces().to_vec();
+        let beta = workspaces
+            .iter_mut()
+            .find(|w| w.project.id == ids.beta)
+            .unwrap();
+        let wf = beta.workflows.iter_mut().find(|w| w.id == run).unwrap();
+        wf.state = RunState::AwaitingFeedback;
+        wf.rounds[0].verdict = None;
+        let pair = (wf.reviewer, wf.planner.unwrap());
+        core.seed(workspaces, vec![]);
+        pair
+    };
+    showing(&mut harness, View::Workflow(run));
+    harness.get_by_label("reviewing ↗");
+    harness.get_by_label("plan review at work");
+    // Terminals are off in the harness; the pane says so in their place.
+    harness.get_by_label("Embedded terminal disabled.");
+    click(&mut harness, "Open session");
+    assert!(actions(&harness).contains(&AppAction::ShowSession(reviewer)));
+    assert_eq!(harness.state().core().view(), View::Session(reviewer));
+    // The planner's turn shows the planner instead, in the Response pane.
+    {
+        let core = harness.state_mut().core_mut_for_seeding();
+        let mut workspaces = core.workspaces().to_vec();
+        let beta = workspaces
+            .iter_mut()
+            .find(|w| w.project.id == ids.beta)
+            .unwrap();
+        let wf = beta.workflows.iter_mut().find(|w| w.id == run).unwrap();
+        wf.state = RunState::AwaitingResponse;
+        wf.rounds[0].verdict = Some(Verdict::Changes);
+        core.seed(workspaces, vec![]);
+    }
+    showing(&mut harness, View::Workflow(run));
+    click(&mut harness, "answering ↗");
+    assert!(actions(&harness).contains(&AppAction::ShowSession(planner)));
+}
+
+#[test]
 fn cleaning_up_asks_first_and_lists_the_files() {
     let (mut harness, ids) = harness();
     let source = seed_claude(&mut harness, &ids);
