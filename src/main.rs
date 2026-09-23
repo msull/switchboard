@@ -15,6 +15,13 @@ use switchboard::app::Services;
 fn main() -> eframe::Result {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("switchboard=info"))
         .init();
+    // A GUI app starts with a soft limit of 256 open files on macOS;
+    // embedded terminals, tmux clients, and log pipes each take a few,
+    // so the limit is raised to what the system allows.
+    match rlimit::increase_nofile_limit(8192) {
+        Ok(limit) => log::info!("open file limit {limit}"),
+        Err(e) => log::warn!("could not raise the open file limit: {e}"),
+    }
 
     // `SWITCHBOARD_DATA_DIR` overrides the data directory for testing.
     let data_dir = std::env::var_os("SWITCHBOARD_DATA_DIR").map_or_else(

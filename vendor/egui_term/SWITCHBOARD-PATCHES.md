@@ -18,3 +18,10 @@ source changes were made. Re-apply them when updating the vendored copy.
    Ghostty). The new `env` map is passed through to
    `alacritty_terminal::tty::Options::env`; Switchboard sets
    `TERM=xterm-256color` and `COLORTERM=truecolor`.
+
+3. **The event subscription thread ends with the terminal**
+   (`src/backend/mod.rs`, `TerminalBackend::new`). Upstream looped
+   forever on `recv()`, so once the backend was dropped and its channel
+   closed the thread spun at full speed and never released what it
+   held; one per terminal ever opened. Now a closed channel on either
+   side ends the thread.

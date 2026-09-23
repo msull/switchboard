@@ -31,7 +31,7 @@ pub mod theme;
 pub mod workflow;
 pub mod working_set;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::SystemTime;
 
@@ -137,8 +137,12 @@ pub struct UiState {
     /// clone's or a discard's), taken when that editor is next drawn.
     /// Separate from the drafts, which the cards' quick-send lines share.
     pub primed: HashMap<RecordId, String>,
-    /// Embedded terminals, only ever the one for the session on screen.
+    /// Embedded terminals, only for the panes drawn last frame: a
+    /// session's own, or the agent at work on a review page.
     pub terminals: HashMap<RecordId, EmbeddedTerminal>,
+    /// The terminals drawn this frame; the rest are dropped at the next
+    /// frame's start, which detaches their tmux client.
+    pub terminals_drawn: HashSet<RecordId>,
     /// The theme last pushed into egui; pushed again only when it changes.
     pub applied_theme: Option<ThemeMode>,
     /// The Prompt Box editors of agent sessions and the voice runtime.
@@ -194,6 +198,7 @@ impl Default for UiState {
             prompt_boxes: prompt_box::PromptBoxes::default(),
             voice_draft: None,
             next_terminal_id: 0,
+            terminals_drawn: HashSet::new(),
         }
     }
 }
@@ -254,18 +259,13 @@ fn draw_frame(cx: &mut DrawCtx<'_>, ui: &mut Ui) {
         ui.ctx().request_repaint_after(delay);
     }
 
-    // An embedded terminal only lives while its session is on screen.
-    // Dropping the backend closes the pty, which detaches the tmux client
-    // and leaves the session running.
-    let shown = match &view {
-        View::Session(id) => Some(*id),
-        View::Switchboard
-        | View::Board(_)
-        | View::Document(..)
-        | View::WorkingSet(_)
-        | View::Workflow(_) => None,
-    };
-    cx.state.terminals.retain(|id, _| Some(*id) == shown);
+    // An embedded terminal only lives while its pane is on screen: the
+    // ones drawn last frame stay, the rest are dropped, which closes the
+    // pty, detaches the tmux client, and leaves the session running.
+    // Keyed on what was drawn rather than on the view, because a review
+    // page and a command page draw panes of their own.
+    let drawn = std::mem::take(&mut cx.state.terminals_drawn);
+    cx.state.terminals.retain(|id, _| drawn.contains(id));
 
     // The rail's surface fill is the only edge between the columns.
     let palette = theme::palette(ui);

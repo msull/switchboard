@@ -3852,6 +3852,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "rlimit"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f35ee2729c56bb610f6dba436bf78135f728b7373bdffae2ec815b2d3eb98cc3"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "rustc-hash"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4313,6 +4322,7 @@ dependencies = [
  "objc2-foundation 0.3.2",
  "promptbox",
  "pulldown-cmark",
+ "rlimit",
  "security-framework",
  "serde",
  "serde_json",

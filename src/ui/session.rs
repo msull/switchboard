@@ -1240,6 +1240,7 @@ fn terminal_body(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord) {
 
 /// The embedded terminal attached to the record's running pane.
 pub(super) fn live_pane(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord) {
+    cx.state.terminals_drawn.insert(record.id);
     if !cx.state.embed_terminals {
         ui.label(RichText::new("Embedded terminal disabled.").weak());
         return;
@@ -1293,8 +1294,43 @@ pub(super) fn live_pane(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecor
 
 #[cfg(test)]
 mod tests {
-    use super::append_path;
+    use super::{EmbeddedTerminal, append_path};
     use std::path::Path;
+
+    /// Open descriptors of this process, as the kernel lists them.
+    fn open_fds() -> usize {
+        std::fs::read_dir("/dev/fd").map_or(0, Iterator::count)
+    }
+
+    /// A dropped terminal gives back its pty, its poller, and its two
+    /// threads; a page that opens one per frame must not run out of
+    /// files.
+    #[test]
+    #[cfg(unix)]
+    fn a_dropped_terminal_releases_its_descriptors() {
+        // The login shell runs the attach; a CI box without it skips.
+        if !Path::new(&super::login_shell()).exists() {
+            return;
+        }
+        let ctx = egui::Context::default();
+        let attach = vec!["sleep".to_owned(), "30".to_owned()];
+        let cwd = std::env::temp_dir();
+        // Warm up: the first terminal loads what the rest share.
+        drop(EmbeddedTerminal::attach(0, ctx.clone(), &attach, cwd.clone()).unwrap());
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let baseline = open_fds();
+        for id in 1..=20 {
+            let term = EmbeddedTerminal::attach(id, ctx.clone(), &attach, cwd.clone()).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            drop(term);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        let after = open_fds();
+        assert!(
+            after <= baseline + 2,
+            "{baseline} descriptors before, {after} after twenty terminals"
+        );
+    }
 
     #[test]
     fn dropped_paths_join_the_draft_as_words() {

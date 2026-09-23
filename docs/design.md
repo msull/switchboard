@@ -1124,6 +1124,18 @@ show what is actually shared.
   for the round in progress and from the snapshot directory once a
   round was copied, so a cleaned-up run still shows every version.
 
+## Open files (2026-09-23)
+
+A macOS app launched from Finder starts with a soft limit of 256 open
+files. An embedded terminal costs a pty, a poller, and two threads, and
+the review page opened one per frame because terminals were kept by
+the view (a session's own) rather than by what was drawn; the vendored
+widget's event thread also spun on forever after its terminal was
+dropped. Terminals are now kept by the panes drawn last frame, the
+thread ends with its channel, a test attaches and drops twenty and
+checks the descriptor count is flat, and the launcher raises the soft
+limit to what the system allows.
+
 ## Watching a review round (2026-09-22)
 
 A round in progress used to be a word ("reviewing") and an empty pane
