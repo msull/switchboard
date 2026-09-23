@@ -101,6 +101,19 @@ pub fn show(cx: &mut DrawCtx<'_>, ui: &mut Ui, id: RecordId) {
         return;
     };
     ui.spacing_mut().item_spacing = egui::vec2(GAP, GAP);
+    // The page is drawn in one place: while the session has a window
+    // of its own, the main window only points there.
+    if cx.core.popped_out(id) && cx.state.in_popout != Some(id) {
+        ui.label(theme::strong_text(&record.name));
+        ui.label(theme::meta_text(
+            ui,
+            "This session is open in its own window.",
+        ));
+        if theme::secondary(ui, "Show its window").clicked() {
+            cx.dispatch(AppAction::PopOut(id));
+        }
+        return;
+    }
     header(cx, ui, &record);
     match record.kind {
         SessionKind::Agent(_) => agent_body(cx, ui, &record),
@@ -285,6 +298,16 @@ fn header_actions(
     if undo {
         order.insert(1, "Undo discard");
     }
+    // In its own window Back means nothing; Close window puts the page
+    // back in the main window. Elsewhere, Pop out gives it a window.
+    let in_popout = cx.state.in_popout == Some(record.id);
+    if in_popout {
+        order.retain(|b| *b != "Back");
+        order.push("Close window");
+    } else {
+        let at = order.len() - 1;
+        order.insert(at, "Pop out");
+    }
     if reversed {
         order.reverse();
     }
@@ -304,6 +327,10 @@ fn header_actions(
                 continue;
             }
             "Kill" | "Back" => theme::ghost_muted(ui, button),
+            "Pop out" => theme::ghost_muted(ui, button)
+                .on_hover_text("Open this session in a window of its own (Cmd+Shift+P)"),
+            "Close window" => theme::ghost_muted(ui, button)
+                .on_hover_text("Close this window; the session shows in the main one (Cmd+W)"),
             "Undo discard" => theme::ghost(ui, button)
                 .on_hover_text("Put back the conversation the last discard cut away"),
             "Review plan" => theme::ghost(ui, button).on_hover_text(
@@ -330,6 +357,8 @@ fn header_actions(
             "Kill" | "Stop" => cx.dispatch(AppAction::KillSession(record.id)),
             "Undo discard" => cx.dispatch(AppAction::UndoDiscard(record.id)),
             "Back" => cx.dispatch(AppAction::Back),
+            "Pop out" => cx.dispatch(AppAction::PopOut(record.id)),
+            "Close window" => cx.dispatch(AppAction::ClosePopout(record.id)),
             _ => cx.dispatch(AppAction::ReturnToSession(record.id)),
         }
     }

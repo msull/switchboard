@@ -19,6 +19,7 @@ pub mod files;
 pub mod markdown;
 pub mod notes;
 pub mod palette;
+pub mod popout;
 pub mod prompt_box;
 mod rail;
 mod run;
@@ -39,7 +40,8 @@ use egui::{Key, Modifiers, RichText, Ui};
 
 use crate::app::{Services, SwitchboardApp};
 use crate::core::{
-    AppAction, AppCore, ProjectId, RecordId, SetId, SideTab, ThemeMode, View, WorkflowId,
+    AppAction, AppCore, ProjectId, RecordId, SetId, SideTab, ThemeMode, View, WindowFrame,
+    WorkflowId,
 };
 use crate::ports::transcript::Conversation;
 
@@ -143,6 +145,15 @@ pub struct UiState {
     /// The terminals drawn this frame; the rest are dropped at the next
     /// frame's start, which detaches their tmux client.
     pub terminals_drawn: HashSet<RecordId>,
+    /// Session windows the core asked to raise; drawn to the front on
+    /// the next frame.
+    pub focus_windows: Vec<RecordId>,
+    /// The session whose own window is being drawn right now, so the
+    /// page knows it is not in the main window.
+    pub in_popout: Option<RecordId>,
+    /// Each session window's frame as last seen and since when, so a
+    /// move is saved once it settles.
+    pub popout_frames: HashMap<RecordId, (WindowFrame, std::time::Instant)>,
     /// The theme last pushed into egui; pushed again only when it changes.
     pub applied_theme: Option<ThemeMode>,
     /// The Prompt Box editors of agent sessions and the voice runtime.
@@ -199,6 +210,9 @@ impl Default for UiState {
             voice_draft: None,
             next_terminal_id: 0,
             terminals_drawn: HashSet::new(),
+            focus_windows: Vec::new(),
+            in_popout: None,
+            popout_frames: HashMap::new(),
         }
     }
 }
@@ -292,7 +306,7 @@ fn draw_frame(cx: &mut DrawCtx<'_>, ui: &mut Ui) {
         View::Session(_) | View::Switchboard | View::WorkingSet(_) | View::Workflow(_) => None,
     };
     if let Some((pid, inline, message, session)) = files_for {
-        side_panel(cx, ui, pid, inline, message, session);
+        side_panel(cx, ui, pid, inline, message, session, None);
     }
     egui::CentralPanel::default()
         .frame(
@@ -312,6 +326,7 @@ fn draw_frame(cx: &mut DrawCtx<'_>, ui: &mut Ui) {
             }
         });
 
+    popout::show_all(cx, ui.ctx());
     switcher::toasts(cx, ui.ctx());
     prompt_box::overlays(cx.state, ui.ctx());
     dialogs::show(cx, ui.ctx());
@@ -330,14 +345,22 @@ fn side_panel(
     inline: bool,
     message: Option<RecordId>,
     session: Option<RecordId>,
+    window: Option<RecordId>,
 ) {
     // On the left the side sits between the rail and the page, so
-    // its wider margin faces the page either way.
+    // its wider margin faces the page either way. A session window's
+    // panel has an id of its own, so its size is remembered apart from
+    // the main window's.
     let on_left = cx.core.settings().side_left;
+    let name = if on_left { "files-left" } else { "files" };
+    let id = match window {
+        Some(w) => egui::Id::new((name, w)),
+        None => egui::Id::new(name),
+    };
     let panel = if on_left {
-        egui::Panel::left("files-left")
+        egui::Panel::left(id)
     } else {
-        egui::Panel::right("files")
+        egui::Panel::right(id)
     };
     let (left_margin, right_margin) = if on_left { (20, 12) } else { (12, 20) };
     let side = panel
@@ -458,6 +481,37 @@ fn side_tabs(
     tab
 }
 
+/// Cmd+B, Cmd+R, and Cmd+N each name a tab of the side panel: they
+/// show it, opening the side beside a session if it is closed, and a
+/// second press on the tab already showing closes the side again.
+/// Boards always have the side, so there the keys only switch tabs,
+/// and Notes belongs to a session alone. `session` says which of the
+/// two the keys are beside.
+fn side_tab_keys(cx: &mut DrawCtx<'_>, ctx: &egui::Context, session: bool) {
+    for (key, tab) in [
+        (Key::B, SideTab::Files),
+        (Key::R, SideTab::Run),
+        (Key::N, SideTab::Notes),
+    ] {
+        let allowed = session || tab != SideTab::Notes;
+        if !allowed || !ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, key)) {
+            continue;
+        }
+        let settings = cx.core.settings();
+        let showing = settings.side_tab == tab;
+        if showing && settings.files_open && session {
+            cx.dispatch(AppAction::SetFilesOpen(false));
+            continue;
+        }
+        if !showing {
+            cx.dispatch(AppAction::SetSideTab(tab));
+        }
+        if session && !settings.files_open {
+            cx.dispatch(AppAction::SetFilesOpen(true));
+        }
+    }
+}
+
 /// Esc goes back, Cmd+1..9 switch project, Cmd+0 shows the switchboard,
 /// Cmd+K opens the quick-switcher, Cmd+B, Cmd+R, and Cmd+N show the
 /// Files, Run, and Notes tabs of the side panel (again to close it
@@ -494,36 +548,16 @@ fn keyboard(cx: &mut DrawCtx<'_>, ui: &Ui, view: &View) {
     if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::K)) {
         cx.state.palette = Some(palette::PaletteDraft::default());
     }
-    // Cmd+B, Cmd+R, and Cmd+N each name a tab of the side panel: they
-    // show it, opening the side beside a session if it is closed, and a
-    // second press on the tab already showing closes the side again.
-    // Boards always have the side, so there the keys only switch tabs,
-    // and Notes belongs to a session alone.
-    for (key, tab) in [
-        (Key::B, SideTab::Files),
-        (Key::R, SideTab::Run),
-        (Key::N, SideTab::Notes),
-    ] {
-        let allowed = match view {
-            View::Session(_) => true,
-            View::Board(_) => tab != SideTab::Notes,
-            _ => false,
-        };
-        if !allowed || !ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, key)) {
-            continue;
-        }
-        let settings = cx.core.settings();
-        let showing = settings.side_tab == tab;
-        if showing && settings.files_open && matches!(view, View::Session(_)) {
-            cx.dispatch(AppAction::SetFilesOpen(false));
-            continue;
-        }
-        if !showing {
-            cx.dispatch(AppAction::SetSideTab(tab));
-        }
-        if matches!(view, View::Session(_)) && !settings.files_open {
-            cx.dispatch(AppAction::SetFilesOpen(true));
-        }
+    match view {
+        View::Session(_) => side_tab_keys(cx, ctx, true),
+        View::Board(_) => side_tab_keys(cx, ctx, false),
+        _ => {}
+    }
+    // Cmd+Shift+P gives the session a window of its own.
+    if let View::Session(id) = view
+        && ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND | Modifiers::SHIFT, Key::P))
+    {
+        cx.dispatch(AppAction::PopOut(*id));
     }
     // Cmd+. is the macOS "stop" key; Escape already means Back here and
     // would also blur the message box.

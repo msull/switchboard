@@ -34,7 +34,8 @@ approvals of defined commands live inside these records),
 `settings.json` (theme, exclusive mode, editor, global variables, file
 side shown next to sessions and its tab, the screen to reopen on, the
 Prompt Box switch and its trigger word, model, captions, and the screen
-its caption bar and preview panel appear on, the
+its caption bar and preview panel appear on, the sessions open in
+windows of their own and where each window sits, the
 workflow round cap and the user's workflow definitions),
 `views.json` (the working sets: each one's name, which sessions and
 files are on it, and where each card sits on its grid, with a `.bak`),
@@ -131,6 +132,7 @@ Dev aids, all environment variables:
   `add-file-to-working-set`, `arrange`, `show-message`, `clone-session`,
   `discard-to`, `undo-discard`, `review-plan`, `show-review`,
   `review-file`, `review-continue`, `review-finalize`, `show-artifact`,
+  `pop-out`, `close-pop-out`,
   `open-terminal`, `prompt-box`, `theme`, `sleep`).
 - `SWITCHBOARD_TMUX=<path>`: tmux binary to use.
 - `RUST_LOG=switchboard=debug`: verbose logging.
@@ -193,6 +195,7 @@ src/ui/
   document.rs            read-only preview: Markdown, text, images, a PDF's first page; full view and the side pane's body
   markdown.rs            Markdown: prose through egui_commonmark, tables laid out here with content-sized columns
   palette.rs             quick-switcher (Cmd+K) over projects and sessions
+  popout.rs              a session in a window of its own: the page and side panel in a viewport, frame saved on settle
   env.rs                 Environment dialog: variables, secrets, .env opt-in, masked preview
   config.rs              project config editor: .switchboard/project.json as text, options listed, parse shown
   workflow.rs            plan review: the Review plan dialog, the run's page (rounds, plan with diff, feedback beside response, controls)

@@ -90,6 +90,10 @@ pub struct Settings {
     /// The side panel sits on the left of the content, between the
     /// rail and the page, instead of on the right.
     pub side_left: bool,
+    /// Sessions shown in windows of their own, brought back where they
+    /// were on the next launch. A session is drawn as a page in one
+    /// place only: its window while it has one, else the main window.
+    pub popouts: Vec<Popout>,
     /// The screen that was showing when the app last ran, so it reopens
     /// there. A project or session that no longer exists falls back to
     /// the switchboard.
@@ -121,6 +125,7 @@ impl Default for Settings {
             files_open: false,
             side_tab: SideTab::default(),
             side_left: false,
+            popouts: Vec::new(),
             last_view: SavedView::default(),
             open_terminal_on_launch: false,
             prompt_box: true,
@@ -443,6 +448,25 @@ pub enum SavedView {
     WorkingSet,
     Set(SetId),
     Workflow(WorkflowId),
+}
+
+/// A session in a window of its own.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Popout {
+    pub session: RecordId,
+    /// Where the window was last seen, in screen points; `None` until
+    /// the window has reported a position.
+    #[serde(default)]
+    pub frame: Option<WindowFrame>,
+}
+
+/// A window's outer rectangle in whole screen points.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WindowFrame {
+    pub x: i32,
+    pub y: i32,
+    pub w: i32,
+    pub h: i32,
 }
 
 /// Schema of `views.json`, bumped like [`SCHEMA_VERSION`] when a type

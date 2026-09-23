@@ -106,7 +106,14 @@ pub const DARK: Palette = Palette {
 /// not drag every color drawn inside it to the other theme.
 #[must_use]
 pub fn palette(ui: &Ui) -> &'static Palette {
-    if ui.ctx().theme() == egui::Theme::Dark {
+    palette_of(ui.ctx())
+}
+
+/// The palette for a context, for code that has no `Ui` yet (a window
+/// being opened).
+#[must_use]
+pub fn palette_of(ctx: &egui::Context) -> &'static Palette {
+    if ctx.theme() == egui::Theme::Dark {
         &DARK
     } else {
         &LIGHT

@@ -1124,6 +1124,34 @@ show what is actually shared.
   for the round in progress and from the snapshot directory once a
   round was copied, so a cleaned-up run still shows every version.
 
+## Session windows (2026-09-23)
+
+A session can have a window of its own, so a working set stays up on
+one display as the dashboard while the sessions being worked in sit on
+another. The window is an egui viewport drawn from the main frame with
+the same page code: header, conversation or terminal, message box, run
+bar, and the side panel with its own remembered width. The list of
+open windows is data (`Settings.popouts`, with each window's frame once
+it has held still), so they come back where they were on the next
+launch, and one whose session is gone is dropped on load.
+
+The page of a session is drawn in one place. Cards read the pane's
+snapshot and attach nothing, so they keep working everywhere; the full
+page attaches a tmux client through the embedded terminal, and two of
+those on one pane would fight. So while a session has a window, the
+main window's page for it is a note and a button that raises the
+window, and showing the session from the rail or switcher raises it
+too (`Effect::FocusWindow`). Popping out a session that is the main
+window's page steps the main window back to what it showed before.
+
+Entry points: Pop out in the session header (Cmd+Shift+P), Open in
+window on a card's right-click menu, and the `pop-out` script line.
+Cmd+W in the window, its close button, or Close window in its header
+puts the page back. Voice binding is untouched: it is per session, as
+before. Boards and working sets are not popped out yet; the window
+holds a session only, though nothing in the mechanism is session
+specific.
+
 ## Open files (2026-09-23)
 
 A macOS app launched from Finder starts with a soft limit of 256 open

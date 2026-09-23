@@ -25,6 +25,7 @@ impl AppCore {
                 self.workspaces = loaded.workspaces;
                 self.settings = loaded.settings;
                 self.views = loaded.views;
+                self.prune_popouts(out);
                 self.restore_view();
                 // Definition files are read before the first host poll, so
                 // the reconcile already knows which entries are approved.

@@ -2929,6 +2929,44 @@ fn the_settings_menu_picks_the_screen_for_the_overlays_and_the_editor_follows() 
 }
 
 #[test]
+fn pop_out_moves_the_session_page_into_its_own_window() {
+    let (mut harness, ids) = harness();
+    plain_message_box(&mut harness);
+    let id = seed_claude(&mut harness, &ids);
+    harness
+        .state_mut()
+        .ui_state
+        .conversations
+        .insert(id, (None, two_turns()));
+    showing(&mut harness, View::Board(ids.beta));
+    showing(&mut harness, View::Session(id));
+    click(&mut harness, "Pop out");
+    assert!(actions(&harness).contains(&AppAction::PopOut(id)));
+    let app = harness.state();
+    assert!(app.core().popped_out(id));
+    assert_eq!(
+        app.core().view(),
+        View::Board(ids.beta),
+        "the main window stepped back"
+    );
+    harness.run_steps(2);
+    // Headless egui embeds the window in the main one: the page is
+    // there, with Close window in place of Back, and the conversation.
+    harness.get_by_label("Close window");
+    harness.get_by_label("pong");
+    assert!(harness.query_by_label("Pop out").is_none());
+    // The main window's page for it only points at the window.
+    showing(&mut harness, View::Session(id));
+    harness.get_by_label("This session is open in its own window.");
+    click(&mut harness, "Close window");
+    assert!(actions(&harness).contains(&AppAction::ClosePopout(id)));
+    assert!(!harness.state().core().popped_out(id));
+    harness.run_steps(2);
+    harness.get_by_label("Back");
+    assert!(harness.query_by_label("Close window").is_none());
+}
+
+#[test]
 fn the_settings_menu_moves_the_side_panel_to_the_left() {
     let (mut harness, ids) = harness();
     showing(&mut harness, View::Board(ids.alpha));

@@ -826,9 +826,22 @@ pub fn set_menu_actions(
 /// was chosen, so the menu can close.
 pub fn set_menu(cx: &mut DrawCtx<'_>, ui: &mut Ui, target: &PinTarget) -> bool {
     let columns = cx.state.working_set_columns;
-    let (actions, chosen) = set_menu_actions(cx.core, ui, target, columns);
+    let (actions, mut chosen) = set_menu_actions(cx.core, ui, target, columns);
     for action in actions {
         cx.dispatch(action);
+    }
+    // A session can also go to a window of its own, from any card.
+    if let PinTarget::Session(id) = target {
+        ui.separator();
+        let label = if cx.core.popped_out(*id) {
+            "Show its window"
+        } else {
+            "Open in window"
+        };
+        if ui.button(label).clicked() {
+            cx.dispatch(AppAction::PopOut(*id));
+            chosen = true;
+        }
     }
     chosen
 }

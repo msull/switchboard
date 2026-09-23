@@ -11,7 +11,7 @@ use super::definitions::entry_hash;
 use super::model::{
     Activity, AgentKind, Approval, CardState, Discarded, GridRect, Launch, PinTarget, Project,
     ProjectEnv, ProjectId, RecordId, ResumeHandle, SavedView, SessionKind, SessionRecord, Settings,
-    SideTab, ThemeMode, Views, Workspace,
+    SideTab, ThemeMode, Views, WindowFrame, Workspace,
 };
 use super::reconcile::RECORD_ID_ENV;
 use crate::ports::agent::AgentLaunch;
@@ -344,6 +344,58 @@ fn the_file_side_toggle_is_a_saved_setting() {
     // Setting it again to the same value writes nothing.
     let effects = core.dispatch(AppAction::SetFilesOpen(true), Clock::at(2));
     assert!(!effects.iter().any(|e| matches!(e, Effect::SaveSettings(_))));
+}
+
+#[test]
+fn a_popped_out_session_is_shown_in_its_window_and_the_main_window_steps_back() {
+    let (mut core, _, ids) = with_records(&[SessionKind::Shell], |r| Some(running(r.id)));
+    let id = ids[0];
+    core.dispatch(
+        AppAction::ShowBoard(core.workspaces()[0].project.id),
+        Clock::at(1),
+    );
+    core.dispatch(AppAction::ShowSession(id), Clock::at(2));
+    assert_eq!(core.view(), View::Session(id));
+    let effects = core.dispatch(AppAction::PopOut(id), Clock::at(3));
+    assert!(core.popped_out(id));
+    assert!(
+        effects
+            .iter()
+            .any(|e| matches!(e, Effect::SaveSettings(s) if s.popouts.len() == 1))
+    );
+    assert!(
+        matches!(core.view(), View::Board(_)),
+        "the page left the main window"
+    );
+    // Showing it again raises the window instead of drawing it here.
+    let effects = core.dispatch(AppAction::ShowSession(id), Clock::at(4));
+    assert!(matches!(core.view(), View::Board(_)));
+    assert!(
+        effects
+            .iter()
+            .any(|e| matches!(e, Effect::FocusWindow(w) if *w == id))
+    );
+    // A second pop out only focuses; a move is remembered.
+    let effects = core.dispatch(AppAction::PopOut(id), Clock::at(5));
+    assert!(effects.iter().any(|e| matches!(e, Effect::FocusWindow(_))));
+    assert!(!effects.iter().any(|e| matches!(e, Effect::SaveSettings(_))));
+    let frame = WindowFrame {
+        x: 10,
+        y: 20,
+        w: 800,
+        h: 600,
+    };
+    core.dispatch(AppAction::PopoutMoved(id, frame), Clock::at(6));
+    assert_eq!(core.settings().popouts[0].frame, Some(frame));
+    // Closing the window gives the page back to the main window.
+    core.dispatch(AppAction::ClosePopout(id), Clock::at(7));
+    assert!(!core.popped_out(id));
+    core.dispatch(AppAction::ShowSession(id), Clock::at(8));
+    assert_eq!(core.view(), View::Session(id));
+    // A removed session takes its window with it.
+    core.dispatch(AppAction::PopOut(id), Clock::at(9));
+    core.dispatch(AppAction::RemoveSession(id), Clock::at(10));
+    assert!(core.settings().popouts.is_empty());
 }
 
 #[test]

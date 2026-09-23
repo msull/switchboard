@@ -23,9 +23,9 @@ use crate::core::env::SecretScope;
 use crate::core::grid;
 use crate::core::model::{
     Activity, AgentKind, CardState, EnvVar, GridRect, HandoffMode, Launch, PinTarget, PinnedItem,
-    Project, ProjectEnv, ProjectId, RecordId, ResumeHandle, SavedView, SessionKind, SessionRecord,
-    SetId, Settings, SideTab, ThemeMode, VOICE_KEY_ACCOUNT, Views, VoiceSettings,
-    WorkflowDefinition, WorkflowId, WorkingSet, Workspace,
+    Popout, Project, ProjectEnv, ProjectId, RecordId, ResumeHandle, SavedView, SessionKind,
+    SessionRecord, SetId, Settings, SideTab, ThemeMode, VOICE_KEY_ACCOUNT, Views, VoiceSettings,
+    WindowFrame, WorkflowDefinition, WorkflowId, WorkingSet, Workspace,
 };
 use crate::ports::agent::AgentLaunch;
 use crate::ports::events::SessionEvent;
@@ -207,6 +207,13 @@ pub enum AppAction {
     SetSideTab(SideTab),
     /// The side panel on the left of the content (true) or the right.
     SetSideLeft(bool),
+    /// Give the session a window of its own; the main window goes back
+    /// to what it showed before if the session was its page.
+    PopOut(RecordId),
+    /// The session's window closed; its page is the main window's again.
+    ClosePopout(RecordId),
+    /// The session's window was moved or resized.
+    PopoutMoved(RecordId, WindowFrame),
     /// The project's `.switchboard/project.json` was read (or is absent,
     /// or unusable). Entries become records that cannot run until
     /// approved.
@@ -365,6 +372,8 @@ pub enum AppAction {
 /// Work the shell performs on the core's behalf.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Effect {
+    /// Bring the session's own window to the front.
+    FocusWindow(RecordId),
     Save(Workspace),
     Delete(ProjectId),
     SaveSettings(Settings),
@@ -627,7 +636,7 @@ impl AppCore {
             | AppAction::RenameWorkingSet { .. }
             | AppAction::DeleteWorkingSet(_) => self.working_set_action(action, now, &mut out),
             AppAction::ShowBoard(id) => self.show(View::Board(id), now, &mut out),
-            AppAction::ShowSession(id) => self.show(View::Session(id), now, &mut out),
+            AppAction::ShowSession(id) => self.show_session(id, now, &mut out),
             AppAction::RenameProject(..)
             | AppAction::PinDocument(..)
             | AppAction::UnpinDocument(..)
@@ -648,7 +657,10 @@ impl AppCore {
             | AppAction::SetVoiceSettings(_)
             | AppAction::StoreVoiceKey(_)
             | AppAction::SetSideTab(_)
-            | AppAction::SetSideLeft(_) => self.files_and_settings(action, now, &mut out),
+            | AppAction::SetSideLeft(_)
+            | AppAction::PopOut(_)
+            | AppAction::ClosePopout(_)
+            | AppAction::PopoutMoved(..) => self.files_and_settings(action, now, &mut out),
             AppAction::ProjectConfigRead { .. }
             | AppAction::SaveProjectConfig { .. }
             | AppAction::ProjectConfigWritten { .. }
@@ -1123,6 +1135,57 @@ impl AppCore {
         }
         self.view_stack
             .retain(|v| !matches!(v, View::Session(s) if *s == id));
+        self.update_settings(out, |s| s.popouts.retain(|p| p.session != id));
+    }
+
+    /// A session with a window of its own is shown there, not here.
+    fn show_session(&mut self, id: RecordId, now: Clock, out: &mut Out) {
+        if self.popped_out(id) {
+            out.push(Effect::FocusWindow(id));
+        } else {
+            self.show(View::Session(id), now, out);
+        }
+    }
+
+    /// Whether the session has a window of its own.
+    #[must_use]
+    pub fn popped_out(&self, id: RecordId) -> bool {
+        self.settings.popouts.iter().any(|p| p.session == id)
+    }
+
+    /// The session gets a window; if it was the main window's page,
+    /// that goes back to what was before, so the page is in one place.
+    fn pop_out(&mut self, id: RecordId, out: &mut Out) {
+        if self.session(id).is_none() {
+            return;
+        }
+        if self.popped_out(id) {
+            out.push(Effect::FocusWindow(id));
+            return;
+        }
+        self.update_settings(out, |s| {
+            s.popouts.push(Popout {
+                session: id,
+                frame: None,
+            });
+        });
+        while self.view() == View::Session(id) {
+            self.view_stack.pop();
+        }
+    }
+
+    /// Windows of sessions that no longer exist are forgotten.
+    pub(super) fn prune_popouts(&mut self, out: &mut Out) {
+        let gone: Vec<RecordId> = self
+            .settings
+            .popouts
+            .iter()
+            .map(|p| p.session)
+            .filter(|id| self.session(*id).is_none())
+            .collect();
+        if !gone.is_empty() {
+            self.update_settings(out, |s| s.popouts.retain(|p| !gone.contains(&p.session)));
+        }
     }
 
     pub(super) fn session_mut(&mut self, id: RecordId) -> Option<&mut SessionRecord> {
@@ -1321,6 +1384,15 @@ impl AppCore {
             }
             AppAction::SetSideTab(tab) => self.update_settings(out, |s| s.side_tab = tab),
             AppAction::SetSideLeft(left) => self.update_settings(out, |s| s.side_left = left),
+            AppAction::PopOut(id) => self.pop_out(id, out),
+            AppAction::ClosePopout(id) => {
+                self.update_settings(out, |s| s.popouts.retain(|p| p.session != id));
+            }
+            AppAction::PopoutMoved(id, frame) => self.update_settings(out, |s| {
+                if let Some(p) = s.popouts.iter_mut().find(|p| p.session == id) {
+                    p.frame = Some(frame);
+                }
+            }),
             // Everything else is routed by `dispatch` itself.
             _ => unreachable!("dispatched by `dispatch` itself"),
         }

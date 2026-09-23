@@ -337,6 +337,7 @@ impl SwitchboardApp {
             | Effect::OpenPath(_)
             | Effect::Forget(_)
             | Effect::OpenInEditor { .. }
+            | Effect::FocusWindow(_)
             | Effect::Reveal(_) => unreachable!("not a store effect"),
         }
     }
@@ -477,6 +478,11 @@ impl SwitchboardApp {
             Effect::OpenPath(path) => failed(s.opener.open_default(&path), || {
                 format!("open {}", path.display())
             }),
+            // Windows are the UI's; it raises the one asked for next frame.
+            Effect::FocusWindow(id) => {
+                self.ui_state.focus_windows.push(id);
+                None
+            }
             Effect::OpenInEditor { editor, path } => {
                 failed(s.opener.open_editor(&editor, &path), || {
                     format!("open {} in {editor}", path.display())

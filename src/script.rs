@@ -16,7 +16,8 @@
 //! feedback|response <first line...>` (writes the newest review's
 //! awaited file to disk, as its agent would), `review-continue`,
 //! `review-finalize`, `show-artifact <name> <index>` (a command's card
-//! and page show that file of its last run),
+//! and page show that file of its last run), `pop-out <name>` and
+//! `close-pop-out <name>` (a session's own window),
 //! `send <name> <text...>`, `interrupt <name>` (Escape to the pane),
 //! `return <name>`, `kill <name>`, `approve <name>`, `revoke <name>`
 //! (a defined command's approval), `side files|run|notes` (the side panel's
@@ -115,11 +116,21 @@ const REVIEW_LINES: &[&str] = &[
     "review-continue",
     "review-finalize",
     "show-artifact",
+    "pop-out",
+    "close-pop-out",
 ];
 
 /// The plan review lines, kept out of `working_set_step` for length.
 fn review_step(app: &mut SwitchboardApp, w: &[&str]) -> Result<(), String> {
     match w {
+        ["pop-out", n] => {
+            let id = session(app, n)?;
+            app.dispatch(AppAction::PopOut(id));
+        }
+        ["close-pop-out", n] => {
+            let id = session(app, n)?;
+            app.dispatch(AppAction::ClosePopout(id));
+        }
         ["review-plan", name, path] => {
             let source = session(app, name)?;
             app.dispatch(AppAction::StartWorkflow {
