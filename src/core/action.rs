@@ -550,6 +550,8 @@ impl Out {
 
 /// How long a success notice stays up.
 const NOTICE_TTL: Duration = Duration::from_secs(4);
+/// How a zoom notice starts, so the next one replaces it.
+const ZOOM_NOTICE: &str = "Zoom ";
 
 /// The state of a project's definition file as last read.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -1434,12 +1436,18 @@ impl AppCore {
             AppAction::SetSideTab(tab) => self.update_settings(out, |s| s.side_tab = tab),
             AppAction::SetSideLeft(left) => self.update_settings(out, |s| s.side_left = left),
             AppAction::SetFileRoot(pid, dir) => self.set_file_root(pid, dir, out),
-            AppAction::SetMonitorZoom(monitor, percent) => self.update_settings(out, |s| {
-                s.monitor_zoom.retain(|z| z.monitor != monitor);
-                if percent != 100 {
-                    s.monitor_zoom.push(MonitorZoom { monitor, percent });
-                }
-            }),
+            AppAction::SetMonitorZoom(monitor, percent) => {
+                // One zoom notice at a time: a run of key presses reads
+                // as a changing number, not a queue of toasts.
+                self.notices.retain(|n| !n.text.starts_with(ZOOM_NOTICE));
+                self.info(format!("{ZOOM_NOTICE}{percent}% on {monitor}"), now);
+                self.update_settings(out, |s| {
+                    s.monitor_zoom.retain(|z| z.monitor != monitor);
+                    if percent != 100 {
+                        s.monitor_zoom.push(MonitorZoom { monitor, percent });
+                    }
+                });
+            }
             AppAction::PopOut(id) => self.pop_out(id, out),
             AppAction::ClosePopout(id) => {
                 self.update_settings(out, |s| s.popouts.retain(|p| p.session != id));

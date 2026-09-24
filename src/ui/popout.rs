@@ -92,6 +92,7 @@ fn window(cx: &mut DrawCtx<'_>, ctx: &Context, popout: &Popout) {
             .frame(egui::Frame::new().fill(theme::palette_of(ctx).bg))
             .show(ctx, |ui| body(cx, ui, &record));
         cx.state.in_popout = None;
+        super::switcher::toasts(cx, ctx, Some(id));
     });
     zoom::restore(ctx, main_zoom);
 }

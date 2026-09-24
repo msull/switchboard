@@ -335,7 +335,7 @@ fn draw_frame(cx: &mut DrawCtx<'_>, ui: &mut Ui) {
         });
 
     popout::show_all(cx, ui.ctx());
-    switcher::toasts(cx, ui.ctx());
+    switcher::toasts(cx, ui.ctx(), None);
     prompt_box::overlays(cx.state, ui.ctx());
     dialogs::show(cx, ui.ctx());
     palette::show(cx, ui.ctx());

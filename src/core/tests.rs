@@ -408,6 +408,8 @@ fn zoom_is_a_saved_setting_per_display_and_native_is_the_default() {
     assert_eq!(core.monitor_zoom("Built-in"), 100, "each display its own");
     core.dispatch(AppAction::SetMonitorZoom("DELL".into(), 130), Clock::at(2));
     assert_eq!(core.settings().monitor_zoom.len(), 1, "replaced, not added");
+    assert_eq!(core.notices().len(), 1, "one zoom notice, the latest");
+    assert_eq!(core.notice().unwrap().text, "Zoom 130% on DELL");
     // Native is the default, so it is not kept as an entry.
     core.dispatch(AppAction::SetMonitorZoom("DELL".into(), 100), Clock::at(3));
     assert!(core.settings().monitor_zoom.is_empty());

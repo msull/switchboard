@@ -4,7 +4,7 @@
 use egui::{Context, RichText, Ui};
 
 use super::{DrawCtx, theme};
-use crate::core::{AppAction, ThemeMode, VoiceSettings};
+use crate::core::{AppAction, RecordId, ThemeMode, VoiceSettings};
 
 /// The Prompt Box fields as typed in the menu, until each loses focus.
 #[derive(Debug, Clone, Default)]
@@ -208,13 +208,13 @@ fn prompt_box_settings(cx: &mut DrawCtx<'_>, ui: &mut Ui, settings: &crate::core
 
 /// Notices and the host error as toasts at the top centre: surface
 /// fill, a shadow, errors led by a magenta dot.
-pub fn toasts(cx: &mut DrawCtx<'_>, ctx: &Context) {
+pub fn toasts(cx: &mut DrawCtx<'_>, ctx: &Context, window: Option<RecordId>) {
     let notice = cx.core.notice().cloned();
     let host_error = cx.core.host_error().map(str::to_owned);
     if notice.is_none() && host_error.is_none() {
         return;
     }
-    egui::Area::new(egui::Id::new("toasts"))
+    egui::Area::new(egui::Id::new(("toasts", window)))
         .anchor(egui::Align2::CENTER_TOP, egui::vec2(0.0, 12.0))
         .order(egui::Order::Foreground)
         .show(ctx, |ui| {
