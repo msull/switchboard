@@ -11,10 +11,16 @@
 //! Rects egui reports are in a window's own zoomed points; screen
 //! frames are in native points. A rect is scaled by the window's factor
 //! before it is compared with a screen or saved.
+//!
+//! Pointer events are converted to points as they arrive, between
+//! frames, with whatever factor is installed then. So the frame ends
+//! with the factor of the window under the pointer installed, and the
+//! main window's is put back, with its raw input rescaled to match,
+//! just before its next pass ([`before_main_pass`]).
 
-use egui::{Context, Key, Modifiers, Rect};
+use egui::{Context, Key, Modifiers, RawInput, Rect};
 
-use super::DrawCtx;
+use super::{DrawCtx, UiState};
 use crate::core::AppAction;
 
 /// The name used where the system lists no displays.
@@ -88,9 +94,53 @@ pub fn restore(ctx: &Context, main: f32) {
     ctx.options_mut(|o| o.zoom_factor = main);
 }
 
-/// The zoom keys inside a pop-out, for its display.
+/// The zoom keys inside a pop-out, for its display. A pop-out with the
+/// pointer over it asks for its factor to stay installed after the
+/// frame, so the pointer events it gets next are scaled for it.
 pub fn window_keys(cx: &mut DrawCtx<'_>, ctx: &Context, monitor: &str, percent: u32) {
     if let Some(new) = keys(ctx, percent) {
         cx.dispatch(AppAction::SetMonitorZoom(monitor.to_owned(), new));
     }
+    if ctx.input(|i| i.pointer.has_pointer()) {
+        cx.state.zoom_under_pointer = Some(percent);
+    }
+}
+
+/// The end of the frame: the factor left installed is that of the
+/// window under the pointer, and the main window's is remembered.
+pub fn end_frame(cx: &mut DrawCtx<'_>, ctx: &Context) {
+    let main = ctx.zoom_factor();
+    cx.state.main_zoom = Some(main);
+    if let Some(percent) = cx.state.zoom_under_pointer.take() {
+        ctx.options_mut(|o| o.zoom_factor = factor(percent));
+    }
+}
+
+/// Just before the main window's pass: its own factor is put back, and
+/// the rects `egui_winit` already converted with the other factor are
+/// brought to the main window's points.
+pub fn before_main_pass(state: &UiState, ctx: &Context, raw: &mut RawInput) {
+    let Some(main) = state.main_zoom else {
+        return;
+    };
+    let installed = ctx.zoom_factor();
+    if (installed - main).abs() <= f32::EPSILON {
+        return;
+    }
+    let ratio = installed / main;
+    if let Some(r) = raw.screen_rect.as_mut() {
+        *r = *r * ratio;
+    }
+    for v in raw.viewports.values_mut() {
+        if let Some(r) = v.inner_rect.as_mut() {
+            *r = *r * ratio;
+        }
+        if let Some(r) = v.outer_rect.as_mut() {
+            *r = *r * ratio;
+        }
+        if let Some(s) = v.monitor_size.as_mut() {
+            *s *= ratio;
+        }
+    }
+    ctx.options_mut(|o| o.zoom_factor = main);
 }

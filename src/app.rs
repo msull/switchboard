@@ -887,6 +887,10 @@ impl eframe::App for SwitchboardApp {
         crate::ui::draw(self, ui);
     }
 
+    fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        crate::ui::zoom::before_main_pass(&self.ui_state, ctx, raw_input);
+    }
+
     /// Fully transparent: the rail, side, and central panels paint their
     /// own opaque fills, and the caption overlay viewport needs a
     /// transparent backbuffer, which eframe enables from the root's.

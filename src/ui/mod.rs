@@ -160,6 +160,12 @@ pub struct UiState {
     /// position whenever it changes, which would drag a window back to
     /// its saved place as its zoom changes between displays.
     pub popout_opened: HashMap<RecordId, Option<(egui::Pos2, egui::Vec2)>>,
+    /// The main window's zoom factor as of the end of the last frame,
+    /// put back before its next pass (see `ui/zoom.rs`).
+    pub main_zoom: Option<f32>,
+    /// The zoom, in percent, of the pop-out the pointer is over this
+    /// frame, left installed once the frame ends.
+    pub zoom_under_pointer: Option<u32>,
     /// The theme last pushed into egui; pushed again only when it changes.
     pub applied_theme: Option<ThemeMode>,
     /// The Prompt Box editors of agent sessions and the voice runtime.
@@ -220,6 +226,8 @@ impl Default for UiState {
             in_popout: None,
             popout_frames: HashMap::new(),
             popout_opened: HashMap::new(),
+            main_zoom: None,
+            zoom_under_pointer: None,
         }
     }
 }
@@ -342,6 +350,7 @@ fn draw_frame(cx: &mut DrawCtx<'_>, ui: &mut Ui) {
     env::show(cx, ui.ctx());
     config::show(cx, ui.ctx());
     workflow::dialog_show(cx, ui.ctx());
+    zoom::end_frame(cx, ui.ctx());
 }
 
 /// The side panel (Files, Run, Notes) beside the page: on its right by

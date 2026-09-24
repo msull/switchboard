@@ -1177,8 +1177,14 @@ A window across two displays follows its centre. egui keeps one zoom
 factor for the whole context and applies a new one only at the main
 window's pass, so the main window sets it from its display each frame
 and a pop-out's pass runs with the factor swapped to its own display's
-and back (`ui/zoom.rs`); egui's own zoom keys are off. Cmd+0 stays
-"show Switchboard", so there is no reset key: step back to 100.
+and back (`ui/zoom.rs`); egui's own zoom keys are off. Pointer events
+are converted to points as they arrive, between frames, with the
+factor installed then, so the frame ends with the factor of the window
+under the pointer installed and the main window's is put back, with
+its raw input rescaled, just before its next pass. Each change shows
+the new percent and display as a notice in the window it was made in.
+Cmd+0 stays "show Switchboard", so there is no reset key: step back to
+100.
 
 ## Open files (2026-09-23)
 
