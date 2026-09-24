@@ -157,10 +157,7 @@ fn header(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord) {
         ui.spacing_mut().item_spacing.x = 6.0;
         ui.label(theme::meta_text(ui, kind_label(record.kind)).color(p.n700));
         ui.label(theme::meta_text(ui, "·"));
-        let mut path = record.cwd.display().to_string();
-        if let Some(handle) = &record.resume {
-            path = format!("{path} · resume {}", handle.provider_id());
-        }
+        let path = record.cwd.display().to_string();
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.spacing_mut().item_spacing.x = 2.0;
             ui.spacing_mut().button_padding = egui::vec2(6.0, 3.0);
@@ -177,6 +174,32 @@ fn header(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord) {
                 .clicked()
             {
                 cx.dispatch(AppAction::SetFilesOpen(!files_open));
+            }
+            // The conversation's toggles sit on this line rather than
+            // on one of their own, so the conversation starts higher.
+            if matches!(record.kind, SessionKind::Agent(_)) {
+                let terminal = if cx.state.terminal_open {
+                    theme::ghost(ui, "Terminal")
+                } else {
+                    theme::ghost_muted(ui, "Terminal")
+                };
+                if terminal
+                    .on_hover_text("Show the raw pane below the conversation (Cmd+T)")
+                    .clicked()
+                {
+                    cx.state.terminal_open = !cx.state.terminal_open;
+                }
+                let expand = if cx.state.expand_activity {
+                    theme::ghost(ui, "Expand activity")
+                } else {
+                    theme::ghost_muted(ui, "Expand activity")
+                };
+                if expand.clicked() {
+                    cx.state.expand_activity = !cx.state.expand_activity;
+                }
+            }
+            if let Some(handle) = &record.resume {
+                id_menu(ui, handle);
             }
             // A defined service's autostart is the file's request,
             // shown on the Run tab; only the user's own records
@@ -200,7 +223,25 @@ fn header(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord) {
         });
     });
     super::runbar::show(cx, ui, record.project, true);
-    ui.add_space(6.0);
+}
+
+/// The resume handle behind a small menu: copy the session id, or the
+/// path of the conversation on disk. The id itself is not shown; it
+/// took most of the line and is only ever wanted on the clipboard.
+fn id_menu(ui: &mut Ui, handle: &ResumeHandle) {
+    let button = theme::ghost_muted(ui, "ID").on_hover_text("Copy the session id or its file");
+    egui::Popup::menu(&button).show(|ui| {
+        if ui.button("Copy session id").clicked() {
+            ui.ctx().copy_text(handle.provider_id());
+            ui.close();
+        }
+        if let Some(path) = handle.transcript()
+            && ui.button("Copy transcript path").clicked()
+        {
+            ui.ctx().copy_text(path.display().to_string());
+            ui.close();
+        }
+    });
 }
 
 /// The title, Rename, and the state with its dot. The title truncates to
@@ -506,7 +547,6 @@ fn conversation_or_pane(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecor
         conversation_errors,
         expand_activity,
         expand_applied,
-        terminal_open,
         markdown,
         snapshots,
         raw_message,
@@ -538,7 +578,6 @@ fn conversation_or_pane(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecor
         Toggles {
             expand: expand_activity,
             expand_applied,
-            terminal_open,
         },
         markdown,
         Menus {
@@ -701,11 +740,10 @@ pub(super) fn append_path(draft: &mut String, path: &std::path::Path) {
 
 /// Header line, then the turns in a scroll area that follows new
 /// content, with the raw terminal snapshot folded away at the end.
-/// The toggles above the conversation, written back to the UI state.
+/// The activity fold's state, written back to the UI state.
 struct Toggles<'a> {
     expand: &'a mut bool,
     expand_applied: &'a mut Option<bool>,
-    terminal_open: &'a mut bool,
 }
 
 /// The conversation under its toggles. Claude Code's own name for the
@@ -723,48 +761,26 @@ fn conversation_view(
     let Toggles {
         expand,
         expand_applied,
-        terminal_open,
     } = toggles;
     let p = theme::palette(ui);
+    // Both labels truncate: a row that cannot shrink would widen the
+    // conversation under the side panel.
     ui.horizontal(|ui| {
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            ui.spacing_mut().item_spacing.x = 2.0;
-            ui.spacing_mut().button_padding = egui::vec2(6.0, 3.0);
-            let terminal = if *terminal_open {
-                theme::ghost(ui, "Terminal")
-            } else {
-                theme::ghost_muted(ui, "Terminal")
-            };
-            if terminal
-                .on_hover_text("Show the raw pane below the conversation (Cmd+T)")
-                .clicked()
-            {
-                *terminal_open = !*terminal_open;
-            }
-            let expand_button = if *expand {
-                theme::ghost(ui, "Expand activity")
-            } else {
-                theme::ghost_muted(ui, "Expand activity")
-            };
-            if expand_button.clicked() {
-                *expand = !*expand;
-            }
-            if let Some(title) = conversation.title.as_deref().filter(|t| *t != name) {
-                ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                    ui.add(
-                        egui::Label::new(theme::meta_text(ui, format!("Claude: {title}")))
-                            .truncate(),
-                    )
-                    .on_hover_text(
-                        "The conversation's name inside Claude Code (/rename); Rename above \
-                             changes only Switchboard's name for the session",
-                    );
-                });
-            }
-        });
+        ui.spacing_mut().item_spacing.x = 6.0;
+        ui.add(
+            egui::Label::new(theme::meta_text(ui, meta_line(conversation)).color(p.n700))
+                .truncate(),
+        );
+        if let Some(title) = conversation.title.as_deref().filter(|t| *t != name) {
+            ui.label(theme::meta_text(ui, "·"));
+            ui.add(egui::Label::new(theme::meta_text(ui, format!("Claude: {title}"))).truncate())
+                .on_hover_text(
+                    "The conversation's name inside Claude Code (/rename); Rename above \
+                 changes only Switchboard's name for the session",
+                );
+        }
     });
-    ui.label(theme::meta_text(ui, meta_line(conversation)).color(p.n700));
-    ui.add_space(4.0);
+    ui.add_space(2.0);
     // Push the toggle into every section only on the frame it changes,
     // so single sections can still be opened and closed by hand.
     let open = (*expand_applied != Some(*expand)).then_some(*expand);

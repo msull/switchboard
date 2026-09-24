@@ -2929,6 +2929,47 @@ fn the_settings_menu_picks_the_screen_for_the_overlays_and_the_editor_follows() 
 }
 
 #[test]
+fn the_id_menu_copies_the_session_id_or_its_transcript_path() {
+    let (mut harness, ids) = harness();
+    plain_message_box(&mut harness);
+    let id = seed_claude(&mut harness, &ids);
+    showing(&mut harness, View::Session(id));
+    let handle = harness
+        .state()
+        .core()
+        .session(id)
+        .unwrap()
+        .resume
+        .clone()
+        .unwrap();
+    // The id is on the clipboard, not on the screen.
+    assert!(
+        harness
+            .query_by_label_contains(&handle.provider_id())
+            .is_none()
+    );
+    click(&mut harness, "ID");
+    harness.get_by_label("Copy session id").click();
+    harness.step();
+    let copied = |h: &Harness<'static, SwitchboardApp>, text: String| {
+        h.output()
+            .platform_output
+            .commands
+            .iter()
+            .any(|c| *c == egui::OutputCommand::CopyText(text.clone()))
+    };
+    assert!(copied(&harness, handle.provider_id()));
+    harness.run_steps(2);
+    click(&mut harness, "ID");
+    harness.get_by_label("Copy transcript path").click();
+    harness.step();
+    assert!(copied(
+        &harness,
+        handle.transcript().unwrap().display().to_string()
+    ));
+}
+
+#[test]
 fn pop_out_moves_the_session_page_into_its_own_window() {
     let (mut harness, ids) = harness();
     plain_message_box(&mut harness);
