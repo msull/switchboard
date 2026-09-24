@@ -155,6 +155,11 @@ pub struct UiState {
     /// Each session window's frame as last seen and since when, so a
     /// move is saved once it settles.
     pub popout_frames: HashMap<RecordId, (WindowFrame, std::time::Instant)>,
+    /// Where each session window was opened, in its own zoomed points,
+    /// kept for the life of the window: egui re-sends a builder's
+    /// position whenever it changes, which would drag a window back to
+    /// its saved place as its zoom changes between displays.
+    pub popout_opened: HashMap<RecordId, Option<(egui::Pos2, egui::Vec2)>>,
     /// The theme last pushed into egui; pushed again only when it changes.
     pub applied_theme: Option<ThemeMode>,
     /// The Prompt Box editors of agent sessions and the voice runtime.
@@ -214,6 +219,7 @@ impl Default for UiState {
             focus_windows: Vec::new(),
             in_popout: None,
             popout_frames: HashMap::new(),
+            popout_opened: HashMap::new(),
         }
     }
 }

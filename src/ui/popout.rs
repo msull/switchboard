@@ -32,6 +32,9 @@ pub fn show_all(cx: &mut DrawCtx<'_>, ctx: &Context) {
             ctx.send_viewport_cmd_to(viewport_id(id), ViewportCommand::Focus);
         }
     }
+    cx.state
+        .popout_opened
+        .retain(|id, _| popouts.iter().any(|p| p.session == *id));
     for popout in popouts {
         window(cx, ctx, &popout);
     }
@@ -58,11 +61,16 @@ fn window(cx: &mut DrawCtx<'_>, ctx: &Context, popout: &Popout) {
     let mut builder = ViewportBuilder::default()
         .with_title(format!("{} · Switchboard", record.name))
         .with_inner_size(DEFAULT_SIZE);
-    if let Some(f) = popout.frame {
-        let r = rect_of(f);
-        builder = builder
-            .with_position(r.min / factor)
-            .with_inner_size(r.size() / factor);
+    // The opening geometry is fixed when the window is first shown and
+    // given unchanged after, so the builder never moves the window.
+    let opened = *cx.state.popout_opened.entry(id).or_insert_with(|| {
+        popout.frame.map(|f| {
+            let r = rect_of(f);
+            (r.min / factor, r.size() / factor)
+        })
+    });
+    if let Some((pos, size)) = opened {
+        builder = builder.with_position(pos).with_inner_size(size);
     }
     let main_zoom = zoom::install(ctx, percent);
     ctx.show_viewport_immediate(viewport_id(id), builder, |ctx, _class| {
