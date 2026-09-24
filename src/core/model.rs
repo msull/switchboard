@@ -90,6 +90,10 @@ pub struct Settings {
     /// The side panel sits on the left of the content, between the
     /// rail and the page, instead of on the right.
     pub side_left: bool,
+    /// Zoom per display, by the display's name: a window is drawn at
+    /// the zoom of the display its centre is on, so the dashboard on a
+    /// big screen and the sessions on a laptop can each be read.
+    pub monitor_zoom: Vec<MonitorZoom>,
     /// Where each project's file side starts: a directory under the
     /// project root shown as the tree's top, for projects whose side
     /// has been narrowed. Absent means the project root.
@@ -129,6 +133,7 @@ impl Default for Settings {
             files_open: false,
             side_tab: SideTab::default(),
             side_left: false,
+            monitor_zoom: Vec::new(),
             file_roots: Vec::new(),
             popouts: Vec::new(),
             last_view: SavedView::default(),
@@ -453,6 +458,15 @@ pub enum SavedView {
     WorkingSet,
     Set(SetId),
     Workflow(WorkflowId),
+}
+
+/// The zoom of windows on one display, in percent (100 is native).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MonitorZoom {
+    /// The display's name as the system gives it; "main" where the
+    /// system lists no displays.
+    pub monitor: String,
+    pub percent: u32,
 }
 
 /// A project's file side narrowed to a directory under its root.

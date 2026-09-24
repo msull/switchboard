@@ -120,6 +120,8 @@ const REVIEW_LINES: &[&str] = &[
     "pop-out",
     "close-pop-out",
     "files-root",
+    "zoom",
+    "place-pop-out",
 ];
 
 /// The plan review lines, kept out of `working_set_step` for length.
@@ -137,6 +139,21 @@ fn review_step(app: &mut SwitchboardApp, w: &[&str]) -> Result<(), String> {
             let (id, _) = project(app, p)?;
             let dir = (*rel != ".").then(|| PathBuf::from(rel));
             app.dispatch(AppAction::SetFileRoot(id, dir));
+        }
+        ["zoom", percent, monitor @ ..] => {
+            let percent = percent.parse().map_err(|_| "zoom: percent".to_owned())?;
+            app.dispatch(AppAction::SetMonitorZoom(monitor.join(" "), percent));
+        }
+        ["place-pop-out", name, left, top, width, height] => {
+            let id = session(app, name)?;
+            let num = |v: &str| v.parse::<i32>().map_err(|_| format!("place-pop-out: {v}"));
+            let frame = crate::core::WindowFrame {
+                x: num(left)?,
+                y: num(top)?,
+                w: num(width)?,
+                h: num(height)?,
+            };
+            app.dispatch(AppAction::PopoutMoved(id, frame));
         }
         ["review-plan", name, path] => {
             let source = session(app, name)?;

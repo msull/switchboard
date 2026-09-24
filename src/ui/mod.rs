@@ -31,6 +31,7 @@ mod switcher;
 pub mod theme;
 pub mod workflow;
 pub mod working_set;
+pub mod zoom;
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -267,6 +268,7 @@ fn draw_frame(cx: &mut DrawCtx<'_>, ui: &mut Ui) {
         });
         cx.state.applied_theme = Some(theme);
     }
+    zoom::main_window(cx, ui.ctx());
     let view = cx.core.view();
     keyboard(cx, ui, &view);
     if let Some(delay) = prompt_box::pump(cx) {

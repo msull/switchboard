@@ -399,6 +399,21 @@ fn a_popped_out_session_is_shown_in_its_window_and_the_main_window_steps_back() 
 }
 
 #[test]
+fn zoom_is_a_saved_setting_per_display_and_native_is_the_default() {
+    let mut core = AppCore::new();
+    core.seed(Vec::new(), Vec::new());
+    assert_eq!(core.monitor_zoom("DELL"), 100);
+    core.dispatch(AppAction::SetMonitorZoom("DELL".into(), 120), Clock::at(1));
+    assert_eq!(core.monitor_zoom("DELL"), 120);
+    assert_eq!(core.monitor_zoom("Built-in"), 100, "each display its own");
+    core.dispatch(AppAction::SetMonitorZoom("DELL".into(), 130), Clock::at(2));
+    assert_eq!(core.settings().monitor_zoom.len(), 1, "replaced, not added");
+    // Native is the default, so it is not kept as an entry.
+    core.dispatch(AppAction::SetMonitorZoom("DELL".into(), 100), Clock::at(3));
+    assert!(core.settings().monitor_zoom.is_empty());
+}
+
+#[test]
 fn the_side_position_is_a_saved_setting() {
     let mut core = AppCore::new();
     core.seed(Vec::new(), Vec::new());

@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use egui::{Context, Key, Modifiers, Ui, ViewportBuilder, ViewportCommand, ViewportId};
 
-use super::{DrawCtx, session, side_panel, theme};
+use super::{DrawCtx, session, side_panel, theme, zoom};
 use crate::core::{AppAction, Popout, RecordId, SessionKind, WindowFrame};
 
 /// Size of a new window before it is moved or resized.
@@ -42,14 +42,29 @@ fn window(cx: &mut DrawCtx<'_>, ctx: &Context, popout: &Popout) {
     let Some(record) = cx.core.session(id).cloned() else {
         return;
     };
+    // The window's display sets its zoom, found from where the window
+    // was last seen, or where it was saved. Frames are in native points;
+    // the builder takes the window's own zoomed points.
+    let last_seen = cx
+        .state
+        .popout_frames
+        .get(&id)
+        .map(|(f, _)| *f)
+        .or(popout.frame)
+        .map(rect_of);
+    let monitor = zoom::monitor_of(last_seen);
+    let percent = cx.core.monitor_zoom(&monitor);
+    let factor = zoom::factor(percent);
     let mut builder = ViewportBuilder::default()
         .with_title(format!("{} · Switchboard", record.name))
         .with_inner_size(DEFAULT_SIZE);
     if let Some(f) = popout.frame {
+        let r = rect_of(f);
         builder = builder
-            .with_position(egui::pos2(points(f.x), points(f.y)))
-            .with_inner_size(egui::vec2(points(f.w), points(f.h)));
+            .with_position(r.min / factor)
+            .with_inner_size(r.size() / factor);
     }
+    let main_zoom = zoom::install(ctx, percent);
     ctx.show_viewport_immediate(viewport_id(id), builder, |ctx, _class| {
         let (close_requested, frame) = ctx.input(|i| {
             let v = i.viewport();
@@ -60,8 +75,9 @@ fn window(cx: &mut DrawCtx<'_>, ctx: &Context, popout: &Popout) {
             cx.dispatch(AppAction::ClosePopout(id));
         }
         if let Some((inner, outer)) = frame {
-            remember_frame(cx, id, popout.frame, inner, outer);
+            remember_frame(cx, id, popout.frame, inner * factor, outer * factor);
         }
+        zoom::window_keys(cx, ctx, &monitor, percent);
         shortcuts(cx, ctx, &record.id, record.kind);
         cx.state.in_popout = Some(id);
         egui::CentralPanel::default()
@@ -69,6 +85,14 @@ fn window(cx: &mut DrawCtx<'_>, ctx: &Context, popout: &Popout) {
             .show(ctx, |ui| body(cx, ui, &record));
         cx.state.in_popout = None;
     });
+    zoom::restore(ctx, main_zoom);
+}
+
+fn rect_of(f: WindowFrame) -> egui::Rect {
+    egui::Rect::from_min_size(
+        egui::pos2(points(f.x), points(f.y)),
+        egui::vec2(points(f.w), points(f.h)),
+    )
 }
 
 /// The session page with the side panel beside it, as the main window
@@ -100,9 +124,9 @@ fn body(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &crate::core::SessionRecord) 
         .show(ui, |ui| session::show(cx, ui, record.id));
 }
 
-/// The frame is saved once it differs from the record and has held
-/// still for a moment; the size is the inner one, which is what the
-/// window is opened with again.
+/// The frame (in native points) is saved once it differs from the
+/// record and has held still for a moment; the size is the inner one,
+/// which is what the window is opened with again.
 fn remember_frame(
     cx: &mut DrawCtx<'_>,
     id: RecordId,

@@ -3050,6 +3050,26 @@ fn pop_out_moves_the_session_page_into_its_own_window() {
 }
 
 #[test]
+fn the_main_window_draws_at_the_zoom_saved_for_its_display() {
+    let (mut harness, _ids) = harness();
+    harness.run_steps(2);
+    assert!((harness.ctx.zoom_factor() - 1.0).abs() < f32::EPSILON);
+    // The harness lists no displays, so its window is on "main".
+    harness
+        .state_mut()
+        .dispatch(AppAction::SetMonitorZoom("main".into(), 150));
+    harness.run_steps(3);
+    assert!(
+        (harness.ctx.zoom_factor() - 1.5).abs() < f32::EPSILON,
+        "zoom follows the setting"
+    );
+    assert!(
+        !harness.ctx.options(|o| o.zoom_with_keyboard),
+        "egui's zoom keys are off; the app handles them per window"
+    );
+}
+
+#[test]
 fn the_settings_menu_moves_the_side_panel_to_the_left() {
     let (mut harness, ids) = harness();
     showing(&mut harness, View::Board(ids.alpha));

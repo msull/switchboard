@@ -1167,6 +1167,19 @@ before. Boards and working sets are not popped out yet; the window
 holds a session only, though nothing in the mechanism is session
 specific.
 
+## Zoom per display (2026-09-24)
+
+Cmd+= and Cmd+- zoom the window they are pressed in, and the zoom is
+remembered for the display that window is on (`Settings.monitor_zoom`,
+by the display's name, native when absent), so a window moved to the
+other display takes that display's zoom and a new window opens at it.
+A window across two displays follows its centre. egui keeps one zoom
+factor for the whole context and applies a new one only at the main
+window's pass, so the main window sets it from its display each frame
+and a pop-out's pass runs with the factor swapped to its own display's
+and back (`ui/zoom.rs`); egui's own zoom keys are off. Cmd+0 stays
+"show Switchboard", so there is no reset key: step back to 100.
+
 ## Open files (2026-09-23)
 
 A macOS app launched from Finder starts with a soft limit of 256 open

@@ -22,10 +22,10 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use crate::core::env::SecretScope;
 use crate::core::grid;
 use crate::core::model::{
-    Activity, AgentKind, CardState, EnvVar, FileRoot, GridRect, HandoffMode, Launch, PinTarget,
-    PinnedItem, Popout, Project, ProjectEnv, ProjectId, RecordId, ResumeHandle, SavedView,
-    SessionKind, SessionRecord, SetId, Settings, SideTab, ThemeMode, VOICE_KEY_ACCOUNT, Views,
-    VoiceSettings, WindowFrame, WorkflowDefinition, WorkflowId, WorkingSet, Workspace,
+    Activity, AgentKind, CardState, EnvVar, FileRoot, GridRect, HandoffMode, Launch, MonitorZoom,
+    PinTarget, PinnedItem, Popout, Project, ProjectEnv, ProjectId, RecordId, ResumeHandle,
+    SavedView, SessionKind, SessionRecord, SetId, Settings, SideTab, ThemeMode, VOICE_KEY_ACCOUNT,
+    Views, VoiceSettings, WindowFrame, WorkflowDefinition, WorkflowId, WorkingSet, Workspace,
 };
 use crate::ports::agent::AgentLaunch;
 use crate::ports::events::SessionEvent;
@@ -217,6 +217,8 @@ pub enum AppAction {
     /// The project's file side starts at this directory (relative to
     /// the root); `None` puts the project root back.
     SetFileRoot(ProjectId, Option<PathBuf>),
+    /// Windows on the named display draw at this zoom, in percent.
+    SetMonitorZoom(String, u32),
     /// The project's `.switchboard/project.json` was read (or is absent,
     /// or unusable). Entries become records that cannot run until
     /// approved.
@@ -664,7 +666,8 @@ impl AppCore {
             | AppAction::PopOut(_)
             | AppAction::ClosePopout(_)
             | AppAction::PopoutMoved(..)
-            | AppAction::SetFileRoot(..) => self.files_and_settings(action, now, &mut out),
+            | AppAction::SetFileRoot(..)
+            | AppAction::SetMonitorZoom(..) => self.files_and_settings(action, now, &mut out),
             AppAction::ProjectConfigRead { .. }
             | AppAction::SaveProjectConfig { .. }
             | AppAction::ProjectConfigWritten { .. }
@@ -1172,6 +1175,16 @@ impl AppCore {
         });
     }
 
+    /// The zoom of windows on the named display, in percent.
+    #[must_use]
+    pub fn monitor_zoom(&self, monitor: &str) -> u32 {
+        self.settings
+            .monitor_zoom
+            .iter()
+            .find(|z| z.monitor == monitor)
+            .map_or(100, |z| z.percent)
+    }
+
     /// Where the project's file side starts, relative to its root, when
     /// it has been narrowed.
     #[must_use]
@@ -1421,6 +1434,12 @@ impl AppCore {
             AppAction::SetSideTab(tab) => self.update_settings(out, |s| s.side_tab = tab),
             AppAction::SetSideLeft(left) => self.update_settings(out, |s| s.side_left = left),
             AppAction::SetFileRoot(pid, dir) => self.set_file_root(pid, dir, out),
+            AppAction::SetMonitorZoom(monitor, percent) => self.update_settings(out, |s| {
+                s.monitor_zoom.retain(|z| z.monitor != monitor);
+                if percent != 100 {
+                    s.monitor_zoom.push(MonitorZoom { monitor, percent });
+                }
+            }),
             AppAction::PopOut(id) => self.pop_out(id, out),
             AppAction::ClosePopout(id) => {
                 self.update_settings(out, |s| s.popouts.retain(|p| p.session != id));
