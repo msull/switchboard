@@ -887,6 +887,28 @@ impl eframe::App for SwitchboardApp {
         crate::ui::draw(self, ui);
     }
 
+    /// Quitting saves where the windows are, even ones that moved in the
+    /// last moment and had not held still long enough to be saved yet.
+    fn on_exit(&mut self) {
+        if let Some((frame, _)) = self.ui_state.main_frame.take()
+            && self.core.settings().main_window.as_ref() != Some(&frame)
+        {
+            self.dispatch(AppAction::MainWindowMoved(frame));
+        }
+        let popouts = std::mem::take(&mut self.ui_state.popout_frames);
+        for (id, (frame, _)) in popouts {
+            let saved = self
+                .core
+                .settings()
+                .popouts
+                .iter()
+                .find(|p| p.session == id);
+            if saved.is_some_and(|p| p.frame.as_ref() != Some(&frame)) {
+                self.dispatch(AppAction::PopoutMoved(id, frame));
+            }
+        }
+    }
+
     fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
         crate::ui::zoom::before_main_pass(&self.ui_state, ctx, raw_input);
     }

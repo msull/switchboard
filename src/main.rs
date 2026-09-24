@@ -67,10 +67,15 @@ fn main() -> eframe::Result {
     // un-zoomed. Native points: zoom is applied from the first frame on.
     let store = JsonStore::new(data_dir.clone());
     let viewport = egui::ViewportBuilder::default().with_min_inner_size([600.0, 400.0]);
-    let saved = store
-        .load_settings()
-        .main_window
+    let loaded = store.load_settings().main_window;
+    let screens: Vec<String> = promptbox::adapters::screens::screens()
+        .into_iter()
+        .map(|s| s.name)
+        .collect();
+    let saved = loaded
+        .clone()
         .filter(|f| switchboard::ui::zoom::monitor_attached(&f.monitor));
+    log::info!("main window: saved {loaded:?}; displays {screens:?}; restoring {saved:?}");
     let viewport = match saved {
         Some(f) => viewport
             .with_position([points(f.x), points(f.y)])

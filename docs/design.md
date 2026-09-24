@@ -1177,7 +1177,9 @@ its own, only while that display is attached; otherwise the main window
 is zoomed to the main screen as before and the pop-out opens where the
 system puts it. The main window's frame is read from the settings file
 before eframe starts, since that is when a window's first position is
-decided. A window zoomed to its screen comes back as that frame rather
+decided, and the launch logs what it loaded and chose. Quitting saves
+the frames last seen, so a window moved just before Cmd+Q is not lost
+to the settle wait. A window zoomed to its screen comes back as that frame rather
 than as a zoomed state, which macOS would put on the main screen.
 
 ## Zoom per display (2026-09-24)
