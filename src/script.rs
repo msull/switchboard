@@ -152,6 +152,7 @@ fn review_step(app: &mut SwitchboardApp, w: &[&str]) -> Result<(), String> {
                 y: num(top)?,
                 w: num(width)?,
                 h: num(height)?,
+                monitor: String::new(),
             };
             app.dispatch(AppAction::PopoutMoved(id, frame));
         }

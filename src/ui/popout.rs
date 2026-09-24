@@ -52,9 +52,9 @@ fn window(cx: &mut DrawCtx<'_>, ctx: &Context, popout: &Popout) {
         .state
         .popout_frames
         .get(&id)
-        .map(|(f, _)| *f)
-        .or(popout.frame)
-        .map(rect_of);
+        .map(|(f, _)| f.clone())
+        .or_else(|| popout.frame.clone())
+        .map(|f| rect_of(&f));
     let monitor = zoom::monitor_of(last_seen);
     let percent = cx.core.monitor_zoom(&monitor);
     let factor = zoom::factor(percent);
@@ -64,10 +64,14 @@ fn window(cx: &mut DrawCtx<'_>, ctx: &Context, popout: &Popout) {
     // The opening geometry is fixed when the window is first shown and
     // given unchanged after, so the builder never moves the window.
     let opened = *cx.state.popout_opened.entry(id).or_insert_with(|| {
-        popout.frame.map(|f| {
-            let r = rect_of(f);
-            (r.min / factor, r.size() / factor)
-        })
+        popout
+            .frame
+            .as_ref()
+            .filter(|f| zoom::monitor_attached(&f.monitor))
+            .map(|f| {
+                let r = rect_of(f);
+                (r.min / factor, r.size() / factor)
+            })
     });
     if let Some((pos, size)) = opened {
         builder = builder.with_position(pos).with_inner_size(size);
@@ -83,7 +87,15 @@ fn window(cx: &mut DrawCtx<'_>, ctx: &Context, popout: &Popout) {
             cx.dispatch(AppAction::ClosePopout(id));
         }
         if let Some((inner, outer)) = frame {
-            remember_frame(cx, id, popout.frame, inner * factor, outer * factor);
+            let now = frame_of(inner * factor, outer * factor, monitor.clone());
+            let seen = cx
+                .state
+                .popout_frames
+                .entry(id)
+                .or_insert((now.clone(), Instant::now()));
+            if settled(seen, now.clone()) && popout.frame.as_ref() != Some(&now) {
+                cx.dispatch(AppAction::PopoutMoved(id, now));
+            }
         }
         zoom::window_keys(cx, ctx, &monitor, percent);
         shortcuts(cx, ctx, &record.id, record.kind);
@@ -97,7 +109,7 @@ fn window(cx: &mut DrawCtx<'_>, ctx: &Context, popout: &Popout) {
     zoom::restore(ctx, main_zoom);
 }
 
-fn rect_of(f: WindowFrame) -> egui::Rect {
+fn rect_of(f: &WindowFrame) -> egui::Rect {
     egui::Rect::from_min_size(
         egui::pos2(points(f.x), points(f.y)),
         egui::vec2(points(f.w), points(f.h)),
@@ -133,33 +145,48 @@ fn body(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &crate::core::SessionRecord) 
         .show(ui, |ui| session::show(cx, ui, record.id));
 }
 
-/// The frame (in native points) is saved once it differs from the
-/// record and has held still for a moment; the size is the inner one,
-/// which is what the window is opened with again.
-fn remember_frame(
-    cx: &mut DrawCtx<'_>,
-    id: RecordId,
-    saved: Option<WindowFrame>,
-    inner: egui::Rect,
-    outer: egui::Rect,
-) {
-    let now = WindowFrame {
+/// A frame from a window's inner and outer rects in native points: the
+/// position is the outer one, the size the inner one, which is what a
+/// window is opened with again.
+fn frame_of(inner: egui::Rect, outer: egui::Rect, monitor: String) -> WindowFrame {
+    WindowFrame {
         x: whole(outer.min.x),
         y: whole(outer.min.y),
         w: whole(inner.width()),
         h: whole(inner.height()),
-    };
-    let seen = cx
-        .state
-        .popout_frames
-        .entry(id)
-        .or_insert((now, Instant::now()));
+        monitor,
+    }
+}
+
+/// Whether a window has held still at `now` for a moment: `seen` is the
+/// frame last seen and since when, so a drag is not saved on every
+/// frame.
+fn settled(seen: &mut (WindowFrame, Instant), now: WindowFrame) -> bool {
     if seen.0 != now {
         *seen = (now, Instant::now());
-        return;
+        return false;
     }
-    if saved != Some(now) && seen.1.elapsed() >= SETTLE {
-        cx.dispatch(AppAction::PopoutMoved(id, now));
+    seen.1.elapsed() >= SETTLE
+}
+
+/// The main window's frame, saved like a pop-out's once it settles, so
+/// the next launch opens it there.
+pub fn remember_main_window(cx: &mut DrawCtx<'_>, ctx: &Context, monitor: String) {
+    let factor = ctx.zoom_factor();
+    let rects = ctx.input(|i| {
+        let v = i.viewport();
+        v.inner_rect.zip(v.outer_rect)
+    });
+    let Some((inner, outer)) = rects else {
+        return;
+    };
+    let now = frame_of(inner * factor, outer * factor, monitor);
+    let seen = cx
+        .state
+        .main_frame
+        .get_or_insert_with(|| (now.clone(), Instant::now()));
+    if settled(seen, now.clone()) && cx.core.settings().main_window.as_ref() != Some(&now) {
+        cx.dispatch(AppAction::MainWindowMoved(now));
     }
 }
 

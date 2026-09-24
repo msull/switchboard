@@ -384,8 +384,9 @@ fn a_popped_out_session_is_shown_in_its_window_and_the_main_window_steps_back() 
         y: 20,
         w: 800,
         h: 600,
+        monitor: "DELL".into(),
     };
-    core.dispatch(AppAction::PopoutMoved(id, frame), Clock::at(6));
+    core.dispatch(AppAction::PopoutMoved(id, frame.clone()), Clock::at(6));
     assert_eq!(core.settings().popouts[0].frame, Some(frame));
     // Closing the window gives the page back to the main window.
     core.dispatch(AppAction::ClosePopout(id), Clock::at(7));
@@ -396,6 +397,23 @@ fn a_popped_out_session_is_shown_in_its_window_and_the_main_window_steps_back() 
     core.dispatch(AppAction::PopOut(id), Clock::at(9));
     core.dispatch(AppAction::RemoveSession(id), Clock::at(10));
     assert!(core.settings().popouts.is_empty());
+}
+
+#[test]
+fn the_main_window_frame_is_a_saved_setting() {
+    let mut core = AppCore::new();
+    core.seed(Vec::new(), Vec::new());
+    assert!(core.settings().main_window.is_none());
+    let main = WindowFrame {
+        x: -3440,
+        y: -797,
+        w: 3440,
+        h: 1400,
+        monitor: "DELL".into(),
+    };
+    let effects = core.dispatch(AppAction::MainWindowMoved(main.clone()), Clock::at(1));
+    assert_eq!(core.settings().main_window, Some(main));
+    assert!(effects.iter().any(|e| matches!(e, Effect::SaveSettings(_))));
 }
 
 #[test]

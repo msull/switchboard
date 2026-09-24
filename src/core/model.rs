@@ -90,6 +90,9 @@ pub struct Settings {
     /// The side panel sits on the left of the content, between the
     /// rail and the page, instead of on the right.
     pub side_left: bool,
+    /// Where the main window was last seen, so the next launch opens it
+    /// there; `None` until it has reported a position.
+    pub main_window: Option<WindowFrame>,
     /// Zoom per display, by the display's name: a window is drawn at
     /// the zoom of the display its centre is on, so the dashboard on a
     /// big screen and the sessions on a laptop can each be read.
@@ -133,6 +136,7 @@ impl Default for Settings {
             files_open: false,
             side_tab: SideTab::default(),
             side_left: false,
+            main_window: None,
             monitor_zoom: Vec::new(),
             file_roots: Vec::new(),
             popouts: Vec::new(),
@@ -487,13 +491,17 @@ pub struct Popout {
     pub frame: Option<WindowFrame>,
 }
 
-/// A window's outer rectangle in whole screen points.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// A window's outer rectangle in whole native screen points, and the
+/// display it was on, so the frame is used again only while that
+/// display is attached ("" when unknown).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WindowFrame {
     pub x: i32,
     pub y: i32,
     pub w: i32,
     pub h: i32,
+    #[serde(default)]
+    pub monitor: String,
 }
 
 /// Schema of `views.json`, bumped like [`SCHEMA_VERSION`] when a type

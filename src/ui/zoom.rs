@@ -41,6 +41,18 @@ pub fn monitor_of(outer: Option<Rect>) -> String {
         .map_or_else(|| NO_DISPLAY.to_owned(), |s| s.name.clone())
 }
 
+/// Whether a display of this name is attached. Unknown names ("" on
+/// frames saved before names were kept) and systems that list no
+/// displays count as attached, so a frame is still used.
+#[must_use]
+pub fn monitor_attached(name: &str) -> bool {
+    if name.is_empty() {
+        return true;
+    }
+    let screens = promptbox::adapters::screens::screens();
+    screens.is_empty() || screens.iter().any(|s| s.name == name)
+}
+
 /// egui's zoom factor for a percent.
 #[must_use]
 #[allow(clippy::cast_precision_loss)]
@@ -70,6 +82,7 @@ pub fn main_window(cx: &mut DrawCtx<'_>, ctx: &Context) {
     let current = ctx.zoom_factor();
     let outer = ctx.input(|i| i.viewport().outer_rect.map(|r| r * current));
     let monitor = monitor_of(outer);
+    super::popout::remember_main_window(cx, ctx, monitor.clone());
     let mut percent = cx.core.monitor_zoom(&monitor);
     if let Some(new) = keys(ctx, percent) {
         cx.dispatch(AppAction::SetMonitorZoom(monitor, new));

@@ -89,6 +89,9 @@ pub struct Notice {
 
 /// Inputs from UI, workers, and the host poll.
 #[derive(Debug, Clone, PartialEq)]
+// The largest variant carries the loaded store, dispatched once at
+// startup; boxing it would change the contract for no gain.
+#[allow(clippy::large_enum_variant)]
 pub enum AppAction {
     // --- startup / persistence
     StoreLoaded(Result<Loaded, StoreError>),
@@ -219,6 +222,8 @@ pub enum AppAction {
     SetFileRoot(ProjectId, Option<PathBuf>),
     /// Windows on the named display draw at this zoom, in percent.
     SetMonitorZoom(String, u32),
+    /// The main window has held still at this frame.
+    MainWindowMoved(WindowFrame),
     /// The project's `.switchboard/project.json` was read (or is absent,
     /// or unusable). Entries become records that cannot run until
     /// approved.
@@ -669,7 +674,8 @@ impl AppCore {
             | AppAction::ClosePopout(_)
             | AppAction::PopoutMoved(..)
             | AppAction::SetFileRoot(..)
-            | AppAction::SetMonitorZoom(..) => self.files_and_settings(action, now, &mut out),
+            | AppAction::SetMonitorZoom(..)
+            | AppAction::MainWindowMoved(..) => self.files_and_settings(action, now, &mut out),
             AppAction::ProjectConfigRead { .. }
             | AppAction::SaveProjectConfig { .. }
             | AppAction::ProjectConfigWritten { .. }
@@ -1436,6 +1442,9 @@ impl AppCore {
             AppAction::SetSideTab(tab) => self.update_settings(out, |s| s.side_tab = tab),
             AppAction::SetSideLeft(left) => self.update_settings(out, |s| s.side_left = left),
             AppAction::SetFileRoot(pid, dir) => self.set_file_root(pid, dir, out),
+            AppAction::MainWindowMoved(main) => {
+                self.update_settings(out, |s| s.main_window = Some(main));
+            }
             AppAction::SetMonitorZoom(monitor, percent) => {
                 // One zoom notice at a time: a run of key presses reads
                 // as a changing number, not a queue of toasts.

@@ -12,6 +12,12 @@ use switchboard::adapters::tmux::TmuxHost;
 use switchboard::adapters::transcript::ClaudeTranscripts;
 use switchboard::app::Services;
 
+/// Screen points are whole numbers far below what `f32` counts exactly.
+#[allow(clippy::cast_precision_loss)]
+fn points(v: i32) -> f32 {
+    v as f32
+}
+
 fn main() -> eframe::Result {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("switchboard=info"))
         .init();
@@ -55,13 +61,26 @@ fn main() -> eframe::Result {
         width: 256,
         height: 256,
     };
-    let options = eframe::NativeOptions {
-        // Zoomed to the screen from the first frame; the size below is
-        // what the window falls back to when un-zoomed.
-        viewport: egui::ViewportBuilder::default()
+    // Where the window was last seen, if that display is attached: a
+    // window zoomed to its screen comes back as that frame. Otherwise
+    // zoomed to the main screen, with a size to fall back to when
+    // un-zoomed. Native points: zoom is applied from the first frame on.
+    let store = JsonStore::new(data_dir.clone());
+    let viewport = egui::ViewportBuilder::default().with_min_inner_size([600.0, 400.0]);
+    let saved = store
+        .load_settings()
+        .main_window
+        .filter(|f| switchboard::ui::zoom::monitor_attached(&f.monitor));
+    let viewport = match saved {
+        Some(f) => viewport
+            .with_position([points(f.x), points(f.y)])
+            .with_inner_size([points(f.w), points(f.h)]),
+        None => viewport
             .with_inner_size([1100.0, 720.0])
-            .with_min_inner_size([600.0, 400.0])
-            .with_maximized(true)
+            .with_maximized(true),
+    };
+    let options = eframe::NativeOptions {
+        viewport: viewport
             .with_icon(icon)
             // Transparency is decided once, here, for every viewport: the
             // caption overlay of the embedded Prompt Box needs it. The
@@ -88,7 +107,7 @@ fn main() -> eframe::Result {
                 }
             };
             let services = Services {
-                store: Box::new(JsonStore::new(data_dir.clone())),
+                store: Box::new(store),
                 host: Box::new(host),
                 events: Box::new(HookLog::new(data_dir.clone())),
                 agents: Box::new(Agents::detect(data_dir.clone())),

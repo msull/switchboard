@@ -36,8 +36,9 @@ side shown next to sessions and its tab, the directory each project's
 file side starts at when narrowed, the screen to reopen on, the
 Prompt Box switch and its trigger word, model, captions, and the screen
 its caption bar and preview panel appear on, the sessions open in
-windows of their own and where each window sits, the zoom of each
-display, the workflow round cap and the user's workflow definitions),
+windows of their own and where each window sits, where the main
+window sits, the zoom of each display, the workflow round cap and the
+user's workflow definitions),
 `views.json` (the working sets: each one's name, which sessions and
 files are on it, and where each card sits on its grid, with a `.bak`),
 the

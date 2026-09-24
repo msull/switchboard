@@ -160,6 +160,9 @@ pub struct UiState {
     /// position whenever it changes, which would drag a window back to
     /// its saved place as its zoom changes between displays.
     pub popout_opened: HashMap<RecordId, Option<(egui::Pos2, egui::Vec2)>>,
+    /// The main window's frame as last seen and since when, so a move
+    /// is saved once it settles.
+    pub main_frame: Option<(WindowFrame, std::time::Instant)>,
     /// The main window's zoom factor as of the end of the last frame,
     /// put back before its next pass (see `ui/zoom.rs`).
     pub main_zoom: Option<f32>,
@@ -226,6 +229,7 @@ impl Default for UiState {
             in_popout: None,
             popout_frames: HashMap::new(),
             popout_opened: HashMap::new(),
+            main_frame: None,
             main_zoom: None,
             zoom_under_pointer: None,
         }

@@ -315,9 +315,12 @@ impl JsonStore {
         }
     }
 
-    /// Preferences are not worth a recovery notice: an unreadable file
-    /// is logged and the defaults apply.
-    fn load_settings(&self) -> Settings {
+    /// The settings file alone, for what must be known before the app
+    /// exists: where the main window opens. Preferences are not worth a
+    /// recovery notice: an unreadable file is logged and the defaults
+    /// apply.
+    #[must_use]
+    pub fn load_settings(&self) -> Settings {
         let path = self.settings_path();
         match fs::read(&path) {
             Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_else(|e| {

@@ -1167,6 +1167,19 @@ before. Boards and working sets are not popped out yet; the window
 holds a session only, though nothing in the mechanism is session
 specific.
 
+## Windows come back where they were (2026-09-24)
+
+Every window's frame is saved once it has held still, in native screen
+points with the name of the display it is on (`WindowFrame.monitor`):
+pop-outs on their record, the main window in `Settings.main_window`.
+A launch opens the main window at its saved frame, and a pop-out at
+its own, only while that display is attached; otherwise the main window
+is zoomed to the main screen as before and the pop-out opens where the
+system puts it. The main window's frame is read from the settings file
+before eframe starts, since that is when a window's first position is
+decided. A window zoomed to its screen comes back as that frame rather
+than as a zoomed state, which macOS would put on the main screen.
+
 ## Zoom per display (2026-09-24)
 
 Cmd+= and Cmd+- zoom the window they are pressed in, and the zoom is
