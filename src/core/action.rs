@@ -16,16 +16,16 @@
 //! The transitions live beside it: `reconcile` (store and host results),
 //! `sessions` (launch, return, resume), and `events` (hook events).
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::core::env::SecretScope;
 use crate::core::grid;
 use crate::core::model::{
-    Activity, AgentKind, CardState, EnvVar, GridRect, HandoffMode, Launch, PinTarget, PinnedItem,
-    Popout, Project, ProjectEnv, ProjectId, RecordId, ResumeHandle, SavedView, SessionKind,
-    SessionRecord, SetId, Settings, SideTab, ThemeMode, VOICE_KEY_ACCOUNT, Views, VoiceSettings,
-    WindowFrame, WorkflowDefinition, WorkflowId, WorkingSet, Workspace,
+    Activity, AgentKind, CardState, EnvVar, FileRoot, GridRect, HandoffMode, Launch, PinTarget,
+    PinnedItem, Popout, Project, ProjectEnv, ProjectId, RecordId, ResumeHandle, SavedView,
+    SessionKind, SessionRecord, SetId, Settings, SideTab, ThemeMode, VOICE_KEY_ACCOUNT, Views,
+    VoiceSettings, WindowFrame, WorkflowDefinition, WorkflowId, WorkingSet, Workspace,
 };
 use crate::ports::agent::AgentLaunch;
 use crate::ports::events::SessionEvent;
@@ -214,6 +214,9 @@ pub enum AppAction {
     ClosePopout(RecordId),
     /// The session's window was moved or resized.
     PopoutMoved(RecordId, WindowFrame),
+    /// The project's file side starts at this directory (relative to
+    /// the root); `None` puts the project root back.
+    SetFileRoot(ProjectId, Option<PathBuf>),
     /// The project's `.switchboard/project.json` was read (or is absent,
     /// or unusable). Entries become records that cannot run until
     /// approved.
@@ -660,18 +663,15 @@ impl AppCore {
             | AppAction::SetSideLeft(_)
             | AppAction::PopOut(_)
             | AppAction::ClosePopout(_)
-            | AppAction::PopoutMoved(..) => self.files_and_settings(action, now, &mut out),
+            | AppAction::PopoutMoved(..)
+            | AppAction::SetFileRoot(..) => self.files_and_settings(action, now, &mut out),
             AppAction::ProjectConfigRead { .. }
             | AppAction::SaveProjectConfig { .. }
             | AppAction::ProjectConfigWritten { .. }
             | AppAction::ApproveDefinition(_)
             | AppAction::RevokeApproval(_) => self.definition_action(action, now, &mut out),
             AppAction::Back => drop(self.view_stack.pop()),
-            AppAction::DismissNotice => {
-                if !self.notices.is_empty() {
-                    self.notices.remove(0);
-                }
-            }
+            AppAction::DismissNotice => self.dismiss_notice(),
             AppAction::Tick => self.tick(now, &mut out),
 
             AppAction::StartWorkflow { .. }
@@ -1020,6 +1020,12 @@ impl AppCore {
         });
     }
 
+    fn dismiss_notice(&mut self) {
+        if !self.notices.is_empty() {
+            self.notices.remove(0);
+        }
+    }
+
     /// Once a second: notices age out and waiting workflows probe.
     fn tick(&mut self, now: Clock, out: &mut Out) {
         self.expire_notices(now);
@@ -1092,6 +1098,7 @@ impl AppCore {
             self.codex_pending = None;
         }
         self.advance_codex_queue(now, out);
+        self.update_settings(out, |s| s.file_roots.retain(|r| r.project != id));
     }
 
     fn edit_project(&mut self, id: ProjectId, out: &mut Out, edit: impl FnOnce(&mut Project)) {
@@ -1145,6 +1152,35 @@ impl AppCore {
         } else {
             self.show(View::Session(id), now, out);
         }
+    }
+
+    fn set_file_root(&mut self, pid: ProjectId, dir: Option<PathBuf>, out: &mut Out) {
+        self.update_settings(out, |s| {
+            s.file_roots.retain(|r| r.project != pid);
+            let dir = dir.filter(|d| !d.as_os_str().is_empty() && *d != Path::new("."));
+            if let Some(dir) = dir {
+                s.file_roots.push(FileRoot { project: pid, dir });
+            }
+        });
+    }
+
+    fn popout_moved(&mut self, id: RecordId, frame: WindowFrame, out: &mut Out) {
+        self.update_settings(out, |s| {
+            if let Some(p) = s.popouts.iter_mut().find(|p| p.session == id) {
+                p.frame = Some(frame);
+            }
+        });
+    }
+
+    /// Where the project's file side starts, relative to its root, when
+    /// it has been narrowed.
+    #[must_use]
+    pub fn file_root(&self, pid: ProjectId) -> Option<&PathBuf> {
+        self.settings
+            .file_roots
+            .iter()
+            .find(|r| r.project == pid)
+            .map(|r| &r.dir)
     }
 
     /// Whether the session has a window of its own.
@@ -1384,15 +1420,12 @@ impl AppCore {
             }
             AppAction::SetSideTab(tab) => self.update_settings(out, |s| s.side_tab = tab),
             AppAction::SetSideLeft(left) => self.update_settings(out, |s| s.side_left = left),
+            AppAction::SetFileRoot(pid, dir) => self.set_file_root(pid, dir, out),
             AppAction::PopOut(id) => self.pop_out(id, out),
             AppAction::ClosePopout(id) => {
                 self.update_settings(out, |s| s.popouts.retain(|p| p.session != id));
             }
-            AppAction::PopoutMoved(id, frame) => self.update_settings(out, |s| {
-                if let Some(p) = s.popouts.iter_mut().find(|p| p.session == id) {
-                    p.frame = Some(frame);
-                }
-            }),
+            AppAction::PopoutMoved(id, frame) => self.popout_moved(id, frame, out),
             // Everything else is routed by `dispatch` itself.
             _ => unreachable!("dispatched by `dispatch` itself"),
         }

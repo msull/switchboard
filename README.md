@@ -32,7 +32,8 @@ Data lives in `~/Library/Application Support/Switchboard/`: one JSON file
 per project under `projects/` (with a `.bak` of the previous version;
 approvals of defined commands live inside these records),
 `settings.json` (theme, exclusive mode, editor, global variables, file
-side shown next to sessions and its tab, the screen to reopen on, the
+side shown next to sessions and its tab, the directory each project's
+file side starts at when narrowed, the screen to reopen on, the
 Prompt Box switch and its trigger word, model, captions, and the screen
 its caption bar and preview panel appear on, the sessions open in
 windows of their own and where each window sits, the
@@ -132,7 +133,7 @@ Dev aids, all environment variables:
   `add-file-to-working-set`, `arrange`, `show-message`, `clone-session`,
   `discard-to`, `undo-discard`, `review-plan`, `show-review`,
   `review-file`, `review-continue`, `review-finalize`, `show-artifact`,
-  `pop-out`, `close-pop-out`,
+  `pop-out`, `close-pop-out`, `files-root`,
   `open-terminal`, `prompt-box`, `theme`, `sleep`).
 - `SWITCHBOARD_TMUX=<path>`: tmux binary to use.
 - `RUST_LOG=switchboard=debug`: verbose logging.
@@ -187,7 +188,7 @@ src/ui/
   rail.rs                left project rail (brand, All sessions, projects with dots, Go to, Settings); a session's neighbours beside it
   switcher.rs            Settings menu and the toasts (notice, host error)
   board.rs               one project's board: run bar, agent and shell cards, command and service rows, pinned documents, notes
-  files.rs               Files tab of the side panel: lazy tree, fuzzy finder, bottom preview pane, right-click hand-offs
+  files.rs               Files tab of the side panel: lazy tree (from the project root or a directory chosen as its top), fuzzy finder, bottom preview pane, right-click hand-offs
   run.rs                 Run tab of the side panel: commands and services, definitions, approval, last run
   runs.rs                a command or service as runs: the kicker (exit, duration, when), the card body with output or an artifact, the page with run history
   notes.rs               Notes tab of the side panel: the session's notes, edited in place

@@ -1124,6 +1124,21 @@ show what is actually shared.
   for the round in progress and from the snapshot directory once a
   round was copied, so a cleaned-up run still shows every version.
 
+## A narrowed file side (2026-09-24)
+
+A directory's right-click menu offers "Show as top level": the file
+side's tree then starts there and the finder searches only under it,
+which is what a workspace directory with several repositories inside
+needs. The narrowed side says so above the finder, in the accent, with
+a Project root button that puts the whole project back. The choice is
+per project (the side belongs to the project, and a session's own
+window shares it) and lives in settings (`file_roots`), so it survives
+a relaunch; removing the project drops it. Paths stay relative to the
+project root underneath, so pins, decorations, and the message box's
+paths are unchanged. The preview pane's second button is Open, in the
+file's app, since that is what is wanted far more often than the
+editor, which the row's menu still offers.
+
 ## Session windows (2026-09-23)
 
 A session can have a window of its own, so a working set stays up on

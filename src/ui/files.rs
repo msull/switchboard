@@ -142,9 +142,11 @@ pub fn show(
     let mut to_message = Vec::new();
     let columns = cx.state.working_set_columns;
     let core = cx.core;
+    let top_rel = cx.core.file_root(pid).cloned();
     let mut side = Side {
         pid,
         root: &root,
+        top: top_rel.as_deref(),
         shown: &shown,
         pinned: &pinned,
         core,
@@ -174,6 +176,9 @@ pub fn show(
             PaneClick::None => {}
         }
     }
+    if let Some(rel) = &top_rel {
+        narrowed_tell(ui, rel, &mut side);
+    }
     let mut open_first = false;
     ui.horizontal(|ui| {
         // The label is invisible but keeps the field findable by name.
@@ -199,8 +204,10 @@ pub fn show(
             ui.spacing_mut().item_spacing.y = 2.0;
             ui.spacing_mut().button_padding = egui::vec2(6.0, 4.0);
             if state.query.trim().is_empty() {
-                let root_dir = root.clone();
-                directory(ui, &mut state, &mut side, &root_dir, 0);
+                let top_dir = top_rel
+                    .as_ref()
+                    .map_or_else(|| root.clone(), |r| root.join(r));
+                directory(ui, &mut state, &mut side, &top_dir, 0);
             } else {
                 finder(ui, &mut state, &mut side, open_first);
             }
@@ -213,26 +220,58 @@ pub fn show(
         });
     cx.state.files.insert(pid, state);
     if let Some(id) = message {
-        // Into the Prompt Box editor when the session has one, else the
-        // plain box's draft.
-        if let Some(editor) = cx.state.prompt_boxes.editors.get_mut(&id) {
-            let mut text = editor.core().doc().rendered();
-            for path in &to_message {
-                append_path(&mut text, path);
-            }
-            if !to_message.is_empty() {
-                editor.set_text(&text);
-            }
-        } else {
-            let draft = cx.state.input_drafts.entry(id).or_default();
-            for path in &to_message {
-                append_path(draft, path);
-            }
-        }
+        paths_to_message(cx, id, &to_message);
     }
     for action in actions {
         cx.dispatch(action);
     }
+}
+
+/// Paths the side handed to the session's message: into the Prompt Box
+/// editor when the session has one, else the plain box's draft.
+fn paths_to_message(cx: &mut DrawCtx<'_>, id: RecordId, paths: &[PathBuf]) {
+    if let Some(editor) = cx.state.prompt_boxes.editors.get_mut(&id) {
+        let mut text = editor.core().doc().rendered();
+        for path in paths {
+            append_path(&mut text, path);
+        }
+        if !paths.is_empty() {
+            editor.set_text(&text);
+        }
+    } else {
+        let draft = cx.state.input_drafts.entry(id).or_default();
+        for path in paths {
+            append_path(draft, path);
+        }
+    }
+}
+
+/// A narrowed side says so where the tree begins, in the accent so it
+/// cannot be mistaken for the whole project, and offers the project
+/// root back.
+fn narrowed_tell(ui: &mut Ui, rel: &Path, side: &mut Side<'_>) {
+    let p = theme::palette(ui);
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 6.0;
+        ui.spacing_mut().button_padding = egui::vec2(6.0, 3.0);
+        ui.add(
+            egui::Label::new(
+                RichText::new(format!("⏵ {}", rel.display()))
+                    .text_style(theme::meta())
+                    .color(p.accent_text),
+            )
+            .truncate(),
+        )
+        .on_hover_text("The tree starts here, not at the project root");
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if theme::ghost(ui, "Project root")
+                .on_hover_text("Show the whole project again")
+                .clicked()
+            {
+                side.actions.push(AppAction::SetFileRoot(side.pid, None));
+            }
+        });
+    });
 }
 
 /// What the preview pane's header buttons asked for.
@@ -313,8 +352,11 @@ fn preview_pane(
                 {
                     cx.dispatch(AppAction::ShowDocument(pid, path.to_path_buf()));
                 }
-                if theme::ghost(ui, "Open in editor").clicked() {
-                    cx.dispatch(AppAction::OpenInEditor(path.to_path_buf()));
+                if theme::ghost(ui, "Open")
+                    .on_hover_text("Open it in its app")
+                    .clicked()
+                {
+                    cx.dispatch(AppAction::OpenDocument(path.to_path_buf()));
                 }
                 if can_message
                     && theme::ghost(ui, "To message")
@@ -351,6 +393,9 @@ fn preview_pane(
 struct Side<'a> {
     pid: ProjectId,
     root: &'a Path,
+    /// The directory the tree starts at when the side is narrowed,
+    /// relative to `root`.
+    top: Option<&'a Path>,
     /// Folders listed despite the root's ignore rules.
     shown: &'a [PathBuf],
     pinned: &'a [PathBuf],
@@ -422,6 +467,16 @@ impl Side<'_> {
     fn context_menu(&mut self, ui: &mut Ui, path: &Path, is_dir: bool) {
         let rel = path.strip_prefix(self.root).ok().map(Path::to_path_buf);
         if is_dir {
+            if let Some(rel) = &rel
+                && ui
+                    .button("Show as top level")
+                    .on_hover_text("Start the tree here; Project root brings it all back")
+                    .clicked()
+            {
+                self.actions
+                    .push(AppAction::SetFileRoot(self.pid, Some(rel.clone())));
+                ui.close();
+            }
             if ui.button("New shell here").clicked() {
                 let name = path
                     .file_name()
@@ -588,7 +643,21 @@ fn finder(ui: &mut Ui, state: &mut FilesState, side: &mut Side<'_>, open_first: 
         return;
     };
     let query = state.query.clone();
-    let hits = fuzzy(&listing.entries, &query, MAX_HITS, false);
+    // A narrowed side searches only under its top.
+    let scoped: Vec<Entry>;
+    let entries: &[Entry] = match side.top {
+        Some(top) => {
+            scoped = listing
+                .entries
+                .iter()
+                .filter(|e| e.rel.starts_with(top) && e.rel != top)
+                .cloned()
+                .collect();
+            &scoped
+        }
+        None => &listing.entries,
+    };
+    let hits = fuzzy(entries, &query, MAX_HITS, false);
     if hits.is_empty() {
         ui.label(RichText::new("no matches").weak());
     }

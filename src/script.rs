@@ -17,7 +17,8 @@
 //! awaited file to disk, as its agent would), `review-continue`,
 //! `review-finalize`, `show-artifact <name> <index>` (a command's card
 //! and page show that file of its last run), `pop-out <name>` and
-//! `close-pop-out <name>` (a session's own window),
+//! `close-pop-out <name>` (a session's own window), `files-root
+//! <project> <relative dir|.>` (where the file side's tree starts),
 //! `send <name> <text...>`, `interrupt <name>` (Escape to the pane),
 //! `return <name>`, `kill <name>`, `approve <name>`, `revoke <name>`
 //! (a defined command's approval), `side files|run|notes` (the side panel's
@@ -118,6 +119,7 @@ const REVIEW_LINES: &[&str] = &[
     "show-artifact",
     "pop-out",
     "close-pop-out",
+    "files-root",
 ];
 
 /// The plan review lines, kept out of `working_set_step` for length.
@@ -130,6 +132,11 @@ fn review_step(app: &mut SwitchboardApp, w: &[&str]) -> Result<(), String> {
         ["close-pop-out", n] => {
             let id = session(app, n)?;
             app.dispatch(AppAction::ClosePopout(id));
+        }
+        ["files-root", p, rel] => {
+            let (id, _) = project(app, p)?;
+            let dir = (*rel != ".").then(|| PathBuf::from(rel));
+            app.dispatch(AppAction::SetFileRoot(id, dir));
         }
         ["review-plan", name, path] => {
             let source = session(app, name)?;

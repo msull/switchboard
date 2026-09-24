@@ -90,6 +90,10 @@ pub struct Settings {
     /// The side panel sits on the left of the content, between the
     /// rail and the page, instead of on the right.
     pub side_left: bool,
+    /// Where each project's file side starts: a directory under the
+    /// project root shown as the tree's top, for projects whose side
+    /// has been narrowed. Absent means the project root.
+    pub file_roots: Vec<FileRoot>,
     /// Sessions shown in windows of their own, brought back where they
     /// were on the next launch. A session is drawn as a page in one
     /// place only: its window while it has one, else the main window.
@@ -125,6 +129,7 @@ impl Default for Settings {
             files_open: false,
             side_tab: SideTab::default(),
             side_left: false,
+            file_roots: Vec::new(),
             popouts: Vec::new(),
             last_view: SavedView::default(),
             open_terminal_on_launch: false,
@@ -448,6 +453,14 @@ pub enum SavedView {
     WorkingSet,
     Set(SetId),
     Workflow(WorkflowId),
+}
+
+/// A project's file side narrowed to a directory under its root.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileRoot {
+    pub project: ProjectId,
+    /// Relative to the project root.
+    pub dir: PathBuf,
 }
 
 /// A session in a window of its own.

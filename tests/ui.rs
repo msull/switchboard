@@ -1458,6 +1458,48 @@ fn a_file_row_dragged_onto_the_message_box_adds_its_path() {
 }
 
 #[test]
+fn a_directory_can_become_the_file_sides_top_and_the_project_root_comes_back() {
+    let (mut harness, _) = harness();
+    let (dir, pid, _) = file_project(&mut harness);
+    harness.get_by_label("⏵ docs").click_secondary();
+    harness.run_steps(2);
+    click(&mut harness, "Show as top level");
+    assert!(actions(&harness).contains(&AppAction::SetFileRoot(pid, Some(PathBuf::from("docs")))));
+    assert_eq!(
+        harness.state().core().file_root(pid),
+        Some(&PathBuf::from("docs"))
+    );
+    harness.run_steps(2);
+    // The tell names the directory, the tree starts inside it, and the
+    // finder searches only there.
+    harness.get_by_label("⏵ docs");
+    harness.get_by_label("  design.md");
+    assert!(harness.query_by_label("  README.md").is_none());
+    let find = harness.get_by_label("Find");
+    find.focus();
+    find.type_text("md");
+    // The index is built on a thread; a few frames let it land.
+    for _ in 0..50 {
+        harness.run_steps(2);
+        if harness.query_by_label("docs/design.md").is_some() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    harness.get_by_label("docs/design.md");
+    // The board's pinned README card is the one "README.md" on screen;
+    // the finder adds none while narrowed, one once the root is back.
+    assert_eq!(harness.query_all_by_label("README.md").count(), 1);
+    click(&mut harness, "Project root");
+    assert!(actions(&harness).contains(&AppAction::SetFileRoot(pid, None)));
+    assert!(harness.state().core().file_root(pid).is_none());
+    harness.run_steps(2);
+    assert_eq!(harness.query_all_by_label("README.md").count(), 2);
+    assert!(harness.query_by_label("Project root").is_none());
+    drop(dir);
+}
+
+#[test]
 fn shift_click_the_menu_and_the_pane_put_a_path_in_the_message() {
     let (mut harness, _) = harness();
     plain_message_box(&mut harness);
