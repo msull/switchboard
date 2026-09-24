@@ -31,6 +31,8 @@ no error, so listening looks dead.
 Data lives in `~/Library/Application Support/Switchboard/`: one JSON file
 per project under `projects/` (with a `.bak` of the previous version;
 approvals of defined commands live inside these records),
+`launch.log` (what the last launch loaded and chose for the main
+window's frame, for a launch with no terminal to log to),
 `settings.json` (theme, exclusive mode, editor, global variables, file
 side shown next to sessions and its tab, the directory each project's
 file side starts at when narrowed, the screen to reopen on, the

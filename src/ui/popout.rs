@@ -8,6 +8,11 @@ use std::time::{Duration, Instant};
 
 use egui::{Context, Key, Modifiers, Ui, ViewportBuilder, ViewportCommand, ViewportId};
 
+/// How long after launch the main window is held at its saved frame.
+/// macOS moves a new window onto the Dock's display, and clamps it to
+/// that screen, some time after the window exists.
+const HOLD_AT_LAUNCH: Duration = Duration::from_millis(1500);
+
 use super::{DrawCtx, session, side_panel, theme, zoom};
 use crate::core::{AppAction, Popout, RecordId, SessionKind, WindowFrame};
 
@@ -181,6 +186,11 @@ pub fn remember_main_window(cx: &mut DrawCtx<'_>, ctx: &Context, monitor: String
         return;
     };
     let now = frame_of(inner * factor, outer * factor, monitor);
+    let first = *cx.state.first_frame.get_or_insert_with(Instant::now);
+    if first.elapsed() < HOLD_AT_LAUNCH {
+        hold_at_launch(cx, ctx, &now, factor);
+        return;
+    }
     let seen = cx
         .state
         .main_frame
@@ -188,6 +198,22 @@ pub fn remember_main_window(cx: &mut DrawCtx<'_>, ctx: &Context, monitor: String
     if settled(seen, now.clone()) && cx.core.settings().main_window.as_ref() != Some(&now) {
         cx.dispatch(AppAction::MainWindowMoved(now));
     }
+}
+
+/// The saved frame is asked for again while the window is elsewhere,
+/// in the window's own zoomed points, which is what viewport commands
+/// take.
+fn hold_at_launch(cx: &DrawCtx<'_>, ctx: &Context, now: &WindowFrame, factor: f32) {
+    let Some(saved) = cx.core.settings().main_window.as_ref() else {
+        return;
+    };
+    if !zoom::monitor_attached(&saved.monitor) || saved == now {
+        return;
+    }
+    let r = rect_of(saved);
+    ctx.send_viewport_cmd(ViewportCommand::OuterPosition(r.min / factor));
+    ctx.send_viewport_cmd(ViewportCommand::InnerSize(r.size() / factor));
+    ctx.request_repaint_after(Duration::from_millis(100));
 }
 
 /// Screen points are whole numbers far below what `f32` counts exactly.

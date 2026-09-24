@@ -163,6 +163,10 @@ pub struct UiState {
     /// The main window's frame as last seen and since when, so a move
     /// is saved once it settles.
     pub main_frame: Option<(WindowFrame, std::time::Instant)>,
+    /// When the first frame was drawn: for a moment after launch the
+    /// main window is put back at its saved frame if the system moved
+    /// it (a Dock launch drags a new window onto the Dock's display).
+    pub first_frame: Option<std::time::Instant>,
     /// The main window's zoom factor as of the end of the last frame,
     /// put back before its next pass (see `ui/zoom.rs`).
     pub main_zoom: Option<f32>,
@@ -230,6 +234,7 @@ impl Default for UiState {
             popout_frames: HashMap::new(),
             popout_opened: HashMap::new(),
             main_frame: None,
+            first_frame: None,
             main_zoom: None,
             zoom_under_pointer: None,
         }

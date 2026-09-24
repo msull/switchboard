@@ -75,7 +75,14 @@ fn main() -> eframe::Result {
     let saved = loaded
         .clone()
         .filter(|f| switchboard::ui::zoom::monitor_attached(&f.monitor));
-    log::info!("main window: saved {loaded:?}; displays {screens:?}; restoring {saved:?}");
+    let decision =
+        format!("main window: saved {loaded:?}; displays {screens:?}; restoring {saved:?}");
+    log::info!("{decision}");
+    // A Dock launch has no stderr, so the decision is also left in the
+    // data directory for the last launch.
+    if let Err(e) = std::fs::write(data_dir.join("launch.log"), format!("{decision}\n")) {
+        log::warn!("could not write launch.log: {e}");
+    }
     let viewport = match saved {
         Some(f) => viewport
             .with_position([points(f.x), points(f.y)])
