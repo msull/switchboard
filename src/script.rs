@@ -122,6 +122,7 @@ const REVIEW_LINES: &[&str] = &[
     "files-root",
     "zoom",
     "place-pop-out",
+    "place-card",
 ];
 
 /// The plan review lines, kept out of `working_set_step` for length.
@@ -143,6 +144,22 @@ fn review_step(app: &mut SwitchboardApp, w: &[&str]) -> Result<(), String> {
         ["zoom", percent, monitor @ ..] => {
             let percent = percent.parse().map_err(|_| "zoom: percent".to_owned())?;
             app.dispatch(AppAction::SetMonitorZoom(monitor.join(" "), percent));
+        }
+        // A session's card on the named set, in grid units.
+        ["place-card", set, name, left, top, width, height] => {
+            let set = working_set(app, set)?;
+            let id = session(app, name)?;
+            let num = |v: &str| v.parse::<u32>().map_err(|_| format!("place-card: {v}"));
+            app.dispatch(AppAction::PlacePin {
+                set,
+                target: PinTarget::Session(id),
+                rect: crate::core::GridRect {
+                    x: num(left)?,
+                    y: num(top)?,
+                    w: num(width)?,
+                    h: num(height)?,
+                },
+            });
         }
         ["place-pop-out", name, left, top, width, height] => {
             let id = session(app, name)?;

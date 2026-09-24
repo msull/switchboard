@@ -817,10 +817,13 @@ is 3 by 2 units.
 
 Cards: an agent or shell card shows state and project, the name, the
 last prompt on one line ("You: …", hover for the whole prompt), then
-as much of the last answer (a shell: the pane's tail, refreshed with
-the captions while the set is on screen) as fits above a one-line send
-box; hovering the answer shows up to a screenful and clicking it opens
-the raw message dialog. An agent card has "Terminal" at the bottom
+the last answer above a one-line send box. An agent's final response
+is rendered as Markdown and scrolls, so the whole of it can be read on
+the set without opening the session (2026-09-24); a plain answer (an
+agent's activity line while it works, or a shell's pane tail refreshed
+with the captions while the set is on screen) is cut at the send box,
+shows up to a screenful on hover, and opens the raw message dialog on
+click. An agent card has "Terminal" at the bottom
 right of its actions row: hovering it shows the pane's last 40 lines
 in a code block, so the raw output is a glance away without opening the
 session. Enter in the send box dispatches `SendInput`;

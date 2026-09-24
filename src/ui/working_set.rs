@@ -320,16 +320,20 @@ fn capped(text: &str) -> String {
 const FOOTER: f32 = 62.0;
 
 /// An agent or shell on the working set: state and project, name, the
-/// last prompt on one line, as much of the last answer (a shell: the
-/// pane's tail) as fits, a one-line send box, and the usual actions.
-/// Hovering the prompt or the answer shows more; clicking the answer
-/// opens it unformatted.
+/// last prompt on one line, the last answer (an agent's rendered as
+/// Markdown and scrolling, so the whole of it can be read on the set;
+/// a shell: the pane's tail), a one-line send box, and the usual
+/// actions. Hovering the prompt shows more of it. A plain answer (an
+/// agent still working, or a shell) shows more on hover and opens
+/// unformatted on click.
 /// What an agent or shell card says, gathered before drawing.
 struct SetCardText {
     kicker: String,
     meta: String,
     prompt: Option<String>,
     answer: Option<String>,
+    /// The answer is an agent's final response: Markdown.
+    rendered: bool,
     reason: Option<String>,
     agent: bool,
     state: CardState,
@@ -348,6 +352,7 @@ fn set_card_text(cx: &DrawCtx<'_>, record: &SessionRecord) -> SetCardText {
     let conversation = cx.state.conversations.get(&record.id).map(|(_, c)| c);
     let last = conversation.and_then(|c| c.turns.last());
     let prompt = last.map(|t| t.user.clone()).filter(|u| !u.is_empty());
+    let rendered = agent && last.is_some_and(|t| !t.final_text.is_empty());
     let answer = if agent {
         last.map(|t| {
             if t.final_text.is_empty() {
@@ -381,6 +386,7 @@ fn set_card_text(cx: &DrawCtx<'_>, record: &SessionRecord) -> SetCardText {
         meta: parts.join(" · "),
         prompt,
         answer,
+        rendered,
         reason,
         agent,
         state,
@@ -428,6 +434,7 @@ fn set_card(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord) {
         meta,
         prompt,
         answer,
+        rendered,
         reason,
         agent,
         state,
@@ -488,19 +495,18 @@ fn set_card(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord) {
                             .color(p.accent_2_text),
                     );
                 }
-                if let Some(answer) = &answer {
-                    let text = if agent {
-                        RichText::new(answer)
-                            .text_style(theme::excerpt())
-                            .color(p.n800)
-                    } else {
-                        RichText::new(answer).monospace().color(p.n800)
-                    };
-                    ui.add(egui::Label::new(text).wrap());
-                }
+                set_card_answer(
+                    cx,
+                    ui,
+                    record,
+                    answer.as_deref(),
+                    rendered,
+                    agent,
+                    body_height,
+                );
             }
             ui.advance_cursor_after_rect(body_rect);
-            if let Some(answer) = &answer {
+            if let Some(answer) = answer.as_ref().filter(|_| !rendered) {
                 let hover = ui
                     .interact(body_rect, ui.id().with(("body", record.id)), Sense::click())
                     .on_hover_text(capped(answer))
@@ -516,6 +522,45 @@ fn set_card(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord) {
     }
     if open {
         cx.dispatch(AppAction::ShowSession(record.id));
+    }
+}
+
+/// The answer in the card's body: an agent's final response rendered
+/// as Markdown that scrolls, an agent's activity line as an excerpt,
+/// and a shell's tail in monospace.
+fn set_card_answer(
+    cx: &mut DrawCtx<'_>,
+    ui: &mut Ui,
+    record: &SessionRecord,
+    answer: Option<&str>,
+    rendered: bool,
+    agent: bool,
+    body_height: f32,
+) {
+    let p = theme::palette(ui);
+    match answer {
+        Some(answer) if rendered => {
+            egui::ScrollArea::vertical()
+                .id_salt(("answer", record.id))
+                .max_height(body_height)
+                .auto_shrink(false)
+                .show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    super::document::markdown_style(ui);
+                    super::markdown::show(ui, &mut cx.state.markdown, answer);
+                });
+        }
+        Some(answer) if agent => {
+            let text = RichText::new(answer)
+                .text_style(theme::excerpt())
+                .color(p.n800);
+            ui.add(egui::Label::new(text).wrap());
+        }
+        Some(answer) => {
+            let text = RichText::new(answer).monospace().color(p.n800);
+            ui.add(egui::Label::new(text).wrap());
+        }
+        None => {}
     }
 }
 

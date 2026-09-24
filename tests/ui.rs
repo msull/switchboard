@@ -2705,8 +2705,14 @@ fn working_set_cards_show_the_last_exchange_and_send_a_line() {
         .unwrap()
         .1
         .turns[1]
-        .final_text = "A full answer that is the agent's latest.".into();
+        .final_text = "A full answer **that is** the agent's latest.".into();
     harness.run_steps(2);
+    // The final answer is rendered: the emphasis marks are gone.
+    harness.get_by_label_contains("that is");
+    assert!(
+        harness.query_by_label_contains("**that is**").is_none(),
+        "the answer is Markdown, not its source"
+    );
     // The one-line box sends on Enter and asks for nothing else.
     harness.get_by_label("Line to send").focus();
     harness.run_steps(2);
@@ -2723,10 +2729,26 @@ fn working_set_cards_show_the_last_exchange_and_send_a_line() {
         "{:?}",
         harness.state().dispatched
     );
-    // Clicking the answer opens it unformatted.
-    harness
-        .get_by_label("A full answer that is the agent's latest.")
-        .click();
+    // An agent still working shows its activity line, which opens
+    // unformatted on click.
+    let conversation = &mut harness
+        .state_mut()
+        .ui_state
+        .conversations
+        .get_mut(&id)
+        .unwrap()
+        .1;
+    conversation.turns[1].final_text.clear();
+    conversation.turns[1].activity.push(TranscriptActivity {
+        kind: ActivityKind::Text,
+        line: "Reading the tests".into(),
+        at: Some(at(12)),
+        error: false,
+        detail: None,
+        text: None,
+    });
+    harness.run_steps(2);
+    harness.get_by_label("Reading the tests").click();
     harness.run_steps(2);
     harness.get_by_label("Full message");
 }
