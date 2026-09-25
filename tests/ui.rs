@@ -26,6 +26,7 @@ use switchboard::ports::store::Store;
 use switchboard::ports::transcript::{
     Activity as TranscriptActivity, ActivityKind, Conversation, ToolDetail, Turn, Usage,
 };
+use switchboard::ui::working_set;
 
 /// Ids of the seeded records, so tests can name them in assertions.
 struct Seeded {
@@ -3489,4 +3490,41 @@ fn a_press_on_a_working_set_card_selects_it_for_the_controller() {
         AppAction::ActivateCard { set: s, target: PinTarget::Session(t) } if *s == set && *t == shell
     )));
     assert_eq!(core.view(), View::Session(shell));
+}
+
+#[test]
+fn working_set_keys_move_the_selection_and_step_into_a_card() {
+    let (mut harness, ids) = harness();
+    let (id, shell) = working_set_of_two(&mut harness, &ids);
+    let set = first_set(&harness);
+    harness.key_press(egui::Key::L);
+    harness.run_steps(2);
+    assert_eq!(
+        harness.state().core().active_card(set),
+        Some(PinTarget::Session(shell))
+    );
+    harness.key_press(egui::Key::H);
+    harness.run_steps(2);
+    assert_eq!(
+        harness.state().core().active_card(set),
+        Some(PinTarget::Session(id))
+    );
+    // i puts the cursor in the selected card's field; the keys are
+    // typing now, so l no longer moves; Esc gives the keys back.
+    harness.key_press(egui::Key::I);
+    harness.run_steps(2);
+    let field = working_set::send_field_id(id);
+    assert_eq!(harness.ctx.memory(egui::Memory::focused), Some(field));
+    harness.key_press(egui::Key::L);
+    harness.run_steps(2);
+    assert_eq!(
+        harness.state().core().active_card(set),
+        Some(PinTarget::Session(id))
+    );
+    harness.key_press(egui::Key::Escape);
+    harness.run_steps(2);
+    assert_eq!(harness.ctx.memory(egui::Memory::focused), None);
+    harness.key_press(egui::Key::O);
+    harness.run_steps(2);
+    assert_eq!(harness.state().core().view(), View::Session(id));
 }

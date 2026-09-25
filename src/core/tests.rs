@@ -4380,6 +4380,11 @@ fn the_stick_moves_the_selection_only_while_z_is_held() {
     flick(&mut core, Direction::Left, 6);
     assert_eq!(core.active_card(set), Some(left.clone()));
     press(&mut core, Button::Z, false, 7);
+    // The keyboard steps without Z.
+    core.dispatch(AppAction::StepCard(Direction::Right), Clock::at(7));
+    assert_eq!(core.active_card(set), Some(right.clone()));
+    core.dispatch(AppAction::StepCard(Direction::Left), Clock::at(7));
+    assert_eq!(core.active_card(set), Some(left.clone()));
     // A click picks a card too, and a card that leaves the set gives
     // the selection back to the top-left one.
     core.dispatch(

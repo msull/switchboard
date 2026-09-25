@@ -41,8 +41,8 @@ use egui::{Key, Modifiers, RichText, Ui};
 
 use crate::app::{Services, SwitchboardApp};
 use crate::core::{
-    AppAction, AppCore, ProjectId, RecordId, SetId, SideTab, ThemeMode, View, WindowFrame,
-    WorkflowId,
+    AppAction, AppCore, PinTarget, ProjectId, RecordId, SessionKind, SetId, SideTab, ThemeMode,
+    View, WindowFrame, WorkflowId,
 };
 use crate::ports::transcript::Conversation;
 
@@ -555,7 +555,10 @@ fn side_tab_keys(cx: &mut DrawCtx<'_>, ctx: &egui::Context, session: bool) {
 /// Files, Run, and Notes tabs of the side panel (again to close it
 /// beside a session; Notes only there),
 /// Cmd+T the raw pane under a conversation, and Cmd+. sends Escape to
-/// the session's terminal.
+/// the session's terminal. On a working set, h, j, k, l (or the
+/// arrows) move the selected card, i or Enter puts the cursor in its
+/// "Send a line" field (Esc leaves it), v starts and stops listening
+/// into it, and o opens it.
 /// Esc is left alone while a text field, a dialog, or the terminal has
 /// focus.
 fn keyboard(cx: &mut DrawCtx<'_>, ui: &Ui, view: &View) {
@@ -629,6 +632,49 @@ fn keyboard(cx: &mut DrawCtx<'_>, ui: &Ui, view: &View) {
         && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape))
     {
         cx.dispatch(AppAction::Back);
+    }
+    if let View::WorkingSet(set) = view
+        && nothing_focused
+        && !has_dialog
+    {
+        working_set_keys(cx, ctx, *set);
+    }
+}
+
+/// The keys that drive a working set with no hands on the mouse: the
+/// same moves as the controller, plus getting into and out of a card.
+fn working_set_keys(cx: &mut DrawCtx<'_>, ctx: &egui::Context, set: SetId) {
+    use crate::ports::controller::Direction;
+    const STEPS: [(Key, Key, Direction); 4] = [
+        (Key::H, Key::ArrowLeft, Direction::Left),
+        (Key::J, Key::ArrowDown, Direction::Down),
+        (Key::K, Key::ArrowUp, Direction::Up),
+        (Key::L, Key::ArrowRight, Direction::Right),
+    ];
+    for (letter, arrow, direction) in STEPS {
+        if ctx.input_mut(|i| {
+            i.consume_key(Modifiers::NONE, letter) || i.consume_key(Modifiers::NONE, arrow)
+        }) {
+            cx.dispatch(AppAction::StepCard(direction));
+        }
+    }
+    let Some(PinTarget::Session(id)) = cx.core.active_card(set) else {
+        return;
+    };
+    if ctx.input_mut(|i| {
+        i.consume_key(Modifiers::NONE, Key::I) || i.consume_key(Modifiers::NONE, Key::Enter)
+    }) {
+        ctx.memory_mut(|m| m.request_focus(working_set::send_field_id(id)));
+    }
+    if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::O)) {
+        cx.dispatch(AppAction::ShowSession(id));
+    }
+    if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::V))
+        && cx.core.settings().prompt_box
+        && let Some(record) = cx.core.session(id).cloned()
+        && matches!(record.kind, SessionKind::Agent(_))
+    {
+        prompt_box::toggle_listening(cx, &record);
     }
 }
 

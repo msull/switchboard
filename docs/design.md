@@ -1278,6 +1278,13 @@ path as the microphone button. A shell or file card under C gets a
 notice instead. The waiting count goes back down the wire for the LED
 strip. The selection is transient; nothing here touches the store.
 
+The keyboard drives the same selection when no field has focus: h, j,
+k, l or the arrows step, i or Enter puts the cursor in the selected
+card's "Send a line" field and Esc gives the keys back, v starts and
+stops listening into the selected agent (the microphone's toggle), and
+o opens the session. So a round trip is: move, i, type, Enter, Esc,
+move on.
+
 ## Workspaces (2026-09-25)
 
 The top level. A workspace (`Space` in the code, since `Workspace` is

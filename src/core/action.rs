@@ -29,7 +29,7 @@ use crate::core::model::{
     WorkingSet, Workspace,
 };
 use crate::ports::agent::AgentLaunch;
-use crate::ports::controller::ControllerEvent;
+use crate::ports::controller::{ControllerEvent, Direction};
 use crate::ports::events::SessionEvent;
 use crate::ports::host::{HostId, HostStatus, Liveness, SpawnSpec};
 use crate::ports::project_config::ProjectConfig;
@@ -247,6 +247,9 @@ pub enum AppAction {
         set: SetId,
         target: PinTarget,
     },
+    /// Move the selection one card that way on the working set shown
+    /// (the keyboard's h, j, k, l).
+    StepCard(Direction),
     /// Work in this space: the rail shows it, and the screen goes to
     /// its switchboard unless what was showing is in it.
     ShowSpace(SpaceId),
@@ -749,6 +752,7 @@ impl AppCore {
             AppAction::Tick => self.tick(now, &mut out),
             AppAction::Controller(event) => self.controller_event(event, now),
             AppAction::ActivateCard { set, target } => self.activate_card(set, target),
+            AppAction::StepCard(direction) => self.step_card(direction),
 
             AppAction::StartWorkflow { .. }
             | AppAction::ShowWorkflow(_)

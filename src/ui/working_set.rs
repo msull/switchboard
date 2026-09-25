@@ -12,8 +12,8 @@ use super::document::{self, Body};
 use super::{DrawCtx, UiState, theme};
 use crate::core::grid::{MIN_HEIGHT, MIN_WIDTH};
 use crate::core::{
-    AppAction, AppCore, CardState, GridRect, PinTarget, PinnedItem, SessionKind, SessionRecord,
-    SetId,
+    AppAction, AppCore, CardState, GridRect, PinTarget, PinnedItem, RecordId, SessionKind,
+    SessionRecord, SetId,
 };
 
 /// Arrange mode: while on, cards are moved and resized instead of
@@ -658,9 +658,15 @@ pub(super) fn pane_tail(snapshot: &str, lines: usize) -> String {
 
 /// One line to type into the session without opening it: Enter sends
 /// it as a line to the pane. Off while the session is not running.
+/// The id of a card's "Send a line" field, so the keyboard can focus it.
+#[must_use]
+pub fn send_field_id(id: RecordId) -> egui::Id {
+    egui::Id::new(("quick-send", id))
+}
+
 fn send_line(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord, running: bool) {
     let p = theme::palette(ui);
-    let field_id = ui.id().with(("quick-send", record.id));
+    let field_id = send_field_id(record.id);
     let draft = cx.state.input_drafts.entry(record.id).or_default();
     let hint = if running {
         "Send a line…"

@@ -6,7 +6,7 @@
 use super::action::{AppCore, Clock, View};
 use super::grid;
 use super::model::{PinTarget, RecordId, SessionKind, SetId};
-use crate::ports::controller::{Button, ControllerEvent};
+use crate::ports::controller::{Button, ControllerEvent, Direction};
 
 #[derive(Debug, Default)]
 pub(super) struct ControllerState {
@@ -58,23 +58,28 @@ impl AppCore {
             ControllerEvent::Flick(direction) => {
                 // The stick only steers while Z is held, so brushing it
                 // between dictations moves nothing.
-                if !self.controller.z {
-                    return;
-                }
-                let View::WorkingSet(set) = self.view() else {
-                    return;
-                };
-                let Some(from) = self.active_card(set) else {
-                    return;
-                };
-                let next = self.working_set(set).and_then(|s| {
-                    let rect = s.items.iter().find(|i| i.target == from)?.rect;
-                    grid::neighbour(&s.items, rect, direction).cloned()
-                });
-                if let Some(target) = next {
-                    self.activate_card(set, target);
+                if self.controller.z {
+                    self.step_card(direction);
                 }
             }
+        }
+    }
+
+    /// Select the card one step `direction` from the selected one, on
+    /// the working set being shown. At the edge nothing moves.
+    pub(super) fn step_card(&mut self, direction: Direction) {
+        let View::WorkingSet(set) = self.view() else {
+            return;
+        };
+        let Some(from) = self.active_card(set) else {
+            return;
+        };
+        let next = self.working_set(set).and_then(|s| {
+            let rect = s.items.iter().find(|i| i.target == from)?.rect;
+            grid::neighbour(&s.items, rect, direction).cloned()
+        });
+        if let Some(target) = next {
+            self.activate_card(set, target);
         }
     }
 
