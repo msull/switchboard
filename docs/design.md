@@ -819,7 +819,9 @@ Cards: an agent or shell card shows state and project, the name, the
 last prompt on one line ("You: …", hover for the whole prompt), then
 the last answer above a one-line send box. An agent's final response
 is rendered as Markdown and scrolls, so the whole of it can be read on
-the set without opening the session (2026-09-24); a plain answer (an
+the set without opening the session, and "View" in the actions row
+opens it in the message dialog, rendered or raw for copying
+(2026-09-24); a plain answer (an
 agent's activity line while it works, or a shell's pane tail refreshed
 with the captions while the set is on screen) is cut at the send box,
 shows up to a screenful on hover, and opens the raw message dialog on

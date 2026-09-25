@@ -323,9 +323,11 @@ const FOOTER: f32 = 62.0;
 /// last prompt on one line, the last answer (an agent's rendered as
 /// Markdown and scrolling, so the whole of it can be read on the set;
 /// a shell: the pane's tail), a one-line send box, and the usual
-/// actions. Hovering the prompt shows more of it. A plain answer (an
-/// agent still working, or a shell) shows more on hover and opens
-/// unformatted on click.
+/// actions. Hovering the prompt shows more of it. A rendered answer
+/// has "View" in the actions row, which opens it in the message dialog
+/// (rendered or raw, for reading a long one or copying). A plain
+/// answer (an agent still working, or a shell) shows more on hover and
+/// opens unformatted on click.
 /// What an agent or shell card says, gathered before drawing.
 struct SetCardText {
     kicker: String,
@@ -515,7 +517,8 @@ fn set_card(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord) {
                     show_raw = Some(answer.clone());
                 }
             }
-            set_footer(cx, ui, record, running, agent);
+            let view = answer.as_deref().filter(|_| rendered);
+            set_footer(cx, ui, record, running, agent, view);
         });
     if let Some(text) = show_raw {
         cx.state.raw_message = Some(text);
@@ -564,19 +567,28 @@ fn set_card_answer(
     }
 }
 
-/// The card's bottom: the actions row (with the terminal peek at its
-/// right for agents) above the send box, laid out from the bottom so
-/// they stay put whatever the body holds.
+/// The card's bottom: the actions row (then "View" for a rendered
+/// answer, and the terminal peek at its right for agents) above the
+/// send box, laid out from the bottom so they stay put whatever the
+/// body holds.
 fn set_footer(
     cx: &mut DrawCtx<'_>,
     ui: &mut Ui,
     record: &SessionRecord,
     running: bool,
     agent: bool,
+    view: Option<&str>,
 ) {
     ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
         ui.horizontal(|ui| {
             actions(cx, ui, record, running);
+            if let Some(answer) = view
+                && theme::ghost_muted(ui, "View")
+                    .on_hover_text("Open the answer in a dialog, rendered or raw")
+                    .clicked()
+            {
+                cx.state.raw_message = Some(answer.to_owned());
+            }
             if agent {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     pane_peek(ui, cx.state.snapshots.get(&record.id));

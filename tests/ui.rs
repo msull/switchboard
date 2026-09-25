@@ -2656,6 +2656,36 @@ fn hovering_terminal_on_an_agent_card_shows_the_panes_tail() {
 }
 
 #[test]
+fn a_rendered_answer_on_a_working_set_card_opens_in_the_message_dialog() {
+    let (mut harness, ids) = harness();
+    let (id, _) = working_set_of_two(&mut harness, &ids);
+    let mut conversation = two_turns();
+    conversation.turns[1].final_text = "A full answer **that is** the agent's latest.".into();
+    harness
+        .state_mut()
+        .ui_state
+        .conversations
+        .insert(id, (None, conversation));
+    harness.run_steps(2);
+    // View opens it in the message dialog, where Raw shows the source.
+    click(&mut harness, "View");
+    harness.get_by_label("Full message");
+    assert_eq!(
+        harness.state().ui_state.raw_message.as_deref(),
+        Some("A full answer **that is** the agent's latest.")
+    );
+    click(&mut harness, "Raw");
+    assert_eq!(
+        harness.state().ui_state.message_view,
+        switchboard::ui::dialogs::MessageView::Raw
+    );
+    click(&mut harness, "Rendered");
+    click(&mut harness, "Close");
+    harness.run_steps(2);
+    assert!(harness.query_by_label("Full message").is_none());
+}
+
+#[test]
 fn working_set_cards_show_the_last_exchange_and_send_a_line() {
     let (mut harness, ids) = harness();
     let (id, _) = working_set_of_two(&mut harness, &ids);
