@@ -9,6 +9,7 @@ use std::time::SystemTime;
 
 use crate::core::{AgentKind, ProjectId, RecordId, ResumeHandle, Settings, Views, Workspace};
 use crate::ports::agent::{AgentLaunch, AgentLauncher};
+use crate::ports::controller::{Controller, ControllerEvent};
 use crate::ports::events::{EventSource, SessionEvent};
 use crate::ports::host::{HostId, HostInfo, HostStatus, ProcessHost, SpawnSpec};
 use crate::ports::opener::Opener;
@@ -137,6 +138,23 @@ impl EventSource for FakeEvents {
     }
     fn checkpoint(&mut self) {
         self.checkpoints += 1;
+    }
+}
+
+/// Events queued by a test, handed over on the next poll.
+#[derive(Debug, Default)]
+pub struct FakeController {
+    pub queued: Vec<ControllerEvent>,
+    /// Every waiting count the app sent down.
+    pub waiting: Vec<usize>,
+}
+
+impl Controller for FakeController {
+    fn poll(&mut self) -> Vec<ControllerEvent> {
+        std::mem::take(&mut self.queued)
+    }
+    fn set_waiting(&mut self, count: usize) {
+        self.waiting.push(count);
     }
 }
 

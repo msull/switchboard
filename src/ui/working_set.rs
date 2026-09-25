@@ -159,6 +159,7 @@ pub fn show(cx: &mut DrawCtx<'_>, ui: &mut Ui, set: SetId) {
                     items.iter().map(|i| cell_rect(origin, i.rect)).collect();
                 grid_dots(ui, rect, width_units, height_units, &cells);
             }
+            let active = cx.core.active_card(set);
             for item in &items {
                 let cell = cell_rect(origin, item.rect);
                 ui.scope_builder(UiBuilder::new().max_rect(cell), |ui| {
@@ -168,6 +169,27 @@ pub fn show(cx: &mut DrawCtx<'_>, ui: &mut Ui, set: SetId) {
                     }
                     card(cx, ui, set, item);
                 });
+                if active.as_ref() == Some(&item.target) {
+                    // Drawn over the card: the border is where the
+                    // controller's next press lands.
+                    ui.painter().rect_stroke(
+                        cell,
+                        2,
+                        egui::Stroke::new(2.0, p.accent),
+                        egui::StrokeKind::Inside,
+                    );
+                }
+                // A press anywhere on the card selects it, without taking
+                // the click from whatever it landed on.
+                if !arranging
+                    && ui.rect_contains_pointer(cell)
+                    && ui.input(|i| i.pointer.primary_pressed())
+                {
+                    cx.actions.push(AppAction::ActivateCard {
+                        set,
+                        target: item.target.clone(),
+                    });
+                }
                 if arranging {
                     arrange_handles(cx, ui, set, item, cell);
                 }

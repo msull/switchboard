@@ -15,6 +15,7 @@ use super::model::{
 };
 use super::reconcile::RECORD_ID_ENV;
 use crate::ports::agent::AgentLaunch;
+use crate::ports::controller::{Button, ControllerEvent, Direction};
 use crate::ports::events::{EventKind, SessionEvent};
 use crate::ports::host::{HostId, HostStatus, Liveness};
 use crate::ports::project_config::{DefinedEntry, ProjectConfig};
@@ -4310,4 +4311,140 @@ mod runs {
         assert_eq!(saves(&effects), 1);
         assert_eq!(core.session(id).unwrap().outputs, vec!["a.md".to_owned()]);
     }
+}
+
+/// A set of an agent (left) and a shell (right), shown.
+fn controller_set(
+    core: &mut AppCore,
+    agent_id: RecordId,
+    shell_id: RecordId,
+) -> super::model::SetId {
+    core.dispatch(
+        AppAction::NewWorkingSet {
+            name: None,
+            clone_of: None,
+            with: Some(PinTarget::Session(agent_id)),
+            columns: 24,
+        },
+        Clock::at(1),
+    );
+    let set = core.working_sets()[0].id;
+    core.dispatch(
+        AppAction::AddToWorkingSet {
+            set,
+            target: PinTarget::Session(shell_id),
+            columns: 24,
+        },
+        Clock::at(1),
+    );
+    core.dispatch(AppAction::ShowWorkingSet(set), Clock::at(1));
+    set
+}
+
+fn press(core: &mut AppCore, button: Button, down: bool, at: u64) {
+    core.dispatch(
+        AppAction::Controller(ControllerEvent::Button { button, down }),
+        Clock::at(at),
+    );
+}
+
+fn flick(core: &mut AppCore, direction: Direction, at: u64) {
+    core.dispatch(
+        AppAction::Controller(ControllerEvent::Flick(direction)),
+        Clock::at(at),
+    );
+}
+
+#[test]
+fn the_stick_moves_the_selection_only_while_z_is_held() {
+    let (mut core, _, ids) = with_records(&[agent(), SessionKind::Shell], |s| Some(running(s.id)));
+    let (agent_id, shell_id) = (ids[0], ids[1]);
+    let set = controller_set(&mut core, agent_id, shell_id);
+    let (left, right) = (PinTarget::Session(agent_id), PinTarget::Session(shell_id));
+    assert_eq!(
+        core.active_card(set),
+        Some(left.clone()),
+        "with nothing chosen the top-left card is selected"
+    );
+    flick(&mut core, Direction::Right, 2);
+    assert_eq!(core.active_card(set), Some(left.clone()), "Z was not held");
+    press(&mut core, Button::Z, true, 3);
+    flick(&mut core, Direction::Right, 4);
+    assert_eq!(core.active_card(set), Some(right.clone()));
+    flick(&mut core, Direction::Right, 5);
+    assert_eq!(
+        core.active_card(set),
+        Some(right.clone()),
+        "no wrap at the edge"
+    );
+    flick(&mut core, Direction::Left, 6);
+    assert_eq!(core.active_card(set), Some(left.clone()));
+    press(&mut core, Button::Z, false, 7);
+    // A click picks a card too, and a card that leaves the set gives
+    // the selection back to the top-left one.
+    core.dispatch(
+        AppAction::ActivateCard {
+            set,
+            target: right.clone(),
+        },
+        Clock::at(8),
+    );
+    assert_eq!(core.active_card(set), Some(right.clone()));
+    core.dispatch(AppAction::RemoveSession(shell_id), Clock::at(9));
+    assert_eq!(core.active_card(set), Some(left));
+}
+
+#[test]
+fn c_holds_the_selected_agent_open_for_dictation() {
+    let (mut core, _, ids) = with_records(&[agent(), SessionKind::Shell], |s| Some(running(s.id)));
+    let (agent_id, shell_id) = (ids[0], ids[1]);
+    let set = controller_set(&mut core, agent_id, shell_id);
+    assert_eq!(core.hold_listen(), None);
+    press(&mut core, Button::C, true, 2);
+    assert_eq!(core.hold_listen(), Some(agent_id));
+    // Moving the selection while C is down does not move the listener.
+    press(&mut core, Button::Z, true, 3);
+    flick(&mut core, Direction::Right, 4);
+    assert_eq!(core.hold_listen(), Some(agent_id));
+    press(&mut core, Button::C, false, 5);
+    assert_eq!(core.hold_listen(), None);
+    press(&mut core, Button::Z, false, 6);
+    // The shell is selected now: nothing to dictate into, and a notice says so.
+    assert_eq!(core.active_card(set), Some(PinTarget::Session(shell_id)));
+    press(&mut core, Button::C, true, 7);
+    assert_eq!(core.hold_listen(), None);
+    assert_eq!(
+        core.notice().map(|n| n.text.clone()),
+        Some("No agent selected to listen into".to_owned())
+    );
+    press(&mut core, Button::C, false, 8);
+    // On a session's own page C holds that session.
+    core.dispatch(AppAction::ShowSession(agent_id), Clock::at(9));
+    press(&mut core, Button::C, true, 10);
+    assert_eq!(core.hold_listen(), Some(agent_id));
+    // Losing the device lets go of everything.
+    core.dispatch(
+        AppAction::Controller(ControllerEvent::Connected(false)),
+        Clock::at(11),
+    );
+    assert_eq!(core.hold_listen(), None);
+    assert!(!core.controller_connected());
+}
+
+#[test]
+fn controller_lines_parse_to_events_and_the_rest_are_ignored() {
+    assert_eq!(
+        ControllerEvent::parse("Z1\n"),
+        Some(ControllerEvent::Button {
+            button: Button::Z,
+            down: true
+        })
+    );
+    assert_eq!(
+        ControllerEvent::parse("SL"),
+        Some(ControllerEvent::Flick(Direction::Left))
+    );
+    assert_eq!(ControllerEvent::parse("S0"), None);
+    assert_eq!(ControllerEvent::parse("P"), None);
+    assert_eq!(ControllerEvent::parse("# nunchuk error"), None);
 }

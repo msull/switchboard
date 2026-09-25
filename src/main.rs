@@ -4,6 +4,7 @@ use std::path::PathBuf;
 
 use switchboard::SwitchboardApp;
 use switchboard::adapters::agents::Agents;
+use switchboard::adapters::controller::SerialController;
 use switchboard::adapters::ghostty::MacOpener;
 use switchboard::adapters::hooks::{HookLog, WakeSocket, write_hook_settings};
 use switchboard::adapters::project_config::FileConfigReader;
@@ -16,6 +17,26 @@ use switchboard::app::Services;
 #[allow(clippy::cast_precision_loss)]
 fn points(v: i32) -> f32 {
     v as f32
+}
+
+/// The hook helper's socket; a hook event wakes the frame loop.
+fn wake_socket(data_dir: &std::path::Path, ctx: &egui::Context) -> Option<WakeSocket> {
+    let ctx = ctx.clone();
+    match WakeSocket::bind_with(data_dir, move || ctx.request_repaint()) {
+        Ok(w) => Some(w),
+        Err(e) => {
+            log::error!("wake socket: {e}");
+            None
+        }
+    }
+}
+
+/// The nunchuk's port thread; a button press wakes the frame loop.
+fn controller(ctx: &egui::Context) -> SerialController {
+    let ctx = ctx.clone();
+    SerialController::spawn(std::env::var("SWITCHBOARD_CONTROLLER").ok(), move || {
+        ctx.request_repaint();
+    })
 }
 
 fn main() -> eframe::Result {
@@ -110,14 +131,8 @@ fn main() -> eframe::Result {
             // Fonts and styles apply from the next frame on, so they go
             // in before the first one is drawn.
             switchboard::ui::theme::install(&cc.egui_ctx);
-            let ctx = cc.egui_ctx.clone();
-            let wake = match WakeSocket::bind_with(&data_dir, move || ctx.request_repaint()) {
-                Ok(w) => Some(w),
-                Err(e) => {
-                    log::error!("wake socket: {e}");
-                    None
-                }
-            };
+            let wake = wake_socket(&data_dir, &cc.egui_ctx);
+            let controller = controller(&cc.egui_ctx);
             let services = Services {
                 store: Box::new(store),
                 host: Box::new(host),
@@ -129,6 +144,7 @@ fn main() -> eframe::Result {
                 project_config: Box::new(FileConfigReader::new()),
                 round_files: Box::new(switchboard::adapters::round_files::DiskRoundFiles),
                 artifacts: Box::new(switchboard::adapters::artifacts::DiskArtifacts),
+                controller: Box::new(controller),
                 wake,
             };
             let mut app = SwitchboardApp::with_services(services);

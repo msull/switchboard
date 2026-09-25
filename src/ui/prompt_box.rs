@@ -86,6 +86,9 @@ pub struct PromptBoxes {
     pub voice: Voice,
     /// The session the voice runtime dictates into.
     pub bound: Option<RecordId>,
+    /// The session the controller's C button holds open, as last
+    /// synced from the core.
+    held: Option<RecordId>,
     pub outbox: Outbox,
     /// The `OpenAI` key as last read from the Keychain.
     key: KeyState,
@@ -107,6 +110,7 @@ impl Default for PromptBoxes {
             running: std::collections::HashMap::new(),
             voice: Voice::default(),
             bound: None,
+            held: None,
             outbox: Outbox::default(),
             key: KeyState::Unread,
             native: true,
@@ -174,6 +178,7 @@ pub fn pump(cx: &mut DrawCtx<'_>) -> Option<std::time::Duration> {
             }
         }
     }
+    hold_listen(cx);
     let boxes = &mut cx.state.prompt_boxes;
     boxes.editors.retain(|id, _| core.session(*id).is_some());
     boxes.running.retain(|id, _| core.session(*id).is_some());
@@ -203,6 +208,36 @@ pub fn pump(cx: &mut DrawCtx<'_>) -> Option<std::time::Duration> {
         boxes.stop();
     }
     repaint
+}
+
+/// Push-to-talk from the controller: listening starts when the core
+/// says C is holding a session and stops when it lets go, through the
+/// same path as the microphone button. A click that stopped listening
+/// in between is respected: only what the button started is stopped.
+fn hold_listen(cx: &mut DrawCtx<'_>) {
+    let core = cx.core;
+    let want = core
+        .hold_listen()
+        .filter(|_| core.settings().prompt_box)
+        .filter(|id| core.session(*id).is_some());
+    let had = cx.state.prompt_boxes.held;
+    if want == had {
+        return;
+    }
+    cx.state.prompt_boxes.held = want;
+    match want {
+        Some(id) => {
+            if let Some(record) = core.session(id) {
+                editor_for(cx, record);
+                cx.state.prompt_boxes.listen_into(id);
+            }
+        }
+        None => {
+            if cx.state.prompt_boxes.listening() == had {
+                cx.state.prompt_boxes.stop();
+            }
+        }
+    }
 }
 
 /// The caption and preview overlays of the bound editor, on the screen

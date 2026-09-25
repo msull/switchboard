@@ -3,6 +3,7 @@
 //! here where they can be tested without a window.
 
 use super::model::{GridRect, PinTarget, PinnedItem, SessionKind};
+use crate::ports::controller::Direction;
 
 /// A card can be squeezed to this many units, and no fewer.
 pub const MIN_WIDTH: u32 = 3;
@@ -57,6 +58,40 @@ pub fn fits(items: &[PinnedItem], target: &PinTarget, rect: GridRect) -> bool {
         .any(|i| i.target != *target && i.rect.overlaps(rect))
 }
 
+/// The card one step `direction` from `from`: the nearest card wholly
+/// on that side, preferring one that shares rows (or columns) with
+/// `from`, then the closest to its centre line. None at the edge: the
+/// selection does not wrap.
+#[must_use]
+pub fn neighbour(items: &[PinnedItem], from: GridRect, direction: Direction) -> Option<&PinTarget> {
+    // Rotate every rect so the step is always "towards larger main".
+    let span = |r: GridRect| -> (u32, u32, u32, u32) {
+        let (x0, x1, y0, y1) = (r.x, r.x + r.w, r.y, r.y + r.h);
+        match direction {
+            Direction::Right => (x0, x1, y0, y1),
+            Direction::Left => (u32::MAX - x1, u32::MAX - x0, y0, y1),
+            Direction::Down => (y0, y1, x0, x1),
+            Direction::Up => (u32::MAX - y1, u32::MAX - y0, x0, x1),
+        }
+    };
+    let (_, from_end, from_c0, from_c1) = span(from);
+    let from_mid = from_c0 + from_c1;
+    items
+        .iter()
+        .filter_map(|item| {
+            let (start, _, c0, c1) = span(item.rect);
+            if start < from_end {
+                return None;
+            }
+            let shares = c0 < from_c1 && from_c0 < c1;
+            let mid = c0 + c1;
+            let off = mid.abs_diff(from_mid);
+            Some(((!shares, start - from_end, off), &item.target))
+        })
+        .min_by_key(|(key, _)| *key)
+        .map(|(_, target)| target)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -67,6 +102,35 @@ mod tests {
             target: PinTarget::Session(RecordId::new()),
             rect: GridRect { x, y, w, h },
         }
+    }
+
+    #[test]
+    fn a_step_lands_on_the_nearest_card_that_shares_rows_and_stops_at_the_edge() {
+        // Two rows: a wide card over two narrow ones, and one far right.
+        //   [ a a a a ] [ d ]
+        //   [ b ] [ c ]
+        let items = vec![
+            item(0, 0, 8, 2),
+            item(0, 2, 4, 2),
+            item(4, 2, 4, 2),
+            item(8, 0, 4, 2),
+        ];
+        let (a, b, c, d) = (&items[0], &items[1], &items[2], &items[3]);
+        let step = |from: &PinnedItem, dir| neighbour(&items, from.rect, dir);
+        assert_eq!(step(a, Direction::Right), Some(&d.target));
+        assert_eq!(
+            step(a, Direction::Down),
+            Some(&b.target),
+            "the one nearest a's centre line"
+        );
+        assert_eq!(step(c, Direction::Up), Some(&a.target));
+        assert_eq!(step(b, Direction::Right), Some(&c.target));
+        assert_eq!(step(c, Direction::Left), Some(&b.target));
+        // d shares no rows with b or c; it is still the only card to the right.
+        assert_eq!(step(c, Direction::Right), Some(&d.target));
+        assert_eq!(step(d, Direction::Right), None);
+        assert_eq!(step(a, Direction::Up), None);
+        assert_eq!(step(b, Direction::Left), None);
     }
 
     #[test]

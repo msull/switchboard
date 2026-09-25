@@ -29,6 +29,7 @@ use crate::core::model::{
     WorkingSet, Workspace,
 };
 use crate::ports::agent::AgentLaunch;
+use crate::ports::controller::ControllerEvent;
 use crate::ports::events::SessionEvent;
 use crate::ports::host::{HostId, HostStatus, Liveness, SpawnSpec};
 use crate::ports::project_config::ProjectConfig;
@@ -238,6 +239,14 @@ pub enum AppAction {
     MainWindowMoved(WindowFrame),
     /// Put back a session removed within the undo window.
     UndoRemove(RecordId),
+    /// The hand controller said something.
+    Controller(ControllerEvent),
+    /// The card the controller's stick starts from on this set; a click
+    /// on a card sets it too.
+    ActivateCard {
+        set: SetId,
+        target: PinTarget,
+    },
     /// Work in this space: the rail shows it, and the screen goes to
     /// its switchboard unless what was showing is in it.
     ShowSpace(SpaceId),
@@ -653,6 +662,9 @@ pub struct AppCore {
     /// [`crate::core::STALL_AFTER`]: noticed once, and shown as waiting
     /// on the user until the pane moves again. Transient.
     pub(super) stalled: Vec<WorkflowId>,
+    /// The hand controller: held buttons and the selected card per set.
+    /// Transient.
+    pub(super) controller: super::controller::ControllerState,
 }
 
 impl AppCore {
@@ -735,6 +747,8 @@ impl AppCore {
             AppAction::Back => drop(self.view_stack.pop()),
             AppAction::DismissNotice => self.dismiss_notice(),
             AppAction::Tick => self.tick(now, &mut out),
+            AppAction::Controller(event) => self.controller_event(event, now),
+            AppAction::ActivateCard { set, target } => self.activate_card(set, target),
 
             AppAction::StartWorkflow { .. }
             | AppAction::ShowWorkflow(_)

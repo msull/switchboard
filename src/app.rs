@@ -14,6 +14,7 @@ use crate::core::{
 };
 use crate::ports::agent::AgentLauncher;
 use crate::ports::artifacts::ArtifactFinder;
+use crate::ports::controller::Controller;
 use crate::ports::events::EventSource;
 use crate::ports::host::{HostId, Liveness, ProcessHost};
 use crate::ports::opener::Opener;
@@ -46,6 +47,8 @@ pub struct Services {
     pub project_config: Box<dyn ProjectConfigReader>,
     pub round_files: Box<dyn RoundFiles>,
     pub artifacts: Box<dyn ArtifactFinder>,
+    /// The hand controller (a nunchuk over serial); a fake in tests.
+    pub controller: Box<dyn Controller>,
     /// The hook helper's wake-up socket; `None` in tests.
     pub wake: Option<WakeSocket>,
 }
@@ -95,7 +98,8 @@ pub struct SwitchboardApp {
     services: Services,
     started: Instant,
     last_poll: Option<Instant>,
-    /// The waiting count last put on the Dock badge.
+    /// The waiting count last put on the Dock badge and sent to the
+    /// controller.
     badge: Option<usize>,
     last_caption: Option<Instant>,
     discoveries: Vec<Discovery>,
@@ -842,6 +846,11 @@ impl SwitchboardApp {
     }
 
     fn pump(&mut self) {
+        // Every frame, not every poll: a button press should land in
+        // the frame its wake-up requested.
+        for event in self.services.controller.poll() {
+            self.dispatch(AppAction::Controller(event));
+        }
         let woken = self
             .services
             .wake
@@ -881,6 +890,7 @@ impl eframe::App for SwitchboardApp {
             let waiting = self.core.waiting_count();
             if self.badge != Some(waiting) {
                 crate::adapters::dock::set_waiting_badge(waiting);
+                self.services.controller.set_waiting(waiting);
                 self.badge = Some(waiting);
             }
         }

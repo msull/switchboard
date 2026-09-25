@@ -11,8 +11,8 @@ use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;
 use switchboard::SwitchboardApp;
 use switchboard::adapters::fakes::{
-    FakeAgents, FakeArtifacts, FakeEvents, FakeHost, FakeOpener, FakeProjectConfig, FakeRoundFiles,
-    FakeSecrets, FakeTranscripts, MemoryStore,
+    FakeAgents, FakeArtifacts, FakeController, FakeEvents, FakeHost, FakeOpener, FakeProjectConfig,
+    FakeRoundFiles, FakeSecrets, FakeTranscripts, MemoryStore,
 };
 use switchboard::app::Services;
 use switchboard::core::{
@@ -190,6 +190,7 @@ fn harness_build(
         project_config: Box::new(FakeProjectConfig::default()),
         round_files: Box::new(FakeRoundFiles::default()),
         artifacts: Box::new(FakeArtifacts::default()),
+        controller: Box::new(FakeController::default()),
         wake: None,
     };
     let mut harness = Harness::builder()
@@ -1983,6 +1984,7 @@ fn polling_reads_the_transcript_into_the_ui_state() {
         project_config: Box::new(FakeProjectConfig::default()),
         round_files: Box::new(FakeRoundFiles::default()),
         artifacts: Box::new(FakeArtifacts::default()),
+        controller: Box::new(FakeController::default()),
         wake: None,
     };
     let mut harness = Harness::builder()
@@ -3465,4 +3467,26 @@ fn cleaning_up_asks_first_and_lists_the_files() {
     click(&mut harness, "Delete files");
     assert!(actions(&harness).contains(&AppAction::CleanUpWorkflow(run)));
     assert!(harness.state().core().workflow(run).unwrap().cleaned);
+}
+
+#[test]
+fn a_press_on_a_working_set_card_selects_it_for_the_controller() {
+    let (mut harness, ids) = harness();
+    let (id, shell) = working_set_of_two(&mut harness, &ids);
+    let set = first_set(&harness);
+    assert_eq!(
+        harness.state().core().active_card(set),
+        Some(PinTarget::Session(id)),
+        "the top-left card to begin with"
+    );
+    // Press on the shell card's title: the title's own click still
+    // happens (it opens the session), and the card is selected.
+    click(&mut harness, "build");
+    let core = harness.state().core();
+    assert_eq!(core.active_card(set), Some(PinTarget::Session(shell)));
+    assert!(actions(&harness).iter().any(|a| matches!(
+        a,
+        AppAction::ActivateCard { set: s, target: PinTarget::Session(t) } if *s == set && *t == shell
+    )));
+    assert_eq!(core.view(), View::Session(shell));
 }

@@ -3,6 +3,7 @@
 
 pub mod agent;
 pub mod artifacts;
+pub mod controller;
 pub mod events;
 pub mod host;
 pub mod opener;

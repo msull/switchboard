@@ -33,6 +33,7 @@ use crate::core::{
     AgentKind, AppAction, EnvVar, Launch, PinTarget, ProjectId, RecordId, SecretScope, SessionKind,
     SetId, SideTab,
 };
+use crate::ports::controller::ControllerEvent;
 
 pub fn run(app: &mut SwitchboardApp, text: &str) {
     for line in text.lines() {
@@ -131,6 +132,7 @@ const SPACE_LINES: &[&str] = &[
     "workspace",
     "move-project",
     "move-working-set",
+    "controller",
 ];
 
 /// Workspaces: make one, work in one, move a project or set into one.
@@ -146,6 +148,11 @@ fn space_step(app: &mut SwitchboardApp, w: &[&str]) -> Result<(), String> {
             let (pid, _) = project(app, p)?;
             let id = space(app, &name.join(" "))?;
             app.dispatch(AppAction::MoveProjectToSpace(pid, id));
+        }
+        ["controller", line] => {
+            let event =
+                ControllerEvent::parse(line).ok_or_else(|| format!("controller: {line}"))?;
+            app.dispatch(AppAction::Controller(event));
         }
         ["move-working-set", set, name @ ..] => {
             let set = working_set(app, set)?;

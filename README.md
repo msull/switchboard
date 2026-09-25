@@ -139,8 +139,10 @@ Dev aids, all environment variables:
   `review-file`, `review-continue`, `review-finalize`, `show-artifact`,
   `pop-out`, `close-pop-out`, `files-root`, `zoom`, `place-pop-out`,
   `place-card`, `new-workspace`, `workspace`, `move-project`,
-  `move-working-set`,
+  `move-working-set`, `controller`,
   `open-terminal`, `prompt-box`, `theme`, `sleep`).
+- `SWITCHBOARD_CONTROLLER=<device>`: the nunchuk's serial port (default: the
+  first `/dev/cu.usbmodem*`, waited for if absent).
 - `SWITCHBOARD_TMUX=<path>`: tmux binary to use.
 - `RUST_LOG=switchboard=debug`: verbose logging.
 
@@ -162,17 +164,19 @@ src/core/
   action.rs              AppAction, Effect, Clock, AppCore::dispatch, read model for the UI
   reconcile.rs           StoreLoaded / HostListed: card states, autostart services, spawn specs
   sessions.rs            launch, idempotent return, resume preflight, Codex serialization
-  grid.rs                Working Set placement: default card sizes, first free spot, overlap, minimum size
+  grid.rs                Working Set placement: default card sizes, first free spot, overlap, minimum size, the card a step away
+  controller.rs          the hand controller's meaning: the selected card per working set, the session C holds open
   definitions.rs         .switchboard/project.json entries -> records; hash-keyed approval
   events.rs              hook events -> record activity (matched by record id, ordered by time)
   workflow.rs            plan review runs: reviewer and planner rounds as a state machine over records
   tests.rs               state-transition tests for the core
-src/ports/               traits: store, host, events, agent, opener, transcript, secrets, project_config, round_files, artifacts
+src/ports/               traits: store, host, events, agent, opener, transcript, secrets, project_config, round_files, artifacts, controller
 src/adapters/
   store.rs               JSON store: atomic writes, .bak, flock
   tmux.rs                tmux process host on the private socket
   hooks.rs               append-first event log + socket wake-up + hook settings JSON
   dock.rs                Dock badge with the waiting-session count (macOS)
+  controller.rs          the nunchuk over USB serial: a thread owns the port, reconnects, hands events over a channel
   files.rs               project file index: gitignore-aware scan, lazy children, fuzzy match
   git.rs                 branches, change counts, per-path status; finds repos one or two dirs down
   keychain.rs            secrets as generic-password items in the login Keychain (tests use a temp keychain)
@@ -218,6 +222,7 @@ tests/fixtures/          a small real Claude Code transcript for the parser test
 tests/live.rs            ignored: real claude / codex / Ghostty runs
 tests/gate.rs            Milestone 1 gate: real store, tmux, hooks; agents ignored
 vendor/egui_term/        embedded terminal widget (Harzu/egui_term @ 31bbc7ab, egui 0.36; see SWITCHBOARD-PATCHES.md)
+firmware/nunchuk/        CircuitPython for the Feather that reports the nunchuk's buttons and stick
 spikes/                  Spike 0 evidence
 ```
 

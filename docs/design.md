@@ -1260,6 +1260,24 @@ launch. Session views open scrolled to the end: each window remembers
 which conversation it drew last frame, and a conversation shown afresh
 starts at its end instead of at the scroll of the one shown before.
 
+## A hand controller (2026-09-25)
+
+Clicking cards and the microphone all day hurts. A Wii nunchuk on a
+Feather RP2040 (`firmware/nunchuk/code.py`) reports its two buttons
+and its stick over USB serial, one short line per change, and the
+`Controller` port polls those lines every frame from a thread that owns
+the port and reconnects when the cable goes (spike 10). The core keeps
+a selected card per working set, drawn with an accent border and
+defaulting to the top-left card; a press on a card selects it, and
+while Z is held a flick of the stick steps to the nearest card that
+way, preferring one that shares rows or columns and never wrapping.
+Holding C holds the selected agent session (or the session being
+shown) open for dictation: the core records which, and the Prompt Box
+pump starts and stops the one voice runtime to match, through the same
+path as the microphone button. A shell or file card under C gets a
+notice instead. The waiting count goes back down the wire for the LED
+strip. The selection is transient; nothing here touches the store.
+
 ## Workspaces (2026-09-25)
 
 The top level. A workspace (`Space` in the code, since `Workspace` is
