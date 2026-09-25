@@ -13,7 +13,7 @@ mod workflow;
 #[cfg(test)]
 mod tests;
 
-pub use action::{AppAction, AppCore, Clock, ConfigStatus, Effect, Notice, View};
+pub use action::{AppAction, AppCore, Clock, ConfigStatus, Effect, Notice, UNDO_WINDOW, View};
 pub use definitions::entry_hash;
 pub use env::{Resolved, ResolvedVar, SecretScope, Source};
 pub use model::*;

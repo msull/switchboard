@@ -131,7 +131,7 @@ Dev aids, all environment variables:
   `src/script.rs` for the lines (`add-project`, `new-shell`, `new-claude`,
   `new-codex`, `new-service`, `show-board`, `show-session`, `show-document`,
   `files`, `side-position`, `terminal`, `select-file`, `set-env`, `set-secret`, `dotenv`, `environment`, `config`,
-  `send`, `interrupt`, `return`, `kill`, `approve`, `revoke`, `side`,
+  `send`, `interrupt`, `return`, `kill`, `remove`, `approve`, `revoke`, `side`,
   `switchboard`, `working-set`, `new-working-set`, `clone-working-set`,
   `rename-working-set`, `delete-working-set`, `add-to-working-set`,
   `add-file-to-working-set`, `arrange`, `show-message`, `clone-session`,

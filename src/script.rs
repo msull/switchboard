@@ -508,6 +508,10 @@ fn step(app: &mut SwitchboardApp, w: &[&str]) -> Result<(), String> {
             let id = session(app, n)?;
             app.dispatch(AppAction::KillSession(id));
         }
+        ["remove", n] => {
+            let id = session(app, n)?;
+            app.dispatch(AppAction::RemoveSession(id));
+        }
         [first, ..] if REVIEW_LINES.contains(first) => review_step(app, w)?,
         [first, ..] if SPACE_LINES.contains(first) => space_step(app, w)?,
         [first, ..] if EXTRA_LINES.contains(first) => working_set_step(app, w)?,

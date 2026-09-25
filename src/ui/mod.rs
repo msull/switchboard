@@ -155,6 +155,11 @@ pub struct UiState {
     /// The session whose own window is being drawn right now, so the
     /// page knows it is not in the main window.
     pub in_popout: Option<RecordId>,
+    /// The conversation each window (the main window is `None`) drew
+    /// last frame and this frame, so a session just opened, or come
+    /// back to, starts scrolled to its end.
+    pub conversation_was: HashMap<Option<RecordId>, RecordId>,
+    pub conversation_now: HashMap<Option<RecordId>, RecordId>,
     /// Each session window's frame as last seen and since when, so a
     /// move is saved once it settles.
     pub popout_frames: HashMap<RecordId, (WindowFrame, std::time::Instant)>,
@@ -235,6 +240,8 @@ impl Default for UiState {
             terminals_drawn: HashSet::new(),
             focus_windows: Vec::new(),
             in_popout: None,
+            conversation_was: HashMap::new(),
+            conversation_now: HashMap::new(),
             popout_frames: HashMap::new(),
             popout_opened: HashMap::new(),
             main_frame: None,
@@ -286,6 +293,7 @@ pub fn draw(app: &mut SwitchboardApp, ui: &mut Ui) {
 }
 
 fn draw_frame(cx: &mut DrawCtx<'_>, ui: &mut Ui) {
+    cx.state.conversation_was = std::mem::take(&mut cx.state.conversation_now);
     let theme = cx.core.settings().theme;
     if cx.state.applied_theme != Some(theme) {
         ui.ctx().set_theme(match theme {

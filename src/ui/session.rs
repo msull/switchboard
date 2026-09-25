@@ -551,8 +551,15 @@ fn conversation_or_pane(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecor
         snapshots,
         raw_message,
         message_links,
+        in_popout,
+        conversation_was,
+        conversation_now,
         ..
     } = &mut *cx.state;
+    // Just opened in this window: the end is what the user came for.
+    let window = *in_popout;
+    let opened = conversation_was.get(&window) != Some(&record.id);
+    conversation_now.insert(window, record.id);
     let snapshot = snapshots.get(&record.id);
     let Some((_, conversation)) = conversations.get(&record.id) else {
         ui.label(
@@ -578,6 +585,7 @@ fn conversation_or_pane(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecor
         Toggles {
             expand: expand_activity,
             expand_applied,
+            opened,
         },
         markdown,
         Menus {
@@ -742,6 +750,9 @@ pub(super) fn append_path(draft: &mut String, path: &std::path::Path) {
 /// content, with the raw terminal snapshot folded away at the end.
 /// The activity fold's state, written back to the UI state.
 struct Toggles<'a> {
+    /// The first frame of this conversation in its window: scroll to
+    /// the end, whatever the scroll of the one shown before.
+    opened: bool,
     expand: &'a mut bool,
     expand_applied: &'a mut Option<bool>,
 }
@@ -761,6 +772,7 @@ fn conversation_view(
     let Toggles {
         expand,
         expand_applied,
+        opened,
     } = toggles;
     let p = theme::palette(ui);
     // Both labels truncate: a row that cannot shrink would widen the
@@ -785,18 +797,22 @@ fn conversation_view(
     // so single sections can still be opened and closed by hand.
     let open = (*expand_applied != Some(*expand)).then_some(*expand);
     *expand_applied = Some(*expand);
-    egui::ScrollArea::vertical()
+    let mut scroll = egui::ScrollArea::vertical()
         .auto_shrink([false, false])
-        .stick_to_bottom(true)
-        .show(ui, |ui| {
-            // Measured once, before any turn: a word egui cannot break
-            // widens the layout for everything after it, and a cap read
-            // back per turn would only carry that widening along.
-            let width = ui.available_width().min(MAX_READING_WIDTH);
-            for turn in &conversation.turns {
-                turn_block(ui, turn, open, markdown, width, menus.reborrow());
-            }
-        });
+        .stick_to_bottom(true);
+    if opened {
+        // Larger than any conversation; egui clamps it to the end.
+        scroll = scroll.vertical_scroll_offset(1.0e9);
+    }
+    scroll.show(ui, |ui| {
+        // Measured once, before any turn: a word egui cannot break
+        // widens the layout for everything after it, and a cap read
+        // back per turn would only carry that widening along.
+        let width = ui.available_width().min(MAX_READING_WIDTH);
+        for turn in &conversation.turns {
+            turn_block(ui, turn, open, markdown, width, menus.reborrow());
+        }
+    });
 }
 
 fn meta_line(c: &Conversation) -> String {

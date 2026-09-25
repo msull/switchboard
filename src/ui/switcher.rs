@@ -217,10 +217,15 @@ pub fn toasts(cx: &mut DrawCtx<'_>, ctx: &Context, window: Option<RecordId>) {
         .show(ctx, |ui| {
             let p = theme::palette(ui);
             let mut dismiss = false;
-            for (text, is_error, dismissable) in host_error
+            let mut undo = None;
+            for (text, is_error, dismissable, undoes) in host_error
                 .iter()
-                .map(|e| (e.clone(), true, false))
-                .chain(notice.iter().map(|n| (n.text.clone(), n.is_error, true)))
+                .map(|e| (e.clone(), true, false, None))
+                .chain(
+                    notice
+                        .iter()
+                        .map(|n| (n.text.clone(), n.is_error, true, n.undo)),
+                )
             {
                 egui::Frame::new()
                     .fill(p.surface)
@@ -237,13 +242,22 @@ pub fn toasts(cx: &mut DrawCtx<'_>, ctx: &Context, window: Option<RecordId>) {
                                 ui.painter().circle_filled(rect.center(), 4.0, p.accent_2);
                             }
                             ui.label(RichText::new(&text).text_style(theme::meta()));
+                            if let Some(id) = undoes
+                                && theme::ghost(ui, "Undo")
+                                    .on_hover_text("Put the session back on its board")
+                                    .clicked()
+                            {
+                                undo = Some(id);
+                            }
                             if dismissable && theme::ghost_muted(ui, "Dismiss").clicked() {
                                 dismiss = true;
                             }
                         });
                     });
             }
-            if dismiss {
+            if let Some(id) = undo {
+                cx.dispatch(AppAction::UndoRemove(id));
+            } else if dismiss {
                 cx.dispatch(AppAction::DismissNotice);
             }
         });

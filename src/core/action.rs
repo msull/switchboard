@@ -90,6 +90,8 @@ pub struct Notice {
     /// shown as it is in that space, and as a neutral line elsewhere so
     /// no name crosses the space boundary.
     pub space: Option<SpaceId>,
+    /// The removed session this notice can put back (`UndoRemove`).
+    pub undo: Option<RecordId>,
 }
 
 impl Notice {
@@ -234,6 +236,8 @@ pub enum AppAction {
     SetMonitorZoom(String, u32),
     /// The main window has held still at this frame.
     MainWindowMoved(WindowFrame),
+    /// Put back a session removed within the undo window.
+    UndoRemove(RecordId),
     /// Work in this space: the rail shows it, and the screen goes to
     /// its switchboard unless what was showing is in it.
     ShowSpace(SpaceId),
@@ -576,6 +580,21 @@ impl Out {
 
 /// How long a success notice stays up.
 const NOTICE_TTL: Duration = Duration::from_secs(4);
+/// How long a removed session can be put back. Cards move as states
+/// change, so a click meant for one can land on another; the record is
+/// held here, untouched on disk, until the window closes.
+pub const UNDO_WINDOW: Duration = Duration::from_secs(10);
+
+/// A session taken off its board, kept whole until its undo window
+/// closes: the record, the project it came from, and its cards on the
+/// working sets.
+#[derive(Debug, Clone, PartialEq)]
+struct Trashed {
+    record: SessionRecord,
+    project: ProjectId,
+    pins: Vec<(SetId, PinnedItem)>,
+    until: Duration,
+}
 /// How a zoom notice starts, so the next one replaces it.
 const ZOOM_NOTICE: &str = "Zoom ";
 
@@ -600,6 +619,8 @@ pub struct AppCore {
     pub(super) views: Views,
     pub(super) view_stack: Vec<View>,
     pub(super) notices: Vec<Notice>,
+    /// Sessions removed within the last [`UNDO_WINDOW`].
+    trash: Vec<Trashed>,
     pub(super) host_error: Option<String>,
     pub(super) read_only: bool,
     /// Latest host status per session, from the last poll.
@@ -747,6 +768,7 @@ impl AppCore {
             | AppAction::Interrupt(_)
             | AppAction::KillSession(_)
             | AppAction::RemoveSession(_)
+            | AppAction::UndoRemove(_)
             | AppAction::RestartSession(_)
             | AppAction::CloneSession { .. }
             | AppAction::TranscriptCloned { .. }
@@ -820,7 +842,8 @@ impl AppCore {
                     out.push(Effect::Kill(status.id.clone()));
                 }
             }
-            AppAction::RemoveSession(id) => self.remove_session(id, out),
+            AppAction::RemoveSession(id) => self.trash_session(id, now),
+            AppAction::UndoRemove(id) => self.undo_remove(id, out),
             AppAction::RestartSession(id) => self.restart_session(id, now, out),
             AppAction::CloneSession { id, before, prompt } => {
                 self.clone_session(id, before, prompt, out);
@@ -1062,6 +1085,7 @@ impl AppCore {
             is_error: true,
             expires_at: None,
             space: None,
+            undo: None,
         });
     }
 
@@ -1071,6 +1095,7 @@ impl AppCore {
             is_error: false,
             expires_at: Some(now.mono + NOTICE_TTL),
             space: None,
+            undo: None,
         });
     }
 
@@ -1118,6 +1143,16 @@ impl AppCore {
     /// Once a second: notices age out and waiting workflows probe.
     fn tick(&mut self, now: Clock, out: &mut Out) {
         self.expire_notices(now);
+        let expired: Vec<(RecordId, ProjectId)> = self
+            .trash
+            .iter()
+            .filter(|t| t.until <= now.mono)
+            .map(|t| (t.record.id, t.project))
+            .collect();
+        self.trash.retain(|t| t.until > now.mono);
+        for (id, project) in expired {
+            self.finish_removal(id, project, out);
+        }
         self.workflow_tick(now, out);
     }
 
@@ -1311,19 +1346,80 @@ impl AppCore {
         }
     }
 
-    fn remove_session(&mut self, id: RecordId, out: &mut Out) {
+    /// Removing takes the record off its board at once but keeps it,
+    /// and its record on disk, until the undo window closes; the toast
+    /// offers to put it back.
+    fn trash_session(&mut self, id: RecordId, now: Clock) {
+        let mut taken = None;
+        for w in &mut self.workspaces {
+            if let Some(pos) = w.sessions.iter().position(|s| s.id == id) {
+                taken = Some((w.sessions.remove(pos), w.project.id));
+            }
+        }
+        let Some((record, project)) = taken else {
+            return;
+        };
+        let pins = self
+            .views
+            .sets
+            .iter()
+            .flat_map(|s| {
+                s.items
+                    .iter()
+                    .filter(|i| i.target == PinTarget::Session(id))
+                    .map(move |i| (s.id, i.clone()))
+            })
+            .collect();
+        self.view_stack
+            .retain(|v| !matches!(v, View::Session(s) if *s == id));
+        self.info_in(project, format!("Removed {}", record.name), now);
+        if let Some(n) = self.notices.last_mut() {
+            n.expires_at = Some(now.mono + UNDO_WINDOW);
+            n.undo = Some(id);
+        }
+        self.trash.push(Trashed {
+            record,
+            project,
+            pins,
+            until: now.mono + UNDO_WINDOW,
+        });
+    }
+
+    fn undo_remove(&mut self, id: RecordId, out: &mut Out) {
+        let Some(pos) = self.trash.iter().position(|t| t.record.id == id) else {
+            return;
+        };
+        let t = self.trash.remove(pos);
+        let Some(w) = self
+            .workspaces
+            .iter_mut()
+            .find(|w| w.project.id == t.project)
+        else {
+            return;
+        };
+        w.sessions.push(t.record);
+        if !t.pins.is_empty() {
+            self.update_views(out, |v| {
+                for (set, item) in t.pins {
+                    if let Some(s) = v.sets.iter_mut().find(|s| s.id == set)
+                        && !s.items.iter().any(|i| i.target == item.target)
+                    {
+                        s.items.push(item);
+                    }
+                }
+            });
+        }
+        self.notices.retain(|n| n.undo != Some(id));
+    }
+
+    /// The undo window closed: the record is dropped for good.
+    fn finish_removal(&mut self, id: RecordId, project: ProjectId, out: &mut Out) {
         // A running process is left alone (removing a record is not a
         // kill); only a gone pane's scrollback is dropped with the record.
         if self.host_status(id).is_none() {
             out.push(Effect::Forget(HostId(id.host_name())));
         }
-        for w in &mut self.workspaces {
-            let before = w.sessions.len();
-            w.sessions.retain(|s| s.id != id);
-            if w.sessions.len() != before {
-                out.touch(w.project.id);
-            }
-        }
+        out.touch(project);
         self.in_flight.retain(|f| f.id != id);
         self.codex_queue.retain(|q| *q != id);
         if self.codex_pending == Some(id) {

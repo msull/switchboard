@@ -6,7 +6,7 @@ use std::time::{Duration, SystemTime};
 
 use uuid::Uuid;
 
-use super::action::{AppAction, AppCore, Clock, Effect, View};
+use super::action::{AppAction, AppCore, Clock, Effect, UNDO_WINDOW, View};
 use super::definitions::entry_hash;
 use super::model::{
     Activity, AgentKind, Approval, CardState, Discarded, GridRect, Launch, PinTarget, Project,
@@ -248,13 +248,58 @@ fn remove_of_a_cold_record_forgets_its_scrollback() {
     let id = r.id;
     w.sessions.push(r);
     let (mut core, _) = loaded(vec![w], vec![]);
-    let effects = core.dispatch(AppAction::RemoveSession(id), Clock::at(1));
+    core.dispatch(AppAction::RemoveSession(id), Clock::at(1));
+    assert!(core.session(id).is_none(), "off the board at once");
+    // The record and its scrollback go once the undo window closes.
+    let effects = core.dispatch(AppAction::Tick, Clock::at(12_000));
     assert!(
         effects
             .iter()
             .any(|e| matches!(e, Effect::Forget(h) if h.0 == id.host_name()))
     );
     assert!(!effects.iter().any(|e| matches!(e, Effect::Kill(_))));
+    assert!(core.session(id).is_none());
+}
+
+#[test]
+fn a_removed_session_comes_back_within_the_undo_window() {
+    let (mut core, pid, ids) = with_records(&[SessionKind::Shell], |s| Some(running(s.id)));
+    let id = ids[0];
+    let shell = PinTarget::Session(id);
+    core.dispatch(
+        AppAction::NewWorkingSet {
+            name: None,
+            clone_of: None,
+            with: Some(shell.clone()),
+            columns: 24,
+        },
+        Clock::at(1),
+    );
+    let set = core.working_sets()[0].id;
+    let e = core.dispatch(AppAction::RemoveSession(id), Clock::at(2));
+    assert!(core.session(id).is_none());
+    assert!(
+        !e.iter().any(|e| matches!(e, Effect::Save(_))),
+        "nothing on disk changes until the window closes: {e:?}"
+    );
+    assert!(core.sets_holding(&shell).is_empty(), "its card is gone");
+    let notice = core.notice().expect("the removal notice");
+    assert_eq!(notice.text, "Removed s0");
+    assert_eq!(notice.undo, Some(id));
+    assert_eq!(notice.expires_at, Some(Clock::at(2).mono + UNDO_WINDOW));
+    // Undo puts the record and its cards back and drops the notice.
+    let e = core.dispatch(AppAction::UndoRemove(id), Clock::at(5));
+    assert!(core.session(id).is_some());
+    assert_eq!(core.workspace(pid).unwrap().sessions.len(), 1);
+    assert_eq!(core.sets_holding(&shell), vec![set]);
+    assert!(core.notice().is_none());
+    assert!(e.iter().any(|e| matches!(e, Effect::SaveViews(_))));
+    // Once the window has closed there is nothing to undo.
+    core.dispatch(AppAction::RemoveSession(id), Clock::at(6));
+    let e = core.dispatch(AppAction::Tick, Clock::at(17_000));
+    assert!(e.iter().any(|e| matches!(e, Effect::Save(_))));
+    assert!(core.notice().is_none(), "the notice went with the window");
+    core.dispatch(AppAction::UndoRemove(id), Clock::at(18_000));
     assert!(core.session(id).is_none());
 }
 
@@ -565,9 +610,11 @@ fn a_popped_out_session_is_shown_in_its_window_and_the_main_window_steps_back() 
     assert!(!core.popped_out(id));
     core.dispatch(AppAction::ShowSession(id), Clock::at(8));
     assert_eq!(core.view(), View::Session(id));
-    // A removed session takes its window with it.
+    // A removed session takes its window with it, once it is gone for
+    // good.
     core.dispatch(AppAction::PopOut(id), Clock::at(9));
     core.dispatch(AppAction::RemoveSession(id), Clock::at(10));
+    core.dispatch(AppAction::Tick, Clock::at(21_000));
     assert!(core.settings().popouts.is_empty());
 }
 
@@ -1955,12 +2002,13 @@ fn remove_session_drops_record_and_saves_without_killing() {
     let (mut core, pid, ids) = with_records(&[SessionKind::Shell], |s| Some(running(s.id)));
     core.dispatch(AppAction::ShowSession(ids[0]), Clock::at(1));
     let e = core.dispatch(AppAction::RemoveSession(ids[0]), Clock::at(2));
-    assert_eq!(e.len(), 2);
-    assert!(matches!(e[0], Effect::Save(_)));
-    assert!(matches!(e[1], Effect::SaveSettings(_)), "the view moved");
+    assert!(matches!(e[0], Effect::SaveSettings(_)), "the view moved");
     assert!(core.session(ids[0]).is_none());
     assert!(core.workspace(pid).unwrap().sessions.is_empty());
     assert_ne!(core.view(), View::Session(ids[0]));
+    let e = core.dispatch(AppAction::Tick, Clock::at(13_000));
+    assert!(matches!(e[0], Effect::Save(_)), "{e:?}");
+    assert!(!e.iter().any(|e| matches!(e, Effect::Kill(_))));
 }
 
 #[test]

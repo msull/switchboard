@@ -281,6 +281,7 @@ fn a_new_workspace_shows_nothing_of_the_others_until_the_selector_opens() {
             is_error: true,
             expires_at: None,
             space: Some(SpaceId::DEFAULT),
+            undo: None,
         }),
         None,
         false,
@@ -621,6 +622,7 @@ fn notice_bar_shows_the_notice_and_dismisses_it() {
             is_error: true,
             expires_at: None,
             space: None,
+            undo: None,
         }),
         None,
         false,
@@ -629,6 +631,25 @@ fn notice_bar_shows_the_notice_and_dismisses_it() {
     harness.get_by_label("Recovered alpha from backup");
     click(&mut harness, "Dismiss");
     assert_eq!(actions(&harness), vec![AppAction::DismissNotice]);
+}
+
+#[test]
+fn a_removal_notice_offers_undo() {
+    let (mut harness, ids) = harness();
+    harness.state_mut().core_mut_for_seeding().seed_status(
+        Some(Notice {
+            text: "Removed build".into(),
+            is_error: false,
+            expires_at: None,
+            space: None,
+            undo: Some(ids.build),
+        }),
+        None,
+        false,
+    );
+    harness.run_steps(2);
+    click(&mut harness, "Undo");
+    assert_eq!(actions(&harness), vec![AppAction::UndoRemove(ids.build)]);
 }
 
 #[test]

@@ -1245,6 +1245,21 @@ discard undo, and says so in a notice; the shell drops the cached
 conversation when a handle changes under an event. The old transcript
 stays on disk.
 
+## Removing with an undo (2026-09-25)
+
+Cards move as states change, so a click meant for one can land on
+another's Remove. Remove now takes the session off its board at once
+but keeps the record whole in the core, untouched on disk, for ten
+seconds (`UNDO_WINDOW`), with a toast "Removed <name> · Undo". Undo
+puts the record and its working-set cards back; when the window
+closes, the record is dropped as before (the pane is left alone, a
+cold pane's scrollback is forgotten, its own window and its place in
+the Codex queue go). Quitting inside the window is the safe direction:
+the record was never removed from disk, so it is back on the next
+launch. Session views open scrolled to the end: each window remembers
+which conversation it drew last frame, and a conversation shown afresh
+starts at its end instead of at the scroll of the one shown before.
+
 ## Workspaces (2026-09-25)
 
 The top level. A workspace (`Space` in the code, since `Workspace` is
