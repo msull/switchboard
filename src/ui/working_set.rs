@@ -845,7 +845,7 @@ pub fn set_menu_actions(
     let holding = core.sets_holding(target);
     let mut actions = Vec::new();
     ui.label(theme::meta_text(ui, "Working sets").color(p.n600));
-    for set in core.working_sets() {
+    for set in core.visible_working_sets() {
         let on = holding.contains(&set.id);
         let label = if on {
             format!("✓ {}", set.name)
@@ -927,6 +927,9 @@ fn header(cx: &mut DrawCtx<'_>, ui: &mut Ui, set: SetId, name: &str, empty: bool
             if theme::ghost_muted(ui, "Delete").clicked() {
                 cx.state.delete_set = Some(set);
             }
+            super::dialogs::move_to_space_menu(cx, ui, |space| {
+                AppAction::MoveSetToSpace(set, space)
+            });
             if theme::ghost(ui, "Clone")
                 .on_hover_text("A new working set with the same cards")
                 .clicked()

@@ -73,7 +73,7 @@ impl AppCore {
         if let Some(e) = &status.error
             && previous.error.as_deref() != Some(e)
         {
-            self.error(format!("{}: {e}", self.project_name(project)));
+            self.error_in(project, format!("{}: {e}", self.project_name(project)));
         }
         self.set_config_status(project, status);
 
@@ -145,11 +145,11 @@ impl AppCore {
         match result {
             Ok(()) => {
                 if let Some(root) = self.workspace(project).map(|w| w.project.root.clone()) {
-                    self.info(format!("{name}: project.json saved"), now);
+                    self.info_in(project, format!("{name}: project.json saved"), now);
                     out.push(Effect::ReadProjectConfig { project, root });
                 }
             }
-            Err(e) => self.error(format!("{name}: project.json not saved: {e}")),
+            Err(e) => self.error_in(project, format!("{name}: project.json not saved: {e}")),
         }
     }
 
@@ -163,7 +163,7 @@ impl AppCore {
             self.edit_session(id, out, |s| s.approved_hash = Some(hash));
         } else {
             let name = self.session_name(id);
-            self.error(format!("{name} has no definition to approve"));
+            self.error_about(id, format!("{name} has no definition to approve"));
         }
     }
 

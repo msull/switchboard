@@ -13,6 +13,9 @@ use crate::core::{AppAction, CardState, ProjectId, RecordId};
 #[derive(Debug, Default, Clone)]
 pub struct PaletteDraft {
     pub query: String,
+    /// Search every space, not just the active one. Off each time the
+    /// palette opens, so nothing of another space shows unasked.
+    pub all_spaces: bool,
 }
 
 /// What a row opens.
@@ -37,7 +40,7 @@ pub fn show(cx: &mut DrawCtx<'_>, ctx: &Context) {
     let Some(mut draft) = cx.state.palette.take() else {
         return;
     };
-    let rows = rows(cx);
+    let rows = rows(cx, draft.all_spaces);
     let entries: Vec<Entry> = rows
         .iter()
         .map(|r| Entry {
@@ -81,6 +84,10 @@ pub fn show(cx: &mut DrawCtx<'_>, ctx: &Context) {
                 )
                 .labelled_by(label);
             field.request_focus();
+            if cx.core.spaces().len() > 1 {
+                ui.checkbox(&mut draft.all_spaces, "All workspaces")
+                    .on_hover_text("Also find projects and sessions in the other workspaces");
+            }
             let (enter, escape) = ui.input(|i| {
                 (
                     i.key_pressed(egui::Key::Enter),
@@ -97,30 +104,8 @@ pub fn show(cx: &mut DrawCtx<'_>, ctx: &Context) {
                 ui.label(theme::meta_text(ui, "no matches"));
             }
             ui.spacing_mut().item_spacing.y = 2.0;
-            for (n, &i) in shown.iter().enumerate() {
-                let row = &rows[i];
-                ui.horizontal(|ui| {
-                    if let Some(state) = &row.state {
-                        theme::status_dot(ui, state, 7.0);
-                    } else {
-                        ui.add_space(7.0);
-                    }
-                    let title = if n == 0 {
-                        theme::strong_text(&row.title)
-                    } else {
-                        RichText::new(&row.title)
-                    };
-                    if ui
-                        .add(egui::Button::new(title).frame_when_inactive(false))
-                        .clicked()
-                    {
-                        chosen = Some(row.target.clone());
-                    }
-                    ui.label(theme::meta_text(ui, &row.detail));
-                    if let Some(state) = &row.state {
-                        ui.label(theme::meta_text(ui, state.label()).color(p.state_text(state)));
-                    }
-                });
+            if let Some(target) = hit_rows(ui, &rows, &shown) {
+                chosen = Some(target);
             }
         });
     if let Some(target) = chosen {
@@ -135,15 +120,59 @@ pub fn show(cx: &mut DrawCtx<'_>, ctx: &Context) {
     }
 }
 
+/// The matching rows, the first one strong; the clicked row's target.
+fn hit_rows(ui: &mut egui::Ui, rows: &[Row], shown: &[usize]) -> Option<Target> {
+    let p = theme::palette(ui);
+    let mut chosen = None;
+    for (n, &i) in shown.iter().enumerate() {
+        let row = &rows[i];
+        ui.horizontal(|ui| {
+            if let Some(state) = &row.state {
+                theme::status_dot(ui, state, 7.0);
+            } else {
+                ui.add_space(7.0);
+            }
+            let title = if n == 0 {
+                theme::strong_text(&row.title)
+            } else {
+                RichText::new(&row.title)
+            };
+            if ui
+                .add(egui::Button::new(title).frame_when_inactive(false))
+                .clicked()
+            {
+                chosen = Some(row.target.clone());
+            }
+            ui.label(theme::meta_text(ui, &row.detail));
+            if let Some(state) = &row.state {
+                ui.label(theme::meta_text(ui, state.label()).color(p.state_text(state)));
+            }
+        });
+    }
+    chosen
+}
+
 /// Projects (most recent first) and their sessions, waiting ones first.
-fn rows(cx: &DrawCtx<'_>) -> Vec<Row> {
+/// With `all`, every space's, each project titled with its space.
+fn rows(cx: &DrawCtx<'_>, all: bool) -> Vec<Row> {
     let mut rows = Vec::new();
-    let mut workspaces: Vec<_> = cx.core.visible_workspaces().collect();
+    let mut workspaces: Vec<_> = if all {
+        cx.core.workspaces().iter().collect()
+    } else {
+        cx.core.visible_workspaces().collect()
+    };
     workspaces.sort_by_key(|w| std::cmp::Reverse(w.project.last_active));
     for w in workspaces {
+        let space = (all && w.project.space != cx.core.active_space())
+            .then(|| cx.core.space(w.project.space).map(|s| s.name.clone()))
+            .flatten();
+        let title = match &space {
+            Some(space) => format!("{space} · {}", w.project.name),
+            None => w.project.name.clone(),
+        };
         rows.push(Row {
             target: Target::Board(w.project.id),
-            title: w.project.name.clone(),
+            title,
             detail: w.project.root.display().to_string(),
             state: None,
             key: PathBuf::from(&w.project.name),

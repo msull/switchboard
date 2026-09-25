@@ -531,7 +531,8 @@ behave as everywhere else.
   hooks whose pane has printed nothing for 20 s reads as *idle*; output
   flips it back to *working*. Claude Code keeps using its hooks.
 - **Settings** (theme, exclusive mode, editor) persist in
-  `settings.json`; sessions can be renamed from their header.
+  `settings.json`; sessions can be renamed from their header. (Exclusive
+  mode was later superseded by workspaces.)
 
 Verified headlessly (kittest with a real temp directory: ignored
 directories absent, folder open on click, preview shows the file's text,
@@ -1243,6 +1244,41 @@ rebinds the record to the new id and transcript, clears any pending
 discard undo, and says so in a notice; the shell drops the cached
 conversation when a handle changes under an event. The old transcript
 stays on disk.
+
+## Workspaces (2026-09-25)
+
+The top level. A workspace (`Space` in the code, since `Workspace` is
+the older name of a project's record) owns projects and working sets,
+each of which is in exactly one, and the rail shows one workspace at a
+time: its working sets, its projects, its "All sessions". The point is
+a boundary as much as a grouping: with a screen shared, nothing on
+screen names anything from another workspace unless the selector is
+opened. So the quick switcher searches the active workspace only, with
+an "All workspaces" checkbox that is off each time it opens; Cmd+1..9
+count the active workspace's projects; a working set holds cards from
+its own workspace only (moving a project out of a workspace drops its
+cards from that workspace's sets); a notice about a record in another
+workspace shows as "Something in another workspace needs you", with no
+name; and the rail's count is the active workspace's, while the Dock
+badge counts every workspace, so a waiting agent elsewhere still gets
+through. The selector is the active workspace's name at the top of the
+rail: a menu of every workspace with its waiting count, then New,
+Rename, and Delete (only an empty workspace that is not the last).
+"Move to" on a project's board and a working set's header moves it,
+offered only when another workspace exists.
+
+Records: `Views.spaces` lists the workspaces (views.json v3), and
+`Project.space` (records v8) and `WorkingSet.space` name each thing's
+workspace, defaulting to the fixed id of the default workspace, so
+files from before workspaces read as members of it with no step. The
+active workspace is `Settings.space` and the next launch opens on it;
+the last view is restored only if it is in that workspace. Showing
+something in another workspace (a pop-out's Show its window, a hit
+with "All workspaces" on) steps into that workspace. Session windows
+stay open across a switch: they were opened on purpose, and nothing
+lists them outside their workspace. Exclusive mode is superseded: its
+setting and action stay for older files, but the checkbox and the
+filtering are gone.
 
 ## Side panel position (2026-09-22)
 

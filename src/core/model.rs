@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 /// Bump when the on-disk shape changes incompatibly.
-pub const SCHEMA_VERSION: u32 = 7;
+pub const SCHEMA_VERSION: u32 = 8;
 
 /// How the UI picks its colours: follow the system, or force one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -75,8 +75,12 @@ impl ProjectEnv {
 #[allow(clippy::struct_excessive_bools)] // independent preferences
 pub struct Settings {
     pub theme: ThemeMode,
-    /// Show only the active project, for screen sharing.
+    /// Show only the active project, for screen sharing. Superseded by
+    /// spaces; kept so older files read and write unchanged.
     pub exclusive: bool,
+    /// The space being worked in: the one the rail shows, and the one
+    /// the next launch opens on.
+    pub space: SpaceId,
     /// Command that opens a file in the editor (`code`, `zed`, `cursor`,
     /// `subl`); it gets the path as its one argument. Blank means the
     /// system text editor via `open -t`.
@@ -131,6 +135,7 @@ impl Default for Settings {
         Self {
             theme: ThemeMode::default(),
             exclusive: false,
+            space: SpaceId::DEFAULT,
             editor: String::new(),
             env: Vec::new(),
             files_open: false,
@@ -506,8 +511,52 @@ pub struct WindowFrame {
 
 /// Schema of `views.json`, bumped like [`SCHEMA_VERSION`] when a type
 /// below changes shape. v2 gave every set an id; a v1 file reads with
-/// fresh ids.
-pub const VIEWS_SCHEMA_VERSION: u32 = 2;
+/// fresh ids. v3 added spaces and put every set in one; a v2 file
+/// reads with everything in the default space.
+pub const VIEWS_SCHEMA_VERSION: u32 = 3;
+
+/// Switchboard's own id for a space. Never reused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct SpaceId(pub Uuid);
+
+impl SpaceId {
+    /// The space everything is in until the user makes another: records
+    /// from before spaces existed read as its members without a step.
+    pub const DEFAULT: Self = Self(Uuid::from_u128(1));
+
+    #[must_use]
+    pub fn new() -> Self {
+        Self(Uuid::new_v4())
+    }
+}
+
+impl Default for SpaceId {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
+/// What the UI calls a workspace: the top level, owning projects and
+/// working sets, each of which is in exactly one. The rail shows one
+/// space at a time and nothing of the others, so a shared screen gives
+/// away only the one being worked in. (`Workspace` is the older name of
+/// a project's record, which this does not replace.)
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Space {
+    pub id: SpaceId,
+    pub name: String,
+}
+
+impl Space {
+    /// The space records land in before any other exists.
+    #[must_use]
+    pub fn default_space() -> Self {
+        Self {
+            id: SpaceId::DEFAULT,
+            name: "Default".into(),
+        }
+    }
+}
 
 /// Switchboard's own id for a working set. Never reused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -533,6 +582,10 @@ pub struct Views {
     pub schema_version: u32,
     #[serde(default)]
     pub sets: Vec<WorkingSet>,
+    /// In the user's order; never empty once loaded (the default space
+    /// is put back if a file lists none).
+    #[serde(default)]
+    pub spaces: Vec<Space>,
 }
 
 impl Default for Views {
@@ -540,6 +593,7 @@ impl Default for Views {
         Self {
             schema_version: VIEWS_SCHEMA_VERSION,
             sets: Vec::new(),
+            spaces: vec![Space::default_space()],
         }
     }
 }
@@ -553,6 +607,9 @@ pub struct WorkingSet {
     pub name: String,
     #[serde(default)]
     pub items: Vec<PinnedItem>,
+    /// The space the set belongs to.
+    #[serde(default)]
+    pub space: SpaceId,
 }
 
 impl Default for WorkingSet {
@@ -561,6 +618,7 @@ impl Default for WorkingSet {
             id: SetId::new(),
             name: "Working Set".into(),
             items: Vec::new(),
+            space: SpaceId::DEFAULT,
         }
     }
 }
@@ -573,6 +631,7 @@ impl WorkingSet {
             id: SetId::new(),
             name: name.into(),
             items: Vec::new(),
+            space: SpaceId::DEFAULT,
         }
     }
 }
@@ -696,6 +755,9 @@ pub struct Project {
     pub created: SystemTime,
     /// Most recent time this project was active; drives switcher order.
     pub last_active: SystemTime,
+    /// The space the project belongs to.
+    #[serde(default)]
+    pub space: SpaceId,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

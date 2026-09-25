@@ -24,8 +24,9 @@ use crate::core::grid;
 use crate::core::model::{
     Activity, AgentKind, CardState, EnvVar, FileRoot, GridRect, HandoffMode, Launch, MonitorZoom,
     PinTarget, PinnedItem, Popout, Project, ProjectEnv, ProjectId, RecordId, ResumeHandle,
-    SavedView, SessionKind, SessionRecord, SetId, Settings, SideTab, ThemeMode, VOICE_KEY_ACCOUNT,
-    Views, VoiceSettings, WindowFrame, WorkflowDefinition, WorkflowId, WorkingSet, Workspace,
+    SavedView, SessionKind, SessionRecord, SetId, Settings, SideTab, Space, SpaceId, ThemeMode,
+    VOICE_KEY_ACCOUNT, Views, VoiceSettings, WindowFrame, WorkflowDefinition, WorkflowId,
+    WorkingSet, Workspace,
 };
 use crate::ports::agent::AgentLaunch;
 use crate::ports::events::SessionEvent;
@@ -85,6 +86,15 @@ pub struct Notice {
     pub text: String,
     pub is_error: bool,
     pub expires_at: Option<Duration>,
+    /// The space the notice is about, when it names something in one:
+    /// shown as it is in that space, and as a neutral line elsewhere so
+    /// no name crosses the space boundary.
+    pub space: Option<SpaceId>,
+}
+
+impl Notice {
+    /// What a notice says outside its own space.
+    pub const ELSEWHERE: &'static str = "Something in another workspace needs you";
 }
 
 /// Inputs from UI, workers, and the host poll.
@@ -224,6 +234,17 @@ pub enum AppAction {
     SetMonitorZoom(String, u32),
     /// The main window has held still at this frame.
     MainWindowMoved(WindowFrame),
+    /// Work in this space: the rail shows it, and the screen goes to
+    /// its switchboard unless what was showing is in it.
+    ShowSpace(SpaceId),
+    /// A new space with this name, shown at once.
+    NewSpace(String),
+    RenameSpace(SpaceId, String),
+    /// Drop an empty space; the last one, or one with anything in it,
+    /// stays.
+    DeleteSpace(SpaceId),
+    MoveProjectToSpace(ProjectId, SpaceId),
+    MoveSetToSpace(SetId, SpaceId),
     /// The project's `.switchboard/project.json` was read (or is absent,
     /// or unusable). Entries become records that cannot run until
     /// approved.
@@ -629,6 +650,9 @@ impl AppCore {
     /// The single entry point: applies one action at `now` and returns
     /// the effects the shell must run. See the module docs for the
     /// contract; the transitions live in the sibling modules.
+    // The router names every action once; splitting it would hide the
+    // one place that shows where each goes.
+    #[allow(clippy::too_many_lines)]
     pub fn dispatch(&mut self, action: AppAction, now: Clock) -> Vec<Effect> {
         let mut out = Out::default();
         match action {
@@ -676,6 +700,12 @@ impl AppCore {
             | AppAction::SetFileRoot(..)
             | AppAction::SetMonitorZoom(..)
             | AppAction::MainWindowMoved(..) => self.files_and_settings(action, now, &mut out),
+            AppAction::ShowSpace(_)
+            | AppAction::NewSpace(_)
+            | AppAction::RenameSpace(..)
+            | AppAction::DeleteSpace(_)
+            | AppAction::MoveProjectToSpace(..)
+            | AppAction::MoveSetToSpace(..) => self.space_action(action, &mut out),
             AppAction::ProjectConfigRead { .. }
             | AppAction::SaveProjectConfig { .. }
             | AppAction::ProjectConfigWritten { .. }
@@ -877,7 +907,7 @@ impl AppCore {
 
     /// Change the views and save them if anything changed. A read-only
     /// instance changes nothing.
-    fn update_views(&mut self, out: &mut Out, change: impl FnOnce(&mut Views)) {
+    pub(super) fn update_views(&mut self, out: &mut Out, change: impl FnOnce(&mut Views)) {
         let mut next = self.views.clone();
         change(&mut next);
         if next != self.views {
@@ -897,17 +927,10 @@ impl AppCore {
         });
     }
 
-    fn target_exists(&self, target: &PinTarget) -> bool {
-        match target {
-            PinTarget::Session(id) => self.session(*id).is_some(),
-            PinTarget::File(pid, _) => self.workspace(*pid).is_some(),
-        }
-    }
-
     /// `target`'s card, placed on `set` in the first free spot, if it
     /// exists and is not there already.
     fn place_new(&self, set: &mut WorkingSet, target: PinTarget, columns: u32) {
-        if !self.target_exists(&target) || set.items.iter().any(|i| i.target == target) {
+        if !self.target_in(&target, set.space) || set.items.iter().any(|i| i.target == target) {
             return;
         }
         let kind = match &target {
@@ -941,11 +964,12 @@ impl AppCore {
             .map(|n| n.trim().to_owned())
             .filter(|n| !n.is_empty())
             .or_else(|| source.as_ref().map(|s| format!("{} copy", s.name)))
-            .unwrap_or_else(|| match self.views.sets.len() {
+            .unwrap_or_else(|| match self.visible_working_sets().count() {
                 0 => "Working Set".to_owned(),
                 n => format!("Working Set {}", n + 1),
             });
         let mut set = WorkingSet::named(name);
+        set.space = self.settings.space;
         if let Some(source) = source {
             set.items = source.items;
         }
@@ -958,22 +982,33 @@ impl AppCore {
     }
 
     /// Drop working-set cards whose session or project is gone, after
-    /// whatever action removed it (or the load that found it missing).
+    /// whatever action removed it (or the load that found it missing),
+    /// and cards whose project is no longer in the set's space: a set
+    /// shows only its own space.
     fn prune_working_set(&mut self, out: &mut Out) {
         let stale = self
             .views
             .sets
             .iter()
-            .flat_map(|s| &s.items)
-            .any(|i| !self.target_exists(&i.target));
+            .any(|s| s.items.iter().any(|i| !self.target_in(&i.target, s.space)));
         if !stale {
             return;
         }
         let mut next = self.views.clone();
         for set in &mut next.sets {
-            set.items.retain(|i| self.target_exists(&i.target));
+            let space = set.space;
+            set.items.retain(|i| self.target_in(&i.target, space));
         }
         self.update_views(out, |v| *v = next);
+    }
+
+    /// The target exists and its project is in `space`.
+    fn target_in(&self, target: &PinTarget, space: SpaceId) -> bool {
+        let project = match target {
+            PinTarget::Session(id) => self.session(*id).map(|s| s.project),
+            PinTarget::File(pid, _) => Some(*pid),
+        };
+        project.and_then(|p| self.project_space(p)) == Some(space)
     }
 
     /// Keep `settings.last_view` equal to the screen showing, whatever
@@ -1006,6 +1041,12 @@ impl AppCore {
 
     /// Populate state directly, bypassing dispatch. For UI tests and the
     /// demo launcher only; the app itself always goes through `dispatch`.
+    /// The views (sets and spaces) directly, bypassing dispatch. Tests
+    /// only.
+    pub fn seed_views(&mut self, views: Views) {
+        self.views = views;
+    }
+
     pub fn seed(&mut self, workspaces: Vec<Workspace>, host: Vec<HostStatus>) {
         self.workspaces = workspaces;
         self.host = host;
@@ -1020,6 +1061,7 @@ impl AppCore {
             text: text.into(),
             is_error: true,
             expires_at: None,
+            space: None,
         });
     }
 
@@ -1028,7 +1070,43 @@ impl AppCore {
             text: text.into(),
             is_error: false,
             expires_at: Some(now.mono + NOTICE_TTL),
+            space: None,
         });
+    }
+
+    /// An error naming something in a project: shown as it is in the
+    /// project's space only.
+    pub(super) fn error_in(&mut self, project: ProjectId, text: impl Into<String>) {
+        let space = self.project_space(project);
+        self.error(text);
+        if let Some(n) = self.notices.last_mut() {
+            n.space = space;
+        }
+    }
+
+    /// An info notice naming something in a project.
+    pub(super) fn info_in(&mut self, project: ProjectId, text: impl Into<String>, now: Clock) {
+        let space = self.project_space(project);
+        self.info(text, now);
+        if let Some(n) = self.notices.last_mut() {
+            n.space = space;
+        }
+    }
+
+    /// An error naming a session, scoped to its project's space.
+    pub(super) fn error_about(&mut self, id: RecordId, text: impl Into<String>) {
+        match self.session(id).map(|s| s.project) {
+            Some(p) => self.error_in(p, text),
+            None => self.error(text),
+        }
+    }
+
+    /// An info notice naming a session, scoped to its project's space.
+    pub(super) fn info_about(&mut self, id: RecordId, text: impl Into<String>, now: Clock) {
+        match self.session(id).map(|s| s.project) {
+            Some(p) => self.info_in(p, text, now),
+            None => self.info(text, now),
+        }
     }
 
     fn dismiss_notice(&mut self) {
@@ -1053,8 +1131,102 @@ impl AppCore {
             let id = *id;
             self.edit_project(id, out, |p| p.last_active = now.wall);
         }
+        // Showing something is an explicit step into its space.
+        if let Some(space) = self.view_space(&view)
+            && space != self.settings.space
+        {
+            self.update_settings(out, |s| s.space = space);
+        }
         if self.view() != view {
             self.view_stack.push(view);
+        }
+    }
+
+    /// The space a view is in; the switchboard is in every space.
+    pub(super) fn view_space(&self, view: &View) -> Option<SpaceId> {
+        match view {
+            View::Switchboard => None,
+            View::Board(pid) | View::Document(pid, _) => self.project_space(*pid),
+            View::Session(id) => self
+                .session(*id)
+                .and_then(|s| self.project_space(s.project)),
+            View::Workflow(id) => self
+                .workflow(*id)
+                .and_then(|r| self.project_space(r.project)),
+            View::WorkingSet(id) => self.working_set(*id).map(|s| s.space),
+        }
+    }
+
+    /// Work in a space that exists: the setting changes, and a page of
+    /// another space gives way to the switchboard.
+    fn enter_space(&mut self, id: SpaceId, out: &mut Out) {
+        if self.settings.space != id {
+            self.update_settings(out, |s| s.space = id);
+        }
+        let view = self.view();
+        if self.view_space(&view).is_some_and(|s| s != id) {
+            self.view_stack.push(View::Switchboard);
+        }
+    }
+
+    /// The spaces' transitions, split out of `dispatch` for length.
+    fn space_action(&mut self, action: AppAction, out: &mut Out) {
+        match action {
+            AppAction::ShowSpace(id) => {
+                if self.space(id).is_some() {
+                    self.enter_space(id, out);
+                }
+            }
+            AppAction::NewSpace(name) => {
+                let name = name.trim().to_owned();
+                if name.is_empty() {
+                    return;
+                }
+                let space = Space {
+                    id: SpaceId::new(),
+                    name,
+                };
+                let id = space.id;
+                self.update_views(out, |v| v.spaces.push(space));
+                self.enter_space(id, out);
+            }
+            AppAction::RenameSpace(id, name) => {
+                let name = name.trim().to_owned();
+                if !name.is_empty() {
+                    self.update_views(out, |v| {
+                        if let Some(s) = v.spaces.iter_mut().find(|s| s.id == id) {
+                            s.name = name;
+                        }
+                    });
+                }
+            }
+            AppAction::DeleteSpace(id) => {
+                if !self.space_empty(id) || self.views.spaces.len() < 2 {
+                    return;
+                }
+                self.update_views(out, |v| v.spaces.retain(|s| s.id != id));
+                if self.settings.space == id {
+                    let first = self.views.spaces[0].id;
+                    self.update_settings(out, |s| s.space = first);
+                }
+            }
+            AppAction::MoveProjectToSpace(pid, space) => {
+                if self.space(space).is_some() {
+                    self.edit_project(pid, out, |p| p.space = space);
+                    // Its cards leave the sets of the space it left, and
+                    // its board, if showing, gives way.
+                    self.prune_working_set(out);
+                    self.enter_space(self.settings.space, out);
+                }
+            }
+            AppAction::MoveSetToSpace(set, space) => {
+                if self.space(space).is_some() {
+                    self.update_set(out, set, |s| s.space = space);
+                    self.prune_working_set(out);
+                    self.enter_space(self.settings.space, out);
+                }
+            }
+            _ => unreachable!("routed by `dispatch`"),
         }
     }
 
@@ -1073,6 +1245,7 @@ impl AppCore {
             shown: Vec::new(),
             created: now.wall,
             last_active: now.wall,
+            space: self.settings.space,
         }));
         out.touch(id);
         out.push(super::definitions::read_config(
@@ -1112,7 +1285,12 @@ impl AppCore {
         self.update_settings(out, |s| s.file_roots.retain(|r| r.project != id));
     }
 
-    fn edit_project(&mut self, id: ProjectId, out: &mut Out, edit: impl FnOnce(&mut Project)) {
+    pub(super) fn edit_project(
+        &mut self,
+        id: ProjectId,
+        out: &mut Out,
+        edit: impl FnOnce(&mut Project),
+    ) {
         if let Some(w) = self.workspaces.iter_mut().find(|w| w.project.id == id) {
             edit(&mut w.project);
             out.touch(id);
@@ -1354,17 +1532,64 @@ impl AppCore {
             .map(|p| p.id)
     }
 
-    /// Whether the UI may show this project at all.
+    /// Whether the UI may show this project at all: it is in the space
+    /// being worked in.
     #[must_use]
     pub fn project_visible(&self, id: ProjectId) -> bool {
-        !self.settings.exclusive || self.active_project() == Some(id)
+        self.project_space(id) == Some(self.settings.space)
     }
 
-    /// Workspaces the UI may show, in stored order.
+    /// Workspaces the UI may show, in stored order: the active space's.
     pub fn visible_workspaces(&self) -> impl Iterator<Item = &Workspace> {
         self.workspaces
             .iter()
-            .filter(|w| self.project_visible(w.project.id))
+            .filter(|w| w.project.space == self.settings.space)
+    }
+
+    /// The working sets of the active space, in the user's order.
+    pub fn visible_working_sets(&self) -> impl Iterator<Item = &WorkingSet> {
+        self.views
+            .sets
+            .iter()
+            .filter(|s| s.space == self.settings.space)
+    }
+
+    // --- spaces
+
+    /// Every space, in the user's order.
+    #[must_use]
+    pub fn spaces(&self) -> &[Space] {
+        &self.views.spaces
+    }
+    #[must_use]
+    pub fn space(&self, id: SpaceId) -> Option<&Space> {
+        self.views.spaces.iter().find(|s| s.id == id)
+    }
+    /// The space being worked in.
+    #[must_use]
+    pub fn active_space(&self) -> SpaceId {
+        self.settings.space
+    }
+    #[must_use]
+    pub fn project_space(&self, id: ProjectId) -> Option<SpaceId> {
+        self.workspace(id).map(|w| w.project.space)
+    }
+    /// A space with no project and no working set in it.
+    #[must_use]
+    pub fn space_empty(&self, id: SpaceId) -> bool {
+        !self.workspaces.iter().any(|w| w.project.space == id)
+            && !self.views.sets.iter().any(|s| s.space == id)
+    }
+    /// Sessions waiting on the user in one space: the switcher's count
+    /// per space, a number and nothing more.
+    #[must_use]
+    pub fn waiting_count_in(&self, space: SpaceId) -> usize {
+        self.workspaces
+            .iter()
+            .filter(|w| w.project.space == space)
+            .flat_map(|w| &w.sessions)
+            .filter(|s| self.card_state(s.id) == CardState::WaitingOnYou)
+            .count()
     }
 
     /// The project config file: read, edited and saved, and its entries'
@@ -1638,8 +1863,10 @@ impl AppCore {
     }
     /// Sessions across all projects that are waiting on the user.
     #[must_use]
+    /// Sessions waiting on the user in every space: the Dock badge.
     pub fn waiting_count(&self) -> usize {
-        self.visible_workspaces()
+        self.workspaces
+            .iter()
             .flat_map(|w| &w.sessions)
             .filter(|s| self.card_state(s.id) == CardState::WaitingOnYou)
             .count()

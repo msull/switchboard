@@ -133,6 +133,9 @@ pub struct UiState {
     pub set_rename: Option<(SetId, String)>,
     /// The working set whose deletion is being confirmed.
     pub delete_set: Option<SetId>,
+    /// The space name dialog: a new space (`None`) or a rename, with
+    /// the draft name.
+    pub space_editor: Option<(Option<crate::core::SpaceId>, String)>,
     /// Messages being composed, one per session, so switching away and
     /// back does not lose a half-written prompt.
     pub input_drafts: HashMap<RecordId, String>,
@@ -221,6 +224,7 @@ impl Default for UiState {
             file_modes: HashMap::new(),
             set_rename: None,
             delete_set: None,
+            space_editor: None,
             input_drafts: HashMap::new(),
             primed: HashMap::new(),
             terminals: HashMap::new(),

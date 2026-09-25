@@ -18,8 +18,8 @@ use switchboard::app::Services;
 use switchboard::core::{
     Activity, AgentKind, AppAction, Approval, BUILTIN_WORKFLOW, CardLayout, Definition,
     HandoffMode, Launch, Notice, PinTarget, Project, ProjectEnv, ProjectId, RecordId, ResumeHandle,
-    Round, RunState, SessionKind, SessionRecord, SideTab, ThemeMode, Verdict, View, VoiceSettings,
-    WorkflowId, WorkflowRun, Workspace, round_paths,
+    Round, RunState, SessionKind, SessionRecord, SideTab, SpaceId, ThemeMode, Verdict, View,
+    VoiceSettings, WorkflowId, WorkflowRun, Workspace, round_paths,
 };
 use switchboard::ports::host::{HostId, HostStatus, Liveness};
 use switchboard::ports::store::Store;
@@ -55,6 +55,7 @@ fn project(name: &str, last_active: SystemTime) -> Project {
         shown: Vec::new(),
         created: at(0),
         last_active,
+        space: SpaceId::DEFAULT,
     }
 }
 
@@ -243,15 +244,87 @@ fn settings_menu_sets_the_theme() {
 }
 
 #[test]
-fn exclusive_mode_hides_the_other_projects() {
+fn a_new_workspace_shows_nothing_of_the_others_until_the_selector_opens() {
     let (mut harness, _) = harness();
     assert!(harness.query_all_by_label("beta").count() > 0);
-    click(&mut harness, "Settings");
-    click(&mut harness, "Exclusive: only the active project");
-    assert!(actions(&harness).contains(&AppAction::SetExclusive(true)));
-    // alpha was active most recently, so it is the one that stays.
-    assert!(harness.query_all_by_label("alpha").count() > 0);
+    // The rail's head names the active workspace and opens the selector.
+    click(&mut harness, "Default ▾");
+    click(&mut harness, "New workspace…");
+    harness.get_by_label("New workspace");
+    type_into(&mut harness, "Name", "Client");
+    click(&mut harness, "Create");
+    harness.run_steps(2);
+    assert!(
+        actions(&harness).contains(&AppAction::NewSpace("Client".into())),
+        "{:?}",
+        actions(&harness)
+    );
+    harness.get_by_label("Client ▾");
+    // Nothing of the default workspace is on screen: no project names,
+    // no rows, and the quick switcher finds none of them.
+    assert_eq!(harness.query_all_by_label("alpha").count(), 0);
     assert_eq!(harness.query_all_by_label("beta").count(), 0);
+    assert_eq!(harness.query_all_by_label("Default").count(), 0);
+    click(&mut harness, "Go to ⌘K");
+    harness.run_steps(2);
+    assert_eq!(harness.query_all_by_label_contains("alpha").count(), 0);
+    click(&mut harness, "All workspaces");
+    harness.run_steps(2);
+    harness.get_by_label("Default · alpha");
+    harness.key_press(egui::Key::Escape);
+    harness.run_steps(2);
+    // A notice about the default workspace's session says only that
+    // something needs attention.
+    harness.state_mut().core_mut_for_seeding().seed_status(
+        Some(Notice {
+            text: "cannot start server: gone".into(),
+            is_error: true,
+            expires_at: None,
+            space: Some(SpaceId::DEFAULT),
+        }),
+        None,
+        false,
+    );
+    harness.run_steps(2);
+    harness.get_by_label(Notice::ELSEWHERE);
+    assert_eq!(harness.query_all_by_label_contains("server").count(), 0);
+    // The selector lists every workspace; picking one steps into it.
+    click(&mut harness, "Client ▾");
+    // The row carries the workspace's waiting count: a number only.
+    harness.get_by_label_contains("Default 1").click();
+    harness.run_steps(2);
+    assert!(actions(&harness).contains(&AppAction::ShowSpace(SpaceId::DEFAULT)));
+    harness.get_by_label("Default ▾");
+    assert!(harness.query_all_by_label("alpha").count() > 0);
+    harness.get_by_label("cannot start server: gone");
+}
+
+#[test]
+fn a_project_moves_to_another_workspace_from_its_board() {
+    let (mut harness, ids) = harness();
+    let clock = switchboard::core::Clock::at(1);
+    harness
+        .state_mut()
+        .core_mut_for_seeding()
+        .dispatch(AppAction::NewSpace("Client".into()), clock);
+    harness
+        .state_mut()
+        .core_mut_for_seeding()
+        .dispatch(AppAction::ShowSpace(SpaceId::DEFAULT), clock);
+    showing(&mut harness, View::Board(ids.alpha));
+    click(&mut harness, "Move to");
+    click(&mut harness, "Client");
+    harness.run_steps(2);
+    let client = harness.state().core().spaces()[1].id;
+    assert!(
+        actions(&harness).contains(&AppAction::MoveProjectToSpace(ids.alpha, client)),
+        "{:?}",
+        actions(&harness)
+    );
+    // The project is gone from this workspace's rail and the board gave
+    // way to the switchboard.
+    assert_eq!(harness.query_all_by_label("alpha").count(), 0);
+    assert!(harness.query_all_by_label("beta").count() > 0);
 }
 
 #[test]
@@ -299,9 +372,9 @@ fn type_into(harness: &mut Harness<'static, SwitchboardApp>, label: &str, text: 
 }
 
 #[test]
-fn shows_the_switchboard_heading() {
+fn the_rail_is_headed_by_the_active_workspace() {
     let (harness, _) = harness();
-    harness.get_by_label("Switchboard");
+    harness.get_by_label("Default ▾");
 }
 
 #[test]
@@ -547,6 +620,7 @@ fn notice_bar_shows_the_notice_and_dismisses_it() {
             text: "Recovered alpha from backup".into(),
             is_error: true,
             expires_at: None,
+            space: None,
         }),
         None,
         false,

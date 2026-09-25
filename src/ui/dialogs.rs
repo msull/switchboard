@@ -89,6 +89,88 @@ pub fn show(cx: &mut DrawCtx<'_>, ctx: &Context) {
     raw_message(cx, ctx);
     message_links(cx, ctx);
     delete_set(cx, ctx);
+    space_editor(cx, ctx);
+}
+
+/// Name a new space, or rename the active one. Enter or the button
+/// commits, Escape or Cancel closes.
+fn space_editor(cx: &mut DrawCtx<'_>, ctx: &Context) {
+    let Some((target, mut draft)) = cx.state.space_editor.take() else {
+        return;
+    };
+    let title = if target.is_some() {
+        "Rename workspace"
+    } else {
+        "New workspace"
+    };
+    let mut done = false;
+    dialog(ctx, title, |ui| {
+        let label = ui.label("Name").id;
+        let field = ui
+            .add(egui::TextEdit::singleline(&mut draft).desired_width(300.0))
+            .labelled_by(label);
+        field.request_focus();
+        let ready = !draft.trim().is_empty();
+        let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
+        let (confirmed, cancelled) = dialog_actions(
+            ui,
+            if target.is_some() { "Rename" } else { "Create" },
+            ready,
+        );
+        if (confirmed || enter) && ready {
+            cx.dispatch(match target {
+                Some(id) => AppAction::RenameSpace(id, draft.trim().to_owned()),
+                None => AppAction::NewSpace(draft.trim().to_owned()),
+            });
+            done = true;
+        }
+        if cancelled {
+            done = true;
+        }
+    });
+    if done || ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
+        cx.state.space_editor = None;
+    } else {
+        cx.state.space_editor = Some((target, draft));
+    }
+}
+
+/// A muted "Move to" menu listing the other spaces, for a project's
+/// board and a working set's header; `action` makes the move. Drawn
+/// only when there is another space, so a single-space rail shows
+/// nothing of the feature.
+pub fn move_to_space_menu(
+    cx: &mut DrawCtx<'_>,
+    ui: &mut Ui,
+    action: impl Fn(crate::core::SpaceId) -> AppAction,
+) {
+    let active = cx.core.active_space();
+    let others: Vec<(crate::core::SpaceId, String)> = cx
+        .core
+        .spaces()
+        .iter()
+        .filter(|s| s.id != active)
+        .map(|s| (s.id, s.name.clone()))
+        .collect();
+    if others.is_empty() {
+        return;
+    }
+    let p = theme::palette(ui);
+    egui::containers::menu::MenuButton::new(
+        egui::RichText::new("Move to")
+            .text_style(theme::meta())
+            .color(p.n600),
+    )
+    .ui(ui, |ui| {
+        ui.label(theme::meta_text(ui, "Another workspace").color(p.n600));
+        for (id, name) in &others {
+            if ui.button(name).clicked() {
+                cx.dispatch(action(*id));
+            }
+        }
+    })
+    .0
+    .on_hover_text("Move this to another workspace");
 }
 
 /// Confirm dropping a working set. Its cards are only references, so

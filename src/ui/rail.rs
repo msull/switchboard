@@ -73,17 +73,10 @@ pub fn show(cx: &mut DrawCtx<'_>, ui: &mut Ui, view: &View) {
 
 fn top(cx: &mut DrawCtx<'_>, ui: &mut Ui, view: &View, compact: bool) {
     let p = theme::palette(ui);
-    let brand = if compact { "S" } else { "Switchboard" };
-    if ui
-        .add(egui::Button::new(RichText::new(brand).text_style(theme::brand())).frame(false))
-        .on_hover_text("Every session across every project (Cmd+0)")
-        .clicked()
-    {
-        cx.dispatch(AppAction::ShowSwitchboard);
-    }
+    space_menu(cx, ui, compact);
     ui.add_space(14.0);
 
-    let waiting = cx.core.waiting_count();
+    let waiting = cx.core.waiting_count_in(cx.core.active_space());
     let all = row(
         ui,
         &RowSpec {
@@ -170,6 +163,84 @@ fn top(cx: &mut DrawCtx<'_>, ui: &mut Ui, view: &View, compact: bool) {
     }
 }
 
+/// The rail's head: the active space's name where the wordmark was,
+/// opening the one menu that names the other spaces (each with its
+/// waiting count), with New, Rename, and Delete under them. Nothing
+/// else on screen names another space, so a shared screen gives away
+/// only the space being worked in.
+fn space_menu(cx: &mut DrawCtx<'_>, ui: &mut Ui, compact: bool) {
+    let p = theme::palette(ui);
+    let active = cx.core.active_space();
+    let name = cx
+        .core
+        .space(active)
+        .map_or_else(|| "Switchboard".to_owned(), |s| s.name.clone());
+    let brand = if compact {
+        initial(&name)
+    } else {
+        format!("{name} ▾")
+    };
+    let spaces: Vec<(crate::core::SpaceId, String, usize)> = cx
+        .core
+        .spaces()
+        .iter()
+        .map(|s| (s.id, s.name.clone(), cx.core.waiting_count_in(s.id)))
+        .collect();
+    let empty = cx.core.space_empty(active);
+    let one = spaces.len() == 1;
+    egui::containers::menu::MenuButton::new(
+        RichText::new(brand)
+            .text_style(theme::brand())
+            .color(p.text),
+    )
+    .config(
+        egui::containers::menu::MenuConfig::new()
+            .close_behavior(egui::PopupCloseBehavior::CloseOnClick),
+    )
+    .ui(ui, |ui| {
+        ui.set_min_width(200.0);
+        ui.label(theme::meta_text(ui, "Workspaces").color(p.n600));
+        for (id, name, waiting) in &spaces {
+            let label = if *id == active {
+                format!("✓ {name}")
+            } else {
+                format!("   {name}")
+            };
+            let mut button = egui::Button::new(label);
+            if *waiting > 0 {
+                button = button.right_text(
+                    RichText::new(waiting.to_string())
+                        .small()
+                        .color(p.accent_2_text),
+                );
+            }
+            if ui.add(button).clicked() && *id != active {
+                cx.dispatch(AppAction::ShowSpace(*id));
+            }
+        }
+        ui.separator();
+        if ui.button("New workspace…").clicked() {
+            cx.state.space_editor = Some((None, String::new()));
+        }
+        if ui.button("Rename…").clicked() {
+            cx.state.space_editor = Some((Some(active), name.clone()));
+        }
+        if ui
+            .add_enabled(empty && !one, egui::Button::new("Delete"))
+            .on_disabled_hover_text(if one {
+                "The last workspace stays"
+            } else {
+                "Move or delete its projects and working sets first"
+            })
+            .clicked()
+        {
+            cx.dispatch(AppAction::DeleteSpace(active));
+        }
+    })
+    .0
+    .on_hover_text("The workspace being worked in; click for the others");
+}
+
 /// The "Working sets" section: one row per set, the empty ones greyed,
 /// and a way to make another.
 fn working_set_rows(cx: &mut DrawCtx<'_>, ui: &mut Ui, view: &View, compact: bool) {
@@ -181,8 +252,7 @@ fn working_set_rows(cx: &mut DrawCtx<'_>, ui: &mut Ui, view: &View, compact: boo
     }
     let sets: Vec<(crate::core::SetId, String, usize)> = cx
         .core
-        .working_sets()
-        .iter()
+        .visible_working_sets()
         .map(|s| (s.id, s.name.clone(), s.items.len()))
         .collect();
     for (id, name, count) in &sets {
@@ -325,14 +395,6 @@ fn bottom(cx: &mut DrawCtx<'_>, ui: &mut Ui, view: &View, compact: bool) {
                 .color(p.accent_2_text),
         )
         .on_hover_text("Another Switchboard holds the store lock; changes are not saved");
-    }
-    if settings.exclusive {
-        ui.label(
-            RichText::new("exclusive")
-                .text_style(theme::meta())
-                .color(p.n600),
-        )
-        .on_hover_text("Other projects are hidden (Settings)");
     }
     super::switcher::settings_menu(cx, ui, &settings, compact);
     if bottom_item(ui, "Go to", "⌘K", compact)

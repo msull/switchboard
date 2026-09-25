@@ -301,6 +301,7 @@ impl JsonStore {
             return Views {
                 schema_version: version as u32,
                 sets: Vec::new(),
+                spaces: Vec::new(),
             };
         }
         match serde_json::from_value::<Views>(value) {
@@ -348,9 +349,10 @@ pub fn migrate(value: serde_json::Value) -> Result<Workspace, String> {
         .and_then(serde_json::Value::as_u64)
         .ok_or_else(|| "missing schema_version".to_string())?;
     match version {
-        // v2 to v7 added optional fields only, so an older document reads
-        // with their defaults; it is written back at the current version.
-        1..=7 => serde_json::from_value(value)
+        // v2 to v8 added optional fields only (v8: the project's space),
+        // so an older document reads with their defaults; it is written
+        // back at the current version.
+        1..=8 => serde_json::from_value(value)
             .map(|mut w: Workspace| {
                 w.schema_version = SCHEMA_VERSION;
                 w
@@ -463,7 +465,7 @@ mod tests {
     use super::*;
     use crate::core::{
         Activity, AgentKind, CardLayout, Launch, Project, RecordId, ResumeHandle, SessionKind,
-        SessionRecord,
+        SessionRecord, SpaceId,
     };
 
     fn workspace(name: &str) -> Workspace {
@@ -519,6 +521,7 @@ mod tests {
                 shown: Vec::new(),
                 created: now,
                 last_active: now,
+                space: SpaceId::DEFAULT,
             },
             sessions: vec![agent, shell],
             workflows: Vec::new(),
@@ -567,6 +570,7 @@ mod tests {
         views.sets.push(WorkingSet {
             id: crate::core::SetId::new(),
             name: "Working Set".into(),
+            space: SpaceId::DEFAULT,
             items: vec![PinnedItem {
                 target: PinTarget::Session(RecordId::new()),
                 rect: GridRect {

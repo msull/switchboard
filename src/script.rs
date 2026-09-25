@@ -125,6 +125,38 @@ const REVIEW_LINES: &[&str] = &[
     "place-card",
 ];
 
+/// The workspace lines `space_step` handles.
+const SPACE_LINES: &[&str] = &[
+    "new-workspace",
+    "workspace",
+    "move-project",
+    "move-working-set",
+];
+
+/// Workspaces: make one, work in one, move a project or set into one.
+/// Names may have spaces: the rest of the line is the name.
+fn space_step(app: &mut SwitchboardApp, w: &[&str]) -> Result<(), String> {
+    match w {
+        ["new-workspace", name @ ..] => app.dispatch(AppAction::NewSpace(name.join(" "))),
+        ["workspace", name @ ..] => {
+            let id = space(app, &name.join(" "))?;
+            app.dispatch(AppAction::ShowSpace(id));
+        }
+        ["move-project", p, name @ ..] => {
+            let (pid, _) = project(app, p)?;
+            let id = space(app, &name.join(" "))?;
+            app.dispatch(AppAction::MoveProjectToSpace(pid, id));
+        }
+        ["move-working-set", set, name @ ..] => {
+            let set = working_set(app, set)?;
+            let id = space(app, &name.join(" "))?;
+            app.dispatch(AppAction::MoveSetToSpace(set, id));
+        }
+        _ => return Err(format!("unknown line: {}", w.join(" "))),
+    }
+    Ok(())
+}
+
 /// The plan review lines, kept out of `working_set_step` for length.
 fn review_step(app: &mut SwitchboardApp, w: &[&str]) -> Result<(), String> {
     match w {
@@ -223,6 +255,15 @@ fn newest_review(app: &SwitchboardApp) -> Result<crate::core::WorkflowId, String
         .max_by_key(|r| r.created)
         .map(|r| r.id)
         .ok_or_else(|| "no plan review".to_owned())
+}
+
+fn space(app: &SwitchboardApp, name: &str) -> Result<crate::core::SpaceId, String> {
+    app.core()
+        .spaces()
+        .iter()
+        .find(|s| s.name == name)
+        .map(|s| s.id)
+        .ok_or_else(|| format!("no workspace {name}"))
 }
 
 fn working_set(app: &SwitchboardApp, name: &str) -> Result<SetId, String> {
@@ -468,6 +509,7 @@ fn step(app: &mut SwitchboardApp, w: &[&str]) -> Result<(), String> {
             app.dispatch(AppAction::KillSession(id));
         }
         [first, ..] if REVIEW_LINES.contains(first) => review_step(app, w)?,
+        [first, ..] if SPACE_LINES.contains(first) => space_step(app, w)?,
         [first, ..] if EXTRA_LINES.contains(first) => working_set_step(app, w)?,
         _ => return Err("unknown line".into()),
     }

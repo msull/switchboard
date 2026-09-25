@@ -11,7 +11,7 @@ use super::definitions::entry_hash;
 use super::model::{
     Activity, AgentKind, Approval, CardState, Discarded, GridRect, Launch, PinTarget, Project,
     ProjectEnv, ProjectId, RecordId, ResumeHandle, SavedView, SessionKind, SessionRecord, Settings,
-    SideTab, ThemeMode, Views, WindowFrame, Workspace,
+    SideTab, SpaceId, ThemeMode, Views, WindowFrame, Workspace,
 };
 use super::reconcile::RECORD_ID_ENV;
 use crate::ports::agent::AgentLaunch;
@@ -35,6 +35,7 @@ fn project(name: &str) -> Project {
         shown: Vec::new(),
         created: t,
         last_active: t,
+        space: SpaceId::DEFAULT,
     }
 }
 
@@ -316,17 +317,188 @@ fn document_view_and_file_actions() {
 }
 
 #[test]
-fn exclusive_mode_hides_all_but_the_active_project() {
+fn a_space_shows_only_its_own_projects_and_sets() {
     let mut core = AppCore::new();
     let (a, b) = (Workspace::new(project("a")), Workspace::new(project("b")));
     let (ida, idb) = (a.project.id, b.project.id);
     core.seed(vec![a, b], Vec::new());
-    core.dispatch(AppAction::ShowBoard(idb), Clock::at(5));
+    core.seed_views(Views::default());
+    assert_eq!(core.active_space(), SpaceId::DEFAULT);
     assert!(core.project_visible(ida) && core.project_visible(idb));
-    core.dispatch(AppAction::SetExclusive(true), Clock::at(6));
-    assert_eq!(core.active_project(), Some(idb));
-    assert!(!core.project_visible(ida) && core.project_visible(idb));
-    assert_eq!(core.visible_workspaces().count(), 1);
+    // A new space is shown at once and starts empty.
+    let effects = core.dispatch(AppAction::NewSpace("Client".into()), Clock::at(5));
+    let client = core.spaces()[1].id;
+    assert_eq!(core.active_space(), client);
+    assert_eq!(core.view(), View::Switchboard);
+    assert_eq!(core.visible_workspaces().count(), 0);
+    assert!(!core.project_visible(ida));
+    assert!(effects.iter().any(|e| matches!(e, Effect::SaveViews(_))));
+    assert!(effects.iter().any(|e| matches!(e, Effect::SaveSettings(_))));
+    // Blank names are refused.
+    core.dispatch(AppAction::NewSpace("  ".into()), Clock::at(6));
+    assert_eq!(core.spaces().len(), 2);
+    // What is made while a space is active belongs to it.
+    core.dispatch(
+        AppAction::AddProject {
+            name: "c".into(),
+            root: "/tmp/c".into(),
+        },
+        Clock::at(7),
+    );
+    let idc = core.visible_workspaces().next().unwrap().project.id;
+    assert_eq!(core.project_space(idc), Some(client));
+    core.dispatch(
+        AppAction::NewWorkingSet {
+            name: None,
+            clone_of: None,
+            with: None,
+            columns: 24,
+        },
+        Clock::at(8),
+    );
+    assert_eq!(core.visible_working_sets().count(), 1);
+    assert_eq!(core.working_sets()[0].space, client);
+    assert_eq!(core.working_sets()[0].name, "Working Set");
+    // Back in the default space, the other projects show and the
+    // client's set does not.
+    core.dispatch(AppAction::ShowSpace(SpaceId::DEFAULT), Clock::at(9));
+    assert_eq!(core.visible_workspaces().count(), 2);
+    assert_eq!(core.visible_working_sets().count(), 0);
+    assert!(core.project_visible(ida) && !core.project_visible(idc));
+}
+
+#[test]
+fn showing_something_in_another_space_steps_into_it_and_leaving_goes_to_the_switchboard() {
+    let mut core = AppCore::new();
+    let a = Workspace::new(project("a"));
+    let ida = a.project.id;
+    core.seed(vec![a], Vec::new());
+    core.seed_views(Views::default());
+    core.dispatch(AppAction::NewSpace("Client".into()), Clock::at(1));
+    let client = core.active_space();
+    // The board of a project in the default space: the space follows.
+    core.dispatch(AppAction::ShowBoard(ida), Clock::at(2));
+    assert_eq!(core.active_space(), SpaceId::DEFAULT);
+    assert_eq!(core.view(), View::Board(ida));
+    // Switching away from the space of the page showing lands on the
+    // switchboard, so nothing of the old space stays on screen.
+    core.dispatch(AppAction::ShowSpace(client), Clock::at(3));
+    assert_eq!(core.view(), View::Switchboard);
+    // The switchboard is in every space: switching keeps it.
+    core.dispatch(AppAction::ShowSpace(SpaceId::DEFAULT), Clock::at(4));
+    assert_eq!(core.view(), View::Switchboard);
+    // Renames stick; deleting refuses a space with something in it and
+    // the last one.
+    core.dispatch(
+        AppAction::RenameSpace(client, "  Client work ".into()),
+        Clock::at(5),
+    );
+    assert_eq!(core.space(client).unwrap().name, "Client work");
+    core.dispatch(AppAction::DeleteSpace(SpaceId::DEFAULT), Clock::at(6));
+    assert_eq!(core.spaces().len(), 2, "the default space has a project");
+    core.dispatch(AppAction::DeleteSpace(client), Clock::at(7));
+    assert_eq!(core.spaces().len(), 1);
+    core.dispatch(AppAction::DeleteSpace(SpaceId::DEFAULT), Clock::at(8));
+    assert_eq!(core.spaces().len(), 1, "the last space stays");
+}
+
+#[test]
+fn moving_a_project_between_spaces_takes_it_off_the_old_space_sets() {
+    let mut core = AppCore::new();
+    let p = project("p");
+    let mut w = Workspace::new(p.clone());
+    let r = record(p.id, SessionKind::Shell, 0);
+    let id = r.id;
+    w.sessions.push(r);
+    core.seed(vec![w], Vec::new());
+    core.seed_views(Views::default());
+    core.dispatch(
+        AppAction::NewWorkingSet {
+            name: None,
+            clone_of: None,
+            with: Some(PinTarget::Session(id)),
+            columns: 24,
+        },
+        Clock::at(1),
+    );
+    let set = core.working_sets()[0].id;
+    assert_eq!(core.working_sets()[0].items.len(), 1);
+    core.dispatch(AppAction::NewSpace("Client".into()), Clock::at(2));
+    let client = core.active_space();
+    core.dispatch(AppAction::MoveProjectToSpace(p.id, client), Clock::at(3));
+    assert_eq!(core.project_space(p.id), Some(client));
+    assert!(
+        core.working_set(set).unwrap().items.is_empty(),
+        "a set holds only its own space's cards"
+    );
+    // A card from another space is refused.
+    core.dispatch(
+        AppAction::AddToWorkingSet {
+            set,
+            target: PinTarget::Session(id),
+            columns: 24,
+        },
+        Clock::at(4),
+    );
+    assert!(core.working_set(set).unwrap().items.is_empty());
+    // The set can follow the project.
+    core.dispatch(AppAction::MoveSetToSpace(set, client), Clock::at(5));
+    core.dispatch(
+        AppAction::AddToWorkingSet {
+            set,
+            target: PinTarget::Session(id),
+            columns: 24,
+        },
+        Clock::at(6),
+    );
+    assert_eq!(core.working_set(set).unwrap().items.len(), 1);
+    // A space's waiting count is its own; the badge counts every space.
+    core.dispatch(AppAction::ShowSpace(SpaceId::DEFAULT), Clock::at(7));
+    assert_eq!(core.waiting_count_in(client), 0);
+    // Notices about the project carry its space.
+    core.dispatch(AppAction::UndoDiscard(id), Clock::at(8));
+    assert!(
+        core.notices().iter().any(|n| n.space == Some(client)),
+        "{:?}",
+        core.notices()
+    );
+}
+
+#[test]
+fn a_load_puts_records_of_a_lost_space_in_the_first_and_reopens_the_last_space() {
+    let mut core = AppCore::new();
+    let mut p = project("p");
+    let lost = SpaceId::new();
+    p.space = lost;
+    let mut views = Views::default();
+    views.spaces.clear();
+    let mut set = crate::core::WorkingSet::named("s");
+    set.space = lost;
+    views.sets.push(set);
+    let settings = Settings {
+        space: lost,
+        last_view: SavedView::Board(p.id),
+        ..Default::default()
+    };
+    let pid = p.id;
+    core.dispatch(
+        AppAction::StoreLoaded(Ok(Loaded {
+            workspaces: vec![Workspace::new(p)],
+            notices: Vec::new(),
+            settings,
+            views,
+        })),
+        Clock::at(1),
+    );
+    assert_eq!(core.spaces().len(), 1, "the default space is put back");
+    assert_eq!(core.active_space(), SpaceId::DEFAULT);
+    assert_eq!(core.project_space(pid), Some(SpaceId::DEFAULT));
+    assert_eq!(core.working_sets()[0].space, SpaceId::DEFAULT);
+    assert_eq!(
+        core.view(),
+        View::Board(pid),
+        "the last view is in the active space"
+    );
 }
 
 #[test]
@@ -3262,6 +3434,7 @@ fn working_set_loads_and_is_pruned_and_the_view_is_restored() {
     views.sets.push(crate::core::WorkingSet {
         id: set,
         name: "Working Set".into(),
+        space: SpaceId::DEFAULT,
         items: vec![
             crate::core::PinnedItem {
                 target: PinTarget::Session(id),

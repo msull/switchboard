@@ -76,7 +76,8 @@ impl AppCore {
                 // The cut conversation is gone from the process too.
                 s.discard = None;
             });
-            self.info(
+            self.info_about(
+                id,
                 format!("{name} started a new conversation; the old one stays on disk"),
                 now,
             );

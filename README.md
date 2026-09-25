@@ -33,7 +33,7 @@ per project under `projects/` (with a `.bak` of the previous version;
 approvals of defined commands live inside these records),
 `launch.log` (what the last launch loaded and chose for the main
 window's frame, for a launch with no terminal to log to),
-`settings.json` (theme, exclusive mode, editor, global variables, file
+`settings.json` (theme, the active workspace, editor, global variables, file
 side shown next to sessions and its tab, the directory each project's
 file side starts at when narrowed, the screen to reopen on, the
 Prompt Box switch and its trigger word, model, captions, and the screen
@@ -41,8 +41,9 @@ its caption bar and preview panel appear on, the sessions open in
 windows of their own and where each window sits, where the main
 window sits, the zoom of each display, the workflow round cap and the
 user's workflow definitions),
-`views.json` (the working sets: each one's name, which sessions and
-files are on it, and where each card sits on its grid, with a `.bak`),
+`views.json` (the workspaces, and the working sets: each one's name,
+workspace, which sessions and files are on it, and where each card sits
+on its grid, with a `.bak`),
 the
 tmux config and socket name, `claude-hooks.json` (passed to Claude Code
 with `--settings`), `events.log` (the hook event log), `wake.sock`, and
@@ -137,7 +138,8 @@ Dev aids, all environment variables:
   `discard-to`, `undo-discard`, `review-plan`, `show-review`,
   `review-file`, `review-continue`, `review-finalize`, `show-artifact`,
   `pop-out`, `close-pop-out`, `files-root`, `zoom`, `place-pop-out`,
-  `place-card`,
+  `place-card`, `new-workspace`, `workspace`, `move-project`,
+  `move-working-set`,
   `open-terminal`, `prompt-box`, `theme`, `sleep`).
 - `SWITCHBOARD_TMUX=<path>`: tmux binary to use.
 - `RUST_LOG=switchboard=debug`: verbose logging.

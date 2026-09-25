@@ -64,15 +64,6 @@ pub fn settings_menu(
                 ui.close();
             }
             ui.add_space(6.0);
-            let mut exclusive = settings.exclusive;
-            if ui
-                .checkbox(&mut exclusive, "Exclusive: only the active project")
-                .on_hover_text("Hides every other project while screen sharing")
-                .changed()
-            {
-                cx.dispatch(AppAction::SetExclusive(exclusive));
-                ui.close();
-            }
             let mut side_left = settings.side_left;
             if ui
                 .checkbox(&mut side_left, "Side panel on the left")
@@ -209,7 +200,13 @@ fn prompt_box_settings(cx: &mut DrawCtx<'_>, ui: &mut Ui, settings: &crate::core
 /// Notices and the host error as toasts at the top centre: surface
 /// fill, a shadow, errors led by a magenta dot.
 pub fn toasts(cx: &mut DrawCtx<'_>, ctx: &Context, window: Option<RecordId>) {
-    let notice = cx.core.notice().cloned();
+    let mut notice = cx.core.notice().cloned();
+    // A notice about another space says only that there is one.
+    if let Some(n) = notice.as_mut()
+        && n.space.is_some_and(|s| s != cx.core.active_space())
+    {
+        crate::core::Notice::ELSEWHERE.clone_into(&mut n.text);
+    }
     let host_error = cx.core.host_error().map(str::to_owned);
     if notice.is_none() && host_error.is_none() {
         return;

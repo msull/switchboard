@@ -100,7 +100,7 @@ impl AppCore {
         // approved; the file may have been edited since.
         if !record.runnable() {
             let name = record.name.clone();
-            self.error(format!(
+            self.error_about(record.id, format!(
                 "{name} comes from .switchboard/project.json and is not approved; approve it in the Run tab"
             ));
             return;
@@ -196,7 +196,7 @@ impl AppCore {
         let record = &record;
         if let Some(reason) = self.host_error.clone() {
             let name = record.name.clone();
-            self.error(format!("cannot return to {name}: {reason}"));
+            self.error_about(record.id, format!("cannot return to {name}: {reason}"));
             return;
         }
         let liveness = self.host_status(id).map(|h| h.liveness.clone());
@@ -247,7 +247,7 @@ impl AppCore {
         }
         if let Some(reason) = self.host_error.clone() {
             let name = record.name.clone();
-            self.error(format!("cannot restart {name}: {reason}"));
+            self.error_about(record.id, format!("cannot restart {name}: {reason}"));
             return;
         }
         let host = HostId(id.host_name());
@@ -322,13 +322,17 @@ impl AppCore {
                 Some(handle)
             }
             (SessionKind::Agent(AgentKind::ClaudeCode), _) => {
-                self.error(format!("cannot {verb} {name}: it has no transcript yet"));
+                self.error_about(
+                    id,
+                    format!("cannot {verb} {name}: it has no transcript yet"),
+                );
                 None
             }
             _ => {
-                self.error(format!(
-                    "cannot {verb} {name}: only Claude Code sessions can be {verb}d"
-                ));
+                self.error_about(
+                    id,
+                    format!("cannot {verb} {name}: only Claude Code sessions can be {verb}d"),
+                );
                 None
             }
         }
@@ -372,7 +376,10 @@ impl AppCore {
         let handle = match result {
             Ok(handle) => handle,
             Err(e) => {
-                self.error(format!("could not discard in {}: {e}", record.name));
+                self.error_about(
+                    record.id,
+                    format!("could not discard in {}: {e}", record.name),
+                );
                 return;
             }
         };
@@ -390,7 +397,8 @@ impl AppCore {
             });
         });
         self.primed.push((id, prompt));
-        self.info(
+        self.info_about(
+            record.id,
             format!(
                 "{}: conversation cut back to before turn {before}; Undo discard puts it back",
                 record.name
@@ -406,7 +414,7 @@ impl AppCore {
             return;
         };
         let Some(discarded) = record.discard else {
-            self.error(format!("{}: nothing to undo", record.name));
+            self.error_about(record.id, format!("{}: nothing to undo", record.name));
             return;
         };
         self.stop_if_running(id, out);
@@ -415,7 +423,7 @@ impl AppCore {
             s.not_resumable = false;
             s.discard = None;
         });
-        self.info(format!("{}: discard undone", record.name), now);
+        self.info_about(record.id, format!("{}: discard undone", record.name), now);
     }
 
     fn stop_if_running(&mut self, id: RecordId, out: &mut Out) {
@@ -440,7 +448,7 @@ impl AppCore {
         let handle = match result {
             Ok(handle) => handle,
             Err(e) => {
-                self.error(format!("could not clone {}: {e}", record.name));
+                self.error_about(record.id, format!("could not clone {}: {e}", record.name));
                 return;
             }
         };
@@ -493,7 +501,8 @@ impl AppCore {
     fn mark_not_resumable(&mut self, id: RecordId, now: Clock, out: &mut Out) {
         self.edit_session(id, out, |s| s.not_resumable = true);
         let name = self.session_name(id);
-        self.info(
+        self.info_about(
+            id,
             format!("{name} is not resumable; start a fresh session"),
             now,
         );
@@ -535,7 +544,7 @@ impl AppCore {
             }
             Err(e) => {
                 let name = self.session_name(id);
-                self.error(format!("could not prepare {name}: {e}"));
+                self.error_about(id, format!("could not prepare {name}: {e}"));
                 self.end_flight(id);
                 self.advance_codex_queue(now, out);
             }
@@ -605,7 +614,7 @@ impl AppCore {
             }
             Err(e) => {
                 let name = self.session_name(id);
-                self.error(format!("could not start {name}: {e}"));
+                self.error_about(id, format!("could not start {name}: {e}"));
                 self.end_flight(id);
                 if flight.kind == FlightKind::Resume {
                     self.edit_session(id, out, |s| s.not_resumable = true);
@@ -631,18 +640,21 @@ impl AppCore {
             // resume the wrong conversation, so refuse and say so.
             Ok(Some(handle)) if self.bound_elsewhere(id, &handle) => {
                 let name = self.session_name(id);
-                self.error(format!(
+                self.error_about(id, format!(
                     "Codex session id unknown for {name}: the only new rollout belongs to another card"
                 ));
             }
             Ok(Some(handle)) => self.edit_session(id, out, |s| s.resume = Some(handle)),
             Ok(None) => {
                 let name = self.session_name(id);
-                self.error(format!("Codex session id unknown for {name}"));
+                self.error_about(id, format!("Codex session id unknown for {name}"));
             }
             Err(e) => {
                 let name = self.session_name(id);
-                self.error(format!("could not discover Codex session for {name}: {e}"));
+                self.error_about(
+                    id,
+                    format!("could not discover Codex session for {name}: {e}"),
+                );
             }
         }
         self.advance_codex_queue(now, out);

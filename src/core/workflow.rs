@@ -389,7 +389,8 @@ impl AppCore {
                 .map(|f| f.to_string_lossy().into_owned())
                 .unwrap_or_default();
             let mins = quiet.map_or(0, |q| q.as_secs() / 60);
-            self.info(
+            self.info_about(
+                agent,
                 format!(
                     "{name} has been quiet for {mins} min while the review waits on {file}; \
                      it may be waiting on an approval"

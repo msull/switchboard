@@ -272,6 +272,7 @@ fn project(root: &Path) -> Project {
         shown: Vec::new(),
         created: now,
         last_active: now,
+        space: switchboard::core::SpaceId::DEFAULT,
     }
 }
 

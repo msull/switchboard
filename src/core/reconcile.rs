@@ -5,7 +5,8 @@
 
 use crate::core::action::{AppCore, Clock, Effect, FlightKind, Out, View};
 use crate::core::model::{
-    AgentKind, Launch, RUNS_KEPT, RecordId, Run, SavedView, SessionKind, SessionRecord,
+    AgentKind, Launch, ProjectId, RUNS_KEPT, RecordId, Run, SavedView, SessionKind, SessionRecord,
+    Space, SpaceId,
 };
 use crate::ports::host::{HostId, HostStatus, Liveness, SpawnSpec};
 use crate::ports::store::{Loaded, StoreError};
@@ -25,6 +26,7 @@ impl AppCore {
                 self.workspaces = loaded.workspaces;
                 self.settings = loaded.settings;
                 self.views = loaded.views;
+                self.ensure_spaces(out);
                 self.prune_popouts(out);
                 self.restore_view();
                 // Definition files are read before the first host poll, so
@@ -52,8 +54,41 @@ impl AppCore {
         self.reconciled = false;
     }
 
+    /// A file from before spaces lists none, and a record may name a
+    /// space that is gone: the default space is put back, records in
+    /// no listed space go to the first, and the active space must exist.
+    fn ensure_spaces(&mut self, out: &mut Out) {
+        if self.views.spaces.is_empty() {
+            self.update_views(out, |v| v.spaces.push(Space::default_space()));
+        }
+        let known: Vec<SpaceId> = self.views.spaces.iter().map(|s| s.id).collect();
+        let first = known[0];
+        if !known.contains(&self.settings.space) {
+            self.update_settings(out, |s| s.space = first);
+        }
+        let lost: Vec<ProjectId> = self
+            .workspaces
+            .iter()
+            .filter(|w| !known.contains(&w.project.space))
+            .map(|w| w.project.id)
+            .collect();
+        for pid in lost {
+            self.edit_project(pid, out, |p| p.space = first);
+        }
+        if self.views.sets.iter().any(|s| !known.contains(&s.space)) {
+            self.update_views(out, |v| {
+                for s in &mut v.sets {
+                    if !known.contains(&s.space) {
+                        s.space = first;
+                    }
+                }
+            });
+        }
+    }
+
     /// Reopen the screen the last run ended on, if what it showed still
-    /// exists. Only the view moves: nothing is launched or resumed.
+    /// exists and is in the space being worked in. Only the view moves:
+    /// nothing is launched or resumed.
     fn restore_view(&mut self) {
         let view = match self.settings.last_view {
             SavedView::Board(id) if self.workspace(id).is_some() => View::Board(id),
@@ -66,6 +101,12 @@ impl AppCore {
             SavedView::Workflow(id) if self.workflow(id).is_some() => View::Workflow(id),
             _ => return,
         };
+        if self
+            .view_space(&view)
+            .is_some_and(|s| s != self.settings.space)
+        {
+            return;
+        }
         self.view_stack.push(view);
     }
 
