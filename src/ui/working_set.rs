@@ -866,7 +866,8 @@ fn file_card(
             let mut body = ui.new_child(UiBuilder::new().max_rect(body_rect));
             body.set_clip_rect(body_rect.intersect(ui.clip_rect()));
             let renders = cx.services.store.data_dir().join("renders");
-            file_body(cx.state, &mut body, &path, mode, &renders);
+            let nudge = stick_scroll(cx, ui, &target);
+            file_body(cx.state, &mut body, &path, mode, &renders, nudge);
             ui.advance_cursor_after_rect(body_rect);
             ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
                 ui.horizontal(|ui| {
@@ -895,7 +896,33 @@ fn file_card(
 
 /// The file inside its card: a scroll area, wrapped or sideways, with
 /// the preview rendered or its source.
-fn file_body(state: &mut UiState, ui: &mut Ui, path: &Path, mode: FileMode, renders: &Path) {
+/// How far the held stick scrolls this card this frame, while C holds
+/// the card: a steady speed, up and left as the stick points.
+fn stick_scroll(cx: &DrawCtx<'_>, ui: &Ui, target: &PinTarget) -> Option<egui::Vec2> {
+    use crate::ports::controller::Direction;
+    const SPEED: f32 = 700.0;
+    let (held, stick) = cx.core.scroll_hold()?;
+    if held != target {
+        return None;
+    }
+    ui.ctx().request_repaint();
+    let step = SPEED * ui.input(|i| i.stable_dt).min(0.1);
+    Some(match stick? {
+        Direction::Up => vec2(0.0, step),
+        Direction::Down => vec2(0.0, -step),
+        Direction::Left => vec2(step, 0.0),
+        Direction::Right => vec2(-step, 0.0),
+    })
+}
+
+fn file_body(
+    state: &mut UiState,
+    ui: &mut Ui,
+    path: &Path,
+    mode: FileMode,
+    renders: &Path,
+    nudge: Option<egui::Vec2>,
+) {
     let is_pdf = state
         .previews
         .get(path)
@@ -905,7 +932,12 @@ fn file_body(state: &mut UiState, ui: &mut Ui, path: &Path, mode: FileMode, rend
         egui::ScrollArea::vertical()
             .id_salt(("file-card", path))
             .auto_shrink(false)
-            .show(ui, |ui| document::pdf_page(state, ui, path, renders));
+            .show(ui, |ui| {
+                if let Some(delta) = nudge {
+                    ui.scroll_with_delta(delta);
+                }
+                document::pdf_page(state, ui, path, renders);
+            });
         return;
     }
     let UiState {
@@ -929,6 +961,9 @@ fn file_body(state: &mut UiState, ui: &mut Ui, path: &Path, mode: FileMode, rend
         .id_salt(("file-card", path))
         .auto_shrink(false)
         .show(ui, |ui| {
+            if let Some(delta) = nudge {
+                ui.scroll_with_delta(delta);
+            }
             if let Some(text) = raw {
                 let label = egui::Label::new(RichText::new(text).monospace());
                 if mode.wrap {

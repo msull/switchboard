@@ -86,9 +86,9 @@ pub struct PromptBoxes {
     pub voice: Voice,
     /// The session the voice runtime dictates into.
     pub bound: Option<RecordId>,
-    /// The session the controller's C button holds open, as last
-    /// synced from the core.
-    held: Option<RecordId>,
+    /// The session the controller's C button holds open and the press
+    /// that started it, as last synced from the core.
+    held: Option<(RecordId, u64)>,
     pub outbox: Outbox,
     /// The `OpenAI` key as last read from the Keychain.
     key: KeyState,
@@ -219,21 +219,22 @@ fn hold_listen(cx: &mut DrawCtx<'_>) {
     let want = core
         .hold_listen()
         .filter(|_| core.settings().prompt_box)
-        .filter(|id| core.session(*id).is_some());
+        .filter(|id| core.session(*id).is_some())
+        .map(|id| (id, core.listen_presses()));
     let had = cx.state.prompt_boxes.held;
     if want == had {
         return;
     }
     cx.state.prompt_boxes.held = want;
     match want {
-        Some(id) => {
+        Some((id, _)) => {
             if let Some(record) = core.session(id) {
                 editor_for(cx, record);
                 cx.state.prompt_boxes.listen_into(id);
             }
         }
         None => {
-            if cx.state.prompt_boxes.listening() == had {
+            if cx.state.prompt_boxes.listening() == had.map(|(id, _)| id) {
                 cx.state.prompt_boxes.stop();
             }
         }

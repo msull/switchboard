@@ -1282,9 +1282,15 @@ state after the dispatch, the way primed drafts travel. Holding C
 holds the selected agent session (or the session being shown) open for
 dictation: the core records which, and the Prompt Box pump starts and
 stops the one voice runtime to match, through the same path as the
-microphone button. A shell or file card under C gets a notice instead.
-The waiting count goes back down the wire for the LED strip. The
-selection is transient; nothing here touches the store.
+microphone button. Two presses of C within 400 ms latch listening
+on past the second release, and the next press turns it off as a
+single press would; each press that starts listening counts up, so
+the UI hears a fresh press even when the same session is already
+held. On a file card C holds the card instead and the stick scrolls
+it, at a steady speed while the stick is held over, sideways too. A
+shell card under C gets a notice. The waiting count goes back down the
+wire for the LED strip. The selection is transient; nothing here
+touches the store.
 
 The keyboard drives the same selection when no field has focus: h, j,
 k, l or the arrows step, i or Enter puts the cursor in the selected

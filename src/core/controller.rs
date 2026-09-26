@@ -4,10 +4,16 @@
 //! dictation. The selection is transient: a set with no selection
 //! starts at its top-left card.
 
+use std::time::Duration;
+
 use super::action::{AppCore, Clock, Effect, Out, View};
 use super::grid;
 use super::model::{PinTarget, RecordId, SessionKind, SetId};
 use crate::ports::controller::{Button, ControllerEvent, Direction};
+
+/// Two presses of C this close together latch listening on, so it
+/// outlives the second press.
+pub const DOUBLE_PRESS: Duration = Duration::from_millis(400);
 
 /// The radial menu Z holds open on the selected card: a slice per
 /// stick direction, the one the stick points at highlighted.
@@ -43,12 +49,22 @@ pub enum UiRequest {
 #[derive(Debug, Default)]
 pub(super) struct ControllerState {
     pub z: bool,
-    pub c: bool,
     pub connected: bool,
     /// The selected card of each set the stick has moved on.
     pub active: Vec<(SetId, PinTarget)>,
     /// The session C is holding open for dictation.
     pub hold_listen: Option<RecordId>,
+    /// How many C presses have started listening, so the UI can tell a
+    /// fresh press from the same hold going on.
+    pub listen_presses: u64,
+    /// When C was last let go, for the double press.
+    pub c_released_at: Option<Duration>,
+    /// The second press of a double press: letting go keeps listening.
+    pub latched: bool,
+    /// Where the stick is held, between a flick and its return.
+    pub stick: Option<Direction>,
+    /// The file card C is holding for the stick to scroll.
+    pub scroll_hold: Option<PinTarget>,
     pub menu: Option<RadialMenu>,
     pub requests: Vec<UiRequest>,
 }
@@ -63,8 +79,10 @@ impl AppCore {
                 } else {
                     // Nothing more will come from it: let go of everything.
                     self.controller.z = false;
-                    self.controller.c = false;
                     self.controller.hold_listen = None;
+                    self.controller.latched = false;
+                    self.controller.scroll_hold = None;
+                    self.controller.stick = None;
                     self.controller.menu = None;
                     self.info("Controller disconnected", now);
                 }
@@ -93,29 +111,59 @@ impl AppCore {
             ControllerEvent::Button {
                 button: Button::C,
                 down: true,
-            } => {
-                self.controller.c = true;
-                match self.listen_target() {
-                    Some(id) => self.controller.hold_listen = Some(id),
-                    None => self.info("No agent selected to listen into", now),
-                }
-            }
+            } => self.c_down(now),
             ControllerEvent::Button {
                 button: Button::C,
                 down: false,
             } => {
-                self.controller.c = false;
-                self.controller.hold_listen = None;
+                self.controller.c_released_at = Some(now.mono);
+                self.controller.scroll_hold = None;
+                if self.controller.latched {
+                    self.controller.latched = false;
+                } else {
+                    self.controller.hold_listen = None;
+                }
             }
-            ControllerEvent::Flick(direction) => match &mut self.controller.menu {
-                Some(menu) => menu.highlighted = Some(direction),
-                None => self.step_card(direction),
-            },
+            ControllerEvent::Flick(direction) => {
+                self.controller.stick = Some(direction);
+                if let Some(menu) = &mut self.controller.menu {
+                    menu.highlighted = Some(direction);
+                } else if self.controller.scroll_hold.is_none() {
+                    self.step_card(direction);
+                }
+            }
             ControllerEvent::StickCentred => {
+                self.controller.stick = None;
                 if let Some(menu) = &mut self.controller.menu {
                     menu.highlighted = None;
                 }
             }
+        }
+    }
+
+    /// C on a file card holds it for the stick to scroll. On a session
+    /// it holds the session open for dictation; a second press within
+    /// [`DOUBLE_PRESS`] latches that on, and the next press turns it
+    /// off as a single press would.
+    fn c_down(&mut self, now: Clock) {
+        if let Some(target @ PinTarget::File(..)) = self.selected_card() {
+            self.controller.scroll_hold = Some(target);
+            return;
+        }
+        let double = self
+            .controller
+            .c_released_at
+            .is_some_and(|at| now.mono.saturating_sub(at) <= DOUBLE_PRESS);
+        match self.listen_target() {
+            Some(id) => {
+                self.controller.hold_listen = Some(id);
+                self.controller.listen_presses += 1;
+                if double {
+                    self.controller.latched = true;
+                    self.info("Listening stays on; press C to stop", now);
+                }
+            }
+            None => self.info("No agent selected to listen into", now),
         }
     }
 
@@ -135,13 +183,18 @@ impl AppCore {
         }
     }
 
-    /// The selected card of the working set being shown, if it is a
-    /// session's.
-    fn selected_session(&self) -> Option<RecordId> {
+    /// The selected card of the working set being shown.
+    fn selected_card(&self) -> Option<PinTarget> {
         let View::WorkingSet(set) = self.view() else {
             return None;
         };
-        match self.active_card(set)? {
+        self.active_card(set)
+    }
+
+    /// The selected card of the working set being shown, if it is a
+    /// session's.
+    fn selected_session(&self) -> Option<RecordId> {
+        match self.selected_card()? {
             PinTarget::Session(id) => Some(id),
             PinTarget::File(..) => None,
         }
@@ -215,6 +268,23 @@ impl AppCore {
     #[must_use]
     pub fn hold_listen(&self) -> Option<RecordId> {
         self.controller.hold_listen
+    }
+
+    /// How many times C has started listening. A new number with the
+    /// same session is a fresh press, to be listened to again.
+    #[must_use]
+    pub fn listen_presses(&self) -> u64 {
+        self.controller.listen_presses
+    }
+
+    /// The file card C is holding, and where the stick points, for
+    /// the UI to scroll it.
+    #[must_use]
+    pub fn scroll_hold(&self) -> Option<(&PinTarget, Option<Direction>)> {
+        self.controller
+            .scroll_hold
+            .as_ref()
+            .map(|t| (t, self.controller.stick))
     }
 
     /// The radial menu while Z holds it open.

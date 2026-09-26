@@ -4513,3 +4513,87 @@ fn z_holds_a_radial_menu_on_the_selected_card_and_letting_go_picks_the_slice() {
     assert!(core.radial_menu().is_none());
     press(&mut core, Button::Z, false, 19);
 }
+
+#[test]
+fn a_double_press_of_c_latches_listening_and_the_next_press_stops_it() {
+    let (mut core, _, ids) = with_records(&[agent(), SessionKind::Shell], |s| Some(running(s.id)));
+    let (agent_id, shell_id) = (ids[0], ids[1]);
+    controller_set(&mut core, agent_id, shell_id);
+    // Press, release: a hold. Press again inside the window: latched.
+    press(&mut core, Button::C, true, 1_000);
+    assert_eq!(
+        (core.hold_listen(), core.listen_presses()),
+        (Some(agent_id), 1)
+    );
+    press(&mut core, Button::C, false, 1_100);
+    assert_eq!(core.hold_listen(), None);
+    press(&mut core, Button::C, true, 1_300);
+    assert_eq!(
+        (core.hold_listen(), core.listen_presses()),
+        (Some(agent_id), 2)
+    );
+    press(&mut core, Button::C, false, 1_400);
+    assert_eq!(core.hold_listen(), Some(agent_id), "latched on");
+    assert_eq!(
+        core.notice().map(|n| n.text.clone()),
+        Some("Listening stays on; press C to stop".to_owned())
+    );
+    // A single press later turns it off: down is a fresh press, up lets go.
+    press(&mut core, Button::C, true, 5_000);
+    assert_eq!(
+        (core.hold_listen(), core.listen_presses()),
+        (Some(agent_id), 3)
+    );
+    press(&mut core, Button::C, false, 5_100);
+    assert_eq!(core.hold_listen(), None);
+    // Two presses far apart are two holds.
+    press(&mut core, Button::C, true, 9_000);
+    press(&mut core, Button::C, false, 9_100);
+    press(&mut core, Button::C, true, 9_600);
+    press(&mut core, Button::C, false, 9_700);
+    assert_eq!(core.hold_listen(), None);
+}
+
+#[test]
+fn c_on_a_file_card_holds_it_for_the_stick_to_scroll() {
+    let (mut core, pid, ids) = with_records(&[agent()], |s| Some(running(s.id)));
+    let agent_id = ids[0];
+    let file = PinTarget::File(pid, "README.md".into());
+    core.dispatch(
+        AppAction::NewWorkingSet {
+            name: None,
+            clone_of: None,
+            with: Some(file.clone()),
+            columns: 24,
+        },
+        Clock::at(1),
+    );
+    let set = core.working_sets()[0].id;
+    core.dispatch(
+        AppAction::AddToWorkingSet {
+            set,
+            target: PinTarget::Session(agent_id),
+            columns: 24,
+        },
+        Clock::at(1),
+    );
+    core.dispatch(AppAction::ShowWorkingSet(set), Clock::at(1));
+    assert_eq!(core.active_card(set), Some(file.clone()));
+    assert_eq!(core.scroll_hold(), None);
+    press(&mut core, Button::C, true, 2);
+    assert_eq!(core.scroll_hold(), Some((&file, None)));
+    assert_eq!(core.hold_listen(), None, "a file is not listened into");
+    // The stick scrolls instead of moving the selection.
+    flick(&mut core, Direction::Right, 3);
+    assert_eq!(core.scroll_hold(), Some((&file, Some(Direction::Right))));
+    assert_eq!(core.active_card(set), Some(file.clone()));
+    core.dispatch(
+        AppAction::Controller(ControllerEvent::StickCentred),
+        Clock::at(4),
+    );
+    assert_eq!(core.scroll_hold(), Some((&file, None)));
+    press(&mut core, Button::C, false, 5);
+    assert_eq!(core.scroll_hold(), None);
+    flick(&mut core, Direction::Right, 6);
+    assert_eq!(core.active_card(set), Some(PinTarget::Session(agent_id)));
+}
