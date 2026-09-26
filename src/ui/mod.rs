@@ -321,7 +321,7 @@ fn draw_frame(cx: &mut DrawCtx<'_>, ui: &mut Ui) {
     }
     zoom::main_window(cx, ui.ctx());
     let view = cx.core.view();
-    working_set::serve_requests(cx);
+    working_set::serve_requests(cx, ui.ctx());
     keyboard(cx, ui, &view);
     if let Some(delay) = prompt_box::pump(cx) {
         ui.ctx().request_repaint_after(delay);

@@ -685,10 +685,21 @@ pub(super) fn pane_tail(snapshot: &str, lines: usize) -> String {
 /// One line to type into the session without opening it: Enter sends
 /// it as a line to the pane. Off while the session is not running.
 /// What the core asked for that this view knows how to show: the
-/// answer text of a card in the message dialog, or its pane.
-pub fn serve_requests(cx: &mut DrawCtx<'_>) {
+/// answer text of a card in the message dialog, its pane, or the
+/// controller's Escape (a dialog closed, a text field left).
+pub fn serve_requests(cx: &mut DrawCtx<'_>, ctx: &egui::Context) {
     for request in std::mem::take(&mut cx.state.requests) {
         match request {
+            UiRequest::Escape => {
+                cx.state.pane_dialog = None;
+                cx.state.raw_message = None;
+                cx.state.message_links = None;
+                ctx.memory_mut(|m| {
+                    if let Some(id) = m.focused() {
+                        m.surrender_focus(id);
+                    }
+                });
+            }
             UiRequest::ViewAnswer(id) => {
                 let Some(record) = cx.core.session(id) else {
                     continue;

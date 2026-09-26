@@ -12,7 +12,7 @@ use super::model::{PinTarget, RecordId, SessionKind, SetId};
 use crate::ports::controller::{Button, ControllerEvent, Direction};
 
 /// Two presses of C this close together latch listening on, so it
-/// outlives the second press.
+/// outlives the second press; two of Z are Escape.
 pub const DOUBLE_PRESS: Duration = Duration::from_millis(400);
 
 /// The radial menu Z holds open on the selected card: a slice per
@@ -44,6 +44,8 @@ pub enum UiRequest {
     ViewAnswer(RecordId),
     /// The session's live pane in a dialog.
     Terminal(RecordId),
+    /// What the Escape key does: close a dialog, leave a text field.
+    Escape,
 }
 
 /// Which buttons are down. The device repeats both states once a
@@ -84,6 +86,8 @@ pub(super) struct ControllerState {
     pub listen_presses: u64,
     /// When C was last let go, for the double press.
     pub c_released_at: Option<Duration>,
+    /// When Z was last let go, for the double press.
+    pub z_released_at: Option<Duration>,
     /// The second press of a double press: letting go keeps listening.
     pub latched: bool,
     /// Where the stick is held, between a flick and its return.
@@ -122,15 +126,26 @@ impl AppCore {
                 button: Button::Z,
                 down: true,
             } => {
-                self.controller.menu = self.selected_session().map(|target| RadialMenu {
-                    target,
-                    highlighted: None,
-                });
+                // A second press within the window is Escape, and opens
+                // no menu of its own.
+                let double = self
+                    .controller
+                    .z_released_at
+                    .is_some_and(|at| now.mono.saturating_sub(at) <= DOUBLE_PRESS);
+                if double {
+                    self.controller.requests.push(UiRequest::Escape);
+                } else {
+                    self.controller.menu = self.selected_session().map(|target| RadialMenu {
+                        target,
+                        highlighted: None,
+                    });
+                }
             }
             ControllerEvent::Button {
                 button: Button::Z,
                 down: false,
             } => {
+                self.controller.z_released_at = Some(now.mono);
                 if let Some(menu) = self.controller.menu.take()
                     && let Some(direction) = menu.highlighted
                 {

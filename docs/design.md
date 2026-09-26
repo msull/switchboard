@@ -1276,7 +1276,8 @@ session's card, a slice per stick direction: up View (the answer in
 the message dialog), right Open, down Stop (Escape to the pane), left
 Terminal (the live pane in a dialog that stays until closed). The
 stick lights a slice, letting Z go picks it, and letting go on none
-cancels. View and Terminal are things only the UI can show, so the
+cancels. Two presses of Z within 400 ms are Escape instead: a dialog
+closes, a card's text field is left, and no menu opens. View and Terminal are things only the UI can show, so the
 core queues them as `UiRequest`s that the shell moves into the UI's
 state after the dispatch, the way primed drafts travel. Holding C
 holds the selected agent session (or the session being shown) open for

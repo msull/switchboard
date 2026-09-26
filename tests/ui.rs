@@ -3580,6 +3580,19 @@ fn the_radial_menus_view_and_terminal_open_their_dialogs() {
         Some("The latest answer.")
     );
     click(&mut harness, "Close");
+}
+
+#[test]
+fn the_radial_menus_terminal_opens_the_pane_dialog() {
+    let (mut harness, ids) = harness();
+    let (id, _) = working_set_of_two(&mut harness, &ids);
+    harness
+        .state_mut()
+        .ui_state
+        .snapshots
+        .insert(id, "$ cargo test\nok\n".into());
+    // Presses in one test are closer than a double press, so each
+    // test presses Z once.
     controller(&mut harness, &["Z1", "SL", "Z0"]);
     assert_eq!(harness.state().ui_state.pane_dialog, Some(id));
     assert!(
@@ -3591,4 +3604,29 @@ fn the_radial_menus_view_and_terminal_open_their_dialogs() {
     harness.key_press(egui::Key::Escape);
     harness.run_steps(2);
     assert!(harness.state().ui_state.pane_dialog.is_none());
+}
+
+#[test]
+fn the_controllers_escape_closes_the_dialog_and_leaves_the_field() {
+    let (mut harness, ids) = harness();
+    let (id, _) = working_set_of_two(&mut harness, &ids);
+    harness.state_mut().ui_state.pane_dialog = Some(id);
+    harness.run_steps(2);
+    harness
+        .state_mut()
+        .ui_state
+        .requests
+        .push(switchboard::core::UiRequest::Escape);
+    harness.run_steps(2);
+    assert!(harness.state().ui_state.pane_dialog.is_none());
+    harness.key_press(egui::Key::I);
+    harness.run_steps(2);
+    assert!(harness.ctx.memory(egui::Memory::focused).is_some());
+    harness
+        .state_mut()
+        .ui_state
+        .requests
+        .push(switchboard::core::UiRequest::Escape);
+    harness.run_steps(2);
+    assert_eq!(harness.ctx.memory(egui::Memory::focused), None);
 }

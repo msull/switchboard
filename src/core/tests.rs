@@ -4457,11 +4457,11 @@ fn z_holds_a_radial_menu_on_the_selected_card_and_letting_go_picks_the_slice() {
     let (agent_id, shell_id) = (ids[0], ids[1]);
     let set = controller_set(&mut core, agent_id, shell_id);
     assert!(core.radial_menu().is_none());
-    press(&mut core, Button::Z, true, 2);
+    press(&mut core, Button::Z, true, 2000);
     let menu = core.radial_menu().expect("the menu is open");
     assert_eq!((menu.target, menu.highlighted), (agent_id, None));
     // The stick points at slices instead of moving the selection.
-    flick(&mut core, Direction::Right, 3);
+    flick(&mut core, Direction::Right, 3000);
     assert_eq!(
         core.radial_menu().unwrap().highlighted,
         Some(Direction::Right)
@@ -4469,49 +4469,49 @@ fn z_holds_a_radial_menu_on_the_selected_card_and_letting_go_picks_the_slice() {
     assert_eq!(core.active_card(set), Some(PinTarget::Session(agent_id)));
     core.dispatch(
         AppAction::Controller(ControllerEvent::StickCentred),
-        Clock::at(4),
+        Clock::at(4000),
     );
     assert_eq!(core.radial_menu().unwrap().highlighted, None);
     // Letting go on nothing does nothing.
-    press(&mut core, Button::Z, false, 5);
+    press(&mut core, Button::Z, false, 5000);
     assert!(core.radial_menu().is_none());
     assert_eq!(core.view(), View::WorkingSet(set));
     // Up is View and Left is Terminal: requests for the UI.
-    press(&mut core, Button::Z, true, 6);
-    flick(&mut core, Direction::Up, 7);
-    press(&mut core, Button::Z, false, 8);
+    press(&mut core, Button::Z, true, 6000);
+    flick(&mut core, Direction::Up, 7000);
+    press(&mut core, Button::Z, false, 8000);
     assert_eq!(
         core.take_ui_requests(),
         vec![UiRequest::ViewAnswer(agent_id)]
     );
-    press(&mut core, Button::Z, true, 9);
-    flick(&mut core, Direction::Left, 10);
-    press(&mut core, Button::Z, false, 11);
+    press(&mut core, Button::Z, true, 9000);
+    flick(&mut core, Direction::Left, 10000);
+    press(&mut core, Button::Z, false, 11000);
     assert_eq!(core.take_ui_requests(), vec![UiRequest::Terminal(agent_id)]);
     assert!(core.take_ui_requests().is_empty(), "taken once");
     // Down is Stop: Escape to the pane.
-    press(&mut core, Button::Z, true, 12);
-    flick(&mut core, Direction::Down, 13);
+    press(&mut core, Button::Z, true, 12000);
+    flick(&mut core, Direction::Down, 13000);
     let e = core.dispatch(
         AppAction::Controller(ControllerEvent::Button {
             button: Button::Z,
             down: false,
         }),
-        Clock::at(14),
+        Clock::at(14000),
     );
     assert!(
         e.iter()
             .any(|e| matches!(e, Effect::SendKeys { bytes, .. } if bytes == &[0x1b]))
     );
     // Right is Open.
-    press(&mut core, Button::Z, true, 15);
-    flick(&mut core, Direction::Right, 16);
-    press(&mut core, Button::Z, false, 17);
+    press(&mut core, Button::Z, true, 15000);
+    flick(&mut core, Direction::Right, 16000);
+    press(&mut core, Button::Z, false, 17000);
     assert_eq!(core.view(), View::Session(agent_id));
     // Off a working set Z opens nothing.
-    press(&mut core, Button::Z, true, 18);
+    press(&mut core, Button::Z, true, 18000);
     assert!(core.radial_menu().is_none());
-    press(&mut core, Button::Z, false, 19);
+    press(&mut core, Button::Z, false, 19000);
 }
 
 #[test]
@@ -4613,4 +4613,29 @@ fn c_on_a_file_card_holds_it_for_the_stick_to_scroll() {
     assert_eq!(core.scroll_hold(), None);
     flick(&mut core, Direction::Right, 6);
     assert_eq!(core.active_card(set), Some(PinTarget::Session(agent_id)));
+}
+
+#[test]
+fn a_double_press_of_z_is_escape_and_opens_no_menu() {
+    let (mut core, _, ids) = with_records(&[agent(), SessionKind::Shell], |s| Some(running(s.id)));
+    let (agent_id, shell_id) = (ids[0], ids[1]);
+    controller_set(&mut core, agent_id, shell_id);
+    press(&mut core, Button::Z, true, 1_000);
+    press(&mut core, Button::Z, false, 1_100);
+    assert!(core.take_ui_requests().is_empty());
+    press(&mut core, Button::Z, true, 1_300);
+    assert!(
+        core.radial_menu().is_none(),
+        "the second press is not a menu"
+    );
+    assert_eq!(core.take_ui_requests(), vec![UiRequest::Escape]);
+    press(&mut core, Button::Z, false, 1_400);
+    assert!(
+        core.take_ui_requests().is_empty(),
+        "letting go picks nothing"
+    );
+    // Far apart, each press is a menu again.
+    press(&mut core, Button::Z, true, 5_000);
+    assert!(core.radial_menu().is_some());
+    press(&mut core, Button::Z, false, 5_100);
 }
