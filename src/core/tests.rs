@@ -4546,6 +4546,23 @@ fn a_double_press_of_c_latches_listening_and_the_next_press_stops_it() {
     );
     press(&mut core, Button::C, false, 5_100);
     assert_eq!(core.hold_listen(), None);
+    // The device repeats the button states once a second: a repeated
+    // release is not a release. Latch again and let the heartbeat come.
+    press(&mut core, Button::C, true, 6_000);
+    press(&mut core, Button::C, false, 6_100);
+    press(&mut core, Button::C, true, 6_300);
+    press(&mut core, Button::C, false, 6_400);
+    assert_eq!(core.hold_listen(), Some(agent_id));
+    press(&mut core, Button::C, false, 7_400);
+    press(&mut core, Button::Z, false, 7_400);
+    assert_eq!(
+        core.hold_listen(),
+        Some(agent_id),
+        "the heartbeat changed nothing"
+    );
+    press(&mut core, Button::C, true, 8_000);
+    press(&mut core, Button::C, false, 8_100);
+    assert_eq!(core.hold_listen(), None);
     // Two presses far apart are two holds.
     press(&mut core, Button::C, true, 9_000);
     press(&mut core, Button::C, false, 9_100);

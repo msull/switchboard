@@ -46,9 +46,34 @@ pub enum UiRequest {
     Terminal(RecordId),
 }
 
+/// Which buttons are down. The device repeats both states once a
+/// second as a heartbeat, so a line that changes nothing is not a
+/// press or a release.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(super) struct Held {
+    pub z: bool,
+    pub c: bool,
+}
+
+impl Held {
+    fn get(self, button: Button) -> bool {
+        match button {
+            Button::Z => self.z,
+            Button::C => self.c,
+        }
+    }
+
+    fn set(&mut self, button: Button, down: bool) {
+        match button {
+            Button::Z => self.z = down,
+            Button::C => self.c = down,
+        }
+    }
+}
+
 #[derive(Debug, Default)]
 pub(super) struct ControllerState {
-    pub z: bool,
+    pub held: Held,
     pub connected: bool,
     /// The selected card of each set the stick has moved on.
     pub active: Vec<(SetId, PinTarget)>,
@@ -71,6 +96,12 @@ pub(super) struct ControllerState {
 
 impl AppCore {
     pub(super) fn controller_event(&mut self, event: ControllerEvent, now: Clock, out: &mut Out) {
+        if let ControllerEvent::Button { button, down } = event {
+            if self.controller.held.get(button) == down {
+                return;
+            }
+            self.controller.held.set(button, down);
+        }
         match event {
             ControllerEvent::Connected(connected) => {
                 self.controller.connected = connected;
@@ -78,7 +109,7 @@ impl AppCore {
                     self.info("Controller connected", now);
                 } else {
                     // Nothing more will come from it: let go of everything.
-                    self.controller.z = false;
+                    self.controller.held = Held::default();
                     self.controller.hold_listen = None;
                     self.controller.latched = false;
                     self.controller.scroll_hold = None;
@@ -91,7 +122,6 @@ impl AppCore {
                 button: Button::Z,
                 down: true,
             } => {
-                self.controller.z = true;
                 self.controller.menu = self.selected_session().map(|target| RadialMenu {
                     target,
                     highlighted: None,
@@ -101,7 +131,6 @@ impl AppCore {
                 button: Button::Z,
                 down: false,
             } => {
-                self.controller.z = false;
                 if let Some(menu) = self.controller.menu.take()
                     && let Some(direction) = menu.highlighted
                 {
