@@ -124,6 +124,9 @@ pub struct UiState {
     pub working_set_columns: u32,
     /// Arrange mode of the working set and the drag under way.
     pub arrange: working_set::Arrange,
+    /// The selected card the working set grid last scrolled to, so it
+    /// follows a change of selection and leaves a manual scroll alone.
+    pub followed_card: Option<(SetId, PinTarget)>,
     /// Previews for the working set's file cards, one per path.
     pub previews: HashMap<PathBuf, Option<document::Preview>>,
     /// How each file card shows its file: rendered or raw, wrapped or
@@ -229,6 +232,7 @@ impl Default for UiState {
             message_view: dialogs::MessageView::Rendered,
             working_set_columns: 24,
             arrange: working_set::Arrange::default(),
+            followed_card: None,
             previews: HashMap::new(),
             file_modes: HashMap::new(),
             set_rename: None,

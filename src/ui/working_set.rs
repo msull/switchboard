@@ -160,8 +160,17 @@ pub fn show(cx: &mut DrawCtx<'_>, ui: &mut Ui, set: SetId) {
                 grid_dots(ui, rect, width_units, height_units, &cells);
             }
             let active = cx.core.active_card(set);
+            let follow = active
+                .as_ref()
+                .is_some_and(|a| cx.state.followed_card.as_ref() != Some(&(set, a.clone())));
             for item in &items {
                 let cell = cell_rect(origin, item.rect);
+                if follow && active.as_ref() == Some(&item.target) {
+                    // A new selection is brought into view; after that the
+                    // user scrolls where they like.
+                    ui.scroll_to_rect(cell, None);
+                    cx.state.followed_card = Some((set, item.target.clone()));
+                }
                 ui.scope_builder(UiBuilder::new().max_rect(cell), |ui| {
                     ui.set_clip_rect(cell.intersect(ui.clip_rect()));
                     if arranging {
