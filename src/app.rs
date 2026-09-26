@@ -267,6 +267,7 @@ impl SwitchboardApp {
                 self.ui_state.input_drafts.insert(id, text);
             }
         }
+        self.ui_state.requests.extend(self.core.take_ui_requests());
         for effect in effects {
             if let Some(result) = self.run_effect(effect) {
                 self.dispatch_inner(result);

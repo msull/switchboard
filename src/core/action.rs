@@ -750,7 +750,7 @@ impl AppCore {
             AppAction::Back => drop(self.view_stack.pop()),
             AppAction::DismissNotice => self.dismiss_notice(),
             AppAction::Tick => self.tick(now, &mut out),
-            AppAction::Controller(event) => self.controller_event(event, now),
+            AppAction::Controller(event) => self.controller_event(event, now, &mut out),
             AppAction::ActivateCard { set, target } => self.activate_card(set, target),
             AppAction::StepCard(direction) => self.step_card(direction),
 
@@ -1449,7 +1449,7 @@ impl AppCore {
     }
 
     /// A session with a window of its own is shown there, not here.
-    fn show_session(&mut self, id: RecordId, now: Clock, out: &mut Out) {
+    pub(super) fn show_session(&mut self, id: RecordId, now: Clock, out: &mut Out) {
         if self.popped_out(id) {
             out.push(Effect::FocusWindow(id));
         } else {
@@ -1824,7 +1824,12 @@ impl AppCore {
     }
     /// Emit an effect aimed at a record's running pane, or a notice when
     /// there is none.
-    fn aim_at_pane(&mut self, id: RecordId, out: &mut Out, effect: impl FnOnce(HostId) -> Effect) {
+    pub(super) fn aim_at_pane(
+        &mut self,
+        id: RecordId,
+        out: &mut Out,
+        effect: impl FnOnce(HostId) -> Effect,
+    ) {
         let host = self
             .host_status(id)
             .filter(|h| matches!(h.liveness, Liveness::Running { .. }))

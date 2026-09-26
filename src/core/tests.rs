@@ -7,6 +7,7 @@ use std::time::{Duration, SystemTime};
 use uuid::Uuid;
 
 use super::action::{AppAction, AppCore, Clock, Effect, UNDO_WINDOW, View};
+use super::controller::UiRequest;
 use super::definitions::entry_hash;
 use super::model::{
     Activity, AgentKind, Approval, CardState, Discarded, GridRect, Launch, PinTarget, Project,
@@ -4356,7 +4357,7 @@ fn flick(core: &mut AppCore, direction: Direction, at: u64) {
 }
 
 #[test]
-fn the_stick_moves_the_selection_only_while_z_is_held() {
+fn the_stick_moves_the_selection_and_so_does_the_keyboard() {
     let (mut core, _, ids) = with_records(&[agent(), SessionKind::Shell], |s| Some(running(s.id)));
     let (agent_id, shell_id) = (ids[0], ids[1]);
     let set = controller_set(&mut core, agent_id, shell_id);
@@ -4366,9 +4367,6 @@ fn the_stick_moves_the_selection_only_while_z_is_held() {
         Some(left.clone()),
         "with nothing chosen the top-left card is selected"
     );
-    flick(&mut core, Direction::Right, 2);
-    assert_eq!(core.active_card(set), Some(left.clone()), "Z was not held");
-    press(&mut core, Button::Z, true, 3);
     flick(&mut core, Direction::Right, 4);
     assert_eq!(core.active_card(set), Some(right.clone()));
     flick(&mut core, Direction::Right, 5);
@@ -4379,8 +4377,6 @@ fn the_stick_moves_the_selection_only_while_z_is_held() {
     );
     flick(&mut core, Direction::Left, 6);
     assert_eq!(core.active_card(set), Some(left.clone()));
-    press(&mut core, Button::Z, false, 7);
-    // The keyboard steps without Z.
     core.dispatch(AppAction::StepCard(Direction::Right), Clock::at(7));
     assert_eq!(core.active_card(set), Some(right.clone()));
     core.dispatch(AppAction::StepCard(Direction::Left), Clock::at(7));
@@ -4408,12 +4404,10 @@ fn c_holds_the_selected_agent_open_for_dictation() {
     press(&mut core, Button::C, true, 2);
     assert_eq!(core.hold_listen(), Some(agent_id));
     // Moving the selection while C is down does not move the listener.
-    press(&mut core, Button::Z, true, 3);
     flick(&mut core, Direction::Right, 4);
     assert_eq!(core.hold_listen(), Some(agent_id));
     press(&mut core, Button::C, false, 5);
     assert_eq!(core.hold_listen(), None);
-    press(&mut core, Button::Z, false, 6);
     // The shell is selected now: nothing to dictate into, and a notice says so.
     assert_eq!(core.active_card(set), Some(PinTarget::Session(shell_id)));
     press(&mut core, Button::C, true, 7);
@@ -4449,7 +4443,73 @@ fn controller_lines_parse_to_events_and_the_rest_are_ignored() {
         ControllerEvent::parse("SL"),
         Some(ControllerEvent::Flick(Direction::Left))
     );
-    assert_eq!(ControllerEvent::parse("S0"), None);
+    assert_eq!(
+        ControllerEvent::parse("S0"),
+        Some(ControllerEvent::StickCentred)
+    );
     assert_eq!(ControllerEvent::parse("P"), None);
     assert_eq!(ControllerEvent::parse("# nunchuk error"), None);
+}
+
+#[test]
+fn z_holds_a_radial_menu_on_the_selected_card_and_letting_go_picks_the_slice() {
+    let (mut core, _, ids) = with_records(&[agent(), SessionKind::Shell], |s| Some(running(s.id)));
+    let (agent_id, shell_id) = (ids[0], ids[1]);
+    let set = controller_set(&mut core, agent_id, shell_id);
+    assert!(core.radial_menu().is_none());
+    press(&mut core, Button::Z, true, 2);
+    let menu = core.radial_menu().expect("the menu is open");
+    assert_eq!((menu.target, menu.highlighted), (agent_id, None));
+    // The stick points at slices instead of moving the selection.
+    flick(&mut core, Direction::Right, 3);
+    assert_eq!(
+        core.radial_menu().unwrap().highlighted,
+        Some(Direction::Right)
+    );
+    assert_eq!(core.active_card(set), Some(PinTarget::Session(agent_id)));
+    core.dispatch(
+        AppAction::Controller(ControllerEvent::StickCentred),
+        Clock::at(4),
+    );
+    assert_eq!(core.radial_menu().unwrap().highlighted, None);
+    // Letting go on nothing does nothing.
+    press(&mut core, Button::Z, false, 5);
+    assert!(core.radial_menu().is_none());
+    assert_eq!(core.view(), View::WorkingSet(set));
+    // Up is View and Left is Terminal: requests for the UI.
+    press(&mut core, Button::Z, true, 6);
+    flick(&mut core, Direction::Up, 7);
+    press(&mut core, Button::Z, false, 8);
+    assert_eq!(
+        core.take_ui_requests(),
+        vec![UiRequest::ViewAnswer(agent_id)]
+    );
+    press(&mut core, Button::Z, true, 9);
+    flick(&mut core, Direction::Left, 10);
+    press(&mut core, Button::Z, false, 11);
+    assert_eq!(core.take_ui_requests(), vec![UiRequest::Terminal(agent_id)]);
+    assert!(core.take_ui_requests().is_empty(), "taken once");
+    // Down is Stop: Escape to the pane.
+    press(&mut core, Button::Z, true, 12);
+    flick(&mut core, Direction::Down, 13);
+    let e = core.dispatch(
+        AppAction::Controller(ControllerEvent::Button {
+            button: Button::Z,
+            down: false,
+        }),
+        Clock::at(14),
+    );
+    assert!(
+        e.iter()
+            .any(|e| matches!(e, Effect::SendKeys { bytes, .. } if bytes == &[0x1b]))
+    );
+    // Right is Open.
+    press(&mut core, Button::Z, true, 15);
+    flick(&mut core, Direction::Right, 16);
+    press(&mut core, Button::Z, false, 17);
+    assert_eq!(core.view(), View::Session(agent_id));
+    // Off a working set Z opens nothing.
+    press(&mut core, Button::Z, true, 18);
+    assert!(core.radial_menu().is_none());
+    press(&mut core, Button::Z, false, 19);
 }

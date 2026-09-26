@@ -3541,3 +3541,54 @@ fn working_set_keys_move_the_selection_and_step_into_a_card() {
     harness.run_steps(2);
     assert_eq!(harness.state().core().view(), View::Session(id));
 }
+
+fn controller(harness: &mut Harness<'static, SwitchboardApp>, lines: &[&str]) {
+    for line in lines {
+        let event = switchboard::ports::controller::ControllerEvent::parse(line).unwrap();
+        harness.state_mut().dispatch(AppAction::Controller(event));
+    }
+    harness.run_steps(2);
+}
+
+#[test]
+fn the_radial_menus_view_and_terminal_open_their_dialogs() {
+    let (mut harness, ids) = harness();
+    let (id, _) = working_set_of_two(&mut harness, &ids);
+    let mut conversation = two_turns();
+    conversation.turns[1].final_text = "The latest answer.".into();
+    harness
+        .state_mut()
+        .ui_state
+        .conversations
+        .insert(id, (None, conversation));
+    harness
+        .state_mut()
+        .ui_state
+        .snapshots
+        .insert(id, "$ cargo test\nok\n".into());
+    // While Z is held the menu is on the card; letting go on View asks
+    // the UI for the answer, which opens the message dialog.
+    controller(&mut harness, &["Z1", "SU"]);
+    assert_eq!(
+        harness.state().core().radial_menu().map(|m| m.target),
+        Some(id)
+    );
+    controller(&mut harness, &["Z0"]);
+    harness.get_by_label("Full message");
+    assert_eq!(
+        harness.state().ui_state.raw_message.as_deref(),
+        Some("The latest answer.")
+    );
+    click(&mut harness, "Close");
+    controller(&mut harness, &["Z1", "SL", "Z0"]);
+    assert_eq!(harness.state().ui_state.pane_dialog, Some(id));
+    assert!(
+        harness
+            .query_all_by_value("$ cargo test\nok")
+            .next()
+            .is_some()
+    );
+    harness.key_press(egui::Key::Escape);
+    harness.run_steps(2);
+    assert!(harness.state().ui_state.pane_dialog.is_none());
+}

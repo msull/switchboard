@@ -12,8 +12,8 @@ use super::document::{self, Body};
 use super::{DrawCtx, UiState, theme};
 use crate::core::grid::{MIN_HEIGHT, MIN_WIDTH};
 use crate::core::{
-    AppAction, AppCore, CardState, GridRect, PinTarget, PinnedItem, RecordId, SessionKind,
-    SessionRecord, SetId,
+    AppAction, AppCore, CardState, GridRect, PinTarget, PinnedItem, RadialMenu, RecordId,
+    SessionKind, SessionRecord, SetId, UiRequest,
 };
 
 /// Arrange mode: while on, cards are moved and resized instead of
@@ -165,12 +165,6 @@ pub fn show(cx: &mut DrawCtx<'_>, ui: &mut Ui, set: SetId) {
                 .is_some_and(|a| cx.state.followed_card.as_ref() != Some(&(set, a.clone())));
             for item in &items {
                 let cell = cell_rect(origin, item.rect);
-                if follow && active.as_ref() == Some(&item.target) {
-                    // A new selection is brought into view; after that the
-                    // user scrolls where they like.
-                    ui.scroll_to_rect(cell, None);
-                    cx.state.followed_card = Some((set, item.target.clone()));
-                }
                 ui.scope_builder(UiBuilder::new().max_rect(cell), |ui| {
                     ui.set_clip_rect(cell.intersect(ui.clip_rect()));
                     if arranging {
@@ -179,14 +173,7 @@ pub fn show(cx: &mut DrawCtx<'_>, ui: &mut Ui, set: SetId) {
                     card(cx, ui, set, item);
                 });
                 if active.as_ref() == Some(&item.target) {
-                    // Drawn over the card: the border is where the
-                    // controller's next press lands.
-                    ui.painter().rect_stroke(
-                        cell,
-                        2,
-                        egui::Stroke::new(2.0, p.accent),
-                        egui::StrokeKind::Inside,
-                    );
+                    selected(cx, ui, set, item, cell, follow);
                 }
                 // A press anywhere on the card selects it, without taking
                 // the click from whatever it landed on.
@@ -204,6 +191,36 @@ pub fn show(cx: &mut DrawCtx<'_>, ui: &mut Ui, set: SetId) {
                 }
             }
         });
+}
+
+/// The selected card's border, drawn over the card since it is where
+/// the controller's next press lands; the radial menu while Z holds
+/// it; and, on a new selection, a scroll to bring it into view (after
+/// that the user scrolls where they like).
+fn selected(
+    cx: &mut DrawCtx<'_>,
+    ui: &mut Ui,
+    set: SetId,
+    item: &PinnedItem,
+    cell: egui::Rect,
+    follow: bool,
+) {
+    let p = theme::palette(ui);
+    if follow {
+        ui.scroll_to_rect(cell, None);
+        cx.state.followed_card = Some((set, item.target.clone()));
+    }
+    ui.painter().rect_stroke(
+        cell,
+        2,
+        egui::Stroke::new(2.0, p.accent),
+        egui::StrokeKind::Inside,
+    );
+    if let Some(menu) = cx.core.radial_menu()
+        && item.target == PinTarget::Session(menu.target)
+    {
+        radial_menu(ui, cell, menu);
+    }
 }
 
 /// A dot at every unit corner not under a card, so the grid a card
@@ -667,6 +684,65 @@ pub(super) fn pane_tail(snapshot: &str, lines: usize) -> String {
 
 /// One line to type into the session without opening it: Enter sends
 /// it as a line to the pane. Off while the session is not running.
+/// What the core asked for that this view knows how to show: the
+/// answer text of a card in the message dialog, or its pane.
+pub fn serve_requests(cx: &mut DrawCtx<'_>) {
+    for request in std::mem::take(&mut cx.state.requests) {
+        match request {
+            UiRequest::ViewAnswer(id) => {
+                let Some(record) = cx.core.session(id) else {
+                    continue;
+                };
+                let text = set_card_text(cx, record);
+                cx.state.raw_message = Some(
+                    text.answer
+                        .filter(|a| !a.is_empty())
+                        .unwrap_or_else(|| "No answer yet.".into()),
+                );
+            }
+            UiRequest::Terminal(id) => cx.state.pane_dialog = Some(id),
+        }
+    }
+}
+
+/// The controller's radial menu over the selected card: a disc with a
+/// label per stick direction, the one the stick points at filled.
+fn radial_menu(ui: &Ui, cell: egui::Rect, menu: &RadialMenu) {
+    use crate::ports::controller::Direction;
+    const RADIUS: f32 = 72.0;
+    let p = theme::palette(ui);
+    let centre = cell.center();
+    let painter = ui.ctx().layer_painter(egui::LayerId::new(
+        egui::Order::Foreground,
+        egui::Id::new("radial-menu"),
+    ));
+    painter.circle(centre, RADIUS, p.surface, egui::Stroke::new(1.0, p.n500));
+    painter.circle_filled(centre, 4.0, p.n500);
+    let font = egui::FontId::proportional(14.0);
+    for (direction, offset) in [
+        (Direction::Up, vec2(0.0, -RADIUS * 0.62)),
+        (Direction::Right, vec2(RADIUS * 0.62, 0.0)),
+        (Direction::Down, vec2(0.0, RADIUS * 0.62)),
+        (Direction::Left, vec2(-RADIUS * 0.62, 0.0)),
+    ] {
+        let at = centre + offset;
+        let label = RadialMenu::label(direction);
+        let lit = menu.highlighted == Some(direction);
+        if lit {
+            let galley = painter.layout_no_wrap(label.to_owned(), font.clone(), p.accent_on_fill);
+            let pill = egui::Rect::from_center_size(at, galley.size() + vec2(16.0, 8.0));
+            painter.rect_filled(pill, 10.0, p.accent);
+        }
+        painter.text(
+            at,
+            egui::Align2::CENTER_CENTER,
+            label,
+            font.clone(),
+            if lit { p.accent_on_fill } else { p.n800 },
+        );
+    }
+}
+
 /// The id of a card's "Send a line" field, so the keyboard can focus it.
 #[must_use]
 pub fn send_field_id(id: RecordId) -> egui::Id {

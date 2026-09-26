@@ -42,7 +42,7 @@ use egui::{Key, Modifiers, RichText, Ui};
 use crate::app::{Services, SwitchboardApp};
 use crate::core::{
     AppAction, AppCore, PinTarget, ProjectId, RecordId, SessionKind, SetId, SideTab, ThemeMode,
-    View, WindowFrame, WorkflowId,
+    UiRequest, View, WindowFrame, WorkflowId,
 };
 use crate::ports::transcript::Conversation;
 
@@ -127,6 +127,11 @@ pub struct UiState {
     /// The selected card the working set grid last scrolled to, so it
     /// follows a change of selection and leaves a manual scroll alone.
     pub followed_card: Option<(SetId, PinTarget)>,
+    /// What the core asked the UI to show (the radial menu's View and
+    /// Terminal), served by the next frame.
+    pub requests: Vec<UiRequest>,
+    /// The session whose live pane the Terminal dialog shows.
+    pub pane_dialog: Option<RecordId>,
     /// Previews for the working set's file cards, one per path.
     pub previews: HashMap<PathBuf, Option<document::Preview>>,
     /// How each file card shows its file: rendered or raw, wrapped or
@@ -233,6 +238,8 @@ impl Default for UiState {
             working_set_columns: 24,
             arrange: working_set::Arrange::default(),
             followed_card: None,
+            requests: Vec::new(),
+            pane_dialog: None,
             previews: HashMap::new(),
             file_modes: HashMap::new(),
             set_rename: None,
@@ -314,6 +321,7 @@ fn draw_frame(cx: &mut DrawCtx<'_>, ui: &mut Ui) {
     }
     zoom::main_window(cx, ui.ctx());
     let view = cx.core.view();
+    working_set::serve_requests(cx);
     keyboard(cx, ui, &view);
     if let Some(delay) = prompt_box::pump(cx) {
         ui.ctx().request_repaint_after(delay);
@@ -594,7 +602,8 @@ fn keyboard(cx: &mut DrawCtx<'_>, ui: &Ui, view: &View) {
         || cx.state.confirm_cleanup.is_some()
         || cx.state.raw_message.is_some()
         || cx.state.message_links.is_some()
-        || cx.state.delete_set.is_some();
+        || cx.state.delete_set.is_some()
+        || cx.state.pane_dialog.is_some();
 
     if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::K)) {
         cx.state.palette = Some(palette::PaletteDraft::default());

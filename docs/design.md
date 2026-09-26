@@ -1268,15 +1268,23 @@ and its stick over USB serial, one short line per change, and the
 `Controller` port polls those lines every frame from a thread that owns
 the port and reconnects when the cable goes (spike 10). The core keeps
 a selected card per working set, drawn with an accent border and
-defaulting to the top-left card; a press on a card selects it, and
-while Z is held a flick of the stick steps to the nearest card that
-way, preferring one that shares rows or columns and never wrapping.
-Holding C holds the selected agent session (or the session being
-shown) open for dictation: the core records which, and the Prompt Box
-pump starts and stops the one voice runtime to match, through the same
-path as the microphone button. A shell or file card under C gets a
-notice instead. The waiting count goes back down the wire for the LED
-strip. The selection is transient; nothing here touches the store.
+defaulting to the top-left card; a press on a card selects it, and a
+flick of the stick steps to the nearest card that way, preferring one
+that shares rows or columns and never wrapping. The grid scrolls a new
+selection into view. Holding Z opens a radial menu on the selected
+session's card, a slice per stick direction: up View (the answer in
+the message dialog), right Open, down Stop (Escape to the pane), left
+Terminal (the live pane in a dialog that stays until closed). The
+stick lights a slice, letting Z go picks it, and letting go on none
+cancels. View and Terminal are things only the UI can show, so the
+core queues them as `UiRequest`s that the shell moves into the UI's
+state after the dispatch, the way primed drafts travel. Holding C
+holds the selected agent session (or the session being shown) open for
+dictation: the core records which, and the Prompt Box pump starts and
+stops the one voice runtime to match, through the same path as the
+microphone button. A shell or file card under C gets a notice instead.
+The waiting count goes back down the wire for the LED strip. The
+selection is transient; nothing here touches the store.
 
 The keyboard drives the same selection when no field has focus: h, j,
 k, l or the arrows step, i or Enter puts the cursor in the selected

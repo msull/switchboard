@@ -87,6 +87,7 @@ pub fn show(cx: &mut DrawCtx<'_>, ctx: &Context) {
     add_project(cx, ctx);
     new_session(cx, ctx);
     raw_message(cx, ctx);
+    pane_dialog(cx, ctx);
     message_links(cx, ctx);
     delete_set(cx, ctx);
     space_editor(cx, ctx);
@@ -284,6 +285,51 @@ fn raw_message(cx: &mut DrawCtx<'_>, ctx: &Context) {
     cx.state.message_view = view;
     if close {
         cx.state.raw_message = None;
+    }
+}
+
+/// A session's live pane, as the card's Terminal hover shows it but
+/// staying up until closed, so the controller can bring it up.
+fn pane_dialog(cx: &mut DrawCtx<'_>, ctx: &Context) {
+    let Some(id) = cx.state.pane_dialog else {
+        return;
+    };
+    let mut close = ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
+    let name = cx
+        .core
+        .session(id)
+        .map(|r| r.name.clone())
+        .unwrap_or_default();
+    let tail = cx
+        .state
+        .snapshots
+        .get(&id)
+        .map(|s| super::working_set::pane_tail(s, 40))
+        .unwrap_or_default();
+    let screen = ctx.content_rect();
+    let width = (screen.width() * 0.72).clamp(320.0, 1080.0);
+    let height = (screen.height() - 180.0).max(160.0);
+    dialog(ctx, "Terminal", |ui| {
+        ui.set_width(width);
+        ui.label(theme::meta_text(ui, name));
+        egui::ScrollArea::vertical()
+            .id_salt("pane-dialog")
+            .max_height(height)
+            .auto_shrink([false, true])
+            .show(ui, |ui| {
+                if tail.is_empty() {
+                    ui.label("No terminal output yet");
+                } else {
+                    super::session::code_block(ui, &tail);
+                }
+            });
+        ui.add_space(6.0);
+        if theme::ghost_muted(ui, "Close").clicked() {
+            close = true;
+        }
+    });
+    if close {
+        cx.state.pane_dialog = None;
     }
 }
 

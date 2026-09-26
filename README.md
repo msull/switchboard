@@ -165,7 +165,7 @@ src/core/
   reconcile.rs           StoreLoaded / HostListed: card states, autostart services, spawn specs
   sessions.rs            launch, idempotent return, resume preflight, Codex serialization
   grid.rs                Working Set placement: default card sizes, first free spot, overlap, minimum size, the card a step away
-  controller.rs          the hand controller's meaning: the selected card per working set, the session C holds open
+  controller.rs          the hand controller's meaning: the selected card per working set, Z's radial menu, the session C holds open
   definitions.rs         .switchboard/project.json entries -> records; hash-keyed approval
   events.rs              hook events -> record activity (matched by record id, ordered by time)
   workflow.rs            plan review runs: reviewer and planner rounds as a state machine over records

@@ -27,14 +27,15 @@ pub enum ControllerEvent {
     /// The stick was flicked that way (or held there long enough to
     /// repeat). The device decides the dead zone and the repeat rate.
     Flick(Direction),
+    /// The stick came back to centre.
+    StickCentred,
     /// The device appeared or went away.
     Connected(bool),
 }
 
 impl ControllerEvent {
-    /// One line of the device's protocol: `Z1`, `C0`, `SU`, `SL`.
-    /// `S0` (stick centred), `P` (a ping's answer), and comments are
-    /// not events.
+    /// One line of the device's protocol: `Z1`, `C0`, `SU`, `SL`, `S0`.
+    /// `P` (a ping's answer) and comments are not events.
     #[must_use]
     pub fn parse(line: &str) -> Option<Self> {
         let line = line.trim();
@@ -59,6 +60,7 @@ impl ControllerEvent {
             "SD" => Self::Flick(Direction::Down),
             "SL" => Self::Flick(Direction::Left),
             "SR" => Self::Flick(Direction::Right),
+            "S0" => Self::StickCentred,
             _ => return None,
         };
         Some(event)
