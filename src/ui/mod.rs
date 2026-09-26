@@ -175,6 +175,10 @@ pub struct UiState {
     /// main window is put back at its saved frame if the system moved
     /// it (a Dock launch drags a new window onto the Dock's display).
     pub first_frame: Option<std::time::Instant>,
+    /// The widget that had focus at the end of the last frame. egui
+    /// drops focus on Escape before the frame runs, so this is how the
+    /// Escape that left a text field is told from one meant as Back.
+    pub had_focus: Option<egui::Id>,
     /// The main window's zoom factor as of the end of the last frame,
     /// put back before its next pass (see `ui/zoom.rs`).
     pub main_zoom: Option<f32>,
@@ -246,6 +250,7 @@ impl Default for UiState {
             popout_opened: HashMap::new(),
             main_frame: None,
             first_frame: None,
+            had_focus: None,
             main_zoom: None,
             zoom_under_pointer: None,
         }
@@ -372,6 +377,7 @@ fn draw_frame(cx: &mut DrawCtx<'_>, ui: &mut Ui) {
     config::show(cx, ui.ctx());
     workflow::dialog_show(cx, ui.ctx());
     zoom::end_frame(cx, ui.ctx());
+    cx.state.had_focus = ui.ctx().memory(egui::Memory::focused);
 }
 
 /// The side panel (Files, Run, Notes) beside the page: on its right by
@@ -626,8 +632,16 @@ fn keyboard(cx: &mut DrawCtx<'_>, ui: &Ui, view: &View) {
             cx.dispatch(AppAction::ShowBoard(*pid));
         }
     }
+    // The Escape that just left a text field is spent: egui blurred the
+    // field already, and Back would be a second step the user did not
+    // ask for. A dialog's field is different: its Escape closes the
+    // dialog, and the dialog takes it itself.
+    let left_a_field = cx.state.had_focus.is_some()
+        && !has_dialog
+        && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape));
     if nothing_focused
         && !has_dialog
+        && !left_a_field
         && *view != View::Switchboard
         && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape))
     {

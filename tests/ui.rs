@@ -3524,6 +3524,19 @@ fn working_set_keys_move_the_selection_and_step_into_a_card() {
     harness.key_press(egui::Key::Escape);
     harness.run_steps(2);
     assert_eq!(harness.ctx.memory(egui::Memory::focused), None);
+    assert_eq!(
+        harness.state().core().view(),
+        View::WorkingSet(set),
+        "that Escape left the field; it was not Back"
+    );
+    assert!(!actions(&harness).contains(&AppAction::Back));
+    harness.key_press(egui::Key::Escape);
+    harness.run_steps(2);
+    assert!(
+        actions(&harness).contains(&AppAction::Back),
+        "the next Escape is Back"
+    );
+    showing(&mut harness, View::WorkingSet(set));
     harness.key_press(egui::Key::O);
     harness.run_steps(2);
     assert_eq!(harness.state().core().view(), View::Session(id));
