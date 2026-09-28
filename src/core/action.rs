@@ -1161,6 +1161,7 @@ impl AppCore {
     /// Once a second: notices age out and waiting workflows probe.
     fn tick(&mut self, now: Clock, out: &mut Out) {
         self.expire_notices(now);
+        self.controller_tick(now, out);
         let expired: Vec<(RecordId, ProjectId)> = self
             .trash
             .iter()
@@ -1504,7 +1505,7 @@ impl AppCore {
 
     /// The session gets a window; if it was the main window's page,
     /// that goes back to what was before, so the page is in one place.
-    fn pop_out(&mut self, id: RecordId, out: &mut Out) {
+    pub(super) fn pop_out(&mut self, id: RecordId, out: &mut Out) {
         if self.session(id).is_none() {
             return;
         }

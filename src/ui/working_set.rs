@@ -12,7 +12,7 @@ use super::document::{self, Body};
 use super::{DrawCtx, UiState, theme};
 use crate::core::grid::{MIN_HEIGHT, MIN_WIDTH};
 use crate::core::{
-    AppAction, AppCore, CardState, GridRect, PinTarget, PinnedItem, RadialMenu, RecordId,
+    AppAction, AppCore, CardState, GridRect, MenuKind, PinTarget, PinnedItem, RadialMenu, RecordId,
     SessionKind, SessionRecord, SetId, UiRequest,
 };
 
@@ -217,9 +217,10 @@ fn selected(
         egui::StrokeKind::Inside,
     );
     if let Some(menu) = cx.core.radial_menu()
+        && menu.kind == MenuKind::Card
         && item.target == PinTarget::Session(menu.target)
     {
-        radial_menu(ui, cell, menu);
+        radial_menu(ui, cell.center(), menu);
     }
 }
 
@@ -712,23 +713,39 @@ pub fn serve_requests(cx: &mut DrawCtx<'_>, ctx: &egui::Context) {
                 );
             }
             UiRequest::Terminal(id) => cx.state.pane_dialog = Some(id),
+            UiRequest::ToggleTerminal => cx.state.terminal_open = !cx.state.terminal_open,
         }
     }
 }
 
-/// The controller's radial menu over the selected card: a disc with a
-/// label per stick direction, the one the stick points at filled.
-fn radial_menu(ui: &Ui, cell: egui::Rect, menu: &RadialMenu) {
+/// The controller's radial menu: a disc at `centre` with a label per
+/// stick direction, the one the stick points at filled, and a ring
+/// growing around the disc as the dwell on it runs.
+pub fn radial_menu(ui: &Ui, centre: egui::Pos2, menu: &RadialMenu) {
     use crate::ports::controller::Direction;
     const RADIUS: f32 = 72.0;
     let p = theme::palette(ui);
-    let centre = cell.center();
     let painter = ui.ctx().layer_painter(egui::LayerId::new(
         egui::Order::Foreground,
         egui::Id::new("radial-menu"),
     ));
     painter.circle(centre, RADIUS, p.surface, egui::Stroke::new(1.0, p.n500));
     painter.circle_filled(centre, 4.0, p.n500);
+    let progress = menu.progress();
+    if progress > 0.0 {
+        // The dwell, from the top and clockwise; an animation, so keep
+        // the frames coming while it runs.
+        ui.ctx().request_repaint();
+        let sweep = std::f32::consts::TAU * progress;
+        let points: Vec<egui::Pos2> = (0..=48)
+            .map(|i| {
+                #[allow(clippy::cast_precision_loss)]
+                let angle = -std::f32::consts::FRAC_PI_2 + sweep * (i as f32 / 48.0);
+                centre + vec2(angle.cos(), angle.sin()) * (RADIUS - 2.0)
+            })
+            .collect();
+        painter.add(egui::Shape::line(points, egui::Stroke::new(3.0, p.accent)));
+    }
     let font = egui::FontId::proportional(14.0);
     for (direction, offset) in [
         (Direction::Up, vec2(0.0, -RADIUS * 0.62)),
@@ -737,7 +754,7 @@ fn radial_menu(ui: &Ui, cell: egui::Rect, menu: &RadialMenu) {
         (Direction::Left, vec2(-RADIUS * 0.62, 0.0)),
     ] {
         let at = centre + offset;
-        let label = RadialMenu::label(direction);
+        let label = menu.label(direction);
         let lit = menu.highlighted == Some(direction);
         if lit {
             let galley = painter.layout_no_wrap(label.to_owned(), font.clone(), p.accent_on_fill);

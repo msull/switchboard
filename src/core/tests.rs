@@ -7,7 +7,7 @@ use std::time::{Duration, SystemTime};
 use uuid::Uuid;
 
 use super::action::{AppAction, AppCore, Clock, Effect, UNDO_WINDOW, View};
-use super::controller::UiRequest;
+use super::controller::{MenuKind, UiRequest};
 use super::definitions::entry_hash;
 use super::model::{
     Activity, AgentKind, Approval, CardState, Discarded, GridRect, Launch, PinTarget, Project,
@@ -4508,10 +4508,15 @@ fn z_holds_a_radial_menu_on_the_selected_card_and_letting_go_picks_the_slice() {
     flick(&mut core, Direction::Right, 16000);
     press(&mut core, Button::Z, false, 17000);
     assert_eq!(core.view(), View::Session(agent_id));
-    // Off a working set Z opens nothing.
+    // On the session's page Z opens the session menu; on the
+    // switchboard nothing.
     press(&mut core, Button::Z, true, 18000);
-    assert!(core.radial_menu().is_none());
+    assert_eq!(core.radial_menu().map(|m| m.kind), Some(MenuKind::Session));
     press(&mut core, Button::Z, false, 19000);
+    core.dispatch(AppAction::ShowSwitchboard, Clock::at(20000));
+    press(&mut core, Button::Z, true, 21000);
+    assert!(core.radial_menu().is_none());
+    press(&mut core, Button::Z, false, 22000);
 }
 
 #[test]
@@ -4638,4 +4643,54 @@ fn a_double_press_of_z_is_escape_and_opens_no_menu() {
     press(&mut core, Button::Z, true, 5_000);
     assert!(core.radial_menu().is_some());
     press(&mut core, Button::Z, false, 5_100);
+}
+
+#[test]
+fn dwelling_on_a_slice_picks_it_before_z_is_let_go() {
+    let (mut core, _, ids) = with_records(&[agent(), SessionKind::Shell], |s| Some(running(s.id)));
+    let (agent_id, shell_id) = (ids[0], ids[1]);
+    controller_set(&mut core, agent_id, shell_id);
+    press(&mut core, Button::Z, true, 1_000);
+    flick(&mut core, Direction::Up, 1_100);
+    core.dispatch(AppAction::Tick, Clock::at(1_400));
+    let menu = core.radial_menu().expect("still open under the dwell");
+    assert!(
+        menu.progress() > 0.5 && menu.progress() < 0.7,
+        "{}",
+        menu.progress()
+    );
+    assert!(core.take_ui_requests().is_empty());
+    // Moving to another slice starts the dwell over.
+    flick(&mut core, Direction::Left, 1_500);
+    core.dispatch(AppAction::Tick, Clock::at(1_700));
+    assert!(core.radial_menu().is_some());
+    core.dispatch(AppAction::Tick, Clock::at(2_000));
+    assert!(core.radial_menu().is_none(), "the dwell picked it");
+    assert_eq!(core.take_ui_requests(), vec![UiRequest::Terminal(agent_id)]);
+    // Z is still held; letting go now picks nothing more.
+    press(&mut core, Button::Z, false, 2_500);
+    assert!(core.take_ui_requests().is_empty());
+}
+
+#[test]
+fn a_sessions_radial_menu_goes_back_pops_out_and_toggles_the_pane() {
+    let (mut core, _, ids) = with_records(&[agent()], |s| Some(running(s.id)));
+    let id = ids[0];
+    core.dispatch(AppAction::ShowSession(id), Clock::at(1));
+    press(&mut core, Button::Z, true, 1_000);
+    let menu = core.radial_menu().expect("open on the session page");
+    assert_eq!(menu.kind, MenuKind::Session);
+    assert_eq!(menu.label(Direction::Up), "Back");
+    assert_eq!(menu.label(Direction::Right), "Pop out");
+    flick(&mut core, Direction::Left, 1_100);
+    press(&mut core, Button::Z, false, 1_200);
+    assert_eq!(core.take_ui_requests(), vec![UiRequest::ToggleTerminal]);
+    press(&mut core, Button::Z, true, 3_000);
+    flick(&mut core, Direction::Right, 3_100);
+    press(&mut core, Button::Z, false, 3_200);
+    assert!(core.popped_out(id));
+    press(&mut core, Button::Z, true, 5_000);
+    flick(&mut core, Direction::Up, 5_100);
+    press(&mut core, Button::Z, false, 5_200);
+    assert_ne!(core.view(), View::Session(id), "Back left the page");
 }

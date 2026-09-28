@@ -380,6 +380,14 @@ fn draw_frame(cx: &mut DrawCtx<'_>, ui: &mut Ui) {
             }
         });
 
+    // The session page's radial menu sits mid-window, where the eye
+    // already is; a card's is drawn over its card.
+    if let Some(menu) = cx.core.radial_menu()
+        && menu.kind == crate::core::MenuKind::Session
+        && matches!(cx.core.view(), View::Session(_))
+    {
+        working_set::radial_menu(ui, ui.ctx().content_rect().center(), menu);
+    }
     popout::show_all(cx, ui.ctx());
     switcher::toasts(cx, ui.ctx(), None);
     prompt_box::overlays(cx.state, ui.ctx());

@@ -15,24 +15,54 @@ use crate::ports::controller::{Button, ControllerEvent, Direction};
 /// outlives the second press; two of Z are Escape.
 pub const DOUBLE_PRESS: Duration = Duration::from_millis(400);
 
-/// The radial menu Z holds open on the selected card: a slice per
-/// stick direction, the one the stick points at highlighted.
+/// Holding the stick on a slice this long picks it, so the choice
+/// does not depend on which of stick and Z is let go of first.
+pub const DWELL: Duration = Duration::from_millis(500);
+
+/// Where a radial menu opened, which decides its slices.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MenuKind {
+    /// On the selected card of a working set.
+    Card,
+    /// On a session's own page.
+    Session,
+}
+
+/// The radial menu Z holds open: a slice per stick direction, the one
+/// the stick points at highlighted, picked by dwelling on it or by
+/// letting Z go.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RadialMenu {
     pub target: RecordId,
+    pub kind: MenuKind,
     pub highlighted: Option<Direction>,
+    /// When the stick came to the highlighted slice.
+    pub highlighted_since: Option<Duration>,
+    /// How long it has been there, as of the last tick.
+    pub held_for: Duration,
 }
 
 impl RadialMenu {
     /// What each slice does, by the direction that picks it.
     #[must_use]
-    pub fn label(direction: Direction) -> &'static str {
-        match direction {
-            Direction::Up => "View",
-            Direction::Right => "Open",
-            Direction::Down => "Stop",
-            Direction::Left => "Terminal",
+    pub fn label(&self, direction: Direction) -> &'static str {
+        match (self.kind, direction) {
+            (MenuKind::Card, Direction::Up) => "View",
+            (MenuKind::Card, Direction::Right) => "Open",
+            (MenuKind::Session, Direction::Up) => "Back",
+            (MenuKind::Session, Direction::Right) => "Pop out",
+            (_, Direction::Down) => "Stop",
+            (_, Direction::Left) => "Terminal",
         }
+    }
+
+    /// How far the dwell on the highlighted slice has come, 0 to 1.
+    #[must_use]
+    pub fn progress(&self) -> f32 {
+        if self.highlighted.is_none() {
+            return 0.0;
+        }
+        (self.held_for.as_secs_f32() / DWELL.as_secs_f32()).min(1.0)
     }
 }
 
@@ -46,6 +76,8 @@ pub enum UiRequest {
     Terminal(RecordId),
     /// What the Escape key does: close a dialog, leave a text field.
     Escape,
+    /// The raw pane under a session's conversation, shown or hidden.
+    ToggleTerminal,
 }
 
 /// Which buttons are down. The device repeats both states once a
@@ -135,9 +167,19 @@ impl AppCore {
                 if double {
                     self.controller.requests.push(UiRequest::Escape);
                 } else {
-                    self.controller.menu = self.selected_session().map(|target| RadialMenu {
+                    let opened = match self.view() {
+                        View::Session(id) => Some((id, MenuKind::Session)),
+                        View::WorkingSet(_) => {
+                            self.selected_session().map(|id| (id, MenuKind::Card))
+                        }
+                        _ => None,
+                    };
+                    self.controller.menu = opened.map(|(target, kind)| RadialMenu {
                         target,
+                        kind,
                         highlighted: None,
+                        highlighted_since: None,
+                        held_for: Duration::ZERO,
                     });
                 }
             }
@@ -149,7 +191,7 @@ impl AppCore {
                 if let Some(menu) = self.controller.menu.take()
                     && let Some(direction) = menu.highlighted
                 {
-                    self.radial_choice(menu.target, direction, now, out);
+                    self.radial_choice(&menu, direction, now, out);
                 }
             }
             ControllerEvent::Button {
@@ -171,7 +213,11 @@ impl AppCore {
             ControllerEvent::Flick(direction) => {
                 self.controller.stick = Some(direction);
                 if let Some(menu) = &mut self.controller.menu {
-                    menu.highlighted = Some(direction);
+                    if menu.highlighted != Some(direction) {
+                        menu.highlighted = Some(direction);
+                        menu.highlighted_since = Some(now.mono);
+                        menu.held_for = Duration::ZERO;
+                    }
                 } else if self.controller.scroll_hold.is_none() {
                     self.step_card(direction);
                 }
@@ -180,6 +226,8 @@ impl AppCore {
                 self.controller.stick = None;
                 if let Some(menu) = &mut self.controller.menu {
                     menu.highlighted = None;
+                    menu.highlighted_since = None;
+                    menu.held_for = Duration::ZERO;
                 }
             }
         }
@@ -211,19 +259,51 @@ impl AppCore {
         }
     }
 
-    /// The radial menu's slice, let go of with the stick pointing at it.
-    fn radial_choice(&mut self, id: RecordId, direction: Direction, now: Clock, out: &mut Out) {
+    /// The dwell: on every tick, a slice the stick has stayed on for
+    /// [`DWELL`] is picked and the menu closes, Z still held or not.
+    pub(super) fn controller_tick(&mut self, now: Clock, out: &mut Out) {
+        let Some(menu) = &mut self.controller.menu else {
+            return;
+        };
+        let (Some(direction), Some(since)) = (menu.highlighted, menu.highlighted_since) else {
+            return;
+        };
+        menu.held_for = now.mono.saturating_sub(since);
+        if menu.held_for >= DWELL {
+            let menu = self.controller.menu.take().expect("the menu is open");
+            self.radial_choice(&menu, direction, now, out);
+        }
+    }
+
+    /// The radial menu's slice, picked with the stick pointing at it.
+    fn radial_choice(
+        &mut self,
+        menu: &RadialMenu,
+        direction: Direction,
+        now: Clock,
+        out: &mut Out,
+    ) {
+        let id = menu.target;
         if self.session(id).is_none() {
             return;
         }
-        match direction {
-            Direction::Up => self.controller.requests.push(UiRequest::ViewAnswer(id)),
-            Direction::Right => self.show_session(id, now, out),
-            Direction::Down => self.aim_at_pane(id, out, |host| Effect::SendKeys {
+        match (menu.kind, direction) {
+            (MenuKind::Card, Direction::Up) => {
+                self.controller.requests.push(UiRequest::ViewAnswer(id));
+            }
+            (MenuKind::Card, Direction::Right) => self.show_session(id, now, out),
+            (MenuKind::Card, Direction::Left) => {
+                self.controller.requests.push(UiRequest::Terminal(id));
+            }
+            (MenuKind::Session, Direction::Up) => drop(self.view_stack.pop()),
+            (MenuKind::Session, Direction::Right) => self.pop_out(id, out),
+            (MenuKind::Session, Direction::Left) => {
+                self.controller.requests.push(UiRequest::ToggleTerminal);
+            }
+            (_, Direction::Down) => self.aim_at_pane(id, out, |host| Effect::SendKeys {
                 host,
                 bytes: vec![0x1b],
             }),
-            Direction::Left => self.controller.requests.push(UiRequest::Terminal(id)),
         }
     }
 
