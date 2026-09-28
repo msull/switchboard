@@ -132,6 +132,8 @@ pub struct UiState {
     pub requests: Vec<UiRequest>,
     /// The session whose live pane the Terminal dialog shows.
     pub pane_dialog: Option<RecordId>,
+    /// The Prompt Box preview panel's place, tracked per opening.
+    pub preview_panel: prompt_box::PreviewPanel,
     /// Previews for the working set's file cards, one per path.
     pub previews: HashMap<PathBuf, Option<document::Preview>>,
     /// How each file card shows its file: rendered or raw, wrapped or
@@ -240,6 +242,7 @@ impl Default for UiState {
             followed_card: None,
             requests: Vec::new(),
             pane_dialog: None,
+            preview_panel: prompt_box::PreviewPanel::default(),
             previews: HashMap::new(),
             file_modes: HashMap::new(),
             set_rename: None,
@@ -390,7 +393,7 @@ fn draw_frame(cx: &mut DrawCtx<'_>, ui: &mut Ui) {
     }
     popout::show_all(cx, ui.ctx());
     switcher::toasts(cx, ui.ctx(), None);
-    prompt_box::overlays(cx.state, ui.ctx());
+    prompt_box::overlays(cx, ui.ctx());
     dialogs::show(cx, ui.ctx());
     palette::show(cx, ui.ctx());
     env::show(cx, ui.ctx());

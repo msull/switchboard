@@ -16,8 +16,10 @@ use promptbox::ports::sink::PromptSink;
 use promptbox::{Editor, Voice};
 
 use super::cards::is_running;
-use super::{DrawCtx, UiState, theme};
-use crate::core::{AppAction, RecordId, SessionRecord, VOICE_KEY_ACCOUNT};
+use super::{DrawCtx, theme};
+use crate::core::{
+    AppAction, RecordId, SessionRecord, VOICE_KEY_ACCOUNT, VoiceSettings, WindowFrame,
+};
 
 /// Prompts sent from editors, waiting for the frame to end so they can
 /// be dispatched with the app borrowed mutably.
@@ -243,9 +245,12 @@ fn hold_listen(cx: &mut DrawCtx<'_>) {
 
 /// The caption and preview overlays of the bound editor, on the screen
 /// chosen in Settings, else the one this window is on.
-pub fn overlays(state: &mut UiState, ctx: &egui::Context) {
-    let boxes = &mut state.prompt_boxes;
+pub fn overlays(cx: &mut DrawCtx<'_>, ctx: &egui::Context) {
+    let settings = cx.core.settings().voice.clone();
+    let boxes = &mut cx.state.prompt_boxes;
+    let listening = boxes.voice.is_live() || boxes.voice.is_demo_running();
     let Some(editor) = boxes.bound.and_then(|id| boxes.editors.get_mut(&id)) else {
+        preview_frame(cx, ctx, false, &settings);
         return;
     };
     let (root, monitor) = ctx.input(|i| (i.viewport().outer_rect, i.viewport().monitor_size));
@@ -260,7 +265,68 @@ pub fn overlays(state: &mut UiState, ctx: &egui::Context) {
         fallback,
     );
     promptbox::caption::draw(&mut boxes.voice, editor.core(), ctx, area);
-    promptbox::preview::draw(editor, ctx, area);
+    promptbox::preview::draw(editor, ctx, area, listening, settings.auto_preview);
+    let open = editor.core().preview_open();
+    preview_frame(cx, ctx, open, &settings);
+}
+
+/// Where the preview panel is, per opening: whether the saved frame
+/// has been put on it yet, and the frame last seen and since when, so
+/// a drag is saved once it settles.
+#[derive(Debug, Default)]
+pub struct PreviewPanel {
+    pub placed: bool,
+    pub seen: Option<(WindowFrame, std::time::Instant)>,
+}
+
+/// The preview panel's own viewport, as Prompt Box names it.
+fn preview_viewport() -> egui::ViewportId {
+    egui::ViewportId::from_hash_of("prompt-preview")
+}
+
+/// The preview panel comes back where it was left. Each editor keeps
+/// its own idea of the panel's place for the run, so on each opening
+/// the saved frame is put on the viewport itself; after that, where
+/// the panel settles is saved, in native screen points like a window.
+fn preview_frame(cx: &mut DrawCtx<'_>, ctx: &egui::Context, open: bool, settings: &VoiceSettings) {
+    if !open {
+        cx.state.preview_panel = PreviewPanel::default();
+        return;
+    }
+    let id = preview_viewport();
+    let factor = ctx.zoom_factor();
+    let rects = ctx.input(|i| {
+        let v = i.raw.viewports.get(&id)?;
+        v.inner_rect.zip(v.outer_rect)
+    });
+    // The viewport exists from the frame after Prompt Box asks for it.
+    let Some((inner, outer)) = rects else {
+        return;
+    };
+    if !cx.state.preview_panel.placed {
+        cx.state.preview_panel.placed = true;
+        if let Some(saved) = &settings.preview_frame
+            && super::zoom::monitor_attached(&saved.monitor)
+        {
+            let r = super::popout::rect_of(saved);
+            ctx.send_viewport_cmd_to(id, egui::ViewportCommand::OuterPosition(r.min / factor));
+            ctx.send_viewport_cmd_to(id, egui::ViewportCommand::InnerSize(r.size() / factor));
+            return;
+        }
+    }
+    let monitor = super::zoom::monitor_of(Some(outer * factor));
+    let now = super::popout::frame_of(inner * factor, outer * factor, monitor);
+    let seen = cx
+        .state
+        .preview_panel
+        .seen
+        .get_or_insert_with(|| (now.clone(), std::time::Instant::now()));
+    if super::popout::settled(seen, now.clone()) && settings.preview_frame.as_ref() != Some(&now) {
+        cx.dispatch(AppAction::SetVoiceSettings(VoiceSettings {
+            preview_frame: Some(now),
+            ..settings.clone()
+        }));
+    }
 }
 
 /// The session's editor, made on first sight with the session's own
@@ -341,11 +407,13 @@ fn editor_for<'a>(cx: &'a mut DrawCtx<'_>, record: &SessionRecord) -> &'a mut Ed
         || current.openai_model != settings.openai_model
         || current.captions != settings.captions
         || current.overlay_screen != settings.overlay_screen
+        || current.auto_preview != settings.auto_preview
     {
         editor.settings_draft.trigger = settings.trigger;
         editor.settings_draft.openai_model = settings.openai_model;
         editor.settings_draft.captions = settings.captions;
         editor.settings_draft.overlay_screen = settings.overlay_screen;
+        editor.settings_draft.auto_preview = settings.auto_preview;
         editor.save_settings_draft();
     }
     editor

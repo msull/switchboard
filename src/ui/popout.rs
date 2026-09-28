@@ -114,7 +114,7 @@ fn window(cx: &mut DrawCtx<'_>, ctx: &Context, popout: &Popout) {
     zoom::restore(ctx, main_zoom);
 }
 
-fn rect_of(f: &WindowFrame) -> egui::Rect {
+pub(super) fn rect_of(f: &WindowFrame) -> egui::Rect {
     egui::Rect::from_min_size(
         egui::pos2(points(f.x), points(f.y)),
         egui::vec2(points(f.w), points(f.h)),
@@ -153,7 +153,7 @@ fn body(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &crate::core::SessionRecord) 
 /// A frame from a window's inner and outer rects in native points: the
 /// position is the outer one, the size the inner one, which is what a
 /// window is opened with again.
-fn frame_of(inner: egui::Rect, outer: egui::Rect, monitor: String) -> WindowFrame {
+pub(super) fn frame_of(inner: egui::Rect, outer: egui::Rect, monitor: String) -> WindowFrame {
     WindowFrame {
         x: whole(outer.min.x),
         y: whole(outer.min.y),
@@ -166,7 +166,7 @@ fn frame_of(inner: egui::Rect, outer: egui::Rect, monitor: String) -> WindowFram
 /// Whether a window has held still at `now` for a moment: `seen` is the
 /// frame last seen and since when, so a drag is not saved on every
 /// frame.
-fn settled(seen: &mut (WindowFrame, Instant), now: WindowFrame) -> bool {
+pub(super) fn settled(seen: &mut (WindowFrame, Instant), now: WindowFrame) -> bool {
     if seen.0 != now {
         *seen = (now, Instant::now());
         return false;

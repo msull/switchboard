@@ -438,6 +438,12 @@ pub struct VoiceSettings {
     /// Display name of the screen for the caption bar and the preview
     /// panel; blank means the screen the window is on.
     pub overlay_screen: String,
+    /// Open the whole-prompt preview whenever listening starts and
+    /// close it when listening stops.
+    pub auto_preview: bool,
+    /// Where the preview panel was last left, in screen points, so it
+    /// comes back there for every session and after a relaunch.
+    pub preview_frame: Option<WindowFrame>,
 }
 
 impl Default for VoiceSettings {
@@ -447,6 +453,8 @@ impl Default for VoiceSettings {
             openai_model: String::new(),
             captions: true,
             overlay_screen: String::new(),
+            auto_preview: false,
+            preview_frame: None,
         }
     }
 }

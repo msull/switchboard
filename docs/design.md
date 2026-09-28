@@ -1260,6 +1260,18 @@ launch. Session views open scrolled to the end: each window remembers
 which conversation it drew last frame, and a conversation shown afresh
 starts at its end instead of at the scroll of the one shown before.
 
+## The preview panel, kept where it was put (2026-09-28)
+
+Prompt Box can open its whole-prompt preview by itself while listening
+and lets the panel be dragged and resized. Switchboard passes the
+choice through as the voice setting "Preview while listening", and
+keeps the panel's place: each editor remembers the panel's frame only
+for its own run, so when the panel opens Switchboard puts the saved
+frame on the viewport itself (if its display is attached), and once
+the panel has held still for a moment its frame is saved in native
+screen points, as a window's is. So the panel comes back where it was
+left, for every session and after a relaunch.
+
 ## A hand controller (2026-09-25)
 
 Clicking cards and the microphone all day hurts. A Wii nunchuk on a

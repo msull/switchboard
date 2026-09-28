@@ -3630,3 +3630,16 @@ fn the_controllers_escape_closes_the_dialog_and_leaves_the_field() {
     harness.run_steps(2);
     assert_eq!(harness.ctx.memory(egui::Memory::focused), None);
 }
+
+#[test]
+fn preview_while_listening_is_a_setting_that_reaches_the_editor() {
+    let (mut harness, ids) = harness();
+    let id = seed_claude(&mut harness, &ids);
+    showing(&mut harness, View::Session(id));
+    click(&mut harness, "Settings");
+    click(&mut harness, "Preview while listening");
+    assert!(harness.state().core().settings().voice.auto_preview);
+    harness.run_steps(2);
+    let editor = &harness.state().ui_state.prompt_boxes.editors[&id];
+    assert!(editor.settings().auto_preview);
+}

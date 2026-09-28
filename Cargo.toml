@@ -35,7 +35,7 @@ ignore = "0.4"
 glob = "0.3"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
 log = "0.4"
-promptbox = { git = "https://github.com/msull/promptbox", rev = "5d7c3b8b846952413206b791c3010b90211d6819" }
+promptbox = { git = "https://github.com/msull/promptbox", rev = "0a4f6aaf8697646956ad6c9fad5d961f0b525687" }
 pulldown-cmark = { version = "0.13", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

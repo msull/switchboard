@@ -151,6 +151,19 @@ fn prompt_box_settings(cx: &mut DrawCtx<'_>, ui: &mut Ui, settings: &crate::core
             ..voice.clone()
         }));
     }
+    let mut auto_preview = voice.auto_preview;
+    if ui
+        .checkbox(&mut auto_preview, "Preview while listening")
+        .on_hover_text(
+            "Show the whole prompt in a panel whenever listening is on; drag it where you like,              and it comes back there",
+        )
+        .changed()
+    {
+        cx.dispatch(AppAction::SetVoiceSettings(VoiceSettings {
+            auto_preview,
+            ..voice.clone()
+        }));
+    }
     overlay_screen_picker(cx, ui, &voice);
     let draft = cx.state.voice_draft.get_or_insert_with(|| VoiceDraft {
         trigger: voice.trigger.clone(),
