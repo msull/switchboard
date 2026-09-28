@@ -129,6 +129,10 @@ pub fn show(cx: &mut DrawCtx<'_>, ctx: &Context) {
         .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
         .show(ctx, |ui| {
             let p = theme::palette(ui);
+            // Never wider than the window: a pasted key would otherwise
+            // push the controls off the screen.
+            let screen = ctx.content_rect().width();
+            ui.set_max_width((screen - 80.0).clamp(320.0, DIALOG_WIDTH));
             ui.spacing_mut().item_spacing = egui::vec2(GAP, GAP);
             ui.label(RichText::new(&draft.title).text_style(theme::brand()));
             ui.add_space(8.0);
@@ -177,6 +181,9 @@ pub fn show(cx: &mut DrawCtx<'_>, ctx: &Context) {
     }
 }
 
+/// The dialog's widest: a long value is cut in the preview rather
+/// than allowed to widen this.
+const DIALOG_WIDTH: f32 = 860.0;
 /// Room for a long variable name (`ANTHROPIC_API_BASE_URL` and the
 /// like) in the monospace the preview below uses.
 const NAME_WIDTH: f32 = 280.0;
@@ -251,6 +258,16 @@ fn variables(ui: &mut Ui, draft: &mut EnvDraft) {
     }
 }
 
+/// How wide `text` draws in `style`, unwrapped.
+fn text_width(ui: &Ui, text: &str, style: &egui::TextStyle) -> f32 {
+    let font = style.resolve(ui.style());
+    ui.fonts_mut(|f| {
+        f.layout_no_wrap(text.to_owned(), font, egui::Color32::PLACEHOLDER)
+            .size()
+            .x
+    })
+}
+
 fn preview(ui: &mut Ui, draft: &mut EnvDraft) {
     let p = theme::palette(ui);
     ui.horizontal(|ui| {
@@ -278,7 +295,18 @@ fn preview(ui: &mut Ui, draft: &mut EnvDraft) {
                     ui.monospace("••••••••");
                 }
                 Some(v) => {
-                    ui.monospace(v);
+                    // The source label keeps its place at the row's end;
+                    // a long value is cut with an ellipsis and shown whole
+                    // on hover.
+                    let room = ui.available_width()
+                        - text_width(ui, &var.source.label(), &egui::TextStyle::Small)
+                        - GAP * 2.0;
+                    let want = text_width(ui, v, &egui::TextStyle::Monospace);
+                    ui.add_sized(
+                        egui::vec2(want.min(room).max(40.0), ui.spacing().interact_size.y),
+                        egui::Label::new(RichText::new(v).monospace()).truncate(),
+                    )
+                    .on_hover_text(v);
                 }
             }
             ui.label(theme::meta_text(ui, var.source.label()));
