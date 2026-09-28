@@ -3643,3 +3643,35 @@ fn preview_while_listening_is_a_setting_that_reaches_the_editor() {
     let editor = &harness.state().ui_state.prompt_boxes.editors[&id];
     assert!(editor.settings().auto_preview);
 }
+
+#[test]
+fn an_editor_made_from_a_cards_microphone_can_send_into_its_running_pane() {
+    let (mut harness, ids) = harness();
+    let (id, _) = working_set_of_two(&mut harness, &ids);
+    harness.run_steps(2);
+    click(&mut harness, "Listen here");
+    harness.run_steps(2);
+    // The session page was never shown, so nothing but the pump could
+    // have told the editor's sink that the pane runs.
+    {
+        let editor = harness
+            .state_mut()
+            .ui_state
+            .prompt_boxes
+            .editors
+            .get_mut(&id)
+            .expect("its editor was made");
+        editor.set_text("hello from the card");
+        editor.dispatch(promptbox::core::AppAction::SendPrompt);
+    }
+    harness.run_steps(3);
+    assert!(actions(&harness).iter().any(|a| matches!(
+        a,
+        AppAction::SendInput { id: i, text } if *i == id && text == "hello from the card"
+    )));
+    assert!(
+        harness
+            .query_by_label("Send failed: the session is not running. Prompt kept.")
+            .is_none()
+    );
+}

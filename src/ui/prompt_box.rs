@@ -184,6 +184,12 @@ pub fn pump(cx: &mut DrawCtx<'_>) -> Option<std::time::Duration> {
     let boxes = &mut cx.state.prompt_boxes;
     boxes.editors.retain(|id, _| core.session(*id).is_some());
     boxes.running.retain(|id, _| core.session(*id).is_some());
+    // Every editor's sink learns whether its pane runs, every frame:
+    // an editor made from a card's microphone is never drawn as a
+    // panel, and its sends would otherwise be refused as not running.
+    for (id, flag) in &boxes.running {
+        flag.store(is_running(core, *id), Ordering::Relaxed);
+    }
     if let Some(bound) = boxes.bound
         && !boxes.editors.contains_key(&bound)
     {
@@ -458,9 +464,6 @@ pub fn panel(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord) {
         editor.set_text(&text);
     }
     let boxes = &mut cx.state.prompt_boxes;
-    if let Some(flag) = boxes.running.get(&record.id) {
-        flag.store(running, Ordering::Relaxed);
-    }
     // The stored setting reaches the runtime when it changes; the CC
     // button changes the runtime and is written back below.
     if boxes.applied_captions != Some(captions) {
