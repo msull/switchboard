@@ -3675,3 +3675,37 @@ fn an_editor_made_from_a_cards_microphone_can_send_into_its_running_pane() {
             .is_none()
     );
 }
+
+#[test]
+fn a_flick_left_steps_back_through_the_users_messages_and_right_forward() {
+    let (mut harness, ids) = harness();
+    let id = seed_claude(&mut harness, &ids);
+    harness
+        .state_mut()
+        .ui_state
+        .conversations
+        .insert(id, (None, two_turns()));
+    showing(&mut harness, View::Session(id));
+    let cursor = |h: &Harness<'static, SwitchboardApp>| h.state().ui_state.turn_cursor;
+    assert_eq!(cursor(&harness), None);
+    controller(&mut harness, &["SL", "S0"]);
+    assert_eq!(
+        cursor(&harness),
+        Some((id, 1)),
+        "from the end to the latest message"
+    );
+    controller(&mut harness, &["SL", "S0"]);
+    assert_eq!(cursor(&harness), Some((id, 0)));
+    controller(&mut harness, &["SL", "S0"]);
+    assert_eq!(
+        cursor(&harness),
+        Some((id, 0)),
+        "no further back than the first"
+    );
+    controller(&mut harness, &["SR", "S0", "SR", "S0", "SR", "S0"]);
+    assert_eq!(cursor(&harness), Some((id, 2)), "past the last is the end");
+    assert!(
+        harness.state().ui_state.jump_to_turn.is_none(),
+        "the draw took the jump"
+    );
+}

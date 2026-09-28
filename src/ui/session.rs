@@ -555,15 +555,16 @@ fn conversation_or_pane(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecor
         in_popout,
         conversation_was,
         conversation_now,
+        jump_to_turn,
         ..
     } = &mut *cx.state;
     // Just opened in this window: the end is what the user came for.
     let window = *in_popout;
     let opened = conversation_was.get(&window) != Some(&record.id);
-    let nudge = if window.is_none() && cx.core.view() == View::Session(record.id) {
-        super::stick_delta(ui, cx.core.stick())
+    let (nudge, jump) = if window.is_none() && cx.core.view() == View::Session(record.id) {
+        (super::stick_delta(ui, cx.core.stick()), jump_to_turn.take())
     } else {
-        None
+        (None, None)
     };
     conversation_now.insert(window, record.id);
     let snapshot = snapshots.get(&record.id);
@@ -593,6 +594,7 @@ fn conversation_or_pane(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecor
             expand_applied,
             opened,
             nudge,
+            jump,
         },
         markdown,
         Menus {
@@ -756,6 +758,29 @@ pub(super) fn append_path(draft: &mut String, path: &std::path::Path) {
 /// Header line, then the turns in a scroll area that follows new
 /// content, with the raw terminal snapshot folded away at the end.
 /// The activity fold's state, written back to the UI state.
+/// A flick left or right on a session's page: the cursor steps to the
+/// previous or next of the user's messages and the conversation is
+/// scrolled to it. Past the end means the end of the conversation,
+/// which is where a page opens, so the first flick back lands on the
+/// latest message.
+pub fn jump_message(cx: &mut DrawCtx<'_>, id: RecordId, back: bool) {
+    let Some((_, conversation)) = cx.state.conversations.get(&id) else {
+        return;
+    };
+    let count = conversation.turns.len();
+    let at = match cx.state.turn_cursor {
+        Some((cursor_id, at)) if cursor_id == id => at.min(count),
+        _ => count,
+    };
+    let next = if back {
+        at.saturating_sub(1)
+    } else {
+        (at + 1).min(count)
+    };
+    cx.state.turn_cursor = Some((id, next));
+    cx.state.jump_to_turn = Some(next);
+}
+
 struct Toggles<'a> {
     /// The first frame of this conversation in its window: scroll to
     /// the end, whatever the scroll of the one shown before.
@@ -763,6 +788,9 @@ struct Toggles<'a> {
     /// How far the controller's stick scrolls the conversation this
     /// frame, in the main window only: the controller has no window.
     nudge: Option<egui::Vec2>,
+    /// The turn a jump scrolls to the top this frame; the turns' count
+    /// is the end.
+    jump: Option<usize>,
     expand: &'a mut bool,
     expand_applied: &'a mut Option<bool>,
 }
@@ -784,6 +812,7 @@ fn conversation_view(
         expand_applied,
         opened,
         nudge,
+        jump,
     } = toggles;
     let p = theme::palette(ui);
     // Both labels truncate: a row that cannot shrink would widen the
@@ -811,7 +840,7 @@ fn conversation_view(
     let mut scroll = egui::ScrollArea::vertical()
         .auto_shrink([false, false])
         .stick_to_bottom(true);
-    if opened {
+    if opened || jump == Some(conversation.turns.len()) {
         // Larger than any conversation; egui clamps it to the end.
         scroll = scroll.vertical_scroll_offset(1.0e9);
     }
@@ -823,8 +852,12 @@ fn conversation_view(
         // widens the layout for everything after it, and a cap read
         // back per turn would only carry that widening along.
         let width = ui.available_width().min(MAX_READING_WIDTH);
-        for turn in &conversation.turns {
-            turn_block(ui, turn, open, markdown, width, menus.reborrow());
+        for (i, turn) in conversation.turns.iter().enumerate() {
+            let block =
+                ui.scope(|ui| turn_block(ui, turn, open, markdown, width, menus.reborrow()));
+            if jump == Some(i) {
+                ui.scroll_to_rect(block.response.rect, Some(egui::Align::Min));
+            }
         }
     });
 }

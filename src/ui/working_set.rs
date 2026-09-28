@@ -714,6 +714,7 @@ pub fn serve_requests(cx: &mut DrawCtx<'_>, ctx: &egui::Context) {
             }
             UiRequest::Terminal(id) => cx.state.pane_dialog = Some(id),
             UiRequest::ToggleTerminal => cx.state.terminal_open = !cx.state.terminal_open,
+            UiRequest::JumpMessage { id, back } => super::session::jump_message(cx, id, back),
         }
     }
 }

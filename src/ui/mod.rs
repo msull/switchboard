@@ -132,6 +132,12 @@ pub struct UiState {
     pub requests: Vec<UiRequest>,
     /// The session whose live pane the Terminal dialog shows.
     pub pane_dialog: Option<RecordId>,
+    /// Where the controller's message jumps stand in a conversation:
+    /// the session and the turn index, or the turns' count for the end.
+    pub turn_cursor: Option<(RecordId, usize)>,
+    /// The turn to scroll to the top on the next draw of its
+    /// conversation, from a jump; the turns' count means the end.
+    pub jump_to_turn: Option<usize>,
     /// The Prompt Box preview panel's place, tracked per opening.
     pub preview_panel: prompt_box::PreviewPanel,
     /// Previews for the working set's file cards, one per path.
@@ -242,6 +248,8 @@ impl Default for UiState {
             followed_card: None,
             requests: Vec::new(),
             pane_dialog: None,
+            turn_cursor: None,
+            jump_to_turn: None,
             preview_panel: prompt_box::PreviewPanel::default(),
             previews: HashMap::new(),
             file_modes: HashMap::new(),

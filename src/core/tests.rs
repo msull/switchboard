@@ -4713,3 +4713,26 @@ fn the_stick_is_read_for_scrolling_except_while_a_menu_has_it() {
     );
     assert_eq!(core.stick(), None);
 }
+
+#[test]
+fn on_a_session_page_left_and_right_ask_for_a_jump_between_messages() {
+    let (mut core, _, ids) = with_records(&[agent()], |s| Some(running(s.id)));
+    let id = ids[0];
+    core.dispatch(AppAction::ShowSession(id), Clock::at(1));
+    flick(&mut core, Direction::Left, 100);
+    core.dispatch(
+        AppAction::Controller(ControllerEvent::StickCentred),
+        Clock::at(200),
+    );
+    flick(&mut core, Direction::Right, 300);
+    assert_eq!(
+        core.take_ui_requests(),
+        vec![
+            UiRequest::JumpMessage { id, back: true },
+            UiRequest::JumpMessage { id, back: false }
+        ]
+    );
+    // Up and down are for scrolling, not a jump.
+    flick(&mut core, Direction::Down, 400);
+    assert!(core.take_ui_requests().is_empty());
+}

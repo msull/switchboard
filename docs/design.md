@@ -1293,7 +1293,10 @@ lit, so it does not matter which of stick and Z is let go of first;
 letting go on none cancels. On a session's page Z opens a menu of its
 own mid-window: up Pop out, right Back, down Stop, left Terminal (the
 raw pane under the conversation, as Cmd+T). On that page the stick
-alone scrolls the conversation, in the main window. Two presses of Z within 400 ms are Escape instead: a dialog
+alone scrolls the conversation, in the main window; a flick left or
+right steps a cursor to the previous or next of the user's messages
+and scrolls it to the top, starting from the end so the first flick
+back lands on the latest one, and past the end is the end again. Two presses of Z within 400 ms are Escape instead: a dialog
 closes, a card's text field is left, and no menu opens. View and Terminal are things only the UI can show, so the
 core queues them as `UiRequest`s that the shell moves into the UI's
 state after the dispatch, the way primed drafts travel. Holding C

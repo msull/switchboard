@@ -78,6 +78,9 @@ pub enum UiRequest {
     Escape,
     /// The raw pane under a session's conversation, shown or hidden.
     ToggleTerminal,
+    /// On a session's page: the conversation scrolled to the previous
+    /// (`back`) or next of the user's messages.
+    JumpMessage { id: RecordId, back: bool },
 }
 
 /// Which buttons are down. The device repeats both states once a
@@ -210,18 +213,7 @@ impl AppCore {
                     self.controller.hold_listen = None;
                 }
             }
-            ControllerEvent::Flick(direction) => {
-                self.controller.stick = Some(direction);
-                if let Some(menu) = &mut self.controller.menu {
-                    if menu.highlighted != Some(direction) {
-                        menu.highlighted = Some(direction);
-                        menu.highlighted_since = Some(now.mono);
-                        menu.held_for = Duration::ZERO;
-                    }
-                } else if self.controller.scroll_hold.is_none() {
-                    self.step_card(direction);
-                }
-            }
+            ControllerEvent::Flick(direction) => self.flick(direction, now),
             ControllerEvent::StickCentred => {
                 self.controller.stick = None;
                 if let Some(menu) = &mut self.controller.menu {
@@ -256,6 +248,33 @@ impl AppCore {
                 }
             }
             None => self.info("No agent selected to listen into", now),
+        }
+    }
+
+    /// A flick goes to whatever has the stick: a slice of the open
+    /// menu, the file card C holds (scrolled by the UI), a message jump
+    /// on a session's page, else the selection on a working set.
+    fn flick(&mut self, direction: Direction, now: Clock) {
+        self.controller.stick = Some(direction);
+        if let Some(menu) = &mut self.controller.menu {
+            if menu.highlighted != Some(direction) {
+                menu.highlighted = Some(direction);
+                menu.highlighted_since = Some(now.mono);
+                menu.held_for = Duration::ZERO;
+            }
+            return;
+        }
+        if self.controller.scroll_hold.is_some() {
+            return;
+        }
+        match (self.view(), direction) {
+            (View::Session(id), Direction::Left | Direction::Right) => {
+                self.controller.requests.push(UiRequest::JumpMessage {
+                    id,
+                    back: direction == Direction::Left,
+                });
+            }
+            _ => self.step_card(direction),
         }
     }
 
