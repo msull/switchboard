@@ -177,6 +177,11 @@ pub fn show(cx: &mut DrawCtx<'_>, ctx: &Context) {
     }
 }
 
+/// Room for a long variable name (`ANTHROPIC_API_BASE_URL` and the
+/// like) in the monospace the preview below uses.
+const NAME_WIDTH: f32 = 280.0;
+const VALUE_WIDTH: f32 = 300.0;
+
 fn variables(ui: &mut Ui, draft: &mut EnvDraft) {
     let mut remove = None;
     egui::Grid::new("env_rows")
@@ -184,25 +189,43 @@ fn variables(ui: &mut Ui, draft: &mut EnvDraft) {
         .spacing([GAP, GAP])
         .show(ui, |ui| {
             let p = theme::palette(ui);
+            // Over the fields, past the hidden labels' columns.
+            ui.label("");
             theme::kicker(ui, "Name", p.n600);
+            ui.label("");
             theme::kicker(ui, "Value", p.n600);
             theme::kicker(ui, "Secret", p.n600);
             ui.end_row();
+            let field = egui::vec2(0.0, ui.spacing().interact_size.y);
             for (i, row) in draft.rows.iter_mut().enumerate() {
-                let name_id = ui.label(format!("Name {}", i + 1)).id;
-                ui.add(egui::TextEdit::singleline(&mut row.name).desired_width(160.0))
-                    .labelled_by(name_id);
+                // The fields are named for tests and screen readers by
+                // labels too small to see, so the grid's columns are the
+                // fields themselves.
+                let name_id = ui
+                    .label(RichText::new(format!("Name {}", i + 1)).size(0.1))
+                    .id;
+                // Sized outright: a grid column starts at the width of its
+                // first pass, and a field left to fit it never grows.
+                ui.add_sized(
+                    egui::vec2(NAME_WIDTH, field.y),
+                    egui::TextEdit::singleline(&mut row.name)
+                        .font(egui::TextStyle::Monospace)
+                        .hint_text("NAME"),
+                )
+                .labelled_by(name_id);
                 let hint = match (row.secret, row.stored) {
                     (true, true) => "stored; type to replace",
                     (true, false) => "value to store",
                     (false, _) => "",
                 };
-                let value_id = ui.label(format!("Value {}", i + 1)).id;
-                ui.add(
+                let value_id = ui
+                    .label(RichText::new(format!("Value {}", i + 1)).size(0.1))
+                    .id;
+                ui.add_sized(
+                    egui::vec2(VALUE_WIDTH, field.y),
                     egui::TextEdit::singleline(&mut row.value)
                         .password(row.secret)
-                        .hint_text(hint)
-                        .desired_width(220.0),
+                        .hint_text(hint),
                 )
                 .labelled_by(value_id);
                 ui.checkbox(&mut row.secret, format!("Secret {}", i + 1));
