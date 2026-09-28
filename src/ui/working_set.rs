@@ -927,20 +927,12 @@ fn file_card(
 /// How far the held stick scrolls this card this frame, while C holds
 /// the card: a steady speed, up and left as the stick points.
 fn stick_scroll(cx: &DrawCtx<'_>, ui: &Ui, target: &PinTarget) -> Option<egui::Vec2> {
-    use crate::ports::controller::Direction;
-    const SPEED: f32 = 700.0;
     let (held, stick) = cx.core.scroll_hold()?;
     if held != target {
         return None;
     }
     ui.ctx().request_repaint();
-    let step = SPEED * ui.input(|i| i.stable_dt).min(0.1);
-    Some(match stick? {
-        Direction::Up => vec2(0.0, step),
-        Direction::Down => vec2(0.0, -step),
-        Direction::Left => vec2(step, 0.0),
-        Direction::Right => vec2(-step, 0.0),
-    })
+    super::stick_delta(ui, stick)
 }
 
 fn file_body(

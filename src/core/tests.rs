@@ -4694,3 +4694,22 @@ fn a_sessions_radial_menu_goes_back_pops_out_and_toggles_the_pane() {
     press(&mut core, Button::Z, false, 5_200);
     assert_ne!(core.view(), View::Session(id), "Back left the page");
 }
+
+#[test]
+fn the_stick_is_read_for_scrolling_except_while_a_menu_has_it() {
+    let (mut core, _, ids) = with_records(&[agent()], |s| Some(running(s.id)));
+    let id = ids[0];
+    core.dispatch(AppAction::ShowSession(id), Clock::at(1));
+    assert_eq!(core.stick(), None);
+    flick(&mut core, Direction::Down, 100);
+    assert_eq!(core.stick(), Some(Direction::Down));
+    press(&mut core, Button::Z, true, 1_000);
+    assert_eq!(core.stick(), None, "the menu has the stick");
+    press(&mut core, Button::Z, false, 1_100);
+    assert_eq!(core.stick(), Some(Direction::Down));
+    core.dispatch(
+        AppAction::Controller(ControllerEvent::StickCentred),
+        Clock::at(1_200),
+    );
+    assert_eq!(core.stick(), None);
+}

@@ -401,6 +401,16 @@ impl AppCore {
         self.controller.listen_presses
     }
 
+    /// Where the stick is held, for the UI to scroll what is shown;
+    /// nothing while a menu has the stick.
+    #[must_use]
+    pub fn stick(&self) -> Option<Direction> {
+        if self.controller.menu.is_some() {
+            return None;
+        }
+        self.controller.stick
+    }
+
     /// The file card C is holding, and where the stick points, for
     /// the UI to scroll it.
     #[must_use]

@@ -716,6 +716,27 @@ fn working_set_keys(cx: &mut DrawCtx<'_>, ctx: &egui::Context, set: SetId) {
     }
 }
 
+/// How far a held stick scrolls this frame: a steady speed, up and
+/// left as the stick points, and a repaint asked for so it keeps
+/// going while the stick is held over.
+#[must_use]
+pub fn stick_delta(
+    ui: &Ui,
+    stick: Option<crate::ports::controller::Direction>,
+) -> Option<egui::Vec2> {
+    use crate::ports::controller::Direction;
+    const SPEED: f32 = 700.0;
+    let stick = stick?;
+    ui.ctx().request_repaint();
+    let step = SPEED * ui.input(|i| i.stable_dt).min(0.1);
+    Some(match stick {
+        Direction::Up => egui::vec2(0.0, step),
+        Direction::Down => egui::vec2(0.0, -step),
+        Direction::Left => egui::vec2(step, 0.0),
+        Direction::Right => egui::vec2(-step, 0.0),
+    })
+}
+
 /// The gap between neighbouring items.
 pub const GAP: f32 = 8.0;
 /// Inner padding of every filled block (turn blocks, preview pane,

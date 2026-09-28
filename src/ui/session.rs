@@ -19,6 +19,7 @@ use super::files::DraggedPath;
 use super::{DrawCtx, GAP, PAD, UiState, theme};
 use crate::core::{
     AgentKind, AppAction, CardState, PinTarget, RecordId, ResumeHandle, SessionKind, SessionRecord,
+    View,
 };
 use crate::ports::host::HostId;
 use crate::ports::transcript::{
@@ -559,6 +560,11 @@ fn conversation_or_pane(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecor
     // Just opened in this window: the end is what the user came for.
     let window = *in_popout;
     let opened = conversation_was.get(&window) != Some(&record.id);
+    let nudge = if window.is_none() && cx.core.view() == View::Session(record.id) {
+        super::stick_delta(ui, cx.core.stick())
+    } else {
+        None
+    };
     conversation_now.insert(window, record.id);
     let snapshot = snapshots.get(&record.id);
     let Some((_, conversation)) = conversations.get(&record.id) else {
@@ -586,6 +592,7 @@ fn conversation_or_pane(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecor
             expand: expand_activity,
             expand_applied,
             opened,
+            nudge,
         },
         markdown,
         Menus {
@@ -753,6 +760,9 @@ struct Toggles<'a> {
     /// The first frame of this conversation in its window: scroll to
     /// the end, whatever the scroll of the one shown before.
     opened: bool,
+    /// How far the controller's stick scrolls the conversation this
+    /// frame, in the main window only: the controller has no window.
+    nudge: Option<egui::Vec2>,
     expand: &'a mut bool,
     expand_applied: &'a mut Option<bool>,
 }
@@ -773,6 +783,7 @@ fn conversation_view(
         expand,
         expand_applied,
         opened,
+        nudge,
     } = toggles;
     let p = theme::palette(ui);
     // Both labels truncate: a row that cannot shrink would widen the
@@ -805,6 +816,9 @@ fn conversation_view(
         scroll = scroll.vertical_scroll_offset(1.0e9);
     }
     scroll.show(ui, |ui| {
+        if let Some(delta) = nudge {
+            ui.scroll_with_delta(delta);
+        }
         // Measured once, before any turn: a word egui cannot break
         // widens the layout for everything after it, and a cap read
         // back per turn would only carry that widening along.
