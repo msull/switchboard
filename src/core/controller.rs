@@ -49,8 +49,8 @@ impl RadialMenu {
         match (self.kind, direction) {
             (MenuKind::Card, Direction::Up) => "View",
             (MenuKind::Card, Direction::Right) => "Open",
-            (MenuKind::Session, Direction::Up) => "Back",
-            (MenuKind::Session, Direction::Right) => "Pop out",
+            (MenuKind::Session, Direction::Up) => "Pop out",
+            (MenuKind::Session, Direction::Right) => "Back",
             (_, Direction::Down) => "Stop",
             (_, Direction::Left) => "Terminal",
         }
@@ -295,8 +295,8 @@ impl AppCore {
             (MenuKind::Card, Direction::Left) => {
                 self.controller.requests.push(UiRequest::Terminal(id));
             }
-            (MenuKind::Session, Direction::Up) => drop(self.view_stack.pop()),
-            (MenuKind::Session, Direction::Right) => self.pop_out(id, out),
+            (MenuKind::Session, Direction::Up) => self.pop_out(id, out),
+            (MenuKind::Session, Direction::Right) => drop(self.view_stack.pop()),
             (MenuKind::Session, Direction::Left) => {
                 self.controller.requests.push(UiRequest::ToggleTerminal);
             }

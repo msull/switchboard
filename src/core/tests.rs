@@ -4680,17 +4680,17 @@ fn a_sessions_radial_menu_goes_back_pops_out_and_toggles_the_pane() {
     press(&mut core, Button::Z, true, 1_000);
     let menu = core.radial_menu().expect("open on the session page");
     assert_eq!(menu.kind, MenuKind::Session);
-    assert_eq!(menu.label(Direction::Up), "Back");
-    assert_eq!(menu.label(Direction::Right), "Pop out");
+    assert_eq!(menu.label(Direction::Up), "Pop out");
+    assert_eq!(menu.label(Direction::Right), "Back");
     flick(&mut core, Direction::Left, 1_100);
     press(&mut core, Button::Z, false, 1_200);
     assert_eq!(core.take_ui_requests(), vec![UiRequest::ToggleTerminal]);
     press(&mut core, Button::Z, true, 3_000);
-    flick(&mut core, Direction::Right, 3_100);
+    flick(&mut core, Direction::Up, 3_100);
     press(&mut core, Button::Z, false, 3_200);
     assert!(core.popped_out(id));
     press(&mut core, Button::Z, true, 5_000);
-    flick(&mut core, Direction::Up, 5_100);
+    flick(&mut core, Direction::Right, 5_100);
     press(&mut core, Button::Z, false, 5_200);
     assert_ne!(core.view(), View::Session(id), "Back left the page");
 }
