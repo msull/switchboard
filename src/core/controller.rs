@@ -127,6 +127,9 @@ pub(super) struct ControllerState {
     pub latched: bool,
     /// Where the stick is held, between a flick and its return.
     pub stick: Option<Direction>,
+    /// The stick picked a menu slice and has not come back to centre:
+    /// still held over, it must not move the page the pick brought up.
+    pub spent: bool,
     /// The file card C is holding for the stick to scroll.
     pub scroll_hold: Option<PinTarget>,
     pub menu: Option<RadialMenu>,
@@ -216,6 +219,7 @@ impl AppCore {
             ControllerEvent::Flick(direction) => self.flick(direction, now),
             ControllerEvent::StickCentred => {
                 self.controller.stick = None;
+                self.controller.spent = false;
                 if let Some(menu) = &mut self.controller.menu {
                     menu.highlighted = None;
                     menu.highlighted_since = None;
@@ -255,6 +259,9 @@ impl AppCore {
     /// menu, the file card C holds (scrolled by the UI), a message jump
     /// on a session's page, else the selection on a working set.
     fn flick(&mut self, direction: Direction, now: Clock) {
+        if self.controller.spent {
+            return;
+        }
         self.controller.stick = Some(direction);
         if let Some(menu) = &mut self.controller.menu {
             if menu.highlighted != Some(direction) {
@@ -302,6 +309,9 @@ impl AppCore {
         now: Clock,
         out: &mut Out,
     ) {
+        // The stick that made the pick is spent until it is let go.
+        self.controller.spent = true;
+        self.controller.stick = None;
         let id = menu.target;
         if self.session(id).is_none() {
             return;

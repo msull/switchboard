@@ -1290,7 +1290,9 @@ Terminal (the live pane in a dialog that stays until closed). The
 stick lights a slice; holding it there for half a second (`DWELL`, a
 ring grows round the disc) picks it, as does letting Z go while it is
 lit, so it does not matter which of stick and Z is let go of first;
-letting go on none cancels. On a session's page Z opens a menu of its
+letting go on none cancels. The stick that made a pick is spent until it comes back to
+centre, so one still held over cannot move the page the pick brought
+up. On a session's page Z opens a menu of its
 own mid-window: up Pop out, right Back, down Stop, left Terminal (the
 raw pane under the conversation, as Cmd+T). On that page the stick
 alone scrolls the conversation, in the main window; a flick left or

@@ -4349,6 +4349,15 @@ fn press(core: &mut AppCore, button: Button, down: bool, at: u64) {
     );
 }
 
+/// The stick let go: the device reports it, and until then a stick
+/// that picked a menu slice counts for nothing.
+fn centre(core: &mut AppCore, at: u64) {
+    core.dispatch(
+        AppAction::Controller(ControllerEvent::StickCentred),
+        Clock::at(at),
+    );
+}
+
 fn flick(core: &mut AppCore, direction: Direction, at: u64) {
     core.dispatch(
         AppAction::Controller(ControllerEvent::Flick(direction)),
@@ -4474,12 +4483,14 @@ fn z_holds_a_radial_menu_on_the_selected_card_and_letting_go_picks_the_slice() {
     assert_eq!(core.radial_menu().unwrap().highlighted, None);
     // Letting go on nothing does nothing.
     press(&mut core, Button::Z, false, 5000);
+    centre(&mut core, 5001);
     assert!(core.radial_menu().is_none());
     assert_eq!(core.view(), View::WorkingSet(set));
     // Up is View and Left is Terminal: requests for the UI.
     press(&mut core, Button::Z, true, 6000);
     flick(&mut core, Direction::Up, 7000);
     press(&mut core, Button::Z, false, 8000);
+    centre(&mut core, 8001);
     assert_eq!(
         core.take_ui_requests(),
         vec![UiRequest::ViewAnswer(agent_id)]
@@ -4487,6 +4498,7 @@ fn z_holds_a_radial_menu_on_the_selected_card_and_letting_go_picks_the_slice() {
     press(&mut core, Button::Z, true, 9000);
     flick(&mut core, Direction::Left, 10000);
     press(&mut core, Button::Z, false, 11000);
+    centre(&mut core, 11001);
     assert_eq!(core.take_ui_requests(), vec![UiRequest::Terminal(agent_id)]);
     assert!(core.take_ui_requests().is_empty(), "taken once");
     // Down is Stop: Escape to the pane.
@@ -4503,20 +4515,24 @@ fn z_holds_a_radial_menu_on_the_selected_card_and_letting_go_picks_the_slice() {
         e.iter()
             .any(|e| matches!(e, Effect::SendKeys { bytes, .. } if bytes == &[0x1b]))
     );
+    centre(&mut core, 14001);
     // Right is Open.
     press(&mut core, Button::Z, true, 15000);
     flick(&mut core, Direction::Right, 16000);
     press(&mut core, Button::Z, false, 17000);
+    centre(&mut core, 17001);
     assert_eq!(core.view(), View::Session(agent_id));
     // On the session's page Z opens the session menu; on the
     // switchboard nothing.
     press(&mut core, Button::Z, true, 18000);
     assert_eq!(core.radial_menu().map(|m| m.kind), Some(MenuKind::Session));
     press(&mut core, Button::Z, false, 19000);
+    centre(&mut core, 19001);
     core.dispatch(AppAction::ShowSwitchboard, Clock::at(20000));
     press(&mut core, Button::Z, true, 21000);
     assert!(core.radial_menu().is_none());
     press(&mut core, Button::Z, false, 22000);
+    centre(&mut core, 22001);
 }
 
 #[test]
@@ -4684,14 +4700,17 @@ fn a_sessions_radial_menu_goes_back_pops_out_and_toggles_the_pane() {
     assert_eq!(menu.label(Direction::Right), "Back");
     flick(&mut core, Direction::Left, 1_100);
     press(&mut core, Button::Z, false, 1_200);
+    centre(&mut core, 1201);
     assert_eq!(core.take_ui_requests(), vec![UiRequest::ToggleTerminal]);
     press(&mut core, Button::Z, true, 3_000);
     flick(&mut core, Direction::Up, 3_100);
     press(&mut core, Button::Z, false, 3_200);
+    centre(&mut core, 3201);
     assert!(core.popped_out(id));
     press(&mut core, Button::Z, true, 5_000);
     flick(&mut core, Direction::Right, 5_100);
     press(&mut core, Button::Z, false, 5_200);
+    centre(&mut core, 5201);
     assert_ne!(core.view(), View::Session(id), "Back left the page");
 }
 
@@ -4735,4 +4754,45 @@ fn on_a_session_page_left_and_right_ask_for_a_jump_between_messages() {
     // Up and down are for scrolling, not a jump.
     flick(&mut core, Direction::Down, 400);
     assert!(core.take_ui_requests().is_empty());
+}
+
+#[test]
+fn a_stick_still_held_from_a_menu_pick_moves_nothing_until_it_comes_back() {
+    let (mut core, _, ids) = with_records(&[agent(), SessionKind::Shell], |s| Some(running(s.id)));
+    let (agent_id, shell_id) = (ids[0], ids[1]);
+    let set = controller_set(&mut core, agent_id, shell_id);
+    // Open the session from the menu with the stick to the right...
+    press(&mut core, Button::Z, true, 1_000);
+    flick(&mut core, Direction::Right, 1_100);
+    press(&mut core, Button::Z, false, 1_200);
+    assert_eq!(core.view(), View::Session(agent_id));
+    // ...and keep holding it: the device repeats the flick, which on the
+    // session page would be a jump; it is not one, and no scrolling.
+    flick(&mut core, Direction::Right, 1_500);
+    assert!(core.take_ui_requests().is_empty());
+    assert_eq!(core.stick(), None);
+    // Let go, then a fresh flick counts.
+    core.dispatch(
+        AppAction::Controller(ControllerEvent::StickCentred),
+        Clock::at(1_600),
+    );
+    flick(&mut core, Direction::Right, 1_700);
+    assert_eq!(
+        core.take_ui_requests(),
+        vec![UiRequest::JumpMessage {
+            id: agent_id,
+            back: false
+        }]
+    );
+    // Same going Back: the selection on the working set stays put.
+    core.dispatch(
+        AppAction::Controller(ControllerEvent::StickCentred),
+        Clock::at(2_000),
+    );
+    press(&mut core, Button::Z, true, 3_000);
+    flick(&mut core, Direction::Right, 3_100);
+    press(&mut core, Button::Z, false, 3_200);
+    assert_eq!(core.view(), View::WorkingSet(set));
+    flick(&mut core, Direction::Right, 3_500);
+    assert_eq!(core.active_card(set), Some(PinTarget::Session(agent_id)));
 }
