@@ -49,18 +49,39 @@ impl Controller for SerialController {
     }
 }
 
-fn first_usbmodem() -> Option<String> {
-    let mut names: Vec<String> = serialport::available_ports()
-        .unwrap_or_default()
+/// Adafruit's USB vendor id: the Feather, and other `CircuitPython`
+/// boards that may be plugged in beside it.
+const ADAFRUIT: u16 = 0x239a;
+
+/// The port to open: a Feather by its USB product name, else any
+/// Adafruit board, else the first `usbmodem` port. Another board on
+/// the same machine (a Trinkey, say) must not win by sorting first.
+fn find_port() -> Option<String> {
+    let ports = serialport::available_ports().unwrap_or_default();
+    let mut ranked: Vec<(u8, String)> = ports
         .into_iter()
-        .map(|p| p.port_name)
-        .filter(|n| n.contains("usbmodem"))
-        // macOS lists each device twice; the callout one is for us.
-        .map(|n| n.replace("/dev/tty.", "/dev/cu."))
+        .filter(|p| p.port_name.contains("usbmodem"))
+        .map(|p| {
+            let rank = match &p.port_type {
+                serialport::SerialPortType::UsbPort(usb) => {
+                    let product = usb.product.as_deref().unwrap_or_default();
+                    if product.contains("Feather") {
+                        0
+                    } else if usb.vid == ADAFRUIT {
+                        1
+                    } else {
+                        2
+                    }
+                }
+                _ => 3,
+            };
+            // macOS lists each device twice; the callout one is for us.
+            (rank, p.port_name.replace("/dev/tty.", "/dev/cu."))
+        })
         .collect();
-    names.sort();
-    names.dedup();
-    names.into_iter().next()
+    ranked.sort();
+    ranked.dedup();
+    ranked.into_iter().next().map(|(_, name)| name)
 }
 
 fn run(
@@ -70,7 +91,7 @@ fn run(
     wake: &dyn Fn(),
 ) {
     loop {
-        let Some(path) = port.map(str::to_owned).or_else(first_usbmodem) else {
+        let Some(path) = port.map(str::to_owned).or_else(find_port) else {
             std::thread::sleep(RETRY);
             continue;
         };
