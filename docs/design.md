@@ -1453,11 +1453,15 @@ so a lost reply to an idempotent one (`workflow.finalize`,
 `session.kill`, `set.sync`) is sent again as the same operation. An
 attempt with no launch on the books fails rather than waits. Parking
 and a rerun follow the design's cancellation sequence: the intent is
-written, the review run paused, every process killed and read back,
-and only then does the ticket read as parked or the replacement start.
-A record's backup is a hard link, so its primary is never absent
-mid-write. The reviewer's templates get `{worktree}`, `{branch}` and
-`{project.root}` rendered in, since it works in the attempt directory.
+written, the review run paused and read back as paused, every process
+killed and read back as gone, and only then does the ticket read as
+parked or the rerun's answer count as acted (which is what lets the
+replacement start); the sequence runs from the saved intent on every
+pass, so a restart at any point resumes it whole. A record's backup is
+a hard link, so its primary is never absent mid-write. The reviewer's
+templates get `{worktree}`, `{branch}` and `{project.root}` rendered
+in, and a template naming neither is prefixed with the repository's
+path, since the reviewer works in the attempt directory.
 `dispatch/tests/first_slice.rs` is the acceptance table, plus a test
 per point above; `dispatch/tests/live.rs` runs the first stage against
 a real Switchboard and a haiku agent. Known gap: Claude Code treats a

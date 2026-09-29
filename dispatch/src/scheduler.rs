@@ -373,15 +373,14 @@ impl Runner {
             reason: reason.into(),
         };
         self.save_ticket(t, now_ms)?;
-        let open: Vec<Attempt> = t.attempts.iter().filter(|a| a.is_open()).cloned().collect();
-        for a in open {
-            self.cancel_attempt(t, ps, &a, reason, now_ms)?;
-        }
         self.finish_parking(t, ps, now_ms)
     }
 
-    /// Kill what is still alive on the ticket's process list; parked once
-    /// nothing is.
+    /// The rest of the sequence, from the saved intent: every open
+    /// attempt cancelled (its run paused and read back as paused),
+    /// everything on the process list killed and read back as gone, and
+    /// only then `Parked`. Run again on every pass until it gets there,
+    /// so a restart at any point resumes it whole.
     pub(crate) fn finish_parking(
         &mut self,
         t: &mut Ticket,
@@ -391,7 +390,13 @@ impl Runner {
         let TicketState::Parking { reason } = t.state.clone() else {
             return Ok(());
         };
-        if self.retire_processes(t, ps, &t.processes.clone(), now_ms)? {
+        let open: Vec<Attempt> = t.attempts.iter().filter(|a| a.is_open()).cloned().collect();
+        let mut settled = true;
+        for a in open {
+            settled &= self.cancel_attempt(t, ps, &a, &reason, now_ms)?;
+        }
+        settled &= self.retire_processes(t, ps, &t.processes.clone(), now_ms)?;
+        if settled {
             log::warn!("ticket {} parked: {reason}", t.id);
             t.state = TicketState::Parked { reason };
             self.save_ticket(t, now_ms)?;
@@ -399,8 +404,10 @@ impl Runner {
         Ok(())
     }
 
-    /// An attempt Dispatch stops on purpose: its run paused, its state
-    /// written, its processes killed. No decision follows.
+    /// An attempt Dispatch stops on purpose: its run paused and confirmed
+    /// paused, its processes killed, and only then its state written as
+    /// cancelled, so a record never says cancelled about something still
+    /// going. True once it is. No decision follows.
     fn cancel_attempt(
         &mut self,
         t: &mut Ticket,
@@ -408,16 +415,32 @@ impl Runner {
         a: &Attempt,
         reason: &str,
         now_ms: u64,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         if let Some(run) = a.run.clone() {
             self.send(
                 t,
                 ps,
                 Some((a.stage.clone(), a.n)),
                 "pause",
-                Body::WorkflowPause { run },
+                Body::WorkflowPause { run: run.clone() },
                 now_ms,
             )?;
+            let paused = match self.ask(Body::Workflow { run })? {
+                Reply::Workflow { run } => matches!(
+                    run.state,
+                    RunState::Paused { .. } | RunState::Finalized | RunState::HandedOff
+                ),
+                // Gone is stopped too.
+                Reply::Failed { .. } => true,
+                other => bail!("workflow query answered {other:?}"),
+            };
+            if !paused {
+                return Ok(false);
+            }
+        }
+        let mine = self.processes_of(t, a)?;
+        if !self.retire_processes(t, ps, &mine, now_ms)? {
+            return Ok(false);
         }
         if let Some(attempt) = t
             .attempts
@@ -430,9 +453,7 @@ impl Runner {
             attempt.ended_ms = Some(now_ms);
         }
         self.save_ticket(t, now_ms)?;
-        let mine = self.processes_of(t, a)?;
-        self.retire_processes(t, ps, &mine, now_ms)?;
-        Ok(())
+        Ok(true)
     }
 
     /// The sessions an attempt owns: its own, or its run's reviewer and
@@ -625,10 +646,15 @@ impl Runner {
             })
             .collect();
         for (i, name, answer, attempt) in answered {
-            if let DecisionState::Answered { acted, .. } = &mut t.decisions[i].state {
-                *acted = true;
+            // A rerun is marked acted only once the replaced attempt is
+            // confirmed gone, below; `may_rerun` launches on that mark,
+            // so a crash between the two never leaves both running.
+            if name != "rerun" {
+                if let DecisionState::Answered { acted, .. } = &mut t.decisions[i].state {
+                    *acted = true;
+                }
+                self.save_ticket(t, now_ms)?;
             }
-            self.save_ticket(t, now_ms)?;
             match (name.as_str(), answer.as_str()) {
                 ("lanes", lanes) => {
                     let names: Vec<String> = lanes
@@ -675,7 +701,7 @@ impl Runner {
                 ("rerun", "rerun") => {
                     // The replaced attempt is retired first, so an old
                     // and a new attempt never run together; still alive,
-                    // the answer waits for the next pass.
+                    // the answer stays unacted for the next pass.
                     if let Some(a) = attempt
                         .as_ref()
                         .and_then(|(s, n)| t.attempts.iter().find(|a| &a.stage == s && a.n == *n))
@@ -683,14 +709,13 @@ impl Runner {
                     {
                         let mine = self.processes_of(t, &a)?;
                         if !self.retire_processes(t, ps, &mine, now_ms)? {
-                            if let DecisionState::Answered { acted, .. } = &mut t.decisions[i].state
-                            {
-                                *acted = false;
-                            }
-                            self.save_ticket(t, now_ms)?;
                             continue;
                         }
                     }
+                    if let DecisionState::Answered { acted, .. } = &mut t.decisions[i].state {
+                        *acted = true;
+                    }
+                    self.save_ticket(t, now_ms)?;
                     self.unmark(t, ps, now_ms)?;
                 }
                 (_, "park") => {
@@ -1841,10 +1866,29 @@ fn definition_of(
     review: crate::pipeline::Review,
     vars: &Vars,
 ) -> wire::Definition {
+    // A template that names neither the tree nor the root gets told
+    // where the repository is; the reviewer's cwd is the attempt
+    // directory, and "CLAUDE.md" means nothing there.
+    let tree = vars
+        .0
+        .get("worktree")
+        .or_else(|| vars.0.get("project.root"))
+        .cloned();
+    let with_repo = |text: &str| {
+        let rendered = vars.render(text);
+        match &tree {
+            Some(tree) if !text.contains("{worktree}") && !text.contains("{project.root}") => {
+                format!(
+                    "The repository this is about is at {tree}; paths like CLAUDE.md are relative to it. {rendered}"
+                )
+            }
+            _ => rendered,
+        }
+    };
     let review = crate::pipeline::Review {
         reviewer: review.reviewer,
-        review_first: vars.render(&review.review_first),
-        review_round: vars.render(&review.review_round),
+        review_first: with_repo(&review.review_first),
+        review_round: with_repo(&review.review_round),
         respond: vars.render(&review.respond),
         respond_to_user: vars.render(&review.respond_to_user),
         handoff: vars.render(&review.handoff),
@@ -1887,12 +1931,17 @@ fn review_subject(t: &Ticket, subject: &str) -> Result<(PathBuf, String), String
     Ok((path, session))
 }
 
-/// Whether a failed attempt's rerun was authorised.
+/// Whether a failed attempt's rerun was authorised and its cleanup done:
+/// the answer is marked acted only once the replaced attempt's
+/// processes were confirmed gone, and that mark is on disk.
 fn may_rerun(t: &Ticket, failed: &Attempt) -> bool {
     t.decisions.iter().any(|d| {
         d.name == "rerun"
             && d.attempt.as_ref() == Some(&(failed.stage.clone(), failed.n))
-            && matches!(&d.state, DecisionState::Answered { answer, .. } if answer == "rerun")
+            && matches!(
+                &d.state,
+                DecisionState::Answered { answer, acted: true, .. } if answer == "rerun"
+            )
     })
 }
 

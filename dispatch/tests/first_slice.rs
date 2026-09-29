@@ -1135,3 +1135,146 @@ fn a_rerun_retires_the_replaced_attempt_before_launching() {
         assert!(kill < launch, "kill at {kill}, launch at {launch}");
     }
 }
+
+// --- the follow-up review: cleanup gates a rerun and is persisted first,
+// parking resumes whole after a restart, and the documented pipeline's
+// own reviewer is told its repository.
+
+#[test]
+fn a_rerun_waits_while_the_replaced_process_survives_its_kill() {
+    let mut env = Env::new();
+    let id = env.take(7).id;
+    env.step();
+    let old = session_of(&env.ticket(&id), "investigate");
+    let now = env.now;
+    env.sb().stop(&old, now);
+    for _ in 0..dispatch::ticket::SETTLE_POLLS {
+        env.step();
+    }
+    let now = env.tick();
+    env.runner
+        .decide(&id, &env.pending(&id)[0].id, "rerun", None, now)
+        .unwrap();
+    env.sb().fail_next = Some("session.kill".into());
+    env.step();
+    assert_eq!(env.sb().session(&old).liveness, Liveness::Running);
+    let t = env.ticket(&id);
+    assert_eq!(t.attempts.len(), 1, "launched beside the survivor: {t:#?}");
+    assert!(
+        t.decisions
+            .iter()
+            .any(|d| d.unacted_answer() == Some("rerun")),
+        "the answer stays unacted until the cleanup is done"
+    );
+    // The next pass kills it and launches.
+    env.step();
+    let t = env.ticket(&id);
+    assert_eq!(t.attempts.len(), 2, "{t:#?}");
+    assert_ne!(env.sb().session(&old).liveness, Liveness::Running);
+}
+
+#[test]
+fn parking_resumed_after_a_restart_still_pauses_the_run_first() {
+    let mut env = Env::new();
+    let id = at_finalize(&mut env);
+    // The intent was saved, then Dispatch died before the pause.
+    let mut t = env.ticket(&id);
+    t.state = TicketState::Parking {
+        reason: "parked by hand".into(),
+    };
+    let now = env.tick();
+    env.runner.save_ticket(&mut t, now).unwrap();
+    env.restart();
+    env.step();
+    let t = env.ticket(&id);
+    assert!(matches!(t.state, TicketState::Parked { .. }), "{t:#?}");
+    assert!(matches!(
+        &t.attempts_of("review").last().unwrap().state,
+        AttemptState::Cancelled { .. }
+    ));
+    let sb = env.sb();
+    assert!(
+        matches!(sb.runs[0].state, RunState::Paused { .. }),
+        "{:?}",
+        sb.runs[0].state
+    );
+    assert!(sb.sessions.iter().all(|s| s.liveness != Liveness::Running));
+}
+
+#[test]
+fn a_pause_that_does_not_take_keeps_the_ticket_parking() {
+    let mut env = Env::new();
+    let id = at_finalize(&mut env);
+    let decision = env.pending(&id)[0].id.clone();
+    let now = env.tick();
+    env.runner
+        .decide(&id, &decision, "park", None, now)
+        .unwrap();
+    env.sb().fail_next = Some("workflow.pause".into());
+    env.step();
+    let t = env.ticket(&id);
+    assert!(matches!(t.state, TicketState::Parking { .. }), "{t:#?}");
+    assert!(
+        t.attempts_of("review").last().unwrap().is_open(),
+        "not cancelled until paused"
+    );
+    env.step();
+    let t = env.ticket(&id);
+    assert!(matches!(t.state, TicketState::Parked { .. }), "{t:#?}");
+}
+
+/// The Switchboard pipeline exactly as `docs/dispatch.md` shows it, with
+/// its paths pointed at this test's directories.
+fn documented_pipeline(env: &Env) -> String {
+    let design = include_str!("../../docs/dispatch.md");
+    design
+        .split("### Pipeline: Switchboard")
+        .nth(1)
+        .unwrap()
+        .split("```toml\n")
+        .nth(1)
+        .unwrap()
+        .split("```")
+        .next()
+        .unwrap()
+        .replace(
+            "/Users/sully/code_repos/personal/switchboard-worktrees",
+            &env.worktrees.display().to_string(),
+        )
+        .replace(
+            "/Users/sully/code_repos/personal/switchboard",
+            &env.root.display().to_string(),
+        )
+}
+
+#[test]
+fn the_documented_pipelines_reviewer_is_told_its_repository() {
+    let mut env = Env::new();
+    std::fs::write(env.data.pipeline(PROJECT), documented_pipeline(&env)).unwrap();
+    let id = at_finalize(&mut env);
+    let worktree = env.ticket(&id).lanes[0].worktree.display().to_string();
+    let sb = env.sb();
+    let d = &sb.definitions[0];
+    assert!(d.review_first.contains(&worktree), "{}", d.review_first);
+    assert!(d.review_round.contains(&worktree), "{}", d.review_round);
+    assert!(d.review_first.contains("{plan}") && d.review_first.contains("{feedback}"));
+}
+
+#[test]
+fn a_template_that_never_names_the_tree_is_told_it_anyway() {
+    let mut env = Env::new();
+    let text = std::fs::read_to_string(env.data.pipeline(PROJECT))
+        .unwrap()
+        .replace(" for the tree at {worktree}", "");
+    assert!(!text.contains("{worktree}"));
+    std::fs::write(env.data.pipeline(PROJECT), text).unwrap();
+    let id = at_finalize(&mut env);
+    let worktree = env.ticket(&id).lanes[0].worktree.display().to_string();
+    let sb = env.sb();
+    assert!(
+        sb.definitions[0]
+            .review_first
+            .starts_with("The repository this is about is at ")
+    );
+    assert!(sb.definitions[0].review_first.contains(&worktree));
+}
