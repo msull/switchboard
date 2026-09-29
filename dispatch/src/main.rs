@@ -28,11 +28,11 @@ fn now_ms() -> u64 {
 }
 
 fn runner() -> Result<Runner> {
-    Ok(Runner {
-        data: DataDir::from_env()?,
-        port: Box::new(SocketPort::from_env()?),
-        git: Box::new(GitCli),
-    })
+    Ok(Runner::new(
+        DataDir::from_env()?,
+        Box::new(SocketPort::from_env()?),
+        Box::new(GitCli),
+    ))
 }
 
 fn main() -> Result<()> {
@@ -79,6 +79,8 @@ fn take(project: &str, issue: &str) -> Result<()> {
 
 fn run(once: bool) -> Result<()> {
     let mut runner = runner()?;
+    // One runner per data directory; a second exits here.
+    let _owner = runner.data.claim_runner()?;
     runner.recover(now_ms())?;
     loop {
         runner.step_all(now_ms())?;
@@ -90,11 +92,7 @@ fn run(once: bool) -> Result<()> {
 }
 
 fn decide(ticket: &str, decision: &str, answer: &str, note: Option<&str>) -> Result<()> {
-    let runner = Runner {
-        data: DataDir::from_env()?,
-        port: Box::new(NoPort),
-        git: Box::new(GitCli),
-    };
+    let runner = Runner::new(DataDir::from_env()?, Box::new(NoPort), Box::new(GitCli));
     let d = runner.decide(ticket, decision, answer, note, now_ms())?;
     println!(
         "{ticket} {}: {answer} (the runner acts on it on its next pass)",
@@ -104,11 +102,7 @@ fn decide(ticket: &str, decision: &str, answer: &str, note: Option<&str>) -> Res
 }
 
 fn decisions() -> Result<()> {
-    let runner = Runner {
-        data: DataDir::from_env()?,
-        port: Box::new(NoPort),
-        git: Box::new(GitCli),
-    };
+    let runner = Runner::new(DataDir::from_env()?, Box::new(NoPort), Box::new(GitCli));
     let mut any = false;
     for t in runner.tickets()? {
         for d in t.pending_decisions() {
@@ -135,11 +129,7 @@ fn decisions() -> Result<()> {
 }
 
 fn status() -> Result<()> {
-    let runner = Runner {
-        data: DataDir::from_env()?,
-        port: Box::new(NoPort),
-        git: Box::new(GitCli),
-    };
+    let runner = Runner::new(DataDir::from_env()?, Box::new(NoPort), Box::new(GitCli));
     let tickets = runner.tickets()?;
     if tickets.is_empty() {
         println!("no tickets");
@@ -152,6 +142,7 @@ fn status() -> Result<()> {
             .map_or("done".to_owned(), |s| s.name.clone());
         let standing = match &t.state {
             TicketState::Active => "active".to_owned(),
+            TicketState::Parking { reason } => format!("parking: {reason}"),
             TicketState::Parked { reason } => format!("parked: {reason}"),
             TicketState::Closed { reason } => format!("closed: {reason}"),
         };
@@ -167,6 +158,8 @@ fn status() -> Result<()> {
                     dispatch::ticket::AttemptState::Complete => "complete".to_owned(),
                     dispatch::ticket::AttemptState::Failed { reason } =>
                         format!("failed: {reason}"),
+                    dispatch::ticket::AttemptState::Cancelled { reason } =>
+                        format!("cancelled: {reason}"),
                 }
             )
         });
@@ -195,28 +188,12 @@ fn status() -> Result<()> {
 }
 
 fn queue(project: &str, order: &[&str]) -> Result<()> {
-    let runner = Runner {
-        data: DataDir::from_env()?,
-        port: Box::new(NoPort),
-        git: Box::new(GitCli),
+    let mut runner = Runner::new(DataDir::from_env()?, Box::new(NoPort), Box::new(GitCli));
+    let ps = if order.is_empty() {
+        runner.load_project(project)?
+    } else {
+        runner.reorder_queue(project, order)?
     };
-    let mut ps = runner.load_project(project)?;
-    if !order.is_empty() {
-        let mut next: Vec<String> = Vec::new();
-        for id in order {
-            if !ps.queue.iter().any(|q| q == id) {
-                bail!("{id} is not in {project}'s queue");
-            }
-            next.push((*id).to_owned());
-        }
-        for id in &ps.queue {
-            if !next.contains(id) {
-                next.push(id.clone());
-            }
-        }
-        ps.queue = next;
-        runner.save_project(&ps)?;
-    }
     for (i, id) in ps.queue.iter().enumerate() {
         let title = runner
             .load_ticket(id)

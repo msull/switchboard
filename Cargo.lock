@@ -1167,7 +1167,6 @@ dependencies = [
  "anyhow",
  "directories",
  "env_logger",
- "fd-lock",
  "log",
  "serde",
  "serde_json",

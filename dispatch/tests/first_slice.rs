@@ -51,7 +51,7 @@ kind = "claude"
 kind = "codex"
 [operators.reviewer.review]
 reviewer = "codex"
-review_first = "Review {{plan}}; write to {{feedback}}; else {{no_feedback}}"
+review_first = "Review {{plan}} for the tree at {{worktree}}; write to {{feedback}}; else {{no_feedback}}"
 review_round = "Again {{response}} {{plan}} {{feedback}} {{no_feedback}}"
 respond = "Feedback at {{feedback}}; edit {{plan}}; answer at {{response}}."
 respond_to_user = "{{text}} {{plan}} {{response}}"
@@ -125,11 +125,11 @@ impl Env {
         std::fs::create_dir_all(data.root.join("pipelines")).unwrap();
         std::fs::write(data.pipeline(PROJECT), pipeline(&root, &worktrees)).unwrap();
         let sb = Arc::new(Mutex::new(FakeSwitchboard::new()));
-        let runner = Runner {
-            data: data.clone(),
-            port: Box::new(SharedPort(Arc::clone(&sb))),
-            git: Box::new(FakeRepo::default()),
-        };
+        let runner = Runner::new(
+            data.clone(),
+            Box::new(SharedPort(Arc::clone(&sb))),
+            Box::new(FakeRepo::default()),
+        );
         Self {
             _dir: dir,
             data,
@@ -144,11 +144,11 @@ impl Env {
     /// Dispatch restarts: a fresh runner over the same records and the
     /// same Switchboard, reconciling its ledger first.
     fn restart(&mut self) {
-        self.runner = Runner {
-            data: self.data.clone(),
-            port: Box::new(SharedPort(Arc::clone(&self.sb))),
-            git: Box::new(FakeRepo::default()),
-        };
+        self.runner = Runner::new(
+            self.data.clone(),
+            Box::new(SharedPort(Arc::clone(&self.sb))),
+            Box::new(FakeRepo::default()),
+        );
         let now = self.tick();
         self.runner.recover(now).unwrap();
     }
@@ -829,4 +829,309 @@ fn a_project_that_cannot_be_saved_makes_nothing_else() {
     assert_eq!(env.sb().kinds_called("session.new"), 0);
     let liveness: Vec<Liveness> = env.sb().sessions.iter().map(|s| s.liveness).collect();
     assert!(liveness.is_empty());
+}
+
+// --- what a review of the slice found: the runner's pass and a command
+// from the terminal share one lock, idempotent requests are replayed,
+// an attempt saved without its request fails instead of waiting, a
+// record's primary is never absent, parking stops what runs, and the
+// reviewer is told which tree the plan is about.
+
+/// A port that fails one request of the given kind before it reaches
+/// Switchboard, then behaves.
+struct FailBefore {
+    inner: SharedPort,
+    kind: &'static str,
+    fired: bool,
+}
+
+impl dispatch::port::Port for FailBefore {
+    fn call(
+        &mut self,
+        request: &switchboard_control::Request,
+    ) -> std::io::Result<switchboard_control::Reply> {
+        if !self.fired && request.body.kind() == self.kind {
+            self.fired = true;
+            return Err(std::io::Error::other(
+                "the socket closed before the request went out",
+            ));
+        }
+        self.inner.call(request)
+    }
+}
+
+/// Drive a ticket to the finalize decision.
+fn at_finalize(env: &mut Env) -> String {
+    let id = through_plan(env, 7);
+    let t = env.ticket(&id);
+    env.finish(
+        &session_of(&t, "plan"),
+        &artifact_of(&t, "plan", "plan"),
+        "# plan",
+    );
+    env.steps_until(&id, "the review run", |t, _| {
+        t.attempts_of("review")
+            .last()
+            .is_some_and(|a| a.run.is_some())
+    });
+    env.sb().runs[0].state = RunState::Converged;
+    env.step();
+    assert_eq!(env.pending(&id)[0].name, "finalize");
+    id
+}
+
+#[test]
+fn an_authorised_finalize_survives_a_lost_reply() {
+    let mut env = Env::new();
+    let id = at_finalize(&mut env);
+    let decision = env.pending(&id)[0].id.clone();
+    let now = env.tick();
+    env.runner
+        .decide(&id, &decision, "finalize", None, now)
+        .unwrap();
+    env.runner.port = Box::new(FailBefore {
+        inner: SharedPort(Arc::clone(&env.sb)),
+        kind: "workflow.finalize",
+        fired: false,
+    });
+    env.step();
+    assert_ne!(
+        env.sb().runs[0].state,
+        RunState::Finalized,
+        "the request was lost"
+    );
+    let t = env.ticket(&id);
+    let lost = t
+        .ledger
+        .iter()
+        .find(|o| o.kind == "workflow.finalize")
+        .unwrap();
+    assert!(lost.reply.is_none() && lost.error.is_some());
+    // The next pass sends the same operation again; a restart would too.
+    env.step();
+    assert_eq!(env.sb().runs[0].state, RunState::Finalized);
+    let t = env.ticket(&id);
+    let replayed = t
+        .ledger
+        .iter()
+        .find(|o| o.kind == "workflow.finalize")
+        .unwrap();
+    assert!(replayed.reply.is_some() && replayed.error.is_none());
+    assert_eq!(
+        env.sb().kinds_called("workflow.finalize"),
+        1,
+        "one request reached Switchboard"
+    );
+}
+
+#[test]
+fn parking_pauses_the_run_and_kills_every_process_before_reading_as_parked() {
+    let mut env = Env::new();
+    let id = at_finalize(&mut env);
+    let decision = env.pending(&id)[0].id.clone();
+    let now = env.tick();
+    env.runner
+        .decide(&id, &decision, "park", None, now)
+        .unwrap();
+    env.step();
+    let t = env.ticket(&id);
+    assert!(
+        matches!(&t.state, TicketState::Parked { reason } if reason.contains("by hand")),
+        "{t:#?}"
+    );
+    let review = t.attempts_of("review").last().unwrap();
+    assert!(
+        matches!(&review.state, AttemptState::Cancelled { .. }),
+        "{review:#?}"
+    );
+    {
+        let sb = env.sb();
+        assert!(
+            matches!(sb.runs[0].state, RunState::Paused { .. }),
+            "{:?}",
+            sb.runs[0].state
+        );
+        assert!(
+            sb.sessions.iter().all(|s| s.liveness != Liveness::Running),
+            "parking left something running: {:?}",
+            sb.sessions
+                .iter()
+                .filter(|s| s.liveness == Liveness::Running)
+                .map(|s| &s.name)
+                .collect::<Vec<_>>()
+        );
+    }
+    // Parked is quiet: nothing more is asked of Switchboard.
+    let calls = env.sb().calls.len();
+    env.step();
+    assert_eq!(env.sb().calls.len(), calls);
+}
+
+#[test]
+fn an_attempt_saved_without_its_request_fails_instead_of_waiting_forever() {
+    let mut env = Env::new();
+    let id = env.take(7).id;
+    env.step();
+    // Dispatch stopped between writing the attempt and writing its
+    // request: no session, no operation. (The runner no longer writes
+    // these apart, but a record from a crash may still look like it.)
+    let mut t = env.ticket(&id);
+    let session = t.attempts[0].session.take().unwrap();
+    t.attempts[0].state = AttemptState::Starting;
+    t.ledger.retain(|o| o.kind != "session.new");
+    {
+        let mut sb = env.sb();
+        sb.sessions.retain(|s| s.id != session);
+        sb.log.retain(|l| l.kind != "session.new");
+    }
+    let now = env.tick();
+    env.runner.save_ticket(&mut t, now).unwrap();
+    env.restart();
+    env.step();
+    let t = env.ticket(&id);
+    assert!(
+        matches!(&t.attempts[0].state, AttemptState::Failed { reason } if reason.contains("never recorded")),
+        "{t:#?}"
+    );
+    assert_eq!(env.pending(&id)[0].name, "rerun");
+    assert_eq!(
+        env.sb().kinds_called("session.new"),
+        1,
+        "nothing launched without an answer"
+    );
+}
+
+#[test]
+fn a_decision_written_while_the_runner_is_mid_pass_is_kept() {
+    let mut env = Env::new();
+    let id = at_finalize(&mut env);
+    let decision = env.pending(&id)[0].id.clone();
+    let data = env.data.clone();
+    let sb = Arc::clone(&env.sb);
+    let now = env.tick();
+    // The runner's pass holds the lock; a `dispatch decide` from the
+    // terminal waits for it and lands afterwards, on the saved record,
+    // instead of being overwritten by the pass's own save.
+    let (ticket_id, decision_id) = (id.clone(), decision.clone());
+    let answered = env
+        .runner
+        .transaction(|r| {
+            let mut stale = r.load_ticket(&ticket_id)?;
+            let cli = std::thread::spawn(move || {
+                let cli = Runner::new(
+                    data,
+                    Box::new(SharedPort(sb)),
+                    Box::new(FakeRepo::default()),
+                );
+                cli.decide(&ticket_id, &decision_id, "finalize", None, now + 1)
+                    .map(|d| d.id)
+            });
+            r.save_ticket(&mut stale, now)?;
+            Ok(cli)
+        })
+        .unwrap()
+        .join()
+        .unwrap()
+        .unwrap();
+    assert_eq!(answered, decision);
+    let t = env.ticket(&id);
+    assert!(
+        t.pending_decisions().is_empty(),
+        "the answer was overwritten: {t:#?}"
+    );
+    env.step();
+    assert_eq!(env.sb().runs[0].state, RunState::Finalized);
+}
+
+#[test]
+fn a_project_whose_primary_vanished_reads_its_backup() {
+    let mut env = Env::new();
+    let id = env.take(7).id;
+    let path = env.data.project_file(PROJECT);
+    // Only a crash of an older write could leave this; the backup is
+    // still the truth.
+    std::fs::rename(&path, path.with_file_name("Switchboard.json.bak")).unwrap();
+    assert_eq!(
+        env.runner.load_project(PROJECT).unwrap().queue,
+        vec![id.clone()]
+    );
+    // And a pass rewrites the primary from it.
+    env.step();
+    assert!(path.exists());
+    assert_eq!(env.runner.load_project(PROJECT).unwrap().queue, vec![id]);
+}
+
+#[test]
+fn the_reviewer_is_told_which_tree_the_plan_is_about() {
+    let mut env = Env::new();
+    let id = through_plan(&mut env, 7);
+    let t = env.ticket(&id);
+    env.finish(
+        &session_of(&t, "plan"),
+        &artifact_of(&t, "plan", "plan"),
+        "# plan",
+    );
+    env.steps_until(&id, "the review run", |t, _| {
+        t.attempts_of("review")
+            .last()
+            .is_some_and(|a| a.run.is_some())
+    });
+    let t = env.ticket(&id);
+    let sb = env.sb();
+    let definition = &sb.definitions[0];
+    let worktree = t.lanes[0].worktree.display().to_string();
+    assert!(
+        definition.review_first.contains(&worktree),
+        "{}",
+        definition.review_first
+    );
+    assert!(
+        definition.review_first.contains("{plan}"),
+        "Switchboard's own placeholders stay"
+    );
+    assert!(definition.name.starts_with("Dispatch: reviewer@"));
+}
+
+#[test]
+fn a_rerun_retires_the_replaced_attempt_before_launching() {
+    let mut env = Env::new();
+    let id = env.take(7).id;
+    env.step();
+    let t = env.ticket(&id);
+    let first = session_of(&t, "investigate");
+    // Stopped without writing: the attempt fails, but the pane is still
+    // up.
+    let now = env.now;
+    env.sb().stop(&first, now);
+    for _ in 0..dispatch::ticket::SETTLE_POLLS {
+        env.step();
+    }
+    let t = env.ticket(&id);
+    assert!(
+        matches!(&t.attempts[0].state, AttemptState::Failed { .. }),
+        "{t:#?}"
+    );
+    assert_eq!(env.sb().session(&first).liveness, Liveness::Running);
+    let now = env.tick();
+    env.runner
+        .decide(&id, &env.pending(&id)[0].id, "rerun", None, now)
+        .unwrap();
+    env.step();
+    let t = env.ticket(&id);
+    assert_eq!(t.attempts.len(), 2, "{t:#?}");
+    {
+        let sb = env.sb();
+        assert!(sb.killed.contains(&first), "the old pane was killed first");
+        let kill = sb
+            .calls
+            .iter()
+            .position(|r| matches!(&r.body, Body::SessionKill { session } if session == &first))
+            .unwrap();
+        let launch = sb
+            .calls
+            .iter()
+            .rposition(|r| matches!(&r.body, Body::SessionNew { .. }))
+            .unwrap();
+        assert!(kill < launch, "kill at {kill}, launch at {launch}");
+    }
 }

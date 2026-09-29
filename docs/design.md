@@ -1443,8 +1443,23 @@ Switchboard pipeline through `investigate`, the automatic `lanes`
 decision, `plan`, and a review run on a copy of the plan, stopping at
 the `finalize` decision. Everything else in that document (command and
 external gates, `implement`, PR checks, budgets, the other pipelines)
-parks the ticket with a reason. `dispatch/tests/first_slice.rs` is the
-acceptance table; `dispatch/tests/live.rs` runs the first stage against
+parks the ticket with a reason. The runner's pass over a project is
+one transaction under the data directory's writer lock, and `decide`,
+`take` and `queue` take the same lock around their read and write, so
+an answer from the terminal is never overwritten by a pass that read
+the record before it; a second `dispatch run` on the same directory is
+refused by `runner.lock`. Every request keeps its body in the ledger,
+so a lost reply to an idempotent one (`workflow.finalize`,
+`session.kill`, `set.sync`) is sent again as the same operation. An
+attempt with no launch on the books fails rather than waits. Parking
+and a rerun follow the design's cancellation sequence: the intent is
+written, the review run paused, every process killed and read back,
+and only then does the ticket read as parked or the replacement start.
+A record's backup is a hard link, so its primary is never absent
+mid-write. The reviewer's templates get `{worktree}`, `{branch}` and
+`{project.root}` rendered in, since it works in the attempt directory.
+`dispatch/tests/first_slice.rs` is the acceptance table, plus a test
+per point above; `dispatch/tests/live.rs` runs the first stage against
 a real Switchboard and a haiku agent. Known gap: Claude Code treats a
 git repository as its own workspace for the folder-trust dialog, so the
 first agent in each lane's worktree blocks on that dialog until it is

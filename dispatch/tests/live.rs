@@ -150,11 +150,11 @@ prompt = "Write the single word pong to the file {{notes}} and stop."
     );
     std::fs::write(data.pipeline(PROJECT), &pipeline).unwrap();
 
-    let mut runner = Runner {
-        data: data.clone(),
-        port: Box::new(SocketPort::new(&sb_dir)),
-        git: Box::new(GitCli),
-    };
+    let mut runner = Runner::new(
+        data.clone(),
+        Box::new(SocketPort::new(&sb_dir)),
+        Box::new(GitCli),
+    );
     let id = runner
         .take(
             PROJECT,

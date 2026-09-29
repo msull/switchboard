@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
-use switchboard_control::Reply;
+use switchboard_control::{Body, Reply};
 
 /// Where a ticket came from, as it was when taken.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -49,6 +49,11 @@ pub enum AttemptState {
     Running,
     Complete,
     Failed {
+        reason: String,
+    },
+    /// Stopped by Dispatch (the ticket parked, or a rerun replaced it);
+    /// no decision follows.
+    Cancelled {
         reason: String,
     },
 }
@@ -180,6 +185,10 @@ pub struct Operation {
     #[serde(default)]
     pub intent: String,
     pub sent_ms: u64,
+    /// The request itself, so an idempotent one whose reply was lost can
+    /// be sent again as the same operation.
+    #[serde(default)]
+    pub body: Option<Body>,
     pub reply: Option<Reply>,
     /// The socket failed before a reply came; recovery decides.
     pub error: Option<String>,
@@ -189,6 +198,11 @@ pub struct Operation {
 #[serde(tag = "state", rename_all = "kebab-case")]
 pub enum TicketState {
     Active,
+    /// Stopping: open attempts are cancelled and the ticket's processes
+    /// killed; `Parked` once Switchboard reports every one gone.
+    Parking {
+        reason: String,
+    },
     /// Stopped with a reason; requeue or close by hand.
     Parked {
         reason: String,

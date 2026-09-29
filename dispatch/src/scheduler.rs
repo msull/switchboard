@@ -12,7 +12,7 @@ use switchboard_control::{self as wire, Body, Reply, Request, RunState};
 use crate::git::{Repo, branch_name};
 use crate::pipeline::{Context, Gate, Pipeline, Stage, StageKind};
 use crate::port::Port;
-use crate::store::{DataDir, read_json, write_json};
+use crate::store::{DataDir, Lock, read_json, write_json};
 use crate::template::Vars;
 use crate::ticket::{
     Attempt, AttemptKind, AttemptState, Decision, DecisionKind, DecisionState, LaneRecord,
@@ -24,6 +24,42 @@ pub struct Runner {
     pub data: DataDir,
     pub port: Box<dyn Port>,
     pub git: Box<dyn Repo>,
+    /// The writer lock while a transaction runs; saves inside it write
+    /// straight through, saves outside it take the lock for the write.
+    held: Option<Lock>,
+}
+
+impl Runner {
+    #[must_use]
+    pub fn new(data: DataDir, port: Box<dyn Port>, git: Box<dyn Repo>) -> Self {
+        Self {
+            data,
+            port,
+            git,
+            held: None,
+        }
+    }
+
+    /// Run `f` as one read-modify-write under the writer lock: nothing
+    /// from the terminal lands between the reads and the writes inside.
+    /// Nested calls share the outer lock.
+    pub fn transaction<T>(&mut self, f: impl FnOnce(&mut Self) -> Result<T>) -> Result<T> {
+        if self.held.is_some() {
+            return f(self);
+        }
+        self.held = Some(self.data.lock()?);
+        let result = f(self);
+        self.held = None;
+        result
+    }
+
+    fn write_record<T: serde::Serialize>(&self, path: &Path, value: &T) -> Result<()> {
+        if self.held.is_some() {
+            write_json(path, value)
+        } else {
+            self.data.with_lock(|| write_json(path, value))
+        }
+    }
 }
 
 /// What `dispatch decide` writes as the answerer.
@@ -53,13 +89,12 @@ impl Runner {
 
     pub fn save_ticket(&self, t: &mut Ticket, now_ms: u64) -> Result<()> {
         t.updated_ms = now_ms;
-        let path = self.data.ticket_file(&t.id);
-        self.data.with_lock(|| write_json(&path, t))
+        self.write_record(&self.data.ticket_file(&t.id), t)
     }
 
     pub fn load_project(&self, name: &str) -> Result<ProjectState> {
         let path = self.data.project_file(name);
-        if path.exists() {
+        if crate::store::record_exists(&path) {
             read_json(&path)
         } else {
             Ok(ProjectState {
@@ -70,8 +105,30 @@ impl Runner {
     }
 
     pub fn save_project(&self, ps: &ProjectState) -> Result<()> {
-        let path = self.data.project_file(&ps.name);
-        self.data.with_lock(|| write_json(&path, ps))
+        self.write_record(&self.data.project_file(&ps.name), ps)
+    }
+
+    /// Reorder a project's queue from the terminal: every id named comes
+    /// first in that order, the rest keep theirs. One transaction.
+    pub fn reorder_queue(&mut self, project: &str, order: &[&str]) -> Result<ProjectState> {
+        self.transaction(|r| {
+            let mut ps = r.load_project(project)?;
+            let mut next: Vec<String> = Vec::new();
+            for id in order {
+                if !ps.queue.iter().any(|q| q == id) {
+                    bail!("{id} is not in {project}'s queue");
+                }
+                next.push((*id).to_owned());
+            }
+            for id in &ps.queue {
+                if !next.contains(id) {
+                    next.push(id.clone());
+                }
+            }
+            ps.queue = next;
+            r.save_project(&ps)?;
+            Ok(ps)
+        })
     }
 
     /// The pipeline a ticket runs under: its own copy.
@@ -108,6 +165,16 @@ impl Runner {
                 pipeline.project.name
             );
         }
+        self.transaction(|r| r.take_locked(project, pipeline_text, source, now_ms))
+    }
+
+    fn take_locked(
+        &mut self,
+        project: &str,
+        pipeline_text: &str,
+        source: SourceSnapshot,
+        now_ms: u64,
+    ) -> Result<Ticket> {
         for existing in self.tickets()? {
             if existing.source.identity == source.identity
                 && !matches!(existing.state, TicketState::Closed { .. })
@@ -118,7 +185,9 @@ impl Runner {
                     existing.id,
                     match &existing.state {
                         TicketState::Active => "active".to_owned(),
-                        TicketState::Parked { reason } => format!("parked: {reason}"),
+                        TicketState::Parking { reason } | TicketState::Parked { reason } => {
+                            format!("parked: {reason}")
+                        }
                         TicketState::Closed { .. } => unreachable!(),
                     }
                 );
@@ -184,6 +253,7 @@ impl Runner {
             attempt,
             intent: intent.into(),
             sent_ms: now_ms,
+            body: Some(body.clone()),
             reply: None,
             error: None,
         });
@@ -243,6 +313,7 @@ impl Runner {
         for i in pending {
             self.recover_one(t, ps, i, now_ms)?;
         }
+        self.fail_stranded(t, ps, now_ms)?;
         self.act_on_answers(t, ps, p, now_ms)?;
         if !t.active() {
             return Ok(());
@@ -284,12 +355,159 @@ impl Runner {
         self.save_project(ps)
     }
 
-    fn park(&mut self, t: &mut Ticket, reason: &str, now_ms: u64) -> Result<()> {
-        log::warn!("ticket {} parked: {reason}", t.id);
-        t.state = TicketState::Parked {
+    /// Parking is a sequence, not a flag: the intent is written first,
+    /// open attempts are cancelled (a review run paused so its tick
+    /// cannot start a round), every process on the ticket's list is
+    /// killed, and the ticket reads as parked only once Switchboard
+    /// reports them all gone. `finish_parking` runs the rest on later
+    /// passes if anything is still alive now.
+    fn park(
+        &mut self,
+        t: &mut Ticket,
+        ps: &mut ProjectState,
+        reason: &str,
+        now_ms: u64,
+    ) -> Result<()> {
+        log::warn!("ticket {} parking: {reason}", t.id);
+        t.state = TicketState::Parking {
             reason: reason.into(),
         };
-        self.save_ticket(t, now_ms)
+        self.save_ticket(t, now_ms)?;
+        let open: Vec<Attempt> = t.attempts.iter().filter(|a| a.is_open()).cloned().collect();
+        for a in open {
+            self.cancel_attempt(t, ps, &a, reason, now_ms)?;
+        }
+        self.finish_parking(t, ps, now_ms)
+    }
+
+    /// Kill what is still alive on the ticket's process list; parked once
+    /// nothing is.
+    pub(crate) fn finish_parking(
+        &mut self,
+        t: &mut Ticket,
+        ps: &mut ProjectState,
+        now_ms: u64,
+    ) -> Result<()> {
+        let TicketState::Parking { reason } = t.state.clone() else {
+            return Ok(());
+        };
+        if self.retire_processes(t, ps, &t.processes.clone(), now_ms)? {
+            log::warn!("ticket {} parked: {reason}", t.id);
+            t.state = TicketState::Parked { reason };
+            self.save_ticket(t, now_ms)?;
+        }
+        Ok(())
+    }
+
+    /// An attempt Dispatch stops on purpose: its run paused, its state
+    /// written, its processes killed. No decision follows.
+    fn cancel_attempt(
+        &mut self,
+        t: &mut Ticket,
+        ps: &mut ProjectState,
+        a: &Attempt,
+        reason: &str,
+        now_ms: u64,
+    ) -> Result<()> {
+        if let Some(run) = a.run.clone() {
+            self.send(
+                t,
+                ps,
+                Some((a.stage.clone(), a.n)),
+                "pause",
+                Body::WorkflowPause { run },
+                now_ms,
+            )?;
+        }
+        if let Some(attempt) = t
+            .attempts
+            .iter_mut()
+            .find(|x| x.stage == a.stage && x.n == a.n)
+        {
+            attempt.state = AttemptState::Cancelled {
+                reason: reason.into(),
+            };
+            attempt.ended_ms = Some(now_ms);
+        }
+        self.save_ticket(t, now_ms)?;
+        let mine = self.processes_of(t, a)?;
+        self.retire_processes(t, ps, &mine, now_ms)?;
+        Ok(())
+    }
+
+    /// The sessions an attempt owns: its own, or its run's reviewer and
+    /// planner clone.
+    fn processes_of(&mut self, t: &Ticket, a: &Attempt) -> Result<Vec<String>> {
+        let mut ids: Vec<String> = a.session.iter().cloned().collect();
+        if let Some(run) = a.run.clone()
+            && let Reply::Workflow { run } = self.ask(Body::Workflow { run })?
+        {
+            ids.push(run.reviewer);
+            ids.extend(run.planner);
+        }
+        let _ = t;
+        Ok(ids)
+    }
+
+    /// Kill every session named that still runs, then read each back.
+    /// True when none is running any more.
+    fn retire_processes(
+        &mut self,
+        t: &mut Ticket,
+        ps: &mut ProjectState,
+        ids: &[String],
+        now_ms: u64,
+    ) -> Result<bool> {
+        let mut all_gone = true;
+        for id in ids {
+            let running = matches!(
+                self.ask(Body::Session { session: id.clone() })?,
+                Reply::Session { session } if session.liveness == wire::Liveness::Running
+            );
+            if !running {
+                continue;
+            }
+            self.send(
+                t,
+                ps,
+                None,
+                "kill",
+                Body::SessionKill {
+                    session: id.clone(),
+                },
+                now_ms,
+            )?;
+            if matches!(
+                self.ask(Body::Session { session: id.clone() })?,
+                Reply::Session { session } if session.liveness == wire::Liveness::Running
+            ) {
+                all_gone = false;
+            }
+        }
+        Ok(all_gone)
+    }
+
+    /// An open attempt with nothing to watch and no launch request on
+    /// the books: Dispatch stopped between writing the attempt and
+    /// writing the request, so nothing was ever asked of Switchboard.
+    fn fail_stranded(&mut self, t: &mut Ticket, ps: &mut ProjectState, now_ms: u64) -> Result<()> {
+        let stranded: Vec<(String, u32)> = t
+            .attempts
+            .iter()
+            .filter(|a| a.is_open() && a.session.is_none() && a.run.is_none())
+            .filter(|a| {
+                !t.ledger.iter().any(|o| {
+                    o.reply.is_none()
+                        && matches!(o.intent.as_str(), "session" | "run")
+                        && o.attempt.as_ref() == Some(&(a.stage.clone(), a.n))
+                })
+            })
+            .map(|a| (a.stage.clone(), a.n))
+            .collect();
+        for (stage, n) in stranded {
+            self.fail_attempt(t, ps, &stage, n, "its launch was never recorded", now_ms)?;
+        }
+        Ok(())
     }
 
     // --- decisions
@@ -418,7 +636,7 @@ impl Runner {
                         .map(|s| s.trim().to_owned())
                         .filter(|s| !s.is_empty())
                         .collect();
-                    self.cut_lanes(t, p, &names, now_ms)?;
+                    self.cut_lanes(t, ps, p, &names, now_ms)?;
                 }
                 ("finalize", "finalize") => {
                     if let Some(run) = attempt
@@ -454,13 +672,34 @@ impl Runner {
                     }
                     self.unmark(t, ps, now_ms)?;
                 }
-                ("rerun", "rerun") => self.unmark(t, ps, now_ms)?,
+                ("rerun", "rerun") => {
+                    // The replaced attempt is retired first, so an old
+                    // and a new attempt never run together; still alive,
+                    // the answer waits for the next pass.
+                    if let Some(a) = attempt
+                        .as_ref()
+                        .and_then(|(s, n)| t.attempts.iter().find(|a| &a.stage == s && a.n == *n))
+                        .cloned()
+                    {
+                        let mine = self.processes_of(t, &a)?;
+                        if !self.retire_processes(t, ps, &mine, now_ms)? {
+                            if let DecisionState::Answered { acted, .. } = &mut t.decisions[i].state
+                            {
+                                *acted = false;
+                            }
+                            self.save_ticket(t, now_ms)?;
+                            continue;
+                        }
+                    }
+                    self.unmark(t, ps, now_ms)?;
+                }
                 (_, "park") => {
-                    self.park(t, &format!("parked by hand at decision {name}"), now_ms)?;
+                    self.park(t, ps, &format!("parked by hand at decision {name}"), now_ms)?;
                 }
                 (name, other) => {
                     self.park(
                         t,
+                        ps,
                         &format!("decision {name}: answer {other:?} is not one Dispatch knows"),
                         now_ms,
                     )?;
@@ -479,6 +718,7 @@ impl Runner {
     fn cut_lanes(
         &mut self,
         t: &mut Ticket,
+        ps: &mut ProjectState,
         p: &Pipeline,
         names: &[String],
         now_ms: u64,
@@ -490,6 +730,7 @@ impl Runner {
             let Some(lane) = p.lane(name) else {
                 self.park(
                     t,
+                    ps,
                     &format!("lanes decision named an unknown lane {name:?}"),
                     now_ms,
                 )?;
@@ -498,6 +739,7 @@ impl Runner {
             let Some(worktrees) = &lane.worktrees else {
                 self.park(
                     t,
+                    ps,
                     &format!("lane {name:?} works in place, which is not built in this slice"),
                     now_ms,
                 )?;
@@ -507,7 +749,7 @@ impl Runner {
             let dir = worktrees.join(&t.id);
             let branch = branch_name(t.source.number.unwrap_or(0), &t.source.title);
             if let Err(e) = self.git.worktree_add(&repo, &dir, &branch, &lane.base) {
-                self.park(t, &format!("could not cut lane {name}: {e}"), now_ms)?;
+                self.park(t, ps, &format!("could not cut lane {name}: {e}"), now_ms)?;
                 return Ok(());
             }
             if !lane.setup.is_empty()
@@ -515,7 +757,7 @@ impl Runner {
                     self.git
                         .run(&dir, &lane.setup, &env_for(t, Some(name), Some(&branch)))
             {
-                self.park(t, &format!("lane {name}: setup failed: {e}"), now_ms)?;
+                self.park(t, ps, &format!("lane {name}: setup failed: {e}"), now_ms)?;
                 return Ok(());
             }
             t.lanes.push(LaneRecord {
@@ -547,7 +789,7 @@ impl Runner {
                 }
                 if p.dial("lanes") == "auto" && p.lanes.len() == 1 {
                     let names = vec![p.lanes[0].name.clone()];
-                    self.cut_lanes(t, p, &names, now_ms)?;
+                    self.cut_lanes(t, ps, p, &names, now_ms)?;
                     if t.active() {
                         self.finish_gate_only(t, ps, stage, now_ms)?;
                     }
@@ -586,11 +828,12 @@ impl Runner {
                 };
                 self.park(
                     t,
+                    ps,
                     &format!("stage {} ({kind}) is not built in this slice", stage.name),
                     now_ms,
                 )
             }
-            None => self.park(t, &format!("stage {} has no gate", stage.name), now_ms),
+            None => self.park(t, ps, &format!("stage {} has no gate", stage.name), now_ms),
         }
     }
 
@@ -752,6 +995,7 @@ impl Runner {
             };
             return self.park(
                 t,
+                ps,
                 &format!("stage {} ({kind}) is not built in this slice", stage.name),
                 now_ms,
             );
@@ -760,6 +1004,7 @@ impl Runner {
         if contexts.is_empty() {
             return self.park(
                 t,
+                ps,
                 &format!("stage {} needs lanes the ticket has not cut", stage.name),
                 now_ms,
             );
@@ -829,13 +1074,14 @@ impl Runner {
         let Some(operator) = p.operators.get(&operator_name) else {
             return self.park(
                 t,
+                ps,
                 &format!("stage {} names no operator", stage.name),
                 now_ms,
             );
         };
         let project = match self.ensure_project(t, ps, p, lane, cwd, now_ms) {
             Ok(id) => id,
-            Err(e) => return self.park(t, &format!("stage {}: {e:#}", stage.name), now_ms),
+            Err(e) => return self.park(t, ps, &format!("stage {}: {e:#}", stage.name), now_ms),
         };
         let dir = self
             .data
@@ -869,8 +1115,9 @@ impl Runner {
             now_ms,
         );
         attempt.project = Some(project.clone());
+        // Not saved here: `send` writes the attempt and its request in
+        // one go, so no record ever shows the one without the other.
         t.attempts.push(attempt);
-        self.save_ticket(t, now_ms)?;
         // The artifacts live outside the agent's cwd, in Dispatch's own
         // directory; Claude Code writes there unasked only under an
         // allow rule for the path (an added directory still asks before
@@ -1075,6 +1322,7 @@ impl Runner {
         if contexts.is_empty() {
             return self.park(
                 t,
+                ps,
                 &format!("stage {} needs lanes the ticket has not cut", stage.name),
                 now_ms,
             );
@@ -1145,43 +1393,23 @@ impl Runner {
         else {
             return self.park(
                 t,
+                ps,
                 &format!("stage {} names no reviewer", stage.name),
                 now_ms,
             );
         };
         let Some(subject) = stage.subject.clone() else {
-            return self.park(t, &format!("stage {} names no subject", stage.name), now_ms);
-        };
-        // The subject and the session that wrote it: the review clones
-        // that session's conversation for the planner.
-        let Some((source_path, source_session)) = t
-            .attempts
-            .iter()
-            .rev()
-            .filter(|a| a.state == AttemptState::Complete)
-            .find_map(|a| {
-                a.artifacts
-                    .get(&subject)
-                    .map(|path| (path.clone(), a.session.clone()))
-            })
-        else {
             return self.park(
                 t,
-                &format!("stage {}: nothing wrote {subject}", stage.name),
+                ps,
+                &format!("stage {} names no subject", stage.name),
                 now_ms,
             );
         };
-        let Some(source_session) = source_session else {
-            return self.park(
-                t,
-                &format!(
-                    "stage {}: {subject} was not written by a session",
-                    stage.name
-                ),
-                now_ms,
-            );
+        let (source_path, source_session) = match review_subject(t, &subject) {
+            Ok(found) => found,
+            Err(why) => return self.park(t, ps, &format!("stage {}: {why}", stage.name), now_ms),
         };
-        let _ = lane;
         let dir = self
             .data
             .ticket_dir(&t.id)
@@ -1192,7 +1420,7 @@ impl Runner {
         let copy = dir.join(format!("{subject}.md"));
         std::fs::copy(&source_path, &copy)
             .with_context(|| format!("copy {} to {}", source_path.display(), copy.display()))?;
-        let definition = definition_of(&reviewer_name, review);
+        let definition = definition_of(&reviewer_name, review, &vars_for(t, p, lane));
         t.attempts.push(new_attempt(
             &stage.name,
             n,
@@ -1202,7 +1430,6 @@ impl Runner {
             BTreeMap::from([(subject.clone(), copy.clone())]),
             now_ms,
         ));
-        self.save_ticket(t, now_ms)?;
         let name = definition.name.clone();
         self.send(
             t,
@@ -1333,6 +1560,13 @@ impl Runner {
         if t.attempts[idx].state == AttemptState::Starting {
             t.attempts[idx].state = AttemptState::Running;
         }
+        // The planner clone is made after the start reply, so it joins
+        // the process list here, the first time it is seen.
+        for id in view.planner.iter().chain(std::iter::once(&view.reviewer)) {
+            if !t.processes.contains(id) {
+                t.processes.push(id.clone());
+            }
+        }
         self.save_ticket(t, now_ms)?;
         let subject = stage.subject.clone().unwrap_or_default();
         match view.state {
@@ -1382,6 +1616,10 @@ impl Runner {
     /// Every active ticket of `project`, in queue order, as far as the
     /// slots allow; then the queue view.
     pub fn step_project(&mut self, project: &str, now_ms: u64) -> Result<()> {
+        self.transaction(|r| r.step_project_locked(project, now_ms))
+    }
+
+    fn step_project_locked(&mut self, project: &str, now_ms: u64) -> Result<()> {
         let mut ps = self.load_project(project)?;
         let mut tickets: Vec<Ticket> = Vec::new();
         for id in ps.queue.clone() {
@@ -1400,13 +1638,24 @@ impl Runner {
         }
         let mut pipeline: Option<Pipeline> = None;
         for t in &mut tickets {
+            if matches!(t.state, TicketState::Parking { .. }) {
+                if let Err(e) = self.finish_parking(t, &mut ps, now_ms) {
+                    log::error!("ticket {}: {e}", t.id);
+                }
+                continue;
+            }
             if !t.active() {
                 continue;
             }
             let p = match self.pipeline_of(t) {
                 Ok(p) => p,
                 Err(e) => {
-                    self.park(t, &format!("pipeline copy unreadable: {e}"), now_ms)?;
+                    self.park(
+                        t,
+                        &mut ps,
+                        &format!("pipeline copy unreadable: {e}"),
+                        now_ms,
+                    )?;
                     continue;
                 }
             };
@@ -1480,27 +1729,29 @@ impl Runner {
         note: Option<&str>,
         now_ms: u64,
     ) -> Result<Decision> {
-        let mut t = self.load_ticket(ticket)?;
-        let d = t
-            .decisions
-            .iter_mut()
-            .find(|d| d.id == decision && d.pending())
-            .with_context(|| format!("ticket {ticket} has no pending decision {decision}"))?;
-        if !d.options.iter().any(|o| o == answer) && d.name != "lanes" {
-            bail!("decision {decision} takes one of: {}", d.options.join(", "));
-        }
-        d.state = DecisionState::Answered {
-            answer: answer.into(),
-            note: note.map(str::to_owned),
-            by: BY_HAND.into(),
-            at_ms: now_ms,
-            acted: false,
-        };
-        let d = d.clone();
         let path = self.data.ticket_file(ticket);
-        t.updated_ms = now_ms;
-        self.data.with_lock(|| write_json(&path, &t))?;
-        Ok(d)
+        self.data.with_lock(|| {
+            let mut t: Ticket = read_json(&path)?;
+            let d = t
+                .decisions
+                .iter_mut()
+                .find(|d| d.id == decision && d.pending())
+                .with_context(|| format!("ticket {ticket} has no pending decision {decision}"))?;
+            if !d.options.iter().any(|o| o == answer) && d.name != "lanes" {
+                bail!("decision {decision} takes one of: {}", d.options.join(", "));
+            }
+            d.state = DecisionState::Answered {
+                answer: answer.into(),
+                note: note.map(str::to_owned),
+                by: BY_HAND.into(),
+                at_ms: now_ms,
+                acted: false,
+            };
+            let d = d.clone();
+            t.updated_ms = now_ms;
+            write_json(&path, &t)?;
+            Ok(d)
+        })
     }
 }
 
@@ -1579,7 +1830,27 @@ fn settle(attempt: &mut Attempt) -> Result<bool> {
 
 /// The definition a reviewer operator installs, named by its content so
 /// an edited operator is a new name and a run in flight keeps its own.
-fn definition_of(reviewer_name: &str, review: crate::pipeline::Review) -> wire::Definition {
+/// The reviewer's definition with Dispatch's variables (`{worktree}`,
+/// `{branch}`, `{project.root}`, `{inputs.*}`) rendered into its
+/// templates; Switchboard's own (`{plan}`, `{feedback}`, ...) are left
+/// for it. The reviewer works in the attempt directory, so the templates
+/// are where it learns which repository the plan is about. The name's
+/// hash is of the rendered text, so each worktree gets its own.
+fn definition_of(
+    reviewer_name: &str,
+    review: crate::pipeline::Review,
+    vars: &Vars,
+) -> wire::Definition {
+    let review = crate::pipeline::Review {
+        reviewer: review.reviewer,
+        review_first: vars.render(&review.review_first),
+        review_round: vars.render(&review.review_round),
+        respond: vars.render(&review.respond),
+        respond_to_user: vars.render(&review.respond_to_user),
+        handoff: vars.render(&review.handoff),
+        no_feedback: review.no_feedback,
+        cap: review.cap,
+    };
     let text = serde_json::to_string(&review).unwrap_or_default();
     wire::Definition {
         name: format!("Dispatch: {reviewer_name}@{}", Pipeline::fingerprint(&text)),
@@ -1595,6 +1866,25 @@ fn definition_of(reviewer_name: &str, review: crate::pipeline::Review) -> wire::
         no_feedback: review.no_feedback,
         cap: review.cap,
     }
+}
+
+/// The subject of a review and the session that wrote it, from the
+/// latest complete attempt: the review clones that session's
+/// conversation for the planner.
+fn review_subject(t: &Ticket, subject: &str) -> Result<(PathBuf, String), String> {
+    let (path, session) = t
+        .attempts
+        .iter()
+        .rev()
+        .filter(|a| a.state == AttemptState::Complete)
+        .find_map(|a| {
+            a.artifacts
+                .get(subject)
+                .map(|path| (path.clone(), a.session.clone()))
+        })
+        .ok_or_else(|| format!("nothing wrote {subject}"))?;
+    let session = session.ok_or_else(|| format!("{subject} was not written by a session"))?;
+    Ok((path, session))
 }
 
 /// Whether a failed attempt's rerun was authorised.

@@ -11,6 +11,10 @@ use crate::ticket::{AttemptState, DecisionKind, Ticket, TicketState};
 impl Runner {
     /// Resolve every unanswered operation of every ticket.
     pub fn recover(&mut self, now_ms: u64) -> Result<()> {
+        self.transaction(|r| r.recover_locked(now_ms))
+    }
+
+    fn recover_locked(&mut self, now_ms: u64) -> Result<()> {
         for mut t in self.tickets()? {
             if matches!(t.state, TicketState::Closed { .. }) {
                 continue;
@@ -114,11 +118,7 @@ impl Runner {
                     }
                 }
             }
-            "idempotent" => {
-                // The same op again is answered from Switchboard's log if
-                // it ran, and runs now if it did not; either is right.
-                t.ledger[i].error = Some("reply lost; harmless to repeat".into());
-            }
+            "idempotent" => self.replay(t, ps, i),
             _ => {
                 t.ledger[i].error = Some("reply lost; not repeated".into());
                 let stage = op.attempt.as_ref().map_or("?", |(s, _)| s.as_str());
@@ -142,6 +142,25 @@ impl Runner {
             }
         }
         Ok(())
+    }
+
+    /// An idempotent operation is sent again as itself: Switchboard
+    /// answers from its log if it ran, and runs it now if it did not,
+    /// and either is right. A failure now leaves it for the next pass.
+    fn replay(&mut self, t: &mut Ticket, ps: &mut crate::ticket::ProjectState, i: usize) {
+        let op = t.ledger[i].clone();
+        let Some(body) = op.body else {
+            t.ledger[i].error = Some("reply lost; harmless to repeat".into());
+            return;
+        };
+        match self.port.call(&Request::new(op.op, body)) {
+            Ok(reply) => {
+                t.ledger[i].reply = Some(reply.clone());
+                t.ledger[i].error = None;
+                apply_reply(t, ps, &op.intent, &reply);
+            }
+            Err(e) => t.ledger[i].error = Some(e.to_string()),
+        }
     }
 
     fn status_of(&mut self, op: &str) -> Result<OpStatus> {

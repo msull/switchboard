@@ -353,7 +353,10 @@ kind = "claude" | "codex"
 guidance = "..."
 budget_usd = 0.0              # per ticket across the operator's attempts; 0 means the project default
 
-[operators.<name>.review]     # present on a reviewer: a complete Switchboard definition
+[operators.<name>.review]     # present on a reviewer: a complete Switchboard definition;
+                              # Dispatch renders {worktree}, {branch}, {project.root} and
+                              # {inputs.*} into these templates before installing, since the
+                              # reviewer works in the attempt directory, not the repository
 reviewer = "codex"
 review_first = "..."
 review_round = "..."
