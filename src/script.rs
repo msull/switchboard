@@ -119,6 +119,8 @@ const REVIEW_LINES: &[&str] = &[
     "review-continue",
     "review-finalize",
     "show-artifact",
+    "show-dispatch",
+    "show-ticket",
     "pop-out",
     "close-pop-out",
     "files-root",
