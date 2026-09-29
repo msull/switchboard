@@ -270,6 +270,7 @@ impl FakeSwitchboard {
                 plan,
                 definition,
                 reviewer_cwd,
+                reviewer_args: _,
             } => {
                 let Some(src) = self.sessions.iter().find(|s| &s.id == source).cloned() else {
                     return Reply::failed("no such session");
@@ -280,18 +281,16 @@ impl FakeSwitchboard {
                         src.name
                     ));
                 }
-                if !self.definitions.iter().any(|d| &d.name == definition) {
+                let Some(def) = self.definitions.iter().find(|d| &d.name == definition) else {
                     return Reply::failed(format!("no workflow definition called {definition}"));
-                }
+                };
+                let reviewer_kind = match def.reviewer {
+                    switchboard_control::AgentKind::Claude => SessionKind::Claude,
+                    switchboard_control::AgentKind::Codex => SessionKind::Codex,
+                };
                 let cwd = reviewer_cwd.clone().unwrap_or_else(|| src.cwd.clone());
-                let reviewer = self.new_session(
-                    &src.project,
-                    "plan review",
-                    SessionKind::Codex,
-                    &cwd,
-                    "",
-                    op,
-                );
+                let reviewer =
+                    self.new_session(&src.project, "plan review", reviewer_kind, &cwd, "", op);
                 let planner = self.new_session(
                     &src.project,
                     "planner planner",

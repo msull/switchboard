@@ -364,7 +364,9 @@ budget_usd = 0.0              # per ticket across the operator's attempts; 0 mea
                               # Dispatch renders {worktree}, {branch}, {project.root} and
                               # {inputs.*} into these templates before installing, since the
                               # reviewer works in the attempt directory, not the repository
-reviewer = "codex"
+reviewer = "codex"            # or "claude": the operator's args go on the reviewer's command
+                              # line, and a Claude Code reviewer gets the allow rule that lets
+                              # it write its feedback in the attempt directory unasked
 review_first = "..."
 review_round = "..."
 respond = "..."

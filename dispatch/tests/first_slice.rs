@@ -14,7 +14,7 @@ use dispatch::scheduler::Runner;
 use dispatch::store::DataDir;
 use dispatch::ticket::{AttemptState, Decision, SourceSnapshot, Ticket, TicketState};
 use support::{FakeSwitchboard, SharedPort};
-use switchboard_control::{Body, Liveness, RunState};
+use switchboard_control::{Body, Liveness, RunState, SessionKind};
 
 const PROJECT: &str = "Switchboard";
 
@@ -856,6 +856,62 @@ impl dispatch::port::Port for FailBefore {
 }
 
 /// Drive a ticket to the finalize decision.
+/// A reviewer operator of kind claude runs the review as Claude Code,
+/// with the operator's flags and the allow rule for its attempt
+/// directory on its command line, so the feedback file is written
+/// unasked.
+#[test]
+fn a_claude_reviewer_gets_its_flags_and_an_allow_rule_for_the_attempt_directory() {
+    let mut env = Env::new();
+    let path = env.data.pipeline(PROJECT);
+    let text = std::fs::read_to_string(&path)
+        .unwrap()
+        .replace(
+            "[operators.reviewer]\nkind = \"codex\"",
+            "[operators.reviewer]\nkind = \"claude\"\nargs = [\"--model\", \"haiku\"]",
+        )
+        .replace("reviewer = \"codex\"", "reviewer = \"claude\"");
+    std::fs::write(&path, text).unwrap();
+    let id = through_plan(&mut env, 7);
+    let t = env.ticket(&id);
+    env.finish(
+        &session_of(&t, "plan"),
+        &artifact_of(&t, "plan", "plan"),
+        "# plan",
+    );
+    env.steps_until(&id, "the review run", |t, _| {
+        t.attempts_of("review")
+            .last()
+            .is_some_and(|a| a.run.is_some())
+    });
+    let sb = env.sb();
+    let start = sb
+        .calls
+        .iter()
+        .find_map(|r| match &r.body {
+            Body::WorkflowStart {
+                reviewer_cwd,
+                reviewer_args,
+                ..
+            } => Some((reviewer_cwd.clone().unwrap(), reviewer_args.clone())),
+            _ => None,
+        })
+        .expect("a workflow.start was sent");
+    assert_eq!(
+        start.1,
+        vec![
+            "--model".to_owned(),
+            "haiku".into(),
+            "--allowedTools".into(),
+            format!("Edit(//{}/**)", start.0.display()),
+        ]
+    );
+    let run = &sb.runs[0];
+    let reviewer = sb.sessions.iter().find(|s| s.id == run.reviewer).unwrap();
+    assert_eq!(reviewer.kind, SessionKind::Claude);
+    assert_eq!(reviewer.cwd, start.0);
+}
+
 fn at_finalize(env: &mut Env) -> String {
     let id = through_plan(env, 7);
     let t = env.ticket(&id);

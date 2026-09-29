@@ -1451,10 +1451,17 @@ fetches it before every cut, and cuts the ticket's worktree from
 where instead), so the user's checkout is never read or touched and a
 ticket starts from what the remote has now. Every stage runs in that
 tree, under one Switchboard project per ticket named `#<n> <title>`
-and rooted there; a multi-lane pipeline's other lanes are worktrees of
-the same clone whose sessions carry their own cwd. A project with
-`root` instead of `repo` works in place with no branch, for one that
-is not a repository. Everything else in that document (command and
+and rooted there. A lane with a `repo` of its own (Delta's workspace
+holds three) is Dispatch's clone of that repository too, cut as a
+worktree at the lane's path inside the ticket's tree; every lane is
+cut before the first stage, the `lanes` decision only chooses which
+lanes the stages run in (label hints answer it when the dial says
+auto), and a lane's setup runs once before its first agent. A review
+stage's reviewer may be Claude Code or Codex; the operator's flags go
+over the port with `workflow.start`, and a Claude Code reviewer gets
+the allow rule for its attempt directory. A project with `root`
+instead of `repo` works in place with no branch, for one that is not a
+repository. Everything else in that document (command and
 external gates, `implement`, PR checks, budgets, the other pipelines)
 parks the ticket with a reason. The runner's pass over a project is
 one transaction under the data directory's writer lock, and `decide`,

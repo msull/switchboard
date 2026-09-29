@@ -5208,6 +5208,7 @@ mod control {
                 plan: "/dispatch/t1/review/1/repo/plan.md".into(),
                 definition: "Dispatch: reviewer@abc".into(),
                 reviewer_cwd: Some("/dispatch/t1/review/1/repo".into()),
+                reviewer_args: vec!["--allowedTools".into(), "Edit(//dispatch/**)".into()],
             },
             4,
         );
@@ -5223,6 +5224,11 @@ mod control {
         let reviewer = core.session(run.reviewer).unwrap();
         assert_eq!(reviewer.op.as_deref(), Some("run"));
         assert_eq!(reviewer.cwd, PathBuf::from("/dispatch/t1/review/1/repo"));
+        assert_eq!(
+            reviewer.launch,
+            Launch::Argv(vec!["--allowedTools".into(), "Edit(//dispatch/**)".into()]),
+            "the asker's flags ride on the reviewer"
+        );
         assert!(reviewer.pending_launch);
         core.dispatch(
             AppAction::WorkflowCloned {
@@ -5252,6 +5258,7 @@ mod control {
                 plan: "/p.md".into(),
                 definition: "Dispatch: reviewer@abc".into(),
                 reviewer_cwd: None,
+                reviewer_args: Vec::new(),
             },
             7,
         );

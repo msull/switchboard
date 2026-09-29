@@ -62,7 +62,7 @@ impl AppCore {
                 source,
                 plan,
                 definition,
-            } => self.start_workflow(source, &plan, &definition, None, now, out),
+            } => self.start_workflow(source, &plan, &definition, None, Vec::new(), now, out),
             AppAction::ShowWorkflow(id) => {
                 if self.workflow(id).is_some() {
                     self.show(View::Workflow(id), now, out);
@@ -165,12 +165,15 @@ impl AppCore {
     /// `reviewer_cwd` is where the reviewer runs when it is not the
     /// source's directory: Codex writes only inside its own, and a
     /// review whose files live elsewhere names that place.
+    /// `reviewer_args` are extra flags for the reviewer's command line.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn start_workflow(
         &mut self,
         source: RecordId,
         plan: &Path,
         definition: &str,
         reviewer_cwd: Option<PathBuf>,
+        reviewer_args: Vec<String>,
         now: Clock,
         out: &mut Out,
     ) {
@@ -211,7 +214,11 @@ impl AppCore {
             format!("{stem} review"),
             SessionKind::Agent(def.reviewer),
             reviewer_cwd.unwrap_or_else(|| record.cwd.clone()),
-            Launch::Shell,
+            if reviewer_args.is_empty() {
+                Launch::Shell
+            } else {
+                Launch::Argv(reviewer_args)
+            },
             now,
             out,
         ) else {

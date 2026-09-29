@@ -78,6 +78,7 @@ pub enum ControlAction {
         plan: PathBuf,
         definition: String,
         reviewer_cwd: Option<PathBuf>,
+        reviewer_args: Vec<String>,
     },
     PauseWorkflow(WorkflowId),
     ContinueWorkflow(WorkflowId),
@@ -271,9 +272,18 @@ impl AppCore {
                 plan,
                 definition,
                 reviewer_cwd,
+                reviewer_args,
             } => {
                 let before: Vec<WorkflowId> = self.workflows().map(|r| r.id).collect();
-                self.start_workflow(source, &plan, &definition, reviewer_cwd, now, out);
+                self.start_workflow(
+                    source,
+                    &plan,
+                    &definition,
+                    reviewer_cwd,
+                    reviewer_args,
+                    now,
+                    out,
+                );
                 let Some(run) = self.workflows().find(|r| !before.contains(&r.id)).cloned() else {
                     return Vec::new();
                 };
@@ -729,11 +739,13 @@ impl TryFrom<wire::Body> for ControlAction {
                 plan,
                 definition,
                 reviewer_cwd,
+                reviewer_args,
             } => Self::StartWorkflow {
                 source: session(&source)?,
                 plan,
                 definition,
                 reviewer_cwd,
+                reviewer_args,
             },
             wire::Body::WorkflowPause { run: r } => Self::PauseWorkflow(run(&r)?),
             wire::Body::WorkflowContinue { run: r } => Self::ContinueWorkflow(run(&r)?),

@@ -1576,11 +1576,8 @@ impl Runner {
         now_ms: u64,
     ) -> Result<()> {
         let reviewer_name = stage.review.clone().unwrap_or_default();
-        let Some(review) = p
-            .operators
-            .get(&reviewer_name)
-            .and_then(|o| o.review.clone())
-        else {
+        let operator = p.operators.get(&reviewer_name);
+        let Some(review) = operator.and_then(|o| o.review.clone()) else {
             return self.park(
                 t,
                 ps,
@@ -1610,6 +1607,14 @@ impl Runner {
         let copy = dir.join(format!("{subject}.md"));
         std::fs::copy(&source_path, &copy)
             .with_context(|| format!("copy {} to {}", source_path.display(), copy.display()))?;
+        // The reviewer's feedback lives beside the copy, in Dispatch's
+        // directory; a Claude Code reviewer writes there unasked only
+        // under an allow rule for the path, as an agent stage's does.
+        let mut reviewer_args = operator.map(|o| o.args.clone()).unwrap_or_default();
+        if review.reviewer == crate::pipeline::OperatorKind::Claude {
+            reviewer_args.push("--allowedTools".into());
+            reviewer_args.push(format!("Edit(//{}/**)", dir.display()));
+        }
         let definition = definition_of(&reviewer_name, review, &vars_for(t, p, lane));
         t.attempts.push(new_attempt(
             &stage.name,
@@ -1639,6 +1644,7 @@ impl Runner {
                 plan: copy,
                 definition: name,
                 reviewer_cwd: Some(dir),
+                reviewer_args,
             },
             now_ms,
         )?;

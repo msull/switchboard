@@ -105,6 +105,12 @@ pub enum Body {
         /// whose files live elsewhere names that place here.
         #[serde(default)]
         reviewer_cwd: Option<PathBuf>,
+        /// Extra flags for the reviewer's command line, ahead of its
+        /// first prompt: a model, or the allow rule a Claude Code
+        /// reviewer needs to write its feedback where the caller put
+        /// the review.
+        #[serde(default)]
+        reviewer_args: Vec<String>,
     },
 
     // --- commands: idempotent state
@@ -604,6 +610,7 @@ mod tests {
                 plan: "/p.md".into(),
                 definition: "d".into(),
                 reviewer_cwd: Some("/att".into()),
+                reviewer_args: vec!["--model".into(), "haiku".into()],
             },
             Body::ProjectRemove {
                 project: "p".into(),
