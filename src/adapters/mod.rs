@@ -2,6 +2,7 @@
 
 pub mod agents;
 pub mod artifacts;
+pub mod control;
 pub mod controller;
 pub mod dock;
 pub mod dotenv;

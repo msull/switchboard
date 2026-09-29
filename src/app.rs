@@ -14,6 +14,7 @@ use crate::core::{
 };
 use crate::ports::agent::AgentLauncher;
 use crate::ports::artifacts::ArtifactFinder;
+use crate::ports::control::{OpLine, Operations};
 use crate::ports::controller::Controller;
 use crate::ports::events::EventSource;
 use crate::ports::host::{HostId, Liveness, ProcessHost};
@@ -49,6 +50,8 @@ pub struct Services {
     pub artifacts: Box<dyn ArtifactFinder>,
     /// The hand controller (a nunchuk over serial); a fake in tests.
     pub controller: Box<dyn Controller>,
+    /// The control port's operations log.
+    pub operations: Box<dyn Operations>,
     /// The hook helper's wake-up socket; `None` in tests.
     pub wake: Option<WakeSocket>,
 }
@@ -339,6 +342,7 @@ impl SwitchboardApp {
             | Effect::RemoveRoundFiles { .. }
             | Effect::FindArtifacts { .. }
             | Effect::RemoveLog(_)
+            | Effect::LogOperation { .. }
             | Effect::OpenPath(_)
             | Effect::Forget(_)
             | Effect::OpenInEditor { .. }
@@ -477,9 +481,10 @@ impl SwitchboardApp {
                 result: s.project_config.write_text(&root, &text),
             }),
             Effect::Kill(host) => failed(s.host.kill(&host), || format!("kill {}", host.0)),
-            Effect::Forget(_) | Effect::RemoveLog(_) | Effect::FindArtifacts { .. } => {
-                self.run_log_effect(effect)
-            }
+            Effect::Forget(_)
+            | Effect::RemoveLog(_)
+            | Effect::LogOperation { .. }
+            | Effect::FindArtifacts { .. } => self.run_log_effect(effect),
             Effect::OpenPath(path) => failed(s.opener.open_default(&path), || {
                 format!("open {}", path.display())
             }),
@@ -501,8 +506,7 @@ impl SwitchboardApp {
 
     /// The effects on run logs and artifacts, kept out of `run_effect`
     /// for length.
-    fn run_log_effect(&self, effect: Effect) -> Option<AppAction> {
-        let s = &self.services;
+    fn run_log_effect(&mut self, effect: Effect) -> Option<AppAction> {
         match effect {
             Effect::Forget(host) => {
                 // The record's own log and every run's (`<host>-r<n>.vt`).
@@ -525,6 +529,15 @@ impl SwitchboardApp {
                 remove_quietly(&self.services.store.data_dir().join("scrollback").join(name));
                 None
             }
+            Effect::LogOperation { op, kind, ids } => {
+                let line = OpLine::Requested {
+                    op,
+                    kind,
+                    ids,
+                    at: SystemTime::now(),
+                };
+                failed(self.services.operations.append(&line), || "operations log")
+            }
             Effect::FindArtifacts {
                 id,
                 n,
@@ -534,7 +547,7 @@ impl SwitchboardApp {
             } => Some(AppAction::ArtifactsFound {
                 id,
                 n,
-                paths: s.artifacts.find(&cwd, &patterns, since),
+                paths: self.services.artifacts.find(&cwd, &patterns, since),
             }),
             _ => unreachable!("not a log effect"),
         }

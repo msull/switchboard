@@ -4,6 +4,7 @@ use std::path::PathBuf;
 
 use switchboard::SwitchboardApp;
 use switchboard::adapters::agents::Agents;
+use switchboard::adapters::control::OperationsLog;
 use switchboard::adapters::controller::SerialController;
 use switchboard::adapters::ghostty::MacOpener;
 use switchboard::adapters::hooks::{HookLog, WakeSocket, write_hook_settings};
@@ -27,6 +28,18 @@ fn wake_socket(data_dir: &std::path::Path, ctx: &egui::Context) -> Option<WakeSo
         Err(e) => {
             log::error!("wake socket: {e}");
             None
+        }
+    }
+}
+
+/// The control port's operations log. Without it nothing another
+/// process asked for could be found again, so its failure is fatal.
+fn operations_log(data_dir: &std::path::Path) -> OperationsLog {
+    match OperationsLog::open(data_dir) {
+        Ok(log) => log,
+        Err(e) => {
+            log::error!("operations log: {e}");
+            std::process::exit(1);
         }
     }
 }
@@ -133,6 +146,7 @@ fn main() -> eframe::Result {
             switchboard::ui::theme::install(&cc.egui_ctx);
             let wake = wake_socket(&data_dir, &cc.egui_ctx);
             let controller = controller(&cc.egui_ctx);
+            let operations = operations_log(&data_dir);
             let services = Services {
                 store: Box::new(store),
                 host: Box::new(host),
@@ -145,6 +159,7 @@ fn main() -> eframe::Result {
                 round_files: Box::new(switchboard::adapters::round_files::DiskRoundFiles),
                 artifacts: Box::new(switchboard::adapters::artifacts::DiskArtifacts),
                 controller: Box::new(controller),
+                operations: Box::new(operations),
                 wake,
             };
             let mut app = SwitchboardApp::with_services(services);

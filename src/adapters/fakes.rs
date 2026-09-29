@@ -9,6 +9,7 @@ use std::time::SystemTime;
 
 use crate::core::{AgentKind, ProjectId, RecordId, ResumeHandle, Settings, Views, Workspace};
 use crate::ports::agent::{AgentLaunch, AgentLauncher};
+use crate::ports::control::{OpLine, Operations};
 use crate::ports::controller::{Controller, ControllerEvent};
 use crate::ports::events::{EventSource, SessionEvent};
 use crate::ports::host::{HostId, HostInfo, HostStatus, ProcessHost, SpawnSpec};
@@ -138,6 +139,28 @@ impl EventSource for FakeEvents {
     }
     fn checkpoint(&mut self) {
         self.checkpoints += 1;
+    }
+}
+
+/// The operations log in memory, shared so a test can read it back.
+#[derive(Debug, Default, Clone)]
+pub struct FakeOperations {
+    pub lines: Arc<Mutex<Vec<OpLine>>>,
+}
+
+impl Operations for FakeOperations {
+    fn append(&mut self, line: &OpLine) -> std::io::Result<()> {
+        self.lines.lock().unwrap().push(line.clone());
+        Ok(())
+    }
+    fn find(&self, op: &str) -> Vec<OpLine> {
+        self.lines
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|l| l.op() == op)
+            .cloned()
+            .collect()
     }
 }
 

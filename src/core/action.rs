@@ -19,6 +19,7 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use crate::core::control::{ControlAction, ControlOutcome};
 use crate::core::env::SecretScope;
 use crate::core::grid;
 use crate::core::model::{
@@ -414,6 +415,12 @@ pub enum AppAction {
     HostListed(Vec<HostStatus>),
     Events(Vec<SessionEvent>),
     Tick,
+    /// One command from the control port, run quietly under its
+    /// operation id; the outcome is taken with `take_control_outcome`.
+    Control {
+        op: String,
+        action: ControlAction,
+    },
 }
 
 /// Work the shell performs on the core's behalf.
@@ -548,6 +555,13 @@ pub enum Effect {
         path: PathBuf,
     },
     Reveal(PathBuf),
+    /// Append to the operations log, before anything else of the same
+    /// action runs: `op` made the records `ids` with command `kind`.
+    LogOperation {
+        op: String,
+        kind: String,
+        ids: Vec<String>,
+    },
 }
 
 /// What a record is waiting on. A record with a flight is "in flight":
@@ -668,6 +682,11 @@ pub struct AppCore {
     /// The hand controller: held buttons and the selected card per set.
     /// Transient.
     pub(super) controller: super::controller::ControllerState,
+    /// The control-port operation being applied, while one is: no view
+    /// changes, and records made carry it. Transient.
+    pub(super) quiet_op: Option<String>,
+    /// Outcomes of control commands not yet taken by the app.
+    pub(super) control_outcomes: Vec<ControlOutcome>,
 }
 
 impl AppCore {
@@ -771,7 +790,10 @@ impl AppCore {
             | AppAction::RoundSnapshotted { .. }
             | AppAction::RoundFilesRemoved { .. } => self.workflow_action(action, now, &mut out),
 
-            AppAction::AddProject { name, root } => self.add_project(name, root, now, &mut out),
+            AppAction::AddProject { name, root } => {
+                let space = self.settings.space;
+                self.add_project(name, root, space, now, &mut out);
+            }
             AppAction::RemoveProject(id) => self.remove_project(id, now, &mut out),
 
             AppAction::NewSession { .. }
@@ -800,6 +822,7 @@ impl AppCore {
             | AppAction::Discovered { .. } => self.session_action(action, now, &mut out),
 
             AppAction::Events(events) => self.apply_events(events, now, &mut out),
+            AppAction::Control { op, action } => self.control(op, action, now, &mut out),
         }
         self.remember_view(&mut out);
         self.prune_working_set(&mut out);
@@ -807,7 +830,7 @@ impl AppCore {
     }
 
     /// The session records' transitions, split out of `dispatch` for length.
-    fn session_action(&mut self, action: AppAction, now: Clock, out: &mut Out) {
+    pub(super) fn session_action(&mut self, action: AppAction, now: Clock, out: &mut Out) {
         match action {
             AppAction::NewSession {
                 project,
@@ -1044,7 +1067,7 @@ impl AppCore {
     }
 
     /// The target exists and its project is in `space`.
-    fn target_in(&self, target: &PinTarget, space: SpaceId) -> bool {
+    pub(super) fn target_in(&self, target: &PinTarget, space: SpaceId) -> bool {
         let project = match target {
             PinTarget::Session(id) => self.session(*id).map(|s| s.project),
             PinTarget::File(pid, _) => Some(*pid),
@@ -1065,6 +1088,13 @@ impl AppCore {
     /// writes, so its persistence effects are dropped here.
     fn finish(&self, out: Out) -> Vec<Effect> {
         let mut effects = Vec::with_capacity(out.effects.len() + out.dirty.len());
+        // The operations log comes first: a record found on disk without
+        // its log line would read as never asked for.
+        let (logs, rest): (Vec<Effect>, Vec<Effect>) = out
+            .effects
+            .into_iter()
+            .partition(|e| matches!(e, Effect::LogOperation { .. }));
+        effects.extend(logs);
         if !self.read_only {
             for id in out.dirty {
                 if let Some(w) = self.workspace(id) {
@@ -1073,8 +1103,7 @@ impl AppCore {
             }
         }
         effects.extend(
-            out.effects
-                .into_iter()
+            rest.into_iter()
                 .filter(|e| !(self.read_only && matches!(e, Effect::Delete(_)))),
         );
         effects
@@ -1189,6 +1218,10 @@ impl AppCore {
     }
 
     pub(super) fn show(&mut self, view: View, now: Clock, out: &mut Out) {
+        // A control command changes nothing the user is looking at.
+        if self.quiet_op.is_some() {
+            return;
+        }
         if let View::Board(id) | View::Document(id, _) = &view {
             let id = *id;
             self.edit_project(id, out, |p| p.last_active = now.wall);
@@ -1295,7 +1328,14 @@ impl AppCore {
 
     // --- projects
 
-    fn add_project(&mut self, name: String, root: PathBuf, now: Clock, out: &mut Out) {
+    pub(super) fn add_project(
+        &mut self,
+        name: String,
+        root: PathBuf,
+        space: SpaceId,
+        now: Clock,
+        out: &mut Out,
+    ) -> ProjectId {
         let id = ProjectId::new();
         self.workspaces.push(Workspace::new(Project {
             id,
@@ -1308,8 +1348,8 @@ impl AppCore {
             shown: Vec::new(),
             created: now.wall,
             last_active: now.wall,
-            space: self.settings.space,
-            op: None,
+            space,
+            op: self.quiet_op.clone(),
         }));
         out.touch(id);
         out.push(super::definitions::read_config(
@@ -1319,14 +1359,17 @@ impl AppCore {
                 .map(|w| w.project.root.clone())
                 .unwrap_or_default(),
         ));
-        self.view_stack.push(View::Board(id));
+        if self.quiet_op.is_none() {
+            self.view_stack.push(View::Board(id));
+        }
+        id
     }
 
     /// Drop a project and everything the core remembers about its
     /// sessions: views, flights, and its place in the Codex queue. A
     /// pending discovery for one of its records would otherwise block
     /// every later Codex launch until it expired.
-    fn remove_project(&mut self, id: ProjectId, now: Clock, out: &mut Out) {
+    pub(super) fn remove_project(&mut self, id: ProjectId, now: Clock, out: &mut Out) {
         let Some(pos) = self.workspaces.iter().position(|w| w.project.id == id) else {
             return;
         };

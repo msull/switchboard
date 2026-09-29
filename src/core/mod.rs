@@ -1,6 +1,7 @@
 //! Deterministic application core: no egui, no threads, no I/O.
 
 pub mod action;
+mod control;
 mod controller;
 mod definitions;
 pub mod env;
@@ -15,6 +16,7 @@ mod workflow;
 mod tests;
 
 pub use action::{AppAction, AppCore, Clock, ConfigStatus, Effect, Notice, UNDO_WINDOW, View};
+pub use control::{ControlAction, ControlOutcome};
 pub use controller::{DOUBLE_PRESS, DWELL, MenuKind, RadialMenu, UiRequest};
 pub use definitions::entry_hash;
 pub use env::{Resolved, ResolvedVar, SecretScope, Source};

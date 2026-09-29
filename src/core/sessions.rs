@@ -85,7 +85,7 @@ impl AppCore {
             discard: None,
             runs: Vec::new(),
             outputs: Vec::new(),
-            op: None,
+            op: self.quiet_op.clone(),
             waiting_on: None,
             pending_launch: false,
             last_stop_at: None,
@@ -114,6 +114,12 @@ impl AppCore {
         if matches!(record.kind, SessionKind::Agent(_)) && record.resume.is_some() {
             self.edit_session(id, out, |s| s.resume = None);
         }
+        // A record the control port owns is marked before its launch is
+        // asked for, and saved with the mark, so a restart in between
+        // reads as interrupted rather than as never launched.
+        if self.session(id).is_some_and(|s| s.op.is_some()) {
+            self.edit_session(id, out, |s| s.pending_launch = true);
+        }
         let Some(record) = self.session(id) else {
             return;
         };
@@ -135,6 +141,15 @@ impl AppCore {
             SessionKind::Command | SessionKind::Service | SessionKind::Shell => {
                 self.spawn_record(id, FlightKind::Launch, now, out);
             }
+        }
+    }
+
+    /// The launch reported back (well or badly): the interrupted mark
+    /// comes off. Only a marked record is touched, so a plain launch's
+    /// failure saves nothing.
+    fn clear_pending_launch(&mut self, id: RecordId, out: &mut Out) {
+        if self.session(id).is_some_and(|s| s.pending_launch) {
+            self.edit_session(id, out, |s| s.pending_launch = false);
         }
     }
 
@@ -550,6 +565,7 @@ impl AppCore {
                 let name = self.session_name(id);
                 self.error_about(id, format!("could not prepare {name}: {e}"));
                 self.end_flight(id);
+                self.clear_pending_launch(id, out);
                 self.advance_codex_queue(now, out);
             }
         }
@@ -572,6 +588,7 @@ impl AppCore {
                     s.activity = Activity::Unknown;
                     s.activity_reason = None;
                     s.last_exit = None;
+                    s.pending_launch = false;
                 });
                 // Until the next host poll, treat the session as running so
                 // a "return" in that window attaches instead of spawning
@@ -598,8 +615,9 @@ impl AppCore {
                 if let SessionKind::Agent(kind) = record.kind {
                     // The window is the user's to open: most of the time
                     // the session is driven from here, so it stays closed
-                    // unless asked for.
-                    if self.settings.open_terminal_on_launch {
+                    // unless asked for. A session another process asked
+                    // for never opens one.
+                    if self.settings.open_terminal_on_launch && record.op.is_none() {
                         out.push(attach(record));
                     }
                     if needs_discovery {
@@ -620,6 +638,7 @@ impl AppCore {
                 let name = self.session_name(id);
                 self.error_about(id, format!("could not start {name}: {e}"));
                 self.end_flight(id);
+                self.clear_pending_launch(id, out);
                 if flight.kind == FlightKind::Resume {
                     self.edit_session(id, out, |s| s.not_resumable = true);
                 }

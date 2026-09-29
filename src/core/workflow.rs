@@ -62,7 +62,7 @@ impl AppCore {
                 source,
                 plan,
                 definition,
-            } => self.start_workflow(source, &plan, &definition, now, out),
+            } => self.start_workflow(source, &plan, &definition, None, now, out),
             AppAction::ShowWorkflow(id) => {
                 if self.workflow(id).is_some() {
                     self.show(View::Workflow(id), now, out);
@@ -162,11 +162,15 @@ impl AppCore {
 
     // --- start
 
-    fn start_workflow(
+    /// `reviewer_cwd` is where the reviewer runs when it is not the
+    /// source's directory: Codex writes only inside its own, and a
+    /// review whose files live elsewhere names that place.
+    pub(super) fn start_workflow(
         &mut self,
         source: RecordId,
         plan: &Path,
         definition: &str,
+        reviewer_cwd: Option<PathBuf>,
         now: Clock,
         out: &mut Out,
     ) {
@@ -206,7 +210,7 @@ impl AppCore {
             record.project,
             format!("{stem} review"),
             SessionKind::Agent(def.reviewer),
-            record.cwd.clone(),
+            reviewer_cwd.unwrap_or_else(|| record.cwd.clone()),
             Launch::Shell,
             now,
             out,
@@ -239,7 +243,7 @@ impl AppCore {
             cleaned: false,
             created: now.wall,
             updated: now.wall,
-            op: None,
+            op: self.quiet_op.clone(),
         };
         let prompt = def.render(&def.review_first, &round, plan, cap);
         if let Some(w) = self
@@ -313,6 +317,11 @@ impl AppCore {
             discard: None,
             runs: Vec::new(),
             outputs: Vec::new(),
+            // The clone belongs to the run's operation, not the source's.
+            op: run.op.clone(),
+            waiting_on: None,
+            pending_launch: false,
+            last_stop_at: None,
             ..source
         });
         self.edit_run(id, now, out, |r| {

@@ -4839,3 +4839,363 @@ fn a_stick_still_held_from_a_menu_pick_moves_nothing_until_it_comes_back() {
     flick(&mut core, Direction::Right, 3_500);
     assert_eq!(core.active_card(set), Some(PinTarget::Session(agent_id)));
 }
+
+// --- the control port: quiet commands under an operation id
+
+mod control {
+    use super::*;
+    use crate::core::{ControlAction, PinnedItem, RunState, SetId, WorkflowDefinition};
+    use switchboard_control::RecordKind;
+
+    fn control(core: &mut AppCore, op: &str, action: ControlAction, at: u64) -> Vec<Effect> {
+        core.dispatch(
+            AppAction::Control {
+                op: op.into(),
+                action,
+            },
+            Clock::at(at),
+        )
+    }
+
+    fn new_session(project: ProjectId, prompt: Option<&str>) -> ControlAction {
+        ControlAction::NewSession {
+            project,
+            name: "investigator".into(),
+            kind: agent(),
+            cwd: "/tmp/proj".into(),
+            launch: Launch::Shell,
+            prompt: prompt.map(str::to_owned),
+            notes: "Dispatch ticket 1, stage investigate".into(),
+        }
+    }
+
+    #[test]
+    fn a_session_made_by_the_port_carries_its_op_and_moves_nothing_on_screen() {
+        let (mut core, pid, _) = with_records(&[], |_| None);
+        core.dispatch(AppAction::ShowSwitchboard, Clock::at(1));
+        core.dispatch(AppAction::SetOpenTerminalOnLaunch(true), Clock::at(2));
+        let view = core.view();
+        let effects = control(
+            &mut core,
+            "op-1",
+            new_session(pid, Some("Investigate #1")),
+            10,
+        );
+        // The log line leads, the save follows, then the launch.
+        assert!(
+            matches!(&effects[0], Effect::LogOperation { op, kind, ids } if op == "op-1" && kind == "session.new" && ids.len() == 1),
+            "{effects:?}"
+        );
+        assert!(matches!(&effects[1], Effect::Save(_)));
+        let outcome = core.take_control_outcome("op-1").expect("an outcome");
+        assert_eq!(outcome.error, None);
+        assert_eq!(outcome.made.len(), 1);
+        assert_eq!(outcome.made[0].kind, RecordKind::Session);
+        let id = core.workspace(pid).unwrap().sessions[0].id;
+        assert_eq!(outcome.made[0].id, id.0.to_string());
+        let record = core.session(id).unwrap();
+        assert_eq!(record.op.as_deref(), Some("op-1"));
+        assert_eq!(record.notes, "Dispatch ticket 1, stage investigate");
+        // The pending mark is in the saved record, before the launch.
+        assert!(record.pending_launch);
+        assert!(matches!(&effects[1], Effect::Save(w) if w.sessions[0].pending_launch));
+        assert_eq!(core.view(), view);
+        assert!(core.notice().is_none());
+        // The first prompt rides on the command line, and no terminal
+        // window opens for a session another process asked for.
+        let effects = launch_agent(&mut core, id, Some(claude_handle()));
+        assert!(!effects.iter().any(|e| matches!(e, Effect::Attach { .. })));
+        assert!(!core.session(id).unwrap().pending_launch);
+        assert_eq!(core.view(), view);
+        assert!(core.take_control_outcome("op-1").is_none(), "taken once");
+    }
+
+    #[test]
+    fn a_failed_launch_clears_the_pending_mark_and_a_bad_command_is_an_error_not_a_notice() {
+        let (mut core, pid, _) = with_records(&[], |_| None);
+        control(&mut core, "op-2", new_session(pid, None), 10);
+        let id = core.workspace(pid).unwrap().sessions[0].id;
+        core.dispatch(
+            AppAction::LaunchPrepared {
+                id,
+                result: Err("no claude".into()),
+            },
+            Clock::at(11),
+        );
+        assert!(!core.session(id).unwrap().pending_launch);
+        let effects = control(&mut core, "op-3", new_session(ProjectId::new(), None), 12);
+        assert!(
+            !effects
+                .iter()
+                .any(|e| matches!(e, Effect::LogOperation { .. }))
+        );
+        let outcome = core.take_control_outcome("op-3").unwrap();
+        assert!(outcome.made.is_empty());
+        assert!(outcome.error.unwrap().contains("unknown project"));
+        // The error went to the asker; the window shows nothing new
+        // beyond the launch failure the user should still see.
+        assert_eq!(core.notices().len(), 1);
+    }
+
+    #[test]
+    fn a_project_is_added_to_the_named_space_without_showing_its_board() {
+        let (mut core, _, _) = with_records(&[], |_| None);
+        control(
+            &mut core,
+            "sp",
+            ControlAction::NewSpace {
+                name: "Dispatch · Switchboard".into(),
+            },
+            1,
+        );
+        let space = core.take_control_outcome("sp").unwrap().made[0].id.clone();
+        let space = SpaceId(uuid::Uuid::parse_str(&space).unwrap());
+        assert_eq!(core.space(space).unwrap().op.as_deref(), Some("sp"));
+        assert_ne!(
+            core.settings().space,
+            space,
+            "the user's space is untouched"
+        );
+        let view = core.view();
+        let effects = control(
+            &mut core,
+            "pj",
+            ControlAction::AddProject {
+                space,
+                name: "#1".into(),
+                root: "/tmp/wt".into(),
+            },
+            2,
+        );
+        assert!(matches!(&effects[0], Effect::LogOperation { kind, .. } if kind == "project.add"));
+        let made = core.take_control_outcome("pj").unwrap().made;
+        assert_eq!(made[0].kind, RecordKind::Project);
+        let pid = ProjectId(uuid::Uuid::parse_str(&made[0].id).unwrap());
+        let project = &core.workspace(pid).unwrap().project;
+        assert_eq!(project.space, space);
+        assert_eq!(project.op.as_deref(), Some("pj"));
+        assert_eq!(core.view(), view);
+        assert_eq!(core.project_views(Some(space)).len(), 1);
+        assert_eq!(core.records_with_op("pj", Clock::at(3).wall).len(), 1);
+    }
+
+    #[test]
+    fn a_set_is_synced_whole_or_not_at_all() {
+        let (mut core, pid, ids) = with_records(&[agent(), agent()], |s| Some(running(s.id)));
+        let space = core.settings().space;
+        control(
+            &mut core,
+            "set",
+            ControlAction::NewSet {
+                space,
+                name: "queue".into(),
+            },
+            1,
+        );
+        let set = core.take_control_outcome("set").unwrap().made[0].id.clone();
+        let set = SetId(uuid::Uuid::parse_str(&set).unwrap());
+        let card = |id: RecordId, y: u32| PinnedItem {
+            target: PinTarget::Session(id),
+            rect: GridRect {
+                x: 0,
+                y,
+                w: 10,
+                h: 8,
+            },
+        };
+        control(
+            &mut core,
+            "s1",
+            ControlAction::SyncSet {
+                set,
+                items: vec![card(ids[0], 0), card(ids[1], 8)],
+            },
+            2,
+        );
+        assert_eq!(core.take_control_outcome("s1").unwrap().error, None);
+        assert_eq!(core.working_set(set).unwrap().items.len(), 2);
+        // An overlap refuses the whole list; the set keeps its cards.
+        control(
+            &mut core,
+            "s2",
+            ControlAction::SyncSet {
+                set,
+                items: vec![card(ids[0], 0), card(ids[1], 4)],
+            },
+            3,
+        );
+        assert!(
+            core.take_control_outcome("s2")
+                .unwrap()
+                .error
+                .unwrap()
+                .contains("overlaps")
+        );
+        assert_eq!(core.working_set(set).unwrap().items[1].rect.y, 8);
+        // A target from another space is refused the same way.
+        control(
+            &mut core,
+            "sp2",
+            ControlAction::NewSpace {
+                name: "Other".into(),
+            },
+            4,
+        );
+        let other = core.take_control_outcome("sp2").unwrap().made[0].id.clone();
+        let other = SpaceId(uuid::Uuid::parse_str(&other).unwrap());
+        core.dispatch(AppAction::MoveProjectToSpace(pid, other), Clock::at(5));
+        control(
+            &mut core,
+            "s3",
+            ControlAction::SyncSet {
+                set,
+                items: vec![card(ids[0], 0)],
+            },
+            6,
+        );
+        assert!(
+            core.take_control_outcome("s3")
+                .unwrap()
+                .error
+                .unwrap()
+                .contains("space")
+        );
+        // The empty list is how the set is cleared.
+        control(
+            &mut core,
+            "s4",
+            ControlAction::SyncSet { set, items: vec![] },
+            7,
+        );
+        assert_eq!(core.take_control_outcome("s4").unwrap().error, None);
+        assert!(core.working_set(set).unwrap().items.is_empty());
+    }
+
+    #[test]
+    fn waiting_set_from_outside_reads_as_waiting_and_shows_in_the_views() {
+        let (mut core, _, ids) = with_records(&[agent()], |s| Some(running(s.id)));
+        let id = ids[0];
+        let now = Clock::at(50).wall;
+        control(
+            &mut core,
+            "w1",
+            ControlAction::SetWaiting {
+                id,
+                reason: Some("finalize the review?".into()),
+            },
+            50,
+        );
+        assert_eq!(core.card_state(id), CardState::WaitingOnYou);
+        let view = core.session_view(id, now).unwrap();
+        assert!(view.waiting);
+        assert_eq!(view.waiting_reason.as_deref(), Some("finalize the review?"));
+        assert_eq!(view.liveness, switchboard_control::Liveness::Running);
+        assert_eq!(core.waiting_views(now).len(), 1);
+        control(
+            &mut core,
+            "w2",
+            ControlAction::SetWaiting { id, reason: None },
+            51,
+        );
+        assert_ne!(core.card_state(id), CardState::WaitingOnYou);
+        assert!(core.waiting_views(now).is_empty());
+    }
+
+    #[test]
+    fn a_review_started_by_the_port_puts_the_reviewer_where_asked_and_marks_the_run() {
+        let (mut core, source) = resumable_agent();
+        let def = WorkflowDefinition {
+            name: "Dispatch: reviewer@abc".into(),
+            ..WorkflowDefinition::default()
+        };
+        control(
+            &mut core,
+            "def",
+            ControlAction::InstallDefinition(def.clone()),
+            1,
+        );
+        assert_eq!(core.take_control_outcome("def").unwrap().error, None);
+        assert_eq!(
+            core.settings().workflow("Dispatch: reviewer@abc"),
+            Some(def.clone())
+        );
+        // Installing again replaces, never duplicates.
+        control(&mut core, "def2", ControlAction::InstallDefinition(def), 2);
+        assert_eq!(core.settings().workflows.len(), 1);
+        core.dispatch(AppAction::ShowSwitchboard, Clock::at(3));
+        let effects = control(
+            &mut core,
+            "run",
+            ControlAction::StartWorkflow {
+                source,
+                plan: "/dispatch/t1/review/1/repo/plan.md".into(),
+                definition: "Dispatch: reviewer@abc".into(),
+                reviewer_cwd: Some("/dispatch/t1/review/1/repo".into()),
+            },
+            4,
+        );
+        assert!(
+            matches!(&effects[0], Effect::LogOperation { kind, ids, .. } if kind == "workflow.start" && ids.len() == 2)
+        );
+        let made = core.take_control_outcome("run").unwrap().made;
+        assert_eq!(made[0].kind, RecordKind::Run);
+        assert_eq!(made[1].kind, RecordKind::Session);
+        assert_eq!(core.view(), View::Switchboard, "no review page opened");
+        let run = core.workflows().next().unwrap().clone();
+        assert_eq!(run.op.as_deref(), Some("run"));
+        let reviewer = core.session(run.reviewer).unwrap();
+        assert_eq!(reviewer.op.as_deref(), Some("run"));
+        assert_eq!(reviewer.cwd, PathBuf::from("/dispatch/t1/review/1/repo"));
+        assert!(reviewer.pending_launch);
+        core.dispatch(
+            AppAction::WorkflowCloned {
+                run: run.id,
+                result: Ok(claude_handle()),
+            },
+            Clock::at(5),
+        );
+        let run = core.workflow(run.id).unwrap().clone();
+        assert_eq!(run.state, RunState::AwaitingFeedback);
+        let planner = core.session(run.planner.unwrap()).unwrap();
+        assert_eq!(planner.op.as_deref(), Some("run"), "the clone is the run's");
+        assert!(!planner.pending_launch);
+        let view = core.run_view(run.id).unwrap();
+        assert_eq!(view.state, switchboard_control::RunState::AwaitingFeedback);
+        assert_eq!(view.round, 1);
+        let found = core.records_with_op("run", Clock::at(6).wall);
+        assert_eq!(found.len(), 3, "run, reviewer, planner: {found:?}");
+        // A source without a transcript cannot be reviewed: an error for
+        // the asker, nothing made, nothing logged.
+        let (id, _) = super::new_session(&mut core, run.project, agent(), Launch::Shell);
+        let effects = control(
+            &mut core,
+            "run2",
+            ControlAction::StartWorkflow {
+                source: id,
+                plan: "/p.md".into(),
+                definition: "Dispatch: reviewer@abc".into(),
+                reviewer_cwd: None,
+            },
+            7,
+        );
+        assert!(
+            !effects
+                .iter()
+                .any(|e| matches!(e, Effect::LogOperation { .. }))
+        );
+        let outcome = core.take_control_outcome("run2").unwrap();
+        assert!(outcome.made.is_empty());
+        assert!(outcome.error.unwrap().contains("cannot be the planner"));
+    }
+
+    #[test]
+    fn an_interrupted_launch_is_listed_after_a_reload() {
+        let (mut core, pid, _) = with_records(&[], |_| None);
+        control(&mut core, "op-9", new_session(pid, None), 1);
+        let saved = core.workspace(pid).unwrap().clone();
+        assert!(saved.sessions[0].pending_launch);
+        // The app dies here; the next start loads what was saved.
+        let (core, _) = loaded(vec![saved], vec![]);
+        assert_eq!(core.interrupted_ops(), vec!["op-9".to_owned()]);
+    }
+}

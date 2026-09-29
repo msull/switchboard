@@ -4376,6 +4376,7 @@ dependencies = [
  "serde_json",
  "serialport",
  "sha2",
+ "switchboard-control",
  "tempfile",
  "uuid",
 ]
