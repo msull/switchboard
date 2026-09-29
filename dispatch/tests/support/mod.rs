@@ -340,6 +340,18 @@ impl FakeSwitchboard {
                 self.notes.insert(session.clone(), text.clone());
                 (vec![], false)
             }
+            Body::SessionMove { session, project } => {
+                if let Some(s) = self.sessions.iter_mut().find(|s| &s.id == session) {
+                    s.project.clone_from(project);
+                }
+                (vec![], false)
+            }
+            Body::ProjectRename { project, name } => {
+                if let Some(p) = self.projects.iter_mut().find(|p| &p.id == project) {
+                    p.name.clone_from(name);
+                }
+                (vec![], false)
+            }
             Body::SessionWaiting {
                 session,
                 on,

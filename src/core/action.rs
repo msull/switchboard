@@ -125,6 +125,10 @@ pub enum AppAction {
     },
     RemoveProject(ProjectId),
     RenameProject(ProjectId, String),
+    /// Move a session record into another project's workspace. The
+    /// record, its pane and its place on any working set are unchanged;
+    /// only which board lists it.
+    MoveSession(RecordId, ProjectId),
     PinDocument(ProjectId, PathBuf),
     UnpinDocument(ProjectId, PathBuf),
     /// Preview a file (absolute path) of the project.
@@ -729,6 +733,7 @@ impl AppCore {
             AppAction::ShowBoard(id) => self.show(View::Board(id), now, &mut out),
             AppAction::ShowSession(id) => self.show_session(id, now, &mut out),
             AppAction::RenameProject(..)
+            | AppAction::MoveSession(..)
             | AppAction::PinDocument(..)
             | AppAction::UnpinDocument(..)
             | AppAction::ShowDocument(..)
@@ -1392,6 +1397,37 @@ impl AppCore {
         self.update_settings(out, |s| s.file_roots.retain(|r| r.project != id));
     }
 
+    /// Lift a record out of its workspace into another's; both are
+    /// saved. Nothing happens when the target is missing or the same.
+    pub(super) fn move_session(&mut self, id: RecordId, project: ProjectId, out: &mut Out) {
+        let Some(from) = self
+            .workspaces
+            .iter()
+            .position(|w| w.sessions.iter().any(|s| s.id == id))
+        else {
+            self.error("no such session");
+            return;
+        };
+        let Some(to) = self.workspaces.iter().position(|w| w.project.id == project) else {
+            self.error("no such project");
+            return;
+        };
+        if from == to {
+            return;
+        }
+        let source = self.workspaces[from].project.id;
+        let pos = self.workspaces[from]
+            .sessions
+            .iter()
+            .position(|s| s.id == id)
+            .expect("found above");
+        let mut record = self.workspaces[from].sessions.remove(pos);
+        record.project = project;
+        self.workspaces[to].sessions.push(record);
+        out.touch(source);
+        out.touch(project);
+    }
+
     pub(super) fn edit_project(
         &mut self,
         id: ProjectId,
@@ -1786,6 +1822,7 @@ impl AppCore {
             AppAction::RenameProject(id, name) => {
                 self.edit_project(id, out, |p| p.name = name);
             }
+            AppAction::MoveSession(id, project) => self.move_session(id, project, out),
             AppAction::PinDocument(id, path) => self.edit_project(id, out, |p| {
                 if !p.pinned.contains(&path) {
                     p.pinned.push(path);

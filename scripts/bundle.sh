@@ -35,8 +35,16 @@ cargo build --locked --release --workspace
 TARGET=$(cargo metadata --format-version 1 --no-deps | sed 's/.*"target_directory":"\([^"]*\)".*/\1/')
 BIN="$TARGET/release"
 
-rm -rf "$APP"
-mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
+# Built and signed in a staging directory, then swapped in by rename,
+# so an app that is running keeps its files: nothing of its bundle is
+# overwritten or deleted underneath it. The previous bundle is kept
+# aside once (a running app may still be mapping it).
+STAGE="$DEST/.Switchboard.app.new"
+PREVIOUS="$DEST/.Switchboard.app.previous"
+rm -rf "$STAGE"
+mkdir -p "$STAGE/Contents/MacOS" "$STAGE/Contents/Resources"
+FINAL="$APP"
+APP="$STAGE"
 cp "$BIN/switchboard" "$APP/Contents/MacOS/switchboard"
 cp "$BIN/switchboard-hook" "$APP/Contents/MacOS/switchboard-hook"
 cp "$BIN/dispatch" "$APP/Contents/MacOS/dispatch"
@@ -94,4 +102,9 @@ else
   tccutil reset Accessibility "$ID" >/dev/null 2>&1 || true
   echo "Ad-hoc signed: re-grant Accessibility on next launch."
 fi
-echo "Installed $APP"
+rm -rf "$PREVIOUS"
+if [ -d "$FINAL" ]; then
+  mv "$FINAL" "$PREVIOUS"
+fi
+mv "$APP" "$FINAL"
+echo "Installed $FINAL (the previous bundle is at $PREVIOUS until the next build)"

@@ -123,6 +123,12 @@ pub enum Body {
         #[serde(default)]
         reason: String,
     },
+    /// The session record moves to another project's board; its pane
+    /// and its cards stay.
+    #[serde(rename = "session.move")]
+    SessionMove { session: String, project: String },
+    #[serde(rename = "project.rename")]
+    ProjectRename { project: String, name: String },
     #[serde(rename = "set.sync")]
     SetSync { set: String, items: Vec<Pin> },
     #[serde(rename = "workflow.definitions.install")]
@@ -182,6 +188,8 @@ impl Body {
             | Self::SessionRemove { .. }
             | Self::SessionNotes { .. }
             | Self::SessionWaiting { .. }
+            | Self::SessionMove { .. }
+            | Self::ProjectRename { .. }
             | Self::SetSync { .. }
             | Self::DefinitionInstall { .. }
             | Self::WorkflowPause { .. }
@@ -609,6 +617,14 @@ mod tests {
             Body::SessionNotes {
                 session: "s".into(),
                 text: "t".into(),
+            },
+            Body::SessionMove {
+                session: "s".into(),
+                project: "p".into(),
+            },
+            Body::ProjectRename {
+                project: "p".into(),
+                name: "n".into(),
             },
             Body::SessionWaiting {
                 session: "s".into(),

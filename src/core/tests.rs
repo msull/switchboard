@@ -1061,6 +1061,40 @@ fn add_project_creates_workspace_shows_board_and_saves() {
 }
 
 #[test]
+fn a_session_moves_between_boards_with_both_workspaces_saved() {
+    let mut core = AppCore::new();
+    core.dispatch(
+        AppAction::AddProject {
+            name: "a".into(),
+            root: "/a".into(),
+        },
+        Clock::at(0),
+    );
+    let id = core.workspaces()[0].project.id;
+    // The record is otherwise as it was; a missing target is a notice.
+    let (rid, _) = new_session(&mut core, id, agent(), Launch::Shell);
+    core.dispatch(
+        AppAction::AddProject {
+            name: "c".into(),
+            root: "/c".into(),
+        },
+        Clock::at(4),
+    );
+    let other = core.workspaces()[1].project.id;
+    let e = core.dispatch(AppAction::MoveSession(rid, other), Clock::at(5));
+    assert_eq!(saves(&e), 2, "{e:?}");
+    assert_eq!(core.session(rid).unwrap().project, other);
+    assert!(core.workspace(id).unwrap().sessions.is_empty());
+    assert_eq!(core.workspace(other).unwrap().sessions.len(), 1);
+    let e = core.dispatch(
+        AppAction::MoveSession(rid, ProjectId(uuid::Uuid::new_v4())),
+        Clock::at(6),
+    );
+    assert_eq!(saves(&e), 0);
+    assert!(core.notice().unwrap().text.contains("no such project"));
+}
+
+#[test]
 fn remove_rename_pin_unpin_project() {
     let mut core = AppCore::new();
     core.dispatch(

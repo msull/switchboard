@@ -51,6 +51,14 @@ pub enum ControlAction {
         id: RecordId,
         reason: Option<String>,
     },
+    MoveSession {
+        id: RecordId,
+        project: ProjectId,
+    },
+    RenameProject {
+        id: ProjectId,
+        name: String,
+    },
     NewSpace {
         name: String,
     },
@@ -199,6 +207,17 @@ impl AppCore {
                     self.error("no such session");
                 }
                 self.edit_session(id, out, |s| s.waiting_on = reason);
+                Vec::new()
+            }
+            ControlAction::MoveSession { id, project } => {
+                self.move_session(id, project, out);
+                Vec::new()
+            }
+            ControlAction::RenameProject { id, name } => {
+                if self.workspace(id).is_none() {
+                    self.error("no such project");
+                }
+                self.edit_project(id, out, |p| p.name = name);
                 Vec::new()
             }
             ControlAction::NewSpace { name } => {
@@ -550,6 +569,8 @@ fn control_kind(action: &ControlAction) -> String {
         ControlAction::Remove(_) => "session.remove",
         ControlAction::SetNotes { .. } => "session.notes",
         ControlAction::SetWaiting { .. } => "session.waiting",
+        ControlAction::MoveSession { .. } => "session.move",
+        ControlAction::RenameProject { .. } => "project.rename",
         ControlAction::NewSpace { .. } => "space.new",
         ControlAction::NewSet { .. } => "set.new",
         ControlAction::SyncSet { .. } => "set.sync",
@@ -679,6 +700,17 @@ impl TryFrom<wire::Body> for ControlAction {
             } => Self::SetWaiting {
                 id: session(&s)?,
                 reason: on.then_some(reason),
+            },
+            wire::Body::SessionMove {
+                session: s,
+                project: p,
+            } => Self::MoveSession {
+                id: session(&s)?,
+                project: project(&p)?,
+            },
+            wire::Body::ProjectRename { project: p, name } => Self::RenameProject {
+                id: project(&p)?,
+                name,
             },
             wire::Body::SpaceNew { name } => Self::NewSpace { name },
             wire::Body::SetNew { space: sp, name } => Self::NewSet {
