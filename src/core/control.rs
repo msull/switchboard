@@ -562,3 +562,152 @@ fn control_kind(action: &ControlAction) -> String {
     }
     .to_owned()
 }
+
+// --- from the wire
+
+fn parse_id(kind: &str, text: &str) -> Result<uuid::Uuid, String> {
+    uuid::Uuid::parse_str(text).map_err(|_| format!("{kind} id {text:?} is not a uuid"))
+}
+
+fn session_kind(kind: wire::SessionKind) -> SessionKind {
+    match kind {
+        wire::SessionKind::Claude => SessionKind::Agent(super::AgentKind::ClaudeCode),
+        wire::SessionKind::Codex => SessionKind::Agent(super::AgentKind::Codex),
+        wire::SessionKind::Shell => SessionKind::Shell,
+        wire::SessionKind::Command => SessionKind::Command,
+        wire::SessionKind::Service => SessionKind::Service,
+    }
+}
+
+fn launch(launch: wire::Launch) -> Launch {
+    match launch {
+        wire::Launch::Shell => Launch::Shell,
+        wire::Launch::Argv(argv) => Launch::Argv(argv),
+        wire::Launch::Command { command, shell } => Launch::Command { command, shell },
+    }
+}
+
+fn pin(pin: wire::Pin) -> Result<PinnedItem, String> {
+    let target = match pin.target {
+        wire::PinTarget::Session { session } => {
+            PinTarget::Session(RecordId(parse_id("session", &session)?))
+        }
+        wire::PinTarget::File { project, path } => {
+            PinTarget::File(ProjectId(parse_id("project", &project)?), path)
+        }
+    };
+    Ok(PinnedItem {
+        target,
+        rect: GridRect {
+            x: pin.rect.x,
+            y: pin.rect.y,
+            w: pin.rect.w,
+            h: pin.rect.h,
+        },
+    })
+}
+
+fn definition(d: wire::Definition) -> WorkflowDefinition {
+    WorkflowDefinition {
+        name: d.name,
+        reviewer: match d.reviewer {
+            wire::AgentKind::Claude => super::AgentKind::ClaudeCode,
+            wire::AgentKind::Codex => super::AgentKind::Codex,
+        },
+        review_first: d.review_first,
+        review_round: d.review_round,
+        respond: d.respond,
+        respond_to_user: d.respond_to_user,
+        handoff: d.handoff,
+        no_feedback: d.no_feedback,
+        cap: d.cap,
+    }
+}
+
+impl TryFrom<wire::Body> for ControlAction {
+    type Error = String;
+
+    /// A command's payload with its ids parsed. A query is an error: it
+    /// is answered from the read models, never dispatched.
+    fn try_from(body: wire::Body) -> Result<Self, String> {
+        let session = |s: &str| parse_id("session", s).map(RecordId);
+        let project = |s: &str| parse_id("project", s).map(ProjectId);
+        let space = |s: &str| parse_id("space", s).map(SpaceId);
+        let run = |s: &str| parse_id("run", s).map(WorkflowId);
+        Ok(match body {
+            wire::Body::ProjectAdd {
+                space: sp,
+                name,
+                root,
+            } => Self::AddProject {
+                space: space(&sp)?,
+                name,
+                root,
+            },
+            wire::Body::ProjectRemove { project: p } => Self::RemoveProject(project(&p)?),
+            wire::Body::SessionNew {
+                project: p,
+                name,
+                session_kind: k,
+                cwd,
+                launch: l,
+                prompt,
+                notes,
+            } => Self::NewSession {
+                project: project(&p)?,
+                name,
+                kind: session_kind(k),
+                cwd,
+                launch: launch(l),
+                prompt,
+                notes,
+            },
+            wire::Body::SessionSend { session: s, text } => Self::SendInput {
+                id: session(&s)?,
+                text,
+            },
+            wire::Body::SessionKill { session: s } => Self::Kill(session(&s)?),
+            wire::Body::SessionRemove { session: s } => Self::Remove(session(&s)?),
+            wire::Body::SessionNotes { session: s, text } => Self::SetNotes {
+                id: session(&s)?,
+                text,
+            },
+            wire::Body::SessionWaiting {
+                session: s,
+                on,
+                reason,
+            } => Self::SetWaiting {
+                id: session(&s)?,
+                reason: on.then_some(reason),
+            },
+            wire::Body::SpaceNew { name } => Self::NewSpace { name },
+            wire::Body::SetNew { space: sp, name } => Self::NewSet {
+                space: space(&sp)?,
+                name,
+            },
+            wire::Body::SetSync { set, items } => Self::SyncSet {
+                set: SetId(parse_id("set", &set)?),
+                items: items.into_iter().map(pin).collect::<Result<_, _>>()?,
+            },
+            wire::Body::DefinitionInstall { definition: d } => {
+                Self::InstallDefinition(definition(d))
+            }
+            wire::Body::WorkflowStart {
+                source,
+                plan,
+                definition,
+                reviewer_cwd,
+            } => Self::StartWorkflow {
+                source: session(&source)?,
+                plan,
+                definition,
+                reviewer_cwd,
+            },
+            wire::Body::WorkflowPause { run: r } => Self::PauseWorkflow(run(&r)?),
+            wire::Body::WorkflowContinue { run: r } => Self::ContinueWorkflow(run(&r)?),
+            wire::Body::WorkflowFinalize { run: r } => Self::FinalizeWorkflow(run(&r)?),
+            wire::Body::WorkflowRemove { run: r } => Self::RemoveWorkflow(run(&r)?),
+            other => return Err(format!("{} is a query, not a command", other.kind())),
+        })
+    }
+}

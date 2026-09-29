@@ -1405,6 +1405,33 @@ Known gaps: only a PDF's first page is shown; a service's run closes
 only when its pane exits, so a long-lived service is one run until it
 is stopped.
 
+## The control port (2026-09-29)
+
+Another process (Dispatch, `docs/dispatch.md`) drives Switchboard over
+`<data dir>/control.sock`: newline-delimited JSON, one request in, one
+reply out, the contract in the `switchboard-control` crate rather than
+`AppAction`. Every command carries an operation id. The core runs it as
+`AppAction::Control` with a quiet flag set: no view changes, no
+terminal window, and every record it makes (project, session, space,
+working set, run, and the run's reviewer and planner clone) carries the
+id in a new `op` field (records v9, views v4). A creation appends a
+request line to `operations.log` before its save, and the reply is
+appended after, so `find` answers from the log first and a record
+removed in the window still reads as made, a repeated id is answered
+from its reply line without running again (which is also what keeps a
+repeated `session.send` from sending twice), and `op.status` reads a
+request line with no reply, or a record still marked `pending_launch`
+(set before a control-owned launch, saved, cleared when the launch
+reports), as interrupted. A `Stop` hook event now records
+`last_stop_at`, and `session.waiting` sets an outside reason on a
+record that makes its card read as waiting on you while the pane runs,
+so the badge and the rail count Dispatch's pending decisions without
+knowing about them. Only the instance holding the store lock listens.
+Built: the wire crate, the core path and read models, the log and
+socket adapters, `serve` in the app, and `tests/control.rs`. Gaps:
+`service.new` and `command.run` are not on the port yet; nothing marks
+Dispatch-owned records as such in the window.
+
 ## Open questions
 
 - Shared project config runs with a hash-and-approve flow and no

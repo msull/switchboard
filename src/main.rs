@@ -44,6 +44,16 @@ fn operations_log(data_dir: &std::path::Path) -> OperationsLog {
     }
 }
 
+/// The control port; a request wakes the frame loop. A read-only
+/// instance is refused and says so in the log.
+fn listen(app: &mut SwitchboardApp, ctx: &egui::Context) {
+    let ctx = ctx.clone();
+    match app.listen(move || ctx.request_repaint()) {
+        Ok(path) => log::info!("control port at {}", path.display()),
+        Err(e) => log::warn!("control port: {e}"),
+    }
+}
+
 /// The nunchuk's port thread; a button press wakes the frame loop.
 fn controller(ctx: &egui::Context) -> SerialController {
     let ctx = ctx.clone();
@@ -164,6 +174,7 @@ fn main() -> eframe::Result {
             };
             let mut app = SwitchboardApp::with_services(services);
             app.start();
+            listen(&mut app, &cc.egui_ctx);
             // Dev aid: a script of actions to run at startup.
             if let Some(path) = std::env::var_os("SWITCHBOARD_SCRIPT") {
                 match std::fs::read_to_string(&path) {

@@ -33,6 +33,9 @@ per project under `projects/` (with a `.bak` of the previous version;
 approvals of defined commands live inside these records),
 `launch.log` (what the last launch loaded and chose for the main
 window's frame, for a launch with no terminal to log to),
+`operations.log` and `control.sock` (the control port: every command
+another process sent, its reply, and the socket it came in on; see
+`docs/dispatch.md`),
 `settings.json` (theme, the active workspace, editor, global variables, file
 side shown next to sessions and its tab, the directory each project's
 file side starts at when narrowed, the screen to reopen on, the
@@ -169,12 +172,14 @@ src/core/
   definitions.rs         .switchboard/project.json entries -> records; hash-keyed approval
   events.rs              hook events -> record activity (matched by record id, ordered by time)
   workflow.rs            plan review runs: reviewer and planner rounds as a state machine over records
+  control.rs             the control port's commands run quietly under an operation id; read models in the wire's shapes
   tests.rs               state-transition tests for the core
-src/ports/               traits: store, host, events, agent, opener, transcript, secrets, project_config, round_files, artifacts, controller
+src/ports/               traits: store, host, events, agent, opener, transcript, secrets, project_config, round_files, artifacts, controller, control (the operations log)
 src/adapters/
   store.rs               JSON store: atomic writes, .bak, flock
   tmux.rs                tmux process host on the private socket
   hooks.rs               append-first event log + socket wake-up + hook settings JSON
+  control.rs             the control port: operations.log (append-only, synced) and control.sock (one thread per connection, requests handed to the frame)
   dock.rs                Dock badge with the waiting-session count (macOS)
   controller.rs          the nunchuk over USB serial: a thread owns the port, reconnects, hands events over a channel
   files.rs               project file index: gitignore-aware scan, lazy children, fuzzy match
@@ -218,6 +223,7 @@ src/ui/
   dialogs.rs             add project / create session dialogs, the full-message and links-in-message dialogs
 assets/fonts/            Source Serif 4 (Regular, Semibold, Italic; OFL), embedded by theme.rs
 tests/ui.rs              headless flows via egui_kittest with fakes
+tests/control.rs         the control port over a real socket with fakes: ops on records, logged replies, interrupted launches
 tests/fixtures/          a small real Claude Code transcript for the parser tests
 tests/live.rs            ignored: real claude / codex / Ghostty runs
 tests/gate.rs            Milestone 1 gate: real store, tmux, hooks; agents ignored

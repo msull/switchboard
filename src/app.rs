@@ -4,13 +4,17 @@
 //! lives in [`crate::ui`].
 
 use std::collections::HashMap;
+use std::io;
 use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime};
 
+use switchboard_control as wire;
+
+use crate::adapters::control::{ControlSocket, Incoming};
 use crate::adapters::hooks::WakeSocket;
 use crate::core::{
-    AgentKind, AppAction, AppCore, Clock, Effect, ProjectId, RecordId, Resolved, ResumeHandle,
-    SessionKind, View,
+    AgentKind, AppAction, AppCore, Clock, ControlAction, ControlOutcome, Effect, ProjectId,
+    RecordId, Resolved, ResumeHandle, SessionKind, SpaceId, View, WorkflowId,
 };
 use crate::ports::agent::AgentLauncher;
 use crate::ports::artifacts::ArtifactFinder;
@@ -117,6 +121,8 @@ pub struct SwitchboardApp {
     /// UI tests use this to assert what a click did.
     pub record_actions: bool,
     pub dispatched: Vec<AppAction>,
+    /// The control port, once `listen` bound it.
+    control: Option<ControlSocket>,
 }
 
 /// Turn an adapter failure into the notice the user sees; the log keeps
@@ -150,6 +156,7 @@ impl SwitchboardApp {
             ui_state: UiState::default(),
             record_actions: false,
             dispatched: Vec::new(),
+            control: None,
         }
     }
 
@@ -860,6 +867,7 @@ impl SwitchboardApp {
     }
 
     fn pump(&mut self) {
+        self.serve_pending();
         // Every frame, not every poll: a button press should land in
         // the frame its wake-up requested.
         for event in self.services.controller.poll() {
@@ -951,5 +959,253 @@ fn remove_quietly(path: &std::path::Path) {
         && e.kind() != std::io::ErrorKind::NotFound
     {
         log::warn!("remove {}: {e}", path.display());
+    }
+}
+
+// --- the control port
+
+/// The record kind each id of a creation's log line names.
+fn logged_kind(command: &str, position: usize) -> wire::RecordKind {
+    match command {
+        "project.add" => wire::RecordKind::Project,
+        "space.new" => wire::RecordKind::Space,
+        "set.new" => wire::RecordKind::Set,
+        "workflow.start" if position == 0 => wire::RecordKind::Run,
+        _ => wire::RecordKind::Session,
+    }
+}
+
+fn parse_uuid(kind: &str, text: &str) -> Result<uuid::Uuid, String> {
+    uuid::Uuid::parse_str(text).map_err(|_| format!("{kind} id {text:?} is not a uuid"))
+}
+
+impl SwitchboardApp {
+    /// Bind the control socket in the data directory. Refused for a
+    /// read-only instance: the one holding the store lock owns the port.
+    pub fn listen(&mut self, wake: impl Fn() + Send + Sync + 'static) -> io::Result<PathBuf> {
+        let dir = self.services.store.data_dir();
+        self.listen_at(&dir, wake)
+    }
+
+    /// `listen` with the directory chosen; tests keep each socket apart.
+    pub fn listen_at(
+        &mut self,
+        dir: &std::path::Path,
+        wake: impl Fn() + Send + Sync + 'static,
+    ) -> io::Result<PathBuf> {
+        if self.core.read_only() {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "another instance holds the data directory; not listening",
+            ));
+        }
+        let socket = ControlSocket::bind(dir, wake)?;
+        let path = socket.path().to_path_buf();
+        self.control = Some(socket);
+        Ok(path)
+    }
+
+    /// Answer every request that has arrived. Called once per frame; a
+    /// test calls it while its client waits.
+    pub fn serve_pending(&mut self) {
+        let incoming: Vec<Incoming> = self
+            .control
+            .as_mut()
+            .map(ControlSocket::poll)
+            .unwrap_or_default();
+        for Incoming { request, reply } in incoming {
+            let answer = self.serve(&request);
+            let _ = reply.send(answer);
+        }
+    }
+
+    /// One request, one reply. A query reads; a command runs through the
+    /// core under its operation id, and its reply is logged so a repeat
+    /// of the same id is answered from the log without running again.
+    pub fn serve(&mut self, request: &wire::Request) -> wire::Reply {
+        if !request.body.is_command() {
+            return self.answer(&request.body);
+        }
+        let op = &request.op;
+        if op.trim().is_empty() {
+            return wire::Reply::failed("a command needs an op");
+        }
+        if let Some(reply) = self.replied(op) {
+            return reply;
+        }
+        let action = match ControlAction::try_from(request.body.clone()) {
+            Ok(action) => action,
+            Err(reason) => return wire::Reply::failed(reason),
+        };
+        self.dispatch(AppAction::Control {
+            op: op.clone(),
+            action,
+        });
+        let reply = match self.core.take_control_outcome(op) {
+            None => wire::Reply::failed("the command produced no outcome"),
+            Some(ControlOutcome {
+                error: Some(reason),
+                ..
+            }) => wire::Reply::failed(reason),
+            Some(ControlOutcome { made, .. }) => {
+                let launched = made.iter().any(|m| {
+                    m.kind == wire::RecordKind::Session
+                        && uuid::Uuid::parse_str(&m.id)
+                            .is_ok_and(|id| self.core.host_status(RecordId(id)).is_some())
+                });
+                if launched {
+                    wire::Reply::Launched { made }
+                } else {
+                    wire::Reply::Persisted { made }
+                }
+            }
+        };
+        let line = OpLine::Replied {
+            op: op.clone(),
+            reply: serde_json::to_string(&reply).unwrap_or_default(),
+            at: SystemTime::now(),
+        };
+        if let Err(e) = self.services.operations.append(&line) {
+            log::error!("operations log: {e}");
+        }
+        reply
+    }
+
+    /// The reply already given to `op`, if the log has one.
+    fn replied(&self, op: &str) -> Option<wire::Reply> {
+        self.services
+            .operations
+            .find(op)
+            .into_iter()
+            .find_map(|line| match line {
+                OpLine::Replied { reply, .. } => wire::Reply::parse(&reply).ok(),
+                OpLine::Requested { .. } => None,
+            })
+    }
+
+    fn answer(&self, body: &wire::Body) -> wire::Reply {
+        let now = SystemTime::now();
+        let core = &self.core;
+        match body {
+            wire::Body::Projects { space } => {
+                let space = match space {
+                    Some(s) => match parse_uuid("space", s) {
+                        Ok(id) => Some(SpaceId(id)),
+                        Err(reason) => return wire::Reply::failed(reason),
+                    },
+                    None => None,
+                };
+                wire::Reply::Projects {
+                    projects: core.project_views(space),
+                }
+            }
+            wire::Body::Spaces => wire::Reply::Spaces {
+                spaces: core.space_views(),
+            },
+            wire::Body::Sets { space } => match parse_uuid("space", space) {
+                Ok(id) => wire::Reply::Sets {
+                    sets: core.set_views(SpaceId(id)),
+                },
+                Err(reason) => wire::Reply::failed(reason),
+            },
+            wire::Body::Sessions { project } => match parse_uuid("project", project) {
+                Ok(id) => match core.workspace(ProjectId(id)) {
+                    Some(w) => wire::Reply::Sessions {
+                        sessions: w
+                            .sessions
+                            .iter()
+                            .filter_map(|s| core.session_view(s.id, now))
+                            .collect(),
+                    },
+                    None => wire::Reply::failed("no such project"),
+                },
+                Err(reason) => wire::Reply::failed(reason),
+            },
+            wire::Body::Session { session } => match parse_uuid("session", session) {
+                Ok(id) => match core.session_view(RecordId(id), now) {
+                    Some(session) => wire::Reply::Session { session },
+                    None => wire::Reply::failed("no such session"),
+                },
+                Err(reason) => wire::Reply::failed(reason),
+            },
+            wire::Body::Waiting => wire::Reply::Waiting {
+                sessions: core.waiting_views(now),
+            },
+            wire::Body::Workflow { run } => match parse_uuid("run", run) {
+                Ok(id) => match core.run_view(WorkflowId(id)) {
+                    Some(run) => wire::Reply::Workflow { run },
+                    None => wire::Reply::failed("no such run"),
+                },
+                Err(reason) => wire::Reply::failed(reason),
+            },
+            wire::Body::Workflows { project } => match parse_uuid("project", project) {
+                Ok(id) => match core.workspace(ProjectId(id)) {
+                    Some(w) => wire::Reply::Workflows {
+                        runs: w
+                            .workflows
+                            .iter()
+                            .filter_map(|r| core.run_view(r.id))
+                            .collect(),
+                    },
+                    None => wire::Reply::failed("no such project"),
+                },
+                Err(reason) => wire::Reply::failed(reason),
+            },
+            wire::Body::Find { operation } => wire::Reply::Found {
+                records: self.find_op(operation, now),
+            },
+            wire::Body::OpStatus { operation } => wire::Reply::OpStatus {
+                status: self.op_status(operation),
+            },
+            _ => wire::Reply::failed("not a query"),
+        }
+    }
+
+    /// Every record `op` made: the ones still present with their state,
+    /// and the ones the log names that are gone, marked removed. The log
+    /// is read first, so a record removed in the window is still
+    /// reported as made.
+    fn find_op(&self, op: &str, now: SystemTime) -> Vec<wire::Found> {
+        let mut found = self.core.records_with_op(op, now);
+        for line in self.services.operations.find(op) {
+            let OpLine::Requested { kind, ids, .. } = line else {
+                continue;
+            };
+            for (n, id) in ids.iter().enumerate() {
+                if !found.iter().any(|f| &f.id == id) {
+                    found.push(wire::Found {
+                        kind: logged_kind(&kind, n),
+                        id: id.clone(),
+                        removed: true,
+                        session: None,
+                        run: None,
+                    });
+                }
+            }
+        }
+        found
+    }
+
+    /// Requests are answered in the same frame they run, so a request
+    /// line with no reply line can only mean the app died between the
+    /// two; so can a record still marked as launching.
+    fn op_status(&self, op: &str) -> wire::OpStatus {
+        let lines = self.services.operations.find(op);
+        let replied = lines.iter().find_map(|l| match l {
+            OpLine::Replied { reply, .. } => wire::Reply::parse(reply).ok(),
+            OpLine::Requested { .. } => None,
+        });
+        let requested = lines.iter().any(|l| matches!(l, OpLine::Requested { .. }));
+        let interrupted = self.core.interrupted_ops().iter().any(|o| o == op);
+        if interrupted {
+            return wire::OpStatus::Interrupted;
+        }
+        match replied {
+            Some(reply) => wire::OpStatus::Done {
+                reply: Box::new(reply),
+            },
+            None if requested => wire::OpStatus::Interrupted,
+            None => wire::OpStatus::Unknown,
+        }
     }
 }
