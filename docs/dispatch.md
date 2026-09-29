@@ -1035,6 +1035,20 @@ exist:
   through `session.waiting`, so the Dock count and the rail include
   it, and the decision text is in its notes.
 
+Dispatch also has a port of its own, so a reader can see tickets as
+they are rather than through the sessions they made. While `dispatch
+run` is up it serves `<data>/dispatch.sock` (wire crate
+`dispatch-control`): `status` answers every project's queue and every
+ticket as a view (stage names resolved, attempts, decisions, lanes,
+artifact paths), `ticket` one in full, `artifact` the text of a file
+under a ticket's directory and nothing outside it, and `decide`,
+`queue` and `take` do exactly what the command line does, through the
+same runner methods under the same writer lock. Switchboard's Dispatch
+page is a client of this port and knows nothing of the records; a
+runner on another machine looks the same through a forwarded socket.
+The port is served only by the runner that holds `runner.lock`, so a
+socket file left by a dead runner is never a live one.
+
 ## The first slice
 
 The Switchboard pipeline only, and no autonomy. A command:

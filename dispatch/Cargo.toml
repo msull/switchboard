@@ -22,6 +22,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
 switchboard-control = { path = "../control" }
+dispatch-control = { path = "../dispatch-control" }
 toml = "1"
 uuid = { version = "1", features = ["v4"] }
 directories = "6"

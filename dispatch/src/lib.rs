@@ -13,6 +13,7 @@
 //!   world, then acts through the traits.
 //! - `recover`: the ledger reconciled against Switchboard at start.
 //! - `view`: the queue's working set, redrawn whole.
+//! - `serve`: Dispatch's own port, tickets as views and the commands.
 
 pub mod git;
 pub mod github;
@@ -20,6 +21,7 @@ pub mod pipeline;
 pub mod port;
 pub mod recover;
 pub mod scheduler;
+pub mod serve;
 pub mod store;
 pub mod template;
 pub mod ticket;

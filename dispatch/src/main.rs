@@ -2,13 +2,13 @@
 
 use std::time::{Duration, SystemTime};
 
-use anyhow::{Context, Result, bail};
+use anyhow::Result;
 use dispatch::epoch_ms;
 use dispatch::git::GitCli;
-use dispatch::github::{Gh, Issues};
-use dispatch::pipeline::{Pipeline, Source};
+use dispatch::github::Gh;
 use dispatch::port::SocketPort;
 use dispatch::scheduler::Runner;
+use dispatch::serve::{Handler, Server, take_issue};
 use dispatch::store::DataDir;
 use dispatch::ticket::{DecisionState, TicketState};
 
@@ -21,7 +21,8 @@ const USAGE: &str = "usage:
   dispatch queue <project> [<ticket>...]   show, or reorder, a project's queue
 
 Data: $DISPATCH_DATA_DIR (default ~/Library/Application Support/Dispatch).
-Switchboard: $SWITCHBOARD_DATA_DIR/control.sock (default Switchboard's).";
+Switchboard: $SWITCHBOARD_DATA_DIR/control.sock (default Switchboard's).
+While `run` is up it serves the same commands on <data>/dispatch.sock.";
 
 fn now_ms() -> u64 {
     epoch_ms(SystemTime::now())
@@ -60,20 +61,13 @@ fn main() -> Result<()> {
 
 fn take(project: &str, issue: &str) -> Result<()> {
     let mut runner = runner()?;
-    let path = runner.data.pipeline(project);
-    let text = std::fs::read_to_string(&path)
-        .with_context(|| format!("no pipeline for {project} at {}", path.display()))?;
-    let pipeline = Pipeline::parse(&text)?;
-    let Source::Github { repo, .. } = &pipeline.source else {
-        bail!("only a GitHub source is taken from the command line in this slice");
-    };
-    let number: u64 = issue
-        .trim_start_matches('#')
-        .parse()
-        .context("an issue number")?;
-    let source = Gh.fetch(repo, number, now_ms())?;
-    let ticket = runner.take(project, &text, source, now_ms())?;
-    println!("{} #{} {}", ticket.id, number, ticket.source.title);
+    let ticket = take_issue(&mut runner, &Gh, project, issue, now_ms())?;
+    println!(
+        "{} #{} {}",
+        ticket.id,
+        ticket.source.number.unwrap_or(0),
+        ticket.source.title
+    );
     Ok(())
 }
 
@@ -81,6 +75,13 @@ fn run(once: bool) -> Result<()> {
     let mut runner = runner()?;
     // One runner per data directory; a second exits here.
     let _owner = runner.data.claim_runner()?;
+    // The port answers on its own runner over the same records; the
+    // writer lock keeps the two apart.
+    let handler = Handler {
+        runner: self::runner()?,
+        issues: Box::new(Gh),
+    };
+    let _port = Server::bind(&runner.data, handler)?;
     runner.recover(now_ms())?;
     loop {
         runner.step_all(now_ms())?;
