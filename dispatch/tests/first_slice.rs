@@ -1382,14 +1382,47 @@ fn a_lane_cut_before_a_stop_is_adopted_not_cut_twice() {
         &artifact_of(&t, "investigate", "notes"),
         "# notes",
     );
-    // The worktree directory exists from a pass that stopped before the
-    // lane record was written.
+    // The worktree exists from a pass that stopped before the lane
+    // record was written: git knows it as this repository's, on the
+    // ticket's branch.
     let dir = env.worktrees.join(&id);
     std::fs::create_dir_all(&dir).unwrap();
+    let branch = dispatch::git::branch_name(7, &t.source.title);
+    env.runner.git = Box::new(FakeRepo {
+        worktrees: vec![(env.root.join("."), dir.clone(), branch, "main".into())],
+        ..FakeRepo::default()
+    });
     env.steps_until(&id, "the plan stage", |t, _| {
         t.attempts_of("plan").next().is_some()
     });
     let t = env.ticket(&id);
     assert_eq!(t.lanes[0].worktree, dir);
     assert!(t.active(), "{t:#?}");
+}
+
+#[test]
+fn a_directory_in_the_way_that_is_not_the_worktree_parks_the_ticket() {
+    let mut env = Env::new();
+    let id = env.take(7).id;
+    env.step();
+    let t = env.ticket(&id);
+    env.finish(
+        &session_of(&t, "investigate"),
+        &artifact_of(&t, "investigate", "notes"),
+        "# notes",
+    );
+    // An empty directory, or anything git does not know as this
+    // repository's worktree on the branch: not adopted, not launched in.
+    std::fs::create_dir_all(env.worktrees.join(&id)).unwrap();
+    env.steps_until(&id, "parking", |t, _| !t.active());
+    let t = env.ticket(&id);
+    assert!(
+        matches!(&t.state, TicketState::Parked { reason } if reason.contains("not a worktree")),
+        "{t:#?}"
+    );
+    assert!(t.lanes.is_empty());
+    assert!(
+        env.sb().sessions_named("planner").is_empty(),
+        "no planner outside a worktree"
+    );
 }

@@ -777,9 +777,24 @@ impl Runner {
             let repo = p.project.root.join(&lane.path);
             let dir = worktrees.join(&t.id);
             let branch = branch_name(t.source.number.unwrap_or(0), &t.source.title);
-            // A worktree already there is this ticket's own, cut before a
-            // stop that came ahead of the lane record; adopt it.
+            // A directory already there is adopted only if git says it is
+            // this repository's worktree on this branch (cut before a stop
+            // that came ahead of the lane record); anything else in the
+            // way is not guessed at.
             if dir.exists() {
+                if !self.git.is_worktree_of(&repo, &dir, &branch)? {
+                    self.park(
+                        t,
+                        ps,
+                        &format!(
+                            "lane {name}: {} exists but is not a worktree of {} on {branch}",
+                            dir.display(),
+                            repo.display()
+                        ),
+                        now_ms,
+                    )?;
+                    return Ok(());
+                }
                 log::info!("ticket {} lane {name}: adopting {}", t.id, dir.display());
             } else if let Err(e) = self.git.worktree_add(&repo, &dir, &branch, &lane.base) {
                 self.park(t, ps, &format!("could not cut lane {name}: {e}"), now_ms)?;

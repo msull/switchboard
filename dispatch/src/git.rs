@@ -2,7 +2,7 @@
 //! it is clean. Fixed argv only; nothing from a ticket is spliced into a
 //! command line.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Context, Result, bail};
@@ -11,6 +11,9 @@ pub trait Repo: Send {
     /// `git worktree add <dir> -b <branch> <base>` in `repo`, then the
     /// lane's `setup` argv inside the new worktree.
     fn worktree_add(&mut self, repo: &Path, dir: &Path, branch: &str, base: &str) -> Result<()>;
+    /// Whether `dir` is a finished worktree of `repo` with `branch`
+    /// checked out: the same common git directory, that branch, a tree.
+    fn is_worktree_of(&self, repo: &Path, dir: &Path, branch: &str) -> Result<bool>;
     fn head(&self, dir: &Path) -> Result<String>;
     fn is_clean(&self, dir: &Path) -> Result<bool>;
     /// Run `argv` in `dir` with `env` set; nonzero exit is an error.
@@ -61,6 +64,40 @@ impl Repo for GitCli {
         Ok(())
     }
 
+    fn is_worktree_of(&self, repo: &Path, dir: &Path, branch: &str) -> Result<bool> {
+        // `rev-parse` answers relative to the directory git was given.
+        let show = |where_: &Path, what: &str| -> Result<Option<PathBuf>> {
+            let out = git()
+                .arg("-C")
+                .arg(where_)
+                .args(["rev-parse", what])
+                .output()
+                .with_context(|| format!("git in {}", where_.display()))?;
+            if !out.status.success() {
+                return Ok(None);
+            }
+            let text = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+            Ok(where_.join(text).canonicalize().ok())
+        };
+        let (Some(common), Some(repo_common), Some(top)) = (
+            show(dir, "--git-common-dir")?,
+            show(repo, "--git-common-dir")?,
+            show(dir, "--show-toplevel")?,
+        ) else {
+            return Ok(false);
+        };
+        if common != repo_common || top != dir.canonicalize()? {
+            return Ok(false);
+        }
+        let head = output(
+            git()
+                .arg("-C")
+                .arg(dir)
+                .args(["rev-parse", "--abbrev-ref", "HEAD"]),
+        )?;
+        Ok(head == branch)
+    }
+
     fn head(&self, dir: &Path) -> Result<String> {
         output(git().arg("-C").arg(dir).args(["rev-parse", "HEAD"]))
     }
@@ -88,10 +125,10 @@ impl Repo for GitCli {
 /// set by the test, commands are recorded.
 #[derive(Debug, Default)]
 pub struct FakeRepo {
-    pub worktrees: Vec<(std::path::PathBuf, std::path::PathBuf, String, String)>,
-    pub heads: std::collections::BTreeMap<std::path::PathBuf, String>,
-    pub dirty: Vec<std::path::PathBuf>,
-    pub ran: Vec<(std::path::PathBuf, Vec<String>)>,
+    pub worktrees: Vec<(PathBuf, PathBuf, String, String)>,
+    pub heads: std::collections::BTreeMap<PathBuf, String>,
+    pub dirty: Vec<PathBuf>,
+    pub ran: Vec<(PathBuf, Vec<String>)>,
     pub fail_worktree: Option<String>,
 }
 
@@ -109,6 +146,12 @@ impl Repo for FakeRepo {
         ));
         self.heads.insert(dir.to_path_buf(), "base0000".into());
         Ok(())
+    }
+    fn is_worktree_of(&self, repo: &Path, dir: &Path, branch: &str) -> Result<bool> {
+        Ok(self
+            .worktrees
+            .iter()
+            .any(|(r, d, b, _)| r == repo && d == dir && b == branch))
     }
     fn head(&self, dir: &Path) -> Result<String> {
         self.heads
@@ -196,6 +239,45 @@ mod tests {
             .unwrap();
         assert!(cli.is_clean(&wt).unwrap());
         assert_eq!(cli.head(&wt).unwrap(), cli.head(&repo).unwrap());
+        assert!(cli.is_worktree_of(&repo, &wt, "dispatch/1-x").unwrap());
+        assert!(
+            !cli.is_worktree_of(&repo, &wt, "main").unwrap(),
+            "wrong branch"
+        );
+        let empty = dir.path().join("wt").join("t2");
+        std::fs::create_dir_all(&empty).unwrap();
+        assert!(
+            !cli.is_worktree_of(&repo, &empty, "dispatch/2-x").unwrap(),
+            "no worktree"
+        );
+        let other = dir.path().join("other");
+        std::fs::create_dir_all(&other).unwrap();
+        let other_git = |args: &[&str]| {
+            let ok = Command::new("git")
+                .arg("-C")
+                .arg(&other)
+                .args(args)
+                .status()
+                .unwrap()
+                .success();
+            assert!(ok, "{args:?}");
+        };
+        other_git(&["init", "-q", "-b", "dispatch/1-x"]);
+        other_git(&[
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "x",
+        ]);
+        assert!(
+            !cli.is_worktree_of(&repo, &other, "dispatch/1-x").unwrap(),
+            "another repository"
+        );
         std::fs::write(wt.join("f"), "x").unwrap();
         assert!(!cli.is_clean(&wt).unwrap());
         cli.run(&wt, &["true".to_owned()], &[]).unwrap();
