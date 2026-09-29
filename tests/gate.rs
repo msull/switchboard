@@ -274,6 +274,7 @@ fn project(root: &Path) -> Project {
         created: now,
         last_active: now,
         space: switchboard::core::SpaceId::DEFAULT,
+        op: None,
     }
 }
 
@@ -304,6 +305,10 @@ fn record(project: ProjectId, name: &str, kind: SessionKind, cwd: &Path) -> Sess
         discard: None,
         runs: Vec::new(),
         outputs: Vec::new(),
+        op: None,
+        waiting_on: None,
+        pending_launch: false,
+        last_stop_at: None,
     }
 }
 

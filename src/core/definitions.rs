@@ -253,6 +253,10 @@ fn upsert(
         discard: None,
         runs: Vec::new(),
         outputs: entry.outputs,
+        op: None,
+        waiting_on: None,
+        pending_launch: false,
+        last_stop_at: None,
     });
     id
 }

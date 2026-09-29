@@ -38,6 +38,7 @@ fn project(name: &str) -> Project {
         created: t,
         last_active: t,
         space: SpaceId::DEFAULT,
+        op: None,
     }
 }
 
@@ -75,6 +76,10 @@ fn record(project: ProjectId, kind: SessionKind, order: u32) -> SessionRecord {
         discard: None,
         runs: Vec::new(),
         outputs: Vec::new(),
+        op: None,
+        waiting_on: None,
+        pending_launch: false,
+        last_stop_at: None,
     }
 }
 
@@ -879,6 +884,43 @@ fn card_state_follows_activity_while_running() {
         );
         assert_eq!(core.card_state(ids[0]), expected);
     }
+}
+
+#[test]
+fn a_stop_is_remembered_on_its_own_and_an_outside_wait_reads_as_waiting() {
+    let (mut core, _, ids) = with_records(&[agent()], |s| Some(running(s.id)));
+    let id = ids[0];
+    assert_eq!(core.session(id).unwrap().last_stop_at, None);
+    core.dispatch(
+        AppAction::Events(vec![SessionEvent {
+            record_id: Some(id),
+            ..event(EventKind::PromptSubmitted, 100)
+        }]),
+        Clock::at(1),
+    );
+    // Any event moves `last_event_at`; only a stop moves `last_stop_at`.
+    assert_eq!(core.session(id).unwrap().last_stop_at, None);
+    core.dispatch(
+        AppAction::Events(vec![SessionEvent {
+            record_id: Some(id),
+            // A second later: the wall clock is whole seconds.
+            ..event(EventKind::Stopped { last_message: None }, 2_100)
+        }]),
+        Clock::at(1),
+    );
+    assert_eq!(
+        core.session(id).unwrap().last_stop_at,
+        Some(Clock::at(2_100).wall)
+    );
+    assert_eq!(core.card_state(id), CardState::Idle);
+    // Someone outside (Dispatch) says a decision waits on this session:
+    // the card reads as waiting while the pane runs, whatever the hooks
+    // last said.
+    core.seed_waiting_on(id, Some("finalize the review?".into()));
+    assert_eq!(core.card_state(id), CardState::WaitingOnYou);
+    assert_eq!(core.waiting_count(), 1);
+    core.seed_waiting_on(id, None);
+    assert_eq!(core.card_state(id), CardState::Idle);
 }
 
 #[test]
@@ -3505,6 +3547,7 @@ fn working_set_loads_and_is_pruned_and_the_view_is_restored() {
                 },
             },
         ],
+        op: None,
     });
     let load = |last_view: SavedView| {
         let mut core = AppCore::new();

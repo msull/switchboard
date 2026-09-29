@@ -349,10 +349,12 @@ pub fn migrate(value: serde_json::Value) -> Result<Workspace, String> {
         .and_then(serde_json::Value::as_u64)
         .ok_or_else(|| "missing schema_version".to_string())?;
     match version {
-        // v2 to v8 added optional fields only (v8: the project's space),
-        // so an older document reads with their defaults; it is written
-        // back at the current version.
-        1..=8 => serde_json::from_value(value)
+        // v2 to v9 added optional fields only (v8: the project's space;
+        // v9: the control port's operation id, the outside waiting
+        // reason, the pending-launch mark and the last stop time), so an
+        // older document reads with their defaults; it is written back
+        // at the current version.
+        1..=9 => serde_json::from_value(value)
             .map(|mut w: Workspace| {
                 w.schema_version = SCHEMA_VERSION;
                 w
@@ -496,6 +498,10 @@ mod tests {
             discard: None,
             runs: Vec::new(),
             outputs: Vec::new(),
+            op: None,
+            waiting_on: None,
+            pending_launch: false,
+            last_stop_at: None,
         };
         let mut agent = session(
             "claude",
@@ -522,6 +528,7 @@ mod tests {
                 created: now,
                 last_active: now,
                 space: SpaceId::DEFAULT,
+                op: None,
             },
             sessions: vec![agent, shell],
             workflows: Vec::new(),
@@ -580,6 +587,7 @@ mod tests {
                     h: 8,
                 },
             }],
+            op: None,
         });
         store.save_views(&views).unwrap();
         assert_eq!(store.load_all().unwrap().views, views);
@@ -855,5 +863,28 @@ mod tests {
 
         value["schema_version"] = serde_json::json!(u64::from(SCHEMA_VERSION) + 1);
         assert!(migrate(value).unwrap_err().contains("newer"));
+    }
+
+    #[test]
+    fn v8_records_read_with_no_operation_and_nothing_waiting() {
+        let mut w = workspace("v8");
+        w.schema_version = 8;
+        let mut value = serde_json::to_value(&w).unwrap();
+        value["project"].as_object_mut().unwrap().remove("op");
+        for s in value["sessions"].as_array_mut().unwrap() {
+            let s = s.as_object_mut().unwrap();
+            for field in ["op", "waiting_on", "pending_launch", "last_stop_at"] {
+                s.remove(field);
+            }
+        }
+        let loaded = migrate(value).unwrap();
+        assert_eq!(loaded.schema_version, SCHEMA_VERSION);
+        assert!(loaded.project.op.is_none());
+        assert!(loaded.sessions.iter().all(|s| {
+            s.op.is_none()
+                && s.waiting_on.is_none()
+                && !s.pending_launch
+                && s.last_stop_at.is_none()
+        }));
     }
 }

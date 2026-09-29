@@ -85,6 +85,10 @@ impl AppCore {
             discard: None,
             runs: Vec::new(),
             outputs: Vec::new(),
+            op: None,
+            waiting_on: None,
+            pending_launch: false,
+            last_stop_at: None,
         });
         out.touch(project);
         Some(id)

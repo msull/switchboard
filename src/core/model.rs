@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 /// Bump when the on-disk shape changes incompatibly.
-pub const SCHEMA_VERSION: u32 = 8;
+pub const SCHEMA_VERSION: u32 = 9;
 
 /// How the UI picks its colours: follow the system, or force one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -301,6 +301,11 @@ pub struct WorkflowRun {
     pub cleaned: bool,
     pub created: SystemTime,
     pub updated: SystemTime,
+    /// The control-port operation that made this record, when one did.
+    /// Stored so the process that asked can find it again after a lost
+    /// reply; never shown as an id, only as a "Dispatch" mark.
+    #[serde(default)]
+    pub op: Option<String>,
 }
 
 impl WorkflowRun {
@@ -521,7 +526,7 @@ pub struct WindowFrame {
 /// below changes shape. v2 gave every set an id; a v1 file reads with
 /// fresh ids. v3 added spaces and put every set in one; a v2 file
 /// reads with everything in the default space.
-pub const VIEWS_SCHEMA_VERSION: u32 = 3;
+pub const VIEWS_SCHEMA_VERSION: u32 = 4;
 
 /// Switchboard's own id for a space. Never reused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -553,6 +558,11 @@ impl Default for SpaceId {
 pub struct Space {
     pub id: SpaceId,
     pub name: String,
+    /// The control-port operation that made this record, when one did.
+    /// Stored so the process that asked can find it again after a lost
+    /// reply; never shown as an id, only as a "Dispatch" mark.
+    #[serde(default)]
+    pub op: Option<String>,
 }
 
 impl Space {
@@ -562,6 +572,7 @@ impl Space {
         Self {
             id: SpaceId::DEFAULT,
             name: "Default".into(),
+            op: None,
         }
     }
 }
@@ -618,6 +629,11 @@ pub struct WorkingSet {
     /// The space the set belongs to.
     #[serde(default)]
     pub space: SpaceId,
+    /// The control-port operation that made this record, when one did.
+    /// Stored so the process that asked can find it again after a lost
+    /// reply; never shown as an id, only as a "Dispatch" mark.
+    #[serde(default)]
+    pub op: Option<String>,
 }
 
 impl Default for WorkingSet {
@@ -627,6 +643,7 @@ impl Default for WorkingSet {
             name: "Working Set".into(),
             items: Vec::new(),
             space: SpaceId::DEFAULT,
+            op: None,
         }
     }
 }
@@ -640,6 +657,7 @@ impl WorkingSet {
             name: name.into(),
             items: Vec::new(),
             space: SpaceId::DEFAULT,
+            op: None,
         }
     }
 }
@@ -760,6 +778,11 @@ pub struct Project {
     /// `.switchboard/project.json` last declared them (`show`).
     #[serde(default)]
     pub shown: Vec<PathBuf>,
+    /// The control-port operation that made this record, when one did.
+    /// Stored so the process that asked can find it again after a lost
+    /// reply; never shown as an id, only as a "Dispatch" mark.
+    #[serde(default)]
+    pub op: Option<String>,
     pub created: SystemTime,
     /// Most recent time this project was active; drives switcher order.
     pub last_active: SystemTime,
@@ -920,6 +943,25 @@ pub struct SessionRecord {
     /// ends. A defined entry's come from the file (`output`).
     #[serde(default)]
     pub outputs: Vec<String>,
+    /// The control-port operation that made this record, when one did.
+    /// Stored so the process that asked can find it again after a lost
+    /// reply; never shown as an id, only as a "Dispatch" mark.
+    #[serde(default)]
+    pub op: Option<String>,
+    /// Why an outside process says this session waits on the user
+    /// (Dispatch's pending decision, say). While set and the pane runs,
+    /// the card reads as waiting, so the badge and the rail count it.
+    #[serde(default)]
+    pub waiting_on: Option<String>,
+    /// A launch effect was emitted for this record and has not reported
+    /// back. Saved before the launch runs, so a record found with it
+    /// set after a restart was interrupted between the two.
+    #[serde(default)]
+    pub pending_launch: bool,
+    /// When the agent last reported finishing a turn (the Stop hook).
+    /// `last_event_at` moves on every event; this one only on a stop.
+    #[serde(default)]
+    pub last_stop_at: Option<SystemTime>,
 }
 
 /// How many runs a record keeps; the logs of older ones are deleted

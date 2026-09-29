@@ -57,6 +57,7 @@ fn project(name: &str, last_active: SystemTime) -> Project {
         created: at(0),
         last_active,
         space: SpaceId::DEFAULT,
+        op: None,
     }
 }
 
@@ -86,6 +87,10 @@ fn record(project: ProjectId, name: &str, kind: SessionKind, order: u32) -> Sess
         discard: None,
         runs: Vec::new(),
         outputs: Vec::new(),
+        op: None,
+        waiting_on: None,
+        pending_launch: false,
+        last_stop_at: None,
     }
 }
 
@@ -3306,6 +3311,7 @@ fn seed_review(
         cleaned: false,
         created: at(200),
         updated: at(200),
+        op: None,
     };
     let id = run.id;
     let core = harness.state_mut().core_mut_for_seeding();

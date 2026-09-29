@@ -1088,6 +1088,14 @@ impl AppCore {
         self.views = views;
     }
 
+    /// Set a record's outside waiting reason directly. Tests only; the
+    /// control port sets it through its own action.
+    pub fn seed_waiting_on(&mut self, id: RecordId, reason: Option<String>) {
+        if let Some(s) = self.session_mut(id) {
+            s.waiting_on = reason;
+        }
+    }
+
     pub fn seed(&mut self, workspaces: Vec<Workspace>, host: Vec<HostStatus>) {
         self.workspaces = workspaces;
         self.host = host;
@@ -1239,6 +1247,7 @@ impl AppCore {
                 let space = Space {
                     id: SpaceId::new(),
                     name,
+                    op: None,
                 };
                 let id = space.id;
                 self.update_views(out, |v| v.spaces.push(space));
@@ -1300,6 +1309,7 @@ impl AppCore {
             created: now.wall,
             last_active: now.wall,
             space: self.settings.space,
+            op: None,
         }));
         out.touch(id);
         out.push(super::definitions::read_config(
@@ -1851,6 +1861,8 @@ impl AppCore {
         match self.host_status(id).map(|h| &h.liveness) {
             Some(Liveness::Running { .. }) => match record.activity {
                 Activity::WaitingOnYou => CardState::WaitingOnYou,
+                // An outside process (Dispatch) says a decision waits here.
+                _ if record.waiting_on.is_some() => CardState::WaitingOnYou,
                 // A review's agent gone quiet mid-round is most likely
                 // sitting at an approval prompt: the user's turn.
                 _ if self.stalled_agents().any(|a| a == id) => CardState::WaitingOnYou,

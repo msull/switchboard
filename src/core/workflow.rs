@@ -239,6 +239,7 @@ impl AppCore {
             cleaned: false,
             created: now.wall,
             updated: now.wall,
+            op: None,
         };
         let prompt = def.render(&def.review_first, &round, plan, cap);
         if let Some(w) = self

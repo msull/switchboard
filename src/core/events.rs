@@ -85,6 +85,9 @@ impl AppCore {
         self.edit_session(id, out, |s| {
             s.last_event_at = Some(event.at);
             s.last_seen = s.last_seen.max(event.at);
+            if matches!(event.kind, EventKind::Stopped { .. }) {
+                s.last_stop_at = Some(event.at);
+            }
             if let Some((activity, reason)) = change {
                 s.activity = activity;
                 s.activity_reason = reason;
