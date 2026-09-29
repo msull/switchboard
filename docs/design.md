@@ -1444,7 +1444,17 @@ window.
 The `dispatch` crate holds the first slice of `docs/dispatch.md`: the
 Switchboard pipeline through `investigate`, the automatic `lanes`
 decision, `plan`, and a review run on a copy of the plan, stopping at
-the `finalize` decision. Everything else in that document (command and
+the `finalize` decision. A ticket's tree comes first: Dispatch keeps
+its own clone of the project's `repo` under `<data>/repos/<project>`,
+fetches it before every cut, and cuts the ticket's worktree from
+`<remote>/<base>` under `<data>/worktrees/<ticket>` (a lane may say
+where instead), so the user's checkout is never read or touched and a
+ticket starts from what the remote has now. Every stage runs in that
+tree, under one Switchboard project per ticket named `#<n> <title>`
+and rooted there; a multi-lane pipeline's other lanes are worktrees of
+the same clone whose sessions carry their own cwd. A project with
+`root` instead of `repo` works in place with no branch, for one that
+is not a repository. Everything else in that document (command and
 external gates, `implement`, PR checks, budgets, the other pipelines)
 parks the ticket with a reason. The runner's pass over a project is
 one transaction under the data directory's writer lock, and `decide`,

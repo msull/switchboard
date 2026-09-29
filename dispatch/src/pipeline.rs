@@ -30,9 +30,31 @@ pub struct Pipeline {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProjectSection {
     pub name: String,
-    pub root: PathBuf,
-    /// The Switchboard workspace every ticket's projects go in.
+    /// The repository's URL. Dispatch keeps its own clone of it under
+    /// its data directory, fetched before every cut, and every ticket
+    /// works in a worktree of that clone; the user's checkout is never
+    /// touched. One of `repo` and `root`.
+    #[serde(default)]
+    pub repo: Option<String>,
+    /// A directory to work in as it is, with no branch and no clone:
+    /// for a project that is not a repository. One of `repo` and `root`.
+    #[serde(default)]
+    pub root: Option<PathBuf>,
+    /// The branch tickets branch from, in the clone's `remote`.
+    #[serde(default = "default_base")]
+    pub base: String,
+    #[serde(default = "default_remote")]
+    pub remote: String,
+    /// The Switchboard workspace every ticket's project goes in.
     pub space: String,
+}
+
+fn default_base() -> String {
+    "main".into()
+}
+
+fn default_remote() -> String {
+    "origin".into()
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -54,11 +76,14 @@ pub enum Source {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Lane {
     pub name: String,
-    /// Relative to the project root; `.` for a single-repository project.
+    /// Relative to the clone (or the root); `.` for a single-repository
+    /// project.
     pub path: PathBuf,
-    pub base: String,
-    /// Absent: the lane works in place on a branch and holds the
-    /// repository.
+    /// The branch this lane branches from; absent, the project's.
+    #[serde(default)]
+    pub base: Option<String>,
+    /// Where this lane's worktrees go; absent, Dispatch's own
+    /// `worktrees` directory.
     #[serde(default)]
     pub worktrees: Option<PathBuf>,
     /// Run once in a new worktree.
@@ -278,6 +303,19 @@ impl Default for Policy {
 }
 
 impl Pipeline {
+    /// The branch a lane branches from: its own, else the project's.
+    #[must_use]
+    pub fn lane_base<'a>(&'a self, lane: &'a Lane) -> &'a str {
+        lane.base.as_deref().unwrap_or(&self.project.base)
+    }
+
+    /// Whether tickets work in worktrees of Dispatch's clone (`repo`),
+    /// as opposed to in place at `root`.
+    #[must_use]
+    pub fn cuts_worktrees(&self) -> bool {
+        self.project.repo.is_some()
+    }
+
     /// Parse and validate one file's text.
     pub fn parse(text: &str) -> Result<Self> {
         let pipeline: Self = toml::from_str(text).context("parse the pipeline file")?;
@@ -412,6 +450,11 @@ impl Pipeline {
         if self.lanes.is_empty() {
             bail!("a pipeline needs at least one lane");
         }
+        match (&self.project.repo, &self.project.root) {
+            (Some(_), None) | (None, Some(_)) => {}
+            (Some(_), Some(_)) => bail!("[project] takes repo or root, not both"),
+            (None, None) => bail!("[project] needs repo (a URL to clone) or root (a directory)"),
+        }
         let mut names = std::collections::BTreeSet::new();
         for lane in &self.lanes {
             if !names.insert(&lane.name) {
@@ -452,7 +495,7 @@ version = 1
 
 [project]
 name = "Switchboard"
-root = "/repo"
+repo = "git@example.com:msull/switchboard.git"
 space = "Dispatch · Switchboard"
 
 [source]

@@ -119,7 +119,7 @@ version = 1
 
 [project]
 name = "Live"
-root = "{root}"
+root = "{root}"                 # in place: a plain directory, no clone, no branch
 space = "Dispatch · Live"
 
 [source]
@@ -130,8 +130,6 @@ label = "dispatch"
 [[lanes]]
 name = "repo"
 path = "."
-base = "main"
-worktrees = "{worktrees}"
 
 [operators.investigator]
 kind = "claude"
@@ -146,7 +144,6 @@ writes = ["notes"]
 prompt = "Write the single word pong to the file {{notes}} and stop."
 "#,
         root = repo.0.display(),
-        worktrees = tmp.path().join("wt").display()
     );
     std::fs::write(data.pipeline(PROJECT), &pipeline).unwrap();
 

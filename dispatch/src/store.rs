@@ -62,6 +62,18 @@ impl DataDir {
         self.root.join("tickets").join(id)
     }
 
+    /// Dispatch's own clone of a project's repository.
+    #[must_use]
+    pub fn repo_dir(&self, project: &str) -> PathBuf {
+        self.root.join("repos").join(project)
+    }
+
+    /// Where tickets' worktrees go unless a lane says otherwise.
+    #[must_use]
+    pub fn worktrees_dir(&self) -> PathBuf {
+        self.root.join("worktrees")
+    }
+
     #[must_use]
     pub fn project_file(&self, project: &str) -> PathBuf {
         self.root.join("projects").join(format!("{project}.json"))

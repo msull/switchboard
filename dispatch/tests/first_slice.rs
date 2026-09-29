@@ -1,5 +1,5 @@
 //! The first slice, end to end against a Switchboard in memory: an issue
-//! becomes a ticket, a worktree, two projects and four sessions, and
+//! becomes a ticket, a worktree, one project and four sessions, and
 //! stops at the finalize decision; and every way the path can be cut
 //! short (a lost reply, a removed record, a launch the app died in, an
 //! agent that never wrote) ends as a decision, never a second launch.
@@ -18,14 +18,14 @@ use switchboard_control::{Body, Liveness, RunState};
 
 const PROJECT: &str = "Switchboard";
 
-fn pipeline(root: &std::path::Path, worktrees: &std::path::Path) -> String {
+fn pipeline(worktrees: &std::path::Path) -> String {
     format!(
         r#"
 version = 1
 
 [project]
 name = "Switchboard"
-root = "{root}"
+repo = "git@example.com:msull/switchboard.git"
 space = "Dispatch · Switchboard"
 
 [source]
@@ -100,7 +100,6 @@ slots = 2
 waiting_on_me = 3
 decisions = {{ lanes = "auto", finalize = "ask" }}
 "#,
-        root = root.display(),
         worktrees = worktrees.display()
     )
 }
@@ -110,7 +109,6 @@ struct Env {
     data: DataDir,
     sb: Arc<Mutex<FakeSwitchboard>>,
     runner: Runner,
-    root: PathBuf,
     worktrees: PathBuf,
     now: u64,
 }
@@ -119,11 +117,9 @@ impl Env {
     fn new() -> Self {
         let dir = tempfile::tempdir().unwrap();
         let data = DataDir::new(dir.path().join("dispatch"));
-        let root = dir.path().join("repo");
         let worktrees = dir.path().join("wt");
-        std::fs::create_dir_all(&root).unwrap();
         std::fs::create_dir_all(data.root.join("pipelines")).unwrap();
-        std::fs::write(data.pipeline(PROJECT), pipeline(&root, &worktrees)).unwrap();
+        std::fs::write(data.pipeline(PROJECT), pipeline(&worktrees)).unwrap();
         let sb = Arc::new(Mutex::new(FakeSwitchboard::new()));
         let runner = Runner::new(
             data.clone(),
@@ -135,7 +131,6 @@ impl Env {
             data,
             sb,
             runner,
-            root,
             worktrees,
             now: 1_000,
         }
@@ -269,7 +264,7 @@ fn through_plan(env: &mut Env, number: u64) -> String {
 // order that the acceptance table fixes.
 #[test]
 #[allow(clippy::too_many_lines)]
-fn an_issue_becomes_two_projects_four_sessions_one_run_and_a_finalize_decision() {
+fn an_issue_becomes_one_project_four_sessions_one_run_and_a_finalize_decision() {
     let mut env = Env::new();
     let t = env.take(7);
     let id = t.id.clone();
@@ -280,9 +275,17 @@ fn an_issue_becomes_two_projects_four_sessions_one_run_and_a_finalize_decision()
         vec![id.clone()]
     );
 
-    // Step one: the space, the root project and the investigator.
+    // Step one: the tree is cut from Dispatch's clone, then the space,
+    // the ticket's one project at that tree, and the investigator in it.
     env.step();
     let t = env.ticket(&id);
+    assert_eq!(t.lanes.len(), 1, "{t:#?}");
+    assert_eq!(
+        t.lanes[0].branch,
+        "dispatch/7-issue-7-escape-leaves-the-field"
+    );
+    assert_eq!(t.lanes[0].worktree, env.worktrees.join(&id));
+    let tree = t.lanes[0].worktree.clone();
     {
         let sb = env.sb();
         assert_eq!(
@@ -293,11 +296,11 @@ fn an_issue_becomes_two_projects_four_sessions_one_run_and_a_finalize_decision()
             1
         );
         assert_eq!(sb.projects.len(), 1);
-        assert_eq!(sb.projects[0].name, "#7");
-        assert_eq!(sb.projects[0].root, env.root);
+        assert_eq!(sb.projects[0].name, "#7 Issue 7: escape leaves the field");
+        assert_eq!(sb.projects[0].root, tree);
         let sessions = sb.sessions_named("investigator");
         assert_eq!(sessions.len(), 1);
-        assert_eq!(sessions[0].cwd, env.root);
+        assert_eq!(sessions[0].cwd, tree);
         assert!(sessions[0].op.is_some());
         assert!(sessions[0].notes.contains(&id));
         let prompt = sb
@@ -339,8 +342,9 @@ fn an_issue_becomes_two_projects_four_sessions_one_run_and_a_finalize_decision()
     env.step();
     assert_eq!(env.ticket(&id).stage, 0);
 
-    // The notes settle: the investigator is killed, the one lane is cut
-    // without asking, and the planner starts in the worktree.
+    // The notes settle: the investigator is killed, the one-lane gate
+    // passes without asking, and the planner starts in the same tree
+    // under the same project.
     env.finish(
         &investigator,
         &artifact_of(&t, "investigate", "notes"),
@@ -353,25 +357,17 @@ fn an_issue_becomes_two_projects_four_sessions_one_run_and_a_finalize_decision()
         t.attempts_of("plan").next().is_some()
     });
     let t = env.ticket(&id);
-    assert_eq!(t.lanes.len(), 1);
-    assert_eq!(
-        t.lanes[0].branch,
-        "dispatch/7-issue-7-escape-leaves-the-field"
-    );
-    assert_eq!(t.lanes[0].worktree, env.worktrees.join(&id));
-    assert!(t.lanes[0].project.is_some());
     assert!(
         t.pending_decisions().is_empty(),
         "the lanes decision was auto"
     );
     {
         let sb = env.sb();
-        assert_eq!(sb.projects.len(), 2);
-        assert_eq!(sb.projects[1].name, "#7 repo");
-        assert_eq!(sb.projects[1].root, t.lanes[0].worktree);
+        assert_eq!(sb.projects.len(), 1, "one project per ticket");
         let planner = sb.sessions_named("planner");
         assert_eq!(planner.len(), 1);
-        assert_eq!(planner[0].cwd, t.lanes[0].worktree);
+        assert_eq!(planner[0].cwd, tree);
+        assert_eq!(planner[0].project, sb.projects[0].id);
         let prompt = sb
             .calls
             .iter()
@@ -1225,7 +1221,7 @@ fn a_pause_that_does_not_take_keeps_the_ticket_parking() {
 
 /// The Switchboard pipeline exactly as `docs/dispatch.md` shows it, with
 /// its paths pointed at this test's directories.
-fn documented_pipeline(env: &Env) -> String {
+fn documented_pipeline() -> String {
     let design = include_str!("../../docs/dispatch.md");
     design
         .split("### Pipeline: Switchboard")
@@ -1237,20 +1233,13 @@ fn documented_pipeline(env: &Env) -> String {
         .split("```")
         .next()
         .unwrap()
-        .replace(
-            "/Users/sully/code_repos/personal/switchboard-worktrees",
-            &env.worktrees.display().to_string(),
-        )
-        .replace(
-            "/Users/sully/code_repos/personal/switchboard",
-            &env.root.display().to_string(),
-        )
+        .to_owned()
 }
 
 #[test]
 fn the_documented_pipelines_reviewer_is_told_its_repository() {
     let mut env = Env::new();
-    std::fs::write(env.data.pipeline(PROJECT), documented_pipeline(&env)).unwrap();
+    std::fs::write(env.data.pipeline(PROJECT), documented_pipeline()).unwrap();
     let id = at_finalize(&mut env);
     let worktree = env.ticket(&id).lanes[0].worktree.display().to_string();
     let sb = env.sb();
@@ -1374,47 +1363,35 @@ fn a_finalize_answer_cut_off_at_its_request_is_replayed_after_a_restart() {
 #[test]
 fn a_lane_cut_before_a_stop_is_adopted_not_cut_twice() {
     let mut env = Env::new();
-    let id = env.take(7).id;
-    env.step();
-    let t = env.ticket(&id);
-    env.finish(
-        &session_of(&t, "investigate"),
-        &artifact_of(&t, "investigate", "notes"),
-        "# notes",
-    );
+    let t = env.take(7);
+    let id = t.id.clone();
     // The worktree exists from a pass that stopped before the lane
     // record was written: git knows it as this repository's, on the
     // ticket's branch.
     let dir = env.worktrees.join(&id);
     std::fs::create_dir_all(&dir).unwrap();
     let branch = dispatch::git::branch_name(7, &t.source.title);
+    let clone = env.data.repo_dir(PROJECT).join(".");
     env.runner.git = Box::new(FakeRepo {
-        worktrees: vec![(env.root.join("."), dir.clone(), branch, "main".into())],
+        worktrees: vec![(clone, dir.clone(), branch, "origin/main".into())],
         ..FakeRepo::default()
     });
-    env.steps_until(&id, "the plan stage", |t, _| {
-        t.attempts_of("plan").next().is_some()
-    });
+    env.step();
     let t = env.ticket(&id);
     assert_eq!(t.lanes[0].worktree, dir);
     assert!(t.active(), "{t:#?}");
+    assert_eq!(env.sb().sessions_named("investigator").len(), 1);
 }
 
 #[test]
 fn a_directory_in_the_way_that_is_not_the_worktree_parks_the_ticket() {
     let mut env = Env::new();
     let id = env.take(7).id;
-    env.step();
-    let t = env.ticket(&id);
-    env.finish(
-        &session_of(&t, "investigate"),
-        &artifact_of(&t, "investigate", "notes"),
-        "# notes",
-    );
     // An empty directory, or anything git does not know as this
-    // repository's worktree on the branch: not adopted, not launched in.
+    // repository's worktree on the branch: not adopted, nothing
+    // launched in it.
     std::fs::create_dir_all(env.worktrees.join(&id)).unwrap();
-    env.steps_until(&id, "parking", |t, _| !t.active());
+    env.step();
     let t = env.ticket(&id);
     assert!(
         matches!(&t.state, TicketState::Parked { reason } if reason.contains("not a worktree")),
@@ -1422,7 +1399,24 @@ fn a_directory_in_the_way_that_is_not_the_worktree_parks_the_ticket() {
     );
     assert!(t.lanes.is_empty());
     assert!(
-        env.sb().sessions_named("planner").is_empty(),
-        "no planner outside a worktree"
+        env.sb().sessions.is_empty(),
+        "nothing runs outside a worktree"
     );
+}
+
+#[test]
+fn the_tree_comes_from_dispatches_own_clone_fetched_first() {
+    let mut env = Env::new();
+    let id = env.take(7).id;
+    env.step();
+    let t = env.ticket(&id);
+    assert!(env.data.repo_dir(PROJECT).exists(), "the private clone");
+    assert_eq!(t.lanes[0].worktree, env.worktrees.join(&id));
+    assert_eq!(
+        t.lanes[0].branch,
+        "dispatch/7-issue-7-escape-leaves-the-field"
+    );
+    // The reviewer's and the investigator's tree are the same one.
+    let investigator = env.sb().sessions_named("investigator")[0].clone();
+    assert_eq!(investigator.cwd, t.lanes[0].worktree);
 }

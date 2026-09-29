@@ -331,17 +331,22 @@ version = 1
 
 [project]
 name = "..."                  # Switchboard project name
-root = "/path"                # the repository, or the workspace repo
-space = "..."                 # the Switchboard workspace every ticket's projects go in
+repo = "git@..."              # the repository: Dispatch keeps its own clone under its data
+                              # directory, fetches it before every cut, and cuts each ticket's
+                              # worktree from <remote>/<base>; the user's checkout is never used
+root = "/path"                # instead of repo: work in place in this directory, no branch
+base = "main"                 # the branch tickets branch from (default main)
+remote = "origin"             # (default origin)
+space = "..."                 # the Switchboard workspace every ticket's project goes in
 
 [source]
 kind = "github" | "task-file" | "manual"
 
 [[lanes]]
 name = "..."
-path = "relative/to/root"     # "." for a single-repo project
-base = "main"                 # the integration branch a lane branches from
-worktrees = "/path"           # omitted: in place, on a branch, holding the repository
+path = "relative/to/clone"    # "." for a single-repo project
+base = "main"                 # omitted: the project's
+worktrees = "/path"           # omitted: Dispatch's own worktrees directory
 setup = ["cmd", "args"]       # run once in a new worktree
 
 [[resources]]
@@ -400,7 +405,8 @@ version = 1
 
 [project]
 name = "Switchboard"
-root = "/Users/sully/code_repos/personal/switchboard"
+repo = "git@github.com:msull/switchboard.git"
+base = "main"
 space = "Dispatch · Switchboard"
 
 [source]
@@ -411,8 +417,6 @@ label = "dispatch"            # marking an issue with it is the handover
 [[lanes]]
 name = "repo"
 path = "."
-base = "main"
-worktrees = "/Users/sully/code_repos/personal/switchboard-worktrees"
 setup = ["cargo", "fetch", "--locked"]
 
 [operators.investigator]
@@ -638,7 +642,7 @@ version = 1
 
 [project]
 name = "Delta"
-root = "/Users/sully/code_repos/delta"
+repo = "git@github.com:k3systems/delta-workspace.git"
 space = "Dispatch · Delta"
 
 [source]
@@ -652,14 +656,12 @@ lane_hints = { "area:backend" = "backend", "area:frontend" = "frontend", "area:s
 name = "backend"
 path = "delta-backend"
 base = "main"
-worktrees = "/Users/sully/code_repos/delta-worktrees/backend"
 setup = ["sh", "-c", "uv sync && uv run inv link-env --env-name sully-dev"]
 
 [[lanes]]
 name = "frontend"
 path = "delta-frontend"
 base = "dev"
-worktrees = "/Users/sully/code_repos/delta-worktrees/frontend"
 setup = ["npm", "ci", "--legacy-peer-deps"]
 # A service Dispatch starts for a stage that asks. PORT is a port
 # Dispatch allocates per ticket; the URL is what the tester is told.
@@ -669,7 +671,6 @@ serve = { argv = ["npm", "start"], env = { BROWSER = "none", PORT = "{port}" }, 
 name = "snp"
 path = "delta-snp"
 base = "master"
-worktrees = "/Users/sully/code_repos/delta-worktrees/snp"
 setup = ["npm", "ci", "--legacy-peer-deps"]
 serve = { argv = ["npm", "start"], env = { BROWSER = "none", PORT = "{port}" }, url = "http://localhost:{port}", ready = { http = "/", within_secs = 120 } }
 

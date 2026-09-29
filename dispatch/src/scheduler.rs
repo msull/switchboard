@@ -318,6 +318,16 @@ impl Runner {
         if !t.active() {
             return Ok(());
         }
+        // The ticket's own tree comes before any stage: a worktree of
+        // Dispatch's clone on the ticket's branch, cut from what the
+        // remote has now. The user's checkout is never involved.
+        if p.cuts_worktrees() && t.lanes.is_empty() {
+            let primary = vec![p.lanes[0].name.clone()];
+            self.cut_lanes(t, ps, p, &primary, now_ms)?;
+            if !t.active() {
+                return Ok(());
+            }
+        }
         let Some(stage) = p.stages.get(t.stage).cloned() else {
             self.close(t, ps, "every stage is done", now_ms)?;
             return Ok(());
@@ -752,6 +762,30 @@ impl Runner {
         names: &[String],
         now_ms: u64,
     ) -> Result<()> {
+        let Some(url) = p.project.repo.clone() else {
+            return self.park(
+                t,
+                ps,
+                "lanes of a project that works in place are not built in this slice",
+                now_ms,
+            );
+        };
+        let clone = self.data.repo_dir(&p.project.name);
+        if let Err(e) = self.git.ensure_clone(&url, &clone) {
+            return self.park(t, ps, &format!("could not clone {url}: {e:#}"), now_ms);
+        }
+        if let Err(e) = self.git.fetch(&clone, &p.project.remote) {
+            return self.park(
+                t,
+                ps,
+                &format!(
+                    "could not fetch {} in {}: {e:#}",
+                    p.project.remote,
+                    clone.display()
+                ),
+                now_ms,
+            );
+        }
         for name in names {
             if t.lanes.iter().any(|l| &l.name == name) {
                 continue;
@@ -765,18 +799,18 @@ impl Runner {
                 )?;
                 return Ok(());
             };
-            let Some(worktrees) = &lane.worktrees else {
-                self.park(
-                    t,
-                    ps,
-                    &format!("lane {name:?} works in place, which is not built in this slice"),
-                    now_ms,
-                )?;
-                return Ok(());
+            let repo = clone.join(&lane.path);
+            let worktrees = lane
+                .worktrees
+                .clone()
+                .unwrap_or_else(|| self.data.worktrees_dir());
+            let dir = if p.lanes.len() == 1 {
+                worktrees.join(&t.id)
+            } else {
+                worktrees.join(format!("{}-{name}", t.id))
             };
-            let repo = p.project.root.join(&lane.path);
-            let dir = worktrees.join(&t.id);
             let branch = branch_name(t.source.number.unwrap_or(0), &t.source.title);
+            let start = format!("{}/{}", p.project.remote, p.lane_base(lane));
             // A directory already there is adopted only if git says it is
             // this repository's worktree on this branch (cut before a stop
             // that came ahead of the lane record); anything else in the
@@ -796,7 +830,7 @@ impl Runner {
                     return Ok(());
                 }
                 log::info!("ticket {} lane {name}: adopting {}", t.id, dir.display());
-            } else if let Err(e) = self.git.worktree_add(&repo, &dir, &branch, &lane.base) {
+            } else if let Err(e) = self.git.worktree_add(&repo, &dir, &branch, &start) {
                 self.park(t, ps, &format!("could not cut lane {name}: {e}"), now_ms)?;
                 return Ok(());
             }
@@ -831,16 +865,12 @@ impl Runner {
     ) -> Result<()> {
         match &stage.gate {
             Some(Gate::Human { decision, .. }) if decision == "lanes" => {
-                if !t.lanes.is_empty() {
+                // The ticket's own tree was cut before the first stage;
+                // this gate is about any other lanes the issue needs, so
+                // a one-lane pipeline, or one where every lane is cut,
+                // passes without a question.
+                if p.lanes.len() == 1 || t.lanes.len() == p.lanes.len() || !p.cuts_worktrees() {
                     self.finish_gate_only(t, ps, stage, now_ms)?;
-                    return Ok(());
-                }
-                if p.dial("lanes") == "auto" && p.lanes.len() == 1 {
-                    let names = vec![p.lanes[0].name.clone()];
-                    self.cut_lanes(t, ps, p, &names, now_ms)?;
-                    if t.active() {
-                        self.finish_gate_only(t, ps, stage, now_ms)?;
-                    }
                     return Ok(());
                 }
                 let hinted = lane_hints(p, &t.source.labels);
@@ -917,10 +947,12 @@ impl Runner {
     /// The contexts a stage runs in: `(name, cwd, lane)`. Empty when the
     /// stage needs lanes the ticket has not cut.
     fn contexts(t: &Ticket, p: &Pipeline, stage: &Stage) -> Vec<(String, PathBuf, Option<String>)> {
-        let root = ("root".to_owned(), p.project.root.clone(), None);
+        let Some(tree) = primary_tree(t, p) else {
+            return Vec::new();
+        };
         match &stage.context {
-            Context::Root => vec![root],
-            Context::Joined => vec![("joined".to_owned(), p.project.root.clone(), None)],
+            Context::Root => vec![("root".to_owned(), tree, None)],
+            Context::Joined => vec![("joined".to_owned(), tree, None)],
             Context::Each => t
                 .lanes
                 .iter()
@@ -975,53 +1007,32 @@ impl Runner {
     }
 
     /// The Switchboard project for a context, made once per ticket.
+    /// The ticket's one Switchboard project, `#<n> <title>`, rooted at
+    /// the ticket's tree; sessions in other lanes carry their own cwd.
     fn ensure_project(
         &mut self,
         t: &mut Ticket,
         ps: &mut ProjectState,
         p: &Pipeline,
-        lane: Option<&str>,
-        cwd: &Path,
         now_ms: u64,
     ) -> Result<String> {
-        let existing = match lane {
-            None => t.root_project.clone(),
-            Some(l) => t
-                .lanes
-                .iter()
-                .find(|x| x.name == l)
-                .and_then(|x| x.project.clone()),
-        };
-        if let Some(id) = existing {
+        if let Some(id) = t.root_project.clone() {
             return Ok(id);
         }
+        let root = primary_tree(t, p).ok_or_else(|| anyhow!("the ticket has no tree yet"))?;
         let space = self.ensure_space(t, ps, p, now_ms)?;
-        let number = t.source.number.unwrap_or(0);
-        let (intent, name) = match lane {
-            None => ("root-project".to_owned(), format!("#{number}")),
-            Some(l) => (format!("lane-project:{l}"), format!("#{number} {l}")),
-        };
+        let name = format!("#{} {}", t.source.number.unwrap_or(0), t.source.title);
         let reply = self.send(
             t,
             ps,
             None,
-            &intent,
-            Body::ProjectAdd {
-                space,
-                name,
-                root: cwd.to_path_buf(),
-            },
+            "root-project",
+            Body::ProjectAdd { space, name, root },
             now_ms,
         )?;
-        match lane {
-            None => t.root_project.clone(),
-            Some(l) => t
-                .lanes
-                .iter()
-                .find(|x| x.name == l)
-                .and_then(|x| x.project.clone()),
-        }
-        .ok_or_else(|| anyhow!("project.add: {reply:?}"))
+        t.root_project
+            .clone()
+            .ok_or_else(|| anyhow!("project.add: {reply:?}"))
     }
 
     // --- agent stages
@@ -1127,7 +1138,7 @@ impl Runner {
                 now_ms,
             );
         };
-        let project = match self.ensure_project(t, ps, p, lane, cwd, now_ms) {
+        let project = match self.ensure_project(t, ps, p, now_ms) {
             Ok(id) => id,
             Err(e) => return self.park(t, ps, &format!("stage {}: {e:#}", stage.name), now_ms),
         };
@@ -1954,6 +1965,16 @@ fn review_subject(t: &Ticket, subject: &str) -> Result<(PathBuf, String), String
     Ok((path, session))
 }
 
+/// The ticket's own tree: its first lane's worktree, or the project's
+/// root for a project that works in place. None before the cut.
+fn primary_tree(t: &Ticket, p: &Pipeline) -> Option<PathBuf> {
+    if p.cuts_worktrees() {
+        t.lanes.first().map(|l| l.worktree.clone())
+    } else {
+        p.project.root.clone()
+    }
+}
+
 /// Whether a failed attempt's rerun was authorised and its cleanup done:
 /// the answer is marked acted only once the replaced attempt's
 /// processes were confirmed gone, and that mark is on disk.
@@ -1989,7 +2010,10 @@ fn vars_for(t: &Ticket, p: &Pipeline, lane: Option<&str>) -> Vars {
         .set("issue.url", t.source.url.clone().unwrap_or_default())
         .set("task.text", t.source.title.clone())
         .set("task.context", t.source.body.clone())
-        .set("project.root", p.project.root.display().to_string())
+        .set(
+            "project.root",
+            primary_tree(t, p).map_or(String::new(), |d| d.display().to_string()),
+        )
         .set(
             "lanes",
             t.lanes
@@ -1998,6 +2022,9 @@ fn vars_for(t: &Ticket, p: &Pipeline, lane: Option<&str>) -> Vars {
                 .collect::<Vec<_>>()
                 .join(", "),
         );
+    // The root context is the primary lane's tree, so its variables
+    // are set there too.
+    let lane = lane.or_else(|| t.lanes.first().map(|l| l.name.as_str()));
     if let Some(l) = lane.and_then(|name| t.lanes.iter().find(|x| x.name == name)) {
         vars.set("lane", l.name.clone())
             .set("branch", l.branch.clone())

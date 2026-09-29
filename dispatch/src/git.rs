@@ -8,9 +8,14 @@ use std::process::Command;
 use anyhow::{Context, Result, bail};
 
 pub trait Repo: Send {
-    /// `git worktree add <dir> -b <branch> <base>` in `repo`, then the
-    /// lane's `setup` argv inside the new worktree.
-    fn worktree_add(&mut self, repo: &Path, dir: &Path, branch: &str, base: &str) -> Result<()>;
+    /// A clone of `url` at `dir`, made if it is not there yet.
+    fn ensure_clone(&mut self, url: &str, dir: &Path) -> Result<()>;
+    /// `git fetch <remote> --prune` in `dir`, so a cut starts from what
+    /// the remote has now.
+    fn fetch(&mut self, dir: &Path, remote: &str) -> Result<()>;
+    /// `git worktree add <dir> -b <branch> <start>` in `repo`, where
+    /// `start` is a ref like `origin/main`.
+    fn worktree_add(&mut self, repo: &Path, dir: &Path, branch: &str, start: &str) -> Result<()>;
     /// Whether `dir` is a finished worktree of `repo` with `branch`
     /// checked out: the same common git directory, that branch, a tree.
     fn is_worktree_of(&self, repo: &Path, dir: &Path, branch: &str) -> Result<bool>;
@@ -49,7 +54,28 @@ fn output(cmd: &mut Command) -> Result<String> {
 }
 
 impl Repo for GitCli {
-    fn worktree_add(&mut self, repo: &Path, dir: &Path, branch: &str, base: &str) -> Result<()> {
+    fn ensure_clone(&mut self, url: &str, dir: &Path) -> Result<()> {
+        if dir.join(".git").exists() {
+            return Ok(());
+        }
+        if let Some(parent) = dir.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        output(git().args(["clone", "--quiet", url]).arg(dir))?;
+        Ok(())
+    }
+
+    fn fetch(&mut self, dir: &Path, remote: &str) -> Result<()> {
+        output(
+            git()
+                .arg("-C")
+                .arg(dir)
+                .args(["fetch", "--quiet", "--prune", remote]),
+        )?;
+        Ok(())
+    }
+
+    fn worktree_add(&mut self, repo: &Path, dir: &Path, branch: &str, start: &str) -> Result<()> {
         if let Some(parent) = dir.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -59,7 +85,7 @@ impl Repo for GitCli {
                 .arg(repo)
                 .args(["worktree", "add"])
                 .arg(dir)
-                .args(["-b", branch, base]),
+                .args(["-b", branch, start]),
         )?;
         Ok(())
     }
@@ -125,6 +151,8 @@ impl Repo for GitCli {
 /// set by the test, commands are recorded.
 #[derive(Debug, Default)]
 pub struct FakeRepo {
+    pub clones: Vec<(String, PathBuf)>,
+    pub fetched: Vec<(PathBuf, String)>,
     pub worktrees: Vec<(PathBuf, PathBuf, String, String)>,
     pub heads: std::collections::BTreeMap<PathBuf, String>,
     pub dirty: Vec<PathBuf>,
@@ -133,6 +161,15 @@ pub struct FakeRepo {
 }
 
 impl Repo for FakeRepo {
+    fn ensure_clone(&mut self, url: &str, dir: &Path) -> Result<()> {
+        std::fs::create_dir_all(dir)?;
+        self.clones.push((url.to_owned(), dir.to_path_buf()));
+        Ok(())
+    }
+    fn fetch(&mut self, dir: &Path, remote: &str) -> Result<()> {
+        self.fetched.push((dir.to_path_buf(), remote.to_owned()));
+        Ok(())
+    }
     fn worktree_add(&mut self, repo: &Path, dir: &Path, branch: &str, base: &str) -> Result<()> {
         if let Some(e) = &self.fail_worktree {
             bail!("{e}");
@@ -211,18 +248,25 @@ mod tests {
     #[test]
     fn the_real_git_cuts_a_worktree_and_reads_its_head() {
         let dir = tempfile::tempdir().unwrap();
-        let repo = dir.path().join("repo");
-        std::fs::create_dir_all(&repo).unwrap();
-        let git = |args: &[&str]| {
-            let out = git().arg("-C").arg(&repo).args(args).output().unwrap();
+        // An "origin" with one commit on main, cloned the way Dispatch
+        // clones: the clone is the only checkout Dispatch touches.
+        let origin = dir.path().join("origin");
+        std::fs::create_dir_all(&origin).unwrap();
+        let og = |args: &[&str]| {
+            let out = Command::new("git")
+                .arg("-C")
+                .arg(&origin)
+                .args(args)
+                .output()
+                .unwrap();
             assert!(
                 out.status.success(),
                 "{args:?}: {}",
                 String::from_utf8_lossy(&out.stderr)
             );
         };
-        git(&["init", "-q", "-b", "main"]);
-        git(&[
+        og(&["init", "-q", "-b", "main"]);
+        og(&[
             "-c",
             "user.name=t",
             "-c",
@@ -233,9 +277,14 @@ mod tests {
             "-m",
             "root",
         ]);
+        let repo = dir.path().join("clone");
         let mut cli = GitCli;
+        cli.ensure_clone(origin.to_str().unwrap(), &repo).unwrap();
+        cli.ensure_clone(origin.to_str().unwrap(), &repo)
+            .expect("a second call finds the clone");
+        cli.fetch(&repo, "origin").unwrap();
         let wt = dir.path().join("wt").join("t1");
-        cli.worktree_add(&repo, &wt, "dispatch/1-x", "main")
+        cli.worktree_add(&repo, &wt, "dispatch/1-x", "origin/main")
             .unwrap();
         assert!(cli.is_clean(&wt).unwrap());
         assert_eq!(cli.head(&wt).unwrap(), cli.head(&repo).unwrap());
