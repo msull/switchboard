@@ -31,7 +31,7 @@ impl SocketPort {
         if let Some(dir) = std::env::var_os("SWITCHBOARD_DATA_DIR") {
             return Ok(Self::new(Path::new(&dir)));
         }
-        let dirs = directories::ProjectDirs::from("com", "sadburger", "Switchboard")
+        let dirs = directories::ProjectDirs::from("", "", "Switchboard")
             .ok_or_else(|| anyhow::anyhow!("no home directory"))?;
         Ok(Self::new(dirs.data_dir()))
     }

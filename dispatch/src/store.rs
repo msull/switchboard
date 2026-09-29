@@ -40,8 +40,8 @@ impl DataDir {
         if let Some(dir) = std::env::var_os("DISPATCH_DATA_DIR") {
             return Ok(Self::new(dir));
         }
-        let dirs = directories::ProjectDirs::from("com", "sadburger", "Dispatch")
-            .context("no home directory")?;
+        let dirs =
+            directories::ProjectDirs::from("", "", "Dispatch").context("no home directory")?;
         Ok(Self::new(dirs.data_dir()))
     }
 
