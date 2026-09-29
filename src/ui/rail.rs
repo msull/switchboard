@@ -91,7 +91,12 @@ fn dispatch_row(cx: &mut DrawCtx<'_>, ui: &mut Ui, view: &View, compact: bool) {
         .on_hover_text("Tickets, what waits on you, and the dispatch console")
         .clicked()
     {
-        cx.dispatch(AppAction::ShowDispatch);
+        if cx.core.settings().dispatch_window.is_some() {
+            let ctx = ui.ctx().clone();
+            super::popout::raise_or_pop_out_dispatch(cx, &ctx);
+        } else {
+            cx.dispatch(AppAction::ShowDispatch);
+        }
     }
 }
 

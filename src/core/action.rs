@@ -461,6 +461,11 @@ pub enum AppAction {
     /// Type a `dispatch` command line into the console; a line starting
     /// with `!` goes to the shell as it is.
     DispatchConsole(String),
+    /// The Dispatch page in a window of its own; the main window goes
+    /// back to what was under it.
+    PopOutDispatch,
+    CloseDispatchWindow,
+    DispatchWindowMoved(WindowFrame),
 }
 
 /// Work the shell performs on the core's behalf.
@@ -877,7 +882,10 @@ impl AppCore {
             | AppAction::DispatchReadArtifact { .. }
             | AppAction::DispatchReplied { .. }
             | AppAction::OpenDispatchConsole
-            | AppAction::DispatchConsole(_) => self.dispatch_action(action, now, &mut out),
+            | AppAction::DispatchConsole(_)
+            | AppAction::PopOutDispatch
+            | AppAction::CloseDispatchWindow
+            | AppAction::DispatchWindowMoved(_) => self.dispatch_action(action, now, &mut out),
         }
         self.remember_view(&mut out);
         self.prune_working_set(&mut out);

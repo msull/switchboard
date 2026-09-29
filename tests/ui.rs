@@ -3794,37 +3794,78 @@ fn dispatch_page_answers_a_decision_with_a_click() {
         .state_mut()
         .dispatch(AppAction::DispatchStatus(Some(Status {
             data_dir: "/dispatch".into(),
-            projects: vec![ProjectView {
-                name: "Delta".into(),
-                queue: vec!["t1".into()],
-            }],
-            tickets: vec![TicketView {
-                id: "t1".into(),
-                project: "Delta".into(),
-                number: Some(104),
-                title: "One file per entry".into(),
-                state: "active".into(),
-                stages: vec!["investigate".into(), "lanes".into()],
-                stage: 1,
-                decisions: vec![DecisionView {
-                    id: "d1".into(),
-                    ticket: "t1".into(),
-                    stage: "lanes".into(),
-                    name: "lanes".into(),
-                    question: "Which lanes does #104 need?".into(),
-                    options: vec!["backend".into(), "frontend".into()],
-                    recommendation: Some("frontend".into()),
-                    state: "pending".into(),
-                    ..DecisionView::default()
-                }],
-                ..TicketView::default()
-            }],
+            projects: vec![
+                ProjectView {
+                    name: "Delta".into(),
+                    queue: vec!["t1".into()],
+                    slots: 2,
+                    waiting_on_me: 2,
+                    running: 2,
+                    pending: 1,
+                },
+                ProjectView {
+                    name: "PTA".into(),
+                    queue: vec!["t2".into()],
+                    slots: 1,
+                    waiting_on_me: 2,
+                    running: 0,
+                    pending: 0,
+                },
+            ],
+            tickets: vec![
+                TicketView {
+                    id: "t1".into(),
+                    project: "Delta".into(),
+                    number: Some(104),
+                    title: "One file per entry".into(),
+                    state: "active".into(),
+                    stages: vec!["investigate".into(), "lanes".into()],
+                    stage: 1,
+                    decisions: vec![DecisionView {
+                        id: "d1".into(),
+                        ticket: "t1".into(),
+                        stage: "lanes".into(),
+                        name: "lanes".into(),
+                        question: "Which lanes does #104 need?".into(),
+                        options: vec!["backend".into(), "frontend".into()],
+                        recommendation: Some("frontend".into()),
+                        state: "pending".into(),
+                        ..DecisionView::default()
+                    }],
+                    ..TicketView::default()
+                },
+                TicketView {
+                    id: "t2".into(),
+                    project: "PTA".into(),
+                    number: Some(9),
+                    title: "Roster import".into(),
+                    state: "active".into(),
+                    stages: vec!["investigate".into()],
+                    ..TicketView::default()
+                },
+            ],
         })));
     harness.state_mut().dispatched.clear();
     harness.run_steps(2);
     click(&mut harness, "Dispatch");
     assert!(actions(&harness).contains(&AppAction::ShowDispatch));
     harness.get_by_label("Which lanes does #104 need?");
+    // Narrowed to another project, Delta's decision and tickets go.
+    // The chip comes before the project's own section heading.
+    harness
+        .query_all_by_label("PTA")
+        .next()
+        .expect("the PTA chip")
+        .click();
+    harness.run_steps(2);
+    assert!(
+        harness
+            .query_by_label("Which lanes does #104 need?")
+            .is_none()
+    );
+    assert!(harness.query_by_label("#104 One file per entry").is_none());
+    harness.get_by_label("#9 Roster import");
+    click(&mut harness, "All");
     click(&mut harness, "frontend");
     assert!(actions(&harness).contains(&AppAction::DispatchDecide {
         ticket: "t1".into(),
@@ -3842,4 +3883,11 @@ fn dispatch_page_answers_a_decision_with_a_click() {
     assert!(actions(&harness).contains(&AppAction::ShowTicket("t1".into())));
     assert_eq!(harness.state().core().view(), View::Ticket("t1".into()));
     harness.get_by_label("DISPATCH TICKET");
+    // The page can leave for a window of its own; the main window then
+    // goes back to what was under it.
+    click(&mut harness, "Back");
+    click(&mut harness, "Pop out");
+    assert!(actions(&harness).contains(&AppAction::PopOutDispatch));
+    assert!(harness.state().core().settings().dispatch_window.is_some());
+    assert_ne!(harness.state().core().view(), View::Dispatch);
 }

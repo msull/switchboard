@@ -131,6 +131,16 @@ pub struct Settings {
     /// The shell session `dispatch` commands are typed into from the
     /// Dispatch page, once made.
     pub dispatch_console: Option<RecordId>,
+    /// The Dispatch page in a window of its own, while it has one.
+    pub dispatch_window: Option<PageWindow>,
+}
+
+/// A page (not a session) in a window of its own.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct PageWindow {
+    /// Where the window was last seen; `None` until it has reported.
+    #[serde(default)]
+    pub frame: Option<WindowFrame>,
 }
 
 impl Default for Settings {
@@ -155,6 +165,7 @@ impl Default for Settings {
             workflow_round_cap: DEFAULT_ROUND_CAP,
             workflows: Vec::new(),
             dispatch_console: None,
+            dispatch_window: None,
         }
     }
 }

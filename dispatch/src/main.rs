@@ -135,6 +135,18 @@ fn status() -> Result<()> {
     if tickets.is_empty() {
         println!("no tickets");
     }
+    for p in dispatch::serve::status(&runner)?.projects {
+        println!(
+            "{}: {} of {} slots in use, {} of {} decisions waiting{}",
+            p.name,
+            p.running,
+            p.slots,
+            p.pending,
+            p.waiting_on_me,
+            p.held()
+                .map_or(String::new(), |why| format!(" · nothing new starts: {why}"))
+        );
+    }
     for t in tickets {
         let p = runner.pipeline_of(&t).ok();
         let stage = p

@@ -980,6 +980,16 @@ impl eframe::App for SwitchboardApp {
         {
             self.dispatch(AppAction::MainWindowMoved(frame));
         }
+        if let Some((frame, _)) = self.ui_state.dispatch_frame.take()
+            && self
+                .core
+                .settings()
+                .dispatch_window
+                .as_ref()
+                .is_some_and(|w| w.frame.as_ref() != Some(&frame))
+        {
+            self.dispatch(AppAction::DispatchWindowMoved(frame));
+        }
         let popouts = std::mem::take(&mut self.ui_state.popout_frames);
         for (id, (frame, _)) in popouts {
             let saved = self

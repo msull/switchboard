@@ -14,7 +14,7 @@ use egui::{Context, Key, Modifiers, Ui, ViewportBuilder, ViewportCommand, Viewpo
 const HOLD_AT_LAUNCH: Duration = Duration::from_millis(1500);
 
 use super::{DrawCtx, session, side_panel, theme, zoom};
-use crate::core::{AppAction, Popout, RecordId, SessionKind, WindowFrame};
+use crate::core::{AppAction, Popout, RecordId, SessionKind, View, WindowFrame};
 
 /// Size of a new window before it is moved or resized.
 const DEFAULT_SIZE: egui::Vec2 = egui::vec2(1100.0, 780.0);
@@ -43,6 +43,107 @@ pub fn show_all(cx: &mut DrawCtx<'_>, ctx: &Context) {
     for popout in popouts {
         window(cx, ctx, &popout);
     }
+    dispatch_window(cx, ctx);
+}
+
+/// The Dispatch window's viewport.
+#[must_use]
+pub fn dispatch_viewport_id() -> ViewportId {
+    ViewportId::from_hash_of("dispatch-window")
+}
+
+/// The Dispatch page in its own window while the settings say so, with
+/// navigation of its own (the main window's stack is not touched), the
+/// same frame bookkeeping as a session's window, and Cmd+W to close.
+fn dispatch_window(cx: &mut DrawCtx<'_>, ctx: &Context) {
+    let Some(page) = cx.core.settings().dispatch_window.clone() else {
+        cx.state.dispatch_opened = None;
+        cx.state.dispatch_frame = None;
+        return;
+    };
+    let last_seen = cx
+        .state
+        .dispatch_frame
+        .as_ref()
+        .map(|(f, _)| f.clone())
+        .or_else(|| page.frame.clone())
+        .map(|f| rect_of(&f));
+    let monitor = zoom::monitor_of(last_seen);
+    let percent = cx.core.monitor_zoom(&monitor);
+    let factor = zoom::factor(percent);
+    let mut builder = ViewportBuilder::default()
+        .with_title("Dispatch · Switchboard")
+        .with_inner_size(DEFAULT_SIZE);
+    let opened = *cx.state.dispatch_opened.get_or_insert_with(|| {
+        page.frame
+            .as_ref()
+            .filter(|f| zoom::monitor_attached(&f.monitor))
+            .map(|f| {
+                let r = rect_of(f);
+                (r.min / factor, r.size() / factor)
+            })
+    });
+    if let Some((pos, size)) = opened {
+        builder = builder.with_position(pos).with_inner_size(size);
+    }
+    let main_zoom = zoom::install(ctx, percent);
+    ctx.show_viewport_immediate(dispatch_viewport_id(), builder, |ctx, _class| {
+        let (close_requested, frame) = ctx.input(|i| {
+            let v = i.viewport();
+            (v.close_requested(), v.inner_rect.zip(v.outer_rect))
+        });
+        if close_requested || ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::W)) {
+            cx.dispatch(AppAction::CloseDispatchWindow);
+        }
+        if let Some((inner, outer)) = frame {
+            let now = frame_of(inner * factor, outer * factor, monitor.clone());
+            let seen = cx
+                .state
+                .dispatch_frame
+                .get_or_insert((now.clone(), Instant::now()));
+            if settled(seen, now.clone()) && page.frame.as_ref() != Some(&now) {
+                cx.dispatch(AppAction::DispatchWindowMoved(now));
+            }
+        }
+        zoom::window_keys(cx, ctx, &monitor, percent);
+        cx.state.surface = super::Surface::DispatchWindow;
+        egui::CentralPanel::default()
+            .frame(
+                egui::Frame::new()
+                    .fill(theme::palette_of(ctx).bg)
+                    .inner_margin(egui::Margin {
+                        left: 28,
+                        right: 28,
+                        top: 24,
+                        bottom: 20,
+                    }),
+            )
+            .show(ctx, |ui| match cx.state.dispatch_window_ticket.clone() {
+                Some(id) => super::dispatch::ticket(cx, ui, &id),
+                None => super::dispatch::show(cx, ui),
+            });
+        cx.state.surface = super::Surface::Main;
+        super::switcher::toasts(cx, ctx, None);
+    });
+    zoom::restore(ctx, main_zoom);
+}
+
+/// Raise the Dispatch window if there is one; else open it.
+pub fn raise_or_pop_out_dispatch(cx: &mut DrawCtx<'_>, ctx: &Context) {
+    if cx.core.settings().dispatch_window.is_some() {
+        ctx.send_viewport_cmd_to(dispatch_viewport_id(), ViewportCommand::Focus);
+    } else {
+        cx.dispatch(AppAction::PopOutDispatch);
+    }
+}
+
+/// Whether the main window is showing one of Dispatch's views while the
+/// page lives in its own window: then it only points there.
+#[must_use]
+pub fn dispatch_is_elsewhere(cx: &DrawCtx<'_>, view: &View) -> bool {
+    matches!(view, View::Dispatch | View::Ticket(_))
+        && cx.core.settings().dispatch_window.is_some()
+        && cx.state.surface != super::Surface::DispatchWindow
 }
 
 fn window(cx: &mut DrawCtx<'_>, ctx: &Context, popout: &Popout) {

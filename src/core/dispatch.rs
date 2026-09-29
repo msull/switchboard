@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use super::action::{AppAction, AppCore, Clock, Effect, Out, View};
-use super::model::{Launch, RecordId, SessionKind, Space, SpaceId};
+use super::model::{Launch, PageWindow, RecordId, SessionKind, Space, SpaceId};
 use crate::ports::dispatch::{Body, DecisionView, Reply, Status, TicketView};
 
 /// The space and project the console lives in, and its name.
@@ -160,6 +160,36 @@ impl AppCore {
                     None => format!("'{}' {line}", command.replace('\'', "'\\''")),
                 };
                 self.session_action(AppAction::SendInput { id, text }, now, out);
+            }
+            AppAction::PopOutDispatch
+            | AppAction::CloseDispatchWindow
+            | AppAction::DispatchWindowMoved(_) => self.dispatch_window_action(action, out),
+            _ => {}
+        }
+    }
+
+    /// The Dispatch page's own window: opened once (the main window
+    /// goes back to what was under the page), closed, or moved.
+    fn dispatch_window_action(&mut self, action: AppAction, out: &mut Out) {
+        let open = self.settings.dispatch_window.is_some();
+        match action {
+            AppAction::PopOutDispatch => {
+                if !open {
+                    self.update_settings(out, |s| s.dispatch_window = Some(PageWindow::default()));
+                }
+                while matches!(self.view(), View::Dispatch | View::Ticket(_)) {
+                    self.view_stack.pop();
+                }
+            }
+            AppAction::CloseDispatchWindow if open => {
+                self.update_settings(out, |s| s.dispatch_window = None);
+            }
+            AppAction::DispatchWindowMoved(frame) if open => {
+                self.update_settings(out, |s| {
+                    if let Some(w) = &mut s.dispatch_window {
+                        w.frame = Some(frame);
+                    }
+                });
             }
             _ => {}
         }

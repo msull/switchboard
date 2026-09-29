@@ -138,6 +138,32 @@ pub struct ProjectView {
     pub name: String,
     /// Ticket ids in queue order.
     pub queue: Vec<String>,
+    /// The policy's limits: tickets with something running at once,
+    /// and decisions that may wait on the user before nothing new
+    /// starts.
+    pub slots: u32,
+    pub waiting_on_me: u32,
+    /// Where the project stands against them: active tickets with an
+    /// open attempt, and pending decisions across its tickets.
+    pub running: u32,
+    pub pending: u32,
+}
+
+impl ProjectView {
+    /// Nothing new starts: every slot is taken, or too much waits.
+    #[must_use]
+    pub fn held(&self) -> Option<String> {
+        if self.running >= self.slots {
+            Some(format!("all {} slots in use", self.slots))
+        } else if self.pending >= self.waiting_on_me {
+            Some(format!(
+                "{} decision(s) waiting, the limit is {}",
+                self.pending, self.waiting_on_me
+            ))
+        } else {
+            None
+        }
+    }
 }
 
 /// Where a ticket stands: the record as a reader needs it, with the
@@ -271,6 +297,10 @@ mod tests {
                 projects: vec![ProjectView {
                     name: "Delta".into(),
                     queue: vec!["t1".into()],
+                    slots: 2,
+                    waiting_on_me: 2,
+                    running: 1,
+                    pending: 1,
                 }],
                 tickets: vec![ticket.clone()],
             }),

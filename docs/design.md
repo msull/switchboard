@@ -1452,7 +1452,15 @@ directory, remembered in the settings, into which a typed line is sent
 as the `dispatch` executable beside the app's plus the words (a `!`
 line goes to the shell as it is). Without a runner the page shows the
 last status it had and the console still works, which is how a runner
-is started. Built: the wire crate, the core
+is started. The status carries each project's policy limits and where
+it stands against them (slots in use, decisions waiting), so a ticket
+that is not moving says why it is held and the project's section says
+what it allows; the page narrows to one project with a chip row, and a
+decision card names its project. The page can leave for a window of
+its own (`Settings.dispatch_window`, like a session's pop-out: frame
+saved once it settles, Cmd+W closes), with navigation of its own so a
+ticket opened there does not touch the main window's stack, which
+shows only a note pointing at the window while it is open. Built: the wire crate, the core
 path and read models, the log and socket adapters, `serve` in the app,
 and `tests/control.rs`. Gaps: `service.new` and `command.run` are not
 on the port yet; nothing marks Dispatch-owned records as such in the

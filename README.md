@@ -217,12 +217,12 @@ src/ui/
   document.rs            read-only preview: Markdown, text, images, a PDF's first page; full view and the side pane's body
   markdown.rs            Markdown: prose through egui_commonmark, tables laid out here with content-sized columns
   palette.rs             quick-switcher (Cmd+K) over projects and sessions
-  popout.rs              a session in a window of its own: the page and side panel in a viewport, frame saved on settle
+  popout.rs              a session in a window of its own: the page and side panel in a viewport, frame saved on settle; the Dispatch window the same way
   zoom.rs                Cmd+= and Cmd+- per window, remembered per display; a pop-out's pass runs at its display's zoom
   env.rs                 Environment dialog: variables, secrets, .env opt-in, masked preview
   config.rs              project config editor: .switchboard/project.json as text, options listed, parse shown
   workflow.rs            plan review: the Review plan dialog, the run's page (rounds, plan with diff, feedback beside response, controls)
-  dispatch.rs            the Dispatch pages: tickets with what waits on you and the console; one ticket's stages, attempts, decisions and artifacts
+  dispatch.rs            the Dispatch pages: tickets with what waits on you (filtered by project) and the console; one ticket's stages, attempts, decisions and artifacts; Pop out
   cards.rs               the one card for every entry kind, the card grid, pinned document cards
   session.rs             session view: header, embedded terminal or conversation + message box
   switchboard.rs         every session across projects, waiting first

@@ -50,6 +50,15 @@ use crate::ports::transcript::Conversation;
 pub use dialogs::{AddProjectDraft, NewSessionDraft};
 pub use session::EmbeddedTerminal;
 
+/// The window a frame is drawing into.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Surface {
+    #[default]
+    Main,
+    /// The Dispatch page's own window.
+    DispatchWindow,
+}
+
 /// State the UI owns between frames: dialog drafts, text being edited,
 /// embedded terminals. Nothing here is persisted or read by the core.
 pub struct UiState {
@@ -89,6 +98,16 @@ pub struct UiState {
     pub dispatch_console_draft: String,
     /// The artifact the ticket page is showing.
     pub dispatch_artifact: Option<PathBuf>,
+    /// The Dispatch project the page is narrowed to; every one when none.
+    pub dispatch_project: Option<String>,
+    /// Which window is being drawn: the Dispatch window has navigation
+    /// of its own (`dispatch_window_ticket`), the main window the stack.
+    pub surface: Surface,
+    pub dispatch_window_ticket: Option<String>,
+    /// The Dispatch window's frame as last seen and since when, and its
+    /// opening geometry, like a pop-out's.
+    pub dispatch_frame: Option<(WindowFrame, std::time::Instant)>,
+    pub dispatch_opened: Option<Option<(egui::Pos2, egui::Vec2)>>,
     /// The file side per project: tree, finder, index.
     pub files: HashMap<ProjectId, files::FilesState>,
     /// The document on screen, loaded once per path and file time.
@@ -234,6 +253,11 @@ impl Default for UiState {
             rename_draft: None,
             dispatch_console_draft: String::new(),
             dispatch_artifact: None,
+            dispatch_project: None,
+            surface: Surface::Main,
+            dispatch_window_ticket: None,
+            dispatch_frame: None,
+            dispatch_opened: None,
             files: HashMap::new(),
             preview: None,
             editor_draft: None,
@@ -400,6 +424,9 @@ fn draw_frame(cx: &mut DrawCtx<'_>, ui: &mut Ui) {
                 View::Session(id) => session::show(cx, ui, id),
                 View::Document(pid, path) => document::show(cx, ui, pid, &path),
                 View::Workflow(id) => workflow::show(cx, ui, id),
+                View::Dispatch | View::Ticket(_) if popout::dispatch_is_elsewhere(cx, &view) => {
+                    dispatch::elsewhere(cx, ui);
+                }
                 View::Dispatch => dispatch::show(cx, ui),
                 View::Ticket(id) => dispatch::ticket(cx, ui, &id),
             }

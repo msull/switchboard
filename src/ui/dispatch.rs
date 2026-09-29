@@ -9,7 +9,7 @@ use egui::{RichText, Ui};
 
 use super::{DrawCtx, GAP, markdown, theme};
 use crate::core::{AppAction, RecordId, View};
-use crate::ports::dispatch::{AttemptView, DecisionView, TicketView};
+use crate::ports::dispatch::{AttemptView, DecisionView, ProjectView, TicketView};
 
 /// The console pane's height on the overview.
 const CONSOLE_HEIGHT: f32 = 280.0;
@@ -17,11 +17,18 @@ const CONSOLE_HEIGHT: f32 = 280.0;
 pub fn show(cx: &mut DrawCtx<'_>, ui: &mut Ui) {
     let p = theme::palette(ui);
     ui.spacing_mut().item_spacing = egui::vec2(GAP, GAP);
-    theme::kicker(ui, "Dispatch", p.n600);
     let state = cx.core.dispatch_state();
     let (connected, seen) = (state.connected, state.seen);
     let tickets = state.status.tickets.clone();
     let projects = state.status.projects.clone();
+    ui.horizontal(|ui| {
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            pop_out_button(cx, ui);
+            ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                theme::kicker(ui, "Dispatch", p.n600);
+            });
+        });
+    });
     ui.horizontal(|ui| {
         ui.add(egui::Label::new(RichText::new("Tickets").text_style(theme::h1())).truncate());
         ui.label(theme::meta_text(ui, "·"));
@@ -36,12 +43,25 @@ pub fn show(cx: &mut DrawCtx<'_>, ui: &mut Ui) {
                 .color(if connected { p.n700 } else { p.accent_2_text }),
         );
     });
+    project_chips(cx, ui, &projects);
+    let chosen = cx.state.dispatch_project.clone();
+    let shown = |name: &str| chosen.as_deref().is_none_or(|c| c == name);
 
     egui::ScrollArea::vertical()
         .id_salt("dispatch-page")
         .show(ui, |ui| {
-            let pending: Vec<DecisionView> =
-                cx.core.pending_decisions().into_iter().cloned().collect();
+            let pending: Vec<DecisionView> = cx
+                .core
+                .pending_decisions()
+                .into_iter()
+                .filter(|d| {
+                    tickets
+                        .iter()
+                        .find(|t| t.id == d.ticket)
+                        .is_some_and(|t| shown(&t.project))
+                })
+                .cloned()
+                .collect();
             theme::section(ui, "Waiting on you");
             if pending.is_empty() {
                 ui.label(theme::meta_text(ui, "Nothing waits on you."));
@@ -51,25 +71,8 @@ pub fn show(cx: &mut DrawCtx<'_>, ui: &mut Ui) {
                 decision_card(cx, ui, d, ticket.as_ref(), true);
             }
 
-            for project in &projects {
-                theme::section(ui, &project.name);
-                let mut listed = 0;
-                for id in &project.queue {
-                    if let Some(t) = tickets.iter().find(|t| &t.id == id) {
-                        ticket_row(cx, ui, t);
-                        listed += 1;
-                    }
-                }
-                for t in tickets
-                    .iter()
-                    .filter(|t| t.project == project.name && !project.queue.contains(&t.id))
-                {
-                    ticket_row(cx, ui, t);
-                    listed += 1;
-                }
-                if listed == 0 {
-                    ui.label(theme::meta_text(ui, "No tickets."));
-                }
+            for project in projects.iter().filter(|p| shown(&p.name)) {
+                project_section(cx, ui, project, &tickets);
             }
 
             theme::section(ui, "Console");
@@ -77,20 +80,147 @@ pub fn show(cx: &mut DrawCtx<'_>, ui: &mut Ui) {
         });
 }
 
+/// One chip per project, and All; the chosen one filled.
+fn project_chips(cx: &mut DrawCtx<'_>, ui: &mut Ui, projects: &[ProjectView]) {
+    if projects.len() < 2 {
+        cx.state.dispatch_project = None;
+        return;
+    }
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing.x = 4.0;
+        let mut choice = cx.state.dispatch_project.clone();
+        let all = choice.is_none();
+        if (if all {
+            theme::primary(ui, "All")
+        } else {
+            theme::secondary(ui, "All")
+        })
+        .clicked()
+        {
+            choice = None;
+        }
+        for project in projects {
+            let on = choice.as_deref() == Some(project.name.as_str());
+            if (if on {
+                theme::primary(ui, &project.name)
+            } else {
+                theme::secondary(ui, &project.name)
+            })
+            .on_hover_text(format!("Only {}'s tickets and decisions", project.name))
+            .clicked()
+            {
+                choice = Some(project.name.clone());
+            }
+        }
+        cx.state.dispatch_project = choice;
+    });
+}
+
+/// A project's tickets in queue order, under a line saying how many
+/// slots and decisions its policy allows and what that holds back.
+fn project_section(
+    cx: &mut DrawCtx<'_>,
+    ui: &mut Ui,
+    project: &ProjectView,
+    tickets: &[TicketView],
+) {
+    let p = theme::palette(ui);
+    theme::section(ui, &project.name);
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing.x = 6.0;
+        ui.label(theme::meta_text(
+            ui,
+            format!(
+                "{} of {} slots in use · {} of {} decisions waiting",
+                project.running, project.slots, project.pending, project.waiting_on_me
+            ),
+        ));
+        if let Some(why) = project.held() {
+            ui.label(theme::meta_text(ui, "·"));
+            ui.label(
+                RichText::new(format!("nothing new starts: {why}"))
+                    .text_style(theme::meta())
+                    .color(p.accent_2_text),
+            );
+        }
+    });
+    let mut listed = 0;
+    for id in &project.queue {
+        if let Some(t) = tickets.iter().find(|t| &t.id == id) {
+            ticket_row(cx, ui, t, project);
+            listed += 1;
+        }
+    }
+    for t in tickets
+        .iter()
+        .filter(|t| t.project == project.name && !project.queue.contains(&t.id))
+    {
+        ticket_row(cx, ui, t, project);
+        listed += 1;
+    }
+    if listed == 0 {
+        ui.label(theme::meta_text(ui, "No tickets."));
+    }
+}
+
+/// Pop out, or raise the window the page already has.
+fn pop_out_button(cx: &mut DrawCtx<'_>, ui: &mut Ui) {
+    if cx.state.surface == super::Surface::DispatchWindow {
+        return;
+    }
+    ui.spacing_mut().button_padding = egui::vec2(6.0, 3.0);
+    if theme::ghost_muted(ui, "Pop out")
+        .on_hover_text("Show Dispatch in a window of its own")
+        .clicked()
+    {
+        let ctx = ui.ctx().clone();
+        super::popout::raise_or_pop_out_dispatch(cx, &ctx);
+    }
+}
+
+/// The main window's page while Dispatch has a window of its own.
+pub fn elsewhere(cx: &mut DrawCtx<'_>, ui: &mut Ui) {
+    let p = theme::palette(ui);
+    theme::kicker(ui, "Dispatch", p.n600);
+    ui.label(theme::meta_text(ui, "Dispatch is open in its own window."));
+    if theme::secondary(ui, "Show its window").clicked() {
+        let ctx = ui.ctx().clone();
+        super::popout::raise_or_pop_out_dispatch(cx, &ctx);
+    }
+}
+
+/// Go to a ticket: the window's own page inside the Dispatch window,
+/// the main view otherwise.
+fn open_ticket(cx: &mut DrawCtx<'_>, id: &str) {
+    if cx.state.surface == super::Surface::DispatchWindow {
+        cx.state.dispatch_window_ticket = Some(id.to_owned());
+    } else {
+        cx.dispatch(AppAction::ShowTicket(id.to_owned()));
+    }
+}
+
+fn go_back(cx: &mut DrawCtx<'_>) {
+    if cx.state.surface == super::Surface::DispatchWindow {
+        cx.state.dispatch_window_ticket = None;
+    } else {
+        cx.dispatch(AppAction::Back);
+    }
+}
+
 /// One ticket's line: number and title as the link, the stage strip
 /// and its standing after.
-fn ticket_row(cx: &mut DrawCtx<'_>, ui: &mut Ui, t: &TicketView) {
+fn ticket_row(cx: &mut DrawCtx<'_>, ui: &mut Ui, t: &TicketView, project: &ProjectView) {
     let p = theme::palette(ui);
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing.x = 6.0;
         if theme::ghost(ui, &title_of(t)).clicked() {
-            cx.dispatch(AppAction::ShowTicket(t.id.clone()));
+            open_ticket(cx, &t.id);
         }
         ui.label(theme::meta_text(ui, "·"));
         stage_strip(ui, t);
         ui.label(theme::meta_text(ui, "·"));
         let waiting = t.decisions.iter().filter(|d| d.state == "pending").count();
-        let standing = standing_of(t);
+        let standing = standing_of(t, Some(project));
         ui.label(RichText::new(standing).text_style(theme::meta()).color(
             if waiting > 0 || t.state != "active" {
                 p.accent_2_text
@@ -108,17 +238,31 @@ fn title_of(t: &TicketView) -> String {
     }
 }
 
-/// `active · investigate running`, `parked: <reason>`, `2 waiting`.
-fn standing_of(t: &TicketView) -> String {
+/// `investigate running`, `parked: <reason>`, `2 waiting on you`, or
+/// why a ticket with nothing open is not moving when its project is
+/// at a limit.
+fn standing_of(t: &TicketView, project: Option<&ProjectView>) -> String {
     let waiting = t.decisions.iter().filter(|d| d.state == "pending").count();
     if waiting > 0 {
         return format!("{waiting} waiting on you");
     }
     match t.state.as_str() {
-        "active" => t
-            .attempts
-            .last()
-            .map_or("queued".to_owned(), |a| format!("{} {}", a.stage, a.state)),
+        "active" => {
+            let open = t
+                .attempts
+                .last()
+                .is_some_and(|a| matches!(a.state.as_str(), "starting" | "running"));
+            let held = if open {
+                None
+            } else {
+                project.and_then(ProjectView::held)
+            };
+            match (held, t.attempts.last()) {
+                (Some(why), _) => format!("held: {why}"),
+                (None, Some(a)) => format!("{} {}", a.stage, a.state),
+                (None, None) => "queued".to_owned(),
+            }
+        }
         other => match &t.reason {
             Some(reason) => format!("{other}: {reason}"),
             None => other.to_owned(),
@@ -163,8 +307,10 @@ fn decision_card(
             ui.set_width(ui.available_width());
             if with_ticket && let Some(t) = ticket {
                 ui.horizontal(|ui| {
+                    ui.label(theme::strong_text(&t.project));
+                    ui.label(theme::meta_text(ui, "·"));
                     if theme::ghost(ui, &title_of(t)).clicked() {
-                        cx.dispatch(AppAction::ShowTicket(t.id.clone()));
+                        open_ticket(cx, &t.id);
                     }
                     ui.label(theme::meta_text(ui, format!("· {} · {}", d.stage, d.name)));
                 });
@@ -262,7 +408,7 @@ pub fn ticket(cx: &mut DrawCtx<'_>, ui: &mut Ui, id: &str) {
         theme::kicker(ui, "Dispatch ticket", p.n600);
         ui.label("This ticket is not in Dispatch's last status.");
         if theme::ghost(ui, "Back").clicked() {
-            cx.dispatch(AppAction::Back);
+            go_back(cx);
         }
         return;
     };
@@ -310,7 +456,7 @@ fn ticket_header(cx: &mut DrawCtx<'_>, ui: &mut Ui, t: &TicketView) {
     ui.horizontal(|ui| {
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if theme::ghost(ui, "Back").clicked() {
-                cx.dispatch(AppAction::Back);
+                go_back(cx);
             }
             if let Some(url) = &t.url {
                 ui.hyperlink_to(RichText::new("Issue").color(p.accent_text), url);
@@ -324,12 +470,20 @@ fn ticket_header(cx: &mut DrawCtx<'_>, ui: &mut Ui, t: &TicketView) {
     });
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing.x = 6.0;
-        ui.label(theme::meta_text(ui, &t.project));
+        ui.label(theme::strong_text(&t.project));
         ui.label(theme::meta_text(ui, "·"));
         stage_strip(ui, t);
         ui.label(theme::meta_text(ui, "·"));
+        let project = cx
+            .core
+            .dispatch_state()
+            .status
+            .projects
+            .iter()
+            .find(|p| p.name == t.project)
+            .cloned();
         ui.label(
-            RichText::new(standing_of(t))
+            RichText::new(standing_of(t, project.as_ref()))
                 .text_style(theme::meta())
                 .color(if t.state == "active" {
                     p.n700

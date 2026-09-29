@@ -129,16 +129,35 @@ pub fn take_issue(
 
 /// Every project's queue and every ticket.
 pub fn status(runner: &Runner) -> Result<Status> {
+    let records = runner.tickets()?;
     let mut projects = Vec::new();
     for name in runner.projects()? {
         let ps = runner.load_project(&name)?;
+        // The limits come from the project's current pipeline file; the
+        // counts are the scheduler's: an active ticket with an open
+        // attempt holds a slot, and every pending decision counts.
+        let policy = fs::read_to_string(runner.data.pipeline(&name))
+            .ok()
+            .and_then(|text| Pipeline::parse(&text).ok())
+            .map(|p| p.policy)
+            .unwrap_or_default();
+        let mine = records.iter().filter(|t| t.project == name);
+        let running = mine
+            .clone()
+            .filter(|t| t.active() && t.attempts.iter().any(crate::ticket::Attempt::is_open))
+            .count();
+        let pending = mine.map(|t| t.pending_decisions().len()).sum::<usize>();
         projects.push(ProjectView {
             name,
             queue: ps.queue,
+            slots: policy.slots,
+            waiting_on_me: policy.waiting_on_me,
+            running: u32::try_from(running).unwrap_or(u32::MAX),
+            pending: u32::try_from(pending).unwrap_or(u32::MAX),
         });
     }
     let mut tickets = Vec::new();
-    for t in runner.tickets()? {
+    for t in records {
         let stages = runner
             .pipeline_of(&t)
             .map(|p| p.stages.iter().map(|s| s.name.clone()).collect())
@@ -444,6 +463,11 @@ slots = 1
             panic!("a status")
         };
         assert_eq!(status.projects[0].queue, vec![t.id.clone()]);
+        assert_eq!(
+            (status.projects[0].slots, status.projects[0].running),
+            (1, 0),
+            "the pipeline's limit and nothing running yet"
+        );
         assert_eq!(status.tickets[0].title, "Seven");
         assert_eq!(status.data_dir, h.runner.data.root);
         // A file outside the ticket's directory is refused by path.

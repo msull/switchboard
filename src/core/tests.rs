@@ -5297,6 +5297,10 @@ mod dispatch_page {
             projects: vec![ProjectView {
                 name: "Delta".into(),
                 queue: vec!["t1".into()],
+                slots: 2,
+                waiting_on_me: 2,
+                running: 0,
+                pending: 1,
             }],
             tickets: vec![TicketView {
                 id: "t1".into(),
@@ -5521,5 +5525,51 @@ mod dispatch_page {
         core.dispatch(AppAction::DispatchConsole("status".into()), Clock::at(8));
         let again = core.console().expect("made again");
         assert_ne!(again, console);
+    }
+
+    #[test]
+    fn the_page_moves_to_its_own_window_and_back() {
+        let (mut core, _) = loaded(vec![], vec![]);
+        core.dispatch(AppAction::DispatchStatus(Some(status(None))), Clock::at(1));
+        core.dispatch(AppAction::ShowDispatch, Clock::at(2));
+        core.dispatch(AppAction::ShowTicket("t1".into()), Clock::at(3));
+        let e = core.dispatch(AppAction::PopOutDispatch, Clock::at(4));
+        assert!(core.settings().dispatch_window.is_some());
+        assert!(e.iter().any(|e| matches!(e, Effect::SaveSettings(_))));
+        assert_eq!(
+            core.view(),
+            View::Switchboard,
+            "both Dispatch pages left the stack"
+        );
+        let frame = crate::core::WindowFrame {
+            x: 10,
+            y: 20,
+            w: 900,
+            h: 600,
+            monitor: "Built-in".into(),
+        };
+        core.dispatch(AppAction::DispatchWindowMoved(frame.clone()), Clock::at(5));
+        assert_eq!(
+            core.settings()
+                .dispatch_window
+                .as_ref()
+                .and_then(|w| w.frame.clone()),
+            Some(frame)
+        );
+        let e = core.dispatch(AppAction::PopOutDispatch, Clock::at(6));
+        assert!(e.is_empty(), "already out: nothing to save");
+        core.dispatch(AppAction::CloseDispatchWindow, Clock::at(7));
+        assert!(core.settings().dispatch_window.is_none());
+        let e = core.dispatch(
+            AppAction::DispatchWindowMoved(crate::core::WindowFrame {
+                x: 0,
+                y: 0,
+                w: 1,
+                h: 1,
+                monitor: String::new(),
+            }),
+            Clock::at(8),
+        );
+        assert!(e.is_empty(), "a closed window's frame is not kept");
     }
 }
