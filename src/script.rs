@@ -12,7 +12,8 @@
 //! `dotenv <project> on|off`, `environment <project>` (opens the dialog),
 //! `config <project>` (opens the config editor),
 //! `review-plan <session> <absolute plan path>` (starts a plan review),
-//! `show-review` (the newest review's page), `review-file
+//! `show-review` (the newest review's page), `show-dispatch` and
+//! `show-ticket <id>` (Dispatch's pages), `review-file
 //! feedback|response <first line...>` (writes the newest review's
 //! awaited file to disk, as its agent would), `review-continue`,
 //! `review-finalize`, `show-artifact <name> <index>` (a command's card
@@ -224,6 +225,8 @@ fn review_step(app: &mut SwitchboardApp, w: &[&str]) -> Result<(), String> {
             let id = newest_review(app)?;
             app.dispatch(AppAction::ShowWorkflow(id));
         }
+        ["show-dispatch"] => app.dispatch(AppAction::ShowDispatch),
+        ["show-ticket", id] => app.dispatch(AppAction::ShowTicket((*id).to_owned())),
         ["review-continue"] => {
             let id = newest_review(app)?;
             app.dispatch(AppAction::ContinueWorkflow(id));

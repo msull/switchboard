@@ -129,6 +129,9 @@ Dev aids, all environment variables:
 - `SWITCHBOARD_DATA_DIR=<dir>`: use another data directory (keep the path
   short; the wake socket path has a 104-byte limit).
 - `SWITCHBOARD_TMUX_SOCKET=<name>`: use another tmux socket name.
+- `DISPATCH_DATA_DIR=<dir>`: where the Dispatch page looks for
+  `dispatch.sock` and where its console opens (the `dispatch` binary
+  reads the same variable).
 - `SWITCHBOARD_SCRIPT=<file>`: run actions at startup, one per line, so
   the app can be put into a known state without clicking. See
   `src/script.rs` for the lines (`add-project`, `new-shell`, `new-claude`,
@@ -139,6 +142,7 @@ Dev aids, all environment variables:
   `rename-working-set`, `delete-working-set`, `add-to-working-set`,
   `add-file-to-working-set`, `arrange`, `show-message`, `clone-session`,
   `discard-to`, `undo-discard`, `review-plan`, `show-review`,
+  `show-dispatch`, `show-ticket`,
   `review-file`, `review-continue`, `review-finalize`, `show-artifact`,
   `pop-out`, `close-pop-out`, `files-root`, `zoom`, `place-pop-out`,
   `place-card`, `new-workspace`, `workspace`, `move-project`,
@@ -173,13 +177,15 @@ src/core/
   events.rs              hook events -> record activity (matched by record id, ordered by time)
   workflow.rs            plan review runs: reviewer and planner rounds as a state machine over records
   control.rs             the control port's commands run quietly under an operation id; read models in the wire's shapes
+  dispatch.rs            Dispatch as the app shows it: the runner's last status as views, decisions answered as calls, the console session
   tests.rs               state-transition tests for the core
-src/ports/               traits: store, host, events, agent, opener, transcript, secrets, project_config, round_files, artifacts, controller, control (the operations log)
+src/ports/               traits: store, host, events, agent, opener, transcript, secrets, project_config, round_files, artifacts, controller, control (the operations log), dispatch (Dispatch's port)
 src/adapters/
   store.rs               JSON store: atomic writes, .bak, flock
   tmux.rs                tmux process host on the private socket
   hooks.rs               append-first event log + socket wake-up + hook settings JSON
   control.rs             the control port: operations.log (append-only, synced) and control.sock (one thread per connection, requests handed to the frame)
+  dispatch.rs            the Dispatch port's client over <Dispatch data dir>/dispatch.sock, reconnecting after an error; the `dispatch` beside the app's binary
   dock.rs                Dock badge with the waiting-session count (macOS)
   controller.rs          the nunchuk over USB serial: a thread owns the port, reconnects, hands events over a channel
   files.rs               project file index: gitignore-aware scan, lazy children, fuzzy match
@@ -200,7 +206,7 @@ src/ui/
   mod.rs                 UiState, draw loop (collect actions, then dispatch), keyboard, side panel tabs
   prompt_box.rs          the Prompt Box editor per agent session, one voice runtime bound to one of them
   theme.rs               the look: color tokens per theme, Source Serif 4, type scale, shared widgets (dot, kicker, buttons)
-  rail.rs                left project rail (brand, All sessions, projects with dots, Go to, Settings); a session's neighbours beside it
+  rail.rs                left project rail (brand, All sessions, Dispatch with its pending decisions, projects with dots, Go to, Settings); a session's neighbours beside it
   switcher.rs            Settings menu and the toasts (notice, host error)
   board.rs               one project's board: run bar, agent and shell cards, command and service rows, pinned documents, notes
   files.rs               Files tab of the side panel: lazy tree (from the project root or a directory chosen as its top), fuzzy finder, bottom preview pane, right-click hand-offs
@@ -216,6 +222,7 @@ src/ui/
   env.rs                 Environment dialog: variables, secrets, .env opt-in, masked preview
   config.rs              project config editor: .switchboard/project.json as text, options listed, parse shown
   workflow.rs            plan review: the Review plan dialog, the run's page (rounds, plan with diff, feedback beside response, controls)
+  dispatch.rs            the Dispatch pages: tickets with what waits on you and the console; one ticket's stages, attempts, decisions and artifacts
   cards.rs               the one card for every entry kind, the card grid, pinned document cards
   session.rs             session view: header, embedded terminal or conversation + message box
   switchboard.rs         every session across projects, waiting first

@@ -24,6 +24,7 @@ path = "src/bin/switchboard-hook.rs"
 anyhow = "1"
 chrono = "0.4"
 directories = "6"
+dispatch-control = { path = "dispatch-control" }
 eframe = "0.36"
 egui = "0.36"
 egui_commonmark = { version = "0.25", default-features = false, features = ["pulldown_cmark"] }

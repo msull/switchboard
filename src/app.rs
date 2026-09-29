@@ -20,6 +20,7 @@ use crate::ports::agent::AgentLauncher;
 use crate::ports::artifacts::ArtifactFinder;
 use crate::ports::control::{OpLine, Operations};
 use crate::ports::controller::Controller;
+use crate::ports::dispatch::DispatchPort;
 use crate::ports::events::EventSource;
 use crate::ports::host::{HostId, Liveness, ProcessHost};
 use crate::ports::opener::Opener;
@@ -35,6 +36,8 @@ const POLL_INTERVAL: Duration = Duration::from_secs(1);
 /// How often card captions and the session snapshot are refreshed.
 /// How often definition files are checked for a change.
 const CONFIG_INTERVAL: Duration = Duration::from_secs(5);
+/// How often Dispatch is asked for its status.
+const DISPATCH_INTERVAL: Duration = Duration::from_secs(2);
 const CAPTION_INTERVAL: Duration = Duration::from_secs(2);
 /// How long a Codex id discovery keeps looking. Codex writes its rollout
 /// file on the first prompt, not at launch, so this is generous; a
@@ -56,6 +59,8 @@ pub struct Services {
     pub controller: Box<dyn Controller>,
     /// The control port's operations log.
     pub operations: Box<dyn Operations>,
+    /// Dispatch's port: tickets as views, decisions answered.
+    pub dispatch: Box<dyn DispatchPort>,
     /// The hook helper's wake-up socket; `None` in tests.
     pub wake: Option<WakeSocket>,
 }
@@ -105,6 +110,8 @@ pub struct SwitchboardApp {
     services: Services,
     started: Instant,
     last_poll: Option<Instant>,
+    /// When Dispatch was last asked for its status.
+    last_dispatch: Option<Instant>,
     /// The waiting count last put on the Dock badge and sent to the
     /// controller.
     badge: Option<usize>,
@@ -148,6 +155,7 @@ impl SwitchboardApp {
             services,
             started: Instant::now(),
             last_poll: None,
+            last_dispatch: None,
             badge: None,
             last_caption: None,
             discoveries: Vec::new(),
@@ -173,6 +181,10 @@ impl SwitchboardApp {
             Err(e) => Err(e),
         };
         self.dispatch(AppAction::StoreLoaded(loaded));
+        self.dispatch(AppAction::DispatchConfigured {
+            command: self.services.dispatch.command(),
+            data_dir: self.services.dispatch.data_dir(),
+        });
         self.last_poll = Some(Instant::now());
         self.poll_events();
         self.poll_host();
@@ -350,6 +362,7 @@ impl SwitchboardApp {
             | Effect::FindArtifacts { .. }
             | Effect::RemoveLog(_)
             | Effect::LogOperation { .. }
+            | Effect::DispatchCall(_)
             | Effect::OpenPath(_)
             | Effect::Forget(_)
             | Effect::OpenInEditor { .. }
@@ -495,6 +508,14 @@ impl SwitchboardApp {
             Effect::OpenPath(path) => failed(s.opener.open_default(&path), || {
                 format!("open {}", path.display())
             }),
+            Effect::DispatchCall(body) => {
+                let result = self
+                    .services
+                    .dispatch
+                    .call(&body)
+                    .map_err(|e| e.to_string());
+                Some(AppAction::DispatchReplied { body, result })
+            }
             // Windows are the UI's; it raises the one asked for next frame.
             Effect::FocusWindow(id) => {
                 self.ui_state.focus_windows.push(id);
@@ -773,7 +794,7 @@ impl SwitchboardApp {
                 .collect(),
             View::Board(p) => self.core.sessions_sorted(p).iter().map(|s| s.id).collect(),
             View::Session(id) => vec![id],
-            View::Document(..) | View::Workflow(_) => Vec::new(),
+            View::Document(..) | View::Workflow(_) | View::Dispatch | View::Ticket(_) => Vec::new(),
             View::WorkingSet(set) => self.core.working_set_sessions(set),
         };
         // The Run tab shows every command's and service's output, so
@@ -787,7 +808,9 @@ impl SwitchboardApp {
             | View::Switchboard
             | View::Document(..)
             | View::WorkingSet(_)
-            | View::Workflow(_) => None,
+            | View::Workflow(_)
+            | View::Dispatch
+            | View::Ticket(_) => None,
         }
         .filter(|_| self.core.settings().side_tab == crate::core::SideTab::Run);
         let run_set: Vec<RecordId> = run_project
@@ -811,6 +834,8 @@ impl SwitchboardApp {
             | View::Switchboard
             | View::Document(..)
             | View::WorkingSet(_)
+            | View::Dispatch
+            | View::Ticket(_)
             | View::Workflow(_) => Vec::new(),
         };
         for id in run_set.iter().chain(&bar_set) {
@@ -899,6 +924,34 @@ impl SwitchboardApp {
             self.last_config = Some(Instant::now());
             self.poll_configs();
         }
+        if self
+            .last_dispatch
+            .is_none_or(|t| t.elapsed() >= DISPATCH_INTERVAL)
+        {
+            self.last_dispatch = Some(Instant::now());
+            self.poll_dispatch();
+        }
+    }
+
+    /// Ask Dispatch's port for its status. No runner is a quick error
+    /// (no socket, or nobody listening), reported to the core as such.
+    fn poll_dispatch(&mut self) {
+        let status = match self
+            .services
+            .dispatch
+            .call(&crate::ports::dispatch::Body::Status)
+        {
+            Ok(crate::ports::dispatch::Reply::Status(status)) => Some(status),
+            Ok(other) => {
+                log::warn!("dispatch status answered {other:?}");
+                None
+            }
+            Err(e) => {
+                log::debug!("dispatch status: {e}");
+                None
+            }
+        };
+        self.dispatch(AppAction::DispatchStatus(status));
     }
 }
 

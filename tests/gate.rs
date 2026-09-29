@@ -36,7 +36,9 @@ use std::time::{Duration, Instant, SystemTime};
 
 use switchboard::SwitchboardApp;
 use switchboard::adapters::agents::Agents;
-use switchboard::adapters::fakes::{FakeController, FakeOpener, FakeOperations, FakeSecrets};
+use switchboard::adapters::fakes::{
+    FakeController, FakeDispatch, FakeOpener, FakeOperations, FakeSecrets,
+};
 use switchboard::adapters::hooks::{HookLog, unix_millis, write_hook_settings};
 use switchboard::adapters::project_config::FileConfigReader;
 use switchboard::adapters::store::JsonStore;
@@ -120,6 +122,7 @@ impl Gate {
             artifacts: Box::new(switchboard::adapters::artifacts::DiskArtifacts),
             controller: Box::new(FakeController::default()),
             operations: Box::new(FakeOperations::default()),
+            dispatch: Box::new(FakeDispatch::default()),
             wake: None,
         })
     }

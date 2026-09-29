@@ -67,6 +67,10 @@ pub enum View {
     WorkingSet(SetId),
     /// A workflow run: its rounds, plan versions, and controls.
     Workflow(WorkflowId),
+    /// Dispatch: every ticket, what waits on the user, the console.
+    Dispatch,
+    /// One Dispatch ticket by its id: stages, attempts, decisions.
+    Ticket(String),
 }
 
 impl View {
@@ -74,7 +78,8 @@ impl View {
     #[must_use]
     pub fn saved(&self) -> SavedView {
         match self {
-            View::Switchboard => SavedView::Switchboard,
+            // Tickets are Dispatch's; the next launch asks it again.
+            View::Switchboard | View::Dispatch | View::Ticket(_) => SavedView::Switchboard,
             View::Board(id) | View::Document(id, _) => SavedView::Board(*id),
             View::Session(id) => SavedView::Session(*id),
             View::WorkingSet(id) => SavedView::Set(*id),
@@ -425,6 +430,37 @@ pub enum AppAction {
         op: String,
         action: ControlAction,
     },
+    /// Where Dispatch is: its executable and data directory.
+    DispatchConfigured {
+        command: PathBuf,
+        data_dir: PathBuf,
+    },
+    /// The runner's answer to a status poll; `None` is no runner.
+    DispatchStatus(Option<crate::ports::dispatch::Status>),
+    ShowDispatch,
+    ShowTicket(String),
+    /// Answer a pending decision through Dispatch's port.
+    DispatchDecide {
+        ticket: String,
+        decision: String,
+        answer: String,
+        note: Option<String>,
+    },
+    /// Read an artifact's text through the port, once.
+    DispatchReadArtifact {
+        ticket: String,
+        path: PathBuf,
+    },
+    /// What a `DispatchCall` came back with.
+    DispatchReplied {
+        body: crate::ports::dispatch::Body,
+        result: Result<crate::ports::dispatch::Reply, String>,
+    },
+    /// Make the console session if there is none, and show it.
+    OpenDispatchConsole,
+    /// Type a `dispatch` command line into the console; a line starting
+    /// with `!` goes to the shell as it is.
+    DispatchConsole(String),
 }
 
 /// Work the shell performs on the core's behalf.
@@ -566,6 +602,9 @@ pub enum Effect {
         kind: String,
         ids: Vec<String>,
     },
+    /// One request to Dispatch's port; the reply returns as
+    /// `AppAction::DispatchReplied`.
+    DispatchCall(crate::ports::dispatch::Body),
 }
 
 /// What a record is waiting on. A record with a flight is "in flight":
@@ -691,6 +730,8 @@ pub struct AppCore {
     pub(super) quiet_op: Option<String>,
     /// Outcomes of control commands not yet taken by the app.
     pub(super) control_outcomes: Vec<ControlOutcome>,
+    /// What Dispatch's port last said, and the console. Transient.
+    pub(super) dispatch: super::dispatch::DispatchState,
 }
 
 impl AppCore {
@@ -828,6 +869,15 @@ impl AppCore {
 
             AppAction::Events(events) => self.apply_events(events, now, &mut out),
             AppAction::Control { op, action } => self.control(op, action, now, &mut out),
+            AppAction::DispatchConfigured { .. }
+            | AppAction::DispatchStatus(_)
+            | AppAction::ShowDispatch
+            | AppAction::ShowTicket(_)
+            | AppAction::DispatchDecide { .. }
+            | AppAction::DispatchReadArtifact { .. }
+            | AppAction::DispatchReplied { .. }
+            | AppAction::OpenDispatchConsole
+            | AppAction::DispatchConsole(_) => self.dispatch_action(action, now, &mut out),
         }
         self.remember_view(&mut out);
         self.prune_working_set(&mut out);
@@ -1245,7 +1295,7 @@ impl AppCore {
     /// The space a view is in; the switchboard is in every space.
     pub(super) fn view_space(&self, view: &View) -> Option<SpaceId> {
         match view {
-            View::Switchboard => None,
+            View::Switchboard | View::Dispatch | View::Ticket(_) => None,
             View::Board(pid) | View::Document(pid, _) => self.project_space(*pid),
             View::Session(id) => self
                 .session(*id)
@@ -1341,6 +1391,23 @@ impl AppCore {
         now: Clock,
         out: &mut Out,
     ) -> ProjectId {
+        let id = self.add_project_record(name, root, space, now, out);
+        if self.quiet_op.is_none() {
+            self.view_stack.push(View::Board(id));
+        }
+        id
+    }
+
+    /// The project's record and its first config read, without
+    /// showing it.
+    pub(super) fn add_project_record(
+        &mut self,
+        name: String,
+        root: PathBuf,
+        space: SpaceId,
+        now: Clock,
+        out: &mut Out,
+    ) -> ProjectId {
         let id = ProjectId::new();
         self.workspaces.push(Workspace::new(Project {
             id,
@@ -1364,9 +1431,6 @@ impl AppCore {
                 .map(|w| w.project.root.clone())
                 .unwrap_or_default(),
         ));
-        if self.quiet_op.is_none() {
-            self.view_stack.push(View::Board(id));
-        }
         id
     }
 
@@ -1385,7 +1449,7 @@ impl AppCore {
             View::Board(p) | View::Document(p, _) => *p != id,
             View::Session(r) => !gone(*r),
             View::Workflow(w) => !workspace.workflows.iter().any(|r| r.id == *w),
-            View::Switchboard | View::WorkingSet(_) => true,
+            View::Switchboard | View::WorkingSet(_) | View::Dispatch | View::Ticket(_) => true,
         });
         self.in_flight.retain(|f| !gone(f.id));
         self.codex_queue.retain(|r| !gone(*r));
@@ -2075,12 +2139,14 @@ impl AppCore {
     }
     /// Sessions across all projects that are waiting on the user.
     #[must_use]
-    /// Sessions waiting on the user in every space: the Dock badge.
+    /// Sessions waiting on the user in every space, and Dispatch's
+    /// pending decisions: the Dock badge.
     pub fn waiting_count(&self) -> usize {
         self.workspaces
             .iter()
             .flat_map(|w| &w.sessions)
             .filter(|s| self.card_state(s.id) == CardState::WaitingOnYou)
             .count()
+            + self.pending_decisions().len()
     }
 }

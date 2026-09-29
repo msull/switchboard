@@ -10,8 +10,8 @@ use std::time::Duration;
 
 use switchboard::SwitchboardApp;
 use switchboard::adapters::fakes::{
-    FakeAgents, FakeArtifacts, FakeController, FakeEvents, FakeHost, FakeOpener, FakeOperations,
-    FakeProjectConfig, FakeRoundFiles, FakeSecrets, FakeTranscripts, MemoryStore,
+    FakeAgents, FakeArtifacts, FakeController, FakeDispatch, FakeEvents, FakeHost, FakeOpener,
+    FakeOperations, FakeProjectConfig, FakeRoundFiles, FakeSecrets, FakeTranscripts, MemoryStore,
 };
 use switchboard::app::Services;
 use switchboard::core::{AppAction, View};
@@ -49,6 +49,7 @@ fn port(initial: Loaded, operations: FakeOperations) -> Port {
         artifacts: Box::new(FakeArtifacts::default()),
         controller: Box::new(FakeController::default()),
         operations: Box::new(operations.clone()),
+        dispatch: Box::new(FakeDispatch::default()),
         wake: None,
     };
     let mut app = SwitchboardApp::with_services(services);
@@ -486,6 +487,7 @@ fn a_read_only_instance_does_not_listen() {
         artifacts: Box::new(FakeArtifacts::default()),
         controller: Box::new(FakeController::default()),
         operations: Box::new(FakeOperations::default()),
+        dispatch: Box::new(FakeDispatch::default()),
         wake: None,
     };
     let mut app = SwitchboardApp::with_services(services);

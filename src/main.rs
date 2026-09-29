@@ -170,6 +170,7 @@ fn main() -> eframe::Result {
                 artifacts: Box::new(switchboard::adapters::artifacts::DiskArtifacts),
                 controller: Box::new(controller),
                 operations: Box::new(operations),
+                dispatch: Box::new(switchboard::adapters::dispatch::DispatchSocket::detect()),
                 wake,
             };
             let mut app = SwitchboardApp::with_services(services);

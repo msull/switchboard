@@ -11,8 +11,8 @@ use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;
 use switchboard::SwitchboardApp;
 use switchboard::adapters::fakes::{
-    FakeAgents, FakeArtifacts, FakeController, FakeEvents, FakeHost, FakeOpener, FakeOperations,
-    FakeProjectConfig, FakeRoundFiles, FakeSecrets, FakeTranscripts, MemoryStore,
+    FakeAgents, FakeArtifacts, FakeController, FakeDispatch, FakeEvents, FakeHost, FakeOpener,
+    FakeOperations, FakeProjectConfig, FakeRoundFiles, FakeSecrets, FakeTranscripts, MemoryStore,
 };
 use switchboard::app::Services;
 use switchboard::core::{
@@ -198,6 +198,7 @@ fn harness_build(
         artifacts: Box::new(FakeArtifacts::default()),
         controller: Box::new(FakeController::default()),
         operations: Box::new(FakeOperations::default()),
+        dispatch: Box::new(FakeDispatch::default()),
         wake: None,
     };
     let mut harness = Harness::builder()
@@ -1993,6 +1994,7 @@ fn polling_reads_the_transcript_into_the_ui_state() {
         artifacts: Box::new(FakeArtifacts::default()),
         controller: Box::new(FakeController::default()),
         operations: Box::new(FakeOperations::default()),
+        dispatch: Box::new(FakeDispatch::default()),
         wake: None,
     };
     let mut harness = Harness::builder()
@@ -3780,4 +3782,64 @@ fn a_flick_left_steps_back_through_the_users_messages_and_right_forward() {
         harness.state().ui_state.jump_to_turn.is_none(),
         "the draw took the jump"
     );
+}
+
+/// The Dispatch page lists what waits on the user with its options as
+/// buttons, and the rail row counts it; a click is one decide action.
+#[test]
+fn dispatch_page_answers_a_decision_with_a_click() {
+    use switchboard::ports::dispatch::{DecisionView, ProjectView, Status, TicketView};
+    let (mut harness, _) = harness();
+    harness
+        .state_mut()
+        .dispatch(AppAction::DispatchStatus(Some(Status {
+            data_dir: "/dispatch".into(),
+            projects: vec![ProjectView {
+                name: "Delta".into(),
+                queue: vec!["t1".into()],
+            }],
+            tickets: vec![TicketView {
+                id: "t1".into(),
+                project: "Delta".into(),
+                number: Some(104),
+                title: "One file per entry".into(),
+                state: "active".into(),
+                stages: vec!["investigate".into(), "lanes".into()],
+                stage: 1,
+                decisions: vec![DecisionView {
+                    id: "d1".into(),
+                    ticket: "t1".into(),
+                    stage: "lanes".into(),
+                    name: "lanes".into(),
+                    question: "Which lanes does #104 need?".into(),
+                    options: vec!["backend".into(), "frontend".into()],
+                    recommendation: Some("frontend".into()),
+                    state: "pending".into(),
+                    ..DecisionView::default()
+                }],
+                ..TicketView::default()
+            }],
+        })));
+    harness.state_mut().dispatched.clear();
+    harness.run_steps(2);
+    click(&mut harness, "Dispatch");
+    assert!(actions(&harness).contains(&AppAction::ShowDispatch));
+    harness.get_by_label("Which lanes does #104 need?");
+    click(&mut harness, "frontend");
+    assert!(actions(&harness).contains(&AppAction::DispatchDecide {
+        ticket: "t1".into(),
+        decision: "d1".into(),
+        answer: "frontend".into(),
+        note: None,
+    }));
+    // The title is a link in the decision card and in the project's list.
+    harness
+        .query_all_by_label("#104 One file per entry")
+        .next()
+        .expect("the ticket's link")
+        .click();
+    harness.run_steps(2);
+    assert!(actions(&harness).contains(&AppAction::ShowTicket("t1".into())));
+    assert_eq!(harness.state().core().view(), View::Ticket("t1".into()));
+    harness.get_by_label("DISPATCH TICKET");
 }

@@ -4379,6 +4379,7 @@ dependencies = [
  "anyhow",
  "chrono",
  "directories",
+ "dispatch-control",
  "eframe",
  "egui",
  "egui_commonmark",

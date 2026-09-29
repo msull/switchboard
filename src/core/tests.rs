@@ -5283,3 +5283,243 @@ mod control {
         assert_eq!(core.interrupted_ops(), vec!["op-9".to_owned()]);
     }
 }
+
+mod dispatch_page {
+    use super::*;
+    use crate::core::{CONSOLE_NAME, CONSOLE_SPACE};
+    use crate::ports::dispatch::{
+        AttemptView, Body, DecisionView, ProjectView, Reply, Status, TicketView,
+    };
+
+    fn status(session: Option<RecordId>) -> Status {
+        Status {
+            data_dir: "/dispatch".into(),
+            projects: vec![ProjectView {
+                name: "Delta".into(),
+                queue: vec!["t1".into()],
+            }],
+            tickets: vec![TicketView {
+                id: "t1".into(),
+                project: "Delta".into(),
+                number: Some(104),
+                title: "One file per entry".into(),
+                state: "active".into(),
+                stages: vec!["investigate".into(), "lanes".into(), "plan".into()],
+                stage: 1,
+                attempts: vec![AttemptView {
+                    stage: "investigate".into(),
+                    n: 1,
+                    context: "root".into(),
+                    kind: "agent".into(),
+                    state: "complete".into(),
+                    session: session.map(|s| s.0.to_string()),
+                    artifacts: vec![("notes".into(), "/dispatch/t1/notes.md".into())],
+                    ..AttemptView::default()
+                }],
+                decisions: vec![DecisionView {
+                    id: "d1".into(),
+                    ticket: "t1".into(),
+                    stage: "lanes".into(),
+                    name: "lanes".into(),
+                    question: "Which lanes?".into(),
+                    options: vec!["backend".into(), "frontend".into()],
+                    recommendation: Some("frontend".into()),
+                    state: "pending".into(),
+                    ..DecisionView::default()
+                }],
+                ..TicketView::default()
+            }],
+        }
+    }
+
+    #[test]
+    fn a_status_is_kept_when_the_runner_goes_and_its_decisions_count_as_waiting() {
+        let p = project("p");
+        let mut w = Workspace::new(p.clone());
+        let r = record(p.id, agent(), 0);
+        let id = r.id;
+        w.sessions.push(r);
+        let (mut core, _) = loaded(vec![w], vec![]);
+        assert_eq!(core.waiting_count(), 0);
+        core.dispatch(
+            AppAction::DispatchStatus(Some(status(Some(id)))),
+            Clock::at(2),
+        );
+        assert!(core.dispatch_state().connected);
+        assert_eq!(
+            core.waiting_count(),
+            1,
+            "a pending decision waits on the user"
+        );
+        assert_eq!(core.pending_decisions()[0].id, "d1");
+        assert_eq!(
+            core.ticket_of_session(id).map(|t| t.number),
+            Some(Some(104))
+        );
+        core.dispatch(AppAction::DispatchStatus(None), Clock::at(3));
+        assert!(!core.dispatch_state().connected);
+        assert_eq!(
+            core.ticket("t1").map(|t| t.stage),
+            Some(1),
+            "the last status stays"
+        );
+        core.dispatch(AppAction::ShowTicket("t1".into()), Clock::at(4));
+        assert_eq!(core.view(), View::Ticket("t1".into()));
+        core.dispatch(AppAction::ShowTicket("nope".into()), Clock::at(5));
+        assert_eq!(core.view(), View::Ticket("t1".into()));
+        assert!(core.notice().is_some_and(|n| n.is_error));
+    }
+
+    #[test]
+    fn answering_a_decision_is_one_call_whose_reply_updates_the_ticket() {
+        let (mut core, _) = loaded(vec![], vec![]);
+        let decide = AppAction::DispatchDecide {
+            ticket: "t1".into(),
+            decision: "d1".into(),
+            answer: "frontend".into(),
+            note: None,
+        };
+        let e = core.dispatch(decide.clone(), Clock::at(1));
+        assert!(
+            !e.iter().any(|e| matches!(e, Effect::DispatchCall(_))),
+            "no runner, no call"
+        );
+        assert!(core.notice().is_some_and(|n| n.is_error));
+        core.dispatch(AppAction::DispatchStatus(Some(status(None))), Clock::at(2));
+        let e = core.dispatch(decide, Clock::at(3));
+        let body = Body::Decide {
+            ticket: "t1".into(),
+            decision: "d1".into(),
+            answer: "frontend".into(),
+            note: None,
+        };
+        assert!(e.contains(&Effect::DispatchCall(body.clone())));
+        let mut answered = core.ticket("t1").unwrap().decisions[0].clone();
+        answered.state = "answered".into();
+        answered.answer = Some("frontend".into());
+        core.dispatch(
+            AppAction::DispatchReplied {
+                body: body.clone(),
+                result: Ok(Reply::Decided(answered)),
+            },
+            Clock::at(4),
+        );
+        assert_eq!(core.pending_decisions().len(), 0);
+        assert_eq!(core.waiting_count(), 0);
+        core.dispatch(
+            AppAction::DispatchReplied {
+                body,
+                result: Ok(Reply::failed("no such decision")),
+            },
+            Clock::at(5),
+        );
+        assert!(
+            core.notices()
+                .iter()
+                .any(|n| n.text.contains("no such decision"))
+        );
+        // An artifact is asked for once and kept by path.
+        let read = AppAction::DispatchReadArtifact {
+            ticket: "t1".into(),
+            path: "/dispatch/t1/notes.md".into(),
+        };
+        let e = core.dispatch(read.clone(), Clock::at(6));
+        assert!(
+            e.iter()
+                .any(|e| matches!(e, Effect::DispatchCall(Body::Artifact { .. })))
+        );
+        core.dispatch(
+            AppAction::DispatchReplied {
+                body: Body::Artifact {
+                    ticket: "t1".into(),
+                    path: "/dispatch/t1/notes.md".into(),
+                },
+                result: Ok(Reply::Artifact {
+                    text: "# notes".into(),
+                }),
+            },
+            Clock::at(7),
+        );
+        let e = core.dispatch(read, Clock::at(8));
+        assert!(e.is_empty(), "already read");
+        assert_eq!(
+            core.dispatch_state()
+                .artifacts
+                .get(std::path::Path::new("/dispatch/t1/notes.md"))
+                .map(String::as_str),
+            Some("# notes")
+        );
+        // A lost connection is reported once and marks the runner gone.
+        core.dispatch(
+            AppAction::DispatchReplied {
+                body: Body::Status,
+                result: Err("connection reset".into()),
+            },
+            Clock::at(9),
+        );
+        assert!(!core.dispatch_state().connected);
+    }
+
+    #[test]
+    fn the_console_is_made_once_in_its_own_space_and_commands_are_typed_into_it() {
+        let (mut core, _) = loaded(vec![], vec![]);
+        core.dispatch(
+            AppAction::DispatchConfigured {
+                command: "/opt/sb/dispatch".into(),
+                data_dir: "/dispatch".into(),
+            },
+            Clock::at(1),
+        );
+        let e = core.dispatch(AppAction::DispatchConsole("decisions".into()), Clock::at(2));
+        let console = core.console().expect("a console was made");
+        let record = core.session(console).unwrap().clone();
+        assert_eq!(record.name, CONSOLE_NAME);
+        assert_eq!(record.kind, SessionKind::Shell);
+        assert_eq!(record.cwd, PathBuf::from("/dispatch"));
+        let project = core.workspace(record.project).unwrap().project.clone();
+        assert_eq!(project.name, CONSOLE_SPACE);
+        assert_eq!(project.root, PathBuf::from("/dispatch"));
+        let space = core
+            .spaces()
+            .iter()
+            .find(|s| s.id == project.space)
+            .unwrap();
+        assert_eq!(space.name, CONSOLE_SPACE);
+        assert_eq!(core.settings().dispatch_console, Some(console));
+        assert!(
+            e.iter()
+                .any(|e| matches!(e, Effect::Spawn { id, .. } if *id == console))
+        );
+        assert!(
+            !e.iter().any(|e| matches!(e, Effect::SendInput { .. })),
+            "nothing typed into a shell that is not up yet"
+        );
+        assert_ne!(
+            core.view(),
+            View::Board(project.id),
+            "the page did not change"
+        );
+        // Up now: the command line is the executable and the words.
+        core.dispatch(AppAction::HostListed(vec![running(console)]), Clock::at(3));
+        let e = core.dispatch(AppAction::DispatchConsole("decisions".into()), Clock::at(4));
+        assert!(e.iter().any(
+            |e| matches!(e, Effect::SendInput { text, .. } if text == "'/opt/sb/dispatch' decisions")
+        ));
+        let e = core.dispatch(AppAction::DispatchConsole("!ls -la".into()), Clock::at(5));
+        assert!(
+            e.iter()
+                .any(|e| matches!(e, Effect::SendInput { text, .. } if text == "ls -la"))
+        );
+        core.dispatch(AppAction::OpenDispatchConsole, Clock::at(6));
+        assert_eq!(
+            core.workspace(record.project).unwrap().sessions.len(),
+            1,
+            "the console is found, not made again"
+        );
+        // Gone, it is made again on the next command.
+        core.dispatch(AppAction::RemoveSession(console), Clock::at(7));
+        core.dispatch(AppAction::DispatchConsole("status".into()), Clock::at(8));
+        let again = core.console().expect("made again");
+        assert_ne!(again, console);
+    }
+}

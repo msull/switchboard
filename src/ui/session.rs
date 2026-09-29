@@ -275,6 +275,21 @@ fn title_row(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord, state: &
             cx.state.rename_draft = Some((record.id, record.name.clone()));
         }
     }
+    // A session Dispatch made for a ticket links back to it.
+    if let Some(ticket) = cx.core.ticket_of_session(record.id) {
+        let (id, label) = (
+            ticket.id.clone(),
+            ticket
+                .number
+                .map_or("Ticket".to_owned(), |n| format!("#{n}")),
+        );
+        if theme::ghost(ui, &label)
+            .on_hover_text("The Dispatch ticket this session ran for")
+            .clicked()
+        {
+            cx.dispatch(AppAction::ShowTicket(id));
+        }
+    }
     theme::status_dot(ui, state, 8.0);
     ui.add(
         egui::Label::new(
@@ -1330,7 +1345,7 @@ pub fn code_block(ui: &mut Ui, text: &str) {
     );
 }
 
-fn terminal_body(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord) {
+pub(super) fn terminal_body(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord) {
     if !is_running(cx.core, record.id) {
         let note = if cx.state.snapshots.contains_key(&record.id) {
             "Not running. Return starts it again; below is the last output kept on disk."

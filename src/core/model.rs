@@ -128,6 +128,9 @@ pub struct Settings {
     /// (`WorkflowDefinition::default`) is always available under its
     /// own name and never stored.
     pub workflows: Vec<WorkflowDefinition>,
+    /// The shell session `dispatch` commands are typed into from the
+    /// Dispatch page, once made.
+    pub dispatch_console: Option<RecordId>,
 }
 
 impl Default for Settings {
@@ -151,6 +154,7 @@ impl Default for Settings {
             voice: VoiceSettings::default(),
             workflow_round_cap: DEFAULT_ROUND_CAP,
             workflows: Vec::new(),
+            dispatch_console: None,
         }
     }
 }

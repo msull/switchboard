@@ -71,6 +71,30 @@ pub fn show(cx: &mut DrawCtx<'_>, ui: &mut Ui, view: &View) {
         });
 }
 
+/// The Dispatch page's row: its pending decisions as the count, muted
+/// while no runner answers.
+fn dispatch_row(cx: &mut DrawCtx<'_>, ui: &mut Ui, view: &View, compact: bool) {
+    let decisions = cx.core.pending_decisions().len();
+    let dispatch = row(
+        ui,
+        &RowSpec {
+            text: "Dispatch",
+            dot: None,
+            selected: super::dispatch::is_dispatch_view(view),
+            muted: !cx.core.dispatch_state().connected,
+            count: decisions,
+            compact,
+            initial: "D",
+        },
+    );
+    if dispatch
+        .on_hover_text("Tickets, what waits on you, and the dispatch console")
+        .clicked()
+    {
+        cx.dispatch(AppAction::ShowDispatch);
+    }
+}
+
 fn top(cx: &mut DrawCtx<'_>, ui: &mut Ui, view: &View, compact: bool) {
     let p = theme::palette(ui);
     space_menu(cx, ui, compact);
@@ -92,6 +116,7 @@ fn top(cx: &mut DrawCtx<'_>, ui: &mut Ui, view: &View, compact: bool) {
     if all.clicked() {
         cx.dispatch(AppAction::ShowSwitchboard);
     }
+    dispatch_row(cx, ui, view, compact);
     working_set_rows(cx, ui, view, compact);
 
     match view {
@@ -100,11 +125,17 @@ fn top(cx: &mut DrawCtx<'_>, ui: &mut Ui, view: &View, compact: bool) {
         | View::Board(_)
         | View::Document(..)
         | View::WorkingSet(_)
-        | View::Workflow(_) => {
+        | View::Workflow(_)
+        | View::Dispatch
+        | View::Ticket(_) => {
             let active = match view {
                 View::Board(pid) | View::Document(pid, _) => Some(*pid),
                 View::Workflow(id) => cx.core.workflow(*id).map(|r| r.project),
-                View::Switchboard | View::Session(_) | View::WorkingSet(_) => None,
+                View::Switchboard
+                | View::Session(_)
+                | View::WorkingSet(_)
+                | View::Dispatch
+                | View::Ticket(_) => None,
             };
             ui.add_space(12.0);
             if !compact {

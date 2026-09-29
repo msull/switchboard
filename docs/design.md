@@ -1435,7 +1435,24 @@ composed command line, ahead of the first prompt (with `--` between,
 since Claude Code's multi-value flags would otherwise read the prompt
 as one more value), which is how a pipeline operator names a model and
 how Dispatch grants Claude Code its artifact directory with an
-`Edit(//<dir>/**)` allow rule. Built: the wire crate, the core
+`Edit(//<dir>/**)` allow rule.
+
+The port runs the other way too. Dispatch serves its own
+(`dispatch-control`, `<Dispatch data dir>/dispatch.sock`, while
+`dispatch run` is up), and the app is a client of it: a status poll
+every two seconds enters the core as `DispatchStatus` (tickets,
+decisions and attempts as views, never Dispatch's records), the Dispatch
+page lists what waits on the user with each option as a button and one
+`DispatchDecide` is one call whose reply is one more action, a ticket
+page reads a stage's artifacts through the port, a session Dispatch
+made links to its ticket, the rail's Dispatch row and the Dock badge
+count pending decisions, and the console is a shell session of the
+app's own in a `Dispatch` space and project rooted at Dispatch's data
+directory, remembered in the settings, into which a typed line is sent
+as the `dispatch` executable beside the app's plus the words (a `!`
+line goes to the shell as it is). Without a runner the page shows the
+last status it had and the console still works, which is how a runner
+is started. Built: the wire crate, the core
 path and read models, the log and socket adapters, `serve` in the app,
 and `tests/control.rs`. Gaps: `service.new` and `command.run` are not
 on the port yet; nothing marks Dispatch-owned records as such in the

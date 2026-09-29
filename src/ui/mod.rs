@@ -13,6 +13,7 @@ mod board;
 mod cards;
 pub mod config;
 pub mod dialogs;
+pub mod dispatch;
 pub mod document;
 pub mod env;
 pub mod files;
@@ -84,6 +85,10 @@ pub struct UiState {
     pub notes_draft: Option<(RecordId, String)>,
     /// A session name being edited in the session header.
     pub rename_draft: Option<(RecordId, String)>,
+    /// The Dispatch console's command line being typed.
+    pub dispatch_console_draft: String,
+    /// The artifact the ticket page is showing.
+    pub dispatch_artifact: Option<PathBuf>,
     /// The file side per project: tree, finder, index.
     pub files: HashMap<ProjectId, files::FilesState>,
     /// The document on screen, loaded once per path and file time.
@@ -227,6 +232,8 @@ impl Default for UiState {
             new_session: None,
             notes_draft: None,
             rename_draft: None,
+            dispatch_console_draft: String::new(),
+            dispatch_artifact: None,
             files: HashMap::new(),
             preview: None,
             editor_draft: None,
@@ -368,7 +375,12 @@ fn draw_frame(cx: &mut DrawCtx<'_>, ui: &mut Ui) {
             let message = matches!(s.kind, crate::core::SessionKind::Agent(_)).then_some(*id);
             (s.project, true, message, Some(*id))
         }),
-        View::Session(_) | View::Switchboard | View::WorkingSet(_) | View::Workflow(_) => None,
+        View::Session(_)
+        | View::Switchboard
+        | View::WorkingSet(_)
+        | View::Workflow(_)
+        | View::Dispatch
+        | View::Ticket(_) => None,
     };
     if let Some((pid, inline, message, session)) = files_for {
         side_panel(cx, ui, pid, inline, message, session, None);
@@ -388,6 +400,8 @@ fn draw_frame(cx: &mut DrawCtx<'_>, ui: &mut Ui) {
                 View::Session(id) => session::show(cx, ui, id),
                 View::Document(pid, path) => document::show(cx, ui, pid, &path),
                 View::Workflow(id) => workflow::show(cx, ui, id),
+                View::Dispatch => dispatch::show(cx, ui),
+                View::Ticket(id) => dispatch::ticket(cx, ui, &id),
             }
         });
 
@@ -474,14 +488,17 @@ fn side_panel(
 /// preview); the board and the switchboard get the page margin.
 fn page_margin(view: &View) -> egui::Margin {
     match view {
-        View::Switchboard | View::Board(_) | View::WorkingSet(_) | View::Workflow(_) => {
-            egui::Margin {
-                left: 28,
-                right: 28,
-                top: 24,
-                bottom: 20,
-            }
-        }
+        View::Switchboard
+        | View::Board(_)
+        | View::WorkingSet(_)
+        | View::Workflow(_)
+        | View::Dispatch
+        | View::Ticket(_) => egui::Margin {
+            left: 28,
+            right: 28,
+            top: 24,
+            bottom: 20,
+        },
         View::Session(_) | View::Document(..) => egui::Margin {
             left: 24,
             right: 24,

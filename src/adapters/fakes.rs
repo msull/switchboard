@@ -11,6 +11,7 @@ use crate::core::{AgentKind, ProjectId, RecordId, ResumeHandle, Settings, Views,
 use crate::ports::agent::{AgentLaunch, AgentLauncher};
 use crate::ports::control::{OpLine, Operations};
 use crate::ports::controller::{Controller, ControllerEvent};
+use crate::ports::dispatch::{Body as DispatchBody, DispatchPort, Reply as DispatchReply, Status};
 use crate::ports::events::{EventSource, SessionEvent};
 use crate::ports::host::{HostId, HostInfo, HostStatus, ProcessHost, SpawnSpec};
 use crate::ports::opener::Opener;
@@ -139,6 +140,62 @@ impl EventSource for FakeEvents {
     }
     fn checkpoint(&mut self) {
         self.checkpoints += 1;
+    }
+}
+
+/// Dispatch as a test sets it: a status to answer with (none means no
+/// runner), and every request seen, shared so a test can read them.
+#[derive(Debug, Default, Clone)]
+pub struct FakeDispatch {
+    pub status: Option<Status>,
+    pub calls: Arc<Mutex<Vec<DispatchBody>>>,
+    pub artifacts: HashMap<PathBuf, String>,
+}
+
+impl DispatchPort for FakeDispatch {
+    fn command(&self) -> PathBuf {
+        PathBuf::from("/opt/sb/dispatch")
+    }
+    fn data_dir(&self) -> PathBuf {
+        PathBuf::from("/dispatch")
+    }
+    fn call(&mut self, body: &DispatchBody) -> std::io::Result<DispatchReply> {
+        self.calls.lock().unwrap().push(body.clone());
+        let Some(status) = &self.status else {
+            return Err(std::io::Error::other("no runner"));
+        };
+        Ok(match body {
+            DispatchBody::Status => DispatchReply::Status(status.clone()),
+            DispatchBody::Ticket { id } => status
+                .tickets
+                .iter()
+                .find(|t| &t.id == id)
+                .cloned()
+                .map_or_else(
+                    || DispatchReply::failed("no such ticket"),
+                    DispatchReply::Ticket,
+                ),
+            DispatchBody::Artifact { path, .. } => self.artifacts.get(path).map_or_else(
+                || DispatchReply::failed("no such file"),
+                |text| DispatchReply::Artifact { text: text.clone() },
+            ),
+            DispatchBody::Decide {
+                ticket, decision, ..
+            } => status
+                .tickets
+                .iter()
+                .find(|t| &t.id == ticket)
+                .and_then(|t| t.decisions.iter().find(|d| &d.id == decision))
+                .cloned()
+                .map_or_else(
+                    || DispatchReply::failed("no such decision"),
+                    DispatchReply::Decided,
+                ),
+            DispatchBody::Queue { order, .. } => DispatchReply::Queue {
+                order: order.clone(),
+            },
+            DispatchBody::Take { .. } => DispatchReply::failed("takes are not faked"),
+        })
     }
 }
 
