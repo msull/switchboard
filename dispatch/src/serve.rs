@@ -275,6 +275,7 @@ fn decision_view(ticket: &str, d: &Decision) -> DecisionView {
         question: d.question.clone(),
         options: d.options.clone(),
         recommendation: d.recommendation.clone(),
+        multiple: d.name == "lanes",
         state: state.into(),
         answer,
         note,

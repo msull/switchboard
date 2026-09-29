@@ -330,6 +330,10 @@ fn decision_card(
                 );
                 return;
             }
+            if d.multiple {
+                multiple_choice(cx, ui, d);
+                return;
+            }
             ui.horizontal_wrapped(|ui| {
                 for option in &d.options {
                     let recommended = d.recommendation.as_deref() == Some(option);
@@ -355,6 +359,73 @@ fn decision_card(
                 }
             });
         });
+}
+
+/// A decision that takes several options: a checkbox each, ticked from
+/// the recommendation to start, and one Answer button that sends the
+/// ticked ones joined by commas. Nothing is sent by a tick alone.
+fn multiple_choice(cx: &mut DrawCtx<'_>, ui: &mut Ui, d: &DecisionView) {
+    let key = format!("{}/{}", d.ticket, d.id);
+    let suggested: Vec<String> = d
+        .recommendation
+        .as_deref()
+        .unwrap_or_default()
+        .split(',')
+        .map(|s| s.trim().to_owned())
+        .filter(|s| !s.is_empty())
+        .collect();
+    let chosen = cx
+        .state
+        .dispatch_choices
+        .entry(key)
+        .or_insert_with(|| suggested.clone());
+    ui.horizontal_wrapped(|ui| {
+        for option in &d.options {
+            let mut on = chosen.contains(option);
+            let hint = if suggested.contains(option) {
+                "Dispatch suggests this one"
+            } else {
+                "Tick every one that applies, then Answer"
+            };
+            if ui.checkbox(&mut on, option).on_hover_text(hint).changed() {
+                if on {
+                    chosen.push(option.clone());
+                } else {
+                    chosen.retain(|c| c != option);
+                }
+            }
+        }
+    });
+    let ordered: Vec<String> = d
+        .options
+        .iter()
+        .filter(|o| chosen.contains(o))
+        .cloned()
+        .collect();
+    let answer = ordered.join(",");
+    ui.horizontal(|ui| {
+        let label = if ordered.is_empty() {
+            "Answer".to_owned()
+        } else {
+            format!("Answer: {}", ordered.join(", "))
+        };
+        if ui
+            .add_enabled_ui(!ordered.is_empty(), |ui| theme::primary(ui, &label))
+            .inner
+            .on_hover_text("Send the ticked options as the answer")
+            .clicked()
+        {
+            cx.dispatch(AppAction::DispatchDecide {
+                ticket: d.ticket.clone(),
+                decision: d.id.clone(),
+                answer,
+                note: None,
+            });
+        }
+        if ordered.is_empty() {
+            ui.label(theme::meta_text(ui, "Tick at least one."));
+        }
+    });
 }
 
 /// The command line and the console's pane, or the button that makes

@@ -238,7 +238,12 @@ pub struct DecisionView {
     pub name: String,
     pub question: String,
     pub options: Vec<String>,
+    /// The suggested answer; for a decision that takes several, the
+    /// chosen options joined by commas.
     pub recommendation: Option<String>,
+    /// Several options may be chosen at once (the `lanes` decision);
+    /// the answer is the chosen ones joined by commas.
+    pub multiple: bool,
     /// `pending`, `answered` or `acted`.
     pub state: String,
     pub answer: Option<String>,

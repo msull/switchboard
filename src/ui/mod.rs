@@ -100,6 +100,9 @@ pub struct UiState {
     pub dispatch_artifact: Option<PathBuf>,
     /// The Dispatch project the page is narrowed to; every one when none.
     pub dispatch_project: Option<String>,
+    /// Options ticked so far on decisions that take several, by
+    /// decision id; started from the recommendation.
+    pub dispatch_choices: HashMap<String, Vec<String>>,
     /// Which window is being drawn: the Dispatch window has navigation
     /// of its own (`dispatch_window_ticket`), the main window the stack.
     pub surface: Surface,
@@ -254,6 +257,7 @@ impl Default for UiState {
             dispatch_console_draft: String::new(),
             dispatch_artifact: None,
             dispatch_project: None,
+            dispatch_choices: HashMap::new(),
             surface: Surface::Main,
             dispatch_window_ticket: None,
             dispatch_frame: None,

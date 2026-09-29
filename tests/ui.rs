@@ -3784,67 +3784,74 @@ fn a_flick_left_steps_back_through_the_users_messages_and_right_forward() {
     );
 }
 
+/// Two Dispatch projects, one with a pending lanes decision that takes
+/// several lanes, the other held by its one slot.
+fn dispatch_status() -> switchboard::ports::dispatch::Status {
+    use switchboard::ports::dispatch::{DecisionView, ProjectView, Status, TicketView};
+    Status {
+        data_dir: "/dispatch".into(),
+        projects: vec![
+            ProjectView {
+                name: "Delta".into(),
+                queue: vec!["t1".into()],
+                slots: 2,
+                waiting_on_me: 2,
+                running: 2,
+                pending: 1,
+            },
+            ProjectView {
+                name: "PTA".into(),
+                queue: vec!["t2".into()],
+                slots: 1,
+                waiting_on_me: 2,
+                running: 0,
+                pending: 0,
+            },
+        ],
+        tickets: vec![
+            TicketView {
+                id: "t1".into(),
+                project: "Delta".into(),
+                number: Some(104),
+                title: "One file per entry".into(),
+                state: "active".into(),
+                stages: vec!["investigate".into(), "lanes".into()],
+                stage: 1,
+                decisions: vec![DecisionView {
+                    id: "d1".into(),
+                    ticket: "t1".into(),
+                    stage: "lanes".into(),
+                    name: "lanes".into(),
+                    question: "Which lanes does #104 need?".into(),
+                    options: vec!["backend".into(), "frontend".into()],
+                    recommendation: Some("frontend".into()),
+                    multiple: true,
+                    state: "pending".into(),
+                    ..DecisionView::default()
+                }],
+                ..TicketView::default()
+            },
+            TicketView {
+                id: "t2".into(),
+                project: "PTA".into(),
+                number: Some(9),
+                title: "Roster import".into(),
+                state: "active".into(),
+                stages: vec!["investigate".into()],
+                ..TicketView::default()
+            },
+        ],
+    }
+}
+
 /// The Dispatch page lists what waits on the user with its options as
 /// buttons, and the rail row counts it; a click is one decide action.
 #[test]
 fn dispatch_page_answers_a_decision_with_a_click() {
-    use switchboard::ports::dispatch::{DecisionView, ProjectView, Status, TicketView};
     let (mut harness, _) = harness();
     harness
         .state_mut()
-        .dispatch(AppAction::DispatchStatus(Some(Status {
-            data_dir: "/dispatch".into(),
-            projects: vec![
-                ProjectView {
-                    name: "Delta".into(),
-                    queue: vec!["t1".into()],
-                    slots: 2,
-                    waiting_on_me: 2,
-                    running: 2,
-                    pending: 1,
-                },
-                ProjectView {
-                    name: "PTA".into(),
-                    queue: vec!["t2".into()],
-                    slots: 1,
-                    waiting_on_me: 2,
-                    running: 0,
-                    pending: 0,
-                },
-            ],
-            tickets: vec![
-                TicketView {
-                    id: "t1".into(),
-                    project: "Delta".into(),
-                    number: Some(104),
-                    title: "One file per entry".into(),
-                    state: "active".into(),
-                    stages: vec!["investigate".into(), "lanes".into()],
-                    stage: 1,
-                    decisions: vec![DecisionView {
-                        id: "d1".into(),
-                        ticket: "t1".into(),
-                        stage: "lanes".into(),
-                        name: "lanes".into(),
-                        question: "Which lanes does #104 need?".into(),
-                        options: vec!["backend".into(), "frontend".into()],
-                        recommendation: Some("frontend".into()),
-                        state: "pending".into(),
-                        ..DecisionView::default()
-                    }],
-                    ..TicketView::default()
-                },
-                TicketView {
-                    id: "t2".into(),
-                    project: "PTA".into(),
-                    number: Some(9),
-                    title: "Roster import".into(),
-                    state: "active".into(),
-                    stages: vec!["investigate".into()],
-                    ..TicketView::default()
-                },
-            ],
-        })));
+        .dispatch(AppAction::DispatchStatus(Some(dispatch_status())));
     harness.state_mut().dispatched.clear();
     harness.run_steps(2);
     click(&mut harness, "Dispatch");
@@ -3866,11 +3873,20 @@ fn dispatch_page_answers_a_decision_with_a_click() {
     assert!(harness.query_by_label("#104 One file per entry").is_none());
     harness.get_by_label("#9 Roster import");
     click(&mut harness, "All");
-    click(&mut harness, "frontend");
+    // A decision that takes several lanes: ticks, then one Answer, with
+    // the suggested lane ticked to begin with and nothing sent by a tick.
+    click(&mut harness, "backend");
+    assert!(
+        !actions(&harness)
+            .iter()
+            .any(|a| matches!(a, AppAction::DispatchDecide { .. })),
+        "a tick is not an answer"
+    );
+    click(&mut harness, "Answer: backend, frontend");
     assert!(actions(&harness).contains(&AppAction::DispatchDecide {
         ticket: "t1".into(),
         decision: "d1".into(),
-        answer: "frontend".into(),
+        answer: "backend,frontend".into(),
         note: None,
     }));
     // The title is a link in the decision card and in the project's list.
