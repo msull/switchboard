@@ -1427,10 +1427,30 @@ reports), as interrupted. A `Stop` hook event now records
 record that makes its card read as waiting on you while the pane runs,
 so the badge and the rail count Dispatch's pending decisions without
 knowing about them. Only the instance holding the store lock listens.
-Built: the wire crate, the core path and read models, the log and
-socket adapters, `serve` in the app, and `tests/control.rs`. Gaps:
-`service.new` and `command.run` are not on the port yet; nothing marks
-Dispatch-owned records as such in the window.
+An agent record whose `launch` is `Argv` adds those flags to the
+composed command line, ahead of the first prompt (with `--` between,
+since Claude Code's multi-value flags would otherwise read the prompt
+as one more value), which is how a pipeline operator names a model and
+how Dispatch grants Claude Code its artifact directory with an
+`Edit(//<dir>/**)` allow rule. Built: the wire crate, the core
+path and read models, the log and socket adapters, `serve` in the app,
+and `tests/control.rs`. Gaps: `service.new` and `command.run` are not
+on the port yet; nothing marks Dispatch-owned records as such in the
+window.
+
+The `dispatch` crate holds the first slice of `docs/dispatch.md`: the
+Switchboard pipeline through `investigate`, the automatic `lanes`
+decision, `plan`, and a review run on a copy of the plan, stopping at
+the `finalize` decision. Everything else in that document (command and
+external gates, `implement`, PR checks, budgets, the other pipelines)
+parks the ticket with a reason. `dispatch/tests/first_slice.rs` is the
+acceptance table; `dispatch/tests/live.rs` runs the first stage against
+a real Switchboard and a haiku agent. Known gap: Claude Code treats a
+git repository as its own workspace for the folder-trust dialog, so the
+first agent in each lane's worktree blocks on that dialog until it is
+answered in the pane once (a plain directory under a trusted parent
+inherits the trust; a fresh repository does not). Nothing in
+Switchboard or Dispatch writes Claude's trust file.
 
 ## Open questions
 

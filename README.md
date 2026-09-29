@@ -228,6 +228,20 @@ tests/fixtures/          a small real Claude Code transcript for the parser test
 tests/live.rs            ignored: real claude / codex / Ghostty runs
 tests/gate.rs            Milestone 1 gate: real store, tmux, hooks; agents ignored
 control/                 switchboard-control: the control port's wire contract (requests, replies, views) and a blocking client; std + serde only
+dispatch/                the `dispatch` binary (docs/dispatch.md): a ticket scheduler that drives Switchboard over the control port and never links the app
+  src/main.rs            CLI: take, run, decide, decisions, status, queue
+  src/pipeline.rs        the TOML pipeline file, parsed in full and validated; fingerprint of the copy a ticket runs
+  src/ticket.rs          the ticket record: source, lanes, attempts, decisions, operation ledger; the per-project queue
+  src/scheduler.rs       the runner: stage executors (agent, gate-only lanes, review workflow), completion evidence, decisions, ledgered sends
+  src/recover.rs         unanswered ledger operations resolved by class through find and op.status; nothing launched twice
+  src/view.rs            the `Dispatch · <project>` working set, one card per queued ticket, redrawn through set.sync
+  src/store.rs           Dispatch's data directory, flock, atomic writes
+  src/git.rs             worktrees and heads through fixed argv, with a fake
+  src/github.rs          the issue snapshot through gh, with a fake
+  src/port.rs            the Port trait over the control socket client
+  src/template.rs        `{a.b}` substitution for prompts
+  tests/first_slice.rs   the acceptance table against an in-memory Switchboard (tests/support)
+  tests/live.rs          ignored: the first stage against a real Switchboard and a haiku agent
 vendor/egui_term/        embedded terminal widget (Harzu/egui_term @ 31bbc7ab, egui 0.36; see SWITCHBOARD-PATCHES.md)
 firmware/nunchuk/        CircuitPython for the Feather that reports the nunchuk's buttons and stick
 spikes/                  Spike 0 evidence

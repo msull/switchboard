@@ -28,7 +28,7 @@ if [ -d "$APP" ]; then
   OLD_AUTHORITY=$(codesign -dvv "$APP" 2>&1 | sed -n 's/^Authority=//p' | head -1)
 fi
 
-cargo build --locked --release
+cargo build --locked --release --workspace
 
 # The build output may live outside the project (a shared target-dir in
 # ~/.cargo/config.toml or CARGO_TARGET_DIR), so ask cargo where it went.
@@ -39,6 +39,7 @@ rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN/switchboard" "$APP/Contents/MacOS/switchboard"
 cp "$BIN/switchboard-hook" "$APP/Contents/MacOS/switchboard-hook"
+cp "$BIN/dispatch" "$APP/Contents/MacOS/dispatch"
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">

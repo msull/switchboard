@@ -63,7 +63,7 @@ workspace = true
 # The other crates: the control port's wire contract, which both the app
 # and Dispatch speak, and Dispatch itself. Spikes stay standalone.
 [workspace]
-members = ["control"]
+members = ["control", "dispatch"]
 # A path dependency, not ours to lint.
 exclude = ["vendor/egui_term"]
 

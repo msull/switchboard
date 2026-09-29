@@ -1162,6 +1162,24 @@ dependencies = [
 
 [[package]]
 name = "dispatch"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "directories",
+ "env_logger",
+ "fd-lock",
+ "log",
+ "serde",
+ "serde_json",
+ "sha2",
+ "switchboard-control",
+ "tempfile",
+ "toml",
+ "uuid",
+]
+
+[[package]]
+name = "dispatch"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bd0c93bb4b0c6d9b77f4435b0ae98c24d17f1c45b2ff844c6151a07256ca923b"
@@ -3069,7 +3087,7 @@ checksum = "0ee638a5da3799329310ad4cfa62fbf045d5f56e3ef5ba4149e7452dcf89d5a8"
 dependencies = [
  "bitflags 2.13.1",
  "block2 0.5.1",
- "dispatch",
+ "dispatch 0.2.0",
  "libc",
  "objc2 0.5.2",
 ]
@@ -4539,10 +4557,12 @@ version = "1.1.5+spec-1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "12c0ba9680044b4ce98d391a62094047eada0d64860b80166c39f4a6b5640785"
 dependencies = [
+ "indexmap",
  "serde_core",
  "serde_spanned",
  "toml_datetime",
  "toml_parser",
+ "toml_writer",
  "winnow",
 ]
 
@@ -4575,6 +4595,12 @@ checksum = "1d38ac1cf9b95face32296c0a3ede1fdc270627c9d9c02a7274dd6d960dc4d56"
 dependencies = [
  "winnow",
 ]
+
+[[package]]
+name = "toml_writer"
+version = "1.1.2+spec-1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7d56353a2a665ad0f41a421187180aab746c8c325620617ad883a99a1cbe66d2"
 
 [[package]]
 name = "tracing"
