@@ -1458,8 +1458,10 @@ cut before the first stage, the `lanes` decision only chooses which
 lanes the stages run in (label hints answer it when the dial says
 auto), and a lane's setup runs once before its first agent. A review
 stage's reviewer may be Claude Code or Codex; the operator's flags go
-over the port with `workflow.start`, and a Claude Code reviewer gets
-the allow rule for its attempt directory. A project with `root`
+over the port with `workflow.start`. What each kind needs is answered
+by `OperatorKind` alone (a Claude Code reviewer runs in the ticket's
+tree with an allow rule for the attempt directory, Codex in the attempt
+directory), so a new kind of agent is one variant and its answers. A project with `root`
 instead of `repo` works in place with no branch, for one that is not a
 repository. Everything else in that document (command and
 external gates, `implement`, PR checks, budgets, the other pipelines)

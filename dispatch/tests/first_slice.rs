@@ -856,12 +856,12 @@ impl dispatch::port::Port for FailBefore {
 }
 
 /// Drive a ticket to the finalize decision.
-/// A reviewer operator of kind claude runs the review as Claude Code,
-/// with the operator's flags and the allow rule for its attempt
-/// directory on its command line, so the feedback file is written
-/// unasked.
+/// A reviewer operator of kind claude runs the review as Claude Code in
+/// the ticket's tree, where the code is and the trust was granted, with
+/// the operator's flags and the allow rule for the attempt directory on
+/// its command line, so the feedback file is still written unasked.
 #[test]
-fn a_claude_reviewer_gets_its_flags_and_an_allow_rule_for_the_attempt_directory() {
+fn a_claude_reviewer_runs_in_the_tree_with_its_flags_and_an_allow_rule_for_the_attempt() {
     let mut env = Env::new();
     let path = env.data.pipeline(PROJECT);
     let text = std::fs::read_to_string(&path)
@@ -897,13 +897,26 @@ fn a_claude_reviewer_gets_its_flags_and_an_allow_rule_for_the_attempt_directory(
             _ => None,
         })
         .expect("a workflow.start was sent");
+    let t = env.ticket(&id);
+    let attempt_dir = t
+        .attempts_of("review")
+        .last()
+        .and_then(|a| a.artifacts.get("plan"))
+        .and_then(|copy| copy.parent())
+        .unwrap()
+        .to_path_buf();
+    assert_eq!(
+        start.0,
+        t.tree.clone().unwrap(),
+        "the reviewer works in the tree"
+    );
     assert_eq!(
         start.1,
         vec![
             "--model".to_owned(),
             "haiku".into(),
             "--allowedTools".into(),
-            format!("Edit(//{}/**)", start.0.display()),
+            format!("Edit(//{}/**)", attempt_dir.display()),
         ]
     );
     let run = &sb.runs[0];

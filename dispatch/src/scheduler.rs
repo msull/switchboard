@@ -1312,21 +1312,13 @@ impl Runner {
         // directory; Claude Code writes there unasked only under an
         // allow rule for the path (an added directory still asks before
         // creating a file).
-        let (kind, launch) = match operator.kind {
-            crate::pipeline::OperatorKind::Claude => {
-                let mut args = operator.args.clone();
-                args.push("--allowedTools".into());
-                args.push(format!("Edit(//{}/**)", dir.display()));
-                (wire::SessionKind::Claude, wire::Launch::Argv(args))
-            }
-            crate::pipeline::OperatorKind::Codex => (
-                wire::SessionKind::Codex,
-                if operator.args.is_empty() {
-                    wire::Launch::Shell
-                } else {
-                    wire::Launch::Argv(operator.args.clone())
-                },
-            ),
+        let mut args = operator.args.clone();
+        args.extend(operator.kind.write_flags(&dir));
+        let kind = session_kind(operator.kind);
+        let launch = if args.is_empty() {
+            wire::Launch::Shell
+        } else {
+            wire::Launch::Argv(args)
         };
         let notes = format!(
             "Dispatch ticket {} · #{} {} · stage {} attempt {n}",
@@ -1608,13 +1600,18 @@ impl Runner {
         std::fs::copy(&source_path, &copy)
             .with_context(|| format!("copy {} to {}", source_path.display(), copy.display()))?;
         // The reviewer's feedback lives beside the copy, in Dispatch's
-        // directory; a Claude Code reviewer writes there unasked only
-        // under an allow rule for the path, as an agent stage's does.
+        // directory. A reviewer that can be told to write there runs in
+        // the ticket's tree, with the code and the trust the earlier
+        // agents already granted; one that can only write in its cwd
+        // runs in the attempt directory and is told where the tree is.
         let mut reviewer_args = operator.map(|o| o.args.clone()).unwrap_or_default();
-        if review.reviewer == crate::pipeline::OperatorKind::Claude {
-            reviewer_args.push("--allowedTools".into());
-            reviewer_args.push(format!("Edit(//{}/**)", dir.display()));
-        }
+        let reviewer_cwd = match primary_tree(t, p) {
+            Some(tree) if review.reviewer.reviews_in_tree() => {
+                reviewer_args.extend(review.reviewer.write_flags(&dir));
+                tree
+            }
+            _ => dir.clone(),
+        };
         let definition = definition_of(&reviewer_name, review, &vars_for(t, p, lane));
         t.attempts.push(new_attempt(
             &stage.name,
@@ -1643,7 +1640,7 @@ impl Runner {
                 source: source_session,
                 plan: copy,
                 definition: name,
-                reviewer_cwd: Some(dir),
+                reviewer_cwd: Some(reviewer_cwd),
                 reviewer_args,
             },
             now_ms,
@@ -2104,6 +2101,13 @@ fn review_subject(t: &Ticket, subject: &str) -> Result<(PathBuf, String), String
 
 /// The ticket's own tree: its first lane's worktree, or the project's
 /// root for a project that works in place. None before the cut.
+fn session_kind(kind: crate::pipeline::OperatorKind) -> wire::SessionKind {
+    match kind {
+        crate::pipeline::OperatorKind::Claude => wire::SessionKind::Claude,
+        crate::pipeline::OperatorKind::Codex => wire::SessionKind::Codex,
+    }
+}
+
 fn primary_tree(t: &Ticket, p: &Pipeline) -> Option<PathBuf> {
     if p.cuts_worktrees() {
         t.tree

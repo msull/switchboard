@@ -365,8 +365,9 @@ budget_usd = 0.0              # per ticket across the operator's attempts; 0 mea
                               # {inputs.*} into these templates before installing, since the
                               # reviewer works in the attempt directory, not the repository
 reviewer = "codex"            # or "claude": the operator's args go on the reviewer's command
-                              # line, and a Claude Code reviewer gets the allow rule that lets
-                              # it write its feedback in the attempt directory unasked
+                              # line. A Claude Code reviewer runs in the ticket's tree with an
+                              # allow rule for the attempt directory; Codex, which writes only
+                              # in its cwd, runs in the attempt directory and is told the tree
 review_first = "..."
 review_round = "..."
 respond = "..."

@@ -133,6 +133,38 @@ pub enum OperatorKind {
     Codex,
 }
 
+/// What each kind of agent needs from its launch. A new kind is one
+/// variant here plus these answers; the scheduler asks, never matches.
+impl OperatorKind {
+    /// Whether a reviewer of this kind works in the ticket's tree, where
+    /// the code is and where the tree's trust was already granted, or
+    /// must sit in the attempt directory because it can only write
+    /// there. Codex's sandbox writes inside its cwd alone.
+    #[must_use]
+    pub fn reviews_in_tree(self) -> bool {
+        match self {
+            Self::Claude => true,
+            Self::Codex => false,
+        }
+    }
+
+    /// The flags that let this kind write into `dir` unasked when `dir`
+    /// is outside its cwd. Claude Code writes elsewhere only under an
+    /// allow rule for the path (an added directory still asks before
+    /// creating a file); Codex has no such flag, so it is given `dir`
+    /// as its cwd instead.
+    #[must_use]
+    pub fn write_flags(self, dir: &std::path::Path) -> Vec<String> {
+        match self {
+            Self::Claude => vec![
+                "--allowedTools".into(),
+                format!("Edit(//{}/**)", dir.display()),
+            ],
+            Self::Codex => Vec::new(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Operator {
     pub kind: OperatorKind,
