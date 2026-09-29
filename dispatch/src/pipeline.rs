@@ -45,6 +45,10 @@ pub struct ProjectSection {
     pub base: String,
     #[serde(default = "default_remote")]
     pub remote: String,
+    /// Where tickets' trees go; absent, Dispatch's own `worktrees`
+    /// directory.
+    #[serde(default)]
+    pub worktrees: Option<PathBuf>,
     /// The Switchboard workspace every ticket's project goes in.
     pub space: String,
 }
@@ -76,16 +80,19 @@ pub enum Source {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Lane {
     pub name: String,
-    /// Relative to the clone (or the root); `.` for a single-repository
-    /// project.
+    /// Where the lane lives inside the ticket's tree; `.` for a
+    /// single-repository project.
     pub path: PathBuf,
+    /// A repository of the lane's own (a workspace of several): Dispatch
+    /// clones it too and cuts the lane as a worktree of that clone at
+    /// `path` inside the ticket's tree, so the layout matches a checkout.
+    #[serde(default)]
+    pub repo: Option<String>,
     /// The branch this lane branches from; absent, the project's.
     #[serde(default)]
     pub base: Option<String>,
-    /// Where this lane's worktrees go; absent, Dispatch's own
-    /// `worktrees` directory.
     #[serde(default)]
-    pub worktrees: Option<PathBuf>,
+    pub remote: Option<String>,
     /// Run once in a new worktree.
     #[serde(default)]
     pub setup: Vec<String>,
@@ -309,6 +316,11 @@ impl Pipeline {
         lane.base.as_deref().unwrap_or(&self.project.base)
     }
 
+    #[must_use]
+    pub fn lane_remote<'a>(&'a self, lane: &'a Lane) -> &'a str {
+        lane.remote.as_deref().unwrap_or(&self.project.remote)
+    }
+
     /// Whether tickets work in worktrees of Dispatch's clone (`repo`),
     /// as opposed to in place at `root`.
     #[must_use]
@@ -506,8 +518,6 @@ label = "dispatch"
 [[lanes]]
 name = "repo"
 path = "."
-base = "main"
-worktrees = "/worktrees"
 setup = ["cargo", "fetch", "--locked"]
 
 [operators.investigator]

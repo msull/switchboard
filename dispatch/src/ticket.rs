@@ -31,6 +31,17 @@ pub struct LaneRecord {
     pub branch: String,
     /// The Switchboard project for this lane, once made.
     pub project: Option<String>,
+    /// Whether the issue's work runs here: every lane's tree is cut, the
+    /// `lanes` decision says which ones the stages use.
+    #[serde(default = "yes")]
+    pub chosen: bool,
+    /// The lane's setup ran, once, before its first agent.
+    #[serde(default)]
+    pub setup_done: bool,
+}
+
+fn yes() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -222,6 +233,11 @@ pub struct Ticket {
     /// The pipeline as copied when the ticket was taken.
     pub pipeline_file: PathBuf,
     pub lanes: Vec<LaneRecord>,
+    /// The ticket's own tree: a worktree of the project's repository on
+    /// the ticket's branch. Lanes of their own repositories sit inside
+    /// it. None until cut, and for a project that works in place.
+    #[serde(default)]
+    pub tree: Option<PathBuf>,
     /// Index of the current stage in the pipeline copy.
     pub stage: usize,
     pub attempts: Vec<Attempt>,
@@ -314,6 +330,7 @@ mod tests {
             pipeline_fingerprint: String::new(),
             pipeline_file: PathBuf::new(),
             lanes: vec![],
+            tree: None,
             stage: 0,
             attempts: vec![],
             decisions: vec![],

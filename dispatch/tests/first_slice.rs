@@ -26,6 +26,7 @@ version = 1
 [project]
 name = "Switchboard"
 repo = "git@example.com:msull/switchboard.git"
+worktrees = "{worktrees}"
 space = "Dispatch · Switchboard"
 
 [source]
@@ -36,8 +37,6 @@ label = "dispatch"
 [[lanes]]
 name = "repo"
 path = "."
-base = "main"
-worktrees = "{worktrees}"
 setup = ["cargo", "fetch", "--locked"]
 
 [operators.investigator]
@@ -1419,4 +1418,234 @@ fn the_tree_comes_from_dispatches_own_clone_fetched_first() {
     // The reviewer's and the investigator's tree are the same one.
     let investigator = env.sb().sessions_named("investigator")[0].clone();
     assert_eq!(investigator.cwd, t.lanes[0].worktree);
+}
+
+// --- a workspace of several repositories: the ticket's tree is the
+// workspace, each lane a worktree of its own repository inside it, the
+// lanes decision chooses where the work runs, and a lane's setup waits
+// for its first agent.
+
+const WORKSPACE: &str = r#"
+version = 1
+
+[project]
+name = "Delta"
+repo = "git@example.com:k3/delta-workspace.git"
+worktrees = "{worktrees}"
+space = "Dispatch · Delta"
+
+[source]
+kind = "github"
+repo = "k3/delta-workspace"
+label = "dispatch"
+lane_hints = { "area:backend" = "backend", "area:frontend" = "frontend" }
+
+[[lanes]]
+name = "backend"
+path = "delta-backend"
+repo = "git@example.com:k3/delta-backend.git"
+base = "main"
+setup = ["uv", "sync"]
+
+[[lanes]]
+name = "frontend"
+path = "delta-frontend"
+repo = "git@example.com:k3/delta-frontend.git"
+base = "dev"
+setup = ["npm", "ci"]
+
+[operators.investigator]
+kind = "claude"
+
+[operators.planner]
+kind = "claude"
+
+[operators.reviewer]
+kind = "codex"
+[operators.reviewer.review]
+reviewer = "codex"
+review_first = "Review {plan} for {worktree} on {branch}; write to {feedback}; else {no_feedback}"
+review_round = "Again {response} {plan} {feedback} {no_feedback}"
+respond = "Feedback at {feedback}; edit {plan}; answer at {response}."
+respond_to_user = "{text} {plan} {response}"
+handoff = "The plan at {plan} is final."
+no_feedback = "No further feedback."
+cap = 4
+
+[[stages]]
+name = "investigate"
+operator = "investigator"
+context = "root"
+writes = ["notes"]
+prompt = "Issue #{issue.number} in {worktree} on {branch}. Write to {notes}."
+
+[[stages]]
+name = "lanes"
+gate = { kind = "human", decision = "lanes" }
+
+[[stages]]
+name = "plan"
+operator = "planner"
+context = "each"
+writes = ["plan"]
+prompt = "Plan in {worktree} ({lane}) on {branch} to {plan}."
+
+[[stages]]
+name = "review"
+review = "reviewer"
+context = "each"
+subject = "plan"
+gate = { kind = "external", check = "review-finalized" }
+
+[policy]
+slots = 2
+waiting_on_me = 3
+decisions = { lanes = "auto", finalize = "ask" }
+"#;
+
+fn workspace_env(labels: &[&str]) -> (Env, String) {
+    let mut env = Env::new();
+    let text = WORKSPACE.replace("{worktrees}", &env.worktrees.display().to_string());
+    std::fs::write(env.data.pipeline("Delta"), text).unwrap();
+    let now = env.tick();
+    let id = env
+        .runner
+        .take(
+            "Delta",
+            &std::fs::read_to_string(env.data.pipeline("Delta")).unwrap(),
+            SourceSnapshot {
+                kind: "github".into(),
+                identity: "k3/delta-workspace#42".into(),
+                number: Some(42),
+                title: "Asset report column missing".into(),
+                body: String::new(),
+                url: None,
+                labels: labels.iter().map(|l| (*l).to_owned()).collect(),
+                taken_at_ms: now,
+            },
+            now,
+        )
+        .unwrap()
+        .id;
+    (env, id)
+}
+
+#[test]
+fn a_workspace_ticket_gets_the_workspace_tree_with_every_lane_inside_it() {
+    let (mut env, id) = workspace_env(&["area:backend", "type:bug"]);
+    let now = env.tick();
+    env.runner.step_project("Delta", now).unwrap();
+    let t = env.ticket(&id);
+    let tree = env.worktrees.join(&id);
+    assert_eq!(t.tree.as_deref(), Some(tree.as_path()), "{t:#?}");
+    assert_eq!(t.lanes.len(), 2);
+    assert_eq!(t.lanes[0].worktree, tree.join("delta-backend"));
+    assert_eq!(t.lanes[1].worktree, tree.join("delta-frontend"));
+    assert!(
+        t.lanes
+            .iter()
+            .all(|l| l.branch == "dispatch/42-asset-report-column-missing")
+    );
+    assert!(
+        t.lanes.iter().all(|l| !l.setup_done),
+        "setups wait for an agent"
+    );
+    for name in ["Delta", "Delta@backend", "Delta@frontend"] {
+        assert!(env.data.repo_dir(name).exists(), "clone {name}");
+    }
+    let sb = env.sb();
+    assert_eq!(sb.projects.len(), 1);
+    assert_eq!(sb.projects[0].name, "#42 Asset report column missing");
+    assert_eq!(sb.projects[0].root, tree);
+    let inv = &sb.sessions_named("investigator")[0];
+    assert_eq!(inv.cwd, tree, "investigate runs in the workspace tree");
+    let prompt = sb
+        .calls
+        .iter()
+        .find_map(|r| match &r.body {
+            Body::SessionNew { prompt, .. } => prompt.clone(),
+            _ => None,
+        })
+        .unwrap();
+    assert!(prompt.contains(&tree.display().to_string()), "{prompt}");
+    assert!(prompt.contains("on dispatch/42-"), "{prompt}");
+}
+
+#[test]
+fn the_label_hints_choose_the_lanes_and_only_those_get_a_planner() {
+    let (mut env, id) = workspace_env(&["area:backend"]);
+    let now = env.tick();
+    env.runner.step_project("Delta", now).unwrap();
+    let t = env.ticket(&id);
+    let investigator = session_of(&t, "investigate");
+    std::fs::write(artifact_of(&t, "investigate", "notes"), "# notes").unwrap();
+    let now = env.now;
+    env.sb().stop(&investigator, now);
+    for _ in 0..8 {
+        let now = env.tick();
+        env.runner.step_project("Delta", now).unwrap();
+        if env.ticket(&id).attempts_of("plan").next().is_some() {
+            break;
+        }
+    }
+    let t = env.ticket(&id);
+    assert!(
+        t.pending_decisions().is_empty(),
+        "auto with a hint asks nothing"
+    );
+    let chosen: Vec<&str> = t
+        .lanes
+        .iter()
+        .filter(|l| l.chosen)
+        .map(|l| l.name.as_str())
+        .collect();
+    assert_eq!(chosen, ["backend"]);
+    let plans: Vec<&dispatch::ticket::Attempt> = t.attempts_of("plan").collect();
+    assert_eq!(plans.len(), 1, "{t:#?}");
+    assert_eq!(plans[0].context, "backend");
+    let sb = env.sb();
+    let planner = &sb.sessions_named("planner")[0];
+    assert_eq!(planner.cwd, t.lanes[0].worktree);
+    assert_eq!(
+        planner.project, sb.projects[0].id,
+        "one project, the lane's cwd"
+    );
+    // The backend setup ran once, in the lane, before its planner; the
+    // frontend's never did.
+    assert!(t.lanes[0].setup_done && !t.lanes[1].setup_done);
+}
+
+#[test]
+fn without_a_hint_the_lanes_are_asked_and_the_answer_chooses() {
+    let (mut env, id) = workspace_env(&["type:bug"]);
+    let now = env.tick();
+    env.runner.step_project("Delta", now).unwrap();
+    let t = env.ticket(&id);
+    let investigator = session_of(&t, "investigate");
+    std::fs::write(artifact_of(&t, "investigate", "notes"), "# notes").unwrap();
+    let now = env.now;
+    env.sb().stop(&investigator, now);
+    for _ in 0..5 {
+        let now = env.tick();
+        env.runner.step_project("Delta", now).unwrap();
+    }
+    let pending = env.pending(&id);
+    assert_eq!(pending.len(), 1, "{pending:#?}");
+    assert_eq!(pending[0].name, "lanes");
+    assert!(pending[0].question.contains("backend, frontend"));
+    let now = env.tick();
+    env.runner
+        .decide(&id, &pending[0].id, "backend, frontend", None, now)
+        .unwrap();
+    for _ in 0..4 {
+        let now = env.tick();
+        env.runner.step_project("Delta", now).unwrap();
+    }
+    let t = env.ticket(&id);
+    assert!(t.lanes.iter().all(|l| l.chosen));
+    assert_eq!(
+        t.attempts_of("plan").count(),
+        2,
+        "a planner per chosen lane: {t:#?}"
+    );
 }

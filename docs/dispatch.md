@@ -337,6 +337,7 @@ repo = "git@..."              # the repository: Dispatch keeps its own clone und
 root = "/path"                # instead of repo: work in place in this directory, no branch
 base = "main"                 # the branch tickets branch from (default main)
 remote = "origin"             # (default origin)
+worktrees = "/path"           # where tickets' trees go; omitted: Dispatch's own worktrees directory
 space = "..."                 # the Switchboard workspace every ticket's project goes in
 
 [source]
@@ -344,10 +345,11 @@ kind = "github" | "task-file" | "manual"
 
 [[lanes]]
 name = "..."
-path = "relative/to/clone"    # "." for a single-repo project
+path = "relative/to/tree"     # "." for a single-repo project
+repo = "git@..."              # a repository of its own (a workspace of several): cloned by
+                              # Dispatch too, cut as a worktree at path inside the ticket's tree
 base = "main"                 # omitted: the project's
-worktrees = "/path"           # omitted: Dispatch's own worktrees directory
-setup = ["cmd", "args"]       # run once in a new worktree
+setup = ["cmd", "args"]       # run once, before the lane's first agent
 
 [[resources]]
 name = "..."
@@ -655,12 +657,14 @@ lane_hints = { "area:backend" = "backend", "area:frontend" = "frontend", "area:s
 [[lanes]]
 name = "backend"
 path = "delta-backend"
+repo = "git@bitbucket.org:cainfosec/delta-backend.git"
 base = "main"
 setup = ["sh", "-c", "uv sync && uv run inv link-env --env-name sully-dev"]
 
 [[lanes]]
 name = "frontend"
 path = "delta-frontend"
+repo = "git@bitbucket.org:cainfosec/delta.git"
 base = "dev"
 setup = ["npm", "ci", "--legacy-peer-deps"]
 # A service Dispatch starts for a stage that asks. PORT is a port
@@ -670,6 +674,7 @@ serve = { argv = ["npm", "start"], env = { BROWSER = "none", PORT = "{port}" }, 
 [[lanes]]
 name = "snp"
 path = "delta-snp"
+repo = "git@bitbucket.org:cainfosec/delta-snp.git"
 base = "master"
 setup = ["npm", "ci", "--legacy-peer-deps"]
 serve = { argv = ["npm", "start"], env = { BROWSER = "none", PORT = "{port}" }, url = "http://localhost:{port}", ready = { http = "/", within_secs = 120 } }

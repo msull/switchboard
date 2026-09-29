@@ -205,6 +205,7 @@ impl Runner {
             pipeline_fingerprint: Pipeline::fingerprint(pipeline_text),
             pipeline_file,
             lanes: Vec::new(),
+            tree: None,
             stage: 0,
             attempts: Vec::new(),
             decisions: Vec::new(),
@@ -318,12 +319,12 @@ impl Runner {
         if !t.active() {
             return Ok(());
         }
-        // The ticket's own tree comes before any stage: a worktree of
+        // The ticket's trees come before any stage: a worktree of
         // Dispatch's clone on the ticket's branch, cut from what the
-        // remote has now. The user's checkout is never involved.
-        if p.cuts_worktrees() && t.lanes.is_empty() {
-            let primary = vec![p.lanes[0].name.clone()];
-            self.cut_lanes(t, ps, p, &primary, now_ms)?;
+        // remote has now, and every lane inside it. The user's checkout
+        // is never involved.
+        if p.cuts_worktrees() && (t.tree.is_none() || t.lanes.len() < p.lanes.len()) {
+            self.cut_trees(t, ps, p, now_ms)?;
             if !t.active() {
                 return Ok(());
             }
@@ -674,7 +675,7 @@ impl Runner {
                         .map(|s| s.trim().to_owned())
                         .filter(|s| !s.is_empty())
                         .collect();
-                    self.cut_lanes(t, ps, p, &names, now_ms)?;
+                    self.choose_lanes(t, ps, p, &names, now_ms)?;
                 }
                 ("finalize", "finalize") => {
                     if let Some(run) = attempt
@@ -753,8 +754,161 @@ impl Runner {
 
     // --- lanes
 
-    /// Cut a worktree and branch per lane named, then the lane's setup.
-    fn cut_lanes(
+    /// Cut the ticket's tree, then every lane inside it: the tree is a
+    /// worktree of Dispatch's clone of the project repository; a lane
+    /// with a repository of its own is a worktree of Dispatch's clone of
+    /// that, at the lane's path in the tree; any other lane is a path in
+    /// the tree. Setups wait for the first agent in the lane.
+    fn cut_trees(
+        &mut self,
+        t: &mut Ticket,
+        ps: &mut ProjectState,
+        p: &Pipeline,
+        now_ms: u64,
+    ) -> Result<()> {
+        let Some(url) = p.project.repo.clone() else {
+            return Ok(());
+        };
+        let branch = branch_name(t.source.number.unwrap_or(0), &t.source.title);
+        if t.tree.is_none() {
+            let dir = p
+                .project
+                .worktrees
+                .clone()
+                .unwrap_or_else(|| self.data.worktrees_dir())
+                .join(&t.id);
+            let clone = self.data.repo_dir(&p.project.name);
+            let start = format!("{}/{}", p.project.remote, p.project.base);
+            if !self.cut(
+                t,
+                ps,
+                "the tree",
+                &url,
+                &clone,
+                &p.project.remote,
+                &dir,
+                &branch,
+                &start,
+                now_ms,
+            )? {
+                return Ok(());
+            }
+            t.tree = Some(dir);
+            self.save_ticket(t, now_ms)?;
+        }
+        let tree = t.tree.clone().expect("cut above");
+        for lane in &p.lanes {
+            if t.lanes.iter().any(|l| l.name == lane.name) {
+                continue;
+            }
+            let dir = tree.join(&lane.path);
+            if let Some(url) = &lane.repo {
+                let clone = self
+                    .data
+                    .repo_dir(&format!("{}@{}", p.project.name, lane.name));
+                let remote = p.lane_remote(lane).to_owned();
+                let start = format!("{remote}/{}", p.lane_base(lane));
+                let what = format!("lane {}", lane.name);
+                if !self.cut(
+                    t, ps, &what, url, &clone, &remote, &dir, &branch, &start, now_ms,
+                )? {
+                    return Ok(());
+                }
+            } else if !dir.is_dir() {
+                return self.park(
+                    t,
+                    ps,
+                    &format!("lane {}: {} is not in the tree", lane.name, dir.display()),
+                    now_ms,
+                );
+            }
+            t.lanes.push(LaneRecord {
+                name: lane.name.clone(),
+                worktree: dir,
+                branch: branch.clone(),
+                project: None,
+                chosen: p.lanes.len() == 1,
+                setup_done: false,
+            });
+            self.save_ticket(t, now_ms)?;
+        }
+        Ok(())
+    }
+
+    /// One worktree: the clone made or fetched, the worktree cut from
+    /// `start` on `branch` at `dir`, or adopted when git says it is
+    /// already that. False when the ticket was parked instead.
+    #[allow(clippy::too_many_arguments)]
+    fn cut(
+        &mut self,
+        t: &mut Ticket,
+        ps: &mut ProjectState,
+        what: &str,
+        url: &str,
+        clone: &Path,
+        remote: &str,
+        dir: &Path,
+        branch: &str,
+        start: &str,
+        now_ms: u64,
+    ) -> Result<bool> {
+        if let Err(e) = self.git.ensure_clone(url, clone) {
+            self.park(
+                t,
+                ps,
+                &format!("{what}: could not clone {url}: {e:#}"),
+                now_ms,
+            )?;
+            return Ok(false);
+        }
+        if let Err(e) = self.git.fetch(clone, remote) {
+            self.park(
+                t,
+                ps,
+                &format!(
+                    "{what}: could not fetch {remote} in {}: {e:#}",
+                    clone.display()
+                ),
+                now_ms,
+            )?;
+            return Ok(false);
+        }
+        // A directory already there is adopted only if git says it is
+        // this repository's worktree on this branch (cut before a stop
+        // that came ahead of the record); anything else in the way is
+        // not guessed at.
+        if dir.exists() {
+            if !self.git.is_worktree_of(clone, dir, branch)? {
+                self.park(
+                    t,
+                    ps,
+                    &format!(
+                        "{what}: {} exists but is not a worktree of {} on {branch}",
+                        dir.display(),
+                        clone.display()
+                    ),
+                    now_ms,
+                )?;
+                return Ok(false);
+            }
+            log::info!("ticket {} {what}: adopting {}", t.id, dir.display());
+            return Ok(true);
+        }
+        if let Err(e) = self.git.worktree_add(clone, dir, branch, start) {
+            self.park(
+                t,
+                ps,
+                &format!("{what}: could not cut {}: {e:#}", dir.display()),
+                now_ms,
+            )?;
+            return Ok(false);
+        }
+        Ok(true)
+    }
+
+    /// The lanes decision's answer: those lanes are the ones the stages
+    /// run in.
+    fn choose_lanes(
         &mut self,
         t: &mut Ticket,
         ps: &mut ProjectState,
@@ -762,95 +916,56 @@ impl Runner {
         names: &[String],
         now_ms: u64,
     ) -> Result<()> {
-        let Some(url) = p.project.repo.clone() else {
-            return self.park(
-                t,
-                ps,
-                "lanes of a project that works in place are not built in this slice",
-                now_ms,
-            );
-        };
-        let clone = self.data.repo_dir(&p.project.name);
-        if let Err(e) = self.git.ensure_clone(&url, &clone) {
-            return self.park(t, ps, &format!("could not clone {url}: {e:#}"), now_ms);
-        }
-        if let Err(e) = self.git.fetch(&clone, &p.project.remote) {
-            return self.park(
-                t,
-                ps,
-                &format!(
-                    "could not fetch {} in {}: {e:#}",
-                    p.project.remote,
-                    clone.display()
-                ),
-                now_ms,
-            );
-        }
         for name in names {
-            if t.lanes.iter().any(|l| &l.name == name) {
-                continue;
-            }
-            let Some(lane) = p.lane(name) else {
-                self.park(
+            if p.lane(name).is_none() {
+                return self.park(
                     t,
                     ps,
                     &format!("lanes decision named an unknown lane {name:?}"),
                     now_ms,
-                )?;
-                return Ok(());
-            };
-            let repo = clone.join(&lane.path);
-            let worktrees = lane
-                .worktrees
-                .clone()
-                .unwrap_or_else(|| self.data.worktrees_dir());
-            let dir = if p.lanes.len() == 1 {
-                worktrees.join(&t.id)
-            } else {
-                worktrees.join(format!("{}-{name}", t.id))
-            };
-            let branch = branch_name(t.source.number.unwrap_or(0), &t.source.title);
-            let start = format!("{}/{}", p.project.remote, p.lane_base(lane));
-            // A directory already there is adopted only if git says it is
-            // this repository's worktree on this branch (cut before a stop
-            // that came ahead of the lane record); anything else in the
-            // way is not guessed at.
-            if dir.exists() {
-                if !self.git.is_worktree_of(&repo, &dir, &branch)? {
-                    self.park(
-                        t,
-                        ps,
-                        &format!(
-                            "lane {name}: {} exists but is not a worktree of {} on {branch}",
-                            dir.display(),
-                            repo.display()
-                        ),
-                        now_ms,
-                    )?;
-                    return Ok(());
-                }
-                log::info!("ticket {} lane {name}: adopting {}", t.id, dir.display());
-            } else if let Err(e) = self.git.worktree_add(&repo, &dir, &branch, &start) {
-                self.park(t, ps, &format!("could not cut lane {name}: {e}"), now_ms)?;
-                return Ok(());
+                );
             }
-            if !lane.setup.is_empty()
-                && let Err(e) =
-                    self.git
-                        .run(&dir, &lane.setup, &env_for(t, Some(name), Some(&branch)))
+        }
+        for l in &mut t.lanes {
+            l.chosen = names.contains(&l.name);
+        }
+        self.save_ticket(t, now_ms)
+    }
+
+    /// A lane's setup, once, before its first agent; the ticket is
+    /// parked if it fails.
+    fn ensure_setup(
+        &mut self,
+        t: &mut Ticket,
+        ps: &mut ProjectState,
+        p: &Pipeline,
+        cwd: &Path,
+        now_ms: u64,
+    ) -> Result<bool> {
+        let pending: Vec<(usize, Vec<String>, String)> = t
+            .lanes
+            .iter()
+            .enumerate()
+            .filter(|(_, l)| l.worktree == cwd && !l.setup_done)
+            .filter_map(|(i, l)| {
+                p.lane(&l.name)
+                    .filter(|lane| !lane.setup.is_empty())
+                    .map(|lane| (i, lane.setup.clone(), l.branch.clone()))
+            })
+            .collect();
+        for (i, setup, branch) in pending {
+            let name = t.lanes[i].name.clone();
+            if let Err(e) = self
+                .git
+                .run(cwd, &setup, &env_for(t, Some(&name), Some(&branch)))
             {
-                self.park(t, ps, &format!("lane {name}: setup failed: {e}"), now_ms)?;
-                return Ok(());
+                self.park(t, ps, &format!("lane {name}: setup failed: {e:#}"), now_ms)?;
+                return Ok(false);
             }
-            t.lanes.push(LaneRecord {
-                name: name.clone(),
-                worktree: dir,
-                branch,
-                project: None,
-            });
+            t.lanes[i].setup_done = true;
             self.save_ticket(t, now_ms)?;
         }
-        Ok(())
+        Ok(true)
     }
 
     // --- gate-only stages
@@ -865,15 +980,27 @@ impl Runner {
     ) -> Result<()> {
         match &stage.gate {
             Some(Gate::Human { decision, .. }) if decision == "lanes" => {
-                // The ticket's own tree was cut before the first stage;
-                // this gate is about any other lanes the issue needs, so
-                // a one-lane pipeline, or one where every lane is cut,
-                // passes without a question.
-                if p.lanes.len() == 1 || t.lanes.len() == p.lanes.len() || !p.cuts_worktrees() {
+                // Every lane's tree was cut before the first stage; this
+                // gate chooses which lanes the issue's work runs in, so a
+                // one-lane pipeline passes without a question and label
+                // hints answer it when the dial says auto.
+                let answered = t.decisions.iter().any(|d| {
+                    d.name == "lanes"
+                        && d.stage == stage.name
+                        && matches!(d.state, DecisionState::Answered { .. })
+                });
+                if p.lanes.len() == 1 || !p.cuts_worktrees() || answered {
                     self.finish_gate_only(t, ps, stage, now_ms)?;
                     return Ok(());
                 }
                 let hinted = lane_hints(p, &t.source.labels);
+                if p.dial("lanes") == "auto" && !hinted.is_empty() {
+                    self.choose_lanes(t, ps, p, &hinted, now_ms)?;
+                    if t.active() {
+                        self.finish_gate_only(t, ps, stage, now_ms)?;
+                    }
+                    return Ok(());
+                }
                 let all: Vec<&str> = p.lanes.iter().map(|l| l.name.as_str()).collect();
                 let notes = t.input("notes").map(|n| n.display().to_string());
                 let question = format!(
@@ -956,6 +1083,7 @@ impl Runner {
             Context::Each => t
                 .lanes
                 .iter()
+                .filter(|l| l.chosen)
                 .map(|l| (l.name.clone(), l.worktree.clone(), Some(l.name.clone())))
                 .collect(),
             Context::Lane(name) => t
@@ -1142,6 +1270,9 @@ impl Runner {
             Ok(id) => id,
             Err(e) => return self.park(t, ps, &format!("stage {}: {e:#}", stage.name), now_ms),
         };
+        if !self.ensure_setup(t, ps, p, cwd, now_ms)? {
+            return Ok(());
+        }
         let dir = self
             .data
             .ticket_dir(&t.id)
@@ -1969,7 +2100,9 @@ fn review_subject(t: &Ticket, subject: &str) -> Result<(PathBuf, String), String
 /// root for a project that works in place. None before the cut.
 fn primary_tree(t: &Ticket, p: &Pipeline) -> Option<PathBuf> {
     if p.cuts_worktrees() {
-        t.lanes.first().map(|l| l.worktree.clone())
+        t.tree
+            .clone()
+            .or_else(|| t.lanes.first().map(|l| l.worktree.clone()))
     } else {
         p.project.root.clone()
     }
@@ -2022,13 +2155,19 @@ fn vars_for(t: &Ticket, p: &Pipeline, lane: Option<&str>) -> Vars {
                 .collect::<Vec<_>>()
                 .join(", "),
         );
-    // The root context is the primary lane's tree, so its variables
-    // are set there too.
-    let lane = lane.or_else(|| t.lanes.first().map(|l| l.name.as_str()));
+    // The root context is the ticket's tree on the ticket's branch.
     if let Some(l) = lane.and_then(|name| t.lanes.iter().find(|x| x.name == name)) {
         vars.set("lane", l.name.clone())
             .set("branch", l.branch.clone())
             .set("worktree", l.worktree.display().to_string());
+    } else if let Some(tree) = primary_tree(t, p) {
+        vars.set("worktree", tree.display().to_string());
+        if p.cuts_worktrees() {
+            vars.set(
+                "branch",
+                branch_name(t.source.number.unwrap_or(0), &t.source.title),
+            );
+        }
     }
     let names: std::collections::BTreeSet<&String> =
         t.attempts.iter().flat_map(|a| a.artifacts.keys()).collect();
