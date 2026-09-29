@@ -51,8 +51,7 @@ fn record(project: ProjectId, kind: SessionKind, order: u32) -> SessionRecord {
         kind,
         cwd: PathBuf::from("/tmp/proj"),
         launch: match kind {
-            SessionKind::Agent(_) => Launch::Argv(vec!["agent".into()]),
-            SessionKind::Shell => Launch::Shell,
+            SessionKind::Agent(_) | SessionKind::Shell => Launch::Shell,
             SessionKind::Command | SessionKind::Service => Launch::Command {
                 command: "npm run dev".into(),
                 shell: "/bin/zsh".into(),
@@ -1229,6 +1228,48 @@ fn launch_prepared_stores_resume_and_spawns_with_record_id() {
     assert!(spec.env.contains(&("A".into(), "1".into())));
     assert!(spec.env.contains(&(RECORD_ID_ENV.into(), id.0.to_string())));
     assert!(core.is_in_flight(id), "still in flight until spawned");
+}
+
+#[test]
+fn an_agent_records_own_flags_come_after_the_composed_command_and_before_the_prompt() {
+    let (mut core, pid, _) = with_records(&[], |_| None);
+    let (id, _) = new_session(
+        &mut core,
+        pid,
+        agent(),
+        Launch::Argv(vec!["--model".into(), "haiku".into()]),
+    );
+    core.first_prompts.push((id, "pong".into()));
+    let effects = core.dispatch(
+        AppAction::LaunchPrepared {
+            id,
+            result: Ok(AgentLaunch {
+                argv: vec!["claude".into(), "--session-id".into(), "x".into()],
+                env: vec![],
+                resume: None,
+            }),
+        },
+        Clock::at(10),
+    );
+    let spec = effects
+        .iter()
+        .find_map(|e| match e {
+            Effect::Spawn { spec, .. } => Some(spec),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("{effects:?}"));
+    assert_eq!(
+        spec.command.as_ref().unwrap(),
+        &[
+            "claude",
+            "--session-id",
+            "x",
+            "--model",
+            "haiku",
+            "--",
+            "pong"
+        ]
+    );
 }
 
 #[test]
@@ -3823,10 +3864,11 @@ mod workflow {
             Clock::at(420),
         );
         let argv = spawn_argv(&effects);
-        assert_eq!(argv.len(), 4);
-        assert!(argv[3].contains(&feedback.display().to_string()));
-        assert!(argv[3].contains(&response.display().to_string()));
-        assert!(argv[3].contains("Never mention the reviewer"));
+        assert_eq!(argv.len(), 5);
+        assert_eq!(argv[3], "--", "the prompt is closed off from the flags");
+        assert!(argv[4].contains(&feedback.display().to_string()));
+        assert!(argv[4].contains(&response.display().to_string()));
+        assert!(argv[4].contains("Never mention the reviewer"));
     }
 
     #[test]
@@ -4076,7 +4118,8 @@ mod workflow {
             Clock::at(470),
         );
         let argv = spawn_argv(&effects);
-        assert!(argv[1].contains("Enter plan mode"), "{argv:?}");
+        assert_eq!(argv[1], "--");
+        assert!(argv[2].contains("Enter plan mode"), "{argv:?}");
     }
 
     #[test]

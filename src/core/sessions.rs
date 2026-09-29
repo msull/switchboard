@@ -540,13 +540,26 @@ impl AppCore {
         let first_prompt = self.take_first_prompt(id);
         match result {
             Ok(mut launch) => {
-                // A prompt on the command line is submitted as soon as the
-                // agent is up, which no key sent into the pane could time.
-                launch.argv.extend(first_prompt);
                 let Some(record) = self.session_mut(id) else {
                     self.end_flight(id);
                     return;
                 };
+                // An agent's command is composed by the adapter; the
+                // record's own argv is extra flags for it (a model, say),
+                // ahead of the prompt.
+                if let Launch::Argv(extra) = &record.launch {
+                    launch.argv.extend(extra.iter().cloned());
+                }
+                // A prompt on the command line is submitted as soon as the
+                // agent is up, which no key sent into the pane could time.
+                // Claude Code's flags that take several values would read
+                // the prompt as one more, so `--` closes them first.
+                if let Some(prompt) = first_prompt {
+                    if record.kind == SessionKind::Agent(AgentKind::ClaudeCode) {
+                        launch.argv.push("--".into());
+                    }
+                    launch.argv.push(prompt);
+                }
                 if let Some(handle) = launch.resume {
                     record.resume = Some(handle);
                     let project = record.project;

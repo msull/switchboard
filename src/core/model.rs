@@ -815,8 +815,9 @@ pub enum SessionKind {
     Shell,
 }
 
-/// What to run. Agents get a composed argv; user-authored commands stay
-/// as the string the user wrote plus the shell that runs it.
+/// What to run. Agents get a composed argv, to which an `Argv` here adds
+/// flags; user-authored commands stay as the string the user wrote plus
+/// the shell that runs it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Launch {
     /// The user's login shell, interactive.

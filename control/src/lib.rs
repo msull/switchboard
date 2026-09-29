@@ -241,6 +241,8 @@ pub enum AgentKind {
 pub enum Launch {
     /// The login shell (and for an agent, the agent's own command).
     Shell,
+    /// A command; for an agent, extra flags for its composed command,
+    /// such as `["--model", "haiku"]`.
     Argv(Vec<String>),
     Command {
         command: String,
