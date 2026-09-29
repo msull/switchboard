@@ -646,14 +646,16 @@ impl Runner {
             })
             .collect();
         for (i, name, answer, attempt) in answered {
-            // A rerun is marked acted only once the replaced attempt is
-            // confirmed gone, below; `may_rerun` launches on that mark,
-            // so a crash between the two never leaves both running.
-            if name != "rerun" {
-                if let DecisionState::Answered { acted, .. } = &mut t.decisions[i].state {
-                    *acted = true;
-                }
-                self.save_ticket(t, now_ms)?;
+            // The acted mark is set in memory here and reaches disk with
+            // the action's own first write (the parking state, the ledger
+            // entry, the lane record), never before it: an answer is
+            // either still unacted or its intent is durable. A rerun is
+            // marked only once the replaced attempt is confirmed gone,
+            // below, since `may_rerun` launches on that mark.
+            if name != "rerun"
+                && let DecisionState::Answered { acted, .. } = &mut t.decisions[i].state
+            {
+                *acted = true;
             }
             match (name.as_str(), answer.as_str()) {
                 ("lanes", lanes) => {
@@ -730,6 +732,8 @@ impl Runner {
                     )?;
                 }
             }
+            // Arms that wrote nothing still need the mark on disk.
+            self.save_ticket(t, now_ms)?;
             if !t.active() {
                 break;
             }
@@ -773,7 +777,11 @@ impl Runner {
             let repo = p.project.root.join(&lane.path);
             let dir = worktrees.join(&t.id);
             let branch = branch_name(t.source.number.unwrap_or(0), &t.source.title);
-            if let Err(e) = self.git.worktree_add(&repo, &dir, &branch, &lane.base) {
+            // A worktree already there is this ticket's own, cut before a
+            // stop that came ahead of the lane record; adopt it.
+            if dir.exists() {
+                log::info!("ticket {} lane {name}: adopting {}", t.id, dir.display());
+            } else if let Err(e) = self.git.worktree_add(&repo, &dir, &branch, &lane.base) {
                 self.park(t, ps, &format!("could not cut lane {name}: {e}"), now_ms)?;
                 return Ok(());
             }

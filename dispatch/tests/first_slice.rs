@@ -1278,3 +1278,118 @@ fn a_template_that_never_names_the_tree_is_told_it_anyway() {
     );
     assert!(sb.definitions[0].review_first.contains(&worktree));
 }
+
+// --- the answer and its action reach disk together: a stop right after
+// either the mark or the first request leaves something recovery acts on.
+
+/// A port that fails one request of the given kind with a socket error.
+struct SocketFails {
+    inner: SharedPort,
+    kind: &'static str,
+    fired: bool,
+}
+
+impl dispatch::port::Port for SocketFails {
+    fn call(
+        &mut self,
+        request: &switchboard_control::Request,
+    ) -> std::io::Result<switchboard_control::Reply> {
+        if !self.fired && request.body.kind() == self.kind {
+            self.fired = true;
+            return Err(std::io::Error::other("the socket dropped"));
+        }
+        self.inner.call(request)
+    }
+}
+
+#[test]
+fn a_park_answer_cut_off_at_its_first_request_is_finished_after_a_restart() {
+    let mut env = Env::new();
+    let id = at_finalize(&mut env);
+    let decision = env.pending(&id)[0].id.clone();
+    let now = env.tick();
+    env.runner
+        .decide(&id, &decision, "park", None, now)
+        .unwrap();
+    // The pass dies at the pause: the socket error ends the pass.
+    env.runner.port = Box::new(SocketFails {
+        inner: SharedPort(Arc::clone(&env.sb)),
+        kind: "workflow.pause",
+        fired: false,
+    });
+    env.step();
+    let t = env.ticket(&id);
+    assert!(
+        matches!(t.state, TicketState::Parking { .. }),
+        "the intent is on disk: {t:#?}"
+    );
+    assert!(
+        t.pending_decisions().is_empty(),
+        "the answer is consumed only with its intent"
+    );
+    env.restart();
+    env.step();
+    let t = env.ticket(&id);
+    assert!(matches!(t.state, TicketState::Parked { .. }), "{t:#?}");
+    assert!(
+        env.sb()
+            .sessions
+            .iter()
+            .all(|s| s.liveness != Liveness::Running)
+    );
+}
+
+#[test]
+fn a_finalize_answer_cut_off_at_its_request_is_replayed_after_a_restart() {
+    let mut env = Env::new();
+    let id = at_finalize(&mut env);
+    let decision = env.pending(&id)[0].id.clone();
+    let now = env.tick();
+    env.runner
+        .decide(&id, &decision, "finalize", None, now)
+        .unwrap();
+    env.runner.port = Box::new(SocketFails {
+        inner: SharedPort(Arc::clone(&env.sb)),
+        kind: "workflow.finalize",
+        fired: false,
+    });
+    env.step();
+    let t = env.ticket(&id);
+    assert!(t.pending_decisions().is_empty());
+    let op = t
+        .ledger
+        .iter()
+        .find(|o| o.kind == "workflow.finalize")
+        .unwrap();
+    assert!(op.reply.is_none(), "the request is on disk for recovery");
+    assert_ne!(env.sb().runs[0].state, RunState::Finalized);
+    env.restart();
+    assert_eq!(
+        env.sb().runs[0].state,
+        RunState::Finalized,
+        "recovery replayed it"
+    );
+}
+
+#[test]
+fn a_lane_cut_before_a_stop_is_adopted_not_cut_twice() {
+    let mut env = Env::new();
+    let id = env.take(7).id;
+    env.step();
+    let t = env.ticket(&id);
+    env.finish(
+        &session_of(&t, "investigate"),
+        &artifact_of(&t, "investigate", "notes"),
+        "# notes",
+    );
+    // The worktree directory exists from a pass that stopped before the
+    // lane record was written.
+    let dir = env.worktrees.join(&id);
+    std::fs::create_dir_all(&dir).unwrap();
+    env.steps_until(&id, "the plan stage", |t, _| {
+        t.attempts_of("plan").next().is_some()
+    });
+    let t = env.ticket(&id);
+    assert_eq!(t.lanes[0].worktree, dir);
+    assert!(t.active(), "{t:#?}");
+}

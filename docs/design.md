@@ -1457,7 +1457,10 @@ written, the review run paused and read back as paused, every process
 killed and read back as gone, and only then does the ticket read as
 parked or the rerun's answer count as acted (which is what lets the
 replacement start); the sequence runs from the saved intent on every
-pass, so a restart at any point resumes it whole. A record's backup is
+pass, so a restart at any point resumes it whole. An answer's acted
+mark reaches disk only with its action's first write (the parking
+state, the ledger entry, the lane record), so a stop leaves an answer
+either still unacted or with a durable intent. A record's backup is
 a hard link, so its primary is never absent mid-write. The reviewer's
 templates get `{worktree}`, `{branch}` and `{project.root}` rendered
 in, and a template naming neither is prefixed with the repository's
