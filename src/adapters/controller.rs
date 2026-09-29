@@ -6,7 +6,7 @@
 
 use std::io::{BufRead, BufReader, Write};
 use std::sync::mpsc::{Receiver, Sender, TryRecvError, channel};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::ports::controller::{Controller, ControllerEvent};
 
@@ -15,6 +15,10 @@ const BAUD: u32 = 115_200;
 /// send and whether the port is still there.
 const READ_TIMEOUT: Duration = Duration::from_millis(200);
 const RETRY: Duration = Duration::from_secs(1);
+/// How often the device is pinged. It answers each ping, and treats a
+/// host that has pinged as gone once the pings stop, so its display
+/// can say whether Switchboard is still there.
+const KEEPALIVE: Duration = Duration::from_secs(1);
 
 pub struct SerialController {
     events: Receiver<ControllerEvent>,
@@ -128,7 +132,14 @@ fn session(
     };
     let mut reader = BufReader::new(port);
     let mut line = String::new();
+    let mut last_ping: Option<Instant> = None;
     loop {
+        if last_ping.is_none_or(|t| t.elapsed() >= KEEPALIVE) {
+            if let Err(e) = writer.write_all(b"P\n") {
+                return format!("write: {e}");
+            }
+            last_ping = Some(Instant::now());
+        }
         loop {
             match outbound.try_recv() {
                 Ok(text) => {

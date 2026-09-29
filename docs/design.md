@@ -1315,8 +1315,11 @@ the UI hears a fresh press even when the same session is already
 held. On a file card C holds the card instead and the stick scrolls
 it, at a steady speed while the stick is held over, sideways too. A
 shell card under C gets a notice. The waiting count goes back down the
-wire for the LED strip. The selection is transient; nothing here
-touches the store.
+wire for the LED strip, and a ping once a second: the device answers
+each one, and a device that has been pinged treats the pings stopping
+as Switchboard gone, which the USB side cannot tell it (macOS keeps the
+line asserted after a program closes the port). The selection is
+transient; nothing here touches the store.
 
 The keyboard drives the same selection when no field has focus: h, j,
 k, l or the arrows step, i or Enter puts the cursor in the selected

@@ -15,7 +15,7 @@ side syncs up if it connects mid-hold.
 
 Lines down (Mac to device):
 
-    P         ping; answered with P
+    P         ping, once a second while Switchboard runs; answered with P
     W<n>      n agents waiting: n amber pixels while no button is held
 
 The LED strip animates while a button is held (rainbow for Z, cyan for
