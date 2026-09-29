@@ -26,8 +26,8 @@ rehydrated?" before "what does the pane look like?"
 ## Commands
 
 ```sh
-cargo test --locked                                  # unit + headless UI + tmux tests
-cargo clippy --locked --all-targets -- -D warnings   # must be clean; pedantic is on
+cargo test --locked --workspace                      # unit + headless UI + tmux tests, every crate
+cargo clippy --locked --workspace --all-targets -- -D warnings   # must be clean; pedantic is on
 cargo fmt --all
 cargo run --locked                                   # launch the app
 ./scripts/bundle.sh                                  # ~/Applications/Switchboard.app

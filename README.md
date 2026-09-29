@@ -221,6 +221,7 @@ tests/ui.rs              headless flows via egui_kittest with fakes
 tests/fixtures/          a small real Claude Code transcript for the parser tests
 tests/live.rs            ignored: real claude / codex / Ghostty runs
 tests/gate.rs            Milestone 1 gate: real store, tmux, hooks; agents ignored
+control/                 switchboard-control: the control port's wire contract (requests, replies, views) and a blocking client; std + serde only
 vendor/egui_term/        embedded terminal widget (Harzu/egui_term @ 31bbc7ab, egui 0.36; see SWITCHBOARD-PATCHES.md)
 firmware/nunchuk/        CircuitPython for the Feather that reports the nunchuk's buttons and stick
 spikes/                  Spike 0 evidence

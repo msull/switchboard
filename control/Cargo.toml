@@ -1,0 +1,15 @@
+[package]
+name = "switchboard-control"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+description = "The wire contract of Switchboard's control port, and a blocking client for it"
+license = "MIT"
+publish = false
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[lints]
+workspace = true

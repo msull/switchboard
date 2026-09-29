@@ -56,10 +56,20 @@ security-framework = "3"
 egui_kittest = { version = "0.36", features = ["eframe"] }
 tempfile = "3"
 
-[lints.rust]
+[lints]
+workspace = true
+
+# The other crates: the control port's wire contract, which both the app
+# and Dispatch speak, and Dispatch itself. Spikes stay standalone.
+[workspace]
+members = ["control"]
+# A path dependency, not ours to lint.
+exclude = ["vendor/egui_term"]
+
+[workspace.lints.rust]
 unsafe_code = "forbid"
 
-[lints.clippy]
+[workspace.lints.clippy]
 all = { level = "warn", priority = -1 }
 pedantic = { level = "warn", priority = -1 }
 missing_errors_doc = "allow"
