@@ -11,20 +11,30 @@ use dispatch_control as wire_dispatch;
 use switchboard_control::{self as wire, Body, Reply, Request, RunState};
 
 use crate::git::{Repo, branch_name};
+use crate::github::{Checks, Gh, PullRequests, github_repo};
 use crate::pipeline::{Context, Gate, Pipeline, Stage, StageKind};
 use crate::port::Port;
 use crate::store::{DataDir, Lock, Settings, expand_home, read_json, shell_unsafe, write_json};
 use crate::template::Vars;
 use crate::ticket::{
     Attempt, AttemptKind, AttemptState, Decision, DecisionKind, DecisionState, GateRun, LaneRecord,
-    Operation, ProjectState, SETTLE_POLLS, Settle, SourceSnapshot, Ticket, TicketState,
+    Operation, ProjectState, PullRequestRecord, SETTLE_POLLS, Settle, SourceSnapshot, Ticket,
+    TicketState,
 };
+
+/// How often a `pr-checks` gate reads the provider.
+pub const PR_POLL_MS: u64 = 60_000;
+/// How long lookups may keep failing before the gate asks.
+pub const PR_ERROR_GRACE_MS: u64 = 3_600_000;
 
 /// Everything the runner acts through.
 pub struct Runner {
     pub data: DataDir,
     pub port: Box<dyn Port>,
     pub git: Box<dyn Repo>,
+    /// Pull requests, for the `pr-checks` gate; `gh` unless a test
+    /// swaps in a fake.
+    pub prs: Box<dyn PullRequests>,
     /// The writer lock while a transaction runs; saves inside it write
     /// straight through, saves outside it take the lock for the write.
     held: Option<Lock>,
@@ -37,6 +47,7 @@ impl Runner {
             data,
             port,
             git,
+            prs: Box::new(Gh),
             held: None,
         }
     }
@@ -672,7 +683,10 @@ impl Runner {
         let stranded: Vec<(String, u32)> = t
             .attempts
             .iter()
-            .filter(|a| a.is_open() && a.session.is_none() && a.run.is_none())
+            // A gate-only attempt launches nothing, so it has nothing
+            // to be stranded without.
+            .filter(|a| a.is_open() && a.kind != AttemptKind::GateOnly)
+            .filter(|a| a.session.is_none() && a.run.is_none())
             .filter(|a| {
                 !t.ledger.iter().any(|o| {
                     o.reply.is_none()
@@ -884,6 +898,7 @@ impl Runner {
                     }
                     self.check_again(t, ps, attempt.as_ref(), now_ms)?;
                 }
+                ("pr", "recheck") => recheck_pr(t, attempt.as_ref()),
                 ("rerun", "rerun") => {
                     // The replaced attempt is retired first, so an old
                     // and a new attempt never run together; still alive,
@@ -1193,6 +1208,9 @@ impl Runner {
                     now_ms,
                 )
             }
+            Some(Gate::External { check, .. }) if check == "pr-checks" => {
+                self.pr_checks_stage(t, ps, p, stage, now_ms)
+            }
             Some(gate) => {
                 let kind = match gate {
                     Gate::Command { .. } => "command gate",
@@ -1208,6 +1226,199 @@ impl Runner {
             }
             None => self.park(t, ps, &format!("stage {} has no gate", stage.name), now_ms),
         }
+    }
+
+    /// A `pr-checks` stage: one gate-only attempt per context that
+    /// finds the lane's pull request and waits for its checks to be
+    /// green at the head the tree is at. Anything but green or pending
+    /// is a question, never a failure: the work is fine, the world
+    /// around it is what needs a look.
+    fn pr_checks_stage(
+        &mut self,
+        t: &mut Ticket,
+        ps: &mut ProjectState,
+        p: &Pipeline,
+        stage: &Stage,
+        now_ms: u64,
+    ) -> Result<()> {
+        let contexts = Self::contexts(t, p, stage);
+        if contexts.is_empty() {
+            return self.park(
+                t,
+                ps,
+                &format!("stage {} needs lanes the ticket has not cut", stage.name),
+                now_ms,
+            );
+        }
+        let mut all_complete = true;
+        for (ctx, cwd, lane) in contexts {
+            let last = t
+                .attempts
+                .iter()
+                .filter(|a| a.stage == stage.name && a.context == ctx)
+                .max_by_key(|a| a.n)
+                .cloned();
+            let attempt = match last {
+                Some(a) if a.state == AttemptState::Complete => continue,
+                Some(a) if a.is_open() => a,
+                Some(_) => {
+                    all_complete = false;
+                    continue;
+                }
+                None => {
+                    let a = new_attempt(
+                        &stage.name,
+                        next_n(t, &stage.name),
+                        &ctx,
+                        AttemptKind::GateOnly,
+                        AttemptState::Running,
+                        BTreeMap::new(),
+                        now_ms,
+                    );
+                    t.attempts.push(a.clone());
+                    self.save_ticket(t, now_ms)?;
+                    a
+                }
+            };
+            all_complete = false;
+            self.poll_pr_checks(t, ps, p, stage, &attempt, &cwd, lane.as_deref(), now_ms)?;
+            if !t.active() {
+                return Ok(());
+            }
+        }
+        if all_complete {
+            self.advance(t, ps, now_ms)?;
+        }
+        Ok(())
+    }
+
+    /// One reading of the PR for an open `pr-checks` attempt, at most
+    /// once per `PR_POLL_MS` unless a recheck answer cleared the clock.
+    #[allow(clippy::too_many_arguments)]
+    fn poll_pr_checks(
+        &mut self,
+        t: &mut Ticket,
+        ps: &mut ProjectState,
+        p: &Pipeline,
+        stage: &Stage,
+        a: &Attempt,
+        cwd: &Path,
+        lane: Option<&str>,
+        now_ms: u64,
+    ) -> Result<()> {
+        if a.pr
+            .as_ref()
+            .is_some_and(|pr| pr.checked_ms != 0 && now_ms < pr.checked_ms + PR_POLL_MS)
+        {
+            return Ok(());
+        }
+        let Some(Gate::External {
+            provider, checks, ..
+        }) = &stage.gate
+        else {
+            return Ok(());
+        };
+        let none_expected = checks.as_deref() == Some("none");
+        let target = match pr_target(t, p, stage, lane, provider.as_deref()) {
+            Ok(target) => target,
+            Err(why) => return self.park(t, ps, &why, now_ms),
+        };
+        let head = self.git.head(cwd)?;
+        let reading = self.read_pr(&target, none_expected);
+        let question = match reading {
+            Err(e) => {
+                log::warn!("ticket {} {}/{}: {e:#}", t.id, a.stage, a.context);
+                let since =
+                    a.pr.as_ref()
+                        .and_then(|pr| pr.error_since_ms)
+                        .unwrap_or(now_ms);
+                attempt_mut(t, a).pr = Some(PullRequestRecord {
+                    number: 0,
+                    url: String::new(),
+                    checks: format!("error: {e:#}"),
+                    error_since_ms: Some(since),
+                    ..target.record(&head, now_ms)
+                });
+                self.save_ticket(t, now_ms)?;
+                if now_ms.saturating_sub(since) < PR_ERROR_GRACE_MS {
+                    return Ok(());
+                }
+                format!(
+                    "the pull request for {} in {} could not be read for an hour: {e:#}",
+                    target.branch, target.repo
+                )
+            }
+            Ok(None) => {
+                attempt_mut(t, a).pr = None;
+                self.save_ticket(t, now_ms)?;
+                format!(
+                    "no pull request for branch {} in {}; open one, then answer recheck",
+                    target.branch, target.repo
+                )
+            }
+            Ok(Some((pr, checks))) => {
+                let (summary, verdict) = judge_pr(&pr, checks.as_ref(), &head, none_expected);
+                let attempt = attempt_mut(t, a);
+                attempt.pr = Some(PullRequestRecord {
+                    number: pr.number,
+                    url: pr.url.clone(),
+                    checks: summary.clone(),
+                    ..target.record(&pr.head, now_ms)
+                });
+                match verdict {
+                    Ok(true) => {
+                        attempt.head = Some(head.clone());
+                        attempt.state = AttemptState::Complete;
+                        attempt.ended_ms = Some(now_ms);
+                        log::info!(
+                            "ticket {} {}/{} PR #{} {summary} at {head}",
+                            t.id,
+                            a.stage,
+                            a.context,
+                            pr.number
+                        );
+                        return self.save_ticket(t, now_ms);
+                    }
+                    Ok(false) => return self.save_ticket(t, now_ms),
+                    Err(why) => {
+                        self.save_ticket(t, now_ms)?;
+                        why
+                    }
+                }
+            }
+        };
+        self.ensure_decision(
+            t,
+            ps,
+            Ask {
+                stage: &a.stage,
+                name: "pr",
+                kind: DecisionKind::Permission,
+                question: format!("{} ({}): {question}", a.stage, a.context),
+                options: &["recheck", "park"],
+                recommendation: None,
+                attempt: Some((a.stage.clone(), a.n)),
+            },
+            now_ms,
+        )
+    }
+
+    /// The PR for a branch and, when it is open and checks are
+    /// expected, what its checks say.
+    #[allow(clippy::type_complexity)]
+    fn read_pr(
+        &self,
+        target: &PrTarget,
+        none_expected: bool,
+    ) -> Result<Option<(crate::github::PullRequest, Option<Checks>)>> {
+        let Some(pr) = self.prs.find(&target.repo, &target.branch)? else {
+            return Ok(None);
+        };
+        if pr.state != "open" || none_expected {
+            return Ok(Some((pr, None)));
+        }
+        let checks = self.prs.checks(&target.repo, pr.number)?;
+        Ok(Some((pr, Some(checks))))
     }
 
     fn finish_gate_only(
@@ -2474,6 +2685,140 @@ impl Runner {
 const NO_SUCH_SESSION: &str = "no such session";
 
 /// The artifacts an attempt was to write that are not files yet.
+/// The PR is read again on the next pass instead of after the poll
+/// interval.
+fn recheck_pr(t: &mut Ticket, attempt: Option<&(String, u32)>) {
+    if let Some((stage, n)) = attempt
+        && let Some(a) = t
+            .attempts
+            .iter_mut()
+            .find(|a| &a.stage == stage && a.n == *n)
+        && let Some(pr) = &mut a.pr
+    {
+        pr.checked_ms = 0;
+    }
+}
+
+/// The record behind a copy of an attempt the runner is polling.
+fn attempt_mut<'t>(t: &'t mut Ticket, a: &Attempt) -> &'t mut Attempt {
+    t.attempts
+        .iter_mut()
+        .find(|x| x.stage == a.stage && x.n == a.n)
+        .expect("the attempt polled exists")
+}
+
+/// Where a `pr-checks` gate looks: the provider, its name for the
+/// repository, and the branch.
+struct PrTarget {
+    provider: String,
+    repo: String,
+    branch: String,
+}
+
+impl PrTarget {
+    fn record(&self, head: &str, now_ms: u64) -> PullRequestRecord {
+        PullRequestRecord {
+            provider: self.provider.clone(),
+            repo: self.repo.clone(),
+            number: 0,
+            url: String::new(),
+            head: head.to_owned(),
+            checks: String::new(),
+            checked_ms: now_ms,
+            error_since_ms: None,
+        }
+    }
+}
+
+/// The lane's remote as a provider knows it, or why the stage cannot
+/// run (a reason to park: the pipeline names something not built).
+fn pr_target(
+    t: &Ticket,
+    p: &Pipeline,
+    stage: &Stage,
+    lane: Option<&str>,
+    provider: Option<&str>,
+) -> Result<PrTarget, String> {
+    let lane_record = lane
+        .and_then(|l| t.lanes.iter().find(|x| x.name == l))
+        .or_else(|| t.lanes.first())
+        .ok_or_else(|| format!("stage {} needs a lane with a branch", stage.name))?;
+    let remote = p
+        .lane(&lane_record.name)
+        .and_then(|l| l.repo.clone())
+        .or_else(|| p.project.repo.clone())
+        .unwrap_or_default();
+    let github = github_repo(&remote);
+    let provider = provider.map_or_else(
+        || {
+            if github.is_some() {
+                "github".to_owned()
+            } else {
+                "unknown".to_owned()
+            }
+        },
+        str::to_owned,
+    );
+    let repo = match (provider.as_str(), github) {
+        ("github", Some(repo)) => repo,
+        ("github", None) => {
+            return Err(format!(
+                "stage {}: {remote:?} is not a GitHub repository",
+                stage.name
+            ));
+        }
+        (other, _) => {
+            return Err(format!(
+                "stage {} reads pull requests from {other}, which is not built",
+                stage.name
+            ));
+        }
+    };
+    Ok(PrTarget {
+        provider,
+        repo,
+        branch: lane_record.branch.clone(),
+    })
+}
+
+/// What a reading of the PR means: its summary for the record, and
+/// pass (`Ok(true)`), wait (`Ok(false)`) or a question.
+fn judge_pr(
+    pr: &crate::github::PullRequest,
+    checks: Option<&Checks>,
+    head: &str,
+    none_expected: bool,
+) -> (String, Result<bool, String>) {
+    let summary = match (pr.state.as_str(), checks) {
+        ("merged", _) => "merged".to_owned(),
+        ("closed", _) => "closed".to_owned(),
+        (_, None | Some(Checks::None)) => "none".to_owned(),
+        (_, Some(Checks::Pending)) => "pending".to_owned(),
+        (_, Some(Checks::Passed)) => "passed".to_owned(),
+        (_, Some(Checks::Failed(names))) => format!("failed: {}", names.join(", ")),
+    };
+    let short = |h: &str| h.chars().take(8).collect::<String>();
+    let verdict = match summary.as_str() {
+        "merged" => Ok(true),
+        "closed" => Err(format!("PR #{} is closed without being merged", pr.number)),
+        _ if pr.head != head => Err(format!(
+            "PR #{} is at {} but the tree is at {}; push the branch, then answer recheck",
+            pr.number,
+            short(&pr.head),
+            short(head)
+        )),
+        "none" if none_expected => Ok(true),
+        "none" => Err(format!(
+            "PR #{} has no checks configured; add a workflow, or set checks = \"none\" on the stage",
+            pr.number
+        )),
+        "pending" => Ok(false),
+        "passed" => Ok(true),
+        failed => Err(format!("PR #{} checks {failed}", pr.number)),
+    };
+    (summary, verdict)
+}
+
 fn missing_artifacts(attempt: &Attempt) -> Vec<String> {
     attempt
         .artifacts
@@ -2521,6 +2866,7 @@ fn new_attempt(
         polls_since_stop: 0,
         head: None,
         gate: None,
+        pr: None,
         started_ms: now_ms,
         ended_ms: done.then_some(now_ms),
     }

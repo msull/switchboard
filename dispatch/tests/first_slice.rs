@@ -10,7 +10,8 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use dispatch::git::FakeRepo;
-use dispatch::scheduler::Runner;
+use dispatch::github::{Checks, FakePullRequests, PullRequest};
+use dispatch::scheduler::{PR_ERROR_GRACE_MS, PR_POLL_MS, Runner};
 use dispatch::store::DataDir;
 use dispatch::ticket::{Attempt, AttemptState, Decision, SourceSnapshot, Ticket, TicketState};
 use support::{FakeSwitchboard, SharedPort, SharedRepo};
@@ -25,7 +26,7 @@ version = 1
 
 [project]
 name = "Switchboard"
-repo = "git@example.com:msull/switchboard.git"
+repo = "git@github.com:msull/switchboard.git"
 worktrees = "{worktrees}"
 space = "Dispatch · Switchboard"
 
@@ -94,6 +95,11 @@ writes = ["notes"]
 prompt = "Implement {{inputs.plan}} on {{branch}}."
 gate = {{ kind = "command", argv = ["sh", "-c", "cargo test"], in = "lane" }}
 
+[[stages]]
+name = "ready"
+context = "each"
+gate = {{ kind = "external", check = "pr-checks" }}
+
 [policy]
 slots = 2
 waiting_on_me = 3
@@ -108,6 +114,7 @@ struct Env {
     data: DataDir,
     sb: Arc<Mutex<FakeSwitchboard>>,
     repo: Arc<Mutex<FakeRepo>>,
+    prs: Arc<Mutex<FakePullRequests>>,
     runner: Runner,
     worktrees: PathBuf,
     now: u64,
@@ -126,16 +133,19 @@ impl Env {
         std::fs::write(data.pipeline(PROJECT), pipeline(&worktrees)).unwrap();
         let sb = Arc::new(Mutex::new(FakeSwitchboard::new()));
         let repo = Arc::new(Mutex::new(FakeRepo::default()));
-        let runner = Runner::new(
+        let prs = Arc::new(Mutex::new(FakePullRequests::default()));
+        let mut runner = Runner::new(
             data.clone(),
             Box::new(SharedPort(Arc::clone(&sb))),
             Box::new(SharedRepo(Arc::clone(&repo))),
         );
+        runner.prs = Box::new(Arc::clone(&prs));
         Self {
             _dir: dir,
             data,
             sb,
             repo,
+            prs,
             runner,
             worktrees,
             now: 1_000,
@@ -150,6 +160,7 @@ impl Env {
             Box::new(SharedPort(Arc::clone(&self.sb))),
             Box::new(SharedRepo(Arc::clone(&self.repo))),
         );
+        self.runner.prs = Box::new(Arc::clone(&self.prs));
         let now = self.tick();
         self.runner.recover(now).unwrap();
     }
@@ -157,6 +168,44 @@ impl Env {
     fn tick(&mut self) -> u64 {
         self.now += 1_000;
         self.now
+    }
+
+    /// Time passes without a pass.
+    fn wait(&mut self, ms: u64) {
+        self.now += ms;
+    }
+
+    /// The pull request for the ticket's one lane, as the provider
+    /// will report it from now on.
+    fn pr_is(&mut self, id: &str, head: &str, state: &str, checks: Checks) {
+        let t = self.ticket(id);
+        let branch = t.lanes[0].branch.clone();
+        let mut prs = self.prs.lock().unwrap();
+        prs.prs.clear();
+        prs.checks.clear();
+        prs.prs.push((
+            "msull/switchboard".into(),
+            branch,
+            PullRequest {
+                number: 7,
+                url: "https://github.com/msull/switchboard/pull/7".into(),
+                head: head.into(),
+                state: state.into(),
+            },
+        ));
+        prs.checks.push(("msull/switchboard".into(), 7, checks));
+    }
+
+    /// The pending `pr` decision answered with `recheck`.
+    fn recheck(&mut self, id: &str) {
+        let pending = self.pending(id);
+        assert_eq!(pending.len(), 1, "one pr decision: {pending:?}");
+        assert_eq!(pending[0].name, "pr");
+        assert_eq!(pending[0].options, vec!["recheck", "park"]);
+        let now = self.tick();
+        self.runner
+            .decide(id, &pending[0].id, "recheck", None, now)
+            .unwrap();
     }
 
     fn take(&mut self, number: u64) -> Ticket {
@@ -588,8 +637,193 @@ fn checks_run_after_the_agent_on_a_clean_tree_and_pass_bound_to_its_head() {
         "the result is bound to the head"
     );
     assert_eq!(a.gate.as_ref().and_then(|g| g.exit), Some(0));
+    env.pr_is(&id, "base0000", "open", Checks::Passed);
     env.steps_until(&id, "the ticket closing", |t, _| !t.active());
     assert!(matches!(&env.ticket(&id).state, TicketState::Closed { .. }));
+}
+
+/// `implement` done with the checks green: the ticket stands at `ready`.
+fn at_ready(env: &mut Env) -> String {
+    let (id, implementer) = at_implement(env);
+    implementer_stops(env, &id, &implementer);
+    env.steps_until(&id, "the checks starting", |t, _| {
+        t.attempts_of("implement")
+            .last()
+            .is_some_and(|a| a.gate.is_some())
+    });
+    let key = format!("{id}/implement/1");
+    env.repo.lock().unwrap().check_exits.insert(key, 0);
+    env.steps_until(&id, "the ready attempt", |t, _| {
+        t.attempts_of("ready").next().is_some()
+    });
+    id
+}
+
+/// The `ready` stage finds the lane's PR, waits while its checks are
+/// pending, reads the provider at most once a minute, and completes
+/// bound to the tree's head once they pass.
+#[test]
+fn ready_waits_for_the_prs_checks_and_passes_green_at_the_trees_head() {
+    let mut env = Env::new();
+    let id = at_ready(&mut env);
+    // No PR yet: a question, not a failure, and the attempt stays open.
+    let t = env.ticket(&id);
+    let a = t.attempts_of("ready").last().unwrap();
+    assert!(a.is_open());
+    assert_eq!(a.context, "repo");
+    let pending = env.pending(&id);
+    assert_eq!(pending.len(), 1);
+    assert!(
+        pending[0].question.contains("no pull request for branch"),
+        "{}",
+        pending[0].question
+    );
+    env.step();
+    assert_eq!(env.prs.lock().unwrap().looked, 1, "held by the decision");
+    env.pr_is(&id, "base0000", "open", Checks::Pending);
+    env.recheck(&id);
+    env.step();
+    let t = env.ticket(&id);
+    let a = t.attempts_of("ready").last().unwrap();
+    assert!(a.is_open());
+    let pr = a.pr.clone().expect("the PR is on the attempt");
+    assert_eq!((pr.number, pr.checks.as_str()), (7, "pending"));
+    assert_eq!(pr.url, "https://github.com/msull/switchboard/pull/7");
+    assert!(env.pending(&id).is_empty(), "pending is waiting");
+    let looked = env.prs.lock().unwrap().looked;
+    env.step();
+    env.step();
+    assert_eq!(env.prs.lock().unwrap().looked, looked, "once a minute");
+    env.wait(PR_POLL_MS);
+    env.step();
+    assert_eq!(env.prs.lock().unwrap().looked, looked + 1);
+    env.pr_is(&id, "base0000", "open", Checks::Passed);
+    env.wait(PR_POLL_MS);
+    env.steps_until(&id, "ready completing", |t, _| {
+        t.attempts_of("ready")
+            .last()
+            .is_some_and(|a| a.state == AttemptState::Complete)
+    });
+    let t = env.ticket(&id);
+    let a = t.attempts_of("ready").last().unwrap();
+    assert_eq!(a.head.as_deref(), Some("base0000"));
+    assert_eq!(a.pr.as_ref().map(|p| p.checks.as_str()), Some("passed"));
+    env.steps_until(&id, "the ticket closing", |t, _| !t.active());
+    assert!(matches!(&env.ticket(&id).state, TicketState::Closed { .. }));
+    assert_eq!(
+        env.sb().sessions_named("implementer").len(),
+        1,
+        "no agent for a gate-only stage"
+    );
+}
+
+/// Red checks, a PR at another head, and a repository with no checks
+/// are each a question with `recheck`; a stage that says
+/// `checks = "none"` passes on the PR at the head alone.
+#[test]
+fn ready_asks_about_red_moved_or_missing_checks_and_none_can_be_expected() {
+    let mut env = Env::new();
+    let id = at_ready(&mut env);
+    env.pr_is(&id, "other000", "open", Checks::Passed);
+    env.recheck(&id);
+    env.step();
+    let pending = env.pending(&id);
+    assert!(
+        pending[0]
+            .question
+            .contains("PR #7 is at other000 but the tree is at base0000"),
+        "{}",
+        pending[0].question
+    );
+    env.pr_is(&id, "base0000", "open", Checks::Failed(vec!["lint".into()]));
+    env.recheck(&id);
+    env.step();
+    let pending = env.pending(&id);
+    assert!(
+        pending[0].question.contains("PR #7 checks failed: lint"),
+        "{}",
+        pending[0].question
+    );
+    env.pr_is(&id, "base0000", "open", Checks::None);
+    env.recheck(&id);
+    env.step();
+    let pending = env.pending(&id);
+    assert!(
+        pending[0].question.contains("no checks configured"),
+        "{}",
+        pending[0].question
+    );
+    let t = env.ticket(&id);
+    for path in [env.data.pipeline(PROJECT), t.pipeline_file.clone()] {
+        let text = std::fs::read_to_string(&path).unwrap().replace(
+            r#"check = "pr-checks" }"#,
+            r#"check = "pr-checks", checks = "none" }"#,
+        );
+        std::fs::write(&path, text).unwrap();
+    }
+    env.recheck(&id);
+    env.steps_until(&id, "ready completing", |t, _| {
+        t.attempts_of("ready")
+            .last()
+            .is_some_and(|a| a.state == AttemptState::Complete)
+    });
+    let t = env.ticket(&id);
+    assert_eq!(
+        t.attempts_of("ready").count(),
+        1,
+        "the same attempt throughout"
+    );
+    assert_eq!(
+        t.attempts_of("ready")
+            .last()
+            .unwrap()
+            .pr
+            .as_ref()
+            .map(|p| p.checks.as_str()),
+        Some("none")
+    );
+}
+
+/// A provider that cannot be read is retried quietly for an hour, then
+/// asked about; a merged PR passes whatever its checks say.
+#[test]
+fn ready_backs_off_a_failing_provider_for_an_hour_and_a_merged_pr_passes() {
+    let mut env = Env::new();
+    env.prs.lock().unwrap().fail = Some("api.github.com: connection refused".into());
+    let id = at_ready(&mut env);
+    let t = env.ticket(&id);
+    let a = t.attempts_of("ready").last().unwrap();
+    assert!(a.is_open());
+    assert!(
+        a.pr.as_ref()
+            .is_some_and(|p| p.checks.starts_with("error: ")),
+        "{:?}",
+        a.pr
+    );
+    assert!(env.pending(&id).is_empty(), "no question in the first hour");
+    env.wait(PR_ERROR_GRACE_MS);
+    env.step();
+    let pending = env.pending(&id);
+    assert_eq!(pending.len(), 1);
+    assert!(
+        pending[0]
+            .question
+            .contains("could not be read for an hour"),
+        "{}",
+        pending[0].question
+    );
+    env.prs.lock().unwrap().fail = None;
+    env.pr_is(&id, "elsewhere", "merged", Checks::None);
+    env.recheck(&id);
+    env.steps_until(&id, "ready completing", |t, _| {
+        t.attempts_of("ready")
+            .last()
+            .is_some_and(|a| a.state == AttemptState::Complete)
+    });
+    let t = env.ticket(&id);
+    let a = t.attempts_of("ready").last().unwrap();
+    assert_eq!(a.pr.as_ref().map(|p| p.checks.as_str()), Some("merged"));
+    assert_eq!(a.pr.as_ref().and_then(|p| p.error_since_ms), None);
 }
 
 #[test]

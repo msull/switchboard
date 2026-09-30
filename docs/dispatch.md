@@ -398,6 +398,7 @@ prompt = "..."                # templates: {issue} {task} {lane} {branch} {input
 gate = { kind = "command", argv = ["..."], in = "root" | "lane" | "lane:<name>" }
      | { kind = "command", per_lane = { <lane> = ["..."] }, in = "lane" }
      | { kind = "external", check = "review-finalized" | "pr-checks" | "pr-merged" }
+     | { kind = "external", check = "pr-checks", checks = "none" }   # a repository with no CI: a PR at the head is enough
      | { kind = "human", decision = "...", confirm = true }
 needs = ["resource name"]     # held from the first stage that names it to the last, contiguous
 
@@ -914,6 +915,24 @@ along with every other result made against the old head set, as
 described under "Stage semantics". `pr-merged` reads the same PR and
 resolves the pending merge decision; it never merges.
 
+The provider is read from the lane's remote (the lane's `repo`, else
+the project's): a `github.com` remote is read through `gh`; another
+host needs `provider` named on the gate and an adapter for it, and
+until one exists the ticket parks saying so. A project with no remote
+at all cannot name a `pr-` check; its "ready" is a human gate (the PTA
+pipeline). A repository that runs no CI says `checks = "none"` on the
+stage, and the gate then passes on an open PR whose head is the
+tree's head, without reading checks; without it, a PR with no checks
+is the decision above, every time. Every reading but pending and
+green is one decision, `pr`, with `recheck` and `park`: the attempt is
+never failed, since the work is done and the world around it is what
+needs a look (open the PR, push the branch, fix the workflow), and
+`recheck` reads again on the next pass instead of after the poll
+interval of a minute. A merged PR passes whatever its checks say. The
+PR is recorded on the attempt (provider, repository, number, url, the
+head it was at, what its checks said, when) and shown on the ticket
+page.
+
 ## Budget
 
 Budgets are reporting, not enforcement. Switchboard reads token counts
@@ -1110,6 +1129,9 @@ and one against the real one:
 | The tree is dirty when the agent stops | No check runs; a failed attempt and the same decision |
 | A stage fails past the policy's `max_reruns` in one context | The ticket parks with the count and the last reason; nothing is asked |
 | The runner restarts while the checks run | The lost check starts again on the same head; no second agent |
+| `ready` with the PR's checks pending, then green | A gate-only attempt per context, no agent; no PR is a `pr` decision (`recheck`, `park`); pending waits and reads the provider once a minute; green at the tree's head completes the attempt bound to that head |
+| The PR is at another head, its checks are red, or it has no checks | A `pr` decision naming which; `recheck` reads again at once; the same attempt throughout; `checks = "none"` on the stage passes on the PR at the head alone |
+| The provider cannot be read | The error is recorded on the attempt and retried quietly for an hour, then a `pr` decision; a merged PR passes |
 | The queue view after `plan` replaces `investigate`, and after two tickets swap places | One card per ticket, in order, no stale card, no overlap failure |
 | Plan session has no transcript yet | `workflow.start` fails; the attempt is failed and a decision, not retried |
 | Plan file from an earlier attempt exists | The new attempt's own path is empty, so nothing advances |
@@ -1118,7 +1140,8 @@ and one against the real one:
 
 Then, in order: `implement` with its command gate bound to a commit,
 tested with one lane committing after another lane's checks finished;
-`ready` and `merge` from GitHub; the queue and slots; the PTA pipeline
+`ready` from GitHub (built, as above; a moved head is not yet voided);
+`merge` from GitHub; the queue and slots; the PTA pipeline
 with its in-place hold; the Delta pipeline with the deploy gate and
 the persisted `sully-dev` hold; budget reporting; the `recommend`
 dial.

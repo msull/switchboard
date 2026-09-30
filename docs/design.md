@@ -1526,8 +1526,19 @@ head is a failed attempt and a rerun decision, and a runner restart
 starts the lost check again on the same head. (The design has the
 gate run as a Switchboard command record; a child of the runner is
 what is built, so the port needs no per-record environment yet.)
+A gate-only `pr-checks` stage (`ready`) opens one attempt per
+context that launches nothing: it finds the lane's PR by branch
+through `gh` (the provider is read from the remote; another host
+parks the ticket until an adapter exists), reads its checks once a
+minute, and completes bound to the tree's head when they are green at
+it, or at once on a merged PR or, with `checks = "none"` on the
+stage, on an open PR at the head; no PR, another head, red checks or
+missing checks is one `pr` decision with `recheck` and `park`, never
+a failed attempt, and a provider that cannot be read is retried
+quietly for an hour first. The PR is recorded on the attempt and
+shown on the ticket page as a link with the last reading.
 Everything else in that document (external and human gates on agent
-stages, gate-only command stages, PR checks, budgets, the other
+stages, gate-only command stages, `pr-merged`, budgets, the other
 pipelines) parks the ticket with a reason. The runner's pass over a project is
 one transaction under the data directory's writer lock, and `decide`,
 `take` and `queue` take the same lock around their read and write, so

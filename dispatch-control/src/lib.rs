@@ -254,8 +254,24 @@ pub struct AttemptView {
     /// The stage's checks, once the agent stopped and they started: the
     /// head they ran at and their exit, none while they run.
     pub checks: Option<ChecksView>,
+    /// The pull request a `pr-checks` gate is bound to, once looked up.
+    pub pr: Option<PullRequestView>,
     pub started_ms: u64,
     pub ended_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PullRequestView {
+    pub provider: String,
+    pub repo: String,
+    pub number: u64,
+    pub url: String,
+    /// The head the PR was at when last read.
+    pub head: String,
+    /// What its checks said then: `pending`, `passed`, `failed: <names>`,
+    /// `none`, `merged`, `closed`, or `error: <why>`.
+    pub checks: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]

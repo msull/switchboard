@@ -3905,6 +3905,40 @@ fn dispatch_page_shows_a_tickets_agent_waiting_for_itself() {
 
 /// The worktree root is shown, and a typed path goes to the port with
 /// or without a migration.
+/// A `ready` attempt shows the pull request it is bound to and what
+/// its checks said, so the page is enough to see why a ticket waits.
+#[test]
+fn ticket_page_shows_the_attempts_pull_request() {
+    use switchboard::ports::dispatch::{AttemptView, PullRequestView};
+    let (mut harness, _ids) = harness();
+    let mut status = dispatch_status();
+    status.tickets[0].attempts = vec![AttemptView {
+        stage: "ready".into(),
+        n: 1,
+        context: "repo".into(),
+        kind: "gate-only".into(),
+        state: "running".into(),
+        pr: Some(PullRequestView {
+            provider: "github".into(),
+            repo: "msull/simplesingletable".into(),
+            number: 20,
+            url: "https://github.com/msull/simplesingletable/pull/20".into(),
+            head: "fa62f3f78577".into(),
+            checks: "pending".into(),
+        }),
+        ..AttemptView::default()
+    }];
+    harness
+        .state_mut()
+        .dispatch(AppAction::DispatchStatus(Some(status)));
+    harness
+        .state_mut()
+        .dispatch(AppAction::ShowTicket("t1".into()));
+    harness.run_steps(2);
+    harness.get_by_label("PR #20");
+    harness.get_by_label("pending at fa62f3f7");
+}
+
 #[test]
 fn dispatch_page_sets_the_worktree_root() {
     let (mut harness, _) = harness();

@@ -249,6 +249,14 @@ pub fn ticket_view(t: &Ticket, stages: Vec<String>) -> TicketView {
                         exit: g.exit,
                         log: g.log.clone(),
                     }),
+                    pr: a.pr.as_ref().map(|pr| dispatch_control::PullRequestView {
+                        provider: pr.provider.clone(),
+                        repo: pr.repo.clone(),
+                        number: pr.number,
+                        url: pr.url.clone(),
+                        head: pr.head.clone(),
+                        checks: pr.checks.clone(),
+                    }),
                     started_ms: a.started_ms,
                     ended_ms: a.ended_ms,
                 }

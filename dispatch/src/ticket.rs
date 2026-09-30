@@ -109,6 +109,9 @@ pub struct Attempt {
     /// The stage's command gate, once the agent stopped and it started.
     #[serde(default)]
     pub gate: Option<GateRun>,
+    /// The pull request a `pr-checks` gate is bound to, once looked up.
+    #[serde(default)]
+    pub pr: Option<PullRequestRecord>,
     pub started_ms: u64,
     pub ended_ms: Option<u64>,
 }
@@ -125,6 +128,26 @@ pub struct GateRun {
     pub log: PathBuf,
     pub started_ms: u64,
     pub exit: Option<i32>,
+}
+
+/// A pull request as a gate last read it: which one, where, the head
+/// it was at, and what its checks said.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PullRequestRecord {
+    pub provider: String,
+    pub repo: String,
+    pub number: u64,
+    pub url: String,
+    pub head: String,
+    /// `pending`, `passed`, `failed: <names>`, `none`, `merged`,
+    /// `closed`, or `error: <why>`.
+    pub checks: String,
+    /// When it was last read; zero after a `recheck` answer, so the
+    /// next pass reads it without waiting out the poll interval.
+    pub checked_ms: u64,
+    /// When lookups started failing, until one succeeds.
+    #[serde(default)]
+    pub error_since_ms: Option<u64>,
 }
 
 impl Attempt {
@@ -373,6 +396,7 @@ mod tests {
             polls_since_stop: 0,
             head: None,
             gate: None,
+            pr: None,
             started_ms: 0,
             ended_ms: None,
         };

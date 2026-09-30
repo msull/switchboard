@@ -709,6 +709,29 @@ fn ticket_header(cx: &mut DrawCtx<'_>, ui: &mut Ui, t: &TicketView) {
     }
 }
 
+/// The pull request a `ready` attempt is bound to: a link when one was
+/// found, and what its checks said at the head it was read at.
+fn pr_labels(ui: &mut Ui, pr: &crate::ports::dispatch::PullRequestView) {
+    let p = theme::palette(ui);
+    if pr.number > 0 {
+        ui.hyperlink_to(
+            RichText::new(format!("PR #{}", pr.number))
+                .text_style(theme::meta())
+                .color(p.accent_text),
+            &pr.url,
+        );
+    }
+    let short: String = pr.head.chars().take(8).collect();
+    ui.label(theme::meta_text(
+        ui,
+        if short.is_empty() {
+            pr.checks.clone()
+        } else {
+            format!("{} at {short}", pr.checks)
+        },
+    ));
+}
+
 fn attempt_row(cx: &mut DrawCtx<'_>, ui: &mut Ui, t: &TicketView, a: &AttemptView) {
     let p = theme::palette(ui);
     theme::surface(ui)
@@ -753,6 +776,9 @@ fn attempt_row(cx: &mut DrawCtx<'_>, ui: &mut Ui, t: &TicketView, a: &AttemptVie
                             Some(code) => format!("checks exited {code} at {short}"),
                         },
                     ));
+                }
+                if let Some(pr) = &a.pr {
+                    pr_labels(ui, pr);
                 }
             });
             ui.horizontal_wrapped(|ui| {

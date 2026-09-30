@@ -253,6 +253,11 @@ pub enum Gate {
         /// A pending decision while the fact is awaited.
         #[serde(default)]
         decision: Option<String>,
+        /// For `pr-checks`: `"none"` when the repository runs no CI, so
+        /// the gate passes on a PR at the head alone instead of asking
+        /// about the missing checks every time.
+        #[serde(default)]
+        checks: Option<String>,
     },
     Human {
         decision: String,
@@ -414,11 +419,45 @@ impl Pipeline {
         self.lanes.iter().find(|l| l.name == name)
     }
 
+    /// A gate names a check Dispatch knows and one the project can answer.
+    fn validate_gate(&self, stage: &Stage) -> Result<()> {
+        if let Some(Gate::External { check, checks, .. }) = &stage.gate {
+            if !matches!(
+                check.as_str(),
+                "review-finalized" | "pr-checks" | "pr-merged"
+            ) {
+                bail!(
+                    "stage {:?}: {check:?} is not a check Dispatch knows",
+                    stage.name
+                );
+            }
+            if check.starts_with("pr-")
+                && self.project.repo.is_none()
+                && self.lanes.iter().all(|l| l.repo.is_none())
+            {
+                bail!(
+                    "stage {:?} reads a pull request, and the project has no repository remote; use a human gate",
+                    stage.name
+                );
+            }
+            match checks.as_deref() {
+                None => {}
+                Some("none") if check == "pr-checks" => {}
+                Some(other) => bail!(
+                    "stage {:?}: checks = {other:?}; only pr-checks takes checks = \"none\"",
+                    stage.name
+                ),
+            }
+        }
+        Ok(())
+    }
+
     /// One stage's references, given what earlier stages wrote.
     fn validate_stage(&self, stage: &Stage, written: &[&str]) -> Result<()> {
         if stage.operator.is_some() && stage.review.is_some() {
             bail!("stage {:?} names both an operator and a review", stage.name);
         }
+        self.validate_gate(stage)?;
         if let Some(op) = &stage.operator
             && !self.operators.contains_key(op)
         {
@@ -712,6 +751,21 @@ writes = ["plan"]"#,
             ),
             (r#"lanes = "auto""#, r#"lanes = "maybe""#, "the dial"),
             ("version = 1", "version = 2", "version 2"),
+            (
+                r#"check = "review-finalized" }"#,
+                r#"check = "pr-green" }"#,
+                "not a check Dispatch knows",
+            ),
+            (
+                r#"check = "review-finalized" }"#,
+                r#"check = "review-finalized", checks = "none" }"#,
+                r#"only pr-checks takes checks = "none""#,
+            ),
+            (
+                r#"check = "review-finalized" }"#,
+                r#"check = "pr-checks", checks = "some" }"#,
+                r#"only pr-checks takes checks = "none""#,
+            ),
         ];
         for (from, to, expected) in cases {
             let text = SWITCHBOARD.replace(from, to);
@@ -719,5 +773,21 @@ writes = ["plan"]"#,
             let err = Pipeline::parse(&text).unwrap_err().to_string();
             assert!(err.contains(expected), "{from}: {err}");
         }
+    }
+
+    #[test]
+    fn a_pull_request_gate_needs_a_repository_remote() {
+        let with = SWITCHBOARD.replace(
+            r#"check = "review-finalized" }"#,
+            r#"check = "pr-checks", checks = "none" }"#,
+        );
+        assert!(Pipeline::parse(&with).is_ok());
+        let without = with.replace(
+            r#"repo = "git@example.com:msull/switchboard.git""#,
+            r#"root = "/tmp/switchboard""#,
+        );
+        assert_ne!(with, without);
+        let err = Pipeline::parse(&without).unwrap_err().to_string();
+        assert!(err.contains("no repository remote"), "{err}");
     }
 }
