@@ -1219,7 +1219,8 @@ impl Runner {
                 Some(a) if a.state == AttemptState::Complete => {}
                 Some(a) if a.is_open() => {
                     all_complete = false;
-                    self.poll_agent(t, ps, &a, stage, &cwd, lane.as_deref(), now_ms)?;
+                    let trust = p.policy.trust_folders;
+                    self.poll_agent(t, ps, &a, stage, &cwd, lane.as_deref(), trust, now_ms)?;
                 }
                 Some(a) => {
                     // Failed: a rerun waits on its decision.
@@ -1381,6 +1382,7 @@ impl Runner {
         stage: &Stage,
         cwd: &Path,
         lane: Option<&str>,
+        trust: bool,
         now_ms: u64,
     ) -> Result<()> {
         let Some(session) = a.session.clone() else {
@@ -1405,6 +1407,9 @@ impl Runner {
                 );
             }
         };
+        if view.trust_question && trust {
+            return self.answer_trust(t, ps, a, session, now_ms);
+        }
         let idx = t
             .attempts
             .iter()
@@ -1433,12 +1438,7 @@ impl Runner {
             };
         }
         attempt.polls_since_stop += 1;
-        let missing: Vec<String> = attempt
-            .artifacts
-            .iter()
-            .filter(|(_, path)| !path.is_file())
-            .map(|(name, _)| name.clone())
-            .collect();
+        let missing = missing_artifacts(attempt);
         if !missing.is_empty() {
             if attempt.polls_since_stop >= SETTLE_POLLS || view.liveness != wire::Liveness::Running
             {
@@ -1487,6 +1487,34 @@ impl Runner {
     }
 
     /// A session as Switchboard sees it, or why it has none.
+    /// Claude's folder trust question, which a fresh worktree asks
+    /// before any hook: answered for the project when its policy says
+    /// so, else left to the user.
+    fn answer_trust(
+        &mut self,
+        t: &mut Ticket,
+        ps: &mut ProjectState,
+        a: &Attempt,
+        session: String,
+        now_ms: u64,
+    ) -> Result<()> {
+        log::info!(
+            "ticket {} {}/{} answers the folder trust question",
+            t.id,
+            a.stage,
+            a.context
+        );
+        self.send(
+            t,
+            ps,
+            Some((a.stage.clone(), a.n)),
+            "trust",
+            Body::SessionTrust { session },
+            now_ms,
+        )?;
+        self.save_ticket(t, now_ms)
+    }
+
     fn session_view(&mut self, session: &str) -> Result<Result<wire::SessionView, String>> {
         let reply = self.ask(Body::Session {
             session: session.to_owned(),
@@ -2191,6 +2219,16 @@ impl Runner {
 }
 
 /// A fresh attempt record.
+/// The artifacts an attempt was to write that are not files yet.
+fn missing_artifacts(attempt: &Attempt) -> Vec<String> {
+    attempt
+        .artifacts
+        .iter()
+        .filter(|(_, path)| !path.is_file())
+        .map(|(name, _)| name.clone())
+        .collect()
+}
+
 /// The number of a stage's next attempt: one more than any attempt of
 /// the stage in any context, so `(stage, n)` names one attempt even in
 /// an `each` stage where lanes run side by side, which is how the

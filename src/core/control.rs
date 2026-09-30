@@ -51,6 +51,8 @@ pub enum ControlAction {
         id: RecordId,
         reason: Option<String>,
     },
+    /// Answer Claude's folder trust question in the pane with yes.
+    TrustFolder(RecordId),
     MoveSession {
         id: RecordId,
         project: ProjectId,
@@ -208,6 +210,10 @@ impl AppCore {
                     self.error("no such session");
                 }
                 self.edit_session(id, out, |s| s.waiting_on = reason);
+                Vec::new()
+            }
+            ControlAction::TrustFolder(id) => {
+                self.trust_folder(id, out);
                 Vec::new()
             }
             ControlAction::MoveSession { id, project } => {
@@ -388,6 +394,7 @@ impl AppCore {
             quiet_secs,
             waiting: card == super::CardState::WaitingOnYou,
             waiting_reason: s.waiting_on.clone().or_else(|| s.activity_reason.clone()),
+            trust_question: self.at_trust_prompt(id),
             resume_id: s.resume.as_ref().map(super::ResumeHandle::provider_id),
             op: s.op.clone(),
         })
@@ -579,6 +586,7 @@ fn control_kind(action: &ControlAction) -> String {
         ControlAction::Remove(_) => "session.remove",
         ControlAction::SetNotes { .. } => "session.notes",
         ControlAction::SetWaiting { .. } => "session.waiting",
+        ControlAction::TrustFolder(_) => "session.trust",
         ControlAction::MoveSession { .. } => "session.move",
         ControlAction::RenameProject { .. } => "project.rename",
         ControlAction::NewSpace { .. } => "space.new",
@@ -711,6 +719,7 @@ impl TryFrom<wire::Body> for ControlAction {
                 id: session(&s)?,
                 reason: on.then_some(reason),
             },
+            wire::Body::SessionTrust { session: s } => Self::TrustFolder(session(&s)?),
             wire::Body::SessionMove {
                 session: s,
                 project: p,

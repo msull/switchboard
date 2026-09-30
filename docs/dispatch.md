@@ -393,6 +393,7 @@ slots = 1                     # tickets with a running attempt or a held resourc
 waiting_on_me = 2             # pending decisions across the project before nothing new starts
 rates = { "claude-sonnet-5" = [3.0, 15.0], ... }   # $ per million input, output tokens
 decisions = { lanes = "ask", finalize = "ask", merge = "ask", budget = "ask" }
+trust_folders = false         # true: Claude Code's folder trust question, which every fresh worktree asks, is answered for the project's agents
 ```
 
 An agent stage needs no `gate` line: "the agent stopped and every
@@ -967,7 +968,9 @@ Commands:
 - `session.new {project, kind, cwd, launch, prompt?, notes}` →
   `session`; `session.send {session, text}`; `session.kill`;
   `session.remove`; `session.notes {session, text}`;
-  `session.waiting {session, on: bool, reason}`
+  `session.waiting {session, on: bool, reason}`;
+  `session.trust {session}` (Claude Code's folder trust question,
+  reported on the session view as `trust_question`, answered yes)
 - `service.new {project, name, argv, env}` → `session`: a service
   record Dispatch owns, killed and removed by it; whether it is
   listening is Dispatch's probe, not Switchboard's reply

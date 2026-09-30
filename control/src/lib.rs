@@ -129,6 +129,10 @@ pub enum Body {
         #[serde(default)]
         reason: String,
     },
+    /// Answer Claude Code's folder trust question with yes; nothing is
+    /// sent unless the pane was last seen showing it.
+    #[serde(rename = "session.trust")]
+    SessionTrust { session: String },
     /// The session record moves to another project's board; its pane
     /// and its cards stay.
     #[serde(rename = "session.move")]
@@ -194,6 +198,7 @@ impl Body {
             | Self::SessionRemove { .. }
             | Self::SessionNotes { .. }
             | Self::SessionWaiting { .. }
+            | Self::SessionTrust { .. }
             | Self::SessionMove { .. }
             | Self::ProjectRename { .. }
             | Self::SetSync { .. }
@@ -351,6 +356,10 @@ pub struct SessionView {
     pub quiet_secs: Option<u64>,
     pub waiting: bool,
     pub waiting_reason: Option<String>,
+    /// The pane shows Claude Code's own folder trust question, which
+    /// comes before any hook and which `session.trust` answers.
+    #[serde(default)]
+    pub trust_question: bool,
     /// The provider's session id, once the agent has one.
     pub resume_id: Option<String>,
     pub op: Option<String>,
@@ -547,6 +556,7 @@ mod tests {
             quiet_secs: None,
             waiting: false,
             waiting_reason: None,
+            trust_question: false,
             resume_id: Some("uuid".into()),
             op: Some("op-1".into()),
         }
@@ -637,6 +647,9 @@ mod tests {
                 session: "s".into(),
                 on: true,
                 reason: "finalize?".into(),
+            },
+            Body::SessionTrust {
+                session: "s".into(),
             },
             Body::SetSync {
                 set: "set".into(),

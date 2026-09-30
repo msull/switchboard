@@ -1787,7 +1787,39 @@ gate = { kind = "external", check = "review-finalized" }
 slots = 2
 waiting_on_me = 3
 decisions = { lanes = "auto", finalize = "ask" }
+trust_folders = true
 "#;
+
+/// A project whose policy pre-authorises Claude's folder trust question
+/// has it answered for its agents; one without leaves it to the user.
+#[test]
+fn the_trust_question_is_answered_only_where_the_policy_says_so() {
+    let (mut env, id) = workspace_env(&["type:bug"]);
+    let now = env.tick();
+    env.runner.step_project("Delta", now).unwrap();
+    let investigator = session_of(&env.ticket(&id), "investigate");
+    env.sb().session_mut(&investigator).trust_question = true;
+    let now = env.tick();
+    env.runner.step_project("Delta", now).unwrap();
+    {
+        let sb = env.sb();
+        assert_eq!(sb.trusted, vec![investigator.clone()]);
+        assert!(!sb.session(&investigator).trust_question);
+    }
+    let now = env.tick();
+    env.runner.step_project("Delta", now).unwrap();
+    assert_eq!(env.sb().trusted.len(), 1, "answered once");
+    // The Switchboard pipeline says nothing, so its agent waits.
+    let mut plain = Env::new();
+    let other = plain.take(7).id;
+    plain.step();
+    let investigator = session_of(&plain.ticket(&other), "investigate");
+    plain.sb().session_mut(&investigator).trust_question = true;
+    plain.step();
+    plain.step();
+    assert!(plain.sb().trusted.is_empty());
+    assert!(plain.sb().session(&investigator).trust_question);
+}
 
 fn workspace_env(labels: &[&str]) -> (Env, String) {
     let mut env = Env::new();

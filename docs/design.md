@@ -1483,7 +1483,10 @@ standing, a line on the attempt on the ticket page, and the rail count
 beside the decisions. The page can then be the one view watched. The
 question is answered from the card or the session page ("Trust this
 folder", `TrustFolder`): down arrow and Enter to the pane, sent only
-while the pane was last seen showing it.
+while the pane was last seen showing it. The port reports the question
+on the session view (`trust_question`) and answers it with
+`session.trust`, so a pipeline whose policy says `trust_folders = true`
+has Dispatch answer it for that project's agents.
 
 The `dispatch` crate holds the first slice of `docs/dispatch.md`: the
 Switchboard pipeline through `investigate`, the automatic `lanes`

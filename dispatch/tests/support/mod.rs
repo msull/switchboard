@@ -43,6 +43,8 @@ pub struct FakeSwitchboard {
     pub killed: Vec<String>,
     pub notes: BTreeMap<String, String>,
     pub waiting: BTreeMap<String, (bool, String)>,
+    /// Sessions whose trust question was answered, in order.
+    pub trusted: Vec<String>,
     /// Sessions the app has a transcript for (a review can clone them).
     pub resumable: Vec<String>,
     // --- knobs
@@ -158,6 +160,7 @@ impl FakeSwitchboard {
             quiet_secs: Some(0),
             waiting: false,
             waiting_reason: None,
+            trust_question: false,
             resume_id: Some(format!("resume-{id}")),
             op: Some(op.into()),
         });
@@ -362,6 +365,13 @@ impl FakeSwitchboard {
                     s.waiting_reason = on.then(|| reason.clone());
                 }
                 self.waiting.insert(session.clone(), (*on, reason.clone()));
+                (vec![], false)
+            }
+            Body::SessionTrust { session } => {
+                if let Some(s) = self.sessions.iter_mut().find(|s| &s.id == session) {
+                    s.trust_question = false;
+                }
+                self.trusted.push(session.clone());
                 (vec![], false)
             }
             Body::WorkflowFinalize { run } => {

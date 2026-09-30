@@ -1922,7 +1922,7 @@ impl AppCore {
     /// pane was last seen showing the question, so the keys land on
     /// nothing else; the mark is dropped at once and the next read of
     /// the pane restores it if the question is still there.
-    fn trust_folder(&mut self, id: RecordId, out: &mut Out) {
+    pub(super) fn trust_folder(&mut self, id: RecordId, out: &mut Out) {
         if !self.prompted.contains(&id) {
             let name = self.session_name(id);
             self.error(format!("{name} is not at the trust question"));

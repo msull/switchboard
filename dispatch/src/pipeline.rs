@@ -327,6 +327,10 @@ pub struct Policy {
     /// Per decision kind: `ask`, `recommend` or `auto`.
     #[serde(default)]
     pub decisions: BTreeMap<String, String>,
+    /// Answer Claude Code's folder trust question for the project's
+    /// agents, which every fresh worktree asks once.
+    #[serde(default)]
+    pub trust_folders: bool,
 }
 
 impl Default for Policy {
@@ -337,6 +341,7 @@ impl Default for Policy {
             ports: None,
             rates: BTreeMap::new(),
             decisions: BTreeMap::new(),
+            trust_folders: false,
         }
     }
 }
