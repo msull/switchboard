@@ -5527,6 +5527,50 @@ mod dispatch_page {
         assert_ne!(again, console);
     }
 
+    /// Dispatch marks a ticket's session waiting for the same decision
+    /// the status lists, so the badge counts it once; an agent asking
+    /// for itself still counts on top.
+    #[test]
+    fn a_session_waiting_only_for_dispatch_is_counted_once_with_its_decision() {
+        let p = project("p");
+        let mut w = Workspace::new(p.clone());
+        let mut r = record(p.id, agent(), 0);
+        r.waiting_on = Some("lanes decision".into());
+        let id = r.id;
+        w.sessions.push(r);
+        let (mut core, _) = loaded(vec![w], vec![]);
+        core.dispatch(AppAction::HostListed(vec![running(id)]), Clock::at(1));
+        assert_eq!(core.card_state(id), CardState::WaitingOnYou);
+        assert_eq!(
+            core.waiting_count(),
+            1,
+            "before any status the mark is all there is"
+        );
+        core.dispatch(
+            AppAction::DispatchStatus(Some(status(Some(id)))),
+            Clock::at(2),
+        );
+        assert_eq!(
+            core.waiting_count(),
+            1,
+            "the decision, not the mark and the decision"
+        );
+        assert_eq!(core.waiting_count_in(p.space), 0);
+        assert!(!core.counts_as_waiting(id));
+        core.dispatch(
+            AppAction::Events(vec![SessionEvent {
+                record_id: Some(id),
+                ..event(EventKind::PermissionRequested { tool: None }, 100)
+            }]),
+            Clock::at(3),
+        );
+        assert!(
+            core.counts_as_waiting(id),
+            "an agent asking for itself counts"
+        );
+        assert_eq!(core.waiting_count(), 2);
+    }
+
     #[test]
     fn the_page_moves_to_its_own_window_and_back() {
         let (mut core, _) = loaded(vec![], vec![]);

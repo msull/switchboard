@@ -1864,8 +1864,26 @@ impl AppCore {
             .iter()
             .filter(|w| w.project.space == space)
             .flat_map(|w| &w.sessions)
-            .filter(|s| self.card_state(s.id) == CardState::WaitingOnYou)
+            .filter(|s| self.counts_as_waiting(s.id))
             .count()
+    }
+
+    /// Whether a session adds to the waiting counts. A session that
+    /// waits only because Dispatch marked it (`waiting_on`, no waiting
+    /// activity of its own) is Dispatch's decision, counted once from
+    /// the status once one has arrived, not again here; an agent that
+    /// is itself asking (a permission, a question) always counts.
+    #[must_use]
+    pub fn counts_as_waiting(&self, id: RecordId) -> bool {
+        if self.card_state(id) != CardState::WaitingOnYou {
+            return false;
+        }
+        let Some(record) = self.session(id) else {
+            return false;
+        };
+        let only_dispatch =
+            record.waiting_on.is_some() && record.activity != Activity::WaitingOnYou;
+        !(only_dispatch && self.dispatch.seen)
     }
 
     /// The project config file: read, edited and saved, and its entries'
@@ -2153,7 +2171,7 @@ impl AppCore {
         self.workspaces
             .iter()
             .flat_map(|w| &w.sessions)
-            .filter(|s| self.card_state(s.id) == CardState::WaitingOnYou)
+            .filter(|s| self.counts_as_waiting(s.id))
             .count()
             + self.pending_decisions().len()
     }

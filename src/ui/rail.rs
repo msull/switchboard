@@ -43,7 +43,7 @@ fn waiting_in(core: &AppCore, project: ProjectId) -> usize {
     core.workspace(project).map_or(0, |w| {
         w.sessions
             .iter()
-            .filter(|s| core.card_state(s.id) == CardState::WaitingOnYou)
+            .filter(|s| core.counts_as_waiting(s.id))
             .count()
     })
 }
