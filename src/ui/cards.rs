@@ -162,7 +162,13 @@ pub fn session_card(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord) {
         kicker_text(cx.core, record, &state, running)
     };
     let reason = (state == CardState::WaitingOnYou)
-        .then(|| record.activity_reason.clone())
+        .then(|| {
+            if cx.core.at_trust_prompt(record.id) {
+                Some("Claude asks whether to trust this folder".to_owned())
+            } else {
+                record.activity_reason.clone()
+            }
+        })
         .flatten();
 
     let mut frame = egui::Frame::new()

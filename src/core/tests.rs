@@ -5531,6 +5531,46 @@ mod dispatch_page {
     /// the status lists, so the badge counts it once; an agent asking
     /// for itself still counts on top.
     #[test]
+    fn claudes_trust_prompt_is_the_users_turn_until_a_hook_runs() {
+        let p = project("p");
+        let mut w = Workspace::new(p.clone());
+        let mut r = record(p.id, agent(), 0);
+        r.waiting_on = Some("lanes decision".into());
+        let id = r.id;
+        w.sessions.push(r);
+        let (mut core, _) = loaded(vec![w], vec![]);
+        core.dispatch(AppAction::HostListed(vec![running(id)]), Clock::at(1));
+        core.dispatch(
+            AppAction::DispatchStatus(Some(status(Some(id)))),
+            Clock::at(2),
+        );
+        assert!(!core.counts_as_waiting(id), "the mark alone is Dispatch's");
+        core.dispatch(AppAction::PromptSeen { id, seen: true }, Clock::at(3));
+        assert_eq!(core.card_state(id), CardState::WaitingOnYou);
+        assert!(core.at_trust_prompt(id));
+        assert!(
+            core.counts_as_waiting(id),
+            "a prompt of Claude's own is the user's, whatever Dispatch marked"
+        );
+        core.dispatch(
+            AppAction::Events(vec![SessionEvent {
+                record_id: Some(id),
+                ..event(EventKind::SessionStart, 100)
+            }]),
+            Clock::at(4),
+        );
+        assert!(
+            !core.at_trust_prompt(id),
+            "the first hook means it was answered"
+        );
+        assert!(!core.counts_as_waiting(id));
+        // Seen again then gone from the pane, without any hook.
+        core.dispatch(AppAction::PromptSeen { id, seen: true }, Clock::at(5));
+        core.dispatch(AppAction::PromptSeen { id, seen: false }, Clock::at(6));
+        assert!(!core.at_trust_prompt(id));
+    }
+
+    #[test]
     fn a_session_waiting_only_for_dispatch_is_counted_once_with_its_decision() {
         let p = project("p");
         let mut w = Workspace::new(p.clone());

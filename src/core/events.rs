@@ -82,6 +82,8 @@ impl AppCore {
                 now,
             );
         }
+        // A hook ran, so Claude is past its own prompts.
+        self.prompted.retain(|r| *r != id);
         self.edit_session(id, out, |s| {
             s.last_event_at = Some(event.at);
             s.last_seen = s.last_seen.max(event.at);

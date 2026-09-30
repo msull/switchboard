@@ -13,8 +13,8 @@ use switchboard_control as wire;
 use crate::adapters::control::{ControlSocket, Incoming};
 use crate::adapters::hooks::WakeSocket;
 use crate::core::{
-    AgentKind, AppAction, AppCore, Clock, ControlAction, ControlOutcome, Effect, ProjectId,
-    RecordId, Resolved, ResumeHandle, SessionKind, SpaceId, View, WorkflowId,
+    Activity, AgentKind, AppAction, AppCore, Clock, ControlAction, ControlOutcome, Effect,
+    ProjectId, RecordId, Resolved, ResumeHandle, SessionKind, SpaceId, View, WorkflowId,
 };
 use crate::ports::agent::AgentLauncher;
 use crate::ports::artifacts::ArtifactFinder;
@@ -33,6 +33,11 @@ use crate::ui::UiState;
 
 /// How often the host is listed and the event log read.
 const POLL_INTERVAL: Duration = Duration::from_secs(1);
+/// The line Claude Code prints in its folder trust question, and how
+/// far back in a pane to look for it.
+const TRUST_PROMPT_MARK: &str = "trust this folder";
+const TRUST_PROMPT_LINES: usize = 20;
+
 /// How often card captions and the session snapshot are refreshed.
 /// How often definition files are checked for a change.
 const CONFIG_INTERVAL: Duration = Duration::from_secs(5);
@@ -777,6 +782,36 @@ impl SwitchboardApp {
         }
     }
 
+    /// Claude Code asks whether to trust a folder before any hook can
+    /// run, so a pane that has reported nothing is read for that
+    /// question and the core told when it appears or goes away.
+    fn check_trust_prompts(&mut self) {
+        let candidates: Vec<RecordId> = self
+            .core
+            .all_sessions_sorted()
+            .iter()
+            .filter(|s| matches!(s.kind, SessionKind::Agent(AgentKind::ClaudeCode)))
+            .filter(|s| {
+                s.activity == Activity::Unknown
+                    && self
+                        .core
+                        .host_status(s.id)
+                        .is_some_and(|h| matches!(h.liveness, Liveness::Running { .. }))
+            })
+            .map(|s| s.id)
+            .collect();
+        for id in candidates {
+            let host = HostId(id.host_name());
+            let Ok(text) = self.services.host.snapshot(&host, Some(TRUST_PROMPT_LINES)) else {
+                continue;
+            };
+            let seen = text.contains(TRUST_PROMPT_MARK);
+            if seen != self.core.at_trust_prompt(id) {
+                self.dispatch(AppAction::PromptSeen { id, seen });
+            }
+        }
+    }
+
     /// Captions for cards on screen and the snapshot for the open session.
     /// Agent cards excerpt the transcript rather than the pane, so their
     /// conversations are kept fresh too (a stat each; a read on change).
@@ -889,6 +924,7 @@ impl SwitchboardApp {
         self.poll_discoveries();
         self.poll_configs();
         self.refresh_captions();
+        self.check_trust_prompts();
     }
 
     fn pump(&mut self) {
@@ -916,6 +952,7 @@ impl SwitchboardApp {
         {
             self.last_caption = Some(Instant::now());
             self.refresh_captions();
+            self.check_trust_prompts();
         }
         if self
             .last_config

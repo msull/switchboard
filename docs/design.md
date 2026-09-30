@@ -1466,6 +1466,15 @@ and `tests/control.rs`. Gaps: `service.new` and `command.run` are not
 on the port yet; nothing marks Dispatch-owned records as such in the
 window.
 
+Claude Code asks whether to trust a folder before it runs any hook, so
+a launch into a fresh worktree sits at that question with nothing to
+report. The shell reads every Claude Code pane that has reported no
+hook yet (with the captions, every two seconds) for the question's
+text and tells the core with `PromptSeen`; the card reads as waiting on
+you with the reason, the count includes it even when Dispatch has
+marked the session, and the first hook event clears it. Transient, so
+a restart reads the pane again.
+
 The `dispatch` crate holds the first slice of `docs/dispatch.md`: the
 Switchboard pipeline through `investigate`, the automatic `lanes`
 decision, `plan`, and a review run on a copy of the plan, stopping at

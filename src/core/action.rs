@@ -423,6 +423,12 @@ pub enum AppAction {
     /// Result of one `ProcessHost::list` poll.
     HostListed(Vec<HostStatus>),
     Events(Vec<SessionEvent>),
+    /// The shell read a Claude Code pane that has reported no hook yet:
+    /// `seen` says whether it shows Claude's own folder trust prompt.
+    PromptSeen {
+        id: RecordId,
+        seen: bool,
+    },
     Tick,
     /// One command from the control port, run quietly under its
     /// operation id; the outcome is taken with `take_control_outcome`.
@@ -720,6 +726,11 @@ pub struct AppCore {
     /// Agents without hooks (Codex) whose pane has been quiet for a
     /// while, per the last host poll: shown idle instead of working.
     pub(super) quiet: Vec<RecordId>,
+    /// Claude Code panes sitting at a prompt of Claude's own before any
+    /// hook has run (the folder trust question): the user's turn, though
+    /// no event says so. Transient; the shell reports them from the
+    /// pane's text and the first hook event clears them.
+    pub(super) prompted: Vec<RecordId>,
     /// Text to submit as the first prompt of a record's next launch,
     /// on its command line. Consumed by `launch_prepared`.
     pub(super) first_prompts: Vec<(RecordId, String)>,
@@ -821,6 +832,7 @@ impl AppCore {
             | AppAction::RevokeApproval(_) => self.definition_action(action, now, &mut out),
             AppAction::Back => drop(self.view_stack.pop()),
             AppAction::DismissNotice => self.dismiss_notice(),
+            AppAction::PromptSeen { id, seen } => self.prompt_seen(id, seen),
             AppAction::Tick => self.tick(now, &mut out),
             AppAction::Controller(event) => self.controller_event(event, now, &mut out),
             AppAction::ActivateCard { set, target } => self.activate_card(set, target),
@@ -1465,6 +1477,7 @@ impl AppCore {
         self.in_flight.retain(|f| !gone(f.id));
         self.codex_queue.retain(|r| !gone(*r));
         self.quiet.retain(|r| !gone(*r));
+        self.prompted.retain(|r| !gone(*r));
         if self.codex_pending.is_some_and(gone) {
             self.codex_pending = None;
         }
@@ -1884,9 +1897,26 @@ impl AppCore {
         let Some(record) = self.session(id) else {
             return false;
         };
-        let only_dispatch =
-            record.waiting_on.is_some() && record.activity != Activity::WaitingOnYou;
+        let only_dispatch = record.waiting_on.is_some()
+            && record.activity != Activity::WaitingOnYou
+            && !self.prompted.contains(&id);
         !(only_dispatch && self.dispatch.seen)
+    }
+
+    /// Whether the pane sits at Claude's folder trust prompt, as last
+    /// reported by the shell.
+    #[must_use]
+    pub fn at_trust_prompt(&self, id: RecordId) -> bool {
+        self.prompted.contains(&id)
+    }
+
+    fn prompt_seen(&mut self, id: RecordId, seen: bool) {
+        let marked = self.prompted.contains(&id);
+        if seen && !marked && self.session(id).is_some() {
+            self.prompted.push(id);
+        } else if !seen && marked {
+            self.prompted.retain(|r| *r != id);
+        }
     }
 
     /// The project config file: read, edited and saved, and its entries'
@@ -2036,6 +2066,8 @@ impl AppCore {
                 Activity::WaitingOnYou => CardState::WaitingOnYou,
                 // An outside process (Dispatch) says a decision waits here.
                 _ if record.waiting_on.is_some() => CardState::WaitingOnYou,
+                // Claude's own trust question, before any hook can say so.
+                _ if self.prompted.contains(&id) => CardState::WaitingOnYou,
                 // A review's agent gone quiet mid-round is most likely
                 // sitting at an approval prompt: the user's turn.
                 _ if self.stalled_agents().any(|a| a == id) => CardState::WaitingOnYou,

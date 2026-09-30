@@ -16,6 +16,7 @@ use switchboard::adapters::fakes::{
 use switchboard::app::Services;
 use switchboard::core::{AppAction, View};
 use switchboard::ports::control::OpLine;
+use switchboard::ports::host::{HostId, HostStatus, Liveness as HostLiveness};
 use switchboard::ports::store::Loaded;
 use switchboard_control::{
     Body, Client, Launch, Liveness, OpStatus, RecordKind, Reply, Request, SessionKind,
@@ -32,13 +33,18 @@ struct Port {
 /// A started app listening on a socket of its own. `initial` is what the
 /// store loads; the operations log is shared so a test can pre-fill it.
 fn port(initial: Loaded, operations: FakeOperations) -> Port {
+    port_on(initial, operations, FakeHost::default())
+}
+
+/// A port whose host the test keeps a handle to.
+fn port_on(initial: Loaded, operations: FakeOperations, host: FakeHost) -> Port {
     let opener = FakeOpener::default();
     let services = Services {
         store: Box::new(MemoryStore {
             initial,
             ..MemoryStore::default()
         }),
-        host: Box::new(FakeHost::default()),
+        host: Box::new(host),
         events: Box::new(FakeEvents::default()),
         agents: Box::new(FakeAgents::default()),
         opener: Box::new(opener.clone()),
@@ -498,4 +504,67 @@ fn a_read_only_instance_does_not_listen() {
         .unwrap();
     assert!(app.listen_at(dir.path(), || {}).is_err());
     assert!(!dir.path().join("control.sock").exists());
+}
+
+/// Claude Code's folder trust question comes before any hook, so the
+/// app reads it off the pane: the session waits on the user while the
+/// question shows, and not once it is gone.
+#[test]
+fn a_pane_at_claudes_trust_question_waits_on_the_user_until_it_is_answered() {
+    let host = FakeHost::default();
+    let mut port = port_on(Loaded::default(), FakeOperations::default(), host.clone());
+    let reply = call(
+        &mut port,
+        Request::new("sp", Body::SpaceNew { name: "D".into() }),
+    );
+    let space = made_id(&reply, RecordKind::Space);
+    let reply = call(
+        &mut port,
+        Request::new(
+            "pj",
+            Body::ProjectAdd {
+                space,
+                name: "#1".into(),
+                root: PathBuf::from("/tmp"),
+            },
+        ),
+    );
+    let project = made_id(&reply, RecordKind::Project);
+    let reply = call(&mut port, Request::new("se", session_new(&project, None)));
+    let session = made_id(&reply, RecordKind::Session);
+    let record = switchboard::core::RecordId(uuid::Uuid::parse_str(&session).unwrap());
+    let pane = HostId(record.host_name());
+    host.state().statuses.push(HostStatus {
+        id: pane.clone(),
+        liveness: HostLiveness::Running {
+            pid: 7,
+            command: "claude".into(),
+        },
+        cwd: None,
+        last_activity: None,
+        title: None,
+    });
+    host.state().snapshots.insert(
+        pane.clone(),
+        "Quick safety check: Is this a project you created or one you trust?\n\
+         \u{276f} No, exit\n  Yes, I trust this folder\n"
+            .into(),
+    );
+    port.app.poll_now();
+    let waiting = call(&mut port, Request::new("w1", Body::Waiting));
+    let Reply::Waiting { sessions } = waiting else {
+        panic!("{waiting:?}");
+    };
+    assert_eq!(
+        sessions.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(),
+        vec![session.as_str()],
+        "the question is the user's turn"
+    );
+    host.state().snapshots.insert(pane, "> \n".into());
+    port.app.poll_now();
+    let waiting = call(&mut port, Request::new("w2", Body::Waiting));
+    assert!(
+        matches!(&waiting, Reply::Waiting { sessions } if sessions.is_empty()),
+        "{waiting:?}"
+    );
 }

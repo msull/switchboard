@@ -67,6 +67,8 @@ pub struct FakeHostState {
     pub fail_spawn: Option<String>,
     /// Every write fails with this message (a pane that died).
     pub fail_write: Option<String>,
+    /// What `snapshot` returns per pane; unknown panes read as empty.
+    pub snapshots: HashMap<HostId, String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -104,8 +106,8 @@ impl ProcessHost for FakeHost {
             .cloned()
             .ok_or_else(|| std::io::Error::other("no such session"))
     }
-    fn snapshot(&self, _id: &HostId, _lines: Option<usize>) -> std::io::Result<String> {
-        Ok(String::new())
+    fn snapshot(&self, id: &HostId, _lines: Option<usize>) -> std::io::Result<String> {
+        Ok(self.state().snapshots.get(id).cloned().unwrap_or_default())
     }
     fn write(&self, id: &HostId, bytes: &[u8]) -> std::io::Result<()> {
         if let Some(e) = &self.state().fail_write {
