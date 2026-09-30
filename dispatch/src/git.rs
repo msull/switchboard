@@ -13,6 +13,11 @@ pub trait Repo: Send {
     /// `git fetch <remote> --prune` in `dir`, so a cut starts from what
     /// the remote has now.
     fn fetch(&mut self, dir: &Path, remote: &str) -> Result<()>;
+    /// `remote` in `dir` points at `url`: added, or its URL set.
+    fn ensure_remote(&mut self, dir: &Path, remote: &str, url: &str) -> Result<()>;
+    /// A GitHub pull request's head fetched from `remote` in `dir` as
+    /// `<remote>/pr/<number>`, whichever fork it comes from.
+    fn fetch_pull(&mut self, dir: &Path, remote: &str, number: u64) -> Result<()>;
     /// `git worktree add <dir> -b <branch> <start>` in `repo`, where
     /// `start` is a ref like `origin/main`.
     fn worktree_add(&mut self, repo: &Path, dir: &Path, branch: &str, start: &str) -> Result<()>;
@@ -106,6 +111,32 @@ impl Repo for GitCli {
                 .arg(dir)
                 .args(["fetch", "--quiet", "--prune", remote]),
         )?;
+        Ok(())
+    }
+
+    fn ensure_remote(&mut self, dir: &Path, remote: &str, url: &str) -> Result<()> {
+        let known = git()
+            .arg("-C")
+            .arg(dir)
+            .args(["remote", "get-url", remote])
+            .output()
+            .with_context(|| format!("git in {}", dir.display()))?;
+        let verb = if known.status.success() {
+            "set-url"
+        } else {
+            "add"
+        };
+        output(git().arg("-C").arg(dir).args(["remote", verb, remote, url]))?;
+        Ok(())
+    }
+
+    fn fetch_pull(&mut self, dir: &Path, remote: &str, number: u64) -> Result<()> {
+        output(git().arg("-C").arg(dir).args([
+            "fetch",
+            "--quiet",
+            remote,
+            &format!("+refs/pull/{number}/head:refs/remotes/{remote}/pr/{number}"),
+        ]))?;
         Ok(())
     }
 
@@ -326,6 +357,10 @@ pub struct FakeRepo {
     pub worktrees: Vec<(PathBuf, PathBuf, String, String)>,
     /// Worktrees of someone else's branch: repo, dir, branch, remote.
     pub tracked: Vec<(PathBuf, PathBuf, String, String)>,
+    /// Remotes added or re-pointed: dir, name, url.
+    pub remotes_set: Vec<(PathBuf, String, String)>,
+    /// Pull request heads fetched: dir, remote, number.
+    pub fetched_pulls: Vec<(PathBuf, String, u64)>,
     pub heads: std::collections::BTreeMap<PathBuf, String>,
     pub dirty: Vec<PathBuf>,
     pub ran: Vec<(PathBuf, Vec<String>)>,
@@ -348,6 +383,16 @@ impl Repo for FakeRepo {
     fn ensure_clone(&mut self, url: &str, dir: &Path) -> Result<()> {
         std::fs::create_dir_all(dir)?;
         self.clones.push((url.to_owned(), dir.to_path_buf()));
+        Ok(())
+    }
+    fn ensure_remote(&mut self, dir: &Path, remote: &str, url: &str) -> Result<()> {
+        self.remotes_set
+            .push((dir.to_path_buf(), remote.to_owned(), url.to_owned()));
+        Ok(())
+    }
+    fn fetch_pull(&mut self, dir: &Path, remote: &str, number: u64) -> Result<()> {
+        self.fetched_pulls
+            .push((dir.to_path_buf(), remote.to_owned(), number));
         Ok(())
     }
     fn fetch(&mut self, dir: &Path, remote: &str) -> Result<()> {

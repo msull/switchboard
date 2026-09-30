@@ -20,8 +20,8 @@ use crate::store::{DataDir, Lock, Settings, expand_home, read_json, shell_unsafe
 use crate::template::Vars;
 use crate::ticket::{
     Attempt, AttemptKind, AttemptState, Decision, DecisionKind, DecisionState, GateRun, LaneRecord,
-    Operation, ProjectState, PullRequestRecord, SETTLE_POLLS, Settle, SourceSnapshot, Ticket,
-    TicketState,
+    Operation, ProjectState, PullRequestRecord, PullRequestSource, SETTLE_POLLS, Settle,
+    SourceSnapshot, Ticket, TicketState,
 };
 
 /// How often a `pr-checks` gate reads the provider.
@@ -1010,12 +1010,13 @@ impl Runner {
             .cloned();
         let branch = tree_pr.as_ref().map_or_else(
             || branch_name(t.source.number.unwrap_or(0), &t.source.title),
-            |pr| pr.branch.clone(),
+            |pr| pr.local().to_owned(),
         );
         if t.tree.is_none() {
             let dir = self.worktree_root(p).join(&t.id);
             let clone = self.data.repo_dir(&p.project.name);
             let start = format!("{}/{}", p.project.remote, p.project.base);
+            let extra = tree_pr.as_ref().and_then(|pr| extra_remote(p, None, pr));
             if !self.cut(
                 t,
                 ps,
@@ -1026,7 +1027,8 @@ impl Runner {
                 &dir,
                 &branch,
                 &start,
-                tree_pr.is_some(),
+                tree_pr.as_ref(),
+                extra,
                 now_ms,
             )? {
                 return Ok(());
@@ -1043,7 +1045,7 @@ impl Runner {
             if !prs.is_empty() && pr.is_none() {
                 continue;
             }
-            let lane_branch = pr.map_or_else(|| branch.clone(), |pr| pr.branch.clone());
+            let lane_branch = pr.map_or_else(|| branch.clone(), |pr| pr.local().to_owned());
             let dir = tree.join(&lane.path);
             if let Some(url) = &lane.repo {
                 let clone = self
@@ -1052,6 +1054,7 @@ impl Runner {
                 let remote = p.lane_remote(lane).to_owned();
                 let start = format!("{remote}/{}", p.lane_base(lane));
                 let what = format!("lane {}", lane.name);
+                let extra = pr.and_then(|pr| extra_remote(p, Some(lane), pr));
                 if !self.cut(
                     t,
                     ps,
@@ -1062,7 +1065,8 @@ impl Runner {
                     &dir,
                     &lane_branch,
                     &start,
-                    pr.is_some(),
+                    pr,
+                    extra,
                     now_ms,
                 )? {
                     return Ok(());
@@ -1112,14 +1116,14 @@ impl Runner {
             } else {
                 self.data.repo_dir(&p.project.name)
             };
-            let remote = p.lane_remote(lane).to_owned();
+            let extra = extra_remote(p, Some(lane), &pr);
             let worktree = record.worktree.clone();
-            let refresh = self.git.fetch(&clone, &remote).and_then(|()| {
+            let refresh = self.fetch_pull_request(&clone, &pr, extra).and_then(|()| {
                 let argv = [
                     "git",
                     "merge",
                     "--ff-only",
-                    &format!("{remote}/{}", pr.branch),
+                    &format!("{}/{}", pr.remote, pr.local()),
                 ]
                 .map(str::to_owned);
                 self.git.run(&worktree, &argv, &[])
@@ -1139,9 +1143,30 @@ impl Runner {
         Ok(())
     }
 
+    /// What the clone needs of a pull request: its remote pointed at
+    /// the mirror when it is one, fetched, and on GitHub the pull ref
+    /// itself.
+    fn fetch_pull_request(
+        &mut self,
+        clone: &Path,
+        pr: &PullRequestSource,
+        extra: Option<(String, String)>,
+    ) -> Result<()> {
+        if let Some((name, url)) = extra {
+            self.git.ensure_remote(clone, &name, &url)?;
+        }
+        self.git.fetch(clone, &pr.remote)?;
+        if pr.provider == "github" {
+            self.git.fetch_pull(clone, &pr.remote, pr.number)?;
+        }
+        Ok(())
+    }
+
     /// One worktree: the clone made or fetched, the worktree cut from
     /// `start` on `branch` at `dir`, or adopted when git says it is
-    /// already that. False when the ticket was parked instead.
+    /// already that. With `pr`, the worktree is that pull request's
+    /// branch as its remote has it. False when the ticket was parked
+    /// instead.
     #[allow(clippy::too_many_arguments)]
     fn cut(
         &mut self,
@@ -1154,7 +1179,8 @@ impl Runner {
         dir: &Path,
         branch: &str,
         start: &str,
-        track: bool,
+        pr: Option<&PullRequestSource>,
+        extra: Option<(String, String)>,
         now_ms: u64,
     ) -> Result<bool> {
         if let Err(e) = self.git.ensure_clone(url, clone) {
@@ -1166,7 +1192,12 @@ impl Runner {
             )?;
             return Ok(false);
         }
-        if let Err(e) = self.git.fetch(clone, remote) {
+        let fetched = match pr {
+            Some(pr) => self.fetch_pull_request(clone, pr, extra),
+            None => self.git.fetch(clone, remote),
+        };
+        let remote = pr.map_or(remote, |pr| pr.remote.as_str());
+        if let Err(e) = fetched {
             self.park(
                 t,
                 ps,
@@ -1199,7 +1230,7 @@ impl Runner {
             log::info!("ticket {} {what}: adopting {}", t.id, dir.display());
             return Ok(true);
         }
-        let added = if track {
+        let added = if pr.is_some() {
             self.git.worktree_track(clone, dir, branch, remote)
         } else {
             self.git.worktree_add(clone, dir, branch, start)
@@ -1535,8 +1566,12 @@ impl Runner {
         none_expected: bool,
     ) -> Result<Option<(crate::github::PullRequest, Option<Checks>)>> {
         let prs = self.prs_for(&target.provider);
-        let Some(pr) = prs.find(&target.repo, &target.branch)? else {
-            return Ok(None);
+        let pr = match target.number {
+            Some(n) => prs.by_number(&target.repo, n)?,
+            None => match prs.find(&target.repo, &target.branch)? {
+                Some(pr) => pr,
+                None => return Ok(None),
+            },
         };
         if pr.state != "open" || none_expected {
             return Ok(Some((pr, None)));
@@ -1707,10 +1742,14 @@ impl Runner {
             && p.cuts_worktrees()
         {
             let head = self.git.head(cwd)?;
-            let base = p.lane(&l.name).map_or_else(
-                || p.project.base.clone(),
-                |lane| format!("{}/{}", p.lane_remote(lane), p.lane_base(lane)),
-            );
+            let pr = t.source.pull_requests.iter().find(|pr| pr.lane == l.name);
+            let base = match pr {
+                Some(pr) if !pr.base.is_empty() => format!("{}/{}", pr.remote, pr.base),
+                _ => p.lane(&l.name).map_or_else(
+                    || p.project.base.clone(),
+                    |lane| format!("{}/{}", p.lane_remote(lane), p.lane_base(lane)),
+                ),
+            };
             let short: String = head.chars().take(8).collect();
             let _ = write!(q, " branch {} at {short} over {base}.", l.branch);
             let summary = self.git.summary(cwd, &base)?;
@@ -3646,6 +3685,9 @@ struct PrTarget {
     provider: String,
     repo: String,
     branch: String,
+    /// Known from the ticket's source; read by number rather than by
+    /// branch, since the lane's branch may be a pull ref's.
+    number: Option<u64>,
 }
 
 impl PrTarget {
@@ -3677,6 +3719,19 @@ fn pr_target(
         .and_then(|l| t.lanes.iter().find(|x| x.name == l))
         .or_else(|| t.lanes.first())
         .ok_or_else(|| format!("stage {} needs a lane with a branch", stage.name))?;
+    if let Some(pr) = t
+        .source
+        .pull_requests
+        .iter()
+        .find(|pr| pr.lane == lane_record.name)
+    {
+        return Ok(PrTarget {
+            provider: pr.provider.clone(),
+            repo: pr.repo.clone(),
+            branch: pr.branch.clone(),
+            number: Some(pr.number),
+        });
+    }
     let Some(remote) = p
         .lane(&lane_record.name)
         .and_then(|l| l.repo.clone())
@@ -3709,7 +3764,25 @@ fn pr_target(
         provider,
         repo,
         branch: lane_record.branch.clone(),
+        number: None,
     })
+}
+
+/// The remote a pull request is fetched from when it is not the
+/// lane's own: its name and URL from the pipeline's `remotes`.
+fn extra_remote(
+    p: &Pipeline,
+    lane: Option<&crate::pipeline::Lane>,
+    pr: &PullRequestSource,
+) -> Option<(String, String)> {
+    let default = lane
+        .filter(|l| l.repo.is_some())
+        .map_or(p.project.remote.as_str(), |l| p.lane_remote(l));
+    if pr.remote.is_empty() || pr.remote == default {
+        return None;
+    }
+    p.remote_url(lane, &pr.remote)
+        .map(|url| (pr.remote.clone(), url))
 }
 
 /// The control socket failed before or while a request was answered:

@@ -227,6 +227,7 @@ impl Env {
                 state: state.into(),
                 mergeable: mergeable.map(str::to_owned),
                 branch: String::new(),
+                base: String::new(),
                 title: String::new(),
             },
         ));
@@ -1494,6 +1495,7 @@ fn a_bitbucket_remote_is_read_through_bitbucket_and_a_short_head_matches() {
                 state: "open".into(),
                 mergeable: None,
                 branch: String::new(),
+                base: String::new(),
                 title: String::new(),
             },
         ));
@@ -2156,6 +2158,7 @@ fn open_pr(env: &Env, repo: &str, number: u64, branch: &str, title: &str) {
             state: "open".into(),
             mergeable: Some("clean".into()),
             branch: branch.to_owned(),
+            base: "main".to_owned(),
             title: title.to_owned(),
         },
     ));
@@ -2190,7 +2193,10 @@ fn a_ticket_from_pull_requests_checks_out_their_branches_and_watches_the_merges(
             .unwrap();
     let id = t.id.clone();
     assert_eq!(t.source.kind, "pull-request");
-    assert_eq!(t.source.identity, "msull/switchboard!9+msull/docs!3");
+    assert_eq!(
+        t.source.identity,
+        "github:msull/switchboard!9+github:msull/docs!3"
+    );
     assert_eq!(t.source.title, "Escape leaves the field");
     assert_eq!(t.source.pull_requests.len(), 2);
     env.steps_until(&id, "the sign-off question", |t, _| {
@@ -2205,8 +2211,8 @@ fn a_ticket_from_pull_requests_checks_out_their_branches_and_watches_the_merges(
     assert_eq!(
         branches,
         vec![
-            ("repo".to_owned(), "feature/escape".to_owned(), true),
-            ("docs".to_owned(), "feature/escape-docs".to_owned(), true),
+            ("repo".to_owned(), "pr/9".to_owned(), true),
+            ("docs".to_owned(), "pr/3".to_owned(), true),
         ]
     );
     {
@@ -2219,19 +2225,25 @@ fn a_ticket_from_pull_requests_checks_out_their_branches_and_watches_the_merges(
         assert_eq!(
             tracked,
             vec![
-                ("feature/escape".to_owned(), "origin".to_owned()),
-                ("feature/escape-docs".to_owned(), "origin".to_owned()),
+                ("pr/9".to_owned(), "origin".to_owned()),
+                ("pr/3".to_owned(), "origin".to_owned()),
             ],
-            "both are the PRs' branches, tracking the remote"
+            "GitHub PRs are checked out from their pull refs, tracking the remote"
+        );
+        let pulls: Vec<(String, u64)> = repo
+            .fetched_pulls
+            .iter()
+            .map(|(_, r, n)| (r.clone(), *n))
+            .collect();
+        assert!(
+            pulls.starts_with(&[("origin".to_owned(), 9), ("origin".to_owned(), 3)]),
+            "{pulls:?}"
         );
         assert!(repo.worktrees.is_empty(), "no branch of Dispatch's own");
         let refreshed = repo
             .ran
             .iter()
-            .filter(|(_, argv)| {
-                argv.join(" ")
-                    .starts_with("git merge --ff-only origin/feature/")
-            })
+            .filter(|(_, argv)| argv.join(" ").starts_with("git merge --ff-only origin/pr/"))
             .count();
         assert_eq!(refreshed, 2, "each branch was brought up to date first");
     }
@@ -2253,6 +2265,90 @@ fn a_ticket_from_pull_requests_checks_out_their_branches_and_watches_the_merges(
     for (_, _, pr) in &mut env.prs.lock().unwrap().prs {
         pr.state = "merged".into();
     }
+    env.wait(PR_POLL_MS);
+    env.steps_until(&id, "the ticket closing", |t, _| !t.active());
+    assert!(matches!(&env.ticket(&id).state, TicketState::Closed { .. }));
+}
+
+/// A pull request on a mirror: the spec names the remote, the clone
+/// gains it, the lane checks the PR's branch out from there (Bitbucket
+/// has the branch itself, no pull ref), and the merge is read from
+/// that provider by number.
+#[test]
+fn a_pull_request_on_a_named_mirror_is_fetched_from_that_remote() {
+    let mut env = Env::new();
+    let worktrees = env.data.root.join("wt");
+    let text = pr_pipeline(&worktrees).replace(
+        "repo = \"git@github.com:msull/docs.git\"\n",
+        "repo = \"git@github.com:msull/docs.git\"\nremotes = { bb = \"git@bitbucket.org:msull/docs.git\" }\n",
+    );
+    std::fs::write(env.data.pr_pipeline(PROJECT), text).unwrap();
+    env.bitbucket.lock().unwrap().prs.push((
+        "msull/docs".into(),
+        "feature/escape-docs".into(),
+        PullRequest {
+            number: 3,
+            url: "https://bitbucket.org/msull/docs/pull-requests/3".into(),
+            head: "bb00003".into(),
+            state: "open".into(),
+            mergeable: None,
+            branch: "feature/escape-docs".into(),
+            base: "dev".into(),
+            title: "Document escape".into(),
+        },
+    ));
+    let now = env.tick();
+    let err = dispatch::serve::take_pull_requests(&mut env.runner, PROJECT, &["gh:docs/3"], now)
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("no remote \"gh\""), "{err}");
+    let t =
+        dispatch::serve::take_pull_requests(&mut env.runner, PROJECT, &["bb:docs/3"], now).unwrap();
+    let id = t.id.clone();
+    assert_eq!(t.source.identity, "bitbucket:msull/docs!3");
+    let pr = &t.source.pull_requests[0];
+    assert_eq!(
+        (pr.remote.as_str(), pr.local(), pr.base.as_str()),
+        ("bb", "feature/escape-docs", "dev")
+    );
+    env.steps_until(&id, "the sign-off question", |t, _| {
+        t.pending_decisions().iter().any(|d| d.name == "inspect")
+    });
+    {
+        let repo = env.repo.lock().unwrap();
+        assert!(
+            repo.remotes_set
+                .iter()
+                .any(|(_, n, u)| n == "bb" && u == "git@bitbucket.org:msull/docs.git"),
+            "{:?}",
+            repo.remotes_set
+        );
+        let tracked: Vec<(String, String)> = repo
+            .tracked
+            .iter()
+            .map(|(_, _, b, r)| (b.clone(), r.clone()))
+            .collect();
+        assert_eq!(
+            tracked,
+            vec![("feature/escape-docs".to_owned(), "bb".to_owned())]
+        );
+        assert!(repo.fetched_pulls.is_empty(), "no pull ref on Bitbucket");
+        assert_eq!(
+            repo.worktrees.len(),
+            1,
+            "the tree itself is Dispatch's own branch"
+        );
+    }
+    let t = env.ticket(&id);
+    assert_eq!(t.lanes.len(), 1, "only the docs lane is cut");
+    let d = env.pending(&id).into_iter().next().unwrap();
+    assert!(d.question.contains("over bb/dev"), "{}", d.question);
+    let now = env.tick();
+    env.runner.decide(&id, &d.id, "proceed", None, now).unwrap();
+    env.steps_until(&id, "the merge watch", |t, _| {
+        t.pending_decisions().iter().any(|d| d.name == "merge")
+    });
+    env.bitbucket.lock().unwrap().prs[0].2.state = "merged".into();
     env.wait(PR_POLL_MS);
     env.steps_until(&id, "the ticket closing", |t, _| !t.active());
     assert!(matches!(&env.ticket(&id).state, TicketState::Closed { .. }));

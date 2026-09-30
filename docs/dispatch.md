@@ -366,6 +366,7 @@ base = "main"                 # the branch tickets branch from (default main)
 remote = "origin"             # (default origin)
 worktrees = "/path"           # where this project's trees go (~ expands); omitted: the `dispatch worktrees` setting, default ~/.dispatch/worktrees
 space = "..."                 # the Switchboard workspace every ticket's project goes in
+remotes = { github = "git@github.com:..." }   # mirrors a pull request may be taken from, by remote name
 
 [source]
 kind = "github" | "task-file" | "manual" | "pull-request"   # pull-request: see "Tickets from pull requests"
@@ -376,6 +377,7 @@ path = "relative/to/tree"     # "." for a single-repo project
 repo = "git@..."              # a repository of its own (a workspace of several): cloned by
                               # Dispatch too, cut as a worktree at path inside the ticket's tree
 base = "main"                 # omitted: the project's
+remotes = { github = "git@github.com:..." }   # this lane's mirrors, as the project's
 setup = ["cmd", "args"]       # run once, before the lane's first agent
 
 [[resources]]
@@ -989,24 +991,34 @@ project's. The queue, the slots and `waiting_on_me` are the project's,
 shared with its issue tickets.
 
 ```
-dispatch take Delta pr backend/123 frontend/45
-dispatch take Switchboard pr 12          # the lane may be left off when there is one
+dispatch take Delta pr backend/123 frontend/45     # the lanes' own repositories
+dispatch take Delta pr github:backend/17           # a named mirror
+dispatch take Switchboard pr 12                    # the lane may be left off when there is one
 ```
 
-Each spec names a lane and a pull request number; the PR is read from
-the lane's repository on its provider (GitHub or Bitbucket, by the
-remote's host) and must be open. One ticket carries one PR per lane;
-two lanes that share the project's repository cannot each carry one.
-The identity is the set of PRs, so a PR on a live ticket is refused
-until that ticket closes. The snapshot records each PR's lane,
-provider, repository, number, URL, branch, head and title; the
-ticket's title is the first PR's.
+Each spec names a lane and a pull request number, and may name a
+remote in front: without one the PR is read from the lane's own
+repository, with one from that entry of the lane's (or the project's)
+`remotes`, a mirror where collaborators without access to the main
+host work. The provider is the remote's host, GitHub or Bitbucket,
+and the PR must be open. One ticket carries one PR per lane; two lanes
+that share the project's repository cannot each carry one. The
+identity is the set of PRs with their providers, so a PR on a live
+ticket is refused until that ticket closes. The snapshot records each
+PR's lane, provider, repository, number, URL, branch, base, remote,
+the branch the lane checks out, head and title; the ticket's title is
+the first PR's.
 
-The lanes are the PRs' own branches: a lane with a repository of its
-own is a worktree of Dispatch's clone on that branch, tracking the
-remote (`git worktree add --track -B <branch> <remote>/<branch>`); a
-PR in a lane without one makes the tree itself that branch. Lanes no
-PR is in are not cut. Nothing in this mode pushes: a pull-request
+The lanes are the PRs' branches as their remote has them. The clone
+gains the named remote when it is a mirror. On GitHub the checkout is
+the pull ref, `refs/pull/<n>/head`, on a local branch `pr/<n>`, so a
+PR from a fork works the same as one from the repository; on
+Bitbucket it is the PR's branch itself. Either way the worktree
+tracks the remote's ref (`git worktree add --track -B <local>
+<remote>/<local>`), and later readings of the PR (its checks, its
+merge) go by number to the provider it came from. A PR in a lane
+without a repository of its own makes the tree itself that branch.
+Lanes no PR is in are not cut. Nothing in this mode pushes: a pull-request
 pipeline refuses a `rebaser` or `fixer` in its policy, and the
 conflicting or red readings of `pr-checks` stay questions for the
 author to act on. Each time a human gate opens, the branches are
@@ -1245,8 +1257,9 @@ and one against the real one:
 | Plan session has no transcript yet | `workflow.start` fails; the attempt is failed and a decision, not retried |
 | Plan file from an earlier attempt exists | The new attempt's own path is empty, so nothing advances |
 | `project.add` fails to save | `failed` reply; attempt failed; nothing else made |
-| `take <project> pr <lane>/<n>...` | A ticket on `<project>.pr.toml` with one PR per named lane, refused for a closed PR, an unknown or repeated lane, two lanes in one repository, or a PR already on a live ticket |
-| A pull-request ticket's first pass | Each PR's lane is a worktree on the PR's branch tracking the remote, chosen; no branch of Dispatch's own; lanes without a PR are not cut |
+| `take <project> pr <lane>/<n>...` | A ticket on `<project>.pr.toml` with one PR per named lane, refused for a closed PR, an unknown or repeated lane, an unknown remote, two lanes in one repository, or a PR already on a live ticket |
+| A pull-request ticket's first pass | Each PR's lane is a worktree on the PR's branch tracking the remote (a GitHub PR from its pull ref on `pr/<n>`), chosen; no branch of Dispatch's own; lanes without a PR are not cut |
+| `take .. pr <remote>:<lane>/<n>` on a mirror | The clone gains that remote, the lane is checked out from it, the question shows the PR's base there, and the merge is read from that provider by number |
 | The sign-off gate opens on a pull-request ticket | Each branch is fetched and fast-forwarded first; a force push parks the ticket; `proceed` leads to `pr-merged`, and the merges close the ticket |
 | The socket fails mid-pass (Switchboard quit or restarted under the runner) | Nothing is parked; the pass ends with a log line and the next one goes on; the port remakes its connection and sends the request again, which the operations log makes safe |
 | User is viewing another workspace during the whole path | The window stays on it through every launch and the review start; no terminal window opens |

@@ -51,6 +51,11 @@ pub struct ProjectSection {
     pub worktrees: Option<PathBuf>,
     /// The Switchboard workspace every ticket's project goes in.
     pub space: String,
+    /// Other places the repository lives (a mirror), by remote name,
+    /// where a pull request may be taken from: `dispatch take .. pr
+    /// <name>:<lane>/<n>`.
+    #[serde(default)]
+    pub remotes: BTreeMap<String, String>,
 }
 
 fn default_base() -> String {
@@ -96,6 +101,10 @@ pub struct Lane {
     pub base: Option<String>,
     #[serde(default)]
     pub remote: Option<String>,
+    /// Other places this lane's repository lives, by remote name; see
+    /// the project's.
+    #[serde(default)]
+    pub remotes: BTreeMap<String, String>,
     /// Run once in a new worktree.
     #[serde(default)]
     pub setup: Vec<String>,
@@ -401,6 +410,25 @@ impl Pipeline {
     #[must_use]
     pub fn lane_remote<'a>(&'a self, lane: &'a Lane) -> &'a str {
         lane.remote.as_deref().unwrap_or(&self.project.remote)
+    }
+
+    /// A named remote of a lane's repository (or the project's, for a
+    /// lane without one): the default one, or one of the `remotes`.
+    #[must_use]
+    pub fn remote_url(&self, lane: Option<&Lane>, name: &str) -> Option<String> {
+        let (default_name, default_url, extra) = match lane {
+            Some(l) if l.repo.is_some() => (self.lane_remote(l), l.repo.clone(), &l.remotes),
+            _ => (
+                self.project.remote.as_str(),
+                self.project.repo.clone(),
+                &self.project.remotes,
+            ),
+        };
+        if name == default_name {
+            default_url
+        } else {
+            extra.get(name).cloned()
+        }
     }
 
     /// Whether tickets work in worktrees of Dispatch's clone (`repo`),

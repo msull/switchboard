@@ -32,6 +32,8 @@ pub struct PullRequest {
     pub mergeable: Option<String>,
     /// The branch it comes from.
     pub branch: String,
+    /// The branch it goes into.
+    pub base: String,
     pub title: String,
 }
 
@@ -87,6 +89,8 @@ struct PrRow {
     mergeable: String,
     #[serde(rename = "headRefName", default)]
     branch: String,
+    #[serde(rename = "baseRefName", default)]
+    base: String,
     #[serde(default)]
     title: String,
 }
@@ -104,12 +108,13 @@ impl PrRow {
                 _ => None,
             },
             branch: self.branch.clone(),
+            base: self.base.clone(),
             title: self.title.clone(),
         }
     }
 }
 
-const PR_FIELDS: &str = "number,url,headRefOid,state,mergeable,headRefName,title";
+const PR_FIELDS: &str = "number,url,headRefOid,state,mergeable,headRefName,baseRefName,title";
 
 #[derive(Deserialize)]
 struct CheckRow {

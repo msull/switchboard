@@ -155,6 +155,8 @@ struct PrRow {
     #[serde(default)]
     links: Links,
     #[serde(default)]
+    destination: Source,
+    #[serde(default)]
     title: String,
 }
 
@@ -182,6 +184,12 @@ impl PrRow {
             mergeable: None,
             branch: self
                 .source
+                .branch
+                .as_ref()
+                .map(|b| b.name.clone())
+                .unwrap_or_default(),
+            base: self
+                .destination
                 .branch
                 .as_ref()
                 .map(|b| b.name.clone())

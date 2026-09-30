@@ -163,69 +163,29 @@ pub fn take_pull_requests(
     let lanes: Vec<&str> = pipeline.lanes.iter().map(|l| l.name.as_str()).collect();
     let mut prs: Vec<PullRequestSource> = Vec::new();
     for spec in specs {
-        let (lane, number) = match spec.split_once('/') {
-            Some((lane, number)) => (lane.to_owned(), number),
-            None if lanes.len() == 1 => (lanes[0].to_owned(), *spec),
-            None => bail!(
-                "name the lane as <lane>/<number>; the lanes are {}",
-                lanes.join(", ")
-            ),
-        };
-        let number: u64 = number
-            .trim_start_matches('#')
-            .parse()
-            .with_context(|| format!("a pull request number in {spec:?}"))?;
-        let def = pipeline
-            .lane(&lane)
-            .with_context(|| format!("no lane {lane:?}; the lanes are {}", lanes.join(", ")))?;
-        if prs.iter().any(|pr| pr.lane == lane) {
-            bail!("lane {lane} is named twice");
+        let pr = pull_request_source(runner, &pipeline, &lanes, spec)?;
+        if prs.iter().any(|x| x.lane == pr.lane) {
+            bail!("lane {} is named twice", pr.lane);
         }
-        if def.repo.is_none()
+        if pipeline.lane(&pr.lane).is_some_and(|l| l.repo.is_none())
             && let Some(other) = prs
                 .iter()
-                .find(|pr| pipeline.lane(&pr.lane).is_some_and(|l| l.repo.is_none()))
+                .find(|x| pipeline.lane(&x.lane).is_some_and(|l| l.repo.is_none()))
         {
             bail!(
-                "lanes {} and {lane} share the project's repository, so one pull request covers both",
-                other.lane
+                "lanes {} and {} share the project's repository, so one pull request covers both",
+                other.lane,
+                pr.lane
             );
         }
-        let remote = def
-            .repo
-            .clone()
-            .or_else(|| pipeline.project.repo.clone())
-            .with_context(|| {
-                format!("lane {lane} has no repository to read a pull request from")
-            })?;
-        let provider = crate::scheduler::guess_provider(&remote).to_owned();
-        let repo = match provider.as_str() {
-            "github" => crate::github::github_repo(&remote),
-            "bitbucket" => crate::bitbucket::bitbucket_repo(&remote),
-            _ => None,
-        }
-        .with_context(|| format!("lane {lane}: {remote:?} is not on a provider Dispatch reads"))?;
-        let pr = runner.prs_for(&provider).by_number(&repo, number)?;
-        if pr.state != "open" {
-            bail!("PR #{number} in {repo} is {}", pr.state);
-        }
-        prs.push(PullRequestSource {
-            lane,
-            provider,
-            repo,
-            number,
-            url: pr.url,
-            branch: pr.branch,
-            head: pr.head,
-            title: pr.title,
-        });
+        prs.push(pr);
     }
     let Some(first) = prs.first() else {
         bail!("name at least one pull request as <lane>/<number>");
     };
     let identity = prs
         .iter()
-        .map(|pr| format!("{}!{}", pr.repo, pr.number))
+        .map(|pr| format!("{}:{}!{}", pr.provider, pr.repo, pr.number))
         .collect::<Vec<_>>()
         .join("+");
     let body = prs
@@ -245,6 +205,78 @@ pub fn take_pull_requests(
         pull_requests: prs,
     };
     runner.take(project, &text, source, now_ms)
+}
+
+/// One `<remote>:<lane>/<n>` (or `<lane>/<n>`, or `<n>` with one lane)
+/// read from its provider.
+fn pull_request_source(
+    runner: &Runner,
+    pipeline: &Pipeline,
+    lanes: &[&str],
+    spec: &str,
+) -> Result<PullRequestSource> {
+    // `<remote>:<lane>/<n>` takes the PR from a named mirror.
+    let (remote_name, spec_rest) = match spec.split_once(':') {
+        Some((remote, rest)) => (Some(remote), rest),
+        None => (None, spec),
+    };
+    let (lane, number) = match spec_rest.split_once('/') {
+        Some((lane, number)) => (lane.to_owned(), number),
+        None if lanes.len() == 1 => (lanes[0].to_owned(), spec_rest),
+        None => bail!(
+            "name the lane as <lane>/<number>; the lanes are {}",
+            lanes.join(", ")
+        ),
+    };
+    let number: u64 = number
+        .trim_start_matches('#')
+        .parse()
+        .with_context(|| format!("a pull request number in {spec:?}"))?;
+    let def = pipeline
+        .lane(&lane)
+        .with_context(|| format!("no lane {lane:?}; the lanes are {}", lanes.join(", ")))?;
+    let default_remote = if def.repo.is_some() {
+        pipeline.lane_remote(def)
+    } else {
+        pipeline.project.remote.as_str()
+    };
+    let remote_name = remote_name.unwrap_or(default_remote).to_owned();
+    let remote = pipeline
+        .remote_url(Some(def), &remote_name)
+        .with_context(|| {
+            format!("lane {lane} has no remote {remote_name:?} to read a pull request from")
+        })?;
+    let provider = crate::scheduler::guess_provider(&remote).to_owned();
+    let repo = match provider.as_str() {
+        "github" => crate::github::github_repo(&remote),
+        "bitbucket" => crate::bitbucket::bitbucket_repo(&remote),
+        _ => None,
+    }
+    .with_context(|| format!("lane {lane}: {remote:?} is not on a provider Dispatch reads"))?;
+    let pr = runner.prs_for(&provider).by_number(&repo, number)?;
+    if pr.state != "open" {
+        bail!("PR #{number} in {repo} is {}", pr.state);
+    }
+    // GitHub serves every PR's head as a pull ref, from whichever
+    // fork; Bitbucket has the branch itself.
+    let local = if provider == "github" {
+        format!("pr/{number}")
+    } else {
+        pr.branch.clone()
+    };
+    Ok(PullRequestSource {
+        lane,
+        provider,
+        repo,
+        number,
+        url: pr.url,
+        branch: pr.branch,
+        base: pr.base,
+        remote: remote_name,
+        local,
+        head: pr.head,
+        title: pr.title,
+    })
 }
 
 /// Every project's queue and every ticket.

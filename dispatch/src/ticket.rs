@@ -46,11 +46,34 @@ pub struct PullRequestSource {
     pub repo: String,
     pub number: u64,
     pub url: String,
-    /// The PR's own branch, which the lane checks out.
+    /// The PR's own branch.
     pub branch: String,
+    /// The branch it goes into.
+    #[serde(default)]
+    pub base: String,
+    /// The remote of Dispatch's clone it is fetched from: the lane's
+    /// own, or one of the pipeline's named `remotes` (a mirror).
+    #[serde(default)]
+    pub remote: String,
+    /// The branch the lane checks out: `pr/<n>` from a GitHub pull
+    /// ref (so a fork's PR works), the PR's own branch elsewhere.
+    #[serde(default)]
+    pub local: String,
     /// Its head when taken.
     pub head: String,
     pub title: String,
+}
+
+impl PullRequestSource {
+    /// The branch the lane is on.
+    #[must_use]
+    pub fn local(&self) -> &str {
+        if self.local.is_empty() {
+            &self.branch
+        } else {
+            &self.local
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

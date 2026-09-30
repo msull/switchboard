@@ -637,6 +637,22 @@ impl Repo for SharedRepo {
     fn fetch(&mut self, dir: &std::path::Path, remote: &str) -> anyhow::Result<()> {
         self.0.lock().unwrap().fetch(dir, remote)
     }
+    fn ensure_remote(
+        &mut self,
+        dir: &std::path::Path,
+        remote: &str,
+        url: &str,
+    ) -> anyhow::Result<()> {
+        self.0.lock().unwrap().ensure_remote(dir, remote, url)
+    }
+    fn fetch_pull(
+        &mut self,
+        dir: &std::path::Path,
+        remote: &str,
+        number: u64,
+    ) -> anyhow::Result<()> {
+        self.0.lock().unwrap().fetch_pull(dir, remote, number)
+    }
     fn worktree_add(
         &mut self,
         repo: &std::path::Path,
