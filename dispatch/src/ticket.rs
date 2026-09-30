@@ -307,11 +307,18 @@ impl Ticket {
     /// The most recent completed attempt of any stage that wrote `name`.
     #[must_use]
     pub fn input(&self, name: &str) -> Option<&PathBuf> {
+        self.input_with_stage(name).map(|(_, path)| path)
+    }
+
+    /// The same, with the stage whose attempt wrote it: a reader is told
+    /// whose notes these are when a later stage wrote none.
+    #[must_use]
+    pub fn input_with_stage(&self, name: &str) -> Option<(&str, &PathBuf)> {
         self.attempts
             .iter()
             .rev()
             .filter(|a| a.state == AttemptState::Complete)
-            .find_map(|a| a.artifacts.get(name))
+            .find_map(|a| a.artifacts.get(name).map(|p| (a.stage.as_str(), p)))
     }
 
     #[must_use]

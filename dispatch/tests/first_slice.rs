@@ -794,7 +794,8 @@ fn an_inspect_stage_shows_the_work_and_asks() {
     );
     let notes = artifact_of(&t, "implement", "notes");
     assert!(
-        d.question.contains(&notes.display().to_string()),
+        d.question
+            .contains(&format!("Notes (implement): {}", notes.display())),
         "{}",
         d.question
     );

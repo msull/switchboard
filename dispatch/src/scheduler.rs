@@ -1592,8 +1592,8 @@ impl Runner {
             }
         }
         let _ = write!(q, "\n\nTree: {}", cwd.display());
-        if let Some(notes) = t.input("notes") {
-            let _ = write!(q, "\nNotes: {}", notes.display());
+        if let Some((stage, notes)) = t.input_with_stage("notes") {
+            let _ = write!(q, "\nNotes ({stage}): {}", notes.display());
         }
         Ok(q)
     }
