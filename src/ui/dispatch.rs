@@ -24,6 +24,13 @@ pub fn show(cx: &mut DrawCtx<'_>, ui: &mut Ui) {
     ui.horizontal(|ui| {
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             pop_out_button(cx, ui);
+            let open = cx.state.dispatch_settings.is_some();
+            if theme::ghost(ui, if open { "Hide settings" } else { "Settings…" })
+                .on_hover_text("Where tickets' trees are cut")
+                .clicked()
+            {
+                cx.state.dispatch_settings = (!open).then(String::new);
+            }
             ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
                 theme::kicker(ui, "Dispatch", p.n600);
             });
@@ -50,6 +57,12 @@ pub fn show(cx: &mut DrawCtx<'_>, ui: &mut Ui) {
     egui::ScrollArea::vertical()
         .id_salt("dispatch-page")
         .show(ui, |ui| {
+            // Rarely touched, so behind the header's button rather than
+            // beside the console's command line, which it looked like.
+            if cx.state.dispatch_settings.is_some() {
+                theme::section(ui, "Settings");
+                worktrees(cx, ui, &state.status.worktrees);
+            }
             let pending: Vec<DecisionView> = cx
                 .core
                 .pending_decisions()
@@ -90,9 +103,6 @@ pub fn show(cx: &mut DrawCtx<'_>, ui: &mut Ui) {
                 project_section(cx, ui, project, &tickets);
             }
 
-            theme::section(ui, "Worktrees");
-            worktrees(cx, ui, &state.status.worktrees);
-
             theme::section(ui, "Console");
             console(cx, ui);
         });
@@ -107,14 +117,15 @@ fn worktrees(cx: &mut DrawCtx<'_>, ui: &mut Ui, root: &std::path::Path) {
         ui.label(theme::mono_text(ui, root.display().to_string()));
     });
     ui.horizontal(|ui| {
+        ui.label("Move to");
         let width = (ui.available_width() - 220.0).max(120.0);
+        let draft = cx.state.dispatch_settings.get_or_insert_default();
         ui.add_sized(
             [width, 24.0],
-            egui::TextEdit::singleline(&mut cx.state.dispatch_worktrees_draft)
-                .hint_text("~/.dispatch/worktrees")
-                .font(egui::TextStyle::Monospace),
+            egui::TextEdit::singleline(draft)
+                .hint_text("a directory, for example ~/.dispatch/worktrees"),
         );
-        let path = cx.state.dispatch_worktrees_draft.trim().to_owned();
+        let path = draft.trim().to_owned();
         let typed = !path.is_empty();
         ui.add_enabled_ui(typed, |ui| {
             if theme::secondary(ui, "Set")

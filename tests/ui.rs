@@ -3990,9 +3990,14 @@ fn dispatch_page_sets_the_worktree_root() {
     harness.state_mut().dispatched.clear();
     harness.run_steps(2);
     click(&mut harness, "Dispatch");
+    assert!(
+        harness.query_by_label("/wt").is_none(),
+        "the root is behind the settings button"
+    );
+    click(&mut harness, "Settings…");
     harness.get_by_label("/wt");
-    // The first text field on the page is the root; the console's is
-    // under it.
+    // Settings open at the top of the page, so the first text field is
+    // the root; the console's is far under it.
     let field = harness
         .query_all_by_role(Role::TextInput)
         .next()

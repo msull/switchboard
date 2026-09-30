@@ -97,7 +97,9 @@ pub struct UiState {
     /// The Dispatch console's command line being typed.
     pub dispatch_console_draft: String,
     /// A worktree root typed on the Dispatch page, not yet sent.
-    pub dispatch_worktrees_draft: String,
+    /// The Dispatch page's settings, when shown: the worktree root as
+    /// typed. `None` keeps them behind the header's button.
+    pub dispatch_settings: Option<String>,
     /// A note typed under a decision, by decision id, sent with the
     /// answer; a send-back from a human gate carries it to the agent.
     pub dispatch_note_drafts: std::collections::HashMap<String, String>,
@@ -260,7 +262,7 @@ impl Default for UiState {
             notes_draft: None,
             rename_draft: None,
             dispatch_console_draft: String::new(),
-            dispatch_worktrees_draft: String::new(),
+            dispatch_settings: None,
             dispatch_note_drafts: std::collections::HashMap::new(),
             dispatch_artifact: None,
             dispatch_project: None,
