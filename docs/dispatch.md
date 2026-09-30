@@ -899,7 +899,9 @@ path escaping the root, and two entries sharing a basename.
   look before doing one by hand.
 - `slots` counts tickets that have a running attempt or hold a
   resource. A ticket sitting at a human gate with no holds costs no
-  slot. When `waiting_on_me` pending decisions exist in a project,
+  slot, and neither does a gate-only stage (`lanes`, `ready`) or a
+  ticket closing past its last stage: they launch nothing, so they
+  run beside a full project. When `waiting_on_me` pending decisions exist in a project,
   nothing new is started there until one is answered; running attempts
   finish.
 
@@ -1132,6 +1134,7 @@ and one against the real one:
 | `ready` with the PR's checks pending, then green | A gate-only attempt per context, no agent; no PR is a `pr` decision (`recheck`, `park`); pending waits and reads the provider once a minute; green at the tree's head completes the attempt bound to that head |
 | The PR is at another head, its checks are red, or it has no checks | A `pr` decision naming which; `recheck` reads again at once; the same attempt throughout; `checks = "none"` on the stage passes on the PR at the head alone |
 | The provider cannot be read | The error is recorded on the attempt and retried quietly for an hour, then a `pr` decision; a merged PR passes |
+| `ready` with every slot taken by another ticket's agent | The PR is still read and the ticket still closes; a gate-only attempt holds no slot and the other agent keeps its own |
 | The queue view after `plan` replaces `investigate`, and after two tickets swap places | One card per ticket, in order, no stale card, no overlap failure |
 | Plan session has no transcript yet | `workflow.start` fails; the attempt is failed and a decision, not retried |
 | Plan file from an earlier attempt exists | The new attempt's own path is empty, so nothing advances |

@@ -151,7 +151,7 @@ pub fn status(runner: &Runner) -> Result<Status> {
         let mine = records.iter().filter(|t| t.project == name);
         let running = mine
             .clone()
-            .filter(|t| t.active() && t.attempts.iter().any(crate::ticket::Attempt::is_open))
+            .filter(|t| t.active() && t.attempts.iter().any(crate::scheduler::costs_slot))
             .count();
         let pending = mine.map(|t| t.pending_decisions().len()).sum::<usize>();
         projects.push(ProjectView {

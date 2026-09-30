@@ -717,6 +717,43 @@ fn ready_waits_for_the_prs_checks_and_passes_green_at_the_trees_head() {
     );
 }
 
+/// A `ready` attempt launches nothing, so it holds no slot: another
+/// ticket's agent starts beside it, and it finishes beside that agent.
+#[test]
+fn a_ready_stage_costs_no_slot() {
+    let mut env = Env::new();
+    let path = env.data.pipeline(PROJECT);
+    let text = std::fs::read_to_string(&path)
+        .unwrap()
+        .replace("slots = 2\n", "slots = 1\n");
+    std::fs::write(&path, text).unwrap();
+    let id = at_ready(&mut env);
+    assert!(
+        env.ticket(&id)
+            .attempts_of("ready")
+            .last()
+            .unwrap()
+            .is_open()
+    );
+    let other = env.take(8).id;
+    env.steps_until(&other, "the other ticket's investigator", |t, _| {
+        t.attempts_of("investigate")
+            .next()
+            .is_some_and(Attempt::is_open)
+    });
+    env.pr_is(&id, "base0000", "open", Checks::Passed);
+    env.recheck(&id);
+    env.steps_until(&id, "the ticket closing", |t, _| !t.active());
+    assert!(matches!(&env.ticket(&id).state, TicketState::Closed { .. }));
+    assert!(
+        env.ticket(&other)
+            .attempts_of("investigate")
+            .next()
+            .is_some_and(Attempt::is_open),
+        "the other ticket kept its slot"
+    );
+}
+
 /// Red checks, a PR at another head, and a repository with no checks
 /// are each a question with `recheck`; a stage that says
 /// `checks = "none"` passes on the PR at the head alone.

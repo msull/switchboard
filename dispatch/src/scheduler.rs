@@ -2521,7 +2521,7 @@ impl Runner {
         let mut running = 0u32;
         let mut pending = 0u32;
         for t in &tickets {
-            if t.active() && t.attempts.iter().any(Attempt::is_open) {
+            if t.active() && t.attempts.iter().any(costs_slot) {
                 running += 1;
             }
             pending += u32::try_from(t.pending_decisions().len()).unwrap_or(u32::MAX);
@@ -2550,21 +2550,26 @@ impl Runner {
                 }
             };
             let has_open = t.attempts.iter().any(Attempt::is_open);
-            // Watching what runs is free; starting something new takes a
-            // slot and is refused while too much waits on the user.
-            let may_start =
-                has_open || (running < p.policy.slots && pending < p.policy.waiting_on_me);
+            // Watching what runs is free, and so is a gate-only stage
+            // (a lanes choice, a PR read) or closing a ticket past its
+            // last stage: they launch nothing. Starting
+            // an agent takes a slot and is refused while too much waits
+            // on the user.
+            let gate_only = p
+                .stages
+                .get(t.stage)
+                .is_none_or(|s| s.kind() == StageKind::GateOnly);
+            let may_start = has_open
+                || gate_only
+                || (running < p.policy.slots && pending < p.policy.waiting_on_me);
             if !may_start {
                 continue;
             }
-            let attempts_before = t.attempts.len();
+            let had_slot = t.attempts.iter().any(costs_slot);
             if let Err(e) = self.step(t, &mut ps, &p, now_ms) {
                 log::error!("ticket {}: {e}", t.id);
             }
-            if !has_open
-                && t.attempts.len() > attempts_before
-                && t.attempts.iter().any(Attempt::is_open)
-            {
+            if !had_slot && t.attempts.iter().any(costs_slot) {
                 running += 1;
             }
             pipeline = Some(p);
@@ -2688,6 +2693,12 @@ impl Runner {
 const NO_SUCH_SESSION: &str = "no such session";
 
 /// The artifacts an attempt was to write that are not files yet.
+/// An open attempt with an agent or a review run in it: what the
+/// policy's `slots` count. A gate-only attempt launches nothing.
+pub(crate) fn costs_slot(a: &Attempt) -> bool {
+    a.is_open() && a.kind != AttemptKind::GateOnly
+}
+
 /// The PR is read again on the next pass instead of after the poll
 /// interval.
 fn recheck_pr(t: &mut Ticket, attempt: Option<&(String, u32)>) {
