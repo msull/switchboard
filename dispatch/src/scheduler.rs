@@ -1233,7 +1233,7 @@ impl Runner {
                             &ctx,
                             &cwd,
                             lane.as_deref(),
-                            a.n + 1,
+                            next_n(t, &stage.name),
                             now_ms,
                         )?;
                     }
@@ -1241,7 +1241,8 @@ impl Runner {
                 None => {
                     all_complete = false;
                     if !held {
-                        self.start_agent(t, ps, p, stage, &ctx, &cwd, lane.as_deref(), 1, now_ms)?;
+                        let n = next_n(t, &stage.name);
+                        self.start_agent(t, ps, p, stage, &ctx, &cwd, lane.as_deref(), n, now_ms)?;
                     }
                 }
             }
@@ -1301,8 +1302,10 @@ impl Runner {
             vars.set(name.clone(), path.display().to_string());
         }
         let mut prompt = String::new();
+        // Guidance is a template like the stage prompt: it may name the
+        // branch, the worktree or an artifact.
         if !operator.guidance.trim().is_empty() {
-            prompt.push_str(operator.guidance.trim());
+            prompt.push_str(&vars.render(operator.guidance.trim()));
             prompt.push_str("\n\n");
         }
         prompt.push_str(&vars.render(stage.prompt.as_deref().unwrap_or_default()));
@@ -1734,7 +1737,7 @@ impl Runner {
                             stage,
                             &ctx,
                             lane.as_deref(),
-                            a.n + 1,
+                            next_n(t, &stage.name),
                             now_ms,
                         )?;
                     }
@@ -1742,7 +1745,8 @@ impl Runner {
                 None => {
                     all_complete = false;
                     if !held {
-                        self.start_workflow(t, ps, p, stage, &ctx, lane.as_deref(), 1, now_ms)?;
+                        let n = next_n(t, &stage.name);
+                        self.start_workflow(t, ps, p, stage, &ctx, lane.as_deref(), n, now_ms)?;
                     }
                 }
             }
@@ -2092,9 +2096,15 @@ impl Runner {
         let mut names = Vec::new();
         if let Ok(entries) = std::fs::read_dir(dir) {
             for entry in entries.flatten() {
-                let path = entry.path();
-                if path.extension().is_some_and(|e| e == "json")
-                    && let Some(stem) = path.file_stem().and_then(|s| s.to_str())
+                // A project whose primary file is gone still exists
+                // through its backup, and a pass restores the primary.
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                let stem = name
+                    .strip_suffix(".json.bak")
+                    .or_else(|| name.strip_suffix(".json"));
+                if let Some(stem) = stem
+                    && !names.iter().any(|n| n == stem)
                 {
                     names.push(stem.to_owned());
                 }
@@ -2181,6 +2191,14 @@ impl Runner {
 }
 
 /// A fresh attempt record.
+/// The number of a stage's next attempt: one more than any attempt of
+/// the stage in any context, so `(stage, n)` names one attempt even in
+/// an `each` stage where lanes run side by side, which is how the
+/// ledger, decisions and the runner's own lookups identify one.
+fn next_n(t: &Ticket, stage: &str) -> u32 {
+    t.attempts_of(stage).map(|a| a.n).max().unwrap_or(0) + 1
+}
+
 /// The key a check is polled under: one per attempt.
 fn gate_key(t: &Ticket, a: &Attempt) -> String {
     format!("{}/{}/{}", t.id, a.stage, a.n)

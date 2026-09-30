@@ -41,7 +41,7 @@ setup = ["cargo", "fetch", "--locked"]
 
 [operators.investigator]
 kind = "claude"
-guidance = "Read CLAUDE.md first."
+guidance = "Read CLAUDE.md first; the branch is {{branch}}."
 
 [operators.planner]
 kind = "claude"
@@ -177,9 +177,11 @@ impl Env {
             .unwrap()
     }
 
+    /// One runner tick over every project, so a test's tickets advance
+    /// whichever project they belong to.
     fn step(&mut self) {
         let now = self.tick();
-        self.runner.step_project(PROJECT, now).unwrap();
+        self.runner.step_all(now).unwrap();
     }
 
     fn ticket(&self, id: &str) -> Ticket {
@@ -313,7 +315,13 @@ fn an_issue_becomes_one_project_four_sessions_one_run_and_a_finalize_decision() 
                 _ => None,
             })
             .unwrap();
-        assert!(prompt.starts_with("Read CLAUDE.md first."), "{prompt}");
+        assert!(
+            prompt.starts_with(&format!(
+                "Read CLAUDE.md first; the branch is {}.",
+                t.lanes[0].branch
+            )),
+            "guidance is rendered too: {prompt}"
+        );
         assert!(prompt.contains("Issue #7: Issue 7"), "{prompt}");
         assert!(
             prompt.contains(
@@ -1926,4 +1934,63 @@ fn without_a_hint_the_lanes_are_asked_and_the_answer_chooses() {
         2,
         "a planner per chosen lane: {t:#?}"
     );
+    // Side by side, the two attempts are distinct to every lookup: one
+    // stops and completes while the other keeps its own session; a
+    // rerun of one is numbered after both.
+    let numbers: Vec<u32> = t.attempts_of("plan").map(|a| a.n).collect();
+    assert_eq!(numbers, vec![1, 2], "one number per attempt of the stage");
+    let backend = plan_of(&t, "backend");
+    let frontend = plan_of(&t, "frontend");
+    assert_ne!(backend.session, frontend.session);
+    env.finish(
+        backend.session.as_ref().unwrap(),
+        &backend.artifacts["plan"],
+        "# backend plan",
+    );
+    env.steps_until(&id, "the backend plan completing", |t, _| {
+        plan_of(t, "backend").state == AttemptState::Complete
+    });
+    let t = env.ticket(&id);
+    assert!(plan_of(&t, "frontend").is_open(), "{t:#?}");
+    assert_eq!(
+        plan_of(&t, "frontend").session,
+        frontend.session,
+        "untouched by the other's poll"
+    );
+    // The frontend's pane goes away: only its attempt fails, and the
+    // rerun takes the next number of the stage.
+    env.sb().remove(frontend.session.as_ref().unwrap());
+    env.steps_until(&id, "the frontend plan failing", |t, _| {
+        matches!(plan_of(t, "frontend").state, AttemptState::Failed { .. })
+    });
+    let t = env.ticket(&id);
+    assert_eq!(plan_of(&t, "backend").state, AttemptState::Complete);
+    let rerun = env.pending(&id).remove(0);
+    assert_eq!(
+        (rerun.name.as_str(), rerun.attempt.clone()),
+        ("rerun", Some(("plan".to_owned(), 2)))
+    );
+    let now = env.tick();
+    env.runner
+        .decide(&id, &rerun.id, "rerun", None, now)
+        .unwrap();
+    env.steps_until(&id, "the rerun starting", |t, _| {
+        plan_of(t, "frontend").n == 3
+    });
+    let t = env.ticket(&id);
+    let latest = t
+        .attempts_of("plan")
+        .filter(|a| a.context == "frontend")
+        .max_by_key(|a| a.n)
+        .unwrap();
+    assert_eq!((latest.n, latest.is_open()), (3, true), "{t:#?}");
+}
+
+/// The plan attempt of one lane, by context.
+fn plan_of(t: &Ticket, ctx: &str) -> Attempt {
+    t.attempts_of("plan")
+        .filter(|a| a.context == ctx)
+        .max_by_key(|a| a.n)
+        .unwrap()
+        .clone()
 }
