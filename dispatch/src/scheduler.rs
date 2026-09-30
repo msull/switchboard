@@ -2150,6 +2150,23 @@ impl Runner {
 }
 
 impl Runner {
+    /// A parked ticket back to active; the runner takes it from its
+    /// current stage on its next pass. Nothing else is a resume.
+    pub fn resume(&self, ticket: &str, now_ms: u64) -> Result<Ticket> {
+        let path = self.data.ticket_file(ticket);
+        self.data.with_lock(|| {
+            let mut t: Ticket = read_json(&path)?;
+            let TicketState::Parked { reason } = &t.state else {
+                bail!("ticket {ticket} is not parked");
+            };
+            log::info!("ticket {ticket} resumed (was parked: {reason})");
+            t.state = TicketState::Active;
+            t.updated_ms = now_ms;
+            write_json(&path, &t)?;
+            Ok(t)
+        })
+    }
+
     /// `send` for the queue view, which is not an attempt's.
     pub fn send_for_view(
         &mut self,

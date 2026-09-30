@@ -19,6 +19,7 @@ const USAGE: &str = "usage:
   dispatch decisions                       what waits on you
   dispatch status                          every ticket, its stage and state
   dispatch queue <project> [<ticket>...]   show, or reorder, a project's queue
+  dispatch resume <ticket>                 a parked ticket back to active
 
 Data: $DISPATCH_DATA_DIR (default ~/Library/Application Support/Dispatch).
 Switchboard: $SWITCHBOARD_DATA_DIR/control.sock (default Switchboard's).
@@ -52,6 +53,7 @@ fn main() -> Result<()> {
         ["decisions"] => decisions(),
         ["status"] => status(),
         ["queue", project, rest @ ..] => queue(project, rest),
+        ["resume", ticket] => resume(ticket),
         _ => {
             eprintln!("{USAGE}");
             std::process::exit(2);
@@ -209,6 +211,22 @@ fn status() -> Result<()> {
             }
         }
     }
+    Ok(())
+}
+
+fn resume(ticket: &str) -> Result<()> {
+    let runner = Runner::new(
+        DataDir::from_env()?,
+        Box::new(NoPort),
+        Box::new(GitCli::default()),
+    );
+    let t = runner.resume(ticket, now_ms())?;
+    println!(
+        "{} #{} {} active again",
+        t.id,
+        t.source.number.unwrap_or(0),
+        t.source.title
+    );
     Ok(())
 }
 

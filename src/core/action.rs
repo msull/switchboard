@@ -446,6 +446,8 @@ pub enum AppAction {
         answer: String,
         note: Option<String>,
     },
+    /// A parked ticket back to active, through the port.
+    DispatchResume(String),
     /// Read an artifact's text through the port, once.
     DispatchReadArtifact {
         ticket: String,
@@ -880,6 +882,7 @@ impl AppCore {
             | AppAction::ShowTicket(_)
             | AppAction::DispatchDecide { .. }
             | AppAction::DispatchReadArtifact { .. }
+            | AppAction::DispatchResume(_)
             | AppAction::DispatchReplied { .. }
             | AppAction::OpenDispatchConsole
             | AppAction::DispatchConsole(_)

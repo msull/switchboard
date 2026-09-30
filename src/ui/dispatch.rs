@@ -529,6 +529,13 @@ fn ticket_header(cx: &mut DrawCtx<'_>, ui: &mut Ui, t: &TicketView) {
             if theme::ghost(ui, "Back").clicked() {
                 go_back(cx);
             }
+            if t.state == "parked"
+                && theme::secondary(ui, "Resume")
+                    .on_hover_text("Back to active; the runner takes it from its current stage")
+                    .clicked()
+            {
+                cx.dispatch(AppAction::DispatchResume(t.id.clone()));
+            }
             if let Some(url) = &t.url {
                 ui.hyperlink_to(RichText::new("Issue").color(p.accent_text), url);
             }

@@ -195,6 +195,15 @@ impl DispatchPort for FakeDispatch {
                 order: order.clone(),
             },
             DispatchBody::Take { .. } => DispatchReply::failed("takes are not faked"),
+            DispatchBody::Resume { ticket } => status
+                .tickets
+                .iter()
+                .find(|t| &t.id == ticket)
+                .cloned()
+                .map_or_else(
+                    || DispatchReply::failed("no such ticket"),
+                    DispatchReply::Ticket,
+                ),
         })
     }
 }

@@ -5572,6 +5572,30 @@ mod dispatch_page {
     }
 
     #[test]
+    fn resuming_a_parked_ticket_is_one_call_whose_reply_replaces_it() {
+        let (mut core, _) = loaded(vec![], vec![]);
+        let mut parked = status(None);
+        parked.tickets[0].state = "parked".into();
+        core.dispatch(AppAction::DispatchStatus(Some(parked)), Clock::at(1));
+        let e = core.dispatch(AppAction::DispatchResume("t1".into()), Clock::at(2));
+        assert!(e.contains(&Effect::DispatchCall(Body::Resume {
+            ticket: "t1".into()
+        })));
+        let mut active = core.ticket("t1").unwrap().clone();
+        active.state = "active".into();
+        core.dispatch(
+            AppAction::DispatchReplied {
+                body: Body::Resume {
+                    ticket: "t1".into(),
+                },
+                result: Ok(Reply::Ticket(active)),
+            },
+            Clock::at(3),
+        );
+        assert_eq!(core.ticket("t1").unwrap().state, "active");
+    }
+
+    #[test]
     fn the_page_moves_to_its_own_window_and_back() {
         let (mut core, _) = loaded(vec![], vec![]);
         core.dispatch(AppAction::DispatchStatus(Some(status(None))), Clock::at(1));

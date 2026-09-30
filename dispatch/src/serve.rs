@@ -87,6 +87,10 @@ impl Handler {
                 };
                 Reply::Queue { order: ps.queue }
             }
+            Body::Resume { ticket } => {
+                let t = self.runner.resume(ticket, now_ms)?;
+                Reply::Ticket(self.view(&t))
+            }
             Body::Take { project, issue } => {
                 let t = take_issue(&mut self.runner, &*self.issues, project, issue, now_ms)?;
                 Reply::Taken(self.view(&t))

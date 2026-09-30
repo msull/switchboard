@@ -73,6 +73,8 @@ pub enum Body {
     },
     /// Make a ticket from the project's source and queue it.
     Take { project: String, issue: String },
+    /// A parked ticket back to active.
+    Resume { ticket: String },
 }
 
 impl Body {
@@ -86,6 +88,7 @@ impl Body {
             Self::Decide { .. } => "decide",
             Self::Queue { .. } => "queue",
             Self::Take { .. } => "take",
+            Self::Resume { .. } => "resume",
         }
     }
 }
@@ -290,6 +293,9 @@ mod tests {
             Body::Take {
                 project: "Delta".into(),
                 issue: "104".into(),
+            },
+            Body::Resume {
+                ticket: "t1".into(),
             },
         ];
         for body in bodies {

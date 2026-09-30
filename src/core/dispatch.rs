@@ -112,37 +112,20 @@ impl AppCore {
                     note,
                 }));
             }
+            AppAction::DispatchResume(ticket) => {
+                if !self.dispatch.connected {
+                    self.error("Dispatch is not running; start it from the console");
+                    return;
+                }
+                out.push(Effect::DispatchCall(Body::Resume { ticket }));
+            }
             AppAction::DispatchReadArtifact { ticket, path } => {
                 if self.dispatch.artifacts.contains_key(&path) {
                     return;
                 }
                 out.push(Effect::DispatchCall(Body::Artifact { ticket, path }));
             }
-            AppAction::DispatchReplied { body, result } => match (body, result) {
-                (_, Err(e)) => {
-                    self.dispatch.connected = false;
-                    self.error(format!("Dispatch did not answer: {e}"));
-                }
-                (_, Ok(Reply::Failed { reason })) => self.error(format!("Dispatch: {reason}")),
-                (Body::Artifact { path, .. }, Ok(Reply::Artifact { text })) => {
-                    self.dispatch.artifacts.insert(path, text);
-                }
-                (Body::Decide { ticket, .. }, Ok(Reply::Decided(d))) => {
-                    // The next status carries it too; this keeps the
-                    // buttons from being pressed twice in between.
-                    if let Some(t) = self
-                        .dispatch
-                        .status
-                        .tickets
-                        .iter_mut()
-                        .find(|t| t.id == ticket)
-                        && let Some(slot) = t.decisions.iter_mut().find(|x| x.id == d.id)
-                    {
-                        *slot = d;
-                    }
-                }
-                _ => {}
-            },
+            AppAction::DispatchReplied { body, result } => self.dispatch_replied(body, result),
             AppAction::OpenDispatchConsole => {
                 self.ensure_console(now, out);
             }
@@ -164,6 +147,48 @@ impl AppCore {
             AppAction::PopOutDispatch
             | AppAction::CloseDispatchWindow
             | AppAction::DispatchWindowMoved(_) => self.dispatch_window_action(action, out),
+            _ => {}
+        }
+    }
+
+    /// What a call to Dispatch's port came back with: an error marks
+    /// the runner gone, a failure is a notice, and an answer lands on
+    /// the status it belongs to.
+    fn dispatch_replied(&mut self, body: Body, result: Result<Reply, String>) {
+        match (body, result) {
+            (_, Err(e)) => {
+                self.dispatch.connected = false;
+                self.error(format!("Dispatch did not answer: {e}"));
+            }
+            (_, Ok(Reply::Failed { reason })) => self.error(format!("Dispatch: {reason}")),
+            (Body::Artifact { path, .. }, Ok(Reply::Artifact { text })) => {
+                self.dispatch.artifacts.insert(path, text);
+            }
+            (Body::Resume { .. }, Ok(Reply::Ticket(t))) => {
+                if let Some(slot) = self
+                    .dispatch
+                    .status
+                    .tickets
+                    .iter_mut()
+                    .find(|x| x.id == t.id)
+                {
+                    *slot = t;
+                }
+            }
+            (Body::Decide { ticket, .. }, Ok(Reply::Decided(d))) => {
+                // The next status carries it too; this keeps the
+                // buttons from being pressed twice in between.
+                if let Some(t) = self
+                    .dispatch
+                    .status
+                    .tickets
+                    .iter_mut()
+                    .find(|t| t.id == ticket)
+                    && let Some(slot) = t.decisions.iter_mut().find(|x| x.id == d.id)
+                {
+                    *slot = d;
+                }
+            }
             _ => {}
         }
     }
