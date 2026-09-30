@@ -410,12 +410,21 @@ fn agent_card(cx: &mut DrawCtx<'_>, ui: &mut Ui, a: &WaitingAgent, ticket: Optio
                 )));
             });
             ui.label(RichText::new(&a.reason).color(p.accent_2_text));
-            if theme::secondary(ui, "Open session")
-                .on_hover_text("The pane, to answer it there")
-                .clicked()
-            {
-                cx.dispatch(AppAction::ShowSession(a.session));
-            }
+            ui.horizontal(|ui| {
+                if cx.core.at_trust_prompt(a.session)
+                    && theme::secondary(ui, "Trust this folder")
+                        .on_hover_text("Answer yes in the pane")
+                        .clicked()
+                {
+                    cx.dispatch(AppAction::TrustFolder(a.session));
+                }
+                if theme::ghost(ui, "Open session")
+                    .on_hover_text("The pane, to answer it there")
+                    .clicked()
+                {
+                    cx.dispatch(AppAction::ShowSession(a.session));
+                }
+            });
         });
 }
 

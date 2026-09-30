@@ -54,6 +54,10 @@ impl Clock {
     }
 }
 
+/// Down arrow then Enter: the trust question's "Yes" is the second
+/// choice of its menu.
+pub const TRUST_YES_KEYS: &[u8] = b"\x1b[B\r";
+
 /// Which screen is showing.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum View {
@@ -429,6 +433,8 @@ pub enum AppAction {
         id: RecordId,
         seen: bool,
     },
+    /// Answer Claude's folder trust question in the pane with yes.
+    TrustFolder(RecordId),
     Tick,
     /// One command from the control port, run quietly under its
     /// operation id; the outcome is taken with `take_control_outcome`.
@@ -833,6 +839,7 @@ impl AppCore {
             AppAction::Back => drop(self.view_stack.pop()),
             AppAction::DismissNotice => self.dismiss_notice(),
             AppAction::PromptSeen { id, seen } => self.prompt_seen(id, seen),
+            AppAction::TrustFolder(id) => self.trust_folder(id, &mut out),
             AppAction::Tick => self.tick(now, &mut out),
             AppAction::Controller(event) => self.controller_event(event, now, &mut out),
             AppAction::ActivateCard { set, target } => self.activate_card(set, target),
@@ -1908,6 +1915,24 @@ impl AppCore {
     #[must_use]
     pub fn at_trust_prompt(&self, id: RecordId) -> bool {
         self.prompted.contains(&id)
+    }
+
+    /// The question's menu starts on "No, exit"; one step down is
+    /// "Yes, I trust this folder", and Enter confirms. Only while the
+    /// pane was last seen showing the question, so the keys land on
+    /// nothing else; the mark is dropped at once and the next read of
+    /// the pane restores it if the question is still there.
+    fn trust_folder(&mut self, id: RecordId, out: &mut Out) {
+        if !self.prompted.contains(&id) {
+            let name = self.session_name(id);
+            self.error(format!("{name} is not at the trust question"));
+            return;
+        }
+        self.prompted.retain(|r| *r != id);
+        self.aim_at_pane(id, out, |host| Effect::SendKeys {
+            host,
+            bytes: TRUST_YES_KEYS.to_vec(),
+        });
     }
 
     fn prompt_seen(&mut self, id: RecordId, seen: bool) {

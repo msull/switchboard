@@ -5590,6 +5590,34 @@ mod dispatch_page {
     }
 
     #[test]
+    fn the_trust_question_is_answered_with_keys_only_while_it_shows() {
+        let p = project("p");
+        let mut w = Workspace::new(p.clone());
+        let r = record(p.id, agent(), 0);
+        let id = r.id;
+        w.sessions.push(r);
+        let (mut core, _) = loaded(vec![w], vec![]);
+        core.dispatch(AppAction::HostListed(vec![running(id)]), Clock::at(1));
+        let effects = core.dispatch(AppAction::TrustFolder(id), Clock::at(2));
+        assert!(
+            !effects.iter().any(|e| matches!(e, Effect::SendKeys { .. })),
+            "no question, no keys: {effects:?}"
+        );
+        assert!(core.notice().is_some());
+        core.dispatch(AppAction::PromptSeen { id, seen: true }, Clock::at(3));
+        let effects = core.dispatch(AppAction::TrustFolder(id), Clock::at(4));
+        assert!(effects.iter().any(|e| matches!(
+            e,
+            Effect::SendKeys { host, bytes }
+                if host.0 == id.host_name() && bytes == crate::core::TRUST_YES_KEYS
+        )));
+        assert!(
+            !core.at_trust_prompt(id),
+            "answered, until the pane says otherwise"
+        );
+    }
+
+    #[test]
     fn claudes_trust_prompt_is_the_users_turn_until_a_hook_runs() {
         let p = project("p");
         let mut w = Workspace::new(p.clone());

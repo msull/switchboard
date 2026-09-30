@@ -3888,6 +3888,16 @@ fn dispatch_page_shows_a_tickets_agent_waiting_for_itself() {
     harness.get_by_label(
         "agent waiting on you: implement (repo) Claude asks whether to trust this folder",
     );
+    harness.get_by_label("Open session");
+    // Answering drops the card until the pane is read again.
+    click(&mut harness, "Trust this folder");
+    assert!(actions(&harness).contains(&AppAction::TrustFolder(session)));
+    assert!(harness.query_by_label("implement (repo) agent").is_none());
+    harness.state_mut().dispatch(AppAction::PromptSeen {
+        id: session,
+        seen: true,
+    });
+    harness.run_steps(2);
     click(&mut harness, "Open session");
     assert!(actions(&harness).contains(&AppAction::ShowSession(session)));
 }

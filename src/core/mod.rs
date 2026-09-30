@@ -16,7 +16,9 @@ mod workflow;
 #[cfg(test)]
 mod tests;
 
-pub use action::{AppAction, AppCore, Clock, ConfigStatus, Effect, Notice, UNDO_WINDOW, View};
+pub use action::{
+    AppAction, AppCore, Clock, ConfigStatus, Effect, Notice, TRUST_YES_KEYS, UNDO_WINDOW, View,
+};
 pub use control::{ControlAction, ControlOutcome};
 pub use controller::{DOUBLE_PRESS, DWELL, MenuKind, RadialMenu, UiRequest};
 pub use definitions::entry_hash;

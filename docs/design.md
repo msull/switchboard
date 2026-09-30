@@ -1480,7 +1480,10 @@ The Dispatch page shows a ticket's own agents waiting for themselves
 with the trust question or the hook's reason): a card under "Waiting
 on you" with the attempt and an Open session button, the ticket row's
 standing, a line on the attempt on the ticket page, and the rail count
-beside the decisions. The page can then be the one view watched.
+beside the decisions. The page can then be the one view watched. The
+question is answered from the card or the session page ("Trust this
+folder", `TrustFolder`): down arrow and Enter to the pane, sent only
+while the pane was last seen showing it.
 
 The `dispatch` crate holds the first slice of `docs/dispatch.md`: the
 Switchboard pipeline through `investigate`, the automatic `lanes`

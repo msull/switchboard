@@ -141,6 +141,21 @@ fn header(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord) {
     let p = theme::palette(ui);
     let state = cx.core.card_state(record.id);
     let running = is_running(cx.core, record.id);
+    // Claude's own folder trust question, answerable from here.
+    if cx.core.at_trust_prompt(record.id) {
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 6.0;
+            ui.label(
+                RichText::new("Claude asks whether to trust this folder").color(p.accent_2_text),
+            );
+            if theme::secondary(ui, "Trust this folder")
+                .on_hover_text("Answer yes in the pane")
+                .clicked()
+            {
+                cx.dispatch(AppAction::TrustFolder(record.id));
+            }
+        });
+    }
     if ui.available_width() < TIGHT_HEADER {
         ui.horizontal(|ui| title_row(cx, ui, record, &state));
         ui.horizontal_wrapped(|ui| header_actions(cx, ui, record, running, false));
