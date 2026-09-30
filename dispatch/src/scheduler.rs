@@ -764,6 +764,27 @@ impl Runner {
         Ok(())
     }
 
+    /// The same attempt, its checks again: the agent's work stands and
+    /// the gate starts over on the next poll, no agent launched.
+    fn check_again(
+        &mut self,
+        t: &mut Ticket,
+        ps: &mut ProjectState,
+        attempt: Option<&(String, u32)>,
+        now_ms: u64,
+    ) -> Result<()> {
+        if let Some(a) =
+            attempt.and_then(|(s, n)| t.attempts.iter_mut().find(|a| &a.stage == s && a.n == *n))
+        {
+            a.state = AttemptState::Running;
+            a.gate = None;
+            a.ended_ms = None;
+            log::info!("ticket {} {}/{} checks again", t.id, a.stage, a.context);
+        }
+        self.save_ticket(t, now_ms)?;
+        self.unmark(t, ps, now_ms)
+    }
+
     /// Clear the waiting mark a decision put on a session.
     fn unmark(&mut self, t: &mut Ticket, ps: &mut ProjectState, now_ms: u64) -> Result<()> {
         if t.pending_decisions().is_empty()
@@ -856,6 +877,12 @@ impl Runner {
                         )?;
                     }
                     self.unmark(t, ps, now_ms)?;
+                }
+                ("rerun", "check") => {
+                    if let DecisionState::Answered { acted, .. } = &mut t.decisions[i].state {
+                        *acted = true;
+                    }
+                    self.check_again(t, ps, attempt.as_ref(), now_ms)?;
                 }
                 ("rerun", "rerun") => {
                     // The replaced attempt is retired first, so an old
@@ -1725,7 +1752,7 @@ impl Runner {
         };
         if !self.git.is_clean(cwd)? {
             let reason = format!("the tree at {} is not clean after the agent", cwd.display());
-            return self.fail_attempt(t, ps, &a.stage, a.n, &reason, now_ms);
+            return self.fail_checks(t, ps, &a.stage, a.n, &reason, now_ms);
         }
         let head = self.git.head(cwd)?;
         let dir = self
@@ -1831,11 +1858,11 @@ impl Runner {
                 cwd.display(),
                 gate.head
             );
-            return self.fail_attempt(t, ps, &a.stage, a.n, &reason, now_ms);
+            return self.fail_checks(t, ps, &a.stage, a.n, &reason, now_ms);
         }
         if code != 0 {
             let reason = format!("checks exited {code}; output at {}", gate.log.display());
-            return self.fail_attempt(t, ps, &a.stage, a.n, &reason, now_ms);
+            return self.fail_checks(t, ps, &a.stage, a.n, &reason, now_ms);
         }
         if let Some(attempt) = t
             .attempts
@@ -1865,6 +1892,39 @@ impl Runner {
         reason: &str,
         now_ms: u64,
     ) -> Result<()> {
+        self.fail_attempt_with(t, ps, stage, n, reason, &["rerun", "park"], now_ms)
+    }
+
+    /// A failure at the stage's checks: the work may be fine and the
+    /// environment not, so the checks can be run again on the same
+    /// attempt without another agent.
+    fn fail_checks(
+        &mut self,
+        t: &mut Ticket,
+        ps: &mut ProjectState,
+        stage: &str,
+        n: u32,
+        reason: &str,
+        now_ms: u64,
+    ) -> Result<()> {
+        self.fail_attempt_with(t, ps, stage, n, reason, &["rerun", "check", "park"], now_ms)
+    }
+
+    /// The attempt fails and the user is asked what next, unless the
+    /// stage has failed in this context as often as the policy's
+    /// `max_reruns` allows: then the ticket parks, so a broken stage
+    /// cannot spend agent runs on its own.
+    #[allow(clippy::too_many_arguments)]
+    fn fail_attempt_with(
+        &mut self,
+        t: &mut Ticket,
+        ps: &mut ProjectState,
+        stage: &str,
+        n: u32,
+        reason: &str,
+        options: &[&str],
+        now_ms: u64,
+    ) -> Result<()> {
         let Some(attempt) = t.attempts.iter_mut().find(|a| a.stage == stage && a.n == n) else {
             return Ok(());
         };
@@ -1875,6 +1935,26 @@ impl Runner {
         let ctx = attempt.context.clone();
         log::warn!("ticket {} {stage}/{ctx} attempt {n} failed: {reason}", t.id);
         self.save_ticket(t, now_ms)?;
+        let failed = t
+            .attempts
+            .iter()
+            .filter(|a| {
+                a.stage == stage
+                    && a.context == ctx
+                    && matches!(a.state, AttemptState::Failed { .. })
+            })
+            .count();
+        let max_reruns = self.pipeline_of(t).map_or(3, |p| p.policy.max_reruns);
+        if failed > max_reruns as usize {
+            return self.park(
+                t,
+                ps,
+                &format!(
+                    "{stage} ({ctx}) failed {failed} times, more than the policy's max_reruns of {max_reruns}; last: {reason}"
+                ),
+                now_ms,
+            );
+        }
         self.ensure_decision(
             t,
             ps,
@@ -1883,7 +1963,7 @@ impl Runner {
                 name: "rerun",
                 kind: DecisionKind::Permission,
                 question: format!("{stage} ({ctx}) attempt {n} failed: {reason}. Run it again?"),
-                options: &["rerun", "park"],
+                options,
                 recommendation: None,
                 attempt: Some((stage.to_owned(), n)),
             },

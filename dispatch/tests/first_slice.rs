@@ -634,6 +634,98 @@ fn failed_checks_are_a_decision_and_a_rerun_is_a_fresh_agent() {
     assert_eq!(env.sb().sessions_named("implementer").len(), 2);
 }
 
+/// Failed checks can be run again on the same attempt: the agent's
+/// work stands, no agent is launched, and the gate starts over.
+#[test]
+fn failed_checks_are_run_again_on_the_same_attempt_without_an_agent() {
+    let mut env = Env::new();
+    let (id, implementer) = at_implement(&mut env);
+    implementer_stops(&mut env, &id, &implementer);
+    env.steps_until(&id, "the checks starting", |t, _| {
+        t.attempts_of("implement")
+            .last()
+            .is_some_and(|a| a.gate.is_some())
+    });
+    let key = format!("{id}/implement/1");
+    env.repo.lock().unwrap().check_exits.insert(key.clone(), 1);
+    env.steps_until(&id, "the failure", |t, _| {
+        t.attempts_of("implement")
+            .last()
+            .is_some_and(|a| matches!(a.state, AttemptState::Failed { .. }))
+    });
+    let pending = env.pending(&id);
+    assert_eq!(pending[0].options, vec!["rerun", "check", "park"]);
+    // The environment is fixed; the checks pass this time.
+    env.repo.lock().unwrap().check_exits.insert(key, 0);
+    let now = env.tick();
+    env.runner
+        .decide(&id, &pending[0].id, "check", None, now)
+        .unwrap();
+    env.steps_until(&id, "the checks passing", |t, _| {
+        t.attempts_of("implement")
+            .last()
+            .is_some_and(|a| a.state == AttemptState::Complete)
+    });
+    let t = env.ticket(&id);
+    assert_eq!(t.attempts_of("implement").count(), 1, "the same attempt");
+    assert_eq!(
+        env.sb().sessions_named("implementer").len(),
+        1,
+        "no new agent"
+    );
+    assert_eq!(
+        env.repo.lock().unwrap().checks.len(),
+        2,
+        "the checks ran twice"
+    );
+}
+
+/// A stage that keeps failing parks the ticket once the policy's
+/// `max_reruns` is spent, instead of asking for another run.
+#[test]
+fn a_stage_failing_past_max_reruns_parks_the_ticket() {
+    let mut env = Env::new();
+    let (id, implementer) = at_implement(&mut env);
+    let t = env.ticket(&id);
+    for path in [env.data.pipeline(PROJECT), t.pipeline_file.clone()] {
+        let text = std::fs::read_to_string(&path)
+            .unwrap()
+            .replace("waiting_on_me = 3\n", "waiting_on_me = 3\nmax_reruns = 1\n");
+        std::fs::write(&path, text).unwrap();
+    }
+    env.repo
+        .lock()
+        .unwrap()
+        .dirty
+        .push(t.lanes[0].worktree.clone());
+    implementer_stops(&mut env, &id, &implementer);
+    env.steps_until(&id, "the first failure", |t, _| {
+        t.attempts_of("implement")
+            .last()
+            .is_some_and(|a| matches!(a.state, AttemptState::Failed { .. }))
+    });
+    let pending = env.pending(&id);
+    assert_eq!(pending.len(), 1, "one failure: asked");
+    let now = env.tick();
+    env.runner
+        .decide(&id, &pending[0].id, "rerun", None, now)
+        .unwrap();
+    env.steps_until(&id, "a second implementer", |t, _| {
+        t.attempts_of("implement")
+            .last()
+            .is_some_and(|a| a.n == 2 && a.is_open())
+    });
+    let second = session_of(&env.ticket(&id), "implement");
+    implementer_stops(&mut env, &id, &second);
+    env.steps_until(&id, "the ticket parking", |t, _| !t.active());
+    let t = env.ticket(&id);
+    let (TicketState::Parked { reason } | TicketState::Parking { reason }) = &t.state else {
+        panic!("{t:#?}");
+    };
+    assert!(reason.contains("max_reruns"), "{reason}");
+    assert!(env.pending(&id).is_empty(), "nothing more is asked");
+}
+
 #[test]
 fn a_dirty_tree_after_the_agent_never_runs_the_checks() {
     let mut env = Env::new();

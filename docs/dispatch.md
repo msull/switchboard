@@ -407,6 +407,7 @@ waiting_on_me = 2             # pending decisions across the project before noth
 rates = { "claude-sonnet-5" = [3.0, 15.0], ... }   # $ per million input, output tokens
 decisions = { lanes = "ask", finalize = "ask", merge = "ask", budget = "ask" }
 trust_folders = false         # true: Claude Code's folder trust question, which every fresh worktree asks, is answered for the project's agents
+max_reruns = 3                # failed attempts a stage may collect in one context before the ticket parks instead of asking again
 ```
 
 An agent stage needs no `gate` line: "the agent stopped and every
@@ -1105,8 +1106,9 @@ and one against the real one:
 | A review with one objection | The copy in the review attempt changes; the plan attempt's file does not |
 | Dispatch restarts while the planner clone is still being made | `op.status` is `in progress`; Dispatch waits; the attempt continues |
 | The implementer stops on a clean tree | The checks start at the tree's head in the lane with `DISPATCH_*` in their environment; the agent is killed; the attempt stays open until they exit; exit 0 binds the head and completes it |
-| The checks fail | A failed attempt and a rerun decision; nothing retried on its own; a rerun is a fresh agent |
-| The tree is dirty when the agent stops | No check runs; a failed attempt and a rerun decision |
+| The checks fail | A failed attempt and a rerun decision with `rerun`, `check` and `park`; nothing retried on its own; a rerun is a fresh agent, `check` runs the checks again on the same attempt with no agent |
+| The tree is dirty when the agent stops | No check runs; a failed attempt and the same decision |
+| A stage fails past the policy's `max_reruns` in one context | The ticket parks with the count and the last reason; nothing is asked |
 | The runner restarts while the checks run | The lost check starts again on the same head; no second agent |
 | The queue view after `plan` replaces `investigate`, and after two tickets swap places | One card per ticket, in order, no stale card, no overlap failure |
 | Plan session has no transcript yet | `workflow.start` fails; the attempt is failed and a decision, not retried |

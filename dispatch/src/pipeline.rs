@@ -331,6 +331,14 @@ pub struct Policy {
     /// agents, which every fresh worktree asks once.
     #[serde(default)]
     pub trust_folders: bool,
+    /// How many failed attempts a stage may collect in one context
+    /// before the ticket parks instead of asking for another run.
+    #[serde(default = "default_max_reruns")]
+    pub max_reruns: u32,
+}
+
+fn default_max_reruns() -> u32 {
+    3
 }
 
 impl Default for Policy {
@@ -342,6 +350,7 @@ impl Default for Policy {
             rates: BTreeMap::new(),
             decisions: BTreeMap::new(),
             trust_folders: false,
+            max_reruns: default_max_reruns(),
         }
     }
 }
