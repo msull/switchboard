@@ -36,6 +36,14 @@ pub enum ControlAction {
         prompt: Option<String>,
         notes: String,
     },
+    /// A Claude Code session cloned from `source`'s whole transcript,
+    /// launched with `prompt`.
+    CloneSession {
+        source: RecordId,
+        name: String,
+        prompt: String,
+        notes: String,
+    },
     SendInput {
         id: RecordId,
         text: String,
@@ -120,6 +128,7 @@ impl AppCore {
             action,
             ControlAction::AddProject { .. }
                 | ControlAction::NewSession { .. }
+                | ControlAction::CloneSession { .. }
                 | ControlAction::NewSpace { .. }
                 | ControlAction::NewSet { .. }
                 | ControlAction::StartWorkflow { .. }
@@ -193,6 +202,19 @@ impl AppCore {
                 }
                 self.launch_fresh(id, now, out);
                 vec![made(K::Session, id.0)]
+            }
+            ControlAction::CloneSession {
+                source,
+                name,
+                prompt,
+                notes,
+            } => {
+                if let Some(reason) = self.host_error.clone() {
+                    self.error(format!("cannot start {name}: {reason}"));
+                    return Vec::new();
+                }
+                self.clone_into(source, name, prompt, notes, now, out)
+                    .map_or_else(Vec::new, |id| vec![made(K::Session, id.0)])
             }
             ControlAction::SendInput { id, text } => {
                 self.session_action(AppAction::SendInput { id, text }, now, out);
@@ -593,6 +615,7 @@ fn control_kind(action: &ControlAction) -> String {
         ControlAction::AddProject { .. } => "project.add",
         ControlAction::RemoveProject(_) => "project.remove",
         ControlAction::NewSession { .. } => "session.new",
+        ControlAction::CloneSession { .. } => "session.clone",
         ControlAction::SendInput { .. } => "session.send",
         ControlAction::Kill(_) => "session.kill",
         ControlAction::Remove(_) => "session.remove",
@@ -681,6 +704,7 @@ impl TryFrom<wire::Body> for ControlAction {
 
     /// A command's payload with its ids parsed. A query is an error: it
     /// is answered from the read models, never dispatched.
+    #[allow(clippy::too_many_lines)] // one arm per command
     fn try_from(body: wire::Body) -> Result<Self, String> {
         let session = |s: &str| parse_id("session", s).map(RecordId);
         let project = |s: &str| parse_id("project", s).map(ProjectId);
@@ -711,6 +735,17 @@ impl TryFrom<wire::Body> for ControlAction {
                 kind: session_kind(k),
                 cwd,
                 launch: launch(l),
+                prompt,
+                notes,
+            },
+            wire::Body::SessionClone {
+                source: s,
+                name,
+                prompt,
+                notes,
+            } => Self::CloneSession {
+                source: session(&s)?,
+                name,
                 prompt,
                 notes,
             },

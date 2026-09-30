@@ -1301,33 +1301,12 @@ impl Runner {
         }
         let mut all_complete = true;
         for (ctx, cwd, lane) in contexts {
-            let last = t
-                .attempts
-                .iter()
-                .filter(|a| a.stage == stage.name && a.context == ctx)
-                .max_by_key(|a| a.n)
-                .cloned();
-            let attempt = match last {
-                Some(a) if a.state == AttemptState::Complete => continue,
-                Some(a) if a.is_open() => a,
-                Some(_) => {
-                    all_complete = false;
-                    continue;
-                }
-                None => {
-                    let a = new_attempt(
-                        &stage.name,
-                        next_n(t, &stage.name),
-                        &ctx,
-                        AttemptKind::GateOnly,
-                        AttemptState::Running,
-                        BTreeMap::new(),
-                        now_ms,
-                    );
-                    t.attempts.push(a.clone());
-                    self.save_ticket(t, now_ms)?;
-                    a
-                }
+            if self.poll_rebaser(t, ps, p, stage, &ctx, &cwd, lane.as_deref(), now_ms)? {
+                all_complete = false;
+                continue;
+            }
+            let Some(attempt) = self.open_gate_attempt(t, stage, &ctx, now_ms)? else {
+                continue;
             };
             all_complete = false;
             self.poll_pr_checks(t, ps, p, stage, &attempt, &cwd, lane.as_deref(), now_ms)?;
@@ -1389,6 +1368,19 @@ impl Runner {
                     "no pull request for branch {} in {}; open one, then answer recheck",
                     target.branch, target.repo
                 )
+            }
+            Ok(Some((pr, _)))
+                if pr.state == "open" && pr.mergeable.as_deref() == Some("conflicting") =>
+            {
+                attempt_mut(t, a).pr = Some(PullRequestRecord {
+                    number: pr.number,
+                    url: pr.url.clone(),
+                    checks: "conflicting".into(),
+                    ..target.record(&pr.head, now_ms)
+                });
+                self.save_ticket(t, now_ms)?;
+                let a = attempt_mut(t, a).clone();
+                return self.conflict(t, ps, p, stage, &a, cwd, lane, &pr, now_ms);
             }
             Ok(Some((pr, checks))) => {
                 let (summary, verdict) = judge_pr(&pr, checks.as_ref(), &head, none_expected);
@@ -1527,6 +1519,35 @@ impl Runner {
         Ok(())
     }
 
+    /// A rebaser at work in the context is what is watched; true while
+    /// one is open.
+    #[allow(clippy::too_many_arguments)]
+    fn poll_rebaser(
+        &mut self,
+        t: &mut Ticket,
+        ps: &mut ProjectState,
+        p: &Pipeline,
+        stage: &Stage,
+        ctx: &str,
+        cwd: &Path,
+        lane: Option<&str>,
+        now_ms: u64,
+    ) -> Result<bool> {
+        let open = t
+            .attempts
+            .iter()
+            .filter(|a| a.stage == stage.name && a.context == ctx && a.kind == AttemptKind::Agent)
+            .max_by_key(|a| a.n)
+            .filter(|a| a.is_open())
+            .cloned();
+        let Some(a) = open else {
+            return Ok(false);
+        };
+        let trust = p.policy.trust_folders;
+        self.poll_agent(t, ps, &a, stage, cwd, lane, trust, now_ms)?;
+        Ok(true)
+    }
+
     /// The open gate-only attempt of a stage in a context: the one
     /// there is, or a new one; `None` when the context is complete.
     fn open_gate_attempt(
@@ -1539,7 +1560,9 @@ impl Runner {
         let last = t
             .attempts
             .iter()
-            .filter(|a| a.stage == stage.name && a.context == ctx)
+            .filter(|a| {
+                a.stage == stage.name && a.context == ctx && a.kind == AttemptKind::GateOnly
+            })
             .max_by_key(|a| a.n)
             .cloned();
         Ok(match last {
@@ -1726,6 +1749,10 @@ impl Runner {
         }
         let mut all_complete = true;
         for (ctx, cwd, lane) in contexts {
+            if self.poll_rebaser(t, ps, p, stage, &ctx, &cwd, lane.as_deref(), now_ms)? {
+                all_complete = false;
+                continue;
+            }
             let Some(attempt) = self.open_gate_attempt(t, stage, &ctx, now_ms)? else {
                 continue;
             };
@@ -1806,6 +1833,10 @@ impl Runner {
                 match pr.state.as_str() {
                     "merged" => return self.merged(t, ps, a, decision, &pr, now_ms),
                     "closed" => format!("PR #{} is closed without being merged", pr.number),
+                    _ if pr.mergeable.as_deref() == Some("conflicting") => {
+                        let a = attempt_mut(t, a).clone();
+                        return self.conflict(t, ps, p, stage, &a, cwd, lane, &pr, now_ms);
+                    }
                     _ => {
                         let question = format!(
                             "{} ({}): PR #{} {} is open at {}; merge it there. Dispatch resolves this when the provider reports the merge.",
@@ -2153,29 +2184,16 @@ impl Runner {
         n: u32,
         now_ms: u64,
     ) -> Result<()> {
-        let operator_name = stage.operator.clone().unwrap_or_default();
-        let Some(operator) = p.operators.get(&operator_name) else {
+        let operator = stage.operator.clone().unwrap_or_default();
+        if !p.operators.contains_key(&operator) {
             return self.park(
                 t,
                 ps,
                 &format!("stage {} names no operator", stage.name),
                 now_ms,
             );
-        };
-        let project = match self.ensure_project(t, ps, p, now_ms) {
-            Ok(id) => id,
-            Err(e) => return self.park(t, ps, &format!("stage {}: {e:#}", stage.name), now_ms),
-        };
-        if !self.ensure_setup(t, ps, p, cwd, now_ms)? {
-            return Ok(());
         }
-        let dir = self
-            .data
-            .ticket_dir(&t.id)
-            .join(&stage.name)
-            .join(n.to_string())
-            .join(ctx);
-        std::fs::create_dir_all(&dir)?;
+        let dir = self.attempt_dir(t, &stage.name, n, ctx)?;
         let artifacts: BTreeMap<String, PathBuf> = stage
             .writes
             .iter()
@@ -2188,8 +2206,9 @@ impl Runner {
         let mut prompt = String::new();
         // Guidance is a template like the stage prompt: it may name the
         // branch, the worktree or an artifact.
-        if !operator.guidance.trim().is_empty() {
-            prompt.push_str(&vars.render(operator.guidance.trim()));
+        let guidance = p.operators[&operator].guidance.trim();
+        if !guidance.is_empty() {
+            prompt.push_str(&vars.render(guidance));
             prompt.push_str("\n\n");
         }
         prompt.push_str(&vars.render(stage.prompt.as_deref().unwrap_or_default()));
@@ -2197,65 +2216,247 @@ impl Runner {
             prompt.push_str("\n\nThe user looked at the previous attempt and sent it back: ");
             prompt.push_str(&note);
         }
+        let spec = AgentSpec {
+            operator,
+            prompt,
+            artifacts,
+            clone_of: None,
+            pr: None,
+        };
+        self.launch_agent(t, ps, p, &stage.name, ctx, cwd, n, spec, now_ms)
+    }
+
+    /// The attempt's own directory under the ticket's, made.
+    fn attempt_dir(&self, t: &Ticket, stage: &str, n: u32, ctx: &str) -> Result<PathBuf> {
+        let dir = self
+            .data
+            .ticket_dir(&t.id)
+            .join(stage)
+            .join(n.to_string())
+            .join(ctx);
+        std::fs::create_dir_all(&dir)?;
+        Ok(dir)
+    }
+
+    /// One agent attempt started: the record and its request written
+    /// together. A `clone_of` makes the session from that session's
+    /// transcript instead of fresh, so it knows what it is continuing.
+    #[allow(clippy::too_many_arguments)]
+    fn launch_agent(
+        &mut self,
+        t: &mut Ticket,
+        ps: &mut ProjectState,
+        p: &Pipeline,
+        stage: &str,
+        ctx: &str,
+        cwd: &Path,
+        n: u32,
+        spec: AgentSpec,
+        now_ms: u64,
+    ) -> Result<()> {
+        let operator = &p.operators[&spec.operator];
+        let project = match self.ensure_project(t, ps, p, now_ms) {
+            Ok(id) => id,
+            Err(e) => return self.park(t, ps, &format!("stage {stage}: {e:#}"), now_ms),
+        };
+        if !self.ensure_setup(t, ps, p, cwd, now_ms)? {
+            return Ok(());
+        }
+        let dir = self.attempt_dir(t, stage, n, ctx)?;
         let mut attempt = new_attempt(
-            &stage.name,
+            stage,
             n,
             ctx,
             AttemptKind::Agent,
             AttemptState::Starting,
-            artifacts,
+            spec.artifacts,
             now_ms,
         );
         attempt.project = Some(project.clone());
+        attempt.pr = spec.pr;
         // Not saved here: `send` writes the attempt and its request in
         // one go, so no record ever shows the one without the other.
         t.attempts.push(attempt);
-        // The artifacts live outside the agent's cwd, in Dispatch's own
-        // directory; Claude Code writes there unasked only under an
-        // allow rule for the path (an added directory still asks before
-        // creating a file).
-        let mut args = operator.args.clone();
-        args.extend(operator.kind.write_flags(&dir));
-        let kind = session_kind(operator.kind);
-        let launch = if args.is_empty() {
-            wire::Launch::Shell
-        } else {
-            wire::Launch::Argv(args)
-        };
         let notes = format!(
-            "Dispatch ticket {} · #{} {} · stage {} attempt {n}",
+            "Dispatch ticket {} · #{} {} · stage {stage} attempt {n}",
             t.id,
             t.source.number.unwrap_or(0),
             t.source.title,
-            stage.name
         );
-        let reply = self.send(
-            t,
-            ps,
-            Some((stage.name.clone(), n)),
-            "session",
+        let body = if let Some(source) = spec.clone_of {
+            Body::SessionClone {
+                source,
+                name: spec.operator,
+                prompt: spec.prompt,
+                notes,
+            }
+        } else {
+            // The artifacts live outside the agent's cwd, in Dispatch's
+            // own directory; Claude Code writes there unasked only under
+            // an allow rule for the path (an added directory still asks
+            // before creating a file).
+            let mut args = operator.args.clone();
+            args.extend(operator.kind.write_flags(&dir));
+            let launch = if args.is_empty() {
+                wire::Launch::Shell
+            } else {
+                wire::Launch::Argv(args)
+            };
             Body::SessionNew {
                 project,
-                name: operator_name,
-                session_kind: kind,
+                name: spec.operator,
+                session_kind: session_kind(operator.kind),
                 cwd: cwd.to_path_buf(),
                 launch,
-                prompt: Some(prompt),
+                prompt: Some(spec.prompt),
                 notes,
-            },
-            now_ms,
-        )?;
+            }
+        };
+        let reply = self.send(t, ps, Some((stage.to_owned(), n)), "session", body, now_ms)?;
         if let Reply::Failed { reason } = reply {
             self.fail_attempt(
                 t,
                 ps,
-                &stage.name,
+                stage,
                 n,
                 &format!("could not start: {reason}"),
                 now_ms,
             )?;
         }
         Ok(())
+    }
+
+    /// A PR that conflicts with its base: the policy's rebaser runs in
+    /// the lane, cloned from the lane's last implementer so it knows the
+    /// change, once per conflicting head and at most `max_rebases`
+    /// times; otherwise, or without a rebaser, the conflict is a
+    /// question. True when something was started or asked.
+    #[allow(clippy::too_many_arguments)]
+    fn conflict(
+        &mut self,
+        t: &mut Ticket,
+        ps: &mut ProjectState,
+        p: &Pipeline,
+        stage: &Stage,
+        a: &Attempt,
+        cwd: &Path,
+        lane: Option<&str>,
+        pr: &crate::github::PullRequest,
+        now_ms: u64,
+    ) -> Result<()> {
+        if let Some(why) = conflict_reason(t, p, a, pr) {
+            return self.ensure_decision(
+                t,
+                ps,
+                Ask {
+                    stage: &a.stage,
+                    name: "pr",
+                    kind: DecisionKind::Permission,
+                    question: format!(
+                        "{} ({}): PR #{} conflicts with its base; {why}",
+                        a.stage, a.context, pr.number
+                    ),
+                    options: &["recheck", "park"],
+                    recommendation: None,
+                    attempt: Some((a.stage.clone(), a.n)),
+                },
+                now_ms,
+            );
+        }
+        let _ = stage;
+        self.start_rebase(t, ps, p, a, cwd, lane, pr, now_ms)
+    }
+
+    /// The rebaser started in the lane, cloned from the lane's last
+    /// finished agent, with the conflicting head on its record.
+    #[allow(clippy::too_many_arguments)]
+    fn start_rebase(
+        &mut self,
+        t: &mut Ticket,
+        ps: &mut ProjectState,
+        p: &Pipeline,
+        a: &Attempt,
+        cwd: &Path,
+        lane: Option<&str>,
+        pr: &crate::github::PullRequest,
+        now_ms: u64,
+    ) -> Result<()> {
+        let rebaser = p.policy.rebaser.clone().unwrap_or_default();
+        let n = next_n(t, &a.stage);
+        let dir = self.attempt_dir(t, &a.stage, n, &a.context)?;
+        let notes = dir.join("notes.md");
+        let lane_record = lane.and_then(|l| t.lanes.iter().find(|x| x.name == l));
+        let base = lane_record.and_then(|l| p.lane(&l.name)).map_or_else(
+            || p.project.base.clone(),
+            |l| format!("{}/{}", p.lane_remote(l), p.lane_base(l)),
+        );
+        let mut vars = vars_for(t, p, lane);
+        vars.set("notes", notes.display().to_string());
+        let mut prompt = String::new();
+        let guidance = p.operators[&rebaser].guidance.trim();
+        if !guidance.is_empty() {
+            prompt.push_str(&vars.render(guidance));
+            prompt.push_str("\n\n");
+        }
+        let _ = write!(
+            prompt,
+            "PR #{} ({}) for branch {} conflicts with {base}. In {}: fetch, rebase the branch onto {base}, resolve every conflict keeping the change's intent{}, run the checks, then push with --force-with-lease. Write what you resolved and why to {}.",
+            pr.number,
+            pr.url,
+            lane_record.map_or("", |l| l.branch.as_str()),
+            cwd.display(),
+            t.input("plan")
+                .map(|plan| format!(" (the plan is at {})", plan.display()))
+                .unwrap_or_default(),
+            notes.display()
+        );
+        // The lane's last finished agent, whose transcript the rebaser
+        // continues from.
+        let clone_of = t
+            .attempts
+            .iter()
+            .filter(|x| {
+                x.context == a.context
+                    && x.kind == AttemptKind::Agent
+                    && x.state == AttemptState::Complete
+                    && x.session.is_some()
+            })
+            .max_by_key(|x| x.started_ms)
+            .and_then(|x| x.session.clone());
+        let mut record = PullRequestRecord {
+            provider: String::new(),
+            repo: String::new(),
+            number: pr.number,
+            url: pr.url.clone(),
+            head: pr.head.clone(),
+            checks: "conflicting".into(),
+            checked_ms: now_ms,
+            error_since_ms: None,
+        };
+        if let Some(seen) = &a.pr {
+            record.provider.clone_from(&seen.provider);
+            record.repo.clone_from(&seen.repo);
+        }
+        log::info!(
+            "ticket {} {}/{} PR #{} conflicts; rebaser starting{}",
+            t.id,
+            a.stage,
+            a.context,
+            pr.number,
+            clone_of
+                .as_deref()
+                .map(|s| format!(" from {s}"))
+                .unwrap_or_default()
+        );
+        let spec = AgentSpec {
+            operator: rebaser,
+            prompt,
+            artifacts: BTreeMap::from([("notes".to_owned(), notes)]),
+            clone_of,
+            pr: Some(record),
+        };
+        let (stage_name, ctx) = (a.stage.clone(), a.context.clone());
+        self.launch_agent(t, ps, p, &stage_name, &ctx, cwd, n, spec, now_ms)
     }
 
     /// What Switchboard says about the attempt's session, and what that
@@ -3277,6 +3478,16 @@ fn attempt_mut<'t>(t: &'t mut Ticket, a: &Attempt) -> &'t mut Attempt {
         .expect("the attempt polled exists")
 }
 
+/// An agent attempt to start: who, with what prompt, writing which
+/// artifacts, and from whose transcript.
+struct AgentSpec {
+    operator: String,
+    prompt: String,
+    artifacts: BTreeMap<String, PathBuf>,
+    clone_of: Option<String>,
+    pr: Option<PullRequestRecord>,
+}
+
 /// One context's poll of a PR-reading stage.
 #[derive(Clone, Copy)]
 struct PrPoll<'a> {
@@ -3368,6 +3579,45 @@ fn pr_target(
         repo,
         branch: lane_record.branch.clone(),
     })
+}
+
+/// Why a conflicting PR is a question rather than a rebase: no rebaser
+/// in the policy, the last rebase changed nothing, or the cap is spent.
+fn conflict_reason(
+    t: &Ticket,
+    p: &Pipeline,
+    a: &Attempt,
+    pr: &crate::github::PullRequest,
+) -> Option<String> {
+    let earlier: Vec<&Attempt> = t
+        .attempts
+        .iter()
+        .filter(|x| x.stage == a.stage && x.context == a.context && x.kind == AttemptKind::Agent)
+        .collect();
+    let count = u32::try_from(earlier.len()).unwrap_or(u32::MAX);
+    let last_head = earlier
+        .iter()
+        .max_by_key(|x| x.n)
+        .and_then(|x| x.pr.as_ref())
+        .map(|r| r.head.clone());
+    if p.policy.rebaser.is_none() {
+        Some("rebase it onto its base by hand, then answer recheck".to_owned())
+    } else if last_head
+        .as_deref()
+        .is_some_and(|h| same_commit(h, &pr.head))
+    {
+        Some(
+            "the rebaser ran and the PR is still at the same head; rebase by hand, then answer recheck"
+                .to_owned(),
+        )
+    } else if count >= p.policy.max_rebases {
+        Some(format!(
+            "the policy's max_rebases of {} is spent ({count} done); rebase by hand, then answer recheck",
+            p.policy.max_rebases
+        ))
+    } else {
+        None
+    }
 }
 
 /// Whether two hashes name one commit; a provider may report a short

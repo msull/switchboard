@@ -352,6 +352,7 @@ impl SwitchboardApp {
             | Effect::CheckTranscript { .. }
             | Effect::CloneTranscript { .. }
             | Effect::CloneAllTranscript { .. }
+            | Effect::CloneTranscriptInto { .. }
             | Effect::DiscardTranscript { .. }
             | Effect::Discover { .. }
             | Effect::Spawn { .. }
@@ -419,6 +420,15 @@ impl SwitchboardApp {
                 run,
                 result: s.transcripts.clone_all(&handle),
             },
+            Effect::CloneTranscriptInto {
+                target,
+                handle,
+                prompt,
+            } => AppAction::TranscriptClonedInto {
+                target,
+                prompt,
+                result: s.transcripts.clone_all(&handle),
+            },
             Effect::DiscardTranscript {
                 id,
                 handle,
@@ -448,6 +458,7 @@ impl SwitchboardApp {
             | Effect::CheckTranscript { .. }
             | Effect::CloneTranscript { .. }
             | Effect::CloneAllTranscript { .. }
+            | Effect::CloneTranscriptInto { .. }
             | Effect::DiscardTranscript { .. } => Some(self.run_agent_effect(effect)),
             Effect::ProbeRoundFile { .. }
             | Effect::SnapshotRound { .. }

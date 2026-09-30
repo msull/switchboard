@@ -4946,6 +4946,91 @@ mod control {
         }
     }
 
+    /// `session.clone` makes the record at once, so the asker has its
+    /// id and its op, and launches it through the copied transcript.
+    #[test]
+    fn a_session_cloned_by_the_port_exists_before_its_copy_and_launches_from_it() {
+        let (mut core, source) = resumable_agent();
+        let pid = core.session(source).unwrap().project;
+        let effects = control(
+            &mut core,
+            "op-9",
+            ControlAction::CloneSession {
+                source,
+                name: "rebaser".into(),
+                prompt: "Rebase onto main.".into(),
+                notes: "Dispatch ticket 1, rebase".into(),
+            },
+            10,
+        );
+        let outcome = core.take_control_outcome("op-9").expect("an outcome");
+        assert_eq!(outcome.error, None);
+        assert_eq!(outcome.made.len(), 1);
+        let id = core
+            .workspace(pid)
+            .unwrap()
+            .sessions
+            .iter()
+            .find(|s| s.name == "rebaser")
+            .map(|s| s.id)
+            .expect("the clone's record");
+        assert_eq!(outcome.made[0].id, id.0.to_string());
+        let record = core.session(id).unwrap();
+        assert_eq!(record.op.as_deref(), Some("op-9"));
+        assert_eq!(record.notes, "Dispatch ticket 1, rebase");
+        assert!(record.pending_launch);
+        assert_eq!(record.resume, None, "no handle until the copy exists");
+        assert_eq!(record.cwd, core.session(source).unwrap().cwd);
+        assert!(
+            effects
+                .iter()
+                .any(|e| matches!(e, Effect::CloneTranscriptInto { target, .. } if *target == id)),
+            "{effects:?}"
+        );
+        let copy = claude_handle();
+        let effects = core.dispatch(
+            AppAction::TranscriptClonedInto {
+                target: id,
+                prompt: "Rebase onto main.".into(),
+                result: Ok(copy.clone()),
+            },
+            Clock::at(11),
+        );
+        assert_eq!(core.session(id).unwrap().resume, Some(copy));
+        assert!(
+            effects
+                .iter()
+                .any(|e| matches!(e, Effect::CheckTranscript { id: i, .. } if *i == id)),
+            "the record resumes through the copy: {effects:?}"
+        );
+        // A copy that could not be made leaves a record that never ran.
+        let effects = control(
+            &mut core,
+            "op-10",
+            ControlAction::CloneSession {
+                source,
+                name: "rebaser".into(),
+                prompt: "again".into(),
+                notes: String::new(),
+            },
+            12,
+        );
+        let second = match &effects[0] {
+            Effect::LogOperation { ids, .. } => ids[0].parse::<Uuid>().map(RecordId).unwrap(),
+            other => panic!("{other:?}"),
+        };
+        core.dispatch(
+            AppAction::TranscriptClonedInto {
+                target: second,
+                prompt: "again".into(),
+                result: Err("no transcript".into()),
+            },
+            Clock::at(13),
+        );
+        let record = core.session(second).unwrap();
+        assert!(record.not_resumable && !record.pending_launch);
+    }
+
     #[test]
     fn a_session_made_by_the_port_carries_its_op_and_moves_nothing_on_screen() {
         let (mut core, pid, _) = with_records(&[], |_| None);

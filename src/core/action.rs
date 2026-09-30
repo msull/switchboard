@@ -413,6 +413,13 @@ pub enum AppAction {
         prompt: String,
         result: Result<ResumeHandle, String>,
     },
+    /// The copy for a record made ahead of it (the control port's
+    /// `session.clone`) exists (or not); the record launches from it.
+    TranscriptClonedInto {
+        target: RecordId,
+        prompt: String,
+        result: Result<ResumeHandle, String>,
+    },
     /// The provider-side copy for `DiscardTo` was made (or not).
     TranscriptDiscarded {
         id: RecordId,
@@ -528,6 +535,14 @@ pub enum Effect {
     CloneAllTranscript {
         run: WorkflowId,
         handle: ResumeHandle,
+    },
+    /// The whole conversation behind `handle` copied under a fresh id
+    /// for the record `target`, which already exists and waits for it
+    /// (reports `TranscriptClonedInto`).
+    CloneTranscriptInto {
+        target: RecordId,
+        handle: ResumeHandle,
+        prompt: String,
     },
     /// Look for the file a run waits on (reports `RoundFileProbed`).
     ProbeRoundFile {
@@ -890,6 +905,7 @@ impl AppCore {
             | AppAction::RestartSession(_)
             | AppAction::CloneSession { .. }
             | AppAction::TranscriptCloned { .. }
+            | AppAction::TranscriptClonedInto { .. }
             | AppAction::DiscardTo { .. }
             | AppAction::UndoDiscard(_)
             | AppAction::TranscriptDiscarded { .. }
@@ -986,6 +1002,11 @@ impl AppCore {
                 prompt,
                 result,
             } => self.transcript_cloned(source, prompt, result, now, out),
+            AppAction::TranscriptClonedInto {
+                target,
+                prompt,
+                result,
+            } => self.transcript_cloned_into(target, prompt, result, now, out),
             AppAction::DiscardTo { id, before, prompt } => {
                 self.discard_to(id, before, prompt, out);
             }

@@ -340,10 +340,23 @@ pub struct Policy {
     /// before the ticket parks instead of asking for another run.
     #[serde(default = "default_max_reruns")]
     pub max_reruns: u32,
+    /// The operator that rebases a branch whose PR conflicts with its
+    /// base, cloned from the lane's implementer; absent, a conflict is
+    /// a question.
+    #[serde(default)]
+    pub rebaser: Option<String>,
+    /// How many rebases one PR may get before the conflict is a
+    /// question instead.
+    #[serde(default = "default_max_rebases")]
+    pub max_rebases: u32,
 }
 
 fn default_max_reruns() -> u32 {
     3
+}
+
+fn default_max_rebases() -> u32 {
+    2
 }
 
 impl Default for Policy {
@@ -356,6 +369,8 @@ impl Default for Policy {
             decisions: BTreeMap::new(),
             trust_folders: false,
             max_reruns: default_max_reruns(),
+            rebaser: None,
+            max_rebases: default_max_rebases(),
         }
     }
 }
@@ -545,6 +560,11 @@ impl Pipeline {
         }
         if self.lanes.is_empty() {
             bail!("a pipeline needs at least one lane");
+        }
+        if let Some(rebaser) = &self.policy.rebaser
+            && !self.operators.contains_key(rebaser)
+        {
+            bail!("[policy] rebaser names an unknown operator {rebaser:?}");
         }
         match (&self.project.repo, &self.project.root) {
             (Some(_), None) | (None, Some(_)) => {}

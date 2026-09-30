@@ -13,7 +13,9 @@ use dispatch::git::FakeRepo;
 use dispatch::github::{Checks, FakePullRequests, PullRequest};
 use dispatch::scheduler::{PR_ERROR_GRACE_MS, PR_POLL_MS, Runner};
 use dispatch::store::DataDir;
-use dispatch::ticket::{Attempt, AttemptState, Decision, SourceSnapshot, Ticket, TicketState};
+use dispatch::ticket::{
+    Attempt, AttemptKind, AttemptState, Decision, SourceSnapshot, Ticket, TicketState,
+};
 use support::{FakeSwitchboard, SharedPort, SharedRepo};
 use switchboard_control::{Body, Liveness, RunState, SessionKind};
 
@@ -61,6 +63,10 @@ cap = 4
 
 [operators.implementer]
 kind = "claude"
+
+[operators.rebaser]
+kind = "claude"
+guidance = "Rebase carefully on {{branch}}."
 
 [[stages]]
 name = "investigate"
@@ -113,6 +119,7 @@ gate = {{ kind = "external", check = "pr-merged", decision = "merge" }}
 [policy]
 slots = 2
 waiting_on_me = 3
+rebaser = "rebaser"
 decisions = {{ lanes = "auto", finalize = "ask" }}
 "#,
         worktrees = worktrees.display()
@@ -193,6 +200,18 @@ impl Env {
     /// The pull request for the ticket's one lane, as the provider
     /// will report it from now on.
     fn pr_is(&mut self, id: &str, head: &str, state: &str, checks: Checks) {
+        self.pr_is_with(id, head, state, checks, None);
+    }
+
+    /// The same, with what the provider says about merging it.
+    fn pr_is_with(
+        &mut self,
+        id: &str,
+        head: &str,
+        state: &str,
+        checks: Checks,
+        mergeable: Option<&str>,
+    ) {
         let t = self.ticket(id);
         let branch = t.lanes[0].branch.clone();
         let mut prs = self.prs.lock().unwrap();
@@ -206,9 +225,19 @@ impl Env {
                 url: "https://github.com/msull/switchboard/pull/7".into(),
                 head: head.into(),
                 state: state.into(),
+                mergeable: mergeable.map(str::to_owned),
             },
         ));
         prs.checks.push(("msull/switchboard".into(), 7, checks));
+    }
+
+    /// The ticket at `merge` with its PR open and clean.
+    fn at_merge(&mut self, id: &str) {
+        self.pr_is(id, "base0000", "open", Checks::Passed);
+        self.recheck(id);
+        self.steps_until(id, "the merge decision", |t, _| {
+            t.pending_decisions().iter().any(|d| d.name == "merge")
+        });
     }
 
     /// The pending `inspect` decision, answered.
@@ -894,6 +923,162 @@ fn a_note_at_inspect_sends_the_lane_back_to_implement() {
     );
 }
 
+/// A PR that conflicts with its base at `merge` gets the policy's
+/// rebaser: a session cloned from the lane's implementer, told the PR,
+/// the base and where the notes go; when it stops, the gate reads the
+/// PR again and the merge goes on.
+#[test]
+fn a_conflicting_pr_is_rebased_by_a_clone_of_the_implementer() {
+    let mut env = Env::new();
+    let id = at_ready(&mut env);
+    env.at_merge(&id);
+    let implementer = session_of(&env.ticket(&id), "implement");
+    env.pr_is_with(&id, "base0000", "open", Checks::Passed, Some("conflicting"));
+    env.wait(PR_POLL_MS);
+    env.steps_until(&id, "the rebaser", |t, _| {
+        t.attempts_of("merge")
+            .any(|a| a.kind == AttemptKind::Agent && a.session.is_some())
+    });
+    let t = env.ticket(&id);
+    let rebase = t
+        .attempts_of("merge")
+        .find(|a| a.kind == AttemptKind::Agent)
+        .unwrap()
+        .clone();
+    assert!(rebase.is_open());
+    assert_eq!(rebase.context, "repo");
+    assert_eq!(
+        rebase.pr.as_ref().map(|p| p.head.as_str()),
+        Some("base0000"),
+        "the conflicting head is on the attempt"
+    );
+    let rebaser = rebase.session.clone().unwrap();
+    assert_eq!(
+        env.sb().cloned,
+        vec![(implementer.clone(), rebaser.clone())],
+        "cloned from the implementer"
+    );
+    let prompt = env
+        .sb()
+        .calls
+        .iter()
+        .rev()
+        .find_map(|r| match &r.body {
+            Body::SessionClone { prompt, name, .. } if name == "rebaser" => Some(prompt.clone()),
+            _ => None,
+        })
+        .unwrap();
+    assert!(
+        prompt.starts_with("Rebase carefully on dispatch/"),
+        "{prompt}"
+    );
+    assert!(
+        prompt.contains("PR #7 (https://github.com/msull/switchboard/pull/7)"),
+        "{prompt}"
+    );
+    assert!(prompt.contains("conflicts with origin/main"), "{prompt}");
+    assert!(prompt.contains("--force-with-lease"), "{prompt}");
+    let notes = rebase.artifacts["notes"].clone();
+    assert!(prompt.contains(&notes.display().to_string()), "{prompt}");
+    assert!(
+        t.pending_decisions().iter().any(|d| d.name == "merge"),
+        "the merge decision stays while the rebaser works"
+    );
+    // The rebaser pushed a new head and stopped.
+    env.repo
+        .lock()
+        .unwrap()
+        .heads
+        .insert(t.lanes[0].worktree.clone(), "rebased1".into());
+    env.pr_is_with(&id, "rebased1", "open", Checks::Passed, Some("clean"));
+    env.finish(&rebaser, &notes, "# rebased\nkept both changelog entries");
+    env.steps_until(&id, "the rebase completing", |t, _| {
+        t.attempts_of("merge")
+            .find(|a| a.kind == AttemptKind::Agent)
+            .is_some_and(|a| a.state == AttemptState::Complete)
+    });
+    assert!(env.sb().killed.contains(&rebaser), "the rebaser is done");
+    env.wait(PR_POLL_MS);
+    env.step();
+    let t = env.ticket(&id);
+    let gate = t
+        .attempts_of("merge")
+        .find(|a| a.kind == AttemptKind::GateOnly)
+        .unwrap();
+    assert!(gate.is_open(), "the same gate attempt watches on");
+    assert_eq!(gate.pr.as_ref().map(|p| p.head.as_str()), Some("rebased1"));
+    env.pr_is_with(&id, "rebased1", "merged", Checks::Passed, None);
+    env.wait(PR_POLL_MS);
+    env.steps_until(&id, "the ticket closing", |t, _| !t.active());
+    assert!(matches!(&env.ticket(&id).state, TicketState::Closed { .. }));
+}
+
+/// A rebase that leaves the PR at the same head, and a policy whose
+/// `max_rebases` is spent, are each a `pr` question, not another run.
+#[test]
+fn a_rebase_that_changes_nothing_or_past_the_cap_is_a_question() {
+    let mut env = Env::new();
+    let id = at_ready(&mut env);
+    env.at_merge(&id);
+    env.pr_is_with(&id, "base0000", "open", Checks::Passed, Some("conflicting"));
+    env.wait(PR_POLL_MS);
+    env.steps_until(&id, "the rebaser", |t, _| {
+        t.attempts_of("merge")
+            .any(|a| a.kind == AttemptKind::Agent && a.session.is_some())
+    });
+    let t = env.ticket(&id);
+    let rebaser = session_of(&t, "merge");
+    let notes = artifact_of(&t, "merge", "notes");
+    env.finish(&rebaser, &notes, "# could not");
+    env.wait(PR_POLL_MS);
+    env.steps_until(&id, "the question", |t, _| {
+        t.pending_decisions().iter().any(|d| d.name == "pr")
+    });
+    let d = env
+        .pending(&id)
+        .into_iter()
+        .find(|d| d.name == "pr")
+        .unwrap();
+    assert!(
+        d.question.contains("still at the same head"),
+        "{}",
+        d.question
+    );
+    assert_eq!(
+        env.ticket(&id)
+            .attempts_of("merge")
+            .filter(|a| a.kind == AttemptKind::Agent)
+            .count(),
+        1
+    );
+    // The cap: no rebaser runs when it is spent.
+    let mut env = Env::new();
+    let path = env.data.pipeline(PROJECT);
+    let text = std::fs::read_to_string(&path).unwrap().replace(
+        "rebaser = \"rebaser\"\n",
+        "rebaser = \"rebaser\"\nmax_rebases = 0\n",
+    );
+    std::fs::write(&path, text).unwrap();
+    let id = at_ready(&mut env);
+    env.at_merge(&id);
+    env.pr_is_with(&id, "base0000", "open", Checks::Passed, Some("conflicting"));
+    env.wait(PR_POLL_MS);
+    env.steps_until(&id, "the question", |t, _| {
+        t.pending_decisions().iter().any(|d| d.name == "pr")
+    });
+    let d = env
+        .pending(&id)
+        .into_iter()
+        .find(|d| d.name == "pr")
+        .unwrap();
+    assert!(
+        d.question.contains("max_rebases of 0 is spent"),
+        "{}",
+        d.question
+    );
+    assert!(env.sb().cloned.is_empty(), "no rebaser");
+}
+
 /// `merge` is a confirmation the provider resolves: the decision has no
 /// answer but park, `merged` by hand is refused, and the PR reading as
 /// merged completes the stage with the decision answered by Dispatch.
@@ -1146,6 +1331,7 @@ fn a_bitbucket_remote_is_read_through_bitbucket_and_a_short_head_matches() {
                 url: "https://bitbucket.org/msull/switchboard/pull-requests/12".into(),
                 head: "base0000".chars().take(7).collect(),
                 state: "open".into(),
+                mergeable: None,
             },
         ));
         bb.checks

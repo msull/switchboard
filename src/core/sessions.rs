@@ -511,6 +511,99 @@ impl AppCore {
         self.show(View::Session(id), now, out);
     }
 
+    /// The control port's clone: the record is made now, so the asker
+    /// gets its id at once and recovery can find it by its operation,
+    /// and it launches once the transcript copy exists. In the source's
+    /// project and cwd, with the source's launch flags.
+    pub(super) fn clone_into(
+        &mut self,
+        source: RecordId,
+        name: String,
+        prompt: String,
+        notes: String,
+        now: Clock,
+        out: &mut Out,
+    ) -> Option<RecordId> {
+        let handle = self.forkable(source, usize::MAX, "clone")?;
+        let record = self.session(source).cloned()?;
+        let workspace = self
+            .workspaces
+            .iter_mut()
+            .find(|w| w.project.id == record.project)?;
+        let order = workspace
+            .sessions
+            .iter()
+            .map(|s| s.layout.order + 1)
+            .max()
+            .unwrap_or(0);
+        let id = RecordId::new();
+        workspace.sessions.push(SessionRecord {
+            id,
+            name,
+            notes,
+            created: now.wall,
+            last_seen: now.wall,
+            resume: None,
+            autostart: false,
+            layout: CardLayout { order, group: None },
+            activity: Activity::Unknown,
+            activity_reason: None,
+            last_event_at: None,
+            last_exit: None,
+            not_resumable: false,
+            scrollback: None,
+            source: None,
+            approved_hash: None,
+            discard: None,
+            runs: Vec::new(),
+            outputs: Vec::new(),
+            op: self.quiet_op.clone(),
+            waiting_on: None,
+            pending_launch: true,
+            last_stop_at: None,
+            ..record
+        });
+        out.touch(record.project);
+        out.push(Effect::CloneTranscriptInto {
+            target: id,
+            handle,
+            prompt,
+        });
+        Some(id)
+    }
+
+    /// The copy for `clone_into`'s record: it resumes through the new
+    /// handle with the prompt as its first turn, or, with no copy, is
+    /// marked not resumable so a watcher sees it never ran.
+    pub(super) fn transcript_cloned_into(
+        &mut self,
+        target: RecordId,
+        prompt: String,
+        result: Result<ResumeHandle, String>,
+        now: Clock,
+        out: &mut Out,
+    ) {
+        if self.session(target).is_none() {
+            return;
+        }
+        match result {
+            Ok(handle) => {
+                self.edit_session(target, out, |s| s.resume = Some(handle));
+                self.first_prompts.retain(|(r, _)| *r != target);
+                self.first_prompts.push((target, prompt));
+                self.return_to_session(target, now, out);
+            }
+            Err(e) => {
+                let name = self.session_name(target);
+                self.error_about(target, format!("could not clone into {name}: {e}"));
+                self.edit_session(target, out, |s| {
+                    s.pending_launch = false;
+                    s.not_resumable = true;
+                });
+            }
+        }
+    }
+
     /// The text queued as `id`'s first prompt, if any.
     fn take_first_prompt(&mut self, id: RecordId) -> Option<String> {
         let i = self.first_prompts.iter().position(|(r, _)| *r == id)?;

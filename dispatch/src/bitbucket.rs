@@ -217,6 +217,7 @@ pub(crate) fn parse_prs(json: &[u8]) -> Result<Option<PullRequest>> {
             "MERGED" => "merged".to_owned(),
             _ => "closed".to_owned(),
         },
+        mergeable: None,
     }))
 }
 

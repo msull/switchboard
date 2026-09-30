@@ -27,6 +27,9 @@ pub struct PullRequest {
     pub head: String,
     /// `open`, `merged` or `closed`.
     pub state: String,
+    /// Whether it can merge as it stands: `clean`, `conflicting`, or
+    /// `None` where the provider does not say.
+    pub mergeable: Option<String>,
 }
 
 /// What a PR's checks say, taken together.
@@ -75,6 +78,8 @@ struct PrRow {
     head: String,
     #[serde(default)]
     state: String,
+    #[serde(default)]
+    mergeable: String,
 }
 
 #[derive(Deserialize)]
@@ -91,7 +96,7 @@ impl PullRequests for Gh {
             .args([
                 "pr", "list", "--repo", repo, "--head", branch, "--state", "all",
             ])
-            .args(["--json", "number,url,headRefOid,state"])
+            .args(["--json", "number,url,headRefOid,state,mergeable"])
             .output()
             .context("run gh")?;
         if !out.status.success() {
@@ -111,6 +116,11 @@ impl PullRequests for Gh {
             url: r.url.clone(),
             head: r.head.clone(),
             state: r.state.to_ascii_lowercase(),
+            mergeable: match r.mergeable.as_str() {
+                "CONFLICTING" => Some("conflicting".to_owned()),
+                "MERGEABLE" => Some("clean".to_owned()),
+                _ => None,
+            },
         }))
     }
 

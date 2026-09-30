@@ -47,6 +47,8 @@ pub struct FakeSwitchboard {
     pub trusted: Vec<String>,
     /// Sessions the app has a transcript for (a review can clone them).
     pub resumable: Vec<String>,
+    /// Sessions made by `session.clone`: source, clone.
+    pub cloned: Vec<(String, String)>,
     // --- knobs
     /// The next launch of this kind fails outright (no records).
     pub fail_next: Option<String>,
@@ -228,6 +230,31 @@ impl FakeSwitchboard {
                     return Reply::failed("cannot start a session: unknown project");
                 }
                 let id = self.new_session(project, name, *session_kind, cwd, notes, op);
+                (
+                    vec![Made {
+                        kind: RecordKind::Session,
+                        id,
+                    }],
+                    true,
+                )
+            }
+            Body::SessionClone {
+                source,
+                name,
+                prompt: _,
+                notes,
+            } => {
+                let Some(src) = self.sessions.iter().find(|s| &s.id == source).cloned() else {
+                    return Reply::failed("no such session");
+                };
+                if !self.resumable.contains(source) {
+                    return Reply::failed(format!(
+                        "cannot clone {}: it has no transcript yet",
+                        src.name
+                    ));
+                }
+                let id = self.new_session(&src.project, name, src.kind, &src.cwd, notes, op);
+                self.cloned.push((source.clone(), id.clone()));
                 (
                     vec![Made {
                         kind: RecordKind::Session,

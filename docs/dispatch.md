@@ -423,6 +423,8 @@ rates = { "claude-sonnet-5" = [3.0, 15.0], ... }   # $ per million input, output
 decisions = { lanes = "ask", finalize = "ask", merge = "ask", budget = "ask" }
 trust_folders = false         # true: Claude Code's folder trust question, which every fresh worktree asks, is answered for the project's agents
 max_reruns = 3                # failed attempts a stage may collect in one context before the ticket parks instead of asking again
+rebaser = "rebaser"           # the operator that rebases a PR that conflicts with its base, cloned from the lane's implementer; absent, a conflict is a question
+max_rebases = 2               # rebases one PR may get before the conflict is a question
 ```
 
 An agent stage needs no `gate` line: "the agent stopped and every
@@ -953,6 +955,18 @@ PR is recorded on the attempt (provider, repository, number, url, the
 head it was at, what its checks said, when) and shown on the ticket
 page.
 
+A PR the provider reports as conflicting with its base (GitHub's
+`mergeable`; Bitbucket does not say) is rebased rather than asked
+about when the policy names a `rebaser`: an agent attempt of the same
+stage in the lane, made by `session.clone` from the lane's last
+finished agent so it knows the change, told the PR, the base, the plan
+and where its notes go, and asked to rebase, resolve, run the checks
+and push with `--force-with-lease`. The gate's own attempt stays open
+and reads the PR again once the rebaser has stopped and its notes
+settled. The conflicting head is on the rebaser's attempt: a rebase
+that leaves the PR at that head, a policy without a rebaser, and a
+spent `max_rebases` are each a `pr` question with `recheck`.
+
 ## Budget
 
 Budgets are reporting, not enforcement. Switchboard reads token counts
@@ -1025,7 +1039,12 @@ Commands:
   `session.remove`; `session.notes {session, text}`;
   `session.waiting {session, on: bool, reason}`;
   `session.trust {session}` (Claude Code's folder trust question,
-  reported on the session view as `trust_question`, answered yes)
+  reported on the session view as `trust_question`, answered yes);
+  `session.clone {source, name, prompt, notes}` → `session`: a Claude
+  Code session whose conversation is a copy of `source`'s whole
+  transcript, in its project and cwd, launched with `prompt`; the
+  record exists (with the op) before the copy does, and a source with
+  no transcript is refused
 - `service.new {project, name, argv, env}` → `session`: a service
   record Dispatch owns, killed and removed by it; whether it is
   listening is Dispatch's probe, not Switchboard's reply
@@ -1157,6 +1176,8 @@ and one against the real one:
 | `rerun` with a note at `inspect` | That lane's `implement` result and the gate's attempt are cancelled, the ticket stands at `implement` again, a fresh implementer gets the note at the end of its prompt, other lanes are untouched, and `inspect` asks again on a new attempt when it is done |
 | `merge` with the PR open | A confirmation decision with only `park`, the session marked waiting; `merged` by hand is refused; the PR is read once a minute |
 | The user's own feedback round after the review converged | The pending `finalize` decision is cancelled and the session unmarked while the planner answers; when the run converges again a new decision names the new round count |
+| The PR conflicts with its base at `merge` | The policy's rebaser starts in the lane, cloned from the implementer's session, with the PR, the base and the notes path in its prompt; the merge decision stays; when it stops the gate reads the PR again and, merged, the ticket closes |
+| The rebaser leaves the PR at the same head, or `max_rebases` is spent | A `pr` decision saying which; no further rebaser runs |
 | The provider reports the merge | The attempt completes at the merged head, the decision reads as answered `merged` by `dispatch`, and the ticket goes on (closes) |
 | The queue view after `plan` replaces `investigate`, and after two tickets swap places | One card per ticket, in order, no stale card, no overlap failure |
 | Plan session has no transcript yet | `workflow.start` fails; the attempt is failed and a decision, not retried |

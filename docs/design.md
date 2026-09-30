@@ -1548,7 +1548,12 @@ account token from the environment or `<data>/env`); `proceed` passes,
 `rerun` with a note (typed under the decision on the page) sends
 that lane back to the nearest earlier agent stage with the note in
 the next prompt. A gate-only stage and a ticket closing past its last
-stage hold no slot. Everything else in that document (external and
+stage hold no slot. A PR GitHub reports as conflicting is rebased by
+the policy's `rebaser`, a session the new `session.clone` port command
+makes from the lane's implementer's transcript (the record is made
+first, so the reply carries its id and recovery finds it by its op;
+the copy and the resumed launch follow), capped by `max_rebases` and
+never repeated at the same head. Everything else in that document (external and
 human gates on agent stages, gate-only command stages, budgets, the
 other pipelines) parks the ticket with a reason. The runner's pass over a project is
 one transaction under the data directory's writer lock, and `decide`,

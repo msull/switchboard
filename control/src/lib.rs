@@ -91,6 +91,18 @@ pub enum Body {
         #[serde(default)]
         notes: String,
     },
+    /// A new Claude Code session whose conversation is a copy of
+    /// `source`'s whole transcript, in the source's project and cwd,
+    /// launched with `prompt` as its first turn. Refused for a source
+    /// with no transcript.
+    #[serde(rename = "session.clone")]
+    SessionClone {
+        source: String,
+        name: String,
+        prompt: String,
+        #[serde(default)]
+        notes: String,
+    },
     #[serde(rename = "space.new")]
     SpaceNew { name: String },
     #[serde(rename = "set.new")]
@@ -194,6 +206,7 @@ impl Body {
         match self {
             Self::ProjectAdd { .. }
             | Self::SessionNew { .. }
+            | Self::SessionClone { .. }
             | Self::SpaceNew { .. }
             | Self::SetNew { .. }
             | Self::WorkflowStart { .. } => Class::Creation,
@@ -601,6 +614,12 @@ mod tests {
                 cwd: "/r".into(),
                 launch: Launch::Shell,
                 prompt: Some("go".into()),
+                notes: "ticket".into(),
+            },
+            Body::SessionClone {
+                source: "s1".into(),
+                name: "rebaser".into(),
+                prompt: "rebase".into(),
                 notes: "ticket".into(),
             },
             Body::SessionNew {
