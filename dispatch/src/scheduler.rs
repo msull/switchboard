@@ -15,7 +15,7 @@ use crate::port::Port;
 use crate::store::{DataDir, Lock, read_json, write_json};
 use crate::template::Vars;
 use crate::ticket::{
-    Attempt, AttemptKind, AttemptState, Decision, DecisionKind, DecisionState, LaneRecord,
+    Attempt, AttemptKind, AttemptState, Decision, DecisionKind, DecisionState, GateRun, LaneRecord,
     Operation, ProjectState, SETTLE_POLLS, Settle, SourceSnapshot, Ticket, TicketState,
 };
 
@@ -1174,18 +1174,29 @@ impl Runner {
         held: bool,
         now_ms: u64,
     ) -> Result<()> {
-        if let Some(gate) = &stage.gate {
-            let kind = match gate {
-                Gate::Command { .. } => "command gate",
-                Gate::External { check, .. } => check.as_str(),
-                Gate::Human { decision, .. } => decision.as_str(),
-            };
-            return self.park(
-                t,
-                ps,
-                &format!("stage {} ({kind}) is not built in this slice", stage.name),
-                now_ms,
-            );
+        // A command gate runs after the agent, in its context; the
+        // other gates on an agent stage are later work.
+        match &stage.gate {
+            None | Some(Gate::Command { .. }) => {}
+            Some(Gate::External { check, .. }) => {
+                return self.park(
+                    t,
+                    ps,
+                    &format!("stage {} ({check}) is not built in this slice", stage.name),
+                    now_ms,
+                );
+            }
+            Some(Gate::Human { decision, .. }) => {
+                return self.park(
+                    t,
+                    ps,
+                    &format!(
+                        "stage {} ({decision}) is not built in this slice",
+                        stage.name
+                    ),
+                    now_ms,
+                );
+            }
         }
         let contexts = Self::contexts(t, p, stage);
         if contexts.is_empty() {
@@ -1208,7 +1219,7 @@ impl Runner {
                 Some(a) if a.state == AttemptState::Complete => {}
                 Some(a) if a.is_open() => {
                     all_complete = false;
-                    self.poll_agent(t, ps, &a, now_ms)?;
+                    self.poll_agent(t, ps, &a, stage, &cwd, lane.as_deref(), now_ms)?;
                 }
                 Some(a) => {
                     // Failed: a rerun waits on its decision.
@@ -1358,23 +1369,29 @@ impl Runner {
 
     /// What Switchboard says about the attempt's session, and what that
     /// makes of the attempt.
+    #[allow(clippy::too_many_arguments)]
     fn poll_agent(
         &mut self,
         t: &mut Ticket,
         ps: &mut ProjectState,
         a: &Attempt,
+        stage: &Stage,
+        cwd: &Path,
+        lane: Option<&str>,
         now_ms: u64,
     ) -> Result<()> {
         let Some(session) = a.session.clone() else {
             // Sent but no reply adopted yet: recovery's to resolve.
             return Ok(());
         };
-        let reply = self.ask(Body::Session {
-            session: session.clone(),
-        })?;
-        let view = match reply {
-            Reply::Session { session } => session,
-            Reply::Failed { reason } => {
+        // The agent is done and the gate is running or about to: the
+        // session is no longer what is watched.
+        if a.gate.is_some() {
+            return self.poll_gate(t, ps, a, stage, cwd, lane, now_ms);
+        }
+        let view = match self.session_view(&session)? {
+            Ok(view) => view,
+            Err(reason) => {
                 return self.fail_attempt(
                     t,
                     ps,
@@ -1384,7 +1401,6 @@ impl Runner {
                     now_ms,
                 );
             }
-            other => bail!("session query answered {other:?}"),
         };
         let idx = t
             .attempts
@@ -1437,9 +1453,19 @@ impl Runner {
         if !settle(attempt)? {
             return self.save_ticket(t, now_ms);
         }
-        attempt.state = AttemptState::Complete;
-        attempt.ended_ms = Some(now_ms);
-        log::info!("ticket {} {}/{} complete", t.id, a.stage, a.context);
+        let gated = matches!(stage.gate, Some(Gate::Command { .. }));
+        if gated {
+            log::info!(
+                "ticket {} {}/{} agent stopped; checks next",
+                t.id,
+                a.stage,
+                a.context
+            );
+        } else {
+            attempt.state = AttemptState::Complete;
+            attempt.ended_ms = Some(now_ms);
+            log::info!("ticket {} {}/{} complete", t.id, a.stage, a.context);
+        }
         self.save_ticket(t, now_ms)?;
         if view.liveness == wire::Liveness::Running {
             self.send(
@@ -1451,7 +1477,182 @@ impl Runner {
                 now_ms,
             )?;
         }
+        if gated {
+            self.start_gate(t, ps, a, stage, cwd, lane, now_ms)?;
+        }
         Ok(())
+    }
+
+    /// A session as Switchboard sees it, or why it has none.
+    fn session_view(&mut self, session: &str) -> Result<Result<wire::SessionView, String>> {
+        let reply = self.ask(Body::Session {
+            session: session.to_owned(),
+        })?;
+        match reply {
+            Reply::Session { session } => Ok(Ok(session)),
+            Reply::Failed { reason } => Ok(Err(reason)),
+            other => bail!("session query answered {other:?}"),
+        }
+    }
+
+    /// The stage's command gate, once the agent has stopped: the tree
+    /// must be clean, its head is recorded, and the command starts as a
+    /// child of this runner in the context's tree with the ticket's
+    /// values in its environment and its output in the attempt's
+    /// `checks.log`. A dirty tree is a failed attempt, never a run.
+    #[allow(clippy::too_many_arguments)]
+    fn start_gate(
+        &mut self,
+        t: &mut Ticket,
+        ps: &mut ProjectState,
+        a: &Attempt,
+        stage: &Stage,
+        cwd: &Path,
+        lane: Option<&str>,
+        now_ms: u64,
+    ) -> Result<()> {
+        let Some(Gate::Command { argv, per_lane, .. }) = &stage.gate else {
+            return Ok(());
+        };
+        let argv = lane
+            .and_then(|l| per_lane.as_ref().and_then(|m| m.get(l)))
+            .or(argv.as_ref())
+            .cloned();
+        let Some(argv) = argv.filter(|v| !v.is_empty()) else {
+            let reason = format!("no checks command for context {}", a.context);
+            return self.fail_attempt(t, ps, &a.stage, a.n, &reason, now_ms);
+        };
+        if !self.git.is_clean(cwd)? {
+            let reason = format!("the tree at {} is not clean after the agent", cwd.display());
+            return self.fail_attempt(t, ps, &a.stage, a.n, &reason, now_ms);
+        }
+        let head = self.git.head(cwd)?;
+        let dir = self
+            .data
+            .ticket_dir(&t.id)
+            .join(&a.stage)
+            .join(a.n.to_string())
+            .join(&a.context);
+        std::fs::create_dir_all(&dir)?;
+        let log = dir.join("checks.log");
+        let lane_record = lane.and_then(|l| t.lanes.iter().find(|x| x.name == l));
+        let mut env = vec![
+            ("DISPATCH_TICKET".to_owned(), t.id.clone()),
+            ("DISPATCH_STAGE".to_owned(), a.stage.clone()),
+            ("DISPATCH_CONTEXT".to_owned(), a.context.clone()),
+            ("DISPATCH_TREE".to_owned(), cwd.display().to_string()),
+            ("DISPATCH_HEAD".to_owned(), head.clone()),
+        ];
+        if let Some(l) = lane_record {
+            env.push(("DISPATCH_LANE".to_owned(), l.name.clone()));
+            env.push(("DISPATCH_BRANCH".to_owned(), l.branch.clone()));
+        }
+        let key = gate_key(t, a);
+        if let Err(e) = self.git.start_check(&key, cwd, &argv, &env, &log) {
+            let reason = format!("the checks could not start: {e:#}");
+            return self.fail_attempt(t, ps, &a.stage, a.n, &reason, now_ms);
+        }
+        log::info!(
+            "ticket {} {}/{} checks started at {head}",
+            t.id,
+            a.stage,
+            a.context
+        );
+        if let Some(attempt) = t
+            .attempts
+            .iter_mut()
+            .find(|x| x.stage == a.stage && x.n == a.n)
+        {
+            attempt.gate = Some(GateRun {
+                head,
+                argv,
+                log: log.clone(),
+                started_ms: now_ms,
+                exit: None,
+            });
+            attempt.artifacts.insert("checks".into(), log);
+        }
+        self.save_ticket(t, now_ms)
+    }
+
+    /// The gate's child: still running, exited, or gone with a runner
+    /// that restarted (then started again on the same clean head, since
+    /// a check is worth nothing until its result is bound). An exit is
+    /// bound to the head only if the tree is still clean at it.
+    #[allow(clippy::too_many_arguments)]
+    fn poll_gate(
+        &mut self,
+        t: &mut Ticket,
+        ps: &mut ProjectState,
+        a: &Attempt,
+        stage: &Stage,
+        cwd: &Path,
+        lane: Option<&str>,
+        now_ms: u64,
+    ) -> Result<()> {
+        let Some(gate) = a.gate.clone() else {
+            return Ok(());
+        };
+        let key = gate_key(t, a);
+        let code = match self.git.poll_check(&key) {
+            None => return Ok(()),
+            Some(Ok(code)) => code,
+            Some(Err(e)) => {
+                log::warn!(
+                    "ticket {} {}/{} checks lost ({e:#}); starting again",
+                    t.id,
+                    a.stage,
+                    a.context
+                );
+                if let Some(attempt) = t
+                    .attempts
+                    .iter_mut()
+                    .find(|x| x.stage == a.stage && x.n == a.n)
+                {
+                    attempt.gate = None;
+                }
+                return self.start_gate(t, ps, a, stage, cwd, lane, now_ms);
+            }
+        };
+        let clean = self.git.is_clean(cwd)?;
+        let head = self.git.head(cwd)?;
+        if let Some(attempt) = t
+            .attempts
+            .iter_mut()
+            .find(|x| x.stage == a.stage && x.n == a.n)
+            && let Some(g) = &mut attempt.gate
+        {
+            g.exit = Some(code);
+        }
+        if !clean || head != gate.head {
+            let reason = format!(
+                "the tree at {} changed while the checks ran (head {} then {head})",
+                cwd.display(),
+                gate.head
+            );
+            return self.fail_attempt(t, ps, &a.stage, a.n, &reason, now_ms);
+        }
+        if code != 0 {
+            let reason = format!("checks exited {code}; output at {}", gate.log.display());
+            return self.fail_attempt(t, ps, &a.stage, a.n, &reason, now_ms);
+        }
+        if let Some(attempt) = t
+            .attempts
+            .iter_mut()
+            .find(|x| x.stage == a.stage && x.n == a.n)
+        {
+            attempt.head = Some(head);
+            attempt.state = AttemptState::Complete;
+            attempt.ended_ms = Some(now_ms);
+        }
+        log::info!(
+            "ticket {} {}/{} checks passed at {}",
+            t.id,
+            a.stage,
+            a.context,
+            gate.head
+        );
+        self.save_ticket(t, now_ms)
     }
 
     pub(crate) fn fail_attempt(
@@ -1963,6 +2164,11 @@ impl Runner {
 }
 
 /// A fresh attempt record.
+/// The key a check is polled under: one per attempt.
+fn gate_key(t: &Ticket, a: &Attempt) -> String {
+    format!("{}/{}/{}", t.id, a.stage, a.n)
+}
+
 fn new_attempt(
     stage_name: &str,
     n: u32,
@@ -1987,6 +2193,7 @@ fn new_attempt(
         stop_at_ms: None,
         polls_since_stop: 0,
         head: None,
+        gate: None,
         started_ms: now_ms,
         ended_ms: done.then_some(now_ms),
     }

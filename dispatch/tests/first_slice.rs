@@ -12,8 +12,8 @@ use std::sync::{Arc, Mutex};
 use dispatch::git::FakeRepo;
 use dispatch::scheduler::Runner;
 use dispatch::store::DataDir;
-use dispatch::ticket::{AttemptState, Decision, SourceSnapshot, Ticket, TicketState};
-use support::{FakeSwitchboard, SharedPort};
+use dispatch::ticket::{Attempt, AttemptState, Decision, SourceSnapshot, Ticket, TicketState};
+use support::{FakeSwitchboard, SharedPort, SharedRepo};
 use switchboard_control::{Body, Liveness, RunState, SessionKind};
 
 const PROJECT: &str = "Switchboard";
@@ -107,6 +107,7 @@ struct Env {
     _dir: tempfile::TempDir,
     data: DataDir,
     sb: Arc<Mutex<FakeSwitchboard>>,
+    repo: Arc<Mutex<FakeRepo>>,
     runner: Runner,
     worktrees: PathBuf,
     now: u64,
@@ -120,15 +121,17 @@ impl Env {
         std::fs::create_dir_all(data.root.join("pipelines")).unwrap();
         std::fs::write(data.pipeline(PROJECT), pipeline(&worktrees)).unwrap();
         let sb = Arc::new(Mutex::new(FakeSwitchboard::new()));
+        let repo = Arc::new(Mutex::new(FakeRepo::default()));
         let runner = Runner::new(
             data.clone(),
             Box::new(SharedPort(Arc::clone(&sb))),
-            Box::new(FakeRepo::default()),
+            Box::new(SharedRepo(Arc::clone(&repo))),
         );
         Self {
             _dir: dir,
             data,
             sb,
+            repo,
             runner,
             worktrees,
             now: 1_000,
@@ -141,7 +144,7 @@ impl Env {
         self.runner = Runner::new(
             self.data.clone(),
             Box::new(SharedPort(Arc::clone(&self.sb))),
-            Box::new(FakeRepo::default()),
+            Box::new(SharedRepo(Arc::clone(&self.repo))),
         );
         let now = self.tick();
         self.runner.recover(now).unwrap();
@@ -459,16 +462,222 @@ fn an_issue_becomes_one_project_four_sessions_one_run_and_a_finalize_decision() 
         let reviewer = sb.runs[0].reviewer.clone();
         assert!(sb.killed.contains(&reviewer) && sb.killed.contains(&face));
     }
-    env.steps_until(&id, "parking at implement", |t, _| !t.active());
+    // The finalized copy is the plan the implementer is told to follow,
+    // in the lane's worktree.
+    env.steps_until(&id, "the implementer", |t, _| {
+        t.attempts_of("implement")
+            .last()
+            .is_some_and(Attempt::is_open)
+    });
     let t = env.ticket(&id);
+    let sb = env.sb();
+    assert_eq!(sb.sessions.len(), 5);
+    let implementer = &sb.sessions_named("implementer")[0];
+    assert_eq!(implementer.cwd, t.lanes[0].worktree);
+    let prompt = sb
+        .calls
+        .iter()
+        .find_map(|r| match &r.body {
+            Body::SessionNew { prompt, name, .. } if name == "implementer" => prompt.clone(),
+            _ => None,
+        })
+        .unwrap();
+    assert!(prompt.contains(&copy.display().to_string()), "{prompt}");
+}
+
+/// Drive a ticket to the implementer running in the lane, returning the
+/// ticket id and the implementer's session.
+fn at_implement(env: &mut Env) -> (String, String) {
+    let id = at_finalize(env);
+    let decision = env.pending(&id)[0].id.clone();
+    let now = env.tick();
+    env.runner
+        .decide(&id, &decision, "finalize", None, now)
+        .unwrap();
+    env.steps_until(&id, "the implementer", |t, _| {
+        t.attempts_of("implement")
+            .last()
+            .is_some_and(Attempt::is_open)
+    });
+    let t = env.ticket(&id);
+    (id, session_of(&t, "implement"))
+}
+
+/// The implementer stopped and wrote its notes; then the checks.
+fn implementer_stops(env: &mut Env, id: &str, session: &str) {
+    let t = env.ticket(id);
+    env.finish(
+        session,
+        &artifact_of(&t, "implement", "notes"),
+        "# done\nchanged two files",
+    );
+}
+
+#[test]
+fn checks_run_after_the_agent_on_a_clean_tree_and_pass_bound_to_its_head() {
+    let mut env = Env::new();
+    let (id, implementer) = at_implement(&mut env);
+    implementer_stops(&mut env, &id, &implementer);
+    env.steps_until(&id, "the checks starting", |t, _| {
+        t.attempts_of("implement")
+            .last()
+            .is_some_and(|a| a.gate.is_some())
+    });
+    let t = env.ticket(&id);
+    let a = t.attempts_of("implement").last().unwrap();
+    assert!(a.is_open(), "the attempt is not complete on a stop alone");
+    let lane = t.lanes[0].clone();
+    {
+        let repo = env.repo.lock().unwrap();
+        let check = &repo.checks[0];
+        assert_eq!(check.dir, lane.worktree);
+        assert_eq!(check.argv, vec!["sh", "-c", "cargo test"]);
+        assert!(
+            check
+                .env
+                .contains(&("DISPATCH_LANE".to_owned(), "repo".to_owned()))
+        );
+        assert!(
+            check
+                .env
+                .contains(&("DISPATCH_BRANCH".to_owned(), lane.branch.clone()))
+        );
+        assert!(
+            check
+                .env
+                .contains(&("DISPATCH_HEAD".to_owned(), "base0000".to_owned()))
+        );
+        assert_eq!(check.log, a.artifacts["checks"]);
+    }
+    assert!(env.sb().killed.contains(&implementer), "the agent is done");
+    let key = format!("{id}/implement/{}", a.n);
+    // Still running: nothing changes, nothing is launched.
+    env.step();
+    env.step();
     assert!(
-        matches!(&t.state, TicketState::Parked { reason } if reason.contains("implement") && reason.contains("not built"))
+        env.ticket(&id)
+            .attempts_of("implement")
+            .last()
+            .unwrap()
+            .is_open()
     );
+    assert_eq!(env.sb().sessions.len(), 5);
+    env.repo.lock().unwrap().check_exits.insert(key, 0);
+    env.steps_until(&id, "the attempt completing", |t, _| {
+        t.attempts_of("implement")
+            .last()
+            .is_some_and(|a| a.state == AttemptState::Complete)
+    });
+    let t = env.ticket(&id);
+    let a = t.attempts_of("implement").last().unwrap();
     assert_eq!(
-        env.sb().sessions.len(),
-        4,
-        "nothing was started for implement"
+        a.head.as_deref(),
+        Some("base0000"),
+        "the result is bound to the head"
     );
+    assert_eq!(a.gate.as_ref().and_then(|g| g.exit), Some(0));
+    env.steps_until(&id, "the ticket closing", |t, _| !t.active());
+    assert!(matches!(&env.ticket(&id).state, TicketState::Closed { .. }));
+}
+
+#[test]
+fn failed_checks_are_a_decision_and_a_rerun_is_a_fresh_agent() {
+    let mut env = Env::new();
+    let (id, implementer) = at_implement(&mut env);
+    implementer_stops(&mut env, &id, &implementer);
+    env.steps_until(&id, "the checks starting", |t, _| {
+        t.attempts_of("implement")
+            .last()
+            .is_some_and(|a| a.gate.is_some())
+    });
+    env.repo
+        .lock()
+        .unwrap()
+        .check_exits
+        .insert(format!("{id}/implement/1"), 1);
+    env.steps_until(&id, "the failure", |t, _| {
+        t.attempts_of("implement")
+            .last()
+            .is_some_and(|a| matches!(a.state, AttemptState::Failed { .. }))
+    });
+    let t = env.ticket(&id);
+    let AttemptState::Failed { reason } = &t.attempts_of("implement").last().unwrap().state else {
+        panic!()
+    };
+    assert!(reason.contains("checks exited 1"), "{reason}");
+    let pending = env.pending(&id);
+    assert_eq!((pending.len(), pending[0].name.as_str()), (1, "rerun"));
+    env.step();
+    env.step();
+    assert_eq!(env.sb().sessions.len(), 5, "no retry on its own");
+    let now = env.tick();
+    env.runner
+        .decide(&id, &pending[0].id, "rerun", None, now)
+        .unwrap();
+    env.steps_until(&id, "a second implementer", |t, _| {
+        t.attempts_of("implement")
+            .last()
+            .is_some_and(|a| a.n == 2 && a.is_open())
+    });
+    assert_eq!(env.sb().sessions_named("implementer").len(), 2);
+}
+
+#[test]
+fn a_dirty_tree_after_the_agent_never_runs_the_checks() {
+    let mut env = Env::new();
+    let (id, implementer) = at_implement(&mut env);
+    let worktree = env.ticket(&id).lanes[0].worktree.clone();
+    env.repo.lock().unwrap().dirty.push(worktree);
+    implementer_stops(&mut env, &id, &implementer);
+    env.steps_until(&id, "the failure", |t, _| {
+        t.attempts_of("implement")
+            .last()
+            .is_some_and(|a| matches!(a.state, AttemptState::Failed { .. }))
+    });
+    let t = env.ticket(&id);
+    let AttemptState::Failed { reason } = &t.attempts_of("implement").last().unwrap().state else {
+        panic!()
+    };
+    assert!(reason.contains("not clean"), "{reason}");
+    assert!(
+        env.repo.lock().unwrap().checks.is_empty(),
+        "nothing ran on a dirty tree"
+    );
+    assert_eq!(env.pending(&id)[0].name, "rerun");
+}
+
+#[test]
+fn checks_lost_to_a_restart_start_again_on_the_same_head() {
+    let mut env = Env::new();
+    let (id, implementer) = at_implement(&mut env);
+    implementer_stops(&mut env, &id, &implementer);
+    env.steps_until(&id, "the checks starting", |t, _| {
+        t.attempts_of("implement")
+            .last()
+            .is_some_and(|a| a.gate.is_some())
+    });
+    // The runner dies with its child; the record says the checks were
+    // running at a head.
+    env.repo.lock().unwrap().checks.clear();
+    env.restart();
+    let repo = Arc::clone(&env.repo);
+    env.steps_until(&id, "the checks again", |_, _| {
+        !repo.lock().unwrap().checks.is_empty()
+    });
+    let t = env.ticket(&id);
+    let a = t.attempts_of("implement").last().unwrap();
+    assert!(a.is_open() && a.gate.as_ref().is_some_and(|g| g.head == "base0000"));
+    assert_eq!(env.sb().sessions.len(), 5, "no second agent");
+    env.repo
+        .lock()
+        .unwrap()
+        .check_exits
+        .insert(format!("{id}/implement/1"), 0);
+    env.steps_until(&id, "completion", |t, _| {
+        t.attempts_of("implement")
+            .last()
+            .is_some_and(|a| a.state == AttemptState::Complete)
+    });
 }
 
 #[test]

@@ -23,11 +23,28 @@ pub trait Repo: Send {
     fn is_clean(&self, dir: &Path) -> Result<bool>;
     /// Run `argv` in `dir` with `env` set; nonzero exit is an error.
     fn run(&mut self, dir: &Path, argv: &[String], env: &[(String, String)]) -> Result<()>;
+    /// Start a check (a command gate) in `dir` as a child of the runner,
+    /// its output appended to `log`, under `key` for polling. Nothing
+    /// from a template reaches the command line; values go in `env`.
+    fn start_check(
+        &mut self,
+        key: &str,
+        dir: &Path,
+        argv: &[String],
+        env: &[(String, String)],
+        log: &Path,
+    ) -> Result<()>;
+    /// `None` while the check runs, `Some(Ok(code))` once it exited, and
+    /// `Some(Err)` for a check this runner never started or lost: a
+    /// restart means the process is gone with it.
+    fn poll_check(&mut self, key: &str) -> Option<Result<i32>>;
 }
 
-/// The `git` on the PATH.
+/// The `git` on the PATH, and the checks this runner has started.
 #[derive(Debug, Default)]
-pub struct GitCli;
+pub struct GitCli {
+    checks: std::collections::HashMap<String, std::process::Child>,
+}
 
 /// A `git` command with the caller's own `GIT_*` variables removed: run
 /// from a hook, those point at the hook's repository, not ours.
@@ -145,6 +162,68 @@ impl Repo for GitCli {
         output(&mut cmd)?;
         Ok(())
     }
+
+    fn start_check(
+        &mut self,
+        key: &str,
+        dir: &Path,
+        argv: &[String],
+        env: &[(String, String)],
+        log: &Path,
+    ) -> Result<()> {
+        let Some((program, rest)) = argv.split_first() else {
+            bail!("a check with no command");
+        };
+        let out = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(log)
+            .with_context(|| format!("open {}", log.display()))?;
+        let err = out.try_clone()?;
+        let mut cmd = Command::new(program);
+        cmd.args(rest)
+            .current_dir(dir)
+            .stdin(std::process::Stdio::null())
+            .stdout(out)
+            .stderr(err);
+        for (k, v) in env {
+            cmd.env(k, v);
+        }
+        let child = cmd
+            .spawn()
+            .with_context(|| format!("start {program} in {}", dir.display()))?;
+        self.checks.insert(key.to_owned(), child);
+        Ok(())
+    }
+
+    fn poll_check(&mut self, key: &str) -> Option<Result<i32>> {
+        let Some(child) = self.checks.get_mut(key) else {
+            return Some(Err(anyhow::anyhow!(
+                "no such check in this runner (it restarted)"
+            )));
+        };
+        match child.try_wait() {
+            Ok(None) => None,
+            Ok(Some(status)) => {
+                self.checks.remove(key);
+                Some(Ok(status.code().unwrap_or(-1)))
+            }
+            Err(e) => {
+                self.checks.remove(key);
+                Some(Err(anyhow::anyhow!("waiting on the check: {e}")))
+            }
+        }
+    }
+}
+
+/// A check the fake was asked to start.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StartedCheck {
+    pub key: String,
+    pub dir: PathBuf,
+    pub argv: Vec<String>,
+    pub env: Vec<(String, String)>,
+    pub log: PathBuf,
 }
 
 /// What tests use: worktrees are directories made on the spot, heads are
@@ -158,6 +237,10 @@ pub struct FakeRepo {
     pub dirty: Vec<PathBuf>,
     pub ran: Vec<(PathBuf, Vec<String>)>,
     pub fail_worktree: Option<String>,
+    /// Checks started.
+    pub checks: Vec<StartedCheck>,
+    /// Exit codes a test sets for a check by key; unset means running.
+    pub check_exits: std::collections::BTreeMap<String, i32>,
 }
 
 impl Repo for FakeRepo {
@@ -202,6 +285,69 @@ impl Repo for FakeRepo {
     fn run(&mut self, dir: &Path, argv: &[String], _env: &[(String, String)]) -> Result<()> {
         self.ran.push((dir.to_path_buf(), argv.to_vec()));
         Ok(())
+    }
+    fn start_check(
+        &mut self,
+        key: &str,
+        dir: &Path,
+        argv: &[String],
+        env: &[(String, String)],
+        log: &Path,
+    ) -> Result<()> {
+        std::fs::write(log, "checks ran\n")?;
+        self.checks.push(StartedCheck {
+            key: key.to_owned(),
+            dir: dir.to_path_buf(),
+            argv: argv.to_vec(),
+            env: env.to_vec(),
+            log: log.to_path_buf(),
+        });
+        Ok(())
+    }
+    fn poll_check(&mut self, key: &str) -> Option<Result<i32>> {
+        if let Some(code) = self.check_exits.get(key) {
+            return Some(Ok(*code));
+        }
+        if self.checks.iter().any(|c| c.key == key) {
+            None
+        } else {
+            Some(Err(anyhow::anyhow!("no such check in this runner")))
+        }
+    }
+}
+
+#[cfg(test)]
+mod check_tests {
+    use super::*;
+
+    #[test]
+    fn a_check_runs_as_a_child_with_its_output_in_the_log_and_is_lost_to_a_new_runner() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("gate.log");
+        let mut cli = GitCli::default();
+        cli.start_check(
+            "k",
+            dir.path(),
+            &[
+                "sh".into(),
+                "-c".into(),
+                "echo $DISPATCH_LANE; exit 3".into(),
+            ],
+            &[("DISPATCH_LANE".into(), "backend".into())],
+            &log,
+        )
+        .unwrap();
+        let mut code = None;
+        for _ in 0..200 {
+            if let Some(result) = cli.poll_check("k") {
+                code = Some(result.unwrap());
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert_eq!(code, Some(3));
+        assert_eq!(std::fs::read_to_string(&log).unwrap().trim(), "backend");
+        assert!(GitCli::default().poll_check("k").unwrap().is_err());
     }
 }
 
@@ -278,7 +424,7 @@ mod tests {
             "root",
         ]);
         let repo = dir.path().join("clone");
-        let mut cli = GitCli;
+        let mut cli = GitCli::default();
         cli.ensure_clone(origin.to_str().unwrap(), &repo).unwrap();
         cli.ensure_clone(origin.to_str().unwrap(), &repo)
             .expect("a second call finds the clone");

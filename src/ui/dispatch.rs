@@ -615,6 +615,17 @@ fn attempt_row(cx: &mut DrawCtx<'_>, ui: &mut Ui, t: &TicketView, a: &AttemptVie
                 if let Some(reason) = &a.reason {
                     ui.label(theme::meta_text(ui, reason));
                 }
+                if let Some(checks) = &a.checks {
+                    let short: String = checks.head.chars().take(8).collect();
+                    ui.label(theme::meta_text(
+                        ui,
+                        match checks.exit {
+                            None => format!("checks running at {short}"),
+                            Some(0) => format!("checks passed at {short}"),
+                            Some(code) => format!("checks exited {code} at {short}"),
+                        },
+                    ));
+                }
             });
             ui.horizontal_wrapped(|ui| {
                 ui.spacing_mut().item_spacing.x = 4.0;

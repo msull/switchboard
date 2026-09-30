@@ -32,7 +32,7 @@ fn runner() -> Result<Runner> {
     Ok(Runner::new(
         DataDir::from_env()?,
         Box::new(SocketPort::from_env()?),
-        Box::new(GitCli),
+        Box::new(GitCli::default()),
     ))
 }
 
@@ -93,7 +93,11 @@ fn run(once: bool) -> Result<()> {
 }
 
 fn decide(ticket: &str, decision: &str, answer: &str, note: Option<&str>) -> Result<()> {
-    let runner = Runner::new(DataDir::from_env()?, Box::new(NoPort), Box::new(GitCli));
+    let runner = Runner::new(
+        DataDir::from_env()?,
+        Box::new(NoPort),
+        Box::new(GitCli::default()),
+    );
     let d = runner.decide(ticket, decision, answer, note, now_ms())?;
     println!(
         "{ticket} {}: {answer} (the runner acts on it on its next pass)",
@@ -103,7 +107,11 @@ fn decide(ticket: &str, decision: &str, answer: &str, note: Option<&str>) -> Res
 }
 
 fn decisions() -> Result<()> {
-    let runner = Runner::new(DataDir::from_env()?, Box::new(NoPort), Box::new(GitCli));
+    let runner = Runner::new(
+        DataDir::from_env()?,
+        Box::new(NoPort),
+        Box::new(GitCli::default()),
+    );
     let mut any = false;
     for t in runner.tickets()? {
         for d in t.pending_decisions() {
@@ -130,7 +138,11 @@ fn decisions() -> Result<()> {
 }
 
 fn status() -> Result<()> {
-    let runner = Runner::new(DataDir::from_env()?, Box::new(NoPort), Box::new(GitCli));
+    let runner = Runner::new(
+        DataDir::from_env()?,
+        Box::new(NoPort),
+        Box::new(GitCli::default()),
+    );
     let tickets = runner.tickets()?;
     if tickets.is_empty() {
         println!("no tickets");
@@ -201,7 +213,11 @@ fn status() -> Result<()> {
 }
 
 fn queue(project: &str, order: &[&str]) -> Result<()> {
-    let mut runner = Runner::new(DataDir::from_env()?, Box::new(NoPort), Box::new(GitCli));
+    let mut runner = Runner::new(
+        DataDir::from_env()?,
+        Box::new(NoPort),
+        Box::new(GitCli::default()),
+    );
     let ps = if order.is_empty() {
         runner.load_project(project)?
     } else {

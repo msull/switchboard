@@ -150,7 +150,7 @@ prompt = "Write the single word pong to the file {{notes}} and stop."
     let mut runner = Runner::new(
         data.clone(),
         Box::new(SocketPort::new(&sb_dir)),
-        Box::new(GitCli),
+        Box::new(GitCli::default()),
     );
     let id = runner
         .take(

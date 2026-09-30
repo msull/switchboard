@@ -240,12 +240,12 @@ dispatch/                the `dispatch` binary (docs/dispatch.md): a ticket sche
   src/main.rs            CLI: take, run, decide, decisions, status, queue
   src/serve.rs           Dispatch's port on <data>/dispatch.sock while `run` is up: the records as views, the commands the CLI has, one handler under one lock
   src/pipeline.rs        the TOML pipeline file, parsed in full and validated; fingerprint of the copy a ticket runs
-  src/ticket.rs          the ticket record: source, lanes, attempts, decisions, operation ledger; the per-project queue
+  src/ticket.rs          the ticket record: source, lanes, attempts (with their checks' head and exit), decisions, operation ledger; the per-project queue
   src/scheduler.rs       the runner: stage executors (agent, gate-only lanes, review workflow), completion evidence, decisions, ledgered sends
   src/recover.rs         unanswered ledger operations resolved by class through find and op.status; nothing launched twice
   src/view.rs            the `Dispatch · <project>` working set, one card per queued ticket, redrawn through set.sync
   src/store.rs           Dispatch's data directory, flock, atomic writes
-  src/git.rs             worktrees and heads through fixed argv, with a fake
+  src/git.rs             clones, worktrees and heads through fixed argv, and a stage's checks as child processes polled by key; with a fake
   src/github.rs          the issue snapshot through gh, with a fake
   src/port.rs            the Port trait over the control socket client
   src/template.rs        `{a.b}` substitution for prompts

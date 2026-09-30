@@ -1488,9 +1488,19 @@ by `OperatorKind` alone (a Claude Code reviewer runs in the ticket's
 tree with an allow rule for the attempt directory, Codex in the attempt
 directory), so a new kind of agent is one variant and its answers. A project with `root`
 instead of `repo` works in place with no branch, for one that is not a
-repository. Everything else in that document (command and
-external gates, `implement`, PR checks, budgets, the other pipelines)
-parks the ticket with a reason. The runner's pass over a project is
+repository. An agent stage's command gate (`implement`) runs after
+the agent stops: the context's tree must be clean, its head is
+recorded, the fixed argv starts as a child of the runner with the
+ticket's values in its environment and its output in the attempt's
+`checks.log`, and the exit is bound to that head only if the tree is
+still clean at it after; a dirty tree, a nonzero exit or a changed
+head is a failed attempt and a rerun decision, and a runner restart
+starts the lost check again on the same head. (The design has the
+gate run as a Switchboard command record; a child of the runner is
+what is built, so the port needs no per-record environment yet.)
+Everything else in that document (external and human gates on agent
+stages, gate-only command stages, PR checks, budgets, the other
+pipelines) parks the ticket with a reason. The runner's pass over a project is
 one transaction under the data directory's writer lock, and `decide`,
 `take` and `queue` take the same lock around their read and write, so
 an answer from the terminal is never overwritten by a pass that read

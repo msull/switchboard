@@ -106,8 +106,25 @@ pub struct Attempt {
     pub polls_since_stop: u32,
     /// The head commit of the context's tree when the attempt completed.
     pub head: Option<String>,
+    /// The stage's command gate, once the agent stopped and it started.
+    #[serde(default)]
+    pub gate: Option<GateRun>,
     pub started_ms: u64,
     pub ended_ms: Option<u64>,
+}
+
+/// A command gate run for an attempt: started on a clean tree at a
+/// head, its exit bound to that head only if the tree is unchanged
+/// after.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GateRun {
+    /// The head the check ran against.
+    pub head: String,
+    pub argv: Vec<String>,
+    /// Where the check's output goes.
+    pub log: PathBuf,
+    pub started_ms: u64,
+    pub exit: Option<i32>,
 }
 
 impl Attempt {
@@ -355,6 +372,7 @@ mod tests {
             stop_at_ms: None,
             polls_since_stop: 0,
             head: None,
+            gate: None,
             started_ms: 0,
             ended_ms: None,
         };

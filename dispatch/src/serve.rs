@@ -235,6 +235,12 @@ pub fn ticket_view(t: &Ticket, stages: Vec<String>) -> TicketView {
                         .iter()
                         .map(|(k, v)| (k.clone(), v.clone()))
                         .collect(),
+                    head: a.head.clone(),
+                    checks: a.gate.as_ref().map(|g| dispatch_control::ChecksView {
+                        head: g.head.clone(),
+                        exit: g.exit,
+                        log: g.log.clone(),
+                    }),
                     started_ms: a.started_ms,
                     ended_ms: a.ended_ms,
                 }

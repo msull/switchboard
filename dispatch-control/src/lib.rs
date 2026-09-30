@@ -224,8 +224,21 @@ pub struct AttemptView {
     pub run: Option<String>,
     /// Artifact name and its file.
     pub artifacts: Vec<(String, PathBuf)>,
+    /// The head the attempt's result is bound to, once complete.
+    pub head: Option<String>,
+    /// The stage's checks, once the agent stopped and they started: the
+    /// head they ran at and their exit, none while they run.
+    pub checks: Option<ChecksView>,
     pub started_ms: u64,
     pub ended_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ChecksView {
+    pub head: String,
+    pub exit: Option<i32>,
+    pub log: PathBuf,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]

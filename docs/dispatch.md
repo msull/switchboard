@@ -1066,6 +1066,12 @@ with the plan attempt's session as the source, then stops at the
 file, the attempt records, one root and one lane context, the
 default output gate, an external gate, and a human gate.
 
+The second slice adds `implement`: an agent stage in every chosen
+lane with a command gate. The gate is built as a child process of the
+runner rather than a Switchboard command record for now (the port has
+no per-record environment yet); its output goes to the attempt's
+`checks.log`, shown on the ticket page as the `checks` artifact.
+
 Acceptance, each as a test against a fake Switchboard on the socket
 and one against the real one:
 
@@ -1080,6 +1086,10 @@ and one against the real one:
 | Investigator killed after a partial notes file | No Stop recorded; the attempt fails; nothing advances |
 | A review with one objection | The copy in the review attempt changes; the plan attempt's file does not |
 | Dispatch restarts while the planner clone is still being made | `op.status` is `in progress`; Dispatch waits; the attempt continues |
+| The implementer stops on a clean tree | The checks start at the tree's head in the lane with `DISPATCH_*` in their environment; the agent is killed; the attempt stays open until they exit; exit 0 binds the head and completes it |
+| The checks fail | A failed attempt and a rerun decision; nothing retried on its own; a rerun is a fresh agent |
+| The tree is dirty when the agent stops | No check runs; a failed attempt and a rerun decision |
+| The runner restarts while the checks run | The lost check starts again on the same head; no second agent |
 | The queue view after `plan` replaces `investigate`, and after two tickets swap places | One card per ticket, in order, no stale card, no overlap failure |
 | Plan session has no transcript yet | `workflow.start` fails; the attempt is failed and a decision, not retried |
 | Plan file from an earlier attempt exists | The new attempt's own path is empty, so nothing advances |

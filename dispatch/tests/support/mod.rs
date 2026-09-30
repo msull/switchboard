@@ -10,6 +10,7 @@ use std::collections::BTreeMap;
 use std::io;
 use std::sync::{Arc, Mutex};
 
+use dispatch::git::{FakeRepo, Repo};
 use dispatch::port::Port;
 use switchboard_control::{
     Body, Definition, Found, Liveness, Made, OpStatus, Pin, ProjectView, RecordKind, Reply,
@@ -573,5 +574,62 @@ impl Port for SharedPort {
             ));
         }
         Ok(reply)
+    }
+}
+
+/// A fake repository shared with the test, so a runner can be replaced
+/// (a restart) over the same heads and checks.
+pub struct SharedRepo(pub Arc<Mutex<FakeRepo>>);
+
+impl Repo for SharedRepo {
+    fn ensure_clone(&mut self, url: &str, dir: &std::path::Path) -> anyhow::Result<()> {
+        self.0.lock().unwrap().ensure_clone(url, dir)
+    }
+    fn fetch(&mut self, dir: &std::path::Path, remote: &str) -> anyhow::Result<()> {
+        self.0.lock().unwrap().fetch(dir, remote)
+    }
+    fn worktree_add(
+        &mut self,
+        repo: &std::path::Path,
+        dir: &std::path::Path,
+        branch: &str,
+        base: &str,
+    ) -> anyhow::Result<()> {
+        self.0.lock().unwrap().worktree_add(repo, dir, branch, base)
+    }
+    fn is_worktree_of(
+        &self,
+        repo: &std::path::Path,
+        dir: &std::path::Path,
+        branch: &str,
+    ) -> anyhow::Result<bool> {
+        self.0.lock().unwrap().is_worktree_of(repo, dir, branch)
+    }
+    fn head(&self, dir: &std::path::Path) -> anyhow::Result<String> {
+        self.0.lock().unwrap().head(dir)
+    }
+    fn is_clean(&self, dir: &std::path::Path) -> anyhow::Result<bool> {
+        self.0.lock().unwrap().is_clean(dir)
+    }
+    fn run(
+        &mut self,
+        dir: &std::path::Path,
+        argv: &[String],
+        env: &[(String, String)],
+    ) -> anyhow::Result<()> {
+        self.0.lock().unwrap().run(dir, argv, env)
+    }
+    fn start_check(
+        &mut self,
+        key: &str,
+        dir: &std::path::Path,
+        argv: &[String],
+        env: &[(String, String)],
+        log: &std::path::Path,
+    ) -> anyhow::Result<()> {
+        self.0.lock().unwrap().start_check(key, dir, argv, env, log)
+    }
+    fn poll_check(&mut self, key: &str) -> Option<anyhow::Result<i32>> {
+        self.0.lock().unwrap().poll_check(key)
     }
 }
