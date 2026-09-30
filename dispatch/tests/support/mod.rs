@@ -646,6 +646,18 @@ impl Repo for SharedRepo {
     ) -> anyhow::Result<()> {
         self.0.lock().unwrap().worktree_add(repo, dir, branch, base)
     }
+    fn worktree_track(
+        &mut self,
+        repo: &std::path::Path,
+        dir: &std::path::Path,
+        branch: &str,
+        remote: &str,
+    ) -> anyhow::Result<()> {
+        self.0
+            .lock()
+            .unwrap()
+            .worktree_track(repo, dir, branch, remote)
+    }
     fn is_worktree_of(
         &self,
         repo: &std::path::Path,

@@ -154,12 +154,55 @@ struct PrRow {
     source: Source,
     #[serde(default)]
     links: Links,
+    #[serde(default)]
+    title: String,
+}
+
+impl PrRow {
+    fn pull_request(&self) -> PullRequest {
+        PullRequest {
+            number: self.id,
+            url: self
+                .links
+                .html
+                .as_ref()
+                .map(|h| h.href.clone())
+                .unwrap_or_default(),
+            head: self
+                .source
+                .commit
+                .as_ref()
+                .map(|c| c.hash.clone())
+                .unwrap_or_default(),
+            state: match self.state.as_str() {
+                "OPEN" => "open".to_owned(),
+                "MERGED" => "merged".to_owned(),
+                _ => "closed".to_owned(),
+            },
+            mergeable: None,
+            branch: self
+                .source
+                .branch
+                .as_ref()
+                .map(|b| b.name.clone())
+                .unwrap_or_default(),
+            title: self.title.clone(),
+        }
+    }
 }
 
 #[derive(Deserialize, Default)]
 struct Source {
     #[serde(default)]
     commit: Option<Commit>,
+    #[serde(default)]
+    branch: Option<Branch>,
+}
+
+#[derive(Deserialize)]
+struct Branch {
+    #[serde(default)]
+    name: String,
 }
 
 #[derive(Deserialize)]
@@ -198,27 +241,13 @@ pub(crate) fn parse_prs(json: &[u8]) -> Result<Option<PullRequest>> {
         .iter()
         .find(|r| r.state == "OPEN")
         .or_else(|| page.values.iter().max_by_key(|r| r.id));
-    Ok(row.map(|r| PullRequest {
-        number: r.id,
-        url: r
-            .links
-            .html
-            .as_ref()
-            .map(|h| h.href.clone())
-            .unwrap_or_default(),
-        head: r
-            .source
-            .commit
-            .as_ref()
-            .map(|c| c.hash.clone())
-            .unwrap_or_default(),
-        state: match r.state.as_str() {
-            "OPEN" => "open".to_owned(),
-            "MERGED" => "merged".to_owned(),
-            _ => "closed".to_owned(),
-        },
-        mergeable: None,
-    }))
+    Ok(row.map(PrRow::pull_request))
+}
+
+/// One pull request as its own page gives it.
+pub(crate) fn parse_pr(json: &[u8]) -> Result<PullRequest> {
+    let row: PrRow = serde_json::from_slice(json).context("parse bitbucket's json")?;
+    Ok(row.pull_request())
 }
 
 /// The commit statuses on a PR's head, taken together.
@@ -264,6 +293,11 @@ impl PullRequests for Bitbucket {
             "{API_ROOT}/repositories/{repo}/pullrequests?q={q}&state=OPEN&state=MERGED&state=DECLINED&state=SUPERSEDED&pagelen=50"
         );
         parse_prs(&self.get(&url)?)
+    }
+
+    fn by_number(&self, repo: &str, number: u64) -> Result<PullRequest> {
+        let url = format!("{API_ROOT}/repositories/{repo}/pullrequests/{number}");
+        parse_pr(&self.get(&url)?)
     }
 
     fn checks(&self, repo: &str, number: u64) -> Result<Checks> {

@@ -226,6 +226,8 @@ impl Env {
                 head: head.into(),
                 state: state.into(),
                 mergeable: mergeable.map(str::to_owned),
+                branch: String::new(),
+                title: String::new(),
             },
         ));
         prs.checks.push(("msull/switchboard".into(), 7, checks));
@@ -282,6 +284,7 @@ impl Env {
                     url: None,
                     labels: vec!["dispatch".into()],
                     taken_at_ms: now,
+                    pull_requests: Vec::new(),
                 },
                 now,
             )
@@ -1490,6 +1493,8 @@ fn a_bitbucket_remote_is_read_through_bitbucket_and_a_short_head_matches() {
                 head: "base0000".chars().take(7).collect(),
                 state: "open".into(),
                 mergeable: None,
+                branch: String::new(),
+                title: String::new(),
             },
         ));
         bb.checks
@@ -2093,6 +2098,208 @@ fn a_project_that_cannot_be_saved_makes_nothing_else() {
     assert_eq!(env.sb().kinds_called("session.new"), 0);
     let liveness: Vec<Liveness> = env.sb().sessions.iter().map(|s| s.liveness).collect();
     assert!(liveness.is_empty());
+}
+
+/// The pull-request pipeline of the test project: two lanes, one in
+/// the project's repository and one with a repository of its own, a
+/// sign-off and a merge watch. No agent stages, nothing pushes.
+fn pr_pipeline(worktrees: &std::path::Path) -> String {
+    format!(
+        r#"
+version = 1
+
+[project]
+name = "Switchboard"
+repo = "git@github.com:msull/switchboard.git"
+worktrees = "{worktrees}"
+space = "Dispatch · Switchboard"
+
+[source]
+kind = "pull-request"
+
+[[lanes]]
+name = "repo"
+path = "."
+
+[[lanes]]
+name = "docs"
+path = "docs"
+repo = "git@github.com:msull/docs.git"
+
+[[stages]]
+name = "inspect"
+context = "each"
+gate = {{ kind = "human", decision = "inspect" }}
+
+[[stages]]
+name = "merge"
+context = "each"
+gate = {{ kind = "external", check = "pr-merged", decision = "merge" }}
+
+[policy]
+slots = 2
+waiting_on_me = 5
+"#,
+        worktrees = worktrees.display()
+    )
+}
+
+/// One open PR the fake provider hands out, by repository and number.
+fn open_pr(env: &Env, repo: &str, number: u64, branch: &str, title: &str) {
+    env.prs.lock().unwrap().prs.push((
+        repo.to_owned(),
+        branch.to_owned(),
+        PullRequest {
+            number,
+            url: format!("https://github.com/{repo}/pull/{number}"),
+            head: format!("head{number:04}"),
+            state: "open".into(),
+            mergeable: Some("clean".into()),
+            branch: branch.to_owned(),
+            title: title.to_owned(),
+        },
+    ));
+}
+
+/// A ticket from someone else's pull requests: one per lane, each
+/// lane checked out on the PR's own branch tracking the remote; the
+/// sign-off question comes after the branches are brought up to date;
+/// proceed leads to the merge watch, and the merges close the ticket.
+#[test]
+fn a_ticket_from_pull_requests_checks_out_their_branches_and_watches_the_merges() {
+    let mut env = Env::new();
+    let worktrees = env.data.root.join("wt");
+    std::fs::write(env.data.pr_pipeline(PROJECT), pr_pipeline(&worktrees)).unwrap();
+    open_pr(
+        &env,
+        "msull/switchboard",
+        9,
+        "feature/escape",
+        "Escape leaves the field",
+    );
+    open_pr(
+        &env,
+        "msull/docs",
+        3,
+        "feature/escape-docs",
+        "Document escape",
+    );
+    let now = env.tick();
+    let t =
+        dispatch::serve::take_pull_requests(&mut env.runner, PROJECT, &["repo/9", "docs/3"], now)
+            .unwrap();
+    let id = t.id.clone();
+    assert_eq!(t.source.kind, "pull-request");
+    assert_eq!(t.source.identity, "msull/switchboard!9+msull/docs!3");
+    assert_eq!(t.source.title, "Escape leaves the field");
+    assert_eq!(t.source.pull_requests.len(), 2);
+    env.steps_until(&id, "the sign-off question", |t, _| {
+        t.pending_decisions().iter().any(|d| d.name == "inspect")
+    });
+    let t = env.ticket(&id);
+    let branches: Vec<(String, String, bool)> = t
+        .lanes
+        .iter()
+        .map(|l| (l.name.clone(), l.branch.clone(), l.chosen))
+        .collect();
+    assert_eq!(
+        branches,
+        vec![
+            ("repo".to_owned(), "feature/escape".to_owned(), true),
+            ("docs".to_owned(), "feature/escape-docs".to_owned(), true),
+        ]
+    );
+    {
+        let repo = env.repo.lock().unwrap();
+        let tracked: Vec<(String, String)> = repo
+            .tracked
+            .iter()
+            .map(|(_, _, b, r)| (b.clone(), r.clone()))
+            .collect();
+        assert_eq!(
+            tracked,
+            vec![
+                ("feature/escape".to_owned(), "origin".to_owned()),
+                ("feature/escape-docs".to_owned(), "origin".to_owned()),
+            ],
+            "both are the PRs' branches, tracking the remote"
+        );
+        assert!(repo.worktrees.is_empty(), "no branch of Dispatch's own");
+        let refreshed = repo
+            .ran
+            .iter()
+            .filter(|(_, argv)| {
+                argv.join(" ")
+                    .starts_with("git merge --ff-only origin/feature/")
+            })
+            .count();
+        assert_eq!(refreshed, 2, "each branch was brought up to date first");
+    }
+    assert!(t.attempts.iter().all(|a| a.kind == AttemptKind::GateOnly));
+    let pending = env.pending(&id);
+    assert_eq!(pending.len(), 2, "one sign-off per lane");
+    for d in &pending {
+        let now = env.tick();
+        env.runner.decide(&id, &d.id, "proceed", None, now).unwrap();
+    }
+    env.steps_until(&id, "the merge watch", |t, _| {
+        t.pending_decisions().iter().any(|d| d.name == "merge")
+    });
+    let merge = env.pending(&id);
+    assert!(
+        merge.iter().any(|d| d.question.contains("PR #9")),
+        "{merge:?}"
+    );
+    for (_, _, pr) in &mut env.prs.lock().unwrap().prs {
+        pr.state = "merged".into();
+    }
+    env.wait(PR_POLL_MS);
+    env.steps_until(&id, "the ticket closing", |t, _| !t.active());
+    assert!(matches!(&env.ticket(&id).state, TicketState::Closed { .. }));
+}
+
+/// A pull request take is refused for a spec without its lane, a lane
+/// the pipeline lacks, a PR that is not open, two lanes in the one
+/// repository, and a PR already on a live ticket.
+#[test]
+fn taking_pull_requests_refuses_bad_specs_and_doubles() {
+    let mut env = Env::new();
+    let worktrees = env.data.root.join("wt");
+    std::fs::write(env.data.pr_pipeline(PROJECT), pr_pipeline(&worktrees)).unwrap();
+    open_pr(
+        &env,
+        "msull/switchboard",
+        9,
+        "feature/escape",
+        "Escape leaves the field",
+    );
+    env.prs.lock().unwrap().prs[0].2.state = "closed".into();
+    let now = env.tick();
+    let refused = |env: &mut Env, specs: &[&str], expected: &str| {
+        let err = dispatch::serve::take_pull_requests(&mut env.runner, PROJECT, specs, now)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains(expected), "{specs:?}: {err}");
+    };
+    refused(&mut env, &["9"], "name the lane");
+    refused(&mut env, &["web/9"], "no lane \"web\"");
+    refused(&mut env, &["repo/9"], "is closed");
+    refused(&mut env, &["repo/9", "repo/9"], "is closed");
+    env.prs.lock().unwrap().prs[0].2.state = "open".into();
+    refused(&mut env, &[], "at least one");
+    refused(&mut env, &["repo/9", "repo/9"], "named twice");
+    dispatch::serve::take_pull_requests(&mut env.runner, PROJECT, &["repo/9"], now).unwrap();
+    refused(&mut env, &["repo/9"], "is already ticket");
+    // A second lane in the project's repository cannot carry a PR of
+    // its own.
+    let text = pr_pipeline(&worktrees).replace("repo = \"git@github.com:msull/docs.git\"\n", "");
+    std::fs::write(env.data.pr_pipeline(PROJECT), text).unwrap();
+    open_pr(&env, "msull/switchboard", 10, "feature/docs", "Docs");
+    refused(
+        &mut env,
+        &["repo/10", "docs/10"],
+        "share the project's repository",
+    );
 }
 
 /// A socket failure (Switchboard restarted under the runner) is not a
@@ -2914,6 +3121,7 @@ fn the_worktree_root_is_a_setting_a_tilde_is_the_home_and_a_space_is_refused() {
                 url: None,
                 labels: vec![],
                 taken_at_ms: now,
+                pull_requests: Vec::new(),
             },
             now,
         )
@@ -3118,6 +3326,7 @@ fn workspace_env(labels: &[&str]) -> (Env, String) {
                 url: None,
                 labels: labels.iter().map(|l| (*l).to_owned()).collect(),
                 taken_at_ms: now,
+                pull_requests: Vec::new(),
             },
             now,
         )

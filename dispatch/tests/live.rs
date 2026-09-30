@@ -165,6 +165,7 @@ prompt = "Write the single word pong to the file {{notes}} and stop."
                 url: None,
                 labels: Vec::new(),
                 taken_at_ms: now_ms(),
+                pull_requests: Vec::new(),
             },
             now_ms(),
         )

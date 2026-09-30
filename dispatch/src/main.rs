@@ -9,12 +9,14 @@ use dispatch::git::GitCli;
 use dispatch::github::Gh;
 use dispatch::port::SocketPort;
 use dispatch::scheduler::Runner;
-use dispatch::serve::{Handler, Server, take_issue};
+use dispatch::serve::{Handler, Server, take_issue, take_pull_requests};
 use dispatch::store::DataDir;
 use dispatch::ticket::{DecisionState, TicketState};
 
 const USAGE: &str = "usage:
   dispatch take <project> <issue-number>   make a ticket from an issue and queue it
+  dispatch take <project> pr <lane>/<n>... a ticket from someone's pull requests, one per lane,
+                                           on <project>.pr.toml; the lane may be left off with one lane
   dispatch run [--once]                    drive every ticket (once, or until stopped)
   dispatch decide <ticket> <decision> <answer> [--note <text>]
   dispatch decisions                       what waits on you
@@ -46,6 +48,7 @@ fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
     match args.as_slice() {
+        ["take", project, "pr", specs @ ..] => take_prs(project, specs),
         ["take", project, issue] => take(project, issue),
         ["run"] => run(false),
         ["run", "--once"] => run(true),
@@ -63,6 +66,24 @@ fn main() -> Result<()> {
             std::process::exit(2);
         }
     }
+}
+
+fn take_prs(project: &str, specs: &[&str]) -> Result<()> {
+    let mut runner = runner()?;
+    let ticket = take_pull_requests(&mut runner, project, specs, now_ms())?;
+    println!(
+        "{} {} ({})",
+        ticket.id,
+        ticket.source.title,
+        ticket
+            .source
+            .pull_requests
+            .iter()
+            .map(|pr| format!("{} PR #{}", pr.lane, pr.number))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    Ok(())
 }
 
 fn take(project: &str, issue: &str) -> Result<()> {

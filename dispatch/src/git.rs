@@ -16,6 +16,12 @@ pub trait Repo: Send {
     /// `git worktree add <dir> -b <branch> <start>` in `repo`, where
     /// `start` is a ref like `origin/main`.
     fn worktree_add(&mut self, repo: &Path, dir: &Path, branch: &str, start: &str) -> Result<()>;
+    /// A worktree of `repo` at `dir` on `branch` as `remote` has it,
+    /// tracking it: someone else's branch, checked out to be looked at.
+    /// A local branch of that name left by an earlier ticket is reset
+    /// to the remote's.
+    fn worktree_track(&mut self, repo: &Path, dir: &Path, branch: &str, remote: &str)
+    -> Result<()>;
     /// Whether `dir` is a finished worktree of `repo` with `branch`
     /// checked out: the same common git directory, that branch, a tree.
     fn is_worktree_of(&self, repo: &Path, dir: &Path, branch: &str) -> Result<bool>;
@@ -114,6 +120,27 @@ impl Repo for GitCli {
                 .args(["worktree", "add"])
                 .arg(dir)
                 .args(["-b", branch, start]),
+        )?;
+        Ok(())
+    }
+
+    fn worktree_track(
+        &mut self,
+        repo: &Path,
+        dir: &Path,
+        branch: &str,
+        remote: &str,
+    ) -> Result<()> {
+        if let Some(parent) = dir.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        output(
+            git()
+                .arg("-C")
+                .arg(repo)
+                .args(["worktree", "add"])
+                .arg(dir)
+                .args(["--track", "-B", branch, &format!("{remote}/{branch}")]),
         )?;
         Ok(())
     }
@@ -297,6 +324,8 @@ pub struct FakeRepo {
     pub clones: Vec<(String, PathBuf)>,
     pub fetched: Vec<(PathBuf, String)>,
     pub worktrees: Vec<(PathBuf, PathBuf, String, String)>,
+    /// Worktrees of someone else's branch: repo, dir, branch, remote.
+    pub tracked: Vec<(PathBuf, PathBuf, String, String)>,
     pub heads: std::collections::BTreeMap<PathBuf, String>,
     pub dirty: Vec<PathBuf>,
     pub ran: Vec<(PathBuf, Vec<String>)>,
@@ -337,6 +366,28 @@ impl Repo for FakeRepo {
             base.into(),
         ));
         self.heads.insert(dir.to_path_buf(), "base0000".into());
+        Ok(())
+    }
+    fn worktree_track(
+        &mut self,
+        repo: &Path,
+        dir: &Path,
+        branch: &str,
+        remote: &str,
+    ) -> Result<()> {
+        if let Some(e) = &self.fail_worktree {
+            bail!("{e}");
+        }
+        std::fs::create_dir_all(dir)?;
+        // Someone else's branch is at whatever it is at; a test that
+        // cares sets `heads` afterwards.
+        self.heads.insert(dir.to_path_buf(), "theirs00".into());
+        self.tracked.push((
+            repo.to_path_buf(),
+            dir.to_path_buf(),
+            branch.to_owned(),
+            remote.to_owned(),
+        ));
         Ok(())
     }
     fn is_worktree_of(&self, repo: &Path, dir: &Path, branch: &str) -> Result<bool> {

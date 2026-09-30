@@ -368,7 +368,7 @@ worktrees = "/path"           # where this project's trees go (~ expands); omitt
 space = "..."                 # the Switchboard workspace every ticket's project goes in
 
 [source]
-kind = "github" | "task-file" | "manual"
+kind = "github" | "task-file" | "manual" | "pull-request"   # pull-request: see "Tickets from pull requests"
 
 [[lanes]]
 name = "..."
@@ -979,6 +979,54 @@ at the same head, no fixer, and a spent `max_fixes` are each a `pr`
 question. Rebases and fixes are counted separately; each kind counts
 only agents that ran.
 
+## Tickets from pull requests
+
+The other kind of work: someone else's change, which the user tests,
+reviews and signs off rather than makes. It is a ticket like any
+other, on a second pipeline file per project, `<project>.pr.toml`,
+whose `[source]` is `kind = "pull-request"` and whose lanes are the
+project's. The queue, the slots and `waiting_on_me` are the project's,
+shared with its issue tickets.
+
+```
+dispatch take Delta pr backend/123 frontend/45
+dispatch take Switchboard pr 12          # the lane may be left off when there is one
+```
+
+Each spec names a lane and a pull request number; the PR is read from
+the lane's repository on its provider (GitHub or Bitbucket, by the
+remote's host) and must be open. One ticket carries one PR per lane;
+two lanes that share the project's repository cannot each carry one.
+The identity is the set of PRs, so a PR on a live ticket is refused
+until that ticket closes. The snapshot records each PR's lane,
+provider, repository, number, URL, branch, head and title; the
+ticket's title is the first PR's.
+
+The lanes are the PRs' own branches: a lane with a repository of its
+own is a worktree of Dispatch's clone on that branch, tracking the
+remote (`git worktree add --track -B <branch> <remote>/<branch>`); a
+PR in a lane without one makes the tree itself that branch. Lanes no
+PR is in are not cut. Nothing in this mode pushes: a pull-request
+pipeline refuses a `rebaser` or `fixer` in its policy, and the
+conflicting or red readings of `pr-checks` stay questions for the
+author to act on. Each time a human gate opens, the branches are
+brought up to what the remote has (fetch, fast-forward); a branch that
+no longer fast-forwards, a force push, parks the ticket, since what
+was looked at is gone.
+
+The pipeline is the tail of an issue's: what runs on the branch (the
+project's `deploy` and `try` stages, once built, bind to the PR head
+like any command gate), an `inspect` human gate for the sign-off, and
+`pr-merged` to watch the merge. The sign-off is recorded on the ticket
+only: approval and feedback go to the provider by the user's hand for
+now, and reviewers' notes, when the review stage gains a notes-only
+mode, stay private to the user. The ticket closes when the provider
+reports the merge, as an issue ticket does.
+
+Later: a notes-only review stage before the sign-off; posting the
+approval or a request for changes to the provider from the decision;
+a PR that moves after sign-off asking again.
+
 ## Budget
 
 Budgets are reporting, not enforcement. Switchboard reads token counts
@@ -1197,6 +1245,9 @@ and one against the real one:
 | Plan session has no transcript yet | `workflow.start` fails; the attempt is failed and a decision, not retried |
 | Plan file from an earlier attempt exists | The new attempt's own path is empty, so nothing advances |
 | `project.add` fails to save | `failed` reply; attempt failed; nothing else made |
+| `take <project> pr <lane>/<n>...` | A ticket on `<project>.pr.toml` with one PR per named lane, refused for a closed PR, an unknown or repeated lane, two lanes in one repository, or a PR already on a live ticket |
+| A pull-request ticket's first pass | Each PR's lane is a worktree on the PR's branch tracking the remote, chosen; no branch of Dispatch's own; lanes without a PR are not cut |
+| The sign-off gate opens on a pull-request ticket | Each branch is fetched and fast-forwarded first; a force push parks the ticket; `proceed` leads to `pr-merged`, and the merges close the ticket |
 | The socket fails mid-pass (Switchboard quit or restarted under the runner) | Nothing is parked; the pass ends with a log line and the next one goes on; the port remakes its connection and sends the request again, which the operations log makes safe |
 | User is viewing another workspace during the whole path | The window stays on it through every launch and the review start; no terminal window opens |
 

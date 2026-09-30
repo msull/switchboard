@@ -494,7 +494,7 @@ impl Runner {
         // Dispatch's clone on the ticket's branch, cut from what the
         // remote has now, and every lane inside it. The user's checkout
         // is never involved.
-        if p.cuts_worktrees() && (t.tree.is_none() || t.lanes.len() < p.lanes.len()) {
+        if p.cuts_worktrees() && (t.tree.is_none() || t.lanes.len() < lanes_wanted(t, p)) {
             self.cut_trees(t, ps, p, now_ms)?;
             if !t.active() {
                 return Ok(());
@@ -1000,7 +1000,18 @@ impl Runner {
         let Some(url) = p.project.repo.clone() else {
             return Ok(());
         };
-        let branch = branch_name(t.source.number.unwrap_or(0), &t.source.title);
+        // A ticket from pull requests checks their branches out instead
+        // of cutting its own: a PR in a lane without a repository of its
+        // own is the tree's branch, and only lanes with a PR are cut.
+        let prs = t.source.pull_requests.clone();
+        let tree_pr = prs
+            .iter()
+            .find(|pr| p.lane(&pr.lane).is_some_and(|l| l.repo.is_none()))
+            .cloned();
+        let branch = tree_pr.as_ref().map_or_else(
+            || branch_name(t.source.number.unwrap_or(0), &t.source.title),
+            |pr| pr.branch.clone(),
+        );
         if t.tree.is_none() {
             let dir = self.worktree_root(p).join(&t.id);
             let clone = self.data.repo_dir(&p.project.name);
@@ -1015,6 +1026,7 @@ impl Runner {
                 &dir,
                 &branch,
                 &start,
+                tree_pr.is_some(),
                 now_ms,
             )? {
                 return Ok(());
@@ -1027,6 +1039,11 @@ impl Runner {
             if t.lanes.iter().any(|l| l.name == lane.name) {
                 continue;
             }
+            let pr = prs.iter().find(|pr| pr.lane == lane.name);
+            if !prs.is_empty() && pr.is_none() {
+                continue;
+            }
+            let lane_branch = pr.map_or_else(|| branch.clone(), |pr| pr.branch.clone());
             let dir = tree.join(&lane.path);
             if let Some(url) = &lane.repo {
                 let clone = self
@@ -1036,7 +1053,17 @@ impl Runner {
                 let start = format!("{remote}/{}", p.lane_base(lane));
                 let what = format!("lane {}", lane.name);
                 if !self.cut(
-                    t, ps, &what, url, &clone, &remote, &dir, &branch, &start, now_ms,
+                    t,
+                    ps,
+                    &what,
+                    url,
+                    &clone,
+                    &remote,
+                    &dir,
+                    &lane_branch,
+                    &start,
+                    pr.is_some(),
+                    now_ms,
                 )? {
                     return Ok(());
                 }
@@ -1051,12 +1078,63 @@ impl Runner {
             t.lanes.push(LaneRecord {
                 name: lane.name.clone(),
                 worktree: dir,
-                branch: branch.clone(),
+                branch: lane_branch,
                 project: None,
-                chosen: p.lanes.len() == 1,
+                chosen: p.lanes.len() == 1 || pr.is_some(),
                 setup_done: false,
             });
             self.save_ticket(t, now_ms)?;
+        }
+        Ok(())
+    }
+
+    /// The pull requests' branches brought up to what the remote has,
+    /// before the user is asked about them. A branch that no longer
+    /// fast-forwards (a force push) parks the ticket, since what was
+    /// looked at is gone.
+    fn refresh_pull_requests(
+        &mut self,
+        t: &mut Ticket,
+        ps: &mut ProjectState,
+        p: &Pipeline,
+        now_ms: u64,
+    ) -> Result<()> {
+        for pr in t.source.pull_requests.clone() {
+            let Some(lane) = p.lane(&pr.lane) else {
+                continue;
+            };
+            let Some(record) = t.lanes.iter().find(|l| l.name == pr.lane) else {
+                continue;
+            };
+            let clone = if lane.repo.is_some() {
+                self.data
+                    .repo_dir(&format!("{}@{}", p.project.name, lane.name))
+            } else {
+                self.data.repo_dir(&p.project.name)
+            };
+            let remote = p.lane_remote(lane).to_owned();
+            let worktree = record.worktree.clone();
+            let refresh = self.git.fetch(&clone, &remote).and_then(|()| {
+                let argv = [
+                    "git",
+                    "merge",
+                    "--ff-only",
+                    &format!("{remote}/{}", pr.branch),
+                ]
+                .map(str::to_owned);
+                self.git.run(&worktree, &argv, &[])
+            });
+            if let Err(e) = refresh {
+                return self.park(
+                    t,
+                    ps,
+                    &format!(
+                        "lane {}: PR #{} branch {} no longer fast-forwards (a force push?): {e:#}",
+                        pr.lane, pr.number, pr.branch
+                    ),
+                    now_ms,
+                );
+            }
         }
         Ok(())
     }
@@ -1076,6 +1154,7 @@ impl Runner {
         dir: &Path,
         branch: &str,
         start: &str,
+        track: bool,
         now_ms: u64,
     ) -> Result<bool> {
         if let Err(e) = self.git.ensure_clone(url, clone) {
@@ -1120,7 +1199,12 @@ impl Runner {
             log::info!("ticket {} {what}: adopting {}", t.id, dir.display());
             return Ok(true);
         }
-        if let Err(e) = self.git.worktree_add(clone, dir, branch, start) {
+        let added = if track {
+            self.git.worktree_track(clone, dir, branch, remote)
+        } else {
+            self.git.worktree_add(clone, dir, branch, start)
+        };
+        if let Err(e) = added {
             self.park(
                 t,
                 ps,
@@ -1462,7 +1546,7 @@ impl Runner {
     }
 
     /// The provider a target names.
-    fn prs_for(&self, provider: &str) -> &dyn PullRequests {
+    pub(crate) fn prs_for(&self, provider: &str) -> &dyn PullRequests {
         if provider == "bitbucket" {
             self.bitbucket.as_ref()
         } else {
@@ -1495,6 +1579,14 @@ impl Runner {
                 &format!("stage {} needs lanes the ticket has not cut", stage.name),
                 now_ms,
             );
+        }
+        // Someone else's branches are read as they are now, once per
+        // opening of the gate.
+        if t.source.is_pull_request() && !t.attempts_of(&stage.name).any(Attempt::is_open) {
+            self.refresh_pull_requests(t, ps, p, now_ms)?;
+            if !t.active() {
+                return Ok(());
+            }
         }
         let mut all_complete = true;
         for (ctx, cwd, lane) in contexts {
@@ -3596,18 +3688,7 @@ fn pr_target(
             stage.name
         ));
     };
-    let provider = provider.map_or_else(
-        || {
-            if github_repo(&remote).is_some() {
-                "github".to_owned()
-            } else if bitbucket_repo(&remote).is_some() {
-                "bitbucket".to_owned()
-            } else {
-                "unknown".to_owned()
-            }
-        },
-        str::to_owned,
-    );
+    let provider = provider.map_or_else(|| guess_provider(&remote).to_owned(), str::to_owned);
     let repo = match provider.as_str() {
         "github" => github_repo(&remote),
         "bitbucket" => bitbucket_repo(&remote),
@@ -3752,6 +3833,30 @@ fn remedy_reason(
         ))
     } else {
         None
+    }
+}
+
+/// The provider a remote URL points at, by its host.
+pub(crate) fn guess_provider(remote: &str) -> &'static str {
+    if github_repo(remote).is_some() {
+        "github"
+    } else if bitbucket_repo(remote).is_some() {
+        "bitbucket"
+    } else {
+        "unknown"
+    }
+}
+
+/// How many lanes a ticket cuts: every lane of the pipeline, or for a
+/// ticket from pull requests only the lanes they are in.
+fn lanes_wanted(t: &Ticket, p: &Pipeline) -> usize {
+    if t.source.is_pull_request() {
+        p.lanes
+            .iter()
+            .filter(|l| t.source.pull_requests.iter().any(|pr| pr.lane == l.name))
+            .count()
+    } else {
+        p.lanes.len()
     }
 }
 

@@ -75,6 +75,9 @@ pub enum Source {
         marker: String,
     },
     Manual,
+    /// Tickets are taken from pull requests named on the command line,
+    /// one per lane; the pipeline reviews them and pushes nothing.
+    PullRequest,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -583,6 +586,10 @@ impl Pipeline {
             {
                 bail!("[policy] {key} names an unknown operator {name:?}");
             }
+            // Someone else's branch is theirs to change.
+            if name.is_some() && self.source == Source::PullRequest {
+                bail!("[policy] {key}: a pull-request pipeline pushes nothing");
+            }
         }
         match (&self.project.repo, &self.project.root) {
             (Some(_), None) | (None, Some(_)) => {}
@@ -802,5 +809,21 @@ writes = ["plan"]"#,
             let err = Pipeline::parse(&text).unwrap_err().to_string();
             assert!(err.contains(expected), "{from}: {err}");
         }
+    }
+
+    /// A pipeline for someone else's pull requests reads their
+    /// branches and pushes nothing: no rebaser, no fixer.
+    #[test]
+    fn a_pull_request_pipeline_names_no_operator_that_pushes() {
+        let text = SWITCHBOARD
+            .replace(
+                "[source]\nkind = \"github\"\nrepo = \"msull/switchboard\"\nlabel = \"dispatch\"\n",
+                "[source]\nkind = \"pull-request\"\n",
+            )
+            .replace("[policy]\n", "[policy]\nfixer = \"planner\"\n");
+        let err = Pipeline::parse(&text).unwrap_err().to_string();
+        assert!(err.contains("pushes nothing"), "{err}");
+        let ok = text.replace("fixer = \"planner\"\n", "");
+        assert_eq!(Pipeline::parse(&ok).unwrap().source, Source::PullRequest);
     }
 }

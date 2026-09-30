@@ -25,7 +25,10 @@ use crate::github::Issues;
 use crate::pipeline::{Pipeline, Source};
 use crate::scheduler::Runner;
 use crate::store::DataDir;
-use crate::ticket::{AttemptKind, AttemptState, Decision, DecisionState, Ticket, TicketState};
+use crate::ticket::{
+    AttemptKind, AttemptState, Decision, DecisionState, PullRequestSource, SourceSnapshot, Ticket,
+    TicketState,
+};
 
 /// A Unix socket path may be at most 104 bytes on macOS.
 const MAX_SOCKET_PATH: usize = 100;
@@ -134,6 +137,116 @@ pub fn take_issue(
     runner.take(project, &text, source, now_ms)
 }
 
+/// Make a ticket from someone else's pull requests, one per lane, on
+/// the project's pull-request pipeline. A spec is `<lane>/<number>`,
+/// or `<number>` alone where the pipeline has one lane.
+pub fn take_pull_requests(
+    runner: &mut Runner,
+    project: &str,
+    specs: &[&str],
+    now_ms: u64,
+) -> Result<Ticket> {
+    let path = runner.data.pr_pipeline(project);
+    let text = fs::read_to_string(&path).with_context(|| {
+        format!(
+            "no pull-request pipeline for {project} at {}",
+            path.display()
+        )
+    })?;
+    let pipeline = Pipeline::parse(&text)?;
+    if pipeline.source != Source::PullRequest {
+        bail!(
+            "{} is not a pull-request pipeline: its source is not kind = \"pull-request\"",
+            path.display()
+        );
+    }
+    let lanes: Vec<&str> = pipeline.lanes.iter().map(|l| l.name.as_str()).collect();
+    let mut prs: Vec<PullRequestSource> = Vec::new();
+    for spec in specs {
+        let (lane, number) = match spec.split_once('/') {
+            Some((lane, number)) => (lane.to_owned(), number),
+            None if lanes.len() == 1 => (lanes[0].to_owned(), *spec),
+            None => bail!(
+                "name the lane as <lane>/<number>; the lanes are {}",
+                lanes.join(", ")
+            ),
+        };
+        let number: u64 = number
+            .trim_start_matches('#')
+            .parse()
+            .with_context(|| format!("a pull request number in {spec:?}"))?;
+        let def = pipeline
+            .lane(&lane)
+            .with_context(|| format!("no lane {lane:?}; the lanes are {}", lanes.join(", ")))?;
+        if prs.iter().any(|pr| pr.lane == lane) {
+            bail!("lane {lane} is named twice");
+        }
+        if def.repo.is_none()
+            && let Some(other) = prs
+                .iter()
+                .find(|pr| pipeline.lane(&pr.lane).is_some_and(|l| l.repo.is_none()))
+        {
+            bail!(
+                "lanes {} and {lane} share the project's repository, so one pull request covers both",
+                other.lane
+            );
+        }
+        let remote = def
+            .repo
+            .clone()
+            .or_else(|| pipeline.project.repo.clone())
+            .with_context(|| {
+                format!("lane {lane} has no repository to read a pull request from")
+            })?;
+        let provider = crate::scheduler::guess_provider(&remote).to_owned();
+        let repo = match provider.as_str() {
+            "github" => crate::github::github_repo(&remote),
+            "bitbucket" => crate::bitbucket::bitbucket_repo(&remote),
+            _ => None,
+        }
+        .with_context(|| format!("lane {lane}: {remote:?} is not on a provider Dispatch reads"))?;
+        let pr = runner.prs_for(&provider).by_number(&repo, number)?;
+        if pr.state != "open" {
+            bail!("PR #{number} in {repo} is {}", pr.state);
+        }
+        prs.push(PullRequestSource {
+            lane,
+            provider,
+            repo,
+            number,
+            url: pr.url,
+            branch: pr.branch,
+            head: pr.head,
+            title: pr.title,
+        });
+    }
+    let Some(first) = prs.first() else {
+        bail!("name at least one pull request as <lane>/<number>");
+    };
+    let identity = prs
+        .iter()
+        .map(|pr| format!("{}!{}", pr.repo, pr.number))
+        .collect::<Vec<_>>()
+        .join("+");
+    let body = prs
+        .iter()
+        .map(|pr| format!("{}: PR #{} {} ({})", pr.lane, pr.number, pr.title, pr.url))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let source = SourceSnapshot {
+        kind: "pull-request".into(),
+        identity,
+        number: Some(first.number),
+        title: first.title.clone(),
+        body,
+        url: Some(first.url.clone()),
+        labels: Vec::new(),
+        taken_at_ms: now_ms,
+        pull_requests: prs,
+    };
+    runner.take(project, &text, source, now_ms)
+}
+
 /// Every project's queue and every ticket.
 pub fn status(runner: &Runner) -> Result<Status> {
     let records = runner.tickets()?;
@@ -192,6 +305,7 @@ pub fn ticket_view(t: &Ticket, stages: Vec<String>) -> TicketView {
     TicketView {
         id: t.id.clone(),
         project: t.project.clone(),
+        kind: t.source.kind.clone(),
         number: t.source.number,
         title: t.source.title.clone(),
         body: t.source.body.clone(),

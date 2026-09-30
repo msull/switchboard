@@ -198,6 +198,9 @@ impl ProjectView {
 pub struct TicketView {
     pub id: String,
     pub project: String,
+    /// The source's kind: `github` for an issue, `pull-request` for
+    /// someone else's work, `task-file` or `manual`.
+    pub kind: String,
     pub number: Option<u64>,
     pub title: String,
     pub body: String,

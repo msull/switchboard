@@ -22,6 +22,35 @@ pub struct SourceSnapshot {
     pub url: Option<String>,
     pub labels: Vec<String>,
     pub taken_at_ms: u64,
+    /// For a ticket taken from someone else's work: the pull requests,
+    /// one per lane. Empty for an issue.
+    #[serde(default)]
+    pub pull_requests: Vec<PullRequestSource>,
+}
+
+impl SourceSnapshot {
+    /// Whether the ticket reviews pull requests rather than doing work
+    /// of its own: its lanes are their branches and nothing pushes.
+    #[must_use]
+    pub fn is_pull_request(&self) -> bool {
+        !self.pull_requests.is_empty()
+    }
+}
+
+/// One pull request a ticket was taken from, in the lane whose
+/// repository it belongs to.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PullRequestSource {
+    pub lane: String,
+    pub provider: String,
+    pub repo: String,
+    pub number: u64,
+    pub url: String,
+    /// The PR's own branch, which the lane checks out.
+    pub branch: String,
+    /// Its head when taken.
+    pub head: String,
+    pub title: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -372,6 +401,7 @@ mod tests {
             source: SourceSnapshot {
                 kind: "manual".into(),
                 identity: "x".into(),
+                pull_requests: Vec::new(),
                 number: None,
                 title: String::new(),
                 body: String::new(),

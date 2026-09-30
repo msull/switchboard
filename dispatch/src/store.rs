@@ -106,6 +106,14 @@ impl DataDir {
         self.root.join("pipelines").join(format!("{project}.toml"))
     }
 
+    /// The project's pipeline for tickets taken from pull requests.
+    #[must_use]
+    pub fn pr_pipeline(&self, project: &str) -> PathBuf {
+        self.root
+            .join("pipelines")
+            .join(format!("{project}.pr.toml"))
+    }
+
     #[must_use]
     pub fn ticket_file(&self, id: &str) -> PathBuf {
         self.root.join("tickets").join(format!("{id}.json"))

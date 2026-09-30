@@ -304,6 +304,7 @@ fn ticket_row(cx: &mut DrawCtx<'_>, ui: &mut Ui, t: &TicketView, project: &Proje
 
 fn title_of(t: &TicketView) -> String {
     match t.number {
+        Some(n) if t.kind == "pull-request" => format!("PR #{n} {}", t.title),
         Some(n) => format!("#{n} {}", t.title),
         None => t.title.clone(),
     }
@@ -672,7 +673,12 @@ fn ticket_header(cx: &mut DrawCtx<'_>, ui: &mut Ui, t: &TicketView) {
                 cx.dispatch(AppAction::DispatchResume(t.id.clone()));
             }
             if let Some(url) = &t.url {
-                ui.hyperlink_to(RichText::new("Issue").color(p.accent_text), url);
+                let what = if t.kind == "pull-request" {
+                    "Pull request"
+                } else {
+                    "Issue"
+                };
+                ui.hyperlink_to(RichText::new(what).color(p.accent_text), url);
             }
             ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
                 ui.add(

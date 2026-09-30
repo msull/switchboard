@@ -30,6 +30,9 @@ pub struct PullRequest {
     /// Whether it can merge as it stands: `clean`, `conflicting`, or
     /// `None` where the provider does not say.
     pub mergeable: Option<String>,
+    /// The branch it comes from.
+    pub branch: String,
+    pub title: String,
 }
 
 /// What a PR's checks say, taken together.
@@ -47,6 +50,8 @@ pub enum Checks {
 pub trait PullRequests: Send {
     /// The PR whose head is `branch`, if one exists in any state.
     fn find(&self, repo: &str, branch: &str) -> Result<Option<PullRequest>>;
+    /// The PR with this number; an error when there is none.
+    fn by_number(&self, repo: &str, number: u64) -> Result<PullRequest>;
     /// The checks on a PR, as a whole.
     fn checks(&self, repo: &str, number: u64) -> Result<Checks>;
 }
@@ -80,7 +85,31 @@ struct PrRow {
     state: String,
     #[serde(default)]
     mergeable: String,
+    #[serde(rename = "headRefName", default)]
+    branch: String,
+    #[serde(default)]
+    title: String,
 }
+
+impl PrRow {
+    fn pull_request(&self) -> PullRequest {
+        PullRequest {
+            number: self.number,
+            url: self.url.clone(),
+            head: self.head.clone(),
+            state: self.state.to_ascii_lowercase(),
+            mergeable: match self.mergeable.as_str() {
+                "CONFLICTING" => Some("conflicting".to_owned()),
+                "MERGEABLE" => Some("clean".to_owned()),
+                _ => None,
+            },
+            branch: self.branch.clone(),
+            title: self.title.clone(),
+        }
+    }
+}
+
+const PR_FIELDS: &str = "number,url,headRefOid,state,mergeable,headRefName,title";
 
 #[derive(Deserialize)]
 struct CheckRow {
@@ -96,7 +125,7 @@ impl PullRequests for Gh {
             .args([
                 "pr", "list", "--repo", repo, "--head", branch, "--state", "all",
             ])
-            .args(["--json", "number,url,headRefOid,state,mergeable"])
+            .args(["--json", PR_FIELDS])
             .output()
             .context("run gh")?;
         if !out.status.success() {
@@ -111,17 +140,23 @@ impl PullRequests for Gh {
             .iter()
             .find(|r| r.state == "OPEN")
             .or_else(|| rows.iter().max_by_key(|r| r.number));
-        Ok(row.map(|r| PullRequest {
-            number: r.number,
-            url: r.url.clone(),
-            head: r.head.clone(),
-            state: r.state.to_ascii_lowercase(),
-            mergeable: match r.mergeable.as_str() {
-                "CONFLICTING" => Some("conflicting".to_owned()),
-                "MERGEABLE" => Some("clean".to_owned()),
-                _ => None,
-            },
-        }))
+        Ok(row.map(PrRow::pull_request))
+    }
+
+    fn by_number(&self, repo: &str, number: u64) -> Result<PullRequest> {
+        let out = Command::new("gh")
+            .args(["pr", "view", &number.to_string(), "--repo", repo])
+            .args(["--json", PR_FIELDS])
+            .output()
+            .context("run gh")?;
+        if !out.status.success() {
+            bail!(
+                "gh pr view {number} --repo {repo}: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
+        }
+        let row: PrRow = serde_json::from_slice(&out.stdout).context("parse gh's json")?;
+        Ok(row.pull_request())
     }
 
     fn checks(&self, repo: &str, number: u64) -> Result<Checks> {
@@ -189,6 +224,18 @@ impl PullRequests for Arc<Mutex<FakePullRequests>> {
             .map(|(_, _, pr)| pr.clone()))
     }
 
+    fn by_number(&self, repo: &str, number: u64) -> Result<PullRequest> {
+        let fake = self.lock().unwrap();
+        if let Some(why) = &fake.fail {
+            bail!("{why}");
+        }
+        fake.prs
+            .iter()
+            .find(|(r, _, pr)| r == repo && pr.number == number)
+            .map(|(_, _, pr)| pr.clone())
+            .with_context(|| format!("no pull request {repo}#{number}"))
+    }
+
     fn checks(&self, repo: &str, number: u64) -> Result<Checks> {
         let fake = self.lock().unwrap();
         if let Some(why) = &fake.fail {
@@ -242,6 +289,7 @@ impl Issues for Gh {
             url: Some(issue.url),
             labels: issue.labels.into_iter().map(|l| l.name).collect(),
             taken_at_ms: now_ms,
+            pull_requests: Vec::new(),
         })
     }
 }
@@ -268,6 +316,7 @@ impl Issues for FakeIssues {
             url: Some(format!("https://github.com/{repo}/issues/{number}")),
             labels: vec!["dispatch".into()],
             taken_at_ms: now_ms,
+            pull_requests: Vec::new(),
         })
     }
 }
