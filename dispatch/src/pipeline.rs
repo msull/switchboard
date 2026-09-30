@@ -420,7 +420,7 @@ impl Pipeline {
     }
 
     /// A gate names a check Dispatch knows and one the project can answer.
-    fn validate_gate(&self, stage: &Stage) -> Result<()> {
+    fn validate_gate(stage: &Stage) -> Result<()> {
         if let Some(Gate::External { check, checks, .. }) = &stage.gate {
             if !matches!(
                 check.as_str(),
@@ -428,15 +428,6 @@ impl Pipeline {
             ) {
                 bail!(
                     "stage {:?}: {check:?} is not a check Dispatch knows",
-                    stage.name
-                );
-            }
-            if check.starts_with("pr-")
-                && self.project.repo.is_none()
-                && self.lanes.iter().all(|l| l.repo.is_none())
-            {
-                bail!(
-                    "stage {:?} reads a pull request, and the project has no repository remote; use a human gate",
                     stage.name
                 );
             }
@@ -457,7 +448,7 @@ impl Pipeline {
         if stage.operator.is_some() && stage.review.is_some() {
             bail!("stage {:?} names both an operator and a review", stage.name);
         }
-        self.validate_gate(stage)?;
+        Self::validate_gate(stage)?;
         if let Some(op) = &stage.operator
             && !self.operators.contains_key(op)
         {
@@ -773,21 +764,5 @@ writes = ["plan"]"#,
             let err = Pipeline::parse(&text).unwrap_err().to_string();
             assert!(err.contains(expected), "{from}: {err}");
         }
-    }
-
-    #[test]
-    fn a_pull_request_gate_needs_a_repository_remote() {
-        let with = SWITCHBOARD.replace(
-            r#"check = "review-finalized" }"#,
-            r#"check = "pr-checks", checks = "none" }"#,
-        );
-        assert!(Pipeline::parse(&with).is_ok());
-        let without = with.replace(
-            r#"repo = "git@example.com:msull/switchboard.git""#,
-            r#"root = "/tmp/switchboard""#,
-        );
-        assert_ne!(with, without);
-        let err = Pipeline::parse(&without).unwrap_err().to_string();
-        assert!(err.contains("no repository remote"), "{err}");
     }
 }

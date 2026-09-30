@@ -1319,7 +1319,10 @@ impl Runner {
             return Ok(());
         };
         let none_expected = checks.as_deref() == Some("none");
-        let target = match pr_target(t, p, stage, lane, provider.as_deref()) {
+        // A project named by `root` has no remote in the pipeline; the
+        // tree's own origin is what its PRs are against.
+        let origin = self.git.remote_url(cwd)?;
+        let target = match pr_target(t, p, stage, lane, provider.as_deref(), origin) {
             Ok(target) => target,
             Err(why) => return self.park(t, ps, &why, now_ms),
         };
@@ -2738,16 +2741,23 @@ fn pr_target(
     stage: &Stage,
     lane: Option<&str>,
     provider: Option<&str>,
+    origin: Option<String>,
 ) -> Result<PrTarget, String> {
     let lane_record = lane
         .and_then(|l| t.lanes.iter().find(|x| x.name == l))
         .or_else(|| t.lanes.first())
         .ok_or_else(|| format!("stage {} needs a lane with a branch", stage.name))?;
-    let remote = p
+    let Some(remote) = p
         .lane(&lane_record.name)
         .and_then(|l| l.repo.clone())
         .or_else(|| p.project.repo.clone())
-        .unwrap_or_default();
+        .or(origin)
+    else {
+        return Err(format!(
+            "stage {} reads a pull request, and the tree has no remote; use a human gate",
+            stage.name
+        ));
+    };
     let github = github_repo(&remote);
     let provider = provider.map_or_else(
         || {

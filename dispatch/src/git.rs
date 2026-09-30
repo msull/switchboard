@@ -27,6 +27,8 @@ pub trait Repo: Send {
     /// Re-point `repo` at its worktree now at `dir`, after the tree was
     /// moved by something other than git (a parent directory moved).
     fn worktree_repair(&mut self, repo: &Path, dir: &Path) -> Result<()>;
+    /// The `origin` remote of the repository holding `dir`, if it has one.
+    fn remote_url(&self, dir: &Path) -> Result<Option<String>>;
     /// Run `argv` in `dir` with `env` set; nonzero exit is an error.
     fn run(&mut self, dir: &Path, argv: &[String], env: &[(String, String)]) -> Result<()>;
     /// Start a check (a command gate) in `dir` as a child of the runner,
@@ -171,6 +173,20 @@ impl Repo for GitCli {
         Ok(())
     }
 
+    fn remote_url(&self, dir: &Path) -> Result<Option<String>> {
+        let out = git()
+            .arg("-C")
+            .arg(dir)
+            .args(["remote", "get-url", "origin"])
+            .output()
+            .context("run git")?;
+        if !out.status.success() {
+            return Ok(None);
+        }
+        let url = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+        Ok((!url.is_empty()).then_some(url))
+    }
+
     fn worktree_repair(&mut self, repo: &Path, dir: &Path) -> Result<()> {
         output(
             git()
@@ -271,6 +287,8 @@ pub struct FakeRepo {
     pub fail_worktree: Option<String>,
     /// Worktrees moved: repo, from, to.
     pub moved: Vec<(PathBuf, PathBuf, PathBuf)>,
+    /// The `origin` of a tree, for a project the pipeline names by `root`.
+    pub remotes: std::collections::BTreeMap<PathBuf, String>,
     /// Worktrees repaired: repo, dir.
     pub repaired: Vec<(PathBuf, PathBuf)>,
     /// Checks started.
@@ -340,6 +358,9 @@ impl Repo for FakeRepo {
     fn worktree_repair(&mut self, repo: &Path, dir: &Path) -> Result<()> {
         self.repaired.push((repo.to_path_buf(), dir.to_path_buf()));
         Ok(())
+    }
+    fn remote_url(&self, dir: &Path) -> Result<Option<String>> {
+        Ok(self.remotes.get(dir).cloned())
     }
     fn run(&mut self, dir: &Path, argv: &[String], _env: &[(String, String)]) -> Result<()> {
         self.ran.push((dir.to_path_buf(), argv.to_vec()));
