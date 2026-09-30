@@ -1790,6 +1790,67 @@ decisions = { lanes = "auto", finalize = "ask" }
 trust_folders = true
 "#;
 
+/// A session query the app could not answer says nothing about the
+/// session: the attempt is asked about again, not failed.
+#[test]
+fn a_query_the_app_could_not_answer_leaves_the_attempt_running() {
+    let mut env = Env::new();
+    let id = env.take(7).id;
+    env.step();
+    let investigator = session_of(&env.ticket(&id), "investigate");
+    env.sb().fail_session_query = Some("the app did not answer in time".into());
+    env.step();
+    let t = env.ticket(&id);
+    let a = t.attempts_of("investigate").last().unwrap();
+    assert!(a.is_open(), "{a:?}");
+    assert_eq!(a.session.as_deref(), Some(investigator.as_str()));
+    assert!(env.pending(&id).is_empty());
+    env.step();
+    assert!(
+        env.ticket(&id)
+            .attempts_of("investigate")
+            .last()
+            .unwrap()
+            .is_open()
+    );
+}
+
+/// A reply recovered on a pass that changes nothing else is still
+/// written, so the operation is not recovered again on every pass.
+#[test]
+fn a_recovered_reply_is_kept_even_when_the_pass_changes_nothing_else() {
+    let (mut env, id) = workspace_env(&["type:bug"]);
+    let now = env.tick();
+    env.runner.step_project("Delta", now).unwrap();
+    let t = env.ticket(&id);
+    let investigator = session_of(&t, "investigate");
+    std::fs::write(artifact_of(&t, "investigate", "notes"), "# notes").unwrap();
+    let now = env.now;
+    env.sb().stop(&investigator, now);
+    // The lanes question marks the session with notes; that reply is lost.
+    env.sb().drop_reply_for = Some("session.notes".into());
+    for _ in 0..5 {
+        let now = env.tick();
+        env.runner.step_project("Delta", now).unwrap();
+    }
+    assert_eq!(env.pending(&id).len(), 1);
+    let unanswered = |t: &Ticket| t.ledger.iter().filter(|o| o.reply.is_none()).count();
+    let t = env.ticket(&id);
+    assert!(unanswered(&t) <= 1, "{:#?}", t.ledger);
+    let now = env.tick();
+    env.runner.step_project("Delta", now).unwrap();
+    let t = env.ticket(&id);
+    assert_eq!(unanswered(&t), 0, "recovered and kept: {:#?}", t.ledger);
+    assert_eq!(
+        env.sb().kinds_called("session.notes"),
+        2,
+        "sent once, recovered once, then left alone"
+    );
+    let now = env.tick();
+    env.runner.step_project("Delta", now).unwrap();
+    assert_eq!(env.sb().kinds_called("session.notes"), 2);
+}
+
 /// A project whose policy pre-authorises Claude's folder trust question
 /// has it answered for its agents; one without leaves it to the user.
 #[test]

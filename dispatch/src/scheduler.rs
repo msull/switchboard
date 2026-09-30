@@ -311,8 +311,13 @@ impl Runner {
             .filter(|(_, o)| o.reply.is_none())
             .map(|(i, _)| i)
             .collect();
+        let recovered = !pending.is_empty();
         for i in pending {
             self.recover_one(t, ps, i, now_ms)?;
+        }
+        // A pass that changes nothing else must still keep the reply.
+        if recovered {
+            self.save_ticket(t, now_ms)?;
         }
         self.fail_stranded(t, ps, now_ms)?;
         self.act_on_answers(t, ps, p, now_ms)?;
@@ -1394,18 +1399,8 @@ impl Runner {
         if a.gate.is_some() {
             return self.poll_gate(t, ps, a, stage, cwd, lane, now_ms);
         }
-        let view = match self.session_view(&session)? {
-            Ok(view) => view,
-            Err(reason) => {
-                return self.fail_attempt(
-                    t,
-                    ps,
-                    &a.stage,
-                    a.n,
-                    &format!("session gone: {reason}"),
-                    now_ms,
-                );
-            }
+        let Some(view) = self.watched_view(t, ps, a, &session, now_ms)? else {
+            return Ok(());
         };
         if view.trust_question && trust {
             return self.answer_trust(t, ps, a, session, now_ms);
@@ -1487,6 +1482,45 @@ impl Runner {
     }
 
     /// A session as Switchboard sees it, or why it has none.
+    /// The session view an open attempt is judged by. `None` when the
+    /// pass is over for it: the record is gone (Switchboard's word, not
+    /// a guess) and the attempt failed, or the query failed for another
+    /// reason (the app busy starting, a bad moment on the socket), which
+    /// says nothing about the session, so it is asked again next pass.
+    fn watched_view(
+        &mut self,
+        t: &mut Ticket,
+        ps: &mut ProjectState,
+        a: &Attempt,
+        session: &str,
+        now_ms: u64,
+    ) -> Result<Option<wire::SessionView>> {
+        match self.session_view(session)? {
+            Ok(view) => Ok(Some(view)),
+            Err(reason) if reason == NO_SUCH_SESSION => {
+                self.fail_attempt(
+                    t,
+                    ps,
+                    &a.stage,
+                    a.n,
+                    &format!("session gone: {reason}"),
+                    now_ms,
+                )?;
+                Ok(None)
+            }
+            Err(reason) => {
+                log::warn!(
+                    "ticket {} {}/{}: session query failed: {reason}; asking again",
+                    t.id,
+                    a.stage,
+                    a.context
+                );
+                self.save_ticket(t, now_ms)?;
+                Ok(None)
+            }
+        }
+    }
+
     /// Claude's folder trust question, which a fresh worktree asks
     /// before any hook: answered for the project when its policy says
     /// so, else left to the user.
@@ -2219,6 +2253,10 @@ impl Runner {
 }
 
 /// A fresh attempt record.
+/// Switchboard's reply to a session query for a record it does not
+/// have; the one failure that means the session is gone.
+const NO_SUCH_SESSION: &str = "no such session";
+
 /// The artifacts an attempt was to write that are not files yet.
 fn missing_artifacts(attempt: &Attempt) -> Vec<String> {
     attempt

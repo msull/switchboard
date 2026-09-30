@@ -52,6 +52,9 @@ pub struct FakeSwitchboard {
     pub fail_next: Option<String>,
     /// Act and log the reply, then fail the socket: the reply was lost.
     pub drop_reply_for: Option<String>,
+    /// The next session query is answered with this failure instead of
+    /// the session (the app too busy to answer, say).
+    pub fail_session_query: Option<String>,
     /// Save the records and the request line, then die: no reply line,
     /// no pane, `op.status` interrupted.
     pub die_launching: Option<String>,
@@ -424,7 +427,7 @@ impl FakeSwitchboard {
     }
 
     #[allow(clippy::too_many_lines)]
-    fn query(&self, body: &Body) -> Reply {
+    fn query(&mut self, body: &Body) -> Reply {
         match body {
             Body::Spaces => Reply::Spaces {
                 spaces: self.spaces.clone(),
@@ -453,9 +456,12 @@ impl FakeSwitchboard {
                     .cloned()
                     .collect(),
             },
-            Body::Session { session } => match self.sessions.iter().find(|s| &s.id == session) {
-                Some(s) => Reply::Session { session: s.clone() },
-                None => Reply::failed("no such session"),
+            Body::Session { session } => match self.fail_session_query.take() {
+                Some(reason) => Reply::failed(reason),
+                None => match self.sessions.iter().find(|s| &s.id == session) {
+                    Some(s) => Reply::Session { session: s.clone() },
+                    None => Reply::failed("no such session"),
+                },
             },
             Body::Waiting => Reply::Waiting {
                 sessions: self
