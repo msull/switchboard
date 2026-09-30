@@ -41,7 +41,12 @@ impl ReviewDraft {
             .state
             .conversations
             .get(&source)
-            .map(|(_, c)| written_markdown(c, &cwd))
+            .map(|(_, c)| {
+                written_markdown(c, &cwd)
+                    .into_iter()
+                    .take(CANDIDATES_SHOWN)
+                    .collect::<Vec<_>>()
+            })
             .unwrap_or_default();
         let plan = candidates
             .first()
@@ -59,6 +64,11 @@ impl ReviewDraft {
 /// Tools whose input names the file they change; Bash counts when the
 /// reader found a redirection target in the command.
 const WRITING_TOOLS: [&str; 5] = ["Write", "Edit", "MultiEdit", "NotebookEdit", "Bash"];
+
+/// Written files the launch dialog offers. Older ones can still be
+/// typed into the path field, so the list only needs the recent ones
+/// and must never push the dialog's buttons off screen.
+const CANDIDATES_SHOWN: usize = 8;
 
 /// Markdown files the conversation's file-writing tool calls name,
 /// newest first, each once.
@@ -175,16 +185,25 @@ pub fn dialog_show(cx: &mut DrawCtx<'_>, ctx: &Context) {
                     .text_style(theme::meta())
                     .color(p.n600),
             );
-            for candidate in draft.candidates.clone() {
-                let shown = candidate
-                    .strip_prefix(&source.cwd)
-                    .unwrap_or(&candidate)
-                    .display()
-                    .to_string();
-                if theme::ghost(ui, &shown).clicked() {
-                    draft.plan = candidate.display().to_string();
-                }
-            }
+            // A fixed height keeps the dialog the same size whatever row
+            // height the theme or zoom gives; the unshrunk width stops a
+            // long path from making it jump as the list scrolls.
+            egui::ScrollArea::vertical()
+                .id_salt("review-candidates")
+                .max_height(160.0)
+                .auto_shrink([false, true])
+                .show(ui, |ui| {
+                    for candidate in &draft.candidates {
+                        let shown = candidate
+                            .strip_prefix(&source.cwd)
+                            .unwrap_or(candidate)
+                            .display()
+                            .to_string();
+                        if theme::ghost(ui, &shown).clicked() {
+                            draft.plan = candidate.display().to_string();
+                        }
+                    }
+                });
         }
         field(ui, "Plan path", &mut draft.plan);
         ui.label(theme::meta_text(
@@ -801,6 +820,7 @@ pub type ReviewViews = HashMap<WorkflowId, ReviewView>;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ports::transcript::{Activity, ActivityKind, ToolDetail, Turn};
 
     #[test]
     fn diff_marks_added_and_removed_lines() {
@@ -847,6 +867,57 @@ mod tests {
         assert_eq!(
             resolve_plan("~/p.md", cwd),
             Some(PathBuf::from(home).join("p.md"))
+        );
+    }
+
+    fn tool(name: &str, path: Option<&str>, input: &str) -> Activity {
+        Activity {
+            kind: ActivityKind::Tool,
+            line: name.into(),
+            at: None,
+            error: false,
+            detail: Some(ToolDetail {
+                name: name.into(),
+                input: input.into(),
+                result: String::new(),
+                path: path.map(PathBuf::from),
+            }),
+            text: None,
+        }
+    }
+
+    #[test]
+    fn written_markdown_lists_markdown_newest_first_once() {
+        let conversation = Conversation {
+            turns: vec![
+                Turn {
+                    n: 1,
+                    activity: vec![
+                        tool("Write", Some("/p/a.md"), ""),
+                        tool("Write", Some("docs/b.md"), ""),
+                    ],
+                    ..Turn::default()
+                },
+                Turn {
+                    n: 2,
+                    activity: vec![
+                        tool("Write", Some("/p/c.rs"), ""),
+                        tool("Read", Some("/p/d.md"), ""),
+                        tool("Write", None, "{\"file_path\": \"/p/e.md\"}"),
+                        tool("Edit", Some("/p/a.md"), ""),
+                    ],
+                    ..Turn::default()
+                },
+            ],
+            ..Conversation::default()
+        };
+        assert_eq!(
+            written_markdown(&conversation, Path::new("/w")),
+            vec![
+                PathBuf::from("/p/a.md"),
+                PathBuf::from("/p/e.md"),
+                PathBuf::from("/w/docs/b.md"),
+            ]
         );
     }
 }
