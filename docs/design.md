@@ -1043,8 +1043,9 @@ is what the review page reads, so the trail survives cleanup.
   its rounds, after a confirmation that lists them. Nothing else in a
   project directory is deleted.
 - Step 1 never guesses: the launch dialog lists markdown files the
-  source session wrote, taken from its transcript, newest first, and the
-  user confirms one or types a path.
+  source session wrote, taken from its transcript, newest first (the
+  newest eight, in a scroll region of fixed height), and the user
+  confirms one or types a path.
 
 ### Handoff
 
@@ -1093,7 +1094,9 @@ show what is actually shared.
    **Built** (`ports::round_files`, `adapters::round_files`).
 3. Launch dialog and the review page, headless UI tests, script lines.
    **Built**: "Review plan" in a Claude Code session's header offers
-   the Markdown files its transcript shows it wrote; the page has the
+   the Markdown files its transcript shows it wrote (the newest eight,
+   in a scroll region of fixed height, so a long session cannot push
+   the buttons off screen; an older file is typed); the page has the
    rounds at the left, the plan (with a line diff against the previous
    round's snapshot) in the middle, feedback beside response at the
    right, the note box for the user's own round, and the controls the

@@ -3366,6 +3366,70 @@ fn review_plan_starts_from_the_session_header_with_a_file_the_session_wrote() {
     harness.get_by_label("Round 1");
 }
 
+/// A session transcript that wrote `count` plans, `plan-0.md` first, so
+/// the highest number is the newest.
+fn seed_written_plans(harness: &mut Harness<'static, SwitchboardApp>, id: RecordId, count: usize) {
+    let mut conversation = two_turns();
+    for n in 0..count {
+        conversation.turns[1].activity.push(TranscriptActivity {
+            kind: ActivityKind::Tool,
+            line: format!("Write docs/plan-{n}.md"),
+            at: None,
+            error: false,
+            detail: Some(ToolDetail {
+                name: "Write".into(),
+                input: "{\n  \"content\": \"# Plan…\"".into(),
+                result: "ok".into(),
+                path: Some(PathBuf::from(format!("/nowhere/docs/plan-{n}.md"))),
+            }),
+            text: None,
+        });
+    }
+    harness
+        .state_mut()
+        .ui_state
+        .conversations
+        .insert(id, (None, conversation));
+}
+
+/// The review dialog, opened in a 600 px window on a session that wrote
+/// thirty plans.
+fn review_dialog_on_a_long_session() -> (Harness<'static, SwitchboardApp>, RecordId) {
+    let (mut harness, ids) = harness();
+    let id = seed_claude(&mut harness, &ids);
+    seed_written_plans(&mut harness, id, 30);
+    harness.set_size(egui::vec2(1200.0, 600.0));
+    showing(&mut harness, View::Session(id));
+    click(&mut harness, "Review plan");
+    (harness, id)
+}
+
+#[test]
+fn the_review_plan_dialog_keeps_its_buttons_on_screen_in_a_long_session() {
+    let (mut harness, id) = review_dialog_on_a_long_session();
+    for label in ["Start review", "Cancel"] {
+        let bottom = harness.get_by_label(label).rect().bottom();
+        assert!(
+            bottom <= 600.0,
+            "{label} ends at {bottom}, below the window"
+        );
+    }
+    click(&mut harness, "Start review");
+    assert!(actions(&harness).contains(&AppAction::StartWorkflow {
+        source: id,
+        plan: PathBuf::from("/nowhere/docs/plan-29.md"),
+        definition: BUILTIN_WORKFLOW.into(),
+    }));
+}
+
+#[test]
+fn the_review_plan_dialog_offers_only_the_newest_eight_files() {
+    let (harness, _) = review_dialog_on_a_long_session();
+    // Rows scrolled out of view stay in the tree, so this is the cap.
+    harness.get_by_label("/nowhere/docs/plan-22.md");
+    assert!(harness.query_by_label("/nowhere/docs/plan-21.md").is_none());
+}
+
 #[test]
 fn the_review_page_lists_rounds_and_its_controls_dispatch() {
     let (mut harness, ids) = harness();
