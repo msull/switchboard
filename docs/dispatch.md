@@ -1197,6 +1197,7 @@ and one against the real one:
 | Plan session has no transcript yet | `workflow.start` fails; the attempt is failed and a decision, not retried |
 | Plan file from an earlier attempt exists | The new attempt's own path is empty, so nothing advances |
 | `project.add` fails to save | `failed` reply; attempt failed; nothing else made |
+| The socket fails mid-pass (Switchboard quit or restarted under the runner) | Nothing is parked; the pass ends with a log line and the next one goes on; the port remakes its connection and sends the request again, which the operations log makes safe |
 | User is viewing another workspace during the whole path | The window stays on it through every launch and the review start; no terminal window opens |
 
 Then, in order: `implement` with its command gate bound to a commit,

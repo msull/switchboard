@@ -439,7 +439,9 @@ impl Runner {
             apply_reply(t, ps, intent, reply);
         }
         self.save_ticket(t, now_ms)?;
-        result.with_context(|| format!("{intent}: the control socket failed"))
+        result
+            .map_err(SocketDown::from)
+            .with_context(|| format!("{intent}: the control socket failed"))
     }
 
     /// A query: never in the ledger, since it changes nothing.
@@ -449,6 +451,7 @@ impl Runner {
                 format!("q-{}", uuid::Uuid::new_v4().simple()),
                 body,
             ))
+            .map_err(SocketDown::from)
             .context("the control socket failed")
     }
 
@@ -2268,6 +2271,10 @@ impl Runner {
         let operator = &p.operators[&spec.operator];
         let project = match self.ensure_project(t, ps, p, now_ms) {
             Ok(id) => id,
+            // Switchboard refusing the project parks the ticket; the
+            // socket failing says nothing about the ticket, so the
+            // pass ends and the next one asks again.
+            Err(e) if e.is::<SocketDown>() => return Err(e),
             Err(e) => return self.park(t, ps, &format!("stage {stage}: {e:#}"), now_ms),
         };
         if !self.ensure_setup(t, ps, p, cwd, now_ms)? {
@@ -3623,6 +3630,26 @@ fn pr_target(
         branch: lane_record.branch.clone(),
     })
 }
+
+/// The control socket failed before or while a request was answered:
+/// Switchboard is down or was restarted. Nothing about the ticket is
+/// wrong, so a pass that meets this ends and the next one tries again.
+#[derive(Debug)]
+pub struct SocketDown(pub String);
+
+impl From<std::io::Error> for SocketDown {
+    fn from(e: std::io::Error) -> Self {
+        Self(e.to_string())
+    }
+}
+
+impl std::fmt::Display for SocketDown {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for SocketDown {}
 
 /// What a provider says stops a PR, and what the policy does about it.
 enum Remedy {

@@ -2095,6 +2095,29 @@ fn a_project_that_cannot_be_saved_makes_nothing_else() {
     assert!(liveness.is_empty());
 }
 
+/// A socket failure (Switchboard restarted under the runner) is not a
+/// refusal: the ticket stays active with nothing made, and the next
+/// pass makes the project and starts the stage.
+#[test]
+fn a_socket_failure_ends_the_pass_without_parking() {
+    let mut env = Env::new();
+    let id = env.take(7).id;
+    env.runner.port = Box::new(FailBefore {
+        inner: SharedPort(Arc::clone(&env.sb)),
+        kind: "spaces",
+        fired: false,
+    });
+    env.step();
+    let t = env.ticket(&id);
+    assert!(t.active(), "{:?}", t.state);
+    assert!(t.attempts.is_empty());
+    assert_eq!(env.sb().kinds_called("project.add"), 0);
+    env.step();
+    let t = env.ticket(&id);
+    assert_eq!(env.sb().kinds_called("project.add"), 1);
+    assert_eq!(t.attempts.len(), 1, "investigate started on the next pass");
+}
+
 // --- what a review of the slice found: the runner's pass and a command
 // from the terminal share one lock, idempotent requests are replayed,
 // an attempt saved without its request fails instead of waiting, a
