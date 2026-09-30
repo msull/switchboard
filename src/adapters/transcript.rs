@@ -25,6 +25,28 @@ use crate::ports::transcript::{
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ClaudeTranscripts;
 
+/// The file a handle names, or where Claude Code really put it. The
+/// hook payload's `transcript_path` keeps a space in the project
+/// directory's name (`-Users-x-Library-Application Support-...`) while
+/// the file is written under the name with the space turned into a
+/// dash, so a missing path is tried again that way.
+fn locate(path: &Path) -> PathBuf {
+    if path.exists() {
+        return path.to_path_buf();
+    }
+    let dashed = path.parent().zip(path.file_name()).and_then(|(dir, file)| {
+        let name = dir.file_name()?.to_str()?;
+        if !name.contains(' ') {
+            return None;
+        }
+        Some(dir.with_file_name(name.replace(' ', "-")).join(file))
+    });
+    match dashed {
+        Some(p) if p.exists() => p,
+        _ => path.to_path_buf(),
+    }
+}
+
 impl TranscriptReader for ClaudeTranscripts {
     fn read(&self, handle: &ResumeHandle) -> Result<Conversation, String> {
         match handle {
@@ -36,7 +58,8 @@ impl TranscriptReader for ClaudeTranscripts {
                 transcript: Some(path),
                 ..
             } => {
-                let text = std::fs::read_to_string(path)
+                let path = locate(path);
+                let text = std::fs::read_to_string(&path)
                     .map_err(|e| format!("{}: {e}", path.display()))?;
                 Ok(parse(&text))
             }
@@ -48,7 +71,7 @@ impl TranscriptReader for ClaudeTranscripts {
             ResumeHandle::ClaudeCode {
                 transcript: Some(path),
                 ..
-            } => std::fs::metadata(path).ok()?.modified().ok(),
+            } => std::fs::metadata(locate(path)).ok()?.modified().ok(),
             ResumeHandle::ClaudeCode { .. } | ResumeHandle::Codex { .. } => None,
         }
     }
@@ -73,6 +96,7 @@ fn write_fork(handle: &ResumeHandle, before: Option<usize>) -> Result<ResumeHand
         else {
             return Err("only Claude Code sessions with a transcript can be cloned".into());
         };
+        let path = &locate(path);
         let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
         let new_id = uuid::Uuid::new_v4();
         let (old_id, new) = (session_id.to_string(), new_id.to_string());
@@ -666,6 +690,40 @@ mod tests {
         assert_eq!(c.title.as_deref(), Some("explain-repo"));
         assert_eq!(c.branch.as_deref(), Some("main"));
         assert_eq!(c.version.as_deref(), Some("2.1.263"));
+    }
+
+    #[test]
+    fn a_transcript_reported_with_a_space_in_its_directory_is_found_under_the_dash() {
+        let dir = std::env::temp_dir().join(format!("sbt-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let real = dir.join("-Users-x-Library-Application-Support-Dispatch-w1");
+        std::fs::create_dir_all(&real).unwrap();
+        let text = std::fs::read_to_string(fixture()).unwrap();
+        std::fs::write(real.join("s.jsonl"), &text).unwrap();
+        let reported = dir
+            .join("-Users-x-Library-Application Support-Dispatch-w1")
+            .join("s.jsonl");
+        assert_eq!(locate(&reported), real.join("s.jsonl"));
+        let handle = ResumeHandle::ClaudeCode {
+            session_id: uuid::Uuid::parse_str(&conversation_id(&text)).unwrap(),
+            transcript: Some(reported),
+        };
+        let cloned = ClaudeTranscripts.clone_all(&handle).unwrap();
+        let ResumeHandle::ClaudeCode {
+            transcript: Some(copy),
+            ..
+        } = cloned
+        else {
+            panic!("a Claude handle")
+        };
+        assert_eq!(
+            copy.parent(),
+            Some(real.as_path()),
+            "the copy goes beside the real file"
+        );
+        let missing = dir.join("nowhere").join("s.jsonl");
+        assert_eq!(locate(&missing), missing, "no guess when nothing is there");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
