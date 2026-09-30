@@ -96,6 +96,8 @@ pub struct UiState {
     pub rename_draft: Option<(RecordId, String)>,
     /// The Dispatch console's command line being typed.
     pub dispatch_console_draft: String,
+    /// A worktree root typed on the Dispatch page, not yet sent.
+    pub dispatch_worktrees_draft: String,
     /// The artifact the ticket page is showing.
     pub dispatch_artifact: Option<PathBuf>,
     /// The Dispatch project the page is narrowed to; every one when none.
@@ -255,6 +257,7 @@ impl Default for UiState {
             notes_draft: None,
             rename_draft: None,
             dispatch_console_draft: String::new(),
+            dispatch_worktrees_draft: String::new(),
             dispatch_artifact: None,
             dispatch_project: None,
             dispatch_choices: HashMap::new(),

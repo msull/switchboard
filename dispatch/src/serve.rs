@@ -87,6 +87,9 @@ impl Handler {
                 };
                 Reply::Queue { order: ps.queue }
             }
+            Body::Worktrees { path, migrate } => {
+                Reply::Worktrees(self.runner.set_worktrees(path.clone(), *migrate, now_ms)?)
+            }
             Body::Resume { ticket } => {
                 let t = self.runner.resume(ticket, now_ms)?;
                 Reply::Ticket(self.view(&t))
@@ -171,6 +174,7 @@ pub fn status(runner: &Runner) -> Result<Status> {
     tickets.sort_by_key(|t| std::cmp::Reverse(t.updated_ms));
     Ok(Status {
         data_dir: runner.data.root.clone(),
+        worktrees: runner.data.worktrees_dir(),
         projects,
         tickets,
     })

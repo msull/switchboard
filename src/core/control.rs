@@ -53,6 +53,11 @@ pub enum ControlAction {
     },
     /// Answer Claude's folder trust question in the pane with yes.
     TrustFolder(RecordId),
+    /// The project's directory moved.
+    SetProjectRoot {
+        id: ProjectId,
+        root: PathBuf,
+    },
     MoveSession {
         id: RecordId,
         project: ProjectId,
@@ -225,6 +230,13 @@ impl AppCore {
                     self.error("no such project");
                 }
                 self.edit_project(id, out, |p| p.name = name);
+                Vec::new()
+            }
+            ControlAction::SetProjectRoot { id, root } => {
+                if self.workspace(id).is_none() {
+                    self.error("no such project");
+                }
+                self.edit_project(id, out, |p| p.root = root);
                 Vec::new()
             }
             ControlAction::NewSpace { name } => {
@@ -589,6 +601,7 @@ fn control_kind(action: &ControlAction) -> String {
         ControlAction::TrustFolder(_) => "session.trust",
         ControlAction::MoveSession { .. } => "session.move",
         ControlAction::RenameProject { .. } => "project.rename",
+        ControlAction::SetProjectRoot { .. } => "project.root",
         ControlAction::NewSpace { .. } => "space.new",
         ControlAction::NewSet { .. } => "set.new",
         ControlAction::SyncSet { .. } => "set.sync",
@@ -730,6 +743,10 @@ impl TryFrom<wire::Body> for ControlAction {
             wire::Body::ProjectRename { project: p, name } => Self::RenameProject {
                 id: project(&p)?,
                 name,
+            },
+            wire::Body::ProjectRoot { project: p, root } => Self::SetProjectRoot {
+                id: project(&p)?,
+                root,
             },
             wire::Body::SpaceNew { name } => Self::NewSpace { name },
             wire::Body::SetNew { space: sp, name } => Self::NewSet {

@@ -137,6 +137,10 @@ pub enum Body {
     /// and its cards stay.
     #[serde(rename = "session.move")]
     SessionMove { session: String, project: String },
+    /// The project's directory moved (a worktree relocated); its
+    /// sessions' own records keep the cwd they were launched with.
+    #[serde(rename = "project.root")]
+    ProjectRoot { project: String, root: PathBuf },
     #[serde(rename = "project.rename")]
     ProjectRename { project: String, name: String },
     #[serde(rename = "set.sync")]
@@ -201,6 +205,7 @@ impl Body {
             | Self::SessionTrust { .. }
             | Self::SessionMove { .. }
             | Self::ProjectRename { .. }
+            | Self::ProjectRoot { .. }
             | Self::SetSync { .. }
             | Self::DefinitionInstall { .. }
             | Self::WorkflowPause { .. }
@@ -642,6 +647,10 @@ mod tests {
             Body::ProjectRename {
                 project: "p".into(),
                 name: "n".into(),
+            },
+            Body::ProjectRoot {
+                project: "p".into(),
+                root: "/r2".into(),
             },
             Body::SessionWaiting {
                 session: "s".into(),

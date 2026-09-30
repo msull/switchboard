@@ -1,5 +1,6 @@
 //! `dispatch`: take a ticket, run the scheduler, answer decisions, look.
 
+use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
 
 use anyhow::Result;
@@ -20,6 +21,8 @@ const USAGE: &str = "usage:
   dispatch status                          every ticket, its stage and state
   dispatch queue <project> [<ticket>...]   show, or reorder, a project's queue
   dispatch resume <ticket>                 a parked ticket back to active
+  dispatch worktrees [<path>] [--migrate]  where tickets' trees go (default ~/.dispatch/worktrees);
+                                           with a path, set it; --migrate moves idle tickets' trees there
 
 Data: $DISPATCH_DATA_DIR (default ~/Library/Application Support/Dispatch).
 Switchboard: $SWITCHBOARD_DATA_DIR/control.sock (default Switchboard's).
@@ -54,6 +57,7 @@ fn main() -> Result<()> {
         ["status"] => status(),
         ["queue", project, rest @ ..] => queue(project, rest),
         ["resume", ticket] => resume(ticket),
+        ["worktrees", rest @ ..] => worktrees(rest),
         _ => {
             eprintln!("{USAGE}");
             std::process::exit(2);
@@ -105,6 +109,29 @@ fn decide(ticket: &str, decision: &str, answer: &str, note: Option<&str>) -> Res
         "{ticket} {}: {answer} (the runner acts on it on its next pass)",
         d.id
     );
+    Ok(())
+}
+
+fn worktrees(args: &[&str]) -> Result<()> {
+    let migrate = args.contains(&"--migrate");
+    let path: Vec<&str> = args.iter().copied().filter(|a| *a != "--migrate").collect();
+    let path = match path[..] {
+        [] => None,
+        [p] => Some(PathBuf::from(p)),
+        _ => {
+            eprintln!("{USAGE}");
+            std::process::exit(2);
+        }
+    };
+    let mut runner = self::runner()?;
+    let view = runner.set_worktrees(path, migrate, now_ms())?;
+    println!("worktrees: {}", view.root.display());
+    for id in &view.moved {
+        println!("  moved {id}");
+    }
+    for (id, why) in &view.skipped {
+        println!("  left {id}: {why}");
+    }
     Ok(())
 }
 

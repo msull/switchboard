@@ -367,6 +367,14 @@ impl Pipeline {
 
     /// Parse and validate one file's text.
     pub fn parse(text: &str) -> Result<Self> {
+        let mut p = Self::parse_raw(text)?;
+        if let Some(dir) = &p.project.worktrees {
+            p.project.worktrees = Some(crate::store::expand_home(dir));
+        }
+        Ok(p)
+    }
+
+    fn parse_raw(text: &str) -> Result<Self> {
         let pipeline: Self = toml::from_str(text).context("parse the pipeline file")?;
         pipeline.validate()?;
         Ok(pipeline)

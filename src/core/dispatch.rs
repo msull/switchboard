@@ -6,6 +6,7 @@
 //! reply is one more action.
 
 use std::collections::HashMap;
+use std::fmt::Write as _;
 use std::path::PathBuf;
 
 use super::action::{AppAction, AppCore, Clock, Effect, Out, View};
@@ -174,13 +175,22 @@ impl AppCore {
                 }
                 out.push(Effect::DispatchCall(Body::Resume { ticket }));
             }
+            AppAction::DispatchWorktrees { path, migrate } => {
+                if !self.dispatch.connected {
+                    self.error("Dispatch is not running; start it from the console");
+                    return;
+                }
+                out.push(Effect::DispatchCall(Body::Worktrees { path, migrate }));
+            }
             AppAction::DispatchReadArtifact { ticket, path } => {
                 if self.dispatch.artifacts.contains_key(&path) {
                     return;
                 }
                 out.push(Effect::DispatchCall(Body::Artifact { ticket, path }));
             }
-            AppAction::DispatchReplied { body, result } => self.dispatch_replied(body, result),
+            AppAction::DispatchReplied { body, result } => {
+                self.dispatch_replied(body, result, now);
+            }
             AppAction::OpenDispatchConsole => {
                 self.ensure_console(now, out);
             }
@@ -209,7 +219,7 @@ impl AppCore {
     /// What a call to Dispatch's port came back with: an error marks
     /// the runner gone, a failure is a notice, and an answer lands on
     /// the status it belongs to.
-    fn dispatch_replied(&mut self, body: Body, result: Result<Reply, String>) {
+    fn dispatch_replied(&mut self, body: Body, result: Result<Reply, String>, now: Clock) {
         match (body, result) {
             (_, Err(e)) => {
                 self.dispatch.connected = false;
@@ -218,6 +228,22 @@ impl AppCore {
             (_, Ok(Reply::Failed { reason })) => self.error(format!("Dispatch: {reason}")),
             (Body::Artifact { path, .. }, Ok(Reply::Artifact { text })) => {
                 self.dispatch.artifacts.insert(path, text);
+            }
+            (Body::Worktrees { .. }, Ok(Reply::Worktrees(v))) => {
+                self.dispatch.status.worktrees.clone_from(&v.root);
+                let moved = if v.moved.is_empty() {
+                    String::new()
+                } else {
+                    format!("; moved {} ticket(s)", v.moved.len())
+                };
+                let mut left = String::new();
+                for (id, why) in &v.skipped {
+                    let _ = write!(left, "; left {id}: {why}");
+                }
+                self.info(
+                    format!("Dispatch worktrees: {}{moved}{left}", v.root.display()),
+                    now,
+                );
             }
             (Body::Resume { .. }, Ok(Reply::Ticket(t))) => {
                 if let Some(slot) = self

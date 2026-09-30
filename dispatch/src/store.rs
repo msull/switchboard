@@ -29,6 +29,62 @@ pub struct DataDir {
     pub root: PathBuf,
 }
 
+/// Settings of a data directory, at `<data>/settings.json`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct Settings {
+    /// Where tickets' trees go; `~` is expanded when read.
+    pub worktrees: Option<PathBuf>,
+}
+
+/// `~/.dispatch/worktrees`, when there is a home.
+#[must_use]
+pub fn default_worktrees_dir() -> Option<PathBuf> {
+    let home = std::env::var_os("HOME")?;
+    Some(PathBuf::from(home).join(".dispatch").join("worktrees"))
+}
+
+/// A leading `~` as the home directory, as a shell would read it.
+#[must_use]
+pub fn expand_home(path: &Path) -> PathBuf {
+    let text = path.to_string_lossy();
+    if let Some(rest) = text.strip_prefix("~/")
+        && let Some(home) = std::env::var_os("HOME")
+    {
+        return PathBuf::from(home).join(rest);
+    }
+    if text == "~"
+        && let Some(home) = std::env::var_os("HOME")
+    {
+        return PathBuf::from(home);
+    }
+    path.to_path_buf()
+}
+
+/// Why a path is not safe to hand to a repository's tooling: any
+/// whitespace or shell-special character in it, since a task that
+/// interpolates its own location into a shell string splits there.
+#[must_use]
+pub fn shell_unsafe(path: &Path) -> Option<String> {
+    let text = path.to_string_lossy();
+    let bad: Vec<char> = text
+        .chars()
+        .filter(|c| c.is_whitespace() || "'\"$`\\;&|<>(){}[]*?!#".contains(*c))
+        .collect();
+    if bad.is_empty() {
+        return None;
+    }
+    let shown: String = bad
+        .iter()
+        .map(|c| format!("{c:?}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    Some(format!(
+        "{} holds {shown}; a repository's own tooling may split a command there",
+        path.display()
+    ))
+}
+
 impl DataDir {
     #[must_use]
     pub fn new(root: impl Into<PathBuf>) -> Self {
@@ -68,10 +124,32 @@ impl DataDir {
         self.root.join("repos").join(project)
     }
 
-    /// Where tickets' worktrees go unless a lane says otherwise.
+    /// Where tickets' trees go unless a pipeline says otherwise: the
+    /// `worktrees` setting, else `~/.dispatch/worktrees`. Never under
+    /// the data directory itself, whose path on macOS holds a space
+    /// that a repository's own tooling may not survive.
     #[must_use]
     pub fn worktrees_dir(&self) -> PathBuf {
-        self.root.join("worktrees")
+        if let Some(dir) = self.settings().worktrees {
+            return dir;
+        }
+        default_worktrees_dir().unwrap_or_else(|| self.root.join("worktrees"))
+    }
+
+    #[must_use]
+    pub fn settings_file(&self) -> PathBuf {
+        self.root.join("settings.json")
+    }
+
+    /// The directory's own settings; absent or unreadable reads as
+    /// defaults.
+    #[must_use]
+    pub fn settings(&self) -> Settings {
+        read_json(&self.settings_file()).unwrap_or_default()
+    }
+
+    pub fn write_settings(&self, settings: &Settings) -> Result<()> {
+        write_json(&self.settings_file(), settings)
     }
 
     #[must_use]

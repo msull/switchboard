@@ -7,12 +7,13 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result, anyhow, bail};
+use dispatch_control as wire_dispatch;
 use switchboard_control::{self as wire, Body, Reply, Request, RunState};
 
 use crate::git::{Repo, branch_name};
 use crate::pipeline::{Context, Gate, Pipeline, Stage, StageKind};
 use crate::port::Port;
-use crate::store::{DataDir, Lock, read_json, write_json};
+use crate::store::{DataDir, Lock, Settings, expand_home, read_json, shell_unsafe, write_json};
 use crate::template::Vars;
 use crate::ticket::{
     Attempt, AttemptKind, AttemptState, Decision, DecisionKind, DecisionState, GateRun, LaneRecord,
@@ -193,6 +194,14 @@ impl Runner {
                 );
             }
         }
+        // The tree's path reaches the repository's own tooling; one it
+        // may not survive is refused before anything is made.
+        let pipeline = Pipeline::parse(pipeline_text)?;
+        if pipeline.cuts_worktrees()
+            && let Some(why) = shell_unsafe(&self.worktree_root(&pipeline))
+        {
+            bail!("worktrees: {why}; set another with `dispatch worktrees <path>`");
+        }
         let id = Ticket::new_id();
         let dir = self.data.ticket_dir(&id);
         std::fs::create_dir_all(&dir)?;
@@ -221,6 +230,138 @@ impl Runner {
         ps.queue.push(id);
         self.save_project(&ps)?;
         Ok(ticket)
+    }
+
+    /// Where a pipeline's tickets' trees go: its own `worktrees`, else
+    /// the data directory's setting or default.
+    #[must_use]
+    pub fn worktree_root(&self, p: &Pipeline) -> PathBuf {
+        p.project
+            .worktrees
+            .clone()
+            .unwrap_or_else(|| self.data.worktrees_dir())
+    }
+
+    /// Set where tickets' trees go (`path`; `None` leaves it), and with
+    /// `migrate` move every ticket's tree that is not under the root
+    /// there: git moves the ticket's tree, each lane clone is re-pointed
+    /// at its tree inside it, the records and the Switchboard projects
+    /// follow. A ticket with something running, or whose pipeline names
+    /// its own `worktrees`, is left where it is.
+    pub fn set_worktrees(
+        &mut self,
+        path: Option<PathBuf>,
+        migrate: bool,
+        now_ms: u64,
+    ) -> Result<wire_dispatch::WorktreesView> {
+        if let Some(path) = path {
+            let path = expand_home(&path);
+            if let Some(why) = shell_unsafe(&path) {
+                bail!("{why}");
+            }
+            if !path.is_absolute() {
+                bail!("{} is not an absolute path", path.display());
+            }
+            self.data.write_settings(&Settings {
+                worktrees: Some(path),
+            })?;
+        }
+        let root = self.data.worktrees_dir();
+        let mut view = wire_dispatch::WorktreesView {
+            root: root.clone(),
+            ..Default::default()
+        };
+        if !migrate {
+            return Ok(view);
+        }
+        self.transaction(|r| {
+            for mut t in r.tickets()? {
+                let Some(tree) = t.tree.clone() else {
+                    continue;
+                };
+                if matches!(t.state, TicketState::Closed { .. }) || tree.parent() == Some(&*root) {
+                    continue;
+                }
+                let p = match r.pipeline_of(&t) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        view.skipped.push((t.id.clone(), format!("pipeline: {e}")));
+                        continue;
+                    }
+                };
+                if p.project.worktrees.is_some() {
+                    continue;
+                }
+                if t.attempts.iter().any(Attempt::is_open) {
+                    view.skipped
+                        .push((t.id.clone(), "something is running in it".into()));
+                    continue;
+                }
+                let mut ps = r.load_project(&t.project)?;
+                match r.move_tree(&mut t, &mut ps, &p, &root, now_ms) {
+                    Ok(()) => view.moved.push(t.id.clone()),
+                    Err(e) => view.skipped.push((t.id.clone(), format!("{e:#}"))),
+                }
+                r.save_project(&ps)?;
+            }
+            Ok(())
+        })?;
+        Ok(view)
+    }
+
+    fn move_tree(
+        &mut self,
+        t: &mut Ticket,
+        ps: &mut ProjectState,
+        p: &Pipeline,
+        root: &Path,
+        now_ms: u64,
+    ) -> Result<()> {
+        let from = t.tree.clone().expect("checked by the caller");
+        let to = root.join(&t.id);
+        let clone = self.data.repo_dir(&p.project.name);
+        self.git.worktree_move(&clone, &from, &to)?;
+        t.tree = Some(to.clone());
+        for lane in &mut t.lanes {
+            let Ok(rest) = lane.worktree.strip_prefix(&from) else {
+                continue;
+            };
+            lane.worktree = to.join(rest);
+            let has_repo = p.lane(&lane.name).is_some_and(|l| l.repo.is_some());
+            if has_repo {
+                let lane_clone = self
+                    .data
+                    .repo_dir(&format!("{}@{}", p.project.name, lane.name));
+                self.git.worktree_repair(&lane_clone, &lane.worktree)?;
+            }
+        }
+        self.save_ticket(t, now_ms)?;
+        log::info!("ticket {} tree moved to {}", t.id, to.display());
+        // The Switchboard projects point at the trees.
+        let mut roots: Vec<(String, PathBuf)> = Vec::new();
+        if let Some(project) = &t.root_project
+            && let Some(tree) = &t.tree
+        {
+            roots.push((project.clone(), tree.clone()));
+        }
+        for lane in &t.lanes {
+            if let Some(project) = &lane.project
+                && !roots.iter().any(|(p, _)| p == project)
+            {
+                roots.push((project.clone(), lane.worktree.clone()));
+            }
+        }
+        for (project, root) in roots {
+            self.send(
+                t,
+                ps,
+                None,
+                "root",
+                Body::ProjectRoot { project, root },
+                now_ms,
+            )?;
+        }
+        Ok(())
     }
 
     // --- the ledger
@@ -776,12 +917,7 @@ impl Runner {
         };
         let branch = branch_name(t.source.number.unwrap_or(0), &t.source.title);
         if t.tree.is_none() {
-            let dir = p
-                .project
-                .worktrees
-                .clone()
-                .unwrap_or_else(|| self.data.worktrees_dir())
-                .join(&t.id);
+            let dir = self.worktree_root(p).join(&t.id);
             let clone = self.data.repo_dir(&p.project.name);
             let start = format!("{}/{}", p.project.remote, p.project.base);
             if !self.cut(

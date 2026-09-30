@@ -90,9 +90,53 @@ pub fn show(cx: &mut DrawCtx<'_>, ui: &mut Ui) {
                 project_section(cx, ui, project, &tickets);
             }
 
+            theme::section(ui, "Worktrees");
+            worktrees(cx, ui, &state.status.worktrees);
+
             theme::section(ui, "Console");
             console(cx, ui);
         });
+}
+
+/// Where tickets' trees go, and a field to move them: set for new
+/// tickets, or set and migrate every idle ticket's tree there.
+fn worktrees(cx: &mut DrawCtx<'_>, ui: &mut Ui, root: &std::path::Path) {
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing.x = 6.0;
+        ui.label(theme::meta_text(ui, "Tickets' trees are cut under"));
+        ui.label(theme::mono_text(ui, root.display().to_string()));
+    });
+    ui.horizontal(|ui| {
+        let width = (ui.available_width() - 220.0).max(120.0);
+        ui.add_sized(
+            [width, 24.0],
+            egui::TextEdit::singleline(&mut cx.state.dispatch_worktrees_draft)
+                .hint_text("~/.dispatch/worktrees")
+                .font(egui::TextStyle::Monospace),
+        );
+        let path = cx.state.dispatch_worktrees_draft.trim().to_owned();
+        let typed = !path.is_empty();
+        ui.add_enabled_ui(typed, |ui| {
+            if theme::secondary(ui, "Set")
+                .on_hover_text("New tickets go here; existing trees stay where they are")
+                .clicked()
+            {
+                cx.dispatch(AppAction::DispatchWorktrees {
+                    path: Some(PathBuf::from(&path)),
+                    migrate: false,
+                });
+            }
+            if theme::secondary(ui, "Set and migrate")
+                .on_hover_text("Also move every ticket's tree that nothing is running in")
+                .clicked()
+            {
+                cx.dispatch(AppAction::DispatchWorktrees {
+                    path: Some(PathBuf::from(&path)),
+                    migrate: true,
+                });
+            }
+        });
+    });
 }
 
 /// One chip per project, and All; the chosen one filled.

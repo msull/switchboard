@@ -75,6 +75,14 @@ pub enum Body {
     Take { project: String, issue: String },
     /// A parked ticket back to active.
     Resume { ticket: String },
+    /// Where tickets' trees go: read it, set it (`path`), and with
+    /// `migrate` move every idle ticket's tree there.
+    Worktrees {
+        #[serde(default)]
+        path: Option<PathBuf>,
+        #[serde(default)]
+        migrate: bool,
+    },
 }
 
 impl Body {
@@ -89,6 +97,7 @@ impl Body {
             Self::Queue { .. } => "queue",
             Self::Take { .. } => "take",
             Self::Resume { .. } => "resume",
+            Self::Worktrees { .. } => "worktrees",
         }
     }
 }
@@ -102,7 +111,18 @@ pub enum Reply {
     Decided(DecisionView),
     Queue { order: Vec<String> },
     Taken(TicketView),
+    Worktrees(WorktreesView),
     Failed { reason: String },
+}
+
+/// The worktree root after a `worktrees` request, and what a migration
+/// moved or left where it was (ticket id, why).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WorktreesView {
+    pub root: PathBuf,
+    pub moved: Vec<String>,
+    pub skipped: Vec<(String, String)>,
 }
 
 impl Reply {
@@ -130,6 +150,8 @@ impl Reply {
 pub struct Status {
     /// Dispatch's data directory, where tickets and their files live.
     pub data_dir: PathBuf,
+    /// Where tickets' trees go unless a pipeline says otherwise.
+    pub worktrees: PathBuf,
     /// The projects with a pipeline file, each with its queue.
     pub projects: Vec<ProjectView>,
     pub tickets: Vec<TicketView>,
@@ -297,6 +319,10 @@ mod tests {
             Body::Resume {
                 ticket: "t1".into(),
             },
+            Body::Worktrees {
+                path: Some("/wt2".into()),
+                migrate: true,
+            },
         ];
         for body in bodies {
             let request = Request::new("op-1", body);
@@ -318,6 +344,7 @@ mod tests {
         let replies = [
             Reply::Status(Status {
                 data_dir: "/d".into(),
+                worktrees: "/wt".into(),
                 projects: vec![ProjectView {
                     name: "Delta".into(),
                     queue: vec!["t1".into()],

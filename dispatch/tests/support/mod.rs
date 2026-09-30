@@ -358,6 +358,12 @@ impl FakeSwitchboard {
                 }
                 (vec![], false)
             }
+            Body::ProjectRoot { project, root } => {
+                if let Some(p) = self.projects.iter_mut().find(|p| &p.id == project) {
+                    p.root.clone_from(root);
+                }
+                (vec![], false)
+            }
             Body::SessionWaiting {
                 session,
                 on,
@@ -626,6 +632,21 @@ impl Repo for SharedRepo {
     }
     fn is_clean(&self, dir: &std::path::Path) -> anyhow::Result<bool> {
         self.0.lock().unwrap().is_clean(dir)
+    }
+    fn worktree_move(
+        &mut self,
+        repo: &std::path::Path,
+        from: &std::path::Path,
+        to: &std::path::Path,
+    ) -> anyhow::Result<()> {
+        self.0.lock().unwrap().worktree_move(repo, from, to)
+    }
+    fn worktree_repair(
+        &mut self,
+        repo: &std::path::Path,
+        dir: &std::path::Path,
+    ) -> anyhow::Result<()> {
+        self.0.lock().unwrap().worktree_repair(repo, dir)
     }
     fn run(
         &mut self,

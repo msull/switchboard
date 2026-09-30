@@ -197,6 +197,12 @@ impl DispatchPort for FakeDispatch {
                 order: order.clone(),
             },
             DispatchBody::Take { .. } => DispatchReply::failed("takes are not faked"),
+            DispatchBody::Worktrees { path, .. } => {
+                DispatchReply::Worktrees(dispatch_control::WorktreesView {
+                    root: path.clone().unwrap_or_else(|| status.worktrees.clone()),
+                    ..Default::default()
+                })
+            }
             DispatchBody::Resume { ticket } => status
                 .tickets
                 .iter()

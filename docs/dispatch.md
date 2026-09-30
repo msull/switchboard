@@ -43,6 +43,19 @@ does not pretend otherwise. Isolation between tickets is that each has
 its own worktree and branch, and that an operator's guidance names the
 worktree it may touch.
 
+Invariant: Dispatch runs only commands written in a pipeline file in
+its own data directory, never a command a repository declares, the way
+Switchboard never runs a project's `project.json` entries without the
+user's approval of each. What a pipeline's command then calls inside
+the repository is the repository's code, running with the user's
+authority; Dispatch reduces that exposure rather than removing it. The
+trees it hands that code live under `~/.dispatch/worktrees` (the
+`dispatch worktrees` setting; a pipeline may name its own), never under
+the data directory, whose path on macOS holds a space that a
+repository's tooling may not survive, and a root holding whitespace or
+a shell-special character is refused at `take`. Confining those
+commands to the tree (a sandbox) is filed as an issue and not built.
+
 ## Objects
 
 - **Ticket.** The unit of work. Its identity is its source identity
@@ -337,7 +350,7 @@ repo = "git@..."              # the repository: Dispatch keeps its own clone und
 root = "/path"                # instead of repo: work in place in this directory, no branch
 base = "main"                 # the branch tickets branch from (default main)
 remote = "origin"             # (default origin)
-worktrees = "/path"           # where tickets' trees go; omitted: Dispatch's own worktrees directory
+worktrees = "/path"           # where this project's trees go (~ expands); omitted: the `dispatch worktrees` setting, default ~/.dispatch/worktrees
 space = "..."                 # the Switchboard workspace every ticket's project goes in
 
 [source]
@@ -964,7 +977,9 @@ fail.
 
 Commands:
 
-- `project.add {space, name, root}` → `project`; `project.remove`
+- `project.add {space, name, root}` → `project`; `project.remove`;
+  `project.rename {project, name}`; `project.root {project, root}` (the
+  tree moved)
 - `session.new {project, kind, cwd, launch, prompt?, notes}` →
   `session`; `session.send {session, text}`; `session.kill`;
   `session.remove`; `session.notes {session, text}`;
@@ -1045,8 +1060,8 @@ run` is up it serves `<data>/dispatch.sock` (wire crate
 ticket as a view (stage names resolved, attempts, decisions, lanes,
 artifact paths), `ticket` one in full, `artifact` the text of a file
 under a ticket's directory and nothing outside it, and `decide`,
-`queue` and `take` do exactly what the command line does, through the
-same runner methods under the same writer lock. Switchboard's Dispatch
+`queue`, `take`, `resume` and `worktrees` do exactly what the command
+line does, through the same runner methods under the same writer lock. Switchboard's Dispatch
 page is a client of this port and knows nothing of the records; a
 runner on another machine looks the same through a forwarded socket.
 The port is served only by the runner that holds `runner.lock`, so a

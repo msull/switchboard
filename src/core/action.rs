@@ -460,6 +460,12 @@ pub enum AppAction {
     },
     /// A parked ticket back to active, through the port.
     DispatchResume(String),
+    /// Where Dispatch puts tickets' trees: set it (`path`), and with
+    /// `migrate` have idle tickets' trees moved there.
+    DispatchWorktrees {
+        path: Option<PathBuf>,
+        migrate: bool,
+    },
     /// Read an artifact's text through the port, once.
     DispatchReadArtifact {
         ticket: String,
@@ -902,6 +908,7 @@ impl AppCore {
             | AppAction::DispatchDecide { .. }
             | AppAction::DispatchReadArtifact { .. }
             | AppAction::DispatchResume(_)
+            | AppAction::DispatchWorktrees { .. }
             | AppAction::DispatchReplied { .. }
             | AppAction::OpenDispatchConsole
             | AppAction::DispatchConsole(_)

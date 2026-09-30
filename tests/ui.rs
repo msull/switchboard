@@ -3790,6 +3790,7 @@ fn dispatch_status() -> switchboard::ports::dispatch::Status {
     use switchboard::ports::dispatch::{DecisionView, ProjectView, Status, TicketView};
     Status {
         data_dir: "/dispatch".into(),
+        worktrees: "/wt".into(),
         projects: vec![
             ProjectView {
                 name: "Delta".into(),
@@ -3900,6 +3901,34 @@ fn dispatch_page_shows_a_tickets_agent_waiting_for_itself() {
     harness.run_steps(2);
     click(&mut harness, "Open session");
     assert!(actions(&harness).contains(&AppAction::ShowSession(session)));
+}
+
+/// The worktree root is shown, and a typed path goes to the port with
+/// or without a migration.
+#[test]
+fn dispatch_page_sets_the_worktree_root() {
+    let (mut harness, _) = harness();
+    harness
+        .state_mut()
+        .dispatch(AppAction::DispatchStatus(Some(dispatch_status())));
+    harness.state_mut().dispatched.clear();
+    harness.run_steps(2);
+    click(&mut harness, "Dispatch");
+    harness.get_by_label("/wt");
+    // The first text field on the page is the root; the console's is
+    // under it.
+    let field = harness
+        .query_all_by_role(Role::TextInput)
+        .next()
+        .expect("the root field");
+    field.focus();
+    field.type_text("/tmp/wt2");
+    harness.run_steps(2);
+    click(&mut harness, "Set and migrate");
+    assert!(actions(&harness).contains(&AppAction::DispatchWorktrees {
+        path: Some(PathBuf::from("/tmp/wt2")),
+        migrate: true,
+    }));
 }
 
 /// The Dispatch page lists what waits on the user with its options as

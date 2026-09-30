@@ -21,6 +21,12 @@ pub trait Repo: Send {
     fn is_worktree_of(&self, repo: &Path, dir: &Path, branch: &str) -> Result<bool>;
     fn head(&self, dir: &Path) -> Result<String>;
     fn is_clean(&self, dir: &Path) -> Result<bool>;
+    /// Move a worktree of `repo` from `from` to `to`, git's own records
+    /// of it included.
+    fn worktree_move(&mut self, repo: &Path, from: &Path, to: &Path) -> Result<()>;
+    /// Re-point `repo` at its worktree now at `dir`, after the tree was
+    /// moved by something other than git (a parent directory moved).
+    fn worktree_repair(&mut self, repo: &Path, dir: &Path) -> Result<()>;
     /// Run `argv` in `dir` with `env` set; nonzero exit is an error.
     fn run(&mut self, dir: &Path, argv: &[String], env: &[(String, String)]) -> Result<()>;
     /// Start a check (a command gate) in `dir` as a child of the runner,
@@ -150,6 +156,32 @@ impl Repo for GitCli {
         Ok(status.is_empty())
     }
 
+    fn worktree_move(&mut self, repo: &Path, from: &Path, to: &Path) -> Result<()> {
+        if let Some(parent) = to.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        output(
+            git()
+                .arg("-C")
+                .arg(repo)
+                .args(["worktree", "move"])
+                .arg(from)
+                .arg(to),
+        )?;
+        Ok(())
+    }
+
+    fn worktree_repair(&mut self, repo: &Path, dir: &Path) -> Result<()> {
+        output(
+            git()
+                .arg("-C")
+                .arg(repo)
+                .args(["worktree", "repair"])
+                .arg(dir),
+        )?;
+        Ok(())
+    }
+
     fn run(&mut self, dir: &Path, argv: &[String], env: &[(String, String)]) -> Result<()> {
         let Some((program, rest)) = argv.split_first() else {
             return Ok(());
@@ -237,6 +269,10 @@ pub struct FakeRepo {
     pub dirty: Vec<PathBuf>,
     pub ran: Vec<(PathBuf, Vec<String>)>,
     pub fail_worktree: Option<String>,
+    /// Worktrees moved: repo, from, to.
+    pub moved: Vec<(PathBuf, PathBuf, PathBuf)>,
+    /// Worktrees repaired: repo, dir.
+    pub repaired: Vec<(PathBuf, PathBuf)>,
     /// Checks started.
     pub checks: Vec<StartedCheck>,
     /// Exit codes a test sets for a check by key; unset means running.
@@ -281,6 +317,29 @@ impl Repo for FakeRepo {
     }
     fn is_clean(&self, dir: &Path) -> Result<bool> {
         Ok(!self.dirty.iter().any(|d| d == dir))
+    }
+    fn worktree_move(&mut self, repo: &Path, from: &Path, to: &Path) -> Result<()> {
+        if let Some(parent) = to.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::rename(from, to)?;
+        let moved = |p: &Path| p.strip_prefix(from).map(|rest| to.join(rest)).ok();
+        for (_, dir, _, _) in &mut self.worktrees {
+            if let Some(new) = moved(dir) {
+                *dir = new;
+            }
+        }
+        self.heads = std::mem::take(&mut self.heads)
+            .into_iter()
+            .map(|(dir, head)| (moved(&dir).unwrap_or(dir), head))
+            .collect();
+        self.moved
+            .push((repo.to_path_buf(), from.to_path_buf(), to.to_path_buf()));
+        Ok(())
+    }
+    fn worktree_repair(&mut self, repo: &Path, dir: &Path) -> Result<()> {
+        self.repaired.push((repo.to_path_buf(), dir.to_path_buf()));
+        Ok(())
     }
     fn run(&mut self, dir: &Path, argv: &[String], _env: &[(String, String)]) -> Result<()> {
         self.ran.push((dir.to_path_buf(), argv.to_vec()));

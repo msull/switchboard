@@ -131,7 +131,10 @@ Dev aids, all environment variables:
 - `SWITCHBOARD_TMUX_SOCKET=<name>`: use another tmux socket name.
 - `DISPATCH_DATA_DIR=<dir>`: where the Dispatch page looks for
   `dispatch.sock` and where its console opens (the `dispatch` binary
-  reads the same variable).
+  reads the same variable). Tickets' trees go under
+  `~/.dispatch/worktrees` regardless, or wherever `dispatch worktrees
+  <path>` (also on the Dispatch page) points; the setting is
+  `<dir>/settings.json`.
 - `SWITCHBOARD_SCRIPT=<file>`: run actions at startup, one per line, so
   the app can be put into a known state without clicking. See
   `src/script.rs` for the lines (`add-project`, `new-shell`, `new-claude`,

@@ -5288,12 +5288,13 @@ mod dispatch_page {
     use super::*;
     use crate::core::{CONSOLE_NAME, CONSOLE_SPACE};
     use crate::ports::dispatch::{
-        AttemptView, Body, DecisionView, ProjectView, Reply, Status, TicketView,
+        AttemptView, Body, DecisionView, ProjectView, Reply, Status, TicketView, WorktreesView,
     };
 
     fn status(session: Option<RecordId>) -> Status {
         Status {
             data_dir: "/dispatch".into(),
+            worktrees: "/wt".into(),
             projects: vec![ProjectView {
                 name: "Delta".into(),
                 queue: vec!["t1".into()],
@@ -5720,6 +5721,61 @@ mod dispatch_page {
             Clock::at(3),
         );
         assert_eq!(core.ticket("t1").unwrap().state, "active");
+    }
+
+    #[test]
+    fn the_worktree_root_is_set_through_the_port_and_the_reply_is_told() {
+        let (mut core, _) = loaded(vec![], vec![]);
+        let e = core.dispatch(
+            AppAction::DispatchWorktrees {
+                path: Some("/new/wt".into()),
+                migrate: true,
+            },
+            Clock::at(1),
+        );
+        assert!(
+            !e.iter().any(|e| matches!(e, Effect::DispatchCall(_))),
+            "no runner, no call"
+        );
+        core.dispatch(AppAction::DispatchStatus(Some(status(None))), Clock::at(2));
+        let e = core.dispatch(
+            AppAction::DispatchWorktrees {
+                path: Some("/new/wt".into()),
+                migrate: true,
+            },
+            Clock::at(3),
+        );
+        assert!(e.contains(&Effect::DispatchCall(Body::Worktrees {
+            path: Some("/new/wt".into()),
+            migrate: true,
+        })));
+        core.dispatch(
+            AppAction::DispatchReplied {
+                body: Body::Worktrees {
+                    path: Some("/new/wt".into()),
+                    migrate: true,
+                },
+                result: Ok(Reply::Worktrees(WorktreesView {
+                    root: "/new/wt".into(),
+                    moved: vec!["t1".into()],
+                    skipped: vec![("t2".into(), "something is running in it".into())],
+                })),
+            },
+            Clock::at(4),
+        );
+        assert_eq!(
+            core.dispatch_state().status.worktrees,
+            PathBuf::from("/new/wt")
+        );
+        let notice = core
+            .notices()
+            .last()
+            .map(|n| n.text.clone())
+            .unwrap_or_default();
+        assert!(
+            notice.contains("moved 1") && notice.contains("left t2"),
+            "{notice}"
+        );
     }
 
     #[test]

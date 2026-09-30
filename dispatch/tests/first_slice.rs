@@ -119,6 +119,10 @@ impl Env {
         let data = DataDir::new(dir.path().join("dispatch"));
         let worktrees = dir.path().join("wt");
         std::fs::create_dir_all(data.root.join("pipelines")).unwrap();
+        data.write_settings(&dispatch::store::Settings {
+            worktrees: Some(worktrees.clone()),
+        })
+        .unwrap();
         std::fs::write(data.pipeline(PROJECT), pipeline(&worktrees)).unwrap();
         let sb = Arc::new(Mutex::new(FakeSwitchboard::new()));
         let repo = Arc::new(Mutex::new(FakeRepo::default()));
@@ -1789,6 +1793,148 @@ waiting_on_me = 3
 decisions = { lanes = "auto", finalize = "ask" }
 trust_folders = true
 "#;
+
+/// The worktree root: the data directory's setting, a pipeline's own
+/// `worktrees` with `~` expanded, and a root a repository's tooling
+/// could not survive refused at take.
+#[test]
+fn the_worktree_root_is_a_setting_a_tilde_is_the_home_and_a_space_is_refused() {
+    let env = Env::new();
+    assert_eq!(env.data.worktrees_dir(), env.worktrees);
+    let home = std::env::var("HOME").unwrap();
+    let text = std::fs::read_to_string(env.data.pipeline(PROJECT))
+        .unwrap()
+        .replace(
+            &format!("worktrees = \"{}\"", env.worktrees.display()),
+            "worktrees = \"~/trees\"",
+        );
+    let p = dispatch::pipeline::Pipeline::parse(&text).unwrap();
+    assert_eq!(
+        p.project.worktrees.as_deref(),
+        Some(std::path::Path::new(&home).join("trees").as_path())
+    );
+    // No worktrees line: the setting rules, and one with a space is
+    // refused before a ticket exists.
+    let mut env = Env::new();
+    let text = std::fs::read_to_string(env.data.pipeline(PROJECT))
+        .unwrap()
+        .replace(
+            &format!("worktrees = \"{}\"\n", env.worktrees.display()),
+            "",
+        );
+    std::fs::write(env.data.pipeline(PROJECT), &text).unwrap();
+    env.data
+        .write_settings(&dispatch::store::Settings {
+            worktrees: Some(env.data.root.parent().unwrap().join("has space")),
+        })
+        .unwrap();
+    let now = env.tick();
+    let err = env
+        .runner
+        .take(
+            PROJECT,
+            &text,
+            SourceSnapshot {
+                kind: "github".into(),
+                identity: "msull/switchboard#7".into(),
+                number: Some(7),
+                title: "x".into(),
+                body: String::new(),
+                url: None,
+                labels: vec![],
+                taken_at_ms: now,
+            },
+            now,
+        )
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains("holds") && err.contains("dispatch worktrees"),
+        "{err}"
+    );
+    assert!(env.runner.tickets().unwrap().is_empty());
+}
+
+/// Moving the worktree root moves every idle ticket's tree with git,
+/// re-points each lane clone at its tree inside it, and tells
+/// Switchboard the projects' new roots; a ticket with something running
+/// is left where it is and named.
+#[test]
+fn moving_the_worktree_root_moves_idle_trees_and_repoints_lanes_and_projects() {
+    let (mut env, id) = workspace_env(&["type:bug"]);
+    // The pipeline defers to the setting.
+    for path in [env.data.pipeline("Delta"), env.ticket(&id).pipeline_file] {
+        let text = std::fs::read_to_string(&path).unwrap().replace(
+            &format!("worktrees = \"{}\"\n", env.worktrees.display()),
+            "",
+        );
+        std::fs::write(&path, text).unwrap();
+    }
+    let now = env.tick();
+    env.runner.step_project("Delta", now).unwrap();
+    let t = env.ticket(&id);
+    let old_tree = env.worktrees.join(&id);
+    assert_eq!(t.tree.as_deref(), Some(old_tree.as_path()));
+    let new_root = env.data.root.parent().unwrap().join("wt2");
+    let now = env.tick();
+    let view = env
+        .runner
+        .set_worktrees(Some(new_root.clone()), true, now)
+        .unwrap();
+    assert_eq!(view.root, new_root);
+    assert_eq!(view.moved, Vec::<String>::new());
+    assert_eq!(view.skipped[0].0, id, "{view:?}");
+    assert!(view.skipped[0].1.contains("running"));
+    assert_eq!(env.ticket(&id).tree.as_deref(), Some(old_tree.as_path()));
+    // The investigator finishes; the lanes question is pending and
+    // nothing runs, so the tree moves.
+    let investigator = session_of(&t, "investigate");
+    std::fs::write(artifact_of(&t, "investigate", "notes"), "# notes").unwrap();
+    let now = env.now;
+    env.sb().stop(&investigator, now);
+    for _ in 0..5 {
+        let now = env.tick();
+        env.runner.step_project("Delta", now).unwrap();
+    }
+    assert_eq!(env.pending(&id).len(), 1);
+    let now = env.tick();
+    let view = env.runner.set_worktrees(None, true, now).unwrap();
+    assert_eq!(view.root, new_root, "unchanged setting, migration only");
+    assert_eq!(view.moved, vec![id.clone()], "{view:?}");
+    let new_tree = new_root.join(&id);
+    let t = env.ticket(&id);
+    assert_eq!(t.tree.as_deref(), Some(new_tree.as_path()));
+    assert!(new_tree.is_dir() && !old_tree.exists());
+    for lane in &t.lanes {
+        assert!(lane.worktree.starts_with(&new_tree), "{lane:?}");
+    }
+    let repo = env.repo.lock().unwrap();
+    assert_eq!(
+        repo.moved,
+        vec![(
+            env.data.repo_dir("Delta"),
+            old_tree.clone(),
+            new_tree.clone()
+        )]
+    );
+    let repaired: Vec<&std::path::Path> = repo.repaired.iter().map(|(_, d)| d.as_path()).collect();
+    assert_eq!(repaired.len(), t.lanes.len(), "{repaired:?}");
+    assert!(repaired.iter().all(|d| d.starts_with(&new_tree)));
+    drop(repo);
+    let sb = env.sb();
+    let project = sb
+        .projects
+        .iter()
+        .find(|p| Some(&p.id) == t.root_project.as_ref())
+        .unwrap();
+    assert_eq!(project.root, new_tree);
+    assert_eq!(sb.kinds_called("project.root"), 1);
+    drop(sb);
+    // Once moved, a second migration finds nothing under the old root.
+    let now = env.tick();
+    let view = env.runner.set_worktrees(None, true, now).unwrap();
+    assert!(view.moved.is_empty() && view.skipped.is_empty(), "{view:?}");
+}
 
 /// A session query the app could not answer says nothing about the
 /// session: the attempt is asked about again, not failed.

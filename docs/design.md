@@ -1494,8 +1494,14 @@ decision, `plan`, and a review run on a copy of the plan, stopping at
 the `finalize` decision. A ticket's tree comes first: Dispatch keeps
 its own clone of the project's `repo` under `<data>/repos/<project>`,
 fetches it before every cut, and cuts the ticket's worktree from
-`<remote>/<base>` under `<data>/worktrees/<ticket>` (a lane may say
-where instead), so the user's checkout is never read or touched and a
+`<remote>/<base>` under `~/.dispatch/worktrees/<ticket>` (the
+`dispatch worktrees` setting in `<data>/settings.json`, or the
+pipeline's own `worktrees`; a root with a space or a shell-special
+character is refused at take, since the repository's tooling gets the
+path; `--migrate`, or the page's "Set and migrate", moves idle tickets'
+trees with git, repairs the lane clones and re-points the Switchboard
+projects through the new `project.root` command), so the user's
+checkout is never read or touched and a
 ticket starts from what the remote has now. Every stage runs in that
 tree, under one Switchboard project per ticket named `#<n> <title>`
 and rooted there. A lane with a `repo` of its own (Delta's workspace
