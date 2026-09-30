@@ -1536,10 +1536,19 @@ stage, on an open PR at the head; no PR, another head, red checks or
 missing checks is one `pr` decision with `recheck` and `park`, never
 a failed attempt, and a provider that cannot be read is retried
 quietly for an hour first. The PR is recorded on the attempt and
-shown on the ticket page as a link with the last reading.
-Everything else in that document (external and human gates on agent
-stages, gate-only command stages, `pr-merged`, budgets, the other
-pipelines) parks the ticket with a reason. The runner's pass over a project is
+shown on the ticket page as a link with the last reading. A
+`pr-merged` stage (`merge`) makes the confirmation decision the design
+describes (only `park` can be answered by hand; the session is marked
+waiting), reads the same PR once a minute, and on merged completes
+the attempt and answers the decision as Dispatch. A human gate-only
+stage (`inspect`) asks once per lane with the branch, its head, what
+it adds over its base, the tree and the notes; `proceed` passes,
+`rerun` with a note (typed under the decision on the page) sends
+that lane back to the nearest earlier agent stage with the note in
+the next prompt. A gate-only stage and a ticket closing past its last
+stage hold no slot. Everything else in that document (external and
+human gates on agent stages, gate-only command stages, budgets, the
+other pipelines) parks the ticket with a reason. The runner's pass over a project is
 one transaction under the data directory's writer lock, and `decide`,
 `take` and `queue` take the same lock around their read and write, so
 an answer from the terminal is never overwritten by a pass that read

@@ -287,6 +287,11 @@ pub struct Ticket {
     pub processes: Vec<String>,
     /// The Switchboard project for the root context, once made.
     pub root_project: Option<String>,
+    /// What the user said when sending a stage's work back from a
+    /// later human gate, by `<stage>/<context>`, until the next attempt
+    /// of that stage takes it into its prompt.
+    #[serde(default)]
+    pub rework: BTreeMap<String, String>,
     #[serde(flatten)]
     pub state: TicketState,
     pub created_ms: u64,
@@ -377,6 +382,7 @@ mod tests {
             ledger: vec![],
             processes: vec![],
             root_project: None,
+            rework: BTreeMap::new(),
             state: TicketState::Active,
             created_ms: 0,
             updated_ms: 0,

@@ -636,6 +636,9 @@ impl Repo for SharedRepo {
     fn remote_url(&self, dir: &std::path::Path) -> anyhow::Result<Option<String>> {
         self.0.lock().unwrap().remote_url(dir)
     }
+    fn summary(&self, dir: &std::path::Path, base: &str) -> anyhow::Result<String> {
+        self.0.lock().unwrap().summary(dir, base)
+    }
     fn worktree_move(
         &mut self,
         repo: &std::path::Path,

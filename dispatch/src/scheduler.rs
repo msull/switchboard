@@ -4,6 +4,7 @@
 //! retries on its own: a failure is a decision.
 
 use std::collections::BTreeMap;
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result, anyhow, bail};
@@ -76,6 +77,8 @@ impl Runner {
 
 /// What `dispatch decide` writes as the answerer.
 pub const BY_HAND: &str = "you";
+/// Who answered a decision Dispatch resolved from a provider.
+pub const BY_DISPATCH: &str = "dispatch";
 
 /// What a decision asks, before it is a record.
 pub struct Ask<'a> {
@@ -232,6 +235,7 @@ impl Runner {
             ledger: Vec::new(),
             processes: Vec::new(),
             root_project: None,
+            rework: BTreeMap::new(),
             state: TicketState::Active,
             created_ms: now_ms,
             updated_ms: now_ms,
@@ -498,7 +502,13 @@ impl Runner {
             .any(|d| d.pending() && d.stage == stage.name);
         match stage.kind() {
             StageKind::GateOnly => {
-                if !held {
+                // The merge decision is pending by design while the
+                // provider is watched, so that gate polls through it.
+                let watches = matches!(
+                    &stage.gate,
+                    Some(Gate::External { check, .. }) if check == "pr-merged"
+                );
+                if !held || watches {
                     self.gate_only(t, ps, p, &stage, now_ms)?;
                 }
             }
@@ -899,25 +909,20 @@ impl Runner {
                     self.check_again(t, ps, attempt.as_ref(), now_ms)?;
                 }
                 ("pr", "recheck") => recheck_pr(t, attempt.as_ref()),
+                (_, "proceed" | "done") => {
+                    self.pass_human_gate(t, ps, p, attempt.as_ref(), now_ms)?;
+                }
+                (name, "rerun") if name != "rerun" => {
+                    let note = match &t.decisions[i].state {
+                        DecisionState::Answered { note, .. } => note.clone(),
+                        _ => None,
+                    };
+                    self.send_back(t, ps, p, name, attempt.as_ref(), note, now_ms)?;
+                }
                 ("rerun", "rerun") => {
-                    // The replaced attempt is retired first, so an old
-                    // and a new attempt never run together; still alive,
-                    // the answer stays unacted for the next pass.
-                    if let Some(a) = attempt
-                        .as_ref()
-                        .and_then(|(s, n)| t.attempts.iter().find(|a| &a.stage == s && a.n == *n))
-                        .cloned()
-                    {
-                        let mine = self.processes_of(t, &a)?;
-                        if !self.retire_processes(t, ps, &mine, now_ms)? {
-                            continue;
-                        }
+                    if !self.retire_replaced(t, ps, i, attempt.as_ref(), now_ms)? {
+                        continue;
                     }
-                    if let DecisionState::Answered { acted, .. } = &mut t.decisions[i].state {
-                        *acted = true;
-                    }
-                    self.save_ticket(t, now_ms)?;
-                    self.unmark(t, ps, now_ms)?;
                 }
                 (_, "park") => {
                     self.park(t, ps, &format!("parked by hand at decision {name}"), now_ms)?;
@@ -938,6 +943,34 @@ impl Runner {
             }
         }
         Ok(())
+    }
+
+    /// A rerun's replaced attempt is retired first, so an old and a new
+    /// attempt never run together; still alive, the answer stays
+    /// unacted for the next pass (false). Gone, the answer is acted.
+    fn retire_replaced(
+        &mut self,
+        t: &mut Ticket,
+        ps: &mut ProjectState,
+        decision: usize,
+        attempt: Option<&(String, u32)>,
+        now_ms: u64,
+    ) -> Result<bool> {
+        if let Some(a) = attempt
+            .and_then(|(s, n)| t.attempts.iter().find(|a| &a.stage == s && a.n == *n))
+            .cloned()
+        {
+            let mine = self.processes_of(t, &a)?;
+            if !self.retire_processes(t, ps, &mine, now_ms)? {
+                return Ok(false);
+            }
+        }
+        if let DecisionState::Answered { acted, .. } = &mut t.decisions[decision].state {
+            *acted = true;
+        }
+        self.save_ticket(t, now_ms)?;
+        self.unmark(t, ps, now_ms)?;
+        Ok(true)
     }
 
     // --- lanes
@@ -1211,6 +1244,15 @@ impl Runner {
             Some(Gate::External { check, .. }) if check == "pr-checks" => {
                 self.pr_checks_stage(t, ps, p, stage, now_ms)
             }
+            Some(Gate::External {
+                check, decision, ..
+            }) if check == "pr-merged" => {
+                let decision = decision.clone().unwrap_or_else(|| "merge".to_owned());
+                self.pr_merged_stage(t, ps, p, stage, &decision, now_ms)
+            }
+            Some(Gate::Human { decision, confirm }) => {
+                self.human_gate(t, ps, p, stage, decision, *confirm, now_ms)
+            }
             Some(gate) => {
                 let kind = match gate {
                     Gate::Command { .. } => "command gate",
@@ -1329,28 +1371,10 @@ impl Runner {
         let head = self.git.head(cwd)?;
         let reading = self.read_pr(&target, none_expected);
         let question = match reading {
-            Err(e) => {
-                log::warn!("ticket {} {}/{}: {e:#}", t.id, a.stage, a.context);
-                let since =
-                    a.pr.as_ref()
-                        .and_then(|pr| pr.error_since_ms)
-                        .unwrap_or(now_ms);
-                attempt_mut(t, a).pr = Some(PullRequestRecord {
-                    number: 0,
-                    url: String::new(),
-                    checks: format!("error: {e:#}"),
-                    error_since_ms: Some(since),
-                    ..target.record(&head, now_ms)
-                });
-                self.save_ticket(t, now_ms)?;
-                if now_ms.saturating_sub(since) < PR_ERROR_GRACE_MS {
-                    return Ok(());
-                }
-                format!(
-                    "the pull request for {} in {} could not be read for an hour: {e:#}",
-                    target.branch, target.repo
-                )
-            }
+            Err(e) => match self.record_pr_error(t, a, &target, &head, &e, now_ms)? {
+                None => return Ok(()),
+                Some(question) => question,
+            },
             Ok(None) => {
                 attempt_mut(t, a).pr = None;
                 self.save_ticket(t, now_ms)?;
@@ -1422,6 +1446,461 @@ impl Runner {
         }
         let checks = self.prs.checks(&target.repo, pr.number)?;
         Ok(Some((pr, Some(checks))))
+    }
+
+    /// A human gate-only stage other than `lanes`: one attempt per
+    /// context that launches nothing and one decision each, with what
+    /// the user needs to judge the work in the question. `proceed`
+    /// completes it, `rerun` with a note sends the context back to the
+    /// nearest earlier agent stage, `park` stops. A `confirm` gate is
+    /// "you did this": its answer is `done`.
+    #[allow(clippy::too_many_arguments)]
+    fn human_gate(
+        &mut self,
+        t: &mut Ticket,
+        ps: &mut ProjectState,
+        p: &Pipeline,
+        stage: &Stage,
+        decision: &str,
+        confirm: bool,
+        now_ms: u64,
+    ) -> Result<()> {
+        let contexts = Self::contexts(t, p, stage);
+        if contexts.is_empty() {
+            return self.park(
+                t,
+                ps,
+                &format!("stage {} needs lanes the ticket has not cut", stage.name),
+                now_ms,
+            );
+        }
+        let mut all_complete = true;
+        for (ctx, cwd, lane) in contexts {
+            let Some(attempt) = self.open_gate_attempt(t, stage, &ctx, now_ms)? else {
+                continue;
+            };
+            all_complete = false;
+            let question = self.human_question(t, p, stage, &attempt, &cwd, lane.as_deref())?;
+            let (kind, options): (DecisionKind, &[&str]) = if confirm {
+                (DecisionKind::Confirmation, &["done", "park"])
+            } else {
+                (DecisionKind::Permission, &["proceed", "rerun", "park"])
+            };
+            self.ensure_decision(
+                t,
+                ps,
+                Ask {
+                    stage: &stage.name,
+                    name: decision,
+                    kind,
+                    question,
+                    options,
+                    recommendation: None,
+                    attempt: Some((attempt.stage.clone(), attempt.n)),
+                },
+                now_ms,
+            )?;
+            if !t.active() {
+                return Ok(());
+            }
+        }
+        if all_complete {
+            self.advance(t, ps, now_ms)?;
+        }
+        Ok(())
+    }
+
+    /// The open gate-only attempt of a stage in a context: the one
+    /// there is, or a new one; `None` when the context is complete.
+    fn open_gate_attempt(
+        &mut self,
+        t: &mut Ticket,
+        stage: &Stage,
+        ctx: &str,
+        now_ms: u64,
+    ) -> Result<Option<Attempt>> {
+        let last = t
+            .attempts
+            .iter()
+            .filter(|a| a.stage == stage.name && a.context == ctx)
+            .max_by_key(|a| a.n)
+            .cloned();
+        Ok(match last {
+            Some(a) if a.state == AttemptState::Complete => None,
+            Some(a) if a.is_open() => Some(a),
+            _ => {
+                let a = new_attempt(
+                    &stage.name,
+                    next_n(t, &stage.name),
+                    ctx,
+                    AttemptKind::GateOnly,
+                    AttemptState::Running,
+                    BTreeMap::new(),
+                    now_ms,
+                );
+                t.attempts.push(a.clone());
+                self.save_ticket(t, now_ms)?;
+                Some(a)
+            }
+        })
+    }
+
+    /// What a human gate shows: the branch and its head, what it adds
+    /// over its base, the tree to open, and the latest notes.
+    fn human_question(
+        &self,
+        t: &Ticket,
+        p: &Pipeline,
+        stage: &Stage,
+        a: &Attempt,
+        cwd: &Path,
+        lane: Option<&str>,
+    ) -> Result<String> {
+        let mut q = format!("{} ({}):", stage.name, a.context);
+        let lane_record = lane.and_then(|l| t.lanes.iter().find(|x| x.name == l));
+        if let Some(l) = lane_record
+            && p.cuts_worktrees()
+        {
+            let head = self.git.head(cwd)?;
+            let base = p.lane(&l.name).map_or_else(
+                || p.project.base.clone(),
+                |lane| format!("{}/{}", p.lane_remote(lane), p.lane_base(lane)),
+            );
+            let short: String = head.chars().take(8).collect();
+            let _ = write!(q, " branch {} at {short} over {base}.", l.branch);
+            let summary = self.git.summary(cwd, &base)?;
+            if !summary.trim().is_empty() {
+                q.push_str("\n\n");
+                q.push_str(summary.trim());
+            }
+        }
+        let _ = write!(q, "\n\nTree: {}", cwd.display());
+        if let Some(notes) = t.input("notes") {
+            let _ = write!(q, "\nNotes: {}", notes.display());
+        }
+        Ok(q)
+    }
+
+    /// The gate's attempt completes, bound to the tree's head.
+    fn pass_human_gate(
+        &mut self,
+        t: &mut Ticket,
+        ps: &mut ProjectState,
+        p: &Pipeline,
+        attempt: Option<&(String, u32)>,
+        now_ms: u64,
+    ) -> Result<()> {
+        let Some((stage, n)) = attempt else {
+            return Ok(());
+        };
+        let Some(a) = t
+            .attempts
+            .iter()
+            .find(|a| &a.stage == stage && a.n == *n)
+            .cloned()
+        else {
+            return Ok(());
+        };
+        let head = match tree_of(t, p, &a.context) {
+            Some(cwd) => Some(self.git.head(&cwd)?),
+            None => None,
+        };
+        let record = attempt_mut(t, &a);
+        record.head = head;
+        record.state = AttemptState::Complete;
+        record.ended_ms = Some(now_ms);
+        log::info!("ticket {} {}/{} passed by hand", t.id, a.stage, a.context);
+        self.save_ticket(t, now_ms)?;
+        self.unmark(t, ps, now_ms)
+    }
+
+    /// A context sent back from a human gate: the gate's attempt is
+    /// cancelled, the nearest earlier agent stage's result for that
+    /// context is cancelled too, the note is kept for that stage's
+    /// next prompt, and the ticket stands at that stage again. Other
+    /// contexts' results are untouched.
+    #[allow(clippy::too_many_arguments)]
+    fn send_back(
+        &mut self,
+        t: &mut Ticket,
+        ps: &mut ProjectState,
+        p: &Pipeline,
+        from: &str,
+        attempt: Option<&(String, u32)>,
+        note: Option<String>,
+        now_ms: u64,
+    ) -> Result<()> {
+        let Some((stage, n)) = attempt else {
+            return Ok(());
+        };
+        let Some(gate) = t
+            .attempts
+            .iter()
+            .find(|a| &a.stage == stage && a.n == *n)
+            .cloned()
+        else {
+            return Ok(());
+        };
+        let Some(back_to) = p
+            .stages
+            .iter()
+            .take(t.stage)
+            .rposition(|s| s.kind() == StageKind::Agent)
+        else {
+            return self.park(
+                t,
+                ps,
+                &format!("{from}: nothing before {} can be run again", gate.stage),
+                now_ms,
+            );
+        };
+        let target = p.stages[back_to].name.clone();
+        let note = note.unwrap_or_else(|| format!("sent back from {from} without a note"));
+        let reason = format!("sent back from {from}: {note}");
+        let record = attempt_mut(t, &gate);
+        record.state = AttemptState::Cancelled {
+            reason: reason.clone(),
+        };
+        record.ended_ms = Some(now_ms);
+        if let Some(done) = t
+            .attempts
+            .iter_mut()
+            .filter(|a| {
+                a.stage == target && a.context == gate.context && a.state == AttemptState::Complete
+            })
+            .max_by_key(|a| a.n)
+        {
+            done.state = AttemptState::Cancelled { reason };
+            done.ended_ms = Some(now_ms);
+        }
+        t.rework.insert(rework_key(&target, &gate.context), note);
+        t.stage = back_to;
+        log::info!(
+            "ticket {} {}/{} sent back to {target}",
+            t.id,
+            gate.stage,
+            gate.context
+        );
+        self.save_ticket(t, now_ms)?;
+        self.unmark(t, ps, now_ms)
+    }
+
+    /// A `pr-merged` stage: one gate-only attempt per context that
+    /// makes the merge decision, a confirmation the provider resolves.
+    /// The PR is read once a minute; merged completes the attempt and
+    /// answers the decision as Dispatch. Nothing here merges.
+    fn pr_merged_stage(
+        &mut self,
+        t: &mut Ticket,
+        ps: &mut ProjectState,
+        p: &Pipeline,
+        stage: &Stage,
+        decision: &str,
+        now_ms: u64,
+    ) -> Result<()> {
+        let contexts = Self::contexts(t, p, stage);
+        if contexts.is_empty() {
+            return self.park(
+                t,
+                ps,
+                &format!("stage {} needs lanes the ticket has not cut", stage.name),
+                now_ms,
+            );
+        }
+        let mut all_complete = true;
+        for (ctx, cwd, lane) in contexts {
+            let Some(attempt) = self.open_gate_attempt(t, stage, &ctx, now_ms)? else {
+                continue;
+            };
+            all_complete = false;
+            let poll = PrPoll {
+                stage,
+                decision,
+                attempt: &attempt,
+                cwd: &cwd,
+                lane: lane.as_deref(),
+            };
+            self.poll_pr_merged(t, ps, p, &poll, now_ms)?;
+            if !t.active() {
+                return Ok(());
+            }
+        }
+        if all_complete {
+            self.advance(t, ps, now_ms)?;
+        }
+        Ok(())
+    }
+
+    fn poll_pr_merged(
+        &mut self,
+        t: &mut Ticket,
+        ps: &mut ProjectState,
+        p: &Pipeline,
+        poll: &PrPoll<'_>,
+        now_ms: u64,
+    ) -> Result<()> {
+        let PrPoll {
+            stage,
+            decision,
+            attempt: a,
+            cwd,
+            lane,
+        } = *poll;
+        if a.pr
+            .as_ref()
+            .is_some_and(|pr| pr.checked_ms != 0 && now_ms < pr.checked_ms + PR_POLL_MS)
+        {
+            return Ok(());
+        }
+        let provider = match &stage.gate {
+            Some(Gate::External { provider, .. }) => provider.as_deref(),
+            _ => None,
+        };
+        let origin = self.git.remote_url(cwd)?;
+        let target = match pr_target(t, p, stage, lane, provider, origin) {
+            Ok(target) => target,
+            Err(why) => return self.park(t, ps, &why, now_ms),
+        };
+        let head = self.git.head(cwd)?;
+        let question = match self.prs.find(&target.repo, &target.branch) {
+            Err(e) => match self.record_pr_error(t, a, &target, &head, &e, now_ms)? {
+                None => return Ok(()),
+                Some(question) => question,
+            },
+            Ok(None) => {
+                attempt_mut(t, a).pr = None;
+                self.save_ticket(t, now_ms)?;
+                format!(
+                    "no pull request for branch {} in {}; open one, then answer recheck",
+                    target.branch, target.repo
+                )
+            }
+            Ok(Some(pr)) => {
+                attempt_mut(t, a).pr = Some(PullRequestRecord {
+                    number: pr.number,
+                    url: pr.url.clone(),
+                    checks: pr.state.clone(),
+                    ..target.record(&pr.head, now_ms)
+                });
+                self.save_ticket(t, now_ms)?;
+                match pr.state.as_str() {
+                    "merged" => return self.merged(t, ps, a, decision, &pr, now_ms),
+                    "closed" => format!("PR #{} is closed without being merged", pr.number),
+                    _ => {
+                        let question = format!(
+                            "{} ({}): PR #{} {} is open at {}; merge it there. Dispatch resolves this when the provider reports the merge.",
+                            a.stage,
+                            a.context,
+                            pr.number,
+                            pr.url,
+                            pr.head.chars().take(8).collect::<String>()
+                        );
+                        return self.ensure_decision(
+                            t,
+                            ps,
+                            Ask {
+                                stage: &a.stage,
+                                name: decision,
+                                kind: DecisionKind::Confirmation,
+                                question,
+                                options: &["park"],
+                                recommendation: None,
+                                attempt: Some((a.stage.clone(), a.n)),
+                            },
+                            now_ms,
+                        );
+                    }
+                }
+            }
+        };
+        self.ensure_decision(
+            t,
+            ps,
+            Ask {
+                stage: &a.stage,
+                name: "pr",
+                kind: DecisionKind::Permission,
+                question: format!("{} ({}): {question}", a.stage, a.context),
+                options: &["recheck", "park"],
+                recommendation: None,
+                attempt: Some((a.stage.clone(), a.n)),
+            },
+            now_ms,
+        )
+    }
+
+    /// The provider reports the merge: the attempt completes at the
+    /// merged head and the merge decision reads as answered by Dispatch.
+    fn merged(
+        &mut self,
+        t: &mut Ticket,
+        ps: &mut ProjectState,
+        a: &Attempt,
+        decision: &str,
+        pr: &crate::github::PullRequest,
+        now_ms: u64,
+    ) -> Result<()> {
+        let record = attempt_mut(t, a);
+        record.head = Some(pr.head.clone());
+        record.state = AttemptState::Complete;
+        record.ended_ms = Some(now_ms);
+        let key = (a.stage.clone(), a.n);
+        for d in t
+            .decisions
+            .iter_mut()
+            .filter(|d| d.pending() && d.name == decision && d.attempt.as_ref() == Some(&key))
+        {
+            d.state = DecisionState::Answered {
+                answer: "merged".into(),
+                note: None,
+                by: BY_DISPATCH.into(),
+                at_ms: now_ms,
+                acted: true,
+            };
+        }
+        log::info!(
+            "ticket {} {}/{} PR #{} merged",
+            t.id,
+            a.stage,
+            a.context,
+            pr.number
+        );
+        self.save_ticket(t, now_ms)?;
+        self.unmark(t, ps, now_ms)
+    }
+
+    /// A provider that could not be read: noted on the attempt and
+    /// retried quietly, until it has failed for `PR_ERROR_GRACE_MS`;
+    /// then the question to ask.
+    fn record_pr_error(
+        &mut self,
+        t: &mut Ticket,
+        a: &Attempt,
+        target: &PrTarget,
+        head: &str,
+        e: &anyhow::Error,
+        now_ms: u64,
+    ) -> Result<Option<String>> {
+        log::warn!("ticket {} {}/{}: {e:#}", t.id, a.stage, a.context);
+        let since =
+            a.pr.as_ref()
+                .and_then(|pr| pr.error_since_ms)
+                .unwrap_or(now_ms);
+        attempt_mut(t, a).pr = Some(PullRequestRecord {
+            number: 0,
+            url: String::new(),
+            checks: format!("error: {e:#}"),
+            error_since_ms: Some(since),
+            ..target.record(head, now_ms)
+        });
+        self.save_ticket(t, now_ms)?;
+        if now_ms.saturating_sub(since) < PR_ERROR_GRACE_MS {
+            return Ok(None);
+        }
+        Ok(Some(format!(
+            "the pull request for {} in {} could not be read for an hour: {e:#}",
+            target.branch, target.repo
+        )))
     }
 
     fn finish_gate_only(
@@ -1605,9 +2084,11 @@ impl Runner {
                     self.poll_agent(t, ps, &a, stage, &cwd, lane.as_deref(), trust, now_ms)?;
                 }
                 Some(a) => {
-                    // Failed: a rerun waits on its decision.
+                    // Failed: a rerun waits on its decision. Sent back
+                    // from a later human gate: the note is the answer.
                     all_complete = false;
-                    if !held && may_rerun(t, &a) {
+                    let sent_back = t.rework.contains_key(&rework_key(&stage.name, &ctx));
+                    if !held && (may_rerun(t, &a) || sent_back) {
                         self.start_agent(
                             t,
                             ps,
@@ -1692,6 +2173,10 @@ impl Runner {
             prompt.push_str("\n\n");
         }
         prompt.push_str(&vars.render(stage.prompt.as_deref().unwrap_or_default()));
+        if let Some(note) = t.rework.remove(&rework_key(&stage.name, ctx)) {
+            prompt.push_str("\n\nThe user looked at the previous attempt and sent it back: ");
+            prompt.push_str(&note);
+        }
         let mut attempt = new_attempt(
             &stage.name,
             n,
@@ -2713,12 +3198,36 @@ fn recheck_pr(t: &mut Ticket, attempt: Option<&(String, u32)>) {
     }
 }
 
+/// The key a sent-back note is kept under.
+fn rework_key(stage: &str, ctx: &str) -> String {
+    format!("{stage}/{ctx}")
+}
+
+/// The tree a context runs in: the lane's worktree, or the ticket's.
+fn tree_of(t: &Ticket, p: &Pipeline, ctx: &str) -> Option<PathBuf> {
+    t.lanes
+        .iter()
+        .find(|l| l.name == ctx)
+        .map(|l| l.worktree.clone())
+        .or_else(|| primary_tree(t, p))
+}
+
 /// The record behind a copy of an attempt the runner is polling.
 fn attempt_mut<'t>(t: &'t mut Ticket, a: &Attempt) -> &'t mut Attempt {
     t.attempts
         .iter_mut()
         .find(|x| x.stage == a.stage && x.n == a.n)
         .expect("the attempt polled exists")
+}
+
+/// One context's poll of a PR-reading stage.
+#[derive(Clone, Copy)]
+struct PrPoll<'a> {
+    stage: &'a Stage,
+    decision: &'a str,
+    attempt: &'a Attempt,
+    cwd: &'a Path,
+    lane: Option<&'a str>,
 }
 
 /// Where a `pr-checks` gate looks: the provider, its name for the

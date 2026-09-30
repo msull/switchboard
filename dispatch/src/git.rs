@@ -29,6 +29,9 @@ pub trait Repo: Send {
     fn worktree_repair(&mut self, repo: &Path, dir: &Path) -> Result<()>;
     /// The `origin` remote of the repository holding `dir`, if it has one.
     fn remote_url(&self, dir: &Path) -> Result<Option<String>>;
+    /// What the branch at `dir` adds over `base`: the commits, one per
+    /// line, then the files changed, for a person to read.
+    fn summary(&self, dir: &Path, base: &str) -> Result<String>;
     /// Run `argv` in `dir` with `env` set; nonzero exit is an error.
     fn run(&mut self, dir: &Path, argv: &[String], env: &[(String, String)]) -> Result<()>;
     /// Start a check (a command gate) in `dir` as a child of the runner,
@@ -187,6 +190,19 @@ impl Repo for GitCli {
         Ok((!url.is_empty()).then_some(url))
     }
 
+    fn summary(&self, dir: &Path, base: &str) -> Result<String> {
+        let range = format!("{base}..HEAD");
+        let log =
+            output(
+                git()
+                    .arg("-C")
+                    .arg(dir)
+                    .args(["log", "--oneline", "--no-decorate", &range]),
+            )?;
+        let stat = output(git().arg("-C").arg(dir).args(["diff", "--stat", &range]))?;
+        Ok(format!("{log}\n{stat}").trim().to_owned())
+    }
+
     fn worktree_repair(&mut self, repo: &Path, dir: &Path) -> Result<()> {
         output(
             git()
@@ -289,6 +305,8 @@ pub struct FakeRepo {
     pub moved: Vec<(PathBuf, PathBuf, PathBuf)>,
     /// The `origin` of a tree, for a project the pipeline names by `root`.
     pub remotes: std::collections::BTreeMap<PathBuf, String>,
+    /// What a tree's branch adds over its base, as a test wrote it.
+    pub summaries: std::collections::BTreeMap<PathBuf, String>,
     /// Worktrees repaired: repo, dir.
     pub repaired: Vec<(PathBuf, PathBuf)>,
     /// Checks started.
@@ -361,6 +379,9 @@ impl Repo for FakeRepo {
     }
     fn remote_url(&self, dir: &Path) -> Result<Option<String>> {
         Ok(self.remotes.get(dir).cloned())
+    }
+    fn summary(&self, dir: &Path, _base: &str) -> Result<String> {
+        Ok(self.summaries.get(dir).cloned().unwrap_or_default())
     }
     fn run(&mut self, dir: &Path, argv: &[String], _env: &[(String, String)]) -> Result<()> {
         self.ran.push((dir.to_path_buf(), argv.to_vec()));

@@ -98,6 +98,9 @@ pub struct UiState {
     pub dispatch_console_draft: String,
     /// A worktree root typed on the Dispatch page, not yet sent.
     pub dispatch_worktrees_draft: String,
+    /// A note typed under a decision, by decision id, sent with the
+    /// answer; a send-back from a human gate carries it to the agent.
+    pub dispatch_note_drafts: std::collections::HashMap<String, String>,
     /// The artifact the ticket page is showing.
     pub dispatch_artifact: Option<PathBuf>,
     /// The Dispatch project the page is narrowed to; every one when none.
@@ -258,6 +261,7 @@ impl Default for UiState {
             rename_draft: None,
             dispatch_console_draft: String::new(),
             dispatch_worktrees_draft: String::new(),
+            dispatch_note_drafts: std::collections::HashMap::new(),
             dispatch_artifact: None,
             dispatch_project: None,
             dispatch_choices: HashMap::new(),

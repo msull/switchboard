@@ -400,6 +400,21 @@ fn decision_card(
                 multiple_choice(cx, ui, d);
                 return;
             }
+            let note = {
+                let draft = cx
+                    .state
+                    .dispatch_note_drafts
+                    .entry(d.id.clone())
+                    .or_default();
+                ui.add(
+                    egui::TextEdit::singleline(draft)
+                        .hint_text("Note (optional)")
+                        .desired_width(f32::INFINITY),
+                )
+                .on_hover_text("Sent with the answer; a rerun sends it to the agent");
+                let text = draft.trim().to_owned();
+                (!text.is_empty()).then_some(text)
+            };
             ui.horizontal_wrapped(|ui| {
                 for option in &d.options {
                     let recommended = d.recommendation.as_deref() == Some(option);
@@ -415,11 +430,12 @@ fn decision_card(
                     })
                     .clicked();
                     if clicked {
+                        cx.state.dispatch_note_drafts.remove(&d.id);
                         cx.dispatch(AppAction::DispatchDecide {
                             ticket: d.ticket.clone(),
                             decision: d.id.clone(),
                             answer: option.clone(),
-                            note: None,
+                            note: note.clone(),
                         });
                     }
                 }

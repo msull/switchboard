@@ -329,7 +329,21 @@ Merge is a confirmation decision as well as an external fact: when a
 ticket reaches `merge`, a pending decision is made, the current
 session is marked waiting, and it counts against `waiting_on_me`.
 `pr-merged` resolves it without your answer when the provider reports
-the merge; answering it by hand is refused until the provider agrees.
+the merge; answering it by hand is refused until the provider agrees
+(the decision's only option is `park`).
+
+A human gate on a gate-only stage other than `lanes` (an `inspect`
+stage after `implement`, before anything is pushed or a PR opened) is
+one permission decision per context: the question names the branch
+and its head, what it adds over its base (the commits and the files
+changed), the tree to open and the latest notes. `proceed` completes
+the attempt bound to the head. `rerun` with a note sends that context
+back: the gate's attempt and the nearest earlier agent stage's result
+for that context are cancelled, the ticket stands at that stage
+again, and the note goes at the end of the next attempt's prompt as
+what the user said; other contexts keep their results. A gate with
+`confirm = true` is "you did this": its answers are `done` and
+`park`, and it is never answered automatically.
 What follows a merge on your side (a rebundle, a mirror backup) is
 outside Dispatch's definition of done and is named in the decision's
 text as a reminder, not verified.
@@ -1135,6 +1149,10 @@ and one against the real one:
 | The PR is at another head, its checks are red, or it has no checks | A `pr` decision naming which; `recheck` reads again at once; the same attempt throughout; `checks = "none"` on the stage passes on the PR at the head alone |
 | The provider cannot be read | The error is recorded on the attempt and retried quietly for an hour, then a `pr` decision; a merged PR passes |
 | `ready` with every slot taken by another ticket's agent | The PR is still read and the ticket still closes; a gate-only attempt holds no slot and the other agent keeps its own |
+| A human gate (`inspect`) after `implement` | One gate-only attempt and one decision per lane, naming the branch and head, what it adds over its base, the tree and the notes; `proceed` completes it bound to the head; `park` stops |
+| `rerun` with a note at `inspect` | That lane's `implement` result and the gate's attempt are cancelled, the ticket stands at `implement` again, a fresh implementer gets the note at the end of its prompt, other lanes are untouched, and `inspect` asks again on a new attempt when it is done |
+| `merge` with the PR open | A confirmation decision with only `park`, the session marked waiting; `merged` by hand is refused; the PR is read once a minute |
+| The provider reports the merge | The attempt completes at the merged head, the decision reads as answered `merged` by `dispatch`, and the ticket goes on (closes) |
 | The queue view after `plan` replaces `investigate`, and after two tickets swap places | One card per ticket, in order, no stale card, no overlap failure |
 | Plan session has no transcript yet | `workflow.start` fails; the attempt is failed and a decision, not retried |
 | Plan file from an earlier attempt exists | The new attempt's own path is empty, so nothing advances |
@@ -1143,8 +1161,9 @@ and one against the real one:
 
 Then, in order: `implement` with its command gate bound to a commit,
 tested with one lane committing after another lane's checks finished;
-`ready` from GitHub (built, as above; a moved head is not yet voided);
-`merge` from GitHub; the queue and slots; the PTA pipeline
+`ready` and `merge` from GitHub and the human gate-only stage (built,
+as above; a moved head is not yet voided); the code review stage
+(`docs/review-stage-plan.md`); the queue and slots; the PTA pipeline
 with its in-place hold; the Delta pipeline with the deploy gate and
 the persisted `sully-dev` hold; budget reporting; the `recommend`
 dial.

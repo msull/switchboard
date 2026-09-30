@@ -96,9 +96,19 @@ prompt = "Implement {{inputs.plan}} on {{branch}}."
 gate = {{ kind = "command", argv = ["sh", "-c", "cargo test"], in = "lane" }}
 
 [[stages]]
+name = "inspect"
+context = "each"
+gate = {{ kind = "human", decision = "inspect" }}
+
+[[stages]]
 name = "ready"
 context = "each"
 gate = {{ kind = "external", check = "pr-checks" }}
+
+[[stages]]
+name = "merge"
+context = "each"
+gate = {{ kind = "external", check = "pr-merged", decision = "merge" }}
 
 [policy]
 slots = 2
@@ -194,6 +204,20 @@ impl Env {
             },
         ));
         prs.checks.push(("msull/switchboard".into(), 7, checks));
+    }
+
+    /// The pending `inspect` decision, answered.
+    fn inspect(&mut self, id: &str, answer: &str, note: Option<&str>) {
+        self.steps_until(id, "the inspect question", |t, _| {
+            t.pending_decisions().iter().any(|d| d.name == "inspect")
+        });
+        let d = self
+            .pending(id)
+            .into_iter()
+            .find(|d| d.name == "inspect")
+            .unwrap();
+        let now = self.tick();
+        self.runner.decide(id, &d.id, answer, note, now).unwrap();
     }
 
     /// The pending `pr` decision answered with `recheck`.
@@ -638,6 +662,12 @@ fn checks_run_after_the_agent_on_a_clean_tree_and_pass_bound_to_its_head() {
     );
     assert_eq!(a.gate.as_ref().and_then(|g| g.exit), Some(0));
     env.pr_is(&id, "base0000", "open", Checks::Passed);
+    env.inspect(&id, "proceed", None);
+    env.steps_until(&id, "the merge decision", |t, _| {
+        t.pending_decisions().iter().any(|d| d.name == "merge")
+    });
+    env.pr_is(&id, "base0000", "merged", Checks::Passed);
+    env.wait(PR_POLL_MS);
     env.steps_until(&id, "the ticket closing", |t, _| !t.active());
     assert!(matches!(&env.ticket(&id).state, TicketState::Closed { .. }));
 }
@@ -653,10 +683,227 @@ fn at_ready(env: &mut Env) -> String {
     });
     let key = format!("{id}/implement/1");
     env.repo.lock().unwrap().check_exits.insert(key, 0);
+    env.inspect(&id, "proceed", None);
     env.steps_until(&id, "the ready attempt", |t, _| {
         t.attempts_of("ready").next().is_some()
     });
     id
+}
+
+/// `implement` done with the checks green and a summary for the tree,
+/// stepped to the `inspect` question.
+fn at_inspect(env: &mut Env) -> String {
+    let (id, implementer) = at_implement(env);
+    let tree = env.ticket(&id).lanes[0].worktree.clone();
+    env.repo.lock().unwrap().summaries.insert(
+        tree,
+        "abc1234 Escape leaves the field\n src/ui/set.rs | 4 +-".into(),
+    );
+    implementer_stops(env, &id, &implementer);
+    env.steps_until(&id, "the checks starting", |t, _| {
+        t.attempts_of("implement")
+            .last()
+            .is_some_and(|a| a.gate.is_some())
+    });
+    env.repo
+        .lock()
+        .unwrap()
+        .check_exits
+        .insert(format!("{id}/implement/1"), 0);
+    env.steps_until(&id, "the inspect question", |t, _| {
+        t.pending_decisions().iter().any(|d| d.name == "inspect")
+    });
+    id
+}
+
+/// The `inspect` stage asks once per lane with the branch, what it
+/// adds and where to look, on a gate-only attempt.
+#[test]
+fn an_inspect_stage_shows_the_work_and_asks() {
+    let mut env = Env::new();
+    let id = at_inspect(&mut env);
+    let t = env.ticket(&id);
+    let tree = t.lanes[0].worktree.clone();
+    let d = env
+        .pending(&id)
+        .into_iter()
+        .find(|d| d.name == "inspect")
+        .unwrap();
+    assert_eq!(d.options, vec!["proceed", "rerun", "park"]);
+    assert!(d.question.contains(&t.lanes[0].branch), "{}", d.question);
+    assert!(
+        d.question.contains("base0000 over origin/main"),
+        "{}",
+        d.question
+    );
+    assert!(
+        d.question.contains("Escape leaves the field"),
+        "{}",
+        d.question
+    );
+    assert!(
+        d.question.contains(&tree.display().to_string()),
+        "{}",
+        d.question
+    );
+    let notes = artifact_of(&t, "implement", "notes");
+    assert!(
+        d.question.contains(&notes.display().to_string()),
+        "{}",
+        d.question
+    );
+    assert!(
+        t.attempts_of("inspect")
+            .last()
+            .is_some_and(Attempt::is_open),
+        "a gate-only attempt, open while asked"
+    );
+    assert_eq!(env.sb().sessions_named("implementer").len(), 1);
+    env.inspect(&id, "proceed", None);
+    env.steps_until(&id, "past inspect", |t, _| {
+        t.attempts_of("inspect")
+            .last()
+            .is_some_and(|a| a.state == AttemptState::Complete)
+    });
+    assert_eq!(
+        env.ticket(&id)
+            .attempts_of("inspect")
+            .last()
+            .unwrap()
+            .head
+            .as_deref(),
+        Some("base0000")
+    );
+}
+
+/// `rerun` with a note at `inspect` sends that lane back to `implement`:
+/// a fresh implementer with the note in its prompt, on the same branch,
+/// and `inspect` asks again on a new attempt when it is done.
+#[test]
+fn a_note_at_inspect_sends_the_lane_back_to_implement() {
+    let mut env = Env::new();
+    let id = at_inspect(&mut env);
+    env.inspect(&id, "rerun", Some("use a set, not a vec"));
+    env.steps_until(&id, "a second implementer", |t, _| {
+        t.attempts_of("implement").count() == 2
+    });
+    let t = env.ticket(&id);
+    assert_eq!(t.stage, 4, "back at implement");
+    assert!(matches!(
+        t.attempts_of("implement").next().unwrap().state,
+        AttemptState::Cancelled { .. }
+    ));
+    assert!(matches!(
+        t.attempts_of("inspect").next().unwrap().state,
+        AttemptState::Cancelled { .. }
+    ));
+    let prompt = env
+        .sb()
+        .calls
+        .iter()
+        .rev()
+        .find_map(|r| match &r.body {
+            Body::SessionNew { prompt, name, .. } if name == "implementer" => prompt.clone(),
+            _ => None,
+        })
+        .unwrap();
+    assert!(
+        prompt.ends_with("sent it back: use a set, not a vec"),
+        "{prompt}"
+    );
+    assert!(t.rework.is_empty(), "the note was taken");
+    // The second implementer finishes; inspect asks again, on a new attempt.
+    let second = session_of(&t, "implement");
+    implementer_stops(&mut env, &id, &second);
+    env.steps_until(&id, "the checks starting", |t, _| {
+        t.attempts_of("implement")
+            .last()
+            .is_some_and(|a| a.gate.is_some())
+    });
+    env.repo
+        .lock()
+        .unwrap()
+        .check_exits
+        .insert(format!("{id}/implement/2"), 0);
+    env.steps_until(&id, "inspect again", |t, _| {
+        t.pending_decisions().iter().any(|d| d.name == "inspect")
+    });
+    let t = env.ticket(&id);
+    assert_eq!(t.attempts_of("inspect").count(), 2);
+    env.inspect(&id, "proceed", None);
+    env.steps_until(&id, "past inspect", |t, _| {
+        t.attempts_of("inspect")
+            .last()
+            .is_some_and(|a| a.state == AttemptState::Complete)
+    });
+    assert_eq!(
+        env.ticket(&id)
+            .attempts_of("inspect")
+            .last()
+            .unwrap()
+            .head
+            .as_deref(),
+        Some("base0000")
+    );
+}
+
+/// `merge` is a confirmation the provider resolves: the decision has no
+/// answer but park, `merged` by hand is refused, and the PR reading as
+/// merged completes the stage with the decision answered by Dispatch.
+#[test]
+fn merge_waits_for_the_provider_and_refuses_a_hand_answer() {
+    let mut env = Env::new();
+    let id = at_ready(&mut env);
+    env.pr_is(&id, "base0000", "open", Checks::Passed);
+    env.recheck(&id);
+    env.steps_until(&id, "the merge decision", |t, _| {
+        t.pending_decisions().iter().any(|d| d.name == "merge")
+    });
+    let d = env
+        .pending(&id)
+        .into_iter()
+        .find(|d| d.name == "merge")
+        .unwrap();
+    assert_eq!(d.options, vec!["park"]);
+    assert!(
+        d.question
+            .contains("PR #7 https://github.com/msull/switchboard/pull/7 is open"),
+        "{}",
+        d.question
+    );
+    let now = env.tick();
+    let err = env
+        .runner
+        .decide(&id, &d.id, "merged", None, now)
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("takes one of: park"), "{err}");
+    let session = env.ticket(&id).current_session().cloned().unwrap();
+    assert!(
+        env.sb().session(&session).waiting,
+        "the session waits on the merge"
+    );
+    env.pr_is(&id, "base0000", "merged", Checks::Passed);
+    env.step();
+    assert!(env.ticket(&id).active(), "not read again within the minute");
+    env.wait(PR_POLL_MS);
+    env.steps_until(&id, "the ticket closing", |t, _| !t.active());
+    let t = env.ticket(&id);
+    assert!(matches!(&t.state, TicketState::Closed { .. }));
+    let d = t.decisions.iter().find(|d| d.name == "merge").unwrap();
+    assert!(
+        matches!(&d.state, dispatch::ticket::DecisionState::Answered { answer, by, acted: true, .. } if answer == "merged" && by == "dispatch"),
+        "{d:?}"
+    );
+    assert_eq!(
+        t.attempts_of("merge")
+            .last()
+            .unwrap()
+            .pr
+            .as_ref()
+            .map(|p| p.checks.as_str()),
+        Some("merged")
+    );
 }
 
 /// The `ready` stage finds the lane's PR, waits while its checks are
@@ -708,8 +955,9 @@ fn ready_waits_for_the_prs_checks_and_passes_green_at_the_trees_head() {
     let a = t.attempts_of("ready").last().unwrap();
     assert_eq!(a.head.as_deref(), Some("base0000"));
     assert_eq!(a.pr.as_ref().map(|p| p.checks.as_str()), Some("passed"));
-    env.steps_until(&id, "the ticket closing", |t, _| !t.active());
-    assert!(matches!(&env.ticket(&id).state, TicketState::Closed { .. }));
+    env.steps_until(&id, "the merge stage", |t, _| {
+        t.attempts_of("merge").next().is_some()
+    });
     assert_eq!(
         env.sb().sessions_named("implementer").len(),
         1,
@@ -743,6 +991,11 @@ fn a_ready_stage_costs_no_slot() {
     });
     env.pr_is(&id, "base0000", "open", Checks::Passed);
     env.recheck(&id);
+    env.steps_until(&id, "the merge stage", |t, _| {
+        t.attempts_of("merge").next().is_some()
+    });
+    env.pr_is(&id, "base0000", "merged", Checks::Passed);
+    env.wait(PR_POLL_MS);
     env.steps_until(&id, "the ticket closing", |t, _| !t.active());
     assert!(matches!(&env.ticket(&id).state, TicketState::Closed { .. }));
     assert!(

@@ -3905,6 +3905,48 @@ fn dispatch_page_shows_a_tickets_agent_waiting_for_itself() {
 
 /// The worktree root is shown, and a typed path goes to the port with
 /// or without a migration.
+/// A note typed under a decision goes with the answer, so a human gate
+/// can be answered `rerun` with what to change from the page.
+#[test]
+fn dispatch_page_sends_a_note_with_an_answer() {
+    use switchboard::ports::dispatch::DecisionView;
+    let (mut harness, _) = harness();
+    let mut status = dispatch_status();
+    status.tickets[0].decisions = vec![DecisionView {
+        id: "d9".into(),
+        ticket: "t1".into(),
+        stage: "inspect".into(),
+        name: "inspect".into(),
+        question: "inspect (repo): branch dispatch/104 at abc12345 over origin/main.".into(),
+        options: vec!["proceed".into(), "rerun".into(), "park".into()],
+        state: "pending".into(),
+        ..DecisionView::default()
+    }];
+    harness
+        .state_mut()
+        .dispatch(AppAction::DispatchStatus(Some(status)));
+    harness.state_mut().dispatched.clear();
+    harness.run_steps(2);
+    click(&mut harness, "Dispatch");
+    harness.get_by_label("inspect (repo): branch dispatch/104 at abc12345 over origin/main.");
+    // Decisions come before the worktrees section, so the first text
+    // field on the page is this card's note.
+    let field = harness
+        .query_all_by_role(Role::TextInput)
+        .next()
+        .expect("the note field");
+    field.focus();
+    field.type_text("use a set, not a vec");
+    harness.run_steps(2);
+    click(&mut harness, "rerun");
+    assert!(actions(&harness).contains(&AppAction::DispatchDecide {
+        ticket: "t1".into(),
+        decision: "d9".into(),
+        answer: "rerun".into(),
+        note: Some("use a set, not a vec".into()),
+    }));
+}
+
 /// A `ready` attempt shows the pull request it is bound to and what
 /// its checks said, so the page is enough to see why a ticket waits.
 #[test]
