@@ -1380,7 +1380,7 @@ impl Runner {
                 });
                 self.save_ticket(t, now_ms)?;
                 let a = attempt_mut(t, a).clone();
-                return self.conflict(t, ps, p, stage, &a, cwd, lane, &pr, now_ms);
+                return self.remedy(t, ps, p, &a, cwd, lane, &pr, &Remedy::Rebase, now_ms);
             }
             Ok(Some((pr, checks))) => {
                 let (summary, verdict) = judge_pr(&pr, checks.as_ref(), &head, none_expected);
@@ -1391,6 +1391,16 @@ impl Runner {
                     checks: summary.clone(),
                     ..target.record(&pr.head, now_ms)
                 });
+                // Red checks at the tree's head are the fixer's, when
+                // the policy names one.
+                if let (Err(_), Some(Checks::Failed(names))) = (&verdict, &checks)
+                    && same_commit(&pr.head, &head)
+                {
+                    self.save_ticket(t, now_ms)?;
+                    let a = attempt_mut(t, a).clone();
+                    let remedy = Remedy::Fix(names.clone());
+                    return self.remedy(t, ps, p, &a, cwd, lane, &pr, &remedy, now_ms);
+                }
                 match verdict {
                     Ok(true) => {
                         attempt.head = Some(head.clone());
@@ -1835,7 +1845,8 @@ impl Runner {
                     "closed" => format!("PR #{} is closed without being merged", pr.number),
                     _ if pr.mergeable.as_deref() == Some("conflicting") => {
                         let a = attempt_mut(t, a).clone();
-                        return self.conflict(t, ps, p, stage, &a, cwd, lane, &pr, now_ms);
+                        let remedy = Remedy::Rebase;
+                        return self.remedy(t, ps, p, &a, cwd, lane, &pr, &remedy, now_ms);
                     }
                     _ => {
                         let question = format!(
@@ -2326,32 +2337,32 @@ impl Runner {
         Ok(())
     }
 
-    /// A PR that conflicts with its base: the policy's rebaser runs in
-    /// the lane, cloned from the lane's last implementer so it knows the
-    /// change, once per conflicting head and at most `max_rebases`
-    /// times; otherwise, or without a rebaser, the conflict is a
-    /// question. True when something was started or asked.
+    /// A PR the provider says cannot go in as it stands (it conflicts
+    /// with its base, or its checks are red): the policy's operator for
+    /// that runs in the lane, cloned from the lane's last finished agent
+    /// so it knows the change, once per head and at most the policy's
+    /// cap; otherwise, or without such an operator, it is a question.
     #[allow(clippy::too_many_arguments)]
-    fn conflict(
+    fn remedy(
         &mut self,
         t: &mut Ticket,
         ps: &mut ProjectState,
         p: &Pipeline,
-        stage: &Stage,
         a: &Attempt,
         cwd: &Path,
         lane: Option<&str>,
         pr: &crate::github::PullRequest,
+        remedy: &Remedy,
         now_ms: u64,
     ) -> Result<()> {
-        // A failed rebaser's rerun question is answered first.
+        // A failed agent's rerun question is answered first.
         if t.decisions
             .iter()
             .any(|d| d.pending() && d.stage == a.stage && d.name == "rerun")
         {
             return Ok(());
         }
-        if let Some(why) = conflict_reason(t, p, a, pr) {
+        if let Some(why) = remedy_reason(t, p, a, pr, remedy) {
             return self.ensure_decision(
                 t,
                 ps,
@@ -2360,8 +2371,11 @@ impl Runner {
                     name: "pr",
                     kind: DecisionKind::Permission,
                     question: format!(
-                        "{} ({}): PR #{} conflicts with its base; {why}",
-                        a.stage, a.context, pr.number
+                        "{} ({}): PR #{} {}; {why}",
+                        a.stage,
+                        a.context,
+                        pr.number,
+                        remedy.problem()
                     ),
                     options: &["recheck", "park"],
                     recommendation: None,
@@ -2370,14 +2384,13 @@ impl Runner {
                 now_ms,
             );
         }
-        let _ = stage;
-        self.start_rebase(t, ps, p, a, cwd, lane, pr, now_ms)
+        self.start_remedy(t, ps, p, a, cwd, lane, pr, remedy, now_ms)
     }
 
-    /// The rebaser started in the lane, cloned from the lane's last
-    /// finished agent, with the conflicting head on its record.
+    /// The remedy's operator started in the lane, cloned from the lane's
+    /// last finished agent, with the PR's head on its record.
     #[allow(clippy::too_many_arguments)]
-    fn start_rebase(
+    fn start_remedy(
         &mut self,
         t: &mut Ticket,
         ps: &mut ProjectState,
@@ -2386,9 +2399,10 @@ impl Runner {
         cwd: &Path,
         lane: Option<&str>,
         pr: &crate::github::PullRequest,
+        remedy: &Remedy,
         now_ms: u64,
     ) -> Result<()> {
-        let rebaser = p.policy.rebaser.clone().unwrap_or_default();
+        let operator = remedy.operator(p).unwrap_or_default();
         let n = next_n(t, &a.stage);
         let dir = self.attempt_dir(t, &a.stage, n, &a.context)?;
         let notes = dir.join("notes.md");
@@ -2400,24 +2414,45 @@ impl Runner {
         let mut vars = vars_for(t, p, lane);
         vars.set("notes", notes.display().to_string());
         let mut prompt = String::new();
-        let guidance = p.operators[&rebaser].guidance.trim();
+        let guidance = p.operators[&operator].guidance.trim();
         if !guidance.is_empty() {
             prompt.push_str(&vars.render(guidance));
             prompt.push_str("\n\n");
         }
+        let plan = t
+            .input("plan")
+            .map(|plan| format!(" (the plan is at {})", plan.display()))
+            .unwrap_or_default();
+        let branch = lane_record.map_or("", |l| l.branch.as_str());
         let _ = write!(
             prompt,
-            "PR #{} ({}) for branch {} conflicts with {base}. In {}: fetch, rebase the branch onto {base}, resolve every conflict keeping the change's intent{}, run the checks, then push with --force-with-lease. Write what you resolved and why to {}.",
-            pr.number,
-            pr.url,
-            lane_record.map_or("", |l| l.branch.as_str()),
-            cwd.display(),
-            t.input("plan")
-                .map(|plan| format!(" (the plan is at {})", plan.display()))
-                .unwrap_or_default(),
+            "PR #{} ({}) for branch {branch} ",
+            pr.number, pr.url
+        );
+        match remedy {
+            Remedy::Rebase => {
+                let _ = write!(
+                    prompt,
+                    "conflicts with {base}. In {}: fetch, rebase the branch onto {base}, resolve every conflict keeping the change's intent{plan}, run the checks, then push with --force-with-lease.",
+                    cwd.display()
+                );
+            }
+            Remedy::Fix(names) => {
+                let _ = write!(
+                    prompt,
+                    "has failing checks: {}. In {}: read why they failed (gh pr checks {} and gh run view --log-failed for the failed run), fix the cause on the branch keeping the change's intent{plan}, run the checks here, commit, then push. Fix the change, not the checks, unless the check itself is what this change adds.",
+                    names.join(", "),
+                    cwd.display(),
+                    pr.number
+                );
+            }
+        }
+        let _ = write!(
+            prompt,
+            " Write what you did and why to {}.",
             notes.display()
         );
-        // The lane's last finished agent, whose transcript the rebaser
+        // The lane's last finished agent, whose transcript the operator
         // continues from.
         let clone_of = t
             .attempts
@@ -2436,7 +2471,7 @@ impl Runner {
             number: pr.number,
             url: pr.url.clone(),
             head: pr.head.clone(),
-            checks: "conflicting".into(),
+            checks: remedy.tag(),
             checked_ms: now_ms,
             error_since_ms: None,
         };
@@ -2445,18 +2480,19 @@ impl Runner {
             record.repo.clone_from(&seen.repo);
         }
         log::info!(
-            "ticket {} {}/{} PR #{} conflicts; rebaser starting{}",
+            "ticket {} {}/{} PR #{} {}; {operator} starting{}",
             t.id,
             a.stage,
             a.context,
             pr.number,
+            remedy.problem(),
             clone_of
                 .as_deref()
                 .map(|s| format!(" from {s}"))
                 .unwrap_or_default()
         );
         let spec = AgentSpec {
-            operator: rebaser,
+            operator,
             prompt,
             artifacts: BTreeMap::from([("notes".to_owned(), notes)]),
             clone_of,
@@ -3588,15 +3624,70 @@ fn pr_target(
     })
 }
 
-/// Why a conflicting PR is a question rather than a rebase: no rebaser
-/// in the policy, the last rebase changed nothing, or the cap is spent.
-fn conflict_reason(
+/// What a provider says stops a PR, and what the policy does about it.
+enum Remedy {
+    /// The branch conflicts with its base: the `rebaser`.
+    Rebase,
+    /// These checks are red: the `fixer`.
+    Fix(Vec<String>),
+}
+
+impl Remedy {
+    fn operator(&self, p: &Pipeline) -> Option<String> {
+        match self {
+            Self::Rebase => p.policy.rebaser.clone(),
+            Self::Fix(_) => p.policy.fixer.clone(),
+        }
+    }
+
+    fn cap(&self, p: &Pipeline) -> (&'static str, u32) {
+        match self {
+            Self::Rebase => ("max_rebases", p.policy.max_rebases),
+            Self::Fix(_) => ("max_fixes", p.policy.max_fixes),
+        }
+    }
+
+    /// What the record's `checks` says for an attempt of this kind.
+    fn tag(&self) -> String {
+        match self {
+            Self::Rebase => "conflicting".to_owned(),
+            Self::Fix(names) => format!("failed: {}", names.join(", ")),
+        }
+    }
+
+    /// Whether an earlier attempt's record is of this kind.
+    fn owns(&self, record: &PullRequestRecord) -> bool {
+        match self {
+            Self::Rebase => record.checks == "conflicting",
+            Self::Fix(_) => record.checks.starts_with("failed:"),
+        }
+    }
+
+    fn problem(&self) -> String {
+        match self {
+            Self::Rebase => "conflicts with its base".to_owned(),
+            Self::Fix(names) => format!("checks failed: {}", names.join(", ")),
+        }
+    }
+
+    fn by_hand(&self) -> &'static str {
+        match self {
+            Self::Rebase => "rebase it onto its base by hand",
+            Self::Fix(_) => "fix it by hand",
+        }
+    }
+}
+
+/// Why a stopped PR is a question rather than a run: no operator in
+/// the policy for it, the last run changed nothing, or the cap is spent.
+fn remedy_reason(
     t: &Ticket,
     p: &Pipeline,
     a: &Attempt,
     pr: &crate::github::PullRequest,
+    remedy: &Remedy,
 ) -> Option<String> {
-    // Only a rebaser that ran counts: one that could not start spends
+    // Only an agent that ran counts: one that could not start spends
     // nothing and proves nothing about the head.
     let earlier: Vec<&Attempt> = t
         .attempts
@@ -3606,6 +3697,7 @@ fn conflict_reason(
                 && x.context == a.context
                 && x.kind == AttemptKind::Agent
                 && x.session.is_some()
+                && x.pr.as_ref().is_some_and(|r| remedy.owns(r))
         })
         .collect();
     let count = u32::try_from(earlier.len()).unwrap_or(u32::MAX);
@@ -3615,20 +3707,21 @@ fn conflict_reason(
         .max_by_key(|x| x.n)
         .and_then(|x| x.pr.as_ref())
         .map(|r| r.head.clone());
-    if p.policy.rebaser.is_none() {
-        Some("rebase it onto its base by hand, then answer recheck".to_owned())
+    let (cap_name, cap) = remedy.cap(p);
+    let by_hand = remedy.by_hand();
+    if remedy.operator(p).is_none() {
+        Some(format!("{by_hand}, then answer recheck"))
     } else if last_head
         .as_deref()
         .is_some_and(|h| same_commit(h, &pr.head))
     {
-        Some(
-            "the rebaser ran and the PR is still at the same head; rebase by hand, then answer recheck"
-                .to_owned(),
-        )
-    } else if count >= p.policy.max_rebases {
         Some(format!(
-            "the policy's max_rebases of {} is spent ({count} done); rebase by hand, then answer recheck",
-            p.policy.max_rebases
+            "the {} ran and the PR is still at the same head; {by_hand}, then answer recheck",
+            remedy.operator(p).unwrap_or_default()
+        ))
+    } else if count >= cap {
+        Some(format!(
+            "the policy's {cap_name} of {cap} is spent ({count} done); {by_hand}, then answer recheck"
         ))
     } else {
         None

@@ -349,6 +349,17 @@ pub struct Policy {
     /// question instead.
     #[serde(default = "default_max_rebases")]
     pub max_rebases: u32,
+    /// The operator that fixes a branch whose PR checks are red, cloned
+    /// from the lane's last agent; absent, red checks are a question.
+    #[serde(default)]
+    pub fixer: Option<String>,
+    /// How many fixes one PR may get before red checks are a question.
+    #[serde(default = "default_max_fixes")]
+    pub max_fixes: u32,
+}
+
+fn default_max_fixes() -> u32 {
+    2
 }
 
 fn default_max_reruns() -> u32 {
@@ -371,6 +382,8 @@ impl Default for Policy {
             max_reruns: default_max_reruns(),
             rebaser: None,
             max_rebases: default_max_rebases(),
+            fixer: None,
+            max_fixes: default_max_fixes(),
         }
     }
 }
@@ -561,10 +574,15 @@ impl Pipeline {
         if self.lanes.is_empty() {
             bail!("a pipeline needs at least one lane");
         }
-        if let Some(rebaser) = &self.policy.rebaser
-            && !self.operators.contains_key(rebaser)
-        {
-            bail!("[policy] rebaser names an unknown operator {rebaser:?}");
+        for (key, name) in [
+            ("rebaser", &self.policy.rebaser),
+            ("fixer", &self.policy.fixer),
+        ] {
+            if let Some(name) = name
+                && !self.operators.contains_key(name)
+            {
+                bail!("[policy] {key} names an unknown operator {name:?}");
+            }
         }
         match (&self.project.repo, &self.project.root) {
             (Some(_), None) | (None, Some(_)) => {}

@@ -1120,6 +1120,123 @@ fn a_rebase_that_changes_nothing_or_past_the_cap_is_a_question() {
     assert!(env.sb().cloned.is_empty(), "no rebaser");
 }
 
+/// Red checks on the PR at the tree's head get the policy's fixer: a
+/// session cloned from the lane's implementer, told the PR and the
+/// failed checks; when it pushes and stops, the gate reads again and
+/// green checks pass it. Without a fixer, red checks stay a question
+/// (`ready_asks_about_red_moved_or_missing_checks_and_none_can_be_expected`).
+/// The test pipeline with a `fixer` operator in the policy, plus
+/// `extra` policy lines.
+fn with_fixer(env: &Env, extra: &str) {
+    let path = env.data.pipeline(PROJECT);
+    let text = std::fs::read_to_string(&path)
+        .unwrap()
+        .replace(
+            "[operators.rebaser]\n",
+            "[operators.fixer]\nkind = \"claude\"\nguidance = \"Fix it properly.\"\n\n[operators.rebaser]\n",
+        )
+        .replace(
+            "rebaser = \"rebaser\"\n",
+            &format!("rebaser = \"rebaser\"\nfixer = \"fixer\"\n{extra}"),
+        );
+    std::fs::write(&path, text).unwrap();
+}
+
+#[test]
+fn red_checks_are_fixed_by_a_clone_of_the_implementer() {
+    let mut env = Env::new();
+    with_fixer(&env, "");
+    let id = at_ready(&mut env);
+    let implementer = session_of(&env.ticket(&id), "implement");
+    env.pr_is(&id, "base0000", "open", Checks::Failed(vec!["test".into()]));
+    env.recheck(&id);
+    env.steps_until(&id, "the fixer", |t, _| {
+        t.attempts_of("ready")
+            .any(|a| a.kind == AttemptKind::Agent && a.session.is_some())
+    });
+    let t = env.ticket(&id);
+    assert!(
+        t.pending_decisions().is_empty(),
+        "no question while the fixer works"
+    );
+    let fix = t
+        .attempts_of("ready")
+        .find(|a| a.kind == AttemptKind::Agent)
+        .unwrap()
+        .clone();
+    assert_eq!(
+        fix.pr.as_ref().map(|p| p.checks.as_str()),
+        Some("failed: test"),
+        "the failure is on the attempt"
+    );
+    let fixer = fix.session.clone().unwrap();
+    assert_eq!(env.sb().cloned, vec![(implementer, fixer.clone())]);
+    let prompt = env
+        .sb()
+        .calls
+        .iter()
+        .rev()
+        .find_map(|r| match &r.body {
+            Body::SessionClone { prompt, name, .. } if name == "fixer" => Some(prompt.clone()),
+            _ => None,
+        })
+        .unwrap();
+    assert!(prompt.starts_with("Fix it properly."), "{prompt}");
+    assert!(prompt.contains("has failing checks: test"), "{prompt}");
+    assert!(prompt.contains("gh pr checks 7"), "{prompt}");
+    let notes = fix.artifacts["notes"].clone();
+    assert!(prompt.contains(&notes.display().to_string()), "{prompt}");
+    // The fixer pushed a new head and stopped; the checks come back green.
+    env.repo
+        .lock()
+        .unwrap()
+        .heads
+        .insert(t.lanes[0].worktree.clone(), "fixed001".into());
+    env.pr_is(&id, "fixed001", "open", Checks::Passed);
+    env.finish(&fixer, &notes, "# fixed\nthe fixture needed the endpoint");
+    env.steps_until(&id, "the fix completing", |t, _| {
+        t.attempts_of("ready")
+            .find(|a| a.kind == AttemptKind::Agent)
+            .is_some_and(|a| a.state == AttemptState::Complete)
+    });
+    assert!(env.sb().killed.contains(&fixer), "the fixer is done");
+    env.wait(PR_POLL_MS);
+    env.steps_until(&id, "ready passing", |t, _| {
+        t.attempts_of("ready")
+            .any(|a| a.kind == AttemptKind::GateOnly && a.state == AttemptState::Complete)
+    });
+}
+
+/// A spent `max_fixes` makes red checks a `pr` question, not a run.
+#[test]
+fn red_checks_past_the_fix_cap_are_a_question() {
+    let mut env2 = Env::new();
+    with_fixer(&env2, "max_fixes = 0\n");
+    let id2 = at_ready(&mut env2);
+    env2.pr_is(
+        &id2,
+        "base0000",
+        "open",
+        Checks::Failed(vec!["test".into()]),
+    );
+    env2.recheck(&id2);
+    env2.steps_until(&id2, "the question", |t, _| {
+        t.pending_decisions().iter().any(|d| d.name == "pr")
+    });
+    let d = env2
+        .pending(&id2)
+        .into_iter()
+        .find(|d| d.name == "pr")
+        .unwrap();
+    assert!(
+        d.question
+            .contains("checks failed: test; the policy's max_fixes of 0 is spent"),
+        "{}",
+        d.question
+    );
+    assert!(env2.sb().cloned.is_empty(), "no fixer");
+}
+
 /// `merge` is a confirmation the provider resolves: the decision has no
 /// answer but park, `merged` by hand is refused, and the PR reading as
 /// merged completes the stage with the decision answered by Dispatch.

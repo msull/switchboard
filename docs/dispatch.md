@@ -425,6 +425,8 @@ trust_folders = false         # true: Claude Code's folder trust question, which
 max_reruns = 3                # failed attempts a stage may collect in one context before the ticket parks instead of asking again
 rebaser = "rebaser"           # the operator that rebases a PR that conflicts with its base, cloned from the lane's implementer; absent, a conflict is a question
 max_rebases = 2               # rebases one PR may get before the conflict is a question
+fixer = "fixer"               # the operator that fixes a PR whose checks are red at the tree's head, cloned the same way; absent, red checks are a question
+max_fixes = 2                 # fixes one PR may get before red checks are a question
 ```
 
 An agent stage needs no `gate` line: "the agent stopped and every
@@ -967,6 +969,16 @@ settled. The conflicting head is on the rebaser's attempt: a rebase
 that leaves the PR at that head, a policy without a rebaser, and a
 spent `max_rebases` are each a `pr` question with `recheck`.
 
+Red checks on the PR at the tree's head are handled the same way by
+the policy's `fixer`: cloned from the lane's last finished agent, told
+the PR and the failed check names, how to read the failed run (`gh pr
+checks`, `gh run view --log-failed`), and asked to fix the cause on
+the branch, run the checks locally, commit and push. What failed is on
+the fixer's attempt (`failed: <names>`), so a fix that leaves the PR
+at the same head, no fixer, and a spent `max_fixes` are each a `pr`
+question. Rebases and fixes are counted separately; each kind counts
+only agents that ran.
+
 ## Budget
 
 Budgets are reporting, not enforcement. Switchboard reads token counts
@@ -1178,6 +1190,8 @@ and one against the real one:
 | The user's own feedback round after the review converged | The pending `finalize` decision is cancelled and the session unmarked while the planner answers; when the run converges again a new decision names the new round count |
 | The PR conflicts with its base at `merge` | The policy's rebaser starts in the lane, cloned from the implementer's session, with the PR, the base and the notes path in its prompt; the merge decision stays; when it stops the gate reads the PR again and, merged, the ticket closes |
 | The rebaser leaves the PR at the same head, or `max_rebases` is spent | A `pr` decision saying which; no further rebaser runs |
+| The PR's checks are red at the tree's head and the policy names a `fixer` | The fixer starts in the lane, cloned from the implementer, with the PR and the failed check names in its prompt; no question; when it stops the gate reads again and green checks pass it |
+| Red checks with no fixer, or `max_fixes` spent | A `pr` decision with `recheck` and `park` |
 | The provider reports the merge | The attempt completes at the merged head, the decision reads as answered `merged` by `dispatch`, and the ticket goes on (closes) |
 | The queue view after `plan` replaces `investigate`, and after two tickets swap places | One card per ticket, in order, no stale card, no overlap failure |
 | Plan session has no transcript yet | `workflow.start` fails; the attempt is failed and a decision, not retried |
