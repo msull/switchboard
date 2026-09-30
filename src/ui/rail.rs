@@ -74,7 +74,8 @@ pub fn show(cx: &mut DrawCtx<'_>, ui: &mut Ui, view: &View) {
 /// The Dispatch page's row: its pending decisions as the count, muted
 /// while no runner answers.
 fn dispatch_row(cx: &mut DrawCtx<'_>, ui: &mut Ui, view: &View, compact: bool) {
-    let decisions = cx.core.pending_decisions().len();
+    // Decisions, and agents of tickets at a prompt of their own.
+    let decisions = cx.core.pending_decisions().len() + cx.core.waiting_agents().len();
     let dispatch = row(
         ui,
         &RowSpec {

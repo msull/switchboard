@@ -1475,6 +1475,13 @@ you with the reason, the count includes it even when Dispatch has
 marked the session, and the first hook event clears it. Transient, so
 a restart reads the pane again.
 
+The Dispatch page shows a ticket's own agents waiting for themselves
+(`waiting_agents_of`: an open attempt whose session counts as waiting,
+with the trust question or the hook's reason): a card under "Waiting
+on you" with the attempt and an Open session button, the ticket row's
+standing, a line on the attempt on the ticket page, and the rail count
+beside the decisions. The page can then be the one view watched.
+
 The `dispatch` crate holds the first slice of `docs/dispatch.md`: the
 Switchboard pipeline through `investigate`, the automatic `lanes`
 decision, `plan`, and a review run on a copy of the plan, stopping at

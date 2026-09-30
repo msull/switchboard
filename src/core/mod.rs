@@ -20,7 +20,7 @@ pub use action::{AppAction, AppCore, Clock, ConfigStatus, Effect, Notice, UNDO_W
 pub use control::{ControlAction, ControlOutcome};
 pub use controller::{DOUBLE_PRESS, DWELL, MenuKind, RadialMenu, UiRequest};
 pub use definitions::entry_hash;
-pub use dispatch::{CONSOLE_NAME, CONSOLE_SPACE, DispatchState};
+pub use dispatch::{CONSOLE_NAME, CONSOLE_SPACE, DispatchState, WaitingAgent};
 pub use env::{Resolved, ResolvedVar, SecretScope, Source};
 pub use model::*;
 pub use reconcile::{RECORD_ID_ENV, spawn_spec};

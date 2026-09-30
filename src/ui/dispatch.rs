@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use egui::{RichText, Ui};
 
 use super::{DrawCtx, GAP, markdown, theme};
-use crate::core::{AppAction, RecordId, View};
+use crate::core::{AppAction, RecordId, View, WaitingAgent};
 use crate::ports::dispatch::{AttemptView, DecisionView, ProjectView, TicketView};
 
 /// The console pane's height on the overview.
@@ -62,13 +62,28 @@ pub fn show(cx: &mut DrawCtx<'_>, ui: &mut Ui) {
                 })
                 .cloned()
                 .collect();
+            let agents: Vec<WaitingAgent> = cx
+                .core
+                .waiting_agents()
+                .into_iter()
+                .filter(|a| {
+                    tickets
+                        .iter()
+                        .find(|t| t.id == a.ticket)
+                        .is_some_and(|t| shown(&t.project))
+                })
+                .collect();
             theme::section(ui, "Waiting on you");
-            if pending.is_empty() {
+            if pending.is_empty() && agents.is_empty() {
                 ui.label(theme::meta_text(ui, "Nothing waits on you."));
             }
             for d in &pending {
                 let ticket = tickets.iter().find(|t| t.id == d.ticket).cloned();
                 decision_card(cx, ui, d, ticket.as_ref(), true);
+            }
+            for a in &agents {
+                let ticket = tickets.iter().find(|t| t.id == a.ticket).cloned();
+                agent_card(cx, ui, a, ticket.as_ref());
             }
 
             for project in projects.iter().filter(|p| shown(&p.name)) {
@@ -220,9 +235,10 @@ fn ticket_row(cx: &mut DrawCtx<'_>, ui: &mut Ui, t: &TicketView, project: &Proje
         stage_strip(ui, t);
         ui.label(theme::meta_text(ui, "·"));
         let waiting = t.decisions.iter().filter(|d| d.state == "pending").count();
-        let standing = standing_of(t, Some(project));
+        let agents = cx.core.waiting_agents_of(t);
+        let standing = standing_of(t, Some(project), &agents);
         ui.label(RichText::new(standing).text_style(theme::meta()).color(
-            if waiting > 0 || t.state != "active" {
+            if waiting > 0 || !agents.is_empty() || t.state != "active" {
                 p.accent_2_text
             } else {
                 p.n700
@@ -238,13 +254,19 @@ fn title_of(t: &TicketView) -> String {
     }
 }
 
-/// `investigate running`, `parked: <reason>`, `2 waiting on you`, or
-/// why a ticket with nothing open is not moving when its project is
-/// at a limit.
-fn standing_of(t: &TicketView, project: Option<&ProjectView>) -> String {
+/// `investigate running`, `parked: <reason>`, `2 waiting on you`, an
+/// agent at a prompt of its own, or why a ticket with nothing open is
+/// not moving when its project is at a limit.
+fn standing_of(t: &TicketView, project: Option<&ProjectView>, agents: &[WaitingAgent]) -> String {
     let waiting = t.decisions.iter().filter(|d| d.state == "pending").count();
     if waiting > 0 {
         return format!("{waiting} waiting on you");
+    }
+    if let Some(a) = agents.first() {
+        return format!(
+            "agent waiting on you: {} ({}) {}",
+            a.stage, a.context, a.reason
+        );
     }
     match t.state.as_str() {
         "active" => {
@@ -364,6 +386,39 @@ fn decision_card(
 /// A decision that takes several options: a checkbox each, ticked from
 /// the recommendation to start, and one Answer button that sends the
 /// ticked ones joined by commas. Nothing is sent by a tick alone.
+/// An agent at a prompt of its own: the ticket, the attempt, why, and
+/// the session to open and answer it in.
+fn agent_card(cx: &mut DrawCtx<'_>, ui: &mut Ui, a: &WaitingAgent, ticket: Option<&TicketView>) {
+    let p = theme::palette(ui);
+    theme::surface(ui)
+        .inner_margin(egui::Margin::symmetric(12, 10))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing.x = 6.0;
+                if let Some(t) = ticket {
+                    if theme::ghost(ui, &title_of(t)).clicked() {
+                        open_ticket(cx, &t.id);
+                    }
+                    ui.label(theme::meta_text(ui, "·"));
+                    ui.label(theme::meta_text(ui, &t.project));
+                    ui.label(theme::meta_text(ui, "·"));
+                }
+                ui.label(theme::strong_text(format!(
+                    "{} ({}) agent",
+                    a.stage, a.context
+                )));
+            });
+            ui.label(RichText::new(&a.reason).color(p.accent_2_text));
+            if theme::secondary(ui, "Open session")
+                .on_hover_text("The pane, to answer it there")
+                .clicked()
+            {
+                cx.dispatch(AppAction::ShowSession(a.session));
+            }
+        });
+}
+
 fn multiple_choice(cx: &mut DrawCtx<'_>, ui: &mut Ui, d: &DecisionView) {
     let key = format!("{}/{}", d.ticket, d.id);
     let suggested: Vec<String> = d
@@ -560,10 +615,11 @@ fn ticket_header(cx: &mut DrawCtx<'_>, ui: &mut Ui, t: &TicketView) {
             .iter()
             .find(|p| p.name == t.project)
             .cloned();
+        let agents = cx.core.waiting_agents_of(t);
         ui.label(
-            RichText::new(standing_of(t, project.as_ref()))
+            RichText::new(standing_of(t, project.as_ref(), &agents))
                 .text_style(theme::meta())
-                .color(if t.state == "active" {
+                .color(if t.state == "active" && agents.is_empty() {
                     p.n700
                 } else {
                     p.accent_2_text
@@ -621,6 +677,18 @@ fn attempt_row(cx: &mut DrawCtx<'_>, ui: &mut Ui, t: &TicketView, a: &AttemptVie
                 ));
                 if let Some(reason) = &a.reason {
                     ui.label(theme::meta_text(ui, reason));
+                }
+                if let Some(w) = cx
+                    .core
+                    .waiting_agents_of(t)
+                    .into_iter()
+                    .find(|w| w.stage == a.stage && w.context == a.context)
+                {
+                    ui.label(
+                        RichText::new(format!("waiting on you: {}", w.reason))
+                            .text_style(theme::meta())
+                            .color(p.accent_2_text),
+                    );
                 }
                 if let Some(checks) = &a.checks {
                     let short: String = checks.head.chars().take(8).collect();

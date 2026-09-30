@@ -12,6 +12,17 @@ use super::action::{AppAction, AppCore, Clock, Effect, Out, View};
 use super::model::{Launch, PageWindow, RecordId, SessionKind, Space, SpaceId};
 use crate::ports::dispatch::{Body, DecisionView, Reply, Status, TicketView};
 
+/// An agent of a ticket that waits on the user for itself, with the
+/// attempt it runs and why it waits.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WaitingAgent {
+    pub session: RecordId,
+    pub ticket: String,
+    pub stage: String,
+    pub context: String,
+    pub reason: String,
+}
+
 /// The space and project the console lives in, and its name.
 pub const CONSOLE_SPACE: &str = "Dispatch";
 pub const CONSOLE_NAME: &str = "console";
@@ -52,6 +63,50 @@ impl AppCore {
             .tickets
             .iter()
             .flat_map(|t| t.decisions.iter().filter(|d| d.state == "pending"))
+            .collect()
+    }
+
+    /// The agents of `t` that wait on the user for themselves, as the
+    /// window sees their panes: a prompt of Claude's own, a permission,
+    /// a question. Dispatch's decisions are listed separately, and a
+    /// session waiting only under Dispatch's mark is not an agent
+    /// waiting.
+    #[must_use]
+    pub fn waiting_agents_of(&self, t: &TicketView) -> Vec<WaitingAgent> {
+        t.attempts
+            .iter()
+            .filter(|a| matches!(a.state.as_str(), "starting" | "running"))
+            .filter_map(|a| {
+                let session = RecordId(uuid::Uuid::parse_str(a.session.as_deref()?).ok()?);
+                if !self.counts_as_waiting(session) {
+                    return None;
+                }
+                let reason = if self.at_trust_prompt(session) {
+                    "Claude asks whether to trust this folder".to_owned()
+                } else {
+                    self.session(session)
+                        .and_then(|s| s.activity_reason.clone())
+                        .unwrap_or_else(|| "waiting on you".to_owned())
+                };
+                Some(WaitingAgent {
+                    session,
+                    ticket: t.id.clone(),
+                    stage: a.stage.clone(),
+                    context: a.context.clone(),
+                    reason,
+                })
+            })
+            .collect()
+    }
+
+    /// Every agent of every ticket that waits on the user for itself.
+    #[must_use]
+    pub fn waiting_agents(&self) -> Vec<WaitingAgent> {
+        self.dispatch
+            .status
+            .tickets
+            .iter()
+            .flat_map(|t| self.waiting_agents_of(t))
             .collect()
     }
 

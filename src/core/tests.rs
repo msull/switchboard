@@ -5531,6 +5531,65 @@ mod dispatch_page {
     /// the status lists, so the badge counts it once; an agent asking
     /// for itself still counts on top.
     #[test]
+    fn a_tickets_agent_at_a_prompt_of_its_own_is_listed_with_its_attempt() {
+        let p = project("p");
+        let mut w = Workspace::new(p.clone());
+        let mut r = record(p.id, agent(), 0);
+        r.waiting_on = Some("lanes decision".into());
+        let id = r.id;
+        w.sessions.push(r);
+        let (mut core, _) = loaded(vec![w], vec![]);
+        core.dispatch(AppAction::HostListed(vec![running(id)]), Clock::at(1));
+        let mut status = status(Some(id));
+        status.tickets[0].attempts[0].state = "running".into();
+        status.tickets[0].attempts[0].stage = "implement".into();
+        status.tickets[0].attempts[0].context = "backend".into();
+        core.dispatch(AppAction::DispatchStatus(Some(status)), Clock::at(2));
+        assert!(
+            core.waiting_agents().is_empty(),
+            "Dispatch's own mark is not the agent waiting"
+        );
+        core.dispatch(AppAction::PromptSeen { id, seen: true }, Clock::at(3));
+        let agents = core.waiting_agents();
+        assert_eq!(agents.len(), 1);
+        assert_eq!(
+            (
+                agents[0].session,
+                agents[0].ticket.as_str(),
+                agents[0].stage.as_str(),
+                agents[0].context.as_str()
+            ),
+            (id, "t1", "implement", "backend")
+        );
+        assert_eq!(agents[0].reason, "Claude asks whether to trust this folder");
+        core.dispatch(
+            AppAction::Events(vec![SessionEvent {
+                record_id: Some(id),
+                ..event(EventKind::SessionStart, 100)
+            }]),
+            Clock::at(4),
+        );
+        assert!(core.waiting_agents().is_empty());
+        // A permission request of its own, with its reason.
+        core.dispatch(
+            AppAction::Events(vec![SessionEvent {
+                record_id: Some(id),
+                seq: 1,
+                ..event(
+                    EventKind::PermissionRequested {
+                        tool: Some("Bash".into()),
+                    },
+                    2_000,
+                )
+            }]),
+            Clock::at(5),
+        );
+        let agents = core.waiting_agents();
+        assert_eq!(agents.len(), 1, "{agents:?}");
+        assert!(agents[0].reason.contains("Bash"), "{}", agents[0].reason);
+    }
+
+    #[test]
     fn claudes_trust_prompt_is_the_users_turn_until_a_hook_runs() {
         let p = project("p");
         let mut w = Workspace::new(p.clone());

@@ -3844,6 +3844,54 @@ fn dispatch_status() -> switchboard::ports::dispatch::Status {
     }
 }
 
+/// A ticket's agent at a prompt of its own is on the page: a card under
+/// "Waiting on you" that opens the session, the ticket row's standing,
+/// and the rail count.
+#[test]
+fn dispatch_page_shows_a_tickets_agent_waiting_for_itself() {
+    use switchboard::ports::dispatch::AttemptView;
+    let (mut harness, ids) = harness();
+    let session = ids.agent;
+    harness
+        .state_mut()
+        .dispatch(AppAction::HostListed(vec![HostStatus {
+            id: HostId(session.host_name()),
+            liveness: Liveness::Running {
+                pid: 7,
+                command: "claude".into(),
+            },
+            cwd: None,
+            last_activity: None,
+            title: None,
+        }]));
+    let mut status = dispatch_status();
+    status.tickets[1].attempts = vec![AttemptView {
+        stage: "implement".into(),
+        n: 1,
+        context: "repo".into(),
+        kind: "agent".into(),
+        state: "running".into(),
+        session: Some(session.0.to_string()),
+        ..AttemptView::default()
+    }];
+    harness
+        .state_mut()
+        .dispatch(AppAction::DispatchStatus(Some(status)));
+    harness.state_mut().dispatch(AppAction::PromptSeen {
+        id: session,
+        seen: true,
+    });
+    harness.state_mut().dispatched.clear();
+    harness.run_steps(2);
+    click(&mut harness, "Dispatch");
+    harness.get_by_label("implement (repo) agent");
+    harness.get_by_label(
+        "agent waiting on you: implement (repo) Claude asks whether to trust this folder",
+    );
+    click(&mut harness, "Open session");
+    assert!(actions(&harness).contains(&AppAction::ShowSession(session)));
+}
+
 /// The Dispatch page lists what waits on the user with its options as
 /// buttons, and the rail row counts it; a click is one decide action.
 #[test]
