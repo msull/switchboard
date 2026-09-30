@@ -2344,6 +2344,13 @@ impl Runner {
         pr: &crate::github::PullRequest,
         now_ms: u64,
     ) -> Result<()> {
+        // A failed rebaser's rerun question is answered first.
+        if t.decisions
+            .iter()
+            .any(|d| d.pending() && d.stage == a.stage && d.name == "rerun")
+        {
+            return Ok(());
+        }
         if let Some(why) = conflict_reason(t, p, a, pr) {
             return self.ensure_decision(
                 t,
@@ -3589,14 +3596,22 @@ fn conflict_reason(
     a: &Attempt,
     pr: &crate::github::PullRequest,
 ) -> Option<String> {
+    // Only a rebaser that ran counts: one that could not start spends
+    // nothing and proves nothing about the head.
     let earlier: Vec<&Attempt> = t
         .attempts
         .iter()
-        .filter(|x| x.stage == a.stage && x.context == a.context && x.kind == AttemptKind::Agent)
+        .filter(|x| {
+            x.stage == a.stage
+                && x.context == a.context
+                && x.kind == AttemptKind::Agent
+                && x.session.is_some()
+        })
         .collect();
     let count = u32::try_from(earlier.len()).unwrap_or(u32::MAX);
     let last_head = earlier
         .iter()
+        .filter(|x| x.state == AttemptState::Complete)
         .max_by_key(|x| x.n)
         .and_then(|x| x.pr.as_ref())
         .map(|r| r.head.clone());

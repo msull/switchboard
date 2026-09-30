@@ -1013,6 +1013,47 @@ fn a_conflicting_pr_is_rebased_by_a_clone_of_the_implementer() {
     assert!(matches!(&env.ticket(&id).state, TicketState::Closed { .. }));
 }
 
+/// A rebaser that could not start (no transcript to clone) is a rerun
+/// question, counts as nothing, and runs once the answer is given.
+#[test]
+fn a_rebaser_that_could_not_start_is_rerun_on_request() {
+    let mut env = Env::new();
+    let id = at_ready(&mut env);
+    env.at_merge(&id);
+    let implementer = session_of(&env.ticket(&id), "implement");
+    env.sb().resumable.retain(|s| s != &implementer);
+    env.pr_is_with(&id, "base0000", "open", Checks::Passed, Some("conflicting"));
+    env.wait(PR_POLL_MS);
+    env.steps_until(&id, "the rerun question", |t, _| {
+        t.pending_decisions().iter().any(|d| d.name == "rerun")
+    });
+    let d = env
+        .pending(&id)
+        .into_iter()
+        .find(|d| d.name == "rerun")
+        .unwrap();
+    assert!(d.question.contains("no transcript"), "{}", d.question);
+    env.wait(PR_POLL_MS);
+    env.step();
+    assert_eq!(
+        env.ticket(&id)
+            .attempts_of("merge")
+            .filter(|a| a.kind == AttemptKind::Agent)
+            .count(),
+        1,
+        "nothing more until the answer"
+    );
+    env.sb().resumable.push(implementer.clone());
+    let now = env.tick();
+    env.runner.decide(&id, &d.id, "rerun", None, now).unwrap();
+    env.wait(PR_POLL_MS);
+    env.steps_until(&id, "the rebaser", |t, _| {
+        t.attempts_of("merge")
+            .any(|a| a.kind == AttemptKind::Agent && a.session.is_some())
+    });
+    assert_eq!(env.sb().cloned.len(), 1);
+}
+
 /// A rebase that leaves the PR at the same head, and a policy whose
 /// `max_rebases` is spent, are each a `pr` question, not another run.
 #[test]
