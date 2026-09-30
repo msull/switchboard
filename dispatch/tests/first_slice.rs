@@ -672,6 +672,47 @@ fn checks_run_after_the_agent_on_a_clean_tree_and_pass_bound_to_its_head() {
     assert!(matches!(&env.ticket(&id).state, TicketState::Closed { .. }));
 }
 
+/// The user's own feedback round after convergence takes the finalize
+/// question away while the planner answers, and it comes back, with
+/// the new round count, once the run converges again.
+#[test]
+fn a_users_round_after_convergence_withdraws_finalize_until_it_converges_again() {
+    let mut env = Env::new();
+    let id = at_finalize(&mut env);
+    let first = env.pending(&id)[0].clone();
+    assert_eq!(first.name, "finalize");
+    let session = env.ticket(&id).current_session().cloned().unwrap();
+    assert!(env.sb().session(&session).waiting);
+    {
+        let mut sb = env.sb();
+        sb.runs[0].state = RunState::AwaitingResponse;
+        sb.runs[0].round = 2;
+    }
+    env.step();
+    assert!(env.pending(&id).is_empty(), "the question is withdrawn");
+    assert!(
+        !env.sb().session(&session).waiting,
+        "the session no longer waits on it"
+    );
+    assert!(
+        env.ticket(&id)
+            .attempts_of("review")
+            .last()
+            .unwrap()
+            .is_open()
+    );
+    env.sb().runs[0].state = RunState::Converged;
+    env.step();
+    let again = env.pending(&id);
+    assert_eq!(again.len(), 1);
+    assert_ne!(again[0].id, first.id, "a new decision");
+    assert!(
+        again[0].question.contains("converged after 2 round(s)"),
+        "{}",
+        again[0].question
+    );
+}
+
 /// `implement` done with the checks green: the ticket stands at `ready`.
 fn at_ready(env: &mut Env) -> String {
     let (id, implementer) = at_implement(env);

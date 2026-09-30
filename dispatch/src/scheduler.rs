@@ -2840,6 +2840,38 @@ impl Runner {
         Ok(())
     }
 
+    /// A pending finalize decision for a run that is working again is
+    /// cancelled, and the session no longer reads as waiting on it.
+    fn withdraw_finalize(
+        &mut self,
+        t: &mut Ticket,
+        ps: &mut ProjectState,
+        a: &Attempt,
+        now_ms: u64,
+    ) -> Result<()> {
+        let key = (a.stage.clone(), a.n);
+        let mut withdrawn = false;
+        for d in t
+            .decisions
+            .iter_mut()
+            .filter(|d| d.pending() && d.name == "finalize" && d.attempt.as_ref() == Some(&key))
+        {
+            d.state = DecisionState::Cancelled;
+            withdrawn = true;
+        }
+        if !withdrawn {
+            return Ok(());
+        }
+        log::info!(
+            "ticket {} {}/{} review is working again; finalize withdrawn",
+            t.id,
+            a.stage,
+            a.context
+        );
+        self.save_ticket(t, now_ms)?;
+        self.unmark(t, ps, now_ms)
+    }
+
     /// The reviewer has nothing further, or the rounds ran out: the
     /// finalize decision, or finalized outright when the dial says so.
     #[allow(clippy::too_many_arguments)]
@@ -2945,7 +2977,12 @@ impl Runner {
         self.save_ticket(t, now_ms)?;
         let subject = stage.subject.clone().unwrap_or_default();
         match view.state {
-            RunState::Starting | RunState::AwaitingFeedback | RunState::AwaitingResponse => Ok(()),
+            RunState::Starting | RunState::AwaitingFeedback | RunState::AwaitingResponse => {
+                // Back in a round after converging (the user's own
+                // feedback round): the finalize question no longer
+                // describes the run, and is asked again when it stops.
+                self.withdraw_finalize(t, ps, a, now_ms)
+            }
             RunState::Converged | RunState::AtCap => {
                 self.review_done(t, ps, p, stage, a, &view, now_ms)
             }
