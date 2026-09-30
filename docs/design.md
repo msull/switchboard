@@ -1542,7 +1542,9 @@ describes (only `park` can be answered by hand; the session is marked
 waiting), reads the same PR once a minute, and on merged completes
 the attempt and answers the decision as Dispatch. A human gate-only
 stage (`inspect`) asks once per lane with the branch, its head, what
-it adds over its base, the tree and the notes; `proceed` passes,
+it adds over its base, the tree and the notes (Bitbucket Cloud is a
+second provider for both PR gates, read through `curl` with the
+account token from the environment or `<data>/env`); `proceed` passes,
 `rerun` with a note (typed under the decision on the page) sends
 that lane back to the nearest earlier agent stage with the note in
 the next prompt. A gate-only stage and a ticket closing past its last

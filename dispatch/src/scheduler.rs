@@ -11,6 +11,7 @@ use anyhow::{Context as _, Result, anyhow, bail};
 use dispatch_control as wire_dispatch;
 use switchboard_control::{self as wire, Body, Reply, Request, RunState};
 
+use crate::bitbucket::{Bitbucket, bitbucket_repo};
 use crate::git::{Repo, branch_name};
 use crate::github::{Checks, Gh, PullRequests, github_repo};
 use crate::pipeline::{Context, Gate, Pipeline, Stage, StageKind};
@@ -33,9 +34,11 @@ pub struct Runner {
     pub data: DataDir,
     pub port: Box<dyn Port>,
     pub git: Box<dyn Repo>,
-    /// Pull requests, for the `pr-checks` gate; `gh` unless a test
-    /// swaps in a fake.
+    /// Pull requests on GitHub, for the `pr-checks` and `pr-merged`
+    /// gates; `gh` unless a test swaps in a fake.
     pub prs: Box<dyn PullRequests>,
+    /// The same on Bitbucket Cloud, through its API.
+    pub bitbucket: Box<dyn PullRequests>,
     /// The writer lock while a transaction runs; saves inside it write
     /// straight through, saves outside it take the lock for the write.
     held: Option<Lock>,
@@ -44,11 +47,15 @@ pub struct Runner {
 impl Runner {
     #[must_use]
     pub fn new(data: DataDir, port: Box<dyn Port>, git: Box<dyn Repo>) -> Self {
+        // The field takes ownership of `data`, so the path it needs is
+        // taken first.
+        let env_file = data.root.join("env");
         Self {
             data,
             port,
             git,
             prs: Box::new(Gh),
+            bitbucket: Box::new(Bitbucket::new(env_file)),
             held: None,
         }
     }
@@ -1438,14 +1445,24 @@ impl Runner {
         target: &PrTarget,
         none_expected: bool,
     ) -> Result<Option<(crate::github::PullRequest, Option<Checks>)>> {
-        let Some(pr) = self.prs.find(&target.repo, &target.branch)? else {
+        let prs = self.prs_for(&target.provider);
+        let Some(pr) = prs.find(&target.repo, &target.branch)? else {
             return Ok(None);
         };
         if pr.state != "open" || none_expected {
             return Ok(Some((pr, None)));
         }
-        let checks = self.prs.checks(&target.repo, pr.number)?;
+        let checks = prs.checks(&target.repo, pr.number)?;
         Ok(Some((pr, Some(checks))))
+    }
+
+    /// The provider a target names.
+    fn prs_for(&self, provider: &str) -> &dyn PullRequests {
+        if provider == "bitbucket" {
+            self.bitbucket.as_ref()
+        } else {
+            self.prs.as_ref()
+        }
     }
 
     /// A human gate-only stage other than `lanes`: one attempt per
@@ -1762,7 +1779,10 @@ impl Runner {
             Err(why) => return self.park(t, ps, &why, now_ms),
         };
         let head = self.git.head(cwd)?;
-        let question = match self.prs.find(&target.repo, &target.branch) {
+        let found = self
+            .prs_for(&target.provider)
+            .find(&target.repo, &target.branch);
+        let question = match found {
             Err(e) => match self.record_pr_error(t, a, &target, &head, &e, now_ms)? {
                 None => return Ok(()),
                 Some(question) => question,
@@ -3315,37 +3335,46 @@ fn pr_target(
             stage.name
         ));
     };
-    let github = github_repo(&remote);
     let provider = provider.map_or_else(
         || {
-            if github.is_some() {
+            if github_repo(&remote).is_some() {
                 "github".to_owned()
+            } else if bitbucket_repo(&remote).is_some() {
+                "bitbucket".to_owned()
             } else {
                 "unknown".to_owned()
             }
         },
         str::to_owned,
     );
-    let repo = match (provider.as_str(), github) {
-        ("github", Some(repo)) => repo,
-        ("github", None) => {
-            return Err(format!(
-                "stage {}: {remote:?} is not a GitHub repository",
-                stage.name
-            ));
-        }
-        (other, _) => {
+    let repo = match provider.as_str() {
+        "github" => github_repo(&remote),
+        "bitbucket" => bitbucket_repo(&remote),
+        other => {
             return Err(format!(
                 "stage {} reads pull requests from {other}, which is not built",
                 stage.name
             ));
         }
     };
+    let Some(repo) = repo else {
+        return Err(format!(
+            "stage {}: {remote:?} is not a {provider} repository",
+            stage.name
+        ));
+    };
     Ok(PrTarget {
         provider,
         repo,
         branch: lane_record.branch.clone(),
     })
+}
+
+/// Whether two hashes name one commit; a provider may report a short
+/// one.
+fn same_commit(a: &str, b: &str) -> bool {
+    let n = a.len().min(b.len());
+    n >= 7 && a[..n].eq_ignore_ascii_case(&b[..n])
 }
 
 /// What a reading of the PR means: its summary for the record, and
@@ -3368,7 +3397,7 @@ fn judge_pr(
     let verdict = match summary.as_str() {
         "merged" => Ok(true),
         "closed" => Err(format!("PR #{} is closed without being merged", pr.number)),
-        _ if pr.head != head => Err(format!(
+        _ if !same_commit(&pr.head, head) => Err(format!(
             "PR #{} is at {} but the tree is at {}; push the branch, then answer recheck",
             pr.number,
             short(&pr.head),

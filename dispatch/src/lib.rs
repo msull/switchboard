@@ -8,13 +8,15 @@
 //! - `pipeline`: the TOML file, parsed and validated; pure.
 //! - `ticket`: the records (ticket, attempt, decision, ledger); pure.
 //! - `store`: the data directory, atomic writes, the writer lock.
-//! - `port`, `git`, `github`: the outside world behind traits with fakes.
+//! - `port`, `git`, `github`, `bitbucket`: the outside world behind
+//!   traits with fakes.
 //! - `scheduler`: one step of one ticket; decides from a probe of the
 //!   world, then acts through the traits.
 //! - `recover`: the ledger reconciled against Switchboard at start.
 //! - `view`: the queue's working set, redrawn whole.
 //! - `serve`: Dispatch's own port, tickets as views and the commands.
 
+pub mod bitbucket;
 pub mod git;
 pub mod github;
 pub mod pipeline;

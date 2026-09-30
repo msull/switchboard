@@ -250,6 +250,7 @@ dispatch/                the `dispatch` binary (docs/dispatch.md): a ticket sche
   src/store.rs           Dispatch's data directory, flock, atomic writes
   src/git.rs             clones, worktrees and heads through fixed argv, and a stage's checks as child processes polled by key; with a fake
   src/github.rs          issues and pull requests through gh, with fakes
+  src/bitbucket.rs       pull requests on Bitbucket Cloud through curl; credentials from the environment or <data>/env (NAME=value lines, mode 0600, never logged)
   src/port.rs            the Port trait over the control socket client
   src/template.rs        `{a.b}` substitution for prompts
   tests/first_slice.rs   the acceptance table against an in-memory Switchboard (tests/support)

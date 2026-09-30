@@ -125,6 +125,7 @@ struct Env {
     sb: Arc<Mutex<FakeSwitchboard>>,
     repo: Arc<Mutex<FakeRepo>>,
     prs: Arc<Mutex<FakePullRequests>>,
+    bitbucket: Arc<Mutex<FakePullRequests>>,
     runner: Runner,
     worktrees: PathBuf,
     now: u64,
@@ -144,18 +145,21 @@ impl Env {
         let sb = Arc::new(Mutex::new(FakeSwitchboard::new()));
         let repo = Arc::new(Mutex::new(FakeRepo::default()));
         let prs = Arc::new(Mutex::new(FakePullRequests::default()));
+        let bitbucket = Arc::new(Mutex::new(FakePullRequests::default()));
         let mut runner = Runner::new(
             data.clone(),
             Box::new(SharedPort(Arc::clone(&sb))),
             Box::new(SharedRepo(Arc::clone(&repo))),
         );
         runner.prs = Box::new(Arc::clone(&prs));
+        runner.bitbucket = Box::new(Arc::clone(&bitbucket));
         Self {
             _dir: dir,
             data,
             sb,
             repo,
             prs,
+            bitbucket,
             runner,
             worktrees,
             now: 1_000,
@@ -171,6 +175,7 @@ impl Env {
             Box::new(SharedRepo(Arc::clone(&self.repo))),
         );
         self.runner.prs = Box::new(Arc::clone(&self.prs));
+        self.runner.bitbucket = Box::new(Arc::clone(&self.bitbucket));
         let now = self.tick();
         self.runner.recover(now).unwrap();
     }
@@ -1113,6 +1118,47 @@ fn ready_asks_about_red_moved_or_missing_checks_and_none_can_be_expected() {
             .map(|p| p.checks.as_str()),
         Some("none")
     );
+}
+
+/// A Bitbucket remote is read through the Bitbucket adapter, and a
+/// short head from the provider still matches the tree's.
+#[test]
+fn a_bitbucket_remote_is_read_through_bitbucket_and_a_short_head_matches() {
+    let mut env = Env::new();
+    let path = env.data.pipeline(PROJECT);
+    let text = std::fs::read_to_string(&path).unwrap().replace(
+        "git@github.com:msull/switchboard.git",
+        "git@bitbucket.org:msull/switchboard.git",
+    );
+    std::fs::write(&path, text).unwrap();
+    let id = at_ready(&mut env);
+    assert_eq!(env.prs.lock().unwrap().looked, 0, "GitHub was not asked");
+    assert_eq!(env.bitbucket.lock().unwrap().looked, 1);
+    let branch = env.ticket(&id).lanes[0].branch.clone();
+    {
+        let mut bb = env.bitbucket.lock().unwrap();
+        bb.prs.push((
+            "msull/switchboard".into(),
+            branch,
+            PullRequest {
+                number: 12,
+                url: "https://bitbucket.org/msull/switchboard/pull-requests/12".into(),
+                head: "base0000".chars().take(7).collect(),
+                state: "open".into(),
+            },
+        ));
+        bb.checks
+            .push(("msull/switchboard".into(), 12, Checks::Passed));
+    }
+    env.recheck(&id);
+    env.steps_until(&id, "ready completing", |t, _| {
+        t.attempts_of("ready")
+            .last()
+            .is_some_and(|a| a.state == AttemptState::Complete)
+    });
+    let t = env.ticket(&id);
+    let pr = t.attempts_of("ready").last().unwrap().pr.clone().unwrap();
+    assert_eq!((pr.provider.as_str(), pr.number), ("bitbucket", 12));
 }
 
 /// A provider that cannot be read is retried quietly for an hour, then

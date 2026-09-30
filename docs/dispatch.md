@@ -933,10 +933,14 @@ resolves the pending merge decision; it never merges.
 
 The provider is read from the lane's remote (the lane's `repo`, else
 the project's, else the tree's own `origin` for a project named by
-`root`): a `github.com` remote is read through `gh`; another host
-needs `provider` named on the gate and an adapter for it, and until
-one exists the ticket parks saying so, as does a tree with no remote
-at all, whose "ready" is a human gate (the PTA pipeline). A repository that runs no CI says `checks = "none"` on the
+`root`): a `github.com` remote is read through `gh`, a
+`bitbucket.org` remote through the Bitbucket Cloud API with `curl`
+(the account token from `BITBUCKET_EMAIL` and `BITBUCKET_API_TOKEN`
+in the runner's environment, else `<data dir>/env`, handed to curl on
+stdin and never logged; Bitbucket reports a short head, which matches
+the tree's by prefix); `provider` on the gate overrides the guess.
+Another host parks the ticket saying so, as does a tree with no
+remote at all, whose "ready" is a human gate (the PTA pipeline). A repository that runs no CI says `checks = "none"` on the
 stage, and the gate then passes on an open PR whose head is the
 tree's head, without reading checks; without it, a PR with no checks
 is the decision above, every time. Every reading but pending and
