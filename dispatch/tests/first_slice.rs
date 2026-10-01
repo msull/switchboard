@@ -2116,7 +2116,7 @@ fn a_plan_session_with_no_transcript_fails_the_review_once() {
     env.step();
     env.step();
     assert_eq!(env.sb().kinds_called("workflow.start"), 1);
-    assert!(env.sb().runs.is_empty());
+    assert!(env.sb().runs.is_empty(), "no run was started");
 }
 
 #[test]
@@ -2127,11 +2127,11 @@ fn a_project_that_cannot_be_saved_makes_nothing_else() {
     env.step();
     let t = env.ticket(&id);
     assert!(matches!(&t.state, TicketState::Parked { reason } if reason.contains("project.add")));
-    assert!(t.attempts.is_empty());
-    assert!(env.sb().sessions.is_empty());
+    assert!(t.attempts.is_empty(), "no attempt was made");
+    assert!(env.sb().sessions.is_empty(), "no session was made");
     assert_eq!(env.sb().kinds_called("session.new"), 0);
     let liveness: Vec<Liveness> = env.sb().sessions.iter().map(|s| s.liveness).collect();
-    assert!(liveness.is_empty());
+    assert!(liveness.is_empty(), "nothing is alive");
 }
 
 /// The pull-request pipeline of the test project: two lanes, one in
@@ -2464,7 +2464,7 @@ fn a_socket_failure_ends_the_pass_without_parking() {
     env.step();
     let t = env.ticket(&id);
     assert!(t.active(), "{:?}", t.state);
-    assert!(t.attempts.is_empty());
+    assert!(t.attempts.is_empty(), "no attempt was made");
     assert_eq!(env.sb().kinds_called("project.add"), 0);
     env.step();
     let t = env.ticket(&id);
@@ -3058,7 +3058,10 @@ fn a_finalize_answer_cut_off_at_its_request_is_replayed_after_a_restart() {
     });
     env.step();
     let t = env.ticket(&id);
-    assert!(t.pending_decisions().is_empty());
+    assert!(
+        t.pending_decisions().is_empty(),
+        "nothing waits on the user"
+    );
     let op = t
         .ledger
         .iter()
@@ -3111,7 +3114,7 @@ fn a_directory_in_the_way_that_is_not_the_worktree_parks_the_ticket() {
         matches!(&t.state, TicketState::Parked { reason } if reason.contains("not a worktree")),
         "{t:#?}"
     );
-    assert!(t.lanes.is_empty());
+    assert!(t.lanes.is_empty(), "no lane was cut");
     assert!(
         env.sb().sessions.is_empty(),
         "nothing runs outside a worktree"
@@ -3278,7 +3281,10 @@ fn the_worktree_root_is_a_setting_a_tilde_is_the_home_and_a_space_is_refused() {
         err.contains("holds") && err.contains("dispatch worktrees"),
         "{err}"
     );
-    assert!(env.runner.tickets().unwrap().is_empty());
+    assert!(
+        env.runner.tickets().unwrap().is_empty(),
+        "no ticket was made"
+    );
 }
 
 /// Moving the worktree root moves every idle ticket's tree with git,
@@ -3376,7 +3382,7 @@ fn a_query_the_app_could_not_answer_leaves_the_attempt_running() {
     let a = t.attempts_of("investigate").last().unwrap();
     assert!(a.is_open(), "{a:?}");
     assert_eq!(a.session.as_deref(), Some(investigator.as_str()));
-    assert!(env.pending(&id).is_empty());
+    assert!(env.pending(&id).is_empty(), "nothing waits on the user");
     env.step();
     assert!(
         env.ticket(&id)
@@ -3450,7 +3456,7 @@ fn the_trust_question_is_answered_only_where_the_policy_says_so() {
     plain.sb().session_mut(&investigator).trust_question = true;
     plain.step();
     plain.step();
-    assert!(plain.sb().trusted.is_empty());
+    assert!(plain.sb().trusted.is_empty(), "no folder was trusted");
     assert!(plain.sb().session(&investigator).trust_question);
 }
 
@@ -4054,7 +4060,10 @@ fn a_withdrawn_point_closes_and_the_auto_dial_fixes_without_asking() {
         review_attempt(t).rounds[0].implementer.is_some()
     });
     let t = env.ticket(&id);
-    assert!(t.pending_decisions().is_empty());
+    assert!(
+        t.pending_decisions().is_empty(),
+        "nothing waits on the user"
+    );
     let round = &review_attempt(&t).rounds[0];
     let fixer = round.implementer.clone().unwrap();
     env.repo

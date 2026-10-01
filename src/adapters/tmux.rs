@@ -613,7 +613,9 @@ mod tests {
     }
 
     fn poll(what: &str, mut ready: impl FnMut() -> bool) {
-        let deadline = Instant::now() + Duration::from_secs(5);
+        // Generous: a cold CI runner has taken more than five seconds
+        // to start a server and report a pane's exit.
+        let deadline = Instant::now() + Duration::from_secs(20);
         while !ready() {
             assert!(Instant::now() < deadline, "timed out waiting for {what}");
             std::thread::sleep(Duration::from_millis(50));

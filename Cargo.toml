@@ -77,6 +77,9 @@ pedantic = { level = "warn", priority = -1 }
 missing_errors_doc = "allow"
 missing_panics_doc = "allow"
 module_name_repetitions = "allow"
+# Tests say `assert!(x.is_empty())` in some ninety places; the value an
+# `assert_eq!` would print is an empty collection either way.
+assert_is_empty = "allow"
 
 # egui is slow in unoptimised builds; optimise dependencies even in dev.
 [profile.dev.package."*"]

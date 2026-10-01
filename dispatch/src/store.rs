@@ -353,7 +353,10 @@ mod tests {
     fn the_lock_serialises_writers_and_lists_tickets() {
         let dir = tempfile::tempdir().unwrap();
         let data = DataDir::new(dir.path());
-        assert!(data.ticket_files().unwrap().is_empty());
+        assert!(
+            data.ticket_files().unwrap().is_empty(),
+            "a fresh data directory has no tickets"
+        );
         data.with_lock(|| write_json(&data.ticket_file("a1"), &1))
             .unwrap();
         data.with_lock(|| write_json(&data.ticket_file("b2"), &2))
