@@ -76,7 +76,7 @@ commands to the tree (a sandbox) is filed as an issue and not built.
   (below) for as long as the ticket owns files there.
 - **Root context.** Every ticket also has a Switchboard project at the
   pipeline's root, used before lanes exist and for joined stages. For
-  a single-repository pipeline it is the repository; for Delta it is
+  a single-repository pipeline it is the repository; for Orchard it is
   the workspace directory. Agents run there before any branch is cut
   and are told to write nothing but their notes.
 - **Pipeline.** Per project, a list of stages. A stage names an
@@ -232,7 +232,7 @@ interrupted attempt.
   session; its attempt is the gate's own result, and its prompt
   fields (`{inputs.deploy.commit}`) are what the gate recorded. A
   skipped stage records nothing, and a template naming its field
-  renders as `unknown (deploy skipped)`; the Delta `try` prompt says
+  renders as `unknown (deploy skipped)`; the Orchard `try` prompt says
   so in words.
 - **Command gates run once, on a clean tree.** After the agent stops,
   Dispatch requires the context's tree clean, records its head commit,
@@ -258,7 +258,7 @@ interrupted attempt.
   rerun from the earliest. The answer authorises those attempts; no
   paid rerun happens without it. Before any rerun starts, the
   cancellation sequence retires the superseded attempts, so an old
-  and a replacement attempt never run together. For Delta a push after
+  and a replacement attempt never run together. For Orchard a push after
   `tried` lists `implement`'s checks, `deploy`, `try` and `tried`;
   there is no path from a moved head to `merge` on old evidence.
 - Failure is a decision, never a retry. A gate that fails, an agent
@@ -651,31 +651,31 @@ decision shows the subject line the writer recorded. The `marker` on a task line
 Dispatch reads from the project as configuration, which matches
 Switchboard's rule for `.switchboard/project.json`.
 
-### Pipeline: Delta
+### Pipeline: Orchard
 
 The hard case, and the one the vocabulary was shaped for. Facts from
-`~/code_repos/delta` (its `CLAUDE.md`, `guides/ENVIRONMENTS_GUIDE.md`,
+`~/code_repos/orchard` (its `CLAUDE.md`, `guides/ENVIRONMENTS_GUIDE.md`,
 `guides/COLLABORATION_GUIDE.md`, the backend `tasks/`):
 
-- The root is a planning workspace (`k3systems/delta-workspace`), and
+- The root is a planning workspace (`example-org/orchard-workspace`), and
   the issues live there with a label scheme (`type:`, `area:`,
   `priority:`, `status:`). The application repositories are separate
-  git repositories nested under it: `delta-backend` (integration branch
-  `main`), `delta-frontend` (`dev`; `master` is production),
-  `delta-snp` (`master`). Bitbucket is the origin; GitHub mirrors
+  git repositories nested under it: `orchard-backend` (integration branch
+  `main`), `orchard-frontend` (`dev`; `master` is production),
+  `orchard-admin` (`master`). Bitbucket is the origin; GitHub mirrors
   exist. PRs go through `tools/bb.py`, which squashes on merge.
-- "Ready for the test environment" pre-merge means `sully-dev`: one
+- "Ready for the test environment" pre-merge means `my-dev`: one
   personal backend stack, deployed from any branch by
-  `aws-vault exec -n deltadev -- uv run inv deploy -f` from
-  `delta-backend` with that env linked. Last deploy wins. The link is
+  `aws-vault exec -n orchard-dev -- uv run inv deploy -f` from
+  `orchard-backend` with that env linked. Last deploy wins. The link is
   a per-checkout cache file, so a fresh worktree is unlinked until
-  `inv link-env --env-name sully-dev` runs in it. The frontends have no
-  per-branch environment; a branch is tried against `sully-dev` with
+  `inv link-env --env-name my-dev` runs in it. The frontends have no
+  per-branch environment; a branch is tried against `my-dev` with
   `npm run link-env` and a local `npm start`. Shared `dev` deploys
   itself on merge to `main` and is post-merge, so it is not a gate.
 - Machine checks: backend `uv run inv lint` and `uv run inv pytest`;
   frontend `npm ci --legacy-peer-deps` then
-  `CI=true npm test -- --watchAll=false`; snp `npm test`. Bitbucket
+  `CI=true npm test -- --watchAll=false`; admin `npm test`. Bitbucket
   Pipelines runs tests on PRs but has no lint gate, and the GitHub
   mirrors have no CI, so `pr-checks` here reads Bitbucket through
   `bb.py` rather than `gh`.
@@ -684,35 +684,35 @@ The hard case, and the one the vocabulary was shaped for. Facts from
   user-visible frontend change, tests listed in the body, and no
   session-link attribution of any kind.
 - Nothing in the repos locks an environment. Two tickets deploying to
-  `sully-dev` would overwrite each other, which is exactly what a
+  `my-dev` would overwrite each other, which is exactly what a
   resource with `count = 1` prevents.
 
 ```toml
 version = 1
 
 [project]
-name = "Delta"
-repo = "git@github.com:k3systems/delta-workspace.git"
-space = "Dispatch · Delta"
+name = "Orchard"
+repo = "git@github.com:example-org/orchard-workspace.git"
+space = "Dispatch · Orchard"
 
 [source]
 kind = "github"
-repo = "k3systems/delta-workspace"
+repo = "example-org/orchard-workspace"
 label = "dispatch"
 # area: labels are the suggested answer to the lanes decision.
-lane_hints = { "area:backend" = "backend", "area:frontend" = "frontend", "area:snp" = "snp" }
+lane_hints = { "area:backend" = "backend", "area:frontend" = "frontend", "area:admin" = "admin" }
 
 [[lanes]]
 name = "backend"
-path = "delta-backend"
-repo = "git@bitbucket.org:cainfosec/delta-backend.git"
+path = "orchard-backend"
+repo = "git@bitbucket.org:example-co/orchard-backend.git"
 base = "main"
-setup = ["sh", "-c", "uv sync && uv run inv link-env --env-name sully-dev"]
+setup = ["sh", "-c", "uv sync && uv run inv link-env --env-name my-dev"]
 
 [[lanes]]
 name = "frontend"
-path = "delta-frontend"
-repo = "git@bitbucket.org:cainfosec/delta.git"
+path = "orchard-frontend"
+repo = "git@bitbucket.org:example-co/orchard-frontend.git"
 base = "dev"
 setup = ["npm", "ci", "--legacy-peer-deps"]
 # A service Dispatch starts for a stage that asks. PORT is a port
@@ -720,15 +720,15 @@ setup = ["npm", "ci", "--legacy-peer-deps"]
 serve = { argv = ["npm", "start"], env = { BROWSER = "none", PORT = "{port}" }, url = "http://localhost:{port}", ready = { http = "/", within_secs = 120 } }
 
 [[lanes]]
-name = "snp"
-path = "delta-snp"
-repo = "git@bitbucket.org:cainfosec/delta-snp.git"
+name = "admin"
+path = "orchard-admin"
+repo = "git@bitbucket.org:example-co/orchard-admin.git"
 base = "master"
 setup = ["npm", "ci", "--legacy-peer-deps"]
 serve = { argv = ["npm", "start"], env = { BROWSER = "none", PORT = "{port}" }, url = "http://localhost:{port}", ready = { http = "/", within_secs = 120 } }
 
 [[resources]]
-name = "sully-dev"
+name = "my-dev"
 count = 1
 
 [operators.investigator]
@@ -737,7 +737,7 @@ guidance = "Read the root CLAUDE.md, guides/ENVIRONMENTS_GUIDE.md and each repos
 
 [operators.planner]
 kind = "claude"
-guidance = "Write the plan as plans/YYYYMMDD-name.md is written: per lane, the change, the tests, the CHANGELOG or What's New entry, and how it is tried on sully-dev."
+guidance = "Write the plan as plans/YYYYMMDD-name.md is written: per lane, the change, the tests, the CHANGELOG or What's New entry, and how it is tried on my-dev."
 
 [operators.reviewer]
 kind = "codex"
@@ -758,7 +758,7 @@ guidance = "Implement the lane's part of the finalized plan on branch {branch} i
 
 [operators.tester]
 kind = "claude"
-guidance = "The backend branch is already deployed to sully-dev; the commit is in your prompt. Do not deploy. The frontend worktree is linked to sully-dev and already being served at the address in your prompt; do not start another. Exercise the change with the tools/e2e probes or curl. Write what worked and what did not, with the commands and their output, to {notes}."
+guidance = "The backend branch is already deployed to my-dev; the commit is in your prompt. Do not deploy. The frontend worktree is linked to my-dev and already being served at the address in your prompt; do not start another. Exercise the change with the tools/e2e probes or curl. Write what worked and what did not, with the commands and their output, to {notes}."
 
 [[stages]]
 name = "investigate"
@@ -790,30 +790,30 @@ name = "implement"
 operator = "implementer"
 context = "each"
 prompt = "The plan at {inputs.plan} is final. Implement the {lane} part on {branch}."
-gate = { kind = "command", in = "lane", per_lane = { backend = ["sh", "-c", "uv run inv lint && uv run inv pytest"], frontend = ["sh", "-c", "CI=true npm test -- --watchAll=false"], snp = ["sh", "-c", "CI=true npm test"] } }
+gate = { kind = "command", in = "lane", per_lane = { backend = ["sh", "-c", "uv run inv lint && uv run inv pytest"], frontend = ["sh", "-c", "CI=true npm test -- --watchAll=false"], admin = ["sh", "-c", "CI=true npm test"] } }
 
 [[stages]]
 name = "deploy"
-context = "lane:backend"      # skipped when the ticket has no backend lane: the frontend is then tried against what sully-dev already has
-needs = ["sully-dev"]
+context = "lane:backend"      # skipped when the ticket has no backend lane: the frontend is then tried against what my-dev already has
+needs = ["my-dev"]
 # Dispatch deploys, once, after linking again so the target cannot be
 # whatever a previous checkout left; the deployed commit is recorded
 # on the attempt.
-gate = { kind = "command", in = "lane:backend", argv = ["sh", "-c", "uv run inv link-env --env-name sully-dev && aws-vault exec -n deltadev -- uv run inv deploy -f"] }
+gate = { kind = "command", in = "lane:backend", argv = ["sh", "-c", "uv run inv link-env --env-name my-dev && aws-vault exec -n orchard-dev -- uv run inv deploy -f"] }
 
 [[stages]]
 name = "try"
 operator = "tester"
 context = "joined"
-needs = ["sully-dev"]
-services = ["frontend", "snp"]   # each started only if its lane was cut; owned by the ticket until `tried` ends
-before = { frontend = ["npm", "run", "link-env"], snp = ["npm", "run", "link-env"] }
+needs = ["my-dev"]
+services = ["frontend", "admin"]   # each started only if its lane was cut; owned by the ticket until `tried` ends
+before = { frontend = ["npm", "run", "link-env"], admin = ["npm", "run", "link-env"] }
 writes = ["notes"]
-prompt = "sully-dev is running backend commit {inputs.deploy.commit} (when that reads as skipped, this ticket has no backend lane and sully-dev runs whatever was deployed last). The admin frontend: {services.frontend}. The student portal: {services.snp}. A lane this ticket did not cut is not served; test it, if at all, against the existing deployment. Try ticket #{issue.number} end to end and report to {notes}."
+prompt = "my-dev is running backend commit {inputs.deploy.commit} (when that reads as skipped, this ticket has no backend lane and my-dev runs whatever was deployed last). The admin frontend: {services.frontend}. The student portal: {services.admin}. A lane this ticket did not cut is not served; test it, if at all, against the existing deployment. Try ticket #{issue.number} end to end and report to {notes}."
 
 [[stages]]
 name = "tried"
-needs = ["sully-dev"]        # still held: what you are looking at must stay deployed
+needs = ["my-dev"]        # still held: what you are looking at must stay deployed
 gate = { kind = "human", decision = "tried", confirm = true }   # the tester's evidence and the deployed commit are shown
 
 [[stages]]
@@ -830,7 +830,7 @@ context = "each"
 gate = { kind = "external", check = "pr-merged", provider = "bitbucket", decision = "merge" }   # pending on you until Bitbucket says merged; backup.py is yours
 
 [policy]
-slots = 2                    # two tickets in flight; only one can hold sully-dev
+slots = 2                    # two tickets in flight; only one can hold my-dev
 waiting_on_me = 2
 ports = [3100, 3199]         # for services; one per service per ticket, tested free before use
 rates = { "claude-sonnet-5" = [3.0, 15.0], "claude-opus-5-5" = [15.0, 75.0], "gpt-5-codex" = [1.25, 10.0] }
@@ -841,7 +841,7 @@ What this pipeline showed, and what it added to the vocabulary:
 
 - **Lanes with a `base` and a `setup`.** Each repository has its own
   integration branch and install step. The backend's setup also links
-  the worktree to `sully-dev`, and the deploy gate links again right
+  the worktree to `my-dev`, and the deploy gate links again right
   before deploying, so the target is established twice and never
   inherited from another checkout.
 - **`joined` stages.** Plan and review happen once per ticket across
@@ -849,7 +849,7 @@ What this pipeline showed, and what it added to the vocabulary:
   exist until a multi-repo project needed it.
 - **`lane:backend` as a context**, and a stage that is skipped when
   its lane was not cut. A frontend-only ticket is tried against
-  whatever backend `sully-dev` already runs, and the `tried` decision
+  whatever backend `my-dev` already runs, and the `tried` decision
   says so.
 - **Services are Dispatch's.** A stage's `services` name lanes; each
   is started only if the ticket cut that lane, and a template field
@@ -881,7 +881,7 @@ What this pipeline showed, and what it added to the vocabulary:
   in the file is Dispatch's own. If that is not enough the next step
   is an environment the agent's credentials cannot reach, not more
   guidance.
-- **A count is not an environment.** Raising `sully-dev` to 2 would
+- **A count is not an environment.** Raising `my-dev` to 2 would
   need a second stack to exist and each ticket bound to one (a
   `link-env` name per hold, and the frontend linked to match). The
   mechanism is a resource with instances rather than a count, and it
@@ -1038,9 +1038,9 @@ ticket's slot as any open attempt does).
   ticket still needs out of the tree.
 - A hold is released only after every writer that could touch the
   resource is confirmed stopped, by the cancellation sequence under
-  "Decisions"; a deploy still running keeps `sully-dev`.
+  "Decisions"; a deploy still running keeps `my-dev`.
 - Holds cover Dispatch tickets only. Dispatch cannot see a manual
-  deploy to `sully-dev`; `dispatch status` shows the holds so you can
+  deploy to `my-dev`; `dispatch status` shows the holds so you can
   look before doing one by hand.
 - `slots` counts tickets that have a running attempt or hold a
   resource. A ticket sitting at a human gate with no holds costs no
@@ -1116,8 +1116,8 @@ project's. The queue, the slots and `waiting_on_me` are the project's,
 shared with its issue tickets.
 
 ```
-dispatch take Delta pr backend/123 frontend/45     # the lanes' own repositories
-dispatch take Delta pr github:backend/17           # a named mirror
+dispatch take Orchard pr backend/123 frontend/45     # the lanes' own repositories
+dispatch take Orchard pr github:backend/17           # a named mirror
 dispatch take Switchboard pr 12                    # the lane may be left off when there is one
 ```
 
@@ -1403,8 +1403,8 @@ tested with one lane committing after another lane's checks finished;
 `ready` and `merge` from GitHub and the human gate-only stage (built,
 as above; a moved head is not yet voided); the code review stage
 (`docs/review-stage-plan.md`); the queue and slots; the PTA pipeline
-with its in-place hold; the Delta pipeline with the deploy gate and
-the persisted `sully-dev` hold; budget reporting; the `recommend`
+with its in-place hold; the Orchard pipeline with the deploy gate and
+the persisted `my-dev` hold; budget reporting; the `recommend`
 dial.
 
 ## Decisions I made (review these)

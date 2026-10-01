@@ -30,7 +30,7 @@ Specify decision IDs, pending/resolved state, allowed answers, and a machine-rea
 
 ## 5. Make the review integration match the existing workflow
 
-The shipped definition is named `Plan review`, not `Built-in review`; `start_workflow` rejects unknown names (`src/core/model.rs`, `src/core/workflow.rs`). `PTA review` and `Delta review` also need a provisioning mechanism. Explain how operator guidance becomes the definition's actual prompt templates; passing only a name does not apply it.
+The shipped definition is named `Plan review`, not `Built-in review`; `start_workflow` rejects unknown names (`src/core/model.rs`, `src/core/workflow.rs`). `PTA review` and `Orchard review` also need a provisioning mechanism. Explain how operator guidance becomes the definition's actual prompt templates; passing only a name does not apply it.
 
 `StartWorkflow` requires an absolute plan path and a source Claude Code session with a discovered resume handle/transcript. The pipeline needs an explicit review subject and source session, plus readiness for cloning. The schema currently permits Codex planners, which the existing workflow cannot clone. PTA creates a draft and a notes file but never defines `{plan}` or identifies which artifact is reviewed; a mail draft or rendered PDF also needs a suitable reviewable source.
 
@@ -44,19 +44,19 @@ Likewise, the existing round-file probe observes metadata stability; it does not
 
 ## 7. Define execution context before and after lane selection
 
-Delta's investigation says `lanes = ["backend"]` while its comment says it runs at the workspace root before lanes exist. Those are different contexts, and neither the schema nor the control flow explains how this stage starts. Introduce an explicit root/planning context, identify its Switchboard project and cwd, and explain how joined stages receive the selected lane roots and commits.
+Orchard's investigation says `lanes = ["backend"]` while its comment says it runs at the workspace root before lanes exist. Those are different contexts, and neither the schema nor the control flow explains how this stage starts. Introduce an explicit root/planning context, identify its Switchboard project and cwd, and explain how joined stages receive the selected lane roots and commits.
 
 The `try` stage unconditionally uses `lane:backend`, although lane selection allows frontend-only or SNP-only tickets. Define whether backend is mandatory, how unchanged backend code is supplied, or how the stage behaves without it. Also describe how frontend worktrees receive environment linking and a running server: an existing service in the original checkout does not automatically run the ticket's frontend changes.
 
-## 8. The Delta deploy gate does not establish a tested, correctly targeted deployment
+## 8. The Orchard deploy gate does not establish a tested, correctly targeted deployment
 
 The tester prompt asks the agent to deploy, and the command gate deploys again. Successful deployment alone does not prove the end-to-end probes passed, and the second deployment may differ from what the tester examined. Choose one owner of deployment, then require test evidence and record the deployed revision before the human `tried` decision.
 
-The command targets whichever environment is linked. A fresh worktree's `uv sync` does not establish that link, and a command-text approval hash cannot pin mutable linked-environment state. Define an explicit, verified target or fail-closed preflight for `sully-dev`; explain how the claimed tool allowance is enforced or acknowledge that guidance is only advisory. Raising a resource count also does not create isolated environments: separate instances require allocation and binding of the chosen backend/frontend endpoints to each ticket.
+The command targets whichever environment is linked. A fresh worktree's `uv sync` does not establish that link, and a command-text approval hash cannot pin mutable linked-environment state. Define an explicit, verified target or fail-closed preflight for `my-dev`; explain how the claimed tool allowance is enforced or acknowledge that guidance is only advisory. Raising a resource count also does not create isolated environments: separate instances require allocation and binding of the chosen backend/frontend endpoints to each ticket.
 
 ## 9. Persist resource holds and define scheduler capacity
 
-Keeping `sully-dev` across `try` and `tried` is the right requirement, but specify atomic acquisition, ownership, release on rejection/cancellation, and recovery after either process restarts. Losing an in-memory hold while a human is still inspecting the stack would allow another ticket to overwrite it. State whether the lock covers only Dispatch tickets or also cooperating manual deploys.
+Keeping `my-dev` across `try` and `tried` is the right requirement, but specify atomic acquisition, ownership, release on rejection/cancellation, and recovery after either process restarts. Losing an in-memory hold while a human is still inspecting the stack would allow another ticket to overwrite it. State whether the lock covers only Dispatch tickets or also cooperating manual deploys.
 
 Define whether tickets at human gates consume `slots`. If they do, PTA's `slots = 1` can never accumulate three waiting drafts. If they do not, its in-place repository still cannot be switched to another ticket branch while the previous ticket owns files there. Add a repository-level hold for in-place lanes, dirty-tree handling, and a clear rule for when work is safe to release. Specify backpressure when `waiting_on_me` is reached.
 
@@ -80,6 +80,6 @@ Specify whether a threshold stops a running agent, blocks the next launch, or on
 
 ## 13. Tighten the first-slice acceptance criteria
 
-Pick one concrete supported pipeline for the first slice, likely Switchboard. The advertised universal `investigate -> plan -> review` sequence does not match PTA's stages and skips Delta's pre-worktree lane decision. The Switchboard prefix also has no explicit human gate unless finalization is counted; name the exact interaction being exercised.
+Pick one concrete supported pipeline for the first slice, likely Switchboard. The advertised universal `investigate -> plan -> review` sequence does not match PTA's stages and skips Orchard's pre-worktree lane decision. The Switchboard prefix also has no explicit human gate unless finalization is counted; name the exact interaction being exercised.
 
 Include a small acceptance matrix: successful issue-to-review flow; restart after a lost creation reply without a duplicate paid launch; unavailable planner transcript; stale artifact that must not advance a stage; launch/persistence failure; and workspace placement while the user is viewing another space. Later slices should test gate revision binding, durable resource ownership, and decision submission. This makes the architectural assumptions testable before queue automation and deployment are added.

@@ -8,7 +8,7 @@ Recovery now relies on “only Dispatch removes records” to conclude that an a
 
 Choose an explicit policy: prevent direct deletion of Dispatch-owned records while their operation history is needed, retain durable creation tombstones after deletion, or classify an absent record as an uncertain outcome rather than proof of non-execution. If deletion is restricted, state how the UI explains it and how the user removes the item through Dispatch. Add a recovery case where a creation succeeds, its reply is lost, and its record is removed through the UI before reconciliation. No inference that paid work or a side effect never occurred should depend on an unenforced convention.
 
-## 2. Complete the new Delta service binding
+## 2. Complete the new Orchard service binding
 
 The `try` stage now unconditionally requests `services = ["frontend"]`, runs `before.frontend`, and expands `{services.frontend.url}`. Lane selection still allows backend-only and SNP-only tickets, for which no frontend project/worktree exists. Unlike the backend deploy, there is no stated skip or fallback rule for this service dependency.
 

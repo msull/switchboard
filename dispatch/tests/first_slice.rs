@@ -3104,28 +3104,28 @@ const WORKSPACE: &str = r#"
 version = 1
 
 [project]
-name = "Delta"
-repo = "git@example.com:k3/delta-workspace.git"
+name = "Orchard"
+repo = "git@example.com:k3/orchard-workspace.git"
 worktrees = "{worktrees}"
-space = "Dispatch · Delta"
+space = "Dispatch · Orchard"
 
 [source]
 kind = "github"
-repo = "k3/delta-workspace"
+repo = "k3/orchard-workspace"
 label = "dispatch"
 lane_hints = { "area:backend" = "backend", "area:frontend" = "frontend" }
 
 [[lanes]]
 name = "backend"
-path = "delta-backend"
-repo = "git@example.com:k3/delta-backend.git"
+path = "orchard-backend"
+repo = "git@example.com:k3/orchard-backend.git"
 base = "main"
 setup = ["uv", "sync"]
 
 [[lanes]]
 name = "frontend"
-path = "delta-frontend"
-repo = "git@example.com:k3/delta-frontend.git"
+path = "orchard-frontend"
+repo = "git@example.com:k3/orchard-frontend.git"
 base = "dev"
 setup = ["npm", "ci"]
 
@@ -3249,7 +3249,7 @@ fn the_worktree_root_is_a_setting_a_tilde_is_the_home_and_a_space_is_refused() {
 fn moving_the_worktree_root_moves_idle_trees_and_repoints_lanes_and_projects() {
     let (mut env, id) = workspace_env(&["type:bug"]);
     // The pipeline defers to the setting.
-    for path in [env.data.pipeline("Delta"), env.ticket(&id).pipeline_file] {
+    for path in [env.data.pipeline("Orchard"), env.ticket(&id).pipeline_file] {
         let text = std::fs::read_to_string(&path).unwrap().replace(
             &format!("worktrees = \"{}\"\n", env.worktrees.display()),
             "",
@@ -3257,7 +3257,7 @@ fn moving_the_worktree_root_moves_idle_trees_and_repoints_lanes_and_projects() {
         std::fs::write(&path, text).unwrap();
     }
     let now = env.tick();
-    env.runner.step_project("Delta", now).unwrap();
+    env.runner.step_project("Orchard", now).unwrap();
     let t = env.ticket(&id);
     let old_tree = env.worktrees.join(&id);
     assert_eq!(t.tree.as_deref(), Some(old_tree.as_path()));
@@ -3280,7 +3280,7 @@ fn moving_the_worktree_root_moves_idle_trees_and_repoints_lanes_and_projects() {
     env.sb().stop(&investigator, now);
     for _ in 0..5 {
         let now = env.tick();
-        env.runner.step_project("Delta", now).unwrap();
+        env.runner.step_project("Orchard", now).unwrap();
     }
     assert_eq!(env.pending(&id).len(), 1);
     let now = env.tick();
@@ -3298,7 +3298,7 @@ fn moving_the_worktree_root_moves_idle_trees_and_repoints_lanes_and_projects() {
     assert_eq!(
         repo.moved,
         vec![(
-            env.data.repo_dir("Delta"),
+            env.data.repo_dir("Orchard"),
             old_tree.clone(),
             new_tree.clone()
         )]
@@ -3353,7 +3353,7 @@ fn a_query_the_app_could_not_answer_leaves_the_attempt_running() {
 fn a_recovered_reply_is_kept_even_when_the_pass_changes_nothing_else() {
     let (mut env, id) = workspace_env(&["type:bug"]);
     let now = env.tick();
-    env.runner.step_project("Delta", now).unwrap();
+    env.runner.step_project("Orchard", now).unwrap();
     let t = env.ticket(&id);
     let investigator = session_of(&t, "investigate");
     std::fs::write(artifact_of(&t, "investigate", "notes"), "# notes").unwrap();
@@ -3363,14 +3363,14 @@ fn a_recovered_reply_is_kept_even_when_the_pass_changes_nothing_else() {
     env.sb().drop_reply_for = Some("session.notes".into());
     for _ in 0..5 {
         let now = env.tick();
-        env.runner.step_project("Delta", now).unwrap();
+        env.runner.step_project("Orchard", now).unwrap();
     }
     assert_eq!(env.pending(&id).len(), 1);
     let unanswered = |t: &Ticket| t.ledger.iter().filter(|o| o.reply.is_none()).count();
     let t = env.ticket(&id);
     assert!(unanswered(&t) <= 1, "{:#?}", t.ledger);
     let now = env.tick();
-    env.runner.step_project("Delta", now).unwrap();
+    env.runner.step_project("Orchard", now).unwrap();
     let t = env.ticket(&id);
     assert_eq!(unanswered(&t), 0, "recovered and kept: {:#?}", t.ledger);
     assert_eq!(
@@ -3379,7 +3379,7 @@ fn a_recovered_reply_is_kept_even_when_the_pass_changes_nothing_else() {
         "sent once, recovered once, then left alone"
     );
     let now = env.tick();
-    env.runner.step_project("Delta", now).unwrap();
+    env.runner.step_project("Orchard", now).unwrap();
     assert_eq!(env.sb().kinds_called("session.notes"), 2);
 }
 
@@ -3389,18 +3389,18 @@ fn a_recovered_reply_is_kept_even_when_the_pass_changes_nothing_else() {
 fn the_trust_question_is_answered_only_where_the_policy_says_so() {
     let (mut env, id) = workspace_env(&["type:bug"]);
     let now = env.tick();
-    env.runner.step_project("Delta", now).unwrap();
+    env.runner.step_project("Orchard", now).unwrap();
     let investigator = session_of(&env.ticket(&id), "investigate");
     env.sb().session_mut(&investigator).trust_question = true;
     let now = env.tick();
-    env.runner.step_project("Delta", now).unwrap();
+    env.runner.step_project("Orchard", now).unwrap();
     {
         let sb = env.sb();
         assert_eq!(sb.trusted, vec![investigator.clone()]);
         assert!(!sb.session(&investigator).trust_question);
     }
     let now = env.tick();
-    env.runner.step_project("Delta", now).unwrap();
+    env.runner.step_project("Orchard", now).unwrap();
     assert_eq!(env.sb().trusted.len(), 1, "answered once");
     // The Switchboard pipeline says nothing, so its agent waits.
     let mut plain = Env::new();
@@ -3417,16 +3417,16 @@ fn the_trust_question_is_answered_only_where_the_policy_says_so() {
 fn workspace_env(labels: &[&str]) -> (Env, String) {
     let mut env = Env::new();
     let text = WORKSPACE.replace("{worktrees}", &env.worktrees.display().to_string());
-    std::fs::write(env.data.pipeline("Delta"), text).unwrap();
+    std::fs::write(env.data.pipeline("Orchard"), text).unwrap();
     let now = env.tick();
     let id = env
         .runner
         .take(
-            "Delta",
-            &std::fs::read_to_string(env.data.pipeline("Delta")).unwrap(),
+            "Orchard",
+            &std::fs::read_to_string(env.data.pipeline("Orchard")).unwrap(),
             SourceSnapshot {
                 kind: "github".into(),
-                identity: "k3/delta-workspace#42".into(),
+                identity: "k3/orchard-workspace#42".into(),
                 number: Some(42),
                 title: "Asset report column missing".into(),
                 body: String::new(),
@@ -3446,13 +3446,13 @@ fn workspace_env(labels: &[&str]) -> (Env, String) {
 fn a_workspace_ticket_gets_the_workspace_tree_with_every_lane_inside_it() {
     let (mut env, id) = workspace_env(&["area:backend", "type:bug"]);
     let now = env.tick();
-    env.runner.step_project("Delta", now).unwrap();
+    env.runner.step_project("Orchard", now).unwrap();
     let t = env.ticket(&id);
     let tree = env.worktrees.join(&id);
     assert_eq!(t.tree.as_deref(), Some(tree.as_path()), "{t:#?}");
     assert_eq!(t.lanes.len(), 2);
-    assert_eq!(t.lanes[0].worktree, tree.join("delta-backend"));
-    assert_eq!(t.lanes[1].worktree, tree.join("delta-frontend"));
+    assert_eq!(t.lanes[0].worktree, tree.join("orchard-backend"));
+    assert_eq!(t.lanes[1].worktree, tree.join("orchard-frontend"));
     assert!(
         t.lanes
             .iter()
@@ -3462,7 +3462,7 @@ fn a_workspace_ticket_gets_the_workspace_tree_with_every_lane_inside_it() {
         t.lanes.iter().all(|l| !l.setup_done),
         "setups wait for an agent"
     );
-    for name in ["Delta", "Delta@backend", "Delta@frontend"] {
+    for name in ["Orchard", "Orchard@backend", "Orchard@frontend"] {
         assert!(env.data.repo_dir(name).exists(), "clone {name}");
     }
     let sb = env.sb();
@@ -3487,7 +3487,7 @@ fn a_workspace_ticket_gets_the_workspace_tree_with_every_lane_inside_it() {
 fn the_label_hints_choose_the_lanes_and_only_those_get_a_planner() {
     let (mut env, id) = workspace_env(&["area:backend"]);
     let now = env.tick();
-    env.runner.step_project("Delta", now).unwrap();
+    env.runner.step_project("Orchard", now).unwrap();
     let t = env.ticket(&id);
     let investigator = session_of(&t, "investigate");
     std::fs::write(artifact_of(&t, "investigate", "notes"), "# notes").unwrap();
@@ -3495,7 +3495,7 @@ fn the_label_hints_choose_the_lanes_and_only_those_get_a_planner() {
     env.sb().stop(&investigator, now);
     for _ in 0..8 {
         let now = env.tick();
-        env.runner.step_project("Delta", now).unwrap();
+        env.runner.step_project("Orchard", now).unwrap();
         if env.ticket(&id).attempts_of("plan").next().is_some() {
             break;
         }
@@ -3531,7 +3531,7 @@ fn the_label_hints_choose_the_lanes_and_only_those_get_a_planner() {
 fn without_a_hint_the_lanes_are_asked_and_the_answer_chooses() {
     let (mut env, id) = workspace_env(&["type:bug"]);
     let now = env.tick();
-    env.runner.step_project("Delta", now).unwrap();
+    env.runner.step_project("Orchard", now).unwrap();
     let t = env.ticket(&id);
     let investigator = session_of(&t, "investigate");
     std::fs::write(artifact_of(&t, "investigate", "notes"), "# notes").unwrap();
@@ -3539,7 +3539,7 @@ fn without_a_hint_the_lanes_are_asked_and_the_answer_chooses() {
     env.sb().stop(&investigator, now);
     for _ in 0..5 {
         let now = env.tick();
-        env.runner.step_project("Delta", now).unwrap();
+        env.runner.step_project("Orchard", now).unwrap();
     }
     let pending = env.pending(&id);
     assert_eq!(pending.len(), 1, "{pending:#?}");
@@ -3551,7 +3551,7 @@ fn without_a_hint_the_lanes_are_asked_and_the_answer_chooses() {
         .unwrap();
     for _ in 0..4 {
         let now = env.tick();
-        env.runner.step_project("Delta", now).unwrap();
+        env.runner.step_project("Orchard", now).unwrap();
     }
     let t = env.ticket(&id);
     assert!(t.lanes.iter().all(|l| l.chosen));

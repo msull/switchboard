@@ -107,18 +107,18 @@ dirty tree is a decision.
 
 Added the root context: a Switchboard project at the pipeline's root
 per ticket, used by `investigate` and by joined stages, which are given
-every lane's path and head commit. Delta's investigation now says
+every lane's path and head commit. Orchard's investigation now says
 `context = "root"`. The `try` stage was split: `deploy` runs in
 `lane:backend` and is skipped when no backend lane was cut, in which
-case the frontend is tried against what `sully-dev` already runs and
+case the frontend is tried against what `my-dev` already runs and
 the `tried` decision says so. The tester links and starts the
 frontend worktree itself; the original checkout's `webserver` service
 is no longer assumed to serve the ticket's code.
 
-## 8. The Delta deploy gate — accepted
+## 8. The Orchard deploy gate — accepted
 
 One owner: Dispatch's command gate deploys, after running
-`inv link-env --env-name sully-dev` in the worktree in the same
+`inv link-env --env-name my-dev` in the worktree in the same
 command, so the target is established rather than inherited. The lane's
 `setup` links too. The deployed commit is recorded on the attempt, the
 tester is told it and told not to deploy, and the `tried` decision

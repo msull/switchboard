@@ -349,11 +349,11 @@ mod tests {
                 note: Some("only that".into()),
             },
             Body::Queue {
-                project: "Delta".into(),
+                project: "Orchard".into(),
                 order: vec!["t2".into(), "t1".into()],
             },
             Body::Take {
-                project: "Delta".into(),
+                project: "Orchard".into(),
                 issue: "104".into(),
             },
             Body::Resume {
@@ -386,7 +386,7 @@ mod tests {
                 data_dir: "/d".into(),
                 worktrees: "/wt".into(),
                 projects: vec![ProjectView {
-                    name: "Delta".into(),
+                    name: "Orchard".into(),
                     queue: vec!["t1".into()],
                     slots: 2,
                     waiting_on_me: 2,

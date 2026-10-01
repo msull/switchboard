@@ -1507,7 +1507,7 @@ projects through the new `project.root` command), so the user's
 checkout is never read or touched and a
 ticket starts from what the remote has now. Every stage runs in that
 tree, under one Switchboard project per ticket named `#<n> <title>`
-and rooted there. A lane with a `repo` of its own (Delta's workspace
+and rooted there. A lane with a `repo` of its own (Orchard's workspace
 holds three) is Dispatch's clone of that repository too, cut as a
 worktree at the lane's path inside the ticket's tree; every lane is
 cut before the first stage, the `lanes` decision only chooses which

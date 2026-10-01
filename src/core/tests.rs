@@ -5401,7 +5401,7 @@ mod dispatch_page {
             data_dir: "/dispatch".into(),
             worktrees: "/wt".into(),
             projects: vec![ProjectView {
-                name: "Delta".into(),
+                name: "Orchard".into(),
                 queue: vec!["t1".into()],
                 slots: 2,
                 waiting_on_me: 2,
@@ -5410,7 +5410,7 @@ mod dispatch_page {
             }],
             tickets: vec![TicketView {
                 id: "t1".into(),
-                project: "Delta".into(),
+                project: "Orchard".into(),
                 number: Some(104),
                 title: "One file per entry".into(),
                 state: "active".into(),

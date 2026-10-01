@@ -574,7 +574,7 @@ fn console(cx: &mut DrawCtx<'_>, ui: &mut Ui) {
         let response = ui.add_sized(
             [width.max(120.0), 24.0],
             egui::TextEdit::singleline(&mut cx.state.dispatch_console_draft)
-                .hint_text("decisions · status · take Delta 104 · !any shell line")
+                .hint_text("decisions · status · take <project> 104 · !any shell line")
                 .font(egui::TextStyle::Monospace),
         );
         let submit = response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));

@@ -2,7 +2,7 @@
 
 Both claims were checked: sessions, runs and working sets can be
 removed from the window (`src/ui/cards.rs`, `src/ui/workflow.rs`,
-`src/ui/runs.rs`, `src/ui/dialogs.rs`), and the Delta admin frontend
+`src/ui/runs.rs`, `src/ui/dialogs.rs`), and the Orchard admin frontend
 is a Create React App that owns port 3000 by default and takes `PORT`
 from the environment. Both items are accepted.
 
@@ -26,7 +26,7 @@ Restricting deletion was not chosen: it would need a new refusal path
 in four UI surfaces and an explanation in each, for a case the log
 already makes safe.
 
-## 2. Delta service binding — accepted
+## 2. Orchard service binding — accepted
 
 Services are now per lane and conditional. `services` names lanes,
 each started only if the ticket cut it, and a template field for one

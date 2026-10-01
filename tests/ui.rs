@@ -3793,7 +3793,7 @@ fn dispatch_status() -> switchboard::ports::dispatch::Status {
         worktrees: "/wt".into(),
         projects: vec![
             ProjectView {
-                name: "Delta".into(),
+                name: "Orchard".into(),
                 queue: vec!["t1".into()],
                 slots: 2,
                 waiting_on_me: 2,
@@ -3812,7 +3812,7 @@ fn dispatch_status() -> switchboard::ports::dispatch::Status {
         tickets: vec![
             TicketView {
                 id: "t1".into(),
-                project: "Delta".into(),
+                project: "Orchard".into(),
                 number: Some(104),
                 title: "One file per entry".into(),
                 state: "active".into(),
@@ -3962,9 +3962,9 @@ fn ticket_page_shows_the_attempts_pull_request() {
         state: "running".into(),
         pr: Some(PullRequestView {
             provider: "github".into(),
-            repo: "msull/simplesingletable".into(),
+            repo: "example-org/widgets".into(),
             number: 20,
-            url: "https://github.com/msull/simplesingletable/pull/20".into(),
+            url: "https://github.com/example-org/widgets/pull/20".into(),
             head: "fa62f3f78577".into(),
             checks: "pending".into(),
         }),
@@ -4025,7 +4025,7 @@ fn dispatch_page_answers_a_decision_with_a_click() {
     click(&mut harness, "Dispatch");
     assert!(actions(&harness).contains(&AppAction::ShowDispatch));
     harness.get_by_label("Which lanes does #104 need?");
-    // Narrowed to another project, Delta's decision and tickets go.
+    // Narrowed to another project, Orchard's decision and tickets go.
     // The chip comes before the project's own section heading.
     harness
         .query_all_by_label("PTA")

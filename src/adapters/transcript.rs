@@ -753,8 +753,8 @@ mod tests {
     fn shell_write_targets() {
         let t = |c: &str| shell_write_target(c).map(|p| p.display().to_string());
         assert_eq!(
-            t("cd /w/delta && cat > plans/a.md <<'EOF'\n# hi\nEOF"),
-            Some("/w/delta/plans/a.md".into())
+            t("cd /w/orchard && cat > plans/a.md <<'EOF'\n# hi\nEOF"),
+            Some("/w/orchard/plans/a.md".into())
         );
         assert_eq!(t("cat >plans/a.md <<EOF"), Some("plans/a.md".into()));
         assert_eq!(t("echo x >> \"/abs/b.md\""), Some("/abs/b.md".into()));

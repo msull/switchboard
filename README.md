@@ -75,7 +75,7 @@ can set them up for you:
   "services": [
     { "name": "web", "command": "npm run dev", "autostart": true }
   ],
-  "show": ["manager", "delta-backend"]
+  "show": ["manager", "orchard-backend"]
 }
 ```
 

@@ -50,7 +50,7 @@ Switchboard's `implement` reads the one the review finalized. A
 workflow stage copies its `subject` into its own attempt directory and
 runs on the copy, which keeps the original auditable and gives each
 attempt its own round files. A skipped stage's fields render as
-`unknown (deploy skipped)` and the Delta `try` prompt says what that
+`unknown (deploy skipped)` and the Orchard `try` prompt says what that
 means.
 
 ## 4. Idle is not completion — accepted
@@ -74,7 +74,7 @@ before and after the run; a dirty tree either side is a decision. Every
 code-dependent result records the set of lane heads it was made
 against, and a moved head, whether by an agent or a push from your
 machine, voids every result made against the old set and returns the
-ticket to the earliest voided stage. For Delta that is `implement`'s
+ticket to the earliest voided stage. For Orchard that is `implement`'s
 checks, then `deploy`, `try` and `tried` again before `ready`, so there
 is no path to `merge` on old test evidence.
 

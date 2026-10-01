@@ -333,14 +333,17 @@ mod tests {
     #[test]
     fn a_github_remote_is_read_in_every_spelling_and_others_are_not() {
         for url in [
-            "git@github.com:msull/simplesingletable.git",
-            "https://github.com/msull/simplesingletable",
-            "https://github.com/msull/simplesingletable.git",
-            "ssh://git@github.com/msull/simplesingletable.git",
+            "git@github.com:example-org/widgets.git",
+            "https://github.com/example-org/widgets",
+            "https://github.com/example-org/widgets.git",
+            "ssh://git@github.com/example-org/widgets.git",
         ] {
-            assert_eq!(github_repo(url).as_deref(), Some("msull/simplesingletable"));
+            assert_eq!(github_repo(url).as_deref(), Some("example-org/widgets"));
         }
-        assert_eq!(github_repo("git@bitbucket.org:cainfosec/delta.git"), None);
+        assert_eq!(
+            github_repo("git@bitbucket.org:example-co/orchard-frontend.git"),
+            None
+        );
         assert_eq!(github_repo("https://github.com/msull"), None);
     }
 }

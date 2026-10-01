@@ -322,14 +322,14 @@ mod tests {
     #[test]
     fn a_bitbucket_remote_is_read_in_every_spelling_and_others_are_not() {
         for url in [
-            "git@bitbucket.org:cainfosec/delta-backend.git",
-            "https://bitbucket.org/cainfosec/delta-backend.git",
-            "https://sully@bitbucket.org/cainfosec/delta-backend",
-            "ssh://git@bitbucket.org/cainfosec/delta-backend.git",
+            "git@bitbucket.org:example-co/orchard-backend.git",
+            "https://bitbucket.org/example-co/orchard-backend.git",
+            "https://me@bitbucket.org/example-co/orchard-backend",
+            "ssh://git@bitbucket.org/example-co/orchard-backend.git",
         ] {
             assert_eq!(
                 bitbucket_repo(url).as_deref(),
-                Some("cainfosec/delta-backend")
+                Some("example-co/orchard-backend")
             );
         }
         assert_eq!(bitbucket_repo("git@github.com:msull/switchboard.git"), None);
