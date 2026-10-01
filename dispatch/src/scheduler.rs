@@ -507,19 +507,16 @@ impl Runner {
 
     // --- one step
 
-    /// Advance one ticket as far as this poll allows.
-    pub fn step(
+    /// A request whose reply never came (the socket failed, or a
+    /// restart) is resolved before anything else is asked. Recovery
+    /// sends only queries and idempotent requests, so it launches
+    /// nothing.
+    fn recover_unanswered(
         &mut self,
         t: &mut Ticket,
         ps: &mut ProjectState,
-        p: &Pipeline,
         now_ms: u64,
     ) -> Result<()> {
-        if !t.active() {
-            return Ok(());
-        }
-        // A request whose reply never came (the socket failed, or a
-        // restart) is resolved before anything else is asked.
         let pending: Vec<usize> = t
             .ledger
             .iter()
@@ -535,6 +532,21 @@ impl Runner {
         if recovered {
             self.save_ticket(t, now_ms)?;
         }
+        Ok(())
+    }
+
+    /// Advance one ticket as far as this poll allows.
+    pub fn step(
+        &mut self,
+        t: &mut Ticket,
+        ps: &mut ProjectState,
+        p: &Pipeline,
+        now_ms: u64,
+    ) -> Result<()> {
+        if !t.active() {
+            return Ok(());
+        }
+        self.recover_unanswered(t, ps, now_ms)?;
         self.fail_stranded(t, ps, now_ms)?;
         self.act_on_answers(t, ps, p, now_ms)?;
         if !t.active() {
@@ -554,17 +566,16 @@ impl Runner {
             self.close(t, ps, "every stage is done", now_ms)?;
             return Ok(());
         };
-        // A pending decision for this stage holds a gate-only stage,
-        // whose questions are about the whole stage. The other kinds
-        // hold per context (`held_in`): a decision holds the context it
-        // is about, and one about no attempt holds every context.
-        // Attempts still running are watched either way.
-        let held = t
-            .decisions
-            .iter()
-            .any(|d| d.pending() && d.stage == stage.name);
+        // Agent, workflow and review stages are held per context
+        // (`held_in`); attempts still running are watched either way.
         match stage.kind() {
             StageKind::GateOnly => {
+                // A gate-only stage's questions are about the whole
+                // stage, so any pending one for it holds it.
+                let held = t
+                    .decisions
+                    .iter()
+                    .any(|d| d.pending() && d.stage == stage.name);
                 // The merge decision is pending by design while the
                 // provider is watched, so that gate polls through it.
                 let watches = matches!(
@@ -2482,7 +2493,7 @@ impl Runner {
                     // later human gate: the note is the answer.
                     all_complete = false;
                     let held = held_in(t, &stage.name, &ctx);
-                    let sent_back = t.rework.contains_key(&rework_key(&stage.name, &ctx));
+                    let sent_back = sent_back(t, stage, &ctx);
                     if !held && (may_rerun(t, &a) || sent_back) {
                         self.start_agent(
                             t,
@@ -3252,6 +3263,9 @@ impl Runner {
             reason: reason.into(),
         };
         attempt.ended_ms = Some(now_ms);
+        // Kept on the attempt, not only on the question: a park past
+        // `max_reruns` asks nothing, and a resume asks afresh.
+        attempt.failed_at_checks = options.contains(&"check");
         let ctx = attempt.context.clone();
         log::warn!("ticket {} {stage}/{ctx} attempt {n} failed: {reason}", t.id);
         self.save_ticket(t, now_ms)?;
@@ -3304,14 +3318,15 @@ impl Runner {
     ) -> Result<()> {
         let (what, options): (String, &[&str]) = match &a.state {
             AttemptState::Failed { reason } => {
-                // A failure at the checks was offered `check` too; the
-                // earlier question about this attempt says which it was.
-                let at_checks = t
-                    .decisions
-                    .iter()
-                    .rev()
-                    .find(|d| d.name == "rerun" && d.attempt == Some((a.stage.clone(), a.n)))
-                    .is_some_and(|d| d.options.iter().any(|o| o == "check"));
+                // A failure at the checks was offered `check` too. A
+                // ticket written before the attempt kept that has only
+                // the earlier question about it to say so.
+                let at_checks = a.failed_at_checks
+                    || t.decisions
+                        .iter()
+                        .rev()
+                        .find(|d| d.name == "rerun" && d.attempt == Some((a.stage.clone(), a.n)))
+                        .is_some_and(|d| d.options.iter().any(|o| o == "check"));
                 let options: &[&str] = if at_checks {
                     &["rerun", "check", "park"]
                 } else {
@@ -3346,44 +3361,38 @@ impl Runner {
     }
 
     /// The stage's re-asks alone, for a ticket that may not start
-    /// anything this pass: the same question `asks_again` lets a stage
-    /// ask, for each context's latest attempt. A ledger entry still
-    /// without its reply leaves it to `step`, which resolves those first.
+    /// anything this pass: unanswered requests are recovered as `step`
+    /// recovers them, then the same question `asks_again` lets a stage
+    /// ask, for each context's latest attempt. Returns how many
+    /// questions are now pending that were not before.
     fn ask_again_unslotted(
         &mut self,
         t: &mut Ticket,
         ps: &mut ProjectState,
         p: &Pipeline,
         now_ms: u64,
-    ) -> Result<()> {
-        if t.ledger.iter().any(|o| o.reply.is_none()) {
-            return Ok(());
-        }
-        let Some(stage) = p.stages.get(t.stage) else {
-            return Ok(());
-        };
-        let kind = stage.kind();
-        if kind == StageKind::GateOnly {
-            return Ok(());
-        }
-        for (ctx, _, _) in Self::contexts(t, p, stage) {
-            let Some(a) = t
-                .attempts
-                .iter()
-                .filter(|a| a.stage == stage.name && a.context == ctx)
-                .max_by_key(|a| a.n)
-                .cloned()
-            else {
-                continue;
-            };
-            // A workflow stage takes no note, so nothing sends it back.
-            let sent_back = kind != StageKind::Workflow
-                && t.rework.contains_key(&rework_key(&stage.name, &ctx));
-            if asks_again(t, &a, sent_back) {
-                self.ask_rerun(t, ps, &a, now_ms)?;
+    ) -> Result<usize> {
+        let before = t.pending_decisions().len();
+        self.recover_unanswered(t, ps, now_ms)?;
+        if let Some(stage) = p.stages.get(t.stage)
+            && stage.kind() != StageKind::GateOnly
+        {
+            for (ctx, _, _) in Self::contexts(t, p, stage) {
+                let Some(a) = t
+                    .attempts
+                    .iter()
+                    .filter(|a| a.stage == stage.name && a.context == ctx)
+                    .max_by_key(|a| a.n)
+                    .cloned()
+                else {
+                    continue;
+                };
+                if asks_again(t, &a, sent_back(t, stage, &ctx)) {
+                    self.ask_rerun(t, ps, &a, now_ms)?;
+                }
             }
         }
-        Ok(())
+        Ok(t.pending_decisions().len().saturating_sub(before))
     }
 
     // --- workflow stages
@@ -3433,7 +3442,7 @@ impl Runner {
                             next_n(t, &stage.name),
                             now_ms,
                         )?;
-                    } else if asks_again(t, &a, false) {
+                    } else if asks_again(t, &a, sent_back(t, stage, &ctx)) {
                         self.ask_rerun(t, ps, &a, now_ms)?;
                     }
                 }
@@ -3807,7 +3816,7 @@ impl Runner {
                 if stepped.took_slot {
                     running += 1;
                 }
-                pending += stepped.asked;
+                pending = pending.saturating_add(stepped.asked);
                 if let Some(p) = stepped.pipeline {
                     pipeline = Some(p);
                 }
@@ -3878,14 +3887,16 @@ impl Runner {
             if !may_start {
                 // Asking launches nothing, so a resumed ticket's
                 // questions do not wait for a slot.
-                let before = t.pending_decisions().len();
-                if let Err(e) = self.ask_again_unslotted(t, ps, &p, now_ms) {
-                    log::error!("ticket {}: {e}", t.id);
-                }
-                let asked = t.pending_decisions().len().saturating_sub(before);
+                let asked = match self.ask_again_unslotted(t, ps, &p, now_ms) {
+                    Ok(asked) => u32::try_from(asked).unwrap_or(u32::MAX),
+                    Err(e) => {
+                        log::error!("ticket {}: {e}", t.id);
+                        0
+                    }
+                };
                 return Ok(Some(Stepped {
                     took_slot: false,
-                    asked: u32::try_from(asked).unwrap_or(u32::MAX),
+                    asked,
                     pipeline: None,
                 }));
             }
@@ -4440,6 +4451,7 @@ pub(crate) fn new_attempt(
         artifacts,
         rounds: Vec::new(),
         extra_pass: false,
+        failed_at_checks: false,
         settle: BTreeMap::new(),
         stop_at_ms: None,
         polls_since_stop: 0,
@@ -4600,6 +4612,12 @@ pub(crate) fn held_in(t: &Ticket, stage: &str, ctx: &str) -> bool {
         })
 }
 
+/// Whether a note sent this context of the stage back, so the note is
+/// the answer to its failure. A workflow stage takes no note.
+pub(crate) fn sent_back(t: &Ticket, stage: &Stage, ctx: &str) -> bool {
+    stage.kind() != StageKind::Workflow && t.rework.contains_key(&rework_key(&stage.name, ctx))
+}
+
 /// Whether the latest attempt in its context, failed or cancelled, is
 /// to be asked about again: nothing holds the context, no rerun is
 /// authorised or in flight, and no note sent it back (the note is the
@@ -4616,7 +4634,7 @@ pub(crate) fn asks_again(t: &Ticket, a: &Attempt, sent_back: bool) -> bool {
 
 /// A rerun question about this attempt still open, or answered and
 /// waiting for the replaced attempt to be retired.
-pub(crate) fn rerun_in_flight(t: &Ticket, a: &Attempt) -> bool {
+fn rerun_in_flight(t: &Ticket, a: &Attempt) -> bool {
     t.decisions.iter().any(|d| {
         d.name == "rerun"
             && d.attempt.as_ref() == Some(&(a.stage.clone(), a.n))
