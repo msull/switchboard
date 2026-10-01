@@ -837,7 +837,12 @@ mod tests {
         let spec = SpawnSpec {
             id: id.clone(),
             cwd: std::env::temp_dir(),
-            command: Some(vec!["sh".into(), "-c".into(), "exit 3".into()]),
+            // Not a bare `exit`: tmux 3.4 on a Linux runner has left a
+            // pane that exited during its own spawn dead with no exit
+            // status, its child never reaped, for as long as we waited.
+            // A command that lives into the pane's first read exits
+            // through the ordinary path on every tmux seen.
+            command: Some(vec!["sh".into(), "-c".into(), "sleep 0.3; exit 3".into()]),
             env: Vec::new(),
             scrollback: None,
         };
