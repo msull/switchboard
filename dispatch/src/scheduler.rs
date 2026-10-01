@@ -470,6 +470,7 @@ impl Runner {
             body: Some(body.clone()),
             reply: None,
             error: None,
+            asked: false,
         });
         self.save_ticket(t, now_ms)?;
         let result = self.port.call(&Request::new(op.clone(), body));
@@ -521,7 +522,7 @@ impl Runner {
             .ledger
             .iter()
             .enumerate()
-            .filter(|(_, o)| o.reply.is_none())
+            .filter(|(_, o)| o.unresolved())
             .map(|(i, _)| i)
             .collect();
         let recovered = !pending.is_empty();
@@ -3362,9 +3363,11 @@ impl Runner {
 
     /// The stage's re-asks alone, for a ticket that may not start
     /// anything this pass: unanswered requests are recovered as `step`
-    /// recovers them, then the same question `asks_again` lets a stage
-    /// ask, for each context's latest attempt. Returns how many
-    /// questions are now pending that were not before.
+    /// recovers them, a `park` answer is acted on, then the same
+    /// question `asks_again` lets a stage ask, for each context's
+    /// latest attempt. The other answers wait for `step`, since they
+    /// may launch. Returns how many questions are now pending that were
+    /// not before.
     fn ask_again_unslotted(
         &mut self,
         t: &mut Ticket,
@@ -3374,6 +3377,20 @@ impl Runner {
     ) -> Result<usize> {
         let before = t.pending_decisions().len();
         self.recover_unanswered(t, ps, now_ms)?;
+        if let Some(i) = t
+            .decisions
+            .iter()
+            .position(|d| d.unacted_answer() == Some("park"))
+        {
+            // Marked in memory, written with the parking state, as in
+            // `act_on_answers`.
+            if let DecisionState::Answered { acted, .. } = &mut t.decisions[i].state {
+                *acted = true;
+            }
+            let name = t.decisions[i].name.clone();
+            self.park(t, ps, &format!("parked by hand at decision {name}"), now_ms)?;
+            return Ok(0);
+        }
         if let Some(stage) = p.stages.get(t.stage)
             && stage.kind() != StageKind::GateOnly
         {
