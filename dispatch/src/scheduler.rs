@@ -546,8 +546,11 @@ impl Runner {
             self.close(t, ps, "every stage is done", now_ms)?;
             return Ok(());
         };
-        // A pending decision for this stage holds it, unless attempts
-        // of it are still running and only need watching.
+        // A pending decision for this stage holds a gate-only stage,
+        // whose questions are about the whole stage. The other kinds
+        // hold per context (`held_in`): a decision holds the context it
+        // is about, and one about no attempt holds every context.
+        // Attempts still running are watched either way.
         let held = t
             .decisions
             .iter()
@@ -564,9 +567,9 @@ impl Runner {
                     self.gate_only(t, ps, p, &stage, now_ms)?;
                 }
             }
-            StageKind::Agent => self.agent_stage(t, ps, p, &stage, held, now_ms)?,
-            StageKind::Workflow => self.workflow_stage(t, ps, p, &stage, held, now_ms)?,
-            StageKind::Review => self.review_stage(t, ps, p, &stage, held, now_ms)?,
+            StageKind::Agent => self.agent_stage(t, ps, p, &stage, now_ms)?,
+            StageKind::Workflow => self.workflow_stage(t, ps, p, &stage, now_ms)?,
+            StageKind::Review => self.review_stage(t, ps, p, &stage, now_ms)?,
         }
         Ok(())
     }
@@ -587,11 +590,13 @@ impl Runner {
     }
 
     /// Parking is a sequence, not a flag: the intent is written first,
-    /// open attempts are cancelled (a review run paused so its tick
-    /// cannot start a round), every process on the ticket's list is
-    /// killed, and the ticket reads as parked only once Switchboard
-    /// reports them all gone. `finish_parking` runs the rest on later
-    /// passes if anything is still alive now.
+    /// with every pending decision on the ticket cancelled in the same
+    /// write, the session's waiting mark is cleared and read back, open
+    /// attempts are cancelled (a review run paused so its tick cannot
+    /// start a round), every process on the ticket's list is killed,
+    /// and the ticket reads as parked only once Switchboard reports them
+    /// all gone. `finish_parking` runs the rest on later passes if
+    /// anything is still alive now.
     pub(crate) fn park(
         &mut self,
         t: &mut Ticket,
@@ -603,15 +608,17 @@ impl Runner {
         t.state = TicketState::Parking {
             reason: reason.into(),
         };
+        Self::withdraw_pending(t);
         self.save_ticket(t, now_ms)?;
         self.finish_parking(t, ps, now_ms)
     }
 
-    /// The rest of the sequence, from the saved intent: every open
-    /// attempt cancelled (its run paused and read back as paused),
-    /// everything on the process list killed and read back as gone, and
-    /// only then `Parked`. Run again on every pass until it gets there,
-    /// so a restart at any point resumes it whole.
+    /// The rest of the sequence, from the saved intent: any decision
+    /// still pending withdrawn, the session's waiting mark cleared and
+    /// answered, every open attempt cancelled (its run paused and read
+    /// back as paused), everything on the process list killed and read
+    /// back as gone, and only then `Parked`. Run again on every pass
+    /// until it gets there, so a restart at any point resumes it whole.
     pub(crate) fn finish_parking(
         &mut self,
         t: &mut Ticket,
@@ -621,13 +628,22 @@ impl Runner {
         let TicketState::Parking { reason } = t.state.clone() else {
             return Ok(());
         };
+        // A parking ticket asks nothing. `park` withdraws its questions
+        // with the intent; this catches a record from before that, and
+        // is a no-op otherwise.
+        if Self::withdraw_pending(t) {
+            self.save_ticket(t, now_ms)?;
+        }
+        // The session stops reading as waiting, and parking is not done
+        // until Switchboard has said so.
+        let unmarked = self.unmark_for_parking(t, ps, now_ms)?;
         let open: Vec<Attempt> = t.attempts.iter().filter(|a| a.is_open()).cloned().collect();
         let mut settled = true;
         for a in open {
             settled &= self.cancel_attempt(t, ps, &a, &reason, now_ms)?;
         }
         settled &= self.retire_processes(t, ps, &t.processes.clone(), now_ms)?;
-        if settled {
+        if settled && unmarked {
             log::warn!("ticket {} parked: {reason}", t.id);
             t.state = TicketState::Parked { reason };
             self.save_ticket(t, now_ms)?;
@@ -895,6 +911,75 @@ impl Runner {
         Ok(())
     }
 
+    /// Every pending decision on the ticket withdrawn, in memory; the
+    /// caller's next save writes it. True if there was one.
+    fn withdraw_pending(t: &mut Ticket) -> bool {
+        let mut withdrawn = false;
+        for d in t.decisions.iter_mut().filter(|d| d.pending()) {
+            d.state = DecisionState::Cancelled;
+            withdrawn = true;
+        }
+        withdrawn
+    }
+
+    /// Resolve every `session.waiting` whose reply never came, in ledger
+    /// order and under its own operation id, and only then send `on:
+    /// false` to each session whose last waiting request turned its mark
+    /// on. True once every waiting request on the ledger has a reply and
+    /// no session's last one is `on: true`, or there never was one.
+    ///
+    /// Only waiting requests are replayed here: recovering a lost
+    /// creation can fail an attempt and ask a new question, which a
+    /// parking ticket must not do. The rest wait for startup recovery.
+    fn unmark_for_parking(
+        &mut self,
+        t: &mut Ticket,
+        ps: &mut ProjectState,
+        now_ms: u64,
+    ) -> Result<bool> {
+        let unanswered: Vec<usize> = t
+            .ledger
+            .iter()
+            .enumerate()
+            .filter(|(_, o)| o.kind == "session.waiting" && o.reply.is_none())
+            .map(|(i, _)| i)
+            .collect();
+        let replayed = !unanswered.is_empty();
+        let mut resolved = true;
+        for i in unanswered {
+            self.replay(t, ps, i);
+            // Later requests wait for this one, so an older `on: true`
+            // cannot land after the unmark.
+            if t.ledger[i].reply.is_none() {
+                resolved = false;
+                break;
+            }
+        }
+        if replayed {
+            self.save_ticket(t, now_ms)?;
+        }
+        if !resolved {
+            return Ok(false);
+        }
+        // The session a mark was put on is the one unmarked, even if a
+        // later attempt has a session of its own.
+        for session in still_marked(t) {
+            self.send(
+                t,
+                ps,
+                None,
+                "waiting",
+                Body::SessionWaiting {
+                    session,
+                    on: false,
+                    reason: String::new(),
+                },
+                now_ms,
+            )?;
+        }
+        Ok(still_marked(t).is_empty())
+    }
+
     /// Every answer not yet acted on.
     fn act_on_answers(
         &mut self,
@@ -916,10 +1001,11 @@ impl Runner {
             // The acted mark is set in memory here and reaches disk with
             // the action's own first write (the parking state, the ledger
             // entry, the lane record), never before it: an answer is
-            // either still unacted or its intent is durable. A rerun is
-            // marked only once the replaced attempt is confirmed gone,
-            // below, since `may_rerun` launches on that mark.
-            if name != "rerun"
+            // either still unacted or its intent is durable. The one
+            // exception is a `rerun` answer to a `rerun` decision, marked
+            // only once the replaced attempt is confirmed gone, below,
+            // since `may_rerun` launches on that mark.
+            if !(name == "rerun" && answer == "rerun")
                 && let DecisionState::Answered { acted, .. } = &mut t.decisions[i].state
             {
                 *acted = true;
@@ -961,9 +1047,6 @@ impl Runner {
                     self.unmark(t, ps, now_ms)?;
                 }
                 ("rerun", "check") => {
-                    if let DecisionState::Answered { acted, .. } = &mut t.decisions[i].state {
-                        *acted = true;
-                    }
                     self.check_again(t, ps, attempt.as_ref(), now_ms)?;
                 }
                 ("pr", "recheck") => recheck_pr(t, attempt.as_ref()),
@@ -2331,7 +2414,6 @@ impl Runner {
         ps: &mut ProjectState,
         p: &Pipeline,
         stage: &Stage,
-        held: bool,
         now_ms: u64,
     ) -> Result<()> {
         // A command gate runs after the agent, in its context; the
@@ -2383,9 +2465,11 @@ impl Runner {
                     self.poll_agent(t, ps, &a, stage, &cwd, lane.as_deref(), trust, now_ms)?;
                 }
                 Some(a) => {
-                    // Failed: a rerun waits on its decision. Sent back
-                    // from a later human gate: the note is the answer.
+                    // Failed: a rerun waits on its decision, asked again
+                    // if none is open (after a park). Sent back from a
+                    // later human gate: the note is the answer.
                     all_complete = false;
+                    let held = held_in(t, &stage.name, &ctx);
                     let sent_back = t.rework.contains_key(&rework_key(&stage.name, &ctx));
                     if !held && (may_rerun(t, &a) || sent_back) {
                         self.start_agent(
@@ -2399,11 +2483,13 @@ impl Runner {
                             next_n(t, &stage.name),
                             now_ms,
                         )?;
+                    } else if !held && !rerun_in_flight(t, &a) {
+                        self.ask_rerun(t, ps, &a, now_ms)?;
                     }
                 }
                 None => {
                     all_complete = false;
-                    if !held {
+                    if !held_in(t, &stage.name, &ctx) {
                         let n = next_n(t, &stage.name);
                         self.start_agent(t, ps, p, stage, &ctx, &cwd, lane.as_deref(), n, now_ms)?;
                     }
@@ -3184,6 +3270,39 @@ impl Runner {
         )
     }
 
+    /// A failed or cancelled attempt with no rerun question open about
+    /// it (after a park) is asked about again, under a new id. Nothing
+    /// launches until the answer, and no rerun is spent.
+    pub(crate) fn ask_rerun(
+        &mut self,
+        t: &mut Ticket,
+        ps: &mut ProjectState,
+        a: &Attempt,
+        now_ms: u64,
+    ) -> Result<()> {
+        let what = match &a.state {
+            AttemptState::Failed { reason } => format!("failed: {reason}"),
+            _ => "was cancelled when the ticket parked".to_owned(),
+        };
+        self.ensure_decision(
+            t,
+            ps,
+            Ask {
+                stage: &a.stage,
+                name: "rerun",
+                kind: DecisionKind::Permission,
+                question: format!(
+                    "{} ({}) attempt {} {what}. Run it again?",
+                    a.stage, a.context, a.n
+                ),
+                options: &["rerun", "park"],
+                recommendation: None,
+                attempt: Some((a.stage.clone(), a.n)),
+            },
+            now_ms,
+        )
+    }
+
     // --- workflow stages
 
     fn workflow_stage(
@@ -3192,7 +3311,6 @@ impl Runner {
         ps: &mut ProjectState,
         p: &Pipeline,
         stage: &Stage,
-        held: bool,
         now_ms: u64,
     ) -> Result<()> {
         let contexts = Self::contexts(t, p, stage);
@@ -3220,6 +3338,7 @@ impl Runner {
                 }
                 Some(a) => {
                     all_complete = false;
+                    let held = held_in(t, &stage.name, &ctx);
                     if !held && may_rerun(t, &a) {
                         self.start_workflow(
                             t,
@@ -3231,11 +3350,13 @@ impl Runner {
                             next_n(t, &stage.name),
                             now_ms,
                         )?;
+                    } else if !held && !rerun_in_flight(t, &a) {
+                        self.ask_rerun(t, ps, &a, now_ms)?;
                     }
                 }
                 None => {
                     all_complete = false;
-                    if !held {
+                    if !held_in(t, &stage.name, &ctx) {
                         let n = next_n(t, &stage.name);
                         self.start_workflow(t, ps, p, stage, &ctx, lane.as_deref(), n, now_ms)?;
                     }
@@ -4355,6 +4476,50 @@ pub(crate) fn primary_tree(t: &Ticket, p: &Pipeline) -> Option<PathBuf> {
     } else {
         p.project.root.clone()
     }
+}
+
+/// Whether a pending decision holds this stage in this context: one
+/// about the whole stage (no attempt), or one about an attempt of this
+/// stage in this context. One about an attempt that no longer exists
+/// holds nothing, since there is nothing of that context to protect.
+pub(crate) fn held_in(t: &Ticket, stage: &str, ctx: &str) -> bool {
+    t.decisions
+        .iter()
+        .filter(|d| d.pending() && d.stage == stage)
+        .any(|d| match &d.attempt {
+            None => true,
+            Some((s, n)) => t
+                .attempts
+                .iter()
+                .any(|a| &a.stage == s && a.n == *n && a.context == ctx),
+        })
+}
+
+/// A rerun question about this attempt still open, or answered and
+/// waiting for the replaced attempt to be retired.
+pub(crate) fn rerun_in_flight(t: &Ticket, a: &Attempt) -> bool {
+    t.decisions.iter().any(|d| {
+        d.name == "rerun"
+            && d.attempt.as_ref() == Some(&(a.stage.clone(), a.n))
+            && (d.pending() || d.unacted_answer().is_some())
+    })
+}
+
+/// The sessions whose last waiting request on the ledger turned the
+/// mark on, in the order they were first marked.
+fn still_marked(t: &Ticket) -> Vec<String> {
+    let mut last: Vec<(String, bool)> = Vec::new();
+    for o in &t.ledger {
+        if let Some(Body::SessionWaiting { session, on, .. }) = &o.body {
+            match last.iter_mut().find(|(s, _)| s == session) {
+                Some(entry) => entry.1 = *on,
+                None => last.push((session.clone(), *on)),
+            }
+        }
+    }
+    last.into_iter()
+        .filter_map(|(session, on)| on.then_some(session))
+        .collect()
 }
 
 /// Whether a failed attempt's rerun was authorised and its cleanup done:

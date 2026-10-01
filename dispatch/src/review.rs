@@ -14,8 +14,8 @@ use switchboard_control::{self as wire, Body, Reply};
 
 use crate::pipeline::{Gate, OperatorKind, Pipeline, Stage};
 use crate::scheduler::{
-    Ask, NO_SUCH_SESSION, Runner, SocketDown, env_for, may_rerun, new_attempt, next_n,
-    primary_tree, rework_key, session_kind, vars_for,
+    Ask, NO_SUCH_SESSION, Runner, SocketDown, env_for, held_in, may_rerun, new_attempt, next_n,
+    primary_tree, rerun_in_flight, rework_key, session_kind, vars_for,
 };
 use crate::ticket::{
     Attempt, AttemptKind, AttemptState, DIRTY_POLLS, DecisionKind, GateRun, ProjectState,
@@ -53,7 +53,6 @@ impl Runner {
         ps: &mut ProjectState,
         p: &Pipeline,
         stage: &Stage,
-        held: bool,
         now_ms: u64,
     ) -> Result<()> {
         let contexts = Self::contexts(t, p, stage);
@@ -81,14 +80,17 @@ impl Runner {
                 }
                 Some(a) => {
                     all_complete = false;
+                    let held = held_in(t, &stage.name, &ctx);
                     let sent_back = t.rework.contains_key(&rework_key(&stage.name, &ctx));
                     if !held && (may_rerun(t, &a) || sent_back) {
                         self.start_review(t, ps, p, stage, &ctx, &cwd, lane.as_deref(), now_ms)?;
+                    } else if !held && !rerun_in_flight(t, &a) {
+                        self.ask_rerun(t, ps, &a, now_ms)?;
                     }
                 }
                 None => {
                     all_complete = false;
-                    if !held {
+                    if !held_in(t, &stage.name, &ctx) {
                         self.start_review(t, ps, p, stage, &ctx, &cwd, lane.as_deref(), now_ms)?;
                     }
                 }

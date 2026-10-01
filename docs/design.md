@@ -1600,11 +1600,16 @@ so a lost reply to an idempotent one (`workflow.finalize`,
 `session.kill`, `set.sync`) is sent again as the same operation. An
 attempt with no launch on the books fails rather than waits. Parking
 and a rerun follow the design's cancellation sequence: the intent is
-written, the review run paused and read back as paused, every process
+written (for parking, with every pending decision on the ticket
+cancelled in the same write, and the session's waiting mark then
+cleared and read back), the review run paused and read back as paused, every process
 killed and read back as gone, and only then does the ticket read as
 parked or the rerun's answer count as acted (which is what lets the
 replacement start); the sequence runs from the saved intent on every
-pass, so a restart at any point resumes it whole. An answer's acted
+pass, so a restart at any point resumes it whole. A resumed ticket
+asks `rerun` again, under a new id, about each failed or cancelled
+attempt with no rerun question in flight, and a pending decision holds
+its stage only in the context it is about. An answer's acted
 mark reaches disk only with its action's first write (the parking
 state, the ledger entry, the lane record), so a stop leaves an answer
 either still unacted or with a durable intent. A record's backup is
@@ -1619,7 +1624,10 @@ git repository as its own workspace for the folder-trust dialog, so the
 first agent in each lane's worktree blocks on that dialog until it is
 answered in the pane once (a plain directory under a trusted parent
 inherits the trust; a fresh repository does not). Nothing in
-Switchboard or Dispatch writes Claude's trust file.
+Switchboard or Dispatch writes Claude's trust file. Two more: when two
+answers arrive in one pass and the first is `park`, the second stays
+answered and unacted and is acted on after a resume; and `close` (and
+`retake`, which closes by it) leaves pending decisions pending.
 
 ## Global workspace status (2026-10-01)
 

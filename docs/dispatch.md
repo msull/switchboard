@@ -312,13 +312,24 @@ attempt's completion evidence is recorded, so nothing of a finished
 stage keeps running, and the record stays for viewing.
 
 Rejecting a decision cancels the ticket's current attempt, and
-cancelling is a sequence, not a flag: write the intent on the record;
-pause any review run (`workflow.pause`) so its tick cannot start a
+cancelling is a sequence, not a flag: write the intent on the record,
+with every pending decision on the ticket cancelled in the same write;
+clear the session's waiting mark and read it back; pause any review run (`workflow.pause`) so its tick cannot start a
 round; kill everything on the ticket's process list that is still
 alive, including a service started for an earlier stage; read each
 back until Switchboard reports it gone; for an in-place lane, confirm
 the tree is clean; and only then release the holds and move the ticket
-to `parked`, where you can requeue or close it. Releasing a hold at
+to `parked`, where you can requeue or close it. A cancelled decision
+cannot be answered, and a parked ticket counts nothing against
+`waiting_on_me`. A ticket already parked by a Dispatch from before this
+rule keeps its leftover questions until it is resumed or closed. A
+resumed ticket asks again about each failed or cancelled attempt under
+a new decision id; nothing reruns without an answer.
+
+A pending decision holds its stage in the context it is about: one
+about a lane's attempt holds that lane only, so another lane's first
+launch or authorised rerun goes ahead, and one about no attempt holds
+every context. Releasing a hold at
 the end of a stage runs the same check over the ticket's whole
 process list, not the current attempt's. If any writer cannot be confirmed gone or the
 tree cannot be made clean, the holds stay and a decision says why.
@@ -1393,6 +1404,10 @@ and one against the real one:
 | The tree is dirty when the agent stops | No check runs; a failed attempt and the same decision |
 | A stage fails past the policy's `max_reruns` in one context | The ticket parks with the count and the last reason; nothing is asked |
 | Free space on the worktrees' volume is under the policy's `min_free_gb` | Nothing new starts and `status` says why; running attempts are still watched; the hold lifts on its own (`a_full_disk_holds_new_starts_until_space_is_back`) |
+| A ticket with two pending decisions is parked from one | The other is cancelled in the same write as the parking intent; the park answer reads acted; the session is unmarked before the ticket reads parked; none is pending, `waiting_on_me` no longer counts it, the cancelled one cannot be answered; a resume asks a fresh rerun per lane and launches nothing (`parking_cancels_every_pending_decision_and_a_resume_asks_afresh`) |
+| The pass dies at the unmark after the parking intent | No decision is pending on disk; the next pass, without a restart, sends the same operation again and only then reads parked (`a_park_cut_off_after_its_intent_asks_nothing_and_unmarks_on_the_next_pass`) |
+| An earlier waiting mark's reply was lost when the ticket parks | It is resolved under its own id before the unmark is sent; parked only with every waiting request answered, and a restart's recovery does not turn the mark back on (`an_unanswered_mark_is_resolved_before_the_unmark_and_stays_off_after_a_restart`) |
+| Two lanes' questions after a resume, the pass cut off between them | The next pass asks the missing one and not the other again; an answered lane starts while the other lane's question is open (`a_pass_cut_off_between_two_lanes_reasks_finishes_on_the_next_pass`) |
 | The runner restarts while the checks run | The lost check starts again on the same head; no second agent |
 | `ready` with the PR's checks pending, then green | A gate-only attempt per context, no agent; no PR is a `pr` decision (`recheck`, `park`); pending waits and reads the provider once a minute; green at the tree's head completes the attempt bound to that head |
 | The PR is at another head, its checks are red, or it has no checks | A `pr` decision naming which; `recheck` reads again at once; the same attempt throughout; `checks = "none"` on the stage passes on the PR at the head alone |
