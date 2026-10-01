@@ -14,9 +14,9 @@ const CARD: (u32, u32) = (10, 8);
 /// Make the set once, then keep it showing the current session of every
 /// ticket in flight or waiting, top to bottom in queue order. The
 /// request goes on `owner`'s ledger when one is given (a closing ticket
-/// clearing its own card), else on the first shown ticket's; with
-/// neither there is nothing to write it under, and that is an error,
-/// never a sync pretended.
+/// clearing its own card), else on the first shown ticket's, else on
+/// that of a ticket the set still shows; with none there is nothing to
+/// write it under, and that is an error, never a sync pretended.
 pub fn sync_queue(
     runner: &mut Runner,
     ps: &mut ProjectState,
@@ -52,10 +52,24 @@ pub fn sync_queue(
         .iter()
         .find(|t| shown.iter().any(|(id, _)| id == &t.id))
         .cloned();
-    let t: &mut Ticket = match (owner, first.as_mut()) {
-        (Some(owner), _) => owner,
-        (None, Some(first)) => first,
-        (None, None) => bail!("nothing shown and no closing ticket to sync the set under"),
+    // Nothing to show any more, but a card is still up (a close stopped
+    // between clearing its card and saving the project, or one from
+    // before closes cleared their own): the set is emptied under the
+    // ledger of a ticket it still shows, which is saved with the reply.
+    let mut stale = None;
+    if owner.is_none() && first.is_none() {
+        // A closing ticket clears its own card under its own ledger.
+        stale = ps
+            .shown
+            .iter()
+            .filter_map(|(id, _)| runner.load_ticket(id).ok())
+            .find(|t| !matches!(t.state, TicketState::Closing { .. }));
+    }
+    let t: &mut Ticket = match (owner, first.as_mut(), stale.as_mut()) {
+        (Some(owner), _, _) => owner,
+        (None, Some(first), _) => first,
+        (None, None, Some(stale)) => stale,
+        (None, None, None) => bail!("nothing shown and no ticket to sync the set under"),
     };
     if ps.set.is_none() {
         let reply = runner.send_for_view(
@@ -91,6 +105,9 @@ pub fn sync_queue(
         })
         .collect();
     let reply = runner.send_for_view(t, ps, "sync", Body::SetSync { set, items }, now_ms)?;
+    if let Some(stale) = stale.as_mut() {
+        runner.save_ticket(stale, now_ms)?;
+    }
     if let Reply::Failed { reason } = reply {
         bail!("set.sync: {reason}");
     }

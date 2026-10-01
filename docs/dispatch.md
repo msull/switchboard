@@ -183,7 +183,9 @@ ticket's tree with those lanes left out, since a clean nested lane is
 untracked content in the outer tree. Then the ticket is written
 `closing` and moved from the project's `queue` to its `closing` list,
 and every pass runs the rest from the flags on the record until it is
-done: unanswered requests resolved, every process read back as gone,
+done: unanswered requests resolved (a launch Switchboard is still
+working on holds the close until it answers, and recovery parking the
+ticket does not undo the intent to close), every process read back as gone,
 pending decisions cancelled, the session unmarked once Switchboard
 answers, each lane with a repository of its own removed from its clone
 with `git worktree remove` and then the ticket's tree, never forced,
@@ -194,7 +196,9 @@ closes the same way; there a refusal by git does not hold the close,
 it is recorded as the trees kept, and `close` on the closed ticket
 tries the removal again. A closing ticket starts nothing, cuts no
 tree, cannot be resumed, and counts against neither `slots` nor
-`waiting_on_me`.
+`waiting_on_me`, on the page as in the scheduler. A card left on the
+set with nothing else to show (a close stopped before the project was
+saved) is cleared on the next pass under that ticket's ledger.
 
 Ticket and project records carry a `version`. Every read goes through
 `store::read_ticket` and `store::read_project`, which refuse a record

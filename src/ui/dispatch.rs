@@ -709,6 +709,25 @@ fn console(cx: &mut DrawCtx<'_>, ui: &mut Ui) {
     }
 }
 
+/// Drop the close dialog when no page of its ticket is drawn: the
+/// Dispatch window closed under it, or the main window moved on. Nothing
+/// would draw the dialog, yet it would hold the main window's keyboard
+/// and come back by itself the next time the ticket is opened.
+pub fn drop_unseen_close_dialog(cx: &mut DrawCtx<'_>, view: &View) {
+    let Some(id) = cx.state.confirm_close_ticket.as_deref() else {
+        return;
+    };
+    let windowed = cx.core.settings().dispatch_window.is_some();
+    let seen = if windowed {
+        cx.state.dispatch_window_ticket.as_deref() == Some(id)
+    } else {
+        matches!(view, View::Ticket(t) if t == id)
+    };
+    if !seen {
+        cx.state.confirm_close_ticket = None;
+    }
+}
+
 /// One ticket: its stages, lanes, decisions and attempts on the left,
 /// the artifact being read on the right.
 pub fn ticket(cx: &mut DrawCtx<'_>, ui: &mut Ui, id: &str) {
@@ -887,7 +906,13 @@ fn confirm_close(cx: &mut DrawCtx<'_>, ctx: &egui::Context, t: &TicketView) {
     if cx.state.confirm_close_ticket.as_deref() != Some(t.id.as_str()) {
         return;
     }
-    let retry = t.state == "closed";
+    // The flags that showed the button that opened it; a ticket that
+    // has moved on since (its close under way) has nothing to confirm.
+    if !t.closable && !t.trees_retryable {
+        cx.state.confirm_close_ticket = None;
+        return;
+    }
+    let retry = t.trees_retryable;
     let title = if retry {
         "Remove the ticket's trees"
     } else {

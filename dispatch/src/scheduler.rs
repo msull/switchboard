@@ -952,24 +952,44 @@ impl Runner {
         }
         // A lost `session.waiting off` or `set.sync` of an earlier run is
         // resolved before anything is asked again; `step` never visits a
-        // closing ticket to do it.
+        // closing ticket to do it. An op recovery already settled is
+        // left alone; a close can take several passes.
         let pending: Vec<usize> = t
             .ledger
             .iter()
             .enumerate()
-            .filter(|(_, o)| o.reply.is_none())
+            .filter(|(_, o)| !crate::recover::settled(o))
             .map(|(i, _)| i)
             .collect();
         if !pending.is_empty() {
+            let mut failed = None;
             for i in pending {
-                self.recover_one(t, ps, i, now_ms)?;
+                if let Err(e) = self.recover_one(t, ps, i, now_ms) {
+                    failed = Some(e);
+                    break;
+                }
             }
             // Recovery may decide about an attempt as if the ticket were
-            // running; the intent to close stands over that.
+            // running, parking it even; the intent to close stands over
+            // that, and is saved again before any error is returned, so a
+            // failure later in the chain cannot leave the ticket `Parking`
+            // on the closing list, where the next pass would requeue it.
             t.state = TicketState::Closing {
                 reason: reason.clone(),
             };
             self.save_ticket(t, now_ms)?;
+            if let Some(e) = failed {
+                return Err(e);
+            }
+        }
+        // A launch Switchboard is still working on would bring up a
+        // session after the processes below were read back as gone.
+        if t.ledger
+            .iter()
+            .any(|o| o.class == "creation" && !crate::recover::settled(o))
+        {
+            log::info!("ticket {} closing: a launch is still in flight", t.id);
+            return Ok(());
         }
         if !self.retire_processes(t, ps, &t.processes.clone(), now_ms)? {
             log::info!("ticket {} closing: a process is still alive", t.id);
@@ -982,6 +1002,9 @@ impl Runner {
                 }
             }
             t.close.decisions_cancelled = true;
+            // A decision raised since the last unmark marked the session
+            // waiting again.
+            t.close.waiting_cleared = false;
             self.save_ticket(t, now_ms)?;
         }
         // Sent on every run until a reply is recorded: it is idempotent,

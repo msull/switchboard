@@ -5763,10 +5763,16 @@ fn a_close_cut_off_after_every_step_only_writes_closed() {
     env.step();
     assert!(matches!(env.ticket(&id).state, TicketState::Closed { .. }));
     assert!(env.repo.lock().unwrap().removed.is_empty());
-    assert!(
-        !env.sb().calls[calls..].iter().any(|r| r.body.is_command()),
-        "nothing more asked of Switchboard"
-    );
+    // The project was never saved with the card gone, so the set is
+    // redrawn from it once; nothing else is asked.
+    let sb = env.sb();
+    let asked: Vec<String> = sb.calls[calls..]
+        .iter()
+        .filter(|r| r.body.is_command())
+        .map(|r| r.body.kind())
+        .collect();
+    assert_eq!(asked, vec!["set.sync".to_owned()]);
+    assert!(sb.sets[0].items.is_empty());
 }
 
 #[test]
@@ -5880,6 +5886,139 @@ fn a_ticket_on_the_closing_list_that_is_not_closing_goes_back_to_the_queue() {
         (vec![id.clone()], true)
     );
     assert!(matches!(env.ticket(&id).state, TicketState::Parked { .. }));
+}
+
+#[test]
+fn a_close_waits_for_a_launch_in_flight_and_kills_what_it_brought_up() {
+    let mut env = Env::new();
+    let id = env.take(7).id;
+    env.sb().in_progress_for = Some("session.new".into());
+    env.step();
+    assert_eq!(env.sb().kinds_called("session.new"), 1);
+    write_closing(&env, &id, |_| {});
+    env.step();
+    let t = env.ticket(&id);
+    assert!(matches!(t.state, TicketState::Closing { .. }), "{t:#?}");
+    assert!(env.sb().killed.is_empty(), "{:?}", env.sb().killed);
+    env.sb().in_progress_for = None;
+    env.step();
+    let t = env.ticket(&id);
+    assert!(matches!(t.state, TicketState::Closed { .. }), "{t:#?}");
+    let investigator = session_of(&t, "investigate");
+    assert!(env.sb().killed.contains(&investigator));
+    assert_eq!(env.sb().kinds_called("session.new"), 1);
+}
+
+#[test]
+fn a_lost_send_raises_its_decision_once_however_often_the_close_runs() {
+    let mut env = Env::new();
+    let id = env.take(7).id;
+    let investigator = at_rerun(&mut env, &id);
+    write_closing(&env, &id, |t| {
+        let mut lost = t
+            .ledger
+            .iter()
+            .rfind(|o| o.kind == "session.new")
+            .unwrap()
+            .clone();
+        lost.op = format!("{id}-lostsend");
+        lost.kind = "session.input".into();
+        lost.class = "non-replayable".into();
+        lost.body = None;
+        lost.reply = None;
+        lost.error = None;
+        t.ledger.push(lost);
+    });
+    env.sb().drop_reply_for = Some("set.sync".into());
+    env.step();
+    let t = env.ticket(&id);
+    assert!(matches!(t.state, TicketState::Closing { .. }), "{t:#?}");
+    assert!(t.close.waiting_cleared);
+    env.step();
+    let t = env.ticket(&id);
+    assert!(matches!(t.state, TicketState::Closed { .. }), "{t:#?}");
+    let lost_sends = t.decisions.iter().filter(|d| d.name == "lost-send").count();
+    assert_eq!(lost_sends, 1, "{:#?}", t.decisions);
+    assert!(t.pending_decisions().is_empty());
+    assert!(!env.sb().session(&investigator).waiting);
+}
+
+#[test]
+fn a_close_that_recovery_parks_and_then_fails_stays_closing() {
+    let mut env = Env::new();
+    let id = env.take(7).id;
+    env.step();
+    let investigator = session_of(&env.ticket(&id), "investigate");
+    assert!(env.ticket(&id).processes.contains(&investigator));
+    // Recovery cannot find the launch, so it fails the attempt.
+    env.sb().log.clear();
+    write_closing(&env, &id, |t| {
+        let op = t
+            .ledger
+            .iter_mut()
+            .find(|o| o.kind == "session.new")
+            .unwrap();
+        op.reply = None;
+        t.attempts[0].session = None;
+        t.attempts[0].state = AttemptState::Starting;
+        // Failing this one parks the ticket: `max_reruns` is spent.
+        for n in 1..=3 {
+            let mut failed = t.attempts[0].clone();
+            failed.n += n;
+            failed.state = AttemptState::Failed {
+                reason: "earlier".into(),
+            };
+            t.attempts.push(failed);
+        }
+    });
+    // Parking kills the investigator, and that reply is lost.
+    env.sb().drop_reply_for = Some("session.kill".into());
+    env.step();
+    let t = env.ticket(&id);
+    assert!(matches!(t.state, TicketState::Closing { .. }), "{t:#?}");
+    let ps = env.runner.load_project(PROJECT).unwrap();
+    assert_eq!(ps.closing, vec![id.clone()]);
+    env.step();
+    let t = env.ticket(&id);
+    assert!(matches!(t.state, TicketState::Closed { .. }), "{t:#?}");
+    let ps = env.runner.load_project(PROJECT).unwrap();
+    assert!(ps.queue.is_empty() && ps.closing.is_empty());
+}
+
+#[test]
+fn a_card_left_up_with_nothing_to_show_is_cleared() {
+    let mut env = Env::new();
+    let id = env.take(7).id;
+    env.step();
+    assert_eq!(env.sb().sets[0].items.len(), 1);
+    // A close stopped after its ticket was saved closed, before the set
+    // and the project were.
+    let mut t = env.ticket(&id);
+    t.state = TicketState::Closed {
+        reason: "closed by hand".into(),
+    };
+    env.runner.save_ticket(&mut t, env.now).unwrap();
+    env.step();
+    assert!(env.sb().sets[0].items.is_empty());
+    let ps = env.runner.load_project(PROJECT).unwrap();
+    assert!(ps.queue.is_empty() && ps.shown.is_empty());
+    let t = env.ticket(&id);
+    let sync = t.ledger.iter().rfind(|o| o.kind == "set.sync").unwrap();
+    assert!(sync.reply.is_some(), "the stale ticket's ledger, saved");
+    let syncs = env.sb().kinds_called("set.sync");
+    env.step();
+    assert_eq!(env.sb().kinds_called("set.sync"), syncs, "once");
+}
+
+#[test]
+fn a_closing_tickets_decisions_count_against_nothing_in_the_status() {
+    let mut env = Env::new();
+    let id = env.take(7).id;
+    at_rerun(&mut env, &id);
+    let pending = |env: &Env| dispatch::serve::status(&env.runner).unwrap().projects[0].pending;
+    assert_eq!(pending(&env), 1);
+    write_closing(&env, &id, |_| {});
+    assert_eq!(pending(&env), 0);
 }
 
 #[test]

@@ -347,7 +347,12 @@ pub fn status(runner: &Runner) -> Result<Status> {
             .clone()
             .filter(|t| t.active() && t.attempts.iter().any(crate::scheduler::costs_slot))
             .count();
-        let pending = mine.map(|t| t.pending_decisions().len()).sum::<usize>();
+        // A closing ticket counts against neither limit, as in the
+        // scheduler.
+        let pending = mine
+            .filter(|t| !matches!(t.state, TicketState::Closing { .. }))
+            .map(|t| t.pending_decisions().len())
+            .sum::<usize>();
         projects.push(ProjectView {
             name,
             queue: ps.queue,

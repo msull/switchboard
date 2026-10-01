@@ -4269,6 +4269,72 @@ fn a_ticket_leaving_the_status_drops_its_close_dialog() {
     assert!(harness.state().ui_state.confirm_close_ticket.is_none());
 }
 
+/// A close dialog lives only while its ticket's page is drawn: leaving
+/// the page, or closing the Dispatch window under it, drops it, so it
+/// neither holds the keyboard nor comes back by itself.
+#[test]
+fn a_close_dialog_goes_with_its_page() {
+    let mut harness = ticket_page(|t| t.closable = true);
+    click(&mut harness, "Close");
+    harness.get_by_label("Close this ticket");
+    harness.state_mut().dispatch(AppAction::ShowDispatch);
+    harness.run_steps(2);
+    assert!(harness.state().ui_state.confirm_close_ticket.is_none());
+
+    let mut harness = ticket_page(|t| t.closable = true);
+    harness.state_mut().dispatch(AppAction::PopOutDispatch);
+    harness.state_mut().ui_state.dispatch_window_ticket = Some("t1".into());
+    harness.state_mut().ui_state.confirm_close_ticket = Some("t1".into());
+    harness.run_steps(2);
+    assert_eq!(
+        harness.state().ui_state.confirm_close_ticket.as_deref(),
+        Some("t1"),
+        "shown in the Dispatch window"
+    );
+    harness.state_mut().dispatch(AppAction::CloseDispatchWindow);
+    harness.run_steps(2);
+    assert!(harness.state().ui_state.confirm_close_ticket.is_none());
+}
+
+/// The dialog's title and button follow the flag that showed the
+/// button that opened it, not the ticket's state.
+#[test]
+fn the_close_dialog_reads_the_runners_flags() {
+    let mut harness = ticket_page(|t| {
+        t.state = "closed".into();
+        t.trees_kept = Some("/wt/t1 not removed: it has changes".into());
+        t.trees_retryable = true;
+    });
+    click(&mut harness, "Remove trees");
+    harness.get_by_label("Remove the ticket's trees");
+    harness.get_by_label("Try again");
+    let mut harness = ticket_page(|t| {
+        t.state = "closing".into();
+        t.reason = Some("closed by hand".into());
+    });
+    harness.state_mut().ui_state.confirm_close_ticket = Some("t1".into());
+    harness.run_steps(2);
+    assert!(harness.query_by_label("Close this ticket").is_none());
+    assert!(harness.state().ui_state.confirm_close_ticket.is_none());
+}
+
+/// A closing ticket's decisions are on their way out: its row says it
+/// is closing, not that it waits on the user.
+#[test]
+fn a_closing_ticket_does_not_wait_on_you() {
+    let (mut harness, _) = harness();
+    let mut status = dispatch_status();
+    status.tickets[0].state = "closing".into();
+    status.tickets[0].reason = Some("closed by hand".into());
+    harness
+        .state_mut()
+        .dispatch(AppAction::DispatchStatus(Some(status)));
+    harness.state_mut().dispatch(AppAction::ShowDispatch);
+    harness.run_steps(2);
+    harness.get_by_label("closing: closed by hand");
+    assert!(harness.query_by_label("1 waiting on you").is_none());
+}
+
 /// A ticket's agent at a prompt of its own is on the page: a card under
 /// "Waiting on you" that opens the session, the ticket row's standing,
 /// and the rail count.
