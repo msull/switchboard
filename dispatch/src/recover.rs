@@ -147,7 +147,12 @@ impl Runner {
     /// An idempotent operation is sent again as itself: Switchboard
     /// answers from its log if it ran, and runs it now if it did not,
     /// and either is right. A failure now leaves it for the next pass.
-    fn replay(&mut self, t: &mut Ticket, ps: &mut crate::ticket::ProjectState, i: usize) {
+    pub(crate) fn replay(
+        &mut self,
+        t: &mut Ticket,
+        ps: &mut crate::ticket::ProjectState,
+        i: usize,
+    ) {
         let op = t.ledger[i].clone();
         let Some(body) = op.body else {
             t.ledger[i].error = Some("reply lost; harmless to repeat".into());

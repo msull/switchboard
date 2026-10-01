@@ -3006,7 +3006,7 @@ impl dispatch::port::Port for SocketFails {
 }
 
 #[test]
-fn a_park_answer_cut_off_at_its_first_request_is_finished_after_a_restart() {
+fn a_park_answer_cut_off_at_the_pause_is_finished_after_a_restart() {
     let mut env = Env::new();
     let id = at_finalize(&mut env);
     let decision = env.pending(&id)[0].id.clone();
@@ -3659,6 +3659,388 @@ fn plan_of(t: &Ticket, ctx: &str) -> Attempt {
         .max_by_key(|a| a.n)
         .unwrap()
         .clone()
+}
+
+// --- parking withdraws every question, and a resume asks afresh
+
+/// The Orchard ticket with both lanes' planners gone: two failed plan
+/// attempts and a pending `rerun` question about each.
+fn two_failed_plans() -> (Env, String) {
+    let (mut env, id) = workspace_env(&["type:bug"]);
+    let now = env.tick();
+    env.runner.step_project("Orchard", now).unwrap();
+    let t = env.ticket(&id);
+    let investigator = session_of(&t, "investigate");
+    std::fs::write(artifact_of(&t, "investigate", "notes"), "# notes").unwrap();
+    let now = env.now;
+    env.sb().stop(&investigator, now);
+    env.steps_until(&id, "the lanes question", |t, _| {
+        t.pending_decisions().iter().any(|d| d.name == "lanes")
+    });
+    let lanes = env.pending(&id).remove(0);
+    let now = env.tick();
+    env.runner
+        .decide(&id, &lanes.id, "backend, frontend", None, now)
+        .unwrap();
+    env.steps_until(&id, "a planner per lane", |t, _| {
+        t.attempts_of("plan").filter(|a| a.is_open()).count() == 2
+    });
+    let t = env.ticket(&id);
+    for ctx in ["backend", "frontend"] {
+        env.sb().remove(plan_of(&t, ctx).session.as_ref().unwrap());
+    }
+    env.steps_until(&id, "both plans failing", |t, _| {
+        t.attempts_of("plan")
+            .all(|a| matches!(a.state, AttemptState::Failed { .. }))
+            && t.pending_decisions().len() == 2
+    });
+    (env, id)
+}
+
+/// The pending `rerun` question about a lane's latest plan attempt.
+fn rerun_for(t: &Ticket, ctx: &str) -> Option<Decision> {
+    let n = plan_of(t, ctx).n;
+    t.pending_decisions()
+        .into_iter()
+        .find(|d| d.name == "rerun" && d.attempt == Some(("plan".to_owned(), n)))
+        .cloned()
+}
+
+/// The waiting requests on the ledger, oldest first.
+fn waiting_ops(t: &Ticket) -> Vec<dispatch::ticket::Operation> {
+    t.ledger
+        .iter()
+        .filter(|o| o.kind == "session.waiting")
+        .cloned()
+        .collect()
+}
+
+fn waiting_on(op: &dispatch::ticket::Operation) -> bool {
+    matches!(op.body, Some(Body::SessionWaiting { on: true, .. }))
+}
+
+/// Park the two-lane ticket from the backend's question, then resume it.
+fn parked_and_resumed() -> (Env, String, Vec<String>) {
+    let (mut env, id) = two_failed_plans();
+    let t = env.ticket(&id);
+    let parked_from = rerun_for(&t, "backend").unwrap();
+    let now = env.tick();
+    env.runner
+        .decide(&id, &parked_from.id, "park", None, now)
+        .unwrap();
+    let now = env.tick();
+    env.runner.step_project("Orchard", now).unwrap();
+    let t = env.ticket(&id);
+    assert!(matches!(t.state, TicketState::Parked { .. }), "{t:#?}");
+    let earlier: Vec<String> = t.decisions.iter().map(|d| d.id.clone()).collect();
+    let now = env.tick();
+    env.runner.resume(&id, now).unwrap();
+    (env, id, earlier)
+}
+
+#[test]
+fn parking_cancels_every_pending_decision_and_a_resume_asks_afresh() {
+    let (mut env, id) = two_failed_plans();
+    let t = env.ticket(&id);
+    let parked_from = rerun_for(&t, "backend").unwrap();
+    let other = rerun_for(&t, "frontend").unwrap();
+    let now = env.tick();
+    env.runner
+        .decide(&id, &parked_from.id, "park", None, now)
+        .unwrap();
+    let now = env.tick();
+    env.runner.step_project("Orchard", now).unwrap();
+    let t = env.ticket(&id);
+    assert!(
+        matches!(&t.state, TicketState::Parked { reason } if reason.contains("by hand")),
+        "{t:#?}"
+    );
+    assert!(t.pending_decisions().is_empty(), "{t:#?}");
+    let state_of = |t: &Ticket, d: &str| {
+        t.decisions
+            .iter()
+            .find(|x| x.id == d)
+            .unwrap()
+            .state
+            .clone()
+    };
+    assert!(
+        matches!(
+            state_of(&t, &parked_from.id),
+            dispatch::ticket::DecisionState::Answered { answer, acted: true, .. } if answer == "park"
+        ),
+        "{t:#?}"
+    );
+    assert_eq!(
+        state_of(&t, &other.id),
+        dispatch::ticket::DecisionState::Cancelled
+    );
+    let status = dispatch::serve::status(&env.runner).unwrap();
+    let orchard = status
+        .projects
+        .iter()
+        .find(|p| p.name == "Orchard")
+        .unwrap();
+    assert_eq!(orchard.pending, 0, "a parked ticket waits on no one");
+    let session = t.current_session().unwrap().clone();
+    assert!(!env.sb().waiting[&session].0, "the session is unmarked");
+    let last = waiting_ops(&t).pop().unwrap();
+    assert!(!waiting_on(&last) && last.reply.is_some(), "{last:#?}");
+    let now = env.tick();
+    let refused = env
+        .runner
+        .decide(&id, &other.id, "rerun", None, now)
+        .unwrap_err();
+    assert!(
+        refused.to_string().contains("has no pending decision"),
+        "{refused}"
+    );
+
+    // Resumed: the park answer is not acted on again, and each lane is
+    // asked afresh, under a new id. Nothing launches without an answer.
+    let earlier: Vec<String> = t.decisions.iter().map(|d| d.id.clone()).collect();
+    let sessions = env.sb().sessions.len();
+    let now = env.tick();
+    env.runner.resume(&id, now).unwrap();
+    for _ in 0..3 {
+        let now = env.tick();
+        env.runner.step_project("Orchard", now).unwrap();
+    }
+    let t = env.ticket(&id);
+    assert!(t.active(), "{t:#?}");
+    let asked = t.pending_decisions();
+    assert_eq!(asked.len(), 2, "{t:#?}");
+    for ctx in ["backend", "frontend"] {
+        let d = rerun_for(&t, ctx).unwrap_or_else(|| panic!("no rerun for {ctx}: {t:#?}"));
+        assert!(!earlier.contains(&d.id), "a new id: {}", d.id);
+        assert!(d.question.contains("failed"), "{}", d.question);
+    }
+    assert_eq!(t.attempts_of("plan").count(), 2, "{t:#?}");
+    assert_eq!(env.sb().sessions.len(), sessions);
+
+    // One lane's answer starts that lane; the other's question still
+    // holds only the other lane.
+    let backend = rerun_for(&t, "backend").unwrap();
+    let frontend = rerun_for(&t, "frontend").unwrap();
+    let now = env.tick();
+    env.runner
+        .decide(&id, &backend.id, "rerun", None, now)
+        .unwrap();
+    for _ in 0..2 {
+        let now = env.tick();
+        env.runner.step_project("Orchard", now).unwrap();
+    }
+    let t = env.ticket(&id);
+    let started = plan_of(&t, "backend");
+    assert_eq!((started.n, started.is_open()), (3, true), "{t:#?}");
+    assert_eq!(rerun_for(&t, "frontend").unwrap().id, frontend.id);
+    assert_eq!(plan_of(&t, "frontend").n, 2, "the other lane is untouched");
+    assert_eq!(t.attempts_of("plan").count(), 3);
+    assert_eq!(env.sb().sessions.len(), sessions + 1);
+}
+
+#[test]
+fn a_pass_cut_off_between_two_lanes_reasks_finishes_on_the_next_pass() {
+    let (mut env, id, earlier) = parked_and_resumed();
+    let sessions = env.sb().sessions.len();
+    // A question is saved before its notes go out, so the pass ends
+    // with one lane asked and the other not looked at.
+    env.runner.port = Box::new(SocketFails {
+        inner: SharedPort(Arc::clone(&env.sb)),
+        kind: "session.notes",
+        fired: false,
+    });
+    let now = env.tick();
+    env.runner.step_project("Orchard", now).unwrap();
+    let t = env.ticket(&id);
+    let asked = t.pending_decisions();
+    assert_eq!(asked.len(), 1, "{t:#?}");
+    let first = rerun_for(&t, "backend").unwrap();
+    assert!(!earlier.contains(&first.id));
+    assert!(rerun_for(&t, "frontend").is_none());
+    let now = env.tick();
+    env.runner.step_project("Orchard", now).unwrap();
+    let t = env.ticket(&id);
+    assert_eq!(t.pending_decisions().len(), 2, "{t:#?}");
+    assert_eq!(rerun_for(&t, "backend").unwrap().id, first.id, "asked once");
+    let second = rerun_for(&t, "frontend").unwrap();
+    assert!(!earlier.contains(&second.id) && second.id != first.id);
+    assert_eq!(t.attempts_of("plan").count(), 2);
+    assert_eq!(env.sb().sessions.len(), sessions);
+}
+
+#[test]
+fn a_park_cut_off_after_its_intent_asks_nothing_and_unmarks_on_the_next_pass() {
+    let mut env = Env::new();
+    let id = at_finalize(&mut env);
+    let finalize = env.pending(&id)[0].clone();
+    // A second question open on the same ticket.
+    let mut t = env.ticket(&id);
+    let mut second = finalize.clone();
+    second.id = format!("d{}", t.decisions.len() + 1);
+    second.name = "paused".into();
+    t.decisions.push(second.clone());
+    let now = env.tick();
+    env.runner.save_ticket(&mut t, now).unwrap();
+    let now = env.tick();
+    env.runner
+        .decide(&id, &finalize.id, "park", None, now)
+        .unwrap();
+    // The unmark is written down and never delivered.
+    env.runner.port = Box::new(SocketFails {
+        inner: SharedPort(Arc::clone(&env.sb)),
+        kind: "session.waiting",
+        fired: false,
+    });
+    env.step();
+    let t = env.ticket(&id);
+    assert!(matches!(t.state, TicketState::Parking { .. }), "{t:#?}");
+    assert!(t.pending_decisions().is_empty(), "{t:#?}");
+    let state_of = |d: &str| {
+        t.decisions
+            .iter()
+            .find(|x| x.id == d)
+            .unwrap()
+            .state
+            .clone()
+    };
+    assert_eq!(
+        state_of(&second.id),
+        dispatch::ticket::DecisionState::Cancelled
+    );
+    assert!(matches!(
+        state_of(&finalize.id),
+        dispatch::ticket::DecisionState::Answered { answer, acted: true, .. } if answer == "park"
+    ));
+    let now = env.tick();
+    assert!(
+        env.runner
+            .decide(&id, &second.id, "continue", None, now)
+            .is_err()
+    );
+    let ops = waiting_ops(&t);
+    let unmark = ops.last().unwrap().clone();
+    assert!(
+        !waiting_on(&unmark) && unmark.reply.is_none(),
+        "{unmark:#?}"
+    );
+    let session = t.current_session().unwrap().clone();
+    assert!(env.sb().waiting[&session].0, "still marked");
+
+    // The next pass, no restart: the same operation, delivered.
+    env.step();
+    let t = env.ticket(&id);
+    let after = waiting_ops(&t);
+    assert_eq!(after.len(), ops.len(), "no second unmark written");
+    let last = after.last().unwrap();
+    assert_eq!(last.op, unmark.op);
+    assert!(last.reply.is_some());
+    assert!(!env.sb().waiting[&session].0);
+    assert!(matches!(t.state, TicketState::Parked { .. }), "{t:#?}");
+    assert!(matches!(env.sb().runs[0].state, RunState::Paused { .. }));
+    assert!(
+        env.sb()
+            .sessions
+            .iter()
+            .all(|s| s.liveness != Liveness::Running)
+    );
+    let calls = env.sb().calls.len();
+    env.step();
+    assert_eq!(env.sb().calls.len(), calls, "Parked is quiet");
+}
+
+#[test]
+fn parking_from_an_old_record_still_withdraws_and_unmarks() {
+    let mut env = Env::new();
+    let id = at_finalize(&mut env);
+    let finalize = env.pending(&id)[0].id.clone();
+    // What a binary from before this change left: parking, with its
+    // question still pending and the session still marked.
+    let mut t = env.ticket(&id);
+    t.state = TicketState::Parking {
+        reason: "parked by hand".into(),
+    };
+    let now = env.tick();
+    env.runner.save_ticket(&mut t, now).unwrap();
+    let session = t.current_session().unwrap().clone();
+    assert!(env.sb().waiting[&session].0);
+    env.restart();
+    env.step();
+    let t = env.ticket(&id);
+    assert!(matches!(t.state, TicketState::Parked { .. }), "{t:#?}");
+    assert_eq!(
+        t.decisions.iter().find(|d| d.id == finalize).unwrap().state,
+        dispatch::ticket::DecisionState::Cancelled
+    );
+    assert!(!env.sb().waiting[&session].0);
+}
+
+#[test]
+fn an_unanswered_mark_is_resolved_before_the_unmark_and_stays_off_after_a_restart() {
+    let mut env = Env::new();
+    let id = at_finalize(&mut env);
+    // As `park` would leave it just after its intent, with the reply to
+    // the finalize question's mark lost.
+    let mut t = env.ticket(&id);
+    t.state = TicketState::Parking {
+        reason: "parked by hand".into(),
+    };
+    let d = t.decisions.iter_mut().find(|d| d.pending()).unwrap();
+    d.state = dispatch::ticket::DecisionState::Answered {
+        answer: "park".into(),
+        note: None,
+        by: dispatch::scheduler::BY_HAND.into(),
+        at_ms: env.now,
+        acted: true,
+    };
+    let mark = t
+        .ledger
+        .iter_mut()
+        .rev()
+        .find(|o| o.kind == "session.waiting" && waiting_on(o))
+        .unwrap();
+    mark.reply = None;
+    let mark = mark.op.clone();
+    let now = env.tick();
+    env.runner.save_ticket(&mut t, now).unwrap();
+    let session = t.current_session().unwrap().clone();
+    let before = waiting_ops(&t).len();
+    // No restart, whose recovery would replay it first: the replay
+    // inside parking is the request that fails.
+    env.runner.port = Box::new(SocketFails {
+        inner: SharedPort(Arc::clone(&env.sb)),
+        kind: "session.waiting",
+        fired: false,
+    });
+    env.step();
+    let t = env.ticket(&id);
+    assert!(matches!(t.state, TicketState::Parking { .. }), "{t:#?}");
+    let ops = waiting_ops(&t);
+    let replayed = ops.iter().find(|o| o.op == mark).unwrap();
+    assert!(replayed.reply.is_none() && replayed.error.is_some());
+    assert_eq!(ops.len(), before, "the unmark waits for the mark");
+
+    env.step();
+    let t = env.ticket(&id);
+    let ops = waiting_ops(&t);
+    let at = ops.iter().position(|o| o.op == mark).unwrap();
+    assert!(ops[at].reply.is_some(), "answered under its own id");
+    assert_eq!(ops.len(), at + 2, "{ops:#?}");
+    assert!(!waiting_on(&ops[at + 1]) && ops[at + 1].reply.is_some());
+    assert!(ops.iter().all(|o| o.reply.is_some()));
+    assert!(!env.sb().waiting[&session].0);
+    assert!(matches!(t.state, TicketState::Parked { .. }), "{t:#?}");
+
+    let sent = env.sb().kinds_called("session.waiting");
+    env.restart();
+    env.step();
+    assert_eq!(
+        env.sb().kinds_called("session.waiting"),
+        sent,
+        "recovery sends nothing"
+    );
+    assert!(!env.sb().waiting[&session].0, "the mark stays off");
+    assert!(matches!(env.ticket(&id).state, TicketState::Parked { .. }));
 }
 
 // --- the code review stage
