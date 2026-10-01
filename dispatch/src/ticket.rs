@@ -122,6 +122,10 @@ pub struct LaneRecord {
 pub struct Refreshed {
     pub from: String,
     pub to: String,
+    /// The lane's worktree is removed from its clone: the ticket closed.
+    /// The path stays, so a reader can still say where the work was.
+    #[serde(default)]
+    pub removed: bool,
 }
 
 fn yes() -> bool {
@@ -483,14 +487,48 @@ pub enum TicketState {
     Parked {
         reason: String,
     },
+    /// Closing: the intent is written, and the sequence (decisions
+    /// cancelled, processes gone, the session unmarked, the trees
+    /// removed, the card off the set) runs from it on every pass until
+    /// it is done. Nothing starts in a closing ticket.
+    Closing {
+        reason: String,
+    },
     /// Every stage done, or closed by hand.
     Closed {
         reason: String,
     },
 }
 
+/// What a close has done so far. Each flag is set and saved right after
+/// its step is read back, so a close cut short resumes from the first
+/// step not yet done.
+// One flag per step of the sequence, each read back on its own; a state
+// machine would lose which steps a cut-short close already did.
+#[allow(clippy::struct_excessive_bools)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CloseProgress {
+    /// Every pending decision is cancelled.
+    pub decisions_cancelled: bool,
+    /// Switchboard answered `session.waiting off` for the current
+    /// session, or the ticket has none.
+    pub waiting_cleared: bool,
+    /// The ticket's tree is removed from the project's clone.
+    pub tree_removed: bool,
+    /// Why a removal was refused, when one was and the close went on
+    /// without it; the tree is still there.
+    pub trees_kept: Option<String>,
+    /// The working set was synced without this ticket.
+    pub card_cleared: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Ticket {
+    /// The record's format; see `store::RECORD_VERSION`. A record
+    /// written before records carried one reads as 0.
+    #[serde(default)]
+    pub version: u32,
     pub id: String,
     pub project: String,
     pub source: SourceSnapshot,
@@ -523,6 +561,9 @@ pub struct Ticket {
     pub refreshed_stage: Option<usize>,
     #[serde(flatten)]
     pub state: TicketState,
+    /// How far a close has got.
+    #[serde(default)]
+    pub close: CloseProgress,
     pub created_ms: u64,
     pub updated_ms: u64,
 }
@@ -578,6 +619,8 @@ impl Ticket {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ProjectState {
+    /// The record's format; see `store::RECORD_VERSION`.
+    pub version: u32,
     pub name: String,
     /// The Switchboard workspace named by the pipeline, once found or made.
     pub space: Option<String>,
@@ -585,6 +628,9 @@ pub struct ProjectState {
     pub set: Option<String>,
     /// Ticket ids in the order they are taken from.
     pub queue: Vec<String>,
+    /// Ids of the project's tickets that are closing: out of the queue,
+    /// visited by every pass until their close is done.
+    pub closing: Vec<String>,
     /// What the set last showed, so it is redrawn only on a change.
     pub shown: Vec<(String, String)>,
 }
@@ -596,6 +642,7 @@ mod tests {
     #[test]
     fn inputs_come_from_the_latest_completed_attempt_that_wrote_them() {
         let mut t = Ticket {
+            version: 0,
             id: "t".into(),
             project: "p".into(),
             source: SourceSnapshot {
@@ -622,6 +669,7 @@ mod tests {
             rework: BTreeMap::new(),
             refreshed_stage: None,
             state: TicketState::Active,
+            close: CloseProgress::default(),
             created_ms: 0,
             updated_ms: 0,
         };

@@ -97,6 +97,12 @@ impl Handler {
                 let t = self.runner.resume(ticket, now_ms)?;
                 Reply::Ticket(self.view(&t))
             }
+            Body::Close { ticket, reason } => {
+                let t = self
+                    .runner
+                    .close_by_hand(ticket, reason.as_deref(), now_ms)?;
+                Reply::Ticket(self.view(&t))
+            }
             Body::Take { project, issue } => {
                 let t = take_issue(&mut self.runner, &*self.issues, project, issue, now_ms)?;
                 Reply::Taken(self.view(&t))
@@ -377,6 +383,7 @@ pub fn ticket_view(t: &Ticket, stages: Vec<String>) -> TicketView {
         TicketState::Active => ("active", None),
         TicketState::Parking { reason } => ("parking", Some(reason.clone())),
         TicketState::Parked { reason } => ("parked", Some(reason.clone())),
+        TicketState::Closing { reason } => ("closing", Some(reason.clone())),
         TicketState::Closed { reason } => ("closed", Some(reason.clone())),
     };
     TicketView {
@@ -393,6 +400,8 @@ pub fn ticket_view(t: &Ticket, stages: Vec<String>) -> TicketView {
         stages,
         stage: t.stage,
         tree: t.tree.clone(),
+        tree_removed: t.close.tree_removed,
+        trees_kept: t.close.trees_kept.clone(),
         lanes: t
             .lanes
             .iter()
@@ -402,6 +411,7 @@ pub fn ticket_view(t: &Ticket, stages: Vec<String>) -> TicketView {
                 branch: l.branch.clone(),
                 chosen: l.chosen,
                 setup_done: l.setup_done,
+                removed: l.removed,
             })
             .collect(),
         attempts: t
@@ -729,6 +739,54 @@ slots = 1
             5_000,
         );
         assert!(matches!(no_such, Reply::Failed { .. }));
+    }
+
+    /// A close through the port: the ticket's tree removed and the
+    /// closed view in the reply; a second close refused with the reason.
+    #[test]
+    fn the_port_closes_a_ticket_and_refuses_a_second_close() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut h = handler(dir.path());
+        // A pipeline that cuts its own trees, with the tree cut by hand:
+        // stepping would need a Switchboard this test does not have.
+        let text = PIPELINE.replace("root = \"/tmp/p\"", "repo = \"git@example.com:o/r.git\"");
+        fs::write(h.runner.data.pipeline("P"), text).unwrap();
+        let Reply::Taken(view) = h.handle(
+            &Request::new(
+                "1",
+                Body::Take {
+                    project: "P".into(),
+                    issue: "7".into(),
+                },
+            ),
+            1_000,
+        ) else {
+            panic!("taken")
+        };
+        let tree = dir.path().join("wt").join(&view.id);
+        fs::create_dir_all(&tree).unwrap();
+        let mut t = h.runner.load_ticket(&view.id).unwrap();
+        t.tree = Some(tree.clone());
+        h.runner.save_ticket(&mut t, 1_500).unwrap();
+        let close = Body::Close {
+            ticket: view.id.clone(),
+            reason: Some("done elsewhere".into()),
+        };
+        let reply = h.handle(&Request::new("2", close.clone()), 2_000);
+        let Reply::Ticket(closed) = reply else {
+            panic!("{reply:?}")
+        };
+        assert_eq!(
+            (closed.state.as_str(), closed.reason.as_deref()),
+            ("closed", Some("done elsewhere"))
+        );
+        assert!(closed.tree_removed && closed.trees_kept.is_none());
+        assert!(!tree.exists());
+        let again = h.handle(&Request::new("3", close), 3_000);
+        assert!(
+            matches!(&again, Reply::Failed { reason } if reason.contains("already closed")),
+            "{again:?}"
+        );
     }
 
     #[test]

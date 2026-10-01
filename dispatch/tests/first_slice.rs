@@ -708,7 +708,14 @@ fn checks_run_after_the_agent_on_a_clean_tree_and_pass_bound_to_its_head() {
     env.pr_is(&id, "base0000", "merged", Checks::Passed);
     env.wait(PR_POLL_MS);
     env.steps_until(&id, "the ticket closing", |t, _| !t.active());
-    assert!(matches!(&env.ticket(&id).state, TicketState::Closed { .. }));
+    let t = env.ticket(&id);
+    assert!(matches!(&t.state, TicketState::Closed { .. }));
+    // The merged ticket's tree goes; its branch is never touched.
+    let tree = t.tree.clone().unwrap();
+    assert!(t.close.tree_removed && !tree.exists());
+    let repo = env.repo.lock().unwrap();
+    assert_eq!(repo.removed, [(env.data.repo_dir(PROJECT), tree)]);
+    assert_eq!(repo.worktrees.len(), 0, "only the worktree is forgotten");
 }
 
 /// The user's own feedback round after convergence takes the finalize
@@ -5484,4 +5491,412 @@ fn a_refresh_leaves_a_tree_with_work_in_it_alone() {
     );
     assert_eq!(t.lanes[0].base_sha.as_deref(), Some("base0000"));
     assert!(t.attempts_of(dispatch::scheduler::REFRESH).next().is_none());
+// --- closing a ticket: by hand or at the pipeline's end, a sequence from
+// a saved intent; the worktrees removed lanes first and never forced,
+// the branch, the ticket directory and the record kept.
+
+/// A ticket whose first agent vanished: active, at a `rerun` decision,
+/// nothing open, its session marked waiting.
+fn at_rerun(env: &mut Env, id: &str) -> String {
+    env.step();
+    let investigator = session_of(&env.ticket(id), "investigate");
+    env.sb().vanish(&investigator);
+    env.step();
+    let t = env.ticket(id);
+    assert_eq!(env.pending(id)[0].name, "rerun", "{t:#?}");
+    assert!(!t.attempts.iter().any(Attempt::is_open));
+    investigator
+}
+
+/// The workspace ticket, parked from its `rerun` decision.
+fn parked_workspace() -> (Env, String) {
+    let (mut env, id) = workspace_env(&["area:backend"]);
+    at_rerun(&mut env, &id);
+    let d = env.pending(&id)[0].id.clone();
+    let now = env.tick();
+    env.runner.decide(&id, &d, "park", None, now).unwrap();
+    env.step();
+    assert!(matches!(env.ticket(&id).state, TicketState::Parked { .. }));
+    (env, id)
+}
+
+/// The record as a close cut short would have left it.
+fn write_closing(env: &Env, id: &str, edit: impl FnOnce(&mut Ticket)) {
+    let mut t = env.ticket(id);
+    t.state = TicketState::Closing {
+        reason: "closed by hand".into(),
+    };
+    edit(&mut t);
+    env.runner.save_ticket(&mut t, env.now).unwrap();
+}
+
+fn workspace_trees(env: &Env, id: &str) -> [(PathBuf, PathBuf); 3] {
+    let tree = env.worktrees.join(id);
+    [
+        (
+            env.data.repo_dir("Orchard@backend"),
+            tree.join("orchard-backend"),
+        ),
+        (
+            env.data.repo_dir("Orchard@frontend"),
+            tree.join("orchard-frontend"),
+        ),
+        (env.data.repo_dir("Orchard"), tree),
+    ]
+}
+
+#[test]
+fn closing_by_hand_removes_the_lanes_then_the_tree_and_keeps_the_rest() {
+    let (mut env, id) = workspace_env(&["area:backend"]);
+    let investigator = at_rerun(&mut env, &id);
+    assert!(env.sb().session(&investigator).waiting);
+    let artifact = artifact_of(&env.ticket(&id), "investigate", "notes");
+    std::fs::write(&artifact, "# half").unwrap();
+    let now = env.tick();
+    let t = env.runner.close_by_hand(&id, None, now).unwrap();
+    assert!(
+        matches!(&t.state, TicketState::Closed { reason } if reason == "closed by hand"),
+        "{t:#?}"
+    );
+    assert_eq!(env.repo.lock().unwrap().removed, workspace_trees(&env, &id));
+    assert!(!env.worktrees.join(&id).exists());
+    let t = env.ticket(&id);
+    assert!(t.close.decisions_cancelled && t.close.waiting_cleared && t.close.card_cleared);
+    assert!(t.close.tree_removed && t.close.trees_kept.is_none());
+    assert!(t.lanes.iter().all(|l| l.removed));
+    assert_eq!(
+        t.tree.as_deref(),
+        Some(env.worktrees.join(&id).as_path()),
+        "the path stays on the record"
+    );
+    assert!(
+        t.decisions
+            .iter()
+            .all(|d| d.state == dispatch::ticket::DecisionState::Cancelled)
+    );
+    assert!(env.data.ticket_dir(&id).exists() && artifact.exists());
+    let ps = env.runner.load_project("Orchard").unwrap();
+    assert!(!ps.queue.contains(&id) && !ps.closing.contains(&id));
+    assert!(ps.shown.is_empty());
+    let sb = env.sb();
+    assert_eq!(sb.waiting[&investigator], (false, String::new()));
+    assert!(sb.sets[0].items.is_empty(), "the card is off the set");
+    assert_eq!(sb.projects.len(), 1, "the Switchboard project stays");
+}
+
+#[test]
+fn a_parked_ticket_closes_with_the_reason_given_and_is_never_stepped_again() {
+    let (mut env, id) = parked_workspace();
+    let now = env.tick();
+    let t = env
+        .runner
+        .close_by_hand(&id, Some("fixed upstream"), now)
+        .unwrap();
+    assert!(matches!(&t.state, TicketState::Closed { reason } if reason == "fixed upstream"));
+    assert_eq!(env.repo.lock().unwrap().removed.len(), 3);
+    let calls = env.sb().calls.len();
+    env.step();
+    assert_eq!(env.sb().calls.len(), calls, "a closed ticket is quiet");
+    let e = env.runner.close_by_hand(&id, None, env.now).unwrap_err();
+    assert!(e.to_string().contains("already closed"), "{e:#}");
+}
+
+/// A refusal writes nothing and removes nothing.
+fn refused(env: &mut Env, id: &str, why: &str) {
+    let before = std::fs::read(env.data.ticket_file(id)).unwrap();
+    let project = env.ticket(id).project;
+    let ps = env.runner.load_project(&project).unwrap();
+    let now = env.tick();
+    let e = env.runner.close_by_hand(id, None, now).unwrap_err();
+    assert!(format!("{e:#}").contains(why), "{e:#}");
+    assert_eq!(std::fs::read(env.data.ticket_file(id)).unwrap(), before);
+    assert_eq!(env.runner.load_project(&project).unwrap(), ps);
+    assert!(env.repo.lock().unwrap().removed.is_empty());
+}
+
+#[test]
+fn a_close_is_refused_while_anything_runs_or_a_tree_has_changes() {
+    let mut env = Env::new();
+    let id = at_inspect(&mut env);
+    refused(&mut env, &id, "park it first");
+    let mut env = Env::new();
+    let id = at_finalize(&mut env);
+    refused(&mut env, &id, "park it first");
+
+    let (mut env, id) = parked_workspace();
+    let mut t = env.ticket(&id);
+    t.state = TicketState::Parking {
+        reason: "by hand".into(),
+    };
+    env.runner.save_ticket(&mut t, env.now).unwrap();
+    refused(&mut env, &id, "still parking");
+
+    let (mut env, id) = parked_workspace();
+    let tree = env.worktrees.join(&id);
+    env.repo
+        .lock()
+        .unwrap()
+        .changes
+        .insert(tree.clone(), vec!["notes.txt".into()]);
+    refused(&mut env, &id, "commit or clean it");
+    // The lanes are nested repositories, not changes of the tree.
+    env.repo.lock().unwrap().changes.insert(
+        tree,
+        vec!["orchard-backend".into(), "orchard-frontend".into()],
+    );
+    let now = env.tick();
+    env.runner.close_by_hand(&id, None, now).unwrap();
+}
+
+#[test]
+fn a_pipeline_that_works_in_place_closes_and_removes_nothing() {
+    let mut env = Env::new();
+    let root = env.worktrees.join("checkout");
+    let text = std::fs::read_to_string(env.data.pipeline(PROJECT))
+        .unwrap()
+        .replace(
+            "repo = \"git@github.com:msull/switchboard.git\"",
+            &format!("root = \"{}\"", root.display()),
+        );
+    std::fs::write(env.data.pipeline(PROJECT), &text).unwrap();
+    let id = env.take(7).id;
+    let now = env.tick();
+    let t = env.runner.close_by_hand(&id, None, now).unwrap();
+    assert!(matches!(t.state, TicketState::Closed { .. }), "{t:#?}");
+    assert!(env.repo.lock().unwrap().removed.is_empty());
+    assert!(env.sb().calls.is_empty(), "nothing made, nothing to undo");
+}
+
+#[test]
+fn a_close_cut_off_before_the_project_save_finishes_and_clears_the_set_once_answered() {
+    let mut env = Env::new();
+    let id = env.take(7).id;
+    let investigator = at_rerun(&mut env, &id);
+    assert_eq!(env.sb().sets[0].items.len(), 1);
+    write_closing(&env, &id, |_| {});
+    assert!(
+        env.runner
+            .load_project(PROJECT)
+            .unwrap()
+            .queue
+            .contains(&id)
+    );
+    let sessions = env.sb().sessions.len();
+    env.sb().drop_reply_for = Some("set.sync".into());
+    env.step();
+    let t = env.ticket(&id);
+    assert!(matches!(t.state, TicketState::Closing { .. }), "{t:#?}");
+    assert!(!t.close.card_cleared, "no reply, no flag");
+    let ps = env.runner.load_project(PROJECT).unwrap();
+    assert_eq!(
+        (ps.queue.is_empty(), ps.closing.clone()),
+        (true, vec![id.clone()])
+    );
+    let sync = t.ledger.iter().rfind(|o| o.kind == "set.sync").unwrap();
+    assert!(sync.reply.is_none(), "on the closing ticket's own ledger");
+    assert!(env.runner.resume(&id, env.now).is_err());
+    env.step();
+    let t = env.ticket(&id);
+    assert!(matches!(t.state, TicketState::Closed { .. }), "{t:#?}");
+    assert!(t.close.card_cleared);
+    assert!(t.ledger.iter().all(|o| o.reply.is_some()));
+    let ps = env.runner.load_project(PROJECT).unwrap();
+    assert!(ps.queue.is_empty() && ps.closing.is_empty() && ps.shown.is_empty());
+    let sb = env.sb();
+    assert!(sb.sets[0].items.is_empty());
+    assert_eq!(sb.sessions.len(), sessions, "nothing started while closing");
+    assert!(!sb.session(&investigator).waiting);
+}
+
+#[test]
+fn a_closing_ticket_before_its_first_stage_cuts_nothing() {
+    let (mut env, id) = workspace_env(&["area:backend"]);
+    write_closing(&env, &id, |_| {});
+    env.step();
+    assert!(matches!(env.ticket(&id).state, TicketState::Closed { .. }));
+    let repo = env.repo.lock().unwrap();
+    assert!(repo.worktrees.is_empty() && repo.removed.is_empty());
+    assert!(env.sb().sessions.is_empty());
+}
+
+#[test]
+fn a_lane_removed_before_its_flag_was_saved_is_removed_again_then_the_tree() {
+    let (mut env, id) = parked_workspace();
+    let [backend, _, _] = workspace_trees(&env, &id);
+    std::fs::remove_dir_all(&backend.1).unwrap();
+    write_closing(&env, &id, |t| t.close.decisions_cancelled = true);
+    env.step();
+    assert!(matches!(env.ticket(&id).state, TicketState::Closed { .. }));
+    assert_eq!(env.repo.lock().unwrap().removed, workspace_trees(&env, &id));
+}
+
+#[test]
+fn a_close_cut_off_between_the_lanes_and_the_tree_removes_only_the_tree() {
+    let (mut env, id) = parked_workspace();
+    let [backend, frontend, tree] = workspace_trees(&env, &id);
+    for (_, dir) in [&backend, &frontend] {
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+    write_closing(&env, &id, |t| {
+        for lane in &mut t.lanes {
+            lane.removed = true;
+        }
+    });
+    env.step();
+    assert!(matches!(env.ticket(&id).state, TicketState::Closed { .. }));
+    assert_eq!(env.repo.lock().unwrap().removed, [tree]);
+}
+
+#[test]
+fn a_close_cut_off_after_every_step_only_writes_closed() {
+    let (mut env, id) = parked_workspace();
+    write_closing(&env, &id, |t| {
+        t.close.decisions_cancelled = true;
+        t.close.waiting_cleared = true;
+        t.close.tree_removed = true;
+        t.close.card_cleared = true;
+        for lane in &mut t.lanes {
+            lane.removed = true;
+        }
+    });
+    let calls = env.sb().calls.len();
+    env.step();
+    assert!(matches!(env.ticket(&id).state, TicketState::Closed { .. }));
+    assert!(env.repo.lock().unwrap().removed.is_empty());
+    assert!(
+        !env.sb().calls[calls..].iter().any(|r| r.body.is_command()),
+        "nothing more asked of Switchboard"
+    );
+}
+
+#[test]
+fn a_waiting_mark_is_cleared_after_a_stop_and_only_counted_once_answered() {
+    // Cancelled and saved, the mark never sent.
+    let mut env = Env::new();
+    let id = env.take(7).id;
+    let investigator = at_rerun(&mut env, &id);
+    write_closing(&env, &id, |t| {
+        for d in &mut t.decisions {
+            d.state = dispatch::ticket::DecisionState::Cancelled;
+        }
+        t.close.decisions_cancelled = true;
+    });
+    env.step();
+    assert!(!env.sb().session(&investigator).waiting);
+    assert!(env.ticket(&id).close.waiting_cleared);
+
+    // Sent, its reply lost: not counted until the ledger has a reply.
+    let mut env = Env::new();
+    let id = env.take(7).id;
+    let investigator = at_rerun(&mut env, &id);
+    env.sb().drop_reply_for = Some("session.waiting".into());
+    let now = env.tick();
+    let e = env.runner.close_by_hand(&id, None, now).unwrap_err();
+    assert!(format!("{e:#}").contains("is closing"), "{e:#}");
+    let t = env.ticket(&id);
+    assert!(matches!(t.state, TicketState::Closing { .. }));
+    assert!(t.close.decisions_cancelled && !t.close.waiting_cleared);
+    env.step();
+    let t = env.ticket(&id);
+    assert!(matches!(t.state, TicketState::Closed { .. }), "{t:#?}");
+    assert!(t.close.waiting_cleared && t.ledger.iter().all(|o| o.reply.is_some()));
+    assert!(!env.sb().session(&investigator).waiting);
+}
+
+#[test]
+fn a_closed_ticket_left_in_the_closing_list_is_dropped_by_the_next_pass() {
+    let (mut env, id) = parked_workspace();
+    let now = env.tick();
+    env.runner.close_by_hand(&id, None, now).unwrap();
+    let mut ps = env.runner.load_project("Orchard").unwrap();
+    ps.closing.push(id.clone());
+    env.runner.save_project(&ps).unwrap();
+    env.step();
+    assert!(
+        env.runner
+            .load_project("Orchard")
+            .unwrap()
+            .closing
+            .is_empty()
+    );
+}
+
+#[test]
+fn a_ticket_never_on_the_set_closes_without_a_sync() {
+    let mut env = Env::new();
+    env.take(7);
+    env.step();
+    let id = env.take(8).id;
+    let syncs = env.sb().kinds_called("set.sync");
+    let now = env.tick();
+    let t = env.runner.close_by_hand(&id, None, now).unwrap();
+    assert!(t.close.card_cleared && matches!(t.state, TicketState::Closed { .. }));
+    assert_eq!(env.sb().kinds_called("set.sync"), syncs, "unchanged");
+}
+
+#[test]
+fn a_close_beside_a_parked_ticket_still_clears_its_card() {
+    let mut env = Env::new();
+    let a = env.take(7).id;
+    let b = env.take(8).id;
+    env.step();
+    assert_eq!(env.sb().sets[0].items.len(), 2);
+    for id in [&a, &b] {
+        let session = session_of(&env.ticket(id), "investigate");
+        env.sb().vanish(&session);
+    }
+    env.step();
+    let d = env.pending(&a)[0].id.clone();
+    let now = env.tick();
+    env.runner.decide(&a, &d, "park", None, now).unwrap();
+    env.step();
+    assert!(matches!(env.ticket(&a).state, TicketState::Parked { .. }));
+    let now = env.tick();
+    env.runner.close_by_hand(&b, None, now).unwrap();
+    let a_session = session_of(&env.ticket(&a), "investigate");
+    let sb = env.sb();
+    let items = &sb.sets[0].items;
+    assert_eq!(items.len(), 1, "{items:?}");
+    assert!(
+        matches!(&items[0].target, switchboard_control::PinTarget::Session { session } if session == &a_session)
+    );
+}
+
+#[test]
+fn a_dirty_tree_at_the_pipelines_end_is_kept_and_removed_by_hand_later() {
+    let mut env = Env::new();
+    let (id, implementer) = at_implement(&mut env);
+    implementer_stops(&mut env, &id, &implementer);
+    env.steps_until(&id, "the checks starting", |t, _| {
+        t.attempts_of("implement")
+            .last()
+            .is_some_and(|a| a.gate.is_some())
+    });
+    let key = format!("{id}/implement/1");
+    env.repo.lock().unwrap().check_exits.insert(key, 0);
+    env.pr_is(&id, "base0000", "open", Checks::Passed);
+    env.inspect(&id, "proceed", None);
+    env.steps_until(&id, "the merge decision", |t, _| {
+        t.pending_decisions().iter().any(|d| d.name == "merge")
+    });
+    let tree = env.ticket(&id).tree.clone().unwrap();
+    env.repo.lock().unwrap().dirty.push(tree.clone());
+    env.pr_is(&id, "base0000", "merged", Checks::Passed);
+    env.wait(PR_POLL_MS);
+    env.steps_until(&id, "the ticket closing", |t, _| !t.active());
+    let t = env.ticket(&id);
+    assert!(matches!(&t.state, TicketState::Closed { .. }), "{t:#?}");
+    let kept = t.close.trees_kept.clone().unwrap();
+    assert!(kept.contains(&tree.display().to_string()), "{kept}");
+    assert!(!t.close.tree_removed && tree.exists());
+    assert!(env.repo.lock().unwrap().removed.is_empty());
+    env.repo.lock().unwrap().dirty.clear();
+    let now = env.tick();
+    let t = env.runner.close_by_hand(&id, None, now).unwrap();
+    assert!(t.close.tree_removed && t.close.trees_kept.is_none());
+    assert!(matches!(&t.state, TicketState::Closed { reason } if reason == "every stage is done"));
+    assert_eq!(
+        env.repo.lock().unwrap().removed,
+        [(env.data.repo_dir(PROJECT), tree)]
+    );
 }

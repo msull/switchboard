@@ -16,12 +16,15 @@ use crate::git::{Repo, branch_name};
 use crate::github::{Checks, Gh, PullRequests, github_repo};
 use crate::pipeline::{Context, Gate, Pipeline, Stage, StageKind};
 use crate::port::Port;
-use crate::store::{DataDir, Lock, Settings, expand_home, read_json, shell_unsafe, write_json};
+use crate::store::{
+    DataDir, Lock, Settings, expand_home, read_project, read_ticket, shell_unsafe, write_project,
+    write_ticket,
+};
 use crate::template::Vars;
 use crate::ticket::{
-    Attempt, AttemptKind, AttemptState, Decision, DecisionKind, DecisionState, GateRun, LaneRecord,
-    Operation, ProjectState, PullRequestRecord, PullRequestSource, SETTLE_POLLS, Settle,
-    SourceSnapshot, Ticket, TicketState,
+    Attempt, AttemptKind, AttemptState, CloseProgress, Decision, DecisionKind, DecisionState,
+    GateRun, LaneRecord, Operation, ProjectState, PullRequestRecord, PullRequestSource,
+    SETTLE_POLLS, Settle, SourceSnapshot, Ticket, TicketState,
 };
 
 /// How often a `pr-checks` gate reads the provider.
@@ -52,11 +55,10 @@ pub struct Runner {
 }
 
 /// What one ticket's step changed in the project's counts: a slot
-/// taken, questions asked without one, and the pipeline it ran under.
+/// taken, and questions asked without one.
 struct Stepped {
     took_slot: bool,
     asked: u32,
-    pipeline: Option<Pipeline>,
 }
 
 impl Runner {
@@ -127,11 +129,11 @@ impl Runner {
         result
     }
 
-    fn write_record<T: serde::Serialize>(&self, path: &Path, value: &T) -> Result<()> {
+    fn write_record(&self, write: impl FnOnce() -> Result<()>) -> Result<()> {
         if self.held.is_some() {
-            write_json(path, value)
+            write()
         } else {
-            self.data.with_lock(|| write_json(path, value))
+            self.data.with_lock(write)
         }
     }
 }
@@ -160,18 +162,19 @@ impl Runner {
     // --- records
 
     pub fn load_ticket(&self, id: &str) -> Result<Ticket> {
-        read_json(&self.data.ticket_file(id))
+        read_ticket(&self.data.ticket_file(id))
     }
 
     pub fn save_ticket(&self, t: &mut Ticket, now_ms: u64) -> Result<()> {
         t.updated_ms = now_ms;
-        self.write_record(&self.data.ticket_file(&t.id), t)
+        let path = self.data.ticket_file(&t.id);
+        self.write_record(|| write_ticket(&path, t))
     }
 
     pub fn load_project(&self, name: &str) -> Result<ProjectState> {
         let path = self.data.project_file(name);
         if crate::store::record_exists(&path) {
-            read_json(&path)
+            read_project(&path)
         } else {
             Ok(ProjectState {
                 name: name.to_owned(),
@@ -181,7 +184,8 @@ impl Runner {
     }
 
     pub fn save_project(&self, ps: &ProjectState) -> Result<()> {
-        self.write_record(&self.data.project_file(&ps.name), ps)
+        let path = self.data.project_file(&ps.name);
+        self.write_record(|| write_project(&path, ps))
     }
 
     /// Reorder a project's queue from the terminal: every id named comes
@@ -219,7 +223,7 @@ impl Runner {
         self.data
             .ticket_files()?
             .iter()
-            .map(|p| read_json(p))
+            .map(|p| read_ticket(p))
             .collect()
     }
 
@@ -264,6 +268,7 @@ impl Runner {
                         TicketState::Parking { reason } | TicketState::Parked { reason } => {
                             format!("parked: {reason}")
                         }
+                        TicketState::Closing { reason } => format!("closing: {reason}"),
                         TicketState::Closed { .. } => unreachable!(),
                     }
                 );
@@ -283,6 +288,7 @@ impl Runner {
         let pipeline_file = dir.join("pipeline.toml");
         crate::store::atomic_write(&pipeline_file, pipeline_text.as_bytes())?;
         let mut ticket = Ticket {
+            version: crate::store::RECORD_VERSION,
             id: id.clone(),
             project: project.to_owned(),
             source,
@@ -299,6 +305,7 @@ impl Runner {
             rework: BTreeMap::new(),
             refreshed_stage: None,
             state: TicketState::Active,
+            close: CloseProgress::default(),
             created_ms: now_ms,
             updated_ms: now_ms,
         };
@@ -356,7 +363,11 @@ impl Runner {
                 let Some(tree) = t.tree.clone() else {
                     continue;
                 };
-                if matches!(t.state, TicketState::Closed { .. }) || tree.parent() == Some(&*root) {
+                if matches!(
+                    t.state,
+                    TicketState::Closing { .. } | TicketState::Closed { .. }
+                ) || tree.parent() == Some(&*root)
+                {
                     continue;
                 }
                 let p = match r.pipeline_of(&t) {
@@ -569,8 +580,7 @@ impl Runner {
             }
         }
         let Some(stage) = p.stages.get(t.stage).cloned() else {
-            self.close(t, ps, "every stage is done", now_ms)?;
-            return Ok(());
+            return self.begin_close(t, ps, "every stage is done", now_ms);
         };
         if self.refresh_lanes(t, ps, p, &stage, now_ms)? || !t.active() {
             return Ok(());
@@ -887,19 +897,273 @@ impl Runner {
         self.launch_agent(t, ps, p, REFRESH, &name, &cwd, n, spec, now_ms)
     }
 
-    fn close(
+    /// Closing is a sequence, not a flag, as parking is: the intent is
+    /// written first and the ticket moved from the queue to the
+    /// project's closing list, then `finish_closing` runs the rest from
+    /// that saved intent. Closing by hand and reaching the end of the
+    /// pipeline both enter here.
+    fn begin_close(
         &mut self,
         t: &mut Ticket,
         ps: &mut ProjectState,
         reason: &str,
         now_ms: u64,
     ) -> Result<()> {
-        t.state = TicketState::Closed {
+        log::info!("ticket {} closing: {reason}", t.id);
+        t.state = TicketState::Closing {
             reason: reason.into(),
         };
-        ps.queue.retain(|id| id != &t.id);
         self.save_ticket(t, now_ms)?;
+        ps.queue.retain(|id| id != &t.id);
+        if !ps.closing.contains(&t.id) {
+            ps.closing.push(t.id.clone());
+        }
+        self.save_project(ps)?;
+        self.finish_closing(t, ps, now_ms)
+    }
+
+    /// The rest of a close, from the saved intent, safe to run again at
+    /// any point: unanswered requests resolved, every process read back
+    /// as gone, pending decisions cancelled, the session unmarked, the
+    /// trees removed (lanes of their own repositories first), the card
+    /// taken off the set, and only then `Closed`. Each step is skipped
+    /// once its flag is saved; one that cannot finish now (a process
+    /// still alive, the socket down) leaves the ticket `Closing` for the
+    /// next pass.
+    pub(crate) fn finish_closing(
+        &mut self,
+        t: &mut Ticket,
+        ps: &mut ProjectState,
+        now_ms: u64,
+    ) -> Result<()> {
+        let TicketState::Closing { reason } = t.state.clone() else {
+            return Ok(());
+        };
+        // A kill between the ticket's save and the project's leaves the
+        // id in the queue; from here on it is only in `closing`.
+        let listed = (ps.queue.len(), ps.closing.len());
+        ps.queue.retain(|id| id != &t.id);
+        if !ps.closing.contains(&t.id) {
+            ps.closing.push(t.id.clone());
+        }
+        if listed != (ps.queue.len(), ps.closing.len()) {
+            self.save_project(ps)?;
+        }
+        // A lost `session.waiting off` or `set.sync` of an earlier run is
+        // resolved before anything is asked again; `step` never visits a
+        // closing ticket to do it.
+        let pending: Vec<usize> = t
+            .ledger
+            .iter()
+            .enumerate()
+            .filter(|(_, o)| o.reply.is_none())
+            .map(|(i, _)| i)
+            .collect();
+        if !pending.is_empty() {
+            for i in pending {
+                self.recover_one(t, ps, i, now_ms)?;
+            }
+            // Recovery may decide about an attempt as if the ticket were
+            // running; the intent to close stands over that.
+            t.state = TicketState::Closing {
+                reason: reason.clone(),
+            };
+            self.save_ticket(t, now_ms)?;
+        }
+        if !self.retire_processes(t, ps, &t.processes.clone(), now_ms)? {
+            log::info!("ticket {} closing: a process is still alive", t.id);
+            return Ok(());
+        }
+        if !t.close.decisions_cancelled || !t.pending_decisions().is_empty() {
+            for d in &mut t.decisions {
+                if d.pending() {
+                    d.state = DecisionState::Cancelled;
+                }
+            }
+            t.close.decisions_cancelled = true;
+            self.save_ticket(t, now_ms)?;
+        }
+        // Sent on every run until a reply is recorded: it is idempotent,
+        // and a mark left on would keep counting the ticket as waiting.
+        if !t.close.waiting_cleared {
+            self.unmark(t, ps, now_ms)?;
+            t.close.waiting_cleared = true;
+            self.save_ticket(t, now_ms)?;
+        }
+        if t.close.trees_kept.is_none() {
+            self.remove_trees(t, now_ms)?;
+        }
+        if !t.close.card_cleared {
+            let others: Vec<Ticket> = ps
+                .queue
+                .iter()
+                .filter_map(|id| self.load_ticket(id).ok())
+                .collect();
+            let project = ps.name.clone();
+            crate::view::sync_queue(self, ps, &project, &others, Some(t), now_ms)?;
+            t.close.card_cleared = true;
+            self.save_ticket(t, now_ms)?;
+        }
+        log::info!("ticket {} closed: {reason}", t.id);
+        t.state = TicketState::Closed { reason };
+        self.save_ticket(t, now_ms)?;
+        ps.closing.retain(|id| id != &t.id);
         self.save_project(ps)
+    }
+
+    /// The ticket's trees out of Dispatch's clones with `git worktree
+    /// remove`, never forced: each lane with a repository of its own
+    /// first (it is nested in the ticket's tree, and would otherwise be
+    /// untracked content there), then the ticket's tree, each flag saved
+    /// as it is read back. A refusal does not hold the close, which
+    /// would retry forever on a stray file: why goes in `trees_kept`,
+    /// and the tree stays with its work. A pipeline that works in place
+    /// removes nothing; that tree is the user's checkout.
+    fn remove_trees(&mut self, t: &mut Ticket, now_ms: u64) -> Result<()> {
+        let p = match self.pipeline_of(t) {
+            Ok(p) => p,
+            Err(e) => {
+                t.close.trees_kept = Some(format!("pipeline copy unreadable: {e:#}"));
+                return self.save_ticket(t, now_ms);
+            }
+        };
+        if !p.cuts_worktrees() {
+            return Ok(());
+        }
+        let mut kept: Vec<String> = Vec::new();
+        for i in 0..t.lanes.len() {
+            let lane = t.lanes[i].clone();
+            if lane.removed || p.lane(&lane.name).is_none_or(|l| l.repo.is_none()) {
+                continue;
+            }
+            let clone = self
+                .data
+                .repo_dir(&format!("{}@{}", p.project.name, lane.name));
+            match self.git.worktree_remove(&clone, &lane.worktree) {
+                Ok(()) => {
+                    log::info!("ticket {} lane {} removed", t.id, lane.name);
+                    t.lanes[i].removed = true;
+                    self.save_ticket(t, now_ms)?;
+                }
+                Err(e) => kept.push(format!("lane {}: {e:#}", lane.name)),
+            }
+        }
+        // A lane still in the tree would refuse the tree's removal too.
+        if kept.is_empty()
+            && !t.close.tree_removed
+            && let Some(tree) = t.tree.clone()
+        {
+            match self
+                .git
+                .worktree_remove(&self.data.repo_dir(&p.project.name), &tree)
+            {
+                Ok(()) => {
+                    log::info!("ticket {} tree removed", t.id);
+                    t.close.tree_removed = true;
+                    for lane in &mut t.lanes {
+                        lane.removed = true;
+                    }
+                    self.save_ticket(t, now_ms)?;
+                }
+                Err(e) => kept.push(format!("{e:#}")),
+            }
+        }
+        if !kept.is_empty() {
+            let why = kept.join("; ");
+            log::warn!("ticket {} trees kept: {why}", t.id);
+            t.close.trees_kept = Some(why);
+            self.save_ticket(t, now_ms)?;
+        }
+        Ok(())
+    }
+
+    /// The paths that would refuse a ticket's trees' removal, read
+    /// before anything is written: each lane with a repository of its
+    /// own on its own terms, and the ticket's tree with those lanes left
+    /// out.
+    fn preflight_trees(&self, t: &Ticket) -> Result<()> {
+        let p = self.pipeline_of(t)?;
+        if !p.cuts_worktrees() {
+            return Ok(());
+        }
+        let lanes: Vec<PathBuf> = t
+            .lanes
+            .iter()
+            .filter(|l| !l.removed && p.lane(&l.name).is_some_and(|d| d.repo.is_some()))
+            .map(|l| l.worktree.clone())
+            .collect();
+        let tree = t.tree.as_deref().filter(|_| !t.close.tree_removed);
+        let found = crate::git::uncommitted(&*self.git, tree, &lanes)?;
+        if !found.is_empty() {
+            let named: Vec<String> = found.iter().map(|f| f.display().to_string()).collect();
+            bail!(
+                "ticket {} has changes in its trees: {}; commit or clean it, then close again",
+                t.id,
+                named.join(", ")
+            );
+        }
+        Ok(())
+    }
+
+    /// Close a ticket by hand: its worktrees removed, its branch, its
+    /// directory, its record and its Switchboard projects kept. Refused,
+    /// with nothing written, while anything of it runs (park it first,
+    /// so the cancellation sequence runs) or a tree has changes. The
+    /// ticket comes back as it stands: `Closed`, or `Closing` when a
+    /// process is still going and the next pass finishes it. On a closed
+    /// ticket whose trees were kept, the removal is tried again.
+    pub fn close_by_hand(
+        &mut self,
+        ticket: &str,
+        reason: Option<&str>,
+        now_ms: u64,
+    ) -> Result<Ticket> {
+        self.transaction(|r| {
+            let mut t = r.load_ticket(ticket)?;
+            match &t.state {
+                TicketState::Parking { .. } => {
+                    bail!("ticket {ticket} is still parking; try again when it is parked")
+                }
+                TicketState::Active if t.attempts.iter().any(Attempt::is_open) => {
+                    let open: Vec<String> = t
+                        .attempts
+                        .iter()
+                        .filter(|a| a.is_open())
+                        .map(|a| format!("{}/{}", a.stage, a.context))
+                        .collect();
+                    bail!(
+                        "ticket {ticket} has {} open; park it first, so the cancellation sequence runs",
+                        open.join(", ")
+                    )
+                }
+                TicketState::Closed { .. } if t.close.trees_kept.is_some() => {
+                    r.retry_removal(&mut t, now_ms)?;
+                    return Ok(t);
+                }
+                TicketState::Closed { .. } => bail!("ticket {ticket} is already closed"),
+                TicketState::Closing { .. } => return Ok(t),
+                TicketState::Active | TicketState::Parked { .. } => {}
+            }
+            r.preflight_trees(&t)?;
+            let mut ps = r.load_project(&t.project)?;
+            r.begin_close(&mut t, &mut ps, reason.unwrap_or("closed by hand"), now_ms)
+                .with_context(|| {
+                    format!("ticket {ticket} is closing; the runner finishes it on a later pass")
+                })?;
+            Ok(t)
+        })
+    }
+
+    /// The removal of a closed ticket's kept trees, tried again; the
+    /// state and reason stay. A refusal is kept again and reported.
+    fn retry_removal(&mut self, t: &mut Ticket, now_ms: u64) -> Result<()> {
+        t.close.trees_kept = None;
+        self.save_ticket(t, now_ms)?;
+        self.remove_trees(t, now_ms)?;
+        if let Some(why) = &t.close.trees_kept {
+            bail!("ticket {}: trees kept: {why}", t.id);
+        }
+        Ok(())
     }
 
     /// Parking is a sequence, not a flag: the intent is written first,
@@ -1586,6 +1850,7 @@ impl Runner {
                 setup_done: false,
                 base_sha,
                 refreshed: None,
+                removed: false,
             });
             self.save_ticket(t, now_ms)?;
         }
@@ -4121,17 +4386,36 @@ impl Runner {
     /// every ticket's slow work. Each step re-reads its ticket and the
     /// project under the lock, so what landed between steps is seen.
     pub fn step_project(&mut self, project: &str, now_ms: u64) -> Result<()> {
-        let ps = self.load_project(project)?;
+        let mut ps = self.load_project(project)?;
         let mut tickets: Vec<Ticket> = Vec::new();
-        for id in ps.queue.clone() {
-            match self.load_ticket(&id) {
+        for id in ps.queue.iter().chain(&ps.closing) {
+            if tickets.iter().any(|t| &t.id == id) {
+                continue;
+            }
+            match self.load_ticket(id) {
                 Ok(t) => tickets.push(t),
                 Err(e) => log::warn!("ticket {id}: {e}"),
             }
         }
+        // A close finished but not yet saved to the project leaves the
+        // id behind; a closed ticket is in neither list.
+        let closed: Vec<String> = tickets
+            .iter()
+            .filter(|t| matches!(t.state, TicketState::Closed { .. }))
+            .map(|t| t.id.clone())
+            .collect();
+        if !closed.is_empty() {
+            ps.queue.retain(|id| !closed.contains(id));
+            ps.closing.retain(|id| !closed.contains(id));
+            tickets.retain(|t| !closed.contains(&t.id));
+            self.save_project(&ps)?;
+        }
         let mut running = 0u32;
         let mut pending = 0u32;
         for t in &tickets {
+            if matches!(t.state, TicketState::Closing { .. }) {
+                continue;
+            }
             if t.active() && t.attempts.iter().any(costs_slot) {
                 running += 1;
             }
@@ -4147,7 +4431,6 @@ impl Runner {
             .and_then(|text| Pipeline::parse(&text).ok())
             .map(|p| p.policy);
         let free_gb = self.free_gb();
-        let mut pipeline: Option<Pipeline> = None;
         for stale in &tickets {
             let id = stale.id.clone();
             let stepped = self.transaction(|r| {
@@ -4178,25 +4461,23 @@ impl Runner {
                     running += 1;
                 }
                 pending = pending.saturating_add(stepped.asked);
-                if let Some(p) = stepped.pipeline {
-                    pipeline = Some(p);
-                }
             }
         }
-        if let Some(p) = pipeline {
-            self.transaction(|r| {
-                let mut ps = r.load_project(project)?;
-                let refreshed: Vec<Ticket> = ps
-                    .queue
-                    .iter()
-                    .filter_map(|id| r.load_ticket(id).ok())
-                    .collect();
-                if let Err(e) = crate::view::sync_queue(r, &mut ps, &p, &refreshed, now_ms) {
-                    log::warn!("queue view: {e}");
-                }
-                r.save_project(&ps)
-            })?;
-        }
+        // Whatever moved, the set follows: a sync is sent only when what
+        // it would show differs from what it last showed.
+        self.transaction(|r| {
+            let mut ps = r.load_project(project)?;
+            let refreshed: Vec<Ticket> = ps
+                .queue
+                .iter()
+                .filter_map(|id| r.load_ticket(id).ok())
+                .collect();
+            if let Err(e) = crate::view::sync_queue(r, &mut ps, project, &refreshed, None, now_ms)
+            {
+                log::warn!("queue view: {e}");
+            }
+            r.save_project(&ps)
+        })?;
         Ok(())
     }
 
@@ -4215,6 +4496,12 @@ impl Runner {
             if matches!(t.state, TicketState::Parking { .. }) {
                 if let Err(e) = self.finish_parking(t, ps, now_ms) {
                     log::error!("ticket {}: {e}", t.id);
+                }
+                return Ok(None);
+            }
+            if matches!(t.state, TicketState::Closing { .. }) {
+                if let Err(e) = self.finish_closing(t, ps, now_ms) {
+                    log::error!("ticket {}: {e:#}", t.id);
                 }
                 return Ok(None);
             }
@@ -4257,7 +4544,6 @@ impl Runner {
                 return Ok(Some(Stepped {
                     took_slot: false,
                     asked,
-                    pipeline: None,
                 }));
             }
             let had_slot = t.attempts.iter().any(costs_slot);
@@ -4268,7 +4554,6 @@ impl Runner {
             Ok(Some(Stepped {
                 took_slot,
                 asked: 0,
-                pipeline: Some(p),
             }))
         }
     }
@@ -4318,7 +4603,7 @@ impl Runner {
     ) -> Result<Decision> {
         let path = self.data.ticket_file(ticket);
         self.data.with_lock(|| {
-            let mut t: Ticket = read_json(&path)?;
+            let mut t = read_ticket(&path)?;
             let d = t
                 .decisions
                 .iter_mut()
@@ -4336,7 +4621,7 @@ impl Runner {
             };
             let d = d.clone();
             t.updated_ms = now_ms;
-            write_json(&path, &t)?;
+            write_ticket(&path, &mut t)?;
             Ok(d)
         })
     }
@@ -4348,14 +4633,14 @@ impl Runner {
     pub fn resume(&self, ticket: &str, now_ms: u64) -> Result<Ticket> {
         let path = self.data.ticket_file(ticket);
         self.data.with_lock(|| {
-            let mut t: Ticket = read_json(&path)?;
+            let mut t = read_ticket(&path)?;
             let TicketState::Parked { reason } = &t.state else {
                 bail!("ticket {ticket} is not parked");
             };
             log::info!("ticket {ticket} resumed (was parked: {reason})");
             t.state = TicketState::Active;
             t.updated_ms = now_ms;
-            write_json(&path, &t)?;
+            write_ticket(&path, &mut t)?;
             Ok(t)
         })
     }

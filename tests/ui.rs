@@ -4164,6 +4164,94 @@ fn dispatch_table_filters_sorts_and_resumes() {
     assert!(!shown(&harness, "#12 Night sync"));
     click(&mut harness, "Clear");
     assert!(shown(&harness, "#12 Night sync"));
+/// A ticket's page with `edit` applied to Orchard's ticket first.
+fn ticket_page(
+    edit: impl FnOnce(&mut switchboard::ports::dispatch::TicketView),
+) -> Harness<'static, SwitchboardApp> {
+    let (mut harness, _) = harness();
+    let mut status = dispatch_status();
+    status.tickets[0].decisions.clear();
+    status.tickets[0].tree = Some("/wt/t1".into());
+    edit(&mut status.tickets[0]);
+    harness
+        .state_mut()
+        .dispatch(AppAction::DispatchStatus(Some(status)));
+    harness
+        .state_mut()
+        .dispatch(AppAction::ShowTicket("t1".into()));
+    harness.state_mut().dispatched.clear();
+    harness.run_steps(2);
+    harness
+}
+
+/// Close is behind a confirmation that names the tree; only the
+/// dialog's button sends the call, and Cancel sends nothing.
+#[test]
+fn dispatch_ticket_closes_after_a_confirmation_naming_its_tree() {
+    use switchboard::ports::dispatch::LaneView;
+    let mut harness = ticket_page(|t| {
+        t.state = "parked".into();
+        t.reason = Some("parked by hand".into());
+        t.lanes = vec![LaneView {
+            name: "backend".into(),
+            worktree: "/wt/t1/orchard-backend".into(),
+            ..LaneView::default()
+        }];
+    });
+    click(&mut harness, "Close");
+    harness.get_by_label("Close this ticket");
+    harness.get_by_label("/wt/t1/orchard-backend (backend)");
+    assert!(
+        harness.query_all_by_label("/wt/t1").count() >= 2,
+        "the meta line and the dialog"
+    );
+    assert!(
+        !actions(&harness)
+            .iter()
+            .any(|a| matches!(a, AppAction::DispatchClose(_))),
+        "the button alone sends nothing"
+    );
+    click(&mut harness, "Cancel");
+    assert!(harness.query_by_label("Close this ticket").is_none());
+    assert!(actions(&harness).is_empty(), "{:?}", actions(&harness));
+    click(&mut harness, "Close");
+    click(&mut harness, "Close ticket");
+    assert!(actions(&harness).contains(&AppAction::DispatchClose("t1".into())));
+    assert!(harness.query_by_label("Close this ticket").is_none());
+}
+
+/// Close shows only where Dispatch would take it; a closed ticket says
+/// its tree is gone, or offers the removal again when it was kept.
+#[test]
+fn dispatch_ticket_offers_close_only_when_nothing_runs() {
+    use switchboard::ports::dispatch::AttemptView;
+    let harness = ticket_page(|t| {
+        t.attempts = vec![AttemptView {
+            stage: "lanes".into(),
+            n: 1,
+            state: "running".into(),
+            ..AttemptView::default()
+        }];
+    });
+    assert!(harness.query_by_label("Close").is_none());
+    let harness = ticket_page(|t| {
+        t.state = "closing".into();
+        t.reason = Some("closed by hand".into());
+    });
+    assert!(harness.query_by_label("Close").is_none());
+    harness.get_by_label("closing: closed by hand");
+    let harness = ticket_page(|t| {
+        t.state = "closed".into();
+        t.tree_removed = true;
+    });
+    assert!(harness.query_by_label("Close").is_none());
+    harness.get_by_label("/wt/t1 · removed");
+    let harness = ticket_page(|t| {
+        t.state = "closed".into();
+        t.trees_kept = Some("/wt/t1 not removed: it has changes".into());
+    });
+    harness.get_by_label("Remove trees");
+    harness.get_by_label("tree kept: /wt/t1 not removed: it has changes");
 }
 
 /// A ticket's agent at a prompt of its own is on the page: a card under

@@ -240,8 +240,8 @@ tests/fixtures/          a small real Claude Code transcript for the parser test
 tests/live.rs            ignored: real claude / codex / Ghostty runs
 tests/gate.rs            Milestone 1 gate: real store, tmux, hooks; agents ignored
 control/                 switchboard-control: the control port's wire contract (requests, replies, views) and a blocking client; std + serde only
-dispatch-control/        dispatch-control: the wire contract of Dispatch's own port (tickets as views, decide, queue, take) and a blocking client; std + serde only
-dispatch/                the `dispatch` binary (docs/dispatch.md; docs/dispatch-agent-guide.md is the command-line guide for agents that take tickets): a ticket scheduler that drives Switchboard over the control port and never links the app
+dispatch-control/        dispatch-control: the wire contract of Dispatch's own port (tickets as views, decide, queue, take, resume, close) and a blocking client; std + serde only
+dispatch/                the `dispatch` binary (docs/dispatch.md; docs/dispatch-agent-guide.md is the command-line guide for agents that take tickets): a ticket scheduler that drives Switchboard over the control port and never links the app; its records carry a version (`store::migrate`), and a ticket closes by removing its worktrees and keeping its branch
   src/main.rs            CLI: take, run, decide, decisions, status, queue, resume
   src/serve.rs           Dispatch's port on <data>/dispatch.sock while `run` is up: the records as views, the commands the CLI has, one handler under one lock
   src/pipeline.rs        the TOML pipeline file, parsed in full and validated; fingerprint of the copy a ticket runs

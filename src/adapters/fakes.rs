@@ -212,6 +212,20 @@ impl DispatchPort for FakeDispatch {
                     || DispatchReply::failed("no such ticket"),
                     DispatchReply::Ticket,
                 ),
+            DispatchBody::Close { ticket, reason } => status
+                .tickets
+                .iter()
+                .find(|t| &t.id == ticket)
+                .cloned()
+                .map_or_else(
+                    || DispatchReply::failed("no such ticket"),
+                    |mut t| {
+                        t.state = "closed".into();
+                        t.reason = Some(reason.clone().unwrap_or_else(|| "closed by hand".into()));
+                        t.tree_removed = t.tree.is_some();
+                        DispatchReply::Ticket(t)
+                    },
+                ),
         })
     }
 }

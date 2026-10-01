@@ -8,6 +8,7 @@ use std::path::PathBuf;
 use egui::{RichText, Ui};
 use egui_extras::{Column, TableBuilder};
 
+use super::dialogs::{dialog, dialog_actions};
 use super::{DrawCtx, GAP, markdown, theme};
 use crate::core::{AppAction, RecordId, TicketOnly, TicketSort, View, WaitingAgent};
 use crate::ports::dispatch::{AttemptView, DecisionView, ProjectView, TicketView};
@@ -722,6 +723,7 @@ pub fn ticket(cx: &mut DrawCtx<'_>, ui: &mut Ui, id: &str) {
         return;
     };
     ticket_header(cx, ui, &t);
+    confirm_close(cx, ui.ctx(), &t);
 
     let left = (ui.available_width() * 0.45).max(320.0);
     ui.horizontal_top(|ui| {
@@ -767,13 +769,7 @@ fn ticket_header(cx: &mut DrawCtx<'_>, ui: &mut Ui, t: &TicketView) {
             if theme::ghost(ui, "Back").clicked() {
                 go_back(cx);
             }
-            if t.state == "parked"
-                && theme::secondary(ui, "Resume")
-                    .on_hover_text("Back to active; the runner takes it from its current stage")
-                    .clicked()
-            {
-                cx.dispatch(AppAction::DispatchResume(t.id.clone()));
-            }
+            ticket_actions(cx, ui, t);
             if let Some(url) = &t.url {
                 let what = if t.kind == "pull-request" {
                     "Pull request"
@@ -807,7 +803,22 @@ fn ticket_header(cx: &mut DrawCtx<'_>, ui: &mut Ui, t: &TicketView) {
         );
         if let Some(tree) = &t.tree {
             ui.label(theme::meta_text(ui, "·"));
-            ui.label(theme::mono_text(ui, tree.display().to_string()));
+            if t.tree_removed {
+                ui.label(theme::meta_text(
+                    ui,
+                    format!("{} · removed", tree.display()),
+                ));
+            } else {
+                ui.label(theme::mono_text(ui, tree.display().to_string()));
+            }
+        }
+        if let Some(why) = &t.trees_kept {
+            ui.label(theme::meta_text(ui, "·"));
+            ui.label(
+                RichText::new(format!("tree kept: {why}"))
+                    .text_style(theme::meta())
+                    .color(p.accent_2_text),
+            );
         }
     });
     if !t.lanes.is_empty() {
@@ -816,10 +827,11 @@ fn ticket_header(cx: &mut DrawCtx<'_>, ui: &mut Ui, t: &TicketView) {
             ui.label(theme::meta_text(ui, "Lanes:"));
             for lane in &t.lanes {
                 let text = format!(
-                    "{}{}{}",
+                    "{}{}{}{}",
                     lane.name,
                     if lane.chosen { "" } else { " (not chosen)" },
-                    if lane.setup_done { " · set up" } else { "" }
+                    if lane.setup_done { " · set up" } else { "" },
+                    if lane.removed { " · removed" } else { "" }
                 );
                 ui.label(
                     RichText::new(text)
@@ -833,6 +845,93 @@ fn ticket_header(cx: &mut DrawCtx<'_>, ui: &mut Ui, t: &TicketView) {
                 ));
             }
         });
+    }
+}
+
+/// Resume and Close, in the header's right-to-left row, where the
+/// ticket's state allows them.
+fn ticket_actions(cx: &mut DrawCtx<'_>, ui: &mut Ui, t: &TicketView) {
+    if t.state == "parked"
+        && theme::secondary(ui, "Resume")
+            .on_hover_text("Back to active; the runner takes it from its current stage")
+            .clicked()
+    {
+        cx.dispatch(AppAction::DispatchResume(t.id.clone()));
+    }
+    // Dispatch's rule, mirrored only to hide a button it would refuse:
+    // nothing of the ticket may be running.
+    let running = t
+        .attempts
+        .iter()
+        .any(|a| matches!(a.state.as_str(), "starting" | "running"));
+    let closable = t.state == "parked" || (t.state == "active" && !running);
+    if closable
+        && theme::secondary(ui, "Close")
+            .on_hover_text(
+                "Remove the ticket's worktrees and close it; the branch and the record stay",
+            )
+            .clicked()
+    {
+        cx.state.confirm_close_ticket = Some(t.id.clone());
+    }
+    if t.state == "closed"
+        && t.trees_kept.is_some()
+        && theme::secondary(ui, "Remove trees")
+            .on_hover_text("Try the removal again; the branch stays")
+            .clicked()
+    {
+        cx.state.confirm_close_ticket = Some(t.id.clone());
+    }
+}
+
+/// The close confirmation: what goes, by path, and what stays. A
+/// confirmation rather than an undo, since a removed tree cannot be put
+/// back as it was (its ignored build output is gone) and a closed
+/// ticket does not resume.
+fn confirm_close(cx: &mut DrawCtx<'_>, ctx: &egui::Context, t: &TicketView) {
+    if cx.state.confirm_close_ticket.as_deref() != Some(t.id.as_str()) {
+        return;
+    }
+    let retry = t.state == "closed";
+    let title = if retry {
+        "Remove the ticket's trees"
+    } else {
+        "Close this ticket"
+    };
+    let mut done = false;
+    dialog(ctx, title, |ui| {
+        ui.label(
+            "Removed with git worktree remove, never forced: git refuses a tree with changes.",
+        );
+        if let Some(tree) = t.tree.as_ref().filter(|_| !t.tree_removed) {
+            ui.label(theme::mono_text(ui, tree.display().to_string()));
+        }
+        for lane in t
+            .lanes
+            .iter()
+            .filter(|l| !l.removed && Some(&l.worktree) != t.tree.as_ref())
+        {
+            ui.label(theme::mono_text(
+                ui,
+                format!("{} ({})", lane.worktree.display(), lane.name),
+            ));
+        }
+        ui.label(
+            "The branch, the ticket's directory with its attempts and artifacts, and its \
+             Switchboard projects stay.",
+        );
+        let (confirmed, cancelled) =
+            dialog_actions(ui, if retry { "Try again" } else { "Close ticket" }, true);
+        if confirmed {
+            cx.dispatch(AppAction::DispatchClose(t.id.clone()));
+            done = true;
+        }
+        if cancelled {
+            done = true;
+        }
+    });
+    if done || ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
+        cx.state.confirm_close_ticket = None;
     }
 }
 

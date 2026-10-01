@@ -474,6 +474,9 @@ pub enum AppAction {
     },
     /// A parked ticket back to active, through the port.
     DispatchResume(String),
+    /// Close a ticket through the port: its worktrees removed, its
+    /// branch and records kept.
+    DispatchClose(String),
     /// Where Dispatch puts tickets' trees: set it (`path`), and with
     /// `migrate` have idle tickets' trees moved there.
     DispatchWorktrees {
@@ -943,6 +946,7 @@ impl AppCore {
             | AppAction::DispatchDecide { .. }
             | AppAction::DispatchReadArtifact { .. }
             | AppAction::DispatchResume(_)
+            | AppAction::DispatchClose(_)
             | AppAction::DispatchWorktrees { .. }
             | AppAction::DispatchReplied { .. }
             | AppAction::OpenDispatchConsole

@@ -9,6 +9,16 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
+use serde_json::Value;
+
+use crate::ticket::{ProjectState, Ticket};
+
+/// The format of a ticket or project record this build reads and
+/// writes. A record carries it as `version`; one written before records
+/// carried a version reads as 0 and is brought up by `migrate`. A
+/// record above it was written by a newer `dispatch` and is refused
+/// both ways, so this build never drops fields it does not know.
+pub const RECORD_VERSION: u32 = 1;
 
 /// The writer lock, held while this lives.
 #[derive(Debug)]
@@ -281,6 +291,76 @@ pub fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T> {
     }
 }
 
+/// A ticket record, its version checked and migrated to this build's.
+pub fn read_ticket(path: &Path) -> Result<Ticket> {
+    read_record(path)
+}
+
+/// A project's state record, its version checked and migrated.
+pub fn read_project(path: &Path) -> Result<ProjectState> {
+    read_record(path)
+}
+
+fn read_record<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T> {
+    let value: Value = read_json(path)?;
+    let version = value.get("version").and_then(Value::as_u64).unwrap_or(0);
+    if version > u64::from(RECORD_VERSION) {
+        bail!(
+            "{} is version {version}, written by a newer dispatch; update this one",
+            path.display()
+        );
+    }
+    serde_json::from_value(migrate(value)).with_context(|| format!("parse {}", path.display()))
+}
+
+/// Step a record up one version at a time to `RECORD_VERSION`.
+#[must_use]
+pub fn migrate(mut value: Value) -> Value {
+    let mut version = value.get("version").and_then(Value::as_u64).unwrap_or(0);
+    while version < u64::from(RECORD_VERSION) {
+        // 0 to 1: records gain a version; the fields added with it
+        // (a ticket's close progress, a lane's `removed`, a project's
+        // `closing`) arrive from their serde defaults, and no existing
+        // field changes meaning.
+        version += 1;
+        if let Some(record) = value.as_object_mut() {
+            record.insert("version".into(), version.into());
+        }
+    }
+    value
+}
+
+/// Write a ticket record stamped with this build's version; one read
+/// from a newer build is refused rather than written back without the
+/// fields it carried.
+pub fn write_ticket(path: &Path, t: &mut Ticket) -> Result<()> {
+    if t.version > RECORD_VERSION {
+        bail!(
+            "ticket {} is version {}, written by a newer dispatch; update this one",
+            t.id,
+            t.version
+        );
+    }
+    t.version = RECORD_VERSION;
+    write_json(path, t)
+}
+
+/// The same for a project's state.
+pub fn write_project(path: &Path, ps: &ProjectState) -> Result<()> {
+    if ps.version > RECORD_VERSION {
+        bail!(
+            "project {} is version {}, written by a newer dispatch; update this one",
+            ps.name,
+            ps.version
+        );
+    }
+    let stamped = ProjectState {
+        version: RECORD_VERSION,
+        ..ps.clone()
+    };
+    write_json(path, &stamped)
+}
+
 pub fn write_json<T: serde::Serialize>(path: &Path, value: &T) -> Result<()> {
     let bytes = serde_json::to_vec_pretty(value)?;
     atomic_write(path, &bytes)
@@ -330,6 +410,117 @@ mod tests {
         assert!(record_exists(&path));
         fs::remove_file(&path).unwrap();
         assert!(record_exists(&path), "the backup still counts");
+    }
+
+    /// A ticket as records were written before they carried a version.
+    const TICKET_V0: &str = r#"{
+  "id": "a1b2c3d4",
+  "project": "Orchard",
+  "source": {
+    "kind": "github",
+    "identity": "k3/orchard#42",
+    "number": 42,
+    "title": "Asset report column missing",
+    "body": "",
+    "url": null,
+    "labels": ["area:backend"],
+    "taken_at_ms": 1000,
+    "pull_requests": []
+  },
+  "pipeline_fingerprint": "f00d",
+  "pipeline_file": "/d/tickets/a1b2c3d4/pipeline.toml",
+  "lanes": [
+    {
+      "name": "backend",
+      "worktree": "/wt/a1b2c3d4/orchard-backend",
+      "branch": "dispatch/42-asset-report-column-missing",
+      "project": null,
+      "chosen": true,
+      "setup_done": false,
+      "base_sha": "base0000"
+    }
+  ],
+  "tree": "/wt/a1b2c3d4",
+  "stage": 1,
+  "attempts": [],
+  "decisions": [],
+  "ledger": [],
+  "processes": [],
+  "root_project": null,
+  "rework": {},
+  "state": "parked",
+  "reason": "parked by hand at decision lanes",
+  "created_ms": 1000,
+  "updated_ms": 2000
+}"#;
+
+    const PROJECT_V0: &str = r#"{
+  "name": "Orchard",
+  "space": "space-1",
+  "set": "set-1",
+  "queue": ["a1b2c3d4"],
+  "shown": [["a1b2c3d4", "s-1"]]
+}"#;
+
+    #[test]
+    fn a_record_without_a_version_migrates_to_this_one_and_is_written_back_as_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let ticket = dir.path().join("t.json");
+        let project = dir.path().join("p.json");
+        fs::write(&ticket, TICKET_V0).unwrap();
+        fs::write(&project, PROJECT_V0).unwrap();
+        let mut t = read_ticket(&ticket).unwrap();
+        assert_eq!(t.version, RECORD_VERSION);
+        assert_eq!(t.close, crate::ticket::CloseProgress::default());
+        assert!(!t.lanes[0].removed);
+        assert!(
+            matches!(&t.state, crate::ticket::TicketState::Parked { reason } if reason.contains("lanes"))
+        );
+        let ps = read_project(&project).unwrap();
+        assert_eq!(ps.version, RECORD_VERSION);
+        assert!(ps.closing.is_empty());
+        assert_eq!(ps.queue, ["a1b2c3d4"]);
+        write_ticket(&ticket, &mut t).unwrap();
+        write_project(&project, &ps).unwrap();
+        for path in [&ticket, &project] {
+            let value: Value = read_json(path).unwrap();
+            assert_eq!(value["version"], RECORD_VERSION);
+        }
+    }
+
+    #[test]
+    fn a_record_from_a_newer_dispatch_is_refused_and_left_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.json");
+        let newer = TICKET_V0.replacen(
+            '{',
+            &format!("{{\n  \"version\": {},", RECORD_VERSION + 1),
+            1,
+        );
+        fs::write(&path, &newer).unwrap();
+        let e = read_ticket(&path).unwrap_err();
+        assert!(e.to_string().contains("newer dispatch"), "{e:#}");
+        assert_eq!(fs::read_to_string(&path).unwrap(), newer);
+        let mut t = serde_json::from_str::<Ticket>(&newer).unwrap();
+        assert!(write_ticket(&path, &mut t).is_err(), "never written back");
+        assert_eq!(fs::read_to_string(&path).unwrap(), newer);
+    }
+
+    #[test]
+    fn a_closing_ticket_round_trips() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.json");
+        let mut t: Ticket = serde_json::from_str(TICKET_V0).unwrap();
+        t.state = crate::ticket::TicketState::Closing {
+            reason: "closed by hand".into(),
+        };
+        t.close.decisions_cancelled = true;
+        t.close.trees_kept = Some("has changes".into());
+        t.lanes[0].removed = true;
+        write_ticket(&path, &mut t).unwrap();
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(text.contains(r#""state": "closing""#), "{text}");
+        assert_eq!(read_ticket(&path).unwrap(), t);
     }
 
     #[test]

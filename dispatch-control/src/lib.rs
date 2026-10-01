@@ -75,6 +75,14 @@ pub enum Body {
     Take { project: String, issue: String },
     /// A parked ticket back to active.
     Resume { ticket: String },
+    /// Close a ticket: its worktrees removed, its branch, directory and
+    /// record kept. On a closed ticket whose trees were kept, the
+    /// removal is tried again. Answered with the ticket as it stands.
+    Close {
+        ticket: String,
+        #[serde(default)]
+        reason: Option<String>,
+    },
     /// Where tickets' trees go: read it, set it (`path`), and with
     /// `migrate` move every idle ticket's tree there.
     Worktrees {
@@ -97,6 +105,7 @@ impl Body {
             Self::Queue { .. } => "queue",
             Self::Take { .. } => "take",
             Self::Resume { .. } => "resume",
+            Self::Close { .. } => "close",
             Self::Worktrees { .. } => "worktrees",
         }
     }
@@ -217,7 +226,7 @@ pub struct TicketView {
     pub body: String,
     pub url: Option<String>,
     pub labels: Vec<String>,
-    /// `active`, `parking`, `parked` or `closed`.
+    /// `active`, `parking`, `parked`, `closing` or `closed`.
     pub state: String,
     /// Why, for a parked or closed ticket.
     pub reason: Option<String>,
@@ -226,6 +235,11 @@ pub struct TicketView {
     /// Index into `stages` of the current one; past the end when done.
     pub stage: usize,
     pub tree: Option<PathBuf>,
+    /// The tree is removed: the ticket closed. `tree` still says where
+    /// it was.
+    pub tree_removed: bool,
+    /// Why a close left the trees in place, when it did.
+    pub trees_kept: Option<String>,
     pub lanes: Vec<LaneView>,
     pub attempts: Vec<AttemptView>,
     pub decisions: Vec<DecisionView>,
@@ -245,6 +259,8 @@ pub struct LaneView {
     pub branch: String,
     pub chosen: bool,
     pub setup_done: bool,
+    /// The lane's worktree is removed: the ticket closed.
+    pub removed: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -370,6 +386,14 @@ mod tests {
             Body::Resume {
                 ticket: "t1".into(),
             },
+            Body::Close {
+                ticket: "t1".into(),
+                reason: None,
+            },
+            Body::Close {
+                ticket: "t1".into(),
+                reason: Some("done elsewhere".into()),
+            },
             Body::Worktrees {
                 path: Some("/wt2".into()),
                 migrate: true,
@@ -422,6 +446,23 @@ mod tests {
         for reply in replies {
             assert_eq!(Reply::parse(reply.to_line().trim_end()), Ok(reply));
         }
+    }
+
+    #[test]
+    fn a_ticket_from_a_runner_without_the_close_fields_reads_them_as_unset() {
+        let line = r#"{"reply":"ticket","id":"t","state":"closed","tree":"/wt/t","lanes":[{"name":"repo","worktree":"/wt/t"}]}"#;
+        let Reply::Ticket(t) = Reply::parse(line).unwrap() else {
+            panic!("a ticket")
+        };
+        assert!(!t.tree_removed && t.trees_kept.is_none() && !t.lanes[0].removed);
+        let line = r#"{"op":"1","kind":"close","ticket":"t"}"#;
+        assert_eq!(
+            Request::parse(line).unwrap().body,
+            Body::Close {
+                ticket: "t".into(),
+                reason: None
+            }
+        );
     }
 
     #[test]

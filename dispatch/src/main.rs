@@ -24,6 +24,7 @@ const USAGE: &str = "usage:
   dispatch status                          every ticket, its stage and state
   dispatch queue <project> [<ticket>...]   show, or reorder, a project's queue
   dispatch resume <ticket>                 a parked ticket back to active
+  dispatch close <ticket> [--reason <text>]  a ticket closed, its trees removed (the branch is kept)
   dispatch worktrees [<path>] [--migrate]  where tickets' trees go (default ~/.dispatch/worktrees);
                                            with a path, set it; --migrate moves idle tickets' trees there
 
@@ -75,6 +76,8 @@ fn main() -> Result<()> {
         ["status"] => status(),
         ["queue", project, rest @ ..] => queue(project, rest),
         ["resume", ticket] => resume(ticket),
+        ["close", ticket] => close(ticket, None),
+        ["close", ticket, "--reason", reason] => close(ticket, Some(reason)),
         ["worktrees", rest @ ..] => worktrees(rest),
         _ => {
             eprintln!("{USAGE}");
@@ -234,6 +237,7 @@ fn status() -> Result<()> {
             TicketState::Active => "active".to_owned(),
             TicketState::Parking { reason } => format!("parking: {reason}"),
             TicketState::Parked { reason } => format!("parked: {reason}"),
+            TicketState::Closing { reason } => format!("closing: {reason}"),
             TicketState::Closed { reason } => format!("closed: {reason}"),
         };
         let last = t.attempts.last().map_or(String::new(), |a| {
@@ -293,6 +297,41 @@ fn resume(ticket: &str) -> Result<()> {
     Ok(())
 }
 
+/// Close a ticket through Switchboard, as the runner would: its
+/// processes are read back and its session unmarked, so this takes the
+/// real port, not `NoPort`.
+fn close(ticket: &str, reason: Option<&str>) -> Result<()> {
+    let mut runner = runner()?;
+    let t = runner.close_by_hand(ticket, reason, now_ms())?;
+    let standing = match &t.state {
+        TicketState::Closed { reason } => format!("closed: {reason}"),
+        TicketState::Closing { reason } => {
+            format!("closing: {reason} (the runner finishes it on its next pass)")
+        }
+        other => format!("{other:?}"),
+    };
+    say!(
+        "{} {} {} {standing}",
+        t.id,
+        t.source.label(),
+        t.source.title
+    );
+    for lane in t.lanes.iter().filter(|l| l.removed) {
+        if t.tree.as_ref() != Some(&lane.worktree) {
+            say!("  removed lane {}: {}", lane.name, lane.worktree.display());
+        }
+    }
+    if let Some(tree) = &t.tree
+        && t.close.tree_removed
+    {
+        say!("  removed {}", tree.display());
+    }
+    if let Some(why) = &t.close.trees_kept {
+        say!("  kept: {why}");
+    }
+    Ok(())
+}
+
 fn queue(project: &str, order: &[&str]) -> Result<()> {
     let mut runner = Runner::new(
         DataDir::from_env()?,
@@ -310,6 +349,18 @@ fn queue(project: &str, order: &[&str]) -> Result<()> {
             .map(|t| format!("{} {}", t.source.label(), t.source.title))
             .unwrap_or_default();
         say!("{} {id} {title}", i + 1);
+    }
+    for id in &ps.closing {
+        let line = runner.load_ticket(id).map_or_else(
+            |_| String::new(),
+            |t| match &t.state {
+                TicketState::Closing { reason } => {
+                    format!("{} {} closing: {reason}", t.source.label(), t.source.title)
+                }
+                _ => format!("{} {}", t.source.label(), t.source.title),
+            },
+        );
+        say!("- {id} {line}");
     }
     Ok(())
 }

@@ -174,6 +174,34 @@ released on restart. Switchboard's own restart is covered by the same
 reads: every record the port made is an ordinary Switchboard record
 that its reconcile treats like any other, and launches nothing.
 
+Closing a ticket is a sequence from a saved intent, as parking is.
+`dispatch close` (or the port's `close`, or the page's Close) refuses
+while an attempt is open (park first, so the cancellation sequence
+runs) or a tree has changes, before anything is written; the preflight
+reads each lane with a repository of its own on its own terms and the
+ticket's tree with those lanes left out, since a clean nested lane is
+untracked content in the outer tree. Then the ticket is written
+`closing` and moved from the project's `queue` to its `closing` list,
+and every pass runs the rest from the flags on the record until it is
+done: unanswered requests resolved, every process read back as gone,
+pending decisions cancelled, the session unmarked once Switchboard
+answers, each lane with a repository of its own removed from its clone
+with `git worktree remove` and then the ticket's tree, never forced,
+the card taken off the set by a `set.sync` on the closing ticket's own
+ledger, and only then `closed`. The branch, the ticket's directory, the
+record and its Switchboard projects stay. A ticket past its last stage
+closes the same way; there a refusal by git does not hold the close,
+it is recorded as the trees kept, and `close` on the closed ticket
+tries the removal again. A closing ticket starts nothing, cuts no
+tree, cannot be resumed, and counts against neither `slots` nor
+`waiting_on_me`.
+
+Ticket and project records carry a `version`. Every read goes through
+`store::read_ticket` and `store::read_project`, which refuse a record
+from a newer `dispatch` and bring an older one up through
+`store::migrate`; every write stamps the current version and refuses
+to write over a newer one.
+
 The "never resume automatically" rule holds on both sides. New
 launches happen because the scheduler finds a runnable ticket at the
 top of a queue with a free slot, which is the same thing it would have
@@ -1390,7 +1418,7 @@ run` is up it serves `<data>/dispatch.sock` (wire crate
 ticket as a view (stage names resolved, attempts, decisions, lanes,
 artifact paths), `ticket` one in full, `artifact` the text of a file
 under a ticket's directory and nothing outside it, and `decide`,
-`queue`, `take`, `resume` and `worktrees` do exactly what the command
+`queue`, `take`, `resume`, `close` and `worktrees` do exactly what the command
 line does, through the same runner methods under the same writer lock. Switchboard's Dispatch
 page is a client of this port and knows nothing of the records; a
 runner on another machine looks the same through a forwarded socket.
@@ -1493,6 +1521,8 @@ and one against the real one:
 | The head moved while `review-code` was pending | The answer is stale: the ticket parks with both heads named and nothing launches (`an_answer_for_a_moved_head_is_stale_and_parks_the_ticket`) |
 | The runner lost a running command reviewer | Failed on the next pass, not started again (`a_lost_command_reviewer_is_failed_not_started_again`) |
 | The socket fails mid-pass (Switchboard quit or restarted under the runner) | Nothing is parked; the pass ends with a log line and the next one goes on; the port remakes its connection and sends the request again, which the operations log makes safe |
+| `close` on a parked ticket; on an active one with an open attempt; on a dirty tree; a ticket past its last stage | Each lane with its own repository, then the ticket's tree, is removed with `git worktree remove`; the branch, the ticket directory, the record and the Switchboard projects stay; the ticket leaves the queue and its card the set; pending decisions are cancelled and the session unmarked. Refused before anything is written while an attempt is open (park first) or a tree has changes. At the pipeline's end a refusal is recorded as the tree kept and the ticket still closes (`closing_by_hand_removes_the_lanes_then_the_tree_and_keeps_the_rest`, `a_close_is_refused_while_anything_runs_or_a_tree_has_changes`, `a_dirty_tree_at_the_pipelines_end_is_kept_and_removed_by_hand_later`) |
+| Dispatch killed at any point of a close | The ticket reads `closing` and starts nothing; the next pass finishes from the saved flags; nothing counts as done without its read-back (`a_close_cut_off_before_the_project_save_finishes_and_clears_the_set_once_answered` and its siblings) |
 | User is viewing another workspace during the whole path | The window stays on it through every launch and the review start; no terminal window opens |
 
 Then, in order: `implement` with its command gate bound to a commit,

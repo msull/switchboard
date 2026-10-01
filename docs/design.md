@@ -1495,7 +1495,13 @@ decision card names its project. The page can leave for a window of
 its own (`Settings.dispatch_window`, like a session's pop-out: frame
 saved once it settles, Cmd+W closes), with navigation of its own so a
 ticket opened there does not touch the main window's stack, which
-shows only a note pointing at the window while it is open. Built: the wire crate, the core
+shows only a note pointing at the window while it is open. A ticket
+closes by hand (`DispatchClose`, the page's Close behind a confirmation
+that names the trees going) or at its pipeline's end, as a sequence
+from a saved intent: its worktrees are removed lanes first and never
+forced, its branch and records kept, and a tree git refused is shown as
+kept with Remove trees to try again. Dispatch's records now carry a
+version read through a migration. Built: the wire crate, the core
 path and read models, the log and socket adapters, `serve` in the app,
 and `tests/control.rs`. Gaps: `service.new` and `command.run` are not
 on the port yet; nothing marks Dispatch-owned records as such in the

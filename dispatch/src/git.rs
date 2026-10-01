@@ -51,6 +51,17 @@ pub trait Repo: Send {
     /// Re-point `repo` at its worktree now at `dir`, after the tree was
     /// moved by something other than git (a parent directory moved).
     fn worktree_repair(&mut self, repo: &Path, dir: &Path) -> Result<()>;
+    /// `git worktree remove <dir>` in `repo`, never forced: git refuses a
+    /// tree with modified or untracked files, and so does this. Ignored
+    /// files go with the tree. A directory already gone, or one git no
+    /// longer lists as a worktree, is success, after `git worktree
+    /// prune` so the clone forgets a tree deleted by hand. The branch
+    /// stays.
+    fn worktree_remove(&mut self, repo: &Path, dir: &Path) -> Result<()>;
+    /// What `git status` reports in `dir`, every untracked file listed
+    /// on its own, as paths relative to `dir`. A nested repository is
+    /// reported once at its own path. Read-only.
+    fn changes(&self, dir: &Path) -> Result<Vec<PathBuf>>;
     /// The `origin` remote of the repository holding `dir`, if it has one.
     fn remote_url(&self, dir: &Path) -> Result<Option<String>>;
     /// What the branch at `dir` adds over `base`: the commits, one per
@@ -372,6 +383,48 @@ impl Repo for GitCli {
         Ok(())
     }
 
+    fn worktree_remove(&mut self, repo: &Path, dir: &Path) -> Result<()> {
+        let prune = || output(git().arg("-C").arg(repo).args(["worktree", "prune"]));
+        if !dir.exists() {
+            prune()?;
+            return Ok(());
+        }
+        let out = git()
+            .arg("-C")
+            .arg(repo)
+            .args(["worktree", "remove"])
+            .arg(dir)
+            .output()
+            .with_context(|| format!("git in {}", repo.display()))?;
+        if out.status.success() {
+            return Ok(());
+        }
+        let stderr = String::from_utf8_lossy(&out.stderr).trim().to_owned();
+        if stderr.contains("is not a working tree") {
+            prune()?;
+            return Ok(());
+        }
+        bail!("{} not removed: {stderr}", dir.display())
+    }
+
+    fn changes(&self, dir: &Path) -> Result<Vec<PathBuf>> {
+        // Not `output`: it trims, and a record's status column may
+        // begin with a space.
+        let mut cmd = git();
+        cmd.arg("-C")
+            .arg(dir)
+            .args(["status", "--porcelain=v1", "-z", "--untracked-files=all"]);
+        let out = cmd.output().with_context(|| format!("run {cmd:?}"))?;
+        if !out.status.success() {
+            bail!(
+                "{cmd:?} exited {}: {}",
+                out.status,
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
+        }
+        Ok(parse_status_z(&out.stdout))
+    }
+
     fn run(&mut self, dir: &Path, argv: &[String], env: &[(String, String)]) -> Result<()> {
         let Some((program, rest)) = argv.split_first() else {
             return Ok(());
@@ -483,6 +536,59 @@ impl Repo for GitCli {
     }
 }
 
+/// The paths in `git status --porcelain=v1 -z` output: each record is
+/// `XY <path>`, and a rename or copy is followed by its original path,
+/// which is skipped. The `/` git puts after a nested repository goes.
+fn parse_status_z(bytes: &[u8]) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    let mut records = bytes.split(|b| *b == 0).filter(|r| !r.is_empty());
+    while let Some(record) = records.next() {
+        let Some(path) = record.get(3..) else {
+            continue;
+        };
+        let text = String::from_utf8_lossy(path);
+        paths.push(PathBuf::from(text.trim_end_matches('/')));
+        if matches!(record.first(), Some(b'R' | b'C')) {
+            records.next();
+        }
+    }
+    paths
+}
+
+/// What stands in the way of removing a ticket's trees, as absolute
+/// paths: every change in each lane worktree in `lanes` (a lane with a
+/// repository of its own, nested in `tree`), and every change in `tree`
+/// that is not one of those lanes or inside one. The plain `is_clean`
+/// cannot answer this: a clean nested lane is untracked content in the
+/// outer tree. A tree whose directory is already gone is skipped; its
+/// removal will be a prune.
+pub fn uncommitted(git: &dyn Repo, tree: Option<&Path>, lanes: &[PathBuf]) -> Result<Vec<PathBuf>> {
+    let mut found = Vec::new();
+    let mut nested: Vec<PathBuf> = Vec::new();
+    for lane in lanes {
+        if let Some(tree) = tree
+            && let Ok(rel) = lane.strip_prefix(tree)
+        {
+            nested.push(rel.to_path_buf());
+        }
+        if !lane.exists() {
+            continue;
+        }
+        found.extend(git.changes(lane)?.into_iter().map(|c| lane.join(c)));
+    }
+    if let Some(tree) = tree
+        && tree.exists()
+    {
+        found.extend(
+            git.changes(tree)?
+                .into_iter()
+                .filter(|c| !nested.iter().any(|lane| c.starts_with(lane)))
+                .map(|c| tree.join(c)),
+        );
+    }
+    Ok(found)
+}
+
 /// A check the fake was asked to start.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StartedCheck {
@@ -537,6 +643,14 @@ pub struct FakeRepo {
     pub rebase_conflicts: Vec<PathBuf>,
     /// Rebases done: dir, onto.
     pub rebased: Vec<(PathBuf, String)>,
+    /// What `changes` reports for a directory, as a test wrote it; a
+    /// directory in `dirty` reports `.` besides.
+    pub changes: std::collections::BTreeMap<PathBuf, Vec<PathBuf>>,
+    /// Worktrees removed, in order: repo, dir. A repeated removal of
+    /// the same directory is recorded again.
+    pub removed: Vec<(PathBuf, PathBuf)>,
+    /// The next removal of this directory fails, once.
+    pub fail_remove: Option<PathBuf>,
 }
 
 impl Repo for FakeRepo {
@@ -647,6 +761,29 @@ impl Repo for FakeRepo {
     fn worktree_repair(&mut self, repo: &Path, dir: &Path) -> Result<()> {
         self.repaired.push((repo.to_path_buf(), dir.to_path_buf()));
         Ok(())
+    }
+    fn worktree_remove(&mut self, repo: &Path, dir: &Path) -> Result<()> {
+        if self.fail_remove.as_deref() == Some(dir) {
+            self.fail_remove = None;
+            bail!("{} not removed: the fake was told to fail", dir.display());
+        }
+        if self.dirty.iter().any(|d| d == dir) {
+            bail!("{} not removed: it has changes", dir.display());
+        }
+        self.removed.push((repo.to_path_buf(), dir.to_path_buf()));
+        if dir.exists() {
+            std::fs::remove_dir_all(dir)?;
+        }
+        self.worktrees.retain(|(_, d, _, _)| d != dir);
+        self.heads.remove(dir);
+        Ok(())
+    }
+    fn changes(&self, dir: &Path) -> Result<Vec<PathBuf>> {
+        let mut found = self.changes.get(dir).cloned().unwrap_or_default();
+        if self.dirty.iter().any(|d| d == dir) {
+            found.push(PathBuf::from("."));
+        }
+        Ok(found)
     }
     fn remote_url(&self, dir: &Path) -> Result<Option<String>> {
         Ok(self.remotes.get(dir).cloned())
@@ -888,5 +1025,174 @@ mod tests {
         assert!(!cli.is_clean(&wt).unwrap());
         cli.run(&wt, &["true".to_owned()], &[]).unwrap();
         assert!(cli.run(&wt, &["false".to_owned()], &[]).is_err());
+    }
+
+    /// `git <args>` in `dir`, which must succeed. Through `git()`, so a
+    /// test run from a git hook, with the hook's `GIT_DIR` and
+    /// `GIT_INDEX_FILE` set, works on the test's repository and never
+    /// on the one being committed to.
+    fn sh(dir: &Path, args: &[&str]) -> String {
+        let out = git()
+            .arg("-C")
+            .arg(dir)
+            .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    }
+
+    /// An origin with one commit on main, and Dispatch's clone of it.
+    fn origin_and_clone(root: &Path, name: &str) -> PathBuf {
+        let origin = root.join(format!("{name}-origin"));
+        std::fs::create_dir_all(&origin).unwrap();
+        sh(&origin, &["init", "-q", "-b", "main"]);
+        sh(&origin, &["commit", "-q", "--allow-empty", "-m", "root"]);
+        let clone = root.join(format!("{name}-clone"));
+        let mut cli = GitCli::default();
+        cli.ensure_clone(origin.to_str().unwrap(), &clone).unwrap();
+        clone
+    }
+
+    #[test]
+    fn the_real_git_removes_a_worktree_and_keeps_its_branch() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = origin_and_clone(dir.path(), "p");
+        let mut cli = GitCli::default();
+        let wt = dir.path().join("wt").join("t1");
+        cli.worktree_add(&repo, &wt, "dispatch/1-x", "origin/main")
+            .unwrap();
+        cli.worktree_remove(&repo, &wt).unwrap();
+        assert!(!wt.exists());
+        cli.rev_parse(&repo, "refs/heads/dispatch/1-x")
+            .expect("the branch stays");
+        cli.worktree_remove(&repo, &wt)
+            .expect("a second removal finds it gone");
+        // Deleted by hand: a success, and the clone forgets it.
+        let gone = dir.path().join("wt").join("t2");
+        cli.worktree_add(&repo, &gone, "dispatch/2-x", "origin/main")
+            .unwrap();
+        std::fs::remove_dir_all(&gone).unwrap();
+        cli.worktree_remove(&repo, &gone).unwrap();
+        let list = sh(&repo, &["worktree", "list", "--porcelain"]);
+        assert!(!list.contains("t2"), "{list}");
+        // An untracked file: git refuses, and the tree stays.
+        let kept = dir.path().join("wt").join("t3");
+        cli.worktree_add(&repo, &kept, "dispatch/3-x", "origin/main")
+            .unwrap();
+        std::fs::write(kept.join("notes.txt"), "mine").unwrap();
+        let e = cli.worktree_remove(&repo, &kept).unwrap_err();
+        assert!(e.to_string().contains("not removed"), "{e:#}");
+        assert!(kept.join("notes.txt").exists());
+    }
+
+    #[test]
+    fn changes_reads_renames_and_spaces_from_the_nul_separated_status() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = origin_and_clone(dir.path(), "p");
+        std::fs::write(repo.join("a.txt"), "a").unwrap();
+        sh(&repo, &["add", "a.txt"]);
+        sh(&repo, &["commit", "-q", "-m", "a"]);
+        sh(&repo, &["mv", "a.txt", "b.txt"]);
+        std::fs::write(repo.join("with space.txt"), "x").unwrap();
+        let mut found = GitCli::default().changes(&repo).unwrap();
+        found.sort();
+        assert_eq!(
+            found,
+            [PathBuf::from("b.txt"), PathBuf::from("with space.txt")]
+        );
+        assert_eq!(
+            parse_status_z(b" M lead.rs\0R  new.rs\0old.rs\0?? nested/\0"),
+            [
+                PathBuf::from("lead.rs"),
+                PathBuf::from("new.rs"),
+                PathBuf::from("nested")
+            ]
+        );
+    }
+
+    /// The ticket's tree and a lane of a second repository nested in it
+    /// at `rel`, a path the outer repository does not ignore.
+    fn nested(root: &Path, rel: &str) -> (PathBuf, PathBuf) {
+        let mut cli = GitCli::default();
+        let outer_clone = origin_and_clone(root, "outer");
+        let lane_clone = origin_and_clone(root, "lane");
+        let tree = root.join("wt").join("t");
+        cli.worktree_add(&outer_clone, &tree, "dispatch/1-x", "origin/main")
+            .unwrap();
+        let lane = tree.join(rel);
+        cli.worktree_add(&lane_clone, &lane, "dispatch/1-x", "origin/main")
+            .unwrap();
+        (tree, lane)
+    }
+
+    #[test]
+    fn a_clean_nested_lane_passes_the_preflight_the_plain_status_would_fail() {
+        let dir = tempfile::tempdir().unwrap();
+        let (tree, lane) = nested(dir.path(), "backend");
+        let cli = GitCli::default();
+        assert!(
+            !cli.is_clean(&tree).unwrap(),
+            "the lane is untracked content"
+        );
+        assert_eq!(cli.changes(&tree).unwrap(), [PathBuf::from("backend")]);
+        let lanes = [lane.clone()];
+        assert!(uncommitted(&cli, Some(&tree), &lanes).unwrap().is_empty());
+        // Beside the lane: refused, naming that file and not the lane.
+        std::fs::write(tree.join("stray.txt"), "x").unwrap();
+        assert_eq!(
+            uncommitted(&cli, Some(&tree), &lanes).unwrap(),
+            [tree.join("stray.txt")]
+        );
+        std::fs::remove_file(tree.join("stray.txt")).unwrap();
+        // Inside the lane: refused, naming the lane's file.
+        std::fs::write(lane.join("todo.txt"), "x").unwrap();
+        assert_eq!(
+            uncommitted(&cli, Some(&tree), &lanes).unwrap(),
+            [lane.join("todo.txt")]
+        );
+    }
+
+    #[test]
+    fn a_lane_under_an_untracked_parent_is_named_at_its_own_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let (tree, lane) = nested(dir.path(), "packages/backend");
+        let cli = GitCli::default();
+        assert_eq!(
+            cli.changes(&tree).unwrap(),
+            [PathBuf::from("packages/backend")],
+            "not packages/"
+        );
+        let lanes = [lane];
+        assert!(uncommitted(&cli, Some(&tree), &lanes).unwrap().is_empty());
+        std::fs::write(tree.join("packages").join("notes.txt"), "x").unwrap();
+        assert_eq!(
+            uncommitted(&cli, Some(&tree), &lanes).unwrap(),
+            [tree.join("packages/notes.txt")],
+            "the lane's path is taken out, nothing above or beside it"
+        );
+    }
+
+    #[test]
+    fn a_tree_deleted_by_hand_is_skipped_by_the_preflight_and_pruned_on_removal() {
+        let dir = tempfile::tempdir().unwrap();
+        let (tree, lane) = nested(dir.path(), "backend");
+        let mut cli = GitCli::default();
+        std::fs::remove_dir_all(&tree).unwrap();
+        let lanes = [lane.clone()];
+        assert!(uncommitted(&cli, Some(&tree), &lanes).unwrap().is_empty());
+        let lane_clone = dir.path().join("lane-clone");
+        let outer_clone = dir.path().join("outer-clone");
+        cli.worktree_remove(&lane_clone, &lane).unwrap();
+        cli.worktree_remove(&outer_clone, &tree).unwrap();
+        for clone in [&lane_clone, &outer_clone] {
+            let list = sh(clone, &["worktree", "list", "--porcelain"]);
+            assert_eq!(list.matches("worktree ").count(), 1, "{list}");
+        }
     }
 }

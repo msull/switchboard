@@ -736,6 +736,16 @@ impl Repo for SharedRepo {
     ) -> anyhow::Result<()> {
         self.0.lock().unwrap().worktree_move(repo, from, to)
     }
+    fn worktree_remove(
+        &mut self,
+        repo: &std::path::Path,
+        dir: &std::path::Path,
+    ) -> anyhow::Result<()> {
+        self.0.lock().unwrap().worktree_remove(repo, dir)
+    }
+    fn changes(&self, dir: &std::path::Path) -> anyhow::Result<Vec<std::path::PathBuf>> {
+        self.0.lock().unwrap().changes(dir)
+    }
     fn worktree_repair(
         &mut self,
         repo: &std::path::Path,

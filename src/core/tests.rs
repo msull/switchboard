@@ -6444,6 +6444,52 @@ mod dispatch_page {
     }
 
     #[test]
+    fn closing_a_ticket_is_one_call_whose_reply_replaces_it_and_a_refusal_is_told() {
+        let (mut core, _) = loaded(vec![], vec![]);
+        let close = AppAction::DispatchClose("t1".into());
+        let e = core.dispatch(close.clone(), Clock::at(1));
+        assert!(
+            !e.iter().any(|e| matches!(e, Effect::DispatchCall(_))),
+            "no runner, no call"
+        );
+        assert!(core.notice().is_some_and(|n| n.is_error));
+        let mut parked = status(None);
+        parked.tickets[0].state = "parked".into();
+        core.dispatch(AppAction::DispatchStatus(Some(parked)), Clock::at(2));
+        let body = Body::Close {
+            ticket: "t1".into(),
+            reason: None,
+        };
+        let e = core.dispatch(close, Clock::at(3));
+        assert!(e.contains(&Effect::DispatchCall(body.clone())));
+        let mut closed = core.ticket("t1").unwrap().clone();
+        closed.state = "closed".into();
+        closed.tree_removed = true;
+        core.dispatch(
+            AppAction::DispatchReplied {
+                body: body.clone(),
+                result: Ok(Reply::Ticket(closed)),
+            },
+            Clock::at(4),
+        );
+        let t = core.ticket("t1").unwrap();
+        assert_eq!(t.state, "closed");
+        assert!(t.tree_removed);
+        core.dispatch(
+            AppAction::DispatchReplied {
+                body,
+                result: Ok(Reply::failed("ticket t1 has changes in its trees")),
+            },
+            Clock::at(5),
+        );
+        assert!(
+            core.notices()
+                .iter()
+                .any(|n| n.is_error && n.text.contains("has changes in its trees"))
+        );
+    }
+
+    #[test]
     fn the_worktree_root_is_set_through_the_port_and_the_reply_is_told() {
         let (mut core, _) = loaded(vec![], vec![]);
         let e = core.dispatch(

@@ -450,6 +450,16 @@ impl AppCore {
                 }
                 out.push(Effect::DispatchCall(Body::Resume { ticket }));
             }
+            AppAction::DispatchClose(ticket) => {
+                if !self.dispatch.connected {
+                    self.error("Dispatch is not running; start it from the console");
+                    return;
+                }
+                out.push(Effect::DispatchCall(Body::Close {
+                    ticket,
+                    reason: None,
+                }));
+            }
             AppAction::DispatchWorktrees { path, migrate } => {
                 if !self.dispatch.connected {
                     self.error("Dispatch is not running; start it from the console");
@@ -520,7 +530,7 @@ impl AppCore {
                     now,
                 );
             }
-            (Body::Resume { .. }, Ok(Reply::Ticket(t))) => {
+            (Body::Resume { .. } | Body::Close { .. }, Ok(Reply::Ticket(t))) => {
                 if let Some(slot) = self
                     .dispatch
                     .status
