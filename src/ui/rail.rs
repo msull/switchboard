@@ -20,20 +20,6 @@ pub const COMPACT_BELOW: f32 = 120.0;
 /// one value keeps rows aligned with the brand.
 const PAD: i8 = 16;
 
-/// Projects most recently active first: the rail order, also used for
-/// Cmd+1..9. In the global space they are grouped by space, in the
-/// user's order of spaces, so the digits count the list as drawn.
-pub fn projects_by_recency(core: &AppCore) -> Vec<&crate::core::Project> {
-    let mut projects: Vec<_> = core.visible_workspaces().map(|w| &w.project).collect();
-    if core.active_space().is_global() {
-        let rank = |space: SpaceId| core.spaces().iter().position(|s| s.id == space);
-        projects.sort_by_key(|p| (rank(p.space), std::cmp::Reverse(p.last_active)));
-    } else {
-        projects.sort_by_key(|p| std::cmp::Reverse(p.last_active));
-    }
-    projects
-}
-
 /// The most urgent state among a project's sessions, or `None` when it
 /// has none: the dot next to its name.
 #[must_use]
@@ -163,16 +149,21 @@ fn project_rows(cx: &mut DrawCtx<'_>, ui: &mut Ui, active: Option<ProjectId>, co
         theme::kicker(ui, "Projects", p.n600);
         ui.add_space(4.0);
     }
-    let projects: Vec<_> = projects_by_recency(cx.core)
+    let projects: Vec<_> = cx
+        .core
+        .projects_in_rail_order()
         .into_iter()
         .map(|p| (p.id, p.name.clone(), p.space))
         .collect();
+    let mut group = None;
     for (n, (pid, name, space)) in projects.iter().enumerate() {
-        // In global, each space's projects sit under its name.
-        if global && !compact && (n == 0 || projects[n - 1].2 != *space) {
-            if n > 0 {
+        // In global, each space's projects sit under its name; the order
+        // keeps a space's projects together.
+        if global && !compact && group != Some(*space) {
+            if group.is_some() {
                 ui.add_space(8.0);
             }
+            group = Some(*space);
             let label = cx.core.space(*space).map_or("", |s| s.name.as_str());
             theme::kicker(ui, label, p.n600);
             ui.add_space(4.0);
@@ -220,7 +211,11 @@ fn project_rows(cx: &mut DrawCtx<'_>, ui: &mut Ui, active: Option<ProjectId>, co
     {
         // In global the dialog asks which workspace it goes in.
         cx.state.add_project = Some(AddProjectDraft {
-            space: cx.core.spaces().first().map(|s| s.id).filter(|_| global),
+            space: if global {
+                cx.core.spaces().first().map(|s| s.id)
+            } else {
+                None
+            },
             ..AddProjectDraft::default()
         });
     }
@@ -228,11 +223,13 @@ fn project_rows(cx: &mut DrawCtx<'_>, ui: &mut Ui, active: Option<ProjectId>, co
 
 /// The rail's head: the active space's name where the wordmark was,
 /// opening the one menu that names the other spaces (each with its
-/// waiting count), with New, Rename, and Delete under them. Nothing
-/// else on screen names another space, so a shared screen gives away
-/// only the space being worked in. With more than one space the menu
-/// starts with the global space, which can be neither renamed nor
-/// deleted.
+/// waiting count), with New, Rename, and Delete under them. Outside the
+/// global space nothing else on screen names another space, so a shared
+/// screen gives away only the space being worked in; the global space
+/// lifts that boundary on purpose, naming each space over its projects.
+/// The menu starts with the global space while there is more than one
+/// space or a global working set to reach; it can be neither renamed
+/// nor deleted.
 fn space_menu(cx: &mut DrawCtx<'_>, ui: &mut Ui, compact: bool) {
     let p = theme::palette(ui);
     let active = cx.core.active_space();
@@ -257,6 +254,7 @@ fn space_menu(cx: &mut DrawCtx<'_>, ui: &mut Ui, compact: bool) {
         .collect();
     let empty = cx.core.space_empty(active);
     let one = spaces.len() == 1;
+    let has_global_sets = cx.core.working_sets().iter().any(|s| s.space.is_global());
     egui::containers::menu::MenuButton::new(
         RichText::new(brand)
             .text_style(theme::brand())
@@ -269,26 +267,21 @@ fn space_menu(cx: &mut DrawCtx<'_>, ui: &mut Ui, compact: bool) {
     .ui(ui, |ui| {
         ui.set_min_width(200.0);
         ui.label(theme::meta_text(ui, "Workspaces").color(p.n600));
-        // With one space, "everywhere" is that space.
-        if !one {
-            everywhere_row(cx, ui, global);
+        // With one space and no global set, "everywhere" is that space.
+        if !one || has_global_sets {
+            let waiting = cx.core.waiting_count_in(SpaceId::GLOBAL);
+            let label = format!("◇ {}", SpaceId::GLOBAL_NAME);
+            if space_row(ui, &label, global, waiting)
+                .on_hover_text("Every workspace's projects at once")
+                .clicked()
+                && !global
+            {
+                cx.dispatch(AppAction::ShowSpace(SpaceId::GLOBAL));
+            }
             ui.separator();
         }
         for (id, name, waiting) in &spaces {
-            let label = if *id == active {
-                format!("✓ {name}")
-            } else {
-                format!("   {name}")
-            };
-            let mut button = egui::Button::new(label);
-            if *waiting > 0 {
-                button = button.right_text(
-                    RichText::new(waiting.to_string())
-                        .small()
-                        .color(p.accent_2_text),
-                );
-            }
-            if ui.add(button).clicked() && *id != active {
+            if space_row(ui, name, *id == active, *waiting).clicked() && *id != active {
                 cx.dispatch(AppAction::ShowSpace(*id));
             }
         }
@@ -318,15 +311,14 @@ fn space_menu(cx: &mut DrawCtx<'_>, ui: &mut Ui, compact: bool) {
     .on_hover_text("The workspace being worked in; click for the others");
 }
 
-/// The selector's first line: the global space, with every space's
-/// waiting count.
-fn everywhere_row(cx: &mut DrawCtx<'_>, ui: &mut Ui, global: bool) {
+/// One line of the space selector: a check before the active space,
+/// and its waiting count at the right.
+fn space_row(ui: &mut Ui, name: &str, active: bool, waiting: usize) -> Response {
     let p = theme::palette(ui);
-    let waiting = cx.core.waiting_count_in(SpaceId::GLOBAL);
-    let label = if global {
-        format!("✓ ◇ {}", SpaceId::GLOBAL_NAME)
+    let label = if active {
+        format!("✓ {name}")
     } else {
-        format!("   ◇ {}", SpaceId::GLOBAL_NAME)
+        format!("   {name}")
     };
     let mut button = egui::Button::new(label);
     if waiting > 0 {
@@ -336,14 +328,7 @@ fn everywhere_row(cx: &mut DrawCtx<'_>, ui: &mut Ui, global: bool) {
                 .color(p.accent_2_text),
         );
     }
-    if ui
-        .add(button)
-        .on_hover_text("Every workspace's projects at once")
-        .clicked()
-        && !global
-    {
-        cx.dispatch(AppAction::ShowSpace(SpaceId::GLOBAL));
-    }
+    ui.add(button)
 }
 
 /// The "Working sets" section: one row per set, the empty ones greyed,
@@ -590,7 +575,14 @@ fn row(ui: &mut Ui, spec: &RowSpec<'_>) -> Response {
     let height = if spec.compact { 44.0 } else { 28.0 };
     let (rect, response) = ui.allocate_exact_size(Vec2::new(width, height), Sense::click());
     let text = spec.text.to_owned();
-    response.widget_info(|| WidgetInfo::labeled(WidgetType::Button, true, &text));
+    let count = spec.count;
+    // The count is painted, so it is also the node's value: a screen
+    // reader says it, and a test can read what the row shows.
+    response.widget_info(|| {
+        let mut info = WidgetInfo::labeled(WidgetType::Button, true, &text);
+        info.current_text_value = (count > 0).then(|| count.to_string());
+        info
+    });
     let painter = ui.painter();
     if spec.selected {
         painter.rect_filled(rect, 2.0, p.bg);

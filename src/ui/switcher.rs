@@ -217,8 +217,7 @@ pub fn toasts(cx: &mut DrawCtx<'_>, ctx: &Context, window: Option<RecordId>) {
     // A notice about another space says only that there is one; in the
     // global space every notice is about one being shown.
     if let Some(n) = notice.as_mut()
-        && n.space
-            .is_some_and(|s| !crate::core::space_contains(cx.core.active_space(), s))
+        && n.space.is_some_and(|s| !cx.core.active_space().contains(s))
     {
         crate::core::Notice::ELSEWHERE.clone_into(&mut n.text);
     }

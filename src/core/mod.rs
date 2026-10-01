@@ -18,7 +18,6 @@ mod tests;
 
 pub use action::{
     AppAction, AppCore, Clock, ConfigStatus, Effect, Notice, TRUST_YES_KEYS, UNDO_WINDOW, View,
-    space_contains,
 };
 pub use control::{ControlAction, ControlOutcome};
 pub use controller::{DOUBLE_PRESS, DWELL, MenuKind, RadialMenu, UiRequest};

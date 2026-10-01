@@ -1335,14 +1335,16 @@ move on.
 
 The top level. A workspace (`Space` in the code, since `Workspace` is
 the older name of a project's record) owns projects and working sets,
-each of which is in exactly one, and the rail shows one workspace at a
-time: its working sets, its projects, its "All sessions". The point is
-a boundary as much as a grouping: with a screen shared, nothing on
-screen names anything from another workspace unless the selector is
-opened. So the quick switcher searches the active workspace only, with
+each of which is in exactly one, and outside Everywhere (the global
+workspace, below) the rail shows one workspace at a time: its working
+sets, its projects, its "All sessions". The point is a boundary as much
+as a grouping: with a screen shared, nothing on screen names anything
+from another workspace unless the selector is opened or Everywhere is
+active, which lifts the boundary on purpose. Outside Everywhere, then,
+the quick switcher searches the active workspace only, with
 an "All workspaces" checkbox that is off each time it opens; Cmd+1..9
 count the active workspace's projects; a working set holds cards from
-its own workspace only (moving a project out of a workspace drops its
+its own workspace only (a set made in Everywhere is the exception) (moving a project out of a workspace drops its
 cards from that workspace's sets); a notice about a record in another
 workspace shows as "Something in another workspace needs you", with no
 name; and the rail's count is the active workspace's, while the Dock
@@ -1386,6 +1388,15 @@ Nothing new is stored: `Settings.space` and `WorkingSet.space` may hold
 the fixed id, and views.json went to v5 only so an older build, which
 would move a global set into a real workspace and prune its cards,
 refuses to read or rewrite the file.
+
+The downgrade is not lossless. A build from before Everywhere reads a
+v5 views.json as having no workspaces and sends every project to the
+default workspace, saving each record (records are still v8, which it
+writes). views.json itself survives, so on returning the workspaces and
+their sets are back, but projects outside the default workspace must be
+moved back by hand. From this build on, a views file newer than the
+build moves no project: the build works in Everywhere instead, so a
+later bump does not repeat the loss.
 
 ## Side panel position (2026-09-22)
 
@@ -1612,13 +1623,13 @@ Switchboard or Dispatch writes Claude's trust file.
 
 ## Global workspace status (2026-10-01)
 
-Built: `SpaceId::GLOBAL` and `space_contains` in the core, the rehydration
+Built: `SpaceId::GLOBAL` and `SpaceId::contains` in the core, the rehydration
 that keeps a global active workspace and global sets (and sends a project
 hand-edited into global to the first workspace), the refusals (rename,
 delete, move into, move a global set out, a project added into it from
 the window or the control port), "◇ Everywhere" first in the selector
-when more than one workspace exists, the rail grouped by workspace, the
-add dialog's workspace choice, notices named, the switcher without its
+when more than one workspace or any global set exists, the rail grouped
+by workspace (Cmd+1..9 count it as drawn), the add dialog's workspace choice, notices named, the switcher without its
 checkbox, the `workspace-global` script line, and `set.new` accepting
 the fixed id on the control port. views.json is v5.
 

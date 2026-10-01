@@ -6,7 +6,7 @@
 use crate::core::action::{AppCore, Clock, Effect, FlightKind, Out, View};
 use crate::core::model::{
     AgentKind, Launch, ProjectId, RUNS_KEPT, RecordId, Run, SavedView, SessionKind, SessionRecord,
-    Space, SpaceId,
+    Space, SpaceId, VIEWS_SCHEMA_VERSION,
 };
 use crate::ports::host::{HostId, HostStatus, Liveness, SpawnSpec};
 use crate::ports::store::{Loaded, StoreError};
@@ -59,13 +59,25 @@ impl AppCore {
     /// no listed space go to the first, and the active space must exist.
     /// The global space is no record but may be active and hold sets; a
     /// project in it (only a hand edit puts one there) goes to the first.
+    ///
+    /// A views file from a newer build reads with no spaces, so every
+    /// space looks gone. Then no record is moved, since saving the move
+    /// would lose its space for good once the newer build is back; the
+    /// global space is worked in instead, so every project still shows.
     fn ensure_spaces(&mut self, out: &mut Out) {
+        let newer = self.views.schema_version > VIEWS_SCHEMA_VERSION;
         if self.views.spaces.is_empty() {
             self.update_views(out, |v| v.spaces.push(Space::default_space()));
         }
         let known: Vec<SpaceId> = self.views.spaces.iter().map(|s| s.id).collect();
         let first = known[0];
         let known_or_global = |s: &SpaceId| s.is_global() || known.contains(s);
+        if newer {
+            if !self.settings.space.is_global() {
+                self.update_settings(out, |s| s.space = SpaceId::GLOBAL);
+            }
+            return;
+        }
         if !known_or_global(&self.settings.space) {
             self.update_settings(out, |s| s.space = first);
         }

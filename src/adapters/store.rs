@@ -689,9 +689,11 @@ mod tests {
 
     /// A build from before the global space would move a global set
     /// into a real space and prune its cards; the version keeps it from
-    /// reading, and so from rewriting, such a file.
+    /// reading, and so from rewriting, views.json. Only views.json:
+    /// that build still moves projects out of their spaces (design.md,
+    /// "The downgrade is not lossless").
     #[test]
-    fn an_older_build_neither_reads_nor_overwrites_a_global_set() {
+    fn an_older_build_neither_reads_nor_overwrites_views_with_a_global_set() {
         let dir = tempfile::tempdir().unwrap();
         let store = locked_store(dir.path());
         let mut views = Views::default();

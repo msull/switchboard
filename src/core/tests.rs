@@ -6,7 +6,7 @@ use std::time::{Duration, SystemTime};
 
 use uuid::Uuid;
 
-use super::action::{AppAction, AppCore, Clock, Effect, UNDO_WINDOW, View, space_contains};
+use super::action::{AppAction, AppCore, Clock, Effect, UNDO_WINDOW, View};
 use super::controller::{MenuKind, UiRequest};
 use super::definitions::entry_hash;
 use super::model::{
@@ -479,13 +479,13 @@ fn pin(core: &mut AppCore, set: SetId, id: RecordId, at: u64) {
 }
 
 #[test]
-fn space_contains_is_itself_or_everything_from_global() {
+fn a_space_contains_itself_or_everything_from_global() {
     let other = SpaceId::new();
-    assert!(space_contains(SpaceId::DEFAULT, SpaceId::DEFAULT));
-    assert!(!space_contains(SpaceId::DEFAULT, other));
-    assert!(space_contains(SpaceId::GLOBAL, other));
-    assert!(space_contains(SpaceId::GLOBAL, SpaceId::DEFAULT));
-    assert!(!space_contains(other, SpaceId::GLOBAL));
+    assert!(SpaceId::DEFAULT.contains(SpaceId::DEFAULT));
+    assert!(!SpaceId::DEFAULT.contains(other));
+    assert!(SpaceId::GLOBAL.contains(other));
+    assert!(SpaceId::GLOBAL.contains(SpaceId::DEFAULT));
+    assert!(!other.contains(SpaceId::GLOBAL));
 }
 
 #[test]
@@ -507,6 +507,76 @@ fn the_global_space_lists_every_space() {
     // The global space is no record.
     assert!(core.space(SpaceId::GLOBAL).is_none());
     assert_eq!(core.spaces().len(), 2);
+}
+
+#[test]
+fn the_rail_order_groups_by_space_in_global_and_is_recency_elsewhere() {
+    let b = SpaceId::new();
+    let t = Clock::at(0).wall;
+    let at = |n: u64| t + Duration::from_secs(n);
+    let (mut old, mut newer, mut newest) = (project("old"), project("newer"), project("newest"));
+    old.last_active = at(1);
+    newer.last_active = at(2);
+    newest.last_active = at(3);
+    newest.space = b;
+    let ids = [old.id, newer.id, newest.id];
+    let mut core = AppCore::new();
+    core.seed(
+        vec![
+            Workspace::new(old),
+            Workspace::new(newest),
+            Workspace::new(newer),
+        ],
+        Vec::new(),
+    );
+    core.seed_views(Views {
+        spaces: vec![
+            Space::default_space(),
+            Space {
+                id: b,
+                name: "B".into(),
+                op: None,
+            },
+        ],
+        ..Views::default()
+    });
+    let order = |core: &AppCore| -> Vec<ProjectId> {
+        core.projects_in_rail_order().iter().map(|p| p.id).collect()
+    };
+    assert_eq!(order(&core), vec![ids[1], ids[0]]);
+    // In global the default space's projects come first, as the spaces
+    // are listed, though the newest project is in B.
+    core.dispatch(AppAction::ShowSpace(SpaceId::GLOBAL), Clock::at(1));
+    assert_eq!(order(&core), vec![ids[1], ids[0], ids[2]]);
+}
+
+#[test]
+fn views_from_a_newer_build_move_no_project_and_show_everything() {
+    let mut pb = project("b");
+    pb.space = SpaceId::new();
+    let pid = pb.id;
+    let mut core = AppCore::new();
+    let effects = core.dispatch(
+        AppAction::StoreLoaded(Ok(Loaded {
+            workspaces: vec![Workspace::new(pb)],
+            notices: Vec::new(),
+            settings: Settings::default(),
+            // What the store reads from a newer build's file: the version
+            // and nothing else.
+            views: Views {
+                schema_version: super::model::VIEWS_SCHEMA_VERSION + 1,
+                ..Views::default()
+            },
+        })),
+        Clock::at(1),
+    );
+    assert!(
+        !effects.iter().any(|e| matches!(e, Effect::Save(_))),
+        "{effects:?}"
+    );
+    assert_ne!(core.project_space(pid), Some(SpaceId::DEFAULT));
+    assert_eq!(core.active_space(), SpaceId::GLOBAL);
+    assert!(core.project_visible(pid));
 }
 
 #[test]

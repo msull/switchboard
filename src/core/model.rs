@@ -568,9 +568,18 @@ impl SpaceId {
         Self(Uuid::new_v4())
     }
 
+    /// Whether this is [`SpaceId::GLOBAL`], the view of every space,
+    /// never a record.
     #[must_use]
     pub fn is_global(self) -> bool {
         self == Self::GLOBAL
+    }
+
+    /// Whether working in this space shows things of `space`: itself, or
+    /// everything when this is the global space.
+    #[must_use]
+    pub fn contains(self, space: SpaceId) -> bool {
+        self.is_global() || self == space
     }
 }
 
@@ -583,8 +592,10 @@ impl Default for SpaceId {
 /// What the UI calls a workspace: the top level, owning projects and
 /// working sets, each of which is in exactly one. The rail shows one
 /// space at a time and nothing of the others, so a shared screen gives
-/// away only the one being worked in. (`Workspace` is the older name of
-/// a project's record, which this does not replace.)
+/// away only the one being worked in, except in [`SpaceId::GLOBAL`],
+/// which lifts that boundary on purpose and names every space.
+/// (`Workspace` is the older name of a project's record, which this
+/// does not replace.)
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Space {
     pub id: SpaceId,

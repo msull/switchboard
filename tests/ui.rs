@@ -418,15 +418,18 @@ fn the_rail_counts_sessions_and_decisions_apart_in_global() {
         .state_mut()
         .dispatch(AppAction::DispatchStatus(Some(status)));
     show_global(&mut harness);
-    let core = harness.state().core();
-    assert_eq!(core.waiting_count_in(SpaceId::GLOBAL), 2);
-    assert_eq!(core.pending_decisions().len(), 1);
-    assert_eq!(core.waiting_count(), 3, "the Dock badge counts both");
-    // The rail paints its counts; what it paints is these two numbers:
-    // "All sessions" asks `waiting_count_in` of the active space, and the
-    // Dispatch row counts the decisions.
-    assert_eq!(core.waiting_count_in(core.active_space()), 2);
-    harness.get_by_label("Dispatch");
+    assert_eq!(
+        harness.state().core().waiting_count(),
+        3,
+        "the Dock badge counts both"
+    );
+    // What the rail paints: both workspaces' waiting sessions on "All
+    // sessions", not the Dock's total, and the decision on its own row.
+    let painted = |h: &Harness<'_, SwitchboardApp>, label: &str| {
+        h.get_by_role_and_label(Role::Button, label).value()
+    };
+    assert_eq!(painted(&harness, "All sessions").as_deref(), Some("2"));
+    assert_eq!(painted(&harness, "Dispatch").as_deref(), Some("1"));
 }
 
 #[test]

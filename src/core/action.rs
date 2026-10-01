@@ -1206,7 +1206,7 @@ impl AppCore {
         };
         project
             .and_then(|p| self.project_space(p))
-            .is_some_and(|s| space_contains(space, s))
+            .is_some_and(|s| space.contains(s))
     }
 
     /// Keep `settings.last_view` equal to the screen showing, whatever
@@ -1389,12 +1389,12 @@ impl AppCore {
     /// Whether `view` belongs on screen while `space` is active. A
     /// working set belongs to exactly one space, global's included; a
     /// page of a project (board, session, workflow) shows anywhere
-    /// [`space_contains`] says its project's space is.
+    /// [`SpaceId::contains`] says its project's space is.
     pub(super) fn view_shown_in(&self, space: SpaceId, view: &View) -> bool {
         match (view, self.view_space(view)) {
             (_, None) => true,
             (View::WorkingSet(_), Some(s)) => s == space,
-            (_, Some(s)) => space_contains(space, s),
+            (_, Some(s)) => space.contains(s),
         }
     }
 
@@ -1902,7 +1902,7 @@ impl AppCore {
     #[must_use]
     pub fn project_visible(&self, id: ProjectId) -> bool {
         self.project_space(id)
-            .is_some_and(|s| space_contains(self.settings.space, s))
+            .is_some_and(|s| self.settings.space.contains(s))
     }
 
     /// Workspaces the UI may show, in stored order: the active space's,
@@ -1910,7 +1910,23 @@ impl AppCore {
     pub fn visible_workspaces(&self) -> impl Iterator<Item = &Workspace> {
         self.workspaces
             .iter()
-            .filter(|w| space_contains(self.settings.space, w.project.space))
+            .filter(|w| self.settings.space.contains(w.project.space))
+    }
+
+    /// Visible projects in the rail's order, which Cmd+1..9 count: most
+    /// recently active first, and in the global space grouped by space
+    /// in the user's order of spaces, so the digits count the list as
+    /// drawn.
+    #[must_use]
+    pub fn projects_in_rail_order(&self) -> Vec<&Project> {
+        let mut projects: Vec<_> = self.visible_workspaces().map(|w| &w.project).collect();
+        if self.settings.space.is_global() {
+            let rank = |space: SpaceId| self.views.spaces.iter().position(|s| s.id == space);
+            projects.sort_by_key(|p| (rank(p.space), std::cmp::Reverse(p.last_active)));
+        } else {
+            projects.sort_by_key(|p| std::cmp::Reverse(p.last_active));
+        }
+        projects
     }
 
     /// The working sets of the active space, in the user's order. The
@@ -1955,7 +1971,7 @@ impl AppCore {
     pub fn waiting_count_in(&self, space: SpaceId) -> usize {
         self.workspaces
             .iter()
-            .filter(|w| space_contains(space, w.project.space))
+            .filter(|w| space.contains(w.project.space))
             .flat_map(|w| &w.sessions)
             .filter(|s| self.counts_as_waiting(s.id))
             .count()
@@ -2305,11 +2321,4 @@ impl AppCore {
             .count()
             + self.pending_decisions().len()
     }
-}
-
-/// Whether working in `active` shows things of `space`: itself, or
-/// everything when `active` is the global space.
-#[must_use]
-pub fn space_contains(active: SpaceId, space: SpaceId) -> bool {
-    active.is_global() || active == space
 }
