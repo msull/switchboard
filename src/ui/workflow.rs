@@ -444,24 +444,25 @@ fn controls(cx: &mut DrawCtx<'_>, ui: &mut Ui, run: &WorkflowRun) {
 }
 
 fn hand_off_menu(cx: &mut DrawCtx<'_>, ui: &mut Ui, run: &WorkflowRun) {
-    let response = theme::primary(ui, "Hand off")
-        .on_hover_text("Send the revised plan back to the planning session");
+    let response = theme::primary(ui, "Hand off").on_hover_text(
+        "Put the handoff prompt in a session's message box, for you to edit and send",
+    );
     egui::Popup::menu(&response).show(|ui| {
         for (label, mode, hint) in [
             (
                 "As is",
                 HandoffMode::AsIs,
-                "Send the handoff prompt to the planning session",
+                "The prompt goes in the planning session's message box",
             ),
             (
                 "Compact first",
                 HandoffMode::Compact,
-                "Send /compact, then the prompt (the session must be running)",
+                "Send /compact now; the prompt waits in the message box (the session must be running)",
             ),
             (
                 "Fresh session",
                 HandoffMode::Fresh,
-                "A new session in the same directory, with the prompt",
+                "A new session in the same directory, with the prompt in its message box",
             ),
         ] {
             if ui.button(label).on_hover_text(hint).clicked() {

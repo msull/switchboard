@@ -1050,10 +1050,13 @@ is what the review page reads, so the trail survives cleanup.
 ### Handoff
 
 `Finalize` moves to `Finalized` and shows the handoff panel for the
-original planner with three choices: send the handoff prompt as is,
-send `/compact` and then the prompt, or start a fresh session with the
-prompt. Plan mode is requested in the prompt text (the agent has a tool
-for it), never with a keypress. Sending marks `HandedOff`.
+original planner with three choices: back to the planning session as
+is, `/compact` first, or a fresh session in the same directory. In
+every case the handoff prompt is primed as that session's message box
+draft, never sent: the user reads it, edits it and presses send
+(only `/compact` goes straight to the pane). Plan mode is requested in
+the prompt text (the agent has a tool for it), never with a keypress.
+Choosing marks `HandedOff` and shows the session the draft is in.
 
 ### UI
 

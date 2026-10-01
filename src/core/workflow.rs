@@ -699,8 +699,14 @@ impl AppCore {
             self.error("the planning session no longer exists");
             return;
         };
-        match mode {
-            HandoffMode::AsIs => self.prompt_agent(run.source, &prompt, now, out),
+        // The prompt is never sent: it is primed as the message box's
+        // draft of the session it goes to, so the user reads and edits
+        // it before pressing send. Only `/compact` goes straight in.
+        let shown = match mode {
+            HandoffMode::AsIs => {
+                self.return_to_session(run.source, now, out);
+                run.source
+            }
             HandoffMode::Compact => {
                 let running = self
                     .host_status(run.source)
@@ -714,10 +720,10 @@ impl AppCore {
                     return;
                 };
                 out.push(Effect::SendInput {
-                    host: host.clone(),
+                    host,
                     text: "/compact".into(),
                 });
-                out.push(Effect::SendInput { host, text: prompt });
+                run.source
             }
             HandoffMode::Fresh => {
                 let Some(fresh) = self.add_record(
@@ -731,12 +737,13 @@ impl AppCore {
                 ) else {
                     return;
                 };
-                self.first_prompts.push((fresh, prompt));
                 self.launch_fresh(fresh, now, out);
+                fresh
             }
-        }
+        };
+        self.primed.push((shown, prompt));
         self.edit_run(id, now, out, |r| r.state = RunState::HandedOff);
-        self.show(View::Session(run.source), now, out);
+        self.show(View::Session(shown), now, out);
     }
 
     fn user_feedback(&mut self, id: WorkflowId, text: &str, now: Clock, out: &mut Out) {

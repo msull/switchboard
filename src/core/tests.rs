@@ -4110,7 +4110,8 @@ mod workflow {
             Clock::at(431),
         );
         assert!(run_of(&core).cleaned);
-        // Compact needs a live pane; as-is rides on the resume.
+        // Compact needs a live pane; as-is resumes the session and
+        // primes the prompt as its draft, for the user to edit and send.
         core.dispatch(
             AppAction::HandOffWorkflow {
                 run,
@@ -4133,6 +4134,10 @@ mod workflow {
                 .any(|e| matches!(e, Effect::CheckTranscript { id, .. } if *id == source))
         );
         assert_eq!(core.view(), View::Session(source));
+        let primed = core.take_primed();
+        assert_eq!(primed.len(), 1);
+        assert_eq!(primed[0].0, source);
+        assert!(primed[0].1.contains("Enter plan mode"), "{}", primed[0].1);
         core.dispatch(
             AppAction::TranscriptChecked {
                 id: source,
@@ -4152,8 +4157,10 @@ mod workflow {
             Clock::at(470),
         );
         let argv = spawn_argv(&effects);
-        assert_eq!(argv[1], "--");
-        assert!(argv[2].contains("Enter plan mode"), "{argv:?}");
+        assert!(
+            !argv.iter().any(|a| a.contains("Enter plan mode")),
+            "nothing is submitted for the user: {argv:?}"
+        );
     }
 
     #[test]
@@ -4169,9 +4176,11 @@ mod workflow {
             Clock::at(420),
         );
         let sent = sent(&effects);
-        assert_eq!(sent.len(), 2);
+        assert_eq!(sent.len(), 1, "only /compact goes straight in");
         assert_eq!(sent[0].1, "/compact");
-        assert!(sent[1].1.contains(PLAN));
+        let primed = core.take_primed();
+        assert_eq!(primed[0].0, source);
+        assert!(primed[0].1.contains(PLAN), "the prompt is the draft");
     }
 
     #[test]
@@ -4196,6 +4205,17 @@ mod workflow {
             .expect("launch");
         assert_ne!(fresh, source);
         assert!(core.session(fresh).unwrap().name.ends_with("implement"));
+        assert_eq!(
+            core.view(),
+            View::Session(fresh),
+            "the fresh session is shown"
+        );
+        let primed = core.take_primed();
+        assert_eq!(
+            primed[0].0, fresh,
+            "the prompt is its draft, not its first prompt"
+        );
+        assert!(primed[0].1.contains(PLAN));
     }
 
     #[test]
