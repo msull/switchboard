@@ -35,6 +35,23 @@ impl SourceSnapshot {
     pub fn is_pull_request(&self) -> bool {
         !self.pull_requests.is_empty()
     }
+
+    /// How a listing names the source: `#12` for an issue, and for pull
+    /// requests `pr <lane>/<n>` joined by `+`, as `take` spells them, so
+    /// a PR and an issue with the same number never read alike.
+    #[must_use]
+    pub fn label(&self) -> String {
+        if self.is_pull_request() {
+            let prs: Vec<String> = self
+                .pull_requests
+                .iter()
+                .map(|pr| format!("{}/{}", pr.lane, pr.number))
+                .collect();
+            format!("pr {}", prs.join("+"))
+        } else {
+            format!("#{}", self.number.unwrap_or(0))
+        }
+    }
 }
 
 /// One pull request a ticket was taken from, in the lane whose

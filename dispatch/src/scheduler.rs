@@ -3029,7 +3029,7 @@ impl Runner {
             return self.fail_checks(t, ps, &a.stage, a.n, &reason, now_ms);
         }
         if code != 0 {
-            let reason = format!("checks exited {code}; output at {}", gate.log.display());
+            let reason = checks_reason(code, &gate.log);
             return self.fail_checks(t, ps, &a.stage, a.n, &reason, now_ms);
         }
         if let Some(attempt) = t
@@ -3517,6 +3517,15 @@ impl Runner {
             }
             pending += u32::try_from(t.pending_decisions().len()).unwrap_or(u32::MAX);
         }
+        // Slots and the decision limit are operational knobs, not part
+        // of what a ticket was promised, so they are read from the
+        // project's live pipeline file: raising `slots` takes effect on
+        // the next pass, for every ticket. A ticket's frozen copy
+        // stands in only when the live file is unreadable.
+        let live_policy = std::fs::read_to_string(self.data.pipeline(project))
+            .ok()
+            .and_then(|text| Pipeline::parse(&text).ok())
+            .map(|p| p.policy);
         let mut pipeline: Option<Pipeline> = None;
         for t in &mut tickets {
             if matches!(t.state, TicketState::Parking { .. }) {
@@ -3550,9 +3559,9 @@ impl Runner {
                 .stages
                 .get(t.stage)
                 .is_none_or(|s| s.kind() == StageKind::GateOnly);
-            let may_start = has_open
-                || gate_only
-                || (running < p.policy.slots && pending < p.policy.waiting_on_me);
+            let policy = live_policy.as_ref().unwrap_or(&p.policy);
+            let may_start =
+                has_open || gate_only || (running < policy.slots && pending < policy.waiting_on_me);
             if !may_start {
                 continue;
             }
@@ -3983,6 +3992,21 @@ fn lane_names(answer: &str) -> Vec<String> {
         .map(|s| s.trim().to_owned())
         .filter(|s| !s.is_empty())
         .collect()
+}
+
+/// Why a check failed, from its exit code. 127 is the shell saying a
+/// command was not found: the lane's `setup` did not install it and
+/// nothing on the runner's `PATH` stands in, so running the same checks
+/// again cannot help and the question says so.
+pub(crate) fn checks_reason(code: i32, log: &Path) -> String {
+    let base = format!("checks exited {code}; output at {}", log.display());
+    if code == 127 {
+        format!(
+            "{base}. Exit 127 means a command was not found: the lane's setup did not install it and the runner's PATH has no copy; fix the pipeline's setup or gate (new tickets pick it up; this ticket runs on its own copy) rather than running the same checks again"
+        )
+    } else {
+        base
+    }
 }
 
 /// The provider a remote URL points at, by its host.

@@ -1246,7 +1246,7 @@ impl Runner {
             return self.fail_checks(t, ps, &key.0, key.1, &reason, now_ms);
         }
         if code != 0 {
-            let reason = format!("checks exited {code}; output at {}", gate.log.display());
+            let reason = crate::scheduler::checks_reason(code, &gate.log);
             return self.fail_checks(t, ps, &key.0, key.1, &reason, now_ms);
         }
         log::info!(

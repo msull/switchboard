@@ -110,10 +110,14 @@ lane or remote, or a PR already on a live ticket.
 
 `dispatch status` prints one line per project (slots in use,
 decisions waiting, and whether anything is holding new starts), then
-one line per ticket. Each ticket line reads: id, project, `#number`, title, current stage,
-state (`active`, `parked: <why>`, `closed: <why>`), the latest
-attempt and whether a decision is pending. Grep by id or by issue
-number when reporting on one item.
+one line per ticket. Each ticket line reads: id, project, source,
+title, current stage, state (`active`, `parked: <why>`,
+`closed: <why>`), the latest attempt and whether a decision is
+pending. The source is `#12` for an issue ticket and `pr <lane>/<n>`
+for a pull-request ticket (two lanes joined with `+`), as `take`
+spells them, so an issue and a PR with the same number never read
+alike. Grep by ticket id when reporting on one item; the output may
+be piped through `head` or `grep -m`.
 
 `dispatch decisions` lists what waits on the owner. Each entry gives
 the ticket id, the decision id (`d1`, `d2`, …), the stage, the
@@ -121,7 +125,7 @@ question in full, the options, and the exact `dispatch decide` line.
 Copy that line; do not compose one from memory.
 
 `dispatch queue <project>` prints the queue in order with a rank
-number, ticket id, issue number and title.
+number, ticket id, source and title.
 
 ## Ordering the queue
 
@@ -180,11 +184,70 @@ it after the owner has fixed whatever the park reason named. Resuming
 a ticket parked for a reason you do not understand is the owner's
 call.
 
+## Where things live
+
+Dispatch's data directory is `$DISPATCH_DATA_DIR`, by default
+`~/Library/Application Support/Dispatch` (the `Data:` line of
+`dispatch` with no arguments prints it). Under it:
+
+- `pipelines/<project>.toml` is a project's pipeline: its
+  repositories, lanes, operators, stages, gates and policy.
+  `pipelines/<project>.pr.toml`, when present, is the pipeline that
+  reviews other people's pull requests for the same project.
+- `tickets/<id>.json` is a ticket's record and `tickets/<id>/` its
+  artifacts, including `pipeline.toml`, the ticket's own frozen copy
+  of the pipeline it was taken under.
+- `projects/<project>.json` holds the queue.
+
+Tickets, queues and worktrees are hands-off: the commands are the
+whole interface to them. Pipeline files are the owner's, and the
+owner may delegate them to you; the next section says how.
+
+## Managing a pipeline file, when the owner asks
+
+Only when the owner has said so for a named project. Edit
+`pipelines/<project>.toml` in place with an ordinary editor or `sed`;
+nothing needs restarting. What a change reaches depends on the key:
+
+- `[policy] slots` and `waiting_on_me` are read from the live file on
+  every pass, for every ticket of the project. Raising `slots` lets
+  the next waiting ticket start within a second or two and
+  `dispatch status` shows the new limit at once. When a project has a
+  `.pr.toml` as well, its `[policy]` counts do not apply: the
+  project's `.toml` governs both files' tickets, and `status` shows
+  one line per project for that reason.
+- Everything else (lanes, `setup`, gates, operators, stages, prompts,
+  the `decisions` dials) is copied into a ticket when it is taken.
+  Tickets already running keep their copy to the end, so a fix to a
+  lane's `setup` or gate command reaches only tickets taken after it.
+  To apply such a fix to a ticket that has already failed on the old
+  command, the owner has to retake it; say so in your report rather
+  than answering `rerun` or `check`, which both run the old copy.
+- A lane's `setup` runs once per worktree, when it is cut. It is not
+  run again later, whatever the file says now.
+
+Before saving, read the file back: a pipeline that does not parse is
+refused at the next `take` with the parser's reason, and `status`
+falls back to each ticket's copy for the limits. Never edit a ticket's
+`tickets/<id>/pipeline.toml`.
+
+Two traps that read as plain test failures:
+
+- Gates and `setup` run with the runner's `PATH`, so a tool installed
+  globally on the machine can stand in for one the lane's `setup` did
+  not install. The result is a lint that passes from a global copy and
+  a test runner that fails with `command not found`. When a Python
+  lane keeps its tools in a dependency group, both `setup` and the gate
+  need that group (`uv sync --all-groups`, `uv run --all-groups ...`).
+- A gate that exits 127 is that case, and the decision's text says so.
+  `rerun` and `check` cannot help; fix the pipeline and tell the owner
+  which tickets were taken under the broken one.
+
 ## What not to do
 
-- Do not edit anything under `~/Library/Application Support/Dispatch`:
-  not the pipelines, not the tickets, not the queues. The commands
-  above are the whole interface.
+- Do not edit tickets, queues or worktrees under the data directory.
+  Edit a pipeline file only when the owner has delegated that project
+  to you, as above.
 - Do not delete or recreate a ticket by hand. There is no subcommand
   for it yet; ask the owner.
 - Do not take an issue to "see what happens". Every ticket runs real

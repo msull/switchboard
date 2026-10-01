@@ -428,8 +428,8 @@ fix_prompt = "..."
 no_feedback = "No findings."
 
 [policy]
-slots = 1                     # tickets with a running attempt or a held resource
-waiting_on_me = 2             # pending decisions across the project before nothing new starts
+slots = 1                     # tickets with a running attempt or a held resource; read live from <project>.toml on every pass, not from a ticket's copy
+waiting_on_me = 2             # pending decisions across the project before nothing new starts; live as well
 rates = { "claude-sonnet-5" = [3.0, 15.0], ... }   # $ per million input, output tokens
 decisions = { lanes = "ask", finalize = "ask", merge = "ask", budget = "ask", review-code = "ask" }
 trust_folders = false         # true: Claude Code's folder trust question, which every fresh worktree asks, is answered for the project's agents
@@ -1113,7 +1113,9 @@ reviews and signs off rather than makes. It is a ticket like any
 other, on a second pipeline file per project, `<project>.pr.toml`,
 whose `[source]` is `kind = "pull-request"` and whose lanes are the
 project's. The queue, the slots and `waiting_on_me` are the project's,
-shared with its issue tickets.
+shared with its issue tickets: the counts in `<project>.toml` govern
+both files' tickets, and the `.pr.toml`'s own `[policy]` counts are
+not read.
 
 ```
 dispatch take Orchard pr backend/123 frontend/45     # the lanes' own repositories
@@ -1382,6 +1384,9 @@ and one against the real one:
 | Plan session has no transcript yet | `workflow.start` fails; the attempt is failed and a decision, not retried |
 | Plan file from an earlier attempt exists | The new attempt's own path is empty, so nothing advances |
 | `project.add` fails to save | `failed` reply; attempt failed; nothing else made |
+| `slots` raised in the project's live pipeline file while a ticket waits on a copy that says one | The waiting ticket starts on the next pass; the limits are the live file's, a ticket's frozen copy standing in only when the live file is unreadable (`slots_come_from_the_live_pipeline_file_not_a_tickets_copy`) |
+| A gate exits 127 | The `rerun` question says a command was not found, names the lane's `setup` and the runner's `PATH` as the cause, and says new tickets pick up a fixed pipeline while this one runs on its copy |
+| `status` and `queue` list a pull-request ticket | Its source reads `pr <lane>/<n>` (lanes joined by `+`), never `#<n>`, so it cannot be mistaken for the issue of that number; piping either command into `head` ends quietly |
 | `take <project> pr <lane>/<n>...` | A ticket on `<project>.pr.toml` with one PR per named lane, refused for a closed PR, an unknown or repeated lane, an unknown remote, two lanes in one repository, or a PR already on a live ticket |
 | A pull-request ticket's first pass | Each PR's lane is a worktree on the PR's branch tracking the remote (a GitHub PR from its pull ref on `pr/<n>`), chosen; no branch of Dispatch's own; lanes without a PR are not cut |
 | `take .. pr <remote>:<lane>/<n>` on a mirror | The clone gains that remote, the lane is checked out from it, the question shows the PR's base there, and the merge is read from that provider by number |

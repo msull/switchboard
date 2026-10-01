@@ -12,6 +12,7 @@ use dispatch::scheduler::Runner;
 use dispatch::serve::{Handler, Server, take_issue, take_pull_requests};
 use dispatch::store::DataDir;
 use dispatch::ticket::{DecisionState, TicketState};
+use std::io::Write as _;
 
 const USAGE: &str = "usage:
   dispatch take <project> <issue-number>   make a ticket from an issue and queue it
@@ -29,6 +30,20 @@ const USAGE: &str = "usage:
 Data: $DISPATCH_DATA_DIR (default ~/Library/Application Support/Dispatch).
 Switchboard: $SWITCHBOARD_DATA_DIR/control.sock (default Switchboard's).
 While `run` is up it serves the same commands on <data>/dispatch.sock.";
+
+/// Print a line, and end quietly when the reader has gone: a pipe into
+/// `head` or `grep -m` closes stdout early, which is not an error.
+macro_rules! say {
+    ($($arg:tt)*) => {{
+        let mut out = std::io::stdout().lock();
+        if let Err(e) = writeln!(out, $($arg)*) {
+            if e.kind() == std::io::ErrorKind::BrokenPipe {
+                std::process::exit(0);
+            }
+            return Err(e.into());
+        }
+    }};
+}
 
 fn now_ms() -> u64 {
     epoch_ms(SystemTime::now())
@@ -71,7 +86,7 @@ fn main() -> Result<()> {
 fn take_prs(project: &str, specs: &[&str]) -> Result<()> {
     let mut runner = runner()?;
     let ticket = take_pull_requests(&mut runner, project, specs, now_ms())?;
-    println!(
+    say!(
         "{} {} ({})",
         ticket.id,
         ticket.source.title,
@@ -89,10 +104,10 @@ fn take_prs(project: &str, specs: &[&str]) -> Result<()> {
 fn take(project: &str, issue: &str) -> Result<()> {
     let mut runner = runner()?;
     let ticket = take_issue(&mut runner, &Gh, project, issue, now_ms())?;
-    println!(
-        "{} #{} {}",
+    say!(
+        "{} {} {}",
         ticket.id,
-        ticket.source.number.unwrap_or(0),
+        ticket.source.label(),
         ticket.source.title
     );
     Ok(())
@@ -126,7 +141,7 @@ fn decide(ticket: &str, decision: &str, answer: &str, note: Option<&str>) -> Res
         Box::new(GitCli::default()),
     );
     let d = runner.decide(ticket, decision, answer, note, now_ms())?;
-    println!(
+    say!(
         "{ticket} {}: {answer} (the runner acts on it on its next pass)",
         d.id
     );
@@ -146,12 +161,12 @@ fn worktrees(args: &[&str]) -> Result<()> {
     };
     let mut runner = self::runner()?;
     let view = runner.set_worktrees(path, migrate, now_ms())?;
-    println!("worktrees: {}", view.root.display());
+    say!("worktrees: {}", view.root.display());
     for id in &view.moved {
-        println!("  moved {id}");
+        say!("  moved {id}");
     }
     for (id, why) in &view.skipped {
-        println!("  left {id}: {why}");
+        say!("  left {id}: {why}");
     }
     Ok(())
 }
@@ -166,7 +181,7 @@ fn decisions() -> Result<()> {
     for t in runner.tickets()? {
         for d in t.pending_decisions() {
             any = true;
-            println!(
+            say!(
                 "{} {} [{}] {}\n    options: {}{}\n    dispatch decide {} {} <answer>",
                 t.id,
                 d.id,
@@ -182,7 +197,7 @@ fn decisions() -> Result<()> {
         }
     }
     if !any {
-        println!("nothing waits on you");
+        say!("nothing waits on you");
     }
     Ok(())
 }
@@ -195,10 +210,10 @@ fn status() -> Result<()> {
     );
     let tickets = runner.tickets()?;
     if tickets.is_empty() {
-        println!("no tickets");
+        say!("no tickets");
     }
     for p in dispatch::serve::status(&runner)?.projects {
-        println!(
+        say!(
             "{}: {} of {} slots in use, {} of {} decisions waiting{}",
             p.name,
             p.running,
@@ -239,11 +254,11 @@ fn status() -> Result<()> {
             )
         });
         let pending = t.pending_decisions().len();
-        println!(
-            "{} {} #{} {} · stage {stage} · {standing}{last}{}",
+        say!(
+            "{} {} {} {} · stage {stage} · {standing}{last}{}",
             t.id,
             t.project,
-            t.source.number.unwrap_or(0),
+            t.source.label(),
             t.source.title,
             if pending > 0 {
                 format!(" · {pending} decision(s) pending")
@@ -255,7 +270,7 @@ fn status() -> Result<()> {
             if let DecisionState::Answered { answer, acted, .. } = &d.state
                 && !acted
             {
-                println!("    {} answered {answer}, not yet acted on", d.id);
+                say!("    {} answered {answer}, not yet acted on", d.id);
             }
         }
     }
@@ -269,10 +284,10 @@ fn resume(ticket: &str) -> Result<()> {
         Box::new(GitCli::default()),
     );
     let t = runner.resume(ticket, now_ms())?;
-    println!(
-        "{} #{} {} active again",
+    say!(
+        "{} {} {} active again",
         t.id,
-        t.source.number.unwrap_or(0),
+        t.source.label(),
         t.source.title
     );
     Ok(())
@@ -292,9 +307,9 @@ fn queue(project: &str, order: &[&str]) -> Result<()> {
     for (i, id) in ps.queue.iter().enumerate() {
         let title = runner
             .load_ticket(id)
-            .map(|t| format!("#{} {}", t.source.number.unwrap_or(0), t.source.title))
+            .map(|t| format!("{} {}", t.source.label(), t.source.title))
             .unwrap_or_default();
-        println!("{} {id} {title}", i + 1);
+        say!("{} {id} {title}", i + 1);
     }
     Ok(())
 }

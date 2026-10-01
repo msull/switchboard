@@ -1393,6 +1393,46 @@ fn a_ready_stage_costs_no_slot() {
     );
 }
 
+/// `slots` is read from the project's live pipeline file on every
+/// pass, not from a ticket's frozen copy: a second ticket waits while
+/// the file says one slot and starts as soon as the file says two.
+#[test]
+fn slots_come_from_the_live_pipeline_file_not_a_tickets_copy() {
+    let mut env = Env::new();
+    let path = env.data.pipeline(PROJECT);
+    let one = std::fs::read_to_string(&path)
+        .unwrap()
+        .replace("slots = 2\n", "slots = 1\n");
+    std::fs::write(&path, &one).unwrap();
+    let first = env.take(7).id;
+    env.steps_until(&first, "the first investigator", |t, _| {
+        t.attempts_of("investigate")
+            .next()
+            .is_some_and(Attempt::is_open)
+    });
+    let second = env.take(8).id;
+    for _ in 0..3 {
+        env.step();
+    }
+    assert!(
+        env.ticket(&second).attempts.is_empty(),
+        "one slot, held by the first ticket"
+    );
+    std::fs::write(&path, one.replace("slots = 1\n", "slots = 2\n")).unwrap();
+    env.steps_until(&second, "the second investigator", |t, _| {
+        t.attempts_of("investigate")
+            .next()
+            .is_some_and(Attempt::is_open)
+    });
+    assert!(
+        env.ticket(&first)
+            .attempts_of("investigate")
+            .next()
+            .is_some_and(Attempt::is_open),
+        "the first ticket kept its slot"
+    );
+}
+
 /// Red checks, a PR at another head, and a repository with no checks
 /// are each a question with `recheck`; a stage that says
 /// `checks = "none"` passes on the PR at the head alone.
