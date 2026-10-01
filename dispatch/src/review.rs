@@ -15,7 +15,7 @@ use switchboard_control::{self as wire, Body, Reply};
 use crate::pipeline::{Gate, OperatorKind, Pipeline, Stage};
 use crate::scheduler::{
     Ask, NO_SUCH_SESSION, Runner, SocketDown, asks_again, env_for, held_in, may_rerun, new_attempt,
-    next_n, primary_tree, rework_key, session_kind, vars_for,
+    next_n, primary_tree, rework_key, sent_back, session_kind, vars_for,
 };
 use crate::ticket::{
     Attempt, AttemptKind, AttemptState, DecisionKind, GateRun, ProjectState, ReviewRound,
@@ -80,7 +80,7 @@ impl Runner {
                 Some(a) => {
                     all_complete = false;
                     let held = held_in(t, &stage.name, &ctx);
-                    let sent_back = t.rework.contains_key(&rework_key(&stage.name, &ctx));
+                    let sent_back = sent_back(t, stage, &ctx);
                     if !held && (may_rerun(t, &a) || sent_back) {
                         self.start_review(t, ps, p, stage, &ctx, &cwd, lane.as_deref(), now_ms)?;
                     } else if asks_again(t, &a, sent_back) {

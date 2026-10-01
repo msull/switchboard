@@ -197,6 +197,10 @@ pub struct Attempt {
     /// is allowed.
     #[serde(default)]
     pub extra_pass: bool,
+    /// Its last failure was at the stage's checks, so asking about it
+    /// again offers `check` too.
+    #[serde(default)]
+    pub failed_at_checks: bool,
     pub started_ms: u64,
     pub ended_ms: Option<u64>,
 }
@@ -590,6 +594,7 @@ mod tests {
             pr: None,
             rounds: Vec::new(),
             extra_pass: false,
+            failed_at_checks: false,
             started_ms: 0,
             ended_ms: None,
         };

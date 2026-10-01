@@ -4085,6 +4085,76 @@ fn a_resumed_ticket_is_asked_again_with_every_slot_taken() {
     assert_eq!(env.sb().sessions.len(), sessions, "nothing launched");
 }
 
+/// A request that can never be answered (lost without its body) does
+/// not keep a ticket without a slot from being asked again.
+#[test]
+fn a_resumed_ticket_with_a_dead_request_is_asked_again_with_every_slot_taken() {
+    let (mut env, id, earlier) = parked_and_resumed();
+    let path = env.data.pipeline("Orchard");
+    let text = std::fs::read_to_string(&path)
+        .unwrap()
+        .replace("slots = 2\n", "slots = 0\n");
+    std::fs::write(&path, text).unwrap();
+    let mut t = env.ticket(&id);
+    let dead = t
+        .ledger
+        .iter_mut()
+        .rev()
+        .find(|o| o.kind == "session.waiting")
+        .unwrap();
+    dead.reply = None;
+    dead.body = None;
+    let now = env.tick();
+    env.runner.save_ticket(&mut t, now).unwrap();
+    let sessions = env.sb().sessions.len();
+    let now = env.tick();
+    env.runner.step_project("Orchard", now).unwrap();
+    let t = env.ticket(&id);
+    for ctx in ["backend", "frontend"] {
+        let d = rerun_for(&t, ctx).unwrap_or_else(|| panic!("no rerun for {ctx}: {t:#?}"));
+        assert!(!earlier.contains(&d.id), "a new id: {}", d.id);
+    }
+    assert_eq!(env.sb().sessions.len(), sessions, "nothing launched");
+}
+
+/// Failing at the checks past `max_reruns` parks without a question,
+/// and the resume still offers the checks again.
+#[test]
+fn a_resume_after_failed_checks_past_max_reruns_offers_check_again() {
+    let mut env = Env::new();
+    let (id, implementer) = at_implement(&mut env);
+    let t = env.ticket(&id);
+    for path in [env.data.pipeline(PROJECT), t.pipeline_file.clone()] {
+        let text = std::fs::read_to_string(&path)
+            .unwrap()
+            .replace("waiting_on_me = 3\n", "waiting_on_me = 3\nmax_reruns = 0\n");
+        std::fs::write(&path, text).unwrap();
+    }
+    implementer_stops(&mut env, &id, &implementer);
+    env.steps_until(&id, "the checks starting", |t, _| {
+        t.attempts_of("implement")
+            .last()
+            .is_some_and(|a| a.gate.is_some())
+    });
+    let key = format!("{id}/implement/1");
+    env.repo.lock().unwrap().check_exits.insert(key, 1);
+    env.steps_until(&id, "parked", |t, _| {
+        matches!(t.state, TicketState::Parked { .. })
+    });
+    let t = env.ticket(&id);
+    assert!(
+        !t.decisions.iter().any(|d| d.name == "rerun"),
+        "the park asked nothing: {t:#?}"
+    );
+    let now = env.tick();
+    env.runner.resume(&id, now).unwrap();
+    env.steps_until(&id, "the question again", |t, _| {
+        !t.pending_decisions().is_empty()
+    });
+    let again = env.pending(&id).remove(0);
+    assert_eq!(again.options, vec!["rerun", "check", "park"]);
+}
+
 #[test]
 fn a_resume_after_failed_checks_offers_check_again() {
     let mut env = Env::new();

@@ -77,8 +77,8 @@ pedantic = { level = "warn", priority = -1 }
 missing_errors_doc = "allow"
 missing_panics_doc = "allow"
 module_name_repetitions = "allow"
-# New in Rust 1.99: wants `assert_eq!(x, [] as [T; 0])` over
-# `assert!(x.is_empty())`, which reads worse and gains little in tests.
+# Wants `assert_eq!(x, [] as [T; 0])` over `assert!(x.is_empty())`,
+# which reads worse and gains little in tests.
 assert_is_empty = "allow"
 
 # egui is slow in unoptimised builds; optimise dependencies even in dev.
