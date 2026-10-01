@@ -613,11 +613,26 @@ mod tests {
     }
 
     fn poll(what: &str, mut ready: impl FnMut() -> bool) {
+        poll_on(None, what, &mut ready);
+    }
+
+    /// Like `poll`, and on timeout the panic carries what `server` had:
+    /// every pane in the status format and the session list, so a
+    /// failure on a machine that cannot be reached afterwards (CI) says
+    /// which of missing, still running or dead-without-status it was.
+    fn poll_on(server: Option<&Server>, what: &str, ready: &mut dyn FnMut() -> bool) {
         // Generous: a cold CI runner has taken more than five seconds
         // to start a server and report a pane's exit.
         let deadline = Instant::now() + Duration::from_secs(20);
         while !ready() {
-            assert!(Instant::now() < deadline, "timed out waiting for {what}");
+            if Instant::now() >= deadline {
+                let seen = server.map_or(String::new(), |s| {
+                    let panes = s.host.run(&["list-panes", "-a", "-F", STATUS_FORMAT]);
+                    let sessions = s.host.run(&["list-sessions"]);
+                    format!("; panes: {panes:?}; sessions: {sessions:?}")
+                });
+                panic!("timed out waiting for {what}{seen}");
+            }
             std::thread::sleep(Duration::from_millis(50));
         }
     }
@@ -827,7 +842,7 @@ mod tests {
             scrollback: None,
         };
         s.host.spawn(&spec).unwrap();
-        poll("exit status", || {
+        poll_on(Some(&s), "exit status", &mut || {
             s.host.status(&id).unwrap().liveness == Liveness::Exited { code: Some(3) }
         });
         let listed = s.host.list().unwrap();
