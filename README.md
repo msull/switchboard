@@ -44,9 +44,11 @@ its caption bar and preview panel appear on, the sessions open in
 windows of their own and where each window sits, where the main
 window sits, the zoom of each display, the workflow round cap and the
 user's workflow definitions),
-`views.json` (the workspaces, and the working sets: each one's name,
-workspace, which sessions and files are on it, and where each card sits
-on its grid, with a `.bak`),
+`views.json` (schema v5: the workspaces, and the working sets: each
+one's name, workspace, which sessions and files are on it, and where
+each card sits on its grid, with a `.bak`; a set made in the global
+workspace, "Everywhere", is in no real workspace and may hold cards
+from all of them),
 the
 tmux config and socket name, `claude-hooks.json` (passed to Claude Code
 with `--settings`), `events.log` (the hook event log), `wake.sock`, and
@@ -148,8 +150,8 @@ Dev aids, all environment variables:
   `show-dispatch`, `show-ticket`,
   `review-file`, `review-continue`, `review-finalize`, `show-artifact`,
   `pop-out`, `close-pop-out`, `files-root`, `zoom`, `place-pop-out`,
-  `place-card`, `new-workspace`, `workspace`, `move-project`,
-  `move-working-set`, `controller`,
+  `place-card`, `new-workspace`, `workspace`, `workspace-global`,
+  `move-project`, `move-working-set`, `controller`,
   `open-terminal`, `prompt-box`, `theme`, `sleep`).
 - `SWITCHBOARD_CONTROLLER=<device>`: the nunchuk's serial port (default: the
   first `/dev/cu.usbmodem*`, waited for if absent).

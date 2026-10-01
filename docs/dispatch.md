@@ -1249,7 +1249,11 @@ Commands:
   listening is Dispatch's probe, not Switchboard's reply
 - `command.run {project, name, argv, env}` → `session`; the exit code
   is read back with `session.get`
-- `space.new {name}` → `space`; `set.new {space, name}` → `set`;
+- `space.new {name}` → `space`; `set.new {space, name}` → `set`
+  (`space` may be the global workspace's fixed id,
+  `00000000-0000-0000-0000-000000000002`, for a set that holds cards
+  from every workspace; `project.add` refuses that id, since the global
+  workspace holds no projects);
   `set.sync {set, items: [{target, rect}]}`: the set's pins become
   exactly this list, in one action: pins not listed are removed,
   listed ones placed or moved, and an overlap or a target outside the

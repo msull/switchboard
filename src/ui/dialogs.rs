@@ -6,12 +6,15 @@ use std::path::PathBuf;
 use egui::{Context, RichText, Ui};
 
 use super::{DrawCtx, GAP, theme};
-use crate::core::{AgentKind, AppAction, Launch, Project, ProjectId, SessionKind};
+use crate::core::{AgentKind, AppAction, Launch, Project, ProjectId, SessionKind, SpaceId};
 
 #[derive(Debug, Default, Clone)]
 pub struct AddProjectDraft {
     pub name: String,
     pub root: String,
+    /// The workspace picked in the dialog: `Some` only while the global
+    /// space is active, which holds no project of its own.
+    pub space: Option<SpaceId>,
 }
 
 #[derive(Debug, Clone)]
@@ -136,21 +139,21 @@ fn space_editor(cx: &mut DrawCtx<'_>, ctx: &Context) {
     }
 }
 
-/// A muted "Move to" menu listing the other spaces, for a project's
-/// board and a working set's header; `action` makes the move. Drawn
-/// only when there is another space, so a single-space rail shows
-/// nothing of the feature.
+/// A muted "Move to" menu listing the spaces other than `from` (the one
+/// the project or set is in), for a project's board and a working set's
+/// header; `action` makes the move. Drawn only when there is another
+/// space, so a single-space rail shows nothing of the feature.
 pub fn move_to_space_menu(
     cx: &mut DrawCtx<'_>,
     ui: &mut Ui,
-    action: impl Fn(crate::core::SpaceId) -> AppAction,
+    from: SpaceId,
+    action: impl Fn(SpaceId) -> AppAction,
 ) {
-    let active = cx.core.active_space();
-    let others: Vec<(crate::core::SpaceId, String)> = cx
+    let others: Vec<(SpaceId, String)> = cx
         .core
         .spaces()
         .iter()
-        .filter(|s| s.id != active)
+        .filter(|s| s.id != from)
         .map(|s| (s.id, s.name.clone()))
         .collect();
     if others.is_empty() {
@@ -511,12 +514,17 @@ fn add_project(cx: &mut DrawCtx<'_>, ctx: &Context) {
     dialog(ctx, "Add a project", |ui| {
         field(ui, "Name", &mut draft.name);
         field(ui, "Root path", &mut draft.root);
+        if let Some(space) = &mut draft.space {
+            space_combo(cx, ui, space);
+        }
         let ready = !draft.name.trim().is_empty() && !draft.root.trim().is_empty();
         let (add, cancel) = dialog_actions(ui, "Add", ready);
         if add {
-            cx.dispatch(AppAction::AddProject {
-                name: draft.name.trim().to_string(),
-                root: PathBuf::from(draft.root.trim()),
+            let name = draft.name.trim().to_string();
+            let root = PathBuf::from(draft.root.trim());
+            cx.dispatch(match draft.space {
+                Some(space) => AppAction::AddProjectTo { name, root, space },
+                None => AppAction::AddProject { name, root },
             });
             keep = false;
         }
@@ -527,6 +535,30 @@ fn add_project(cx: &mut DrawCtx<'_>, ctx: &Context) {
     if keep {
         cx.state.add_project = Some(draft);
     }
+}
+
+/// The add dialog's "Workspace" choice: the real spaces only.
+fn space_combo(cx: &DrawCtx<'_>, ui: &mut Ui, space: &mut SpaceId) {
+    let p = theme::palette(ui);
+    let id = ui
+        .label(
+            RichText::new("Workspace")
+                .text_style(theme::meta())
+                .color(p.n600),
+        )
+        .id;
+    let selected = cx.core.space(*space).map_or("", |s| s.name.as_str());
+    egui::ComboBox::from_id_salt("add-project-space")
+        .selected_text(selected)
+        .width(360.0)
+        .show_ui(ui, |ui| {
+            for s in cx.core.spaces() {
+                ui.selectable_value(space, s.id, &s.name);
+            }
+        })
+        .response
+        .labelled_by(id);
+    ui.add_space(6.0);
 }
 
 fn new_session(cx: &mut DrawCtx<'_>, ctx: &Context) {

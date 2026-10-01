@@ -231,12 +231,24 @@ impl Store for JsonStore {
     }
 
     fn save_views(&self, views: &Views) -> Result<(), StoreError> {
+        self.save_views_as(views, VIEWS_SCHEMA_VERSION)
+    }
+
+    fn data_dir(&self) -> PathBuf {
+        self.dir.clone()
+    }
+}
+
+impl JsonStore {
+    /// [`Store::save_views`] for a build that understands views up
+    /// to `understands`; a parameter so a test can play an older build.
+    fn save_views_as(&self, views: &Views, understands: u32) -> Result<(), StoreError> {
         if self.lock.is_none() {
             return Err(StoreError::Locked);
         }
-        if views.schema_version > VIEWS_SCHEMA_VERSION {
+        if views.schema_version > understands {
             return Err(StoreError::Io(format!(
-                "refusing to write views schema version {} (this build understands {VIEWS_SCHEMA_VERSION})",
+                "refusing to write views schema version {} (this build understands {understands})",
                 views.schema_version
             )));
         }
@@ -260,17 +272,17 @@ impl Store for JsonStore {
         sync_dir(&self.dir)
     }
 
-    fn data_dir(&self) -> PathBuf {
-        self.dir.clone()
-    }
-}
-
-impl JsonStore {
     /// The arranged views. An unreadable file is logged and the app
     /// starts with none, like the preferences; a file from a newer
     /// build is kept as it is (its version is remembered, and saving
     /// at that version is refused) so nothing of it is lost.
     fn load_views(&self) -> Views {
+        self.load_views_as(VIEWS_SCHEMA_VERSION)
+    }
+
+    /// [`Self::load_views`] for a build that understands views up to
+    /// `understands`; a parameter so a test can play an older build.
+    fn load_views_as(&self, understands: u32) -> Views {
         let path = self.views_path();
         let bytes = match fs::read(&path) {
             Ok(bytes) => bytes,
@@ -292,7 +304,7 @@ impl JsonStore {
             .get("schema_version")
             .and_then(serde_json::Value::as_u64)
             .unwrap_or(0);
-        if version > u64::from(VIEWS_SCHEMA_VERSION) {
+        if version > u64::from(understands) {
             log::warn!(
                 "{}: schema version {version} is newer than this build understands; views are not shown",
                 path.display()
@@ -306,7 +318,7 @@ impl JsonStore {
         }
         match serde_json::from_value::<Views>(value) {
             Ok(mut views) => {
-                views.schema_version = VIEWS_SCHEMA_VERSION;
+                views.schema_version = understands;
                 views
             }
             Err(e) => {
@@ -617,6 +629,82 @@ mod tests {
         assert_eq!(newer.schema_version, VIEWS_SCHEMA_VERSION + 1);
         assert!(newer.sets.is_empty());
         assert!(store.save_views(&newer).is_err());
+    }
+
+    fn set_in(space: SpaceId) -> crate::core::WorkingSet {
+        use crate::core::{GridRect, PinTarget, PinnedItem, RecordId, WorkingSet};
+        WorkingSet {
+            id: crate::core::SetId::new(),
+            name: "Working Set".into(),
+            space,
+            items: vec![PinnedItem {
+                target: PinTarget::Session(RecordId::new()),
+                rect: GridRect {
+                    x: 0,
+                    y: 0,
+                    w: 10,
+                    h: 8,
+                },
+            }],
+            op: None,
+        }
+    }
+
+    #[test]
+    fn a_global_set_round_trips() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = locked_store(dir.path());
+        let mut views = Views::default();
+        views.spaces.push(crate::core::Space::default_space());
+        views.sets.push(set_in(SpaceId::GLOBAL));
+        store.save_views(&views).unwrap();
+        assert_eq!(store.load_all().unwrap().views, views);
+    }
+
+    #[test]
+    fn views_from_the_previous_version_read_unchanged_and_save_as_current() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = locked_store(dir.path());
+        let mut views = Views::default();
+        views.spaces.push(crate::core::Space::default_space());
+        views.sets.push(set_in(SpaceId::DEFAULT));
+        views.schema_version = VIEWS_SCHEMA_VERSION - 1;
+        std::fs::write(
+            dir.path().join("views.json"),
+            serde_json::to_vec(&views).unwrap(),
+        )
+        .unwrap();
+        let loaded = store.load_all().unwrap().views;
+        assert_eq!(loaded.schema_version, VIEWS_SCHEMA_VERSION);
+        assert_eq!(loaded.sets, views.sets);
+        assert_eq!(loaded.spaces, views.spaces);
+        store.save_views(&loaded).unwrap();
+        let written: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(dir.path().join("views.json")).unwrap()).unwrap();
+        assert_eq!(
+            written["schema_version"].as_u64(),
+            Some(u64::from(VIEWS_SCHEMA_VERSION))
+        );
+    }
+
+    /// A build from before the global space would move a global set
+    /// into a real space and prune its cards; the version keeps it from
+    /// reading, and so from rewriting, such a file.
+    #[test]
+    fn an_older_build_neither_reads_nor_overwrites_a_global_set() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = locked_store(dir.path());
+        let mut views = Views::default();
+        views.spaces.push(crate::core::Space::default_space());
+        views.sets.push(set_in(SpaceId::GLOBAL));
+        store.save_views(&views).unwrap();
+        let path = dir.path().join("views.json");
+        let before = std::fs::read(&path).unwrap();
+        let older = VIEWS_SCHEMA_VERSION - 1;
+        let seen = store.load_views_as(older);
+        assert!(seen.sets.is_empty() && seen.spaces.is_empty());
+        assert!(store.save_views_as(&seen, older).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), before);
     }
 
     #[test]

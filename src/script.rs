@@ -32,7 +32,7 @@ use std::path::PathBuf;
 use crate::app::SwitchboardApp;
 use crate::core::{
     AgentKind, AppAction, EnvVar, Launch, PinTarget, ProjectId, RecordId, SecretScope, SessionKind,
-    SetId, SideTab,
+    SetId, SideTab, SpaceId,
 };
 use crate::ports::controller::ControllerEvent;
 
@@ -133,6 +133,7 @@ const REVIEW_LINES: &[&str] = &[
 const SPACE_LINES: &[&str] = &[
     "new-workspace",
     "workspace",
+    "workspace-global",
     "move-project",
     "move-working-set",
     "controller",
@@ -147,6 +148,9 @@ fn space_step(app: &mut SwitchboardApp, w: &[&str]) -> Result<(), String> {
             let id = space(app, &name.join(" "))?;
             app.dispatch(AppAction::ShowSpace(id));
         }
+        // No name resolves to the global space, so a real workspace may
+        // be called anything and nothing can be moved into global.
+        ["workspace-global"] => app.dispatch(AppAction::ShowSpace(SpaceId::GLOBAL)),
         ["move-project", p, name @ ..] => {
             let (pid, _) = project(app, p)?;
             let id = space(app, &name.join(" "))?;
@@ -269,7 +273,7 @@ fn newest_review(app: &SwitchboardApp) -> Result<crate::core::WorkflowId, String
         .ok_or_else(|| "no plan review".to_owned())
 }
 
-fn space(app: &SwitchboardApp, name: &str) -> Result<crate::core::SpaceId, String> {
+fn space(app: &SwitchboardApp, name: &str) -> Result<SpaceId, String> {
     app.core()
         .spaces()
         .iter()

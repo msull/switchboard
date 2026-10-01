@@ -169,6 +169,10 @@ impl AppCore {
         use wire::RecordKind as K;
         match action {
             ControlAction::AddProject { space, name, root } => {
+                if space.is_global() {
+                    self.error("the global workspace holds no projects");
+                    return Vec::new();
+                }
                 if self.space(space).is_none() {
                     self.error("no such space");
                     return Vec::new();
@@ -277,7 +281,8 @@ impl AppCore {
                 vec![made(K::Space, id.0)]
             }
             ControlAction::NewSet { space, name } => {
-                if self.space(space).is_none() {
+                // A set in the global space may hold cards from any space.
+                if !space.is_global() && self.space(space).is_none() {
                     self.error("no such space");
                     return Vec::new();
                 }

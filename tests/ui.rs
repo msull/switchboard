@@ -309,6 +309,246 @@ fn a_new_workspace_shows_nothing_of_the_others_until_the_selector_opens() {
     harness.get_by_label("cannot start server: gone");
 }
 
+/// The seed split over two workspaces: `alpha` stays in Default, `beta`
+/// moves to "Client", and beta's agent runs waiting on the user, so each
+/// workspace has one waiting session. Nothing is made active here.
+fn two_workspaces(harness: &mut Harness<'static, SwitchboardApp>, ids: &Seeded) -> SpaceId {
+    let clock = switchboard::core::Clock::at(1);
+    let core = harness.state_mut().core_mut_for_seeding();
+    core.dispatch(AppAction::NewSpace("Client".into()), clock);
+    let client = core.spaces()[1].id;
+    core.dispatch(AppAction::MoveProjectToSpace(ids.beta, client), clock);
+    core.dispatch(AppAction::ShowSpace(SpaceId::DEFAULT), clock);
+    let mut workspaces = core.workspaces().to_vec();
+    let mut host: Vec<HostStatus> = workspaces
+        .iter()
+        .flat_map(|w| &w.sessions)
+        .filter_map(|s| core.host_status(s.id).cloned())
+        .collect();
+    for w in &mut workspaces {
+        for s in &mut w.sessions {
+            if s.id == ids.agent {
+                s.activity = Activity::WaitingOnYou;
+            }
+        }
+    }
+    host.push(HostStatus {
+        id: HostId(ids.agent.host_name()),
+        liveness: Liveness::Running {
+            pid: 43,
+            command: "codex".into(),
+        },
+        cwd: None,
+        last_activity: None,
+        title: None,
+    });
+    core.seed(workspaces, host);
+    harness.run_steps(2);
+    client
+}
+
+fn show_global(harness: &mut Harness<'static, SwitchboardApp>) {
+    harness.state_mut().core_mut_for_seeding().dispatch(
+        AppAction::ShowSpace(SpaceId::GLOBAL),
+        switchboard::core::Clock::at(2),
+    );
+    harness.run_steps(2);
+}
+
+#[test]
+fn the_selector_offers_everywhere_without_rename_or_delete() {
+    let (mut harness, ids) = harness();
+    // One workspace: "everywhere" is that one, and the row is not drawn.
+    click(&mut harness, "Default ▾");
+    assert_eq!(harness.query_all_by_label_contains("◇").count(), 0);
+    harness.key_press(egui::Key::Escape);
+    harness.run_steps(2);
+    two_workspaces(&mut harness, &ids);
+    click(&mut harness, "Default ▾");
+    // First, above the real workspaces, with every workspace's count.
+    let everywhere = harness.get_by_label_contains("◇ Everywhere").rect();
+    assert!(everywhere.top() < harness.get_by_label_contains("✓ Default").rect().top());
+    harness.get_by_label("   ◇ Everywhere 2");
+    click(&mut harness, "   ◇ Everywhere 2");
+    assert!(actions(&harness).contains(&AppAction::ShowSpace(SpaceId::GLOBAL)));
+    assert_eq!(harness.state().core().active_space(), SpaceId::GLOBAL);
+    click(&mut harness, "Everywhere ▾");
+    harness.get_by_label_contains("✓ ◇ Everywhere");
+    harness.get_by_label("New workspace…");
+    assert_eq!(harness.query_all_by_label("Rename…").count(), 0);
+    assert_eq!(harness.query_all_by_label("Delete").count(), 0);
+}
+
+#[test]
+fn the_rail_groups_projects_by_workspace_in_global() {
+    let (mut harness, ids) = harness();
+    two_workspaces(&mut harness, &ids);
+    show_global(&mut harness);
+    // Both workspaces' projects, each under its workspace's name, in the
+    // user's order of workspaces.
+    // The rail's row, not the switchboard's heading: the leftmost.
+    let in_rail = |label: &str| {
+        harness
+            .query_all_by_label(label)
+            .map(|n| n.rect())
+            .min_by(|a, b| a.left().total_cmp(&b.left()))
+            .unwrap()
+    };
+    let default = harness.get_by_label("DEFAULT").rect();
+    let alpha = in_rail("alpha");
+    let client = harness.get_by_label("CLIENT").rect();
+    let beta = in_rail("beta");
+    assert!(default.top() < alpha.top());
+    assert!(alpha.top() < client.top());
+    assert!(client.top() < beta.top());
+    assert_eq!(harness.query_all_by_label("PROJECTS").count(), 0);
+    // "All sessions" lists both, each heading naming its workspace.
+    assert_eq!(harness.state().core().view(), View::Switchboard);
+    harness.get_by_label_contains("across 2 projects");
+    harness.get_by_label("Client");
+}
+
+#[test]
+fn the_rail_counts_sessions_and_decisions_apart_in_global() {
+    let (mut harness, ids) = harness();
+    two_workspaces(&mut harness, &ids);
+    let mut status = dispatch_status();
+    status.tickets.truncate(1);
+    harness
+        .state_mut()
+        .dispatch(AppAction::DispatchStatus(Some(status)));
+    show_global(&mut harness);
+    let core = harness.state().core();
+    assert_eq!(core.waiting_count_in(SpaceId::GLOBAL), 2);
+    assert_eq!(core.pending_decisions().len(), 1);
+    assert_eq!(core.waiting_count(), 3, "the Dock badge counts both");
+    // The rail paints its counts; what it paints is these two numbers:
+    // "All sessions" asks `waiting_count_in` of the active space, and the
+    // Dispatch row counts the decisions.
+    assert_eq!(core.waiting_count_in(core.active_space()), 2);
+    harness.get_by_label("Dispatch");
+}
+
+#[test]
+fn pins_two_sessions_from_two_workspaces_into_one_global_set() {
+    let (mut harness, ids) = harness();
+    two_workspaces(&mut harness, &ids);
+    show_global(&mut harness);
+    click(&mut harness, "+ New working set");
+    let set = first_set(&harness);
+    assert!(harness.state().core().working_sets()[0].space.is_global());
+    harness.state_mut().dispatched.clear();
+    for id in [ids.server, ids.agent] {
+        showing(&mut harness, View::Session(id));
+        click(&mut harness, "Working sets");
+        click(&mut harness, "   Working Set");
+        assert!(
+            actions(&harness).iter().any(|a| matches!(
+                a,
+                AppAction::AddToWorkingSet { set: s, target: PinTarget::Session(t), .. }
+                    if *s == set && *t == id
+            )),
+            "{:?}",
+            actions(&harness)
+        );
+    }
+    let items: Vec<_> = harness.state().core().working_sets()[0]
+        .items
+        .iter()
+        .map(|i| i.target.clone())
+        .collect();
+    assert_eq!(
+        items,
+        vec![
+            PinTarget::Session(ids.server),
+            PinTarget::Session(ids.agent)
+        ]
+    );
+    assert_eq!(harness.state().core().active_space(), SpaceId::GLOBAL);
+}
+
+#[test]
+fn a_notice_is_named_in_global() {
+    let (mut harness, ids) = harness();
+    let client = two_workspaces(&mut harness, &ids);
+    show_global(&mut harness);
+    harness.state_mut().core_mut_for_seeding().seed_status(
+        Some(Notice {
+            text: "cannot start codex-agent: gone".into(),
+            is_error: true,
+            expires_at: None,
+            space: Some(client),
+            undo: None,
+        }),
+        None,
+        false,
+    );
+    harness.run_steps(2);
+    harness.get_by_label("cannot start codex-agent: gone");
+    assert_eq!(harness.query_all_by_label(Notice::ELSEWHERE).count(), 0);
+}
+
+#[test]
+fn the_switcher_has_no_checkbox_in_global() {
+    let (mut harness, ids) = harness();
+    two_workspaces(&mut harness, &ids);
+    show_global(&mut harness);
+    click(&mut harness, "Go to ⌘K");
+    assert_eq!(harness.query_all_by_label("All workspaces").count(), 0);
+    harness.get_by_label("Default · alpha");
+    harness.get_by_label("Client · beta");
+}
+
+#[test]
+fn adding_a_project_in_global_asks_for_its_workspace() {
+    let (mut harness, ids) = harness();
+    let client = two_workspaces(&mut harness, &ids);
+    show_global(&mut harness);
+    // A board names no workspace, so the combo's lines are the only ones.
+    showing(&mut harness, View::Board(ids.alpha));
+    click(&mut harness, "+ Add project");
+    type_into(&mut harness, "Name", "gamma");
+    type_into(&mut harness, "Root path", "/tmp/gamma");
+    // The combo is named by its label and starts on the first workspace.
+    let combo = harness.get_by_role_and_label(Role::ComboBox, "Workspace");
+    assert_eq!(combo.value().as_deref(), Some("Default"));
+    combo.click();
+    harness.run_steps(2);
+    click(&mut harness, "Client");
+    click(&mut harness, "Add");
+    assert!(
+        actions(&harness).contains(&AppAction::AddProjectTo {
+            name: "gamma".into(),
+            root: "/tmp/gamma".into(),
+            space: client,
+        }),
+        "{:?}",
+        actions(&harness)
+    );
+}
+
+#[test]
+fn a_real_workspace_named_everywhere_keeps_its_script_name() {
+    let (mut harness, ids) = harness();
+    switchboard::script::run(
+        harness.state_mut(),
+        "new-workspace Everywhere\nworkspace Default\nmove-project alpha Everywhere\nworkspace Everywhere",
+    );
+    let core = harness.state().core();
+    let everywhere = core.spaces()[1].id;
+    assert!(!everywhere.is_global());
+    assert_eq!(core.space(everywhere).unwrap().name, SpaceId::GLOBAL_NAME);
+    assert_eq!(core.active_space(), everywhere);
+    assert_eq!(core.project_space(ids.alpha), Some(everywhere));
+    switchboard::script::run(harness.state_mut(), "workspace-global");
+    assert_eq!(harness.state().core().active_space(), SpaceId::GLOBAL);
+    harness.run_steps(2);
+    // The real one's row has no diamond; global's does.
+    click(&mut harness, "Everywhere ▾");
+    harness.get_by_label_contains("✓ ◇ Everywhere");
+    harness.get_by_label_contains("   Everywhere");
+}
+
 #[test]
 fn a_project_moves_to_another_workspace_from_its_board() {
     let (mut harness, ids) = harness();

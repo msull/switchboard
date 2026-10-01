@@ -6,13 +6,13 @@ use std::time::{Duration, SystemTime};
 
 use uuid::Uuid;
 
-use super::action::{AppAction, AppCore, Clock, Effect, UNDO_WINDOW, View};
+use super::action::{AppAction, AppCore, Clock, Effect, UNDO_WINDOW, View, space_contains};
 use super::controller::{MenuKind, UiRequest};
 use super::definitions::entry_hash;
 use super::model::{
     Activity, AgentKind, Approval, CardState, Discarded, GridRect, Launch, PinTarget, Project,
-    ProjectEnv, ProjectId, RecordId, ResumeHandle, SavedView, SessionKind, SessionRecord, Settings,
-    SideTab, SpaceId, ThemeMode, Views, WindowFrame, Workspace,
+    ProjectEnv, ProjectId, RecordId, ResumeHandle, SavedView, SessionKind, SessionRecord, SetId,
+    Settings, SideTab, Space, SpaceId, ThemeMode, Views, WindowFrame, Workspace,
 };
 use super::reconcile::RECORD_ID_ENV;
 use crate::ports::agent::AgentLaunch;
@@ -416,6 +416,255 @@ fn a_space_shows_only_its_own_projects_and_sets() {
     assert_eq!(core.visible_workspaces().count(), 2);
     assert_eq!(core.visible_working_sets().count(), 0);
     assert!(core.project_visible(ida) && !core.project_visible(idc));
+}
+
+/// Two spaces, `DEFAULT` and "B", with one project each and one running
+/// session waiting on the user in each. Returns the core, the B space,
+/// the two projects and their sessions.
+fn two_spaces() -> (AppCore, SpaceId, [ProjectId; 2], [RecordId; 2]) {
+    let mut core = AppCore::new();
+    let b = SpaceId::new();
+    let views = Views {
+        spaces: vec![
+            Space::default_space(),
+            Space {
+                id: b,
+                name: "B".into(),
+                op: None,
+            },
+        ],
+        ..Views::default()
+    };
+    let pa = project("a");
+    let mut pb = project("b");
+    pb.space = b;
+    let mut workspaces = Vec::new();
+    let mut ids = Vec::new();
+    for p in [pa.clone(), pb.clone()] {
+        let mut w = Workspace::new(p.clone());
+        let mut r = record(p.id, SessionKind::Shell, 0);
+        r.activity = Activity::WaitingOnYou;
+        ids.push(r.id);
+        w.sessions.push(r);
+        workspaces.push(w);
+    }
+    let host = ids.iter().map(|id| running(*id)).collect();
+    core.seed(workspaces, host);
+    core.seed_views(views);
+    (core, b, [pa.id, pb.id], [ids[0], ids[1]])
+}
+
+fn new_set(core: &mut AppCore, at: u64) -> SetId {
+    core.dispatch(
+        AppAction::NewWorkingSet {
+            name: None,
+            clone_of: None,
+            with: None,
+            columns: 24,
+        },
+        Clock::at(at),
+    );
+    core.working_sets().last().unwrap().id
+}
+
+fn pin(core: &mut AppCore, set: SetId, id: RecordId, at: u64) {
+    core.dispatch(
+        AppAction::AddToWorkingSet {
+            set,
+            target: PinTarget::Session(id),
+            columns: 24,
+        },
+        Clock::at(at),
+    );
+}
+
+#[test]
+fn space_contains_is_itself_or_everything_from_global() {
+    let other = SpaceId::new();
+    assert!(space_contains(SpaceId::DEFAULT, SpaceId::DEFAULT));
+    assert!(!space_contains(SpaceId::DEFAULT, other));
+    assert!(space_contains(SpaceId::GLOBAL, other));
+    assert!(space_contains(SpaceId::GLOBAL, SpaceId::DEFAULT));
+    assert!(!space_contains(other, SpaceId::GLOBAL));
+}
+
+#[test]
+fn the_global_space_lists_every_space() {
+    let (mut core, _, [pa, pb], _) = two_spaces();
+    assert_eq!(core.visible_workspaces().count(), 1);
+    core.dispatch(AppAction::ShowSpace(SpaceId::GLOBAL), Clock::at(1));
+    assert_eq!(core.active_space(), SpaceId::GLOBAL);
+    assert_eq!(core.visible_workspaces().count(), 2);
+    assert!(core.project_visible(pa) && core.project_visible(pb));
+    assert_eq!(core.waiting_count_in(SpaceId::GLOBAL), 2);
+    // A page of any space shows without leaving global.
+    core.dispatch(AppAction::ShowBoard(pb), Clock::at(2));
+    assert_eq!(core.view(), View::Board(pb));
+    assert_eq!(core.active_space(), SpaceId::GLOBAL);
+    // Stepping into a real space from a page of another gives way.
+    core.dispatch(AppAction::ShowSpace(SpaceId::DEFAULT), Clock::at(3));
+    assert_eq!(core.view(), View::Switchboard);
+    // The global space is no record.
+    assert!(core.space(SpaceId::GLOBAL).is_none());
+    assert_eq!(core.spaces().len(), 2);
+}
+
+#[test]
+fn a_global_set_holds_cards_from_every_space() {
+    let (mut core, b, [pa, _], [sa, sb]) = two_spaces();
+    let own = new_set(&mut core, 1);
+    pin(&mut core, own, sa, 2);
+    core.dispatch(AppAction::ShowSpace(SpaceId::GLOBAL), Clock::at(3));
+    let global = new_set(&mut core, 4);
+    assert_eq!(core.working_set(global).unwrap().space, SpaceId::GLOBAL);
+    // Global lists only its own sets.
+    assert_eq!(
+        core.visible_working_sets()
+            .map(|s| s.id)
+            .collect::<Vec<_>>(),
+        vec![global]
+    );
+    pin(&mut core, global, sa, 5);
+    pin(&mut core, global, sb, 6);
+    assert_eq!(core.working_set(global).unwrap().items.len(), 2);
+    // A project moving between spaces leaves global sets alone.
+    core.dispatch(AppAction::MoveProjectToSpace(pa, b), Clock::at(7));
+    assert_eq!(core.working_set(global).unwrap().items.len(), 2);
+    assert!(core.working_set(own).unwrap().items.is_empty());
+    assert_eq!(core.active_space(), SpaceId::GLOBAL);
+}
+
+#[test]
+fn the_global_space_cannot_be_renamed_deleted_or_moved_into() {
+    let (mut core, b, [pa, _], _) = two_spaces();
+    let own = new_set(&mut core, 1);
+    core.dispatch(AppAction::ShowSpace(SpaceId::GLOBAL), Clock::at(2));
+    let global = new_set(&mut core, 3);
+    let sets = core.working_sets().to_vec();
+    let spaces = core.spaces().to_vec();
+    let settings = core.settings().clone();
+    for action in [
+        AppAction::RenameSpace(SpaceId::GLOBAL, "Mine".into()),
+        AppAction::DeleteSpace(SpaceId::GLOBAL),
+        AppAction::MoveProjectToSpace(pa, SpaceId::GLOBAL),
+        AppAction::MoveSetToSpace(own, SpaceId::GLOBAL),
+        AppAction::MoveSetToSpace(global, b),
+    ] {
+        let effects = core.dispatch(action.clone(), Clock::at(4));
+        assert_eq!(saves(&effects), 0, "{action:?}");
+        assert!(
+            !effects
+                .iter()
+                .any(|e| matches!(e, Effect::SaveViews(_) | Effect::SaveSettings(_))),
+            "{action:?}"
+        );
+    }
+    assert_eq!(core.working_sets(), &sets[..]);
+    assert_eq!(core.spaces(), &spaces[..]);
+    assert_eq!(core.settings(), &settings);
+    assert_eq!(core.project_space(pa), Some(SpaceId::DEFAULT));
+}
+
+#[test]
+fn adding_a_project_in_global_puts_it_in_a_real_space() {
+    let (mut core, b, _, _) = two_spaces();
+    core.dispatch(AppAction::ShowSpace(SpaceId::GLOBAL), Clock::at(1));
+    let space_of = |core: &AppCore, name: &str| {
+        core.workspaces()
+            .iter()
+            .find(|w| w.project.name == name)
+            .map(|w| w.project.space)
+    };
+    core.dispatch(
+        AppAction::AddProject {
+            name: "c".into(),
+            root: "/tmp/c".into(),
+        },
+        Clock::at(2),
+    );
+    assert_eq!(space_of(&core, "c"), Some(core.spaces()[0].id));
+    core.dispatch(
+        AppAction::AddProjectTo {
+            name: "d".into(),
+            root: "/tmp/d".into(),
+            space: b,
+        },
+        Clock::at(3),
+    );
+    assert_eq!(space_of(&core, "d"), Some(b));
+    let effects = core.dispatch(
+        AppAction::AddProjectTo {
+            name: "e".into(),
+            root: "/tmp/e".into(),
+            space: SpaceId::GLOBAL,
+        },
+        Clock::at(4),
+    );
+    assert_eq!(space_of(&core, "e"), None);
+    assert_eq!(saves(&effects), 0);
+    assert_eq!(core.active_space(), SpaceId::GLOBAL);
+}
+
+#[test]
+fn global_survives_a_restart() {
+    let b = SpaceId::new();
+    let mut views = Views {
+        spaces: vec![
+            Space::default_space(),
+            Space {
+                id: b,
+                name: "B".into(),
+                op: None,
+            },
+        ],
+        ..Views::default()
+    };
+    let pa = project("a");
+    let mut pb = project("b");
+    pb.space = b;
+    let mut stray = project("stray");
+    stray.space = SpaceId::GLOBAL;
+    let (sa, sb) = (
+        record(pa.id, SessionKind::Shell, 0),
+        record(pb.id, SessionKind::Shell, 0),
+    );
+    let mut set = crate::core::WorkingSet::named("Everything");
+    set.space = SpaceId::GLOBAL;
+    for (i, id) in [sa.id, sb.id].into_iter().enumerate() {
+        set.items.push(crate::core::PinnedItem {
+            target: PinTarget::Session(id),
+            rect: GridRect {
+                x: 0,
+                y: u32::try_from(i * 8).unwrap(),
+                w: 10,
+                h: 8,
+            },
+        });
+    }
+    views.sets.push(set.clone());
+    let settings = Settings {
+        space: SpaceId::GLOBAL,
+        last_view: SavedView::Board(pb.id),
+        ..Default::default()
+    };
+    let (mut wa, mut wb) = (Workspace::new(pa), Workspace::new(pb.clone()));
+    wa.sessions.push(sa);
+    wb.sessions.push(sb);
+    let stray_id = stray.id;
+    let mut core = AppCore::new();
+    core.dispatch(
+        AppAction::StoreLoaded(Ok(Loaded {
+            workspaces: vec![wa, wb, Workspace::new(stray)],
+            notices: Vec::new(),
+            settings,
+            views,
+        })),
+        Clock::at(1),
+    );
+    assert_eq!(core.active_space(), SpaceId::GLOBAL);
+    assert_eq!(core.working_sets(), &[set][..]);
+    assert_eq!(core.project_space(stray_id), Some(SpaceId::DEFAULT));
+    assert_eq!(core.view(), View::Board(pb.id));
 }
 
 #[test]

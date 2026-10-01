@@ -1353,7 +1353,7 @@ Rename, and Delete (only an empty workspace that is not the last).
 "Move to" on a project's board and a working set's header moves it,
 offered only when another workspace exists.
 
-Records: `Views.spaces` lists the workspaces (views.json v3), and
+Records: `Views.spaces` lists the workspaces (views.json, v5 today), and
 `Project.space` (records v8) and `WorkingSet.space` name each thing's
 workspace, defaulting to the fixed id of the default workspace, so
 files from before workspaces read as members of it with no step. The
@@ -1365,6 +1365,27 @@ stay open across a switch: they were opened on purpose, and nothing
 lists them outside their workspace. Exclusive mode is superseded: its
 setting and action stay for older files, but the checkbox and the
 filtering are gone.
+
+The global workspace. A workspace is a boundary, and the global
+workspace takes it away when the user asks: it is a view that stands
+for every workspace together, not a record. Its id is fixed
+(`SpaceId::GLOBAL`, `00000000-0000-0000-0000-000000000002`); it is
+never listed in `Views.spaces`, holds no projects, and cannot be
+renamed, deleted, or moved into, but it can be the active workspace.
+While it is, the rail lists every workspace's projects under their
+workspace names, "All sessions" covers them all, the quick switcher
+searches everything without its checkbox, and a notice names its
+record. Working sets made there belong to it and may hold cards from
+any workspace; moving a project between workspaces leaves them alone,
+and a global set has no "Move to". It lists only its own sets. A
+project added while it is active goes to the workspace picked in the
+add dialog (`AppAction::AddProjectTo`). The Dock badge already counted
+every workspace and is unchanged; it still differs from the rail's
+"All sessions" count by Dispatch's decisions, which keep their own row.
+Nothing new is stored: `Settings.space` and `WorkingSet.space` may hold
+the fixed id, and views.json went to v5 only so an older build, which
+would move a global set into a real workspace and prune its cards,
+refuses to read or rewrite the file.
 
 ## Side panel position (2026-09-22)
 
@@ -1588,6 +1609,21 @@ first agent in each lane's worktree blocks on that dialog until it is
 answered in the pane once (a plain directory under a trusted parent
 inherits the trust; a fresh repository does not). Nothing in
 Switchboard or Dispatch writes Claude's trust file.
+
+## Global workspace status (2026-10-01)
+
+Built: `SpaceId::GLOBAL` and `space_contains` in the core, the rehydration
+that keeps a global active workspace and global sets (and sends a project
+hand-edited into global to the first workspace), the refusals (rename,
+delete, move into, move a global set out, a project added into it from
+the window or the control port), "◇ Everywhere" first in the selector
+when more than one workspace exists, the rail grouped by workspace, the
+add dialog's workspace choice, notices named, the switcher without its
+checkbox, the `workspace-global` script line, and `set.new` accepting
+the fixed id on the control port. views.json is v5.
+
+Known gap: a real workspace's sets are not listed in global, so a set
+of one workspace is reached by switching to it.
 
 ## Open questions
 

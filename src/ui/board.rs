@@ -108,9 +108,11 @@ pub fn show(cx: &mut DrawCtx<'_>, ui: &mut Ui, pid: ProjectId) {
                     {
                         cx.state.config_dialog = super::config::ConfigDraft::open(cx, pid);
                     }
-                    super::dialogs::move_to_space_menu(cx, ui, |space| {
-                        AppAction::MoveProjectToSpace(pid, space)
-                    });
+                    if let Some(from) = cx.core.project_space(pid) {
+                        super::dialogs::move_to_space_menu(cx, ui, from, |space| {
+                            AppAction::MoveProjectToSpace(pid, space)
+                        });
+                    }
                     ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
                         ui.add(
                             egui::Label::new(

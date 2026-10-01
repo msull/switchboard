@@ -214,9 +214,11 @@ fn prompt_box_settings(cx: &mut DrawCtx<'_>, ui: &mut Ui, settings: &crate::core
 /// fill, a shadow, errors led by a magenta dot.
 pub fn toasts(cx: &mut DrawCtx<'_>, ctx: &Context, window: Option<RecordId>) {
     let mut notice = cx.core.notice().cloned();
-    // A notice about another space says only that there is one.
+    // A notice about another space says only that there is one; in the
+    // global space every notice is about one being shown.
     if let Some(n) = notice.as_mut()
-        && n.space.is_some_and(|s| s != cx.core.active_space())
+        && n.space
+            .is_some_and(|s| !crate::core::space_contains(cx.core.active_space(), s))
     {
         crate::core::Notice::ELSEWHERE.clone_into(&mut n.text);
     }
