@@ -2139,6 +2139,23 @@ waiting_on_me = 5
 }
 
 /// One open PR the fake provider hands out, by repository and number.
+/// A pull request's base is where its branch forked from the branch
+/// it targets, in each lane's own clone.
+fn seed_pr_bases(env: &Env) {
+    let mut repo = env.repo.lock().unwrap();
+    repo.bases
+        .insert(env.data.repo_dir(PROJECT), "fork0009".into());
+    repo.bases
+        .insert(env.data.repo_dir("Switchboard@docs"), "fork0003".into());
+}
+
+/// Each lane's base is the merge base with the PR's target branch,
+/// read at the cut.
+fn assert_pr_bases(t: &Ticket) {
+    let bases: Vec<Option<&str>> = t.lanes.iter().map(|l| l.base_sha.as_deref()).collect();
+    assert_eq!(bases, vec![Some("fork0009"), Some("fork0003")]);
+}
+
 fn open_pr(env: &Env, repo: &str, number: u64, branch: &str, title: &str) {
     env.prs.lock().unwrap().prs.push((
         repo.to_owned(),
@@ -2179,6 +2196,7 @@ fn a_ticket_from_pull_requests_checks_out_their_branches_and_watches_the_merges(
         "feature/escape-docs",
         "Document escape",
     );
+    seed_pr_bases(&env);
     let now = env.tick();
     let t =
         dispatch::serve::take_pull_requests(&mut env.runner, PROJECT, &["repo/9", "docs/3"], now)
@@ -2207,6 +2225,7 @@ fn a_ticket_from_pull_requests_checks_out_their_branches_and_watches_the_merges(
             ("docs".to_owned(), "pr/3".to_owned(), true),
         ]
     );
+    assert_pr_bases(&t);
     {
         let repo = env.repo.lock().unwrap();
         let tracked: Vec<(String, String)> = repo

@@ -1088,11 +1088,7 @@ impl Runner {
                     now_ms,
                 );
             }
-            let base_sha = if pr.is_some() {
-                None
-            } else {
-                self.lane_base_sha(p, lane)
-            };
+            let base_sha = self.lane_base_sha(p, lane, pr);
             t.lanes.push(LaneRecord {
                 name: lane.name.clone(),
                 worktree: dir,
@@ -1109,7 +1105,27 @@ impl Runner {
 
     /// The commit a lane is cut from, resolved once at the cut: what a
     /// code review diffs against however far the remote moves later.
-    fn lane_base_sha(&self, p: &Pipeline, lane: &crate::pipeline::Lane) -> Option<String> {
+    fn lane_base_sha(
+        &self,
+        p: &Pipeline,
+        lane: &crate::pipeline::Lane,
+        pr: Option<&PullRequestSource>,
+    ) -> Option<String> {
+        let clone_of = |name: &str| self.data.repo_dir(name);
+        // A pull request's base is the branch it targets on its own
+        // remote, where its branch forked from it: what its reviewers
+        // see is what the pull request shows.
+        if let Some(pr) = pr {
+            let clone = if lane.repo.is_some() {
+                clone_of(&format!("{}@{}", p.project.name, lane.name))
+            } else {
+                clone_of(&p.project.name)
+            };
+            return self
+                .git
+                .merge_base(&clone, &format!("{}/{}", pr.remote, pr.base), pr.local())
+                .ok();
+        }
         let (clone, start) = if lane.repo.is_some() {
             (
                 self.data
