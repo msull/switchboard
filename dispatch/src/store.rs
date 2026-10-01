@@ -332,8 +332,8 @@ pub fn migrate(mut value: Value) -> Value {
 
 /// Write a ticket record stamped with this build's version; one read
 /// from a newer build is refused rather than written back without the
-/// fields it carried.
-pub fn write_ticket(path: &Path, t: &mut Ticket) -> Result<()> {
+/// fields it carried. The caller's copy is left as it was.
+pub fn write_ticket(path: &Path, t: &Ticket) -> Result<()> {
     if t.version > RECORD_VERSION {
         bail!(
             "ticket {} is version {}, written by a newer dispatch; update this one",
@@ -341,8 +341,11 @@ pub fn write_ticket(path: &Path, t: &mut Ticket) -> Result<()> {
             t.version
         );
     }
-    t.version = RECORD_VERSION;
-    write_json(path, t)
+    let stamped = Ticket {
+        version: RECORD_VERSION,
+        ..t.clone()
+    };
+    write_json(path, &stamped)
 }
 
 /// The same for a project's state.
@@ -469,7 +472,7 @@ mod tests {
         let project = dir.path().join("p.json");
         fs::write(&ticket, TICKET_V0).unwrap();
         fs::write(&project, PROJECT_V0).unwrap();
-        let mut t = read_ticket(&ticket).unwrap();
+        let t = read_ticket(&ticket).unwrap();
         assert_eq!(t.version, RECORD_VERSION);
         assert_eq!(t.close, crate::ticket::CloseProgress::default());
         assert!(!t.lanes[0].removed);
@@ -480,7 +483,7 @@ mod tests {
         assert_eq!(ps.version, RECORD_VERSION);
         assert!(ps.closing.is_empty());
         assert_eq!(ps.queue, ["a1b2c3d4"]);
-        write_ticket(&ticket, &mut t).unwrap();
+        write_ticket(&ticket, &t).unwrap();
         write_project(&project, &ps).unwrap();
         for path in [&ticket, &project] {
             let value: Value = read_json(path).unwrap();
@@ -501,8 +504,8 @@ mod tests {
         let e = read_ticket(&path).unwrap_err();
         assert!(e.to_string().contains("newer dispatch"), "{e:#}");
         assert_eq!(fs::read_to_string(&path).unwrap(), newer);
-        let mut t = serde_json::from_str::<Ticket>(&newer).unwrap();
-        assert!(write_ticket(&path, &mut t).is_err(), "never written back");
+        let t = serde_json::from_str::<Ticket>(&newer).unwrap();
+        assert!(write_ticket(&path, &t).is_err(), "never written back");
         assert_eq!(fs::read_to_string(&path).unwrap(), newer);
     }
 
@@ -517,10 +520,14 @@ mod tests {
         t.close.decisions_cancelled = true;
         t.close.trees_kept = Some("has changes".into());
         t.lanes[0].removed = true;
-        write_ticket(&path, &mut t).unwrap();
+        write_ticket(&path, &t).unwrap();
         let text = fs::read_to_string(&path).unwrap();
         assert!(text.contains(r#""state": "closing""#), "{text}");
-        assert_eq!(read_ticket(&path).unwrap(), t);
+        let stamped = Ticket {
+            version: RECORD_VERSION,
+            ..t
+        };
+        assert_eq!(read_ticket(&path).unwrap(), stamped);
     }
 
     #[test]

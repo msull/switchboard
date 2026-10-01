@@ -11,17 +11,6 @@ use crate::ticket::{ProjectState, Ticket, TicketState};
 /// A card's size in grid units.
 const CARD: (u32, u32) = (10, 8);
 
-/// What a sync did. Each one means the set shows what it should.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Synced {
-    /// `set.sync` went out and was answered.
-    Sent,
-    /// The set already shows exactly this, as its last reply said.
-    Unchanged,
-    /// The project never made a set, and has nothing to show.
-    NoSet,
-}
-
 /// Make the set once, then keep it showing the current session of every
 /// ticket in flight or waiting, top to bottom in queue order. The
 /// request goes on `owner`'s ledger when one is given (a closing ticket
@@ -35,7 +24,7 @@ pub fn sync_queue(
     tickets: &[Ticket],
     owner: Option<&mut Ticket>,
     now_ms: u64,
-) -> Result<Synced> {
+) -> Result<()> {
     let shown: Vec<(String, String)> = ps
         .queue
         .iter()
@@ -49,14 +38,14 @@ pub fn sync_queue(
         .filter_map(|t| t.current_session().map(|s| (t.id.clone(), s.clone())))
         .collect();
     if shown == ps.shown && ps.set.is_some() {
-        return Ok(Synced::Unchanged);
+        return Ok(());
     }
     if shown.is_empty() && ps.set.is_none() {
-        return Ok(Synced::NoSet);
+        return Ok(());
     }
     // A set is made in the space, so without one there is no set yet.
     let Some(space) = ps.space.clone() else {
-        return Ok(Synced::NoSet);
+        return Ok(());
     };
     // The set is made under the first ticket's ledger, like the space.
     let mut first = tickets
@@ -84,7 +73,7 @@ pub fn sync_queue(
         }
     }
     let Some(set) = ps.set.clone() else {
-        return Ok(Synced::NoSet);
+        return Ok(());
     };
     let items: Vec<Pin> = shown
         .iter()
@@ -106,5 +95,5 @@ pub fn sync_queue(
         bail!("set.sync: {reason}");
     }
     ps.shown = shown;
-    Ok(Synced::Sent)
+    Ok(())
 }

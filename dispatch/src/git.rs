@@ -53,10 +53,12 @@ pub trait Repo: Send {
     fn worktree_repair(&mut self, repo: &Path, dir: &Path) -> Result<()>;
     /// `git worktree remove <dir>` in `repo`, never forced: git refuses a
     /// tree with modified or untracked files, and so does this. Ignored
-    /// files go with the tree. A directory already gone, or one git no
-    /// longer lists as a worktree, is success, after `git worktree
-    /// prune` so the clone forgets a tree deleted by hand. The branch
-    /// stays.
+    /// files go with the tree. A directory deleted by hand is removed
+    /// from the clone's records the same way, and one git no longer
+    /// lists as a worktree is success. Never `git worktree prune`: that
+    /// would also forget every other tree whose directory is missing
+    /// right now, such as one on a volume that is not mounted. The
+    /// branch stays.
     fn worktree_remove(&mut self, repo: &Path, dir: &Path) -> Result<()>;
     /// What `git status` reports in `dir`, every untracked file listed
     /// on its own, as paths relative to `dir`. A nested repository is
@@ -384,16 +386,16 @@ impl Repo for GitCli {
     }
 
     fn worktree_remove(&mut self, repo: &Path, dir: &Path) -> Result<()> {
-        let prune = || output(git().arg("-C").arg(repo).args(["worktree", "prune"]));
-        if !dir.exists() {
-            prune()?;
-            return Ok(());
-        }
+        // A missing directory still goes through `remove`, which drops
+        // only this tree's entry from the clone. Git cannot resolve a
+        // missing path's symlinks to match its record, so the deepest
+        // part that exists is resolved here.
+        let dir = resolved(dir);
         let out = git()
             .arg("-C")
             .arg(repo)
             .args(["worktree", "remove"])
-            .arg(dir)
+            .arg(&dir)
             .output()
             .with_context(|| format!("git in {}", repo.display()))?;
         if out.status.success() {
@@ -401,7 +403,6 @@ impl Repo for GitCli {
         }
         let stderr = String::from_utf8_lossy(&out.stderr).trim().to_owned();
         if stderr.contains("is not a working tree") {
-            prune()?;
             return Ok(());
         }
         bail!("{} not removed: {stderr}", dir.display())
@@ -536,6 +537,22 @@ impl Repo for GitCli {
     }
 }
 
+/// `dir` with its deepest existing ancestor's symlinks resolved, and
+/// the missing rest appended as written.
+fn resolved(dir: &Path) -> PathBuf {
+    for base in dir.ancestors() {
+        if let Ok(real) = base.canonicalize() {
+            let rest = dir.strip_prefix(base).unwrap_or(Path::new(""));
+            return if rest.as_os_str().is_empty() {
+                real
+            } else {
+                real.join(rest)
+            };
+        }
+    }
+    dir.to_path_buf()
+}
+
 /// The paths in `git status --porcelain=v1 -z` output: each record is
 /// `XY <path>`, and a rename or copy is followed by its original path,
 /// which is skipped. The `/` git puts after a nested repository goes.
@@ -561,7 +578,7 @@ fn parse_status_z(bytes: &[u8]) -> Vec<PathBuf> {
 /// that is not one of those lanes or inside one. The plain `is_clean`
 /// cannot answer this: a clean nested lane is untracked content in the
 /// outer tree. A tree whose directory is already gone is skipped; its
-/// removal will be a prune.
+/// removal only drops git's record of it.
 pub fn uncommitted(git: &dyn Repo, tree: Option<&Path>, lanes: &[PathBuf]) -> Result<Vec<PathBuf>> {
     let mut found = Vec::new();
     let mut nested: Vec<PathBuf> = Vec::new();
@@ -1073,14 +1090,19 @@ mod tests {
             .expect("the branch stays");
         cli.worktree_remove(&repo, &wt)
             .expect("a second removal finds it gone");
-        // Deleted by hand: a success, and the clone forgets it.
+        // Deleted by hand: a success, and the clone forgets it, but not
+        // another tree that is missing too (an unmounted volume).
         let gone = dir.path().join("wt").join("t2");
-        cli.worktree_add(&repo, &gone, "dispatch/2-x", "origin/main")
-            .unwrap();
-        std::fs::remove_dir_all(&gone).unwrap();
+        let unmounted = dir.path().join("wt").join("t4");
+        for (tree, branch) in [(&gone, "dispatch/2-x"), (&unmounted, "dispatch/4-x")] {
+            cli.worktree_add(&repo, tree, branch, "origin/main")
+                .unwrap();
+            std::fs::remove_dir_all(tree).unwrap();
+        }
         cli.worktree_remove(&repo, &gone).unwrap();
         let list = sh(&repo, &["worktree", "list", "--porcelain"]);
         assert!(!list.contains("t2"), "{list}");
+        assert!(list.contains("t4"), "{list}");
         // An untracked file: git refuses, and the tree stays.
         let kept = dir.path().join("wt").join("t3");
         cli.worktree_add(&repo, &kept, "dispatch/3-x", "origin/main")
@@ -1179,7 +1201,7 @@ mod tests {
     }
 
     #[test]
-    fn a_tree_deleted_by_hand_is_skipped_by_the_preflight_and_pruned_on_removal() {
+    fn a_tree_deleted_by_hand_is_skipped_by_the_preflight_and_forgotten_on_removal() {
         let dir = tempfile::tempdir().unwrap();
         let (tree, lane) = nested(dir.path(), "backend");
         let mut cli = GitCli::default();

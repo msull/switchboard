@@ -16,7 +16,13 @@ impl Runner {
 
     fn recover_locked(&mut self, now_ms: u64) -> Result<()> {
         for mut t in self.tickets()? {
-            if matches!(t.state, TicketState::Closed { .. }) {
+            // A closing ticket's ledger is recovered by `finish_closing`,
+            // which keeps the intent to close over whatever recovery
+            // decides about an attempt.
+            if matches!(
+                t.state,
+                TicketState::Closed { .. } | TicketState::Closing { .. }
+            ) {
                 continue;
             }
             let mut ps = self.load_project(&t.project)?;

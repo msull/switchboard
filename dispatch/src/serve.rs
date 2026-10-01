@@ -402,6 +402,8 @@ pub fn ticket_view(t: &Ticket, stages: Vec<String>) -> TicketView {
         tree: t.tree.clone(),
         tree_removed: t.close.tree_removed,
         trees_kept: t.close.trees_kept.clone(),
+        closable: t.closable(),
+        trees_retryable: t.trees_retryable(),
         lanes: t
             .lanes
             .iter()
@@ -781,6 +783,7 @@ slots = 1
             ("closed", Some("done elsewhere"))
         );
         assert!(closed.tree_removed && closed.trees_kept.is_none());
+        assert!(!closed.closable && !closed.trees_retryable);
         assert!(!tree.exists());
         let again = h.handle(&Request::new("3", close), 3_000);
         assert!(

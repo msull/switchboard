@@ -4192,6 +4192,7 @@ fn dispatch_ticket_closes_after_a_confirmation_naming_its_tree() {
     let mut harness = ticket_page(|t| {
         t.state = "parked".into();
         t.reason = Some("parked by hand".into());
+        t.closable = true;
         t.lanes = vec![LaneView {
             name: "backend".into(),
             worktree: "/wt/t1/orchard-backend".into(),
@@ -4220,20 +4221,14 @@ fn dispatch_ticket_closes_after_a_confirmation_naming_its_tree() {
     assert!(harness.query_by_label("Close this ticket").is_none());
 }
 
-/// Close shows only where Dispatch would take it; a closed ticket says
-/// its tree is gone, or offers the removal again when it was kept.
+/// Close and Remove trees show where the runner says it would take
+/// them; a closed ticket says its tree is gone, or why it was kept.
 #[test]
-fn dispatch_ticket_offers_close_only_when_nothing_runs() {
-    use switchboard::ports::dispatch::AttemptView;
-    let harness = ticket_page(|t| {
-        t.attempts = vec![AttemptView {
-            stage: "lanes".into(),
-            n: 1,
-            state: "running".into(),
-            ..AttemptView::default()
-        }];
-    });
+fn dispatch_ticket_offers_close_where_the_runner_says() {
+    let harness = ticket_page(|_| {});
     assert!(harness.query_by_label("Close").is_none());
+    let harness = ticket_page(|t| t.closable = true);
+    harness.get_by_label("Close");
     let harness = ticket_page(|t| {
         t.state = "closing".into();
         t.reason = Some("closed by hand".into());
@@ -4245,13 +4240,33 @@ fn dispatch_ticket_offers_close_only_when_nothing_runs() {
         t.tree_removed = true;
     });
     assert!(harness.query_by_label("Close").is_none());
+    assert!(harness.query_by_label("Remove trees").is_none());
     harness.get_by_label("/wt/t1 · removed");
     let harness = ticket_page(|t| {
         t.state = "closed".into();
         t.trees_kept = Some("/wt/t1 not removed: it has changes".into());
+        t.trees_retryable = true;
     });
     harness.get_by_label("Remove trees");
     harness.get_by_label("tree kept: /wt/t1 not removed: it has changes");
+}
+
+/// A ticket gone from the status while its close dialog is open takes
+/// the dialog with it, so the keyboard is not held on every view.
+#[test]
+fn a_ticket_leaving_the_status_drops_its_close_dialog() {
+    let mut harness = ticket_page(|t| t.closable = true);
+    click(&mut harness, "Close");
+    harness.get_by_label("Close this ticket");
+    let mut status = dispatch_status();
+    status.tickets.retain(|t| t.id != "t1");
+    harness
+        .state_mut()
+        .dispatch(AppAction::DispatchStatus(Some(status)));
+    harness.run_steps(2);
+    harness.get_by_label("This ticket is not in Dispatch's last status.");
+    assert!(harness.query_by_label("Close this ticket").is_none());
+    assert!(harness.state().ui_state.confirm_close_ticket.is_none());
 }
 
 /// A ticket's agent at a prompt of its own is on the page: a card under

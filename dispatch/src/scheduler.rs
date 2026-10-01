@@ -941,12 +941,13 @@ impl Runner {
         };
         // A kill between the ticket's save and the project's leaves the
         // id in the queue; from here on it is only in `closing`.
-        let listed = (ps.queue.len(), ps.closing.len());
+        let was_queued = ps.queue.contains(&t.id);
         ps.queue.retain(|id| id != &t.id);
-        if !ps.closing.contains(&t.id) {
+        let was_listed = ps.closing.contains(&t.id);
+        if !was_listed {
             ps.closing.push(t.id.clone());
         }
-        if listed != (ps.queue.len(), ps.closing.len()) {
+        if was_queued || !was_listed {
             self.save_project(ps)?;
         }
         // A lost `session.waiting off` or `set.sync` of an earlier run is
@@ -4404,10 +4405,12 @@ impl Runner {
             .filter(|t| matches!(t.state, TicketState::Closed { .. }))
             .map(|t| t.id.clone())
             .collect();
-        if !closed.is_empty() {
-            ps.queue.retain(|id| !closed.contains(id));
-            ps.closing.retain(|id| !closed.contains(id));
-            tickets.retain(|t| !closed.contains(&t.id));
+        let before = ps.clone();
+        ps.queue.retain(|id| !closed.contains(id));
+        ps.closing.retain(|id| !closed.contains(id));
+        tickets.retain(|t| !closed.contains(&t.id));
+        requeue_strays(&mut ps, &tickets);
+        if ps != before {
             self.save_project(&ps)?;
         }
         let mut running = 0u32;
@@ -4621,7 +4624,7 @@ impl Runner {
             };
             let d = d.clone();
             t.updated_ms = now_ms;
-            write_ticket(&path, &mut t)?;
+            write_ticket(&path, &t)?;
             Ok(d)
         })
     }
@@ -4640,7 +4643,7 @@ impl Runner {
             log::info!("ticket {ticket} resumed (was parked: {reason})");
             t.state = TicketState::Active;
             t.updated_ms = now_ms;
-            write_ticket(&path, &mut t)?;
+            write_ticket(&path, &t)?;
             Ok(t)
         })
     }
@@ -4668,6 +4671,25 @@ pub(crate) const NO_SUCH_SESSION: &str = "no such session";
 /// policy's `slots` count. A gate-only attempt launches nothing.
 pub(crate) fn costs_slot(a: &Attempt) -> bool {
     a.is_open() && a.kind != AttemptKind::GateOnly
+}
+
+/// Only a `Closing` ticket belongs on the closing list. Any other goes
+/// back to the queue, where the set and `dispatch queue` see it, rather
+/// than being stepped from a list nothing shows.
+fn requeue_strays(ps: &mut ProjectState, tickets: &[Ticket]) {
+    for t in tickets {
+        if ps.closing.contains(&t.id) && !matches!(t.state, TicketState::Closing { .. }) {
+            log::warn!(
+                "ticket {} is on the closing list but {:?}; back to the queue",
+                t.id,
+                t.state
+            );
+            ps.closing.retain(|id| id != &t.id);
+            if !ps.queue.contains(&t.id) {
+                ps.queue.push(t.id.clone());
+            }
+        }
+    }
 }
 
 /// The PR is read again on the next pass instead of after the poll

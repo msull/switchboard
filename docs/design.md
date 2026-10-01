@@ -1500,8 +1500,8 @@ closes by hand (`DispatchClose`, the page's Close behind a confirmation
 that names the trees going) or at its pipeline's end, as a sequence
 from a saved intent: its worktrees are removed lanes first and never
 forced, its branch and records kept, and a tree git refused is shown as
-kept with Remove trees to try again. Dispatch's records now carry a
-version read through a migration. Built: the wire crate, the core
+kept with Remove trees to try again. Dispatch's records carry a
+version, read through a migration. Built: the wire crate, the core
 path and read models, the log and socket adapters, `serve` in the app,
 and `tests/control.rs`. Gaps: `service.new` and `command.run` are not
 on the port yet; nothing marks Dispatch-owned records as such in the

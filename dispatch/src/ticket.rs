@@ -608,6 +608,25 @@ impl Ticket {
         self.state == TicketState::Active
     }
 
+    /// Whether `close` would start a close, as far as the record says:
+    /// parked, or active with nothing open. A tree with changes is
+    /// still refused when the close runs; that needs git to tell.
+    #[must_use]
+    pub fn closable(&self) -> bool {
+        match self.state {
+            TicketState::Parked { .. } => true,
+            TicketState::Active => !self.attempts.iter().any(Attempt::is_open),
+            _ => false,
+        }
+    }
+
+    /// Whether `close` would try the removal of kept trees again: the
+    /// ticket closed and a refusal kept them.
+    #[must_use]
+    pub fn trees_retryable(&self) -> bool {
+        matches!(self.state, TicketState::Closed { .. }) && self.close.trees_kept.is_some()
+    }
+
     /// A short id for the command line: eight hex characters.
     #[must_use]
     pub fn new_id() -> String {
@@ -639,9 +658,9 @@ pub struct ProjectState {
 mod tests {
     use super::*;
 
-    #[test]
-    fn inputs_come_from_the_latest_completed_attempt_that_wrote_them() {
-        let mut t = Ticket {
+    /// An active ticket with nothing on it.
+    fn blank() -> Ticket {
+        Ticket {
             version: 0,
             id: "t".into(),
             project: "p".into(),
@@ -672,7 +691,12 @@ mod tests {
             close: CloseProgress::default(),
             created_ms: 0,
             updated_ms: 0,
-        };
+        }
+    }
+
+    #[test]
+    fn inputs_come_from_the_latest_completed_attempt_that_wrote_them() {
+        let mut t = blank();
         let attempt = |stage: &str, n: u32, state: AttemptState, path: &str| Attempt {
             stage: stage.into(),
             n,
@@ -708,5 +732,54 @@ mod tests {
         assert_eq!(t.current_session().unwrap(), "s-plan-2");
         assert_eq!(t.attempts_of("plan").count(), 2);
         assert_eq!(Ticket::new_id().len(), 8);
+    }
+
+    #[test]
+    fn a_ticket_closes_by_hand_when_parked_or_active_with_nothing_open() {
+        let mut t = blank();
+        assert!(t.closable() && !t.trees_retryable());
+        t.attempts.push(Attempt {
+            stage: "plan".into(),
+            n: 1,
+            context: "root".into(),
+            kind: AttemptKind::Agent,
+            state: AttemptState::Running,
+            project: None,
+            session: None,
+            run: None,
+            artifacts: BTreeMap::new(),
+            settle: BTreeMap::new(),
+            stop_at_ms: None,
+            polls_since_stop: 0,
+            head: None,
+            gate: None,
+            pr: None,
+            rounds: Vec::new(),
+            extra_pass: false,
+            started_ms: 0,
+            ended_ms: None,
+        });
+        assert!(!t.closable(), "an open attempt is parked first");
+        t.state = TicketState::Parked {
+            reason: "by hand".into(),
+        };
+        assert!(t.closable());
+        for state in [
+            TicketState::Parking {
+                reason: String::new(),
+            },
+            TicketState::Closing {
+                reason: String::new(),
+            },
+            TicketState::Closed {
+                reason: String::new(),
+            },
+        ] {
+            t.state = state;
+            assert!(!t.closable(), "{:?}", t.state);
+        }
+        assert!(!t.trees_retryable(), "closed with its trees removed");
+        t.close.trees_kept = Some("it has changes".into());
+        assert!(t.trees_retryable());
     }
 }

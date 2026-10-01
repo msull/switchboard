@@ -223,6 +223,7 @@ impl DispatchPort for FakeDispatch {
                         t.state = "closed".into();
                         t.reason = Some(reason.clone().unwrap_or_else(|| "closed by hand".into()));
                         t.tree_removed = t.tree.is_some();
+                        t.closable = false;
                         DispatchReply::Ticket(t)
                     },
                 ),

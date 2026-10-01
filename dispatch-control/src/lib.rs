@@ -240,6 +240,11 @@ pub struct TicketView {
     pub tree_removed: bool,
     /// Why a close left the trees in place, when it did.
     pub trees_kept: Option<String>,
+    /// `close` would start a close: parked, or active with nothing
+    /// open. A tree with changes is refused only when it runs.
+    pub closable: bool,
+    /// `close` would try the removal of the kept trees again.
+    pub trees_retryable: bool,
     pub lanes: Vec<LaneView>,
     pub attempts: Vec<AttemptView>,
     pub decisions: Vec<DecisionView>,

@@ -5822,6 +5822,67 @@ fn a_closed_ticket_left_in_the_closing_list_is_dropped_by_the_next_pass() {
 }
 
 #[test]
+fn a_restart_during_a_close_with_a_lost_launch_still_closes() {
+    let mut env = Env::new();
+    let id = env.take(7).id;
+    env.step();
+    {
+        let mut sb = env.sb();
+        sb.sessions.clear();
+        sb.log.clear();
+        sb.resumable.clear();
+    }
+    write_closing(&env, &id, |t| {
+        let op = t
+            .ledger
+            .iter_mut()
+            .find(|o| o.kind == "session.new")
+            .unwrap();
+        op.reply = None;
+        t.attempts[0].session = None;
+        t.attempts[0].state = AttemptState::Starting;
+        // Failing this one parks the ticket: `max_reruns` is spent.
+        for n in 1..=3 {
+            let mut failed = t.attempts[0].clone();
+            failed.n += n;
+            failed.state = AttemptState::Failed {
+                reason: "earlier".into(),
+            };
+            t.attempts.push(failed);
+        }
+    });
+    let mut ps = env.runner.load_project(PROJECT).unwrap();
+    ps.queue.retain(|q| q != &id);
+    ps.closing.push(id.clone());
+    env.runner.save_project(&ps).unwrap();
+    env.restart();
+    let t = env.ticket(&id);
+    assert!(matches!(t.state, TicketState::Closing { .. }), "{t:#?}");
+    env.step();
+    let t = env.ticket(&id);
+    assert!(matches!(t.state, TicketState::Closed { .. }), "{t:#?}");
+    let ps = env.runner.load_project(PROJECT).unwrap();
+    assert!(ps.queue.is_empty() && ps.closing.is_empty());
+    assert!(env.sb().sessions.is_empty(), "nothing launched");
+}
+
+#[test]
+fn a_ticket_on_the_closing_list_that_is_not_closing_goes_back_to_the_queue() {
+    let (mut env, id) = parked_workspace();
+    let mut ps = env.runner.load_project("Orchard").unwrap();
+    ps.queue.retain(|q| q != &id);
+    ps.closing.push(id.clone());
+    env.runner.save_project(&ps).unwrap();
+    env.step();
+    let ps = env.runner.load_project("Orchard").unwrap();
+    assert_eq!(
+        (ps.queue.clone(), ps.closing.is_empty()),
+        (vec![id.clone()], true)
+    );
+    assert!(matches!(env.ticket(&id).state, TicketState::Parked { .. }));
+}
+
+#[test]
 fn a_ticket_never_on_the_set_closes_without_a_sync() {
     let mut env = Env::new();
     env.take(7);

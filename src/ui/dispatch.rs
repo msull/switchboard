@@ -715,6 +715,9 @@ pub fn ticket(cx: &mut DrawCtx<'_>, ui: &mut Ui, id: &str) {
     let p = theme::palette(ui);
     ui.spacing_mut().item_spacing = egui::vec2(GAP, GAP);
     let Some(t) = cx.core.ticket(id).cloned() else {
+        // A ticket gone from the status takes its dialog with it, or
+        // the dialog would hold the keyboard on every view.
+        cx.state.confirm_close_ticket = None;
         theme::kicker(ui, "Dispatch ticket", p.n600);
         ui.label("This ticket is not in Dispatch's last status.");
         if theme::ghost(ui, "Back").clicked() {
@@ -858,14 +861,7 @@ fn ticket_actions(cx: &mut DrawCtx<'_>, ui: &mut Ui, t: &TicketView) {
     {
         cx.dispatch(AppAction::DispatchResume(t.id.clone()));
     }
-    // Dispatch's rule, mirrored only to hide a button it would refuse:
-    // nothing of the ticket may be running.
-    let running = t
-        .attempts
-        .iter()
-        .any(|a| matches!(a.state.as_str(), "starting" | "running"));
-    let closable = t.state == "parked" || (t.state == "active" && !running);
-    if closable
+    if t.closable
         && theme::secondary(ui, "Close")
             .on_hover_text(
                 "Remove the ticket's worktrees and close it; the branch and the record stay",
@@ -874,8 +870,7 @@ fn ticket_actions(cx: &mut DrawCtx<'_>, ui: &mut Ui, t: &TicketView) {
     {
         cx.state.confirm_close_ticket = Some(t.id.clone());
     }
-    if t.state == "closed"
-        && t.trees_kept.is_some()
+    if t.trees_retryable
         && theme::secondary(ui, "Remove trees")
             .on_hover_text("Try the removal again; the branch stays")
             .clicked()
