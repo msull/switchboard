@@ -119,7 +119,15 @@ fn find_repos(dir: &Path, depth: usize) -> Vec<PathBuf> {
 }
 
 fn git(repo: &Path, args: &[&str]) -> Option<String> {
-    let out = Command::new("git")
+    let mut cmd = Command::new("git");
+    // An inherited `GIT_DIR` (from a git hook, say) would override `-C`
+    // and read some other repository.
+    for (k, _) in std::env::vars_os() {
+        if k.to_string_lossy().starts_with("GIT_") {
+            cmd.env_remove(k);
+        }
+    }
+    let out = cmd
         .arg("-C")
         .arg(repo)
         .args(args)
@@ -181,7 +189,15 @@ mod tests {
     use super::*;
 
     fn sh(dir: &Path, cmd: &str) {
-        let ok = Command::new("sh")
+        let mut sh = Command::new("sh");
+        // Run from a git hook, the inherited `GIT_*` variables point at
+        // the hook's repository, and this would commit into it.
+        for (k, _) in std::env::vars_os() {
+            if k.to_string_lossy().starts_with("GIT_") {
+                sh.env_remove(k);
+            }
+        }
+        let ok = sh
             .arg("-c")
             .arg(cmd)
             .current_dir(dir)

@@ -138,8 +138,10 @@ pub enum AttemptState {
     Failed {
         reason: String,
     },
-    /// Stopped by Dispatch (the ticket parked, or a rerun replaced it);
-    /// no decision follows.
+    /// Stopped by Dispatch (the ticket parked, a rerun replaced it, or
+    /// a later gate sent the work back). Nothing is asked when it stops;
+    /// as a context's latest attempt after a resume, it is asked about
+    /// again with a `rerun` decision that quotes the reason.
     Cancelled {
         reason: String,
     },
