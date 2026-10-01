@@ -58,6 +58,9 @@ impl DispatchPort for DispatchSocket {
     fn command(&self) -> PathBuf {
         self.command.clone()
     }
+    fn may_block(&self) -> bool {
+        true
+    }
 
     fn data_dir(&self) -> PathBuf {
         self.data_dir.clone()

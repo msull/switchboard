@@ -3496,12 +3496,13 @@ impl Runner {
 
     /// Every active ticket of `project`, in queue order, as far as the
     /// slots allow; then the queue view.
+    /// The writer lock is held per ticket step, not for the pass: a
+    /// step may fetch, read a provider or launch an agent, and an
+    /// answer from the terminal or the window must not wait behind
+    /// every ticket's slow work. Each step re-reads its ticket and the
+    /// project under the lock, so what landed between steps is seen.
     pub fn step_project(&mut self, project: &str, now_ms: u64) -> Result<()> {
-        self.transaction(|r| r.step_project_locked(project, now_ms))
-    }
-
-    fn step_project_locked(&mut self, project: &str, now_ms: u64) -> Result<()> {
-        let mut ps = self.load_project(project)?;
+        let ps = self.load_project(project)?;
         let mut tickets: Vec<Ticket> = Vec::new();
         for id in ps.queue.clone() {
             match self.load_ticket(&id) {
@@ -3527,26 +3528,83 @@ impl Runner {
             .and_then(|text| Pipeline::parse(&text).ok())
             .map(|p| p.policy);
         let mut pipeline: Option<Pipeline> = None;
-        for t in &mut tickets {
+        for stale in &tickets {
+            let id = stale.id.clone();
+            let stepped = self.transaction(|r| {
+                let mut ps = r.load_project(project)?;
+                let mut t = match r.load_ticket(&id) {
+                    Ok(t) => t,
+                    Err(e) => {
+                        log::warn!("ticket {id}: {e}");
+                        return Ok(None);
+                    }
+                };
+                let before = ps.clone();
+                let result = r.step_one(
+                    &mut t,
+                    &mut ps,
+                    live_policy.as_ref(),
+                    running,
+                    pending,
+                    now_ms,
+                );
+                // A write is an fsync; most steps leave the project alone.
+                if ps != before {
+                    r.save_project(&ps)?;
+                }
+                result
+            })?;
+            if let Some((took_slot, p)) = stepped {
+                if took_slot {
+                    running += 1;
+                }
+                pipeline = Some(p);
+            }
+        }
+        if let Some(p) = pipeline {
+            self.transaction(|r| {
+                let mut ps = r.load_project(project)?;
+                let refreshed: Vec<Ticket> = ps
+                    .queue
+                    .iter()
+                    .filter_map(|id| r.load_ticket(id).ok())
+                    .collect();
+                if let Err(e) = crate::view::sync_queue(r, &mut ps, &p, &refreshed, now_ms) {
+                    log::warn!("queue view: {e}");
+                }
+                r.save_project(&ps)
+            })?;
+        }
+        Ok(())
+    }
+
+    /// One ticket's step under the lock. `Some((took_slot, pipeline))`
+    /// when the ticket was stepped on its pipeline, `None` when it was
+    /// finishing a park, inactive or held back.
+    fn step_one(
+        &mut self,
+        t: &mut Ticket,
+        ps: &mut ProjectState,
+        live_policy: Option<&crate::pipeline::Policy>,
+        running: u32,
+        pending: u32,
+        now_ms: u64,
+    ) -> Result<Option<(bool, Pipeline)>> {
+        {
             if matches!(t.state, TicketState::Parking { .. }) {
-                if let Err(e) = self.finish_parking(t, &mut ps, now_ms) {
+                if let Err(e) = self.finish_parking(t, ps, now_ms) {
                     log::error!("ticket {}: {e}", t.id);
                 }
-                continue;
+                return Ok(None);
             }
             if !t.active() {
-                continue;
+                return Ok(None);
             }
             let p = match self.pipeline_of(t) {
                 Ok(p) => p,
                 Err(e) => {
-                    self.park(
-                        t,
-                        &mut ps,
-                        &format!("pipeline copy unreadable: {e}"),
-                        now_ms,
-                    )?;
-                    continue;
+                    self.park(t, ps, &format!("pipeline copy unreadable: {e}"), now_ms)?;
+                    return Ok(None);
                 }
             };
             let has_open = t.attempts.iter().any(Attempt::is_open);
@@ -3559,32 +3617,19 @@ impl Runner {
                 .stages
                 .get(t.stage)
                 .is_none_or(|s| s.kind() == StageKind::GateOnly);
-            let policy = live_policy.as_ref().unwrap_or(&p.policy);
+            let policy = live_policy.unwrap_or(&p.policy);
             let may_start =
                 has_open || gate_only || (running < policy.slots && pending < policy.waiting_on_me);
             if !may_start {
-                continue;
+                return Ok(None);
             }
             let had_slot = t.attempts.iter().any(costs_slot);
-            if let Err(e) = self.step(t, &mut ps, &p, now_ms) {
+            if let Err(e) = self.step(t, ps, &p, now_ms) {
                 log::error!("ticket {}: {e}", t.id);
             }
-            if !had_slot && t.attempts.iter().any(costs_slot) {
-                running += 1;
-            }
-            pipeline = Some(p);
+            let took_slot = !had_slot && t.attempts.iter().any(costs_slot);
+            Ok(Some((took_slot, p)))
         }
-        if let Some(p) = pipeline {
-            let refreshed: Vec<Ticket> = ps
-                .queue
-                .iter()
-                .filter_map(|id| self.load_ticket(id).ok())
-                .collect();
-            if let Err(e) = crate::view::sync_queue(self, &mut ps, &p, &refreshed, now_ms) {
-                log::warn!("queue view: {e}");
-            }
-        }
-        self.save_project(&ps)
     }
 
     /// Every project with a state file.

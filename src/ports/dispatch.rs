@@ -22,4 +22,10 @@ pub trait DispatchPort: Send {
     /// One request, one reply. An error is no runner (or a runner gone
     /// mid-call); a `Reply::Failed` is an answer.
     fn call(&mut self, body: &Body) -> io::Result<Reply>;
+    /// Whether a call may take real time (a socket to a runner that
+    /// holds a lock while it works). The app then calls from a thread
+    /// of its own; a port that answers at once is called in place.
+    fn may_block(&self) -> bool {
+        false
+    }
 }

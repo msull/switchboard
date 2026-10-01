@@ -117,6 +117,8 @@ pub struct SwitchboardApp {
     last_poll: Option<Instant>,
     /// When Dispatch was last asked for its status.
     last_dispatch: Option<Instant>,
+    /// The Dispatch port on a thread of its own when it may block.
+    dispatch_port: DispatchWorker,
     /// The waiting count last put on the Dock badge and sent to the
     /// controller.
     badge: Option<usize>,
@@ -154,10 +156,17 @@ impl SwitchboardApp {
     /// `main.rs`, which then calls [`Self::start`]; tests pass fakes and
     /// seed the core instead.
     #[must_use]
-    pub fn with_services(services: Services) -> Self {
+    pub fn with_services(mut services: Services) -> Self {
+        // The port moves to the worker; what stays in `services` is
+        // never called (a fake that answers "no runner").
+        let dispatch_port = DispatchWorker::new(std::mem::replace(
+            &mut services.dispatch,
+            Box::new(crate::adapters::fakes::FakeDispatch::default()),
+        ));
         Self {
             core: AppCore::new(),
             services,
+            dispatch_port,
             started: Instant::now(),
             last_poll: None,
             last_dispatch: None,
@@ -187,8 +196,8 @@ impl SwitchboardApp {
         };
         self.dispatch(AppAction::StoreLoaded(loaded));
         self.dispatch(AppAction::DispatchConfigured {
-            command: self.services.dispatch.command(),
-            data_dir: self.services.dispatch.data_dir(),
+            command: self.dispatch_port.command.clone(),
+            data_dir: self.dispatch_port.data_dir.clone(),
         });
         self.last_poll = Some(Instant::now());
         self.poll_events();
@@ -525,12 +534,12 @@ impl SwitchboardApp {
                 format!("open {}", path.display())
             }),
             Effect::DispatchCall(body) => {
-                let result = self
-                    .services
-                    .dispatch
-                    .call(&body)
-                    .map_err(|e| e.to_string());
-                Some(AppAction::DispatchReplied { body, result })
+                self.dispatch_port
+                    .call(body)
+                    .map(|(body, result)| AppAction::DispatchReplied {
+                        body,
+                        result: result.map_err(|e| e.to_string()),
+                    })
             }
             // Windows are the UI's; it raises the one asked for next frame.
             Effect::FocusWindow(id) => {
@@ -972,6 +981,7 @@ impl SwitchboardApp {
             self.last_config = Some(Instant::now());
             self.poll_configs();
         }
+        self.drain_dispatch();
         if self
             .last_dispatch
             .is_none_or(|t| t.elapsed() >= DISPATCH_INTERVAL)
@@ -984,22 +994,24 @@ impl SwitchboardApp {
     /// Ask Dispatch's port for its status. No runner is a quick error
     /// (no socket, or nobody listening), reported to the core as such.
     fn poll_dispatch(&mut self) {
-        let status = match self
-            .services
-            .dispatch
-            .call(&crate::ports::dispatch::Body::Status)
-        {
-            Ok(crate::ports::dispatch::Reply::Status(status)) => Some(status),
-            Ok(other) => {
-                log::warn!("dispatch status answered {other:?}");
-                None
+        if let Some((_, result)) = self.dispatch_port.poll_status() {
+            self.dispatch(AppAction::DispatchStatus(status_of(result)));
+        }
+    }
+
+    /// Replies the port's thread finished since the last frame, each
+    /// one an action.
+    fn drain_dispatch(&mut self) {
+        for (body, result) in self.dispatch_port.drain() {
+            if matches!(body, crate::ports::dispatch::Body::Status) {
+                self.dispatch(AppAction::DispatchStatus(status_of(result)));
+            } else {
+                self.dispatch(AppAction::DispatchReplied {
+                    body,
+                    result: result.map_err(|e| e.to_string()),
+                });
             }
-            Err(e) => {
-                log::debug!("dispatch status: {e}");
-                None
-            }
-        };
-        self.dispatch(AppAction::DispatchStatus(status));
+        }
     }
 }
 
@@ -1318,5 +1330,127 @@ impl SwitchboardApp {
             None if requested => wire::OpStatus::Interrupted,
             None => wire::OpStatus::Unknown,
         }
+    }
+}
+
+/// A status reply as the core takes it: a status, or `None` for no
+/// runner (an error, or an answer that is not a status).
+fn status_of(
+    result: io::Result<crate::ports::dispatch::Reply>,
+) -> Option<crate::ports::dispatch::Status> {
+    match result {
+        Ok(crate::ports::dispatch::Reply::Status(status)) => Some(status),
+        Ok(other) => {
+            log::warn!("dispatch status answered {other:?}");
+            None
+        }
+        Err(e) => {
+            log::debug!("dispatch status: {e}");
+            None
+        }
+    }
+}
+
+type DispatchDone = (
+    crate::ports::dispatch::Body,
+    io::Result<crate::ports::dispatch::Reply>,
+);
+
+/// The Dispatch port, called from a thread of its own when it may
+/// block: a runner holds its writer lock while a ticket's step fetches
+/// or launches, and a frame must not wait for that. Calls are answered
+/// in order through `drain`. A port that cannot block (the fakes) is
+/// called in place, so a test sees its reply on the same frame.
+struct DispatchWorker {
+    command: PathBuf,
+    data_dir: PathBuf,
+    inline: Option<Box<dyn DispatchPort>>,
+    jobs: Option<std::sync::mpsc::Sender<crate::ports::dispatch::Body>>,
+    done: Option<std::sync::mpsc::Receiver<DispatchDone>>,
+    /// A status poll is on the thread; the next waits for its answer
+    /// rather than queueing behind a slow call twice.
+    status_in_flight: bool,
+}
+
+impl DispatchWorker {
+    fn new(mut port: Box<dyn DispatchPort>) -> Self {
+        let command = port.command();
+        let data_dir = port.data_dir();
+        if !port.may_block() {
+            return Self {
+                command,
+                data_dir,
+                inline: Some(port),
+                jobs: None,
+                done: None,
+                status_in_flight: false,
+            };
+        }
+        let (jobs, job_rx) = std::sync::mpsc::channel::<crate::ports::dispatch::Body>();
+        let (done_tx, done) = std::sync::mpsc::channel::<DispatchDone>();
+        let spawned = std::thread::Builder::new()
+            .name("dispatch-port".into())
+            .spawn(move || {
+                for body in job_rx {
+                    let result = port.call(&body);
+                    if done_tx.send((body, result)).is_err() {
+                        break;
+                    }
+                }
+            });
+        if let Err(e) = spawned {
+            log::error!("dispatch port thread: {e}");
+        }
+        Self {
+            command,
+            data_dir,
+            inline: None,
+            jobs: Some(jobs),
+            done: Some(done),
+            status_in_flight: false,
+        }
+    }
+
+    /// Send one call. In place, the reply comes back now; on the
+    /// thread, it comes through `drain` and this is `None`.
+    fn call(&mut self, body: crate::ports::dispatch::Body) -> Option<DispatchDone> {
+        if let Some(port) = &mut self.inline {
+            let result = port.call(&body);
+            return Some((body, result));
+        }
+        if let Some(jobs) = &self.jobs
+            && jobs.send(body.clone()).is_err()
+        {
+            return Some((
+                body,
+                Err(io::Error::other("the dispatch port thread is gone")),
+            ));
+        }
+        None
+    }
+
+    /// Ask for the status, unless the last ask is still on the thread.
+    fn poll_status(&mut self) -> Option<DispatchDone> {
+        if self.inline.is_none() {
+            if self.status_in_flight {
+                return None;
+            }
+            self.status_in_flight = true;
+        }
+        self.call(crate::ports::dispatch::Body::Status)
+    }
+
+    fn drain(&mut self) -> Vec<DispatchDone> {
+        let Some(done) = &self.done else {
+            return Vec::new();
+        };
+        let finished: Vec<DispatchDone> = done.try_iter().collect();
+        if finished
+            .iter()
+            .any(|(body, _)| matches!(body, crate::ports::dispatch::Body::Status))
+        {
+            self.status_in_flight = false;
+        }
+        finished
     }
 }
