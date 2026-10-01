@@ -184,9 +184,8 @@ dispatch resume 314cb7a1
 A parked ticket goes back to active and continues from its stage. Use
 it after the owner has fixed whatever the park reason named. A resumed
 ticket asks `rerun` again, under a new id, for each attempt that failed
-or was cancelled by the park; answer it to go on. Resuming
-a ticket parked for a reason you do not understand is the owner's
-call.
+or was cancelled by the park; answer it to go on. Resuming a ticket
+parked for a reason you do not understand is the owner's call.
 
 ## Where things live
 

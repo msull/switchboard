@@ -47,6 +47,14 @@ pub struct Runner {
     low_disk: Option<String>,
 }
 
+/// What one ticket's step changed in the project's counts: a slot
+/// taken, questions asked without one, and the pipeline it ran under.
+struct Stepped {
+    took_slot: bool,
+    asked: u32,
+    pipeline: Option<Pipeline>,
+}
+
 impl Runner {
     #[must_use]
     pub fn new(data: DataDir, port: Box<dyn Port>, git: Box<dyn Repo>) -> Self {
@@ -629,8 +637,8 @@ impl Runner {
             return Ok(());
         };
         // A parking ticket asks nothing. `park` withdraws its questions
-        // with the intent; this catches a record from before that, and
-        // is a no-op otherwise.
+        // with the intent, so this only finds work on a `Parking` record
+        // whose decisions are still pending.
         if Self::withdraw_pending(t) {
             self.save_ticket(t, now_ms)?;
         }
@@ -895,19 +903,31 @@ impl Runner {
         if t.pending_decisions().is_empty()
             && let Some(session) = t.current_session().cloned()
         {
-            self.send(
-                t,
-                ps,
-                None,
-                "waiting",
-                Body::SessionWaiting {
-                    session,
-                    on: false,
-                    reason: String::new(),
-                },
-                now_ms,
-            )?;
+            self.unmark_session(t, ps, session, now_ms)?;
         }
+        Ok(())
+    }
+
+    /// Clear one named session's waiting mark.
+    fn unmark_session(
+        &mut self,
+        t: &mut Ticket,
+        ps: &mut ProjectState,
+        session: String,
+        now_ms: u64,
+    ) -> Result<()> {
+        self.send(
+            t,
+            ps,
+            None,
+            "waiting",
+            Body::SessionWaiting {
+                session,
+                on: false,
+                reason: String::new(),
+            },
+            now_ms,
+        )?;
         Ok(())
     }
 
@@ -925,12 +945,15 @@ impl Runner {
     /// Resolve every `session.waiting` whose reply never came, in ledger
     /// order and under its own operation id, and only then send `on:
     /// false` to each session whose last waiting request turned its mark
-    /// on. True once every waiting request on the ledger has a reply and
-    /// no session's last one is `on: true`, or there never was one.
+    /// on. True once every waiting request on the ledger that can be
+    /// sent again has a reply and no session's last one is `on: true`,
+    /// or there never was one.
     ///
     /// Only waiting requests are replayed here: recovering a lost
     /// creation can fail an attempt and ask a new question, which a
     /// parking ticket must not do. The rest wait for startup recovery.
+    /// One recorded without its body cannot be sent again or say which
+    /// session it marked, so it is left alone rather than waited on.
     fn unmark_for_parking(
         &mut self,
         t: &mut Ticket,
@@ -941,7 +964,7 @@ impl Runner {
             .ledger
             .iter()
             .enumerate()
-            .filter(|(_, o)| o.kind == "session.waiting" && o.reply.is_none())
+            .filter(|(_, o)| o.kind == "session.waiting" && o.reply.is_none() && o.body.is_some())
             .map(|(i, _)| i)
             .collect();
         let replayed = !unanswered.is_empty();
@@ -964,18 +987,7 @@ impl Runner {
         // The session a mark was put on is the one unmarked, even if a
         // later attempt has a session of its own.
         for session in still_marked(t) {
-            self.send(
-                t,
-                ps,
-                None,
-                "waiting",
-                Body::SessionWaiting {
-                    session,
-                    on: false,
-                    reason: String::new(),
-                },
-                now_ms,
-            )?;
+            self.unmark_session(t, ps, session, now_ms)?;
         }
         Ok(still_marked(t).is_empty())
     }
@@ -2483,7 +2495,7 @@ impl Runner {
                             next_n(t, &stage.name),
                             now_ms,
                         )?;
-                    } else if !held && !rerun_in_flight(t, &a) {
+                    } else if asks_again(t, &a, sent_back) {
                         self.ask_rerun(t, ps, &a, now_ms)?;
                     }
                 }
@@ -2546,16 +2558,21 @@ impl Runner {
             prompt.push_str("\n\n");
         }
         prompt.push_str(&vars.render(stage.prompt.as_deref().unwrap_or_default()));
-        if let Some(note) = t.rework.remove(&rework_key(&stage.name, ctx)) {
+        // The note is taken off only with the attempt that carries it:
+        // a launch that stops short (a setup still running) keeps it.
+        let key = rework_key(&stage.name, ctx);
+        let rework = t.rework.get(&key).map(|note| {
             prompt.push_str("\n\nThe user looked at the previous attempt and sent it back: ");
-            prompt.push_str(&note);
-        }
+            prompt.push_str(note);
+            key
+        });
         let spec = AgentSpec {
             operator,
             prompt,
             artifacts,
             clone_of: None,
             pr: None,
+            rework,
         };
         self.launch_agent(t, ps, p, &stage.name, ctx, cwd, n, spec, now_ms)
     }
@@ -2621,6 +2638,9 @@ impl Runner {
         // Not saved here: `send` writes the attempt and its request in
         // one go, so no record ever shows the one without the other.
         t.attempts.push(attempt);
+        if let Some(key) = &spec.rework {
+            t.rework.remove(key);
+        }
         let notes = format!(
             "Dispatch ticket {} · #{} {} · stage {stage} attempt {n}",
             t.id,
@@ -2830,6 +2850,7 @@ impl Runner {
             artifacts: BTreeMap::from([("notes".to_owned(), notes)]),
             clone_of,
             pr: Some(record),
+            rework: None,
         };
         let (stage_name, ctx) = (a.stage.clone(), a.context.clone());
         self.launch_agent(t, ps, p, &stage_name, &ctx, cwd, n, spec, now_ms)
@@ -3271,8 +3292,9 @@ impl Runner {
     }
 
     /// A failed or cancelled attempt with no rerun question open about
-    /// it (after a park) is asked about again, under a new id. Nothing
-    /// launches until the answer, and no rerun is spent.
+    /// it (after a park) is asked about again, under a new id, with the
+    /// options its failure was first offered. Nothing launches until the
+    /// answer, and no rerun is spent.
     pub(crate) fn ask_rerun(
         &mut self,
         t: &mut Ticket,
@@ -3280,9 +3302,29 @@ impl Runner {
         a: &Attempt,
         now_ms: u64,
     ) -> Result<()> {
-        let what = match &a.state {
-            AttemptState::Failed { reason } => format!("failed: {reason}"),
-            _ => "was cancelled when the ticket parked".to_owned(),
+        let (what, options): (String, &[&str]) = match &a.state {
+            AttemptState::Failed { reason } => {
+                // A failure at the checks was offered `check` too; the
+                // earlier question about this attempt says which it was.
+                let at_checks = t
+                    .decisions
+                    .iter()
+                    .rev()
+                    .find(|d| d.name == "rerun" && d.attempt == Some((a.stage.clone(), a.n)))
+                    .is_some_and(|d| d.options.iter().any(|o| o == "check"));
+                let options: &[&str] = if at_checks {
+                    &["rerun", "check", "park"]
+                } else {
+                    &["rerun", "park"]
+                };
+                (format!("failed: {reason}"), options)
+            }
+            AttemptState::Cancelled { reason } => {
+                (format!("was cancelled: {reason}"), &["rerun", "park"])
+            }
+            AttemptState::Starting | AttemptState::Running | AttemptState::Complete => {
+                return Ok(());
+            }
         };
         self.ensure_decision(
             t,
@@ -3295,12 +3337,53 @@ impl Runner {
                     "{} ({}) attempt {} {what}. Run it again?",
                     a.stage, a.context, a.n
                 ),
-                options: &["rerun", "park"],
+                options,
                 recommendation: None,
                 attempt: Some((a.stage.clone(), a.n)),
             },
             now_ms,
         )
+    }
+
+    /// The stage's re-asks alone, for a ticket that may not start
+    /// anything this pass: the same question `asks_again` lets a stage
+    /// ask, for each context's latest attempt. A ledger entry still
+    /// without its reply leaves it to `step`, which resolves those first.
+    fn ask_again_unslotted(
+        &mut self,
+        t: &mut Ticket,
+        ps: &mut ProjectState,
+        p: &Pipeline,
+        now_ms: u64,
+    ) -> Result<()> {
+        if t.ledger.iter().any(|o| o.reply.is_none()) {
+            return Ok(());
+        }
+        let Some(stage) = p.stages.get(t.stage) else {
+            return Ok(());
+        };
+        let kind = stage.kind();
+        if kind == StageKind::GateOnly {
+            return Ok(());
+        }
+        for (ctx, _, _) in Self::contexts(t, p, stage) {
+            let Some(a) = t
+                .attempts
+                .iter()
+                .filter(|a| a.stage == stage.name && a.context == ctx)
+                .max_by_key(|a| a.n)
+                .cloned()
+            else {
+                continue;
+            };
+            // A workflow stage takes no note, so nothing sends it back.
+            let sent_back = kind != StageKind::Workflow
+                && t.rework.contains_key(&rework_key(&stage.name, &ctx));
+            if asks_again(t, &a, sent_back) {
+                self.ask_rerun(t, ps, &a, now_ms)?;
+            }
+        }
+        Ok(())
     }
 
     // --- workflow stages
@@ -3350,7 +3433,7 @@ impl Runner {
                             next_n(t, &stage.name),
                             now_ms,
                         )?;
-                    } else if !held && !rerun_in_flight(t, &a) {
+                    } else if asks_again(t, &a, false) {
                         self.ask_rerun(t, ps, &a, now_ms)?;
                     }
                 }
@@ -3720,11 +3803,14 @@ impl Runner {
                 }
                 result
             })?;
-            if let Some((took_slot, p)) = stepped {
-                if took_slot {
+            if let Some(stepped) = stepped {
+                if stepped.took_slot {
                     running += 1;
                 }
-                pipeline = Some(p);
+                pending += stepped.asked;
+                if let Some(p) = stepped.pipeline {
+                    pipeline = Some(p);
+                }
             }
         }
         if let Some(p) = pipeline {
@@ -3743,6 +3829,7 @@ impl Runner {
         }
         Ok(())
     }
+    /// What one ticket's step changed in the project's counts.
 
     /// One ticket's step under the lock. `Some((took_slot, pipeline))`
     /// when the ticket was stepped on its pipeline, `None` when it was
@@ -3754,7 +3841,7 @@ impl Runner {
         live_policy: Option<&crate::pipeline::Policy>,
         (running, pending, free_gb): (u32, u32, Option<u32>),
         now_ms: u64,
-    ) -> Result<Option<(bool, Pipeline)>> {
+    ) -> Result<Option<Stepped>> {
         {
             if matches!(t.state, TicketState::Parking { .. }) {
                 if let Err(e) = self.finish_parking(t, ps, now_ms) {
@@ -3789,14 +3876,29 @@ impl Runner {
                     && pending < policy.waiting_on_me
                     && !self.disk_hold(policy, free_gb));
             if !may_start {
-                return Ok(None);
+                // Asking launches nothing, so a resumed ticket's
+                // questions do not wait for a slot.
+                let before = t.pending_decisions().len();
+                if let Err(e) = self.ask_again_unslotted(t, ps, &p, now_ms) {
+                    log::error!("ticket {}: {e}", t.id);
+                }
+                let asked = t.pending_decisions().len().saturating_sub(before);
+                return Ok(Some(Stepped {
+                    took_slot: false,
+                    asked: u32::try_from(asked).unwrap_or(u32::MAX),
+                    pipeline: None,
+                }));
             }
             let had_slot = t.attempts.iter().any(costs_slot);
             if let Err(e) = self.step(t, ps, &p, now_ms) {
                 log::error!("ticket {}: {e}", t.id);
             }
             let took_slot = !had_slot && t.attempts.iter().any(costs_slot);
-            Ok(Some((took_slot, p)))
+            Ok(Some(Stepped {
+                took_slot,
+                asked: 0,
+                pipeline: Some(p),
+            }))
         }
     }
 
@@ -3956,6 +4058,9 @@ struct AgentSpec {
     artifacts: BTreeMap<String, PathBuf>,
     clone_of: Option<String>,
     pr: Option<PullRequestRecord>,
+    /// The sent-back note in the prompt, by its `rework` key, taken off
+    /// in the same write as the attempt.
+    rework: Option<String>,
 }
 
 /// One context's poll of a PR-reading stage.
@@ -4493,6 +4598,20 @@ pub(crate) fn held_in(t: &Ticket, stage: &str, ctx: &str) -> bool {
                 .iter()
                 .any(|a| &a.stage == s && a.n == *n && a.context == ctx),
         })
+}
+
+/// Whether the latest attempt in its context, failed or cancelled, is
+/// to be asked about again: nothing holds the context, no rerun is
+/// authorised or in flight, and no note sent it back (the note is the
+/// answer).
+pub(crate) fn asks_again(t: &Ticket, a: &Attempt, sent_back: bool) -> bool {
+    matches!(
+        a.state,
+        AttemptState::Failed { .. } | AttemptState::Cancelled { .. }
+    ) && !sent_back
+        && !held_in(t, &a.stage, &a.context)
+        && !may_rerun(t, a)
+        && !rerun_in_flight(t, a)
 }
 
 /// A rerun question about this attempt still open, or answered and
