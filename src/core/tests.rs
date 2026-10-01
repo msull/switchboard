@@ -5442,6 +5442,60 @@ mod dispatch_page {
         }
     }
 
+    /// The runner lists tickets newest-written first, so a ticket a
+    /// watch keeps saving would carry its decision to the top on every
+    /// poll. The pending list orders by when each decision was asked.
+    #[test]
+    fn pending_decisions_keep_the_order_they_were_asked_in_as_tickets_are_rewritten() {
+        let (mut core, _) = loaded(vec![], vec![]);
+        let decision = |ticket: &str, id: &str, made_ms: u64| DecisionView {
+            id: id.into(),
+            ticket: ticket.into(),
+            state: "pending".into(),
+            made_ms,
+            ..DecisionView::default()
+        };
+        let ticket = |id: &str, updated_ms: u64, decisions: Vec<DecisionView>| TicketView {
+            id: id.into(),
+            project: "Orchard".into(),
+            state: "active".into(),
+            updated_ms,
+            decisions,
+            ..TicketView::default()
+        };
+        let mut st = status(None);
+        st.tickets = vec![
+            ticket("t2", 50, vec![decision("t2", "d1", 20)]),
+            ticket(
+                "t1",
+                40,
+                vec![decision("t1", "d1", 10), decision("t1", "d2", 30)],
+            ),
+        ];
+        core.dispatch(AppAction::DispatchStatus(Some(st.clone())), Clock::at(2));
+        let order = |core: &AppCore| -> Vec<(String, String)> {
+            core.pending_decisions()
+                .iter()
+                .map(|d| (d.ticket.clone(), d.id.clone()))
+                .collect()
+        };
+        let asked = vec![
+            ("t1".to_owned(), "d1".to_owned()),
+            ("t2".to_owned(), "d1".to_owned()),
+            ("t1".to_owned(), "d2".to_owned()),
+        ];
+        assert_eq!(order(&core), asked);
+        // t1 is written again (a check saved) and the runner lists it first.
+        st.tickets.swap(0, 1);
+        st.tickets[0].updated_ms = 60;
+        core.dispatch(AppAction::DispatchStatus(Some(st)), Clock::at(3));
+        assert_eq!(
+            order(&core),
+            asked,
+            "the list does not follow the write order"
+        );
+    }
+
     #[test]
     fn a_status_is_kept_when_the_runner_goes_and_its_decisions_count_as_waiting() {
         let p = project("p");

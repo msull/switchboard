@@ -59,12 +59,19 @@ impl AppCore {
     /// Every pending decision across every ticket, newest ticket first.
     #[must_use]
     pub fn pending_decisions(&self) -> Vec<&DecisionView> {
-        self.dispatch
+        // Oldest question first, and the same order every poll: the
+        // runner lists tickets by their last write, which moves every
+        // time a watch or a check saves, and a list the user is about to
+        // click in must not follow that.
+        let mut pending: Vec<&DecisionView> = self
+            .dispatch
             .status
             .tickets
             .iter()
             .flat_map(|t| t.decisions.iter().filter(|d| d.state == "pending"))
-            .collect()
+            .collect();
+        pending.sort_by(|a, b| (a.made_ms, &a.ticket, &a.id).cmp(&(b.made_ms, &b.ticket, &b.id)));
+        pending
     }
 
     /// The agents of `t` that wait on the user for themselves, as the
