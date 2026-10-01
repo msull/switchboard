@@ -57,19 +57,34 @@ pub fn sync_queue(
     // before closes cleared their own): the set is emptied under the
     // ledger of a ticket it still shows, which is saved with the reply.
     let mut stale = None;
+    // Why a shown ticket could not be read: the real cause when no
+    // other ticket can carry the sync.
+    let mut unreadable = Vec::new();
     if owner.is_none() && first.is_none() {
-        // A closing ticket clears its own card under its own ledger.
-        stale = ps
-            .shown
-            .iter()
-            .filter_map(|(id, _)| runner.load_ticket(id).ok())
-            .find(|t| !matches!(t.state, TicketState::Closing { .. }));
+        for (id, _) in &ps.shown {
+            match runner.load_ticket(id) {
+                // A closing ticket clears its own card under its own
+                // ledger.
+                Ok(t) if matches!(t.state, TicketState::Closing { .. }) => {}
+                Ok(t) => {
+                    stale = Some(t);
+                    break;
+                }
+                Err(e) => unreadable.push(format!("{id}: {e:#}")),
+            }
+        }
     }
     let t: &mut Ticket = match (owner, first.as_mut(), stale.as_mut()) {
         (Some(owner), _, _) => owner,
         (None, Some(first), _) => first,
         (None, None, Some(stale)) => stale,
-        (None, None, None) => bail!("nothing shown and no ticket to sync the set under"),
+        (None, None, None) if unreadable.is_empty() => {
+            bail!("nothing shown and no ticket to sync the set under")
+        }
+        (None, None, None) => bail!(
+            "nothing shown, and the set's tickets cannot be read to sync it under: {}",
+            unreadable.join("; ")
+        ),
     };
     if ps.set.is_none() {
         let reply = runner.send_for_view(

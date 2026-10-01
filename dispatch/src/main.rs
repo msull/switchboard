@@ -182,7 +182,7 @@ fn decisions() -> Result<()> {
     );
     let mut any = false;
     for t in runner.tickets()? {
-        for d in t.pending_decisions() {
+        for d in t.waiting_on_you() {
             any = true;
             say!(
                 "{} {} [{}] {}\n    options: {}{}\n    dispatch decide {} {} <answer>",
@@ -257,7 +257,7 @@ fn status() -> Result<()> {
                 }
             )
         });
-        let pending = t.pending_decisions().len();
+        let pending = t.waiting_on_you().len();
         say!(
             "{} {} {} {} · stage {stage} · {standing}{last}{}",
             t.id,

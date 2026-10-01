@@ -487,6 +487,7 @@ impl Runner {
             reply: None,
             error: None,
             asked: false,
+            settled: false,
         });
         self.save_ticket(t, now_ms)?;
         let result = self.port.call(&Request::new(op.clone(), body));
@@ -969,11 +970,11 @@ impl Runner {
                     break;
                 }
             }
-            // Recovery may decide about an attempt as if the ticket were
-            // running, parking it even; the intent to close stands over
-            // that, and is saved again before any error is returned, so a
-            // failure later in the chain cannot leave the ticket `Parking`
-            // on the closing list, where the next pass would requeue it.
+            // Recovery decides about attempts as if the ticket were
+            // running; `fail_attempt_with` never parks a closing ticket,
+            // and the intent to close is saved again here before any
+            // error is returned, so nothing recovery does can leave the
+            // ticket in another state on the closing list.
             t.state = TicketState::Closing {
                 reason: reason.clone(),
             };
@@ -3909,6 +3910,13 @@ impl Runner {
         let ctx = attempt.context.clone();
         log::warn!("ticket {} {stage}/{ctx} attempt {n} failed: {reason}", t.id);
         self.save_ticket(t, now_ms)?;
+        // Recovery fails a closing ticket's lost launches too. The close
+        // is what happens next: parking would save a state over the
+        // intent to close, and a kill before it was put back would leave
+        // the ticket parked with the close lost.
+        if matches!(t.state, TicketState::Closing { .. }) {
+            return Ok(());
+        }
         let failed = t
             .attempts
             .iter()
@@ -4439,13 +4447,10 @@ impl Runner {
         let mut running = 0u32;
         let mut pending = 0u32;
         for t in &tickets {
-            if matches!(t.state, TicketState::Closing { .. }) {
-                continue;
-            }
             if t.active() && t.attempts.iter().any(costs_slot) {
                 running += 1;
             }
-            pending += u32::try_from(t.pending_decisions().len()).unwrap_or(u32::MAX);
+            pending += u32::try_from(t.waiting_on_you().len()).unwrap_or(u32::MAX);
         }
         // Slots and the decision limit are operational knobs, not part
         // of what a ticket was promised, so they are read from the

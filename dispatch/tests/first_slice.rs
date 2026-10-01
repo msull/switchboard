@@ -5986,6 +5986,50 @@ fn a_close_that_recovery_parks_and_then_fails_stays_closing() {
 }
 
 #[test]
+fn recovery_never_saves_a_closing_ticket_parking() {
+    let mut env = Env::new();
+    let id = env.take(7).id;
+    env.step();
+    env.sb().log.clear();
+    write_closing(&env, &id, |t| {
+        let op = t
+            .ledger
+            .iter_mut()
+            .find(|o| o.kind == "session.new")
+            .unwrap();
+        op.reply = None;
+        t.attempts[0].session = None;
+        t.attempts[0].state = AttemptState::Starting;
+        // Failing this one would park a running ticket: `max_reruns` is
+        // spent.
+        for n in 1..=3 {
+            let mut failed = t.attempts[0].clone();
+            failed.n += n;
+            failed.state = AttemptState::Failed {
+                reason: "earlier".into(),
+            };
+            t.attempts.push(failed);
+        }
+    });
+    // A runner killed while the processes are killed leaves this file.
+    env.sb().snapshot_on = Some(("session.kill".into(), env.data.ticket_file(&id)));
+    env.step();
+    let snapshots = env.sb().snapshots.clone();
+    assert!(!snapshots.is_empty());
+    for text in snapshots {
+        let t: Ticket = serde_json::from_str(&text).unwrap();
+        assert!(matches!(t.state, TicketState::Closing { .. }), "{t:#?}");
+    }
+    let t = env.ticket(&id);
+    assert!(matches!(t.state, TicketState::Closed { .. }), "{t:#?}");
+    assert!(
+        !t.decisions.iter().any(|d| d.name == "rerun"),
+        "{:#?}",
+        t.decisions
+    );
+}
+
+#[test]
 fn a_card_left_up_with_nothing_to_show_is_cleared() {
     let mut env = Env::new();
     let id = env.take(7).id;
@@ -6011,7 +6055,7 @@ fn a_card_left_up_with_nothing_to_show_is_cleared() {
 }
 
 #[test]
-fn a_closing_tickets_decisions_count_against_nothing_in_the_status() {
+fn a_closing_tickets_decisions_count_against_nothing_and_read_as_cancelling() {
     let mut env = Env::new();
     let id = env.take(7).id;
     at_rerun(&mut env, &id);
@@ -6019,6 +6063,16 @@ fn a_closing_tickets_decisions_count_against_nothing_in_the_status() {
     assert_eq!(pending(&env), 1);
     write_closing(&env, &id, |_| {});
     assert_eq!(pending(&env), 0);
+    let status = dispatch::serve::status(&env.runner).unwrap();
+    let decision_states: Vec<&str> = status.tickets[0]
+        .decisions
+        .iter()
+        .map(|d| d.state.as_str())
+        .collect();
+    assert!(
+        decision_states.contains(&"cancelling") && !decision_states.contains(&"pending"),
+        "{decision_states:?}"
+    );
 }
 
 #[test]

@@ -458,19 +458,25 @@ pub struct Operation {
     #[serde(default)]
     pub body: Option<Body>,
     pub reply: Option<Reply>,
-    /// The socket failed before a reply came; recovery decides.
+    /// The socket failed before a reply came; recovery decides. Once it
+    /// has, this is its verdict in words, for the reader only.
     pub error: Option<String>,
     /// Its reply was lost and it may not be sent again, so the user was
     /// asked what to do; recovery leaves it to that question.
     #[serde(default)]
     pub asked: bool,
+    /// Recovery gave its verdict on this unanswered operation, and a
+    /// later pass must not recover it again (a lost send would raise
+    /// its decision twice).
+    #[serde(default)]
+    pub settled: bool,
 }
 
 impl Operation {
     /// Whether recovery still has to resolve it.
     #[must_use]
     pub fn unresolved(&self) -> bool {
-        self.reply.is_none() && !self.asked
+        self.reply.is_none() && !self.asked && !self.settled
     }
 }
 
@@ -594,6 +600,18 @@ impl Ticket {
     #[must_use]
     pub fn pending_decisions(&self) -> Vec<&Decision> {
         self.decisions.iter().filter(|d| d.pending()).collect()
+    }
+
+    /// The pending decisions that wait on the user and count against
+    /// the project's limit: none while the ticket is closing, whose
+    /// pending decisions are on their way to cancelled. Every count and
+    /// every view reads this, so the rule lives in one place.
+    #[must_use]
+    pub fn waiting_on_you(&self) -> Vec<&Decision> {
+        if matches!(self.state, TicketState::Closing { .. }) {
+            return Vec::new();
+        }
+        self.pending_decisions()
     }
 
     /// The session a card for this ticket should show: the latest
@@ -756,6 +774,7 @@ mod tests {
             pr: None,
             rounds: Vec::new(),
             extra_pass: false,
+            failed_at_checks: false,
             started_ms: 0,
             ended_ms: None,
         });

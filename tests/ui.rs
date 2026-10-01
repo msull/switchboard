@@ -4164,6 +4164,8 @@ fn dispatch_table_filters_sorts_and_resumes() {
     assert!(!shown(&harness, "#12 Night sync"));
     click(&mut harness, "Clear");
     assert!(shown(&harness, "#12 Night sync"));
+}
+
 /// A ticket's page with `edit` applied to Orchard's ticket first.
 fn ticket_page(
     edit: impl FnOnce(&mut switchboard::ports::dispatch::TicketView),
@@ -4318,14 +4320,16 @@ fn the_close_dialog_reads_the_runners_flags() {
     assert!(harness.state().ui_state.confirm_close_ticket.is_none());
 }
 
-/// A closing ticket's decisions are on their way out: its row says it
-/// is closing, not that it waits on the user.
+/// A closing ticket's decisions are on their way out, and the runner
+/// reports them `cancelling`: its row says it is closing, not that it
+/// waits on the user, and the overview offers nothing to answer.
 #[test]
 fn a_closing_ticket_does_not_wait_on_you() {
     let (mut harness, _) = harness();
     let mut status = dispatch_status();
     status.tickets[0].state = "closing".into();
     status.tickets[0].reason = Some("closed by hand".into());
+    status.tickets[0].decisions[0].state = "cancelling".into();
     harness
         .state_mut()
         .dispatch(AppAction::DispatchStatus(Some(status)));
@@ -4333,6 +4337,7 @@ fn a_closing_ticket_does_not_wait_on_you() {
     harness.run_steps(2);
     harness.get_by_label("closing: closed by hand");
     assert!(harness.query_by_label("1 waiting on you").is_none());
+    harness.get_by_label("Nothing waits on you.");
 }
 
 /// A ticket's agent at a prompt of its own is on the page: a card under

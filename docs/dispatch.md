@@ -196,7 +196,9 @@ closes the same way; there a refusal by git does not hold the close,
 it is recorded as the trees kept, and `close` on the closed ticket
 tries the removal again. A closing ticket starts nothing, cuts no
 tree, cannot be resumed, and counts against neither `slots` nor
-`waiting_on_me`, on the page as in the scheduler. A card left on the
+`waiting_on_me`, on the page as in the scheduler: the runner reports
+its pending decisions as `cancelling`, and recovery on a closing
+ticket fails a lost launch without parking it or asking. A card left on the
 set with nothing else to show (a close stopped before the project was
 saved) is cleared on the next pass under that ticket's ledger.
 
@@ -204,7 +206,9 @@ Ticket and project records carry a `version`. Every read goes through
 `store::read_ticket` and `store::read_project`, which refuse a record
 from a newer `dispatch` and bring an older one up through
 `store::migrate`; every write stamps the current version and refuses
-to write over a newer one.
+to write over a newer one. Version 2 adds a ledger operation's
+`settled` flag, which older records had only as recovery's verdict in
+`error`; the migration reads it from those words.
 
 The "never resume automatically" rule holds on both sides. New
 launches happen because the scheduler finds a runnable ticket at the

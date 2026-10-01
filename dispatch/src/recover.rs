@@ -8,24 +8,29 @@ use switchboard_control::{Body, Found, Made, OpStatus, Reply, Request};
 use crate::scheduler::{Ask, Runner, apply_reply};
 use crate::ticket::{AttemptState, DecisionKind, Operation, Ticket, TicketState};
 
-/// Recovery's verdicts on an operation with no reply. An op carrying
-/// one is settled; any other error (the socket failing under it) still
-/// waits for recovery.
-const LOST: &str = "lost: never reached Switchboard";
-const INTERRUPTED: &str = "interrupted";
-const REMOVED: &str = "removed by hand";
-const NOT_REPEATED: &str = "reply lost; not repeated";
-const HARMLESS: &str = "reply lost; harmless to repeat";
+/// Recovery's verdicts on an operation with no reply, as the reader
+/// sees them. Whether an op is settled is its `settled` flag, not these
+/// words; `store::migrate` matches them only to set that flag on
+/// records written before it existed, so those copies must not change.
+pub(crate) const LOST: &str = "lost: never reached Switchboard";
+pub(crate) const INTERRUPTED: &str = "interrupted";
+pub(crate) const REMOVED: &str = "removed by hand";
+pub(crate) const NOT_REPEATED: &str = "reply lost; not repeated";
+pub(crate) const HARMLESS: &str = "reply lost; harmless to repeat";
 
 /// Whether recovery has nothing more to do for this operation: it has a
 /// reply, or recovery already gave its verdict. Recovering a lost send
 /// again would raise its decision again.
 pub(crate) fn settled(op: &Operation) -> bool {
-    op.reply.is_some()
-        || op
-            .error
-            .as_deref()
-            .is_some_and(|e| [LOST, INTERRUPTED, REMOVED, NOT_REPEATED, HARMLESS].contains(&e))
+    op.reply.is_some() || op.settled
+}
+
+/// Recovery's verdict written on an operation: the words for the
+/// reader, and the flag that keeps a later pass from recovering it
+/// again.
+fn give_verdict(op: &mut Operation, verdict: &str) {
+    op.error = Some(verdict.into());
+    op.settled = true;
 }
 
 impl Runner {
@@ -91,7 +96,7 @@ impl Runner {
                             apply_reply(t, ps, &op.intent, &reply);
                         }
                         OpStatus::Unknown => {
-                            t.ledger[i].error = Some(LOST.into());
+                            give_verdict(&mut t.ledger[i], LOST);
                             self.fail_from_recovery(
                                 t,
                                 ps,
@@ -101,7 +106,7 @@ impl Runner {
                             )?;
                         }
                         OpStatus::Interrupted => {
-                            t.ledger[i].error = Some(INTERRUPTED.into());
+                            give_verdict(&mut t.ledger[i], INTERRUPTED);
                             self.fail_from_recovery(
                                 t,
                                 ps,
@@ -112,7 +117,7 @@ impl Runner {
                         }
                     }
                 } else if found.iter().any(|f| f.removed) {
-                    t.ledger[i].error = Some(REMOVED.into());
+                    give_verdict(&mut t.ledger[i], REMOVED);
                     self.fail_from_recovery(
                         t,
                         ps,
@@ -127,7 +132,7 @@ impl Runner {
                     match self.status_of(&op.op)? {
                         OpStatus::InProgress => {}
                         OpStatus::Interrupted => {
-                            t.ledger[i].error = Some(INTERRUPTED.into());
+                            give_verdict(&mut t.ledger[i], INTERRUPTED);
                             self.fail_from_recovery(
                                 t,
                                 ps,
@@ -146,7 +151,7 @@ impl Runner {
             }
             "idempotent" => self.replay(t, ps, i),
             _ => {
-                t.ledger[i].error = Some(NOT_REPEATED.into());
+                give_verdict(&mut t.ledger[i], NOT_REPEATED);
                 // Asked once: the answer, not another pass, settles it.
                 t.ledger[i].asked = true;
                 let stage = op.attempt.as_ref().map_or("?", |(s, _)| s.as_str());
@@ -183,7 +188,7 @@ impl Runner {
     ) {
         let op = t.ledger[i].clone();
         let Some(body) = op.body else {
-            t.ledger[i].error = Some(HARMLESS.into());
+            give_verdict(&mut t.ledger[i], HARMLESS);
             return;
         };
         match self.port.call(&Request::new(op.op, body)) {

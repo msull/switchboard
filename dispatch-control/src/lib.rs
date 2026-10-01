@@ -354,7 +354,8 @@ pub struct DecisionView {
     /// Several options may be chosen at once (the `lanes` decision);
     /// the answer is the chosen ones joined by commas.
     pub multiple: bool,
-    /// `pending`, `answered` or `acted`.
+    /// `pending`, `answered`, `acted` or `cancelled`; `cancelling` for
+    /// one still pending on a closing ticket, which waits on no one.
     pub state: String,
     pub answer: Option<String>,
     pub note: Option<String>,

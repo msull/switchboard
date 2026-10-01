@@ -79,7 +79,8 @@ impl Handler {
                 let d = self
                     .runner
                     .decide(ticket, decision, answer, note.as_deref(), now_ms)?;
-                Reply::Decided(decision_view(ticket, &d))
+                let t = self.runner.load_ticket(ticket)?;
+                Reply::Decided(decision_view(&t, &d))
             }
             Body::Queue { project, order } => {
                 let ps = if order.is_empty() {
@@ -347,12 +348,7 @@ pub fn status(runner: &Runner) -> Result<Status> {
             .clone()
             .filter(|t| t.active() && t.attempts.iter().any(crate::scheduler::costs_slot))
             .count();
-        // A closing ticket counts against neither limit, as in the
-        // scheduler.
-        let pending = mine
-            .filter(|t| !matches!(t.state, TicketState::Closing { .. }))
-            .map(|t| t.pending_decisions().len())
-            .sum::<usize>();
+        let pending = mine.map(|t| t.waiting_on_you().len()).sum::<usize>();
         projects.push(ProjectView {
             name,
             queue: ps.queue,
@@ -472,11 +468,7 @@ pub fn ticket_view(t: &Ticket, stages: Vec<String>) -> TicketView {
                 }
             })
             .collect(),
-        decisions: t
-            .decisions
-            .iter()
-            .map(|d| decision_view(&t.id, d))
-            .collect(),
+        decisions: t.decisions.iter().map(|d| decision_view(t, d)).collect(),
         root_project: t.root_project.clone(),
         current_session: t.current_session().cloned(),
         created_ms: t.created_ms,
@@ -484,9 +476,13 @@ pub fn ticket_view(t: &Ticket, stages: Vec<String>) -> TicketView {
     }
 }
 
-fn decision_view(ticket: &str, d: &Decision) -> DecisionView {
+/// A pending decision the ticket no longer waits on (it is closing)
+/// reads as `cancelling`, so no view offers to answer it or counts it.
+fn decision_view(t: &Ticket, d: &Decision) -> DecisionView {
+    let waiting = t.waiting_on_you().iter().any(|w| w.id == d.id);
     let (state, answer, note) = match &d.state {
-        DecisionState::Pending => ("pending", None, None),
+        DecisionState::Pending if waiting => ("pending", None, None),
+        DecisionState::Pending => ("cancelling", None, None),
         DecisionState::Answered {
             answer,
             note,
@@ -501,7 +497,7 @@ fn decision_view(ticket: &str, d: &Decision) -> DecisionView {
     };
     DecisionView {
         id: d.id.clone(),
-        ticket: ticket.into(),
+        ticket: t.id.clone(),
         stage: d.stage.clone(),
         name: d.name.clone(),
         question: d.question.clone(),

@@ -251,9 +251,7 @@ impl AppCore {
     #[must_use]
     pub fn ticket_standing(&self, t: &TicketView) -> String {
         let waiting = t.decisions.iter().filter(|d| d.state == "pending").count();
-        // A closing ticket's decisions are on their way to cancelled, and
-        // count against nothing.
-        if waiting > 0 && t.state != "closing" {
+        if waiting > 0 {
             return format!("{waiting} waiting on you");
         }
         if let Some(a) = self.waiting_agents_of(t).first() {

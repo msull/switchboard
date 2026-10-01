@@ -65,6 +65,10 @@ pub struct FakeSwitchboard {
     pub in_progress_for: Option<String>,
     /// Replies held back while `in_progress_for` is set.
     pub pending_reply: Vec<(String, Reply)>,
+    /// On each request of this kind, the file read as it is then: what
+    /// a runner killed at that moment would leave on disk.
+    pub snapshot_on: Option<(String, std::path::PathBuf)>,
+    pub snapshots: Vec<String>,
     counter: u64,
 }
 
@@ -598,6 +602,12 @@ impl Port for SharedPort {
             return Ok(reply);
         }
         let kind = request.body.kind();
+        if let Some((on, path)) = &sb.snapshot_on
+            && on == &kind
+        {
+            let text = std::fs::read_to_string(path).unwrap_or_default();
+            sb.snapshots.push(text);
+        }
         let in_progress = sb.in_progress_for.as_deref() == Some(kind.as_str());
         let reply = sb.command(&request.op, &request.body);
         if matches!(&reply, Reply::Failed { reason } if reason == "__die__") {

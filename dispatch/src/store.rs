@@ -18,7 +18,7 @@ use crate::ticket::{ProjectState, Ticket};
 /// carried a version reads as 0 and is brought up by `migrate`. A
 /// record above it was written by a newer `dispatch` and is refused
 /// both ways, so this build never drops fields it does not know.
-pub const RECORD_VERSION: u32 = 1;
+pub const RECORD_VERSION: u32 = 2;
 
 /// The writer lock, held while this lives.
 #[derive(Debug)]
@@ -322,12 +322,34 @@ pub fn migrate(mut value: Value) -> Value {
         // (a ticket's close progress, a lane's `removed`, a project's
         // `closing`) arrive from their serde defaults, and no existing
         // field changes meaning.
+        //
+        // 1 to 2: a ledger operation gains `settled`, which before was
+        // read off recovery's verdict in `error`.
+        if version == 1 {
+            settle_from_verdicts(&mut value);
+        }
         version += 1;
         if let Some(record) = value.as_object_mut() {
             record.insert("version".into(), version.into());
         }
     }
     value
+}
+
+/// Every ledger operation whose `error` is one of recovery's verdicts
+/// marked settled. A project record has no ledger and is left alone.
+fn settle_from_verdicts(value: &mut Value) {
+    use crate::recover::{HARMLESS, INTERRUPTED, LOST, NOT_REPEATED, REMOVED};
+    let Some(ledger) = value.get_mut("ledger").and_then(Value::as_array_mut) else {
+        return;
+    };
+    for op in ledger.iter_mut().filter_map(Value::as_object_mut) {
+        let verdict = op
+            .get("error")
+            .and_then(Value::as_str)
+            .is_some_and(|e| [LOST, INTERRUPTED, REMOVED, NOT_REPEATED, HARMLESS].contains(&e));
+        op.insert("settled".into(), verdict.into());
+    }
 }
 
 /// Write a ticket record stamped with this build's version; one read
@@ -488,6 +510,34 @@ mod tests {
         for path in [&ticket, &project] {
             let value: Value = read_json(path).unwrap();
             assert_eq!(value["version"], RECORD_VERSION);
+        }
+    }
+
+    #[test]
+    fn an_older_ledger_reads_recoverys_verdicts_as_settled() {
+        let op = |error: &str| {
+            format!(
+                r#"{{"op": "o", "kind": "k", "class": "creation", "attempt": null, "sent_ms": 1, "reply": null, "error": {error}}}"#
+            )
+        };
+        let ledger = format!(
+            r#""ledger": [{}, {}, {}],"#,
+            op(&format!("\"{}\"", crate::recover::INTERRUPTED)),
+            op("\"socket closed\""),
+            op("null")
+        );
+        for version in ["", "\"version\": 1,"] {
+            let text = TICKET_V0.replacen(r#""ledger": [],"#, &ledger, 1).replacen(
+                '{',
+                &format!("{{{version}"),
+                1,
+            );
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("t.json");
+            fs::write(&path, text).unwrap();
+            let t = read_ticket(&path).unwrap();
+            let settled: Vec<bool> = t.ledger.iter().map(|o| o.settled).collect();
+            assert_eq!(settled, [true, false, false], "from {version:?}");
         }
     }
 
