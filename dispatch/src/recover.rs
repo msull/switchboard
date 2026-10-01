@@ -24,7 +24,7 @@ impl Runner {
                 .ledger
                 .iter()
                 .enumerate()
-                .filter(|(_, o)| o.reply.is_none())
+                .filter(|(_, o)| o.unresolved())
                 .map(|(i, _)| i)
                 .collect();
             for i in pending {
@@ -121,6 +121,8 @@ impl Runner {
             "idempotent" => self.replay(t, ps, i),
             _ => {
                 t.ledger[i].error = Some("reply lost; not repeated".into());
+                // Asked once: the answer, not another pass, settles it.
+                t.ledger[i].asked = true;
                 let stage = op.attempt.as_ref().map_or("?", |(s, _)| s.as_str());
                 self.ensure_decision(
                     t,

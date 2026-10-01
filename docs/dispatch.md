@@ -1237,7 +1237,9 @@ differently:
   is answered by sending it again.
 - *Non-replayable* (`session.send`, `workflow.continue`): a repeat
   can spend money twice. A lost reply to one is not repeated; it is a
-  decision that shows what was sent and lets you look at the pane.
+  decision that shows what was sent and lets you look at the pane,
+  asked once: the ledger entry is marked, recovery leaves it to your
+  answer, and a `park` answer is acted on even with every slot taken.
 
 An operation whose status is `in progress` is waited for, not judged:
 Dispatch restarting while Switchboard is still cloning a planner finds
@@ -1389,7 +1391,10 @@ and one against the real one:
 | Two lanes' questions after a resume, the pass cut off between them | The next pass asks the missing one and not the other again; an answered lane starts while the other lane's question is open (`a_pass_cut_off_between_two_lanes_finishes_asking_on_the_next_pass`) |
 | A waiting request on the ledger has no body when the ticket parks | It cannot be sent again, so it is left unanswered and parking does not wait on it (`a_waiting_request_without_its_body_does_not_hold_parking`) |
 | Every slot is taken when a ticket is resumed | Its rerun questions are asked anyway; nothing launches (`a_resumed_ticket_is_asked_again_with_every_slot_taken`) |
+| Every slot is taken when a ticket with a body-less waiting request is resumed | That entry does not stall the re-ask: each lane gets a fresh rerun question; nothing launches (`a_resumed_ticket_with_a_dead_request_is_asked_again_with_every_slot_taken`) |
+| Every slot is taken when a ticket with a lost reply to an unrepeatable request is resumed | One `lost-send` question, which holds its lane while the other lane is asked; asked once, not again on later passes or after its answer; `park` parks without a slot (`a_resumed_ticket_with_a_lost_unrepeatable_request_is_asked_once_and_parks_unslotted`) |
 | A ticket parked over failed checks is resumed | The question offers `rerun`, `check` and `park` again; `check` passes on the same attempt with no agent (`a_resume_after_failed_checks_offers_check_again`) |
+| A ticket parked over failed checks past `max_reruns` is resumed | The park asked nothing, but the resume's question still offers `rerun`, `check` and `park`: the attempt keeps that it failed at the checks (`a_resume_after_failed_checks_past_max_reruns_offers_check_again`) |
 | A ticket parked mid-attempt is resumed | The question quotes the attempt's own cancellation reason (`a_resume_after_a_cancelled_attempt_quotes_its_reason`) |
 | The runner restarts while the checks run | The lost check starts again on the same head; no second agent |
 | `ready` with the PR's checks pending, then green | A gate-only attempt per context, no agent; no PR is a `pr` decision (`recheck`, `park`); pending waits and reads the provider once a minute; green at the tree's head completes the attempt bound to that head |

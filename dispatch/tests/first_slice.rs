@@ -4117,6 +4117,58 @@ fn a_resumed_ticket_with_a_dead_request_is_asked_again_with_every_slot_taken() {
     assert_eq!(env.sb().sessions.len(), sessions, "nothing launched");
 }
 
+/// A request whose reply was lost and may not be repeated is asked
+/// about once, and a `park` answer to it parks with every slot taken.
+#[test]
+fn a_resumed_ticket_with_a_lost_unrepeatable_request_is_asked_once_and_parks_unslotted() {
+    let (mut env, id, _) = parked_and_resumed();
+    let path = env.data.pipeline("Orchard");
+    let text = std::fs::read_to_string(&path)
+        .unwrap()
+        .replace("slots = 2\n", "slots = 0\n");
+    std::fs::write(&path, text).unwrap();
+    let mut t = env.ticket(&id);
+    let n = plan_of(&t, "backend").n;
+    let mut lost = t.ledger.last().unwrap().clone();
+    lost.op = format!("{id}-lost");
+    lost.class = "non-replayable".into();
+    lost.attempt = Some(("plan".into(), n));
+    lost.reply = None;
+    lost.error = None;
+    lost.asked = false;
+    t.ledger.push(lost);
+    let now = env.tick();
+    env.runner.save_ticket(&mut t, now).unwrap();
+    let lost_sends = |t: &Ticket| -> Vec<Decision> {
+        t.decisions
+            .iter()
+            .filter(|d| d.name == "lost-send")
+            .cloned()
+            .collect()
+    };
+    for _ in 0..2 {
+        let now = env.tick();
+        env.runner.step_project("Orchard", now).unwrap();
+    }
+    let t = env.ticket(&id);
+    let asked = lost_sends(&t);
+    assert_eq!(asked.len(), 1, "asked once: {t:#?}");
+    assert!(rerun_for(&t, "backend").is_none(), "the question holds it");
+    assert!(rerun_for(&t, "frontend").is_some(), "{t:#?}");
+    let now = env.tick();
+    env.runner
+        .decide(&id, &asked[0].id, "park", None, now)
+        .unwrap();
+    let now = env.tick();
+    env.runner.step_project("Orchard", now).unwrap();
+    let t = env.ticket(&id);
+    assert!(
+        matches!(&t.state, TicketState::Parked { reason } if reason.contains("lost-send")),
+        "{t:#?}"
+    );
+    assert_eq!(lost_sends(&t).len(), 1, "not asked again: {t:#?}");
+}
+
 /// Failing at the checks past `max_reruns` parks without a question,
 /// and the resume still offers the checks again.
 #[test]

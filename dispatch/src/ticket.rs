@@ -424,6 +424,18 @@ pub struct Operation {
     pub reply: Option<Reply>,
     /// The socket failed before a reply came; recovery decides.
     pub error: Option<String>,
+    /// Its reply was lost and it may not be sent again, so the user was
+    /// asked what to do; recovery leaves it to that question.
+    #[serde(default)]
+    pub asked: bool,
+}
+
+impl Operation {
+    /// Whether recovery still has to resolve it.
+    #[must_use]
+    pub fn unresolved(&self) -> bool {
+        self.reply.is_none() && !self.asked
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
