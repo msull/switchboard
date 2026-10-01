@@ -390,7 +390,7 @@ impl Runner {
 
     /// One command to Switchboard, written down before and after. The
     /// reply's records are applied to the ticket by `intent`.
-    fn send(
+    pub(crate) fn send(
         &mut self,
         t: &mut Ticket,
         ps: &mut ProjectState,
@@ -445,7 +445,7 @@ impl Runner {
     }
 
     /// A query: never in the ledger, since it changes nothing.
-    fn ask(&mut self, body: Body) -> Result<Reply> {
+    pub(crate) fn ask(&mut self, body: Body) -> Result<Reply> {
         self.port
             .call(&Request::new(
                 format!("q-{}", uuid::Uuid::new_v4().simple()),
@@ -524,6 +524,7 @@ impl Runner {
             }
             StageKind::Agent => self.agent_stage(t, ps, p, &stage, held, now_ms)?,
             StageKind::Workflow => self.workflow_stage(t, ps, p, &stage, held, now_ms)?,
+            StageKind::Review => self.review_stage(t, ps, p, &stage, held, now_ms)?,
         }
         Ok(())
     }
@@ -549,7 +550,7 @@ impl Runner {
     /// killed, and the ticket reads as parked only once Switchboard
     /// reports them all gone. `finish_parking` runs the rest on later
     /// passes if anything is still alive now.
-    fn park(
+    pub(crate) fn park(
         &mut self,
         t: &mut Ticket,
         ps: &mut ProjectState,
@@ -630,6 +631,7 @@ impl Runner {
         if !self.retire_processes(t, ps, &mine, now_ms)? {
             return Ok(false);
         }
+        self.kill_review_commands(t, a);
         if let Some(attempt) = t
             .attempts
             .iter_mut()
@@ -646,8 +648,12 @@ impl Runner {
 
     /// The sessions an attempt owns: its own, or its run's reviewer and
     /// planner clone.
-    fn processes_of(&mut self, t: &Ticket, a: &Attempt) -> Result<Vec<String>> {
+    pub(crate) fn processes_of(&mut self, t: &Ticket, a: &Attempt) -> Result<Vec<String>> {
         let mut ids: Vec<String> = a.session.iter().cloned().collect();
+        for round in &a.rounds {
+            ids.extend(round.reviewers.iter().filter_map(|r| r.session.clone()));
+            ids.extend(round.implementer.clone());
+        }
         if let Some(run) = a.run.clone()
             && let Reply::Workflow { run } = self.ask(Body::Workflow { run })?
         {
@@ -660,7 +666,7 @@ impl Runner {
 
     /// Kill every session named that still runs, then read each back.
     /// True when none is running any more.
-    fn retire_processes(
+    pub(crate) fn retire_processes(
         &mut self,
         t: &mut Ticket,
         ps: &mut ProjectState,
@@ -705,7 +711,9 @@ impl Runner {
             .iter()
             // A gate-only attempt launches nothing, so it has nothing
             // to be stranded without.
-            .filter(|a| a.is_open() && a.kind != AttemptKind::GateOnly)
+            .filter(|a| {
+                a.is_open() && !matches!(a.kind, AttemptKind::GateOnly | AttemptKind::Review)
+            })
             .filter(|a| a.session.is_none() && a.run.is_none())
             .filter(|a| {
                 !t.ledger.iter().any(|o| {
@@ -820,7 +828,12 @@ impl Runner {
     }
 
     /// Clear the waiting mark a decision put on a session.
-    fn unmark(&mut self, t: &mut Ticket, ps: &mut ProjectState, now_ms: u64) -> Result<()> {
+    pub(crate) fn unmark(
+        &mut self,
+        t: &mut Ticket,
+        ps: &mut ProjectState,
+        now_ms: u64,
+    ) -> Result<()> {
         if t.pending_decisions().is_empty()
             && let Some(session) = t.current_session().cloned()
         {
@@ -870,14 +883,7 @@ impl Runner {
                 *acted = true;
             }
             match (name.as_str(), answer.as_str()) {
-                ("lanes", lanes) => {
-                    let names: Vec<String> = lanes
-                        .split(',')
-                        .map(|s| s.trim().to_owned())
-                        .filter(|s| !s.is_empty())
-                        .collect();
-                    self.choose_lanes(t, ps, p, &names, now_ms)?;
-                }
+                ("lanes", lanes) => self.choose_lanes(t, ps, p, &lane_names(lanes), now_ms)?,
                 ("finalize", "finalize") => {
                     if let Some(run) = attempt
                         .as_ref()
@@ -919,6 +925,9 @@ impl Runner {
                     self.check_again(t, ps, attempt.as_ref(), now_ms)?;
                 }
                 ("pr", "recheck") => recheck_pr(t, attempt.as_ref()),
+                ("review-code" | "review-cap", "fix" | "accept" | "more") => {
+                    self.review_answer(t, ps, &name, &answer, attempt.as_ref(), now_ms)?;
+                }
                 (_, "proceed" | "done") => {
                     self.pass_human_gate(t, ps, p, attempt.as_ref(), now_ms)?;
                 }
@@ -1079,6 +1088,11 @@ impl Runner {
                     now_ms,
                 );
             }
+            let base_sha = if pr.is_some() {
+                None
+            } else {
+                self.lane_base_sha(p, lane)
+            };
             t.lanes.push(LaneRecord {
                 name: lane.name.clone(),
                 worktree: dir,
@@ -1086,10 +1100,29 @@ impl Runner {
                 project: None,
                 chosen: p.lanes.len() == 1 || pr.is_some(),
                 setup_done: false,
+                base_sha,
             });
             self.save_ticket(t, now_ms)?;
         }
         Ok(())
+    }
+
+    /// The commit a lane is cut from, resolved once at the cut: what a
+    /// code review diffs against however far the remote moves later.
+    fn lane_base_sha(&self, p: &Pipeline, lane: &crate::pipeline::Lane) -> Option<String> {
+        let (clone, start) = if lane.repo.is_some() {
+            (
+                self.data
+                    .repo_dir(&format!("{}@{}", p.project.name, lane.name)),
+                format!("{}/{}", p.lane_remote(lane), p.lane_base(lane)),
+            )
+        } else {
+            (
+                self.data.repo_dir(&p.project.name),
+                format!("{}/{}", p.project.remote, p.project.base),
+            )
+        };
+        self.git.rev_parse(&clone, &start).ok()
     }
 
     /// The pull requests' branches brought up to what the remote has,
@@ -1275,7 +1308,7 @@ impl Runner {
 
     /// A lane's setup, once, before its first agent; the ticket is
     /// parked if it fails.
-    fn ensure_setup(
+    pub(crate) fn ensure_setup(
         &mut self,
         t: &mut Ticket,
         ps: &mut ProjectState,
@@ -2119,7 +2152,12 @@ impl Runner {
         self.advance(t, ps, now_ms)
     }
 
-    fn advance(&mut self, t: &mut Ticket, ps: &mut ProjectState, now_ms: u64) -> Result<()> {
+    pub(crate) fn advance(
+        &mut self,
+        t: &mut Ticket,
+        ps: &mut ProjectState,
+        now_ms: u64,
+    ) -> Result<()> {
         t.stage += 1;
         self.save_ticket(t, now_ms)?;
         let _ = ps;
@@ -2130,7 +2168,11 @@ impl Runner {
 
     /// The contexts a stage runs in: `(name, cwd, lane)`. Empty when the
     /// stage needs lanes the ticket has not cut.
-    fn contexts(t: &Ticket, p: &Pipeline, stage: &Stage) -> Vec<(String, PathBuf, Option<String>)> {
+    pub(crate) fn contexts(
+        t: &Ticket,
+        p: &Pipeline,
+        stage: &Stage,
+    ) -> Vec<(String, PathBuf, Option<String>)> {
         let Some(tree) = primary_tree(t, p) else {
             return Vec::new();
         };
@@ -2194,7 +2236,7 @@ impl Runner {
     /// The Switchboard project for a context, made once per ticket.
     /// The ticket's one Switchboard project, `#<n> <title>`, rooted at
     /// the ticket's tree; sessions in other lanes carry their own cwd.
-    fn ensure_project(
+    pub(crate) fn ensure_project(
         &mut self,
         t: &mut Ticket,
         ps: &mut ProjectState,
@@ -2372,7 +2414,13 @@ impl Runner {
     }
 
     /// The attempt's own directory under the ticket's, made.
-    fn attempt_dir(&self, t: &Ticket, stage: &str, n: u32, ctx: &str) -> Result<PathBuf> {
+    pub(crate) fn attempt_dir(
+        &self,
+        t: &Ticket,
+        stage: &str,
+        n: u32,
+        ctx: &str,
+    ) -> Result<PathBuf> {
         let dir = self
             .data
             .ticket_dir(&t.id)
@@ -2788,7 +2836,7 @@ impl Runner {
     /// Claude's folder trust question, which a fresh worktree asks
     /// before any hook: answered for the project when its policy says
     /// so, else left to the user.
-    fn answer_trust(
+    pub(crate) fn answer_trust(
         &mut self,
         t: &mut Ticket,
         ps: &mut ProjectState,
@@ -2813,7 +2861,10 @@ impl Runner {
         self.save_ticket(t, now_ms)
     }
 
-    fn session_view(&mut self, session: &str) -> Result<Result<wire::SessionView, String>> {
+    pub(crate) fn session_view(
+        &mut self,
+        session: &str,
+    ) -> Result<Result<wire::SessionView, String>> {
         let reply = self.ask(Body::Session {
             session: session.to_owned(),
         })?;
@@ -2999,7 +3050,7 @@ impl Runner {
     /// A failure at the stage's checks: the work may be fine and the
     /// environment not, so the checks can be run again on the same
     /// attempt without another agent.
-    fn fail_checks(
+    pub(crate) fn fail_checks(
         &mut self,
         t: &mut Ticket,
         ps: &mut ProjectState,
@@ -3016,7 +3067,7 @@ impl Runner {
     /// `max_reruns` allows: then the ticket parks, so a broken stage
     /// cannot spend agent runs on its own.
     #[allow(clippy::too_many_arguments)]
-    fn fail_attempt_with(
+    pub(crate) fn fail_attempt_with(
         &mut self,
         t: &mut Ticket,
         ps: &mut ProjectState,
@@ -3614,7 +3665,7 @@ impl Runner {
 /// A fresh attempt record.
 /// Switchboard's reply to a session query for a record it does not
 /// have; the one failure that means the session is gone.
-const NO_SUCH_SESSION: &str = "no such session";
+pub(crate) const NO_SUCH_SESSION: &str = "no such session";
 
 /// The artifacts an attempt was to write that are not files yet.
 /// An open attempt with an agent or a review run in it: what the
@@ -3638,12 +3689,12 @@ fn recheck_pr(t: &mut Ticket, attempt: Option<&(String, u32)>) {
 }
 
 /// The key a sent-back note is kept under.
-fn rework_key(stage: &str, ctx: &str) -> String {
+pub(crate) fn rework_key(stage: &str, ctx: &str) -> String {
     format!("{stage}/{ctx}")
 }
 
 /// The tree a context runs in: the lane's worktree, or the ticket's.
-fn tree_of(t: &Ticket, p: &Pipeline, ctx: &str) -> Option<PathBuf> {
+pub(crate) fn tree_of(t: &Ticket, p: &Pipeline, ctx: &str) -> Option<PathBuf> {
     t.lanes
         .iter()
         .find(|l| l.name == ctx)
@@ -3652,7 +3703,7 @@ fn tree_of(t: &Ticket, p: &Pipeline, ctx: &str) -> Option<PathBuf> {
 }
 
 /// The record behind a copy of an attempt the runner is polling.
-fn attempt_mut<'t>(t: &'t mut Ticket, a: &Attempt) -> &'t mut Attempt {
+pub(crate) fn attempt_mut<'t>(t: &'t mut Ticket, a: &Attempt) -> &'t mut Attempt {
     t.attempts
         .iter_mut()
         .find(|x| x.stage == a.stage && x.n == a.n)
@@ -3909,6 +3960,15 @@ fn remedy_reason(
     }
 }
 
+/// A `lanes` answer's names, comma-separated.
+fn lane_names(answer: &str) -> Vec<String> {
+    answer
+        .split(',')
+        .map(|s| s.trim().to_owned())
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
 /// The provider a remote URL points at, by its host.
 pub(crate) fn guess_provider(remote: &str) -> &'static str {
     if github_repo(remote).is_some() {
@@ -3991,7 +4051,7 @@ fn missing_artifacts(attempt: &Attempt) -> Vec<String> {
 /// the stage in any context, so `(stage, n)` names one attempt even in
 /// an `each` stage where lanes run side by side, which is how the
 /// ledger, decisions and the runner's own lookups identify one.
-fn next_n(t: &Ticket, stage: &str) -> u32 {
+pub(crate) fn next_n(t: &Ticket, stage: &str) -> u32 {
     t.attempts_of(stage).map(|a| a.n).max().unwrap_or(0) + 1
 }
 
@@ -4000,7 +4060,7 @@ fn gate_key(t: &Ticket, a: &Attempt) -> String {
     format!("{}/{}/{}", t.id, a.stage, a.n)
 }
 
-fn new_attempt(
+pub(crate) fn new_attempt(
     stage_name: &str,
     n: u32,
     ctx: &str,
@@ -4020,6 +4080,8 @@ fn new_attempt(
         session: None,
         run: None,
         artifacts,
+        rounds: Vec::new(),
+        extra_pass: false,
         settle: BTreeMap::new(),
         stop_at_ms: None,
         polls_since_stop: 0,
@@ -4106,7 +4168,9 @@ fn definition_of(
     wire::Definition {
         name: format!("Dispatch: {reviewer_name}@{}", Pipeline::fingerprint(&text)),
         reviewer: match review.reviewer {
-            crate::pipeline::OperatorKind::Claude => wire::AgentKind::Claude,
+            crate::pipeline::OperatorKind::Claude | crate::pipeline::OperatorKind::Command => {
+                wire::AgentKind::Claude
+            }
             crate::pipeline::OperatorKind::Codex => wire::AgentKind::Codex,
         },
         review_first: review.review_first,
@@ -4140,14 +4204,18 @@ fn review_subject(t: &Ticket, subject: &str) -> Result<(PathBuf, String), String
 
 /// The ticket's own tree: its first lane's worktree, or the project's
 /// root for a project that works in place. None before the cut.
-fn session_kind(kind: crate::pipeline::OperatorKind) -> wire::SessionKind {
+pub(crate) fn session_kind(kind: crate::pipeline::OperatorKind) -> wire::SessionKind {
     match kind {
-        crate::pipeline::OperatorKind::Claude => wire::SessionKind::Claude,
+        // A command never has a session; the pipeline refuses one as a
+        // stage operator, so this arm is never a launch.
+        crate::pipeline::OperatorKind::Claude | crate::pipeline::OperatorKind::Command => {
+            wire::SessionKind::Claude
+        }
         crate::pipeline::OperatorKind::Codex => wire::SessionKind::Codex,
     }
 }
 
-fn primary_tree(t: &Ticket, p: &Pipeline) -> Option<PathBuf> {
+pub(crate) fn primary_tree(t: &Ticket, p: &Pipeline) -> Option<PathBuf> {
     if p.cuts_worktrees() {
         t.tree
             .clone()
@@ -4160,7 +4228,7 @@ fn primary_tree(t: &Ticket, p: &Pipeline) -> Option<PathBuf> {
 /// Whether a failed attempt's rerun was authorised and its cleanup done:
 /// the answer is marked acted only once the replaced attempt's
 /// processes were confirmed gone, and that mark is on disk.
-fn may_rerun(t: &Ticket, failed: &Attempt) -> bool {
+pub(crate) fn may_rerun(t: &Ticket, failed: &Attempt) -> bool {
     t.decisions.iter().any(|d| {
         d.name == "rerun"
             && d.attempt.as_ref() == Some(&(failed.stage.clone(), failed.n))
@@ -4183,7 +4251,7 @@ fn lane_hints(p: &Pipeline, labels: &[String]) -> Vec<String> {
 }
 
 /// The prompt's fields for a ticket in a context.
-fn vars_for(t: &Ticket, p: &Pipeline, lane: Option<&str>) -> Vars {
+pub(crate) fn vars_for(t: &Ticket, p: &Pipeline, lane: Option<&str>) -> Vars {
     let mut vars = Vars::default();
     vars.set("ticket", t.id.clone())
         .set("issue.number", t.source.number.unwrap_or(0).to_string())
@@ -4229,7 +4297,11 @@ fn vars_for(t: &Ticket, p: &Pipeline, lane: Option<&str>) -> Vars {
 }
 
 /// What a command run for a ticket gets in its environment.
-fn env_for(t: &Ticket, lane: Option<&str>, branch: Option<&str>) -> Vec<(String, String)> {
+pub(crate) fn env_for(
+    t: &Ticket,
+    lane: Option<&str>,
+    branch: Option<&str>,
+) -> Vec<(String, String)> {
     let mut env = vec![("DISPATCH_TICKET".to_owned(), t.id.clone())];
     if let Some(l) = lane {
         env.push(("DISPATCH_LANE".to_owned(), l.to_owned()));
@@ -4293,6 +4365,9 @@ pub fn apply_reply(t: &mut Ticket, ps: &mut ProjectState, intent: &str, reply: &
                 && let Some(l) = t.lanes.iter_mut().find(|l| l.name == lane)
             {
                 l.project = Some(id);
+            }
+            if other.starts_with("reviewer:") || other.starts_with("implementer:") {
+                crate::review::apply_review_reply(t, other, made);
             }
         }
     }

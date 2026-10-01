@@ -90,6 +90,10 @@ pub struct LaneRecord {
     /// The lane's setup ran, once, before its first agent.
     #[serde(default)]
     pub setup_done: bool,
+    /// The commit the lane was cut from, resolved once at the cut:
+    /// what a code review diffs against, whatever the remote has since.
+    #[serde(default)]
+    pub base_sha: Option<String>,
 }
 
 fn yes() -> bool {
@@ -102,6 +106,9 @@ pub enum AttemptKind {
     Agent,
     Workflow,
     GateOnly,
+    /// A code review stage's attempt: rounds of reviewers and an
+    /// implementer, then the stage's checks.
+    Review,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -164,8 +171,107 @@ pub struct Attempt {
     /// The pull request a `pr-checks` gate is bound to, once looked up.
     #[serde(default)]
     pub pr: Option<PullRequestRecord>,
+    /// A code review attempt's rounds, first to last.
+    #[serde(default)]
+    pub rounds: Vec<ReviewRound>,
+    /// A `review-cap` answer of `more`: one review pass past the cap
+    /// is allowed.
+    #[serde(default)]
+    pub extra_pass: bool,
     pub started_ms: u64,
     pub ended_ms: Option<u64>,
+}
+
+/// One round of a code review: every reviewer read `base..head`, then
+/// the findings were addressed by a fresh implementer (or there were
+/// none, or the user accepted them).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReviewRound {
+    pub n: u32,
+    /// The commit the branch was cut from, never resolved again.
+    pub base: String,
+    /// The branch's head every reviewer read.
+    pub head: String,
+    pub reviewers: Vec<ReviewerRun>,
+    #[serde(flatten)]
+    pub state: RoundState,
+    /// The aggregated findings, once every reviewer finished.
+    pub feedback: Option<PathBuf>,
+    /// Open points after aggregation: new findings plus points kept
+    /// from earlier rounds.
+    #[serde(default)]
+    pub open_points: u32,
+    /// The user authorised the fix pass (or the dial did).
+    #[serde(default)]
+    pub fix_authorised: bool,
+    /// The implementer's session, once started.
+    pub implementer: Option<String>,
+    pub response: Option<PathBuf>,
+    /// The head after the implementer committed.
+    pub head_after: Option<String>,
+    #[serde(default)]
+    pub stop_at_ms: Option<u64>,
+    #[serde(default)]
+    pub polls_since_stop: u32,
+    #[serde(default)]
+    pub settle: Option<Settle>,
+    pub started_ms: u64,
+    pub ended_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "round_state", rename_all = "kebab-case")]
+pub enum RoundState {
+    /// Reviewers are running.
+    Reviewing,
+    /// No open point: the head is accepted; the stage's checks next.
+    Converged,
+    /// Open points, waiting for the fix pass to be authorised.
+    Findings,
+    /// The implementer is addressing the points.
+    Fixing,
+    /// The implementer committed; the checks at the new head next,
+    /// then the next round.
+    Fixed,
+    /// The user accepted the reviewed head with findings left.
+    Accepted,
+    Failed {
+        reason: String,
+    },
+}
+
+/// One reviewer in one round.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReviewerRun {
+    pub name: String,
+    /// `claude`, `codex` or `command`.
+    pub kind: String,
+    pub dir: PathBuf,
+    /// Where its findings go: the file an agent writes, a command's
+    /// stdout.
+    pub feedback: PathBuf,
+    pub session: Option<String>,
+    /// The intent to start a command was written before it ran.
+    #[serde(default)]
+    pub launched: bool,
+    #[serde(default)]
+    pub stop_at_ms: Option<u64>,
+    #[serde(default)]
+    pub polls_since_stop: u32,
+    #[serde(default)]
+    pub settle: Option<Settle>,
+    pub result: Option<ReviewerResult>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "result", rename_all = "kebab-case")]
+pub enum ReviewerResult {
+    /// Nothing to report (the sentinel, or a command's exit 0).
+    Clean,
+    Findings,
+    Failed {
+        reason: String,
+    },
 }
 
 /// A command gate run for an attempt: started on a clean tree at a
@@ -463,6 +569,8 @@ mod tests {
             head: None,
             gate: None,
             pr: None,
+            rounds: Vec::new(),
+            extra_pass: false,
             started_ms: 0,
             ended_ms: None,
         };

@@ -22,6 +22,7 @@ pub mod github;
 pub mod pipeline;
 pub mod port;
 pub mod recover;
+pub mod review;
 pub mod scheduler;
 pub mod serve;
 pub mod store;

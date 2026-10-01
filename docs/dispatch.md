@@ -385,9 +385,11 @@ name = "..."
 count = 1
 
 [operators.<name>]
-kind = "claude" | "codex"
+kind = "claude" | "codex" | "command"
 guidance = "..."
 budget_usd = 0.0              # per ticket across the operator's attempts; 0 means the project default
+argv = ["cmd", "args"]        # kind = "command" only: local tooling a code review stage runs as a reviewer
+in = "lane"                   # or "root"; where the command runs
 
 [operators.<name>.review]     # present on a reviewer: a complete Switchboard definition;
                               # Dispatch renders {worktree}, {branch}, {project.root} and
@@ -413,16 +415,23 @@ writes = ["notes"]            # artifact names; each expands as {notes}, {plan},
 prompt = "..."                # templates: {issue} {task} {lane} {branch} {inputs.<artifact>} {inputs.<stage>.<field>}
 gate = { kind = "command", argv = ["..."], in = "root" | "lane" | "lane:<name>" }
      | { kind = "command", per_lane = { <lane> = ["..."] }, in = "lane" }
+     | { kind = "command", like = "implement" }   # an earlier stage's command gate by reference; its result at the same clean head is reused
      | { kind = "external", check = "review-finalized" | "pr-checks" | "pr-merged" }
      | { kind = "external", check = "pr-checks", checks = "none" }   # a repository with no CI: a PR at the head is enough
      | { kind = "human", decision = "...", confirm = true }
 needs = ["resource name"]     # held from the first stage that names it to the last, contiguous
+reviewers = ["style", "lint"] # present: a code review stage (see "The code review stage"); operators, run at once each round
+implementer = "implementer"   # the claude operator that addresses a round's findings, fresh each round
+cap = 3                       # review passes before the findings left are a question
+review_prompt = "..."         # optional templates; see the section for the defaults and their variables
+fix_prompt = "..."
+no_feedback = "No findings."
 
 [policy]
 slots = 1                     # tickets with a running attempt or a held resource
 waiting_on_me = 2             # pending decisions across the project before nothing new starts
 rates = { "claude-sonnet-5" = [3.0, 15.0], ... }   # $ per million input, output tokens
-decisions = { lanes = "ask", finalize = "ask", merge = "ask", budget = "ask" }
+decisions = { lanes = "ask", finalize = "ask", merge = "ask", budget = "ask", review-code = "ask" }
 trust_folders = false         # true: Claude Code's folder trust question, which every fresh worktree asks, is answered for the project's agents
 max_reruns = 3                # failed attempts a stage may collect in one context before the ticket parks instead of asking again
 rebaser = "rebaser"           # the operator that rebases a PR that conflicts with its base, cloned from the lane's implementer; absent, a conflict is a question
@@ -898,6 +907,122 @@ base, and releases the hold. The tests for the parser are: unreadable,
 empty, missing file, draft-only (valid), a line in neither form, a
 path escaping the root, and two entries sharing a basename.
 
+## The code review stage
+
+A stage with `reviewers` reviews the branch a lane's `implement`
+produced, with several reviewers at once, and has a fresh implementer
+address what they say, in rounds, until no point is open or the cap
+is reached. It sits after `implement` and before `inspect`. It is a
+fourth stage kind (`StageKind::Review`, `AttemptKind::Review`), not
+the plan review's workflow: the subject is a branch, there are many
+reviewers, and the implementer is a fresh agent per round.
+
+**Reviewers** are operators. A Claude Code reviewer runs in the lane's
+tree with its reviewer directory as its one allowed write target; a
+Codex reviewer runs in that directory and is told the tree; a
+`kind = "command"` operator is local tooling run as a child of the
+runner in the lane (or `in = "root"`), with its stdout as its
+feedback. Reviewers are read-only by detection: the round records the
+head and cleanliness at its start and end, and any change voids it.
+
+**The base** is the commit the lane was cut from, resolved once at the
+cut into `LaneRecord.base_sha` (a lane cut before that existed gets
+it from the merge base on the stage's first pass, and keeps it). It is
+never resolved again: the shared clone's remote refs move whenever
+another ticket fetches. Each round records `base` and `head` before
+any reviewer starts, and the reviewers are pointed at exactly that
+range.
+
+**One round.** The tree must be clean at a head that is where the
+previous round left it (its `head_after`, or its `head` when nothing
+was fixed); any other movement parks the ticket with both heads named.
+Every reviewer starts. A Claude reviewer is complete on its Stop with
+its feedback file settled; Codex on the file present and settled (it
+reports no Stop; gone or exited without the file is a failure); a
+command on exit: 0 is nothing to report (its output is diagnostic),
+1 with output is findings, 1 with nothing on stdout or any other exit
+is a failure. A finished agent's session is killed. A failed reviewer
+fails the round into the ordinary `rerun` question, its siblings
+retired first. When every reviewer is done and the tree is still clean
+at the recorded head, the findings are gathered into `feedback.md`
+under the round: one `- <id> (<reviewer>): <text>` line per point,
+ids `r<round>/<reviewer>-<n>`, then the points earlier rounds left
+open that no reviewer withdrew. A reviewer's file that is exactly the
+sentinel (`No findings.`, or the stage's `no_feedback`) contributes
+nothing; otherwise each `- `, `* ` or `1. ` line is a point, and a
+file with no list is one point. Carried points: the previous round's
+points the implementer marked `disputed` (or did not answer) stay
+open under their original id unless a reviewer in the new pass wrote
+`withdraw <id>`; `keep <id>: why` keeps one with the reason shown.
+
+No open point converges the round: the stage's checks run at that
+head (see below) and the stage completes bound to it. Open points at
+a pass under the cap go by the `review-code` dial: `auto` starts the
+fix pass; `ask` is a `review-code` question with `fix`, `accept`
+(the head as it is, checks next) and `park`. At the cap (`cap`,
+default 3, counting review passes) the question is `review-cap`:
+`accept`, `more` (exactly one fix pass, the checks, then one more
+review pass, after which the cap question is asked again if points
+remain) or `park`; it has no dial. A head no reviewer has seen is
+never offered. An answer whose head no longer matches the round's is
+stale: the ticket parks with both heads named.
+
+**The fix pass** is a fresh implementer session in the lane with the
+plan, the branch and `feedback.md`, asked to address each point on the
+branch and write `response.md` answering each by id (`fixed` or
+`disputed`). It is complete on its Stop with the response settled and
+the tree clean and committed; a dirty tree or a missing response fails
+the round. Its head is `head_after`, an authorised transition. Then
+the stage's checks run at that head, and the next round opens there.
+
+**The checks** are the stage's own command gate, required. `like =
+"implement"` names an earlier stage's command gate by reference: an
+accepted head whose checks that stage already ran (same command, same
+head, exit 0, the tree clean) is not checked twice; any other head,
+and any other gate, runs. A failing check is the ordinary checks
+question (`rerun`, `check`, `park`); `check` runs them again on the
+same head. A check lost to a runner restart starts again on the same
+clean head, the one child that does.
+
+**Records.** One attempt per context per stage run, with `rounds` on
+it: each round's base, head, reviewers (name, kind, session or launch
+intent, completion, result), the aggregated feedback, the open point
+count, the implementer's session, response and `head_after`, and its
+state (`reviewing`, `findings`, `fixing`, `fixed`, `converged`,
+`accepted`, `failed`). Artifacts per round: each reviewer's file
+(`r<n>/<reviewer>`), `r<n>/feedback`, `r<n>/response`, `r<n>/checks`.
+The wire view carries `AttemptView.rounds`; the ticket page shows one
+line per round. Nothing in Switchboard's `model.rs`, `AppAction` or
+`Effect` changed: reviewers and implementers are ordinary sessions
+over the existing port commands.
+
+**Runner children.** A command reviewer's launch intent is written on
+its record before it starts; a restart that finds the intent with no
+result fails the reviewer, never starts a second copy and never kills
+an unrelated process. Children run in their own process group and are
+killed with it when the ticket parks or a rerun retires the attempt.
+
+**Validation** refuses: an unknown or repeated reviewer, a command
+reviewer with no `argv`, a missing implementer or one that is not
+Claude Code, `cap = 0`, a subject other than `branch`, no command
+gate, `operator`, `review` or `writes` beside `reviewers`, a project
+without branches, a command operator anywhere but as a reviewer, and
+a `like` that names no earlier stage with a command gate of its own.
+
+**Templates.** `review_prompt` takes `{base}`, `{head}`, `{worktree}`,
+`{feedback}`, `{no_feedback}`, `{plan}`, `{branch}` and the `{issue.*}`
+values; when earlier points are open the reviewer is also told
+`{previous_feedback}` and `{previous_response}` and how to withdraw
+or keep each. `fix_prompt` takes `{feedback}`, `{response}`,
+`{worktree}`, `{branch}`, `{plan}`. Operator guidance is rendered with
+the same values and comes first.
+
+Out of scope for this cut: reviewers seeing each other's points, a
+workflow or a human as a reviewer, review of anything but a branch,
+cross-lane review of a joined result, and releasing the slot while
+every lane waits on a question (an open review attempt holds the
+ticket's slot as any open attempt does).
+
 ## Resources and slots
 
 - A hold is taken by writing it onto the ticket record under the
@@ -1261,6 +1386,15 @@ and one against the real one:
 | A pull-request ticket's first pass | Each PR's lane is a worktree on the PR's branch tracking the remote (a GitHub PR from its pull ref on `pr/<n>`), chosen; no branch of Dispatch's own; lanes without a PR are not cut |
 | `take .. pr <remote>:<lane>/<n>` on a mirror | The clone gains that remote, the lane is checked out from it, the question shows the PR's base there, and the merge is read from that provider by number |
 | The sign-off gate opens on a pull-request ticket | Each branch is fetched and fast-forwarded first; a force push parks the ticket; `proceed` leads to `pr-merged`, and the merges close the ticket |
+| Two reviewers (one a command), no findings, `like = "implement"` at the same head | One pass; `implement`'s checks reused; the stage completes bound to the head; no implementer, no check run (`a_review_with_no_findings_completes_at_its_head_reusing_implements_checks`) |
+| Reviewers object | `feedback.md` with each point's reviewer and id; `review-code` asks; `fix` starts a fresh implementer with the file; its commit is checked at the new head; round two opens there with the earlier file in the prompt (`findings_are_fixed_by_a_fresh_implementer_and_checked_at_the_new_head`) |
+| A disputed point, no code change, the reviewer keeps it; the cap is reached | The point carries its original id, marked kept with the reason; fixed points close; `review-cap` offers accept, more, park; `accept` runs the checks at the reviewed head (not reused: a different head) and completes (`the_cap_offers_the_reviewed_head_and_accept_completes_at_it`) |
+| A disputed point the reviewer withdraws; `review-code = "auto"` | No question; the fix pass runs; the point closes in pass two, which converges (`a_withdrawn_point_closes_and_the_auto_dial_fixes_without_asking`) |
+| A command reviewer exits 2; an agent reviewer stops with no file | The round fails into `rerun`; the sibling session is killed first; neither is an approval (`a_failed_reviewer_fails_the_round_after_its_siblings_are_killed`) |
+| A command reviewer exits 1 with nothing on stdout | A failed reviewer (`a_command_reviewers_exit_codes_are_read_as_the_protocol_says`) |
+| The tree is dirty when reviewers finish; the implementer leaves it dirty | The round's evidence is void, a `rerun` question naming the change; the fix round fails the same way (`a_changed_tree_voids_the_round_and_a_dirty_implementer_fails_it`) |
+| The head moved while `review-code` was pending | The answer is stale: the ticket parks with both heads named and nothing launches (`an_answer_for_a_moved_head_is_stale_and_parks_the_ticket`) |
+| The runner lost a running command reviewer | Failed on the next pass, not started again (`a_lost_command_reviewer_is_failed_not_started_again`) |
 | The socket fails mid-pass (Switchboard quit or restarted under the runner) | Nothing is parked; the pass ends with a log line and the next one goes on; the port remakes its connection and sends the request again, which the operations log makes safe |
 | User is viewing another workspace during the whole path | The window stays on it through every launch and the review start; no terminal window opens |
 

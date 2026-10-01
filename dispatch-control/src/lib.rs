@@ -259,8 +259,29 @@ pub struct AttemptView {
     pub checks: Option<ChecksView>,
     /// The pull request a `pr-checks` gate is bound to, once looked up.
     pub pr: Option<PullRequestView>,
+    /// A code review attempt's rounds, first to last.
+    pub rounds: Vec<ReviewRoundView>,
     pub started_ms: u64,
     pub ended_ms: Option<u64>,
+}
+
+/// One round of a code review: what every reviewer read, what each
+/// said, and what became of the findings.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ReviewRoundView {
+    pub n: u32,
+    pub base: String,
+    pub head: String,
+    /// `reviewing`, `converged`, `findings`, `fixing`, `fixed`,
+    /// `accepted` or `failed: <why>`.
+    pub state: String,
+    pub open_points: u32,
+    /// The head after the implementer's commits, once it stopped.
+    pub head_after: Option<String>,
+    /// Each reviewer's name and state: `starting`, `running`, `clean`,
+    /// `findings` or `failed: <why>`.
+    pub reviewers: Vec<(String, String)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]

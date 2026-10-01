@@ -674,6 +674,29 @@ impl Repo for SharedRepo {
             .unwrap()
             .worktree_track(repo, dir, branch, remote)
     }
+    fn rev_parse(&self, dir: &std::path::Path, rev: &str) -> anyhow::Result<String> {
+        self.0.lock().unwrap().rev_parse(dir, rev)
+    }
+    fn merge_base(&self, dir: &std::path::Path, a: &str, b: &str) -> anyhow::Result<String> {
+        self.0.lock().unwrap().merge_base(dir, a, b)
+    }
+    fn start_reviewer(
+        &mut self,
+        key: &str,
+        dir: &std::path::Path,
+        argv: &[String],
+        env: &[(String, String)],
+        stdout: &std::path::Path,
+        stderr: &std::path::Path,
+    ) -> anyhow::Result<()> {
+        self.0
+            .lock()
+            .unwrap()
+            .start_reviewer(key, dir, argv, env, stdout, stderr)
+    }
+    fn kill_check(&mut self, key: &str) {
+        self.0.lock().unwrap().kill_check(key);
+    }
     fn is_worktree_of(
         &self,
         repo: &std::path::Path,

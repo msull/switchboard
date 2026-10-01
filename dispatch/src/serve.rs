@@ -279,6 +279,49 @@ fn pull_request_source(
     })
 }
 
+/// A code review attempt's rounds, for the page.
+fn round_views(a: &crate::ticket::Attempt) -> Vec<dispatch_control::ReviewRoundView> {
+    a.rounds
+        .iter()
+        .map(|r| dispatch_control::ReviewRoundView {
+            n: r.n,
+            base: r.base.clone(),
+            head: r.head.clone(),
+            state: match &r.state {
+                crate::ticket::RoundState::Reviewing => "reviewing".to_owned(),
+                crate::ticket::RoundState::Converged => "converged".to_owned(),
+                crate::ticket::RoundState::Findings => "findings".to_owned(),
+                crate::ticket::RoundState::Fixing => "fixing".to_owned(),
+                crate::ticket::RoundState::Fixed => "fixed".to_owned(),
+                crate::ticket::RoundState::Accepted => "accepted".to_owned(),
+                crate::ticket::RoundState::Failed { reason } => {
+                    format!("failed: {reason}")
+                }
+            },
+            open_points: r.open_points,
+            head_after: r.head_after.clone(),
+            reviewers: r
+                .reviewers
+                .iter()
+                .map(|x| {
+                    (
+                        x.name.clone(),
+                        match &x.result {
+                            None if x.session.is_some() || x.launched => "running".to_owned(),
+                            None => "starting".to_owned(),
+                            Some(crate::ticket::ReviewerResult::Clean) => "clean".to_owned(),
+                            Some(crate::ticket::ReviewerResult::Findings) => "findings".to_owned(),
+                            Some(crate::ticket::ReviewerResult::Failed { reason }) => {
+                                format!("failed: {reason}")
+                            }
+                        },
+                    )
+                })
+                .collect(),
+        })
+        .collect()
+}
+
 /// Every project's queue and every ticket.
 pub fn status(runner: &Runner) -> Result<Status> {
     let records = runner.tickets()?;
@@ -378,8 +421,10 @@ pub fn ticket_view(t: &Ticket, stages: Vec<String>) -> TicketView {
                         AttemptKind::Agent => "agent",
                         AttemptKind::Workflow => "workflow",
                         AttemptKind::GateOnly => "gate-only",
+                        AttemptKind::Review => "review",
                     }
                     .into(),
+                    rounds: round_views(a),
                     state: state.into(),
                     reason,
                     session: a.session.clone(),

@@ -2,6 +2,7 @@
 //! it is clean. Fixed argv only; nothing from a ticket is spliced into a
 //! command line.
 
+use std::os::unix::process::CommandExt as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -21,6 +22,10 @@ pub trait Repo: Send {
     /// `git worktree add <dir> -b <branch> <start>` in `repo`, where
     /// `start` is a ref like `origin/main`.
     fn worktree_add(&mut self, repo: &Path, dir: &Path, branch: &str, start: &str) -> Result<()>;
+    /// The commit `rev` names in `dir`.
+    fn rev_parse(&self, dir: &Path, rev: &str) -> Result<String>;
+    /// The merge base of `a` and `b` in `dir`.
+    fn merge_base(&self, dir: &Path, a: &str, b: &str) -> Result<String>;
     /// A worktree of `repo` at `dir` on `branch` as `remote` has it,
     /// tracking it: someone else's branch, checked out to be looked at.
     /// A local branch of that name left by an earlier ticket is reset
@@ -60,6 +65,20 @@ pub trait Repo: Send {
     /// `Some(Err)` for a check this runner never started or lost: a
     /// restart means the process is gone with it.
     fn poll_check(&mut self, key: &str) -> Option<Result<i32>>;
+    /// A command reviewer: like a check, with stdout and stderr kept
+    /// apart, since the stdout is its findings.
+    fn start_reviewer(
+        &mut self,
+        key: &str,
+        dir: &Path,
+        argv: &[String],
+        env: &[(String, String)],
+        stdout: &Path,
+        stderr: &Path,
+    ) -> Result<()>;
+    /// Kill a running check or reviewer and its descendants, if this
+    /// runner started it.
+    fn kill_check(&mut self, key: &str);
 }
 
 /// The `git` on the PATH, and the checks this runner has started.
@@ -174,6 +193,23 @@ impl Repo for GitCli {
                 .args(["--track", "-B", branch, &format!("{remote}/{branch}")]),
         )?;
         Ok(())
+    }
+
+    fn rev_parse(&self, dir: &Path, rev: &str) -> Result<String> {
+        Ok(output(
+            git()
+                .arg("-C")
+                .arg(dir)
+                .args(["rev-parse", "--verify", rev]),
+        )?
+        .trim()
+        .to_owned())
+    }
+
+    fn merge_base(&self, dir: &Path, a: &str, b: &str) -> Result<String> {
+        Ok(output(git().arg("-C").arg(dir).args(["merge-base", a, b]))?
+            .trim()
+            .to_owned())
     }
 
     fn is_worktree_of(&self, repo: &Path, dir: &Path, branch: &str) -> Result<bool> {
@@ -318,6 +354,51 @@ impl Repo for GitCli {
         Ok(())
     }
 
+    fn start_reviewer(
+        &mut self,
+        key: &str,
+        dir: &Path,
+        argv: &[String],
+        env: &[(String, String)],
+        stdout: &Path,
+        stderr: &Path,
+    ) -> Result<()> {
+        let Some((program, rest)) = argv.split_first() else {
+            bail!("a reviewer with no command");
+        };
+        let out = std::fs::File::create(stdout)
+            .with_context(|| format!("create {}", stdout.display()))?;
+        let err = std::fs::File::create(stderr)
+            .with_context(|| format!("create {}", stderr.display()))?;
+        let mut cmd = Command::new(program);
+        cmd.args(rest)
+            .current_dir(dir)
+            .stdin(std::process::Stdio::null())
+            .stdout(out)
+            .stderr(err)
+            .process_group(0);
+        for (k, v) in env {
+            cmd.env(k, v);
+        }
+        let child = cmd
+            .spawn()
+            .with_context(|| format!("start {program} in {}", dir.display()))?;
+        self.checks.insert(key.to_owned(), child);
+        Ok(())
+    }
+
+    fn kill_check(&mut self, key: &str) {
+        if let Some(mut child) = self.checks.remove(key) {
+            // The group first (a reviewer runs in its own), then the
+            // child itself for one started without a group.
+            let _ = Command::new("kill")
+                .args(["-TERM", "--", &format!("-{}", child.id())])
+                .output();
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+
     fn poll_check(&mut self, key: &str) -> Option<Result<i32>> {
         let Some(child) = self.checks.get_mut(key) else {
             return Some(Err(anyhow::anyhow!(
@@ -377,6 +458,12 @@ pub struct FakeRepo {
     pub checks: Vec<StartedCheck>,
     /// Exit codes a test sets for a check by key; unset means running.
     pub check_exits: std::collections::BTreeMap<String, i32>,
+    /// Checks and reviewers killed by key.
+    pub killed_checks: Vec<String>,
+    /// Command reviewers started: the check record plus its stderr file.
+    pub reviewers: Vec<(StartedCheck, PathBuf)>,
+    /// What a tree's base resolves to; absent, `base0000`.
+    pub bases: std::collections::BTreeMap<PathBuf, String>,
 }
 
 impl Repo for FakeRepo {
@@ -510,6 +597,48 @@ impl Repo for FakeRepo {
         } else {
             Some(Err(anyhow::anyhow!("no such check in this runner")))
         }
+    }
+    fn start_reviewer(
+        &mut self,
+        key: &str,
+        dir: &Path,
+        argv: &[String],
+        env: &[(String, String)],
+        stdout: &Path,
+        stderr: &Path,
+    ) -> Result<()> {
+        if !stdout.exists() {
+            std::fs::write(stdout, "")?;
+        }
+        std::fs::write(stderr, "")?;
+        let started = StartedCheck {
+            key: key.to_owned(),
+            dir: dir.to_path_buf(),
+            argv: argv.to_vec(),
+            env: env.to_vec(),
+            log: stdout.to_path_buf(),
+        };
+        self.checks.push(started.clone());
+        self.reviewers.push((started, stderr.to_path_buf()));
+        Ok(())
+    }
+    fn kill_check(&mut self, key: &str) {
+        self.checks.retain(|c| c.key != key);
+        self.killed_checks.push(key.to_owned());
+    }
+    fn rev_parse(&self, dir: &Path, _rev: &str) -> Result<String> {
+        Ok(self
+            .bases
+            .get(dir)
+            .cloned()
+            .unwrap_or_else(|| "base0000".into()))
+    }
+    fn merge_base(&self, dir: &Path, _a: &str, _b: &str) -> Result<String> {
+        Ok(self
+            .bases
+            .get(dir)
+            .cloned()
+            .unwrap_or_else(|| "base0000".into()))
     }
 }
 

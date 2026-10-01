@@ -143,6 +143,10 @@ fn one() -> u32 {
 pub enum OperatorKind {
     Claude,
     Codex,
+    /// Not an agent: a fixed command from the pipeline file, run as a
+    /// child of the runner. Only a code review stage's reviewer may be
+    /// one (local tooling: a linter, a type checker).
+    Command,
 }
 
 /// What each kind of agent needs from its launch. A new kind is one
@@ -155,9 +159,15 @@ impl OperatorKind {
     #[must_use]
     pub fn reviews_in_tree(self) -> bool {
         match self {
-            Self::Claude => true,
+            Self::Claude | Self::Command => true,
             Self::Codex => false,
         }
+    }
+
+    /// Whether this kind is an agent in a Switchboard session at all.
+    #[must_use]
+    pub fn is_agent(self) -> bool {
+        !matches!(self, Self::Command)
     }
 
     /// The flags that let this kind write into `dir` unasked when `dir`
@@ -172,7 +182,7 @@ impl OperatorKind {
                 "--allowedTools".into(),
                 format!("Edit(//{}/**)", dir.display()),
             ],
-            Self::Codex => Vec::new(),
+            Self::Codex | Self::Command => Vec::new(),
         }
     }
 }
@@ -190,6 +200,17 @@ pub struct Operator {
     /// Present on a reviewer: a complete Switchboard workflow definition.
     #[serde(default)]
     pub review: Option<Review>,
+    /// For `kind = "command"`: the fixed command, run in the lane (or
+    /// `in = "root"`, the tree). Exit 0 is nothing to report, exit 1
+    /// with output is findings, anything else is a failure.
+    #[serde(default)]
+    pub argv: Vec<String>,
+    #[serde(rename = "in", default = "default_run_in")]
+    pub run_in: String,
+}
+
+fn default_run_in() -> String {
+    "lane".into()
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -255,8 +276,13 @@ pub enum Gate {
         argv: Option<Vec<String>>,
         #[serde(default)]
         per_lane: Option<BTreeMap<String, Vec<String>>>,
-        #[serde(rename = "in")]
+        #[serde(rename = "in", default = "default_run_in")]
         run_in: String,
+        /// The name of an earlier stage whose command gate this one
+        /// is, by reference: the same command, and a result of it at
+        /// the same clean head is reused rather than run again.
+        #[serde(default)]
+        like: Option<String>,
     },
     External {
         check: String,
@@ -309,6 +335,25 @@ pub struct Stage {
     pub services: Vec<String>,
     #[serde(default)]
     pub before: BTreeMap<String, Vec<String>>,
+    /// Present: a code review stage; the operators that review the
+    /// lane's branch, at once, each round.
+    #[serde(default)]
+    pub reviewers: Vec<String>,
+    /// The operator that addresses a round's findings on the branch;
+    /// a fresh session each round.
+    #[serde(default)]
+    pub implementer: Option<String>,
+    /// Review passes a code review stage may make before the findings
+    /// left are a question; default 3.
+    #[serde(default)]
+    pub cap: Option<u32>,
+    /// Templates for a code review stage; each has a default.
+    #[serde(default)]
+    pub review_prompt: Option<String>,
+    #[serde(default)]
+    pub fix_prompt: Option<String>,
+    #[serde(default)]
+    pub no_feedback: Option<String>,
 }
 
 /// What a stage is, from which fields it names.
@@ -317,18 +362,31 @@ pub enum StageKind {
     Agent,
     Workflow,
     GateOnly,
+    /// Several reviewers of a branch and an implementer, in rounds.
+    Review,
 }
+
+/// Review passes a code review stage makes when the file says nothing.
+pub const DEFAULT_REVIEW_CAP: u32 = 3;
 
 impl Stage {
     #[must_use]
     pub fn kind(&self) -> StageKind {
-        if self.operator.is_some() {
+        if !self.reviewers.is_empty() {
+            StageKind::Review
+        } else if self.operator.is_some() {
             StageKind::Agent
         } else if self.review.is_some() {
             StageKind::Workflow
         } else {
             StageKind::GateOnly
         }
+    }
+
+    /// The review passes a code review stage may make.
+    #[must_use]
+    pub fn review_cap(&self) -> u32 {
+        self.cap.unwrap_or(DEFAULT_REVIEW_CAP)
     }
 }
 
@@ -508,11 +566,16 @@ impl Pipeline {
             bail!("stage {:?} names both an operator and a review", stage.name);
         }
         Self::validate_gate(stage)?;
-        if let Some(op) = &stage.operator
-            && !self.operators.contains_key(op)
-        {
-            bail!("stage {:?} names an unknown operator {op:?}", stage.name);
+        if stage.kind() == StageKind::Review {
+            self.validate_review_stage(stage)?;
+        } else if stage.implementer.is_some() || stage.cap.is_some() {
+            bail!(
+                "stage {:?} has implementer or cap but no reviewers",
+                stage.name
+            );
         }
+        self.validate_operator_ref(stage)?;
+        self.validate_like(stage)?;
         if let Some(rv) = &stage.review {
             let Some(operator) = self.operators.get(rv) else {
                 bail!("stage {:?} names an unknown reviewer {rv:?}", stage.name);
@@ -565,12 +628,13 @@ impl Pipeline {
             argv,
             per_lane,
             run_in,
+            like,
             ..
         }) = &stage.gate
         {
-            if argv.is_none() && per_lane.is_none() {
+            if argv.is_none() && per_lane.is_none() && like.is_none() {
                 bail!(
-                    "stage {:?}: a command gate needs argv or per_lane",
+                    "stage {:?}: a command gate needs argv, per_lane or like",
                     stage.name
                 );
             }
@@ -594,6 +658,109 @@ impl Pipeline {
         Ok(())
     }
 
+    /// A code review stage: reviewers that exist, once each; an
+    /// implementer that is Claude Code (its Stop is the one completion
+    /// signal); a cap of at least one; the branch as its only subject;
+    /// its own command gate; none of an agent or workflow stage's
+    /// fields; and a project with branches to review.
+    fn validate_review_stage(&self, stage: &Stage) -> Result<()> {
+        let name = &stage.name;
+        if stage.operator.is_some() || stage.review.is_some() || !stage.writes.is_empty() {
+            bail!("stage {name:?}: reviewers go with no operator, review or writes");
+        }
+        let mut seen = std::collections::BTreeSet::new();
+        for r in &stage.reviewers {
+            if !seen.insert(r) {
+                bail!("stage {name:?} names reviewer {r:?} twice");
+            }
+            let Some(op) = self.operators.get(r) else {
+                bail!("stage {name:?} names an unknown reviewer {r:?}");
+            };
+            if op.kind == OperatorKind::Command && op.argv.is_empty() {
+                bail!("stage {name:?}: command reviewer {r:?} has no argv");
+            }
+        }
+        let Some(implementer) = &stage.implementer else {
+            bail!("stage {name:?} names no implementer");
+        };
+        match self.operators.get(implementer) {
+            None => bail!("stage {name:?} names an unknown implementer {implementer:?}"),
+            Some(op) if op.kind != OperatorKind::Claude => bail!(
+                "stage {name:?}: implementer {implementer:?} must be claude (its Stop is the completion signal)"
+            ),
+            Some(_) => {}
+        }
+        if stage.cap == Some(0) {
+            bail!("stage {name:?}: cap must be at least 1");
+        }
+        if stage.subject.as_deref().is_some_and(|s| s != "branch") {
+            bail!("stage {name:?}: a code review stage reviews the branch only");
+        }
+        if !matches!(stage.gate, Some(Gate::Command { .. })) {
+            bail!("stage {name:?}: a code review stage needs a command gate (its checks)");
+        }
+        if !self.cuts_worktrees() {
+            bail!("stage {name:?}: a code review stage needs branches (a project with repo)");
+        }
+        Ok(())
+    }
+
+    /// A stage's operator exists and is an agent.
+    fn validate_operator_ref(&self, stage: &Stage) -> Result<()> {
+        if let Some(op) = &stage.operator {
+            let Some(operator) = self.operators.get(op) else {
+                bail!("stage {:?} names an unknown operator {op:?}", stage.name);
+            };
+            if !operator.kind.is_agent() {
+                bail!(
+                    "stage {:?}: operator {op:?} is a command, which only a code review stage runs",
+                    stage.name
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// A gate given by reference names an earlier stage with a command
+    /// gate of its own.
+    fn validate_like(&self, stage: &Stage) -> Result<()> {
+        if let Some(Gate::Command {
+            like: Some(like), ..
+        }) = &stage.gate
+        {
+            let earlier = self
+                .stages
+                .iter()
+                .take_while(|s| s.name != stage.name)
+                .find(|s| &s.name == like);
+            match earlier {
+                Some(s) if matches!(s.gate, Some(Gate::Command { like: None, .. })) => {}
+                _ => bail!(
+                    "stage {:?}: gate like {like:?} names no earlier stage with a command gate",
+                    stage.name
+                ),
+            }
+        }
+        Ok(())
+    }
+
+    /// The command a stage's gate runs: its own, or the earlier stage's
+    /// it names by `like`. `None` when the gate is not a command gate.
+    #[must_use]
+    pub fn command_gate<'a>(&'a self, stage: &'a Stage) -> Option<&'a Gate> {
+        match &stage.gate {
+            Some(Gate::Command {
+                like: Some(like), ..
+            }) => self
+                .stages
+                .iter()
+                .find(|s| &s.name == like)
+                .and_then(|s| s.gate.as_ref()),
+            Some(gate @ Gate::Command { .. }) => Some(gate),
+            _ => None,
+        }
+    }
+
     /// Every reference resolves and every stage is one of the three kinds.
     fn validate(&self) -> Result<()> {
         if self.version != 1 {
@@ -609,10 +776,14 @@ impl Pipeline {
             ("rebaser", &self.policy.rebaser),
             ("fixer", &self.policy.fixer),
         ] {
-            if let Some(name) = name
-                && !self.operators.contains_key(name)
-            {
-                bail!("[policy] {key} names an unknown operator {name:?}");
+            if let Some(name) = name {
+                match self.operators.get(name) {
+                    None => bail!("[policy] {key} names an unknown operator {name:?}"),
+                    Some(op) if !op.kind.is_agent() => {
+                        bail!("[policy] {key} names {name:?}, which is a command, not an agent")
+                    }
+                    Some(_) => {}
+                }
             }
             // Someone else's branch is theirs to change.
             if name.is_some() && self.source == Source::PullRequest {

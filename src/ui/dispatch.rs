@@ -814,6 +814,9 @@ fn attempt_row(cx: &mut DrawCtx<'_>, ui: &mut Ui, t: &TicketView, a: &AttemptVie
                     pr_labels(ui, pr);
                 }
             });
+            for round in &a.rounds {
+                round_line(ui, round);
+            }
             ui.horizontal_wrapped(|ui| {
                 ui.spacing_mut().item_spacing.x = 4.0;
                 if let Some(session) = a
@@ -853,6 +856,40 @@ fn attempt_row(cx: &mut DrawCtx<'_>, ui: &mut Ui, t: &TicketView, a: &AttemptVie
                 }
             });
         });
+}
+
+/// One line per code review round: its head, its state and what each
+/// reviewer said.
+fn round_line(ui: &mut Ui, round: &crate::ports::dispatch::ReviewRoundView) {
+    let p = theme::palette(ui);
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing.x = 6.0;
+        let short: String = round.head.chars().take(8).collect();
+        ui.label(theme::meta_text(
+            ui,
+            format!("round {} at {short}", round.n),
+        ));
+        let points = match round.open_points {
+            0 => String::new(),
+            n => format!(", {n} open"),
+        };
+        ui.label(
+            RichText::new(format!("{}{points}", round.state))
+                .text_style(theme::meta())
+                .color(if round.state.starts_with("failed") {
+                    p.accent_2_text
+                } else {
+                    p.n700
+                }),
+        );
+        for (name, state) in &round.reviewers {
+            ui.label(theme::meta_text(ui, format!("{name}: {state}")));
+        }
+        if let Some(after) = &round.head_after {
+            let short: String = after.chars().take(8).collect();
+            ui.label(theme::meta_text(ui, format!("fixed to {short}")));
+        }
+    });
 }
 
 /// The artifact chosen on the left, rendered as markdown; the issue's

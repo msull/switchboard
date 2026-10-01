@@ -6,6 +6,7 @@
 use std::io;
 use std::path::PathBuf;
 
+pub use dispatch_control::ReviewRoundView;
 pub use dispatch_control::{
     AttemptView, Body, DecisionView, LaneView, ProjectView, PullRequestView, Reply, Status,
     TicketView, WorktreesView,

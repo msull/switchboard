@@ -1,10 +1,21 @@
 # Dispatch: the code review stage (plan skeleton)
 
-Status: a skeleton to be planned in a separate process, then folded
-into `docs/dispatch.md`. Every `PLANNER:` line names a decision or
-detail the plan must supply; `REVIEWER:` lines say what to hold the
-plan to. Rules stated without a `PLANNER:` tag are settled and the
-plan builds on them. Nothing here is built.
+Status: built. The design as built, with every `PLANNER:` decision
+taken, is the "The code review stage" section of `docs/dispatch.md`;
+this file is the plan it was built from and is kept for the record.
+The decisions, in short: command reviewers are `[operators.<name>]`
+with `kind = "command"`; the dial is `review-code` (`fix`, `accept`,
+`park`) and the cap question `review-cap` (`accept`, `more`, `park`);
+one attempt per context with `rounds` on it; a command reviewer's
+launch intent is on its record before it runs and a lost one is
+failed, never relaunched; Codex reviewers complete on a settled file
+and fail when their session is gone without one; a check lost to a
+restart is the one child started again. Not built from the acceptance
+table: the partial fan-out restart cases beyond a lost command (agent
+reviewers go through the ledger like any session), a reused pid (a
+lost child is failed by key, never adopted), parking mid-round as its
+own test (the park sequence is the existing one over the process
+list), and the slot released while every lane waits.
 
 ## What it is
 
