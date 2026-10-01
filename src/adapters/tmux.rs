@@ -621,8 +621,8 @@ mod tests {
     /// failure on a machine that cannot be reached afterwards (CI) says
     /// which of missing, still running or dead-without-status it was.
     fn poll_on(server: Option<&Server>, what: &str, ready: &mut dyn FnMut() -> bool) {
-        // Generous: a cold CI runner has taken more than five seconds
-        // to start a server and report a pane's exit.
+        // Generous: a cold CI runner needs the headroom to start a
+        // server and report a pane's exit.
         let deadline = Instant::now() + Duration::from_secs(20);
         while !ready() {
             if Instant::now() >= deadline {
@@ -837,11 +837,8 @@ mod tests {
         let spec = SpawnSpec {
             id: id.clone(),
             cwd: std::env::temp_dir(),
-            // Not a bare `exit`: tmux 3.4 on a Linux runner has left a
-            // pane that exited during its own spawn dead with no exit
-            // status, its child never reaped, for as long as we waited.
-            // A command that lives into the pane's first read exits
-            // through the ordinary path on every tmux seen.
+            // Not a bare `exit`: a command that lives into the pane's
+            // first read exits through the ordinary path.
             command: Some(vec!["sh".into(), "-c".into(), "sleep 0.3; exit 3".into()]),
             env: Vec::new(),
             scrollback: None,

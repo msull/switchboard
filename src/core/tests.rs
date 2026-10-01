@@ -577,6 +577,100 @@ fn views_from_a_newer_build_move_no_project_and_show_everything() {
     assert_ne!(core.project_space(pid), Some(SpaceId::DEFAULT));
     assert_eq!(core.active_space(), SpaceId::GLOBAL);
     assert!(core.project_visible(pid));
+    // One listed space and no global set, yet Everywhere stays on offer:
+    // it is the only way back to `pb` once another space is picked.
+    assert!(core.global_space_offered());
+    assert!(
+        !effects.iter().any(|e| matches!(e, Effect::SaveSettings(_))),
+        "{effects:?}"
+    );
+}
+
+#[test]
+fn views_from_a_newer_build_leave_the_saved_space_alone_until_the_user_moves() {
+    let mut core = AppCore::new();
+    core.dispatch(
+        AppAction::StoreLoaded(Ok(Loaded {
+            workspaces: Vec::new(),
+            notices: Vec::new(),
+            settings: Settings::default(),
+            views: Views {
+                schema_version: super::model::VIEWS_SCHEMA_VERSION + 1,
+                ..Views::default()
+            },
+        })),
+        Clock::at(1),
+    );
+    assert_eq!(core.active_space(), SpaceId::GLOBAL);
+    let saved = |effects: &[Effect]| {
+        effects.iter().find_map(|e| match e {
+            Effect::SaveSettings(s) => Some(s.space),
+            _ => None,
+        })
+    };
+    // Another setting saved keeps the space the newer build left.
+    let effects = core.dispatch(AppAction::SetExclusive(true), Clock::at(2));
+    assert_eq!(saved(&effects), Some(SpaceId::DEFAULT));
+    assert_eq!(core.active_space(), SpaceId::GLOBAL);
+    // A space the user picks is saved as picked, Everywhere included.
+    let effects = core.dispatch(AppAction::ShowSpace(SpaceId::DEFAULT), Clock::at(3));
+    assert_eq!(saved(&effects), Some(SpaceId::DEFAULT));
+    let effects = core.dispatch(AppAction::ShowSpace(SpaceId::GLOBAL), Clock::at(4));
+    assert_eq!(saved(&effects), Some(SpaceId::GLOBAL));
+}
+
+#[test]
+fn unlisted_spaces_share_one_group_after_the_listed_ones() {
+    let (mut core, _, [pa, pb], _) = two_spaces();
+    let mut workspaces = core.workspaces().to_vec();
+    let mut projects = Vec::new();
+    for (n, space) in [SpaceId::new(), SpaceId::new(), SpaceId::new()]
+        .into_iter()
+        .enumerate()
+    {
+        let mut p = project(&format!("x{n}"));
+        p.space = space;
+        p.last_active = SystemTime::UNIX_EPOCH + Duration::from_secs(10 + n as u64);
+        projects.push(p.id);
+        workspaces.push(Workspace::new(p));
+    }
+    core.seed(workspaces, Vec::new());
+    core.dispatch(AppAction::ShowSpace(SpaceId::GLOBAL), Clock::at(1));
+    let order: Vec<ProjectId> = core.projects_in_rail_order().iter().map(|p| p.id).collect();
+    assert_eq!(order, vec![pa, pb, projects[2], projects[1], projects[0]]);
+}
+
+#[test]
+fn everywhere_is_offered_when_it_is_more_than_the_one_space() {
+    let mut core = AppCore::new();
+    core.seed_views(Views {
+        spaces: vec![Space::default_space()],
+        ..Views::default()
+    });
+    assert!(!core.global_space_offered());
+    // Already there (the last global set deleted, or the script line).
+    core.dispatch(AppAction::ShowSpace(SpaceId::GLOBAL), Clock::at(1));
+    assert!(core.global_space_offered());
+    core.dispatch(AppAction::ShowSpace(SpaceId::DEFAULT), Clock::at(2));
+    // A project in a space this build does not list.
+    let mut p = project("x");
+    p.space = SpaceId::new();
+    core.seed(vec![Workspace::new(p)], Vec::new());
+    assert!(core.global_space_offered());
+
+    let (core, ..) = two_spaces();
+    assert!(core.global_space_offered());
+}
+
+#[test]
+fn the_switcher_covers_every_space_from_everywhere() {
+    let (mut core, ..) = two_spaces();
+    assert!(core.switcher_offers_all());
+    assert!(!core.switcher_covers_all(false));
+    assert!(core.switcher_covers_all(true));
+    core.dispatch(AppAction::ShowSpace(SpaceId::GLOBAL), Clock::at(1));
+    assert!(!core.switcher_offers_all());
+    assert!(core.switcher_covers_all(false));
 }
 
 #[test]
@@ -639,6 +733,8 @@ fn the_global_space_cannot_be_renamed_deleted_or_moved_into() {
 fn adding_a_project_in_global_puts_it_in_a_real_space() {
     let (mut core, b, _, _) = two_spaces();
     core.dispatch(AppAction::ShowSpace(SpaceId::GLOBAL), Clock::at(1));
+    // What the add dialog preselects is where `AddProject` puts it.
+    assert_eq!(core.add_project_space(), core.spaces()[0].id);
     let space_of = |core: &AppCore, name: &str| {
         core.workspaces()
             .iter()

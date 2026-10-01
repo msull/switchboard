@@ -1341,15 +1341,15 @@ sets, its projects, its "All sessions". The point is a boundary as much
 as a grouping: with a screen shared, nothing on screen names anything
 from another workspace unless the selector is opened or Everywhere is
 active, which lifts the boundary on purpose. Outside Everywhere, then,
-the quick switcher searches the active workspace only, with
-an "All workspaces" checkbox that is off each time it opens; Cmd+1..9
-count the active workspace's projects; a working set holds cards from
-its own workspace only (a set made in Everywhere is the exception) (moving a project out of a workspace drops its
-cards from that workspace's sets); a notice about a record in another
-workspace shows as "Something in another workspace needs you", with no
-name; and the rail's count is the active workspace's, while the Dock
-badge counts every workspace, so a waiting agent elsewhere still gets
-through. The selector is the active workspace's name at the top of the
+the quick switcher searches the active workspace only, with an "All
+workspaces" checkbox that is off each time it opens; Cmd+1..9 count the
+active workspace's projects; a working set holds cards from its own
+workspace only, except a set made in Everywhere, which holds any
+(moving a project out of a workspace drops its cards from that
+workspace's sets); a notice about a record in another workspace shows
+as "Something in another workspace needs you", with no name; and the
+rail's count is the active workspace's, while the Dock badge counts
+every workspace, so a waiting agent elsewhere still gets through. The selector is the active workspace's name at the top of the
 rail: a menu of every workspace with its waiting count, then New,
 Rename, and Delete (only an empty workspace that is not the last).
 "Move to" on a project's board and a working set's header moves it,
@@ -1628,10 +1628,14 @@ that keeps a global active workspace and global sets (and sends a project
 hand-edited into global to the first workspace), the refusals (rename,
 delete, move into, move a global set out, a project added into it from
 the window or the control port), "◇ Everywhere" first in the selector
-when more than one workspace or any global set exists, the rail grouped
-by workspace (Cmd+1..9 count it as drawn), the add dialog's workspace choice, notices named, the switcher without its
-checkbox, the `workspace-global` script line, and `set.new` accepting
-the fixed id on the control port. views.json is v5.
+when more than one workspace or any global set exists, while it is
+active, or while a project's workspace is unlisted (views.json from a
+newer build, where the core works in Everywhere for the run without
+saving that choice), the rail grouped by workspace with unlisted ones
+under "Other workspaces" (Cmd+1..9 count it as drawn), the add dialog's
+workspace choice, notices named, the switcher without its checkbox, the
+`workspace-global` script line, and `set.new` accepting the fixed id on
+the control port. views.json is v5.
 
 Known gap: a real workspace's sets are not listed in global, so a set
 of one workspace is reached by switching to it.

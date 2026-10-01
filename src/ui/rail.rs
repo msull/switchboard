@@ -155,16 +155,21 @@ fn project_rows(cx: &mut DrawCtx<'_>, ui: &mut Ui, active: Option<ProjectId>, co
         .into_iter()
         .map(|p| (p.id, p.name.clone(), p.space))
         .collect();
-    let mut group = None;
+    // `None` until the first kicker; then the listed space drawn last,
+    // or `None` inside for the spaces this build does not list, which
+    // the order keeps together as one group.
+    let mut group: Option<Option<SpaceId>> = None;
     for (n, (pid, name, space)) in projects.iter().enumerate() {
         // In global, each space's projects sit under its name; the order
         // keeps a space's projects together.
-        if global && !compact && group != Some(*space) {
+        let listed = cx.core.space(*space);
+        let this = listed.map(|s| s.id);
+        if global && !compact && group != Some(this) {
             if group.is_some() {
                 ui.add_space(8.0);
             }
-            group = Some(*space);
-            let label = cx.core.space(*space).map_or("", |s| s.name.as_str());
+            group = Some(this);
+            let label = listed.map_or("Other workspaces", |s| s.name.as_str());
             theme::kicker(ui, label, p.n600);
             ui.add_space(4.0);
         }
@@ -211,11 +216,7 @@ fn project_rows(cx: &mut DrawCtx<'_>, ui: &mut Ui, active: Option<ProjectId>, co
     {
         // In global the dialog asks which workspace it goes in.
         cx.state.add_project = Some(AddProjectDraft {
-            space: if global {
-                cx.core.spaces().first().map(|s| s.id)
-            } else {
-                None
-            },
+            space: global.then(|| cx.core.add_project_space()),
             ..AddProjectDraft::default()
         });
     }
@@ -227,8 +228,8 @@ fn project_rows(cx: &mut DrawCtx<'_>, ui: &mut Ui, active: Option<ProjectId>, co
 /// global space nothing else on screen names another space, so a shared
 /// screen gives away only the space being worked in; the global space
 /// lifts that boundary on purpose, naming each space over its projects.
-/// The menu starts with the global space while there is more than one
-/// space or a global working set to reach; it can be neither renamed
+/// The menu starts with the global space when
+/// [`AppCore::global_space_offered`] says so; it can be neither renamed
 /// nor deleted.
 fn space_menu(cx: &mut DrawCtx<'_>, ui: &mut Ui, compact: bool) {
     let p = theme::palette(ui);
@@ -254,7 +255,7 @@ fn space_menu(cx: &mut DrawCtx<'_>, ui: &mut Ui, compact: bool) {
         .collect();
     let empty = cx.core.space_empty(active);
     let one = spaces.len() == 1;
-    let has_global_sets = cx.core.working_sets().iter().any(|s| s.space.is_global());
+    let offer_global = cx.core.global_space_offered();
     egui::containers::menu::MenuButton::new(
         RichText::new(brand)
             .text_style(theme::brand())
@@ -267,8 +268,7 @@ fn space_menu(cx: &mut DrawCtx<'_>, ui: &mut Ui, compact: bool) {
     .ui(ui, |ui| {
         ui.set_min_width(200.0);
         ui.label(theme::meta_text(ui, "Workspaces").color(p.n600));
-        // With one space and no global set, "everywhere" is that space.
-        if !one || has_global_sets {
+        if offer_global {
             let waiting = cx.core.waiting_count_in(SpaceId::GLOBAL);
             let label = format!("◇ {}", SpaceId::GLOBAL_NAME);
             if space_row(ui, &label, global, waiting)

@@ -380,6 +380,14 @@ fn the_selector_offers_everywhere_without_rename_or_delete() {
 }
 
 #[test]
+fn the_selector_marks_everywhere_while_it_is_active_with_one_workspace() {
+    let (mut harness, _) = harness();
+    show_global(&mut harness);
+    click(&mut harness, "Everywhere ▾");
+    harness.get_by_label_contains("✓ ◇ Everywhere");
+}
+
+#[test]
 fn the_rail_groups_projects_by_workspace_in_global() {
     let (mut harness, ids) = harness();
     two_workspaces(&mut harness, &ids);

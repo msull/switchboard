@@ -757,6 +757,11 @@ pub struct AppCore {
     pub(super) store_loaded: bool,
     pub(super) reconciled: bool,
     pub(super) settings: Settings,
+    /// The space settings.json holds while the core works in the global
+    /// space only because views came from a newer build: saves write
+    /// this one, so that build reopens where it was left. Cleared once
+    /// the user changes space.
+    pub(super) saved_space: Option<SpaceId>,
     /// Agents without hooks (Codex) whose pane has been quiet for a
     /// while, per the last host poll: shown idle instead of working.
     pub(super) quiet: Vec<RecordId>,
@@ -891,11 +896,7 @@ impl AppCore {
             | AppAction::RoundFilesRemoved { .. } => self.workflow_action(action, now, &mut out),
 
             AppAction::AddProject { name, root } => {
-                // No project is ever in the global space.
-                let space = match self.settings.space {
-                    SpaceId::GLOBAL => self.views.spaces.first().map_or(SpaceId::DEFAULT, |s| s.id),
-                    space => space,
-                };
+                let space = self.add_project_space();
                 self.add_project(name, root, space, now, &mut out);
             }
             AppAction::AddProjectTo { name, root, space } => {
@@ -1433,8 +1434,9 @@ impl AppCore {
                 self.enter_space(id, out);
             }
             AppAction::RenameSpace(id, name) => {
-                // The global space is no record and has no name to change;
-                // the lookup below would find nothing anyway.
+                // The global space is no record and has no name to change.
+                // It is refused by name, so the rule does not rest on the
+                // lookup below happening to miss.
                 let name = name.trim().to_owned();
                 if !name.is_empty() && !id.is_global() {
                     self.update_views(out, |v| {
@@ -1913,6 +1915,47 @@ impl AppCore {
             .filter(|w| self.settings.space.contains(w.project.space))
     }
 
+    /// Whether the space menu offers the global space. With one space
+    /// and no global set it is that space over again, so it is left out,
+    /// unless it is where the user already is or the only way to reach
+    /// a project whose space this build does not list.
+    #[must_use]
+    pub fn global_space_offered(&self) -> bool {
+        self.settings.space.is_global()
+            || self.views.spaces.len() > 1
+            || self.views.sets.iter().any(|s| s.space.is_global())
+            || self.views.schema_version > super::model::VIEWS_SCHEMA_VERSION
+            || self
+                .workspaces
+                .iter()
+                .any(|w| self.space(w.project.space).is_none())
+    }
+
+    /// The space `AddProject` puts a project in: the active one, or in
+    /// the global space, which holds no project, the first listed. The
+    /// add dialog preselects it.
+    #[must_use]
+    pub fn add_project_space(&self) -> SpaceId {
+        match self.settings.space {
+            SpaceId::GLOBAL => self.views.spaces.first().map_or(SpaceId::DEFAULT, |s| s.id),
+            space => space,
+        }
+    }
+
+    /// Whether the switcher searches every space: when asked to, or
+    /// always in the global space, which already sees everything.
+    #[must_use]
+    pub fn switcher_covers_all(&self, all_spaces: bool) -> bool {
+        all_spaces || self.settings.space.is_global()
+    }
+
+    /// Whether the switcher offers to search every space: only where it
+    /// does not already, and there is another space to search.
+    #[must_use]
+    pub fn switcher_offers_all(&self) -> bool {
+        !self.settings.space.is_global() && self.views.spaces.len() > 1
+    }
+
     /// Visible projects in the rail's order, which Cmd+1..9 count: most
     /// recently active first, and in the global space grouped by space
     /// in the user's order of spaces, so the digits count the list as
@@ -1921,7 +1964,15 @@ impl AppCore {
     pub fn projects_in_rail_order(&self) -> Vec<&Project> {
         let mut projects: Vec<_> = self.visible_workspaces().map(|w| &w.project).collect();
         if self.settings.space.is_global() {
-            let rank = |space: SpaceId| self.views.spaces.iter().position(|s| s.id == space);
+            // Spaces this build does not list (views from a newer one)
+            // share one group after the listed ones.
+            let rank = |space: SpaceId| {
+                self.views
+                    .spaces
+                    .iter()
+                    .position(|s| s.id == space)
+                    .unwrap_or(usize::MAX)
+            };
             projects.sort_by_key(|p| (rank(p.space), std::cmp::Reverse(p.last_active)));
         } else {
             projects.sort_by_key(|p| std::cmp::Reverse(p.last_active));
@@ -2135,9 +2186,16 @@ impl AppCore {
         let mut next = self.settings.clone();
         change(&mut next);
         if next != self.settings {
+            if next.space != self.settings.space {
+                self.saved_space = None;
+            }
             self.settings = next;
             if !self.read_only {
-                out.push(Effect::SaveSettings(self.settings.clone()));
+                let mut saved = self.settings.clone();
+                if let Some(space) = self.saved_space {
+                    saved.space = space;
+                }
+                out.push(Effect::SaveSettings(saved));
             }
         }
     }

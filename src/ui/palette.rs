@@ -40,9 +40,7 @@ pub fn show(cx: &mut DrawCtx<'_>, ctx: &Context) {
     let Some(mut draft) = cx.state.palette.take() else {
         return;
     };
-    // The global space already searches everything.
-    let global = cx.core.active_space().is_global();
-    let rows = rows(cx, draft.all_spaces || global);
+    let rows = rows(cx, cx.core.switcher_covers_all(draft.all_spaces));
     let entries: Vec<Entry> = rows
         .iter()
         .map(|r| Entry {
@@ -86,7 +84,7 @@ pub fn show(cx: &mut DrawCtx<'_>, ctx: &Context) {
                 )
                 .labelled_by(label);
             field.request_focus();
-            if cx.core.spaces().len() > 1 && !global {
+            if cx.core.switcher_offers_all() {
                 ui.checkbox(&mut draft.all_spaces, "All workspaces")
                     .on_hover_text("Also find projects and sessions in the other workspaces");
             }

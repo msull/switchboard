@@ -73,8 +73,11 @@ impl AppCore {
         let first = known[0];
         let known_or_global = |s: &SpaceId| s.is_global() || known.contains(s);
         if newer {
+            // Working in global is for this run only: settings.json keeps
+            // the space the newer build left, since that build knows it.
             if !self.settings.space.is_global() {
-                self.update_settings(out, |s| s.space = SpaceId::GLOBAL);
+                self.saved_space = Some(self.settings.space);
+                self.settings.space = SpaceId::GLOBAL;
             }
             return;
         }
