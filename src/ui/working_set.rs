@@ -1096,10 +1096,8 @@ fn header(cx: &mut DrawCtx<'_>, ui: &mut Ui, set: SetId, name: &str, empty: bool
             if theme::ghost_muted(ui, "Delete").clicked() {
                 cx.state.delete_set = Some(set);
             }
-            // A global set stays global: moved out, it would lose every
-            // card from the other spaces.
-            if let Some(from) = cx.core.working_set(set).map(|s| s.space)
-                && !from.is_global()
+            if cx.core.set_movable(set)
+                && let Some(from) = cx.core.working_set(set).map(|s| s.space)
             {
                 super::dialogs::move_to_space_menu(cx, ui, from, |space| {
                     AppAction::MoveSetToSpace(set, space)

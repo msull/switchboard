@@ -1466,10 +1466,7 @@ impl AppCore {
                 }
             }
             AppAction::MoveSetToSpace(set, space) => {
-                // A global set moved out would lose its cards from every
-                // other space, so it stays where it is.
-                let global = self.working_set(set).is_some_and(|s| s.space.is_global());
-                if self.space(space).is_some() && !global {
+                if self.space(space).is_some() && self.set_movable(set) {
                     self.update_set(out, set, |s| s.space = space);
                     self.prune_working_set(out);
                     self.enter_space(self.settings.space, out);
@@ -2363,6 +2360,13 @@ impl AppCore {
     #[must_use]
     pub fn notice(&self) -> Option<&Notice> {
         self.notices.first()
+    }
+    /// Whether `set` exists and may move to another space. A global set
+    /// may not: moved out, it would lose its cards from every other
+    /// space. The set header offers the move only when this is true.
+    #[must_use]
+    pub fn set_movable(&self, set: SetId) -> bool {
+        self.working_set(set).is_some_and(|s| !s.space.is_global())
     }
     /// The oldest notice as the active space may show it: one about a
     /// space it does not contain says only [`Notice::ELSEWHERE`], so no

@@ -455,9 +455,9 @@ impl AppCore {
             .collect()
     }
 
-    #[must_use]
     /// The spaces, then the global space marked as a view, so every set
     /// `set.new` can make is reachable by walking this list.
+    #[must_use]
     pub fn space_views(&self) -> Vec<wire::SpaceView> {
         self.views
             .spaces

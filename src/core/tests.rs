@@ -746,6 +746,9 @@ fn the_global_space_cannot_be_renamed_deleted_or_moved_into() {
             "{action:?}"
         );
     }
+    // The header asks the same question before offering the move.
+    assert!(core.set_movable(own));
+    assert!(!core.set_movable(global));
     assert_eq!(core.working_sets(), &sets[..]);
     assert_eq!(core.spaces(), &spaces[..]);
     assert_eq!(core.settings(), &settings);
