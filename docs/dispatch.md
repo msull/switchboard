@@ -971,8 +971,12 @@ stale: the ticket parks with both heads named.
 plan, the branch and `feedback.md`, asked to address each point on the
 branch and write `response.md` answering each by id (`fixed` or
 `disputed`). It is complete on its Stop with the response settled and
-the tree clean and committed; a dirty tree or a missing response fails
-the round. Its head is `head_after`, an authorised transition. Then
+the tree clean and committed; a missing response fails the round. A
+tree still dirty when the response settles is waited on for about
+five minutes while the session lives (`DIRTY_POLLS`), because a commit
+whose pre-commit hook runs the test suite lands that late; dirty past
+that, or with the session gone, the round fails. Its head is
+`head_after`, an authorised transition. Then
 the stage's checks run at that head, and the next round opens there.
 
 **The checks** are the stage's own command gate, required. `like =
@@ -1419,6 +1423,7 @@ and one against the real one:
 | A command reviewer exits 2; an agent reviewer stops with no file | The round fails into `rerun`; the sibling session is killed first; neither is an approval (`a_failed_reviewer_fails_the_round_after_its_siblings_are_killed`) |
 | A command reviewer exits 1 with nothing on stdout | A failed reviewer (`a_command_reviewers_exit_codes_are_read_as_the_protocol_says`) |
 | The tree is dirty when reviewers finish; the implementer leaves it dirty | The round's evidence is void, a `rerun` question naming the change; the fix round fails the same way (`a_changed_tree_voids_the_round_and_a_dirty_implementer_fails_it`) |
+| The implementer's response settles while its commit's hook still runs | The round waits for the tree while the session lives, then goes on from the committed head (`a_commit_that_lands_after_the_response_settles_is_not_a_dirty_tree`) |
 | The head moved while `review-code` was pending | The answer is stale: the ticket parks with both heads named and nothing launches (`an_answer_for_a_moved_head_is_stale_and_parks_the_ticket`) |
 | The runner lost a running command reviewer | Failed on the next pass, not started again (`a_lost_command_reviewer_is_failed_not_started_again`) |
 | The socket fails mid-pass (Switchboard quit or restarted under the runner) | Nothing is parked; the pass ends with a log line and the next one goes on; the port remakes its connection and sends the request again, which the operations log makes safe |

@@ -18,8 +18,9 @@ use crate::scheduler::{
     primary_tree, rework_key, session_kind, vars_for,
 };
 use crate::ticket::{
-    Attempt, AttemptKind, AttemptState, DecisionKind, GateRun, ProjectState, ReviewRound,
-    ReviewerResult, ReviewerRun, RoundState, SETTLE_POLLS, Settle, Ticket, TicketState,
+    Attempt, AttemptKind, AttemptState, DIRTY_POLLS, DecisionKind, GateRun, ProjectState,
+    ReviewRound, ReviewerResult, ReviewerRun, RoundState, SETTLE_POLLS, Settle, Ticket,
+    TicketState,
 };
 
 /// What a reviewer writes when it has nothing to report, unless the
@@ -271,6 +272,7 @@ impl Runner {
             stop_at_ms: None,
             polls_since_stop: 0,
             settle: None,
+            dirty_polls: 0,
             started_ms: now_ms,
             ended_ms: None,
         });
@@ -999,6 +1001,7 @@ impl Runner {
             }
             Seen::Unknown => return Ok(()),
         };
+        let ticket_id = t.id.clone();
         let rm = attempt_mut(t, &key)
             .rounds
             .iter_mut()
@@ -1039,6 +1042,12 @@ impl Runner {
             return self.save_ticket(t, now_ms);
         }
         if !self.git.is_clean(cwd)? {
+            // A commit whose hook is still running leaves the tree
+            // dirty for minutes after the response settles; while the
+            // session lives the round waits for it, within a bound.
+            if running && waits_for_commit(rm, &ticket_id, &key.0, &a.context) {
+                return self.save_ticket(t, now_ms);
+            }
             let reason = format!(
                 "round {}: the implementer left the tree at {} dirty",
                 round.n,
@@ -1573,6 +1582,22 @@ fn open_points_of(text: &str) -> Vec<(String, String)> {
             Some((id.to_owned(), text.trim().to_owned()))
         })
         .collect()
+}
+
+/// Counts a poll with the tree still dirty after the response settled.
+/// True while the round should keep waiting for the commit to land.
+fn waits_for_commit(rm: &mut ReviewRound, ticket: &str, stage: &str, context: &str) -> bool {
+    if rm.dirty_polls >= DIRTY_POLLS {
+        return false;
+    }
+    if rm.dirty_polls == 0 {
+        log::info!(
+            "ticket {ticket} {stage}/{context} round {}: the tree is dirty after the response; waiting for a commit",
+            rm.n
+        );
+    }
+    rm.dirty_polls += 1;
+    true
 }
 
 /// Whether a file has looked the same for `SETTLE_POLLS` polls.

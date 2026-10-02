@@ -157,6 +157,12 @@ pub struct Settle {
 /// Polls an artifact must look the same for before it counts as written.
 pub const SETTLE_POLLS: u32 = 3;
 
+/// Polls an implementer's tree may stay dirty after its stop while its
+/// session still runs: a commit whose pre-commit hook runs the whole
+/// test suite takes minutes, and the response can settle before it
+/// lands. About five minutes at one poll a second.
+pub const DIRTY_POLLS: u32 = 300;
+
 /// One run of one stage in one context.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Attempt {
@@ -232,6 +238,10 @@ pub struct ReviewRound {
     pub polls_since_stop: u32,
     #[serde(default)]
     pub settle: Option<Settle>,
+    /// Polls the tree has been dirty since the response settled, while
+    /// the implementer's session still runs (a commit in flight).
+    #[serde(default)]
+    pub dirty_polls: u32,
     pub started_ms: u64,
     pub ended_ms: Option<u64>,
 }

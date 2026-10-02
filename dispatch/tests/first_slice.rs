@@ -4241,6 +4241,15 @@ fn a_changed_tree_voids_the_round_and_a_dirty_implementer_fails_it() {
         &round.response.clone().unwrap(),
         "- r1/style-1: fixed\n",
     );
+    // A commit in flight: the session lives, so the round waits for
+    // the tree, for a while.
+    for _ in 0..dispatch::ticket::DIRTY_POLLS - dispatch::ticket::SETTLE_POLLS - 1 {
+        env.step();
+    }
+    assert!(
+        env.pending(&id).is_empty(),
+        "no question while the tree may still be committed"
+    );
     env.steps_until(&id, "the rerun question", |t, _| {
         t.pending_decisions().iter().any(|d| d.name == "rerun")
     });
@@ -4250,6 +4259,40 @@ fn a_changed_tree_voids_the_round_and_a_dirty_implementer_fails_it() {
         "{:?}",
         a.state
     );
+}
+
+/// The implementer's response settles while its commit's hook still
+/// runs; the tree is clean a little later and the round goes on.
+#[test]
+fn a_commit_that_lands_after_the_response_settles_is_not_a_dirty_tree() {
+    let mut env = Env::new();
+    env.with_review_stage("auto");
+    let id = at_review(&mut env);
+    let tree = env.ticket(&id).lanes[0].worktree.clone();
+    lint_exits(&mut env, &id, 1, 0, "");
+    style_says(&mut env, &id, 1, "- a point\n");
+    env.steps_until(&id, "the implementer", |t, _| {
+        review_attempt(t).rounds[0].implementer.is_some()
+    });
+    let t = env.ticket(&id);
+    let round = &review_attempt(&t).rounds[0];
+    env.repo.lock().unwrap().dirty.push(tree);
+    env.finish(
+        &round.implementer.clone().unwrap(),
+        &round.response.clone().unwrap(),
+        "- r1/style-1: fixed\n",
+    );
+    for _ in 0..5 {
+        env.step();
+    }
+    let t = env.ticket(&id);
+    assert!(t.pending_decisions().is_empty(), "{t:#?}");
+    assert!(review_attempt(&t).rounds[0].dirty_polls > 0);
+    env.repo.lock().unwrap().dirty.clear();
+    env.steps_until(&id, "the round fixed", |t, _| {
+        review_attempt(t).rounds[0].head_after.is_some()
+    });
+    assert!(env.pending(&id).is_empty());
 }
 
 /// A head that moved while a question was pending makes the answer
