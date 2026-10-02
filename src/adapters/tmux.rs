@@ -419,9 +419,15 @@ fn pane_target(id: &HostId) -> String {
     format!("={}:", id.0)
 }
 
+/// A server that is not there, or is on its way out: after its last
+/// session is killed tmux exits on its own time, and a command that
+/// reaches it first is answered "server exited unexpectedly". Nothing
+/// is hosted either way.
 fn is_no_server(e: &io::Error) -> bool {
     let msg = e.to_string();
-    msg.contains("no server running") || msg.contains("error connecting")
+    msg.contains("no server running")
+        || msg.contains("error connecting")
+        || msg.contains("server exited unexpectedly")
 }
 
 fn is_not_found(e: &io::Error) -> bool {
