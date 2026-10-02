@@ -1326,7 +1326,11 @@ somewhere (number, title, project, stage, standing or labels), beside
 the project chips. The last column acts: `Answer` on a ticket with a
 decision pending, `Resume` on a parked one, `Open` on any. The order
 and the narrowing are the core's (`AppCore::tickets_listed`), total
-and stable across polls; the page only draws.
+and stable across polls; the page only draws. Above the table the
+decisions and agents waiting on you are cards; up to three stand open,
+and a larger pile starts folded behind its count so the table stays on
+the first screen. The fold is chosen when the first status arrives and
+the user's clicks on it stand after that.
 
 Dispatch also has a port of its own, so a reader can see tickets as
 they are rather than through the sessions they made. While `dispatch
