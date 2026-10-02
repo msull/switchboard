@@ -610,13 +610,13 @@ impl Runner {
     }
 
     /// Parking is a sequence, not a flag: the intent is written first,
-    /// with every pending decision on the ticket, and every answer not
-    /// yet acted on, cancelled in the same write, the session's waiting
-    /// mark is cleared and read back, open attempts are cancelled (a
-    /// review run paused so its tick cannot start a round), every process on the ticket's list is killed,
-    /// and the ticket reads as parked only once Switchboard reports them
-    /// all gone. `finish_parking` runs the rest on later passes if
-    /// anything is still alive now.
+    /// with every open decision on the ticket withdrawn in the same
+    /// write (see `withdraw_open_decisions`), the session's waiting mark
+    /// is cleared and read back, open attempts are cancelled (a review
+    /// run paused so its tick cannot start a round), every process on
+    /// the ticket's list is killed, and the ticket reads as parked only
+    /// once Switchboard reports them all gone. `finish_parking` runs the
+    /// rest on later passes if anything is still alive now.
     pub(crate) fn park(
         &mut self,
         t: &mut Ticket,
@@ -628,14 +628,14 @@ impl Runner {
         t.state = TicketState::Parking {
             reason: reason.into(),
         };
-        Self::withdraw_pending(t);
+        Self::withdraw_open_decisions(t);
         self.save_ticket(t, now_ms)?;
         self.finish_parking(t, ps, now_ms)
     }
 
     /// The rest of the sequence, from the saved intent: any decision
-    /// still pending or unacted withdrawn, the session's waiting mark
-    /// cleared and answered, every open attempt cancelled (its run paused and read
+    /// still open withdrawn, the session's waiting mark cleared and
+    /// answered, every open attempt cancelled (its run paused and read
     /// back as paused), everything on the process list killed and read
     /// back as gone, and only then `Parked`. Run again on every pass
     /// until it gets there, so a restart at any point resumes it whole.
@@ -650,8 +650,8 @@ impl Runner {
         };
         // A parking ticket asks nothing. `park` withdraws its questions
         // with the intent, so this only finds work on a `Parking` record
-        // whose decisions are still pending or unacted.
-        if Self::withdraw_pending(t) {
+        // whose decisions are still open.
+        if Self::withdraw_open_decisions(t) {
             self.save_ticket(t, now_ms)?;
         }
         // The session stops reading as waiting, and parking is not done
@@ -943,20 +943,25 @@ impl Runner {
         Ok(())
     }
 
-    /// Every decision on the ticket that is pending, or answered and not
-    /// yet acted on, withdrawn in memory; the caller's next save writes
-    /// it. True if there was one. An answer waiting for a slot is
-    /// withdrawn with the questions: kept, a `rerun` answer would launch
-    /// on the resume and keep its context from being asked afresh.
-    fn withdraw_pending(t: &mut Ticket) -> bool {
-        let mut withdrawn = false;
-        for d in t
+    /// Every decision on the ticket that is still open withdrawn in
+    /// memory; the caller's next save writes it. True if there was one.
+    /// Open means pending, answered and not yet acted on, or a `rerun`
+    /// answer acted on whose replacement has not launched: its attempt
+    /// is still the latest in its context, so `may_rerun` would launch
+    /// on it. Kept, either kind of answer would launch on the resume
+    /// and keep its context from being asked afresh.
+    fn withdraw_open_decisions(t: &mut Ticket) -> bool {
+        let unlaunched: Vec<bool> = t
             .decisions
-            .iter_mut()
-            .filter(|d| d.pending() || d.unacted_answer().is_some())
-        {
-            d.state = DecisionState::Cancelled;
-            withdrawn = true;
+            .iter()
+            .map(|d| authorises_unlaunched_rerun(t, d))
+            .collect();
+        let mut withdrawn = false;
+        for (d, unlaunched) in t.decisions.iter_mut().zip(unlaunched) {
+            if d.pending() || d.unacted_answer().is_some() || unlaunched {
+                d.state = DecisionState::Cancelled;
+                withdrawn = true;
+            }
         }
         withdrawn
     }
@@ -1119,7 +1124,9 @@ impl Runner {
     }
 
     /// Decision `i`'s `park` answer acted on: the acted mark is set in
-    /// memory and reaches disk with the parking state.
+    /// memory and reaches disk with the parking state. `act_on_answers`
+    /// has set it already; the mark here is for `ask_again_unslotted`,
+    /// which acts on a `park` answer outside that loop.
     fn park_by_answer(
         &mut self,
         t: &mut Ticket,
@@ -4703,6 +4710,31 @@ pub(crate) fn may_rerun(t: &Ticket, failed: &Attempt) -> bool {
                 DecisionState::Answered { answer, acted: true, .. } if answer == "rerun"
             )
     })
+}
+
+/// Whether `d` is a `rerun` answer acted on whose attempt is still the
+/// latest in its context: the replacement it authorised has not
+/// launched, and `may_rerun` would launch it.
+fn authorises_unlaunched_rerun(t: &Ticket, d: &Decision) -> bool {
+    let acted_rerun = d.name == "rerun"
+        && matches!(
+            &d.state,
+            DecisionState::Answered { answer, acted: true, .. } if answer == "rerun"
+        );
+    let Some((stage, n)) = d.attempt.as_ref().filter(|_| acted_rerun) else {
+        return false;
+    };
+    let Some(context) = t
+        .attempts
+        .iter()
+        .find(|a| &a.stage == stage && a.n == *n)
+        .map(|a| &a.context)
+    else {
+        return false;
+    };
+    !t.attempts
+        .iter()
+        .any(|a| &a.stage == stage && &a.context == context && a.n > *n)
 }
 
 /// The lanes the issue's labels suggest, per the source's hints.
