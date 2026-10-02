@@ -312,18 +312,40 @@ attempt's completion evidence is recorded, so nothing of a finished
 stage keeps running, and the record stays for viewing.
 
 Rejecting a decision cancels the ticket's current attempt, and
-cancelling is a sequence, not a flag: write the intent on the record;
-pause any review run (`workflow.pause`) so its tick cannot start a
-round; kill everything on the ticket's process list that is still
-alive, including a service started for an earlier stage; read each
-back until Switchboard reports it gone; for an in-place lane, confirm
-the tree is clean; and only then release the holds and move the ticket
-to `parked`, where you can requeue or close it. Releasing a hold at
-the end of a stage runs the same check over the ticket's whole
-process list, not the current attempt's. If any writer cannot be confirmed gone or the
-tree cannot be made clean, the holds stay and a decision says why.
-`dispatch retake` closes the old ticket by the same sequence before
-making the new one.
+cancelling is a sequence, not a flag: write the intent on the record,
+with every open decision on the ticket cancelled in the same write:
+a pending one, an answer not yet acted on (a `rerun` still waiting for
+a slot), an acted `rerun` whose replacement has not launched, and a
+gate's send-back note no attempt has carried yet (the resume asks
+`rerun` about that context, quoting the note, and answered `rerun`
+the note goes back into the next attempt's prompt);
+clear the session's waiting mark and read it back; pause any review
+run (`workflow.pause`) so its tick cannot start a round; kill
+everything on the ticket's process list that is still alive, including
+a service started for an earlier stage; read each back until
+Switchboard reports it gone; for an in-place lane, confirm the tree is
+clean; and only then release the holds and move the ticket to
+`parked`, where you can requeue or close it. Releasing a hold at the
+end of a stage runs the same check over the ticket's whole process
+list, not the current attempt's. If any writer cannot be confirmed
+gone or the tree cannot be made clean, the holds stay and a decision
+says why. `dispatch retake` closes the old ticket by the same sequence
+before making the new one.
+
+A cancelled decision cannot be answered, and a parked ticket counts
+nothing against `waiting_on_me`. A `parking` record whose decisions
+are still pending has them cancelled on the next pass; a `parked` one
+keeps them until it is resumed or closed. A resumed ticket asks again,
+under a new decision id, about each context's failed or cancelled
+latest attempt, quoting the attempt's own reason and offering what the
+failure first offered (`check` too after failed checks). Asking
+launches nothing, so it does not wait for a slot, and nothing reruns
+without an answer.
+
+A pending decision holds its stage in the context it is about: one
+about a lane's attempt holds that lane only, so another lane's first
+launch or authorised rerun goes ahead, and one about no attempt holds
+every context.
 
 Merge is a confirmation decision as well as an external fact: when a
 ticket reaches `merge`, a pending decision is made, the current
@@ -341,9 +363,11 @@ the attempt bound to the head. `rerun` with a note sends that context
 back: the gate's attempt and the nearest earlier agent stage's result
 for that context are cancelled, the ticket stands at that stage
 again, and the note goes at the end of the next attempt's prompt as
-what the user said; other contexts keep their results. A gate with
-`confirm = true` is "you did this": its answers are `done` and
-`park`, and it is never answered automatically.
+what the user said; other contexts keep their results. A `rerun`
+answer to an agent stage's `rerun` question carries its own note the
+same way, and without one, the note that sent the attempt back. A
+gate with `confirm = true` is "you did this": its answers are `done`
+and `park`, and it is never answered automatically.
 What follows a merge on your side (a rebundle, a mirror backup) is
 outside Dispatch's definition of done and is named in the decision's
 text as a reminder, not verified.
@@ -1225,7 +1249,9 @@ differently:
   is answered by sending it again.
 - *Non-replayable* (`session.send`, `workflow.continue`): a repeat
   can spend money twice. A lost reply to one is not repeated; it is a
-  decision that shows what was sent and lets you look at the pane.
+  decision that shows what was sent and lets you look at the pane,
+  asked once: the ledger entry is marked, recovery leaves it to your
+  answer, and a `park` answer is acted on even with every slot taken.
 
 An operation whose status is `in progress` is waited for, not judged:
 Dispatch restarting while Switchboard is still cloning a planner finds
@@ -1393,6 +1419,20 @@ and one against the real one:
 | The tree is dirty when the agent stops | No check runs; a failed attempt and the same decision |
 | A stage fails past the policy's `max_reruns` in one context | The ticket parks with the count and the last reason; nothing is asked |
 | Free space on the worktrees' volume is under the policy's `min_free_gb` | Nothing new starts and `status` says why; running attempts are still watched; the hold lifts on its own (`a_full_disk_holds_new_starts_until_space_is_back`) |
+| A ticket with two pending decisions is parked from one | The other is cancelled in the same write as the parking intent; the park answer reads acted; the session is unmarked before the ticket reads parked; none is pending, `waiting_on_me` no longer counts it, the cancelled one cannot be answered; a resume asks a fresh rerun per lane and launches nothing (`parking_cancels_every_pending_decision_and_a_resume_asks_afresh`) |
+| The pass dies at the unmark after the parking intent | No decision is pending on disk; the next pass, without a restart, sends the same operation again and only then reads parked (`a_park_cut_off_after_its_intent_asks_nothing_and_unmarks_on_the_next_pass`) |
+| An earlier waiting mark's reply was lost when the ticket parks | It is resolved under its own id before the unmark is sent; parked only with every waiting request answered, and a restart's recovery does not turn the mark back on (`an_unanswered_mark_is_resolved_before_the_unmark_and_stays_off_after_a_restart`) |
+| Two lanes' questions after a resume, the pass cut off between them | The next pass asks the missing one and not the other again; an answered lane starts while the other lane's question is open (`a_pass_cut_off_between_two_lanes_finishes_asking_on_the_next_pass`) |
+| A waiting request on the ledger has no body when the ticket parks | It cannot be sent again, so it is left unanswered and parking does not wait on it (`a_waiting_request_without_its_body_does_not_hold_parking`) |
+| Every slot is taken when a ticket is resumed | Its rerun questions are asked anyway; nothing launches (`a_resumed_ticket_is_asked_again_with_every_slot_taken`) |
+| Every slot is taken when a ticket with a body-less waiting request is resumed | That entry does not stall the re-ask: each lane gets a fresh rerun question; nothing launches (`a_resumed_ticket_with_a_dead_request_is_asked_again_with_every_slot_taken`) |
+| Every slot is taken when a ticket with a lost reply to an unrepeatable request is resumed | One `lost-send` question, which holds its lane while the other lane is asked; asked once, not again on later passes or after its answer; `park` parks without a slot (`a_resumed_ticket_with_a_lost_unrepeatable_request_is_asked_once_and_parks_unslotted`) |
+| A lane's `rerun` is answered with every slot taken, then the other lane's question is answered `park` | The waiting answer is cancelled with the parking intent; the resume asks both lanes afresh, and with slots free again the old answer launches nothing (`an_answer_waiting_for_a_slot_is_withdrawn_by_an_unslotted_park`) |
+| Two lanes' `rerun` questions are answered `rerun` and `park` before one pass, with slots free | The `rerun` is acted on first, then the `park` cancels it with the parking intent before its replacement launches; the resume asks both lanes afresh and launches nothing (`a_rerun_acted_before_a_park_in_the_same_pass_launches_nothing`) |
+| Two lanes' `inspect` questions are answered `rerun` with a note and `park` before one pass, with slots free | The send-back is acted on first, then the `park` drops its note with the parking intent before an implementer carries it; the resume asks `rerun` about that lane's sent-back attempt, quoting the note, and launches nothing; answered `rerun`, the new attempt's prompt ends with the note (`a_send_back_acted_before_a_park_in_the_same_pass_launches_nothing`) |
+| A ticket parked over failed checks is resumed | The question offers `rerun`, `check` and `park` again; `check` passes on the same attempt with no agent (`a_resume_after_failed_checks_offers_check_again`) |
+| A ticket parked over failed checks past `max_reruns` is resumed | The park asked nothing, but the resume's question still offers `rerun`, `check` and `park`: the attempt keeps that it failed at the checks (`a_resume_after_failed_checks_past_max_reruns_offers_check_again`) |
+| A ticket parked mid-attempt is resumed | The question quotes the attempt's own cancellation reason (`a_resume_after_a_cancelled_attempt_quotes_its_reason`) |
 | The runner restarts while the checks run | The lost check starts again on the same head; no second agent |
 | `ready` with the PR's checks pending, then green | A gate-only attempt per context, no agent; no PR is a `pr` decision (`recheck`, `park`); pending waits and reads the provider once a minute; green at the tree's head completes the attempt bound to that head |
 | The PR is at another head, its checks are red, or it has no checks | A `pr` decision naming which; `recheck` reads again at once; the same attempt throughout; `checks = "none"` on the stage passes on the PR at the head alone |

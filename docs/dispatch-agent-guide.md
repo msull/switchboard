@@ -165,7 +165,9 @@ dispatch decide 314cb7a1 d1 accept
 
 An answer takes effect on the runner's next pass, within a second or
 two. `park` is always safe: it stops the ticket's work, kills its
-agents, and leaves the record for the owner, who can `resume` it.
+agents, and leaves the record for the owner, who can `resume` it. It
+also withdraws the ticket's other open questions; they read
+`cancelled` and cannot be answered.
 
 Two things never to do: answer a `merge` decision (its only option is
 `park`, and parking a ticket at merge abandons a PR that is about to
@@ -180,9 +182,10 @@ dispatch resume 314cb7a1
 ```
 
 A parked ticket goes back to active and continues from its stage. Use
-it after the owner has fixed whatever the park reason named. Resuming
-a ticket parked for a reason you do not understand is the owner's
-call.
+it after the owner has fixed whatever the park reason named. A resumed
+ticket asks `rerun` again, under a new id, for each attempt that failed
+or was cancelled by the park; answer it to go on. Resuming a ticket
+parked for a reason you do not understand is the owner's call.
 
 ## Where things live
 

@@ -3055,7 +3055,7 @@ impl dispatch::port::Port for SocketFails {
 }
 
 #[test]
-fn a_park_answer_cut_off_at_its_first_request_is_finished_after_a_restart() {
+fn a_park_answer_cut_off_at_the_pause_is_finished_after_a_restart() {
     let mut env = Env::new();
     let id = at_finalize(&mut env);
     let decision = env.pending(&id)[0].id.clone();
@@ -3693,11 +3693,14 @@ fn without_a_hint_the_lanes_are_asked_and_the_answer_chooses() {
     );
     let now = env.tick();
     env.runner
-        .decide(&id, &rerun.id, "rerun", None, now)
+        .decide(&id, &rerun.id, "rerun", Some("keep it short"), now)
         .unwrap();
     env.steps_until(&id, "the rerun starting", |t, _| {
         plan_of(t, "frontend").n == 3
     });
+    // A rerun answer's own note goes at the end of the new prompt.
+    let prompt = last_prompt_of(&env, "planner");
+    assert!(prompt.ends_with("sent it back: keep it short"), "{prompt}");
     let t = env.ticket(&id);
     let latest = t
         .attempts_of("plan")
@@ -3707,6 +3710,19 @@ fn without_a_hint_the_lanes_are_asked_and_the_answer_chooses() {
     assert_eq!((latest.n, latest.is_open()), (3, true), "{t:#?}");
 }
 
+/// The workspace pipeline, on disk and in the ticket's copy, with a
+/// human `inspect` gate after `plan` in place of the review.
+fn inspect_instead_of_review(env: &Env, id: &str) {
+    let t = env.ticket(id);
+    let review = "[[stages]]\nname = \"review\"\nreview = \"reviewer\"\ncontext = \"each\"\nsubject = \"plan\"\ngate = { kind = \"external\", check = \"review-finalized\" }\n";
+    let inspect = "[[stages]]\nname = \"inspect\"\ncontext = \"each\"\ngate = { kind = \"human\", decision = \"inspect\" }\n";
+    for path in [env.data.pipeline("Orchard"), t.pipeline_file.clone()] {
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains(review), "{text}");
+        std::fs::write(&path, text.replace(review, inspect)).unwrap();
+    }
+}
+
 /// The plan attempt of one lane, by context.
 fn plan_of(t: &Ticket, ctx: &str) -> Attempt {
     t.attempts_of("plan")
@@ -3714,6 +3730,847 @@ fn plan_of(t: &Ticket, ctx: &str) -> Attempt {
         .max_by_key(|a| a.n)
         .unwrap()
         .clone()
+}
+
+// --- parking withdraws every question, and a resume asks afresh
+
+/// The Orchard ticket with both lanes' planners gone: two failed plan
+/// attempts and a pending `rerun` question about each.
+fn two_failed_plans() -> (Env, String) {
+    let (mut env, id) = workspace_env(&["type:bug"]);
+    let now = env.tick();
+    env.runner.step_project("Orchard", now).unwrap();
+    let t = env.ticket(&id);
+    let investigator = session_of(&t, "investigate");
+    std::fs::write(artifact_of(&t, "investigate", "notes"), "# notes").unwrap();
+    let now = env.now;
+    env.sb().stop(&investigator, now);
+    env.steps_until(&id, "the lanes question", |t, _| {
+        t.pending_decisions().iter().any(|d| d.name == "lanes")
+    });
+    let lanes = env.pending(&id).remove(0);
+    let now = env.tick();
+    env.runner
+        .decide(&id, &lanes.id, "backend, frontend", None, now)
+        .unwrap();
+    env.steps_until(&id, "a planner per lane", |t, _| {
+        t.attempts_of("plan").filter(|a| a.is_open()).count() == 2
+    });
+    let t = env.ticket(&id);
+    for ctx in ["backend", "frontend"] {
+        env.sb().remove(plan_of(&t, ctx).session.as_ref().unwrap());
+    }
+    env.steps_until(&id, "both plans failing", |t, _| {
+        t.attempts_of("plan")
+            .all(|a| matches!(a.state, AttemptState::Failed { .. }))
+            && t.pending_decisions().len() == 2
+    });
+    (env, id)
+}
+
+/// The pending `rerun` question about a lane's latest plan attempt.
+fn rerun_for(t: &Ticket, ctx: &str) -> Option<Decision> {
+    let n = plan_of(t, ctx).n;
+    t.pending_decisions()
+        .into_iter()
+        .find(|d| d.name == "rerun" && d.attempt == Some(("plan".to_owned(), n)))
+        .cloned()
+}
+
+/// The waiting requests on the ledger, oldest first.
+fn waiting_ops(t: &Ticket) -> Vec<dispatch::ticket::Operation> {
+    t.ledger
+        .iter()
+        .filter(|o| o.kind == "session.waiting")
+        .cloned()
+        .collect()
+}
+
+fn waiting_on(op: &dispatch::ticket::Operation) -> bool {
+    matches!(op.body, Some(Body::SessionWaiting { on: true, .. }))
+}
+
+/// The state of decision `id`.
+fn decision_state(t: &Ticket, id: &str) -> dispatch::ticket::DecisionState {
+    t.decisions
+        .iter()
+        .find(|d| d.id == id)
+        .unwrap()
+        .state
+        .clone()
+}
+
+/// Park the two-lane ticket from the backend's question, then resume it.
+fn parked_and_resumed() -> (Env, String, Vec<String>) {
+    let (mut env, id) = two_failed_plans();
+    let t = env.ticket(&id);
+    let parked_from = rerun_for(&t, "backend").unwrap();
+    let now = env.tick();
+    env.runner
+        .decide(&id, &parked_from.id, "park", None, now)
+        .unwrap();
+    let now = env.tick();
+    env.runner.step_project("Orchard", now).unwrap();
+    let t = env.ticket(&id);
+    assert!(matches!(t.state, TicketState::Parked { .. }), "{t:#?}");
+    let earlier: Vec<String> = t.decisions.iter().map(|d| d.id.clone()).collect();
+    let now = env.tick();
+    env.runner.resume(&id, now).unwrap();
+    (env, id, earlier)
+}
+
+#[test]
+fn parking_cancels_every_pending_decision_and_a_resume_asks_afresh() {
+    let (mut env, id) = two_failed_plans();
+    let t = env.ticket(&id);
+    let parked_from = rerun_for(&t, "backend").unwrap();
+    let other = rerun_for(&t, "frontend").unwrap();
+    let now = env.tick();
+    env.runner
+        .decide(&id, &parked_from.id, "park", None, now)
+        .unwrap();
+    let now = env.tick();
+    env.runner.step_project("Orchard", now).unwrap();
+    let t = env.ticket(&id);
+    assert!(
+        matches!(&t.state, TicketState::Parked { reason } if reason.contains("by hand")),
+        "{t:#?}"
+    );
+    assert!(t.pending_decisions().is_empty(), "{t:#?}");
+    assert!(
+        matches!(
+            decision_state(&t, &parked_from.id),
+            dispatch::ticket::DecisionState::Answered { answer, acted: true, .. } if answer == "park"
+        ),
+        "{t:#?}"
+    );
+    assert_eq!(
+        decision_state(&t, &other.id),
+        dispatch::ticket::DecisionState::Cancelled
+    );
+    let status = dispatch::serve::status(&env.runner).unwrap();
+    let orchard = status
+        .projects
+        .iter()
+        .find(|p| p.name == "Orchard")
+        .unwrap();
+    assert_eq!(orchard.pending, 0, "a parked ticket waits on no one");
+    let session = t.current_session().unwrap().clone();
+    assert!(!env.sb().waiting[&session].0, "the session is unmarked");
+    let last = waiting_ops(&t).pop().unwrap();
+    assert!(!waiting_on(&last) && last.reply.is_some(), "{last:#?}");
+    let now = env.tick();
+    let refused = env
+        .runner
+        .decide(&id, &other.id, "rerun", None, now)
+        .unwrap_err();
+    assert!(
+        refused.to_string().contains("has no pending decision"),
+        "{refused}"
+    );
+
+    // Resumed: the park answer is not acted on again, and each lane is
+    // asked afresh, under a new id. Nothing launches without an answer.
+    let earlier: Vec<String> = t.decisions.iter().map(|d| d.id.clone()).collect();
+    let sessions = env.sb().sessions.len();
+    let now = env.tick();
+    env.runner.resume(&id, now).unwrap();
+    for _ in 0..3 {
+        let now = env.tick();
+        env.runner.step_project("Orchard", now).unwrap();
+    }
+    let t = env.ticket(&id);
+    assert!(t.active(), "{t:#?}");
+    let asked = t.pending_decisions();
+    assert_eq!(asked.len(), 2, "{t:#?}");
+    for ctx in ["backend", "frontend"] {
+        let d = rerun_for(&t, ctx).unwrap_or_else(|| panic!("no rerun for {ctx}: {t:#?}"));
+        assert!(!earlier.contains(&d.id), "a new id: {}", d.id);
+        assert!(d.question.contains("failed"), "{}", d.question);
+    }
+    assert_eq!(t.attempts_of("plan").count(), 2, "{t:#?}");
+    assert_eq!(env.sb().sessions.len(), sessions);
+
+    // One lane's answer starts that lane; the other's question still
+    // holds only the other lane.
+    let backend = rerun_for(&t, "backend").unwrap();
+    let frontend = rerun_for(&t, "frontend").unwrap();
+    let now = env.tick();
+    env.runner
+        .decide(&id, &backend.id, "rerun", None, now)
+        .unwrap();
+    for _ in 0..2 {
+        let now = env.tick();
+        env.runner.step_project("Orchard", now).unwrap();
+    }
+    let t = env.ticket(&id);
+    let started = plan_of(&t, "backend");
+    assert_eq!((started.n, started.is_open()), (3, true), "{t:#?}");
+    assert_eq!(rerun_for(&t, "frontend").unwrap().id, frontend.id);
+    assert_eq!(plan_of(&t, "frontend").n, 2, "the other lane is untouched");
+    assert_eq!(t.attempts_of("plan").count(), 3);
+    assert_eq!(env.sb().sessions.len(), sessions + 1);
+}
+
+#[test]
+fn a_pass_cut_off_between_two_lanes_finishes_asking_on_the_next_pass() {
+    let (mut env, id, earlier) = parked_and_resumed();
+    let sessions = env.sb().sessions.len();
+    // A question is saved before its notes go out, so the pass ends
+    // with one lane asked and the other not looked at.
+    env.runner.port = Box::new(SocketFails {
+        inner: SharedPort(Arc::clone(&env.sb)),
+        kind: "session.notes",
+        fired: false,
+    });
+    let now = env.tick();
+    env.runner.step_project("Orchard", now).unwrap();
+    let t = env.ticket(&id);
+    let asked = t.pending_decisions();
+    assert_eq!(asked.len(), 1, "{t:#?}");
+    let first = rerun_for(&t, "backend").unwrap();
+    assert!(!earlier.contains(&first.id));
+    assert!(rerun_for(&t, "frontend").is_none());
+    let now = env.tick();
+    env.runner.step_project("Orchard", now).unwrap();
+    let t = env.ticket(&id);
+    assert_eq!(t.pending_decisions().len(), 2, "{t:#?}");
+    assert_eq!(rerun_for(&t, "backend").unwrap().id, first.id, "asked once");
+    let second = rerun_for(&t, "frontend").unwrap();
+    assert!(!earlier.contains(&second.id) && second.id != first.id);
+    assert_eq!(t.attempts_of("plan").count(), 2);
+    assert_eq!(env.sb().sessions.len(), sessions);
+}
+
+#[test]
+fn a_park_cut_off_after_its_intent_asks_nothing_and_unmarks_on_the_next_pass() {
+    let mut env = Env::new();
+    let id = at_finalize(&mut env);
+    let finalize = env.pending(&id)[0].clone();
+    // A second question open on the same ticket.
+    let mut t = env.ticket(&id);
+    let mut second = finalize.clone();
+    second.id = format!("d{}", t.decisions.len() + 1);
+    second.name = "paused".into();
+    t.decisions.push(second.clone());
+    let now = env.tick();
+    env.runner.save_ticket(&mut t, now).unwrap();
+    let now = env.tick();
+    env.runner
+        .decide(&id, &finalize.id, "park", None, now)
+        .unwrap();
+    // The unmark is written down and never delivered.
+    env.runner.port = Box::new(SocketFails {
+        inner: SharedPort(Arc::clone(&env.sb)),
+        kind: "session.waiting",
+        fired: false,
+    });
+    env.step();
+    let t = env.ticket(&id);
+    assert!(matches!(t.state, TicketState::Parking { .. }), "{t:#?}");
+    assert!(t.pending_decisions().is_empty(), "{t:#?}");
+    assert_eq!(
+        decision_state(&t, &second.id),
+        dispatch::ticket::DecisionState::Cancelled
+    );
+    assert!(matches!(
+        decision_state(&t, &finalize.id),
+        dispatch::ticket::DecisionState::Answered { answer, acted: true, .. } if answer == "park"
+    ));
+    let now = env.tick();
+    assert!(
+        env.runner
+            .decide(&id, &second.id, "continue", None, now)
+            .is_err()
+    );
+    let ops = waiting_ops(&t);
+    let unmark = ops.last().unwrap().clone();
+    assert!(
+        !waiting_on(&unmark) && unmark.reply.is_none(),
+        "{unmark:#?}"
+    );
+    let session = t.current_session().unwrap().clone();
+    assert!(env.sb().waiting[&session].0, "still marked");
+
+    // The next pass, no restart: the same operation, delivered.
+    env.step();
+    let t = env.ticket(&id);
+    let after = waiting_ops(&t);
+    assert_eq!(after.len(), ops.len(), "no second unmark written");
+    let last = after.last().unwrap();
+    assert_eq!(last.op, unmark.op);
+    assert!(last.reply.is_some());
+    assert!(!env.sb().waiting[&session].0);
+    assert!(matches!(t.state, TicketState::Parked { .. }), "{t:#?}");
+    assert!(matches!(env.sb().runs[0].state, RunState::Paused { .. }));
+    assert!(
+        env.sb()
+            .sessions
+            .iter()
+            .all(|s| s.liveness != Liveness::Running)
+    );
+    let calls = env.sb().calls.len();
+    env.step();
+    assert_eq!(env.sb().calls.len(), calls, "Parked is quiet");
+}
+
+#[test]
+fn a_parking_record_with_pending_decisions_withdraws_and_unmarks() {
+    let mut env = Env::new();
+    let id = at_finalize(&mut env);
+    let finalize = env.pending(&id)[0].id.clone();
+    // Parking, with its question still pending and the session still
+    // marked.
+    let mut t = env.ticket(&id);
+    t.state = TicketState::Parking {
+        reason: "parked by hand".into(),
+    };
+    let now = env.tick();
+    env.runner.save_ticket(&mut t, now).unwrap();
+    let session = t.current_session().unwrap().clone();
+    assert!(env.sb().waiting[&session].0);
+    env.restart();
+    env.step();
+    let t = env.ticket(&id);
+    assert!(matches!(t.state, TicketState::Parked { .. }), "{t:#?}");
+    assert_eq!(
+        t.decisions.iter().find(|d| d.id == finalize).unwrap().state,
+        dispatch::ticket::DecisionState::Cancelled
+    );
+    assert!(!env.sb().waiting[&session].0);
+}
+
+#[test]
+fn an_unanswered_mark_is_resolved_before_the_unmark_and_stays_off_after_a_restart() {
+    let mut env = Env::new();
+    let id = at_finalize(&mut env);
+    // As `park` would leave it just after its intent, with the reply to
+    // the finalize question's mark lost.
+    let mut t = env.ticket(&id);
+    t.state = TicketState::Parking {
+        reason: "parked by hand".into(),
+    };
+    let d = t.decisions.iter_mut().find(|d| d.pending()).unwrap();
+    d.state = dispatch::ticket::DecisionState::Answered {
+        answer: "park".into(),
+        note: None,
+        by: dispatch::scheduler::BY_HAND.into(),
+        at_ms: env.now,
+        acted: true,
+    };
+    let mark = t
+        .ledger
+        .iter_mut()
+        .rev()
+        .find(|o| o.kind == "session.waiting" && waiting_on(o))
+        .unwrap();
+    mark.reply = None;
+    let mark = mark.op.clone();
+    let now = env.tick();
+    env.runner.save_ticket(&mut t, now).unwrap();
+    let session = t.current_session().unwrap().clone();
+    let before = waiting_ops(&t).len();
+    // No restart, whose recovery would replay it first: the replay
+    // inside parking is the request that fails.
+    env.runner.port = Box::new(SocketFails {
+        inner: SharedPort(Arc::clone(&env.sb)),
+        kind: "session.waiting",
+        fired: false,
+    });
+    env.step();
+    let t = env.ticket(&id);
+    assert!(matches!(t.state, TicketState::Parking { .. }), "{t:#?}");
+    let ops = waiting_ops(&t);
+    let replayed = ops.iter().find(|o| o.op == mark).unwrap();
+    assert!(replayed.reply.is_none() && replayed.error.is_some());
+    assert_eq!(ops.len(), before, "the unmark waits for the mark");
+
+    env.step();
+    let t = env.ticket(&id);
+    let ops = waiting_ops(&t);
+    let at = ops.iter().position(|o| o.op == mark).unwrap();
+    assert!(ops[at].reply.is_some(), "answered under its own id");
+    assert_eq!(ops.len(), at + 2, "{ops:#?}");
+    assert!(!waiting_on(&ops[at + 1]) && ops[at + 1].reply.is_some());
+    assert!(ops.iter().all(|o| o.reply.is_some()));
+    assert!(!env.sb().waiting[&session].0);
+    assert!(matches!(t.state, TicketState::Parked { .. }), "{t:#?}");
+
+    let sent = env.sb().kinds_called("session.waiting");
+    env.restart();
+    env.step();
+    assert_eq!(
+        env.sb().kinds_called("session.waiting"),
+        sent,
+        "recovery sends nothing"
+    );
+    assert!(!env.sb().waiting[&session].0, "the mark stays off");
+    assert!(matches!(env.ticket(&id).state, TicketState::Parked { .. }));
+}
+
+#[test]
+fn a_waiting_request_without_its_body_does_not_hold_parking() {
+    let mut env = Env::new();
+    let id = at_finalize(&mut env);
+    // Parking, with a mark whose reply was lost and whose body was
+    // never recorded: it cannot be sent again.
+    let mut t = env.ticket(&id);
+    t.state = TicketState::Parking {
+        reason: "parked by hand".into(),
+    };
+    let mark = t
+        .ledger
+        .iter_mut()
+        .rev()
+        .find(|o| o.kind == "session.waiting" && waiting_on(o))
+        .unwrap();
+    mark.reply = None;
+    mark.body = None;
+    let mark = mark.op.clone();
+    let now = env.tick();
+    env.runner.save_ticket(&mut t, now).unwrap();
+    env.step();
+    let t = env.ticket(&id);
+    assert!(matches!(t.state, TicketState::Parked { .. }), "{t:#?}");
+    let op = t.ledger.iter().find(|o| o.op == mark).unwrap();
+    assert!(op.reply.is_none(), "left alone: {op:#?}");
+}
+
+#[test]
+fn a_resumed_ticket_is_asked_again_with_every_slot_taken() {
+    let (mut env, id, earlier) = parked_and_resumed();
+    let path = env.data.pipeline("Orchard");
+    let text = std::fs::read_to_string(&path)
+        .unwrap()
+        .replace("slots = 2\n", "slots = 0\n");
+    std::fs::write(&path, text).unwrap();
+    let sessions = env.sb().sessions.len();
+    let now = env.tick();
+    env.runner.step_project("Orchard", now).unwrap();
+    let t = env.ticket(&id);
+    for ctx in ["backend", "frontend"] {
+        let d = rerun_for(&t, ctx).unwrap_or_else(|| panic!("no rerun for {ctx}: {t:#?}"));
+        assert!(!earlier.contains(&d.id), "a new id: {}", d.id);
+    }
+    assert_eq!(t.attempts_of("plan").count(), 2);
+    assert_eq!(env.sb().sessions.len(), sessions, "nothing launched");
+}
+
+/// A request that can never be answered (lost without its body) does
+/// not keep a ticket without a slot from being asked again.
+#[test]
+fn a_resumed_ticket_with_a_dead_request_is_asked_again_with_every_slot_taken() {
+    let (mut env, id, earlier) = parked_and_resumed();
+    let path = env.data.pipeline("Orchard");
+    let text = std::fs::read_to_string(&path)
+        .unwrap()
+        .replace("slots = 2\n", "slots = 0\n");
+    std::fs::write(&path, text).unwrap();
+    let mut t = env.ticket(&id);
+    let dead = t
+        .ledger
+        .iter_mut()
+        .rev()
+        .find(|o| o.kind == "session.waiting")
+        .unwrap();
+    dead.reply = None;
+    dead.body = None;
+    let now = env.tick();
+    env.runner.save_ticket(&mut t, now).unwrap();
+    let sessions = env.sb().sessions.len();
+    let now = env.tick();
+    env.runner.step_project("Orchard", now).unwrap();
+    let t = env.ticket(&id);
+    for ctx in ["backend", "frontend"] {
+        let d = rerun_for(&t, ctx).unwrap_or_else(|| panic!("no rerun for {ctx}: {t:#?}"));
+        assert!(!earlier.contains(&d.id), "a new id: {}", d.id);
+    }
+    assert_eq!(env.sb().sessions.len(), sessions, "nothing launched");
+}
+
+/// A request whose reply was lost and may not be repeated is asked
+/// about once, and a `park` answer to it parks with every slot taken.
+#[test]
+fn a_resumed_ticket_with_a_lost_unrepeatable_request_is_asked_once_and_parks_unslotted() {
+    let (mut env, id, _) = parked_and_resumed();
+    let path = env.data.pipeline("Orchard");
+    let text = std::fs::read_to_string(&path)
+        .unwrap()
+        .replace("slots = 2\n", "slots = 0\n");
+    std::fs::write(&path, text).unwrap();
+    let mut t = env.ticket(&id);
+    let n = plan_of(&t, "backend").n;
+    let mut lost = t.ledger.last().unwrap().clone();
+    lost.op = format!("{id}-lost");
+    lost.class = "non-replayable".into();
+    lost.attempt = Some(("plan".into(), n));
+    lost.reply = None;
+    lost.error = None;
+    lost.asked = false;
+    t.ledger.push(lost);
+    let now = env.tick();
+    env.runner.save_ticket(&mut t, now).unwrap();
+    let lost_sends = |t: &Ticket| -> Vec<Decision> {
+        t.decisions
+            .iter()
+            .filter(|d| d.name == "lost-send")
+            .cloned()
+            .collect()
+    };
+    for _ in 0..2 {
+        let now = env.tick();
+        env.runner.step_project("Orchard", now).unwrap();
+    }
+    let t = env.ticket(&id);
+    let asked = lost_sends(&t);
+    assert_eq!(asked.len(), 1, "asked once: {t:#?}");
+    assert!(rerun_for(&t, "backend").is_none(), "the question holds it");
+    assert!(rerun_for(&t, "frontend").is_some(), "{t:#?}");
+    let now = env.tick();
+    env.runner
+        .decide(&id, &asked[0].id, "park", None, now)
+        .unwrap();
+    let now = env.tick();
+    env.runner.step_project("Orchard", now).unwrap();
+    let t = env.ticket(&id);
+    assert!(
+        matches!(&t.state, TicketState::Parked { reason } if reason.contains("lost-send")),
+        "{t:#?}"
+    );
+    assert_eq!(lost_sends(&t).len(), 1, "not asked again: {t:#?}");
+}
+
+/// A `rerun` answer still waiting for a slot when a `park` answer parks
+/// the ticket is withdrawn with the questions: the resume asks about
+/// its lane afresh and launches nothing on the old answer.
+#[test]
+fn an_answer_waiting_for_a_slot_is_withdrawn_by_an_unslotted_park() {
+    let (mut env, id) = two_failed_plans();
+    let path = env.data.pipeline("Orchard");
+    let full = std::fs::read_to_string(&path).unwrap();
+    std::fs::write(&path, full.replace("slots = 2\n", "slots = 0\n")).unwrap();
+    let t = env.ticket(&id);
+    let waiting = rerun_for(&t, "frontend").unwrap();
+    let parked_from = rerun_for(&t, "backend").unwrap();
+    let now = env.tick();
+    env.runner
+        .decide(&id, &waiting.id, "rerun", None, now)
+        .unwrap();
+    let now = env.tick();
+    env.runner.step_project("Orchard", now).unwrap();
+    assert!(
+        env.ticket(&id)
+            .decisions
+            .iter()
+            .any(|d| d.id == waiting.id && d.unacted_answer() == Some("rerun")),
+        "the answer waits for a slot"
+    );
+    let now = env.tick();
+    env.runner
+        .decide(&id, &parked_from.id, "park", None, now)
+        .unwrap();
+    let now = env.tick();
+    env.runner.step_project("Orchard", now).unwrap();
+    let t = env.ticket(&id);
+    assert!(matches!(t.state, TicketState::Parked { .. }), "{t:#?}");
+    assert_eq!(
+        decision_state(&t, &waiting.id),
+        dispatch::ticket::DecisionState::Cancelled
+    );
+    let earlier: Vec<String> = t.decisions.iter().map(|d| d.id.clone()).collect();
+    let sessions = env.sb().sessions.len();
+    let now = env.tick();
+    env.runner.resume(&id, now).unwrap();
+    let now = env.tick();
+    env.runner.step_project("Orchard", now).unwrap();
+    let t = env.ticket(&id);
+    for ctx in ["backend", "frontend"] {
+        let d = rerun_for(&t, ctx).unwrap_or_else(|| panic!("no rerun for {ctx}: {t:#?}"));
+        assert!(!earlier.contains(&d.id), "a new id: {}", d.id);
+    }
+    // With slots free again, the old answer still launches nothing.
+    std::fs::write(&path, &full).unwrap();
+    let now = env.tick();
+    env.runner.step_project("Orchard", now).unwrap();
+    let t = env.ticket(&id);
+    assert_eq!(t.attempts_of("plan").count(), 2, "{t:#?}");
+    assert_eq!(env.sb().sessions.len(), sessions, "nothing launched");
+}
+
+/// Two answers before one pass with slots free: the lower-indexed
+/// lane's `rerun` is acted on first (its attempt retired, the answer
+/// marked acted), then the other's `park` parks the ticket. The acted
+/// rerun has not launched its replacement, so the park withdraws it:
+/// the resume asks both lanes afresh and launches nothing.
+#[test]
+fn a_rerun_acted_before_a_park_in_the_same_pass_launches_nothing() {
+    let (mut env, id) = two_failed_plans();
+    let t = env.ticket(&id);
+    let mut asked = [
+        rerun_for(&t, "backend").unwrap(),
+        rerun_for(&t, "frontend").unwrap(),
+    ];
+    let index = |d: &Decision| t.decisions.iter().position(|x| x.id == d.id).unwrap();
+    asked.sort_by_key(index);
+    let [rerun, parked_from] = asked;
+    let now = env.tick();
+    env.runner
+        .decide(&id, &rerun.id, "rerun", None, now)
+        .unwrap();
+    let now = env.tick();
+    env.runner
+        .decide(&id, &parked_from.id, "park", None, now)
+        .unwrap();
+    let now = env.tick();
+    env.runner.step_project("Orchard", now).unwrap();
+    let t = env.ticket(&id);
+    assert!(matches!(t.state, TicketState::Parked { .. }), "{t:#?}");
+    assert_eq!(
+        decision_state(&t, &rerun.id),
+        dispatch::ticket::DecisionState::Cancelled
+    );
+    let earlier: Vec<String> = t.decisions.iter().map(|d| d.id.clone()).collect();
+    let sessions = env.sb().sessions.len();
+    let now = env.tick();
+    env.runner.resume(&id, now).unwrap();
+    let now = env.tick();
+    env.runner.step_project("Orchard", now).unwrap();
+    let t = env.ticket(&id);
+    for ctx in ["backend", "frontend"] {
+        let d = rerun_for(&t, ctx).unwrap_or_else(|| panic!("no rerun for {ctx}: {t:#?}"));
+        assert!(!earlier.contains(&d.id), "a new id: {}", d.id);
+    }
+    assert_eq!(t.attempts_of("plan").count(), 2, "{t:#?}");
+    assert_eq!(env.sb().sessions.len(), sessions, "nothing launched");
+}
+
+/// A note at `inspect` sends one lane back, and the other lane's
+/// `inspect` is answered `park` in the same pass: the park drops the
+/// note before a planner carries it, so the resume asks about the
+/// sent-back plan, quoting the note, and launches nothing. Answered
+/// `rerun`, the new planner's prompt ends with the note.
+#[test]
+fn a_send_back_acted_before_a_park_in_the_same_pass_launches_nothing() {
+    let (mut env, id) = workspace_env(&["type:bug"]);
+    inspect_instead_of_review(&env, &id);
+    let now = env.tick();
+    env.runner.step_project("Orchard", now).unwrap();
+    let t = env.ticket(&id);
+    let investigator = session_of(&t, "investigate");
+    std::fs::write(artifact_of(&t, "investigate", "notes"), "# notes").unwrap();
+    let now = env.now;
+    env.sb().stop(&investigator, now);
+    env.steps_until(&id, "the lanes question", |t, _| {
+        t.pending_decisions().iter().any(|d| d.name == "lanes")
+    });
+    let lanes = env.pending(&id).remove(0);
+    let now = env.tick();
+    env.runner
+        .decide(&id, &lanes.id, "backend, frontend", None, now)
+        .unwrap();
+    env.steps_until(&id, "a planner per lane", |t, _| {
+        t.attempts_of("plan").filter(|a| a.is_open()).count() == 2
+    });
+    let t = env.ticket(&id);
+    for ctx in ["backend", "frontend"] {
+        let a = plan_of(&t, ctx);
+        env.finish(
+            a.session.as_ref().unwrap(),
+            &a.artifacts["plan"],
+            &format!("# {ctx} plan"),
+        );
+    }
+    env.steps_until(&id, "an inspect question per lane", |t, _| {
+        t.pending_decisions()
+            .iter()
+            .filter(|d| d.name == "inspect")
+            .count()
+            == 2
+    });
+    let t = env.ticket(&id);
+    let asked: Vec<Decision> = t
+        .pending_decisions()
+        .into_iter()
+        .filter(|d| d.name == "inspect")
+        .cloned()
+        .collect();
+    let [sent_back, parked_from] = <[Decision; 2]>::try_from(asked).unwrap();
+    let lane = t
+        .attempts
+        .iter()
+        .find(|a| Some((a.stage.clone(), a.n)) == sent_back.attempt)
+        .unwrap()
+        .context
+        .clone();
+    let now = env.tick();
+    env.runner
+        .decide(
+            &id,
+            &sent_back.id,
+            "rerun",
+            Some("use a set, not a vec"),
+            now,
+        )
+        .unwrap();
+    let now = env.tick();
+    env.runner
+        .decide(&id, &parked_from.id, "park", None, now)
+        .unwrap();
+    let sessions = env.sb().sessions.len();
+    let now = env.tick();
+    env.runner.step_project("Orchard", now).unwrap();
+    let t = env.ticket(&id);
+    assert!(matches!(t.state, TicketState::Parked { .. }), "{t:#?}");
+    assert!(t.rework.is_empty(), "the note was dropped: {:?}", t.rework);
+    assert!(matches!(
+        plan_of(&t, &lane).state,
+        AttemptState::Cancelled { .. }
+    ));
+    let now = env.tick();
+    env.runner.resume(&id, now).unwrap();
+    let now = env.tick();
+    env.runner.step_project("Orchard", now).unwrap();
+    let t = env.ticket(&id);
+    let d = rerun_for(&t, &lane).unwrap_or_else(|| panic!("no rerun for {lane}: {t:#?}"));
+    assert!(
+        d.question.contains("use a set, not a vec"),
+        "{}",
+        d.question
+    );
+    assert_eq!(t.attempts_of("plan").count(), 2, "{t:#?}");
+    assert_eq!(env.sb().sessions.len(), sessions, "nothing launched");
+    // Answered `rerun`, the replacement carries the quoted note.
+    let now = env.tick();
+    env.runner.decide(&id, &d.id, "rerun", None, now).unwrap();
+    env.steps_until(&id, "a new planner", |t, _| {
+        t.attempts_of("plan").count() == 3
+    });
+    let prompt = last_prompt_of(&env, "planner");
+    assert!(
+        prompt.ends_with("sent it back: use a set, not a vec"),
+        "{prompt}"
+    );
+    assert!(env.ticket(&id).rework.is_empty());
+}
+
+/// Failing at the checks past `max_reruns` parks without a question,
+/// and the resume still offers the checks again.
+#[test]
+fn a_resume_after_failed_checks_past_max_reruns_offers_check_again() {
+    let mut env = Env::new();
+    let (id, implementer) = at_implement(&mut env);
+    let t = env.ticket(&id);
+    for path in [env.data.pipeline(PROJECT), t.pipeline_file.clone()] {
+        let text = std::fs::read_to_string(&path)
+            .unwrap()
+            .replace("waiting_on_me = 3\n", "waiting_on_me = 3\nmax_reruns = 0\n");
+        std::fs::write(&path, text).unwrap();
+    }
+    implementer_stops(&mut env, &id, &implementer);
+    env.steps_until(&id, "the checks starting", |t, _| {
+        t.attempts_of("implement")
+            .last()
+            .is_some_and(|a| a.gate.is_some())
+    });
+    let key = format!("{id}/implement/1");
+    env.repo.lock().unwrap().check_exits.insert(key, 1);
+    env.steps_until(&id, "parked", |t, _| {
+        matches!(t.state, TicketState::Parked { .. })
+    });
+    let t = env.ticket(&id);
+    assert!(
+        !t.decisions.iter().any(|d| d.name == "rerun"),
+        "the park asked nothing: {t:#?}"
+    );
+    let now = env.tick();
+    env.runner.resume(&id, now).unwrap();
+    env.steps_until(&id, "the question again", |t, _| {
+        !t.pending_decisions().is_empty()
+    });
+    let again = env.pending(&id).remove(0);
+    assert_eq!(again.options, vec!["rerun", "check", "park"]);
+}
+
+#[test]
+fn a_resume_after_failed_checks_offers_check_again() {
+    let mut env = Env::new();
+    let (id, implementer) = at_implement(&mut env);
+    implementer_stops(&mut env, &id, &implementer);
+    env.steps_until(&id, "the checks starting", |t, _| {
+        t.attempts_of("implement")
+            .last()
+            .is_some_and(|a| a.gate.is_some())
+    });
+    let key = format!("{id}/implement/1");
+    env.repo.lock().unwrap().check_exits.insert(key.clone(), 1);
+    env.steps_until(&id, "the failure", |t, _| {
+        t.attempts_of("implement")
+            .last()
+            .is_some_and(|a| matches!(a.state, AttemptState::Failed { .. }))
+    });
+    let first = env.pending(&id).remove(0);
+    let now = env.tick();
+    env.runner
+        .decide(&id, &first.id, "park", None, now)
+        .unwrap();
+    env.steps_until(&id, "parked", |t, _| {
+        matches!(t.state, TicketState::Parked { .. })
+    });
+    let now = env.tick();
+    env.runner.resume(&id, now).unwrap();
+    env.steps_until(&id, "the question again", |t, _| {
+        !t.pending_decisions().is_empty()
+    });
+    let again = env.pending(&id).remove(0);
+    assert_ne!(again.id, first.id);
+    assert!(again.question.contains("failed: "), "{}", again.question);
+    assert_eq!(again.options, vec!["rerun", "check", "park"]);
+    // The flake is gone; the checks pass on the same attempt.
+    env.repo.lock().unwrap().check_exits.insert(key, 0);
+    let now = env.tick();
+    env.runner
+        .decide(&id, &again.id, "check", None, now)
+        .unwrap();
+    env.steps_until(&id, "the checks passing", |t, _| {
+        t.attempts_of("implement")
+            .last()
+            .is_some_and(|a| a.state == AttemptState::Complete)
+    });
+    assert_eq!(env.ticket(&id).attempts_of("implement").count(), 1);
+    assert_eq!(env.sb().sessions_named("implementer").len(), 1);
+}
+
+#[test]
+fn a_resume_after_a_cancelled_attempt_quotes_its_reason() {
+    let mut env = Env::new();
+    let id = at_finalize(&mut env);
+    let finalize = env.pending(&id)[0].id.clone();
+    let now = env.tick();
+    env.runner
+        .decide(&id, &finalize, "park", None, now)
+        .unwrap();
+    env.steps_until(&id, "parked", |t, _| {
+        matches!(t.state, TicketState::Parked { .. })
+    });
+    let t = env.ticket(&id);
+    let cancelled = t.attempts.iter().rev().find_map(|a| match &a.state {
+        AttemptState::Cancelled { reason } => Some(reason.clone()),
+        _ => None,
+    });
+    let reason = cancelled.expect("the park cancels the open attempt");
+    let now = env.tick();
+    env.runner.resume(&id, now).unwrap();
+    env.steps_until(&id, "the question again", |t, _| {
+        !t.pending_decisions().is_empty()
+    });
+    let again = env.pending(&id).remove(0);
+    assert_eq!(again.name, "rerun");
+    assert!(
+        again.question.contains(&format!("was cancelled: {reason}")),
+        "{}",
+        again.question
+    );
+    assert_eq!(again.options, vec!["rerun", "park"]);
 }
 
 // --- the code review stage

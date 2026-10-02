@@ -138,8 +138,10 @@ pub enum AttemptState {
     Failed {
         reason: String,
     },
-    /// Stopped by Dispatch (the ticket parked, or a rerun replaced it);
-    /// no decision follows.
+    /// Stopped by Dispatch (the ticket parked, a rerun replaced it, or
+    /// a later gate sent the work back). Nothing is asked when it stops;
+    /// as a context's latest attempt after a resume, it is asked about
+    /// again with a `rerun` decision that quotes the reason.
     Cancelled {
         reason: String,
     },
@@ -201,6 +203,10 @@ pub struct Attempt {
     /// is allowed.
     #[serde(default)]
     pub extra_pass: bool,
+    /// Its last failure was at the stage's checks, so asking about it
+    /// again offers `check` too.
+    #[serde(default)]
+    pub failed_at_checks: bool,
     pub started_ms: u64,
     pub ended_ms: Option<u64>,
 }
@@ -390,6 +396,17 @@ impl Decision {
         self.state == DecisionState::Pending
     }
 
+    /// A `rerun` answer to a `rerun` question, acted on: the replaced
+    /// attempt is confirmed gone and its replacement may launch.
+    #[must_use]
+    pub fn acted_rerun(&self) -> bool {
+        self.name == "rerun"
+            && matches!(
+                &self.state,
+                DecisionState::Answered { answer, acted: true, .. } if answer == "rerun"
+            )
+    }
+
     /// The answer given and not yet acted on.
     #[must_use]
     pub fn unacted_answer(&self) -> Option<&str> {
@@ -428,6 +445,18 @@ pub struct Operation {
     pub reply: Option<Reply>,
     /// The socket failed before a reply came; recovery decides.
     pub error: Option<String>,
+    /// Its reply was lost and it may not be sent again, so the user was
+    /// asked what to do; recovery leaves it to that question.
+    #[serde(default)]
+    pub asked: bool,
+}
+
+impl Operation {
+    /// Whether recovery still has to resolve it.
+    #[must_use]
+    pub fn unresolved(&self) -> bool {
+        self.reply.is_none() && !self.asked
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -598,6 +627,7 @@ mod tests {
             pr: None,
             rounds: Vec::new(),
             extra_pass: false,
+            failed_at_checks: false,
             started_ms: 0,
             ended_ms: None,
         };

@@ -24,7 +24,7 @@ impl Runner {
                 .ledger
                 .iter()
                 .enumerate()
-                .filter(|(_, o)| o.reply.is_none())
+                .filter(|(_, o)| o.unresolved())
                 .map(|(i, _)| i)
                 .collect();
             for i in pending {
@@ -121,6 +121,8 @@ impl Runner {
             "idempotent" => self.replay(t, ps, i),
             _ => {
                 t.ledger[i].error = Some("reply lost; not repeated".into());
+                // Asked once: the answer, not another pass, settles it.
+                t.ledger[i].asked = true;
                 let stage = op.attempt.as_ref().map_or("?", |(s, _)| s.as_str());
                 self.ensure_decision(
                     t,
@@ -147,7 +149,12 @@ impl Runner {
     /// An idempotent operation is sent again as itself: Switchboard
     /// answers from its log if it ran, and runs it now if it did not,
     /// and either is right. A failure now leaves it for the next pass.
-    fn replay(&mut self, t: &mut Ticket, ps: &mut crate::ticket::ProjectState, i: usize) {
+    pub(crate) fn replay(
+        &mut self,
+        t: &mut Ticket,
+        ps: &mut crate::ticket::ProjectState,
+        i: usize,
+    ) {
         let op = t.ledger[i].clone();
         let Some(body) = op.body else {
             t.ledger[i].error = Some("reply lost; harmless to repeat".into());
