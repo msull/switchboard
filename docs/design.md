@@ -1565,12 +1565,17 @@ an answer from the terminal is never overwritten by a pass that read
 the record before it; a second `dispatch run` on the same directory is
 refused by `runner.lock`. Every request keeps its body in the ledger,
 so a lost reply to an idempotent one (`workflow.finalize`,
-`session.kill`, `set.sync`) is sent again as the same operation. An
+`session.kill`, `set.sync`) is sent again as the same operation; a
+lost reply to a non-replayable one (`session.send`,
+`workflow.continue`) is a `lost-send` question asked once, since its
+ledger entry is marked asked and recovery skips it from then on. An
 attempt with no launch on the books fails rather than waits. Parking
 and a rerun follow the design's cancellation sequence: the intent is
-written (for parking, with every pending decision on the ticket
-cancelled in the same write, and the session's waiting mark then
-cleared and read back), the review run paused and read back as paused,
+written (for parking, with every pending decision on the ticket and
+every answer not yet acted on cancelled in the same write, so a
+`rerun` answer left waiting for a slot neither launches on the resume
+nor keeps its context from being asked again, and the session's
+waiting mark then cleared and read back), the review run paused and read back as paused,
 every process killed and read back as gone, and only then does the
 ticket read as parked or the rerun's answer count as acted (which is
 what lets the replacement start); the sequence runs from the saved
@@ -1579,8 +1584,10 @@ resumed ticket asks `rerun` again, under a new id and without waiting
 for a slot, about each failed or cancelled attempt with no rerun
 question in flight, with the attempt's own reason and the options its
 failure first had; a pending decision holds its stage only in the
-context it is about. An answer's acted mark reaches disk only with its
-action's first write (the parking state, the ledger entry, the lane
+context it is about. With every slot taken, a `park` answer is still
+acted on, since parking launches nothing; any other answer waits for a
+slot. An answer's acted mark reaches disk only with its action's
+first write (the parking state, the ledger entry, the lane
 record), so a stop leaves an answer either still unacted or with a
 durable intent. A record's backup is a hard link, so its primary is
 never absent mid-write. The reviewer's templates get `{worktree}`,
