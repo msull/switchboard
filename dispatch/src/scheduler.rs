@@ -952,9 +952,10 @@ impl Runner {
     /// `t.rework` (`start_agent` takes it off only with the attempt that
     /// carries it), so `sent_back` would launch on it. Kept, either
     /// would launch on the resume and keep its context from being asked
-    /// afresh. A withdrawn note is not lost to the user: the sent-back
-    /// attempt's cancellation reason quotes it, and the resume's `rerun`
-    /// question quotes that reason.
+    /// afresh. A withdrawn note is not lost: the sent-back attempt's
+    /// cancellation reason quotes it, the resume's `rerun` question
+    /// quotes that reason, and a `rerun` answer to it puts the note back
+    /// (`rerun_note`).
     fn withdraw_open_decisions(t: &mut Ticket) -> bool {
         let unlaunched: Vec<bool> = t
             .decisions
@@ -1109,7 +1110,8 @@ impl Runner {
                     self.send_back(t, ps, p, name, attempt.as_ref(), note, now_ms)?;
                 }
                 ("rerun", "rerun") => {
-                    if !self.retire_replaced(t, ps, i, attempt.as_ref(), now_ms)? {
+                    let note = rerun_note(t, p, i);
+                    if !self.retire_replaced(t, ps, i, attempt.as_ref(), note, now_ms)? {
                         continue;
                     }
                 }
@@ -1152,13 +1154,16 @@ impl Runner {
 
     /// A rerun's replaced attempt is retired first, so an old and a new
     /// attempt never run together; still alive, the answer stays
-    /// unacted for the next pass (false). Gone, the answer is acted.
+    /// unacted for the next pass (false). Gone, the answer is acted,
+    /// and a `note` for the replacement's prompt goes onto `t.rework`
+    /// in the same write, so the launch `may_rerun` allows carries it.
     fn retire_replaced(
         &mut self,
         t: &mut Ticket,
         ps: &mut ProjectState,
         decision: usize,
         attempt: Option<&(String, u32)>,
+        note: Option<(String, String)>,
         now_ms: u64,
     ) -> Result<bool> {
         if let Some(a) = attempt
@@ -1172,6 +1177,9 @@ impl Runner {
         }
         if let DecisionState::Answered { acted, .. } = &mut t.decisions[decision].state {
             *acted = true;
+        }
+        if let Some((key, note)) = note {
+            t.rework.insert(key, note);
         }
         self.save_ticket(t, now_ms)?;
         self.unmark(t, ps, now_ms)?;
@@ -2075,7 +2083,7 @@ impl Runner {
         };
         let target = p.stages[back_to].name.clone();
         let note = note.unwrap_or_else(|| format!("sent back from {from} without a note"));
-        let reason = format!("sent back from {from}: {note}");
+        let reason = format!("{SENT_BACK_FROM}{from}: {note}");
         let record = attempt_mut(t, &gate);
         record.state = AttemptState::Cancelled {
             reason: reason.clone(),
@@ -4085,6 +4093,36 @@ fn recheck_pr(t: &mut Ticket, attempt: Option<&(String, u32)>) {
     {
         pr.checked_ms = 0;
     }
+}
+
+/// How a sent-back attempt's cancellation reason starts; the gate's
+/// name and the note follow, as `send_back` writes them.
+const SENT_BACK_FROM: &str = "sent back from ";
+
+/// The note a `rerun` answer, on decision `decision`, gives its attempt's
+/// replacement, under its `rework` key: the answer's own note, else the
+/// one a send-back gave the attempt, quoted by its cancellation reason,
+/// which a park took off `t.rework` before any attempt carried it. Only
+/// an agent stage's prompt takes a note.
+fn rerun_note(t: &Ticket, p: &Pipeline, decision: usize) -> Option<(String, String)> {
+    let d = &t.decisions[decision];
+    let (stage, n) = d.attempt.as_ref()?;
+    if p.stages.iter().find(|s| &s.name == stage)?.kind() != StageKind::Agent {
+        return None;
+    }
+    let replaced = t.attempts.iter().find(|a| &a.stage == stage && a.n == *n)?;
+    let own = match &d.state {
+        DecisionState::Answered { note, .. } => note.clone(),
+        _ => None,
+    };
+    let note = own.or_else(|| match &replaced.state {
+        AttemptState::Cancelled { reason } => reason
+            .strip_prefix(SENT_BACK_FROM)
+            .and_then(|rest| rest.split_once(": "))
+            .map(|(_, note)| note.to_owned()),
+        _ => None,
+    })?;
+    Some((rework_key(stage, &replaced.context), note))
 }
 
 /// The key a sent-back note is kept under.

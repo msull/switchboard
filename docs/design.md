@@ -1608,7 +1608,8 @@ cancelled in the same write: a pending one, an answer not yet acted
 on, an acted `rerun` whose replacement has not launched, and a human
 gate's send-back note not yet carried by an attempt, so no answer
 given before the park launches on the resume or keeps its context
-from being asked again; the session's waiting mark is then cleared
+from being asked again, while a `rerun` answer to the resume's
+question puts the quoted note back; the session's waiting mark is then cleared
 and read back), the review run paused and read back as paused, every
 process killed and read back as gone, and only then does the ticket
 read as parked or the rerun's answer count as acted (which is what

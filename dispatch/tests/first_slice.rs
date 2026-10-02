@@ -3693,11 +3693,14 @@ fn without_a_hint_the_lanes_are_asked_and_the_answer_chooses() {
     );
     let now = env.tick();
     env.runner
-        .decide(&id, &rerun.id, "rerun", None, now)
+        .decide(&id, &rerun.id, "rerun", Some("keep it short"), now)
         .unwrap();
     env.steps_until(&id, "the rerun starting", |t, _| {
         plan_of(t, "frontend").n == 3
     });
+    // A rerun answer's own note goes at the end of the new prompt.
+    let prompt = last_prompt_of(&env, "planner");
+    assert!(prompt.ends_with("sent it back: keep it short"), "{prompt}");
     let t = env.ticket(&id);
     let latest = t
         .attempts_of("plan")
@@ -3705,6 +3708,19 @@ fn without_a_hint_the_lanes_are_asked_and_the_answer_chooses() {
         .max_by_key(|a| a.n)
         .unwrap();
     assert_eq!((latest.n, latest.is_open()), (3, true), "{t:#?}");
+}
+
+/// The workspace pipeline, on disk and in the ticket's copy, with a
+/// human `inspect` gate after `plan` in place of the review.
+fn inspect_instead_of_review(env: &Env, id: &str) {
+    let t = env.ticket(id);
+    let review = "[[stages]]\nname = \"review\"\nreview = \"reviewer\"\ncontext = \"each\"\nsubject = \"plan\"\ngate = { kind = \"external\", check = \"review-finalized\" }\n";
+    let inspect = "[[stages]]\nname = \"inspect\"\ncontext = \"each\"\ngate = { kind = \"human\", decision = \"inspect\" }\n";
+    for path in [env.data.pipeline("Orchard"), t.pipeline_file.clone()] {
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains(review), "{text}");
+        std::fs::write(&path, text.replace(review, inspect)).unwrap();
+    }
 }
 
 /// The plan attempt of one lane, by context.
@@ -4331,18 +4347,12 @@ fn a_rerun_acted_before_a_park_in_the_same_pass_launches_nothing() {
 /// A note at `inspect` sends one lane back, and the other lane's
 /// `inspect` is answered `park` in the same pass: the park drops the
 /// note before a planner carries it, so the resume asks about the
-/// sent-back plan, quoting the note, and launches nothing.
+/// sent-back plan, quoting the note, and launches nothing. Answered
+/// `rerun`, the new planner's prompt ends with the note.
 #[test]
 fn a_send_back_acted_before_a_park_in_the_same_pass_launches_nothing() {
     let (mut env, id) = workspace_env(&["type:bug"]);
-    let t = env.ticket(&id);
-    let review = "[[stages]]\nname = \"review\"\nreview = \"reviewer\"\ncontext = \"each\"\nsubject = \"plan\"\ngate = { kind = \"external\", check = \"review-finalized\" }\n";
-    let inspect = "[[stages]]\nname = \"inspect\"\ncontext = \"each\"\ngate = { kind = \"human\", decision = \"inspect\" }\n";
-    for path in [env.data.pipeline("Orchard"), t.pipeline_file.clone()] {
-        let text = std::fs::read_to_string(&path).unwrap();
-        assert!(text.contains(review), "{text}");
-        std::fs::write(&path, text.replace(review, inspect)).unwrap();
-    }
+    inspect_instead_of_review(&env, &id);
     let now = env.tick();
     env.runner.step_project("Orchard", now).unwrap();
     let t = env.ticket(&id);
@@ -4429,6 +4439,18 @@ fn a_send_back_acted_before_a_park_in_the_same_pass_launches_nothing() {
     );
     assert_eq!(t.attempts_of("plan").count(), 2, "{t:#?}");
     assert_eq!(env.sb().sessions.len(), sessions, "nothing launched");
+    // Answered `rerun`, the replacement carries the quoted note.
+    let now = env.tick();
+    env.runner.decide(&id, &d.id, "rerun", None, now).unwrap();
+    env.steps_until(&id, "a new planner", |t, _| {
+        t.attempts_of("plan").count() == 3
+    });
+    let prompt = last_prompt_of(&env, "planner");
+    assert!(
+        prompt.ends_with("sent it back: use a set, not a vec"),
+        "{prompt}"
+    );
+    assert!(env.ticket(&id).rework.is_empty());
 }
 
 /// Failing at the checks past `max_reruns` parks without a question,

@@ -317,7 +317,8 @@ with every open decision on the ticket cancelled in the same write:
 a pending one, an answer not yet acted on (a `rerun` still waiting for
 a slot), an acted `rerun` whose replacement has not launched, and a
 gate's send-back note no attempt has carried yet (the resume asks
-`rerun` about that context, quoting the note);
+`rerun` about that context, quoting the note, and answered `rerun`
+the note goes back into the next attempt's prompt);
 clear the session's waiting mark and read it back; pause any review
 run (`workflow.pause`) so its tick cannot start a round; kill
 everything on the ticket's process list that is still alive, including
@@ -362,9 +363,11 @@ the attempt bound to the head. `rerun` with a note sends that context
 back: the gate's attempt and the nearest earlier agent stage's result
 for that context are cancelled, the ticket stands at that stage
 again, and the note goes at the end of the next attempt's prompt as
-what the user said; other contexts keep their results. A gate with
-`confirm = true` is "you did this": its answers are `done` and
-`park`, and it is never answered automatically.
+what the user said; other contexts keep their results. A `rerun`
+answer to an agent stage's `rerun` question carries its own note the
+same way, and without one, the note that sent the attempt back. A
+gate with `confirm = true` is "you did this": its answers are `done`
+and `park`, and it is never answered automatically.
 What follows a merge on your side (a rebundle, a mirror backup) is
 outside Dispatch's definition of done and is named in the decision's
 text as a reminder, not verified.
@@ -1426,7 +1429,7 @@ and one against the real one:
 | Every slot is taken when a ticket with a lost reply to an unrepeatable request is resumed | One `lost-send` question, which holds its lane while the other lane is asked; asked once, not again on later passes or after its answer; `park` parks without a slot (`a_resumed_ticket_with_a_lost_unrepeatable_request_is_asked_once_and_parks_unslotted`) |
 | A lane's `rerun` is answered with every slot taken, then the other lane's question is answered `park` | The waiting answer is cancelled with the parking intent; the resume asks both lanes afresh, and with slots free again the old answer launches nothing (`an_answer_waiting_for_a_slot_is_withdrawn_by_an_unslotted_park`) |
 | Two lanes' `rerun` questions are answered `rerun` and `park` before one pass, with slots free | The `rerun` is acted on first, then the `park` cancels it with the parking intent before its replacement launches; the resume asks both lanes afresh and launches nothing (`a_rerun_acted_before_a_park_in_the_same_pass_launches_nothing`) |
-| Two lanes' `inspect` questions are answered `rerun` with a note and `park` before one pass, with slots free | The send-back is acted on first, then the `park` drops its note with the parking intent before an implementer carries it; the resume asks `rerun` about that lane's sent-back attempt, quoting the note, and launches nothing (`a_send_back_acted_before_a_park_in_the_same_pass_launches_nothing`) |
+| Two lanes' `inspect` questions are answered `rerun` with a note and `park` before one pass, with slots free | The send-back is acted on first, then the `park` drops its note with the parking intent before an implementer carries it; the resume asks `rerun` about that lane's sent-back attempt, quoting the note, and launches nothing; answered `rerun`, the new attempt's prompt ends with the note (`a_send_back_acted_before_a_park_in_the_same_pass_launches_nothing`) |
 | A ticket parked over failed checks is resumed | The question offers `rerun`, `check` and `park` again; `check` passes on the same attempt with no agent (`a_resume_after_failed_checks_offers_check_again`) |
 | A ticket parked over failed checks past `max_reruns` is resumed | The park asked nothing, but the resume's question still offers `rerun`, `check` and `park`: the attempt keeps that it failed at the checks (`a_resume_after_failed_checks_past_max_reruns_offers_check_again`) |
 | A ticket parked mid-attempt is resumed | The question quotes the attempt's own cancellation reason (`a_resume_after_a_cancelled_attempt_quotes_its_reason`) |
