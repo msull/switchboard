@@ -87,18 +87,31 @@ pub fn show(cx: &mut DrawCtx<'_>, ui: &mut Ui) {
                         .is_some_and(|t| shown(&t.project))
                 })
                 .collect();
-            theme::section(ui, "Waiting on you");
-            if pending.is_empty() && agents.is_empty() {
-                ui.label(theme::meta_text(ui, "Nothing waits on you."));
-            }
-            for d in &pending {
-                let ticket = tickets.iter().find(|t| t.id == d.ticket).cloned();
-                decision_card(cx, ui, d, ticket.as_ref(), true);
-            }
-            for a in &agents {
-                let ticket = tickets.iter().find(|t| t.id == a.ticket).cloned();
-                agent_card(cx, ui, a, ticket.as_ref());
-            }
+            // A few questions are shown in full; a pile of them folds
+            // behind its count, so the table is not pushed off the
+            // page, and the fold is remembered for the window's life.
+            let waiting = pending.len() + agents.len();
+            let heading = if waiting == 0 {
+                "Waiting on you".to_owned()
+            } else {
+                format!("Waiting on you · {waiting}")
+            };
+            egui::CollapsingHeader::new(RichText::new(heading).text_style(theme::kicker_style()))
+                .id_salt("dispatch-waiting")
+                .default_open(waiting <= 3)
+                .show(ui, |ui| {
+                    if waiting == 0 {
+                        ui.label(theme::meta_text(ui, "Nothing waits on you."));
+                    }
+                    for d in &pending {
+                        let ticket = tickets.iter().find(|t| t.id == d.ticket).cloned();
+                        decision_card(cx, ui, d, ticket.as_ref(), true);
+                    }
+                    for a in &agents {
+                        let ticket = tickets.iter().find(|t| t.id == a.ticket).cloned();
+                        agent_card(cx, ui, a, ticket.as_ref());
+                    }
+                });
 
             theme::section(ui, "Tickets");
             project_limits(ui, projects.iter().filter(|p| shown(&p.name)));
