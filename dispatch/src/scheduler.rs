@@ -4563,8 +4563,7 @@ impl Runner {
                 .iter()
                 .filter_map(|id| r.load_ticket(id).ok())
                 .collect();
-            if let Err(e) = crate::view::sync_queue(r, &mut ps, project, &refreshed, None, now_ms)
-            {
+            if let Err(e) = crate::view::sync_queue(r, &mut ps, project, &refreshed, None, now_ms) {
                 log::warn!("queue view: {e}");
             }
             r.save_project(&ps)
