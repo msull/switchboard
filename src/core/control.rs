@@ -169,6 +169,10 @@ impl AppCore {
         use wire::RecordKind as K;
         match action {
             ControlAction::AddProject { space, name, root } => {
+                if space.is_global() {
+                    self.error("the global workspace holds no projects");
+                    return Vec::new();
+                }
                 if self.space(space).is_none() {
                     self.error("no such space");
                     return Vec::new();
@@ -277,7 +281,8 @@ impl AppCore {
                 vec![made(K::Space, id.0)]
             }
             ControlAction::NewSet { space, name } => {
-                if self.space(space).is_none() {
+                // A set in the global space may hold cards from any space.
+                if !space.is_global() && self.space(space).is_none() {
                     self.error("no such space");
                     return Vec::new();
                 }
@@ -450,6 +455,8 @@ impl AppCore {
             .collect()
     }
 
+    /// The spaces, then the global space marked as a view, so every set
+    /// `set.new` can make is reachable by walking this list.
     #[must_use]
     pub fn space_views(&self) -> Vec<wire::SpaceView> {
         self.views
@@ -459,7 +466,14 @@ impl AppCore {
                 id: s.id.0.to_string(),
                 name: s.name.clone(),
                 op: s.op.clone(),
+                view: false,
             })
+            .chain(std::iter::once(wire::SpaceView {
+                id: SpaceId::GLOBAL.0.to_string(),
+                name: SpaceId::GLOBAL_NAME.to_owned(),
+                op: None,
+                view: true,
+            }))
             .collect()
     }
 

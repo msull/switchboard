@@ -540,8 +540,11 @@ pub struct WindowFrame {
 /// Schema of `views.json`, bumped like [`SCHEMA_VERSION`] when a type
 /// below changes shape. v2 gave every set an id; a v1 file reads with
 /// fresh ids. v3 added spaces and put every set in one; a v2 file
-/// reads with everything in the default space.
-pub const VIEWS_SCHEMA_VERSION: u32 = 4;
+/// reads with everything in the default space. v5 added the global
+/// space's fixed id to `WorkingSet.space`; a v4 file reads unchanged.
+/// The bump keeps an older build, which would move a global set into a
+/// real space and prune its cards, from rewriting such a file.
+pub const VIEWS_SCHEMA_VERSION: u32 = 5;
 
 /// Switchboard's own id for a space. Never reused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -552,9 +555,31 @@ impl SpaceId {
     /// from before spaces existed read as its members without a step.
     pub const DEFAULT: Self = Self(Uuid::from_u128(1));
 
+    /// Every space at once: a view, never a record in `Views.spaces`.
+    /// A set in it may hold cards from any space; no project is ever in it.
+    pub const GLOBAL: Self = Self(Uuid::from_u128(2));
+
+    /// What the UI calls [`SpaceId::GLOBAL`]. A label only: no name
+    /// resolves to the global space.
+    pub const GLOBAL_NAME: &'static str = "Everywhere";
+
     #[must_use]
     pub fn new() -> Self {
         Self(Uuid::new_v4())
+    }
+
+    /// Whether this is [`SpaceId::GLOBAL`], the view of every space,
+    /// never a record.
+    #[must_use]
+    pub fn is_global(self) -> bool {
+        self == Self::GLOBAL
+    }
+
+    /// Whether working in this space shows things of `space`: itself, or
+    /// everything when this is the global space.
+    #[must_use]
+    pub fn contains(self, space: SpaceId) -> bool {
+        self.is_global() || self == space
     }
 }
 
@@ -567,8 +592,10 @@ impl Default for SpaceId {
 /// What the UI calls a workspace: the top level, owning projects and
 /// working sets, each of which is in exactly one. The rail shows one
 /// space at a time and nothing of the others, so a shared screen gives
-/// away only the one being worked in. (`Workspace` is the older name of
-/// a project's record, which this does not replace.)
+/// away only the one being worked in, except in [`SpaceId::GLOBAL`],
+/// which lifts that boundary on purpose and names every space.
+/// (`Workspace` is the older name of a project's record, which this
+/// does not replace.)
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Space {
     pub id: SpaceId,

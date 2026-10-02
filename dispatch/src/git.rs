@@ -725,12 +725,9 @@ mod tests {
         let origin = dir.path().join("origin");
         std::fs::create_dir_all(&origin).unwrap();
         let og = |args: &[&str]| {
-            let out = Command::new("git")
-                .arg("-C")
-                .arg(&origin)
-                .args(args)
-                .output()
-                .unwrap();
+            // `git()`, not a bare `Command`: run from a hook, the hook's
+            // `GIT_DIR` would point these at the repository being committed.
+            let out = git().arg("-C").arg(&origin).args(args).output().unwrap();
             assert!(
                 out.status.success(),
                 "{args:?}: {}",
@@ -774,7 +771,7 @@ mod tests {
         let other = dir.path().join("other");
         std::fs::create_dir_all(&other).unwrap();
         let other_git = |args: &[&str]| {
-            let ok = Command::new("git")
+            let ok = git()
                 .arg("-C")
                 .arg(&other)
                 .args(args)

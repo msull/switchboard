@@ -397,6 +397,11 @@ pub struct SpaceView {
     pub id: String,
     pub name: String,
     pub op: Option<String>,
+    /// The global space: a view of every space rather than a record. It
+    /// holds sets (`set.new`, `sets`) but no projects, and cannot be
+    /// renamed or removed. Its id is fixed.
+    #[serde(default)]
+    pub view: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -816,6 +821,7 @@ mod tests {
                     id: "sp".into(),
                     name: "D".into(),
                     op: Some("o".into()),
+                    view: false,
                 }],
             },
             Reply::Sets {

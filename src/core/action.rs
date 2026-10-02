@@ -132,6 +132,13 @@ pub enum AppAction {
         name: String,
         root: PathBuf,
     },
+    /// `AddProject` into a named space, which must be a real one: what
+    /// the add dialog sends while the global space is active.
+    AddProjectTo {
+        name: String,
+        root: PathBuf,
+        space: SpaceId,
+    },
     RemoveProject(ProjectId),
     RenameProject(ProjectId, String),
     /// Move a session record into another project's workspace. The
@@ -750,6 +757,11 @@ pub struct AppCore {
     pub(super) store_loaded: bool,
     pub(super) reconciled: bool,
     pub(super) settings: Settings,
+    /// The space settings.json holds while the core works in the global
+    /// space only because views came from a newer build: saves write
+    /// this one, so that build reopens where it was left. Cleared once
+    /// the user changes space.
+    pub(super) saved_space: Option<SpaceId>,
     /// Agents without hooks (Codex) whose pane has been quiet for a
     /// while, per the last host poll: shown idle instead of working.
     pub(super) quiet: Vec<RecordId>,
@@ -884,8 +896,15 @@ impl AppCore {
             | AppAction::RoundFilesRemoved { .. } => self.workflow_action(action, now, &mut out),
 
             AppAction::AddProject { name, root } => {
-                let space = self.settings.space;
+                let space = self.add_project_space();
                 self.add_project(name, root, space, now, &mut out);
+            }
+            AppAction::AddProjectTo { name, root, space } => {
+                if self.space(space).is_some() {
+                    self.add_project(name, root, space, now, &mut out);
+                } else {
+                    self.error("a project goes into a workspace of its own");
+                }
             }
             AppAction::RemoveProject(id) => self.remove_project(id, now, &mut out),
 
@@ -1179,13 +1198,16 @@ impl AppCore {
         self.update_views(out, |v| *v = next);
     }
 
-    /// The target exists and its project is in `space`.
+    /// The target exists and its project is in `space`, or anywhere
+    /// when `space` is the global one.
     pub(super) fn target_in(&self, target: &PinTarget, space: SpaceId) -> bool {
         let project = match target {
             PinTarget::Session(id) => self.session(*id).map(|s| s.project),
             PinTarget::File(pid, _) => Some(*pid),
         };
-        project.and_then(|p| self.project_space(p)) == Some(space)
+        project
+            .and_then(|p| self.project_space(p))
+            .is_some_and(|s| space.contains(s))
     }
 
     /// Keep `settings.last_view` equal to the screen showing, whatever
@@ -1340,8 +1362,8 @@ impl AppCore {
             self.edit_project(id, out, |p| p.last_active = now.wall);
         }
         // Showing something is an explicit step into its space.
-        if let Some(space) = self.view_space(&view)
-            && space != self.settings.space
+        if !self.view_shown_in(self.settings.space, &view)
+            && let Some(space) = self.view_space(&view)
         {
             self.update_settings(out, |s| s.space = space);
         }
@@ -1365,6 +1387,18 @@ impl AppCore {
         }
     }
 
+    /// Whether `view` belongs on screen while `space` is active. A
+    /// working set belongs to exactly one space, global's included; a
+    /// page of a project (board, session, workflow) shows anywhere
+    /// [`SpaceId::contains`] says its project's space is.
+    pub(super) fn view_shown_in(&self, space: SpaceId, view: &View) -> bool {
+        match (view, self.view_space(view)) {
+            (_, None) => true,
+            (View::WorkingSet(_), Some(s)) => s == space,
+            (_, Some(s)) => space.contains(s),
+        }
+    }
+
     /// Work in a space that exists: the setting changes, and a page of
     /// another space gives way to the switchboard.
     fn enter_space(&mut self, id: SpaceId, out: &mut Out) {
@@ -1372,7 +1406,7 @@ impl AppCore {
             self.update_settings(out, |s| s.space = id);
         }
         let view = self.view();
-        if self.view_space(&view).is_some_and(|s| s != id) {
+        if !self.view_shown_in(id, &view) {
             self.view_stack.push(View::Switchboard);
         }
     }
@@ -1381,7 +1415,7 @@ impl AppCore {
     fn space_action(&mut self, action: AppAction, out: &mut Out) {
         match action {
             AppAction::ShowSpace(id) => {
-                if self.space(id).is_some() {
+                if id.is_global() || self.space(id).is_some() {
                     self.enter_space(id, out);
                 }
             }
@@ -1400,8 +1434,11 @@ impl AppCore {
                 self.enter_space(id, out);
             }
             AppAction::RenameSpace(id, name) => {
+                // The global space is no record and has no name to change.
+                // It is refused by name, so the rule does not rest on the
+                // lookup below happening to miss.
                 let name = name.trim().to_owned();
-                if !name.is_empty() {
+                if !name.is_empty() && !id.is_global() {
                     self.update_views(out, |v| {
                         if let Some(s) = v.spaces.iter_mut().find(|s| s.id == id) {
                             s.name = name;
@@ -1410,7 +1447,7 @@ impl AppCore {
                 }
             }
             AppAction::DeleteSpace(id) => {
-                if !self.space_empty(id) || self.views.spaces.len() < 2 {
+                if id.is_global() || !self.space_empty(id) || self.views.spaces.len() < 2 {
                     return;
                 }
                 self.update_views(out, |v| v.spaces.retain(|s| s.id != id));
@@ -1429,7 +1466,7 @@ impl AppCore {
                 }
             }
             AppAction::MoveSetToSpace(set, space) => {
-                if self.space(space).is_some() {
+                if self.space(space).is_some() && self.set_movable(set) {
                     self.update_set(out, set, |s| s.space = space);
                     self.prune_working_set(out);
                     self.enter_space(self.settings.space, out);
@@ -1860,20 +1897,108 @@ impl AppCore {
     }
 
     /// Whether the UI may show this project at all: it is in the space
-    /// being worked in.
+    /// being worked in, or the global space is.
     #[must_use]
     pub fn project_visible(&self, id: ProjectId) -> bool {
-        self.project_space(id) == Some(self.settings.space)
+        self.project_space(id)
+            .is_some_and(|s| self.settings.space.contains(s))
     }
 
-    /// Workspaces the UI may show, in stored order: the active space's.
+    /// Workspaces the UI may show, in stored order: the active space's,
+    /// or every one in the global space.
     pub fn visible_workspaces(&self) -> impl Iterator<Item = &Workspace> {
         self.workspaces
             .iter()
-            .filter(|w| w.project.space == self.settings.space)
+            .filter(|w| self.settings.space.contains(w.project.space))
     }
 
-    /// The working sets of the active space, in the user's order.
+    /// Whether the space menu offers the global space. With one space
+    /// and no global set it is that space over again, so it is left out,
+    /// unless it is where the user already is or the only way to reach
+    /// a project whose space this build does not list.
+    #[must_use]
+    pub fn global_space_offered(&self) -> bool {
+        self.settings.space.is_global()
+            || self.views.spaces.len() > 1
+            || self.views.sets.iter().any(|s| s.space.is_global())
+            || self.views.schema_version > super::model::VIEWS_SCHEMA_VERSION
+            || self
+                .workspaces
+                .iter()
+                .any(|w| self.space(w.project.space).is_none())
+    }
+
+    /// The space `AddProject` puts a project in: the active one, or in
+    /// the global space, which holds no project, the first listed. The
+    /// add dialog preselects it.
+    #[must_use]
+    pub fn add_project_space(&self) -> SpaceId {
+        match self.settings.space {
+            SpaceId::GLOBAL => self.views.spaces.first().map_or(SpaceId::DEFAULT, |s| s.id),
+            space => space,
+        }
+    }
+
+    /// Whether the switcher searches every space: when asked to, or
+    /// always in the global space, which already sees everything.
+    #[must_use]
+    pub fn switcher_covers_all(&self, all_spaces: bool) -> bool {
+        all_spaces || self.settings.space.is_global()
+    }
+
+    /// Whether the switcher offers to search every space: only where it
+    /// does not already, and there is another space to search.
+    #[must_use]
+    pub fn switcher_offers_all(&self) -> bool {
+        !self.settings.space.is_global() && self.views.spaces.len() > 1
+    }
+
+    /// Visible projects in the rail's order, which Cmd+1..9 count: most
+    /// recently active first, and in the global space grouped by space
+    /// in the user's order of spaces, so the digits count the list as
+    /// drawn.
+    #[must_use]
+    pub fn projects_in_rail_order(&self) -> Vec<&Project> {
+        let mut projects: Vec<_> = self.visible_workspaces().map(|w| &w.project).collect();
+        if self.settings.space.is_global() {
+            // Spaces this build does not list (views from a newer one)
+            // share one group after the listed ones.
+            let rank = |space: SpaceId| {
+                self.views
+                    .spaces
+                    .iter()
+                    .position(|s| s.id == space)
+                    .unwrap_or(usize::MAX)
+            };
+            projects.sort_by_key(|p| (rank(p.space), std::cmp::Reverse(p.last_active)));
+        } else {
+            projects.sort_by_key(|p| std::cmp::Reverse(p.last_active));
+        }
+        projects
+    }
+
+    /// [`Self::projects_in_rail_order`] cut where the space changes: in
+    /// the global space one group per listed space, then one `None`
+    /// group for every space this build does not list. Outside global
+    /// it is a single group. The rail draws a kicker per group, and the
+    /// digits count across the groups, so both read the one order.
+    #[must_use]
+    pub fn projects_in_rail_groups(&self) -> Vec<(Option<&Space>, Vec<&Project>)> {
+        let mut groups: Vec<(Option<&Space>, Vec<&Project>)> = Vec::new();
+        for project in self.projects_in_rail_order() {
+            let space = self.space(project.space);
+            match groups.last_mut() {
+                Some((last, projects)) if last.map(|s| s.id) == space.map(|s| s.id) => {
+                    projects.push(project);
+                }
+                _ => groups.push((space, vec![project])),
+            }
+        }
+        groups
+    }
+
+    /// The working sets of the active space, in the user's order. The
+    /// global space lists only its own sets, not every space's.
     pub fn visible_working_sets(&self) -> impl Iterator<Item = &WorkingSet> {
         self.views
             .sets
@@ -1907,13 +2032,14 @@ impl AppCore {
         !self.workspaces.iter().any(|w| w.project.space == id)
             && !self.views.sets.iter().any(|s| s.space == id)
     }
-    /// Sessions waiting on the user in one space: the switcher's count
-    /// per space, a number and nothing more.
+    /// Sessions waiting on the user in one space (every space, for the
+    /// global one): the switcher's count per space, a number and nothing
+    /// more. Dispatch's decisions keep their own count.
     #[must_use]
     pub fn waiting_count_in(&self, space: SpaceId) -> usize {
         self.workspaces
             .iter()
-            .filter(|w| w.project.space == space)
+            .filter(|w| space.contains(w.project.space))
             .flat_map(|w| &w.sessions)
             .filter(|s| self.counts_as_waiting(s.id))
             .count()
@@ -2077,9 +2203,16 @@ impl AppCore {
         let mut next = self.settings.clone();
         change(&mut next);
         if next != self.settings {
+            if next.space != self.settings.space {
+                self.saved_space = None;
+            }
             self.settings = next;
             if !self.read_only {
-                out.push(Effect::SaveSettings(self.settings.clone()));
+                let mut saved = self.settings.clone();
+                if let Some(space) = self.saved_space {
+                    saved.space = space;
+                }
+                out.push(Effect::SaveSettings(saved));
             }
         }
     }
@@ -2227,6 +2360,28 @@ impl AppCore {
     #[must_use]
     pub fn notice(&self) -> Option<&Notice> {
         self.notices.first()
+    }
+    /// Whether `set` exists and may move to another space. A global set
+    /// may not: moved out, it would lose its cards from every other
+    /// space. The set header offers the move only when this is true.
+    #[must_use]
+    pub fn set_movable(&self, set: SetId) -> bool {
+        self.working_set(set).is_some_and(|s| !s.space.is_global())
+    }
+    /// The oldest notice as the active space may show it: one about a
+    /// space it does not contain says only [`Notice::ELSEWHERE`], so no
+    /// name crosses the space boundary. The global space contains every
+    /// space and shows every notice as written.
+    #[must_use]
+    pub fn notice_shown(&self) -> Option<Notice> {
+        let mut notice = self.notice()?.clone();
+        if notice
+            .space
+            .is_some_and(|s| !self.settings.space.contains(s))
+        {
+            Notice::ELSEWHERE.clone_into(&mut notice.text);
+        }
+        Some(notice)
     }
     #[must_use]
     pub fn notices(&self) -> &[Notice] {

@@ -6,7 +6,7 @@
 use crate::core::action::{AppCore, Clock, Effect, FlightKind, Out, View};
 use crate::core::model::{
     AgentKind, Launch, ProjectId, RUNS_KEPT, RecordId, Run, SavedView, SessionKind, SessionRecord,
-    Space, SpaceId,
+    Space, SpaceId, VIEWS_SCHEMA_VERSION,
 };
 use crate::ports::host::{HostId, HostStatus, Liveness, SpawnSpec};
 use crate::ports::store::{Loaded, StoreError};
@@ -57,13 +57,31 @@ impl AppCore {
     /// A file from before spaces lists none, and a record may name a
     /// space that is gone: the default space is put back, records in
     /// no listed space go to the first, and the active space must exist.
+    /// The global space is no record but may be active and hold sets; a
+    /// project in it (only a hand edit puts one there) goes to the first.
+    ///
+    /// A views file from a newer build reads with no spaces, so every
+    /// space looks gone. Then no record is moved, since saving the move
+    /// would lose its space for good once the newer build is back; the
+    /// global space is worked in instead, so every project still shows.
     fn ensure_spaces(&mut self, out: &mut Out) {
+        let newer = self.views.schema_version > VIEWS_SCHEMA_VERSION;
         if self.views.spaces.is_empty() {
             self.update_views(out, |v| v.spaces.push(Space::default_space()));
         }
         let known: Vec<SpaceId> = self.views.spaces.iter().map(|s| s.id).collect();
         let first = known[0];
-        if !known.contains(&self.settings.space) {
+        let known_or_global = |s: &SpaceId| s.is_global() || known.contains(s);
+        if newer {
+            // Working in global is for this run only: settings.json keeps
+            // the space the newer build left, since that build knows it.
+            if !self.settings.space.is_global() {
+                self.saved_space = Some(self.settings.space);
+                self.settings.space = SpaceId::GLOBAL;
+            }
+            return;
+        }
+        if !known_or_global(&self.settings.space) {
             self.update_settings(out, |s| s.space = first);
         }
         let lost: Vec<ProjectId> = self
@@ -75,10 +93,10 @@ impl AppCore {
         for pid in lost {
             self.edit_project(pid, out, |p| p.space = first);
         }
-        if self.views.sets.iter().any(|s| !known.contains(&s.space)) {
+        if self.views.sets.iter().any(|s| !known_or_global(&s.space)) {
             self.update_views(out, |v| {
                 for s in &mut v.sets {
-                    if !known.contains(&s.space) {
+                    if !known_or_global(&s.space) {
                         s.space = first;
                     }
                 }
@@ -101,10 +119,7 @@ impl AppCore {
             SavedView::Workflow(id) if self.workflow(id).is_some() => View::Workflow(id),
             _ => return,
         };
-        if self
-            .view_space(&view)
-            .is_some_and(|s| s != self.settings.space)
-        {
+        if !self.view_shown_in(self.settings.space, &view) {
             return;
         }
         self.view_stack.push(view);

@@ -5,6 +5,13 @@ set -e
 
 export PATH="$HOME/.cargo/bin:$PATH"
 
+# Git runs hooks with GIT_DIR and GIT_INDEX_FILE pointing at the
+# repository being committed. A test that runs git in a fixture directory
+# would act on this repository instead, so none of them reach the tests.
+for var in $(env | sed -n 's/^\(GIT_[A-Za-z0-9_]*\)=.*/\1/p'); do
+    unset "$var"
+done
+
 echo "pre-commit: cargo fmt"
 cargo fmt --all --check
 

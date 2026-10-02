@@ -75,6 +75,7 @@ impl FakeSwitchboard {
                 id: "space-default".into(),
                 name: "Default".into(),
                 op: None,
+                view: false,
             }],
             ..Self::default()
         }
@@ -189,6 +190,7 @@ impl FakeSwitchboard {
                     id: id.clone(),
                     name: name.clone(),
                     op: Some(op.into()),
+                    view: false,
                 });
                 (
                     vec![Made {

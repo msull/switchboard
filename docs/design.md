@@ -1335,25 +1335,27 @@ move on.
 
 The top level. A workspace (`Space` in the code, since `Workspace` is
 the older name of a project's record) owns projects and working sets,
-each of which is in exactly one, and the rail shows one workspace at a
-time: its working sets, its projects, its "All sessions". The point is
-a boundary as much as a grouping: with a screen shared, nothing on
-screen names anything from another workspace unless the selector is
-opened. So the quick switcher searches the active workspace only, with
-an "All workspaces" checkbox that is off each time it opens; Cmd+1..9
-count the active workspace's projects; a working set holds cards from
-its own workspace only (moving a project out of a workspace drops its
-cards from that workspace's sets); a notice about a record in another
-workspace shows as "Something in another workspace needs you", with no
-name; and the rail's count is the active workspace's, while the Dock
-badge counts every workspace, so a waiting agent elsewhere still gets
-through. The selector is the active workspace's name at the top of the
+each of which is in exactly one, and outside Everywhere (the global
+workspace, below) the rail shows one workspace at a time: its working
+sets, its projects, its "All sessions". The point is a boundary as much
+as a grouping: with a screen shared, nothing on screen names anything
+from another workspace unless the selector is opened or Everywhere is
+active, which lifts the boundary on purpose. Outside Everywhere, then,
+the quick switcher searches the active workspace only, with an "All
+workspaces" checkbox that is off each time it opens; Cmd+1..9 count the
+active workspace's projects; a working set holds cards from its own
+workspace only, except a set made in Everywhere, which holds any
+(moving a project out of a workspace drops its cards from that
+workspace's sets); a notice about a record in another workspace shows
+as "Something in another workspace needs you", with no name; and the
+rail's count is the active workspace's, while the Dock badge counts
+every workspace, so a waiting agent elsewhere still gets through. The selector is the active workspace's name at the top of the
 rail: a menu of every workspace with its waiting count, then New,
 Rename, and Delete (only an empty workspace that is not the last).
 "Move to" on a project's board and a working set's header moves it,
 offered only when another workspace exists.
 
-Records: `Views.spaces` lists the workspaces (views.json v3), and
+Records: `Views.spaces` lists the workspaces (views.json, v5 today), and
 `Project.space` (records v8) and `WorkingSet.space` name each thing's
 workspace, defaulting to the fixed id of the default workspace, so
 files from before workspaces read as members of it with no step. The
@@ -1365,6 +1367,36 @@ stay open across a switch: they were opened on purpose, and nothing
 lists them outside their workspace. Exclusive mode is superseded: its
 setting and action stay for older files, but the checkbox and the
 filtering are gone.
+
+The global workspace. A workspace is a boundary, and the global
+workspace takes it away when the user asks: it is a view that stands
+for every workspace together, not a record. Its id is fixed
+(`SpaceId::GLOBAL`, `00000000-0000-0000-0000-000000000002`); it is
+never listed in `Views.spaces`, holds no projects, and cannot be
+renamed, deleted, or moved into, but it can be the active workspace.
+While it is, the rail lists every workspace's projects under their
+workspace names, "All sessions" covers them all, the quick switcher
+searches everything without its checkbox, and a notice names its
+record. Working sets made there belong to it and may hold cards from
+any workspace; moving a project between workspaces leaves them alone,
+and a global set has no "Move to". It lists only its own sets. A
+project added while it is active goes to the workspace picked in the
+add dialog (`AppAction::AddProjectTo`). The Dock badge already counted
+every workspace and is unchanged; it still differs from the rail's
+"All sessions" count by Dispatch's decisions, which keep their own row.
+Nothing new is stored: `Settings.space` and `WorkingSet.space` may hold
+the fixed id, and views.json went to v5 only so an older build, which
+would move a global set into a real workspace and prune its cards,
+refuses to read or rewrite the file.
+
+The downgrade is not lossless. A build from before Everywhere reads a
+v5 views.json as having no workspaces and sends every project to the
+default workspace, saving each record (records are still v8, which it
+writes). views.json itself survives, so on returning the workspaces and
+their sets are back, but projects outside the default workspace must be
+moved back by hand. From this build on, a views file newer than the
+build moves no project: the build works in Everywhere instead, so a
+later bump does not repeat the loss.
 
 ## Side panel position (2026-09-22)
 
@@ -1588,6 +1620,27 @@ first agent in each lane's worktree blocks on that dialog until it is
 answered in the pane once (a plain directory under a trusted parent
 inherits the trust; a fresh repository does not). Nothing in
 Switchboard or Dispatch writes Claude's trust file.
+
+## Global workspace status (2026-10-01)
+
+Built: `SpaceId::GLOBAL` and `SpaceId::contains` in the core, the rehydration
+that keeps a global active workspace and global sets (and sends a project
+hand-edited into global to the first workspace), the refusals (rename,
+delete, move into, move a global set out, a project added into it from
+the window or the control port), "◇ Everywhere" first in the selector
+when more than one workspace or any global set exists, while it is
+active, or while a project's workspace is unlisted (views.json from a
+newer build, where the core works in Everywhere for the run without
+saving that choice), the rail grouped by workspace with unlisted ones
+under "Other workspaces" (Cmd+1..9 count it as drawn), the add dialog's
+workspace choice, notices named, the switcher without its checkbox, the
+`workspace-global` script line, and `set.new` accepting the fixed id on
+the control port, whose `spaces` reply lists it last with `view: true`
+so a client walking the spaces finds every set it can make. views.json
+is v5.
+
+Known gap: a real workspace's sets are not listed in global, so a set
+of one workspace is reached by switching to it.
 
 ## Open questions
 

@@ -710,7 +710,9 @@ fn keyboard(cx: &mut DrawCtx<'_>, ui: &Ui, view: &View) {
     if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::Num0)) {
         cx.dispatch(AppAction::ShowSwitchboard);
     }
-    let projects: Vec<_> = rail::projects_by_recency(cx.core)
+    let projects: Vec<_> = cx
+        .core
+        .projects_in_rail_order()
         .into_iter()
         .map(|p| p.id)
         .collect();

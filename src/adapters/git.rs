@@ -118,8 +118,21 @@ fn find_repos(dir: &Path, depth: usize) -> Vec<PathBuf> {
     found
 }
 
+/// Drops the caller's own `GIT_*` variables from `cmd`: run from a hook,
+/// `GIT_DIR` and `GIT_INDEX_FILE` point at the hook's repository, not
+/// the one the command names.
+fn without_git_env(cmd: &mut Command) -> &mut Command {
+    for (k, _) in std::env::vars_os() {
+        if k.to_string_lossy().starts_with("GIT_") {
+            cmd.env_remove(k);
+        }
+    }
+    cmd
+}
+
+/// A `git` command in `repo`, without the caller's own `GIT_*` variables.
 fn git(repo: &Path, args: &[&str]) -> Option<String> {
-    let out = Command::new("git")
+    let out = without_git_env(&mut Command::new("git"))
         .arg("-C")
         .arg(repo)
         .args(args)
@@ -181,7 +194,7 @@ mod tests {
     use super::*;
 
     fn sh(dir: &Path, cmd: &str) {
-        let ok = Command::new("sh")
+        let ok = without_git_env(&mut Command::new("sh"))
             .arg("-c")
             .arg(cmd)
             .current_dir(dir)

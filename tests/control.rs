@@ -417,6 +417,112 @@ fn port_with(initial: Loaded, operations: FakeOperations) -> Port {
     port(initial, operations)
 }
 
+/// The global space's fixed id, as the wire spells it.
+const GLOBAL: &str = "00000000-0000-0000-0000-000000000002";
+
+#[test]
+fn a_global_set_takes_cards_from_two_spaces_and_holds_no_project() {
+    let mut port = port(Loaded::default(), FakeOperations::default());
+    let mut sessions = Vec::new();
+    for n in ["a", "b"] {
+        let reply = call(
+            &mut port,
+            Request::new(format!("sp-{n}"), Body::SpaceNew { name: n.into() }),
+        );
+        let space = made_id(&reply, RecordKind::Space);
+        let reply = call(
+            &mut port,
+            Request::new(
+                format!("pj-{n}"),
+                Body::ProjectAdd {
+                    space,
+                    name: n.into(),
+                    root: PathBuf::from("/tmp"),
+                },
+            ),
+        );
+        let project = made_id(&reply, RecordKind::Project);
+        let reply = call(
+            &mut port,
+            Request::new(format!("se-{n}"), session_new(&project, None)),
+        );
+        sessions.push(made_id(&reply, RecordKind::Session));
+    }
+    let reply = call(
+        &mut port,
+        Request::new(
+            "set",
+            Body::SetNew {
+                space: GLOBAL.into(),
+                name: "everything".into(),
+            },
+        ),
+    );
+    let set = made_id(&reply, RecordKind::Set);
+    let items = sessions
+        .iter()
+        .enumerate()
+        .map(|(i, session)| switchboard_control::Pin {
+            target: switchboard_control::PinTarget::Session {
+                session: session.clone(),
+            },
+            rect: switchboard_control::Rect {
+                x: 0,
+                y: u32::try_from(i).unwrap() * 8,
+                w: 10,
+                h: 8,
+            },
+        })
+        .collect();
+    let reply = call(
+        &mut port,
+        Request::new("sync", Body::SetSync { set, items }),
+    );
+    assert!(matches!(reply, Reply::Persisted { .. }), "{reply:?}");
+    let global = &port.app.core().working_sets()[0];
+    assert!(global.space.is_global());
+    assert_eq!(global.items.len(), 2);
+
+    // A client walking the listed spaces finds the global set too.
+    let Reply::Spaces { spaces } = call(&mut port, Request::new("ls", Body::Spaces)) else {
+        panic!("spaces");
+    };
+    let listed: Vec<_> = spaces.iter().filter(|s| s.view).collect();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].id, GLOBAL);
+    assert_eq!(spaces.iter().filter(|s| !s.view).count(), 3);
+    let Reply::Sets { sets } = call(
+        &mut port,
+        Request::new(
+            "sets",
+            Body::Sets {
+                space: listed[0].id.clone(),
+            },
+        ),
+    ) else {
+        panic!("sets");
+    };
+    assert_eq!(sets.len(), 1);
+    assert_eq!(sets[0].items.len(), 2);
+
+    let reply = call(
+        &mut port,
+        Request::new(
+            "pj-g",
+            Body::ProjectAdd {
+                space: GLOBAL.into(),
+                name: "g".into(),
+                root: PathBuf::from("/tmp"),
+            },
+        ),
+    );
+    assert!(
+        matches!(&reply, Reply::Failed { reason } if reason.contains("holds no projects")),
+        "{reply:?}"
+    );
+    assert_eq!(port.app.core().workspaces().len(), 2);
+}
+
 #[test]
 fn bad_input_is_failed_and_changes_nothing() {
     let mut port = port(Loaded::default(), FakeOperations::default());

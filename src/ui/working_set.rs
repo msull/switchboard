@@ -1096,9 +1096,13 @@ fn header(cx: &mut DrawCtx<'_>, ui: &mut Ui, set: SetId, name: &str, empty: bool
             if theme::ghost_muted(ui, "Delete").clicked() {
                 cx.state.delete_set = Some(set);
             }
-            super::dialogs::move_to_space_menu(cx, ui, |space| {
-                AppAction::MoveSetToSpace(set, space)
-            });
+            if cx.core.set_movable(set)
+                && let Some(from) = cx.core.working_set(set).map(|s| s.space)
+            {
+                super::dialogs::move_to_space_menu(cx, ui, from, |space| {
+                    AppAction::MoveSetToSpace(set, space)
+                });
+            }
             if theme::ghost(ui, "Clone")
                 .on_hover_text("A new working set with the same cards")
                 .clicked()

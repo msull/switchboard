@@ -27,6 +27,7 @@ pub fn show(cx: &mut DrawCtx<'_>, ui: &mut Ui) {
             .cmp(&rank(b))
             .then_with(|| b.project.last_active.cmp(&a.project.last_active))
     });
+    let global = cx.core.active_space().is_global();
     let total: usize = workspaces.iter().map(|w| w.sessions.len()).sum();
     let waiting = cx.core.waiting_count();
     let working = workspaces
@@ -72,6 +73,9 @@ pub fn show(cx: &mut DrawCtx<'_>, ui: &mut Ui) {
                 ui.add_space(22.0);
                 ui.horizontal(|ui| {
                     ui.heading(&workspace.project.name);
+                    if global && let Some(space) = cx.core.space(workspace.project.space) {
+                        ui.label(theme::meta_text(ui, &space.name));
+                    }
                     ui.label(theme::meta_text(
                         ui,
                         format!("{} sessions", workspace.sessions.len()),
