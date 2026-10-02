@@ -5938,9 +5938,21 @@ fn a_close_waits_for_a_launch_in_flight_and_kills_what_it_brought_up() {
     env.sb().in_progress_for = Some("session.new".into());
     env.step();
     assert_eq!(env.sb().kinds_called("session.new"), 1);
-    write_closing(&env, &id, |_| {});
-    env.step();
-    let t = env.ticket(&id);
+    // Parking cancels an attempt still starting without waiting for
+    // its launch, so a parked ticket can carry one in flight.
+    let mut t = env.ticket(&id);
+    for a in &mut t.attempts {
+        assert!(matches!(a.state, AttemptState::Starting), "{a:#?}");
+        a.state = AttemptState::Cancelled {
+            reason: "parked".into(),
+        };
+    }
+    t.state = TicketState::Parked {
+        reason: "parked by hand".into(),
+    };
+    env.runner.save_ticket(&mut t, env.now).unwrap();
+    let now = env.tick();
+    let t = env.runner.close_by_hand(&id, None, now).unwrap();
     assert!(matches!(t.state, TicketState::Closing { .. }), "{t:#?}");
     assert!(env.sb().killed.is_empty(), "{:?}", env.sb().killed);
     env.sb().in_progress_for = None;
@@ -5950,6 +5962,13 @@ fn a_close_waits_for_a_launch_in_flight_and_kills_what_it_brought_up() {
     let investigator = session_of(&t, "investigate");
     assert!(env.sb().killed.contains(&investigator));
     assert_eq!(env.sb().kinds_called("session.new"), 1);
+    assert!(
+        t.attempts
+            .iter()
+            .all(|a| matches!(a.state, AttemptState::Cancelled { .. })),
+        "{:#?}",
+        t.attempts
+    );
 }
 
 #[test]
@@ -5984,6 +6003,40 @@ fn a_lost_send_raises_its_decision_once_however_often_the_close_runs() {
     assert_eq!(lost_sends, 1, "{:#?}", t.decisions);
     assert!(t.pending_decisions().is_empty());
     assert!(!env.sb().session(&investigator).waiting);
+}
+
+#[test]
+fn an_answered_lost_send_is_not_raised_again_by_later_passes_or_a_restart() {
+    let mut env = Env::new();
+    let id = env.take(7).id;
+    env.step();
+    let mut t = env.ticket(&id);
+    let mut lost = t
+        .ledger
+        .iter()
+        .rfind(|o| o.kind == "session.new")
+        .unwrap()
+        .clone();
+    lost.op = format!("{id}-lostsend");
+    lost.kind = "session.input".into();
+    lost.class = "non-replayable".into();
+    lost.body = None;
+    lost.reply = None;
+    lost.error = None;
+    t.ledger.push(lost);
+    env.runner.save_ticket(&mut t, env.now).unwrap();
+    env.step();
+    let d = env.pending(&id)[0].clone();
+    assert_eq!(d.name, "lost-send");
+    let now = env.tick();
+    env.runner.decide(&id, &d.id, "rerun", None, now).unwrap();
+    env.step();
+    env.step();
+    env.restart();
+    env.step();
+    let t = env.ticket(&id);
+    let lost_sends = t.decisions.iter().filter(|d| d.name == "lost-send").count();
+    assert_eq!(lost_sends, 1, "{:#?}", t.decisions);
 }
 
 #[test]

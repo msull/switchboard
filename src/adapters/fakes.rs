@@ -220,9 +220,14 @@ impl DispatchPort for FakeDispatch {
                 .map_or_else(
                     || DispatchReply::failed("no such ticket"),
                     |mut t| {
-                        t.state = "closed".into();
-                        t.reason = Some(reason.clone().unwrap_or_else(|| "closed by hand".into()));
-                        t.tree_removed = t.tree.is_some();
+                        // As the runner answers: the intent written, the
+                        // rest left to its next pass. A closed ticket
+                        // whose trees were kept stays closed.
+                        if t.state != "closed" {
+                            t.state = "closing".into();
+                            t.reason =
+                                Some(reason.clone().unwrap_or_else(|| "closed by hand".into()));
+                        }
                         t.closable = false;
                         DispatchReply::Ticket(t)
                     },

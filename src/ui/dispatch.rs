@@ -727,10 +727,7 @@ pub fn drop_stale_close_dialog(cx: &mut DrawCtx<'_>, view: &View) {
     } else {
         matches!(view, View::Ticket(t) if t == id)
     };
-    let offered = cx
-        .core
-        .ticket(id)
-        .is_some_and(|t| t.closable || t.trees_retryable);
+    let offered = cx.core.ticket(id).is_some_and(close_offered);
     if !seen || !offered {
         cx.state.confirm_close_ticket = None;
     }
@@ -885,22 +882,29 @@ fn ticket_actions(cx: &mut DrawCtx<'_>, ui: &mut Ui, t: &TicketView) {
     {
         cx.dispatch(AppAction::DispatchResume(t.id.clone()));
     }
-    if t.closable
-        && theme::secondary(ui, "Close")
-            .on_hover_text(
-                "Remove the ticket's worktrees and close it; the branch and the record stay",
-            )
-            .clicked()
-    {
+    if !close_offered(t) {
+        return;
+    }
+    // The runner's flags never both hold: a retry is only for a closed
+    // ticket, a close only for one that is not.
+    let (label, hover) = if t.trees_retryable {
+        ("Remove trees", "Try the removal again; the branch stays")
+    } else {
+        (
+            "Close",
+            "Remove the ticket's worktrees and close it; the branch and the record stay",
+        )
+    };
+    if theme::secondary(ui, label).on_hover_text(hover).clicked() {
         cx.state.confirm_close_ticket = Some(t.id.clone());
     }
-    if t.trees_retryable
-        && theme::secondary(ui, "Remove trees")
-            .on_hover_text("Try the removal again; the branch stays")
-            .clicked()
-    {
-        cx.state.confirm_close_ticket = Some(t.id.clone());
-    }
+}
+
+/// Whether the page offers a close (or a retry of a kept tree's
+/// removal) for this ticket: the button shows, and its open dialog
+/// stays, on this alone.
+fn close_offered(t: &TicketView) -> bool {
+    t.closable || t.trees_retryable
 }
 
 /// The close confirmation: what goes, by path, and what stays. A

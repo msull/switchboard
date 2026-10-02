@@ -997,6 +997,18 @@ impl Runner {
             log::info!("ticket {} closing: a launch is still in flight", t.id);
             return Ok(());
         }
+        // Every launch has settled, so no reply can open an attempt
+        // again; one still open is the close's to end, before its
+        // processes are killed below.
+        if t.attempts.iter().any(Attempt::is_open) {
+            for a in t.attempts.iter_mut().filter(|a| a.is_open()) {
+                a.state = AttemptState::Cancelled {
+                    reason: format!("the ticket closed: {reason}"),
+                };
+                a.ended_ms = Some(now_ms);
+            }
+            self.save_ticket(t, now_ms)?;
+        }
         if !self.retire_processes(t, ps, &t.processes.clone(), now_ms)? {
             log::info!("ticket {} closing: a process is still alive", t.id);
             return Ok(());
@@ -1113,16 +1125,7 @@ impl Runner {
     /// out.
     fn preflight_trees(&self, t: &Ticket) -> Result<()> {
         let p = self.pipeline_of(t)?;
-        if !p.cuts_worktrees() {
-            return Ok(());
-        }
-        let lanes: Vec<PathBuf> = t
-            .lanes
-            .iter()
-            .filter(|l| removes_lane(&p, l))
-            .map(|l| l.worktree.clone())
-            .collect();
-        let tree = t.tree.as_deref().filter(|_| !t.close.tree_removed);
+        let (lanes, tree) = close_trees(t, &p);
         let found = crate::git::uncommitted(&*self.git, tree, &lanes)?;
         if !found.is_empty() {
             let named: Vec<String> = found.iter().map(|f| f.display().to_string()).collect();
@@ -4754,19 +4757,26 @@ fn removes_lane(p: &Pipeline, lane: &LaneRecord) -> bool {
 /// ticket's tree. Nothing for a pipeline that works in place.
 #[must_use]
 pub fn close_removes(t: &Ticket, p: &Pipeline) -> Vec<PathBuf> {
+    let (mut paths, tree) = close_trees(t, p);
+    paths.extend(tree.map(Path::to_path_buf));
+    paths
+}
+
+/// The lanes a close of `t` removes on their own, and the ticket's tree
+/// if it is still there: the one copy of the rule that the preflight
+/// checks and the confirmation lists.
+fn close_trees<'a>(t: &'a Ticket, p: &Pipeline) -> (Vec<PathBuf>, Option<&'a Path>) {
     if !p.cuts_worktrees() {
-        return Vec::new();
+        return (Vec::new(), None);
     }
-    let mut paths: Vec<PathBuf> = t
+    let lanes = t
         .lanes
         .iter()
         .filter(|l| removes_lane(p, l))
         .map(|l| l.worktree.clone())
         .collect();
-    if let Some(tree) = t.tree.as_ref().filter(|_| !t.close.tree_removed) {
-        paths.push(tree.clone());
-    }
-    paths
+    let tree = t.tree.as_deref().filter(|_| !t.close.tree_removed);
+    (lanes, tree)
 }
 
 /// Only a `Closing` ticket belongs on the closing list. Any other goes
@@ -5588,16 +5598,24 @@ pub fn apply_reply(t: &mut Ticket, ps: &mut ProjectState, intent: &str, reply: &
             let Some(attempt) = t.attempts.iter_mut().find(|a| a.stage == stage && a.n == n) else {
                 return;
             };
+            // A reply that comes after the attempt was cancelled (parked
+            // while its launch was in flight) records what was made, so
+            // it is killed, but does not bring the attempt back.
+            let starting = matches!(attempt.state, AttemptState::Starting);
             if intent == "session" {
                 if let Some(id) = first(wire::RecordKind::Session) {
                     attempt.session = Some(id.clone());
-                    attempt.state = AttemptState::Running;
+                    if starting {
+                        attempt.state = AttemptState::Running;
+                    }
                     t.processes.push(id);
                 }
             } else {
                 if let Some(id) = first(wire::RecordKind::Run) {
                     attempt.run = Some(id);
-                    attempt.state = AttemptState::Running;
+                    if starting {
+                        attempt.state = AttemptState::Running;
+                    }
                 }
                 for m in made.iter().filter(|m| m.kind == wire::RecordKind::Session) {
                     t.processes.push(m.id.clone());
