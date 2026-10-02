@@ -14,7 +14,8 @@
 //! `review-plan <session> <absolute plan path>` (starts a plan review),
 //! `show-review` (the newest review's page), `show-dispatch` and
 //! `show-ticket <id>` (Dispatch's pages), `close-ticket <id>` (the
-//! ticket's page with its close confirmation open), `review-file
+//! ticket's page with its close confirmation open; waits up to ten
+//! seconds for Dispatch's status first), `review-file
 //! feedback|response <first line...>` (writes the newest review's
 //! awaited file to disk, as its agent would), `review-continue`,
 //! `review-finalize`, `show-artifact <name> <index>` (a command's card
@@ -235,10 +236,7 @@ fn review_step(app: &mut SwitchboardApp, w: &[&str]) -> Result<(), String> {
         }
         ["show-dispatch"] => app.dispatch(AppAction::ShowDispatch),
         ["show-ticket", id] => app.dispatch(AppAction::ShowTicket((*id).to_owned())),
-        ["close-ticket", id] => {
-            app.dispatch(AppAction::ShowTicket((*id).to_owned()));
-            app.ui_state.confirm_close_ticket = Some((*id).to_owned());
-        }
+        ["close-ticket", id] => close_ticket(app, id)?,
         ["review-continue"] => {
             let id = newest_review(app)?;
             app.dispatch(AppAction::ContinueWorkflow(id));
@@ -268,6 +266,28 @@ fn review_step(app: &mut SwitchboardApp, w: &[&str]) -> Result<(), String> {
         }
         _ => return Err("unknown review line".into()),
     }
+    Ok(())
+}
+
+/// The ticket's page with its close confirmation open. The dialog
+/// stands only while the core has the ticket and offers its close, and
+/// the script runs before the first frame has asked Dispatch for
+/// anything, so the status is fetched here first. With the Dispatch
+/// window open, the page goes there, where the dialog is drawn.
+fn close_ticket(app: &mut SwitchboardApp, id: &str) -> Result<(), String> {
+    if !app.await_dispatch_status(std::time::Duration::from_secs(10)) {
+        return Err("no status from Dispatch".into());
+    }
+    if app.core().settings().dispatch_window.is_some() {
+        app.ui_state.dispatch_window_ticket = Some(id.to_owned());
+    } else {
+        app.dispatch(AppAction::ShowTicket(id.to_owned()));
+    }
+    let window = app.ui_state.dispatch_window_ticket.as_deref();
+    if !app.core().close_dialog_stands(id, window) {
+        return Err(format!("ticket {id} is not offered a close"));
+    }
+    app.ui_state.confirm_close_ticket = Some(id.to_owned());
     Ok(())
 }
 

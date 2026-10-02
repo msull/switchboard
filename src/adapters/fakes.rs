@@ -152,6 +152,8 @@ pub struct FakeDispatch {
     pub status: Option<Status>,
     pub calls: Arc<Mutex<Vec<DispatchBody>>>,
     pub artifacts: HashMap<PathBuf, String>,
+    /// Answer from the app's port thread, as the real socket does.
+    pub blocks: bool,
 }
 
 impl DispatchPort for FakeDispatch {
@@ -160,6 +162,9 @@ impl DispatchPort for FakeDispatch {
     }
     fn data_dir(&self) -> PathBuf {
         PathBuf::from("/dispatch")
+    }
+    fn may_block(&self) -> bool {
+        self.blocks
     }
     fn call(&mut self, body: &DispatchBody) -> std::io::Result<DispatchReply> {
         self.calls.lock().unwrap().push(body.clone());

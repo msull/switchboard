@@ -188,7 +188,20 @@ fn harness_build(
     secrets: FakeSecrets,
     host: FakeHost,
 ) -> (Harness<'static, SwitchboardApp>, Seeded) {
-    let services = Services {
+    let services = fake_services(opener, secrets, host);
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1200.0, 900.0))
+        .build_eframe(move |cc| {
+            switchboard::ui::theme::install(&cc.egui_ctx);
+            test_app(services)
+        });
+    let ids = seed(harness.state_mut());
+    harness.run_steps(2);
+    (harness, ids)
+}
+
+fn fake_services(opener: FakeOpener, secrets: FakeSecrets, host: FakeHost) -> Services {
+    Services {
         store: Box::new(MemoryStore::default()),
         host: Box::new(host),
         events: Box::new(FakeEvents::default()),
@@ -203,26 +216,23 @@ fn harness_build(
         operations: Box::new(FakeOperations::default()),
         dispatch: Some(Box::new(FakeDispatch::default())),
         wake: None,
-    };
-    let mut harness = Harness::builder()
-        .with_size(egui::vec2(1200.0, 900.0))
-        .build_eframe(move |cc| {
-            switchboard::ui::theme::install(&cc.egui_ctx);
-            let mut app = SwitchboardApp::with_services(services);
-            app.record_actions = true;
-            app.ui_state.embed_terminals = false;
-            app.ui_state.prompt_boxes.native = false;
-            // No speech model in tests: the demo stands in for the
-            // microphone. A real model on the developer's machine would
-            // otherwise be loaded onto the GPU by every listening test at
-            // once, and whisper's Metal setup aborts on that race.
-            app.ui_state.prompt_boxes.voice =
-                promptbox::Voice::new(std::path::PathBuf::from("/nonexistent/ggml-none.bin"));
-            app
-        });
-    let ids = seed(harness.state_mut());
-    harness.run_steps(2);
-    (harness, ids)
+    }
+}
+
+/// The app as every harness drives it: actions recorded, no embedded
+/// terminals, no native prompt box, no speech model.
+fn test_app(services: Services) -> SwitchboardApp {
+    let mut app = SwitchboardApp::with_services(services);
+    app.record_actions = true;
+    app.ui_state.embed_terminals = false;
+    app.ui_state.prompt_boxes.native = false;
+    // No speech model in tests: the demo stands in for the
+    // microphone. A real model on the developer's machine would
+    // otherwise be loaded onto the GPU by every listening test at
+    // once, and whisper's Metal setup aborts on that race.
+    app.ui_state.prompt_boxes.voice =
+        promptbox::Voice::new(std::path::PathBuf::from("/nonexistent/ggml-none.bin"));
+    app
 }
 
 /// Turns the Prompt Box editor off so the plain message box is drawn.
@@ -4312,6 +4322,68 @@ fn a_close_dialog_goes_with_its_page() {
     harness.state_mut().dispatch(AppAction::CloseDispatchWindow);
     harness.run_steps(2);
     assert!(harness.state().ui_state.confirm_close_ticket.is_none());
+}
+
+/// A harness whose app ran `script` at startup, before any frame, as
+/// `SWITCHBOARD_SCRIPT` does, against a Dispatch that answers from the
+/// port's thread like the real socket; with `window`, the Dispatch
+/// window was open when the app started.
+fn scripted_harness(
+    status: switchboard::ports::dispatch::Status,
+    window: bool,
+    script: &'static str,
+) -> Harness<'static, SwitchboardApp> {
+    let mut services = fake_services(
+        FakeOpener::default(),
+        FakeSecrets::default(),
+        FakeHost::default(),
+    );
+    services.dispatch = Some(Box::new(FakeDispatch {
+        status: Some(status),
+        blocks: true,
+        ..FakeDispatch::default()
+    }));
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1200.0, 900.0))
+        .build_eframe(move |cc| {
+            switchboard::ui::theme::install(&cc.egui_ctx);
+            let mut app = test_app(services);
+            app.start();
+            if window {
+                app.dispatch(AppAction::PopOutDispatch);
+            }
+            switchboard::script::run(&mut app, script);
+            app
+        });
+    harness.run_steps(2);
+    harness
+}
+
+/// The `close-ticket` script line opens the dialog on the first frame,
+/// though nothing had asked Dispatch for its status yet; with the
+/// Dispatch window open, on that window's page.
+#[test]
+fn the_close_ticket_script_line_opens_the_dialog() {
+    let mut status = dispatch_status();
+    status.tickets[0].decisions.clear();
+    status.tickets[0].closable = true;
+    let harness = scripted_harness(status.clone(), false, "close-ticket t1");
+    harness.get_by_label("Close this ticket");
+    assert_eq!(
+        harness.state().ui_state.confirm_close_ticket.as_deref(),
+        Some("t1")
+    );
+
+    let harness = scripted_harness(status, true, "close-ticket t1");
+    assert_eq!(
+        harness.state().ui_state.dispatch_window_ticket.as_deref(),
+        Some("t1")
+    );
+    assert_eq!(
+        harness.state().ui_state.confirm_close_ticket.as_deref(),
+        Some("t1"),
+        "shown in the Dispatch window"
+    );
 }
 
 /// The dialog's title and button follow the flag that showed the

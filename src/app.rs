@@ -999,10 +999,41 @@ impl SwitchboardApp {
         }
     }
 
+    /// Ask Dispatch for its status and wait up to `timeout` for the
+    /// answer, for a script line that needs the tickets before the
+    /// first frame (a frame never waits: it hands the poll to the port's
+    /// thread and reads the answer on a later frame). Whether a status
+    /// arrived.
+    pub fn await_dispatch_status(&mut self, timeout: Duration) -> bool {
+        self.last_dispatch = Some(Instant::now());
+        if let Some((_, result)) = self.dispatch_port.poll_status() {
+            self.dispatch(AppAction::DispatchStatus(status_of(result)));
+            return true;
+        }
+        let deadline = Instant::now() + timeout;
+        loop {
+            // Other calls' replies may finish first; each is delivered
+            // as it would be on a frame.
+            let left = deadline.saturating_duration_since(Instant::now());
+            let done = self.dispatch_port.wait(left);
+            let timed_out = done.is_empty();
+            let answered = done.iter().any(|(body, _)| matches!(body, Body::Status));
+            self.deliver_dispatch(done);
+            if answered || timed_out {
+                return answered;
+            }
+        }
+    }
+
     /// Replies the port's thread finished since the last frame, each
     /// one an action.
     fn drain_dispatch(&mut self) {
-        for (body, result) in self.dispatch_port.drain() {
+        let done = self.dispatch_port.drain();
+        self.deliver_dispatch(done);
+    }
+
+    fn deliver_dispatch(&mut self, done: Vec<DispatchDone>) {
+        for (body, result) in done {
             if matches!(body, Body::Status) {
                 self.dispatch(AppAction::DispatchStatus(status_of(result)));
             } else {
@@ -1447,6 +1478,20 @@ impl DispatchWorker {
             return Vec::new();
         };
         let finished: Vec<DispatchDone> = done.try_iter().collect();
+        self.finished(finished)
+    }
+
+    /// The next reply the thread finishes, waiting up to `timeout` for
+    /// it; nothing when it does not come in time.
+    fn wait(&mut self, timeout: Duration) -> Vec<DispatchDone> {
+        let Some(done) = &self.done else {
+            return Vec::new();
+        };
+        let finished: Vec<DispatchDone> = done.recv_timeout(timeout).into_iter().collect();
+        self.finished(finished)
+    }
+
+    fn finished(&mut self, finished: Vec<DispatchDone>) -> Vec<DispatchDone> {
         if finished
             .iter()
             .any(|(body, _)| matches!(body, Body::Status))

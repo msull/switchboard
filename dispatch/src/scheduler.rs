@@ -1111,6 +1111,7 @@ impl Runner {
     /// before anything is written: each lane with a repository of its
     /// own on its own terms, and the ticket's tree with those lanes left
     /// out.
+    ///
     /// A ticket whose pipeline copy cannot be read passes: without it
     /// nothing is removed (`remove_trees` keeps the trees and says why),
     /// so nothing can be lost, and the close a parked ticket needs most
