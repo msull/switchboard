@@ -4273,6 +4273,109 @@ fn a_rerun_acted_before_a_park_in_the_same_pass_launches_nothing() {
     assert_eq!(env.sb().sessions.len(), sessions, "nothing launched");
 }
 
+/// A note at `inspect` sends one lane back, and the other lane's
+/// `inspect` is answered `park` in the same pass: the park drops the
+/// note before a planner carries it, so the resume asks about the
+/// sent-back plan, quoting the note, and launches nothing.
+#[test]
+fn a_send_back_acted_before_a_park_in_the_same_pass_launches_nothing() {
+    let (mut env, id) = workspace_env(&["type:bug"]);
+    let t = env.ticket(&id);
+    let review = "[[stages]]\nname = \"review\"\nreview = \"reviewer\"\ncontext = \"each\"\nsubject = \"plan\"\ngate = { kind = \"external\", check = \"review-finalized\" }\n";
+    let inspect = "[[stages]]\nname = \"inspect\"\ncontext = \"each\"\ngate = { kind = \"human\", decision = \"inspect\" }\n";
+    for path in [env.data.pipeline("Orchard"), t.pipeline_file.clone()] {
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains(review), "{text}");
+        std::fs::write(&path, text.replace(review, inspect)).unwrap();
+    }
+    let now = env.tick();
+    env.runner.step_project("Orchard", now).unwrap();
+    let t = env.ticket(&id);
+    let investigator = session_of(&t, "investigate");
+    std::fs::write(artifact_of(&t, "investigate", "notes"), "# notes").unwrap();
+    let now = env.now;
+    env.sb().stop(&investigator, now);
+    env.steps_until(&id, "the lanes question", |t, _| {
+        t.pending_decisions().iter().any(|d| d.name == "lanes")
+    });
+    let lanes = env.pending(&id).remove(0);
+    let now = env.tick();
+    env.runner
+        .decide(&id, &lanes.id, "backend, frontend", None, now)
+        .unwrap();
+    env.steps_until(&id, "a planner per lane", |t, _| {
+        t.attempts_of("plan").filter(|a| a.is_open()).count() == 2
+    });
+    let t = env.ticket(&id);
+    for ctx in ["backend", "frontend"] {
+        let a = plan_of(&t, ctx);
+        env.finish(
+            a.session.as_ref().unwrap(),
+            &a.artifacts["plan"],
+            &format!("# {ctx} plan"),
+        );
+    }
+    env.steps_until(&id, "an inspect question per lane", |t, _| {
+        t.pending_decisions()
+            .iter()
+            .filter(|d| d.name == "inspect")
+            .count()
+            == 2
+    });
+    let t = env.ticket(&id);
+    let asked: Vec<Decision> = t
+        .pending_decisions()
+        .into_iter()
+        .filter(|d| d.name == "inspect")
+        .cloned()
+        .collect();
+    let [sent_back, parked_from] = <[Decision; 2]>::try_from(asked).unwrap();
+    let lane = t
+        .attempts
+        .iter()
+        .find(|a| Some((a.stage.clone(), a.n)) == sent_back.attempt)
+        .unwrap()
+        .context
+        .clone();
+    let now = env.tick();
+    env.runner
+        .decide(
+            &id,
+            &sent_back.id,
+            "rerun",
+            Some("use a set, not a vec"),
+            now,
+        )
+        .unwrap();
+    let now = env.tick();
+    env.runner
+        .decide(&id, &parked_from.id, "park", None, now)
+        .unwrap();
+    let sessions = env.sb().sessions.len();
+    let now = env.tick();
+    env.runner.step_project("Orchard", now).unwrap();
+    let t = env.ticket(&id);
+    assert!(matches!(t.state, TicketState::Parked { .. }), "{t:#?}");
+    assert!(t.rework.is_empty(), "the note was dropped: {:?}", t.rework);
+    assert!(matches!(
+        plan_of(&t, &lane).state,
+        AttemptState::Cancelled { .. }
+    ));
+    let now = env.tick();
+    env.runner.resume(&id, now).unwrap();
+    let now = env.tick();
+    env.runner.step_project("Orchard", now).unwrap();
+    let t = env.ticket(&id);
+    let d = rerun_for(&t, &lane).unwrap_or_else(|| panic!("no rerun for {lane}: {t:#?}"));
+    assert!(
+        d.question.contains("use a set, not a vec"),
+        "{}",
+        d.question
+    );
+    assert_eq!(t.attempts_of("plan").count(), 2, "{t:#?}");
+    assert_eq!(env.sb().sessions.len(), sessions, "nothing launched");
+}
+
 /// Failing at the checks past `max_reruns` parks without a question,
 /// and the resume still offers the checks again.
 #[test]

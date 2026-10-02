@@ -895,11 +895,16 @@ impl Runner {
 
     /// Every decision on the ticket that is still open withdrawn in
     /// memory; the caller's next save writes it. True if there was one.
-    /// Open means pending, answered and not yet acted on, or a `rerun`
-    /// answer acted on whose replacement has not launched: its attempt
-    /// is still the latest in its context, so `may_rerun` would launch
-    /// on it. Kept, either kind of answer would launch on the resume
-    /// and keep its context from being asked afresh.
+    /// Open means pending, answered and not yet acted on, or an answer
+    /// acted on whose replacement has not launched: a `rerun` whose
+    /// attempt is still the latest in its context, so `may_rerun` would
+    /// launch on it, or a human gate's send-back, whose note is still on
+    /// `t.rework` (`start_agent` takes it off only with the attempt that
+    /// carries it), so `sent_back` would launch on it. Kept, either
+    /// would launch on the resume and keep its context from being asked
+    /// afresh. A withdrawn note is not lost to the user: the sent-back
+    /// attempt's cancellation reason quotes it, and the resume's `rerun`
+    /// question quotes that reason.
     fn withdraw_open_decisions(t: &mut Ticket) -> bool {
         let unlaunched: Vec<bool> = t
             .decisions
@@ -912,6 +917,10 @@ impl Runner {
                 d.state = DecisionState::Cancelled;
                 withdrawn = true;
             }
+        }
+        if !t.rework.is_empty() {
+            t.rework.clear();
+            withdrawn = true;
         }
         withdrawn
     }
@@ -4589,26 +4598,19 @@ fn still_marked(t: &Ticket) -> Vec<String> {
 /// the answer is marked acted only once the replaced attempt's
 /// processes were confirmed gone, and that mark is on disk.
 pub(crate) fn may_rerun(t: &Ticket, failed: &Attempt) -> bool {
-    t.decisions.iter().any(|d| {
-        d.name == "rerun"
-            && d.attempt.as_ref() == Some(&(failed.stage.clone(), failed.n))
-            && matches!(
-                &d.state,
-                DecisionState::Answered { answer, acted: true, .. } if answer == "rerun"
-            )
-    })
+    t.decisions
+        .iter()
+        .any(|d| d.acted_rerun() && d.attempt.as_ref() == Some(&(failed.stage.clone(), failed.n)))
 }
 
 /// Whether `d` is a `rerun` answer acted on whose attempt is still the
 /// latest in its context: the replacement it authorised has not
 /// launched, and `may_rerun` would launch it.
 fn authorises_unlaunched_rerun(t: &Ticket, d: &Decision) -> bool {
-    let acted_rerun = d.name == "rerun"
-        && matches!(
-            &d.state,
-            DecisionState::Answered { answer, acted: true, .. } if answer == "rerun"
-        );
-    let Some((stage, n)) = d.attempt.as_ref().filter(|_| acted_rerun) else {
+    if !d.acted_rerun() {
+        return false;
+    }
+    let Some((stage, n)) = &d.attempt else {
         return false;
     };
     let Some(context) = t

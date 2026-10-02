@@ -1573,28 +1573,29 @@ attempt with no launch on the books fails rather than waits. Parking
 and a rerun follow the design's cancellation sequence: the intent is
 written (for parking, with every open decision on the ticket
 cancelled in the same write: a pending one, an answer not yet acted
-on, and an acted `rerun` whose replacement has not launched, so no
-answer given before the park launches on the resume or keeps its
-context from being asked again; the session's waiting mark is then
-cleared and read back), the review run paused and read back as
-paused, every process killed and read back as gone, and only then
-does the ticket read as parked or the rerun's answer count as acted
-(which is what lets the replacement start); the sequence runs from
-the saved intent on every pass, so a restart at any point resumes it
-whole. A resumed ticket asks `rerun` again, under a new id and
-without waiting for a slot, about each failed or cancelled attempt with no rerun
-question in flight, with the attempt's own reason and the options its
-failure first had; a pending decision holds its stage only in the
-context it is about. With every slot taken, a `park` answer is still
-acted on, since parking launches nothing; any other answer waits for a
-slot. An answer's acted mark reaches disk only with its action's
-first write (the parking state, the ledger entry, the lane
-record), so a stop leaves an answer either still unacted or with a
-durable intent. A record's backup is a hard link, so its primary is
-never absent mid-write. The reviewer's templates get `{worktree}`,
-`{branch}` and `{project.root}` rendered in, and a template naming
-neither is prefixed with the repository's path, since the reviewer
-works in the attempt directory.
+on, an acted `rerun` whose replacement has not launched, and a human
+gate's send-back note not yet carried by an attempt, so no answer
+given before the park launches on the resume or keeps its context
+from being asked again; the session's waiting mark is then cleared
+and read back), the review run paused and read back as paused, every
+process killed and read back as gone, and only then does the ticket
+read as parked or the rerun's answer count as acted (which is what
+lets the replacement start); the sequence runs from the saved intent
+on every pass, so a restart at any point resumes it whole. A resumed
+ticket asks `rerun` again, under a new id and without waiting for a
+slot, about each failed or cancelled attempt with no rerun question
+in flight, with the attempt's own reason (for a sent-back attempt,
+the note) and the options its failure first had; a pending decision
+holds its stage only in the context it is about. With every slot
+taken, a `park` answer is still acted on, since parking launches
+nothing; any other answer waits for a slot. An answer's acted mark
+reaches disk only with its action's first write (the parking state,
+the ledger entry, the lane record), so a stop leaves an answer either
+still unacted or with a durable intent. A record's backup is a hard
+link, so its primary is never absent mid-write. The reviewer's
+templates get `{worktree}`, `{branch}` and `{project.root}` rendered
+in, and a template naming neither is prefixed with the repository's
+path, since the reviewer works in the attempt directory.
 `dispatch/tests/first_slice.rs` is the acceptance table, plus a test
 per point above; `dispatch/tests/live.rs` runs the first stage against
 a real Switchboard and a haiku agent. Known gap: Claude Code treats a

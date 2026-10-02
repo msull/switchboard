@@ -386,6 +386,17 @@ impl Decision {
         self.state == DecisionState::Pending
     }
 
+    /// A `rerun` answer to a `rerun` question, acted on: the replaced
+    /// attempt is confirmed gone and its replacement may launch.
+    #[must_use]
+    pub fn acted_rerun(&self) -> bool {
+        self.name == "rerun"
+            && matches!(
+                &self.state,
+                DecisionState::Answered { answer, acted: true, .. } if answer == "rerun"
+            )
+    }
+
     /// The answer given and not yet acted on.
     #[must_use]
     pub fn unacted_answer(&self) -> Option<&str> {
