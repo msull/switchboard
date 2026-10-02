@@ -1396,6 +1396,55 @@ fn a_ready_stage_costs_no_slot() {
 /// `slots` is read from the project's live pipeline file on every
 /// pass, not from a ticket's frozen copy: a second ticket waits while
 /// the file says one slot and starts as soon as the file says two.
+/// A full disk holds new starts: the attempt would fail for nothing
+/// and cost the run. Running work is still watched, and the hold lifts
+/// by itself once space is back.
+#[test]
+fn a_full_disk_holds_new_starts_until_space_is_back() {
+    let mut env = Env::new();
+    let first = env.take(7).id;
+    env.steps_until(&first, "the first investigator", |t, _| {
+        t.attempts_of("investigate")
+            .next()
+            .is_some_and(Attempt::is_open)
+    });
+    env.repo.lock().unwrap().free_bytes = Some(2_000_000_000);
+    let second = env.take(8).id;
+    for _ in 0..3 {
+        env.step();
+    }
+    assert!(
+        env.ticket(&second).attempts.is_empty(),
+        "2 GB free, the default floor is 10"
+    );
+    let status = dispatch::serve::status(&env.runner).unwrap();
+    let p = status.projects.iter().find(|p| p.name == PROJECT).unwrap();
+    assert_eq!(p.free_gb, Some(2));
+    assert!(
+        p.held().is_some_and(|why| why.contains("2 GB free")),
+        "{:?}",
+        p.held()
+    );
+    // The first ticket's running attempt is still watched to its end.
+    env.finish(
+        &session_of(&env.ticket(&first), "investigate"),
+        &artifact_of(&env.ticket(&first), "investigate", "notes"),
+        "notes\n",
+    );
+    env.steps_until(&first, "the first investigator done", |t, _| {
+        t.attempts_of("investigate")
+            .next()
+            .is_some_and(|a| !a.is_open())
+    });
+    assert!(env.ticket(&second).attempts.is_empty());
+    env.repo.lock().unwrap().free_bytes = None;
+    env.steps_until(&second, "the second investigator", |t, _| {
+        t.attempts_of("investigate")
+            .next()
+            .is_some_and(Attempt::is_open)
+    });
+}
+
 #[test]
 fn slots_come_from_the_live_pipeline_file_not_a_tickets_copy() {
     let mut env = Env::new();

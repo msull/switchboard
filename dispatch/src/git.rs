@@ -37,6 +37,9 @@ pub trait Repo: Send {
     fn is_worktree_of(&self, repo: &Path, dir: &Path, branch: &str) -> Result<bool>;
     fn head(&self, dir: &Path) -> Result<String>;
     fn is_clean(&self, dir: &Path) -> Result<bool>;
+    /// Bytes free on the volume holding `dir`, for the preflight that
+    /// keeps a full disk from failing an attempt.
+    fn free_bytes(&self, dir: &Path) -> Result<u64>;
     /// Move a worktree of `repo` from `from` to `to`, git's own records
     /// of it included.
     fn worktree_move(&mut self, repo: &Path, from: &Path, to: &Path) -> Result<()>;
@@ -255,6 +258,19 @@ impl Repo for GitCli {
         Ok(status.is_empty())
     }
 
+    fn free_bytes(&self, dir: &Path) -> Result<u64> {
+        // `df -k` is on every macOS and Linux; its last line is the
+        // volume, and the fourth column is 1K blocks available.
+        let out = output(Command::new("df").arg("-k").arg(dir))?;
+        let line = out.lines().last().context("df printed nothing")?;
+        let avail: u64 = line
+            .split_whitespace()
+            .nth(3)
+            .and_then(|s| s.parse().ok())
+            .with_context(|| format!("df line not understood: {line:?}"))?;
+        Ok(avail.saturating_mul(1024))
+    }
+
     fn worktree_move(&mut self, repo: &Path, from: &Path, to: &Path) -> Result<()> {
         if let Some(parent) = to.parent() {
             std::fs::create_dir_all(parent)?;
@@ -464,6 +480,8 @@ pub struct FakeRepo {
     pub reviewers: Vec<(StartedCheck, PathBuf)>,
     /// What a tree's base resolves to; absent, `base0000`.
     pub bases: std::collections::BTreeMap<PathBuf, String>,
+    /// Bytes free on the fake volume; `None` is plenty.
+    pub free_bytes: Option<u64>,
 }
 
 impl Repo for FakeRepo {
@@ -536,6 +554,10 @@ impl Repo for FakeRepo {
     }
     fn is_clean(&self, dir: &Path) -> Result<bool> {
         Ok(!self.dirty.iter().any(|d| d == dir))
+    }
+
+    fn free_bytes(&self, _dir: &Path) -> Result<u64> {
+        Ok(self.free_bytes.unwrap_or(u64::MAX))
     }
     fn worktree_move(&mut self, repo: &Path, from: &Path, to: &Path) -> Result<()> {
         if let Some(parent) = to.parent() {

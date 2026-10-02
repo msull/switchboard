@@ -410,6 +410,11 @@ pub struct Policy {
     /// before the ticket parks instead of asking for another run.
     #[serde(default = "default_max_reruns")]
     pub max_reruns: u32,
+    /// Free space on the worktrees' volume, in GB, below which nothing
+    /// new starts: a build or an agent on a full disk fails for nothing
+    /// and costs the run. Read live, like `slots`.
+    #[serde(default = "default_min_free_gb")]
+    pub min_free_gb: u32,
     /// The operator that rebases a branch whose PR conflicts with its
     /// base, cloned from the lane's implementer; absent, a conflict is
     /// a question.
@@ -436,6 +441,10 @@ fn default_max_reruns() -> u32 {
     3
 }
 
+fn default_min_free_gb() -> u32 {
+    10
+}
+
 fn default_max_rebases() -> u32 {
     2
 }
@@ -450,6 +459,7 @@ impl Default for Policy {
             decisions: BTreeMap::new(),
             trust_folders: false,
             max_reruns: default_max_reruns(),
+            min_free_gb: default_min_free_gb(),
             rebaser: None,
             max_rebases: default_max_rebases(),
             fixer: None,

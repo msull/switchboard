@@ -5887,6 +5887,8 @@ mod dispatch_page {
                 waiting_on_me: 2,
                 running: 0,
                 pending: 1,
+                min_free_gb: 0,
+                free_gb: None,
             }],
             tickets: vec![TicketView {
                 id: "t1".into(),

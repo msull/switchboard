@@ -172,6 +172,12 @@ pub struct ProjectView {
     /// open attempt, and pending decisions across its tickets.
     pub running: u32,
     pub pending: u32,
+    /// The policy's floor for free space on the worktrees' volume, in
+    /// GB, and what is free now; nothing new starts under the floor.
+    #[serde(default)]
+    pub min_free_gb: u32,
+    #[serde(default)]
+    pub free_gb: Option<u32>,
 }
 
 impl ProjectView {
@@ -180,6 +186,11 @@ impl ProjectView {
     pub fn held(&self) -> Option<String> {
         if self.running >= self.slots {
             Some(format!("all {} slots in use", self.slots))
+        } else if let Some(free) = self.free_gb.filter(|free| *free < self.min_free_gb) {
+            Some(format!(
+                "{free} GB free on the worktrees' volume, the policy wants {}",
+                self.min_free_gb
+            ))
         } else if self.pending >= self.waiting_on_me {
             Some(format!(
                 "{} decision(s) waiting, the limit is {}",
@@ -392,6 +403,8 @@ mod tests {
                     waiting_on_me: 2,
                     running: 1,
                     pending: 1,
+                    min_free_gb: 0,
+                    free_gb: None,
                 }],
                 tickets: vec![ticket.clone()],
             }),

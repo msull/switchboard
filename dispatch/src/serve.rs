@@ -349,6 +349,8 @@ pub fn status(runner: &Runner) -> Result<Status> {
             waiting_on_me: policy.waiting_on_me,
             running: u32::try_from(running).unwrap_or(u32::MAX),
             pending: u32::try_from(pending).unwrap_or(u32::MAX),
+            min_free_gb: policy.min_free_gb,
+            free_gb: runner.free_gb(),
         });
     }
     let mut tickets = Vec::new();

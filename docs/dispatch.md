@@ -434,6 +434,7 @@ rates = { "claude-sonnet-5" = [3.0, 15.0], ... }   # $ per million input, output
 decisions = { lanes = "ask", finalize = "ask", merge = "ask", budget = "ask", review-code = "ask" }
 trust_folders = false         # true: Claude Code's folder trust question, which every fresh worktree asks, is answered for the project's agents
 max_reruns = 3                # failed attempts a stage may collect in one context before the ticket parks instead of asking again
+min_free_gb = 10              # free space on the worktrees' volume below which nothing new starts; live, like slots
 rebaser = "rebaser"           # the operator that rebases a PR that conflicts with its base, cloned from the lane's implementer; absent, a conflict is a question
 max_rebases = 2               # rebases one PR may get before the conflict is a question
 fixer = "fixer"               # the operator that fixes a PR whose checks are red at the tree's head, cloned the same way; absent, red checks are a question
@@ -1391,6 +1392,7 @@ and one against the real one:
 | The checks fail | A failed attempt and a rerun decision with `rerun`, `check` and `park`; nothing retried on its own; a rerun is a fresh agent, `check` runs the checks again on the same attempt with no agent |
 | The tree is dirty when the agent stops | No check runs; a failed attempt and the same decision |
 | A stage fails past the policy's `max_reruns` in one context | The ticket parks with the count and the last reason; nothing is asked |
+| Free space on the worktrees' volume is under the policy's `min_free_gb` | Nothing new starts and `status` says why; running attempts are still watched; the hold lifts on its own (`a_full_disk_holds_new_starts_until_space_is_back`) |
 | The runner restarts while the checks run | The lost check starts again on the same head; no second agent |
 | `ready` with the PR's checks pending, then green | A gate-only attempt per context, no agent; no PR is a `pr` decision (`recheck`, `park`); pending waits and reads the provider once a minute; green at the tree's head completes the attempt bound to that head |
 | The PR is at another head, its checks are red, or it has no checks | A `pr` decision naming which; `recheck` reads again at once; the same attempt throughout; `checks = "none"` on the stage passes on the PR at the head alone |

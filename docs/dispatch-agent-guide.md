@@ -209,8 +209,8 @@ Only when the owner has said so for a named project. Edit
 `pipelines/<project>.toml` in place with an ordinary editor or `sed`;
 nothing needs restarting. What a change reaches depends on the key:
 
-- `[policy] slots` and `waiting_on_me` are read from the live file on
-  every pass, for every ticket of the project. Raising `slots` lets
+- `[policy] slots`, `waiting_on_me` and `min_free_gb` are read from
+  the live file on every pass, for every ticket of the project. Raising `slots` lets
   the next waiting ticket start within a second or two and
   `dispatch status` shows the new limit at once. When a project has a
   `.pr.toml` as well, its `[policy]` counts do not apply: the

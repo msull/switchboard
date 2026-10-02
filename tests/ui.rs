@@ -4056,6 +4056,8 @@ fn dispatch_status() -> switchboard::ports::dispatch::Status {
                 waiting_on_me: 2,
                 running: 2,
                 pending: 1,
+                min_free_gb: 0,
+                free_gb: None,
             },
             ProjectView {
                 name: "PTA".into(),
@@ -4064,6 +4066,8 @@ fn dispatch_status() -> switchboard::ports::dispatch::Status {
                 waiting_on_me: 2,
                 running: 0,
                 pending: 0,
+                min_free_gb: 0,
+                free_gb: None,
             },
         ],
         tickets: vec![

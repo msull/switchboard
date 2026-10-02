@@ -42,6 +42,9 @@ pub struct Runner {
     /// The writer lock while a transaction runs; saves inside it write
     /// straight through, saves outside it take the lock for the write.
     held: Option<Lock>,
+    /// The disk hold as last logged, so a full disk is one line, not
+    /// one a second.
+    low_disk: Option<String>,
 }
 
 impl Runner {
@@ -57,7 +60,46 @@ impl Runner {
             prs: Box::new(Gh),
             bitbucket: Box::new(Bitbucket::new(env_file)),
             held: None,
+            low_disk: None,
         }
+    }
+
+    /// Whole gigabytes free on the volume that holds the worktrees;
+    /// `None` when that cannot be read, which holds nothing back.
+    #[must_use]
+    pub fn free_gb(&self) -> Option<u32> {
+        let mut dir = self.data.worktrees_dir();
+        while !dir.exists() {
+            dir = dir.parent()?.to_path_buf();
+        }
+        match self.git.free_bytes(&dir) {
+            Ok(bytes) => Some(u32::try_from(bytes / 1_000_000_000).unwrap_or(u32::MAX)),
+            Err(e) => {
+                log::warn!("free space at {} unreadable: {e:#}", dir.display());
+                None
+            }
+        }
+    }
+
+    /// Why a full disk holds new starts for `policy`, if it does; logged
+    /// when it begins and when it ends.
+    fn disk_hold(&mut self, policy: &crate::pipeline::Policy, free_gb: Option<u32>) -> bool {
+        let hold = free_gb
+            .filter(|free| *free < policy.min_free_gb)
+            .map(|free| {
+                format!(
+                    "{free} GB free on the worktrees' volume, the policy wants {}",
+                    policy.min_free_gb
+                )
+            });
+        if hold != self.low_disk {
+            match &hold {
+                Some(why) => log::warn!("nothing new starts: {why}"),
+                None => log::info!("free space is back above the policy's floor"),
+            }
+            self.low_disk.clone_from(&hold);
+        }
+        hold.is_some()
     }
 
     /// Run `f` as one read-modify-write under the writer lock: nothing
@@ -3530,6 +3572,7 @@ impl Runner {
             .ok()
             .and_then(|text| Pipeline::parse(&text).ok())
             .map(|p| p.policy);
+        let free_gb = self.free_gb();
         let mut pipeline: Option<Pipeline> = None;
         for stale in &tickets {
             let id = stale.id.clone();
@@ -3547,8 +3590,7 @@ impl Runner {
                     &mut t,
                     &mut ps,
                     live_policy.as_ref(),
-                    running,
-                    pending,
+                    (running, pending, free_gb),
                     now_ms,
                 );
                 // A write is an fsync; most steps leave the project alone.
@@ -3589,8 +3631,7 @@ impl Runner {
         t: &mut Ticket,
         ps: &mut ProjectState,
         live_policy: Option<&crate::pipeline::Policy>,
-        running: u32,
-        pending: u32,
+        (running, pending, free_gb): (u32, u32, Option<u32>),
         now_ms: u64,
     ) -> Result<Option<(bool, Pipeline)>> {
         {
@@ -3621,8 +3662,11 @@ impl Runner {
                 .get(t.stage)
                 .is_none_or(|s| s.kind() == StageKind::GateOnly);
             let policy = live_policy.unwrap_or(&p.policy);
-            let may_start =
-                has_open || gate_only || (running < policy.slots && pending < policy.waiting_on_me);
+            let may_start = has_open
+                || gate_only
+                || (running < policy.slots
+                    && pending < policy.waiting_on_me
+                    && !self.disk_hold(policy, free_gb));
             if !may_start {
                 return Ok(None);
             }

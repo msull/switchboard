@@ -713,6 +713,9 @@ impl Repo for SharedRepo {
     fn is_clean(&self, dir: &std::path::Path) -> anyhow::Result<bool> {
         self.0.lock().unwrap().is_clean(dir)
     }
+    fn free_bytes(&self, dir: &std::path::Path) -> anyhow::Result<u64> {
+        self.0.lock().unwrap().free_bytes(dir)
+    }
     fn remote_url(&self, dir: &std::path::Path) -> anyhow::Result<Option<String>> {
         self.0.lock().unwrap().remote_url(dir)
     }
