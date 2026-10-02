@@ -226,29 +226,38 @@ fn waiting_section(
         format!("Waiting on you · {waiting}")
     };
     let fold = ui.make_persistent_id("dispatch-waiting");
+    let mut st =
+        egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), fold, true);
     if seen && cx.state.dispatch_waiting_folded.is_none() {
-        let mut st =
-            egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), fold, true);
         st.set_open(waiting <= 3);
-        st.store(ui.ctx());
         cx.state.dispatch_waiting_folded = Some(waiting > 3);
     }
-    egui::CollapsingHeader::new(RichText::new(heading).text_style(theme::kicker_style()))
-        .id_salt("dispatch-waiting")
-        .default_open(true)
-        .show(ui, |ui| {
-            if waiting == 0 {
-                ui.label(theme::meta_text(ui, "Nothing waits on you."));
-            }
-            for d in pending {
-                let ticket = tickets.iter().find(|t| t.id == d.ticket).cloned();
-                decision_card(cx, ui, d, ticket.as_ref(), true);
-            }
-            for a in agents {
-                let ticket = tickets.iter().find(|t| t.id == a.ticket).cloned();
-                agent_card(cx, ui, a, ticket.as_ref());
-            }
-        });
+    // The heading toggles the fold too, not only the small arrow.
+    let mut clicked = false;
+    let mut header = st.show_header(ui, |ui| {
+        clicked = ui
+            .add(
+                egui::Label::new(RichText::new(heading).text_style(theme::kicker_style()))
+                    .sense(egui::Sense::click()),
+            )
+            .clicked();
+    });
+    if clicked {
+        header.toggle();
+    }
+    header.body(|ui| {
+        if waiting == 0 {
+            ui.label(theme::meta_text(ui, "Nothing waits on you."));
+        }
+        for d in pending {
+            let ticket = tickets.iter().find(|t| t.id == d.ticket).cloned();
+            decision_card(cx, ui, d, ticket.as_ref(), true);
+        }
+        for a in agents {
+            let ticket = tickets.iter().find(|t| t.id == a.ticket).cloned();
+            agent_card(cx, ui, a, ticket.as_ref());
+        }
+    });
 }
 
 /// The filter row: words every row must contain somewhere, and which

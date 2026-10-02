@@ -4386,3 +4386,39 @@ fn dispatch_page_answers_a_decision_with_a_click() {
     assert!(harness.state().core().settings().dispatch_window.is_some());
     assert_ne!(harness.state().core().view(), View::Dispatch);
 }
+
+#[test]
+fn dispatch_page_folds_a_pile_of_questions_behind_their_count() {
+    let (mut harness, _) = harness();
+    let mut status = dispatch_status();
+    let t = status
+        .tickets
+        .iter_mut()
+        .find(|t| t.id == "t1")
+        .expect("t1");
+    let first = t.decisions[0].clone();
+    for n in 2..=4 {
+        t.decisions
+            .push(switchboard::ports::dispatch::DecisionView {
+                id: format!("d{n}"),
+                question: format!("Question {n}?"),
+                ..first.clone()
+            });
+    }
+    harness
+        .state_mut()
+        .dispatch(AppAction::DispatchStatus(Some(status)));
+    harness.run_steps(2);
+    click(&mut harness, "Dispatch");
+    // Four questions fold; the heading carries the count and one click
+    // opens them.
+    assert!(
+        harness
+            .query_by_label("Which lanes does #104 need?")
+            .is_none(),
+        "four questions start folded"
+    );
+    click(&mut harness, "Waiting on you · 4");
+    harness.get_by_label("Which lanes does #104 need?");
+    harness.get_by_label("Question 4?");
+}
