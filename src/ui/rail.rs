@@ -149,56 +149,57 @@ fn project_rows(cx: &mut DrawCtx<'_>, ui: &mut Ui, active: Option<ProjectId>, co
         theme::kicker(ui, "Projects", p.n600);
         ui.add_space(4.0);
     }
-    let projects: Vec<_> = cx
+    let groups: Vec<_> = cx
         .core
-        .projects_in_rail_order()
+        .projects_in_rail_groups()
         .into_iter()
-        .map(|p| (p.id, p.name.clone(), p.space))
+        .map(|(space, projects)| {
+            let label = space
+                .map_or("Other workspaces", |s| s.name.as_str())
+                .to_owned();
+            let rows: Vec<_> = projects.iter().map(|p| (p.id, p.name.clone())).collect();
+            (label, rows)
+        })
         .collect();
-    // `None` until the first kicker; then the listed space drawn last,
-    // or `None` inside for the spaces this build does not list, which
-    // the order keeps together as one group.
-    let mut group: Option<Option<SpaceId>> = None;
-    for (n, (pid, name, space)) in projects.iter().enumerate() {
-        // In global, each space's projects sit under its name; the order
-        // keeps a space's projects together.
-        let listed = cx.core.space(*space);
-        let this = listed.map(|s| s.id);
-        if global && !compact && group != Some(this) {
-            if group.is_some() {
+    let mut n = 0;
+    for (g, (label, rows)) in groups.iter().enumerate() {
+        // In global, each space's projects sit under its name.
+        if global && !compact {
+            if g > 0 {
                 ui.add_space(8.0);
             }
-            group = Some(this);
-            let label = listed.map_or("Other workspaces", |s| s.name.as_str());
             theme::kicker(ui, label, p.n600);
             ui.add_space(4.0);
         }
-        let state = project_state(cx.core, *pid);
-        let running = state.as_ref().is_some_and(|s| {
-            !matches!(
-                s,
-                CardState::NotRunning | CardState::NotResumable | CardState::Exited(_)
-            )
-        });
-        let response = row(
-            ui,
-            &RowSpec {
-                text: name,
-                dot: Some(state.unwrap_or(CardState::NotRunning)),
-                selected: active == Some(*pid),
-                muted: !running,
-                count: waiting_in(cx.core, *pid),
-                compact,
-                initial: &initial(name),
-            },
-        );
-        let hint = if n < 9 {
-            format!("{name} (Cmd+{})", n + 1)
-        } else {
-            name.clone()
-        };
-        if response.on_hover_text(hint).clicked() {
-            cx.dispatch(AppAction::ShowBoard(*pid));
+        for (pid, name) in rows {
+            let state = project_state(cx.core, *pid);
+            let running = state.as_ref().is_some_and(|s| {
+                !matches!(
+                    s,
+                    CardState::NotRunning | CardState::NotResumable | CardState::Exited(_)
+                )
+            });
+            let response = row(
+                ui,
+                &RowSpec {
+                    text: name,
+                    dot: Some(state.unwrap_or(CardState::NotRunning)),
+                    selected: active == Some(*pid),
+                    muted: !running,
+                    count: waiting_in(cx.core, *pid),
+                    compact,
+                    initial: &initial(name),
+                },
+            );
+            let hint = if n < 9 {
+                format!("{name} (Cmd+{})", n + 1)
+            } else {
+                name.clone()
+            };
+            if response.on_hover_text(hint).clicked() {
+                cx.dispatch(AppAction::ShowBoard(*pid));
+            }
+            n += 1;
         }
     }
     let add = if compact { "+" } else { "+ Add project" };

@@ -1635,7 +1635,9 @@ saving that choice), the rail grouped by workspace with unlisted ones
 under "Other workspaces" (Cmd+1..9 count it as drawn), the add dialog's
 workspace choice, notices named, the switcher without its checkbox, the
 `workspace-global` script line, and `set.new` accepting the fixed id on
-the control port. views.json is v5.
+the control port, whose `spaces` reply lists it last with `view: true`
+so a client walking the spaces finds every set it can make. views.json
+is v5.
 
 Known gap: a real workspace's sets are not listed in global, so a set
 of one workspace is reached by switching to it.

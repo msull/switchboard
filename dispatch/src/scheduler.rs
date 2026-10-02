@@ -2228,7 +2228,10 @@ impl Runner {
             return Ok(space.clone());
         }
         if let Reply::Spaces { spaces } = self.ask(Body::Spaces)?
-            && let Some(s) = spaces.iter().find(|s| s.name == p.project.space)
+            // The global space is listed as a view; it holds no projects.
+            && let Some(s) = spaces
+                .iter()
+                .find(|s| !s.view && s.name == p.project.space)
         {
             ps.space = Some(s.id.clone());
             self.save_project(ps)?;

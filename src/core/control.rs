@@ -456,6 +456,8 @@ impl AppCore {
     }
 
     #[must_use]
+    /// The spaces, then the global space marked as a view, so every set
+    /// `set.new` can make is reachable by walking this list.
     pub fn space_views(&self) -> Vec<wire::SpaceView> {
         self.views
             .spaces
@@ -464,7 +466,14 @@ impl AppCore {
                 id: s.id.0.to_string(),
                 name: s.name.clone(),
                 op: s.op.clone(),
+                view: false,
             })
+            .chain(std::iter::once(wire::SpaceView {
+                id: SpaceId::GLOBAL.0.to_string(),
+                name: SpaceId::GLOBAL_NAME.to_owned(),
+                op: None,
+                view: true,
+            }))
             .collect()
     }
 

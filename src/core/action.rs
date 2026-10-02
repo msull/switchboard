@@ -1980,6 +1980,26 @@ impl AppCore {
         projects
     }
 
+    /// [`Self::projects_in_rail_order`] cut where the space changes: in
+    /// the global space one group per listed space, then one `None`
+    /// group for every space this build does not list. Outside global
+    /// it is a single group. The rail draws a kicker per group, and the
+    /// digits count across the groups, so both read the one order.
+    #[must_use]
+    pub fn projects_in_rail_groups(&self) -> Vec<(Option<&Space>, Vec<&Project>)> {
+        let mut groups: Vec<(Option<&Space>, Vec<&Project>)> = Vec::new();
+        for project in self.projects_in_rail_order() {
+            let space = self.space(project.space);
+            match groups.last_mut() {
+                Some((last, projects)) if last.map(|s| s.id) == space.map(|s| s.id) => {
+                    projects.push(project);
+                }
+                _ => groups.push((space, vec![project])),
+            }
+        }
+        groups
+    }
+
     /// The working sets of the active space, in the user's order. The
     /// global space lists only its own sets, not every space's.
     pub fn visible_working_sets(&self) -> impl Iterator<Item = &WorkingSet> {
@@ -2343,6 +2363,21 @@ impl AppCore {
     #[must_use]
     pub fn notice(&self) -> Option<&Notice> {
         self.notices.first()
+    }
+    /// The oldest notice as the active space may show it: one about a
+    /// space it does not contain says only [`Notice::ELSEWHERE`], so no
+    /// name crosses the space boundary. The global space contains every
+    /// space and shows every notice as written.
+    #[must_use]
+    pub fn notice_shown(&self) -> Option<Notice> {
+        let mut notice = self.notice()?.clone();
+        if notice
+            .space
+            .is_some_and(|s| !self.settings.space.contains(s))
+        {
+            Notice::ELSEWHERE.clone_into(&mut notice.text);
+        }
+        Some(notice)
     }
     #[must_use]
     pub fn notices(&self) -> &[Notice] {

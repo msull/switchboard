@@ -6,7 +6,7 @@ use std::time::{Duration, SystemTime};
 
 use uuid::Uuid;
 
-use super::action::{AppAction, AppCore, Clock, Effect, UNDO_WINDOW, View};
+use super::action::{AppAction, AppCore, Clock, Effect, Notice, UNDO_WINDOW, View};
 use super::controller::{MenuKind, UiRequest};
 use super::definitions::entry_hash;
 use super::model::{
@@ -638,6 +638,23 @@ fn unlisted_spaces_share_one_group_after_the_listed_ones() {
     core.dispatch(AppAction::ShowSpace(SpaceId::GLOBAL), Clock::at(1));
     let order: Vec<ProjectId> = core.projects_in_rail_order().iter().map(|p| p.id).collect();
     assert_eq!(order, vec![pa, pb, projects[2], projects[1], projects[0]]);
+    let groups: Vec<(Option<SpaceId>, Vec<ProjectId>)> = core
+        .projects_in_rail_groups()
+        .into_iter()
+        .map(|(space, ps)| (space.map(|s| s.id), ps.iter().map(|p| p.id).collect()))
+        .collect();
+    let listed = |p| core.project_space(p);
+    assert_eq!(
+        groups,
+        vec![
+            (listed(pa), vec![pa]),
+            (listed(pb), vec![pb]),
+            (None, vec![projects[2], projects[1], projects[0]]),
+        ]
+    );
+    // The groups read the same order the digits count.
+    let flat: Vec<ProjectId> = groups.into_iter().flat_map(|(_, ps)| ps).collect();
+    assert_eq!(flat, order);
 }
 
 #[test]
@@ -703,6 +720,12 @@ fn the_global_space_cannot_be_renamed_deleted_or_moved_into() {
     let (mut core, b, [pa, _], _) = two_spaces();
     let own = new_set(&mut core, 1);
     core.dispatch(AppAction::ShowSpace(SpaceId::GLOBAL), Clock::at(2));
+    // Global is active and holds no set, so only the global guard keeps
+    // this from moving the user to the first space.
+    let settings = core.settings().clone();
+    let effects = core.dispatch(AppAction::DeleteSpace(SpaceId::GLOBAL), Clock::at(2));
+    assert!(effects.is_empty(), "{effects:?}");
+    assert_eq!(core.settings(), &settings);
     let global = new_set(&mut core, 3);
     let sets = core.working_sets().to_vec();
     let spaces = core.spaces().to_vec();
@@ -928,6 +951,45 @@ fn moving_a_project_between_spaces_takes_it_off_the_old_space_sets() {
         "{:?}",
         core.notices()
     );
+}
+
+#[test]
+fn a_notice_keeps_its_words_only_where_its_space_is_seen() {
+    let (mut core, b, _, _) = two_spaces();
+    let text = "cannot start server: gone";
+    core.seed_status(
+        Some(Notice {
+            text: text.into(),
+            is_error: true,
+            expires_at: None,
+            space: Some(b),
+            undo: None,
+        }),
+        None,
+        false,
+    );
+    let shown = |core: &AppCore| core.notice_shown().map(|n| n.text);
+    core.dispatch(AppAction::ShowSpace(SpaceId::DEFAULT), Clock::at(1));
+    assert_eq!(shown(&core).as_deref(), Some(Notice::ELSEWHERE));
+    core.dispatch(AppAction::ShowSpace(b), Clock::at(2));
+    assert_eq!(shown(&core).as_deref(), Some(text));
+    // Everywhere contains every space, so it shows the notice as written.
+    core.dispatch(AppAction::ShowSpace(SpaceId::GLOBAL), Clock::at(3));
+    assert_eq!(shown(&core).as_deref(), Some(text));
+    // A notice about no space reads the same in any space.
+    core.seed_status(
+        Some(Notice {
+            text: "saved".into(),
+            is_error: false,
+            expires_at: None,
+            space: None,
+            undo: None,
+        }),
+        None,
+        false,
+    );
+    core.dispatch(AppAction::ShowSpace(SpaceId::DEFAULT), Clock::at(4));
+    assert_eq!(shown(&core).as_deref(), Some("saved"));
 }
 
 #[test]

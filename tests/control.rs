@@ -483,6 +483,28 @@ fn a_global_set_takes_cards_from_two_spaces_and_holds_no_project() {
     assert!(global.space.is_global());
     assert_eq!(global.items.len(), 2);
 
+    // A client walking the listed spaces finds the global set too.
+    let Reply::Spaces { spaces } = call(&mut port, Request::new("ls", Body::Spaces)) else {
+        panic!("spaces");
+    };
+    let listed: Vec<_> = spaces.iter().filter(|s| s.view).collect();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].id, GLOBAL);
+    assert_eq!(spaces.iter().filter(|s| !s.view).count(), 3);
+    let Reply::Sets { sets } = call(
+        &mut port,
+        Request::new(
+            "sets",
+            Body::Sets {
+                space: listed[0].id.clone(),
+            },
+        ),
+    ) else {
+        panic!("sets");
+    };
+    assert_eq!(sets.len(), 1);
+    assert_eq!(sets[0].items.len(), 2);
+
     let reply = call(
         &mut port,
         Request::new(
