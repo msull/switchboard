@@ -102,6 +102,15 @@ impl TmuxHost {
     pub fn smoke_test(&self) -> io::Result<()> {
         let started = self.run(&["new-session", "-d", "-s", "smoke", "-c", "/"]);
         let _ = self.run(&["kill-session", "-t", "=smoke"]);
+        // Killing the last session makes the server exit on its own
+        // time; a `new-session` that reaches it first is answered
+        // "server exited unexpectedly". Wait until it is gone.
+        for _ in 0..40 {
+            match self.run(&["list-sessions"]) {
+                Err(e) if is_no_server(&e) => break,
+                _ => std::thread::sleep(std::time::Duration::from_millis(50)),
+            }
+        }
         started.map(|_| ())
     }
 
