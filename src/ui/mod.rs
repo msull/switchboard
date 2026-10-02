@@ -109,6 +109,10 @@ pub struct UiState {
     pub dispatch_project: Option<String>,
     /// How the ticket table is narrowed and ordered.
     pub dispatch_listing: crate::core::TicketListing,
+    /// Whether the Waiting on you section was folded when the first
+    /// status arrived; `None` until then, because before it there is
+    /// nothing to count and egui would remember an empty section as open.
+    pub dispatch_waiting_folded: Option<bool>,
     /// Options ticked so far on decisions that take several, by
     /// decision id; started from the recommendation.
     pub dispatch_choices: HashMap<String, Vec<String>>,
@@ -269,6 +273,7 @@ impl Default for UiState {
             dispatch_artifact: None,
             dispatch_project: None,
             dispatch_listing: crate::core::TicketListing::default(),
+            dispatch_waiting_folded: None,
             dispatch_choices: HashMap::new(),
             surface: Surface::Main,
             dispatch_window_ticket: None,

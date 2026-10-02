@@ -87,31 +87,7 @@ pub fn show(cx: &mut DrawCtx<'_>, ui: &mut Ui) {
                         .is_some_and(|t| shown(&t.project))
                 })
                 .collect();
-            // A few questions are shown in full; a pile of them folds
-            // behind its count, so the table is not pushed off the
-            // page, and the fold is remembered for the window's life.
-            let waiting = pending.len() + agents.len();
-            let heading = if waiting == 0 {
-                "Waiting on you".to_owned()
-            } else {
-                format!("Waiting on you · {waiting}")
-            };
-            egui::CollapsingHeader::new(RichText::new(heading).text_style(theme::kicker_style()))
-                .id_salt("dispatch-waiting")
-                .default_open(waiting <= 3)
-                .show(ui, |ui| {
-                    if waiting == 0 {
-                        ui.label(theme::meta_text(ui, "Nothing waits on you."));
-                    }
-                    for d in &pending {
-                        let ticket = tickets.iter().find(|t| t.id == d.ticket).cloned();
-                        decision_card(cx, ui, d, ticket.as_ref(), true);
-                    }
-                    for a in &agents {
-                        let ticket = tickets.iter().find(|t| t.id == a.ticket).cloned();
-                        agent_card(cx, ui, a, ticket.as_ref());
-                    }
-                });
+            waiting_section(cx, ui, seen, &pending, &agents, &tickets);
 
             theme::section(ui, "Tickets");
             project_limits(ui, projects.iter().filter(|p| shown(&p.name)));
@@ -226,6 +202,53 @@ fn project_limits<'a>(ui: &mut Ui, projects: impl Iterator<Item = &'a ProjectVie
             }
         });
     }
+}
+
+/// The decisions and agents that wait on the user, as cards. A few are
+/// shown in full; a pile of them folds behind its count, so the table
+/// is not pushed off the page. The fold is chosen once, when the first
+/// status arrives, and the user's clicks on it are remembered after.
+fn waiting_section(
+    cx: &mut DrawCtx<'_>,
+    ui: &mut Ui,
+    seen: bool,
+    pending: &[DecisionView],
+    agents: &[WaitingAgent],
+    tickets: &[TicketView],
+) {
+    // A few questions are shown in full; a pile of them folds
+    // behind its count, so the table is not pushed off the
+    // page, and the fold is remembered for the window's life.
+    let waiting = pending.len() + agents.len();
+    let heading = if waiting == 0 {
+        "Waiting on you".to_owned()
+    } else {
+        format!("Waiting on you · {waiting}")
+    };
+    let fold = ui.make_persistent_id("dispatch-waiting");
+    if seen && cx.state.dispatch_waiting_folded.is_none() {
+        let mut st =
+            egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), fold, true);
+        st.set_open(waiting <= 3);
+        st.store(ui.ctx());
+        cx.state.dispatch_waiting_folded = Some(waiting > 3);
+    }
+    egui::CollapsingHeader::new(RichText::new(heading).text_style(theme::kicker_style()))
+        .id_salt("dispatch-waiting")
+        .default_open(true)
+        .show(ui, |ui| {
+            if waiting == 0 {
+                ui.label(theme::meta_text(ui, "Nothing waits on you."));
+            }
+            for d in pending {
+                let ticket = tickets.iter().find(|t| t.id == d.ticket).cloned();
+                decision_card(cx, ui, d, ticket.as_ref(), true);
+            }
+            for a in agents {
+                let ticket = tickets.iter().find(|t| t.id == a.ticket).cloned();
+                agent_card(cx, ui, a, ticket.as_ref());
+            }
+        });
 }
 
 /// The filter row: words every row must contain somewhere, and which
