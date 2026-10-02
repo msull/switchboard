@@ -3894,7 +3894,6 @@ impl Runner {
         }
         Ok(())
     }
-    /// What one ticket's step changed in the project's counts.
 
     /// One ticket's step under the lock. `Some((took_slot, pipeline))`
     /// when the ticket was stepped on its pipeline, `None` when it was
