@@ -953,7 +953,7 @@ nothing; otherwise each `- `, `* ` or `1. ` line is a point, and a
 file with no list is one point. Carried points: the previous round's
 points the implementer marked `disputed` (or did not answer) stay
 open under their original id unless a reviewer in the new pass wrote
-`withdraw <id>`; `keep <id>: why` keeps one with the reason shown.
+`withdraw <id>` (bare or as a list item); `keep <id>: why` keeps one with the reason shown.
 
 No open point converges the round: the stage's checks run at that
 head (see below) and the stage completes bound to it. Open points at

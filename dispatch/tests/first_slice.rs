@@ -4085,7 +4085,8 @@ fn a_withdrawn_point_closes_and_the_auto_dial_fixes_without_asking() {
         .insert(checks_key(&t, 1), 0);
     env.steps_until(&id, "round two", |t, _| review_attempt(t).rounds.len() == 2);
     lint_exits(&mut env, &id, 2, 0, "");
-    style_says(&mut env, &id, 2, "withdraw r1/style-1\n");
+    // As a list item, the way reviewers tend to write it.
+    style_says(&mut env, &id, 2, "- withdraw r1/style-1\n");
     env.steps_until(&id, "the final checks", |t, _| {
         review_attempt(t).gate.is_some()
     });

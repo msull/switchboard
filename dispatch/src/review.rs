@@ -1481,11 +1481,17 @@ fn collect_points(round: &ReviewRound, no_feedback: &str) -> Points {
         let mut k = 0;
         let mut listed = false;
         for line in text.lines() {
+            // Reviewers write their lines as list items as often as
+            // not; a bulleted `withdraw` or `keep` is the same ruling.
             let line = line.trim();
-            if let Some(id) = line.strip_prefix("withdraw ") {
+            let ruling = line
+                .strip_prefix("- ")
+                .or_else(|| line.strip_prefix("* "))
+                .map_or(line, str::trim);
+            if let Some(id) = ruling.strip_prefix("withdraw ") {
                 withdrawn.push(id.trim().to_owned());
                 listed = true;
-            } else if let Some(rest) = line.strip_prefix("keep ") {
+            } else if let Some(rest) = ruling.strip_prefix("keep ") {
                 let (id, why) = rest.split_once(':').unwrap_or((rest, ""));
                 kept.push((id.trim().to_owned(), r.name.clone(), why.trim().to_owned()));
                 listed = true;
