@@ -589,6 +589,30 @@ pub struct Ticket {
 }
 
 impl Ticket {
+    /// The indexes of the ledger's operations recovery still has to
+    /// resolve.
+    #[must_use]
+    pub fn unsettled(&self) -> Vec<usize> {
+        self.unsettled_where(|_| true)
+    }
+
+    /// `unsettled`, launches only: what parking and closing wait on,
+    /// since a launch still in flight would bring up a session after
+    /// they stopped everything.
+    #[must_use]
+    pub fn unsettled_creations(&self) -> Vec<usize> {
+        self.unsettled_where(|o| o.class == "creation")
+    }
+
+    fn unsettled_where(&self, keep: impl Fn(&Operation) -> bool) -> Vec<usize> {
+        self.ledger
+            .iter()
+            .enumerate()
+            .filter(|(_, o)| keep(o) && o.unresolved())
+            .map(|(i, _)| i)
+            .collect()
+    }
+
     /// The attempts of stage `stage`, latest numbers last.
     pub fn attempts_of<'a>(&'a self, stage: &'a str) -> impl Iterator<Item = &'a Attempt> + 'a {
         self.attempts.iter().filter(move |a| a.stage == stage)

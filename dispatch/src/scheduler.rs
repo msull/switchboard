@@ -960,13 +960,7 @@ impl Runner {
         // resolved before anything is asked again; `step` never visits a
         // closing ticket to do it. An op recovery already settled is
         // left alone; a close can take several passes.
-        let pending: Vec<usize> = t
-            .ledger
-            .iter()
-            .enumerate()
-            .filter(|(_, o)| !crate::recover::settled(o))
-            .map(|(i, _)| i)
-            .collect();
+        let pending = t.unsettled();
         if !pending.is_empty() {
             let mut failed = None;
             for i in pending {
@@ -990,10 +984,7 @@ impl Runner {
         }
         // A launch Switchboard is still working on would bring up a
         // session after the processes below were read back as gone.
-        if t.ledger
-            .iter()
-            .any(|o| o.class == "creation" && !crate::recover::settled(o))
-        {
+        if !t.unsettled_creations().is_empty() {
             log::info!("ticket {} closing: a launch is still in flight", t.id);
             return Ok(());
         }
@@ -1120,8 +1111,14 @@ impl Runner {
     /// before anything is written: each lane with a repository of its
     /// own on its own terms, and the ticket's tree with those lanes left
     /// out.
+    /// A ticket whose pipeline copy cannot be read passes: without it
+    /// nothing is removed (`remove_trees` keeps the trees and says why),
+    /// so nothing can be lost, and the close a parked ticket needs most
+    /// is not refused.
     fn preflight_trees(&self, t: &Ticket) -> Result<()> {
-        let p = self.pipeline_of(t)?;
+        let Ok(p) = self.pipeline_of(t) else {
+            return Ok(());
+        };
         let (lanes, tree) = close_trees(t, &p);
         let lanes: Vec<PathBuf> = lanes.iter().map(|&i| t.lanes[i].worktree.clone()).collect();
         let found = crate::git::uncommitted(&*self.git, tree, &lanes)?;
@@ -1267,23 +1264,14 @@ impl Runner {
         // session after its attempt was cancelled, owned by nothing: it
         // is resolved first, and parking waits while one is in flight.
         // Only creations: nothing else can start what parking must stop.
-        let creations: Vec<usize> = t
-            .ledger
-            .iter()
-            .enumerate()
-            .filter(|(_, o)| o.class == "creation" && !crate::recover::settled(o))
-            .map(|(i, _)| i)
-            .collect();
+        let creations = t.unsettled_creations();
         if !creations.is_empty() {
             for i in creations {
                 self.recover_one(t, ps, i, now_ms)?;
             }
             self.save_ticket(t, now_ms)?;
         }
-        if t.ledger
-            .iter()
-            .any(|o| o.class == "creation" && !crate::recover::settled(o))
-        {
+        if !t.unsettled_creations().is_empty() {
             log::info!("ticket {} parking: a launch is still in flight", t.id);
             return Ok(());
         }
@@ -4471,39 +4459,45 @@ impl Runner {
     // --- across a project
 
     /// Every active ticket of `project`, in queue order, as far as the
-    /// slots allow; then the queue view.
+    /// slots allow, then the queue view, each in a transaction of its
+    /// own.
+    ///
     /// The writer lock is held per ticket step, not for the pass: a
     /// step may fetch, read a provider or launch an agent, and an
     /// answer from the terminal or the window must not wait behind
     /// every ticket's slow work. Each step re-reads its ticket and the
     /// project under the lock, so what landed between steps is seen.
     pub fn step_project(&mut self, project: &str, now_ms: u64) -> Result<()> {
-        let mut ps = self.load_project(project)?;
-        let mut tickets: Vec<Ticket> = Vec::new();
-        for id in ps.queue.iter().chain(&ps.closing) {
-            if tickets.iter().any(|t| &t.id == id) {
-                continue;
+        // Read and pruned under the lock: a `take` or a reorder landing
+        // between the read and the write would otherwise be lost.
+        let mut tickets = self.transaction(|r| {
+            let mut ps = r.load_project(project)?;
+            let mut tickets: Vec<Ticket> = Vec::new();
+            for id in ps.queue.iter().chain(&ps.closing) {
+                if tickets.iter().any(|t| &t.id == id) {
+                    continue;
+                }
+                match r.load_ticket(id) {
+                    Ok(t) => tickets.push(t),
+                    Err(e) => log::warn!("ticket {id}: {e}"),
+                }
             }
-            match self.load_ticket(id) {
-                Ok(t) => tickets.push(t),
-                Err(e) => log::warn!("ticket {id}: {e}"),
+            // A close finished but not yet saved to the project leaves
+            // the id behind; a closed ticket is in neither list.
+            let before = ps.clone();
+            for t in &tickets {
+                if matches!(t.state, TicketState::Closed { .. }) {
+                    ps.queue.retain(|id| id != &t.id);
+                    ps.closing.retain(|id| id != &t.id);
+                }
             }
-        }
-        // A close finished but not yet saved to the project leaves the
-        // id behind; a closed ticket is in neither list.
-        let closed: Vec<String> = tickets
-            .iter()
-            .filter(|t| matches!(t.state, TicketState::Closed { .. }))
-            .map(|t| t.id.clone())
-            .collect();
-        let before = ps.clone();
-        ps.queue.retain(|id| !closed.contains(id));
-        ps.closing.retain(|id| !closed.contains(id));
-        tickets.retain(|t| !closed.contains(&t.id));
-        requeue_strays(&mut ps, &tickets);
-        if ps != before {
-            self.save_project(&ps)?;
-        }
+            requeue_strays(&mut ps, &tickets);
+            if ps != before {
+                r.save_project(&ps)?;
+            }
+            Ok(tickets)
+        })?;
+        tickets.retain(|t| !matches!(t.state, TicketState::Closed { .. }));
         let mut running = 0u32;
         let mut pending = 0u32;
         for t in &tickets {
@@ -4571,9 +4565,9 @@ impl Runner {
         Ok(())
     }
 
-    /// One ticket's step under the lock. `Some((took_slot, pipeline))`
-    /// when the ticket was stepped on its pipeline, `None` when it was
-    /// finishing a park, inactive or held back.
+    /// One ticket's step under the lock: true when the step took a
+    /// slot, false when it took none or the ticket was finishing a park
+    /// or a close, inactive or held back.
     fn step_one(
         &mut self,
         t: &mut Ticket,

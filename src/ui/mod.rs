@@ -388,7 +388,7 @@ fn draw_frame(cx: &mut DrawCtx<'_>, ui: &mut Ui) {
     zoom::main_window(cx, ui.ctx());
     let view = cx.core.view();
     working_set::serve_requests(cx, ui.ctx());
-    dispatch::drop_stale_close_dialog(cx, &view);
+    dispatch::drop_stale_close_dialog(cx);
     keyboard(cx, ui, &view);
     if let Some(delay) = prompt_box::pump(cx) {
         ui.ctx().request_repaint_after(delay);

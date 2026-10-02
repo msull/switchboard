@@ -10,6 +10,7 @@ use egui_extras::{Column, TableBuilder};
 
 use super::dialogs::{dialog, dialog_actions};
 use super::{DrawCtx, GAP, markdown, theme};
+use crate::core::dispatch::{close_offered, ticket_stage};
 use crate::core::{AppAction, RecordId, TicketOnly, TicketSort, View, WaitingAgent};
 use crate::ports::dispatch::{AttemptView, DecisionView, ProjectView, TicketView};
 
@@ -217,9 +218,6 @@ fn waiting_section(
     agents: &[WaitingAgent],
     tickets: &[TicketView],
 ) {
-    // A few questions are shown in full; a pile of them folds
-    // behind its count, so the table is not pushed off the
-    // page, and the fold is remembered for the window's life.
     let waiting = pending.len() + agents.len();
     let heading = if waiting == 0 {
         "Waiting on you".to_owned()
@@ -357,16 +355,17 @@ fn ticket_table(cx: &mut DrawCtx<'_>, ui: &mut Ui) {
                         ui.label(theme::meta_text(ui, &t.project));
                     });
                     row.col(|ui| {
-                        ui.label(theme::meta_text(ui, crate::core::AppCore::ticket_stage(t)));
+                        ui.label(theme::meta_text(ui, ticket_stage(t)));
                     });
                     row.col(|ui| {
                         let standing = core.ticket_standing(t);
-                        let urgent = core.ticket_waits(t) || t.state != "active";
-                        ui.label(
-                            RichText::new(&standing)
-                                .text_style(theme::meta())
-                                .color(if urgent { p.accent_2_text } else { p.n700 }),
-                        )
+                        ui.label(RichText::new(&standing).text_style(theme::meta()).color(
+                            if core.ticket_urgent(t) {
+                                p.accent_2_text
+                            } else {
+                                p.n700
+                            },
+                        ))
                         .on_hover_text(standing);
                     });
                     row.col(|ui| {
@@ -377,9 +376,7 @@ fn ticket_table(cx: &mut DrawCtx<'_>, ui: &mut Ui) {
                         if core.ticket_waits(t) && theme::ghost(ui, "Answer").clicked() {
                             open_ticket(cx, &t.id);
                         }
-                        if matches!(t.state.as_str(), "parked")
-                            && theme::secondary(ui, "Resume").clicked()
-                        {
+                        if t.state == "parked" && theme::secondary(ui, "Resume").clicked() {
                             cx.dispatch(AppAction::DispatchResume(t.id.clone()));
                         }
                         if theme::ghost_muted(ui, "Open").clicked() {
@@ -709,26 +706,17 @@ fn console(cx: &mut DrawCtx<'_>, ui: &mut Ui) {
     }
 }
 
-/// The close dialog's whole lifetime after it opens, checked once a
-/// frame before anything is drawn. It is dropped when no page of its
-/// ticket is drawn (the Dispatch window closed under it, or the main
-/// window moved on), when the ticket is gone from the status, or when
-/// the runner's flags no longer offer a close or a retry (its close is
-/// under way). Nothing would draw it in the first two cases, yet it
-/// would hold the keyboard and come back by itself the next time the
-/// ticket is opened.
-pub fn drop_stale_close_dialog(cx: &mut DrawCtx<'_>, view: &View) {
+/// The close dialog's draft, cleared once a frame before anything is
+/// drawn when the core says it no longer stands
+/// (`AppCore::close_dialog_stands`).
+pub fn drop_stale_close_dialog(cx: &mut DrawCtx<'_>) {
     let Some(id) = cx.state.confirm_close_ticket.as_deref() else {
         return;
     };
-    let windowed = cx.core.settings().dispatch_window.is_some();
-    let seen = if windowed {
-        cx.state.dispatch_window_ticket.as_deref() == Some(id)
-    } else {
-        matches!(view, View::Ticket(t) if t == id)
-    };
-    let offered = cx.core.ticket(id).is_some_and(close_offered);
-    if !seen || !offered {
+    if !cx
+        .core
+        .close_dialog_stands(id, cx.state.dispatch_window_ticket.as_deref())
+    {
         cx.state.confirm_close_ticket = None;
     }
 }
@@ -815,14 +803,13 @@ fn ticket_header(cx: &mut DrawCtx<'_>, ui: &mut Ui, t: &TicketView) {
         ui.label(theme::meta_text(ui, "·"));
         stage_strip(ui, t);
         ui.label(theme::meta_text(ui, "·"));
-        let agents = cx.core.waiting_agents_of(t);
         ui.label(
             RichText::new(cx.core.ticket_standing(t))
                 .text_style(theme::meta())
-                .color(if t.state == "active" && agents.is_empty() {
-                    p.n700
-                } else {
+                .color(if cx.core.ticket_urgent(t) {
                     p.accent_2_text
+                } else {
+                    p.n700
                 }),
         );
         if let Some(tree) = &t.tree {
@@ -885,8 +872,6 @@ fn ticket_actions(cx: &mut DrawCtx<'_>, ui: &mut Ui, t: &TicketView) {
     if !close_offered(t) {
         return;
     }
-    // The runner's flags never both hold: a retry is only for a closed
-    // ticket, a close only for one that is not.
     let (label, hover) = if t.trees_retryable {
         ("Remove trees", "Try the removal again; the branch stays")
     } else {
@@ -898,13 +883,6 @@ fn ticket_actions(cx: &mut DrawCtx<'_>, ui: &mut Ui, t: &TicketView) {
     if theme::secondary(ui, label).on_hover_text(hover).clicked() {
         cx.state.confirm_close_ticket = Some(t.id.clone());
     }
-}
-
-/// Whether the page offers a close (or a retry of a kept tree's
-/// removal) for this ticket: the button shows, and its open dialog
-/// stays, on this alone.
-fn close_offered(t: &TicketView) -> bool {
-    t.closable || t.trees_retryable
 }
 
 /// The close confirmation: what goes, by path, and what stays. A

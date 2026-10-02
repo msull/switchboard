@@ -1349,11 +1349,12 @@ workspace only, except a set made in Everywhere, which holds any
 workspace's sets); a notice about a record in another workspace shows
 as "Something in another workspace needs you", with no name; and the
 rail's count is the active workspace's, while the Dock badge counts
-every workspace, so a waiting agent elsewhere still gets through. The selector is the active workspace's name at the top of the
-rail: a menu of every workspace with its waiting count, then New,
-Rename, and Delete (only an empty workspace that is not the last).
-"Move to" on a project's board and a working set's header moves it,
-offered only when another workspace exists.
+every workspace, so a waiting agent elsewhere still gets through. The
+selector is the active workspace's name at the top of the rail: a menu
+of every workspace with its waiting count, then New, Rename, and Delete
+(only an empty workspace that is not the last). "Move to" on a
+project's board and a working set's header moves it, offered only when
+another workspace exists.
 
 Records: `Views.spaces` lists the workspaces (views.json, v5 today), and
 `Project.space` (records v8) and `WorkingSet.space` name each thing's

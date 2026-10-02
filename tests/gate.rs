@@ -125,7 +125,7 @@ impl Gate {
             artifacts: Box::new(switchboard::adapters::artifacts::DiskArtifacts),
             controller: Box::new(FakeController::default()),
             operations: Box::new(FakeOperations::default()),
-            dispatch: Box::new(FakeDispatch::default()),
+            dispatch: Some(Box::new(FakeDispatch::default())),
             wake: None,
         })
     }

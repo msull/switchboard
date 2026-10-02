@@ -5625,6 +5625,19 @@ fn a_parked_ticket_closes_with_the_reason_given_and_is_never_stepped_again() {
     assert!(e.to_string().contains("already closed"), "{e:#}");
 }
 
+#[test]
+fn a_ticket_whose_pipeline_copy_is_unreadable_closes_and_keeps_its_trees() {
+    let (mut env, id) = parked_workspace();
+    let t = env.ticket(&id);
+    std::fs::remove_file(&t.pipeline_file).unwrap();
+    let now = env.tick();
+    let t = env.runner.close_by_hand(&id, None, now).unwrap();
+    assert!(matches!(t.state, TicketState::Closed { .. }), "{t:#?}");
+    let kept = t.close.trees_kept.as_deref().unwrap_or_default();
+    assert!(kept.contains("pipeline copy unreadable"), "{kept}");
+    assert!(env.repo.lock().unwrap().removed.is_empty());
+}
+
 /// A refusal writes nothing and removes nothing.
 fn refused(env: &mut Env, id: &str, why: &str) {
     let before = std::fs::read(env.data.ticket_file(id)).unwrap();

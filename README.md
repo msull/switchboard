@@ -147,7 +147,7 @@ Dev aids, all environment variables:
   `rename-working-set`, `delete-working-set`, `add-to-working-set`,
   `add-file-to-working-set`, `arrange`, `show-message`, `clone-session`,
   `discard-to`, `undo-discard`, `review-plan`, `show-review`,
-  `show-dispatch`, `show-ticket`,
+  `show-dispatch`, `show-ticket`, `close-ticket`,
   `review-file`, `review-continue`, `review-finalize`, `show-artifact`,
   `pop-out`, `close-pop-out`, `files-root`, `zoom`, `place-pop-out`,
   `place-card`, `new-workspace`, `workspace`, `workspace-global`,

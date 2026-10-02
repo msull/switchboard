@@ -13,7 +13,8 @@
 //! `config <project>` (opens the config editor),
 //! `review-plan <session> <absolute plan path>` (starts a plan review),
 //! `show-review` (the newest review's page), `show-dispatch` and
-//! `show-ticket <id>` (Dispatch's pages), `review-file
+//! `show-ticket <id>` (Dispatch's pages), `close-ticket <id>` (the
+//! ticket's page with its close confirmation open), `review-file
 //! feedback|response <first line...>` (writes the newest review's
 //! awaited file to disk, as its agent would), `review-continue`,
 //! `review-finalize`, `show-artifact <name> <index>` (a command's card
@@ -121,6 +122,7 @@ const REVIEW_LINES: &[&str] = &[
     "show-artifact",
     "show-dispatch",
     "show-ticket",
+    "close-ticket",
     "pop-out",
     "close-pop-out",
     "files-root",
@@ -233,6 +235,10 @@ fn review_step(app: &mut SwitchboardApp, w: &[&str]) -> Result<(), String> {
         }
         ["show-dispatch"] => app.dispatch(AppAction::ShowDispatch),
         ["show-ticket", id] => app.dispatch(AppAction::ShowTicket((*id).to_owned())),
+        ["close-ticket", id] => {
+            app.dispatch(AppAction::ShowTicket((*id).to_owned()));
+            app.ui_state.confirm_close_ticket = Some((*id).to_owned());
+        }
         ["review-continue"] => {
             let id = newest_review(app)?;
             app.dispatch(AppAction::ContinueWorkflow(id));

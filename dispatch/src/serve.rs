@@ -368,10 +368,9 @@ pub fn status(runner: &Runner) -> Result<Status> {
     })
 }
 
-/// The record as a reader sees it.
-#[must_use]
 /// A ticket as a reader sees it, with what its frozen pipeline copy
 /// says (stage names, the paths a close removes) when it can be read.
+#[must_use]
 pub fn ticket_view(t: &Ticket, p: Option<&Pipeline>) -> TicketView {
     let (state, reason) = match &t.state {
         TicketState::Active => ("active", None),

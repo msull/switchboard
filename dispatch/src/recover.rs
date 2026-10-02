@@ -18,13 +18,6 @@ pub(crate) const REMOVED: &str = "removed by hand";
 pub(crate) const NOT_REPEATED: &str = "reply lost; not repeated";
 pub(crate) const HARMLESS: &str = "reply lost; harmless to repeat";
 
-/// Whether recovery has nothing more to do for this operation: it has a
-/// reply, or recovery already gave its verdict. Recovering a lost send
-/// again would raise its decision again.
-pub(crate) fn settled(op: &Operation) -> bool {
-    op.reply.is_some() || op.settled
-}
-
 /// Recovery's verdict written on an operation: the words for the
 /// reader, and the flag that keeps a later pass from recovering it
 /// again.
@@ -51,13 +44,7 @@ impl Runner {
                 continue;
             }
             let mut ps = self.load_project(&t.project)?;
-            let pending: Vec<usize> = t
-                .ledger
-                .iter()
-                .enumerate()
-                .filter(|(_, o)| o.unresolved())
-                .map(|(i, _)| i)
-                .collect();
+            let pending = t.unsettled();
             for i in pending {
                 self.recover_one(&mut t, &mut ps, i, now_ms)?;
             }

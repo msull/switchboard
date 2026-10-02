@@ -201,7 +201,7 @@ fn harness_build(
         artifacts: Box::new(FakeArtifacts::default()),
         controller: Box::new(FakeController::default()),
         operations: Box::new(FakeOperations::default()),
-        dispatch: Box::new(FakeDispatch::default()),
+        dispatch: Some(Box::new(FakeDispatch::default())),
         wake: None,
     };
     let mut harness = Harness::builder()
@@ -2254,7 +2254,7 @@ fn polling_reads_the_transcript_into_the_ui_state() {
         artifacts: Box::new(FakeArtifacts::default()),
         controller: Box::new(FakeController::default()),
         operations: Box::new(FakeOperations::default()),
-        dispatch: Box::new(FakeDispatch::default()),
+        dispatch: Some(Box::new(FakeDispatch::default())),
         wake: None,
     };
     let mut harness = Harness::builder()

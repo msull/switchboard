@@ -30,10 +30,15 @@ pub enum TicketSort {
     /// Last written, newest first by default.
     #[default]
     Updated,
+    /// When the ticket was taken.
     Created,
+    /// The project's name.
     Project,
+    /// The issue or pull request, by kind and number.
     Source,
+    /// The title, ignoring case.
     Title,
+    /// How far along its pipeline the ticket is.
     Stage,
     /// What the ticket waits on: your answers first, then running
     /// work, then held, parked and closed.
@@ -41,6 +46,7 @@ pub enum TicketSort {
 }
 
 impl TicketSort {
+    /// Every column, in the order the table shows them.
     pub const ALL: [Self; 7] = [
         Self::Source,
         Self::Title,
@@ -51,6 +57,7 @@ impl TicketSort {
         Self::Created,
     ];
 
+    /// The column's header.
     #[must_use]
     pub fn label(self) -> &'static str {
         match self {
@@ -75,16 +82,22 @@ impl TicketSort {
 /// Which tickets the table lists.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum TicketOnly {
+    /// Every ticket, whatever its state.
     #[default]
     All,
     /// A decision pending, or an agent at a prompt of its own.
     Waiting,
+    /// Running on its pipeline.
     Active,
+    /// Stopped, or on its way to stopping or closing: parking, parked,
+    /// or a close still under way.
     Parked,
+    /// Closed for good.
     Closed,
 }
 
 impl TicketOnly {
+    /// Every filter, in the order the picker lists them.
     pub const ALL: [Self; 5] = [
         Self::All,
         Self::Waiting,
@@ -93,6 +106,7 @@ impl TicketOnly {
         Self::Closed,
     ];
 
+    /// The filter's name in the picker.
     #[must_use]
     pub fn label(self) -> &'static str {
         match self {
@@ -162,6 +176,43 @@ pub struct DispatchState {
     pub data_dir: PathBuf,
 }
 
+/// `#104` for an issue, `PR #3` for a pull request, nothing for a
+/// ticket without a number.
+#[must_use]
+pub fn ticket_source(t: &TicketView) -> String {
+    match t.number {
+        Some(n) if t.kind == "pull-request" => format!("PR #{n}"),
+        Some(n) => format!("#{n}"),
+        None => String::new(),
+    }
+}
+
+/// The current stage and where it falls: `review-code 6/8`, or `done`
+/// past the end.
+#[must_use]
+pub fn ticket_stage(t: &TicketView) -> String {
+    match t.stages.get(t.stage) {
+        Some(name) => format!("{name} {}/{}", t.stage + 1, t.stages.len()),
+        None => "done".to_owned(),
+    }
+}
+
+/// Whether the ticket's last attempt is starting or running: the
+/// standing names it, and the Standing sort puts it after the answers.
+fn last_attempt_open(t: &TicketView) -> bool {
+    t.attempts
+        .last()
+        .is_some_and(|a| matches!(a.state.as_str(), "starting" | "running"))
+}
+
+/// Whether the page offers a close (or a retry of a kept tree's
+/// removal) for this ticket. The runner's flags never both hold: a
+/// retry is only for a closed ticket, a close only for one that is not.
+#[must_use]
+pub fn close_offered(t: &TicketView) -> bool {
+    t.closable || t.trees_retryable
+}
+
 impl AppCore {
     #[must_use]
     pub fn dispatch_state(&self) -> &DispatchState {
@@ -224,27 +275,6 @@ impl AppCore {
             .collect()
     }
 
-    /// `#104` for an issue, `PR #3` for a pull request, nothing for a
-    /// ticket without a number.
-    #[must_use]
-    pub fn ticket_source(t: &TicketView) -> String {
-        match t.number {
-            Some(n) if t.kind == "pull-request" => format!("PR #{n}"),
-            Some(n) => format!("#{n}"),
-            None => String::new(),
-        }
-    }
-
-    /// The current stage and where it falls: `review-code 6/8`, or
-    /// `done` past the end.
-    #[must_use]
-    pub fn ticket_stage(t: &TicketView) -> String {
-        match t.stages.get(t.stage) {
-            Some(name) => format!("{name} {}/{}", t.stage + 1, t.stages.len()),
-            None => "done".to_owned(),
-        }
-    }
-
     /// `investigate running`, `parked: <reason>`, `2 waiting on you`, an
     /// agent at a prompt of its own, or why a ticket with nothing open
     /// is not moving when its project is at a limit.
@@ -262,11 +292,7 @@ impl AppCore {
         }
         match t.state.as_str() {
             "active" => {
-                let open = t
-                    .attempts
-                    .last()
-                    .is_some_and(|a| matches!(a.state.as_str(), "starting" | "running"));
-                let held = if open {
+                let held = if last_attempt_open(t) {
                     None
                 } else {
                     self.dispatch
@@ -296,6 +322,39 @@ impl AppCore {
         t.decisions.iter().any(|d| d.state == "pending") || !self.waiting_agents_of(t).is_empty()
     }
 
+    /// Whether the ticket's standing is drawn as needing a look: it
+    /// waits on the user, or it is not simply running. The table and
+    /// the ticket's header colour it by this alone.
+    #[must_use]
+    pub fn ticket_urgent(&self, t: &TicketView) -> bool {
+        self.ticket_waits(t) || t.state != "active"
+    }
+
+    /// The ticket whose page is on screen: the Dispatch window's own
+    /// page while that window is open (`window_ticket`, which the
+    /// window's navigation keeps), the main view's otherwise.
+    #[must_use]
+    pub fn ticket_on_screen<'a>(&'a self, window_ticket: Option<&'a str>) -> Option<&'a str> {
+        if self.settings.dispatch_window.is_some() {
+            return window_ticket;
+        }
+        match self.view_stack.last() {
+            Some(View::Ticket(id)) => Some(id),
+            _ => None,
+        }
+    }
+
+    /// Whether a close confirmation for ticket `id` may stay open: its
+    /// page is on screen and the runner still offers the close. Nothing
+    /// would draw it otherwise, yet it would hold the keyboard and come
+    /// back by itself the next time the ticket is opened; and once a
+    /// close is under way, the runner no longer offers it.
+    #[must_use]
+    pub fn close_dialog_stands(&self, id: &str, window_ticket: Option<&str>) -> bool {
+        self.ticket_on_screen(window_ticket) == Some(id)
+            && self.ticket(id).is_some_and(close_offered)
+    }
+
     /// The tickets the table shows, narrowed and ordered as `listing`
     /// says. The order is total (ids break ties), so it holds still
     /// from one poll to the next.
@@ -316,7 +375,9 @@ impl AppCore {
                 TicketOnly::All => true,
                 TicketOnly::Waiting => self.ticket_waits(t),
                 TicketOnly::Active => t.state == "active",
-                TicketOnly::Parked => matches!(t.state.as_str(), "parked" | "parking"),
+                TicketOnly::Parked => {
+                    matches!(t.state.as_str(), "parked" | "parking" | "closing")
+                }
                 TicketOnly::Closed => t.state == "closed",
             })
             .map(|t| (t, self.ticket_standing(t)))
@@ -326,10 +387,10 @@ impl AppCore {
                 }
                 let haystack = format!(
                     "{} {} {} {} {} {}",
-                    Self::ticket_source(t),
+                    ticket_source(t),
                     t.title,
                     t.project,
-                    Self::ticket_stage(t),
+                    ticket_stage(t),
                     standing,
                     t.labels.join(" ")
                 )
@@ -338,13 +399,9 @@ impl AppCore {
             })
             .collect();
         let rank = |t: &TicketView, standing: &str| -> (u8, String) {
-            let open = t
-                .attempts
-                .last()
-                .is_some_and(|a| matches!(a.state.as_str(), "starting" | "running"));
             let r = if self.ticket_waits(t) {
                 0
-            } else if t.state == "active" && open {
+            } else if t.state == "active" && last_attempt_open(t) {
                 1
             } else if t.state == "active" {
                 2
