@@ -181,9 +181,12 @@ runs) or a tree has changes, before anything is written; the preflight
 reads each lane with a repository of its own on its own terms and the
 ticket's tree with those lanes left out, since a clean nested lane is
 untracked content in the outer tree. Then the ticket is written
-`closing` and moved from the project's `queue` to its `closing` list,
-and every pass runs the rest from the flags on the record until it is
-done: unanswered requests resolved (a launch Switchboard is still
+`closing` and moved from the project's `queue` to its `closing` list.
+`dispatch close` goes on to run the rest itself; the port's `close`
+answers with the ticket `closing` right there, because the rest asks
+Switchboard's control socket, and Switchboard's page is waiting on the
+reply on the thread that answers it. Every pass runs the rest from the
+flags on the record until it is done: unanswered requests resolved (a launch Switchboard is still
 working on holds the close until it answers, and recovery parking the
 ticket does not undo the intent to close), every process read back as gone,
 pending decisions cancelled, the session unmarked once Switchboard

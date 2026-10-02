@@ -101,7 +101,7 @@ impl Handler {
             Body::Close { ticket, reason } => {
                 let t = self
                     .runner
-                    .close_by_hand(ticket, reason.as_deref(), now_ms)?;
+                    .request_close(ticket, reason.as_deref(), now_ms)?;
                 Reply::Ticket(self.view(&t))
             }
             Body::Take { project, issue } => {
@@ -112,12 +112,7 @@ impl Handler {
     }
 
     fn view(&self, t: &Ticket) -> TicketView {
-        let stages = self
-            .runner
-            .pipeline_of(t)
-            .map(|p| p.stages.iter().map(|s| s.name.clone()).collect())
-            .unwrap_or_default();
-        ticket_view(t, stages)
+        ticket_view(t, self.runner.pipeline_of(t).ok().as_ref())
     }
 }
 
@@ -362,11 +357,7 @@ pub fn status(runner: &Runner) -> Result<Status> {
     }
     let mut tickets = Vec::new();
     for t in records {
-        let stages = runner
-            .pipeline_of(&t)
-            .map(|p| p.stages.iter().map(|s| s.name.clone()).collect())
-            .unwrap_or_default();
-        tickets.push(ticket_view(&t, stages));
+        tickets.push(ticket_view(&t, runner.pipeline_of(&t).ok().as_ref()));
     }
     tickets.sort_by_key(|t| std::cmp::Reverse(t.updated_ms));
     Ok(Status {
@@ -379,7 +370,9 @@ pub fn status(runner: &Runner) -> Result<Status> {
 
 /// The record as a reader sees it.
 #[must_use]
-pub fn ticket_view(t: &Ticket, stages: Vec<String>) -> TicketView {
+/// A ticket as a reader sees it, with what its frozen pipeline copy
+/// says (stage names, the paths a close removes) when it can be read.
+pub fn ticket_view(t: &Ticket, p: Option<&Pipeline>) -> TicketView {
     let (state, reason) = match &t.state {
         TicketState::Active => ("active", None),
         TicketState::Parking { reason } => ("parking", Some(reason.clone())),
@@ -398,13 +391,16 @@ pub fn ticket_view(t: &Ticket, stages: Vec<String>) -> TicketView {
         labels: t.source.labels.clone(),
         state: state.into(),
         reason,
-        stages,
+        stages: p.map_or_else(Vec::new, |p| {
+            p.stages.iter().map(|s| s.name.clone()).collect()
+        }),
         stage: t.stage,
         tree: t.tree.clone(),
         tree_removed: t.close.tree_removed,
         trees_kept: t.close.trees_kept.clone(),
         closable: t.closable(),
         trees_retryable: t.trees_retryable(),
+        removes: p.map_or_else(Vec::new, |p| crate::scheduler::close_removes(t, p)),
         lanes: t
             .lanes
             .iter()
@@ -744,8 +740,9 @@ slots = 1
         assert!(matches!(no_such, Reply::Failed { .. }));
     }
 
-    /// A close through the port: the ticket's tree removed and the
-    /// closed view in the reply; a second close refused with the reason.
+    /// A close through the port: only the intent in the reply, the
+    /// ticket `closing`; the runner's pass removes the tree and closes
+    /// it; a second close refused with the reason.
     #[test]
     fn the_port_closes_a_ticket_and_refuses_a_second_close() {
         let dir = tempfile::tempdir().unwrap();
@@ -776,9 +773,18 @@ slots = 1
             reason: Some("done elsewhere".into()),
         };
         let reply = h.handle(&Request::new("2", close.clone()), 2_000);
-        let Reply::Ticket(closed) = reply else {
+        let Reply::Ticket(closing) = reply else {
             panic!("{reply:?}")
         };
+        assert_eq!(
+            (closing.state.as_str(), closing.reason.as_deref()),
+            ("closing", Some("done elsewhere"))
+        );
+        assert!(tree.exists(), "the port leaves the rest to the runner");
+        let mut t = h.runner.load_ticket(&view.id).unwrap();
+        let mut ps = h.runner.load_project("P").unwrap();
+        h.runner.finish_closing(&mut t, &mut ps, 2_500).unwrap();
+        let closed = h.view(&h.runner.load_ticket(&view.id).unwrap());
         assert_eq!(
             (closed.state.as_str(), closed.reason.as_deref()),
             ("closed", Some("done elsewhere"))

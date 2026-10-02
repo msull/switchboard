@@ -233,13 +233,7 @@ fn status() -> Result<()> {
             .as_ref()
             .and_then(|p| p.stages.get(t.stage))
             .map_or("done".to_owned(), |s| s.name.clone());
-        let standing = match &t.state {
-            TicketState::Active => "active".to_owned(),
-            TicketState::Parking { reason } => format!("parking: {reason}"),
-            TicketState::Parked { reason } => format!("parked: {reason}"),
-            TicketState::Closing { reason } => format!("closing: {reason}"),
-            TicketState::Closed { reason } => format!("closed: {reason}"),
-        };
+        let standing = t.state.label();
         let last = t.attempts.last().map_or(String::new(), |a| {
             format!(
                 " · {}/{} #{} {}",
@@ -303,13 +297,10 @@ fn resume(ticket: &str) -> Result<()> {
 fn close(ticket: &str, reason: Option<&str>) -> Result<()> {
     let mut runner = runner()?;
     let t = runner.close_by_hand(ticket, reason, now_ms())?;
-    let standing = match &t.state {
-        TicketState::Closed { reason } => format!("closed: {reason}"),
-        TicketState::Closing { reason } => {
-            format!("closing: {reason} (the runner finishes it on its next pass)")
-        }
-        other => format!("{other:?}"),
-    };
+    let mut standing = t.state.label();
+    if matches!(t.state, TicketState::Closing { .. }) {
+        standing.push_str(" (the runner finishes it on its next pass)");
+    }
     say!(
         "{} {} {} {standing}",
         t.id,
@@ -353,11 +344,13 @@ fn queue(project: &str, order: &[&str]) -> Result<()> {
     for id in &ps.closing {
         let line = runner.load_ticket(id).map_or_else(
             |_| String::new(),
-            |t| match &t.state {
-                TicketState::Closing { reason } => {
-                    format!("{} {} closing: {reason}", t.source.label(), t.source.title)
-                }
-                _ => format!("{} {}", t.source.label(), t.source.title),
+            |t| {
+                format!(
+                    "{} {} {}",
+                    t.source.label(),
+                    t.source.title,
+                    t.state.label()
+                )
             },
         );
         say!("- {id} {line}");

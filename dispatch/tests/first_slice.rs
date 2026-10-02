@@ -4,6 +4,9 @@
 //! short (a lost reply, a removed record, a launch the app died in, an
 //! agent that never wrote) ends as a decision, never a second launch.
 
+// Tests assert emptiness with `assert!` throughout.
+#![allow(clippy::assert_is_empty)]
+
 mod support;
 
 use std::path::PathBuf;
@@ -5727,6 +5730,25 @@ fn a_close_cut_off_before_the_project_save_finishes_and_clears_the_set_once_answ
     assert!(sb.sets[0].items.is_empty());
     assert_eq!(sb.sessions.len(), sessions, "nothing started while closing");
     assert!(!sb.session(&investigator).waiting);
+}
+
+/// A closing ticket that still holds the set's only card leaves it to
+/// its own close: the pass's sync has no other ticket to write under,
+/// and that is not an error to report on every pass.
+#[test]
+fn a_card_held_only_by_a_closing_ticket_is_left_to_its_close() {
+    let mut env = Env::new();
+    let id = env.take(7).id;
+    at_rerun(&mut env, &id);
+    write_closing(&env, &id, |_| {});
+    let mut ps = env.runner.load_project(PROJECT).unwrap();
+    ps.queue.retain(|q| q != &id);
+    ps.closing.push(id.clone());
+    let calls = env.sb().calls.len();
+    let now = env.tick();
+    dispatch::view::sync_queue(&mut env.runner, &mut ps, PROJECT, &[], None, now).unwrap();
+    assert_eq!(ps.shown.len(), 1, "the card stays for the close to clear");
+    assert_eq!(env.sb().calls.len(), calls, "nothing asked");
 }
 
 #[test]

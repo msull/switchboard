@@ -16,6 +16,10 @@
 //! - `view`: the queue's working set, redrawn whole.
 //! - `serve`: Dispatch's own port, tickets as views and the commands.
 
+// Tests assert emptiness with `assert!` throughout; the rest of the
+// crate is held to the lint.
+#![cfg_attr(test, allow(clippy::assert_is_empty))]
+
 pub mod bitbucket;
 pub mod git;
 pub mod github;

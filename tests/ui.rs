@@ -3,6 +3,9 @@
 //! exercised by the core tests), the widgets are found by label, and the
 //! assertions are on what is drawn and which actions a click dispatched.
 
+// Tests assert emptiness with `assert!` throughout.
+#![allow(clippy::assert_is_empty)]
+
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -4186,8 +4189,9 @@ fn ticket_page(
     harness
 }
 
-/// Close is behind a confirmation that names the tree; only the
-/// dialog's button sends the call, and Cancel sends nothing.
+/// Close is behind a confirmation that names the paths the runner says
+/// it removes; only the dialog's button sends the call, and Cancel
+/// sends nothing.
 #[test]
 fn dispatch_ticket_closes_after_a_confirmation_naming_its_tree() {
     use switchboard::ports::dispatch::LaneView;
@@ -4195,15 +4199,27 @@ fn dispatch_ticket_closes_after_a_confirmation_naming_its_tree() {
         t.state = "parked".into();
         t.reason = Some("parked by hand".into());
         t.closable = true;
-        t.lanes = vec![LaneView {
-            name: "backend".into(),
-            worktree: "/wt/t1/orchard-backend".into(),
-            ..LaneView::default()
-        }];
+        t.lanes = vec![
+            LaneView {
+                name: "backend".into(),
+                worktree: "/wt/t1/orchard-backend".into(),
+                ..LaneView::default()
+            },
+            LaneView {
+                name: "docs".into(),
+                worktree: "/wt/t1/docs".into(),
+                ..LaneView::default()
+            },
+        ];
+        t.removes = vec!["/wt/t1/orchard-backend".into(), "/wt/t1".into()];
     });
     click(&mut harness, "Close");
     harness.get_by_label("Close this ticket");
-    harness.get_by_label("/wt/t1/orchard-backend (backend)");
+    harness.get_by_label("/wt/t1/orchard-backend");
+    assert!(
+        harness.query_by_label("/wt/t1/docs").is_none(),
+        "a lane inside the tree goes with it, as the runner says"
+    );
     assert!(
         harness.query_all_by_label("/wt/t1").count() >= 2,
         "the meta line and the dialog"

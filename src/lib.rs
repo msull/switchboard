@@ -10,6 +10,10 @@
 //! - `app`: owns core and adapters; runs effects; drains workers.
 //! - `ui`: egui drawing and input -> actions.
 
+// Tests assert emptiness with `assert!` throughout; the rest of the
+// crate is held to the lint.
+#![cfg_attr(test, allow(clippy::assert_is_empty))]
+
 pub mod adapters;
 pub mod app;
 pub mod core;

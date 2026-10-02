@@ -709,11 +709,15 @@ fn console(cx: &mut DrawCtx<'_>, ui: &mut Ui) {
     }
 }
 
-/// Drop the close dialog when no page of its ticket is drawn: the
-/// Dispatch window closed under it, or the main window moved on. Nothing
-/// would draw the dialog, yet it would hold the main window's keyboard
-/// and come back by itself the next time the ticket is opened.
-pub fn drop_unseen_close_dialog(cx: &mut DrawCtx<'_>, view: &View) {
+/// The close dialog's whole lifetime after it opens, checked once a
+/// frame before anything is drawn. It is dropped when no page of its
+/// ticket is drawn (the Dispatch window closed under it, or the main
+/// window moved on), when the ticket is gone from the status, or when
+/// the runner's flags no longer offer a close or a retry (its close is
+/// under way). Nothing would draw it in the first two cases, yet it
+/// would hold the keyboard and come back by itself the next time the
+/// ticket is opened.
+pub fn drop_stale_close_dialog(cx: &mut DrawCtx<'_>, view: &View) {
     let Some(id) = cx.state.confirm_close_ticket.as_deref() else {
         return;
     };
@@ -723,7 +727,11 @@ pub fn drop_unseen_close_dialog(cx: &mut DrawCtx<'_>, view: &View) {
     } else {
         matches!(view, View::Ticket(t) if t == id)
     };
-    if !seen {
+    let offered = cx
+        .core
+        .ticket(id)
+        .is_some_and(|t| t.closable || t.trees_retryable);
+    if !seen || !offered {
         cx.state.confirm_close_ticket = None;
     }
 }
@@ -734,9 +742,6 @@ pub fn ticket(cx: &mut DrawCtx<'_>, ui: &mut Ui, id: &str) {
     let p = theme::palette(ui);
     ui.spacing_mut().item_spacing = egui::vec2(GAP, GAP);
     let Some(t) = cx.core.ticket(id).cloned() else {
-        // A ticket gone from the status takes its dialog with it, or
-        // the dialog would hold the keyboard on every view.
-        cx.state.confirm_close_ticket = None;
         theme::kicker(ui, "Dispatch ticket", p.n600);
         ui.label("This ticket is not in Dispatch's last status.");
         if theme::ghost(ui, "Back").clicked() {
@@ -906,12 +911,6 @@ fn confirm_close(cx: &mut DrawCtx<'_>, ctx: &egui::Context, t: &TicketView) {
     if cx.state.confirm_close_ticket.as_deref() != Some(t.id.as_str()) {
         return;
     }
-    // The flags that showed the button that opened it; a ticket that
-    // has moved on since (its close under way) has nothing to confirm.
-    if !t.closable && !t.trees_retryable {
-        cx.state.confirm_close_ticket = None;
-        return;
-    }
     let retry = t.trees_retryable;
     let title = if retry {
         "Remove the ticket's trees"
@@ -923,18 +922,8 @@ fn confirm_close(cx: &mut DrawCtx<'_>, ctx: &egui::Context, t: &TicketView) {
         ui.label(
             "Removed with git worktree remove, never forced: git refuses a tree with changes.",
         );
-        if let Some(tree) = t.tree.as_ref().filter(|_| !t.tree_removed) {
-            ui.label(theme::mono_text(ui, tree.display().to_string()));
-        }
-        for lane in t
-            .lanes
-            .iter()
-            .filter(|l| !l.removed && Some(&l.worktree) != t.tree.as_ref())
-        {
-            ui.label(theme::mono_text(
-                ui,
-                format!("{} ({})", lane.worktree.display(), lane.name),
-            ));
+        for path in &t.removes {
+            ui.label(theme::mono_text(ui, path.display().to_string()));
         }
         ui.label(
             "The branch, the ticket's directory with its attempts and artifacts, and its \

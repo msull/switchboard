@@ -506,6 +506,20 @@ pub enum TicketState {
     },
 }
 
+impl TicketState {
+    /// The state as a person reads it: `active`, or `<state>: <reason>`.
+    #[must_use]
+    pub fn label(&self) -> String {
+        match self {
+            Self::Active => "active".to_owned(),
+            Self::Parking { reason } => format!("parking: {reason}"),
+            Self::Parked { reason } => format!("parked: {reason}"),
+            Self::Closing { reason } => format!("closing: {reason}"),
+            Self::Closed { reason } => format!("closed: {reason}"),
+        }
+    }
+}
+
 /// What a close has done so far. Each flag is set and saved right after
 /// its step is read back, so a close cut short resumes from the first
 /// step not yet done.

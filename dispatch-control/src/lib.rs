@@ -77,7 +77,9 @@ pub enum Body {
     Resume { ticket: String },
     /// Close a ticket: its worktrees removed, its branch, directory and
     /// record kept. On a closed ticket whose trees were kept, the
-    /// removal is tried again. Answered with the ticket as it stands.
+    /// removal is tried again. Answered with the ticket as it stands:
+    /// `closing` once the intent is saved, and the runner's next pass
+    /// does the rest, since that asks the caller's own control socket.
     Close {
         ticket: String,
         #[serde(default)]
@@ -245,6 +247,10 @@ pub struct TicketView {
     pub closable: bool,
     /// `close` would try the removal of the kept trees again.
     pub trees_retryable: bool,
+    /// The paths a close would remove, in the order it removes them:
+    /// each lane with a repository of its own, then the ticket's tree.
+    /// Empty for a pipeline that works in place.
+    pub removes: Vec<PathBuf>,
     pub lanes: Vec<LaneView>,
     pub attempts: Vec<AttemptView>,
     pub decisions: Vec<DecisionView>,

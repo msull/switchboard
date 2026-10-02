@@ -5,6 +5,9 @@
 //! repeated from the log, the window is left alone, and a crash between
 //! the log line and the launch reads as interrupted afterwards.
 
+// Tests assert emptiness with `assert!` throughout.
+#![allow(clippy::assert_is_empty)]
+
 use std::path::PathBuf;
 use std::time::Duration;
 

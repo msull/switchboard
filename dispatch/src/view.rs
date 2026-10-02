@@ -14,9 +14,7 @@ const CARD: (u32, u32) = (10, 8);
 /// Make the set once, then keep it showing the current session of every
 /// ticket in flight or waiting, top to bottom in queue order. The
 /// request goes on `owner`'s ledger when one is given (a closing ticket
-/// clearing its own card), else on the first shown ticket's, else on
-/// that of a ticket the set still shows; with none there is nothing to
-/// write it under, and that is an error, never a sync pretended.
+/// clearing its own card), else on the one `ledger_ticket` picks.
 pub fn sync_queue(
     runner: &mut Runner,
     ps: &mut ProjectState,
@@ -47,44 +45,14 @@ pub fn sync_queue(
     let Some(space) = ps.space.clone() else {
         return Ok(());
     };
-    // The set is made under the first ticket's ledger, like the space.
-    let mut first = tickets
-        .iter()
-        .find(|t| shown.iter().any(|(id, _)| id == &t.id))
-        .cloned();
-    // Nothing to show any more, but a card is still up (a close stopped
-    // between clearing its card and saving the project, or one from
-    // before closes cleared their own): the set is emptied under the
-    // ledger of a ticket it still shows, which is saved with the reply.
-    let mut stale = None;
-    // Why a shown ticket could not be read: the real cause when no
-    // other ticket can carry the sync.
-    let mut unreadable = Vec::new();
-    if owner.is_none() && first.is_none() {
-        for (id, _) in &ps.shown {
-            match runner.load_ticket(id) {
-                // A closing ticket clears its own card under its own
-                // ledger.
-                Ok(t) if matches!(t.state, TicketState::Closing { .. }) => {}
-                Ok(t) => {
-                    stale = Some(t);
-                    break;
-                }
-                Err(e) => unreadable.push(format!("{id}: {e:#}")),
-            }
-        }
-    }
-    let t: &mut Ticket = match (owner, first.as_mut(), stale.as_mut()) {
-        (Some(owner), _, _) => owner,
-        (None, Some(first), _) => first,
-        (None, None, Some(stale)) => stale,
-        (None, None, None) if unreadable.is_empty() => {
-            bail!("nothing shown and no ticket to sync the set under")
-        }
-        (None, None, None) => bail!(
-            "nothing shown, and the set's tickets cannot be read to sync it under: {}",
-            unreadable.join("; ")
-        ),
+    let mut found = match owner {
+        Some(_) => None,
+        None => ledger_ticket(runner, ps, &shown, tickets)?,
+    };
+    let t: &mut Ticket = match (owner, found.as_mut()) {
+        (Some(owner), _) => owner,
+        (None, Some(t)) => t,
+        (None, None) => return Ok(()),
     };
     if ps.set.is_none() {
         let reply = runner.send_for_view(
@@ -120,12 +88,50 @@ pub fn sync_queue(
         })
         .collect();
     let reply = runner.send_for_view(t, ps, "sync", Body::SetSync { set, items }, now_ms)?;
-    if let Some(stale) = stale.as_mut() {
-        runner.save_ticket(stale, now_ms)?;
-    }
     if let Reply::Failed { reason } = reply {
         bail!("set.sync: {reason}");
     }
     ps.shown = shown;
     Ok(())
+}
+
+/// The ticket a set request is written under when no closing ticket
+/// brings its own: the first one shown, as the set was made under the
+/// first ticket's ledger, else one whose card the set still holds
+/// though it no longer has a session to show. `None` when every card
+/// left belongs to a closing ticket: each clears its own when its close
+/// gets there. A ticket nobody can read is an error, never a sync
+/// pretended. `send` saves the ledger it writes, so the copy returned
+/// needs no save of its own.
+fn ledger_ticket(
+    runner: &Runner,
+    ps: &ProjectState,
+    shown: &[(String, String)],
+    tickets: &[Ticket],
+) -> Result<Option<Ticket>> {
+    if let Some(t) = tickets
+        .iter()
+        .find(|t| shown.iter().any(|(id, _)| id == &t.id))
+    {
+        return Ok(Some(t.clone()));
+    }
+    let mut closing = false;
+    let mut unreadable = Vec::new();
+    for (id, _) in &ps.shown {
+        match runner.load_ticket(id) {
+            Ok(t) if matches!(t.state, TicketState::Closing { .. }) => closing = true,
+            Ok(t) => return Ok(Some(t)),
+            Err(e) => unreadable.push(format!("{id}: {e:#}")),
+        }
+    }
+    if closing {
+        return Ok(None);
+    }
+    if unreadable.is_empty() {
+        bail!("nothing shown and no ticket to sync the set under");
+    }
+    bail!(
+        "nothing shown, and the set's tickets cannot be read to sync it under: {}",
+        unreadable.join("; ")
+    )
 }

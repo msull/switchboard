@@ -263,14 +263,7 @@ impl Runner {
                     "{} is already ticket {} ({})",
                     source.identity,
                     existing.id,
-                    match &existing.state {
-                        TicketState::Active => "active".to_owned(),
-                        TicketState::Parking { reason } | TicketState::Parked { reason } => {
-                            format!("parked: {reason}")
-                        }
-                        TicketState::Closing { reason } => format!("closing: {reason}"),
-                        TicketState::Closed { .. } => unreachable!(),
-                    }
+                    existing.state.label()
                 );
             }
         }
@@ -899,11 +892,24 @@ impl Runner {
     }
 
     /// Closing is a sequence, not a flag, as parking is: the intent is
-    /// written first and the ticket moved from the queue to the
-    /// project's closing list, then `finish_closing` runs the rest from
-    /// that saved intent. Closing by hand and reaching the end of the
-    /// pipeline both enter here.
+    /// written first (`write_close_intent`), then `finish_closing` runs
+    /// the rest from that saved intent. Reaching the end of the pipeline
+    /// enters here.
     fn begin_close(
+        &mut self,
+        t: &mut Ticket,
+        ps: &mut ProjectState,
+        reason: &str,
+        now_ms: u64,
+    ) -> Result<()> {
+        self.write_close_intent(t, ps, reason, now_ms)?;
+        self.finish_closing(t, ps, now_ms)
+    }
+
+    /// The ticket saved `Closing` and moved from the queue to the
+    /// project's closing list. Once this returns, a pass finishes the
+    /// close whatever happens to the caller.
+    fn write_close_intent(
         &mut self,
         t: &mut Ticket,
         ps: &mut ProjectState,
@@ -919,8 +925,7 @@ impl Runner {
         if !ps.closing.contains(&t.id) {
             ps.closing.push(t.id.clone());
         }
-        self.save_project(ps)?;
-        self.finish_closing(t, ps, now_ms)
+        self.save_project(ps)
     }
 
     /// The rest of a close, from the saved intent, safe to run again at
@@ -1058,7 +1063,7 @@ impl Runner {
         let mut kept: Vec<String> = Vec::new();
         for i in 0..t.lanes.len() {
             let lane = t.lanes[i].clone();
-            if lane.removed || p.lane(&lane.name).is_none_or(|l| l.repo.is_none()) {
+            if !removes_lane(&p, &lane) {
                 continue;
             }
             let clone = self
@@ -1114,7 +1119,7 @@ impl Runner {
         let lanes: Vec<PathBuf> = t
             .lanes
             .iter()
-            .filter(|l| !l.removed && p.lane(&l.name).is_some_and(|d| d.repo.is_some()))
+            .filter(|l| removes_lane(&p, l))
             .map(|l| l.worktree.clone())
             .collect();
         let tree = t.tree.as_deref().filter(|_| !t.close.tree_removed);
@@ -1141,6 +1146,31 @@ impl Runner {
         &mut self,
         ticket: &str,
         reason: Option<&str>,
+        now_ms: u64,
+    ) -> Result<Ticket> {
+        self.close_checked(ticket, reason, true, now_ms)
+    }
+
+    /// `close_by_hand` for a caller that must not wait on Switchboard:
+    /// the same checks, but only the intent is written and the ticket
+    /// comes back `Closing` for the runner's next pass to finish. The
+    /// port answers Switchboard's own page with this, because the rest
+    /// of a close asks Switchboard's control socket, which the page's
+    /// thread is blocked from answering until this reply arrives.
+    pub fn request_close(
+        &mut self,
+        ticket: &str,
+        reason: Option<&str>,
+        now_ms: u64,
+    ) -> Result<Ticket> {
+        self.close_checked(ticket, reason, false, now_ms)
+    }
+
+    fn close_checked(
+        &mut self,
+        ticket: &str,
+        reason: Option<&str>,
+        finish: bool,
         now_ms: u64,
     ) -> Result<Ticket> {
         self.transaction(|r| {
@@ -1171,10 +1201,12 @@ impl Runner {
             }
             r.preflight_trees(&t)?;
             let mut ps = r.load_project(&t.project)?;
-            r.begin_close(&mut t, &mut ps, reason.unwrap_or("closed by hand"), now_ms)
-                .with_context(|| {
+            r.write_close_intent(&mut t, &mut ps, reason.unwrap_or("closed by hand"), now_ms)?;
+            if finish {
+                r.finish_closing(&mut t, &mut ps, now_ms).with_context(|| {
                     format!("ticket {ticket} is closing; the runner finishes it on a later pass")
                 })?;
+            }
             Ok(t)
         })
     }
@@ -4710,6 +4742,33 @@ pub(crate) fn costs_slot(a: &Attempt) -> bool {
     a.is_open() && a.kind != AttemptKind::GateOnly
 }
 
+/// A lane a close removes on its own: one not removed yet with a
+/// repository of its own, cut as a worktree of that repository's clone.
+/// Any other lane is a path inside the ticket's tree and goes with it.
+fn removes_lane(p: &Pipeline, lane: &LaneRecord) -> bool {
+    !lane.removed && p.lane(&lane.name).is_some_and(|l| l.repo.is_some())
+}
+
+/// The paths a close of `t` would remove, by the rule `remove_trees`
+/// follows, in its order: lanes of their own repositories, then the
+/// ticket's tree. Nothing for a pipeline that works in place.
+#[must_use]
+pub fn close_removes(t: &Ticket, p: &Pipeline) -> Vec<PathBuf> {
+    if !p.cuts_worktrees() {
+        return Vec::new();
+    }
+    let mut paths: Vec<PathBuf> = t
+        .lanes
+        .iter()
+        .filter(|l| removes_lane(p, l))
+        .map(|l| l.worktree.clone())
+        .collect();
+    if let Some(tree) = t.tree.as_ref().filter(|_| !t.close.tree_removed) {
+        paths.push(tree.clone());
+    }
+    paths
+}
+
 /// Only a `Closing` ticket belongs on the closing list. Any other goes
 /// back to the queue, where the set and `dispatch queue` see it, rather
 /// than being stepped from a list nothing shows.
@@ -4717,9 +4776,9 @@ fn requeue_strays(ps: &mut ProjectState, tickets: &[Ticket]) {
     for t in tickets {
         if ps.closing.contains(&t.id) && !matches!(t.state, TicketState::Closing { .. }) {
             log::warn!(
-                "ticket {} is on the closing list but {:?}; back to the queue",
+                "ticket {} is on the closing list but {}; back to the queue",
                 t.id,
-                t.state
+                t.state.label()
             );
             ps.closing.retain(|id| id != &t.id);
             if !ps.queue.contains(&t.id) {
