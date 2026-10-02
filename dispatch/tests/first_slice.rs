@@ -5938,8 +5938,8 @@ fn a_close_waits_for_a_launch_in_flight_and_kills_what_it_brought_up() {
     env.sb().in_progress_for = Some("session.new".into());
     env.step();
     assert_eq!(env.sb().kinds_called("session.new"), 1);
-    // Parking cancels an attempt still starting without waiting for
-    // its launch, so a parked ticket can carry one in flight.
+    // A record whose attempt was cancelled while its launch was still
+    // in flight: the close must wait for that launch all the same.
     let mut t = env.ticket(&id);
     for a in &mut t.attempts {
         assert!(matches!(a.state, AttemptState::Starting), "{a:#?}");
@@ -5969,6 +5969,70 @@ fn a_close_waits_for_a_launch_in_flight_and_kills_what_it_brought_up() {
         "{:#?}",
         t.attempts
     );
+}
+
+#[test]
+fn parking_waits_for_a_launch_in_flight_and_kills_what_it_brought_up() {
+    let mut env = Env::new();
+    let id = env.take(7).id;
+    env.sb().in_progress_for = Some("session.new".into());
+    env.step();
+    let mut t = env.ticket(&id);
+    t.state = TicketState::Parking {
+        reason: "parked by hand".into(),
+    };
+    let now = env.tick();
+    env.runner.save_ticket(&mut t, now).unwrap();
+    env.step();
+    let t = env.ticket(&id);
+    assert!(matches!(t.state, TicketState::Parking { .. }), "{t:#?}");
+    assert!(t.attempts[0].is_open(), "not cancelled while in flight");
+    env.sb().in_progress_for = None;
+    env.step();
+    let t = env.ticket(&id);
+    assert!(matches!(t.state, TicketState::Parked { .. }), "{t:#?}");
+    let investigator = session_of(&t, "investigate");
+    assert!(env.sb().killed.contains(&investigator));
+    assert!(matches!(
+        t.attempts[0].state,
+        AttemptState::Cancelled { .. }
+    ));
+    assert!(t.pending_decisions().is_empty(), "{:#?}", t.decisions);
+    assert_eq!(env.sb().kinds_called("session.new"), 1);
+}
+
+#[test]
+fn a_late_lost_launch_leaves_a_cancelled_attempt_and_a_parked_ticket_alone() {
+    let mut env = Env::new();
+    let id = env.take(7).id;
+    env.sb().in_progress_for = Some("session.new".into());
+    env.step();
+    let mut t = env.ticket(&id);
+    for a in &mut t.attempts {
+        a.state = AttemptState::Cancelled {
+            reason: "parked".into(),
+        };
+    }
+    t.state = TicketState::Parked {
+        reason: "parked by hand".into(),
+    };
+    env.runner.save_ticket(&mut t, env.now).unwrap();
+    {
+        let mut sb = env.sb();
+        let made: Vec<String> = sb.sessions.iter().map(|s| s.id.clone()).collect();
+        sb.interrupted.extend(made);
+    }
+    env.restart();
+    let t = env.ticket(&id);
+    assert!(
+        matches!(&t.state, TicketState::Parked { reason } if reason == "parked by hand"),
+        "{t:#?}"
+    );
+    assert!(matches!(
+        t.attempts[0].state,
+        AttemptState::Cancelled { .. }
+    ));
+    assert!(t.pending_decisions().is_empty(), "{:#?}", t.decisions);
 }
 
 #[test]

@@ -1069,15 +1069,13 @@ impl Runner {
                 return self.save_ticket(t, now_ms);
             }
         };
-        if !p.cuts_worktrees() {
-            return Ok(());
-        }
+        let (lanes, tree) = close_trees(t, &p);
+        // An owned copy: the borrowed path would hold `t` borrowed
+        // through the loop below, which changes it.
+        let tree = tree.map(Path::to_path_buf);
         let mut kept: Vec<String> = Vec::new();
-        for i in 0..t.lanes.len() {
+        for i in lanes {
             let lane = t.lanes[i].clone();
-            if !removes_lane(&p, &lane) {
-                continue;
-            }
             let clone = self
                 .data
                 .repo_dir(&format!("{}@{}", p.project.name, lane.name));
@@ -1092,8 +1090,7 @@ impl Runner {
         }
         // A lane still in the tree would refuse the tree's removal too.
         if kept.is_empty()
-            && !t.close.tree_removed
-            && let Some(tree) = t.tree.clone()
+            && let Some(tree) = tree
         {
             match self
                 .git
@@ -1126,6 +1123,7 @@ impl Runner {
     fn preflight_trees(&self, t: &Ticket) -> Result<()> {
         let p = self.pipeline_of(t)?;
         let (lanes, tree) = close_trees(t, &p);
+        let lanes: Vec<PathBuf> = lanes.iter().map(|&i| t.lanes[i].worktree.clone()).collect();
         let found = crate::git::uncommitted(&*self.git, tree, &lanes)?;
         if !found.is_empty() {
             let named: Vec<String> = found.iter().map(|f| f.display().to_string()).collect();
@@ -1265,6 +1263,30 @@ impl Runner {
         let TicketState::Parking { reason } = t.state.clone() else {
             return Ok(());
         };
+        // A launch Switchboard is still working on would bring up a
+        // session after its attempt was cancelled, owned by nothing: it
+        // is resolved first, and parking waits while one is in flight.
+        // Only creations: nothing else can start what parking must stop.
+        let creations: Vec<usize> = t
+            .ledger
+            .iter()
+            .enumerate()
+            .filter(|(_, o)| o.class == "creation" && !crate::recover::settled(o))
+            .map(|(i, _)| i)
+            .collect();
+        if !creations.is_empty() {
+            for i in creations {
+                self.recover_one(t, ps, i, now_ms)?;
+            }
+            self.save_ticket(t, now_ms)?;
+        }
+        if t.ledger
+            .iter()
+            .any(|o| o.class == "creation" && !crate::recover::settled(o))
+        {
+            log::info!("ticket {} parking: a launch is still in flight", t.id);
+            return Ok(());
+        }
         // A parking ticket asks nothing. `park` withdraws its questions
         // with the intent, so this only finds work on a `Parking` record
         // whose decisions are still open.
@@ -3945,11 +3967,14 @@ impl Runner {
         let ctx = attempt.context.clone();
         log::warn!("ticket {} {stage}/{ctx} attempt {n} failed: {reason}", t.id);
         self.save_ticket(t, now_ms)?;
-        // Recovery fails a closing ticket's lost launches too. The close
-        // is what happens next: parking would save a state over the
-        // intent to close, and a kill before it was put back would leave
-        // the ticket parked with the close lost.
-        if matches!(t.state, TicketState::Closing { .. }) {
+        // Recovery fails a closing or parking ticket's lost launches
+        // too. The close or the park is what happens next: a rerun
+        // decision would ask about a ticket the user is stopping, and
+        // parking would save a state over the intent already saved.
+        if matches!(
+            t.state,
+            TicketState::Closing { .. } | TicketState::Parking { .. }
+        ) {
             return Ok(());
         }
         let failed = t
@@ -4752,28 +4777,32 @@ fn removes_lane(p: &Pipeline, lane: &LaneRecord) -> bool {
     !lane.removed && p.lane(&lane.name).is_some_and(|l| l.repo.is_some())
 }
 
-/// The paths a close of `t` would remove, by the rule `remove_trees`
-/// follows, in its order: lanes of their own repositories, then the
-/// ticket's tree. Nothing for a pipeline that works in place.
+/// The paths a close of `t` would remove, in the order `remove_trees`
+/// removes them: lanes of their own repositories, then the ticket's
+/// tree. Nothing for a pipeline that works in place.
 #[must_use]
 pub fn close_removes(t: &Ticket, p: &Pipeline) -> Vec<PathBuf> {
-    let (mut paths, tree) = close_trees(t, p);
+    let (lanes, tree) = close_trees(t, p);
+    let mut paths: Vec<PathBuf> = lanes.iter().map(|&i| t.lanes[i].worktree.clone()).collect();
     paths.extend(tree.map(Path::to_path_buf));
     paths
 }
 
-/// The lanes a close of `t` removes on their own, and the ticket's tree
-/// if it is still there: the one copy of the rule that the preflight
-/// checks and the confirmation lists.
-fn close_trees<'a>(t: &'a Ticket, p: &Pipeline) -> (Vec<PathBuf>, Option<&'a Path>) {
+/// The lanes a close of `t` removes on their own, as indices into
+/// `t.lanes`, and the ticket's tree if it is still there: the one copy
+/// of the rule that the removal follows, the preflight checks and the
+/// confirmation lists. Indices, because the removal needs each lane's
+/// name and flag as well as its path.
+fn close_trees<'a>(t: &'a Ticket, p: &Pipeline) -> (Vec<usize>, Option<&'a Path>) {
     if !p.cuts_worktrees() {
         return (Vec::new(), None);
     }
     let lanes = t
         .lanes
         .iter()
-        .filter(|l| removes_lane(p, l))
-        .map(|l| l.worktree.clone())
+        .enumerate()
+        .filter(|(_, l)| removes_lane(p, l))
+        .map(|(i, _)| i)
         .collect();
     let tree = t.tree.as_deref().filter(|_| !t.close.tree_removed);
     (lanes, tree)
@@ -5598,9 +5627,10 @@ pub fn apply_reply(t: &mut Ticket, ps: &mut ProjectState, intent: &str, reply: &
             let Some(attempt) = t.attempts.iter_mut().find(|a| a.stage == stage && a.n == n) else {
                 return;
             };
-            // A reply that comes after the attempt was cancelled (parked
-            // while its launch was in flight) records what was made, so
-            // it is killed, but does not bring the attempt back.
+            // Parking and closing wait for every launch to settle before
+            // they end an attempt, so a reply finds it starting. Should
+            // one find it ended anyway, what was made goes on the process
+            // list that both of them kill, and the attempt stays ended.
             let starting = matches!(attempt.state, AttemptState::Starting);
             if intent == "session" {
                 if let Some(id) = first(wire::RecordKind::Session) {

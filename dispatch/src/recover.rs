@@ -6,7 +6,7 @@ use anyhow::Result;
 use switchboard_control::{Body, Found, Made, OpStatus, Reply, Request};
 
 use crate::scheduler::{Ask, Runner, apply_reply};
-use crate::ticket::{AttemptState, DecisionKind, Operation, Ticket, TicketState};
+use crate::ticket::{DecisionKind, Operation, Ticket, TicketState};
 
 /// Recovery's verdicts on an operation with no reply, as the reader
 /// sees them. Whether an op is settled is its `settled` flag, not these
@@ -224,9 +224,12 @@ impl Runner {
         let Some((stage, n)) = attempt else {
             return Ok(());
         };
-        if t.attempts.iter().any(|a| {
-            &a.stage == stage && a.n == *n && !matches!(a.state, AttemptState::Failed { .. })
-        }) {
+        // Only an open attempt is failed: one already ended (failed, or
+        // cancelled by a park or a close) keeps the outcome it has.
+        if t.attempts
+            .iter()
+            .any(|a| &a.stage == stage && a.n == *n && a.is_open())
+        {
             self.fail_attempt(t, ps, stage, *n, reason, now_ms)?;
         }
         Ok(())
