@@ -5922,6 +5922,85 @@ mod dispatch_page {
         }
     }
 
+    /// The table's order and narrowing are the core's: a total order
+    /// per column with ids breaking ties, state and text filters, and
+    /// a header click that flips the same column or starts another the
+    /// way it reads best.
+    #[test]
+    fn tickets_listed_narrows_and_orders_the_table() {
+        use crate::core::{TicketListing, TicketOnly, TicketSort};
+        let (mut core, _) = loaded(vec![], vec![]);
+        let ticket = |id: &str, project: &str, number: u64, title: &str, state: &str| TicketView {
+            id: id.into(),
+            project: project.into(),
+            number: Some(number),
+            title: title.into(),
+            state: state.into(),
+            stages: vec!["investigate".into(), "plan".into()],
+            stage: 1,
+            ..TicketView::default()
+        };
+        let mut waiting = ticket("t1", "Orchard", 104, "One file per entry", "active");
+        waiting.updated_ms = 10;
+        waiting.decisions = vec![DecisionView {
+            id: "d1".into(),
+            ticket: "t1".into(),
+            state: "pending".into(),
+            ..DecisionView::default()
+        }];
+        let mut running = ticket("t2", "PTA", 9, "Roster import", "active");
+        running.updated_ms = 30;
+        running.attempts = vec![AttemptView {
+            stage: "plan".into(),
+            state: "running".into(),
+            ..AttemptView::default()
+        }];
+        let mut parked = ticket("t3", "PTA", 12, "Night sync", "parked");
+        parked.updated_ms = 20;
+        parked.reason = Some("by hand".into());
+        let mut st = status(None);
+        st.tickets = vec![waiting, running, parked];
+        core.dispatch(AppAction::DispatchStatus(Some(st)), Clock::at(2));
+        let ids = |core: &AppCore, l: &TicketListing| -> Vec<String> {
+            core.tickets_listed(l)
+                .iter()
+                .map(|t| t.id.clone())
+                .collect()
+        };
+        let mut l = TicketListing::default();
+        assert_eq!(ids(&core, &l), ["t2", "t3", "t1"], "newest written first");
+        l.sort_by(TicketSort::Standing);
+        assert!(l.ascending, "a column that reads best ascending starts so");
+        assert_eq!(
+            ids(&core, &l),
+            ["t1", "t2", "t3"],
+            "waiting, running, parked"
+        );
+        l.sort_by(TicketSort::Standing);
+        assert!(!l.ascending, "the same column again flips");
+        l.sort_by(TicketSort::Title);
+        assert_eq!(ids(&core, &l), ["t3", "t1", "t2"]);
+        l.sort_by(TicketSort::Updated);
+        assert!(!l.ascending, "updated starts newest first");
+        l.only = TicketOnly::Waiting;
+        assert_eq!(ids(&core, &l), ["t1"]);
+        l.only = TicketOnly::Parked;
+        assert_eq!(ids(&core, &l), ["t3"]);
+        l.only = TicketOnly::All;
+        l.text = "ROSTER".into();
+        assert_eq!(ids(&core, &l), ["t2"], "words match case-insensitively");
+        l.text = "pta parked".into();
+        assert_eq!(ids(&core, &l), ["t3"], "every word must match somewhere");
+        l.text.clear();
+        l.project = Some("PTA".into());
+        assert_eq!(ids(&core, &l), ["t2", "t3"]);
+        assert_eq!(AppCore::ticket_source(core.tickets_listed(&l)[0]), "#9");
+        assert_eq!(
+            AppCore::ticket_stage(core.tickets_listed(&l)[0]),
+            "plan 2/2"
+        );
+    }
+
     /// The runner lists tickets newest-written first, so a ticket a
     /// watch keeps saving would carry its decision to the top on every
     /// poll. The pending list orders by when each decision was asked.

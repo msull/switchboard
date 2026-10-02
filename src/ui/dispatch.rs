@@ -6,9 +6,10 @@
 use std::path::PathBuf;
 
 use egui::{RichText, Ui};
+use egui_extras::{Column, TableBuilder};
 
 use super::{DrawCtx, GAP, markdown, theme};
-use crate::core::{AppAction, RecordId, View, WaitingAgent};
+use crate::core::{AppAction, RecordId, TicketOnly, TicketSort, View, WaitingAgent};
 use crate::ports::dispatch::{AttemptView, DecisionView, ProjectView, TicketView};
 
 /// The console pane's height on the overview.
@@ -99,9 +100,10 @@ pub fn show(cx: &mut DrawCtx<'_>, ui: &mut Ui) {
                 agent_card(cx, ui, a, ticket.as_ref());
             }
 
-            for project in projects.iter().filter(|p| shown(&p.name)) {
-                project_section(cx, ui, project, &tickets);
-            }
+            theme::section(ui, "Tickets");
+            project_limits(ui, projects.iter().filter(|p| shown(&p.name)));
+            listing_controls(cx, ui);
+            ticket_table(cx, ui);
 
             theme::section(ui, "Console");
             console(cx, ui);
@@ -186,51 +188,169 @@ fn project_chips(cx: &mut DrawCtx<'_>, ui: &mut Ui, projects: &[ProjectView]) {
     });
 }
 
-/// A project's tickets in queue order, under a line saying how many
-/// slots and decisions its policy allows and what that holds back.
-fn project_section(
-    cx: &mut DrawCtx<'_>,
-    ui: &mut Ui,
-    project: &ProjectView,
-    tickets: &[TicketView],
-) {
+/// One line per project: how many slots and decisions its policy
+/// allows and what holds new starts back.
+fn project_limits<'a>(ui: &mut Ui, projects: impl Iterator<Item = &'a ProjectView>) {
     let p = theme::palette(ui);
-    theme::section(ui, &project.name);
+    for project in projects {
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing.x = 6.0;
+            ui.label(theme::strong_text(&project.name));
+            ui.label(theme::meta_text(
+                ui,
+                format!(
+                    "{} of {} slots in use · {} of {} decisions waiting",
+                    project.running, project.slots, project.pending, project.waiting_on_me
+                ),
+            ));
+            if let Some(why) = project.held() {
+                ui.label(theme::meta_text(ui, "·"));
+                ui.label(
+                    RichText::new(format!("nothing new starts: {why}"))
+                        .text_style(theme::meta())
+                        .color(p.accent_2_text),
+                );
+            }
+        });
+    }
+}
+
+/// The filter row: words every row must contain somewhere, and which
+/// states are listed. The project chips above narrow it too.
+fn listing_controls(cx: &mut DrawCtx<'_>, ui: &mut Ui) {
     ui.horizontal_wrapped(|ui| {
-        ui.spacing_mut().item_spacing.x = 6.0;
-        ui.label(theme::meta_text(
-            ui,
-            format!(
-                "{} of {} slots in use · {} of {} decisions waiting",
-                project.running, project.slots, project.pending, project.waiting_on_me
-            ),
-        ));
-        if let Some(why) = project.held() {
-            ui.label(theme::meta_text(ui, "·"));
-            ui.label(
-                RichText::new(format!("nothing new starts: {why}"))
-                    .text_style(theme::meta())
-                    .color(p.accent_2_text),
-            );
+        ui.spacing_mut().item_spacing.x = 4.0;
+        let label = ui.label(theme::meta_text(ui, "Filter")).id;
+        ui.add(
+            egui::TextEdit::singleline(&mut cx.state.dispatch_listing.text)
+                .hint_text("words from the number, title, stage or standing")
+                .desired_width(260.0),
+        )
+        .labelled_by(label);
+        if !cx.state.dispatch_listing.text.is_empty() && theme::ghost_muted(ui, "Clear").clicked() {
+            cx.state.dispatch_listing.text.clear();
+        }
+        ui.add_space(GAP);
+        for only in TicketOnly::ALL {
+            let on = cx.state.dispatch_listing.only == only;
+            if (if on {
+                theme::primary(ui, only.label())
+            } else {
+                theme::secondary(ui, only.label())
+            })
+            .clicked()
+            {
+                cx.state.dispatch_listing.only = only;
+            }
         }
     });
-    let mut listed = 0;
-    for id in &project.queue {
-        if let Some(t) = tickets.iter().find(|t| &t.id == id) {
-            ticket_row(cx, ui, t, project);
-            listed += 1;
-        }
+}
+
+/// The columns, in order; the actions column has no sort.
+const COLUMNS: [TicketSort; 5] = [
+    TicketSort::Source,
+    TicketSort::Project,
+    TicketSort::Stage,
+    TicketSort::Standing,
+    TicketSort::Updated,
+];
+
+/// Every ticket the listing allows, one row each: the title is the
+/// link, a header click sorts, and the last column acts.
+fn ticket_table(cx: &mut DrawCtx<'_>, ui: &mut Ui) {
+    let core = cx.core;
+    let p = theme::palette(ui);
+    let mut listing = cx.state.dispatch_listing.clone();
+    listing.project.clone_from(&cx.state.dispatch_project);
+    let rows = core.tickets_listed(&listing);
+    if rows.is_empty() {
+        ui.label(theme::meta_text(ui, "No tickets match."));
+        return;
     }
-    for t in tickets
-        .iter()
-        .filter(|t| t.project == project.name && !project.queue.contains(&t.id))
-    {
-        ticket_row(cx, ui, t, project);
-        listed += 1;
+    // Rows hold buttons; a cell clips to the row, and a click outside
+    // the clipped part of a button is no click.
+    let height = ui.spacing().interact_size.y + 2.0 * ui.spacing().button_padding.y + 8.0;
+    TableBuilder::new(ui)
+        .id_salt("dispatch-tickets")
+        .striped(true)
+        .vscroll(false)
+        .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
+        .column(Column::remainder().at_least(200.0).clip(true))
+        .column(Column::auto())
+        .column(Column::auto())
+        .column(Column::initial(240.0).at_least(80.0).clip(true))
+        .column(Column::auto())
+        .column(Column::auto())
+        .header(height, |mut header| {
+            for sort in COLUMNS {
+                header.col(|ui| {
+                    let arrow = if listing.sort == sort {
+                        if listing.ascending { " ▲" } else { " ▼" }
+                    } else {
+                        ""
+                    };
+                    if theme::ghost_muted(ui, &format!("{}{arrow}", sort.label()))
+                        .on_hover_text("Sort by this column; again to flip")
+                        .clicked()
+                    {
+                        cx.state.dispatch_listing.sort_by(sort);
+                    }
+                });
+            }
+            header.col(|_| {});
+        })
+        .body(|mut body| {
+            for t in rows {
+                body.row(height, |mut row| {
+                    row.col(|ui| {
+                        if theme::ghost(ui, &title_of(t)).clicked() {
+                            open_ticket(cx, &t.id);
+                        }
+                    });
+                    row.col(|ui| {
+                        ui.label(theme::meta_text(ui, &t.project));
+                    });
+                    row.col(|ui| {
+                        ui.label(theme::meta_text(ui, crate::core::AppCore::ticket_stage(t)));
+                    });
+                    row.col(|ui| {
+                        let standing = core.ticket_standing(t);
+                        let urgent = core.ticket_waits(t) || t.state != "active";
+                        ui.label(
+                            RichText::new(&standing)
+                                .text_style(theme::meta())
+                                .color(if urgent { p.accent_2_text } else { p.n700 }),
+                        )
+                        .on_hover_text(standing);
+                    });
+                    row.col(|ui| {
+                        ui.label(theme::meta_text(ui, since(t.updated_ms)));
+                    });
+                    row.col(|ui| {
+                        ui.spacing_mut().item_spacing.x = 4.0;
+                        if core.ticket_waits(t) && theme::ghost(ui, "Answer").clicked() {
+                            open_ticket(cx, &t.id);
+                        }
+                        if matches!(t.state.as_str(), "parked")
+                            && theme::secondary(ui, "Resume").clicked()
+                        {
+                            cx.dispatch(AppAction::DispatchResume(t.id.clone()));
+                        }
+                        if theme::ghost_muted(ui, "Open").clicked() {
+                            open_ticket(cx, &t.id);
+                        }
+                    });
+                });
+            }
+        });
+}
+
+/// "3m", "2h", "5d" since a millisecond timestamp; nothing for zero.
+fn since(ms: u64) -> String {
+    if ms == 0 {
+        return String::new();
     }
-    if listed == 0 {
-        ui.label(theme::meta_text(ui, "No tickets."));
-    }
+    super::cards::since_text(std::time::UNIX_EPOCH + std::time::Duration::from_millis(ms))
 }
 
 /// Pop out, or raise the window the page already has.
@@ -277,74 +397,11 @@ fn go_back(cx: &mut DrawCtx<'_>) {
     }
 }
 
-/// One ticket's line: number and title as the link, the stage strip
-/// and its standing after.
-fn ticket_row(cx: &mut DrawCtx<'_>, ui: &mut Ui, t: &TicketView, project: &ProjectView) {
-    let p = theme::palette(ui);
-    ui.horizontal_wrapped(|ui| {
-        ui.spacing_mut().item_spacing.x = 6.0;
-        if theme::ghost(ui, &title_of(t)).clicked() {
-            open_ticket(cx, &t.id);
-        }
-        ui.label(theme::meta_text(ui, "·"));
-        stage_strip(ui, t);
-        ui.label(theme::meta_text(ui, "·"));
-        let waiting = t.decisions.iter().filter(|d| d.state == "pending").count();
-        let agents = cx.core.waiting_agents_of(t);
-        let standing = standing_of(t, Some(project), &agents);
-        ui.label(RichText::new(standing).text_style(theme::meta()).color(
-            if waiting > 0 || !agents.is_empty() || t.state != "active" {
-                p.accent_2_text
-            } else {
-                p.n700
-            },
-        ));
-    });
-}
-
 fn title_of(t: &TicketView) -> String {
     match t.number {
         Some(n) if t.kind == "pull-request" => format!("PR #{n} {}", t.title),
         Some(n) => format!("#{n} {}", t.title),
         None => t.title.clone(),
-    }
-}
-
-/// `investigate running`, `parked: <reason>`, `2 waiting on you`, an
-/// agent at a prompt of its own, or why a ticket with nothing open is
-/// not moving when its project is at a limit.
-fn standing_of(t: &TicketView, project: Option<&ProjectView>, agents: &[WaitingAgent]) -> String {
-    let waiting = t.decisions.iter().filter(|d| d.state == "pending").count();
-    if waiting > 0 {
-        return format!("{waiting} waiting on you");
-    }
-    if let Some(a) = agents.first() {
-        return format!(
-            "agent waiting on you: {} ({}) {}",
-            a.stage, a.context, a.reason
-        );
-    }
-    match t.state.as_str() {
-        "active" => {
-            let open = t
-                .attempts
-                .last()
-                .is_some_and(|a| matches!(a.state.as_str(), "starting" | "running"));
-            let held = if open {
-                None
-            } else {
-                project.and_then(ProjectView::held)
-            };
-            match (held, t.attempts.last()) {
-                (Some(why), _) => format!("held: {why}"),
-                (None, Some(a)) => format!("{} {}", a.stage, a.state),
-                (None, None) => "queued".to_owned(),
-            }
-        }
-        other => match &t.reason {
-            Some(reason) => format!("{other}: {reason}"),
-            None => other.to_owned(),
-        },
     }
 }
 
@@ -693,17 +750,9 @@ fn ticket_header(cx: &mut DrawCtx<'_>, ui: &mut Ui, t: &TicketView) {
         ui.label(theme::meta_text(ui, "·"));
         stage_strip(ui, t);
         ui.label(theme::meta_text(ui, "·"));
-        let project = cx
-            .core
-            .dispatch_state()
-            .status
-            .projects
-            .iter()
-            .find(|p| p.name == t.project)
-            .cloned();
         let agents = cx.core.waiting_agents_of(t);
         ui.label(
-            RichText::new(standing_of(t, project.as_ref(), &agents))
+            RichText::new(cx.core.ticket_standing(t))
                 .text_style(theme::meta())
                 .color(if t.state == "active" && agents.is_empty() {
                     p.n700

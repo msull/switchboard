@@ -107,6 +107,8 @@ pub struct UiState {
     pub dispatch_artifact: Option<PathBuf>,
     /// The Dispatch project the page is narrowed to; every one when none.
     pub dispatch_project: Option<String>,
+    /// How the ticket table is narrowed and ordered.
+    pub dispatch_listing: crate::core::TicketListing,
     /// Options ticked so far on decisions that take several, by
     /// decision id; started from the recommendation.
     pub dispatch_choices: HashMap<String, Vec<String>>,
@@ -266,6 +268,7 @@ impl Default for UiState {
             dispatch_note_drafts: std::collections::HashMap::new(),
             dispatch_artifact: None,
             dispatch_project: None,
+            dispatch_listing: crate::core::TicketListing::default(),
             dispatch_choices: HashMap::new(),
             surface: Surface::Main,
             dispatch_window_ticket: None,

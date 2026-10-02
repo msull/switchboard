@@ -24,6 +24,123 @@ pub struct WaitingAgent {
     pub reason: String,
 }
 
+/// A column the ticket table can be ordered by.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TicketSort {
+    /// Last written, newest first by default.
+    #[default]
+    Updated,
+    Created,
+    Project,
+    Source,
+    Title,
+    Stage,
+    /// What the ticket waits on: your answers first, then running
+    /// work, then held, parked and closed.
+    Standing,
+}
+
+impl TicketSort {
+    pub const ALL: [Self; 7] = [
+        Self::Source,
+        Self::Title,
+        Self::Project,
+        Self::Stage,
+        Self::Standing,
+        Self::Updated,
+        Self::Created,
+    ];
+
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Updated => "Updated",
+            Self::Created => "Created",
+            Self::Project => "Project",
+            Self::Source => "Ticket",
+            Self::Title => "Title",
+            Self::Stage => "Stage",
+            Self::Standing => "Standing",
+        }
+    }
+
+    /// Whether the column reads best newest or most urgent first, so
+    /// the first click on its header sorts that way.
+    #[must_use]
+    pub fn descends_first(self) -> bool {
+        matches!(self, Self::Updated | Self::Created)
+    }
+}
+
+/// Which tickets the table lists.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TicketOnly {
+    #[default]
+    All,
+    /// A decision pending, or an agent at a prompt of its own.
+    Waiting,
+    Active,
+    Parked,
+    Closed,
+}
+
+impl TicketOnly {
+    pub const ALL: [Self; 5] = [
+        Self::All,
+        Self::Waiting,
+        Self::Active,
+        Self::Parked,
+        Self::Closed,
+    ];
+
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::All => "Any state",
+            Self::Waiting => "Waiting on you",
+            Self::Active => "Active",
+            Self::Parked => "Parked",
+            Self::Closed => "Closed",
+        }
+    }
+}
+
+/// How the ticket table is narrowed and ordered: a project, a state,
+/// words that must appear somewhere on the row, and the column.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TicketListing {
+    pub project: Option<String>,
+    pub only: TicketOnly,
+    pub text: String,
+    pub sort: TicketSort,
+    pub ascending: bool,
+}
+
+impl Default for TicketListing {
+    fn default() -> Self {
+        Self {
+            project: None,
+            only: TicketOnly::All,
+            text: String::new(),
+            sort: TicketSort::Updated,
+            ascending: false,
+        }
+    }
+}
+
+impl TicketListing {
+    /// A header click: the same column flips the direction, another
+    /// column starts the way it reads best.
+    pub fn sort_by(&mut self, sort: TicketSort) {
+        if self.sort == sort {
+            self.ascending = !self.ascending;
+        } else {
+            self.sort = sort;
+            self.ascending = !sort.descends_first();
+        }
+    }
+}
+
 /// The space and project the console lives in, and its name.
 pub const CONSOLE_SPACE: &str = "Dispatch";
 pub const CONSOLE_NAME: &str = "console";
@@ -105,6 +222,157 @@ impl AppCore {
                 })
             })
             .collect()
+    }
+
+    /// `#104` for an issue, `PR #3` for a pull request, nothing for a
+    /// ticket without a number.
+    #[must_use]
+    pub fn ticket_source(t: &TicketView) -> String {
+        match t.number {
+            Some(n) if t.kind == "pull-request" => format!("PR #{n}"),
+            Some(n) => format!("#{n}"),
+            None => String::new(),
+        }
+    }
+
+    /// The current stage and where it falls: `review-code 6/8`, or
+    /// `done` past the end.
+    #[must_use]
+    pub fn ticket_stage(t: &TicketView) -> String {
+        match t.stages.get(t.stage) {
+            Some(name) => format!("{name} {}/{}", t.stage + 1, t.stages.len()),
+            None => "done".to_owned(),
+        }
+    }
+
+    /// `investigate running`, `parked: <reason>`, `2 waiting on you`, an
+    /// agent at a prompt of its own, or why a ticket with nothing open
+    /// is not moving when its project is at a limit.
+    #[must_use]
+    pub fn ticket_standing(&self, t: &TicketView) -> String {
+        let waiting = t.decisions.iter().filter(|d| d.state == "pending").count();
+        if waiting > 0 {
+            return format!("{waiting} waiting on you");
+        }
+        if let Some(a) = self.waiting_agents_of(t).first() {
+            return format!(
+                "agent waiting on you: {} ({}) {}",
+                a.stage, a.context, a.reason
+            );
+        }
+        match t.state.as_str() {
+            "active" => {
+                let open = t
+                    .attempts
+                    .last()
+                    .is_some_and(|a| matches!(a.state.as_str(), "starting" | "running"));
+                let held = if open {
+                    None
+                } else {
+                    self.dispatch
+                        .status
+                        .projects
+                        .iter()
+                        .find(|p| p.name == t.project)
+                        .and_then(crate::ports::dispatch::ProjectView::held)
+                };
+                match (held, t.attempts.last()) {
+                    (Some(why), _) => format!("held: {why}"),
+                    (None, Some(a)) => format!("{} {}", a.stage, a.state),
+                    (None, None) => "queued".to_owned(),
+                }
+            }
+            other => match &t.reason {
+                Some(reason) => format!("{other}: {reason}"),
+                None => other.to_owned(),
+            },
+        }
+    }
+
+    /// Whether the ticket waits on the user: a pending decision or an
+    /// agent at a prompt of its own.
+    #[must_use]
+    pub fn ticket_waits(&self, t: &TicketView) -> bool {
+        t.decisions.iter().any(|d| d.state == "pending") || !self.waiting_agents_of(t).is_empty()
+    }
+
+    /// The tickets the table shows, narrowed and ordered as `listing`
+    /// says. The order is total (ids break ties), so it holds still
+    /// from one poll to the next.
+    #[must_use]
+    pub fn tickets_listed(&self, listing: &TicketListing) -> Vec<&TicketView> {
+        let words: Vec<String> = listing
+            .text
+            .split_whitespace()
+            .map(str::to_lowercase)
+            .collect();
+        let mut rows: Vec<(&TicketView, String)> = self
+            .dispatch
+            .status
+            .tickets
+            .iter()
+            .filter(|t| listing.project.as_deref().is_none_or(|p| p == t.project))
+            .filter(|t| match listing.only {
+                TicketOnly::All => true,
+                TicketOnly::Waiting => self.ticket_waits(t),
+                TicketOnly::Active => t.state == "active",
+                TicketOnly::Parked => matches!(t.state.as_str(), "parked" | "parking"),
+                TicketOnly::Closed => t.state == "closed",
+            })
+            .map(|t| (t, self.ticket_standing(t)))
+            .filter(|(t, standing)| {
+                if words.is_empty() {
+                    return true;
+                }
+                let haystack = format!(
+                    "{} {} {} {} {} {}",
+                    Self::ticket_source(t),
+                    t.title,
+                    t.project,
+                    Self::ticket_stage(t),
+                    standing,
+                    t.labels.join(" ")
+                )
+                .to_lowercase();
+                words.iter().all(|w| haystack.contains(w.as_str()))
+            })
+            .collect();
+        let rank = |t: &TicketView, standing: &str| -> (u8, String) {
+            let open = t
+                .attempts
+                .last()
+                .is_some_and(|a| matches!(a.state.as_str(), "starting" | "running"));
+            let r = if self.ticket_waits(t) {
+                0
+            } else if t.state == "active" && open {
+                1
+            } else if t.state == "active" {
+                2
+            } else if t.state == "closed" {
+                4
+            } else {
+                3
+            };
+            (r, standing.to_owned())
+        };
+        rows.sort_by(|(a, sa), (b, sb)| {
+            let order = match listing.sort {
+                TicketSort::Updated => a.updated_ms.cmp(&b.updated_ms),
+                TicketSort::Created => a.created_ms.cmp(&b.created_ms),
+                TicketSort::Project => a.project.cmp(&b.project),
+                TicketSort::Source => (&a.kind, a.number).cmp(&(&b.kind, b.number)),
+                TicketSort::Title => a.title.to_lowercase().cmp(&b.title.to_lowercase()),
+                TicketSort::Stage => (a.stage, &a.project).cmp(&(b.stage, &b.project)),
+                TicketSort::Standing => rank(a, sa).cmp(&rank(b, sb)),
+            };
+            let order = if listing.ascending {
+                order
+            } else {
+                order.reverse()
+            };
+            order.then_with(|| a.id.cmp(&b.id))
+        });
+        rows.into_iter().map(|(t, _)| t).collect()
     }
 
     /// Every agent of every ticket that waits on the user for itself.

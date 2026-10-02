@@ -4096,6 +4096,66 @@ fn dispatch_status() -> switchboard::ports::dispatch::Status {
     }
 }
 
+/// The ticket table: one row per ticket with the title as its link,
+/// state chips and a word filter that narrow it, a header that sorts,
+/// and a parked row's Resume that is one action.
+#[test]
+fn dispatch_table_filters_sorts_and_resumes() {
+    use switchboard::core::{TicketOnly, TicketSort};
+    use switchboard::ports::dispatch::TicketView;
+    let (mut harness, _) = harness();
+    let mut status = dispatch_status();
+    status.tickets.push(TicketView {
+        id: "t3".into(),
+        project: "PTA".into(),
+        number: Some(12),
+        title: "Night sync".into(),
+        state: "parked".into(),
+        reason: Some("by hand".into()),
+        stages: vec!["investigate".into()],
+        ..TicketView::default()
+    });
+    harness
+        .state_mut()
+        .dispatch(AppAction::DispatchStatus(Some(status)));
+    harness.state_mut().dispatched.clear();
+    harness.run_steps(2);
+    click(&mut harness, "Dispatch");
+    // A title may also be on a decision card, so presence is counted.
+    let shown = |h: &Harness<'static, SwitchboardApp>, label: &str| -> bool {
+        h.query_all_by_label(label).next().is_some()
+    };
+    assert!(shown(&harness, "#104 One file per entry"));
+    assert!(shown(&harness, "#9 Roster import"));
+    assert!(shown(&harness, "#12 Night sync"));
+    harness.get_by_label("parked: by hand");
+    // The table's auto-sized columns settle over a sizing pass, during
+    // which nothing is clickable.
+    harness.run_steps(2);
+    click(&mut harness, "Resume");
+    assert!(actions(&harness).contains(&AppAction::DispatchResume("t3".into())));
+    click(&mut harness, "Parked");
+    assert!(!shown(&harness, "#9 Roster import"));
+    assert!(shown(&harness, "#12 Night sync"));
+    assert_eq!(
+        harness.state().ui_state.dispatch_listing.only,
+        TicketOnly::Parked
+    );
+    click(&mut harness, "Any state");
+    assert!(shown(&harness, "#9 Roster import"));
+    click(&mut harness, "Ticket");
+    let listing = &harness.state().ui_state.dispatch_listing;
+    assert_eq!(listing.sort, TicketSort::Source);
+    assert!(listing.ascending);
+    click(&mut harness, "Ticket ▲");
+    assert!(!harness.state().ui_state.dispatch_listing.ascending);
+    type_into(&mut harness, "Filter", "roster");
+    assert!(shown(&harness, "#9 Roster import"));
+    assert!(!shown(&harness, "#12 Night sync"));
+    click(&mut harness, "Clear");
+    assert!(shown(&harness, "#12 Night sync"));
+}
+
 /// A ticket's agent at a prompt of its own is on the page: a card under
 /// "Waiting on you" that opens the session, the ticket row's standing,
 /// and the rail count.

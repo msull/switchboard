@@ -1315,6 +1315,19 @@ exist:
   through `session.waiting`, so the Dock count and the rail include
   it, and the decision text is in its notes.
 
+The Dispatch page lists every ticket in one table: the numbered title
+as the link, project, stage with its place in the pipeline, standing
+(what the ticket waits on, or why it is not moving), and when it was
+last written. A header sorts by its column and sorts the other way on
+a second click; `Updated` starts newest first and the others the way
+they read. Chips narrow it to tickets waiting on you, active, parked
+or closed, and a word filter keeps only rows that contain every word
+somewhere (number, title, project, stage, standing or labels), beside
+the project chips. The last column acts: `Answer` on a ticket with a
+decision pending, `Resume` on a parked one, `Open` on any. The order
+and the narrowing are the core's (`AppCore::tickets_listed`), total
+and stable across polls; the page only draws.
+
 Dispatch also has a port of its own, so a reader can see tickets as
 they are rather than through the sessions they made. While `dispatch
 run` is up it serves `<data>/dispatch.sock` (wire crate
