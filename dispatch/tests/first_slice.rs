@@ -4226,6 +4226,53 @@ fn an_answer_waiting_for_a_slot_is_withdrawn_by_an_unslotted_park() {
     assert_eq!(env.sb().sessions.len(), sessions, "nothing launched");
 }
 
+/// Two answers before one pass with slots free: the lower-indexed
+/// lane's `rerun` is acted on first (its attempt retired, the answer
+/// marked acted), then the other's `park` parks the ticket. The acted
+/// rerun has not launched its replacement, so the park withdraws it:
+/// the resume asks both lanes afresh and launches nothing.
+#[test]
+fn a_rerun_acted_before_a_park_in_the_same_pass_launches_nothing() {
+    let (mut env, id) = two_failed_plans();
+    let t = env.ticket(&id);
+    let mut asked = [
+        rerun_for(&t, "backend").unwrap(),
+        rerun_for(&t, "frontend").unwrap(),
+    ];
+    let index = |d: &Decision| t.decisions.iter().position(|x| x.id == d.id).unwrap();
+    asked.sort_by_key(index);
+    let [rerun, parked_from] = asked;
+    let now = env.tick();
+    env.runner
+        .decide(&id, &rerun.id, "rerun", None, now)
+        .unwrap();
+    let now = env.tick();
+    env.runner
+        .decide(&id, &parked_from.id, "park", None, now)
+        .unwrap();
+    let now = env.tick();
+    env.runner.step_project("Orchard", now).unwrap();
+    let t = env.ticket(&id);
+    assert!(matches!(t.state, TicketState::Parked { .. }), "{t:#?}");
+    assert_eq!(
+        decision_state(&t, &rerun.id),
+        dispatch::ticket::DecisionState::Cancelled
+    );
+    let earlier: Vec<String> = t.decisions.iter().map(|d| d.id.clone()).collect();
+    let sessions = env.sb().sessions.len();
+    let now = env.tick();
+    env.runner.resume(&id, now).unwrap();
+    let now = env.tick();
+    env.runner.step_project("Orchard", now).unwrap();
+    let t = env.ticket(&id);
+    for ctx in ["backend", "frontend"] {
+        let d = rerun_for(&t, ctx).unwrap_or_else(|| panic!("no rerun for {ctx}: {t:#?}"));
+        assert!(!earlier.contains(&d.id), "a new id: {}", d.id);
+    }
+    assert_eq!(t.attempts_of("plan").count(), 2, "{t:#?}");
+    assert_eq!(env.sb().sessions.len(), sessions, "nothing launched");
+}
+
 /// Failing at the checks past `max_reruns` parks without a question,
 /// and the resume still offers the checks again.
 #[test]

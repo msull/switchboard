@@ -1571,17 +1571,18 @@ lost reply to a non-replayable one (`session.send`,
 ledger entry is marked asked and recovery skips it from then on. An
 attempt with no launch on the books fails rather than waits. Parking
 and a rerun follow the design's cancellation sequence: the intent is
-written (for parking, with every pending decision on the ticket and
-every answer not yet acted on cancelled in the same write, so a
-`rerun` answer left waiting for a slot neither launches on the resume
-nor keeps its context from being asked again, and the session's
-waiting mark then cleared and read back), the review run paused and read back as paused,
-every process killed and read back as gone, and only then does the
-ticket read as parked or the rerun's answer count as acted (which is
-what lets the replacement start); the sequence runs from the saved
-intent on every pass, so a restart at any point resumes it whole. A
-resumed ticket asks `rerun` again, under a new id and without waiting
-for a slot, about each failed or cancelled attempt with no rerun
+written (for parking, with every open decision on the ticket
+cancelled in the same write: a pending one, an answer not yet acted
+on, and an acted `rerun` whose replacement has not launched, so no
+answer given before the park launches on the resume or keeps its
+context from being asked again; the session's waiting mark is then
+cleared and read back), the review run paused and read back as
+paused, every process killed and read back as gone, and only then
+does the ticket read as parked or the rerun's answer count as acted
+(which is what lets the replacement start); the sequence runs from
+the saved intent on every pass, so a restart at any point resumes it
+whole. A resumed ticket asks `rerun` again, under a new id and
+without waiting for a slot, about each failed or cancelled attempt with no rerun
 question in flight, with the attempt's own reason and the options its
 failure first had; a pending decision holds its stage only in the
 context it is about. With every slot taken, a `park` answer is still
@@ -1601,10 +1602,8 @@ git repository as its own workspace for the folder-trust dialog, so the
 first agent in each lane's worktree blocks on that dialog until it is
 answered in the pane once (a plain directory under a trusted parent
 inherits the trust; a fresh repository does not). Nothing in
-Switchboard or Dispatch writes Claude's trust file. Two more: when two
-answers arrive in one pass and the first is `park`, the second stays
-answered and unacted and is acted on after a resume; and `close` (and
-`retake`, which closes by it) leaves pending decisions pending.
+Switchboard or Dispatch writes Claude's trust file. One more: `close`
+(and `retake`, which closes by it) leaves pending decisions pending.
 
 ## Open questions
 
