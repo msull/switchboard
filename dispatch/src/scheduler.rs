@@ -610,10 +610,10 @@ impl Runner {
     }
 
     /// Parking is a sequence, not a flag: the intent is written first,
-    /// with every pending decision on the ticket cancelled in the same
-    /// write, the session's waiting mark is cleared and read back, open
-    /// attempts are cancelled (a review run paused so its tick cannot
-    /// start a round), every process on the ticket's list is killed,
+    /// with every pending decision on the ticket, and every answer not
+    /// yet acted on, cancelled in the same write, the session's waiting
+    /// mark is cleared and read back, open attempts are cancelled (a
+    /// review run paused so its tick cannot start a round), every process on the ticket's list is killed,
     /// and the ticket reads as parked only once Switchboard reports them
     /// all gone. `finish_parking` runs the rest on later passes if
     /// anything is still alive now.
@@ -634,8 +634,8 @@ impl Runner {
     }
 
     /// The rest of the sequence, from the saved intent: any decision
-    /// still pending withdrawn, the session's waiting mark cleared and
-    /// answered, every open attempt cancelled (its run paused and read
+    /// still pending or unacted withdrawn, the session's waiting mark
+    /// cleared and answered, every open attempt cancelled (its run paused and read
     /// back as paused), everything on the process list killed and read
     /// back as gone, and only then `Parked`. Run again on every pass
     /// until it gets there, so a restart at any point resumes it whole.
@@ -650,7 +650,7 @@ impl Runner {
         };
         // A parking ticket asks nothing. `park` withdraws its questions
         // with the intent, so this only finds work on a `Parking` record
-        // whose decisions are still pending.
+        // whose decisions are still pending or unacted.
         if Self::withdraw_pending(t) {
             self.save_ticket(t, now_ms)?;
         }
@@ -943,11 +943,18 @@ impl Runner {
         Ok(())
     }
 
-    /// Every pending decision on the ticket withdrawn, in memory; the
-    /// caller's next save writes it. True if there was one.
+    /// Every decision on the ticket that is pending, or answered and not
+    /// yet acted on, withdrawn in memory; the caller's next save writes
+    /// it. True if there was one. An answer waiting for a slot is
+    /// withdrawn with the questions: kept, a `rerun` answer would launch
+    /// on the resume and keep its context from being asked afresh.
     fn withdraw_pending(t: &mut Ticket) -> bool {
         let mut withdrawn = false;
-        for d in t.decisions.iter_mut().filter(|d| d.pending()) {
+        for d in t
+            .decisions
+            .iter_mut()
+            .filter(|d| d.pending() || d.unacted_answer().is_some())
+        {
             d.state = DecisionState::Cancelled;
             withdrawn = true;
         }
@@ -1092,9 +1099,7 @@ impl Runner {
                         continue;
                     }
                 }
-                (_, "park") => {
-                    self.park(t, ps, &format!("parked by hand at decision {name}"), now_ms)?;
-                }
+                (_, "park") => self.park_by_answer(t, ps, i, now_ms)?,
                 (name, other) => {
                     self.park(
                         t,
@@ -1111,6 +1116,22 @@ impl Runner {
             }
         }
         Ok(())
+    }
+
+    /// Decision `i`'s `park` answer acted on: the acted mark is set in
+    /// memory and reaches disk with the parking state.
+    fn park_by_answer(
+        &mut self,
+        t: &mut Ticket,
+        ps: &mut ProjectState,
+        i: usize,
+        now_ms: u64,
+    ) -> Result<()> {
+        if let DecisionState::Answered { acted, .. } = &mut t.decisions[i].state {
+            *acted = true;
+        }
+        let name = t.decisions[i].name.clone();
+        self.park(t, ps, &format!("parked by hand at decision {name}"), now_ms)
     }
 
     /// A rerun's replaced attempt is retired first, so an old and a new
@@ -3382,13 +3403,7 @@ impl Runner {
             .iter()
             .position(|d| d.unacted_answer() == Some("park"))
         {
-            // Marked in memory, written with the parking state, as in
-            // `act_on_answers`.
-            if let DecisionState::Answered { acted, .. } = &mut t.decisions[i].state {
-                *acted = true;
-            }
-            let name = t.decisions[i].name.clone();
-            self.park(t, ps, &format!("parked by hand at decision {name}"), now_ms)?;
+            self.park_by_answer(t, ps, i, now_ms)?;
             return Ok(0);
         }
         if let Some(stage) = p.stages.get(t.stage)

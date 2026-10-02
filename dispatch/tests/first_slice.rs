@@ -4224,6 +4224,63 @@ fn a_resumed_ticket_with_a_lost_unrepeatable_request_is_asked_once_and_parks_uns
     assert_eq!(lost_sends(&t).len(), 1, "not asked again: {t:#?}");
 }
 
+/// A `rerun` answer still waiting for a slot when a `park` answer parks
+/// the ticket is withdrawn with the questions: the resume asks about
+/// its lane afresh and launches nothing on the old answer.
+#[test]
+fn an_answer_waiting_for_a_slot_is_withdrawn_by_an_unslotted_park() {
+    let (mut env, id) = two_failed_plans();
+    let path = env.data.pipeline("Orchard");
+    let full = std::fs::read_to_string(&path).unwrap();
+    std::fs::write(&path, full.replace("slots = 2\n", "slots = 0\n")).unwrap();
+    let t = env.ticket(&id);
+    let waiting = rerun_for(&t, "frontend").unwrap();
+    let parked_from = rerun_for(&t, "backend").unwrap();
+    let now = env.tick();
+    env.runner
+        .decide(&id, &waiting.id, "rerun", None, now)
+        .unwrap();
+    let now = env.tick();
+    env.runner.step_project("Orchard", now).unwrap();
+    assert!(
+        env.ticket(&id)
+            .decisions
+            .iter()
+            .any(|d| d.id == waiting.id && d.unacted_answer() == Some("rerun")),
+        "the answer waits for a slot"
+    );
+    let now = env.tick();
+    env.runner
+        .decide(&id, &parked_from.id, "park", None, now)
+        .unwrap();
+    let now = env.tick();
+    env.runner.step_project("Orchard", now).unwrap();
+    let t = env.ticket(&id);
+    assert!(matches!(t.state, TicketState::Parked { .. }), "{t:#?}");
+    assert_eq!(
+        decision_state(&t, &waiting.id),
+        dispatch::ticket::DecisionState::Cancelled
+    );
+    let earlier: Vec<String> = t.decisions.iter().map(|d| d.id.clone()).collect();
+    let sessions = env.sb().sessions.len();
+    let now = env.tick();
+    env.runner.resume(&id, now).unwrap();
+    let now = env.tick();
+    env.runner.step_project("Orchard", now).unwrap();
+    let t = env.ticket(&id);
+    for ctx in ["backend", "frontend"] {
+        let d = rerun_for(&t, ctx).unwrap_or_else(|| panic!("no rerun for {ctx}: {t:#?}"));
+        assert!(!earlier.contains(&d.id), "a new id: {}", d.id);
+    }
+    // With slots free again, the old answer still launches nothing.
+    std::fs::write(&path, &full).unwrap();
+    let now = env.tick();
+    env.runner.step_project("Orchard", now).unwrap();
+    let t = env.ticket(&id);
+    assert_eq!(t.attempts_of("plan").count(), 2, "{t:#?}");
+    assert_eq!(env.sb().sessions.len(), sessions, "nothing launched");
+}
+
 /// Failing at the checks past `max_reruns` parks without a question,
 /// and the resume still offers the checks again.
 #[test]
