@@ -209,6 +209,12 @@ fn harness_build(
             app.record_actions = true;
             app.ui_state.embed_terminals = false;
             app.ui_state.prompt_boxes.native = false;
+            // No speech model in tests: the demo stands in for the
+            // microphone. A real model on the developer's machine would
+            // otherwise be loaded onto the GPU by every listening test at
+            // once, and whisper's Metal setup aborts on that race.
+            app.ui_state.prompt_boxes.voice =
+                promptbox::Voice::new(std::path::PathBuf::from("/nonexistent/ggml-none.bin"));
             app
         });
     let ids = seed(harness.state_mut());

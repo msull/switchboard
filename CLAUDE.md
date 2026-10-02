@@ -173,6 +173,10 @@ API does not match expectations, read the crate source under
 - `egui_kittest`: `Harness::builder().with_size(..).build_eframe(|cc| ..)`.
   Import `Role` from `egui::accesskit`.
 - Use `GAP` and `PAD` from `ui/mod.rs` for spacing so views line up.
+- `CollapsingHeader::id_salt(x)` hashes `x` into an `IdSalt` first, so
+  `ui.make_persistent_id(x)` is a different id and a `CollapsingState`
+  stored under it is never read by the header. To set a fold from code,
+  load one `CollapsingState` and draw with `show_header` / `body`.
 
 ## Platform-specific code
 
