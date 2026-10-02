@@ -4623,7 +4623,10 @@ impl Runner {
         Ok(())
     }
 
-    /// Write an answer on a pending decision; the runner acts on it.
+    /// Write an answer on a decision that waits on the user; the runner
+    /// acts on it. A closing ticket's pending decisions wait on no one
+    /// (`Ticket::waiting_on_you`), so an answer to one is refused rather
+    /// than left on a closed ticket for nothing to act on.
     pub fn decide(
         &self,
         ticket: &str,
@@ -4635,10 +4638,16 @@ impl Runner {
         let path = self.data.ticket_file(ticket);
         self.data.with_lock(|| {
             let mut t = read_ticket(&path)?;
+            if !t.waiting_on_you().iter().any(|d| d.id == decision) {
+                if matches!(t.state, TicketState::Closing { .. }) {
+                    bail!("ticket {ticket} is closing; its pending decisions are being cancelled");
+                }
+                bail!("ticket {ticket} has no pending decision {decision}");
+            }
             let d = t
                 .decisions
                 .iter_mut()
-                .find(|d| d.id == decision && d.pending())
+                .find(|d| d.id == decision)
                 .with_context(|| format!("ticket {ticket} has no pending decision {decision}"))?;
             if !d.options.iter().any(|o| o == answer) && d.name != "lanes" {
                 bail!("decision {decision} takes one of: {}", d.options.join(", "));

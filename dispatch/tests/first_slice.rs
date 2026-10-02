@@ -5546,6 +5546,27 @@ fn workspace_trees(env: &Env, id: &str) -> [(PathBuf, PathBuf); 3] {
 }
 
 #[test]
+fn a_closing_tickets_pending_decision_takes_no_answer() {
+    let (mut env, id) = workspace_env(&["area:backend"]);
+    at_rerun(&mut env, &id);
+    let d = env.pending(&id)[0].id.clone();
+    write_closing(&env, &id, |_| {});
+    let now = env.tick();
+    let err = env.runner.decide(&id, &d, "rerun", None, now).unwrap_err();
+    assert!(err.to_string().contains("is closing"), "{err:#}");
+    let t = env.ticket(&id);
+    assert!(t.decisions.iter().find(|x| x.id == d).unwrap().pending());
+    env.step();
+    let t = env.ticket(&id);
+    assert!(matches!(t.state, TicketState::Closed { .. }), "{t:#?}");
+    assert!(
+        t.decisions
+            .iter()
+            .all(|d| d.state == dispatch::ticket::DecisionState::Cancelled)
+    );
+}
+
+#[test]
 fn closing_by_hand_removes_the_lanes_then_the_tree_and_keeps_the_rest() {
     let (mut env, id) = workspace_env(&["area:backend"]);
     let investigator = at_rerun(&mut env, &id);
