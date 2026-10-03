@@ -7,6 +7,8 @@
 //! Layering:
 //! - `pipeline`: the TOML file, parsed and validated; pure.
 //! - `ticket`: the records (ticket, attempt, decision, ledger); pure.
+//! - `history`: which commits a code review's fix rounds fold into, as
+//!   plans; pure.
 //! - `store`: the data directory, atomic writes, the writer lock.
 //! - `port`, `git`, `github`, `bitbucket`: the outside world behind
 //!   traits with fakes.
@@ -25,6 +27,7 @@
 pub mod bitbucket;
 pub mod git;
 pub mod github;
+pub mod history;
 pub mod pipeline;
 pub mod port;
 pub mod recover;

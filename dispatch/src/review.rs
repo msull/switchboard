@@ -12,6 +12,7 @@ use std::path::Path;
 use anyhow::{Context as _, Result};
 use switchboard_control::{self as wire, Body, Reply};
 
+use crate::history::{self, Commits};
 use crate::pipeline::{Gate, OperatorKind, Pipeline, Stage};
 use crate::scheduler::{
     Ask, NO_SUCH_SESSION, Runner, SocketDown, asks_again, busy, checks_env, env_for, find_attempt,
@@ -22,7 +23,8 @@ use crate::scheduler::{
 use crate::template::Vars;
 use crate::ticket::{
     Attempt, AttemptKind, AttemptState, DIRTY_POLLS, DecisionKind, GateRun, ProjectState,
-    Refreshed, ReviewRound, ReviewerResult, ReviewerRun, RoundState, STOP_IDLE_POLLS, Ticket,
+    Refreshed, ReviewRound, ReviewerResult, ReviewerRun, Rewrite, RoundState, STOP_IDLE_POLLS,
+    Ticket,
 };
 
 /// What a reviewer writes when it has nothing to report, unless the
@@ -544,7 +546,11 @@ impl Runner {
             }
             RoundState::Fixing => self.poll_fix(t, ps, a, &round, cwd, now_ms),
             RoundState::Fixed | RoundState::Converged | RoundState::Accepted => {
-                if a.gate.is_some() {
+                // A rewrite whose intent was saved and whose end was not:
+                // the checks passed, and the branch may have moved since.
+                if a.rewrite.as_ref().is_some_and(|r| r.after.is_none()) {
+                    self.resume_rewrite(t, ps, p, stage, a, cwd, lane, now_ms)
+                } else if a.gate.is_some() {
                     self.poll_checks(t, ps, p, stage, a, &round, cwd, lane, now_ms)
                 } else {
                     self.start_checks(t, ps, p, stage, a, &round, cwd, lane, now_ms)
@@ -1270,7 +1276,7 @@ impl Runner {
                 key.0,
                 a.context
             );
-            return self.complete_review(t, &key, &head, now_ms);
+            return self.complete_review(t, ps, p, stage, &key, cwd, lane, &head, now_ms);
         }
         let log = round
             .reviewers
@@ -1378,7 +1384,7 @@ impl Runner {
             self.save_ticket(t, now_ms)?;
             return self.open_round(t, ps, p, stage, &key, cwd, lane, now_ms);
         }
-        self.complete_review(t, &key, &head, now_ms)
+        self.complete_review(t, ps, p, stage, &key, cwd, lane, &head, now_ms)
     }
 
     /// The round and the attempt failed for one reason; the rerun
@@ -1404,7 +1410,31 @@ impl Runner {
         self.fail_attempt(t, ps, &key.0, key.1, reason, now_ms)
     }
 
+    /// The stage's checks passed at `head`: the commits are rewritten
+    /// as the stage says, and the attempt completes at the head that
+    /// leaves.
+    #[allow(clippy::too_many_arguments)]
     fn complete_review(
+        &mut self,
+        t: &mut Ticket,
+        ps: &mut ProjectState,
+        p: &Pipeline,
+        stage: &Stage,
+        key: &(String, u32),
+        cwd: &Path,
+        lane: Option<&str>,
+        head: &str,
+        now_ms: u64,
+    ) -> Result<()> {
+        let Some(head) = self.rewrite_commits(t, ps, p, stage, key, cwd, lane, head, now_ms)?
+        else {
+            return Ok(());
+        };
+        self.finish_review(t, key, &head, now_ms)
+    }
+
+    /// The summary written and the attempt complete at `head`.
+    fn finish_review(
         &mut self,
         t: &mut Ticket,
         key: &(String, u32),
@@ -1428,6 +1458,268 @@ impl Runner {
         }
         log::info!("ticket {} {}/{} complete at {head}", t.id, key.0, key.1);
         self.save_ticket(t, now_ms)
+    }
+
+    /// The branch's commits at `before` rewritten as the stage's
+    /// `commits` says, on a clean tree, into a head with the same tree,
+    /// and the branch moved there only while it is still at `before`.
+    /// The head the attempt completes at, or `None` when the attempt
+    /// failed (or the ticket parked) instead. A branch the remote
+    /// already holds is left as it is.
+    #[allow(clippy::too_many_arguments)]
+    fn rewrite_commits(
+        &mut self,
+        t: &mut Ticket,
+        ps: &mut ProjectState,
+        p: &Pipeline,
+        stage: &Stage,
+        key: &(String, u32),
+        cwd: &Path,
+        lane: Option<&str>,
+        before: &str,
+        now_ms: u64,
+    ) -> Result<Option<String>> {
+        let mode = stage.commits();
+        if mode == Commits::Keep {
+            return Ok(Some(before.to_owned()));
+        }
+        if !self.git.is_clean(cwd)? {
+            let reason = format!(
+                "the tree at {} is not clean when its commits would be rewritten",
+                cwd.display()
+            );
+            self.fail_attempt(t, ps, &key.0, key.1, &reason, now_ms)?;
+            return Ok(None);
+        }
+        let base = self.base_of(t, p, cwd, lane, now_ms)?;
+        let commits = match self.git.commits(cwd, &base, before) {
+            Ok(c) => c,
+            Err(e) => {
+                let reason = format!("the commits since {base} could not be read: {e:#}");
+                self.fail_attempt(t, ps, &key.0, key.1, &reason, now_ms)?;
+                return Ok(None);
+            }
+        };
+        let from = count(commits.len());
+        let mut record = Rewrite {
+            mode,
+            before: before.to_owned(),
+            after: None,
+            from,
+            to: from,
+            skipped: None,
+            at_ms: now_ms,
+        };
+        if self.is_published(t, p, cwd, lane, key, &base, before)? {
+            log::info!(
+                "ticket {} {}/{} commits kept at {before}: the branch is published",
+                t.id,
+                key.0,
+                key.1
+            );
+            record.after = Some(before.to_owned());
+            record.skipped = Some("the branch is published".to_owned());
+            record_of(t, &key.0, key.1).rewrite = Some(record);
+            return Ok(Some(before.to_owned()));
+        }
+        let context = record_of(t, &key.0, key.1).context.clone();
+        let ranges = fix_ranges(t, &key.0, &context);
+        let planned = match mode {
+            Commits::One => history::one_plan(&commits, &base, &ranges),
+            _ => history::fold_plan(&commits, &base, &ranges),
+        };
+        let groups = match planned {
+            Ok(g) => g,
+            Err(e) => {
+                self.fail_attempt(t, ps, &key.0, key.1, &format!("{e:#}"), now_ms)?;
+                return Ok(None);
+            }
+        };
+        if history::is_identity(&commits, &groups) {
+            record.after = Some(before.to_owned());
+            record_of(t, &key.0, key.1).rewrite = Some(record);
+            return Ok(Some(before.to_owned()));
+        }
+        // The intent goes on the record before git writes anything, so a
+        // restart knows a move may have landed.
+        record.to = count(groups.len());
+        record_of(t, &key.0, key.1).rewrite = Some(record);
+        self.save_ticket(t, now_ms)?;
+        self.replay_and_move(t, ps, key, cwd, &base, before, &groups, now_ms)
+    }
+
+    /// `groups` replayed onto `base` and the branch moved from `before`
+    /// to the result, proven to have the same tree before and after the
+    /// move; moved back if it does not. The new head, or `None` when the
+    /// attempt failed (or the ticket parked).
+    #[allow(clippy::too_many_arguments)]
+    fn replay_and_move(
+        &mut self,
+        t: &mut Ticket,
+        ps: &mut ProjectState,
+        key: &(String, u32),
+        cwd: &Path,
+        base: &str,
+        before: &str,
+        groups: &[history::Group],
+        now_ms: u64,
+    ) -> Result<Option<String>> {
+        let fail = |this: &mut Self, t: &mut Ticket, ps: &mut ProjectState, reason: String| {
+            this.fail_attempt(t, ps, &key.0, key.1, &reason, now_ms)
+                .map(|()| None)
+        };
+        let after = match self.git.replay(cwd, base, groups) {
+            Ok(a) => a,
+            Err(e) => {
+                return fail(self, t, ps, format!("{e:#}; the branch stays at {before}"));
+            }
+        };
+        let want = self.git.tree(cwd, before)?;
+        let got = self.git.tree(cwd, &after)?;
+        if let Some(r) = &mut record_of(t, &key.0, key.1).rewrite {
+            r.after = Some(after.clone());
+        }
+        if got != want {
+            return fail(
+                self,
+                t,
+                ps,
+                format!(
+                    "the rewritten head {after} has tree {got}, not {want} as {before} has; the branch stays at {before}"
+                ),
+            );
+        }
+        if let Err(e) = self.git.set_head(cwd, &after, before) {
+            return fail(
+                self,
+                t,
+                ps,
+                format!("the branch could not be moved from {before} to {after}: {e:#}"),
+            );
+        }
+        let head = self.git.head(cwd)?;
+        let clean = self.git.is_clean(cwd)?;
+        let tree = self.git.tree(cwd, "HEAD")?;
+        if head != after || !clean || tree != want {
+            let problem = format!(
+                "after the move from {before} to {after} the tree at {} reads head {head}, tree {tree}{}",
+                cwd.display(),
+                if clean { "" } else { ", not clean" }
+            );
+            if let Err(e) = self.git.set_head(cwd, before, &after) {
+                self.park(
+                    t,
+                    ps,
+                    &format!(
+                        "stage {} ({}): {problem}, and the branch could not be moved back to {before}: {e:#}",
+                        key.0,
+                        cwd.display()
+                    ),
+                    now_ms,
+                )?;
+                return Ok(None);
+            }
+            return fail(
+                self,
+                t,
+                ps,
+                format!("{problem}; the branch is back at {before}"),
+            );
+        }
+        if let Some(r) = find_attempt(t, &key.0, key.1).and_then(|a| a.rewrite.as_ref()) {
+            log::info!(
+                "ticket {} rewrote {before} → {after} ({}, {} → {} commits)",
+                t.id,
+                r.mode.as_str(),
+                r.from,
+                r.to
+            );
+        }
+        Ok(Some(after))
+    }
+
+    /// Whether the branch at `cwd` is on the remote already: a refresh
+    /// pushed it, a pull request was looked up for it, or the remote's
+    /// copy of the branch holds a commit of `base..head` (an agent's
+    /// push records nothing else).
+    #[allow(clippy::too_many_arguments)]
+    fn is_published(
+        &self,
+        t: &Ticket,
+        p: &Pipeline,
+        cwd: &Path,
+        lane: Option<&str>,
+        key: &(String, u32),
+        base: &str,
+        head: &str,
+    ) -> Result<bool> {
+        let record = lane.and_then(|l| t.lanes.iter().find(|x| x.name == l));
+        let context = find_attempt(t, &key.0, key.1).map(|a| a.context.as_str());
+        if record.is_some_and(|l| l.pushed.is_some())
+            || t.attempts
+                .iter()
+                .any(|a| Some(a.context.as_str()) == context && a.pr.is_some())
+        {
+            return Ok(true);
+        }
+        let remote = lane
+            .and_then(|l| p.lane(l))
+            .map_or(p.project.remote.as_str(), |l| p.lane_remote(l));
+        self.git.published(cwd, remote, base, head)
+    }
+
+    /// A rewrite whose intent was saved before a restart: the branch is
+    /// still at `before` (the move never landed) and the rewrite runs
+    /// again; or it is at another head with the same clean tree (the
+    /// move landed and the save did not) and the attempt completes
+    /// there; or anything else fails the attempt.
+    #[allow(clippy::too_many_arguments)]
+    fn resume_rewrite(
+        &mut self,
+        t: &mut Ticket,
+        ps: &mut ProjectState,
+        p: &Pipeline,
+        stage: &Stage,
+        a: &Attempt,
+        cwd: &Path,
+        lane: Option<&str>,
+        now_ms: u64,
+    ) -> Result<()> {
+        let key = (a.stage.clone(), a.n);
+        let Some(before) = a.rewrite.as_ref().map(|r| r.before.clone()) else {
+            return Ok(());
+        };
+        let head = self.git.head(cwd)?;
+        if head == before {
+            log::info!(
+                "ticket {} {}/{} rewrite at {before} never moved the branch; rewriting again",
+                t.id,
+                key.0,
+                a.context
+            );
+            return self.complete_review(t, ps, p, stage, &key, cwd, lane, &before, now_ms);
+        }
+        let clean = self.git.is_clean(cwd)?;
+        let tree = self.git.tree(cwd, "HEAD")?;
+        let want = self.git.tree(cwd, &before)?;
+        if clean && tree == want {
+            log::info!(
+                "ticket {} {}/{} rewrite from {before} landed at {head}",
+                t.id,
+                key.0,
+                a.context
+            );
+            if let Some(r) = &mut record_of(t, &key.0, key.1).rewrite {
+                r.after = Some(head.clone());
+            }
+            return self.finish_review(t, &key, &head, now_ms);
+        }
+        let reason = format!(
+            "the rewrite from {before} was interrupted and the tree at {} is at head {head}, tree {tree}{}, not {want}",
+            cwd.display(),
+            if clean { "" } else { ", not clean" }
+        );
+        self.fail_attempt(t, ps, &key.0, key.1, &reason, now_ms)
     }
 
     /// An answer to a round's question, on the attempt's last round:
@@ -2141,6 +2433,22 @@ fn is_decisions(title: &str) -> bool {
         .is_some_and(|rest| rest.chars().next().is_none_or(|c| !c.is_alphanumeric()))
 }
 
+/// The fix rounds' `(head, head_after)` of every review attempt of
+/// `stage` in `ctx`, so a carried rerun's earlier fixes still fold.
+fn fix_ranges(t: &Ticket, stage: &str, ctx: &str) -> Vec<(String, String)> {
+    t.attempts
+        .iter()
+        .filter(|a| a.stage == stage && a.context == ctx && a.kind == AttemptKind::Review)
+        .flat_map(|a| &a.rounds)
+        .filter_map(|r| Some((r.head.clone(), r.head_after.clone()?)))
+        .collect()
+}
+
+/// A length as a record's count.
+fn count(n: usize) -> u32 {
+    u32::try_from(n).unwrap_or(u32::MAX)
+}
+
 /// The summary a completed code review attempt leaves: how it ended,
 /// what it carried, the style points left to the merge, the points open
 /// when it was accepted, and the points that contest the plan.
@@ -2168,6 +2476,29 @@ fn summary_of(a: &Attempt, carry: Option<&Carry>, head: &str) -> String {
         );
     } else {
         let _ = writeln!(out, "Converged at `{head}` in round {k}.");
+    }
+    if let Some(r) = &a.rewrite {
+        match (&r.skipped, &r.after) {
+            (Some(_), _) => {
+                let _ = writeln!(out, "Commits kept: the branch is published.");
+            }
+            (None, Some(after)) if *after != r.before => {
+                let _ = if r.mode == Commits::One {
+                    writeln!(
+                        out,
+                        "Squashed {} commits to one: `{}` → `{after}`.",
+                        r.from, r.before
+                    )
+                } else {
+                    writeln!(
+                        out,
+                        "Commits folded from {} to {}: `{}` → `{after}`.",
+                        r.from, r.to, r.before
+                    )
+                };
+            }
+            _ => {}
+        }
     }
     if let Some(c) = carry {
         let _ = writeln!(

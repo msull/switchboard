@@ -1656,7 +1656,10 @@ one from the `style` reviewer, holds no round open from `style_rounds`
 the plan's "Decisions" section, which the reviewers are given as
 settled, and is found but not done. The first review after a rebase
 with commits checks it, with the rebaser's notes. A completed review
-attempt writes `summary.md`.
+attempt writes `summary.md`. A code review stage with `commits =
+"fold"` or `"one"` rewrites the branch as it completes, with the tree
+proven unchanged and the rewrite on the attempt (dispatch
+`RECORD_VERSION` 5); a branch the remote already holds is left alone.
 `dispatch/tests/first_slice.rs` is the acceptance table, plus a test
 per point above; `dispatch/tests/live.rs` runs the first stage against
 a real Switchboard and a haiku agent. Known gap: Claude Code treats a

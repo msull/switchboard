@@ -11,6 +11,8 @@ use anyhow::{Context as _, Result, bail};
 use serde::{Deserialize, Deserializer, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::history::Commits;
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Pipeline {
     pub version: u32,
@@ -359,6 +361,11 @@ pub struct Stage {
     /// default 2. Read from the live pipeline file each round.
     #[serde(default)]
     pub style_rounds: Option<u32>,
+    /// What a code review stage does to the branch's commits as it
+    /// completes; default `keep`. Read from the ticket's copy, so a
+    /// ticket's mode never changes halfway.
+    #[serde(default)]
+    pub commits: Option<Commits>,
 }
 
 /// What a stage is, from which fields it names.
@@ -402,6 +409,12 @@ impl Stage {
     #[must_use]
     pub fn style_rounds(&self) -> u32 {
         self.style_rounds.unwrap_or(DEFAULT_STYLE_ROUNDS)
+    }
+
+    /// What a code review stage does to the branch's commits.
+    #[must_use]
+    pub fn commits(&self) -> Commits {
+        self.commits.unwrap_or_default()
     }
 }
 
@@ -598,10 +611,13 @@ impl Pipeline {
         Self::validate_gate(stage)?;
         if stage.kind() == StageKind::Review {
             self.validate_review_stage(stage)?;
-        } else if stage.implementer.is_some() || stage.cap.is_some() || stage.style_rounds.is_some()
+        } else if stage.implementer.is_some()
+            || stage.cap.is_some()
+            || stage.style_rounds.is_some()
+            || stage.commits.is_some()
         {
             bail!(
-                "stage {:?} has implementer, cap or style_rounds but no reviewers",
+                "stage {:?} has implementer, cap, style_rounds or commits but no reviewers",
                 stage.name
             );
         }
@@ -726,6 +742,10 @@ impl Pipeline {
         }
         if stage.style_rounds == Some(0) {
             bail!("stage {name:?}: style_rounds must be at least 1");
+        }
+        // Someone else's branch is theirs to change.
+        if stage.commits() != Commits::Keep && self.source == Source::PullRequest {
+            bail!("stage {name:?}: a pull-request pipeline rewrites no history");
         }
         if stage.subject.as_deref().is_some_and(|s| s != "branch") {
             bail!("stage {name:?}: a code review stage reviews the branch only");
@@ -1094,8 +1114,68 @@ writes = ["plan"]"#,
         assert_ne!(text, SWITCHBOARD);
         let err = Pipeline::parse(&text).unwrap_err().to_string();
         assert!(
-            err.contains("has implementer, cap or style_rounds but no reviewers"),
+            err.contains("has implementer, cap, style_rounds or commits but no reviewers"),
             "{err}"
         );
+    }
+
+    #[test]
+    fn commits_defaults_to_keep_and_reads_each_mode() {
+        let stage_of = |p: &Pipeline| {
+            p.stages
+                .iter()
+                .find(|s| s.name == "review-code")
+                .unwrap()
+                .commits()
+        };
+        let p = Pipeline::parse(&with_review_stage("")).unwrap();
+        assert_eq!(stage_of(&p), Commits::Keep);
+        for (text, mode) in [
+            ("keep", Commits::Keep),
+            ("fold", Commits::Fold),
+            ("one", Commits::One),
+        ] {
+            let keys = format!("commits = \"{text}\"\n");
+            let p = Pipeline::parse(&with_review_stage(&keys)).unwrap();
+            assert_eq!(stage_of(&p), mode);
+        }
+    }
+
+    #[test]
+    fn an_unknown_commits_value_is_refused() {
+        let err = Pipeline::parse(&with_review_stage("commits = \"squash\"\n")).unwrap_err();
+        assert!(format!("{err:#}").contains("commits"), "{err:#}");
+    }
+
+    #[test]
+    fn commits_without_reviewers_is_refused() {
+        let text = SWITCHBOARD.replace(
+            "prompt = \"Implement {inputs.plan}",
+            "commits = \"fold\"\nprompt = \"Implement {inputs.plan}",
+        );
+        assert_ne!(text, SWITCHBOARD);
+        let err = Pipeline::parse(&text).unwrap_err().to_string();
+        assert!(
+            err.contains("has implementer, cap, style_rounds or commits but no reviewers"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn a_pull_request_pipeline_refuses_commits_other_than_keep() {
+        let pull_request = |keys: &str| {
+            with_review_stage(keys).replace(
+                "[source]\nkind = \"github\"\nrepo = \"msull/switchboard\"\nlabel = \"dispatch\"\n",
+                "[source]\nkind = \"pull-request\"\n",
+            )
+        };
+        let err = Pipeline::parse(&pull_request("commits = \"fold\"\n"))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("a pull-request pipeline rewrites no history"),
+            "{err}"
+        );
+        Pipeline::parse(&pull_request("commits = \"keep\"\n")).unwrap();
     }
 }

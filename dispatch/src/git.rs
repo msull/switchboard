@@ -1,6 +1,7 @@
 //! Git, for the lanes: Dispatch's clones and their fetches, a worktree
 //! per ticket, branch heads and merge bases, rebases and pushes, whether
-//! a tree is clean. Fixed argv only; nothing from a ticket is spliced into a
+//! a tree is clean, commits replayed into a folded history and a branch
+//! moved onto it. Fixed argv only; nothing from a ticket is spliced into a
 //! command line.
 
 use std::os::unix::process::CommandExt as _;
@@ -8,6 +9,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Context, Result, bail};
+
+use crate::history::{Commit, Group};
 
 pub trait Repo: Send {
     /// A clone of `url` at `dir`, made if it is not there yet.
@@ -110,6 +113,23 @@ pub trait Repo: Send {
     /// Kill a running check or reviewer and its descendants, if this
     /// runner started it.
     fn kill_check(&mut self, key: &str);
+    /// The commits of `base..head` in `dir`, oldest first.
+    fn commits(&self, dir: &Path, base: &str, head: &str) -> Result<Vec<Commit>>;
+    /// The tree `rev` names in `dir`.
+    fn tree(&self, dir: &Path, rev: &str) -> Result<String>;
+    /// `groups` built as new commits on `onto`, in the object database
+    /// only: the new head is returned and nothing moves. Each group's
+    /// commit keeps the author and committer of its `author_of`. A pick
+    /// that does not apply is an error naming it.
+    fn replay(&mut self, dir: &Path, onto: &str, groups: &[Group]) -> Result<String>;
+    /// The branch checked out at `dir` moved from `old` to `new`, and
+    /// refused when it is not at `old` or `dir` has no branch checked
+    /// out. The index and files are left alone: the caller moves only
+    /// between heads with the same tree.
+    fn set_head(&mut self, dir: &Path, new: &str, old: &str) -> Result<()>;
+    /// Whether `remote`'s copy of the branch checked out at `dir`, as
+    /// last fetched or pushed, holds a commit of `base..head`. No fetch.
+    fn published(&self, dir: &Path, remote: &str, base: &str, head: &str) -> Result<bool>;
 }
 
 /// What a leased push did.
@@ -532,6 +552,184 @@ impl Repo for GitCli {
             }
         }
     }
+
+    fn commits(&self, dir: &Path, base: &str, head: &str) -> Result<Vec<Commit>> {
+        let out = output(git_in(dir).args([
+            "log",
+            "--reverse",
+            "--format=%H%x00%P%x00%B%x1e",
+            &format!("{base}..{head}"),
+        ]))?;
+        Ok(parse_log(&out))
+    }
+
+    fn tree(&self, dir: &Path, rev: &str) -> Result<String> {
+        output(git_in(dir).args(["rev-parse", "--verify", &format!("{rev}^{{tree}}")]))
+    }
+
+    fn replay(&mut self, dir: &Path, onto: &str, groups: &[Group]) -> Result<String> {
+        let mut tip = onto.to_owned();
+        for group in groups {
+            let Some(leader) = group.picks.first() else {
+                continue;
+            };
+            let who = output(git_in(dir).args([
+                "show",
+                "-s",
+                "--date=raw",
+                "--format=%an%x00%ae%x00%ad%x00%cn%x00%ce",
+                &group.author_of,
+            ]))?;
+            let fields: Vec<&str> = who.split('\0').collect();
+            let [an, ae, ad, cn, ce] = fields[..] else {
+                bail!("git show printed {who:?} for {}", group.author_of);
+            };
+            let env = [
+                ("GIT_AUTHOR_NAME", an),
+                ("GIT_AUTHOR_EMAIL", ae),
+                ("GIT_AUTHOR_DATE", ad),
+                ("GIT_COMMITTER_NAME", cn),
+                ("GIT_COMMITTER_EMAIL", ce),
+            ];
+            // Picks after the first are applied on throwaway commits, so
+            // each three-way merge has a commit on both sides.
+            let mut working = tip.clone();
+            let mut tree = String::new();
+            for (i, pick) in group.picks.iter().enumerate() {
+                tree = merge_pick(dir, &working, pick, leader)?;
+                if i + 1 < group.picks.len() {
+                    working = commit_tree(dir, &tree, &working, "dispatch: fold", &env)?;
+                }
+            }
+            tip = commit_tree(dir, &tree, &tip, &group.message, &env)?;
+        }
+        Ok(tip)
+    }
+
+    fn set_head(&mut self, dir: &Path, new: &str, old: &str) -> Result<()> {
+        // `update-ref HEAD` follows the symbolic ref to the branch; on a
+        // detached head it would move HEAD alone.
+        output(git_in(dir).args(["symbolic-ref", "-q", "HEAD"]))
+            .with_context(|| format!("{} has no branch checked out", dir.display()))?;
+        output(git_in(dir).args([
+            "update-ref",
+            "-m",
+            "dispatch: rewrite commits",
+            "HEAD",
+            new,
+            old,
+        ]))?;
+        Ok(())
+    }
+
+    fn published(&self, dir: &Path, remote: &str, base: &str, head: &str) -> Result<bool> {
+        let branch = output(git_in(dir).args(["symbolic-ref", "--short", "HEAD"]))?;
+        let remote_ref = format!("refs/remotes/{remote}/{branch}");
+        let known = git_in(dir)
+            .args(["rev-parse", "--verify", "-q", &remote_ref])
+            .output()
+            .context("run git rev-parse")?;
+        if !known.status.success() {
+            return Ok(false);
+        }
+        let Ok(meet) = output(git_in(dir).args(["merge-base", &remote_ref, head])) else {
+            return Ok(false);
+        };
+        let base =
+            output(git_in(dir).args(["rev-parse", "--verify", &format!("{base}^{{commit}}")]))?;
+        if meet == base {
+            return Ok(false);
+        }
+        let status = git_in(dir)
+            .args(["merge-base", "--is-ancestor", &base, &meet])
+            .status()
+            .context("run git merge-base")?;
+        Ok(status.success())
+    }
+}
+
+/// `pick` applied on `onto` as a cherry-pick would, by a three-way
+/// merge with its parent as the base: the resulting tree.
+fn merge_pick(dir: &Path, onto: &str, pick: &str, leader: &str) -> Result<String> {
+    let mut cmd = git_in(dir);
+    cmd.args(["merge-tree", "--write-tree", "--merge-base"])
+        .arg(format!("{pick}^"))
+        .args([onto, pick]);
+    let out = cmd.output().with_context(|| format!("run {cmd:?}"))?;
+    match out.status.code() {
+        Some(0) => {}
+        Some(1) => {
+            let subject =
+                output(git_in(dir).args(["show", "-s", "--format=%s", pick])).unwrap_or_default();
+            bail!("folding {pick} \"{subject}\" into {leader} conflicts");
+        }
+        _ => bail!(
+            "{cmd:?} exited {}: {}",
+            out.status,
+            String::from_utf8_lossy(&out.stderr).trim()
+        ),
+    }
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    stdout
+        .lines()
+        .next()
+        .map(|l| l.trim().to_owned())
+        .filter(|l| !l.is_empty())
+        .with_context(|| format!("{cmd:?} printed no tree"))
+}
+
+/// A commit of `tree` on `parent` with `message`, through `commit-tree`
+/// rather than `commit`, so no hook runs; `env` sets who made it.
+fn commit_tree(
+    dir: &Path,
+    tree: &str,
+    parent: &str,
+    message: &str,
+    env: &[(&str, &str)],
+) -> Result<String> {
+    use std::io::Write as _;
+    let mut cmd = git_in(dir);
+    cmd.args(["commit-tree", tree, "-p", parent, "-F", "-"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    // Set after `git()` removed the caller's `GIT_*`, so these stay.
+    for (k, v) in env {
+        cmd.env(k, v);
+    }
+    let mut child = cmd.spawn().with_context(|| format!("run {cmd:?}"))?;
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin.write_all(message.as_bytes())?;
+        stdin.write_all(b"\n")?;
+    }
+    let out = child.wait_with_output()?;
+    if !out.status.success() {
+        bail!(
+            "{cmd:?} exited {}: {}",
+            out.status,
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_owned())
+}
+
+/// The commits in `git log --format=%H%x00%P%x00%B%x1e` output.
+fn parse_log(text: &str) -> Vec<Commit> {
+    text.split('\x1e')
+        .map(|entry| entry.trim_start_matches('\n'))
+        .filter(|entry| !entry.is_empty())
+        .filter_map(|entry| {
+            let mut fields = entry.splitn(3, '\0');
+            let sha = fields.next()?.trim().to_owned();
+            let parents = fields.next()?.split_whitespace().count();
+            let message = fields.next().unwrap_or("").trim().to_owned();
+            Some(Commit {
+                sha,
+                parents: u32::try_from(parents).unwrap_or(u32::MAX),
+                message,
+            })
+        })
+        .collect()
 }
 
 /// `dir` with its deepest existing ancestor's symlinks resolved, and
@@ -674,6 +872,24 @@ pub struct FakeRepo {
     pub fail_remove: Option<PathBuf>,
     /// Trees whose merge base with anything cannot be read.
     pub no_merge_base: Vec<PathBuf>,
+    /// What `commits` returns for a tree, whatever the range.
+    pub commits: std::collections::BTreeMap<PathBuf, Vec<Commit>>,
+    /// A commit's tree by sha; an unlisted sha is `tree0000`, so a
+    /// replay has the same tree unless a test says otherwise.
+    pub trees: std::collections::BTreeMap<String, String>,
+    /// The head `replay` returns for a tree; absent, `fold0001`.
+    pub replay_heads: std::collections::BTreeMap<PathBuf, String>,
+    /// Trees whose replay stops on a conflict.
+    pub replay_conflicts: Vec<PathBuf>,
+    /// Replays asked for: dir, onto, groups.
+    pub replayed: Vec<(PathBuf, String, Vec<Group>)>,
+    /// Heads moved: dir, new, old. A move is refused unless the tree's
+    /// head is `old`, and a refused one is not recorded.
+    pub head_sets: Vec<(PathBuf, String, String)>,
+    /// Trees left dirty by the next head move, once.
+    pub dirty_on_set: Vec<PathBuf>,
+    /// Trees whose branch the remote already holds.
+    pub published: Vec<PathBuf>,
 }
 
 impl Repo for FakeRepo {
@@ -912,6 +1128,55 @@ impl Repo for FakeRepo {
             .cloned()
             .unwrap_or_else(|| "base0000".into()))
     }
+    fn commits(&self, dir: &Path, _base: &str, _head: &str) -> Result<Vec<Commit>> {
+        Ok(self.commits.get(dir).cloned().unwrap_or_default())
+    }
+    fn tree(&self, dir: &Path, rev: &str) -> Result<String> {
+        let sha = if rev == "HEAD" {
+            self.head(dir)?
+        } else {
+            rev.to_owned()
+        };
+        Ok(self
+            .trees
+            .get(&sha)
+            .cloned()
+            .unwrap_or_else(|| "tree0000".into()))
+    }
+    fn replay(&mut self, dir: &Path, onto: &str, groups: &[Group]) -> Result<String> {
+        self.replayed
+            .push((dir.to_path_buf(), onto.to_owned(), groups.to_vec()));
+        if self.replay_conflicts.iter().any(|d| d == dir) {
+            let pick = groups
+                .iter()
+                .find_map(|g| g.picks.get(1))
+                .cloned()
+                .unwrap_or_default();
+            bail!("folding {pick} into a commit conflicts: the fake was told so");
+        }
+        Ok(self
+            .replay_heads
+            .get(dir)
+            .cloned()
+            .unwrap_or_else(|| "fold0001".into()))
+    }
+    fn set_head(&mut self, dir: &Path, new: &str, old: &str) -> Result<()> {
+        let head = self.head(dir)?;
+        if head != old {
+            bail!("{} is at {head}, not {old}", dir.display());
+        }
+        self.heads.insert(dir.to_path_buf(), new.to_owned());
+        self.head_sets
+            .push((dir.to_path_buf(), new.to_owned(), old.to_owned()));
+        if let Some(i) = self.dirty_on_set.iter().position(|d| d == dir) {
+            self.dirty_on_set.remove(i);
+            self.dirty.push(dir.to_path_buf());
+        }
+        Ok(())
+    }
+    fn published(&self, dir: &Path, _remote: &str, _base: &str, _head: &str) -> Result<bool> {
+        Ok(self.published.iter().any(|d| d == dir))
+    }
 }
 
 /// A fake repository shared with a test, so a runner can be replaced (a
@@ -1027,6 +1292,21 @@ impl Repo for std::sync::Arc<std::sync::Mutex<FakeRepo>> {
     }
     fn kill_check(&mut self, key: &str) {
         self.lock().unwrap().kill_check(key);
+    }
+    fn commits(&self, dir: &Path, base: &str, head: &str) -> Result<Vec<Commit>> {
+        self.lock().unwrap().commits(dir, base, head)
+    }
+    fn tree(&self, dir: &Path, rev: &str) -> Result<String> {
+        self.lock().unwrap().tree(dir, rev)
+    }
+    fn replay(&mut self, dir: &Path, onto: &str, groups: &[Group]) -> Result<String> {
+        self.lock().unwrap().replay(dir, onto, groups)
+    }
+    fn set_head(&mut self, dir: &Path, new: &str, old: &str) -> Result<()> {
+        self.lock().unwrap().set_head(dir, new, old)
+    }
+    fn published(&self, dir: &Path, remote: &str, base: &str, head: &str) -> Result<bool> {
+        self.lock().unwrap().published(dir, remote, base, head)
     }
 }
 
@@ -1377,5 +1657,168 @@ mod tests {
             let list = sh(clone, &["worktree", "list", "--porcelain"]);
             assert_eq!(list.matches("worktree ").count(), 1, "{list}");
         }
+    }
+
+    /// A worktree of a fresh clone on `dispatch/1-x`, and the commit it
+    /// was cut at.
+    fn cut(root: &Path) -> (PathBuf, String) {
+        let repo = origin_and_clone(root, "p");
+        let wt = root.join("wt").join("t1");
+        GitCli::default()
+            .worktree_add(&repo, &wt, "dispatch/1-x", "origin/main")
+            .unwrap();
+        let base = GitCli::default().head(&wt).unwrap();
+        (wt, base)
+    }
+
+    /// `file` written with `text` and committed with `args` after
+    /// `commit`; the new head.
+    fn commit(dir: &Path, file: &str, text: &str, args: &[&str]) -> String {
+        std::fs::write(dir.join(file), text).unwrap();
+        sh(dir, &["add", file]);
+        let mut all = vec!["commit", "-q"];
+        all.extend_from_slice(args);
+        sh(dir, &all);
+        sh(dir, &["rev-parse", "HEAD"]).trim().to_owned()
+    }
+
+    #[test]
+    fn the_real_git_folds_fix_rounds_into_the_commits_they_amend() {
+        let dir = tempfile::tempdir().unwrap();
+        let (wt, base) = cut(dir.path());
+        let a = commit(&wt, "a", "a1\n", &["-m", "A", "-m", "why A"]);
+        let b = commit(&wt, "b", "b1\n", &["-m", "B"]);
+        let f1 = commit(&wt, "a", "a2\n", &["--fixup", &a]);
+        let p = commit(&wt, "b", "b2\n", &["-m", "plain fix"]);
+        let mut cli = GitCli::default();
+        let tree_before = cli.tree(&wt, "HEAD").unwrap();
+        let commits = cli.commits(&wt, &base, &p).unwrap();
+        assert_eq!(
+            commits.iter().map(|c| c.sha.as_str()).collect::<Vec<_>>(),
+            [a.as_str(), b.as_str(), f1.as_str(), p.as_str()]
+        );
+        assert_eq!(commits[0].message, "A\n\nwhy A");
+        assert_eq!(commits[2].subject(), "fixup! A");
+        let ranges = [(b.clone(), f1.clone()), (f1.clone(), p.clone())];
+        let groups = crate::history::fold_plan(&commits, &base, &ranges).unwrap();
+        let after = cli.replay(&wt, &base, &groups).unwrap();
+        assert_eq!(cli.head(&wt).unwrap(), p, "a replay moves nothing");
+        assert_eq!(cli.tree(&wt, &after).unwrap(), tree_before);
+        cli.set_head(&wt, &after, &p).unwrap();
+        assert_eq!(cli.head(&wt).unwrap(), after);
+        assert!(cli.is_clean(&wt).unwrap());
+        let count = sh(&wt, &["rev-list", "--count", &format!("{base}..HEAD")]);
+        assert_eq!(count.trim(), "2");
+        assert_eq!(
+            sh(&wt, &["log", "-1", "--format=%B", "HEAD~1"]).trim(),
+            "A\n\nwhy A"
+        );
+        assert_eq!(sh(&wt, &["show", "HEAD~1:a"]), "a2\n");
+        assert_eq!(
+            sh(&wt, &["diff", "--name-only", "HEAD~2", "HEAD~1"]).trim(),
+            "a"
+        );
+        assert_eq!(sh(&wt, &["log", "-1", "--format=%s", "HEAD"]).trim(), "B");
+        assert_eq!(sh(&wt, &["show", "HEAD:b"]), "b2\n");
+        assert_eq!(cli.tree(&wt, "HEAD").unwrap(), tree_before);
+        let reflog = sh(&wt, &["reflog", "--format=%H"]);
+        assert!(
+            reflog.contains(&p),
+            "the old head stays reachable: {reflog}"
+        );
+    }
+
+    #[test]
+    fn the_real_git_squashes_to_one_commit_with_the_first_message() {
+        let dir = tempfile::tempdir().unwrap();
+        let (wt, base) = cut(dir.path());
+        let a = commit(
+            &wt,
+            "a",
+            "a1\n",
+            &[
+                "--author",
+                "Ann <ann@example.com>",
+                "-m",
+                "A",
+                "-m",
+                "why A",
+            ],
+        );
+        commit(&wt, "b", "b1\n", &["-m", "B"]);
+        let head = commit(&wt, "a", "a2\n", &["-m", "plain fix"]);
+        let mut cli = GitCli::default();
+        let tree_before = cli.tree(&wt, "HEAD").unwrap();
+        let commits = cli.commits(&wt, &base, &head).unwrap();
+        let groups = crate::history::one_plan(&commits, &base, &[]).unwrap();
+        let after = cli.replay(&wt, &base, &groups).unwrap();
+        cli.set_head(&wt, &after, &head).unwrap();
+        let count = sh(&wt, &["rev-list", "--count", &format!("{base}..HEAD")]);
+        assert_eq!(count.trim(), "1");
+        assert_eq!(sh(&wt, &["log", "-1", "--format=%B"]).trim(), "A\n\nwhy A");
+        assert_eq!(
+            sh(&wt, &["log", "-1", "--format=%an <%ae> %ad"]),
+            sh(&wt, &["log", "-1", "--format=%an <%ae> %ad", &a])
+        );
+        assert_eq!(cli.tree(&wt, "HEAD").unwrap(), tree_before);
+    }
+
+    #[test]
+    fn the_real_git_refuses_a_conflicting_fold_and_moves_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let (wt, base) = cut(dir.path());
+        let a = commit(&wt, "a", "1\n", &["-m", "A"]);
+        commit(&wt, "a", "2\n", &["-m", "B"]);
+        let fixup = commit(&wt, "a", "3\n", &["--fixup", &a]);
+        let mut cli = GitCli::default();
+        let commits = cli.commits(&wt, &base, &fixup).unwrap();
+        let groups = crate::history::fold_plan(&commits, &base, &[]).unwrap();
+        let e = cli.replay(&wt, &base, &groups).unwrap_err().to_string();
+        assert!(
+            e.contains(&format!("folding {fixup} \"fixup! A\" into {a} conflicts")),
+            "{e}"
+        );
+        assert_eq!(cli.head(&wt).unwrap(), fixup);
+        assert!(cli.is_clean(&wt).unwrap());
+    }
+
+    #[test]
+    fn set_head_is_refused_when_the_branch_moved() {
+        let dir = tempfile::tempdir().unwrap();
+        let (wt, base) = cut(dir.path());
+        let one = commit(&wt, "a", "1\n", &["-m", "one"]);
+        let mut cli = GitCli::default();
+        assert!(
+            cli.set_head(&wt, &base, &base).is_err(),
+            "not at the old head"
+        );
+        assert_eq!(cli.head(&wt).unwrap(), one);
+        sh(&wt, &["checkout", "-q", "--detach"]);
+        let e = cli.set_head(&wt, &base, &one).unwrap_err();
+        assert!(format!("{e:#}").contains("no branch checked out"), "{e:#}");
+        assert_eq!(cli.head(&wt).unwrap(), one);
+    }
+
+    #[test]
+    fn the_real_git_reads_a_branch_as_published_only_with_its_own_commits() {
+        let dir = tempfile::tempdir().unwrap();
+        let (wt, base) = cut(dir.path());
+        let cli = GitCli::default();
+        assert!(
+            !cli.published(&wt, "origin", &base, "HEAD").unwrap(),
+            "no remote ref"
+        );
+        sh(&wt, &["push", "-q", "origin", "dispatch/1-x"]);
+        assert!(
+            !cli.published(&wt, "origin", &base, "HEAD").unwrap(),
+            "the remote holds only the base"
+        );
+        let head = commit(&wt, "a", "1\n", &["-m", "one"]);
+        assert!(
+            !cli.published(&wt, "origin", &base, &head).unwrap(),
+            "the commit is not pushed yet"
+        );
+        sh(&wt, &["push", "-q", "origin", "dispatch/1-x"]);
+        assert!(cli.published(&wt, "origin", &base, &head).unwrap());
     }
 }

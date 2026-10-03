@@ -5498,6 +5498,7 @@ pub(crate) fn new_attempt(
         failed_at_checks: false,
         carried_from: None,
         rework: None,
+        rewrite: None,
         settle: BTreeMap::new(),
         stop_at_ms: None,
         polls_since_stop: 0,
