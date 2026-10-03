@@ -6377,6 +6377,65 @@ fn a_rebase_from_an_unknown_base_is_checked_without_a_range() {
     assert!(!prompt.contains("git log"), "{prompt}");
 }
 
+/// A lane whose fork point cannot be read while it is behind (history
+/// unrelated to its base) and whose rebaser then replays it onto the
+/// base is checked from an unknown base, with the rebaser's notes, even
+/// though its fork point now reads as the base.
+#[test]
+fn a_rebaser_from_an_unknown_base_has_its_work_checked() {
+    let mut env = Env::new();
+    let (id, implementer) = base_moves_before_review(&mut env, "impl0001", true);
+    let mut t = env.ticket(&id);
+    t.lanes[0].base_sha = None;
+    dispatch::store::write_ticket(&env.data.ticket_file(&id), &t).unwrap();
+    let tree = t.lanes[0].worktree.clone();
+    env.repo.lock().unwrap().no_merge_base.push(tree.clone());
+    implementer_stops(&mut env, &id, &implementer);
+    env.steps_until(&id, "the checks starting", |t, _| {
+        t.attempts_of("implement")
+            .last()
+            .is_some_and(|a| a.gate.is_some())
+    });
+    env.repo
+        .lock()
+        .unwrap()
+        .check_exits
+        .insert(format!("{id}/implement/1"), 0);
+    env.steps_until(&id, "the rebaser", |t, _| {
+        t.attempts_of(dispatch::scheduler::REFRESH)
+            .any(|a| a.session.is_some())
+    });
+    {
+        let mut repo = env.repo.lock().unwrap();
+        repo.no_merge_base.clear();
+        repo.bases.insert(tree, "main0002".into());
+        repo.rebase_conflicts.clear();
+        repo.behind.clear();
+    }
+    let rebase = env
+        .ticket(&id)
+        .attempts_of(dispatch::scheduler::REFRESH)
+        .last()
+        .unwrap()
+        .clone();
+    let notes = rebase.artifacts["notes"].clone();
+    env.finish(
+        &rebase.session.clone().unwrap(),
+        &notes,
+        "# rebased\nkept both sides",
+    );
+    round_started(&mut env, &id, 1);
+    let moved = env.ticket(&id).lanes[0].refreshed.clone().unwrap();
+    assert_eq!((moved.from.as_str(), moved.to.as_str()), ("", "main0002"));
+    assert!(moved.commits);
+    assert_eq!(moved.notes.as_ref(), Some(&notes));
+    let prompt = last_prompt_of(&env, "style");
+    assert!(
+        prompt.contains("rebased onto main0002 from a base that was not recorded"),
+        "{prompt}"
+    );
+}
+
 /// A branch with no commits of its own is moved, not rebased: no check.
 #[test]
 fn a_review_after_a_clean_move_has_no_rebase_check() {

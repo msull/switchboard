@@ -823,15 +823,18 @@ impl Runner {
         // the bring-up after a rebaser still reads it. A lane not behind
         // whose fork point is `onto` never moved and has nothing to
         // record; one whose fork point cannot be read is brought up from
-        // an unknown base.
-        if t.lanes[i].base_sha.is_none() {
+        // an unknown base. Once a rebaser has run since the lane last
+        // moved, a fork point still missing was unreadable before it,
+        // and the one read now is the rebaser's work, so the base stays
+        // unknown and that work is checked.
+        if t.lanes[i].base_sha.is_none() && !rebased_since_moved(t, &t.lanes[i]) {
             let fork = self.git.merge_base(&worktree, "HEAD", &onto).ok();
-            if behind == 0 && fork.as_deref() == Some(onto_sha.as_str()) {
-                t.lanes[i].base_sha = fork;
+            let never_moved = behind == 0 && fork.as_deref() == Some(onto_sha.as_str());
+            t.lanes[i].base_sha = fork;
+            if never_moved {
                 self.save_ticket(t, now_ms)?;
                 return Ok(false);
             }
-            t.lanes[i].base_sha = fork;
         }
         // Both read before anything moves: a branch with no commits of
         // its own sits at the commit it was cut from or last moved to,
@@ -4907,6 +4910,18 @@ fn rerun_note(t: &Ticket, p: &Pipeline, decision: usize) -> Option<(String, Stri
         _ => None,
     })?;
     Some((rework_key(stage, &replaced.context), note))
+}
+
+/// Whether a refresh rebaser has run on the lane since it last moved.
+fn rebased_since_moved(t: &Ticket, lane: &LaneRecord) -> bool {
+    t.attempts.iter().any(|a| {
+        a.stage == REFRESH
+            && a.context == lane.name
+            && lane
+                .refreshed
+                .as_ref()
+                .is_none_or(|r| a.started_ms > r.at_ms)
+    })
 }
 
 /// The notes of the latest finished refresh rebaser in `lane` that
