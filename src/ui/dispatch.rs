@@ -8,7 +8,9 @@ use std::path::PathBuf;
 use egui::{RichText, Ui};
 use egui_extras::{Column, TableBuilder};
 
+use super::dialogs::{dialog, dialog_actions};
 use super::{DrawCtx, GAP, markdown, theme};
+use crate::core::dispatch::{close_offered, ticket_stage};
 use crate::core::{AppAction, RecordId, TicketOnly, TicketSort, View, WaitingAgent};
 use crate::ports::dispatch::{AttemptView, DecisionView, ProjectView, TicketView};
 
@@ -216,9 +218,6 @@ fn waiting_section(
     agents: &[WaitingAgent],
     tickets: &[TicketView],
 ) {
-    // A few questions are shown in full; a pile of them folds
-    // behind its count, so the table is not pushed off the
-    // page, and the fold is remembered for the window's life.
     let waiting = pending.len() + agents.len();
     let heading = if waiting == 0 {
         "Waiting on you".to_owned()
@@ -356,16 +355,17 @@ fn ticket_table(cx: &mut DrawCtx<'_>, ui: &mut Ui) {
                         ui.label(theme::meta_text(ui, &t.project));
                     });
                     row.col(|ui| {
-                        ui.label(theme::meta_text(ui, crate::core::AppCore::ticket_stage(t)));
+                        ui.label(theme::meta_text(ui, ticket_stage(t)));
                     });
                     row.col(|ui| {
                         let standing = core.ticket_standing(t);
-                        let urgent = core.ticket_waits(t) || t.state != "active";
-                        ui.label(
-                            RichText::new(&standing)
-                                .text_style(theme::meta())
-                                .color(if urgent { p.accent_2_text } else { p.n700 }),
-                        )
+                        ui.label(RichText::new(&standing).text_style(theme::meta()).color(
+                            if core.ticket_urgent(t) {
+                                p.accent_2_text
+                            } else {
+                                p.n700
+                            },
+                        ))
                         .on_hover_text(standing);
                     });
                     row.col(|ui| {
@@ -376,9 +376,7 @@ fn ticket_table(cx: &mut DrawCtx<'_>, ui: &mut Ui) {
                         if core.ticket_waits(t) && theme::ghost(ui, "Answer").clicked() {
                             open_ticket(cx, &t.id);
                         }
-                        if matches!(t.state.as_str(), "parked")
-                            && theme::secondary(ui, "Resume").clicked()
-                        {
+                        if t.state == "parked" && theme::secondary(ui, "Resume").clicked() {
                             cx.dispatch(AppAction::DispatchResume(t.id.clone()));
                         }
                         if theme::ghost_muted(ui, "Open").clicked() {
@@ -708,6 +706,21 @@ fn console(cx: &mut DrawCtx<'_>, ui: &mut Ui) {
     }
 }
 
+/// The close dialog's draft, cleared once a frame before anything is
+/// drawn when the core says it no longer stands
+/// (`AppCore::close_dialog_stands`).
+pub fn drop_stale_close_dialog(cx: &mut DrawCtx<'_>) {
+    let Some(id) = cx.state.confirm_close_ticket.as_deref() else {
+        return;
+    };
+    if !cx
+        .core
+        .close_dialog_stands(id, cx.state.dispatch_window_ticket.as_deref())
+    {
+        cx.state.confirm_close_ticket = None;
+    }
+}
+
 /// One ticket: its stages, lanes, decisions and attempts on the left,
 /// the artifact being read on the right.
 pub fn ticket(cx: &mut DrawCtx<'_>, ui: &mut Ui, id: &str) {
@@ -722,6 +735,7 @@ pub fn ticket(cx: &mut DrawCtx<'_>, ui: &mut Ui, id: &str) {
         return;
     };
     ticket_header(cx, ui, &t);
+    confirm_close(cx, ui.ctx(), &t);
 
     let left = (ui.available_width() * 0.45).max(320.0);
     ui.horizontal_top(|ui| {
@@ -767,13 +781,7 @@ fn ticket_header(cx: &mut DrawCtx<'_>, ui: &mut Ui, t: &TicketView) {
             if theme::ghost(ui, "Back").clicked() {
                 go_back(cx);
             }
-            if t.state == "parked"
-                && theme::secondary(ui, "Resume")
-                    .on_hover_text("Back to active; the runner takes it from its current stage")
-                    .clicked()
-            {
-                cx.dispatch(AppAction::DispatchResume(t.id.clone()));
-            }
+            ticket_actions(cx, ui, t);
             if let Some(url) = &t.url {
                 let what = if t.kind == "pull-request" {
                     "Pull request"
@@ -795,19 +803,33 @@ fn ticket_header(cx: &mut DrawCtx<'_>, ui: &mut Ui, t: &TicketView) {
         ui.label(theme::meta_text(ui, "·"));
         stage_strip(ui, t);
         ui.label(theme::meta_text(ui, "·"));
-        let agents = cx.core.waiting_agents_of(t);
         ui.label(
             RichText::new(cx.core.ticket_standing(t))
                 .text_style(theme::meta())
-                .color(if t.state == "active" && agents.is_empty() {
-                    p.n700
-                } else {
+                .color(if cx.core.ticket_urgent(t) {
                     p.accent_2_text
+                } else {
+                    p.n700
                 }),
         );
         if let Some(tree) = &t.tree {
             ui.label(theme::meta_text(ui, "·"));
-            ui.label(theme::mono_text(ui, tree.display().to_string()));
+            if t.tree_removed {
+                ui.label(theme::meta_text(
+                    ui,
+                    format!("{} · removed", tree.display()),
+                ));
+            } else {
+                ui.label(theme::mono_text(ui, tree.display().to_string()));
+            }
+        }
+        if let Some(why) = &t.trees_kept {
+            ui.label(theme::meta_text(ui, "·"));
+            ui.label(
+                RichText::new(format!("tree kept: {why}"))
+                    .text_style(theme::meta())
+                    .color(p.accent_2_text),
+            );
         }
     });
     if !t.lanes.is_empty() {
@@ -816,10 +838,11 @@ fn ticket_header(cx: &mut DrawCtx<'_>, ui: &mut Ui, t: &TicketView) {
             ui.label(theme::meta_text(ui, "Lanes:"));
             for lane in &t.lanes {
                 let text = format!(
-                    "{}{}{}",
+                    "{}{}{}{}",
                     lane.name,
                     if lane.chosen { "" } else { " (not chosen)" },
-                    if lane.setup_done { " · set up" } else { "" }
+                    if lane.setup_done { " · set up" } else { "" },
+                    if lane.removed { " · removed" } else { "" }
                 );
                 ui.label(
                     RichText::new(text)
@@ -833,6 +856,73 @@ fn ticket_header(cx: &mut DrawCtx<'_>, ui: &mut Ui, t: &TicketView) {
                 ));
             }
         });
+    }
+}
+
+/// Resume and Close, in the header's right-to-left row, where the
+/// ticket's state allows them.
+fn ticket_actions(cx: &mut DrawCtx<'_>, ui: &mut Ui, t: &TicketView) {
+    if t.state == "parked"
+        && theme::secondary(ui, "Resume")
+            .on_hover_text("Back to active; the runner takes it from its current stage")
+            .clicked()
+    {
+        cx.dispatch(AppAction::DispatchResume(t.id.clone()));
+    }
+    if !close_offered(t) {
+        return;
+    }
+    let (label, hover) = if t.trees_retryable {
+        ("Remove trees", "Try the removal again; the branch stays")
+    } else {
+        (
+            "Close",
+            "Remove the ticket's worktrees and close it; the branch and the record stay",
+        )
+    };
+    if theme::secondary(ui, label).on_hover_text(hover).clicked() {
+        cx.state.confirm_close_ticket = Some(t.id.clone());
+    }
+}
+
+/// The close confirmation: what goes, by path, and what stays. A
+/// confirmation rather than an undo, since a removed tree cannot be put
+/// back as it was (its ignored build output is gone) and a closed
+/// ticket does not resume.
+fn confirm_close(cx: &mut DrawCtx<'_>, ctx: &egui::Context, t: &TicketView) {
+    if cx.state.confirm_close_ticket.as_deref() != Some(t.id.as_str()) {
+        return;
+    }
+    let retry = t.trees_retryable;
+    let title = if retry {
+        "Remove the ticket's trees"
+    } else {
+        "Close this ticket"
+    };
+    let mut done = false;
+    dialog(ctx, title, |ui| {
+        ui.label(
+            "Removed with git worktree remove, never forced: git refuses a tree with changes.",
+        );
+        for path in &t.removes {
+            ui.label(theme::mono_text(ui, path.display().to_string()));
+        }
+        ui.label(
+            "The branch, the ticket's directory with its attempts and artifacts, and its \
+             Switchboard projects stay.",
+        );
+        let (confirmed, cancelled) =
+            dialog_actions(ui, if retry { "Try again" } else { "Close ticket" }, true);
+        if confirmed {
+            cx.dispatch(AppAction::DispatchClose(t.id.clone()));
+            done = true;
+        }
+        if cancelled {
+            done = true;
+        }
+    });
+    if done || ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
+        cx.state.confirm_close_ticket = None;
     }
 }
 

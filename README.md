@@ -147,7 +147,7 @@ Dev aids, all environment variables:
   `rename-working-set`, `delete-working-set`, `add-to-working-set`,
   `add-file-to-working-set`, `arrange`, `show-message`, `clone-session`,
   `discard-to`, `undo-discard`, `review-plan`, `show-review`,
-  `show-dispatch`, `show-ticket`,
+  `show-dispatch`, `show-ticket`, `close-ticket`,
   `review-file`, `review-continue`, `review-finalize`, `show-artifact`,
   `pop-out`, `close-pop-out`, `files-root`, `zoom`, `place-pop-out`,
   `place-card`, `new-workspace`, `workspace`, `workspace-global`,
@@ -240,18 +240,18 @@ tests/fixtures/          a small real Claude Code transcript for the parser test
 tests/live.rs            ignored: real claude / codex / Ghostty runs
 tests/gate.rs            Milestone 1 gate: real store, tmux, hooks; agents ignored
 control/                 switchboard-control: the control port's wire contract (requests, replies, views) and a blocking client; std + serde only
-dispatch-control/        dispatch-control: the wire contract of Dispatch's own port (tickets as views, decide, queue, take) and a blocking client; std + serde only
+dispatch-control/        dispatch-control: the wire contract of Dispatch's own port (tickets as views, decide, queue, take, resume, close) and a blocking client; std + serde only
 dispatch/                the `dispatch` binary (docs/dispatch.md; docs/dispatch-agent-guide.md is the command-line guide for agents that take tickets): a ticket scheduler that drives Switchboard over the control port and never links the app
-  src/main.rs            CLI: take, run, decide, decisions, status, queue, resume
+  src/main.rs            CLI: take, run, decide, decisions, status, queue, resume, close
   src/serve.rs           Dispatch's port on <data>/dispatch.sock while `run` is up: the records as views, the commands the CLI has, one handler under one lock
   src/pipeline.rs        the TOML pipeline file, parsed in full and validated; fingerprint of the copy a ticket runs
-  src/ticket.rs          the ticket record: source, lanes, attempts (with their checks' head and exit), decisions, operation ledger; the per-project queue
-  src/scheduler.rs       the runner: stage executors (agent, gate-only lanes, review workflow), completion evidence, decisions, ledgered sends
+  src/ticket.rs          the ticket record: source, lanes, attempts (with their checks' head and exit), decisions, operation ledger, a close's progress (`CloseProgress`); the per-project queue and closing list
+  src/scheduler.rs       the runner: stage executors (agent, gate-only lanes, review workflow), completion evidence, decisions, ledgered sends, parking and closing as sequences
   src/review.rs          the code review stage: rounds of several reviewers over a lane's branch, a fresh implementer per round, checks at every accepted head (docs/dispatch.md, "The code review stage")
   src/recover.rs         unanswered ledger operations resolved by class through find and op.status; nothing launched twice
   src/view.rs            the `Dispatch · <project>` working set, one card per queued ticket, redrawn through set.sync
-  src/store.rs           Dispatch's data directory, flock, atomic writes
-  src/git.rs             clones, worktrees and heads through fixed argv, and a stage's checks as child processes polled by key; with a fake
+  src/store.rs           Dispatch's data directory, flock, atomic writes; versioned `read_ticket`/`read_project` through `migrate`
+  src/git.rs             clones, worktrees and heads through fixed argv (a worktree removed, never forced; `changes`, and `uncommitted` for a close's preflight), and a stage's checks as child processes polled by key; with a fake
   src/github.rs          issues and pull requests through gh, with fakes
   src/bitbucket.rs       pull requests on Bitbucket Cloud through curl; credentials from the environment or <data>/env (NAME=value lines, mode 0600, never logged)
   src/port.rs            the Port trait over the control socket client

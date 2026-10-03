@@ -79,7 +79,8 @@ impl Handler {
                 let d = self
                     .runner
                     .decide(ticket, decision, answer, note.as_deref(), now_ms)?;
-                Reply::Decided(decision_view(ticket, &d))
+                let t = self.runner.load_ticket(ticket)?;
+                Reply::Decided(decision_view(&t, &d))
             }
             Body::Queue { project, order } => {
                 let ps = if order.is_empty() {
@@ -97,6 +98,12 @@ impl Handler {
                 let t = self.runner.resume(ticket, now_ms)?;
                 Reply::Ticket(self.view(&t))
             }
+            Body::Close { ticket, reason } => {
+                let t = self
+                    .runner
+                    .request_close(ticket, reason.as_deref(), now_ms)?;
+                Reply::Ticket(self.view(&t))
+            }
             Body::Take { project, issue } => {
                 let t = take_issue(&mut self.runner, &*self.issues, project, issue, now_ms)?;
                 Reply::Taken(self.view(&t))
@@ -105,12 +112,7 @@ impl Handler {
     }
 
     fn view(&self, t: &Ticket) -> TicketView {
-        let stages = self
-            .runner
-            .pipeline_of(t)
-            .map(|p| p.stages.iter().map(|s| s.name.clone()).collect())
-            .unwrap_or_default();
-        ticket_view(t, stages)
+        ticket_view(t, self.runner.pipeline_of(t).ok().as_ref())
     }
 }
 
@@ -341,7 +343,7 @@ pub fn status(runner: &Runner) -> Result<Status> {
             .clone()
             .filter(|t| t.active() && t.attempts.iter().any(crate::scheduler::costs_slot))
             .count();
-        let pending = mine.map(|t| t.pending_decisions().len()).sum::<usize>();
+        let pending = mine.map(|t| t.waiting_on_you().len()).sum::<usize>();
         projects.push(ProjectView {
             name,
             queue: ps.queue,
@@ -355,11 +357,7 @@ pub fn status(runner: &Runner) -> Result<Status> {
     }
     let mut tickets = Vec::new();
     for t in records {
-        let stages = runner
-            .pipeline_of(&t)
-            .map(|p| p.stages.iter().map(|s| s.name.clone()).collect())
-            .unwrap_or_default();
-        tickets.push(ticket_view(&t, stages));
+        tickets.push(ticket_view(&t, runner.pipeline_of(&t).ok().as_ref()));
     }
     tickets.sort_by_key(|t| std::cmp::Reverse(t.updated_ms));
     Ok(Status {
@@ -370,13 +368,15 @@ pub fn status(runner: &Runner) -> Result<Status> {
     })
 }
 
-/// The record as a reader sees it.
+/// A ticket as a reader sees it, with what its frozen pipeline copy
+/// says (stage names, the paths a close removes) when it can be read.
 #[must_use]
-pub fn ticket_view(t: &Ticket, stages: Vec<String>) -> TicketView {
+pub fn ticket_view(t: &Ticket, p: Option<&Pipeline>) -> TicketView {
     let (state, reason) = match &t.state {
         TicketState::Active => ("active", None),
         TicketState::Parking { reason } => ("parking", Some(reason.clone())),
         TicketState::Parked { reason } => ("parked", Some(reason.clone())),
+        TicketState::Closing { reason } => ("closing", Some(reason.clone())),
         TicketState::Closed { reason } => ("closed", Some(reason.clone())),
     };
     TicketView {
@@ -390,9 +390,16 @@ pub fn ticket_view(t: &Ticket, stages: Vec<String>) -> TicketView {
         labels: t.source.labels.clone(),
         state: state.into(),
         reason,
-        stages,
+        stages: p.map_or_else(Vec::new, |p| {
+            p.stages.iter().map(|s| s.name.clone()).collect()
+        }),
         stage: t.stage,
         tree: t.tree.clone(),
+        tree_removed: t.close.tree_removed,
+        trees_kept: t.close.trees_kept.clone(),
+        closable: t.closable(),
+        trees_retryable: t.trees_retryable(),
+        removes: p.map_or_else(Vec::new, |p| crate::scheduler::close_removes(t, p)),
         lanes: t
             .lanes
             .iter()
@@ -402,6 +409,7 @@ pub fn ticket_view(t: &Ticket, stages: Vec<String>) -> TicketView {
                 branch: l.branch.clone(),
                 chosen: l.chosen,
                 setup_done: l.setup_done,
+                removed: l.removed,
             })
             .collect(),
         attempts: t
@@ -455,11 +463,7 @@ pub fn ticket_view(t: &Ticket, stages: Vec<String>) -> TicketView {
                 }
             })
             .collect(),
-        decisions: t
-            .decisions
-            .iter()
-            .map(|d| decision_view(&t.id, d))
-            .collect(),
+        decisions: t.decisions.iter().map(|d| decision_view(t, d)).collect(),
         root_project: t.root_project.clone(),
         current_session: t.current_session().cloned(),
         created_ms: t.created_ms,
@@ -467,9 +471,13 @@ pub fn ticket_view(t: &Ticket, stages: Vec<String>) -> TicketView {
     }
 }
 
-fn decision_view(ticket: &str, d: &Decision) -> DecisionView {
+/// A pending decision the ticket no longer waits on (it is closing)
+/// reads as `cancelling`, so no view offers to answer it or counts it.
+fn decision_view(t: &Ticket, d: &Decision) -> DecisionView {
+    let waiting = t.waiting_on_you().iter().any(|w| w.id == d.id);
     let (state, answer, note) = match &d.state {
-        DecisionState::Pending => ("pending", None, None),
+        DecisionState::Pending if waiting => ("pending", None, None),
+        DecisionState::Pending => ("cancelling", None, None),
         DecisionState::Answered {
             answer,
             note,
@@ -484,7 +492,7 @@ fn decision_view(ticket: &str, d: &Decision) -> DecisionView {
     };
     DecisionView {
         id: d.id.clone(),
-        ticket: ticket.into(),
+        ticket: t.id.clone(),
         stage: d.stage.clone(),
         name: d.name.clone(),
         question: d.question.clone(),
@@ -729,6 +737,65 @@ slots = 1
             5_000,
         );
         assert!(matches!(no_such, Reply::Failed { .. }));
+    }
+
+    /// A close through the port: only the intent in the reply, the
+    /// ticket `closing`; the runner's pass removes the tree and closes
+    /// it; a second close refused with the reason.
+    #[test]
+    fn the_port_closes_a_ticket_and_refuses_a_second_close() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut h = handler(dir.path());
+        // A pipeline that cuts its own trees, with the tree cut by hand:
+        // stepping would need a Switchboard this test does not have.
+        let text = PIPELINE.replace("root = \"/tmp/p\"", "repo = \"git@example.com:o/r.git\"");
+        fs::write(h.runner.data.pipeline("P"), text).unwrap();
+        let Reply::Taken(view) = h.handle(
+            &Request::new(
+                "1",
+                Body::Take {
+                    project: "P".into(),
+                    issue: "7".into(),
+                },
+            ),
+            1_000,
+        ) else {
+            panic!("taken")
+        };
+        let tree = dir.path().join("wt").join(&view.id);
+        fs::create_dir_all(&tree).unwrap();
+        let mut t = h.runner.load_ticket(&view.id).unwrap();
+        t.tree = Some(tree.clone());
+        h.runner.save_ticket(&mut t, 1_500).unwrap();
+        let close = Body::Close {
+            ticket: view.id.clone(),
+            reason: Some("done elsewhere".into()),
+        };
+        let reply = h.handle(&Request::new("2", close.clone()), 2_000);
+        let Reply::Ticket(closing) = reply else {
+            panic!("{reply:?}")
+        };
+        assert_eq!(
+            (closing.state.as_str(), closing.reason.as_deref()),
+            ("closing", Some("done elsewhere"))
+        );
+        assert!(tree.exists(), "the port leaves the rest to the runner");
+        let mut t = h.runner.load_ticket(&view.id).unwrap();
+        let mut ps = h.runner.load_project("P").unwrap();
+        h.runner.finish_closing(&mut t, &mut ps, 2_500).unwrap();
+        let closed = h.view(&h.runner.load_ticket(&view.id).unwrap());
+        assert_eq!(
+            (closed.state.as_str(), closed.reason.as_deref()),
+            ("closed", Some("done elsewhere"))
+        );
+        assert!(closed.tree_removed && closed.trees_kept.is_none());
+        assert!(!closed.closable && !closed.trees_retryable);
+        assert!(!tree.exists());
+        let again = h.handle(&Request::new("3", close), 3_000);
+        assert!(
+            matches!(&again, Reply::Failed { reason } if reason.contains("already closed")),
+            "{again:?}"
+        );
     }
 
     #[test]

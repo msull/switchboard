@@ -26,6 +26,9 @@
 //! into its own panes. Trusting the throwaway directory leaves a
 //! `[projects."<tmp>"]` entry in `~/.codex/config.toml`.
 
+// Tests assert emptiness with `assert!` throughout.
+#![allow(clippy::assert_is_empty)]
+
 use std::collections::HashSet;
 use std::fs;
 use std::io::Write;
@@ -122,7 +125,7 @@ impl Gate {
             artifacts: Box::new(switchboard::adapters::artifacts::DiskArtifacts),
             controller: Box::new(FakeController::default()),
             operations: Box::new(FakeOperations::default()),
-            dispatch: Box::new(FakeDispatch::default()),
+            dispatch: Some(Box::new(FakeDispatch::default())),
             wake: None,
         })
     }

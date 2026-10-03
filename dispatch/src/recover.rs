@@ -6,7 +6,25 @@ use anyhow::Result;
 use switchboard_control::{Body, Found, Made, OpStatus, Reply, Request};
 
 use crate::scheduler::{Ask, Runner, apply_reply};
-use crate::ticket::{AttemptState, DecisionKind, Ticket, TicketState};
+use crate::ticket::{DecisionKind, Operation, Ticket, TicketState};
+
+/// Recovery's verdicts on an operation with no reply, as the reader
+/// sees them. Whether an op is settled is its `settled` flag, not these
+/// words; `store::migrate` matches them only to set that flag on
+/// records written before it existed, so those copies must not change.
+pub(crate) const LOST: &str = "lost: never reached Switchboard";
+pub(crate) const INTERRUPTED: &str = "interrupted";
+pub(crate) const REMOVED: &str = "removed by hand";
+pub(crate) const NOT_REPEATED: &str = "reply lost; not repeated";
+pub(crate) const HARMLESS: &str = "reply lost; harmless to repeat";
+
+/// Recovery's verdict written on an operation: the words for the
+/// reader, and the flag that keeps a later pass from recovering it
+/// again.
+fn give_verdict(op: &mut Operation, verdict: &str) {
+    op.error = Some(verdict.into());
+    op.settled = true;
+}
 
 impl Runner {
     /// Resolve every unanswered operation of every ticket.
@@ -16,17 +34,17 @@ impl Runner {
 
     fn recover_locked(&mut self, now_ms: u64) -> Result<()> {
         for mut t in self.tickets()? {
-            if matches!(t.state, TicketState::Closed { .. }) {
+            // A closing ticket's ledger is recovered by `finish_closing`,
+            // which keeps the intent to close over whatever recovery
+            // decides about an attempt.
+            if matches!(
+                t.state,
+                TicketState::Closed { .. } | TicketState::Closing { .. }
+            ) {
                 continue;
             }
             let mut ps = self.load_project(&t.project)?;
-            let pending: Vec<usize> = t
-                .ledger
-                .iter()
-                .enumerate()
-                .filter(|(_, o)| o.unresolved())
-                .map(|(i, _)| i)
-                .collect();
+            let pending = t.unsettled();
             for i in pending {
                 self.recover_one(&mut t, &mut ps, i, now_ms)?;
             }
@@ -65,7 +83,7 @@ impl Runner {
                             apply_reply(t, ps, &op.intent, &reply);
                         }
                         OpStatus::Unknown => {
-                            t.ledger[i].error = Some("lost: never reached Switchboard".into());
+                            give_verdict(&mut t.ledger[i], LOST);
                             self.fail_from_recovery(
                                 t,
                                 ps,
@@ -75,7 +93,7 @@ impl Runner {
                             )?;
                         }
                         OpStatus::Interrupted => {
-                            t.ledger[i].error = Some("interrupted".into());
+                            give_verdict(&mut t.ledger[i], INTERRUPTED);
                             self.fail_from_recovery(
                                 t,
                                 ps,
@@ -86,7 +104,7 @@ impl Runner {
                         }
                     }
                 } else if found.iter().any(|f| f.removed) {
-                    t.ledger[i].error = Some("removed by hand".into());
+                    give_verdict(&mut t.ledger[i], REMOVED);
                     self.fail_from_recovery(
                         t,
                         ps,
@@ -101,7 +119,7 @@ impl Runner {
                     match self.status_of(&op.op)? {
                         OpStatus::InProgress => {}
                         OpStatus::Interrupted => {
-                            t.ledger[i].error = Some("interrupted".into());
+                            give_verdict(&mut t.ledger[i], INTERRUPTED);
                             self.fail_from_recovery(
                                 t,
                                 ps,
@@ -120,7 +138,7 @@ impl Runner {
             }
             "idempotent" => self.replay(t, ps, i),
             _ => {
-                t.ledger[i].error = Some("reply lost; not repeated".into());
+                give_verdict(&mut t.ledger[i], NOT_REPEATED);
                 // Asked once: the answer, not another pass, settles it.
                 t.ledger[i].asked = true;
                 let stage = op.attempt.as_ref().map_or("?", |(s, _)| s.as_str());
@@ -157,7 +175,7 @@ impl Runner {
     ) {
         let op = t.ledger[i].clone();
         let Some(body) = op.body else {
-            t.ledger[i].error = Some("reply lost; harmless to repeat".into());
+            give_verdict(&mut t.ledger[i], HARMLESS);
             return;
         };
         match self.port.call(&Request::new(op.op, body)) {
@@ -193,9 +211,12 @@ impl Runner {
         let Some((stage, n)) = attempt else {
             return Ok(());
         };
-        if t.attempts.iter().any(|a| {
-            &a.stage == stage && a.n == *n && !matches!(a.state, AttemptState::Failed { .. })
-        }) {
+        // Only an open attempt is failed: one already ended (failed, or
+        // cancelled by a park or a close) keeps the outcome it has.
+        if t.attempts
+            .iter()
+            .any(|a| &a.stage == stage && a.n == *n && a.is_open())
+        {
             self.fail_attempt(t, ps, stage, *n, reason, now_ms)?;
         }
         Ok(())

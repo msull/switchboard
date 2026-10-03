@@ -5996,10 +5996,75 @@ mod dispatch_page {
         l.text.clear();
         l.project = Some("PTA".into());
         assert_eq!(ids(&core, &l), ["t2", "t3"]);
-        assert_eq!(AppCore::ticket_source(core.tickets_listed(&l)[0]), "#9");
         assert_eq!(
-            AppCore::ticket_stage(core.tickets_listed(&l)[0]),
+            crate::core::dispatch::ticket_source(core.tickets_listed(&l)[0]),
+            "#9"
+        );
+        assert_eq!(
+            crate::core::dispatch::ticket_stage(core.tickets_listed(&l)[0]),
             "plan 2/2"
+        );
+    }
+
+    /// A close can take several passes; the ticket stays findable under
+    /// Parked meanwhile, and its standing is coloured as needing a look
+    /// in the table and the header alike, as is an active ticket with
+    /// a question pending.
+    #[test]
+    fn a_closing_ticket_is_listed_under_parked_and_reads_as_urgent() {
+        use crate::core::{TicketListing, TicketOnly};
+        let (mut core, _) = loaded(vec![], vec![]);
+        let mut st = status(None);
+        let mut closing = st.tickets[0].clone();
+        closing.id = "t2".into();
+        closing.state = "closing".into();
+        closing.decisions.clear();
+        st.tickets.push(closing);
+        core.dispatch(AppAction::DispatchStatus(Some(st)), Clock::at(1));
+        let l = TicketListing {
+            only: TicketOnly::Parked,
+            ..TicketListing::default()
+        };
+        let listed: Vec<&str> = core
+            .tickets_listed(&l)
+            .iter()
+            .map(|t| t.id.as_str())
+            .collect();
+        assert_eq!(listed, ["t2"]);
+        assert!(core.ticket_urgent(core.ticket("t2").unwrap()));
+        assert!(
+            core.ticket_urgent(core.ticket("t1").unwrap()),
+            "active, with a decision pending"
+        );
+    }
+
+    /// The close dialog stands only while its ticket's page is on
+    /// screen (the main view's, or the Dispatch window's own while that
+    /// window is open) and the runner offers the close.
+    #[test]
+    fn a_close_dialog_stands_while_its_page_shows_and_the_close_is_offered() {
+        let (mut core, _) = loaded(vec![], vec![]);
+        let mut st = status(None);
+        st.tickets[0].closable = true;
+        core.dispatch(AppAction::DispatchStatus(Some(st.clone())), Clock::at(1));
+        assert!(!core.close_dialog_stands("t1", None), "no page shows it");
+        core.dispatch(AppAction::ShowTicket("t1".into()), Clock::at(2));
+        assert_eq!(core.ticket_on_screen(None), Some("t1"));
+        assert!(core.close_dialog_stands("t1", None));
+        core.dispatch(AppAction::PopOutDispatch, Clock::at(3));
+        assert_eq!(
+            core.ticket_on_screen(None),
+            None,
+            "the window shows its own page"
+        );
+        assert!(core.close_dialog_stands("t1", Some("t1")));
+        core.dispatch(AppAction::CloseDispatchWindow, Clock::at(4));
+        core.dispatch(AppAction::ShowTicket("t1".into()), Clock::at(5));
+        st.tickets[0].closable = false;
+        core.dispatch(AppAction::DispatchStatus(Some(st)), Clock::at(6));
+        assert!(
+            !core.close_dialog_stands("t1", None),
+            "its close is under way"
         );
     }
 
@@ -6441,6 +6506,52 @@ mod dispatch_page {
             Clock::at(3),
         );
         assert_eq!(core.ticket("t1").unwrap().state, "active");
+    }
+
+    #[test]
+    fn closing_a_ticket_is_one_call_whose_reply_replaces_it_and_a_refusal_is_told() {
+        let (mut core, _) = loaded(vec![], vec![]);
+        let close = AppAction::DispatchClose("t1".into());
+        let e = core.dispatch(close.clone(), Clock::at(1));
+        assert!(
+            !e.iter().any(|e| matches!(e, Effect::DispatchCall(_))),
+            "no runner, no call"
+        );
+        assert!(core.notice().is_some_and(|n| n.is_error));
+        let mut parked = status(None);
+        parked.tickets[0].state = "parked".into();
+        core.dispatch(AppAction::DispatchStatus(Some(parked)), Clock::at(2));
+        let body = Body::Close {
+            ticket: "t1".into(),
+            reason: None,
+        };
+        let e = core.dispatch(close, Clock::at(3));
+        assert!(e.contains(&Effect::DispatchCall(body.clone())));
+        let mut closed = core.ticket("t1").unwrap().clone();
+        closed.state = "closed".into();
+        closed.tree_removed = true;
+        core.dispatch(
+            AppAction::DispatchReplied {
+                body: body.clone(),
+                result: Ok(Reply::Ticket(closed)),
+            },
+            Clock::at(4),
+        );
+        let t = core.ticket("t1").unwrap();
+        assert_eq!(t.state, "closed");
+        assert!(t.tree_removed);
+        core.dispatch(
+            AppAction::DispatchReplied {
+                body,
+                result: Ok(Reply::failed("ticket t1 has changes in its trees")),
+            },
+            Clock::at(5),
+        );
+        assert!(
+            core.notices()
+                .iter()
+                .any(|n| n.is_error && n.text.contains("has changes in its trees"))
+        );
     }
 
     #[test]

@@ -20,7 +20,7 @@ use crate::ports::agent::AgentLauncher;
 use crate::ports::artifacts::ArtifactFinder;
 use crate::ports::control::{OpLine, Operations};
 use crate::ports::controller::Controller;
-use crate::ports::dispatch::DispatchPort;
+use crate::ports::dispatch::{Body, DispatchPort, Reply, Status};
 use crate::ports::events::EventSource;
 use crate::ports::host::{HostId, Liveness, ProcessHost};
 use crate::ports::opener::Opener;
@@ -64,8 +64,11 @@ pub struct Services {
     pub controller: Box<dyn Controller>,
     /// The control port's operations log.
     pub operations: Box<dyn Operations>,
-    /// Dispatch's port: tickets as views, decisions answered.
-    pub dispatch: Box<dyn DispatchPort>,
+    /// Dispatch's port: tickets as views, decisions answered. The app
+    /// takes it into a worker of its own when it starts, so it is
+    /// `None` after `SwitchboardApp::with_services`; `None` before it
+    /// means the app runs without Dispatch.
+    pub dispatch: Option<Box<dyn DispatchPort>>,
     /// The hook helper's wake-up socket; `None` in tests.
     pub wake: Option<WakeSocket>,
 }
@@ -157,12 +160,9 @@ impl SwitchboardApp {
     /// seed the core instead.
     #[must_use]
     pub fn with_services(mut services: Services) -> Self {
-        // The port moves to the worker; what stays in `services` is
-        // never called (a fake that answers "no runner").
-        let dispatch_port = DispatchWorker::new(std::mem::replace(
-            &mut services.dispatch,
-            Box::new(crate::adapters::fakes::FakeDispatch::default()),
-        ));
+        // `take` moves the boxed port out and leaves `None`, so the
+        // worker owns the only handle to it.
+        let dispatch_port = DispatchWorker::new(services.dispatch.take());
         Self {
             core: AppCore::new(),
             services,
@@ -999,11 +999,42 @@ impl SwitchboardApp {
         }
     }
 
+    /// Ask Dispatch for its status and wait up to `timeout` for the
+    /// answer, for a script line that needs the tickets before the
+    /// first frame (a frame never waits: it hands the poll to the port's
+    /// thread and reads the answer on a later frame). Whether a status
+    /// arrived.
+    pub fn await_dispatch_status(&mut self, timeout: Duration) -> bool {
+        self.last_dispatch = Some(Instant::now());
+        if let Some((_, result)) = self.dispatch_port.poll_status() {
+            self.dispatch(AppAction::DispatchStatus(status_of(result)));
+            return true;
+        }
+        let deadline = Instant::now() + timeout;
+        loop {
+            // Other calls' replies may finish first; each is delivered
+            // as it would be on a frame.
+            let left = deadline.saturating_duration_since(Instant::now());
+            let done = self.dispatch_port.wait(left);
+            let timed_out = done.is_empty();
+            let answered = done.iter().any(|(body, _)| matches!(body, Body::Status));
+            self.deliver_dispatch(done);
+            if answered || timed_out {
+                return answered;
+            }
+        }
+    }
+
     /// Replies the port's thread finished since the last frame, each
     /// one an action.
     fn drain_dispatch(&mut self) {
-        for (body, result) in self.dispatch_port.drain() {
-            if matches!(body, crate::ports::dispatch::Body::Status) {
+        let done = self.dispatch_port.drain();
+        self.deliver_dispatch(done);
+    }
+
+    fn deliver_dispatch(&mut self, done: Vec<DispatchDone>) {
+        for (body, result) in done {
+            if matches!(body, Body::Status) {
                 self.dispatch(AppAction::DispatchStatus(status_of(result)));
             } else {
                 self.dispatch(AppAction::DispatchReplied {
@@ -1335,11 +1366,9 @@ impl SwitchboardApp {
 
 /// A status reply as the core takes it: a status, or `None` for no
 /// runner (an error, or an answer that is not a status).
-fn status_of(
-    result: io::Result<crate::ports::dispatch::Reply>,
-) -> Option<crate::ports::dispatch::Status> {
+fn status_of(result: io::Result<Reply>) -> Option<Status> {
     match result {
-        Ok(crate::ports::dispatch::Reply::Status(status)) => Some(status),
+        Ok(Reply::Status(status)) => Some(status),
         Ok(other) => {
             log::warn!("dispatch status answered {other:?}");
             None
@@ -1351,10 +1380,7 @@ fn status_of(
     }
 }
 
-type DispatchDone = (
-    crate::ports::dispatch::Body,
-    io::Result<crate::ports::dispatch::Reply>,
-);
+type DispatchDone = (Body, io::Result<Reply>);
 
 /// The Dispatch port, called from a thread of its own when it may
 /// block: a runner holds its writer lock while a ticket's step fetches
@@ -1365,7 +1391,7 @@ struct DispatchWorker {
     command: PathBuf,
     data_dir: PathBuf,
     inline: Option<Box<dyn DispatchPort>>,
-    jobs: Option<std::sync::mpsc::Sender<crate::ports::dispatch::Body>>,
+    jobs: Option<std::sync::mpsc::Sender<Body>>,
     done: Option<std::sync::mpsc::Receiver<DispatchDone>>,
     /// A status poll is on the thread; the next waits for its answer
     /// rather than queueing behind a slow call twice.
@@ -1373,7 +1399,17 @@ struct DispatchWorker {
 }
 
 impl DispatchWorker {
-    fn new(mut port: Box<dyn DispatchPort>) -> Self {
+    fn new(port: Option<Box<dyn DispatchPort>>) -> Self {
+        let Some(mut port) = port else {
+            return Self {
+                command: PathBuf::new(),
+                data_dir: PathBuf::new(),
+                inline: None,
+                jobs: None,
+                done: None,
+                status_in_flight: false,
+            };
+        };
         let command = port.command();
         let data_dir = port.data_dir();
         if !port.may_block() {
@@ -1386,7 +1422,7 @@ impl DispatchWorker {
                 status_in_flight: false,
             };
         }
-        let (jobs, job_rx) = std::sync::mpsc::channel::<crate::ports::dispatch::Body>();
+        let (jobs, job_rx) = std::sync::mpsc::channel::<Body>();
         let (done_tx, done) = std::sync::mpsc::channel::<DispatchDone>();
         let spawned = std::thread::Builder::new()
             .name("dispatch-port".into())
@@ -1413,31 +1449,28 @@ impl DispatchWorker {
 
     /// Send one call. In place, the reply comes back now; on the
     /// thread, it comes through `drain` and this is `None`.
-    fn call(&mut self, body: crate::ports::dispatch::Body) -> Option<DispatchDone> {
+    fn call(&mut self, body: Body) -> Option<DispatchDone> {
         if let Some(port) = &mut self.inline {
             let result = port.call(&body);
             return Some((body, result));
         }
-        if let Some(jobs) = &self.jobs
-            && jobs.send(body.clone()).is_err()
-        {
-            return Some((
-                body,
-                Err(io::Error::other("the dispatch port thread is gone")),
-            ));
-        }
-        None
+        let why = match &self.jobs {
+            Some(jobs) if jobs.send(body.clone()).is_ok() => return None,
+            Some(_) => "the dispatch port thread is gone",
+            None => "the app runs without a Dispatch port",
+        };
+        Some((body, Err(io::Error::other(why))))
     }
 
     /// Ask for the status, unless the last ask is still on the thread.
     fn poll_status(&mut self) -> Option<DispatchDone> {
-        if self.inline.is_none() {
+        if self.jobs.is_some() {
             if self.status_in_flight {
                 return None;
             }
             self.status_in_flight = true;
         }
-        self.call(crate::ports::dispatch::Body::Status)
+        self.call(Body::Status)
     }
 
     fn drain(&mut self) -> Vec<DispatchDone> {
@@ -1445,9 +1478,23 @@ impl DispatchWorker {
             return Vec::new();
         };
         let finished: Vec<DispatchDone> = done.try_iter().collect();
+        self.finished(finished)
+    }
+
+    /// The next reply the thread finishes, waiting up to `timeout` for
+    /// it; nothing when it does not come in time.
+    fn wait(&mut self, timeout: Duration) -> Vec<DispatchDone> {
+        let Some(done) = &self.done else {
+            return Vec::new();
+        };
+        let finished: Vec<DispatchDone> = done.recv_timeout(timeout).into_iter().collect();
+        self.finished(finished)
+    }
+
+    fn finished(&mut self, finished: Vec<DispatchDone>) -> Vec<DispatchDone> {
         if finished
             .iter()
-            .any(|(body, _)| matches!(body, crate::ports::dispatch::Body::Status))
+            .any(|(body, _)| matches!(body, Body::Status))
         {
             self.status_in_flight = false;
         }

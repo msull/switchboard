@@ -142,6 +142,8 @@ pub struct UiState {
     pub review_views: workflow::ReviewViews,
     /// The review whose cleanup awaits confirmation.
     pub confirm_cleanup: Option<WorkflowId>,
+    /// The Dispatch ticket whose close awaits confirmation.
+    pub confirm_close_ticket: Option<String>,
     /// Run logs read from disk, by record and run, with the file time
     /// they were read at.
     pub run_logs: HashMap<(RecordId, u32), (Option<SystemTime>, String)>,
@@ -288,6 +290,7 @@ impl Default for UiState {
             review_dialog: None,
             review_views: HashMap::new(),
             confirm_cleanup: None,
+            confirm_close_ticket: None,
             run_logs: HashMap::new(),
             run_selected: HashMap::new(),
             run_modes: HashMap::new(),
@@ -385,6 +388,7 @@ fn draw_frame(cx: &mut DrawCtx<'_>, ui: &mut Ui) {
     zoom::main_window(cx, ui.ctx());
     let view = cx.core.view();
     working_set::serve_requests(cx, ui.ctx());
+    dispatch::drop_stale_close_dialog(cx);
     keyboard(cx, ui, &view);
     if let Some(delay) = prompt_box::pump(cx) {
         ui.ctx().request_repaint_after(delay);
@@ -684,6 +688,7 @@ fn keyboard(cx: &mut DrawCtx<'_>, ui: &Ui, view: &View) {
         || cx.state.config_dialog.is_some()
         || cx.state.review_dialog.is_some()
         || cx.state.confirm_cleanup.is_some()
+        || cx.state.confirm_close_ticket.is_some()
         || cx.state.raw_message.is_some()
         || cx.state.message_links.is_some()
         || cx.state.delete_set.is_some()

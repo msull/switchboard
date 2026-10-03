@@ -152,6 +152,8 @@ pub struct FakeDispatch {
     pub status: Option<Status>,
     pub calls: Arc<Mutex<Vec<DispatchBody>>>,
     pub artifacts: HashMap<PathBuf, String>,
+    /// Answer from the app's port thread, as the real socket does.
+    pub blocks: bool,
 }
 
 impl DispatchPort for FakeDispatch {
@@ -160,6 +162,9 @@ impl DispatchPort for FakeDispatch {
     }
     fn data_dir(&self) -> PathBuf {
         PathBuf::from("/dispatch")
+    }
+    fn may_block(&self) -> bool {
+        self.blocks
     }
     fn call(&mut self, body: &DispatchBody) -> std::io::Result<DispatchReply> {
         self.calls.lock().unwrap().push(body.clone());
@@ -211,6 +216,26 @@ impl DispatchPort for FakeDispatch {
                 .map_or_else(
                     || DispatchReply::failed("no such ticket"),
                     DispatchReply::Ticket,
+                ),
+            DispatchBody::Close { ticket, reason } => status
+                .tickets
+                .iter()
+                .find(|t| &t.id == ticket)
+                .cloned()
+                .map_or_else(
+                    || DispatchReply::failed("no such ticket"),
+                    |mut t| {
+                        // As the runner answers: the intent written, the
+                        // rest left to its next pass. A closed ticket
+                        // whose trees were kept stays closed.
+                        if t.state != "closed" {
+                            t.state = "closing".into();
+                            t.reason =
+                                Some(reason.clone().unwrap_or_else(|| "closed by hand".into()));
+                        }
+                        t.closable = false;
+                        DispatchReply::Ticket(t)
+                    },
                 ),
         })
     }

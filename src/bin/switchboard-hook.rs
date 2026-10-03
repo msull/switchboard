@@ -10,6 +10,10 @@
 //!
 //! Never prints to stdout: anything a hook prints is fed back to Claude.
 
+// Tests assert emptiness with `assert!` throughout; the rest of the
+// crate is held to the lint.
+#![cfg_attr(test, allow(clippy::assert_is_empty))]
+
 use std::fmt::Write as _;
 use std::fs::OpenOptions;
 use std::io::{Read, Write};

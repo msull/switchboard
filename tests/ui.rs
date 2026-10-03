@@ -3,6 +3,9 @@
 //! exercised by the core tests), the widgets are found by label, and the
 //! assertions are on what is drawn and which actions a click dispatched.
 
+// Tests assert emptiness with `assert!` throughout.
+#![allow(clippy::assert_is_empty)]
+
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -185,7 +188,20 @@ fn harness_build(
     secrets: FakeSecrets,
     host: FakeHost,
 ) -> (Harness<'static, SwitchboardApp>, Seeded) {
-    let services = Services {
+    let services = fake_services(opener, secrets, host);
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1200.0, 900.0))
+        .build_eframe(move |cc| {
+            switchboard::ui::theme::install(&cc.egui_ctx);
+            test_app(services)
+        });
+    let ids = seed(harness.state_mut());
+    harness.run_steps(2);
+    (harness, ids)
+}
+
+fn fake_services(opener: FakeOpener, secrets: FakeSecrets, host: FakeHost) -> Services {
+    Services {
         store: Box::new(MemoryStore::default()),
         host: Box::new(host),
         events: Box::new(FakeEvents::default()),
@@ -198,28 +214,25 @@ fn harness_build(
         artifacts: Box::new(FakeArtifacts::default()),
         controller: Box::new(FakeController::default()),
         operations: Box::new(FakeOperations::default()),
-        dispatch: Box::new(FakeDispatch::default()),
+        dispatch: Some(Box::new(FakeDispatch::default())),
         wake: None,
-    };
-    let mut harness = Harness::builder()
-        .with_size(egui::vec2(1200.0, 900.0))
-        .build_eframe(move |cc| {
-            switchboard::ui::theme::install(&cc.egui_ctx);
-            let mut app = SwitchboardApp::with_services(services);
-            app.record_actions = true;
-            app.ui_state.embed_terminals = false;
-            app.ui_state.prompt_boxes.native = false;
-            // No speech model in tests: the demo stands in for the
-            // microphone. A real model on the developer's machine would
-            // otherwise be loaded onto the GPU by every listening test at
-            // once, and whisper's Metal setup aborts on that race.
-            app.ui_state.prompt_boxes.voice =
-                promptbox::Voice::new(std::path::PathBuf::from("/nonexistent/ggml-none.bin"));
-            app
-        });
-    let ids = seed(harness.state_mut());
-    harness.run_steps(2);
-    (harness, ids)
+    }
+}
+
+/// The app as every harness drives it: actions recorded, no embedded
+/// terminals, no native prompt box, no speech model.
+fn test_app(services: Services) -> SwitchboardApp {
+    let mut app = SwitchboardApp::with_services(services);
+    app.record_actions = true;
+    app.ui_state.embed_terminals = false;
+    app.ui_state.prompt_boxes.native = false;
+    // No speech model in tests: the demo stands in for the
+    // microphone. A real model on the developer's machine would
+    // otherwise be loaded onto the GPU by every listening test at
+    // once, and whisper's Metal setup aborts on that race.
+    app.ui_state.prompt_boxes.voice =
+        promptbox::Voice::new(std::path::PathBuf::from("/nonexistent/ggml-none.bin"));
+    app
 }
 
 /// Turns the Prompt Box editor off so the plain message box is drawn.
@@ -2251,7 +2264,7 @@ fn polling_reads_the_transcript_into_the_ui_state() {
         artifacts: Box::new(FakeArtifacts::default()),
         controller: Box::new(FakeController::default()),
         operations: Box::new(FakeOperations::default()),
-        dispatch: Box::new(FakeDispatch::default()),
+        dispatch: Some(Box::new(FakeDispatch::default())),
         wake: None,
     };
     let mut harness = Harness::builder()
@@ -4164,6 +4177,255 @@ fn dispatch_table_filters_sorts_and_resumes() {
     assert!(!shown(&harness, "#12 Night sync"));
     click(&mut harness, "Clear");
     assert!(shown(&harness, "#12 Night sync"));
+}
+
+/// A ticket's page with `edit` applied to Orchard's ticket first.
+fn ticket_page(
+    edit: impl FnOnce(&mut switchboard::ports::dispatch::TicketView),
+) -> Harness<'static, SwitchboardApp> {
+    let (mut harness, _) = harness();
+    let mut status = dispatch_status();
+    status.tickets[0].decisions.clear();
+    status.tickets[0].tree = Some("/wt/t1".into());
+    edit(&mut status.tickets[0]);
+    harness
+        .state_mut()
+        .dispatch(AppAction::DispatchStatus(Some(status)));
+    harness
+        .state_mut()
+        .dispatch(AppAction::ShowTicket("t1".into()));
+    harness.state_mut().dispatched.clear();
+    harness.run_steps(2);
+    harness
+}
+
+/// Close is behind a confirmation that names the paths the runner says
+/// it removes; only the dialog's button sends the call, and Cancel
+/// sends nothing.
+#[test]
+fn dispatch_ticket_closes_after_a_confirmation_naming_its_tree() {
+    use switchboard::ports::dispatch::LaneView;
+    let mut harness = ticket_page(|t| {
+        t.state = "parked".into();
+        t.reason = Some("parked by hand".into());
+        t.closable = true;
+        t.lanes = vec![
+            LaneView {
+                name: "backend".into(),
+                worktree: "/wt/t1/orchard-backend".into(),
+                ..LaneView::default()
+            },
+            LaneView {
+                name: "docs".into(),
+                worktree: "/wt/t1/docs".into(),
+                ..LaneView::default()
+            },
+        ];
+        t.removes = vec!["/wt/t1/orchard-backend".into(), "/wt/t1".into()];
+    });
+    click(&mut harness, "Close");
+    harness.get_by_label("Close this ticket");
+    harness.get_by_label("/wt/t1/orchard-backend");
+    assert!(
+        harness.query_by_label("/wt/t1/docs").is_none(),
+        "a lane inside the tree goes with it, as the runner says"
+    );
+    assert!(
+        harness.query_all_by_label("/wt/t1").count() >= 2,
+        "the meta line and the dialog"
+    );
+    assert!(
+        !actions(&harness)
+            .iter()
+            .any(|a| matches!(a, AppAction::DispatchClose(_))),
+        "the button alone sends nothing"
+    );
+    click(&mut harness, "Cancel");
+    assert!(harness.query_by_label("Close this ticket").is_none());
+    assert!(actions(&harness).is_empty(), "{:?}", actions(&harness));
+    click(&mut harness, "Close");
+    click(&mut harness, "Close ticket");
+    assert!(actions(&harness).contains(&AppAction::DispatchClose("t1".into())));
+    assert!(harness.query_by_label("Close this ticket").is_none());
+}
+
+/// Close and Remove trees show where the runner says it would take
+/// them; a closed ticket says its tree is gone, or why it was kept.
+#[test]
+fn dispatch_ticket_offers_close_where_the_runner_says() {
+    let harness = ticket_page(|_| {});
+    assert!(harness.query_by_label("Close").is_none());
+    let harness = ticket_page(|t| t.closable = true);
+    harness.get_by_label("Close");
+    let harness = ticket_page(|t| {
+        t.state = "closing".into();
+        t.reason = Some("closed by hand".into());
+    });
+    assert!(harness.query_by_label("Close").is_none());
+    harness.get_by_label("closing: closed by hand");
+    let harness = ticket_page(|t| {
+        t.state = "closed".into();
+        t.tree_removed = true;
+    });
+    assert!(harness.query_by_label("Close").is_none());
+    assert!(harness.query_by_label("Remove trees").is_none());
+    harness.get_by_label("/wt/t1 · removed");
+    let harness = ticket_page(|t| {
+        t.state = "closed".into();
+        t.trees_kept = Some("/wt/t1 not removed: it has changes".into());
+        t.trees_retryable = true;
+    });
+    harness.get_by_label("Remove trees");
+    harness.get_by_label("tree kept: /wt/t1 not removed: it has changes");
+}
+
+/// A ticket gone from the status while its close dialog is open takes
+/// the dialog with it, so the keyboard is not held on every view.
+#[test]
+fn a_ticket_leaving_the_status_drops_its_close_dialog() {
+    let mut harness = ticket_page(|t| t.closable = true);
+    click(&mut harness, "Close");
+    harness.get_by_label("Close this ticket");
+    let mut status = dispatch_status();
+    status.tickets.retain(|t| t.id != "t1");
+    harness
+        .state_mut()
+        .dispatch(AppAction::DispatchStatus(Some(status)));
+    harness.run_steps(2);
+    harness.get_by_label("This ticket is not in Dispatch's last status.");
+    assert!(harness.query_by_label("Close this ticket").is_none());
+    assert!(harness.state().ui_state.confirm_close_ticket.is_none());
+}
+
+/// A close dialog lives only while its ticket's page is drawn: leaving
+/// the page, or closing the Dispatch window under it, drops it, so it
+/// neither holds the keyboard nor comes back by itself.
+#[test]
+fn a_close_dialog_goes_with_its_page() {
+    let mut harness = ticket_page(|t| t.closable = true);
+    click(&mut harness, "Close");
+    harness.get_by_label("Close this ticket");
+    harness.state_mut().dispatch(AppAction::ShowDispatch);
+    harness.run_steps(2);
+    assert!(harness.state().ui_state.confirm_close_ticket.is_none());
+
+    let mut harness = ticket_page(|t| t.closable = true);
+    harness.state_mut().dispatch(AppAction::PopOutDispatch);
+    harness.state_mut().ui_state.dispatch_window_ticket = Some("t1".into());
+    harness.state_mut().ui_state.confirm_close_ticket = Some("t1".into());
+    harness.run_steps(2);
+    assert_eq!(
+        harness.state().ui_state.confirm_close_ticket.as_deref(),
+        Some("t1"),
+        "shown in the Dispatch window"
+    );
+    harness.state_mut().dispatch(AppAction::CloseDispatchWindow);
+    harness.run_steps(2);
+    assert!(harness.state().ui_state.confirm_close_ticket.is_none());
+}
+
+/// A harness whose app ran `script` at startup, before any frame, as
+/// `SWITCHBOARD_SCRIPT` does, against a Dispatch that answers from the
+/// port's thread like the real socket; with `window`, the Dispatch
+/// window was open when the app started.
+fn scripted_harness(
+    status: switchboard::ports::dispatch::Status,
+    window: bool,
+    script: &'static str,
+) -> Harness<'static, SwitchboardApp> {
+    let mut services = fake_services(
+        FakeOpener::default(),
+        FakeSecrets::default(),
+        FakeHost::default(),
+    );
+    services.dispatch = Some(Box::new(FakeDispatch {
+        status: Some(status),
+        blocks: true,
+        ..FakeDispatch::default()
+    }));
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1200.0, 900.0))
+        .build_eframe(move |cc| {
+            switchboard::ui::theme::install(&cc.egui_ctx);
+            let mut app = test_app(services);
+            app.start();
+            if window {
+                app.dispatch(AppAction::PopOutDispatch);
+            }
+            switchboard::script::run(&mut app, script);
+            app
+        });
+    harness.run_steps(2);
+    harness
+}
+
+/// The `close-ticket` script line opens the dialog on the first frame,
+/// though nothing had asked Dispatch for its status yet; with the
+/// Dispatch window open, on that window's page.
+#[test]
+fn the_close_ticket_script_line_opens_the_dialog() {
+    let mut status = dispatch_status();
+    status.tickets[0].decisions.clear();
+    status.tickets[0].closable = true;
+    let harness = scripted_harness(status.clone(), false, "close-ticket t1");
+    harness.get_by_label("Close this ticket");
+    assert_eq!(
+        harness.state().ui_state.confirm_close_ticket.as_deref(),
+        Some("t1")
+    );
+
+    let harness = scripted_harness(status, true, "close-ticket t1");
+    assert_eq!(
+        harness.state().ui_state.dispatch_window_ticket.as_deref(),
+        Some("t1")
+    );
+    assert_eq!(
+        harness.state().ui_state.confirm_close_ticket.as_deref(),
+        Some("t1"),
+        "shown in the Dispatch window"
+    );
+}
+
+/// The dialog's title and button follow the flag that showed the
+/// button that opened it, not the ticket's state.
+#[test]
+fn the_close_dialog_reads_the_runners_flags() {
+    let mut harness = ticket_page(|t| {
+        t.state = "closed".into();
+        t.trees_kept = Some("/wt/t1 not removed: it has changes".into());
+        t.trees_retryable = true;
+    });
+    click(&mut harness, "Remove trees");
+    harness.get_by_label("Remove the ticket's trees");
+    harness.get_by_label("Try again");
+    let mut harness = ticket_page(|t| {
+        t.state = "closing".into();
+        t.reason = Some("closed by hand".into());
+    });
+    harness.state_mut().ui_state.confirm_close_ticket = Some("t1".into());
+    harness.run_steps(2);
+    assert!(harness.query_by_label("Close this ticket").is_none());
+    assert!(harness.state().ui_state.confirm_close_ticket.is_none());
+}
+
+/// A closing ticket's decisions are on their way out, and the runner
+/// reports them `cancelling`: its row says it is closing, not that it
+/// waits on the user, and the overview offers nothing to answer.
+#[test]
+fn a_closing_ticket_does_not_wait_on_you() {
+    let (mut harness, _) = harness();
+    let mut status = dispatch_status();
+    status.tickets[0].state = "closing".into();
+    status.tickets[0].reason = Some("closed by hand".into());
+    status.tickets[0].decisions[0].state = "cancelling".into();
+    harness
+        .state_mut()
+        .dispatch(AppAction::DispatchStatus(Some(status)));
+    harness.state_mut().dispatch(AppAction::ShowDispatch);
+    harness.run_steps(2);
+    harness.get_by_label("closing: closed by hand");
+    assert!(harness.query_by_label("1 waiting on you").is_none());
+    harness.get_by_label("Nothing waits on you.");
 }
 
 /// A ticket's agent at a prompt of its own is on the page: a card under

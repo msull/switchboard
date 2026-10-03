@@ -1349,11 +1349,12 @@ workspace only, except a set made in Everywhere, which holds any
 workspace's sets); a notice about a record in another workspace shows
 as "Something in another workspace needs you", with no name; and the
 rail's count is the active workspace's, while the Dock badge counts
-every workspace, so a waiting agent elsewhere still gets through. The selector is the active workspace's name at the top of the
-rail: a menu of every workspace with its waiting count, then New,
-Rename, and Delete (only an empty workspace that is not the last).
-"Move to" on a project's board and a working set's header moves it,
-offered only when another workspace exists.
+every workspace, so a waiting agent elsewhere still gets through. The
+selector is the active workspace's name at the top of the rail: a menu
+of every workspace with its waiting count, then New, Rename, and Delete
+(only an empty workspace that is not the last). "Move to" on a
+project's board and a working set's header moves it, offered only when
+another workspace exists.
 
 Records: `Views.spaces` lists the workspaces (views.json, v5 today), and
 `Project.space` (records v8) and `WorkingSet.space` name each thing's
@@ -1495,9 +1496,15 @@ decision card names its project. The page can leave for a window of
 its own (`Settings.dispatch_window`, like a session's pop-out: frame
 saved once it settles, Cmd+W closes), with navigation of its own so a
 ticket opened there does not touch the main window's stack, which
-shows only a note pointing at the window while it is open. Built: the wire crate, the core
-path and read models, the log and socket adapters, `serve` in the app,
-and `tests/control.rs`. Gaps: `service.new` and `command.run` are not
+shows only a note pointing at the window while it is open. A ticket's
+page offers Close where the runner says a close would start, and
+Remove trees where a closed ticket's trees were kept. Built: the wire
+crate, the core path and read models, the log and socket adapters,
+`serve` in the app, `tests/control.rs`, and the close: `DispatchClose`
+behind a confirmation dialog that lists the paths the runner reports it
+would remove (`TicketView::removes`), answered by Dispatch with the
+ticket `closing` once the intent is saved, the runner's pass doing the
+rest. Gaps: `service.new` and `command.run` are not
 on the port yet; nothing marks Dispatch-owned records as such in the
 window.
 

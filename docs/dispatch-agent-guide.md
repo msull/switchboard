@@ -33,6 +33,7 @@ dispatch decide <ticket> <decision> <answer> [--note <text>]
 dispatch queue <project>                          the project's queue in order
 dispatch queue <project> <ticket>...              reorder it
 dispatch resume <ticket>                          a parked ticket back to active
+dispatch close <ticket> [--reason <text>]         a ticket closed, its trees removed (the branch is kept)
 ```
 
 `dispatch run` and `dispatch worktrees` are the owner's: never run
@@ -187,6 +188,18 @@ it after the owner has fixed whatever the park reason named. A resumed
 ticket asks `rerun` again, under a new id, for each attempt that failed
 or was cancelled by the park; answer it to go on. Resuming a ticket
 parked for a reason you do not understand is the owner's call.
+
+## Closing
+
+```
+dispatch close 314cb7a1 --reason "fixed by #320"
+```
+
+The ticket's worktrees are removed and it is closed for good; the
+branch and the record stay. It is refused while anything of the ticket
+runs (park it first) or a tree has uncommitted changes; the refusal
+names them. Closing is the owner's call unless you were told to close
+that ticket.
 
 ## Where things live
 

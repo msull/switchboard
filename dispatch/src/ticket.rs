@@ -115,6 +115,10 @@ pub struct LaneRecord {
     /// to the next agent, since its plan was written against `from`.
     #[serde(default)]
     pub refreshed: Option<Refreshed>,
+    /// The lane's worktree is removed from its clone: the ticket closed.
+    /// The path stays, so a reader can still say where the work was.
+    #[serde(default)]
+    pub removed: bool,
 }
 
 /// A base that moved under a branch, and the branch brought up to it.
@@ -454,19 +458,25 @@ pub struct Operation {
     #[serde(default)]
     pub body: Option<Body>,
     pub reply: Option<Reply>,
-    /// The socket failed before a reply came; recovery decides.
+    /// The socket failed before a reply came; recovery decides. Once it
+    /// has, this is its verdict in words, for the reader only.
     pub error: Option<String>,
     /// Its reply was lost and it may not be sent again, so the user was
     /// asked what to do; recovery leaves it to that question.
     #[serde(default)]
     pub asked: bool,
+    /// Recovery gave its verdict on this unanswered operation, and a
+    /// later pass must not recover it again (a lost send would raise
+    /// its decision twice).
+    #[serde(default)]
+    pub settled: bool,
 }
 
 impl Operation {
     /// Whether recovery still has to resolve it.
     #[must_use]
     pub fn unresolved(&self) -> bool {
-        self.reply.is_none() && !self.asked
+        self.reply.is_none() && !self.asked && !self.settled
     }
 }
 
@@ -483,14 +493,62 @@ pub enum TicketState {
     Parked {
         reason: String,
     },
+    /// Closing: the intent is written, and the sequence (decisions
+    /// cancelled, processes gone, the session unmarked, the trees
+    /// removed, the card off the set) runs from it on every pass until
+    /// it is done. Nothing starts in a closing ticket.
+    Closing {
+        reason: String,
+    },
     /// Every stage done, or closed by hand.
     Closed {
         reason: String,
     },
 }
 
+impl TicketState {
+    /// The state as a person reads it: `active`, or `<state>: <reason>`.
+    #[must_use]
+    pub fn label(&self) -> String {
+        match self {
+            Self::Active => "active".to_owned(),
+            Self::Parking { reason } => format!("parking: {reason}"),
+            Self::Parked { reason } => format!("parked: {reason}"),
+            Self::Closing { reason } => format!("closing: {reason}"),
+            Self::Closed { reason } => format!("closed: {reason}"),
+        }
+    }
+}
+
+/// What a close has done so far. Each flag is set and saved right after
+/// its step is read back, so a close cut short resumes from the first
+/// step not yet done.
+// One flag per step of the sequence, each read back on its own; a state
+// machine would lose which steps a cut-short close already did.
+#[allow(clippy::struct_excessive_bools)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CloseProgress {
+    /// Every pending decision is cancelled.
+    pub decisions_cancelled: bool,
+    /// Switchboard answered `session.waiting off` for the current
+    /// session, or the ticket has none.
+    pub waiting_cleared: bool,
+    /// The ticket's tree is removed from the project's clone.
+    pub tree_removed: bool,
+    /// Why a removal was refused, when one was and the close went on
+    /// without it; the tree is still there.
+    pub trees_kept: Option<String>,
+    /// The working set was synced without this ticket.
+    pub card_cleared: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Ticket {
+    /// The record's format; see `store::RECORD_VERSION`. A record
+    /// written before records carried one reads as 0.
+    #[serde(default)]
+    pub version: u32,
     pub id: String,
     pub project: String,
     pub source: SourceSnapshot,
@@ -523,11 +581,38 @@ pub struct Ticket {
     pub refreshed_stage: Option<usize>,
     #[serde(flatten)]
     pub state: TicketState,
+    /// How far a close has got.
+    #[serde(default)]
+    pub close: CloseProgress,
     pub created_ms: u64,
     pub updated_ms: u64,
 }
 
 impl Ticket {
+    /// The indexes of the ledger's operations recovery still has to
+    /// resolve.
+    #[must_use]
+    pub fn unsettled(&self) -> Vec<usize> {
+        self.unsettled_where(|_| true)
+    }
+
+    /// `unsettled`, launches only: what parking and closing wait on,
+    /// since a launch still in flight would bring up a session after
+    /// they stopped everything.
+    #[must_use]
+    pub fn unsettled_creations(&self) -> Vec<usize> {
+        self.unsettled_where(|o| o.class == "creation")
+    }
+
+    fn unsettled_where(&self, keep: impl Fn(&Operation) -> bool) -> Vec<usize> {
+        self.ledger
+            .iter()
+            .enumerate()
+            .filter(|(_, o)| keep(o) && o.unresolved())
+            .map(|(i, _)| i)
+            .collect()
+    }
+
     /// The attempts of stage `stage`, latest numbers last.
     pub fn attempts_of<'a>(&'a self, stage: &'a str) -> impl Iterator<Item = &'a Attempt> + 'a {
         self.attempts.iter().filter(move |a| a.stage == stage)
@@ -555,6 +640,18 @@ impl Ticket {
         self.decisions.iter().filter(|d| d.pending()).collect()
     }
 
+    /// The pending decisions that wait on the user and count against
+    /// the project's limit: none while the ticket is closing, whose
+    /// pending decisions are on their way to cancelled. Every count and
+    /// every view reads this, so the rule lives in one place.
+    #[must_use]
+    pub fn waiting_on_you(&self) -> Vec<&Decision> {
+        if matches!(self.state, TicketState::Closing { .. }) {
+            return Vec::new();
+        }
+        self.pending_decisions()
+    }
+
     /// The session a card for this ticket should show: the latest
     /// attempt's, or none.
     #[must_use]
@@ -565,6 +662,25 @@ impl Ticket {
     #[must_use]
     pub fn active(&self) -> bool {
         self.state == TicketState::Active
+    }
+
+    /// Whether `close` would start a close, as far as the record says:
+    /// parked, or active with nothing open. A tree with changes is
+    /// still refused when the close runs; that needs git to tell.
+    #[must_use]
+    pub fn closable(&self) -> bool {
+        match self.state {
+            TicketState::Parked { .. } => true,
+            TicketState::Active => !self.attempts.iter().any(Attempt::is_open),
+            _ => false,
+        }
+    }
+
+    /// Whether `close` would try the removal of kept trees again: the
+    /// ticket closed and a refusal kept them.
+    #[must_use]
+    pub fn trees_retryable(&self) -> bool {
+        matches!(self.state, TicketState::Closed { .. }) && self.close.trees_kept.is_some()
     }
 
     /// A short id for the command line: eight hex characters.
@@ -578,6 +694,8 @@ impl Ticket {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ProjectState {
+    /// The record's format; see `store::RECORD_VERSION`.
+    pub version: u32,
     pub name: String,
     /// The Switchboard workspace named by the pipeline, once found or made.
     pub space: Option<String>,
@@ -585,6 +703,9 @@ pub struct ProjectState {
     pub set: Option<String>,
     /// Ticket ids in the order they are taken from.
     pub queue: Vec<String>,
+    /// Ids of the project's tickets that are closing: out of the queue,
+    /// visited by every pass until their close is done.
+    pub closing: Vec<String>,
     /// What the set last showed, so it is redrawn only on a change.
     pub shown: Vec<(String, String)>,
 }
@@ -593,9 +714,10 @@ pub struct ProjectState {
 mod tests {
     use super::*;
 
-    #[test]
-    fn inputs_come_from_the_latest_completed_attempt_that_wrote_them() {
-        let mut t = Ticket {
+    /// An active ticket with nothing on it.
+    fn blank() -> Ticket {
+        Ticket {
+            version: 0,
             id: "t".into(),
             project: "p".into(),
             source: SourceSnapshot {
@@ -622,9 +744,15 @@ mod tests {
             rework: BTreeMap::new(),
             refreshed_stage: None,
             state: TicketState::Active,
+            close: CloseProgress::default(),
             created_ms: 0,
             updated_ms: 0,
-        };
+        }
+    }
+
+    #[test]
+    fn inputs_come_from_the_latest_completed_attempt_that_wrote_them() {
+        let mut t = blank();
         let attempt = |stage: &str, n: u32, state: AttemptState, path: &str| Attempt {
             stage: stage.into(),
             n,
@@ -660,5 +788,55 @@ mod tests {
         assert_eq!(t.current_session().unwrap(), "s-plan-2");
         assert_eq!(t.attempts_of("plan").count(), 2);
         assert_eq!(Ticket::new_id().len(), 8);
+    }
+
+    #[test]
+    fn a_ticket_closes_by_hand_when_parked_or_active_with_nothing_open() {
+        let mut t = blank();
+        assert!(t.closable() && !t.trees_retryable());
+        t.attempts.push(Attempt {
+            stage: "plan".into(),
+            n: 1,
+            context: "root".into(),
+            kind: AttemptKind::Agent,
+            state: AttemptState::Running,
+            project: None,
+            session: None,
+            run: None,
+            artifacts: BTreeMap::new(),
+            settle: BTreeMap::new(),
+            stop_at_ms: None,
+            polls_since_stop: 0,
+            head: None,
+            gate: None,
+            pr: None,
+            rounds: Vec::new(),
+            extra_pass: false,
+            failed_at_checks: false,
+            started_ms: 0,
+            ended_ms: None,
+        });
+        assert!(!t.closable(), "an open attempt is parked first");
+        t.state = TicketState::Parked {
+            reason: "by hand".into(),
+        };
+        assert!(t.closable());
+        for state in [
+            TicketState::Parking {
+                reason: String::new(),
+            },
+            TicketState::Closing {
+                reason: String::new(),
+            },
+            TicketState::Closed {
+                reason: String::new(),
+            },
+        ] {
+            t.state = state;
+            assert!(!t.closable(), "{:?}", t.state);
+        }
+        assert!(!t.trees_retryable(), "closed with its trees removed");
+        t.close.trees_kept = Some("it has changes".into());
+        assert!(t.trees_retryable());
     }
 }

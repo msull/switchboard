@@ -5,6 +5,9 @@
 //! repeated from the log, the window is left alone, and a crash between
 //! the log line and the launch reads as interrupted afterwards.
 
+// Tests assert emptiness with `assert!` throughout.
+#![allow(clippy::assert_is_empty)]
+
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -55,7 +58,7 @@ fn port_on(initial: Loaded, operations: FakeOperations, host: FakeHost) -> Port 
         artifacts: Box::new(FakeArtifacts::default()),
         controller: Box::new(FakeController::default()),
         operations: Box::new(operations.clone()),
-        dispatch: Box::new(FakeDispatch::default()),
+        dispatch: Some(Box::new(FakeDispatch::default())),
         wake: None,
     };
     let mut app = SwitchboardApp::with_services(services);
@@ -599,7 +602,7 @@ fn a_read_only_instance_does_not_listen() {
         artifacts: Box::new(FakeArtifacts::default()),
         controller: Box::new(FakeController::default()),
         operations: Box::new(FakeOperations::default()),
-        dispatch: Box::new(FakeDispatch::default()),
+        dispatch: Some(Box::new(FakeDispatch::default())),
         wake: None,
     };
     let mut app = SwitchboardApp::with_services(services);
