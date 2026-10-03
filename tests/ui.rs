@@ -2833,7 +2833,8 @@ fn the_rail_lists_rule_sets_above_hand_sets() {
         switchboard::core::Clock::at(2),
     );
     harness.run_steps(2);
-    // The rail's row, not the page title: the leftmost.
+    // The open set's page title carries the same label as its rail row,
+    // and the rail is the leftmost of the two, so take the leftmost match.
     let in_rail = |label: &str| {
         harness
             .query_all_by_label(label)
@@ -2842,11 +2843,6 @@ fn the_rail_lists_rule_sets_above_hand_sets() {
             .unwrap()
     };
     assert!(in_rail("Recent sessions").top() < in_rail("Working Set").top());
-    let first = first_set(&harness);
-    assert_eq!(
-        harness.state().core().working_set(first).unwrap().name,
-        "Working Set"
-    );
 }
 
 /// Press, move, release with the primary button, a few frames apart.

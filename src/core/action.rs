@@ -2278,7 +2278,7 @@ impl AppCore {
     }
 
     /// The working sets of the active space as the rail lists them: rule
-    /// sets first, then hand sets, each group in the user's order.
+    /// sets first, then hand sets, each group in record order.
     #[must_use]
     pub fn working_sets_in_rail_order(&self) -> Vec<&WorkingSet> {
         let mut sets: Vec<_> = self.visible_working_sets().collect();
