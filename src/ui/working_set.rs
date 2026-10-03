@@ -125,17 +125,16 @@ pub fn show(cx: &mut DrawCtx<'_>, ui: &mut Ui, set: SetId) {
             (n, _) => format!("{n} cards"),
         },
     ));
-    if items.is_empty() && rule.is_some() {
-        return;
-    }
     if items.is_empty() {
-        ui.add_space(8.0);
-        ui.label(
-            RichText::new(
-                "Add a session from its card's menu or its header's Working sets button, and a file from the file tree's menu.",
-            )
-            .color(p.n700),
-        );
+        if rule.is_none() {
+            ui.add_space(8.0);
+            ui.label(
+                RichText::new(
+                    "Add a session from its card's menu or its header's Working sets button, and a file from the file tree's menu.",
+                )
+                .color(p.n700),
+            );
+        }
         return;
     }
     ui.add_space(8.0);

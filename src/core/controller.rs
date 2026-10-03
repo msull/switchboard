@@ -390,11 +390,14 @@ impl AppCore {
     }
 
     pub(super) fn activate_card(&mut self, set: SetId, target: PinTarget) {
-        if !self.working_set(set).is_some_and(|s| {
-            self.set_cards(s, RULE_COLUMNS)
-                .iter()
-                .any(|i| i.target == target)
-        }) {
+        let member = self
+            .working_set(set)
+            .is_some_and(|s| match (&s.rule, &target) {
+                (None, _) => s.items.iter().any(|i| i.target == target),
+                (Some(_), PinTarget::Session(id)) => self.rule_members(set).contains(id),
+                (Some(_), _) => false,
+            });
+        if !member {
             return;
         }
         self.controller.active.retain(|(s, _)| *s != set);
