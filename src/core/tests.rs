@@ -2370,6 +2370,26 @@ fn return_to_running_attaches_and_return_to_exited_relaunches() {
 }
 
 #[test]
+fn return_to_an_exited_pane_keeps_its_last_output_before_the_kill() {
+    let output = Clock::at(50_000).wall;
+    let (mut core, _, ids) = with_records(&[SessionKind::Shell], |s| {
+        Some(HostStatus {
+            last_activity: Some(output),
+            ..exited(s.id, Some(0))
+        })
+    });
+    let id = ids[0];
+    let e = core.dispatch(AppAction::ReturnToSession(id), Clock::at(60_000));
+    assert!(
+        matches!(&e[0], Effect::Save(w) if w.sessions[0].last_seen == output),
+        "{e:?}"
+    );
+    assert!(matches!(&e[1], Effect::Kill(h) if h.0 == id.host_name()));
+    assert_eq!(spawns(&e).len(), 1);
+    assert!(core.session(id).unwrap().last_seen >= output);
+}
+
+#[test]
 fn repeated_return_while_in_flight_spawns_once() {
     let (mut core, _, ids) = with_records(&[SessionKind::Shell], |_| None);
     let id = ids[0];

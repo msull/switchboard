@@ -53,7 +53,7 @@ pub fn kicker(record: &SessionRecord, running: bool, now: SystemTime) -> String 
         None if run.open() => "stopped".to_owned(),
         None => "killed".to_owned(),
     };
-    format!("{how} · {took} · {}", ago_text(ended))
+    format!("{how} · {took} · {}", ago_text(ended, now))
 }
 
 /// The one action row for commands and services: run or stop, open,

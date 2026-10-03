@@ -1724,8 +1724,11 @@ core does not know the view's columns.
 
 ## Cleanup pass (2026-10-03)
 
-One pass over the workspace with no change in behaviour, records or
-wire formats: duplicated code merged into helpers (the core's running,
+One pass over the workspace with no change in records or wire
+formats, and one change in behaviour: returning to an exited pane now
+kills it through the same path as every other kill, so it first raises
+`last_seen` to the pane's last output (and saves the record) as a stop
+or restart already did. Otherwise: duplicated code merged into helpers (the core's running,
 waiting-reason and host-error checks, the store's one atomic write, the
 binary lookup, Dispatch's attempt lookups and `git -C` calls), comments
 moved to the items they describe or brought up to date, fake fields

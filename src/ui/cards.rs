@@ -43,21 +43,19 @@ pub fn file_name(path: &Path) -> String {
 /// clock; the core may not.
 #[must_use]
 pub fn since_text(then: SystemTime) -> String {
-    age(then).unwrap_or_else(|| "just now".into())
+    age(then, SystemTime::now()).unwrap_or_else(|| "just now".into())
 }
 
-/// `since_text` as a phrase: "3m ago", or "just now".
+/// `since_text` as a phrase measured at `now`: "3m ago", or "just now".
 #[must_use]
-pub fn ago_text(then: SystemTime) -> String {
-    age(then).map_or_else(|| "just now".into(), |age| format!("{age} ago"))
+pub fn ago_text(then: SystemTime, now: SystemTime) -> String {
+    age(then, now).map_or_else(|| "just now".into(), |age| format!("{age} ago"))
 }
 
-/// The age of `then` in its largest whole unit, or `None` under a
-/// minute (and for a time in the future).
-fn age(then: SystemTime) -> Option<String> {
-    let secs = SystemTime::now()
-        .duration_since(then)
-        .map_or(0, |d| d.as_secs());
+/// The age of `then` at `now` in its largest whole unit, or `None`
+/// under a minute (and for a time in the future).
+fn age(then: SystemTime, now: SystemTime) -> Option<String> {
+    let secs = now.duration_since(then).map_or(0, |d| d.as_secs());
     match secs {
         s if s < 60 => None,
         s if s < 3600 => Some(format!("{}m", s / 60)),
