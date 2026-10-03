@@ -5229,6 +5229,31 @@ fn ticket_page_shows_a_resolution_reviews_conflict() {
     harness.get_by_label("rebased with conflicts in 2 commits, reviewed");
 }
 
+/// A ticket's page names what it holds and the lanes it serves, each
+/// served lane a link to where it answers.
+#[test]
+fn a_dispatch_ticket_shows_its_holds_and_services() {
+    use switchboard::ports::dispatch::ServiceView;
+    let mut harness = ticket_page(|t| {
+        t.holds = vec!["my-dev".into()];
+        t.services = vec![ServiceView {
+            lane: "frontend".into(),
+            url: Some("http://localhost:3100".into()),
+            state: "ready".into(),
+            session: Some("s-4".into()),
+        }];
+    });
+    harness.run_steps(1);
+    harness.get_by_label("Holds: my-dev");
+    harness.get_by_label("frontend");
+    harness.get_by_label("ready");
+    let mut harness = ticket_page(|t| {
+        t.waiting_for = Some("my-dev, held by t9 (#3)".into());
+    });
+    harness.run_steps(1);
+    harness.get_by_label("Waiting for my-dev, held by t9 (#3)");
+}
+
 /// A completed code review that folded its fix rounds says so on its
 /// attempt's row, with both heads.
 #[test]

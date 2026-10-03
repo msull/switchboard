@@ -902,6 +902,154 @@ impl Pipeline {
                 stage.name
             );
         }
+        Self::validate_gate_context(stage)?;
+        self.validate_services(stage)
+    }
+
+    /// A gate-only command runs in its context's tree, so a gate that
+    /// names a lane must be in that lane's context.
+    fn validate_gate_context(stage: &Stage) -> Result<()> {
+        if stage.kind() == StageKind::GateOnly
+            && let Some(Gate::Command { run_in, .. }) = &stage.gate
+            && let Some(lane) = run_in.strip_prefix("lane:")
+            && stage.context != Context::Lane(lane.to_owned())
+        {
+            bail!(
+                "stage {:?}: a gate-only command in lane:{lane} needs context = \"lane:{lane}\"",
+                stage.name
+            );
+        }
+        Ok(())
+    }
+
+    /// A stage's `services` name lanes that serve, once each, with a
+    /// resource held while they run and ports to put them on; its
+    /// `before` keys are among them.
+    fn validate_services(&self, stage: &Stage) -> Result<()> {
+        let name = &stage.name;
+        let mut seen = std::collections::BTreeSet::new();
+        for lane in &stage.services {
+            if !seen.insert(lane) {
+                bail!("stage {name:?} names service {lane:?} twice");
+            }
+            match self.lane(lane) {
+                None => bail!("stage {name:?} serves an unknown lane {lane:?}"),
+                Some(l) if l.serve.is_none() => {
+                    bail!("stage {name:?} serves lane {lane:?}, which has no serve")
+                }
+                Some(_) => {}
+            }
+        }
+        for lane in stage.before.keys() {
+            if !stage.services.contains(lane) {
+                bail!("stage {name:?}: before names {lane:?}, which is not in its services");
+            }
+        }
+        if !stage.services.is_empty() {
+            // The services live until the resource's range ends, so the
+            // stage must hold one.
+            if !stage.needs.iter().any(|n| self.resource(n).is_some()) {
+                bail!("stage {name:?} names services but needs no [[resources]] entry");
+            }
+            match self.policy.ports {
+                None => bail!("stage {name:?} names services but [policy] has no ports"),
+                Some([lo, hi]) if lo > hi => bail!("[policy] ports = [{lo}, {hi}] is empty"),
+                Some(_) => {}
+            }
+        }
+        Ok(())
+    }
+
+    /// A lane's `serve`: a command, a URL with the port in it, a probe
+    /// path, and an environment with nothing in it but literals and the
+    /// port. The environment travels on the service's command line,
+    /// which a record and the pane keep, so no secret may be there.
+    fn validate_serve(lane: &Lane) -> Result<()> {
+        let Some(serve) = &lane.serve else {
+            return Ok(());
+        };
+        let l = &lane.name;
+        if serve.argv.is_empty() {
+            bail!("lane {l}: serve.argv is empty");
+        }
+        if !serve.url.contains("{port}") {
+            bail!("lane {l}: serve.url must contain {{port}}");
+        }
+        if !serve.ready.http.starts_with('/') {
+            bail!("lane {l}: serve.ready.http must start with /");
+        }
+        for (key, value) in &serve.env {
+            let upper = key.to_ascii_uppercase();
+            if ["TOKEN", "SECRET", "PASSWORD", "KEY", "CREDENTIAL"]
+                .iter()
+                .any(|word| upper.contains(word))
+            {
+                bail!(
+                    "lane {l}: serve.env {key} looks like a secret; service env travels on the command line, so secrets are not allowed there"
+                );
+            }
+            if value.replace("{port}", "").contains('{') {
+                bail!("lane {l}: serve.env {key}: the only field a value may name is {{port}}");
+            }
+        }
+        Ok(())
+    }
+
+    #[must_use]
+    pub fn resource(&self, name: &str) -> Option<&Resource> {
+        self.resources.iter().find(|r| r.name == name)
+    }
+
+    /// The first and last index of the stages whose `needs` name the
+    /// `[[resources]]` entry `resource`: the range a ticket holds it
+    /// for. `None` for a lane name or a resource no stage needs.
+    #[must_use]
+    pub fn hold_range(&self, resource: &str) -> Option<(usize, usize)> {
+        self.resource(resource)?;
+        let mut indexes = self
+            .stages
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| s.needs.iter().any(|n| n == resource))
+            .map(|(i, _)| i);
+        let first = indexes.next()?;
+        Some((first, indexes.next_back().unwrap_or(first)))
+    }
+
+    /// The last stage a service started at `stage` lives through: the
+    /// end of the `needs` ranges that contain it, `stage` itself when it
+    /// holds none.
+    #[must_use]
+    pub fn services_until(&self, stage: usize) -> usize {
+        self.stages.get(stage).map_or(stage, |s| {
+            s.needs
+                .iter()
+                .filter_map(|n| self.hold_range(n))
+                .map(|(_, last)| last)
+                .max()
+                .unwrap_or(stage)
+        })
+    }
+
+    /// Each `[[resources]]` name in `needs` is named by one run of
+    /// stages with no gap, so "held until the last stage needing it
+    /// ends" is a fact the file states.
+    fn validate_contiguous_needs(&self) -> Result<()> {
+        for r in &self.resources {
+            let Some((first, last)) = self.hold_range(&r.name) else {
+                continue;
+            };
+            if let Some(gap) = self.stages[first..=last]
+                .iter()
+                .find(|s| !s.needs.contains(&r.name))
+            {
+                bail!(
+                    "stage {:?} breaks the run of stages needing {:?}; needs must name a resource on stages next to each other",
+                    gap.name,
+                    r.name
+                );
+            }
+        }
         Ok(())
     }
 
@@ -1074,6 +1222,7 @@ impl Pipeline {
             if !names.insert(&lane.name) {
                 bail!("lane {:?} is listed twice", lane.name);
             }
+            Self::validate_serve(lane)?;
         }
         let mut stage_names = std::collections::BTreeSet::new();
         let mut written: Vec<&str> = Vec::new();
@@ -1091,6 +1240,7 @@ impl Pipeline {
                 written.push(subject.as_str());
             }
         }
+        self.validate_contiguous_needs()?;
         for (name, dial) in &self.policy.decisions {
             if !matches!(dial.as_str(), "ask" | "recommend" | "auto") {
                 bail!("decision {name:?}: the dial is ask, recommend or auto, not {dial:?}");
@@ -1707,5 +1857,228 @@ writes = ["plan"]"#,
             err.contains("review-code") && err.contains("takes its network from implement"),
             "{err}"
         );
+    }
+
+    /// The back half of the Orchard pipeline as the three tickets parked
+    /// at `deploy` carry it in their copies: a deploy in the backend
+    /// lane, a tester with two served lanes, and a confirmation, all
+    /// holding `my-dev`.
+    const ORCHARD_BACK_HALF: &str = r#"
+version = 1
+
+[project]
+name = "Orchard"
+repo = "git@github.com:example-org/orchard-workspace.git"
+space = "Dispatch · Orchard"
+
+[source]
+kind = "github"
+repo = "example-org/orchard-workspace"
+label = "dispatch"
+
+[[lanes]]
+name = "backend"
+path = "orchard-backend"
+repo = "git@bitbucket.org:example-co/orchard-backend.git"
+base = "main"
+
+[[lanes]]
+name = "frontend"
+path = "orchard-frontend"
+repo = "git@bitbucket.org:example-co/orchard-frontend.git"
+base = "dev"
+serve = { argv = ["npm", "start"], env = { BROWSER = "none", PORT = "{port}" }, url = "http://localhost:{port}", ready = { http = "/", within_secs = 120 } }
+
+[[lanes]]
+name = "snp"
+path = "orchard-snp"
+repo = "git@bitbucket.org:example-co/orchard-snp.git"
+base = "master"
+serve = { argv = ["npm", "start"], env = { BROWSER = "none", PORT = "{port}" }, url = "http://localhost:{port}", ready = { http = "/", within_secs = 120 } }
+
+[[resources]]
+name = "my-dev"
+count = 1
+
+[operators.implementer]
+kind = "claude"
+
+[operators.tester]
+kind = "claude"
+
+[[stages]]
+name = "implement"
+operator = "implementer"
+context = "each"
+prompt = "Implement the {lane} part on {branch}."
+
+[[stages]]
+name = "inspect"
+context = "each"
+gate = { kind = "human", decision = "inspect" }
+
+[[stages]]
+name = "deploy"
+context = "lane:backend"
+needs = ["my-dev"]
+gate = { kind = "command", in = "lane:backend", argv = ["sh", "-c", "uv run --frozen inv link-env --env-name my-dev && aws-vault exec -n orchard-dev -- uv run inv deploy -f"] }
+
+[[stages]]
+name = "try"
+operator = "tester"
+context = "joined"
+needs = ["my-dev"]
+services = ["frontend", "snp"]
+before = { frontend = ["npm", "run", "link-env"], snp = ["npm", "run", "link-env"] }
+writes = ["notes"]
+prompt = "my-dev is running backend commit {inputs.deploy.commit}. The admin frontend: {services.frontend}. The student portal: {services.snp}. Report to {notes}."
+
+[[stages]]
+name = "tried"
+needs = ["my-dev"]
+gate = { kind = "human", decision = "tried", confirm = true }
+
+[[stages]]
+name = "pr"
+operator = "implementer"
+context = "each"
+prompt = "Push {branch}."
+
+[policy]
+slots = 2
+ports = [3100, 3199]
+"#;
+
+    #[test]
+    fn the_orchard_tickets_deploy_try_and_tried_parse() {
+        let p = Pipeline::parse(ORCHARD_BACK_HALF).unwrap();
+        assert_eq!(p.hold_range("my-dev"), Some((2, 4)));
+        assert_eq!(p.services_until(3), 4);
+        assert_eq!(p.services_until(5), 5, "a stage holding nothing");
+        assert_eq!(p.stages[2].kind(), StageKind::GateOnly);
+        assert_eq!(p.stages[2].context, Context::Lane("backend".into()));
+        assert_eq!(p.stages[3].services, ["frontend", "snp"]);
+        assert_eq!(p.hold_range("backend"), None, "a lane is not a resource");
+    }
+
+    fn orchard_refused(from: &str, to: &str, expected: &str) {
+        let text = ORCHARD_BACK_HALF.replace(from, to);
+        assert_ne!(text, ORCHARD_BACK_HALF, "{from}");
+        let err = Pipeline::parse(&text).unwrap_err().to_string();
+        assert!(err.contains(expected), "{from}: {err}");
+    }
+
+    #[test]
+    fn needs_must_be_contiguous() {
+        // `tried` dropped from the run leaves `deploy`..`try`, which is
+        // contiguous; a hole in the middle is not.
+        Pipeline::parse(&ORCHARD_BACK_HALF.replace(
+            "name = \"tried\"\nneeds = [\"my-dev\"]\n",
+            "name = \"tried\"\n",
+        ))
+        .unwrap();
+        orchard_refused(
+            "name = \"try\"\noperator = \"tester\"\ncontext = \"joined\"\nneeds = [\"my-dev\"]\nservices = [\"frontend\", \"snp\"]\nbefore = { frontend = [\"npm\", \"run\", \"link-env\"], snp = [\"npm\", \"run\", \"link-env\"] }\n",
+            "name = \"try\"\noperator = \"tester\"\ncontext = \"joined\"\n",
+            "breaks the run of stages needing \"my-dev\"",
+        );
+    }
+
+    #[test]
+    fn services_name_served_lanes_and_need_a_resource_and_ports() {
+        orchard_refused(
+            "services = [\"frontend\", \"snp\"]",
+            "services = [\"frontend\", \"backend\"]",
+            "which has no serve",
+        );
+        orchard_refused(
+            "services = [\"frontend\", \"snp\"]",
+            "services = [\"frontend\", \"frontend\"]",
+            "twice",
+        );
+        orchard_refused(
+            "before = { frontend = [\"npm\", \"run\", \"link-env\"], snp",
+            "before = { backend = [\"npm\", \"run\", \"link-env\"], snp",
+            "not in its services",
+        );
+        orchard_refused("ports = [3100, 3199]\n", "", "has no ports");
+        orchard_refused("ports = [3100, 3199]", "ports = [3199, 3100]", "is empty");
+        orchard_refused(
+            "url = \"http://localhost:{port}\", ready = { http = \"/\", within_secs = 120 } }\n\n[[lanes]]\nname = \"snp\"",
+            "url = \"http://localhost:3000\", ready = { http = \"/\", within_secs = 120 } }\n\n[[lanes]]\nname = \"snp\"",
+            "serve.url must contain {port}",
+        );
+        orchard_refused(
+            "ready = { http = \"/\", within_secs = 120 } }\n\n[[lanes]]\nname = \"snp\"",
+            "ready = { http = \"health\", within_secs = 120 } }\n\n[[lanes]]\nname = \"snp\"",
+            "must start with /",
+        );
+        orchard_refused(
+            "PORT = \"{port}\" }, url = \"http://localhost:{port}\", ready = { http = \"/\", within_secs = 120 } }\n\n[[lanes]]\nname = \"snp\"",
+            "PORT = \"{port}\", WHO = \"{ticket}\" }, url = \"http://localhost:{port}\", ready = { http = \"/\", within_secs = 120 } }\n\n[[lanes]]\nname = \"snp\"",
+            "the only field a value may name is {port}",
+        );
+        // Services live until the resource's range ends, so a stage
+        // that serves must hold a resource.
+        let text = ORCHARD_BACK_HALF
+            .replace(
+                "context = \"lane:backend\"\nneeds = [\"my-dev\"]\n",
+                "context = \"lane:backend\"\n",
+            )
+            .replace(
+                "context = \"joined\"\nneeds = [\"my-dev\"]\n",
+                "context = \"joined\"\n",
+            )
+            .replace(
+                "name = \"tried\"\nneeds = [\"my-dev\"]\n",
+                "name = \"tried\"\n",
+            );
+        let err = Pipeline::parse(&text).unwrap_err().to_string();
+        assert!(err.contains("needs no [[resources]] entry"), "{err}");
+    }
+
+    #[test]
+    fn serve_env_refuses_a_secret_looking_key() {
+        for key in [
+            "API_TOKEN",
+            "client_secret",
+            "DB_PASSWORD",
+            "AWS_KEY",
+            "Credentials",
+        ] {
+            orchard_refused(
+                "BROWSER = \"none\", PORT = \"{port}\" }, url = \"http://localhost:{port}\", ready = { http = \"/\", within_secs = 120 } }\n\n[[lanes]]\nname = \"snp\"",
+                &format!(
+                    "BROWSER = \"none\", {key} = \"x\", PORT = \"{{port}}\" }}, url = \"http://localhost:{{port}}\", ready = {{ http = \"/\", within_secs = 120 }} }}\n\n[[lanes]]\nname = \"snp\""
+                ),
+                &format!("serve.env {key} looks like a secret"),
+            );
+        }
+    }
+
+    #[test]
+    fn a_gate_only_command_runs_in_its_context() {
+        orchard_refused(
+            "name = \"deploy\"\ncontext = \"lane:backend\"",
+            "name = \"deploy\"\ncontext = \"joined\"",
+            "needs context = \"lane:backend\"",
+        );
+    }
+
+    #[test]
+    fn contiguity_is_checked_for_resources_not_lanes() {
+        // A lane named in `needs` (the in-place hold, not built) parses
+        // wherever it sits, gaps and all; it parks at run time.
+        let text = ORCHARD_BACK_HALF
+            .replace(
+                "name = \"implement\"\noperator = \"implementer\"\n",
+                "name = \"implement\"\noperator = \"implementer\"\nneeds = [\"backend\"]\n",
+            )
+            .replace(
+                "name = \"tried\"\nneeds = [\"my-dev\"]\n",
+                "name = \"tried\"\nneeds = [\"my-dev\", \"backend\"]\n",
+            );
+        let p = Pipeline::parse(&text).unwrap();
+        assert_eq!(p.hold_range("backend"), None);
     }
 }

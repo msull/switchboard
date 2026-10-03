@@ -370,7 +370,7 @@ pub fn status(runner: &Runner) -> Result<Status> {
         let mine = records.iter().filter(|t| t.project == name);
         let running = mine
             .clone()
-            .filter(|t| t.active() && t.attempts.iter().any(crate::scheduler::costs_slot))
+            .filter(|t| crate::scheduler::ticket_costs_slot(t))
             .count();
         let pending = mine.map(|t| t.waiting_on_you().len()).sum::<usize>();
         projects.push(ProjectView {
@@ -386,8 +386,13 @@ pub fn status(runner: &Runner) -> Result<Status> {
         });
     }
     let mut tickets = Vec::new();
-    for t in records {
-        tickets.push(ticket_view(&t, runner.pipeline_of(&t).ok().as_ref()));
+    for t in &records {
+        let p = runner.pipeline_of(t).ok();
+        let mut view = ticket_view(t, p.as_ref());
+        view.waiting_for = p
+            .as_ref()
+            .and_then(|p| crate::services::waiting_for(t, p, &records));
+        tickets.push(view);
     }
     tickets.sort_by_key(|t| std::cmp::Reverse(t.updated_ms));
     Ok(Status {
@@ -645,6 +650,10 @@ pub fn ticket_view(t: &Ticket, p: Option<&Pipeline>) -> TicketView {
         decisions: t.decisions.iter().map(|d| decision_view(t, d)).collect(),
         root_project: t.root_project.clone(),
         current_session: t.current_session().cloned(),
+        holds: t.holds.iter().map(|h| h.resource.clone()).collect(),
+        // Filled by `status`, which reads every ticket.
+        waiting_for: None,
+        services: service_views(t),
         created_ms: t.created_ms,
         updated_ms: t.updated_ms,
         paths: PathsView::default(),
@@ -667,6 +676,20 @@ fn restart_view(r: &crate::ticket::Restart) -> dispatch_control::RestartView {
         reset: r.reset.iter().map(ToString::to_string).collect(),
         setup_again: r.setup_again.clone(),
     }
+}
+
+/// The ticket's services not yet stopped.
+fn service_views(t: &Ticket) -> Vec<dispatch_control::ServiceView> {
+    t.services
+        .iter()
+        .filter(|s| s.state != crate::ticket::ServiceState::Stopped)
+        .map(|s| dispatch_control::ServiceView {
+            lane: s.lane.clone(),
+            url: s.url.clone(),
+            state: s.state.label(),
+            session: s.session.clone(),
+        })
+        .collect()
 }
 
 /// A pending decision the ticket no longer waits on (it is closing)

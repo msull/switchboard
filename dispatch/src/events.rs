@@ -1411,6 +1411,8 @@ mod tests {
             restarts: Vec::new(),
             restart: None,
             entered: Vec::new(),
+            holds: Vec::new(),
+            services: Vec::new(),
             created_ms: 0,
             updated_ms: 0,
         }

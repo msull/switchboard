@@ -25,6 +25,8 @@
 //! - `review`: the code review stage's rounds, stepped by the scheduler.
 //! - `restart`: a ticket put at a stage under a fresh copy of the live
 //!   pipeline, applied by the park sequence.
+//! - `services`: a stage's resource holds and served lanes, stepped by
+//!   the scheduler.
 //! - `recover`: the ledger reconciled against Switchboard at start.
 //! - `view`: the queue's working set, redrawn whole.
 //! - `supervisor`: a project's supervisor session: its seed, its flags,
@@ -51,6 +53,7 @@ pub mod restart;
 pub mod review;
 pub mod scheduler;
 pub mod serve;
+pub mod services;
 pub mod store;
 pub mod supervisor;
 pub mod template;

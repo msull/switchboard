@@ -1509,8 +1509,11 @@ adapters, `serve` in the app, `tests/control.rs`, and the close:
 `DispatchClose` behind a confirmation dialog that lists the paths the
 runner reports it would remove (`TicketView::removes`), answered by
 Dispatch with the ticket `closing` once the intent is saved, the
-runner's pass doing the rest. Gaps: `service.new` and `command.run` are
-not on the port yet; nothing marks Dispatch-owned records as such in the
+runner's pass doing the rest. Dispatch's services are `session.new`
+service records with an argv launch that carries `PORT` through `env`,
+killed and then removed with `session.remove`, and a service's `before`
+runs as a child of the runner. Gaps: `service.new` and `command.run`
+stay unbuilt; nothing marks Dispatch-owned records as such in the
 window.
 
 Claude Code asks whether to trust a folder before it runs any hook, so
