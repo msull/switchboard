@@ -5548,6 +5548,43 @@ fn an_end_after_a_kill_does_not_undo_the_dismissal() {
 }
 
 #[test]
+fn kill_and_dismiss_kills_the_pane_and_the_end_does_not_bring_it_back() {
+    let (mut core, _, ids) = with_records(&[agent()], |r| Some(running(r.id)));
+    let id = ids[0];
+    let set = recent_set(&mut core, 24, 1_000);
+    tick(&mut core, 2_000);
+    let effects = core.dispatch(
+        AppAction::KillAndDismiss { set, record: id },
+        Clock::at(10_000),
+    );
+    assert!(effects.iter().any(|e| matches!(e, Effect::Kill(_))));
+    assert!(effects.iter().any(|e| matches!(e, Effect::SaveViews(_))));
+    assert!(members(&core, set).is_empty());
+    core.dispatch(
+        hook(id, EventKind::SessionEnded { reason: None }, 12_000),
+        Clock::at(12_000),
+    );
+    core.dispatch(AppAction::HostListed(vec![]), Clock::at(13_000));
+    tick(&mut core, 14_000);
+    assert!(members(&core, set).is_empty());
+}
+
+#[test]
+fn a_new_rule_sets_hours_are_clamped() {
+    let (mut core, _, _) = with_records(&[SessionKind::Shell], |_| None);
+    let low = recent_set(&mut core, 0, 1_000);
+    let high = recent_set(&mut core, 10_000, 1_000);
+    assert_eq!(
+        core.working_set(low).unwrap().rule,
+        Some(SetRule::Recent { hours: 1 })
+    );
+    assert_eq!(
+        core.working_set(high).unwrap().rule,
+        Some(SetRule::Recent { hours: 720 })
+    );
+}
+
+#[test]
 fn a_live_pane_without_output_leaves_the_window() {
     let (mut core, _, ids) = with_records(&[SessionKind::Shell], |r| Some(running(r.id)));
     let set = recent_set(&mut core, 1, 1_000);

@@ -710,8 +710,7 @@ pub(super) fn kill_and_dismiss(
     if !ui.button("Kill and dismiss").clicked() {
         return false;
     }
-    cx.dispatch(AppAction::KillSession(record));
-    cx.dispatch(AppAction::DismissFromSet { set, record });
+    cx.dispatch(AppAction::KillAndDismiss { set, record });
     true
 }
 

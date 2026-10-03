@@ -722,12 +722,23 @@ impl WorkingSet {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum SetRule {
     /// Every session active within the last `hours`.
-    Recent { hours: u32 },
+    Recent {
+        /// How far back the set looks, in hours; the core keeps it in
+        /// `RULE_HOURS`.
+        hours: u32,
+    },
+}
+
+impl SetRule {
+    /// The rule a new set starts with: the last day.
+    pub const DEFAULT: SetRule = SetRule::Recent { hours: 24 };
 }
 
 /// A session taken off a rule set by hand.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Dismissal {
+    /// The dismissed session's record id, never its host id or resume
+    /// handle, so the dismissal outlives a kill and a resume.
     pub record: RecordId,
     /// The session's activity time when it was dismissed, not the
     /// clock: it stays off while its activity is at or before this.

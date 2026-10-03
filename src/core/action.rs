@@ -201,6 +201,12 @@ pub enum AppAction {
         set: SetId,
         record: RecordId,
     },
+    /// Stop a session's pane and take it off a rule set, so the end the
+    /// kill sends does not bring it back.
+    KillAndDismiss {
+        set: SetId,
+        record: RecordId,
+    },
     OpenDocument(PathBuf),
     OpenInEditor(PathBuf),
     RevealDocument(PathBuf),
@@ -728,6 +734,11 @@ pub const RULE_HOURS: std::ops::RangeInclusive<u32> = 1..=720;
 /// says how wide it is (the control port, the controller).
 pub const RULE_COLUMNS: u32 = 24;
 
+/// `hours` kept within [`RULE_HOURS`].
+fn clamp_hours(hours: u32) -> u32 {
+    hours.clamp(*RULE_HOURS.start(), *RULE_HOURS.end())
+}
+
 /// A session taken off its board, kept whole until its undo window
 /// closes: the record, the project it came from, and its cards on the
 /// working sets.
@@ -864,7 +875,8 @@ impl AppCore {
             | AppAction::DeleteWorkingSet(_)
             | AppAction::NewRuleSet { .. }
             | AppAction::SetRuleHours { .. }
-            | AppAction::DismissFromSet { .. } => self.working_set_action(action, now, &mut out),
+            | AppAction::DismissFromSet { .. }
+            | AppAction::KillAndDismiss { .. } => self.working_set_action(action, now, &mut out),
             AppAction::ShowBoard(id) => self.show(View::Board(id), now, &mut out),
             AppAction::ShowSession(id) => self.show_session(id, now, &mut out),
             AppAction::RenameProject(..)
@@ -1141,7 +1153,7 @@ impl AppCore {
                 self.rule_tick(now.wall);
             }
             AppAction::SetRuleHours { set, hours } => {
-                let hours = hours.clamp(*RULE_HOURS.start(), *RULE_HOURS.end());
+                let hours = clamp_hours(hours);
                 self.update_set(out, set, |s| {
                     if let Some(SetRule::Recent { hours: h }) = &mut s.rule {
                         *h = hours;
@@ -1151,6 +1163,15 @@ impl AppCore {
             }
             AppAction::DismissFromSet { set, record } => {
                 self.dismiss_from_set(set, record, out);
+                self.rule_tick(now.wall);
+            }
+            AppAction::KillAndDismiss { set, record } => {
+                // The dismissal is stamped before the end arrives;
+                // `carry_dismissals` moves it up to the end when it does.
+                self.dismiss_from_set(set, record, out);
+                if let Some(status) = self.host_status(record) {
+                    out.push(Effect::Kill(status.id.clone()));
+                }
                 self.rule_tick(now.wall);
             }
             _ => unreachable!("routed by `dispatch`"),
@@ -1180,8 +1201,8 @@ impl AppCore {
     }
 
     /// `target`'s card, placed on `set` in the first free spot, if it
-    /// exists and is not there already.
-    /// A rule set takes no pins: its cards are the rule's.
+    /// exists and is not there already. A rule set takes no pins: its
+    /// cards are the rule's.
     fn place_new(&self, set: &mut WorkingSet, target: PinTarget, columns: u32) {
         if set.rule.is_some()
             || !self.target_in(&target, set.space)
@@ -1253,9 +1274,12 @@ impl AppCore {
                     n => format!("Recent sessions {}", n + 1),
                 }
             });
+        let SetRule::Recent { hours } = rule;
         let mut set = WorkingSet::named(name);
         set.space = self.settings.space;
-        set.rule = Some(rule);
+        set.rule = Some(SetRule::Recent {
+            hours: clamp_hours(hours),
+        });
         let id = set.id;
         self.update_views(out, |v| v.sets.push(set));
         self.show(View::WorkingSet(id), now, out);
@@ -1328,6 +1352,15 @@ impl AppCore {
         members.into_iter().map(|(_, id)| id).collect()
     }
 
+    /// How many cards `set` shows: its pins, or its rule's members.
+    #[must_use]
+    pub fn set_card_count(&self, set: &WorkingSet) -> usize {
+        match set.rule {
+            Some(_) => self.rule_members(set.id).len(),
+            None => set.items.len(),
+        }
+    }
+
     /// A rule set's members as of the last tick; empty for a hand set.
     #[must_use]
     pub fn rule_members(&self, set: SetId) -> &[RecordId] {
@@ -1343,7 +1376,7 @@ impl AppCore {
             return Cow::Borrowed(&set.items);
         }
         let members = self.rule_members(set.id);
-        let (w, h) = grid::default_size(&PinTarget::Session(RecordId::default()), None);
+        let (w, h) = grid::SESSION_CARD;
         let rects = grid::flow(members.len(), w, h, columns);
         Cow::Owned(
             members
@@ -1361,6 +1394,7 @@ impl AppCore {
     /// whatever action removed it (or the load that found it missing),
     /// and cards whose project is no longer in the set's space: a set
     /// shows only its own space.
+    ///
     /// Dismissals go with their record, not its space: a session whose
     /// project moves out and back keeps its dismissal.
     fn prune_working_set(&mut self, out: &mut Out) {

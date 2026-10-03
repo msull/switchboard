@@ -9,10 +9,10 @@ use std::time::SystemTime;
 
 use switchboard_control as wire;
 
-use super::action::{AppAction, Out};
+use super::action::{AppAction, Out, RULE_COLUMNS};
 use super::{
     AppCore, Clock, Effect, GridRect, Launch, PinTarget, PinnedItem, ProjectId, RecordId,
-    SessionKind, SetId, Space, SpaceId, WorkflowDefinition, WorkflowId, WorkingSet, grid,
+    SessionKind, SetId, SetRule, Space, SpaceId, WorkflowDefinition, WorkflowId, WorkingSet, grid,
 };
 use crate::ports::host::Liveness;
 
@@ -494,13 +494,13 @@ impl AppCore {
                 name: s.name.clone(),
                 space: s.space.0.to_string(),
                 items: self
-                    .set_cards(s, crate::core::RULE_COLUMNS)
+                    .set_cards(s, RULE_COLUMNS)
                     .iter()
                     .map(pin_view)
                     .collect(),
                 op: s.op.clone(),
                 rule: s.rule.map(|r| match r {
-                    crate::core::SetRule::Recent { hours } => wire::SetRule::Recent { hours },
+                    SetRule::Recent { hours } => wire::SetRule::Recent { hours },
                 }),
             })
             .collect()

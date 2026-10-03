@@ -2858,10 +2858,7 @@ fn a_running_rule_set_card_is_killed_and_dismissed_from_its_menu() {
     click(&mut harness, "Kill and dismiss");
     assert_eq!(
         actions(&harness),
-        vec![
-            AppAction::KillSession(id),
-            AppAction::DismissFromSet { set, record: id }
-        ]
+        vec![AppAction::KillAndDismiss { set, record: id }]
     );
 }
 

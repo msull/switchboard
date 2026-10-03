@@ -10,7 +10,9 @@ use egui::{
 
 use super::dialogs::AddProjectDraft;
 use super::{DrawCtx, theme};
-use crate::core::{AppAction, AppCore, CardState, ProjectId, RecordId, SideTab, SpaceId, View};
+use crate::core::{
+    AppAction, AppCore, CardState, ProjectId, RecordId, SetRule, SideTab, SpaceId, View,
+};
 
 /// The rail's width when it opens; the user may drag it.
 pub const DEFAULT_WIDTH: f32 = 200.0;
@@ -345,8 +347,12 @@ fn working_set_rows(cx: &mut DrawCtx<'_>, ui: &mut Ui, view: &View, compact: boo
         .core
         .visible_working_sets()
         .map(|s| {
-            let count = cx.core.set_cards(s, cx.state.working_set_columns).len();
-            (s.id, s.name.clone(), count, s.rule.is_some())
+            (
+                s.id,
+                s.name.clone(),
+                cx.core.set_card_count(s),
+                s.rule.is_some(),
+            )
         })
         .collect();
     for (id, name, count, ruled) in &sets {
@@ -397,6 +403,7 @@ fn working_set_rows(cx: &mut DrawCtx<'_>, ui: &mut Ui, view: &View, compact: boo
         });
     }
     let recent = if compact { "+R" } else { "+ Recent sessions" };
+    let SetRule::Recent { hours } = SetRule::DEFAULT;
     if ui
         .add(
             egui::Button::new(
@@ -406,12 +413,14 @@ fn working_set_rows(cx: &mut DrawCtx<'_>, ui: &mut Ui, view: &View, compact: boo
             )
             .frame_when_inactive(false),
         )
-        .on_hover_text("A working set of every session active in the last 24 hours")
+        .on_hover_text(format!(
+            "A working set of every session active in the last {hours} hours"
+        ))
         .clicked()
     {
         cx.dispatch(AppAction::NewRuleSet {
             name: None,
-            rule: crate::core::SetRule::Recent { hours: 24 },
+            rule: SetRule::DEFAULT,
         });
     }
 }

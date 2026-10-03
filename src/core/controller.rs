@@ -6,7 +6,7 @@
 
 use std::time::Duration;
 
-use super::action::{AppCore, Clock, Effect, Out, View};
+use super::action::{AppCore, Clock, Effect, Out, RULE_COLUMNS, View};
 use super::grid;
 use super::model::{PinTarget, RecordId, SessionKind, SetId};
 use crate::ports::controller::{Button, ControllerEvent, Direction};
@@ -391,7 +391,7 @@ impl AppCore {
 
     pub(super) fn activate_card(&mut self, set: SetId, target: PinTarget) {
         if !self.working_set(set).is_some_and(|s| {
-            self.set_cards(s, crate::core::RULE_COLUMNS)
+            self.set_cards(s, RULE_COLUMNS)
                 .iter()
                 .any(|i| i.target == target)
         }) {
@@ -405,7 +405,7 @@ impl AppCore {
     /// while it is still there, else the top-left card.
     #[must_use]
     pub fn active_card(&self, set: SetId) -> Option<PinTarget> {
-        let items = self.set_cards(self.working_set(set)?, crate::core::RULE_COLUMNS);
+        let items = self.set_cards(self.working_set(set)?, RULE_COLUMNS);
         let chosen = self
             .controller
             .active

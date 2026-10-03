@@ -10,6 +10,10 @@ pub const MIN_WIDTH: u32 = 3;
 /// And to this many units tall.
 pub const MIN_HEIGHT: u32 = 2;
 
+/// The one size of a session's card on a working set, and every card's
+/// size on a rule set.
+pub const SESSION_CARD: (u32, u32) = (10, 8);
+
 /// The size a target's card starts at. Today's board cards are 7 units
 /// wide; working-set cards show more and get more room.
 #[must_use]
@@ -17,7 +21,7 @@ pub fn default_size(target: &PinTarget, kind: Option<SessionKind>) -> (u32, u32)
     match (target, kind) {
         (PinTarget::File(..), _) => (10, 10),
         (PinTarget::Session(_), Some(SessionKind::Command | SessionKind::Service)) => (10, 7),
-        (PinTarget::Session(_), _) => (10, 8),
+        (PinTarget::Session(_), _) => SESSION_CARD,
     }
 }
 

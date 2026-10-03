@@ -23,12 +23,13 @@
 //! `close-pop-out <name>` (a session's own window), `files-root
 //! <project> <relative dir|.>` (where the file side's tree starts),
 //! `send <name> <text...>`, `interrupt <name>` (Escape to the pane),
-//! `new-recent-set <hours> [name]` (a rule set of the sessions active
-//! in the last `hours`), `set-hours <set> <hours>`, `dismiss-from-set
-//! <set> <session>`, `return <name>`, `kill <name>`, `approve <name>`, `revoke <name>`
-//! (a defined command's approval), `side files|run|notes` (the side panel's
-//! tab), `switchboard`, `theme light|dark|auto`, `sleep <secs>` (then
-//! polls).
+//! `return <name>`, `kill <name>`, `approve <name>`, `revoke <name>`
+//! (a defined command's approval), `new-recent-set <hours> [name...]`
+//! (a rule set of the sessions active in the last `hours`), `set-hours
+//! <set...> <hours>` and `dismiss-from-set <set...> <session>` (the set
+//! named by every word but the last), `side files|run|notes` (the side
+//! panel's tab), `switchboard`, `theme light|dark|auto`, `sleep <secs>`
+//! (then polls).
 //! Blank lines and `#` comments are ignored; unknown lines are logged.
 
 use std::path::PathBuf;
@@ -36,7 +37,7 @@ use std::path::PathBuf;
 use crate::app::SwitchboardApp;
 use crate::core::{
     AgentKind, AppAction, EnvVar, Launch, PinTarget, ProjectId, RecordId, SecretScope, SessionKind,
-    SetId, SideTab, SpaceId,
+    SetId, SetRule, SideTab, SpaceId,
 };
 use crate::ports::controller::ControllerEvent;
 
@@ -147,16 +148,18 @@ fn rule_set_step(app: &mut SwitchboardApp, w: &[&str]) -> Result<(), String> {
             let name = (!name.is_empty()).then(|| name.join(" "));
             app.dispatch(AppAction::NewRuleSet {
                 name,
-                rule: crate::core::SetRule::Recent { hours },
+                rule: SetRule::Recent { hours },
             });
         }
-        ["set-hours", name, hours] => {
-            let set = working_set(app, name)?;
+        // A set's name may hold spaces ("Recent sessions 2"), so it is
+        // every word between the line's first and last.
+        ["set-hours", name @ .., hours] if !name.is_empty() => {
+            let set = working_set(app, &name.join(" "))?;
             let hours: u32 = hours.parse().map_err(|_| "bad hours")?;
             app.dispatch(AppAction::SetRuleHours { set, hours });
         }
-        ["dismiss-from-set", name, record] => {
-            let set = working_set(app, name)?;
+        ["dismiss-from-set", name @ .., record] if !name.is_empty() => {
+            let set = working_set(app, &name.join(" "))?;
             let record = session(app, record)?;
             app.dispatch(AppAction::DismissFromSet { set, record });
         }

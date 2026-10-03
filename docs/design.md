@@ -1695,7 +1695,8 @@ dismiss" in a running card's menu) stores the session's activity time
 on the set (`WorkingSet.dismissed`), so it stays off while it is quiet
 and comes back by itself the moment it does something. A `SessionEnded`
 event moves a dismissal in force up to the end, so the end a kill sends
-does not bring the card back. Dismissals are pruned when their record
+does not bring the card back; Kill and dismiss is one core action
+(`KillAndDismiss`) that stamps the dismissal and kills the pane. Dismissals are pruned when their record
 is gone, ride along in the undo window of a removal, and are not pruned
 by age, so widening the hours does not bring back what was dismissed.
 
@@ -1708,7 +1709,9 @@ it may hold through `target_in`, so a rule set made while Everywhere is
 active covers every workspace with no code of its own. Clone and Move
 to carry the rule and the dismissals. The control port's `set` replies
 carry `rule`, with `items` the members laid out at 24 columns. Script
-lines: `new-recent-set`, `set-hours`, `dismiss-from-set`.
+lines: `new-recent-set`, `set-hours`, `dismiss-from-set`; the last two
+take a multi-word set name (every word but the last). Hours from any
+sender are clamped to 1 to 720.
 
 Known edges: a pane that redraws forever (`top`, a clock in a prompt)
 cannot stay dismissed past its next redraw; Kill and dismiss is the way

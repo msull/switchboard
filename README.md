@@ -178,7 +178,7 @@ src/core/
   action.rs              AppAction, Effect, Clock, AppCore::dispatch, read model for the UI
   reconcile.rs           StoreLoaded / HostListed: card states, autostart services, spawn specs
   sessions.rs            launch, idempotent return, resume preflight, Codex serialization
-  grid.rs                Working Set placement: default card sizes, first free spot, overlap, minimum size, the card a step away
+  grid.rs                Working Set placement: default card sizes, first free spot, overlap, minimum size, the card a step away, a rule set's flowed layout
   controller.rs          the hand controller's meaning: the selected card per working set, Z's radial menu, the session C holds open
   definitions.rs         .switchboard/project.json entries -> records; hash-keyed approval
   events.rs              hook events -> record activity (matched by record id, ordered by time)
@@ -233,7 +233,7 @@ src/ui/
   cards.rs               the one card for every entry kind, the card grid, pinned document cards
   session.rs             session view: header, embedded terminal or conversation + message box
   switchboard.rs         every session across projects, waiting first
-  working_set.rs         a working set: the user's grid of session and file cards from any project
+  working_set.rs         a working set: the user's grid of session and file cards from any project, or a rule set's cards with its hours field and dismiss controls
   dialogs.rs             add project / create session dialogs, the full-message and links-in-message dialogs
 assets/fonts/            Source Serif 4 (Regular, Semibold, Italic; OFL), embedded by theme.rs
 tests/ui.rs              headless flows via egui_kittest with fakes
