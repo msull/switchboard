@@ -831,8 +831,10 @@ pub struct AppCore {
     /// What Dispatch's port last said, and the console. Transient.
     pub(super) dispatch: super::dispatch::DispatchState,
     /// The members of each rule set, newest first, as of the last
-    /// `Tick`. A cache of the rule: never saved, and worked out again
-    /// on every tick because only a tick brings the clock in.
+    /// action. A cache of the rule, never saved: `dispatch` works it out
+    /// again after every action, so whatever changed the answer (a new
+    /// set, a dismissal, a move to another space, a load, the clock on a
+    /// `Tick`) shows in the same frame.
     pub(super) rule_members: HashMap<SetId, Vec<RecordId>>,
 }
 
@@ -1003,6 +1005,7 @@ impl AppCore {
         }
         self.remember_view(&mut out);
         self.prune_working_set(&mut out);
+        self.refresh_rule_members(now.wall);
         self.finish(out)
     }
 
@@ -1146,7 +1149,6 @@ impl AppCore {
             }
             AppAction::NewRuleSet { name, rule } => {
                 self.new_rule_set(name, rule, now, out);
-                self.rule_tick(now.wall);
             }
             AppAction::SetRuleHours { set, hours } => {
                 let hours = clamp_hours(hours);
@@ -1155,18 +1157,15 @@ impl AppCore {
                         *h = hours;
                     }
                 });
-                self.rule_tick(now.wall);
             }
             AppAction::DismissFromSet { set, record } => {
                 self.dismiss_from_set(set, record, out);
-                self.rule_tick(now.wall);
             }
             AppAction::KillAndDismiss { set, record } => {
                 // The dismissal is stamped before the end arrives;
                 // `carry_dismissals` moves it up to the end when it does.
                 self.dismiss_from_set(set, record, out);
                 self.kill_pane(record, out);
-                self.rule_tick(now.wall);
             }
             _ => unreachable!("routed by `dispatch`"),
         }
@@ -1302,17 +1301,16 @@ impl AppCore {
     }
 
     /// When `id` last did something, for rule sets: the latest of its
-    /// hook events, its launch, and its pane's output while the pane
-    /// runs. A live pane counts through what it prints, not by being
-    /// alive, or an idle shell would never leave a set. `None` for an
-    /// unknown id.
+    /// hook events, its launch, and its pane's last output. A pane counts
+    /// through what it prints, not by being alive, or an idle shell would
+    /// never leave a set. A dead pane counts too: tmux keeps its last
+    /// output time, and without it a service that printed a minute ago
+    /// and then crashed would fall back to its launch and leave the set
+    /// the moment it stops. `None` for an unknown id.
     #[must_use]
     pub fn last_active(&self, id: RecordId) -> Option<SystemTime> {
         let s = self.session(id)?;
-        let output = self.host_status(id).and_then(|h| match h.liveness {
-            Liveness::Running { .. } => h.last_activity,
-            Liveness::Exited { .. } | Liveness::Missing => None,
-        });
+        let output = self.host_status(id).and_then(|h| h.last_activity);
         // `last_seen` already moves with every event; the other two are
         // named so the intent reads here.
         [Some(s.last_seen), s.last_event_at, s.last_stop_at, output]
@@ -1322,7 +1320,7 @@ impl AppCore {
     }
 
     /// Work out every rule set's members again as of `now`.
-    pub(super) fn rule_tick(&mut self, now: SystemTime) {
+    pub(super) fn refresh_rule_members(&mut self, now: SystemTime) {
         let members = self
             .views
             .sets
@@ -1363,7 +1361,7 @@ impl AppCore {
         }
     }
 
-    /// A rule set's members as of the last tick; empty for a hand set.
+    /// A rule set's members as of the last action; empty for a hand set.
     #[must_use]
     pub fn rule_members(&self, set: SetId) -> &[RecordId] {
         self.rule_members.get(&set).map_or(&[], Vec::as_slice)
@@ -1563,7 +1561,6 @@ impl AppCore {
             self.finish_removal(id, project, out);
         }
         self.workflow_tick(now, out);
-        self.rule_tick(now.wall);
     }
 
     fn expire_notices(&mut self, now: Clock) {

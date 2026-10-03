@@ -527,9 +527,11 @@ fn set_card(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord, rule_set:
                 .on_hover_cursor(egui::CursorIcon::PointingHand);
             open = title.clicked();
             title.context_menu(|ui| {
-                if set_menu(cx, ui, &PinTarget::Session(record.id))
-                    | kill_and_dismiss(cx, ui, rule_set, record.id, running)
-                {
+                // Both items are drawn every frame, so neither call may be
+                // skipped when the other was clicked.
+                let set_picked = set_menu(cx, ui, &PinTarget::Session(record.id));
+                let kill_picked = kill_and_dismiss(cx, ui, rule_set, record.id, running);
+                if set_picked || kill_picked {
                     ui.close();
                 }
             });

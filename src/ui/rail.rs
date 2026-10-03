@@ -343,19 +343,12 @@ fn working_set_rows(cx: &mut DrawCtx<'_>, ui: &mut Ui, view: &View, compact: boo
         theme::kicker(ui, "Working sets", p.n600);
         ui.add_space(4.0);
     }
-    let sets: Vec<(crate::core::SetId, String, usize, bool)> = cx
+    let sets: Vec<(crate::core::SetId, String, usize, Option<SetRule>)> = cx
         .core
         .visible_working_sets()
-        .map(|s| {
-            (
-                s.id,
-                s.name.clone(),
-                cx.core.set_card_count(s),
-                s.rule.is_some(),
-            )
-        })
+        .map(|s| (s.id, s.name.clone(), cx.core.set_card_count(s), s.rule))
         .collect();
-    for (id, name, count, ruled) in &sets {
+    for (id, name, count, rule) in &sets {
         let response = row(
             ui,
             &RowSpec {
@@ -369,11 +362,16 @@ fn working_set_rows(cx: &mut DrawCtx<'_>, ui: &mut Ui, view: &View, compact: boo
             },
         );
         // A rule set is marked so it is not taken for one arranged by hand.
-        if *ruled && !compact {
+        if let Some(rule) = rule
+            && !compact
+        {
+            let tag = match rule {
+                SetRule::Recent { .. } => "recent",
+            };
             ui.painter().text(
                 response.rect.right_center() - egui::vec2(8.0, 0.0),
                 Align2::RIGHT_CENTER,
-                "recent",
+                tag,
                 FontId::new(11.0, egui::FontFamily::Proportional),
                 p.n600,
             );

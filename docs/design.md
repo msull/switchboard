@@ -1358,7 +1358,7 @@ of every workspace with its waiting count, then New, Rename, and Delete
 project's board and a working set's header moves it, offered only when
 another workspace exists.
 
-Records: `Views.spaces` lists the workspaces (views.json, v5 today), and
+Records: `Views.spaces` lists the workspaces (views.json, v5 and later), and
 `Project.space` (records v8) and `WorkingSet.space` name each thing's
 workspace, defaulting to the fixed id of the default workspace, so
 files from before workspaces read as members of it with no step. The
@@ -1677,7 +1677,7 @@ the last N hours (default 24, 1 to 720), newest first, laid out by the
 core left to right at one card size (`grid::flow`, 10 by 8). The rule
 is the record (`WorkingSet.rule`, `SetRule::Recent { hours }`, on disk
 `{"kind": "recent", "hours": 24}`); membership is a cache
-(`AppCore::rule_members`) worked out again on every `Tick`, so nothing
+(`AppCore::rule_members`) worked out again after every action, so nothing
 is written per card and a tick never saves. Everything that draws or
 walks a set reads `AppCore::set_cards`: a hand set's pins, or a rule
 set's members laid out. views.json is v6, so an older build leaves a

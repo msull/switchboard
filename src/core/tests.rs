@@ -5719,8 +5719,56 @@ fn moving_a_rule_set_keeps_its_rule() {
     assert_eq!(after.space, b);
     assert_eq!(after.rule, before.rule);
     assert_eq!(after.dismissed, before.dismissed);
-    tick(&mut core, 5_000);
+    // The move itself brings the new space's sessions in, before a tick.
     assert_eq!(members(&core, set), vec![sb]);
+}
+
+#[test]
+fn a_cloned_rule_set_has_members_before_a_tick() {
+    let (mut core, _, ids) = with_records(&[SessionKind::Shell], |_| None);
+    let set = recent_set(&mut core, 24, 1_000);
+    tick(&mut core, 2_000);
+    core.dispatch(
+        AppAction::NewWorkingSet {
+            name: None,
+            clone_of: Some(set),
+            with: None,
+            columns: 24,
+        },
+        Clock::at(3_000),
+    );
+    let clone = core.working_sets().last().unwrap().id;
+    assert_ne!(clone, set);
+    assert_eq!(members(&core, clone), vec![ids[0]]);
+}
+
+#[test]
+fn an_exited_pane_keeps_its_last_output() {
+    let (mut core, _, ids) = with_records(&[SessionKind::Service], |r| Some(running(r.id)));
+    let id = ids[0];
+    let set = recent_set(&mut core, 24, 1_000);
+    let printed_at = 30 * HOUR_MS;
+    core.dispatch(
+        AppAction::HostListed(vec![printed(id, printed_at)]),
+        Clock::at(printed_at),
+    );
+    tick(&mut core, printed_at + 60_000);
+    assert_eq!(members(&core, set), vec![id]);
+    // It crashes a minute later: tmux keeps the time of its last output.
+    let dead = HostStatus {
+        liveness: Liveness::Exited { code: Some(1) },
+        ..printed(id, printed_at)
+    };
+    core.dispatch(
+        AppAction::HostListed(vec![dead]),
+        Clock::at(printed_at + 2 * 60_000),
+    );
+    tick(&mut core, printed_at + 3 * 60_000);
+    assert_eq!(members(&core, set), vec![id]);
+    assert_eq!(core.last_active(id), Some(Clock::at(printed_at).wall));
+    // And leaves once the window has passed since that output.
+    tick(&mut core, printed_at + 25 * HOUR_MS);
+    assert!(members(&core, set).is_empty());
 }
 
 #[test]

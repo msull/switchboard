@@ -6,9 +6,9 @@
 
 use std::time::Duration;
 
-use super::action::{AppCore, Clock, Effect, Out, RULE_COLUMNS, View};
+use super::action::{AppCore, Clock, Effect, Out, View};
 use super::grid;
-use super::model::{PinTarget, RecordId, SessionKind, SetId};
+use super::model::{PinTarget, RecordId, SessionKind, SetId, WorkingSet};
 use crate::ports::controller::{Button, ControllerEvent, Direction};
 
 /// Two presses of C this close together latch listening on, so it
@@ -390,14 +390,10 @@ impl AppCore {
     }
 
     pub(super) fn activate_card(&mut self, set: SetId, target: PinTarget) {
-        let member = self
+        if !self
             .working_set(set)
-            .is_some_and(|s| match (&s.rule, &target) {
-                (None, _) => s.items.iter().any(|i| i.target == target),
-                (Some(_), PinTarget::Session(id)) => self.rule_members(set).contains(id),
-                (Some(_), _) => false,
-            });
-        if !member {
+            .is_some_and(|s| self.shows(s, &target))
+        {
             return;
         }
         self.controller.active.retain(|(s, _)| *s != set);
@@ -408,20 +404,38 @@ impl AppCore {
     /// while it is still there, else the top-left card.
     #[must_use]
     pub fn active_card(&self, set: SetId) -> Option<PinTarget> {
-        let items = self.set_cards(self.working_set(set)?, RULE_COLUMNS);
+        let ws = self.working_set(set)?;
         let chosen = self
             .controller
             .active
             .iter()
             .find(|(s, _)| *s == set)
             .map(|(_, t)| t)
-            .filter(|t| items.iter().any(|i| i.target == **t));
-        match chosen {
-            Some(target) => Some(target.clone()),
-            None => items
+            .filter(|t| self.shows(ws, t));
+        if let Some(target) = chosen {
+            return Some(target.clone());
+        }
+        match ws.rule {
+            // A rule set's first member is its top-left card at any width.
+            Some(_) => self
+                .rule_members(set)
+                .first()
+                .map(|id| PinTarget::Session(*id)),
+            None => ws
+                .items
                 .iter()
                 .min_by_key(|i| (i.rect.y, i.rect.x))
                 .map(|i| i.target.clone()),
+        }
+    }
+
+    /// `target` is one of the cards `set` shows: a pin of a hand set, or
+    /// a member of a rule set.
+    fn shows(&self, set: &WorkingSet, target: &PinTarget) -> bool {
+        match (&set.rule, target) {
+            (None, _) => set.items.iter().any(|i| i.target == *target),
+            (Some(_), PinTarget::Session(id)) => self.rule_members(set.id).contains(id),
+            (Some(_), _) => false,
         }
     }
 

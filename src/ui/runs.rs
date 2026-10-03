@@ -251,9 +251,16 @@ pub fn set_card(
                 .on_hover_cursor(egui::CursorIcon::PointingHand);
             open = title.clicked();
             title.context_menu(|ui| {
-                if super::working_set::set_menu(cx, ui, &crate::core::PinTarget::Session(record.id))
-                    | super::working_set::kill_and_dismiss(cx, ui, rule_set, record.id, running)
-                {
+                // Both items are drawn every frame, so neither call may be
+                // skipped when the other was clicked.
+                let set_picked = super::working_set::set_menu(
+                    cx,
+                    ui,
+                    &crate::core::PinTarget::Session(record.id),
+                );
+                let kill_picked =
+                    super::working_set::kill_and_dismiss(cx, ui, rule_set, record.id, running);
+                if set_picked || kill_picked {
                     ui.close();
                 }
             });
