@@ -5432,6 +5432,16 @@ fn a_reviewer_that_stops_busy_and_writes_later_completes_the_round() {
     assert_eq!(review_attempt(&t).rounds[0].state, RoundState::Reviewing);
     assert!(!env.pending(&id).iter().any(|d| d.name == "rerun"));
     assert!(!env.sb().killed.contains(&style));
+    // Written mid-turn: settled, but no result while it works.
+    let feedback = reviewer(&env.ticket(&id), 1, "style").feedback;
+    std::fs::write(&feedback, "- src/x.rs: draft\n").unwrap();
+    for _ in 0..SETTLE_POLLS + 2 {
+        env.step();
+    }
+    let t = env.ticket(&id);
+    assert_eq!(reviewer(&t, 1, "style").result, None);
+    assert_eq!(review_attempt(&t).rounds[0].state, RoundState::Reviewing);
+    assert!(!env.sb().killed.contains(&style));
     style_says(
         &mut env,
         &id,
@@ -5470,6 +5480,15 @@ fn an_implementer_that_stops_busy_keeps_its_round() {
     }
     let t = env.ticket(&id);
     assert_eq!(review_attempt(&t).rounds[0].state, RoundState::Fixing);
+    assert!(!env.sb().killed.contains(&fixer));
+    // Answered mid-turn: settled, but the round stays open while it works.
+    std::fs::write(&response, "- r1/style-1: fixed\n").unwrap();
+    for _ in 0..SETTLE_POLLS + 2 {
+        env.step();
+    }
+    let t = env.ticket(&id);
+    assert_eq!(review_attempt(&t).rounds[0].state, RoundState::Fixing);
+    assert_eq!(review_attempt(&t).rounds[0].head_after, None);
     assert!(!env.sb().killed.contains(&fixer));
     let tree = t.lanes[0].worktree.clone();
     env.repo

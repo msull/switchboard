@@ -1576,14 +1576,15 @@ parks the ticket until an adapter exists), reads its checks once a
 minute, and completes bound to the tree's head when they are green at
 it, or at once on a merged PR or, with `checks = "none"` on the
 stage, on an open PR at the head; no PR, another head, red checks or
-missing checks past the young-head window is one `pr` decision with `recheck` and `park`, never
-a failed attempt, and a provider that cannot be read is retried
-quietly for an hour first. The PR is recorded on the attempt and
-shown on the ticket page as a link with the last reading. A
-`pr-merged` stage (`merge`) makes the confirmation decision the design
-describes (only `park` can be answered by hand; the session is marked
-waiting), reads the same PR once a minute, and on merged completes
-the attempt and answers the decision as Dispatch. A human gate-only
+missing checks past the young-head window is one `pr` decision with
+`recheck` and `park`, never a failed attempt, and a provider that
+cannot be read is retried quietly for an hour first. The PR is
+recorded on the attempt and shown on the ticket page as a link with
+the last reading. A `pr-merged` stage (`merge`) makes the
+confirmation decision the design describes (only `park` can be
+answered by hand; the session is marked waiting), reads the same PR
+once a minute, and on merged completes the attempt and answers the
+decision as Dispatch. A human gate-only
 stage (`inspect`) asks once per lane with the branch, its head, what
 it adds over its base, the tree and the notes (Bitbucket Cloud is a
 second provider for both PR gates, read through `curl` with the

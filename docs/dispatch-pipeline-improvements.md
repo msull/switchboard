@@ -252,6 +252,7 @@ with a PR, keeps its instruction to fix any claim its rebase changed.
 
 ## Order
 
-9, 4 and 5 are built (#21). 1, 2 and 3 cut the
-round count directly and are small. 11 removes a question with one answer. 6, 8 and 10 are prompt text; 12 is withdrawn. 7 is a taste call for the user before anyone
-builds it.
+9, 4 and 5 are built (#21). 1, 2 and 3 cut the round count directly
+and are small. 11 removes a question with one answer. 6, 8 and 10 are
+prompt text; 12 is withdrawn. 7 is a taste call for the user before
+anyone builds it.

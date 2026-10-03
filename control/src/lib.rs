@@ -20,6 +20,12 @@ pub use client::Client;
 /// The socket's file name inside Switchboard's data directory.
 pub const SOCKET_FILE: &str = "control.sock";
 
+/// `SessionView::card` for an agent at work. The app's card label reads
+/// this, so a client matching on it cannot drift from the app.
+pub const CARD_WORKING: &str = "working";
+/// `SessionView::card` for an agent alive at its prompt, nothing pending.
+pub const CARD_IDLE: &str = "idle";
+
 /// One request line. `body` is flattened beside `op`, so a line reads
 /// `{"op":"...","kind":"session.new",...}`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -362,7 +368,7 @@ pub struct SessionView {
     pub cwd: PathBuf,
     pub notes: String,
     pub liveness: Liveness,
-    /// The card's word: "working", "idle", "waiting on you", ...
+    /// The card's word: `CARD_WORKING`, `CARD_IDLE`, "waiting on you", ...
     pub card: String,
     pub last_exit: Option<i32>,
     /// When the agent last reported that it finished a turn (Claude

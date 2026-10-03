@@ -1260,9 +1260,9 @@ impl Runner {
         if Self::withdraw_open_decisions(t) {
             self.save_ticket(t, now_ms)?;
         }
-        // The session stops reading as waiting, and parking is not done
-        // until Switchboard has said so.
-        let unmarked = self.unmark_for_parking(t, ps, now_ms)?;
+        // Every marked session stops reading as waiting, and parking is
+        // not done until Switchboard has said so for each.
+        let unmarked = self.clear_marks(t, ps, now_ms)?;
         let open: Vec<Attempt> = t.attempts.iter().filter(|a| a.is_open()).cloned().collect();
         let mut settled = true;
         for a in open {
@@ -1599,6 +1599,7 @@ impl Runner {
     /// creation can fail an attempt and ask a new question, which a
     /// parking ticket must not do. The rest wait for `step`'s recovery
     /// or startup's.
+    ///
     /// One recorded without its body cannot be sent again or say which
     /// session it marked, so it is left alone rather than waited on.
     fn clear_marks(&mut self, t: &mut Ticket, ps: &mut ProjectState, now_ms: u64) -> Result<bool> {
@@ -1628,17 +1629,6 @@ impl Runner {
             self.unmark_session(t, ps, session, now_ms)?;
         }
         Ok(still_marked(t).is_empty())
-    }
-
-    /// Every mark cleared before the ticket reads as parked; true once
-    /// all are confirmed off (`clear_marks`).
-    fn unmark_for_parking(
-        &mut self,
-        t: &mut Ticket,
-        ps: &mut ProjectState,
-        now_ms: u64,
-    ) -> Result<bool> {
-        self.clear_marks(t, ps, now_ms)
     }
 
     /// Every answer not yet acted on.
@@ -4651,10 +4641,6 @@ impl Runner {
 /// Switchboard's reply to a session query for a record it does not
 /// have; the one failure that means the session is gone.
 pub(crate) const NO_SUCH_SESSION: &str = "no such session";
-/// The card word for an agent at work (`CardState::Working`'s label).
-pub(crate) const BUSY_CARD: &str = "working";
-/// The card word for an agent at its prompt (`CardState::Idle`'s label).
-pub(crate) const IDLE_CARD: &str = "idle";
 /// Switchboard's reply to a `workflow` query for a run it does not have;
 /// the one failure that means the run is gone.
 pub(crate) const NO_SUCH_RUN: &str = "no such run";
@@ -4662,13 +4648,17 @@ pub(crate) const NO_SUCH_RUN: &str = "no such run";
 /// A running pane whose card says the agent is at work: after a Stop,
 /// a turn ended but the work did not (background agents, a tool).
 pub(crate) fn busy(view: &wire::SessionView) -> bool {
-    view.liveness == wire::Liveness::Running && view.card == BUSY_CARD
+    view.liveness == wire::Liveness::Running && view.card == wire::CARD_WORKING
 }
 
 /// The idle count after one more poll with an artifact missing: only a
 /// card at the prompt counts towards giving up, any other starts again.
 pub(crate) fn idle_polls(view: &wire::SessionView, polls: u32) -> u32 {
-    if view.card == IDLE_CARD { polls + 1 } else { 0 }
+    if view.card == wire::CARD_IDLE {
+        polls + 1
+    } else {
+        0
+    }
 }
 
 /// An open attempt with an agent or a review run in it: what the

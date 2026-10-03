@@ -264,9 +264,8 @@ pub struct ReviewRound {
     pub head_after: Option<String>,
     #[serde(default)]
     pub stop_at_ms: Option<u64>,
-    /// Polls in a row the stopped agent has sat idle at its prompt with an
-    /// artifact still missing; any other card starts the count again. At
-    /// `STOP_IDLE_POLLS` the attempt failed.
+    /// Counted as `Attempt::polls_since_stop` is, for the implementer
+    /// and its response: at `STOP_IDLE_POLLS` the round failed.
     #[serde(default)]
     pub polls_since_stop: u32,
     #[serde(default)]
@@ -316,9 +315,8 @@ pub struct ReviewerRun {
     pub launched: bool,
     #[serde(default)]
     pub stop_at_ms: Option<u64>,
-    /// Polls in a row the stopped agent has sat idle at its prompt with an
-    /// artifact still missing; any other card starts the count again. At
-    /// `STOP_IDLE_POLLS` the attempt failed.
+    /// Counted as `Attempt::polls_since_stop` is, for this reviewer and
+    /// its feedback: at `STOP_IDLE_POLLS` the reviewer failed.
     #[serde(default)]
     pub polls_since_stop: u32,
     #[serde(default)]

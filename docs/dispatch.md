@@ -264,11 +264,11 @@ interrupted attempt.
   for a Codex session Switchboard shows a quiet pane as idle after
   twenty seconds, which can be an agent thinking. For Claude Code,
   `idle` follows a Stop, and only after one does it count toward the
-  grace. A settled file with a running session waits; after that
-  grace, a stop with no file, a nonzero exit, or a session gone with
-  no recorded stop is a failed attempt. Recovery
-  applies the same rule: a missing session is finished only if the
-  stop and the settle were recorded before the crash.
+  grace. A settled file with a running session waits. A stop with no
+  file fails only after that grace; a nonzero exit, or a session gone
+  with no recorded stop, fails the attempt at once. Recovery applies
+  the same rule: a missing session is finished only if the stop and
+  the settle were recorded before the crash.
 - **Stalls.** Switchboard's stall notice is for workflow runs only.
   For agent attempts the port's `session` query reports how long the
   pane has been quiet, and Dispatch raises a decision at its own
@@ -1009,15 +1009,16 @@ was fixed); any other movement parks the ticket with both heads named.
 Every reviewer starts. A Claude reviewer is complete on its Stop with
 its feedback file settled, and is held like any agent while its card
 still reads `working` after the Stop: it fails for a missing file only
-after the same idle grace, so a sibling is never killed early; Codex on the file present and settled (it
-reports no Stop; gone or exited without the file is a failure); a
-command on exit: 0 is nothing to report (its output is diagnostic),
-1 with output is findings, 1 with nothing on stdout or any other exit
-is a failure. A finished agent's session is killed. A failed reviewer
-fails the round into the ordinary `rerun` question, its siblings
-retired first. When every reviewer is done and the tree is still clean
-at the recorded head, the findings are gathered into `feedback.md`
-under the round: one `- <id> (<reviewer>): <text>` line per point,
+after the same idle grace, so a sibling is never killed early; Codex
+on the file present and settled (it reports no Stop; gone or exited
+without the file is a failure); a command on exit: 0 is nothing to
+report (its output is diagnostic), 1 with output is findings, 1 with
+nothing on stdout or any other exit is a failure. A finished agent's
+session is killed. A failed reviewer fails the round into the ordinary
+`rerun` question, its siblings retired first. When every reviewer is
+done and the tree is still clean at the recorded head, the findings
+are gathered into `feedback.md` under the round: one
+`- <id> (<reviewer>): <text>` line per point,
 ids `r<round>/<reviewer>-<n>`, then the points earlier rounds left
 open that no reviewer withdrew. A reviewer's file that is exactly the
 sentinel (`No findings.`, or the stage's `no_feedback`) contributes
@@ -1136,11 +1137,12 @@ pending (wait), green at the head (pass), red at the head (a decision
 with the failed check named), no PR or no checks configured (a
 decision; a `none` reading within two minutes of the head's last move,
 `PR_YOUNG_HEAD_MS`, is pending instead, since GitHub creates a pushed
-head's check runs a little after the push), and any lookup error (retry with backoff, a decision after
-an hour). Green at an older head is not green: a moved head voids it
-along with every other result made against the old head set, as
-described under "Stage semantics". `pr-merged` reads the same PR and
-resolves the pending merge decision; it never merges.
+head's check runs a little after the push), and any lookup error
+(retry with backoff, a decision after an hour). Green at an older head
+is not green: a moved head voids it along with every other result made
+against the old head set, as described under "Stage semantics".
+`pr-merged` reads the same PR and resolves the pending merge decision;
+it never merges.
 
 The provider is read from the lane's remote (the lane's `repo`, else
 the project's, else the tree's own `origin` for a project named by

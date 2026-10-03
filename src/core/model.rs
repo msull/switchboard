@@ -1219,9 +1219,9 @@ impl CardState {
             Self::NotRunning => "not running".into(),
             Self::NotResumable => "not resumable".into(),
             Self::Starting => "starting".into(),
-            Self::Working => "working".into(),
+            Self::Working => switchboard_control::CARD_WORKING.into(),
             Self::WaitingOnYou => "waiting on you".into(),
-            Self::Idle => "idle".into(),
+            Self::Idle => switchboard_control::CARD_IDLE.into(),
             Self::Exited(Some(c)) => format!("exited ({c})"),
             Self::Exited(None) => "exited".into(),
         }
