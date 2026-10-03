@@ -43,6 +43,15 @@ pub trait Repo: Send {
     /// `git rebase <onto>` at `dir`; `false` when it stopped on a
     /// conflict, in which case it is aborted and the tree is as it was.
     fn rebase_onto(&mut self, dir: &Path, onto: &str) -> Result<bool>;
+    /// `git push --force-with-lease` of `branch` to `remote` from `dir`,
+    /// replacing the remote branch only while it is at `expected`.
+    fn push_with_lease(
+        &mut self,
+        dir: &Path,
+        remote: &str,
+        branch: &str,
+        expected: &str,
+    ) -> Result<Push>;
     /// Bytes free on the volume holding `dir`, for the preflight that
     /// keeps a full disk from failing an attempt.
     fn free_bytes(&self, dir: &Path) -> Result<u64>;
@@ -101,6 +110,19 @@ pub trait Repo: Send {
     /// Kill a running check or reviewer and its descendants, if this
     /// runner started it.
     fn kill_check(&mut self, key: &str);
+}
+
+/// What a leased push did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Push {
+    /// The remote branch moved to the local head.
+    Pushed,
+    /// The remote branch was already at the local head; git wrote
+    /// nothing and did not check the lease.
+    UpToDate,
+    /// The lease refused it: the remote branch is not at `expected`, or
+    /// does not exist.
+    Refused,
 }
 
 /// The `git` on the PATH, and the checks this runner has started.
@@ -282,6 +304,46 @@ impl Repo for GitCli {
         }
         let _ = git_in(dir).args(["rebase", "--abort"]).status();
         Ok(false)
+    }
+
+    fn push_with_lease(
+        &mut self,
+        dir: &Path,
+        remote: &str,
+        branch: &str,
+        expected: &str,
+    ) -> Result<Push> {
+        let refname = format!("refs/heads/{branch}");
+        let mut cmd = git_in(dir);
+        cmd.args(["push", "--porcelain"])
+            .arg(format!("--force-with-lease={refname}:{expected}"))
+            .arg(remote)
+            .arg(format!("{refname}:{refname}"));
+        let out = cmd.output().with_context(|| format!("run {cmd:?}"))?;
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        // Porcelain lines are `<flag>\t<from>:<to>\t<summary>`; the flag
+        // says what happened to the ref whatever the exit status.
+        let spec = format!("{refname}:{refname}");
+        let line = stdout.lines().find_map(|l| {
+            let mut parts = l.splitn(3, '\t');
+            let flag = parts.next()?;
+            (parts.next()? == spec)
+                .then(|| (flag.to_owned(), parts.next().unwrap_or("").to_owned()))
+        });
+        match line {
+            Some((flag, _)) if out.status.success() && flag == "=" => Ok(Push::UpToDate),
+            Some((flag, _)) if out.status.success() && matches!(flag.as_str(), "+" | " " | "*") => {
+                Ok(Push::Pushed)
+            }
+            Some((flag, summary)) if flag == "!" && summary.contains("(stale info)") => {
+                Ok(Push::Refused)
+            }
+            _ => bail!(
+                "{cmd:?} exited {}: {}",
+                out.status,
+                String::from_utf8_lossy(&out.stderr).trim()
+            ),
+        }
     }
 
     fn free_bytes(&self, dir: &Path) -> Result<u64> {
@@ -600,6 +662,13 @@ pub struct FakeRepo {
     pub rebase_conflicts: Vec<PathBuf>,
     /// Rebases done: dir, onto.
     pub rebased: Vec<(PathBuf, String)>,
+    /// The head a successful rebase leaves in a tree; a tree not listed
+    /// keeps its head.
+    pub rebase_heads: std::collections::BTreeMap<PathBuf, String>,
+    /// Leased pushes, refused or not: dir, remote, branch, expected.
+    pub pushed: Vec<(PathBuf, String, String, String)>,
+    /// Trees whose leased push is refused; any other is pushed.
+    pub lease_stale: Vec<PathBuf>,
     /// What `changes` reports for a directory, as a test wrote it; a
     /// directory in `dirty` reports `.` besides.
     pub changes: std::collections::BTreeMap<PathBuf, Vec<PathBuf>>,
@@ -694,7 +763,28 @@ impl Repo for FakeRepo {
             return Ok(false);
         }
         self.behind.remove(dir);
+        if let Some(head) = self.rebase_heads.get(dir) {
+            self.heads.insert(dir.to_path_buf(), head.clone());
+        }
         Ok(true)
+    }
+    fn push_with_lease(
+        &mut self,
+        dir: &Path,
+        remote: &str,
+        branch: &str,
+        expected: &str,
+    ) -> Result<Push> {
+        self.pushed.push((
+            dir.to_path_buf(),
+            remote.to_owned(),
+            branch.to_owned(),
+            expected.to_owned(),
+        ));
+        if self.lease_stale.iter().any(|d| d == dir) {
+            return Ok(Push::Refused);
+        }
+        Ok(Push::Pushed)
     }
     fn worktree_move(&mut self, repo: &Path, from: &Path, to: &Path) -> Result<()> {
         if let Some(parent) = to.parent() {
@@ -873,6 +963,17 @@ impl Repo for std::sync::Arc<std::sync::Mutex<FakeRepo>> {
     }
     fn rebase_onto(&mut self, dir: &Path, onto: &str) -> Result<bool> {
         self.lock().unwrap().rebase_onto(dir, onto)
+    }
+    fn push_with_lease(
+        &mut self,
+        dir: &Path,
+        remote: &str,
+        branch: &str,
+        expected: &str,
+    ) -> Result<Push> {
+        self.lock()
+            .unwrap()
+            .push_with_lease(dir, remote, branch, expected)
     }
     fn free_bytes(&self, dir: &Path) -> Result<u64> {
         self.lock().unwrap().free_bytes(dir)
@@ -1066,6 +1167,74 @@ mod tests {
         let mut cli = GitCli::default();
         cli.ensure_clone(origin.to_str().unwrap(), &clone).unwrap();
         clone
+    }
+
+    #[test]
+    fn the_real_git_pushes_with_a_lease_and_is_refused_when_the_remote_moved() {
+        let dir = tempfile::tempdir().unwrap();
+        let clone = origin_and_clone(dir.path(), "p");
+        let origin = dir.path().join("p-origin");
+        let mut cli = GitCli::default();
+        let origin_f = || {
+            sh(&origin, &["rev-parse", "refs/heads/f"])
+                .trim()
+                .to_owned()
+        };
+        sh(&clone, &["checkout", "-q", "-b", "f"]);
+        sh(&clone, &["commit", "-q", "--allow-empty", "-m", "one"]);
+        sh(&clone, &["push", "-q", "origin", "f"]);
+        let old = sh(&clone, &["rev-parse", "HEAD"]).trim().to_owned();
+
+        sh(
+            &clone,
+            &["commit", "-q", "--amend", "--allow-empty", "-m", "two"],
+        );
+        let two = sh(&clone, &["rev-parse", "HEAD"]).trim().to_owned();
+        let push = cli.push_with_lease(&clone, "origin", "f", &old).unwrap();
+        assert_eq!(push, Push::Pushed);
+        assert_eq!(origin_f(), two);
+
+        // Already there: git reports it up to date without checking the
+        // lease, and writes nothing.
+        let push = cli.push_with_lease(&clone, "origin", "f", &old).unwrap();
+        assert_eq!(push, Push::UpToDate);
+        assert_eq!(origin_f(), two);
+
+        // Someone else moves the branch; the lease on what we last saw
+        // refuses to overwrite it.
+        let tree = sh(&origin, &["rev-parse", "refs/heads/f^{tree}"]);
+        let theirs = sh(
+            &origin,
+            &[
+                "commit-tree",
+                "-p",
+                "refs/heads/f",
+                "-m",
+                "theirs",
+                tree.trim(),
+            ],
+        )
+        .trim()
+        .to_owned();
+        sh(&origin, &["update-ref", "refs/heads/f", &theirs]);
+        sh(
+            &clone,
+            &["commit", "-q", "--amend", "--allow-empty", "-m", "three"],
+        );
+        let push = cli.push_with_lease(&clone, "origin", "f", &two).unwrap();
+        assert_eq!(push, Push::Refused);
+        assert_eq!(origin_f(), theirs);
+
+        // A branch the remote does not have is refused too.
+        sh(&clone, &["branch", "g"]);
+        let push = cli.push_with_lease(&clone, "origin", "g", &old).unwrap();
+        assert_eq!(push, Push::Refused);
+        let status = git_in(&origin)
+            .args(["rev-parse", "--verify", "-q", "refs/heads/g"])
+            .output()
+            .unwrap()
+            .status;
+        assert!(!status.success());
     }
 
     #[test]
