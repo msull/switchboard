@@ -1,5 +1,6 @@
-//! Git, for the lanes: a worktree per ticket, the head of a tree, whether
-//! it is clean. Fixed argv only; nothing from a ticket is spliced into a
+//! Git, for the lanes: Dispatch's clones and their fetches, a worktree
+//! per ticket, branch heads and merge bases, rebases and pushes, whether
+//! a tree is clean. Fixed argv only; nothing from a ticket is spliced into a
 //! command line.
 
 use std::os::unix::process::CommandExt as _;
@@ -120,6 +121,13 @@ fn git() -> Command {
     cmd
 }
 
+/// `git -C <dir>`, as `git` makes it.
+fn git_in(dir: impl AsRef<std::ffi::OsStr>) -> Command {
+    let mut cmd = git();
+    cmd.arg("-C").arg(dir);
+    cmd
+}
+
 fn output(cmd: &mut Command) -> Result<String> {
     let out = cmd.output().with_context(|| format!("run {cmd:?}"))?;
     if !out.status.success() {
@@ -145,19 +153,12 @@ impl Repo for GitCli {
     }
 
     fn fetch(&mut self, dir: &Path, remote: &str) -> Result<()> {
-        output(
-            git()
-                .arg("-C")
-                .arg(dir)
-                .args(["fetch", "--quiet", "--prune", remote]),
-        )?;
+        output(git_in(dir).args(["fetch", "--quiet", "--prune", remote]))?;
         Ok(())
     }
 
     fn ensure_remote(&mut self, dir: &Path, remote: &str, url: &str) -> Result<()> {
-        let known = git()
-            .arg("-C")
-            .arg(dir)
+        let known = git_in(dir)
             .args(["remote", "get-url", remote])
             .output()
             .with_context(|| format!("git in {}", dir.display()))?;
@@ -166,12 +167,12 @@ impl Repo for GitCli {
         } else {
             "add"
         };
-        output(git().arg("-C").arg(dir).args(["remote", verb, remote, url]))?;
+        output(git_in(dir).args(["remote", verb, remote, url]))?;
         Ok(())
     }
 
     fn fetch_pull(&mut self, dir: &Path, remote: &str, number: u64) -> Result<()> {
-        output(git().arg("-C").arg(dir).args([
+        output(git_in(dir).args([
             "fetch",
             "--quiet",
             remote,
@@ -185,9 +186,7 @@ impl Repo for GitCli {
             std::fs::create_dir_all(parent)?;
         }
         output(
-            git()
-                .arg("-C")
-                .arg(repo)
+            git_in(repo)
                 .args(["worktree", "add"])
                 .arg(dir)
                 .args(["-b", branch, start]),
@@ -205,40 +204,27 @@ impl Repo for GitCli {
         if let Some(parent) = dir.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        output(
-            git()
-                .arg("-C")
-                .arg(repo)
-                .args(["worktree", "add"])
-                .arg(dir)
-                .args(["--track", "-B", branch, &format!("{remote}/{branch}")]),
-        )?;
+        output(git_in(repo).args(["worktree", "add"]).arg(dir).args([
+            "--track",
+            "-B",
+            branch,
+            &format!("{remote}/{branch}"),
+        ]))?;
         Ok(())
     }
 
     fn rev_parse(&self, dir: &Path, rev: &str) -> Result<String> {
-        Ok(output(
-            git()
-                .arg("-C")
-                .arg(dir)
-                .args(["rev-parse", "--verify", rev]),
-        )?
-        .trim()
-        .to_owned())
+        output(git_in(dir).args(["rev-parse", "--verify", rev]))
     }
 
     fn merge_base(&self, dir: &Path, a: &str, b: &str) -> Result<String> {
-        Ok(output(git().arg("-C").arg(dir).args(["merge-base", a, b]))?
-            .trim()
-            .to_owned())
+        output(git_in(dir).args(["merge-base", a, b]))
     }
 
     fn is_worktree_of(&self, repo: &Path, dir: &Path, branch: &str) -> Result<bool> {
         // `rev-parse` answers relative to the directory git was given.
         let show = |where_: &Path, what: &str| -> Result<Option<PathBuf>> {
-            let out = git()
-                .arg("-C")
-                .arg(where_)
+            let out = git_in(where_)
                 .args(["rev-parse", what])
                 .output()
                 .with_context(|| format!("git in {}", where_.display()))?;
@@ -258,30 +244,21 @@ impl Repo for GitCli {
         if common != repo_common || top != dir.canonicalize()? {
             return Ok(false);
         }
-        let head = output(
-            git()
-                .arg("-C")
-                .arg(dir)
-                .args(["rev-parse", "--abbrev-ref", "HEAD"]),
-        )?;
+        let head = output(git_in(dir).args(["rev-parse", "--abbrev-ref", "HEAD"]))?;
         Ok(head == branch)
     }
 
     fn head(&self, dir: &Path) -> Result<String> {
-        output(git().arg("-C").arg(dir).args(["rev-parse", "HEAD"]))
+        output(git_in(dir).args(["rev-parse", "HEAD"]))
     }
 
     fn is_clean(&self, dir: &Path) -> Result<bool> {
-        let status = output(git().arg("-C").arg(dir).args(["status", "--porcelain"]))?;
+        let status = output(git_in(dir).args(["status", "--porcelain"]))?;
         Ok(status.is_empty())
     }
 
     fn behind(&self, dir: &Path, onto: &str) -> Result<u64> {
-        let out = output(git().arg("-C").arg(dir).args([
-            "rev-list",
-            "--count",
-            &format!("HEAD..{onto}"),
-        ]))?;
+        let out = output(git_in(dir).args(["rev-list", "--count", &format!("HEAD..{onto}")]))?;
         out.trim()
             .parse()
             .with_context(|| format!("rev-list printed {out:?}"))
@@ -290,19 +267,11 @@ impl Repo for GitCli {
     fn rebase_onto(&mut self, dir: &Path, onto: &str) -> Result<bool> {
         // A rebase someone else began is theirs: starting another would
         // fail, and aborting on that failure would throw their work away.
-        let in_progress =
-            output(
-                git()
-                    .arg("-C")
-                    .arg(dir)
-                    .args(["rev-parse", "--git-path", "rebase-merge"]),
-            )?;
+        let in_progress = output(git_in(dir).args(["rev-parse", "--git-path", "rebase-merge"]))?;
         if Path::new(in_progress.trim()).exists() {
             bail!("a rebase is already in progress at {}", dir.display());
         }
-        let status = git()
-            .arg("-C")
-            .arg(dir)
+        let status = git_in(dir)
             .args(["rebase", onto])
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
@@ -311,11 +280,7 @@ impl Repo for GitCli {
         if status.success() {
             return Ok(true);
         }
-        let _ = git()
-            .arg("-C")
-            .arg(dir)
-            .args(["rebase", "--abort"])
-            .status();
+        let _ = git_in(dir).args(["rebase", "--abort"]).status();
         Ok(false)
     }
 
@@ -336,21 +301,12 @@ impl Repo for GitCli {
         if let Some(parent) = to.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        output(
-            git()
-                .arg("-C")
-                .arg(repo)
-                .args(["worktree", "move"])
-                .arg(from)
-                .arg(to),
-        )?;
+        output(git_in(repo).args(["worktree", "move"]).arg(from).arg(to))?;
         Ok(())
     }
 
     fn remote_url(&self, dir: &Path) -> Result<Option<String>> {
-        let out = git()
-            .arg("-C")
-            .arg(dir)
+        let out = git_in(dir)
             .args(["remote", "get-url", "origin"])
             .output()
             .context("run git")?;
@@ -363,25 +319,13 @@ impl Repo for GitCli {
 
     fn summary(&self, dir: &Path, base: &str) -> Result<String> {
         let range = format!("{base}..HEAD");
-        let log =
-            output(
-                git()
-                    .arg("-C")
-                    .arg(dir)
-                    .args(["log", "--oneline", "--no-decorate", &range]),
-            )?;
-        let stat = output(git().arg("-C").arg(dir).args(["diff", "--stat", &range]))?;
+        let log = output(git_in(dir).args(["log", "--oneline", "--no-decorate", &range]))?;
+        let stat = output(git_in(dir).args(["diff", "--stat", &range]))?;
         Ok(format!("{log}\n{stat}").trim().to_owned())
     }
 
     fn worktree_repair(&mut self, repo: &Path, dir: &Path) -> Result<()> {
-        output(
-            git()
-                .arg("-C")
-                .arg(repo)
-                .args(["worktree", "repair"])
-                .arg(dir),
-        )?;
+        output(git_in(repo).args(["worktree", "repair"]).arg(dir))?;
         Ok(())
     }
 
@@ -391,9 +335,7 @@ impl Repo for GitCli {
         // missing path's symlinks to match its record, so the deepest
         // part that exists is resolved here.
         let dir = resolved(dir);
-        let out = git()
-            .arg("-C")
-            .arg(repo)
+        let out = git_in(repo)
             .args(["worktree", "remove"])
             .arg(&dir)
             .output()
@@ -411,10 +353,8 @@ impl Repo for GitCli {
     fn changes(&self, dir: &Path) -> Result<Vec<PathBuf>> {
         // Not `output`: it trims, and a record's status column may
         // begin with a space.
-        let mut cmd = git();
-        cmd.arg("-C")
-            .arg(dir)
-            .args(["status", "--porcelain=v1", "-z", "--untracked-files=all"]);
+        let mut cmd = git_in(dir);
+        cmd.args(["status", "--porcelain=v1", "-z", "--untracked-files=all"]);
         let out = cmd.output().with_context(|| format!("run {cmd:?}"))?;
         if !out.status.success() {
             bail!(
@@ -969,7 +909,7 @@ mod tests {
         let og = |args: &[&str]| {
             // `git()`, not a bare `Command`: run from a hook, the hook's
             // `GIT_DIR` would point these at the repository being committed.
-            let out = git().arg("-C").arg(&origin).args(args).output().unwrap();
+            let out = git_in(&origin).args(args).output().unwrap();
             assert!(
                 out.status.success(),
                 "{args:?}: {}",
@@ -1013,13 +953,7 @@ mod tests {
         let other = dir.path().join("other");
         std::fs::create_dir_all(&other).unwrap();
         let other_git = |args: &[&str]| {
-            let ok = git()
-                .arg("-C")
-                .arg(&other)
-                .args(args)
-                .status()
-                .unwrap()
-                .success();
+            let ok = git_in(&other).args(args).status().unwrap().success();
             assert!(ok, "{args:?}");
         };
         other_git(&["init", "-q", "-b", "dispatch/1-x"]);
@@ -1049,9 +983,7 @@ mod tests {
     /// `GIT_INDEX_FILE` set, works on the test's repository and never
     /// on the one being committed to.
     fn sh(dir: &Path, args: &[&str]) -> String {
-        let out = git()
-            .arg("-C")
-            .arg(dir)
+        let out = git_in(dir)
             .args(["-c", "user.name=t", "-c", "user.email=t@t"])
             .args(args)
             .output()

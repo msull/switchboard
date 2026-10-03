@@ -10,8 +10,10 @@
 //! - `store`: the data directory, atomic writes, the writer lock.
 //! - `port`, `git`, `github`, `bitbucket`: the outside world behind
 //!   traits with fakes.
+//! - `template`: prompt fields filled from a map; pure.
 //! - `scheduler`: one step of one ticket; decides from a probe of the
 //!   world, then acts through the traits.
+//! - `review`: the code review stage's rounds, stepped by the scheduler.
 //! - `recover`: the ledger reconciled against Switchboard at start.
 //! - `view`: the queue's working set, redrawn whole.
 //! - `serve`: Dispatch's own port, tickets as views and the commands.

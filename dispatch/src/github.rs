@@ -13,7 +13,8 @@ pub trait Issues: Send {
     fn fetch(&self, repo: &str, number: u64, now_ms: u64) -> Result<SourceSnapshot>;
 }
 
-/// `gh issue view <n> --repo <repo> --json ...`.
+/// The `gh` CLI: `gh issue view` for issues, `gh pr` for pull requests
+/// and their checks.
 #[derive(Debug, Default)]
 pub struct Gh;
 

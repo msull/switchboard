@@ -232,7 +232,8 @@ pub struct Attempt {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReviewRound {
     pub n: u32,
-    /// The commit the branch was cut from, never resolved again.
+    /// The lane's base when the round began: the commit the branch was
+    /// cut from, or the base a refresh moved it onto since.
     pub base: String,
     /// The branch's head every reviewer read.
     pub head: String,
@@ -448,8 +449,9 @@ pub struct Operation {
     /// The attempt it belongs to, as `(stage, n)`, if any.
     pub attempt: Option<(String, u32)>,
     /// What the request was for (`session`, `run`, `root-project`,
-    /// `lane-project:<lane>`, `space`, `set`, ...), which is how its
-    /// reply's records are applied, now or in recovery.
+    /// `space`, `set`, ...), which is how its reply's records are
+    /// applied, now or in recovery. `lane-project:<lane>` is no longer
+    /// sent but is still applied from older ledgers.
     #[serde(default)]
     pub intent: String,
     pub sent_ms: u64,

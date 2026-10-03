@@ -242,7 +242,7 @@ struct StatusRow {
 /// The PR for a branch from a `pullrequests` page: an open one first,
 /// else the newest of the rest. Bitbucket reports the source commit as
 /// a short hash.
-pub(crate) fn parse_prs(json: &[u8]) -> Result<Option<PullRequest>> {
+fn parse_prs(json: &[u8]) -> Result<Option<PullRequest>> {
     let page: Page<PrRow> = serde_json::from_slice(json).context("parse bitbucket's json")?;
     let row = page
         .values
@@ -253,13 +253,13 @@ pub(crate) fn parse_prs(json: &[u8]) -> Result<Option<PullRequest>> {
 }
 
 /// One pull request as its own page gives it.
-pub(crate) fn parse_pr(json: &[u8]) -> Result<PullRequest> {
+fn parse_pr(json: &[u8]) -> Result<PullRequest> {
     let row: PrRow = serde_json::from_slice(json).context("parse bitbucket's json")?;
     Ok(row.pull_request())
 }
 
 /// The commit statuses on a PR's head, taken together.
-pub(crate) fn parse_statuses(json: &[u8]) -> Result<Checks> {
+fn parse_statuses(json: &[u8]) -> Result<Checks> {
     let page: Page<StatusRow> = serde_json::from_slice(json).context("parse bitbucket's json")?;
     if page.values.is_empty() {
         return Ok(Checks::None);

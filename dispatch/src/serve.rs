@@ -369,10 +369,23 @@ pub fn status(runner: &Runner) -> Result<Status> {
     })
 }
 
+/// An attempt's state as a word, and the reason a failed or cancelled
+/// one gave.
+#[must_use]
+pub fn attempt_state(state: &AttemptState) -> (&'static str, Option<String>) {
+    match state {
+        AttemptState::Starting => ("starting", None),
+        AttemptState::Running => ("running", None),
+        AttemptState::Complete => ("complete", None),
+        AttemptState::Failed { reason } => ("failed", Some(reason.clone())),
+        AttemptState::Cancelled { reason } => ("cancelled", Some(reason.clone())),
+    }
+}
+
 /// A ticket as a reader sees it, with what its frozen pipeline copy
 /// says (stage names, the paths a close removes) when it can be read.
 #[must_use]
-pub fn ticket_view(t: &Ticket, p: Option<&Pipeline>) -> TicketView {
+fn ticket_view(t: &Ticket, p: Option<&Pipeline>) -> TicketView {
     let (state, reason) = match &t.state {
         TicketState::Active => ("active", None),
         TicketState::Parking { reason } => ("parking", Some(reason.clone())),
@@ -417,13 +430,7 @@ pub fn ticket_view(t: &Ticket, p: Option<&Pipeline>) -> TicketView {
             .attempts
             .iter()
             .map(|a| {
-                let (state, reason) = match &a.state {
-                    AttemptState::Starting => ("starting", None),
-                    AttemptState::Running => ("running", None),
-                    AttemptState::Complete => ("complete", None),
-                    AttemptState::Failed { reason } => ("failed", Some(reason.clone())),
-                    AttemptState::Cancelled { reason } => ("cancelled", Some(reason.clone())),
-                };
+                let (state, reason) = attempt_state(&a.state);
                 AttemptView {
                     stage: a.stage.clone(),
                     n: a.n,

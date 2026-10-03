@@ -1,7 +1,8 @@
 //! The pipeline file: one TOML document per project, the whole schema of
-//! `docs/dispatch.md` parsed and checked here, so a later slice adds an
-//! executor rather than a field. A ticket runs from the copy taken when
-//! it was made; the project's file only shapes tickets taken afterwards.
+//! `docs/dispatch.md` parsed and checked here, including the parts the
+//! runner parks on rather than runs. A ticket runs from the copy taken
+//! when it was made; the project's file only shapes tickets taken
+//! afterwards.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -166,7 +167,7 @@ impl OperatorKind {
 
     /// Whether this kind is an agent in a Switchboard session at all.
     #[must_use]
-    pub fn is_agent(self) -> bool {
+    fn is_agent(self) -> bool {
         !matches!(self, Self::Command)
     }
 
@@ -518,17 +519,12 @@ impl Pipeline {
 
     /// Parse and validate one file's text.
     pub fn parse(text: &str) -> Result<Self> {
-        let mut p = Self::parse_raw(text)?;
+        let mut p: Self = toml::from_str(text).context("parse the pipeline file")?;
+        p.validate()?;
         if let Some(dir) = &p.project.worktrees {
             p.project.worktrees = Some(crate::store::expand_home(dir));
         }
         Ok(p)
-    }
-
-    fn parse_raw(text: &str) -> Result<Self> {
-        let pipeline: Self = toml::from_str(text).context("parse the pipeline file")?;
-        pipeline.validate()?;
-        Ok(pipeline)
     }
 
     /// A short hash of the text a ticket was taken under.
@@ -781,7 +777,7 @@ impl Pipeline {
         }
     }
 
-    /// Every reference resolves and every stage is one of the three kinds.
+    /// Every reference resolves and every stage is one of the four kinds.
     fn validate(&self) -> Result<()> {
         if self.version != 1 {
             bail!(
