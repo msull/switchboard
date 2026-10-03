@@ -19,9 +19,10 @@ use crate::scheduler::{
     may_rerun, new_attempt, next_n, primary_tree, record_of, rework_key, sent_back, session_kind,
     settle_file, vars_for,
 };
+use crate::template::Vars;
 use crate::ticket::{
     Attempt, AttemptKind, AttemptState, DIRTY_POLLS, DecisionKind, GateRun, ProjectState,
-    ReviewRound, ReviewerResult, ReviewerRun, RoundState, STOP_IDLE_POLLS, Ticket,
+    Refreshed, ReviewRound, ReviewerResult, ReviewerRun, RoundState, STOP_IDLE_POLLS, Ticket,
 };
 
 /// What a reviewer writes when it has nothing to report, unless the
@@ -36,6 +37,9 @@ const REVIEW_CARRY: &str = "Points still open from earlier rounds are listed at 
 
 /// The addition to round 1 of an attempt that continues an earlier one.
 const REVIEW_CARRIED: &str = "An earlier attempt of this review (attempt {carried_n}) reviewed this branch at {old_head} through round {through}. These points were settled there; do not raise them again:\n{settled}\nThese are still open:\n{open}\n{scope} For each open point write a line \"withdraw <id>\" if the change settles it, or \"keep <id>: why\" if it does not.";
+
+/// The mark on a carried open point whose fix no round has read.
+const UNCHECKED_FIX: &str = "(answered fixed; check the fix)";
 
 /// What a carried round reads when the branch moved since.
 const REVIEW_CARRIED_RANGE: &str =
@@ -160,8 +164,8 @@ impl Runner {
         attempt.project = Some(project);
         // A note from a later human gate goes to the first implementer
         // of this attempt, not to the reviewers. It leaves the ticket
-        // now, so it neither keeps the context sent back nor reaches a
-        // later attempt that a fixer already spent it before.
+        // now, so it does not keep the context sent back, and a note a
+        // fix pass has used is not given to the next attempt.
         attempt.rework = t
             .rework
             .remove(&rework_key(&stage.name, ctx))
@@ -621,16 +625,16 @@ impl Runner {
         r.feedback = Some(path.clone());
         r.open_points = open;
         if open == 0 {
-            let mut left = if left.is_empty() {
+            let mut tally = if left.is_empty() {
                 String::new()
             } else {
                 format!(", {} left to the merge", left.len())
             };
             if !decided.is_empty() {
-                let _ = write!(left, ", {} found but not done", decided.len());
+                let _ = write!(tally, ", {} found but not done", decided.len());
             }
             log::info!(
-                "ticket {} {}/{} round {} converged at {head}{left}",
+                "ticket {} {}/{} round {} converged at {head}{tally}",
                 t.id,
                 key.0,
                 a.context,
@@ -1065,8 +1069,8 @@ impl Runner {
         }
         let mut prompt = guidance_prelude(&op.guidance, &vars);
         prompt.push_str(&vars.render(stage.fix_prompt.as_deref().unwrap_or(FIX_PROMPT)));
-        // An attempt started before notes moved onto the attempt still
-        // has its note on the ticket.
+        // A record from `RECORD_VERSION` 2 or earlier keeps the note on
+        // `t.rework` rather than on the attempt.
         if round.n == 1
             && let Some(note) = a
                 .rework
@@ -1510,16 +1514,16 @@ impl Runner {
 /// A round judged: the round file's text, the points that hold it
 /// open, the style points left to the merge and the points that contest
 /// the plan (each as its listed line).
-pub(crate) struct Aggregated {
-    pub text: String,
-    pub open: u32,
-    pub left: Vec<String>,
-    pub decided: Vec<String>,
+struct Aggregated {
+    text: String,
+    open: u32,
+    left: Vec<String>,
+    decided: Vec<String>,
 }
 
 /// How a point counts towards convergence.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Tag {
+enum Tag {
     /// Wording, naming, comments or layout: holds the early rounds only.
     Style,
     /// Contests the plan's decisions: never open, listed as not done.
@@ -1529,7 +1533,7 @@ pub(crate) enum Tag {
 }
 
 /// A point's tag, by its text's case-insensitive prefix.
-pub(crate) fn tag_of(text: &str) -> Tag {
+fn tag_of(text: &str) -> Tag {
     let text = text.trim_start().to_ascii_lowercase();
     if text.starts_with("style:") {
         Tag::Style
@@ -1572,8 +1576,8 @@ fn aggregate(
     counted: u32,
     style_rounds: u32,
 ) -> Aggregated {
-    let no_feedback = stage.no_feedback.as_deref().unwrap_or(NO_FINDINGS);
-    let (points, withdrawn, kept) = collect_points(round, no_feedback);
+    let no_feedback = no_feedback_of(stage);
+    let (points, withdrawn, kept) = collect_points(round, &no_feedback);
     let carried: Vec<&(String, String)> = earlier
         .iter()
         .filter(|(id, _)| !withdrawn.contains(id))
@@ -1593,20 +1597,23 @@ fn aggregate(
     let style = classes.iter().filter(|c| **c == Tag::Style).count();
     let blocking = classes.len() - style;
     let to_merge = blocking == 0 && style > 0 && counted >= style_rounds;
-    let raised: Vec<String> = raised
+    let raised_lines: Vec<String> = raised
         .iter()
         .map(|(id, r, text)| format!("{id} ({r}): {text}"))
         .collect();
-    let carried: Vec<String> = carried
+    let carried_lines: Vec<String> = carried
         .iter()
         .map(|(id, text)| carried_line(id, text, &kept))
         .collect();
-    let decided: Vec<String> = decided
+    let decided_lines: Vec<String> = decided
         .iter()
         .map(|(id, r, text)| format!("{id} ({r}): {text}"))
         .collect();
     let (open, left) = if to_merge {
-        (0, raised.iter().chain(&carried).cloned().collect())
+        (
+            0,
+            raised_lines.iter().chain(&carried_lines).cloned().collect(),
+        )
     } else {
         (classes.len(), Vec::new())
     };
@@ -1623,14 +1630,19 @@ fn aggregate(
         "Branch {branch} at {}, over {}.\n",
         round.head, round.base
     );
-    if open == 0 && left.is_empty() && decided.is_empty() {
+    if open == 0 && left.is_empty() && decided_lines.is_empty() {
         let _ = writeln!(out, "{no_feedback}");
     } else {
         if open == 0 {
             let _ = writeln!(out, "No open point.");
         } else {
-            section(&mut out, "Points", None, &raised);
-            section(&mut out, "Still open from earlier rounds", None, &carried);
+            section(&mut out, "Points", None, &raised_lines);
+            section(
+                &mut out,
+                "Still open from earlier rounds",
+                None,
+                &carried_lines,
+            );
         }
         section(&mut out, LEFT_HEADING, None, &left);
         section(
@@ -1639,14 +1651,14 @@ fn aggregate(
             Some(
                 "These contest the plan's decisions; they are out of scope for this review and not for the fix pass.",
             ),
-            &decided,
+            &decided_lines,
         );
     }
     Aggregated {
         text: out,
         open: u32::try_from(open).unwrap_or(u32::MAX),
         left,
-        decided,
+        decided: decided_lines,
     }
 }
 
@@ -1758,21 +1770,25 @@ fn carried_points(previous: Option<&ReviewRound>, withdrawn: &[String]) -> Vec<(
             .map(|r| std::fs::read_to_string(r).unwrap_or_default())
             .unwrap_or_default();
         for (id, text) in open_points_of(&std::fs::read_to_string(feedback).unwrap_or_default()) {
-            let fixed = answered.lines().any(|l| {
-                let l = l.trim().trim_start_matches("- ");
-                l.starts_with(&id)
-                    && l[id.len()..]
-                        .trim_start_matches(':')
-                        .trim()
-                        .starts_with("fixed")
-            });
-            if fixed || withdrawn.iter().any(|w| w == &id) {
+            if claims_fixed(&answered, &id) || withdrawn.iter().any(|w| w == &id) {
                 continue;
             }
             carried.push((id, text));
         }
     }
     carried
+}
+
+/// Whether a response answers point `id` as fixed.
+fn claims_fixed(response: &str, id: &str) -> bool {
+    response.lines().any(|l| {
+        let l = l.trim().trim_start_matches("- ");
+        l.starts_with(id)
+            && l[id.len()..]
+                .trim_start_matches(':')
+                .trim()
+                .starts_with("fixed")
+    })
 }
 
 /// A list item's text, for `- `, `* ` and `1. ` lines.
@@ -1867,23 +1883,23 @@ fn qualify(n: u32, id: &str) -> String {
 
 /// What a new attempt of a code review continues: an earlier attempt of
 /// the same stage and context whose rounds read the branch.
-pub(crate) struct Carry {
-    pub from: (String, u32),
+struct Carry {
+    from: (String, u32),
     /// The last round of that attempt with gathered findings.
-    pub through: u32,
+    through: u32,
     /// The base and head that round read.
-    pub base: String,
-    pub head: String,
+    base: String,
+    head: String,
     /// The points it left open, and those settled before, qualified.
-    pub open: Vec<(String, String)>,
-    pub settled: Vec<(String, String)>,
+    open: Vec<(String, String)>,
+    settled: Vec<(String, String)>,
 }
 
 /// The attempt a new attempt `n` of a review in `ctx` carries: the
 /// latest earlier one if any round of it gathered findings, otherwise
 /// whatever that one carried, so a chain of failures points at the
 /// attempt that holds the state.
-pub(crate) fn carry_source(t: &Ticket, stage: &str, ctx: &str, n: u32) -> Option<(String, u32)> {
+fn carry_source(t: &Ticket, stage: &str, ctx: &str, n: u32) -> Option<(String, u32)> {
     let prev = previous_review(t, stage, ctx, n)?;
     if prev.rounds.iter().any(|r| r.feedback.is_some()) {
         Some((stage.to_owned(), prev.n))
@@ -1920,7 +1936,7 @@ fn starts_over(note: &str) -> bool {
 
 /// What attempt `a` carries, rebuilt from the carried attempt's round
 /// files and records alone, so a restart reads the same.
-pub(crate) fn carry_of(t: &Ticket, a: &Attempt, no_feedback: &str) -> Option<Carry> {
+fn carry_of(t: &Ticket, a: &Attempt, no_feedback: &str) -> Option<Carry> {
     let (stage, m) = a.carried_from.clone()?;
     let src = find_attempt(t, &stage, m)?;
     let last = src.rounds.iter().rev().find(|r| r.feedback.is_some())?;
@@ -1932,9 +1948,30 @@ pub(crate) fn carry_of(t: &Ticket, a: &Attempt, no_feedback: &str) -> Option<Car
         .filter(|r| r.n > last.n)
         .flat_map(|r| collect_points(r, no_feedback).1)
         .collect();
-    let open: Vec<(String, String)> = carried_points(Some(last), &withdrawn)
+    // A fix the attempt answered but no later round read is not
+    // settled: the attempt may have failed on exactly that fix. Such a
+    // point stays open, marked for its fix to be checked.
+    let answered = last
+        .response
+        .as_ref()
+        .map(|r| std::fs::read_to_string(r).unwrap_or_default())
+        .unwrap_or_default();
+    let feedback = last
+        .feedback
+        .as_ref()
+        .map(|f| std::fs::read_to_string(f).unwrap_or_default())
+        .unwrap_or_default();
+    let open: Vec<(String, String)> = open_points_of(&feedback)
         .into_iter()
-        .map(|(id, text)| (qualify(m, &id), text))
+        .filter(|(id, _)| !withdrawn.contains(id))
+        .map(|(id, text)| {
+            let text = if claims_fixed(&answered, &id) {
+                format!("{text} {UNCHECKED_FIX}")
+            } else {
+                text
+            };
+            (qualify(m, &id), text)
+        })
         .collect();
     let mut settled = Vec::new();
     if let Some(before) = carry_of(t, src, no_feedback) {
@@ -1977,7 +2014,7 @@ fn carried_text(c: &Carry, round: &ReviewRound) -> String {
                 .join("\n")
         }
     };
-    let mut vars = crate::template::Vars::default();
+    let mut vars = Vars::default();
     vars.set("carried_n", c.from.1.to_string())
         .set("old_head", c.head.clone())
         .set("head", round.head.clone())
@@ -2011,7 +2048,7 @@ fn rebase_to_check<'t>(
     a: &Attempt,
     round: &ReviewRound,
     lane: Option<&str>,
-) -> Option<&'t crate::ticket::Refreshed> {
+) -> Option<&'t Refreshed> {
     let moved = t
         .lanes
         .iter()
@@ -2031,8 +2068,8 @@ fn rebase_to_check<'t>(
 }
 
 /// The rebase check, with the rebaser's notes when there are some.
-fn rebased_text(moved: &crate::ticket::Refreshed) -> String {
-    let mut vars = crate::template::Vars::default();
+fn rebased_text(moved: &Refreshed) -> String {
+    let mut vars = Vars::default();
     vars.set("from", moved.from.clone())
         .set("to", moved.to.clone());
     let mut text = vars.render(REVIEW_REBASED);
@@ -2171,7 +2208,8 @@ fn summary_section(out: &mut String, title: &str, lines: &[String]) {
     }
 }
 
-/// The stage's sentinel for "no findings".
+/// The stage's sentinel for "no findings", from the stage the caller
+/// holds.
 fn no_feedback_of(stage: &Stage) -> String {
     stage
         .no_feedback
@@ -2236,7 +2274,8 @@ fn set_round_state(
 }
 
 /// The stage's sentinel, read from the ticket's pipeline copy; the
-/// default when the copy cannot be read.
+/// default when the copy cannot be read. For callers that hold only
+/// the attempt's key, not its `Stage`, such as the completion summary.
 fn stage_no_feedback(t: &Ticket, key: &(String, u32)) -> String {
     std::fs::read_to_string(&t.pipeline_file)
         .ok()

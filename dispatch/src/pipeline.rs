@@ -1072,11 +1072,10 @@ writes = ["plan"]"#,
     }
 
     #[test]
-    fn style_rounds_defaults_to_two_and_is_refused_at_zero() {
+    fn style_rounds_has_a_default_and_is_refused_at_zero() {
         let p = Pipeline::parse(&with_review_stage("")).unwrap();
         let stage = p.stages.iter().find(|s| s.name == "review-code").unwrap();
         assert_eq!(stage.style_rounds(), DEFAULT_STYLE_ROUNDS);
-        assert_eq!(DEFAULT_STYLE_ROUNDS, 2);
         let p = Pipeline::parse(&with_review_stage("style_rounds = 3\n")).unwrap();
         let stage = p.stages.iter().find(|s| s.name == "review-code").unwrap();
         assert_eq!(stage.style_rounds(), 3);

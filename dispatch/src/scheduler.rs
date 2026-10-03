@@ -784,6 +784,17 @@ impl Runner {
         Ok(())
     }
 
+    /// The base a lane's branch sits on before a bring-up: its recorded
+    /// `base_sha`, or for a lane cut before that was recorded, the fork
+    /// point from `onto`. Empty when neither can be read.
+    fn moved_from(&self, lane: &LaneRecord, onto: &str) -> String {
+        lane.base_sha.clone().unwrap_or_else(|| {
+            self.git
+                .merge_base(&lane.worktree, "HEAD", onto)
+                .unwrap_or_default()
+        })
+    }
+
     /// One lane's branch against its base; true when the stage must
     /// wait on a rebaser or a question for it.
     fn refresh_lane(
@@ -831,9 +842,11 @@ impl Runner {
         }
         // Both read before anything moves: a branch with no commits of
         // its own sits at the commit it was cut from or last moved to.
-        let from = t.lanes[i].base_sha.clone().unwrap_or_default();
+        // When that cannot be read the branch counts as having commits,
+        // so its rebase is still checked.
         let head_before = self.git.head(&worktree)?;
-        let commits = !from.is_empty() && head_before != from;
+        let from = self.moved_from(&t.lanes[i], &onto);
+        let commits = from.is_empty() || head_before != from;
         let brought_up = behind == 0 || self.git.rebase_onto(&worktree, &onto)?;
         if brought_up {
             log::info!(
@@ -851,7 +864,7 @@ impl Runner {
             } else {
                 None
             };
-            t.lanes[i].refreshed = Some(crate::ticket::Refreshed {
+            t.lanes[i].refreshed = Some(Refreshed {
                 from,
                 to: onto_sha.clone(),
                 commits,

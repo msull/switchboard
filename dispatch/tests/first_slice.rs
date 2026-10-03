@@ -5892,6 +5892,34 @@ fn a_rerun_review_carries_the_old_attempts_settled_and_open_points() {
     assert!(!feedback.contains("a1/r1/lint-1"), "{feedback}");
 }
 
+/// A point the failed attempt answered as fixed, with no round after
+/// to read the fix, is carried open with its fix to be checked rather
+/// than settled.
+#[test]
+fn a_rerun_after_a_failed_fix_carries_the_fixed_point_open() {
+    let mut env = Env::new();
+    with_three_rounds(&env);
+    let id = at_review(&mut env);
+    lint_exits(&mut env, &id, 1, 1, "src/a.rs:3: unused import\n");
+    style_says(&mut env, &id, 1, "No findings.");
+    fix_pass(
+        &mut env,
+        &id,
+        1,
+        "fix00001",
+        "- r1/lint-1: fixed removed\n",
+        1,
+    );
+    rerun_with(&mut env, &id, None);
+    let prompt = last_prompt_of(&env, "style");
+    let open_at = prompt.find("These are still open").unwrap();
+    let point = prompt
+        .rfind("- a1/r1/lint-1: src/a.rs:3: unused import (answered fixed; check the fix)")
+        .unwrap();
+    assert!(open_at < point, "{prompt}");
+    assert_eq!(prompt.matches("a1/r1/lint-1").count(), 1, "{prompt}");
+}
+
 /// A rerun whose note says "start over" reviews the whole branch: no
 /// carry, and the note moves onto the attempt and reaches its first fix
 /// pass.
@@ -6206,6 +6234,32 @@ fn a_review_after_a_rebase_with_commits_checks_the_rebase() {
         !prompt.contains("both sides of every conflicted hunk"),
         "{prompt}"
     );
+}
+
+/// A lane cut before its base was recorded reads the fork point as the
+/// base it moved from, so a branch with commits still has its rebase
+/// checked.
+#[test]
+fn a_rebase_of_a_lane_without_a_recorded_base_is_checked() {
+    let mut env = Env::new();
+    let (id, implementer) = base_moves_before_review(&mut env, "impl0001", false);
+    let mut t = env.ticket(&id);
+    t.lanes[0].base_sha = None;
+    dispatch::store::write_ticket(&env.data.ticket_file(&id), &t).unwrap();
+    env.repo
+        .lock()
+        .unwrap()
+        .bases
+        .insert(t.lanes[0].worktree.clone(), "root0000".into());
+    review_starts(&mut env, &id, &implementer);
+    let moved = env.ticket(&id).lanes[0].refreshed.clone().unwrap();
+    assert_eq!(
+        (moved.from.as_str(), moved.to.as_str()),
+        ("root0000", "main0002")
+    );
+    assert!(moved.commits);
+    let prompt = last_prompt_of(&env, "style");
+    assert!(prompt.contains("git log root0000..main0002"), "{prompt}");
 }
 
 /// A branch with no commits of its own is moved, not rebased: no check.

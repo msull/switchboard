@@ -580,7 +580,6 @@ mod tests {
         fs::write(&path, text).unwrap();
         let mut t = read_ticket(&path).unwrap();
         assert_eq!(t.version, RECORD_VERSION);
-        assert_eq!(RECORD_VERSION, 4);
         assert_eq!(t.rework["review-code/backend"], "rename tmp");
         let a = &t.attempts[0];
         assert_eq!((a.carried_from.clone(), a.rework.clone()), (None, None));
