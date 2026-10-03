@@ -333,7 +333,8 @@ fn working_set_rows(cx: &mut DrawCtx<'_>, ui: &mut Ui, view: &View, compact: boo
     }
     let sets: Vec<(crate::core::SetId, String, usize, Option<SetRule>)> = cx
         .core
-        .visible_working_sets()
+        .working_sets_in_rail_order()
+        .into_iter()
         .map(|s| (s.id, s.name.clone(), cx.core.set_card_count(s), s.rule))
         .collect();
     for (id, name, count, rule) in &sets {

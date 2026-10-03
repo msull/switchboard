@@ -2811,6 +2811,40 @@ fn the_rail_makes_a_recent_sessions_set() {
     assert_eq!(harness.state().core().view(), View::WorkingSet(set));
 }
 
+#[test]
+fn the_rail_lists_rule_sets_above_hand_sets() {
+    let (mut harness, _) = harness();
+    harness.set_size(egui::vec2(1200.0, 800.0));
+    let core = harness.state_mut().core_mut_for_seeding();
+    core.dispatch(
+        AppAction::NewWorkingSet {
+            name: None,
+            clone_of: None,
+            with: None,
+            columns: 30,
+        },
+        switchboard::core::Clock::at(1),
+    );
+    core.dispatch(
+        AppAction::NewRuleSet {
+            name: None,
+            rule: switchboard::core::SetRule::DEFAULT,
+        },
+        switchboard::core::Clock::at(2),
+    );
+    harness.run_steps(2);
+    // The open set's page title carries the same label as its rail row,
+    // and the rail is the leftmost of the two, so take the leftmost match.
+    let in_rail = |label: &str| {
+        harness
+            .query_all_by_label(label)
+            .map(|n| n.rect())
+            .min_by(|a, b| a.left().total_cmp(&b.left()))
+            .unwrap()
+    };
+    assert!(in_rail("Recent sessions").top() < in_rail("Working Set").top());
+}
+
 /// Press, move, release with the primary button, a few frames apart.
 fn drag(harness: &mut Harness<'static, SwitchboardApp>, from: egui::Pos2, to: egui::Pos2) {
     harness.event(egui::Event::PointerMoved(from));
