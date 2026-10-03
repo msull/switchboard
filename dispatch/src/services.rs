@@ -12,7 +12,7 @@ use std::collections::BTreeSet;
 use anyhow::Result;
 use switchboard_control::{self as wire, Body, Made, Reply};
 
-use crate::pipeline::{Pipeline, Serve, Stage, StageKind};
+use crate::pipeline::{Pipeline, Serve, Stage};
 use crate::scheduler::{Ask, NO_SUCH_SESSION, Runner, SocketDown, confine_for, env_for};
 use crate::ticket::{
     AttemptState, Decision, DecisionKind, DecisionState, GateRun, Hold, LaneRecord, ProjectState,
@@ -855,27 +855,25 @@ impl Runner {
 }
 
 /// A hold taken past the first stage of its range (a resume, after
-/// parking let it go): what the range's stages did with the resource
-/// may have been replaced by another ticket's since, a deploy, and the
-/// tester that ran against it with services that parking stopped. Each
-/// command or agent stage earlier in the range has its completed
-/// attempts cancelled, so it is a `rerun` question rather than a
-/// result (and an agent stage brings its services up again before
-/// asking), and the earliest is the stage the ticket goes back to.
-/// `None` when nothing in the range ran.
+/// parking let it go) cannot trust what the range's earlier stages did:
+/// another ticket may have deployed since, and parking stopped the
+/// services the tester ran against. Every stage earlier in the range
+/// has its completed attempts cancelled, so a command or agent stage is
+/// a `rerun` question rather than a result (an agent stage asks once its
+/// services are up again) and a human gate asks afresh, and the
+/// earliest is the stage the ticket goes back to. Validation keeps
+/// review and workflow stages out of this span. `None` when nothing in
+/// the range ran.
 fn undo_range(t: &mut Ticket, p: &Pipeline, resource: &str, now_ms: u64) -> Option<usize> {
     let (first, _) = p.hold_range(resource)?;
     let mut back = None;
     for i in first..t.stage {
-        let s = &p.stages[i];
-        if !s.is_command_stage() && s.kind() != StageKind::Agent {
-            continue;
-        }
+        let name = &p.stages[i].name;
         for a in &mut t.attempts {
-            if a.stage == s.name && a.state == AttemptState::Complete {
+            if &a.stage == name && a.state == AttemptState::Complete {
                 a.state = AttemptState::Cancelled {
                     reason: format!(
-                        "{resource} was let go after it ran, so what it ran against may have been replaced by another ticket"
+                        "{resource} was let go after this stage, so what it saw may have been replaced by another ticket"
                     ),
                 };
                 a.ended_ms = Some(now_ms);

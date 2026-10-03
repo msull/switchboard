@@ -725,7 +725,7 @@ gate = { kind = "command", argv = ["..."], in = "root" | "lane" | "lane:<name>" 
      | { kind = "external", check = "pr-checks", checks = "none" }   # a repository with no CI: a PR at the head is enough
      | { kind = "human", decision = "...", confirm = true }
 on_dirty = { nudge = 1 } | "ask"   # an agent stage with a command gate, or a code review stage's implementer: overrides the policy's
-needs = ["resource name"]     # held from the first stage that names it to the last, contiguous
+needs = ["resource name"]     # held from the first stage that names it to the last, contiguous; a review or workflow stage only last
 reviewers = ["style", "lint"] # present: a code review stage (see "The code review stage"); operators, run at once each round
 implementer = "implementer"   # the claude operator that addresses a round's findings, fresh each round
 cap = 3                       # review passes before the findings left are a question
@@ -1627,11 +1627,13 @@ ticket's slot as any open attempt does).
   `try` or `tried`, then resumed) cannot trust what the range's earlier
   stages did: another ticket may have deployed since, and parking
   stopped the services the tester ran against. Every completed attempt
-  of a command or agent stage earlier in the range is cancelled and
-  the ticket goes back to the earliest, where a `rerun` question asks
-  before anything deploys or reads the old commit. Each later agent
-  stage brings its services up again before asking the same, so
-  `tried` is never asked with nothing served. A frontend-only ticket,
+  of a stage earlier in the range is cancelled and the ticket goes back
+  to the earliest, where a `rerun` question asks before anything
+  deploys or reads the old commit. Each later agent stage brings its
+  services up again before asking the same, and a human gate in the
+  range asks afresh, so `tried` is never asked with nothing served. A
+  review or workflow stage cannot be sent back this way, so a pipeline
+  file may put one only last in a `needs` run. A frontend-only ticket,
   with no deploy, goes back to `try`.
 - The in-place lane hold above is not built: a stage whose `needs`
   names a lane parks, saying so.

@@ -14230,17 +14230,104 @@ fn a_resume_with_the_deploy_skipped_serves_again_and_asks_before_the_tester() {
     tested_again(&mut env, &id);
 }
 
+#[test]
+fn a_resume_past_a_human_gate_in_the_range_asks_it_again() {
+    let mut env = Env::new();
+    let text = BACK_HALF
+        .replace("{worktrees}", &env.worktrees.display().to_string())
+        .replace(
+            "[[stages]]\nname = \"tried\"",
+            "[[stages]]\nname = \"look\"\nneeds = [\"my-dev\"]\ngate = { kind = \"human\", decision = \"look\" }\n\n[[stages]]\nname = \"tried\"",
+        );
+    std::fs::write(env.data.pipeline("Orchard"), text).unwrap();
+    let id = take_orchard(&mut env, 42, BOTH);
+    deployed(&mut env, &id);
+    served(&mut env, &id);
+    let t = env.ticket(&id);
+    env.finish(
+        &session_of(&t, "try"),
+        &artifact_of(&t, "try", "notes"),
+        "it works",
+    );
+    env.steps_until(&id, "the look question", |t, _| {
+        t.pending_decisions().iter().any(|d| d.name == "look")
+    });
+    answer_named(&mut env, &id, "look", "proceed");
+    tried(&mut env, &id, "park");
+    env.step();
+    assert!(is_parked(&env.ticket(&id)));
+    let now = env.tick();
+    env.runner.resume(&id, now).unwrap();
+    env.steps_until(&id, "the deploy question", |t, _| {
+        t.pending_decisions()
+            .iter()
+            .any(|d| d.name == "rerun" && d.stage == "deploy")
+    });
+    answer_named(&mut env, &id, "rerun", "rerun");
+    for _ in 0..3 {
+        env.step();
+    }
+    exits(&env, &deploy_key(&id, 2), 0);
+    at_stage(&mut env, &id, "try");
+    serving(&mut env, &id, 2);
+    env.steps_until(&id, "the tester question", |t, _| {
+        t.pending_decisions().iter().any(|d| d.name == "rerun")
+    });
+    answer_named(&mut env, &id, "rerun", "rerun");
+    env.steps_until(&id, "the second tester", |t, _| {
+        t.attempts_of("try").count() == 2
+    });
+    let t = env.ticket(&id);
+    env.finish(
+        &session_of(&t, "try"),
+        &artifact_of(&t, "try", "notes"),
+        "still works",
+    );
+    env.steps_until(&id, "a question after the tester", |t, _| {
+        t.pending_decisions()
+            .iter()
+            .any(|d| d.name == "look" || d.name == "tried")
+    });
+    let t = env.ticket(&id);
+    assert!(
+        t.pending_decisions().iter().any(|d| d.name == "look"),
+        "the earlier look was about the old deploy: {:#?}",
+        t.pending_decisions()
+    );
+    let looks: Vec<&Attempt> = t.attempts_of("look").collect();
+    assert_eq!(looks.len(), 2, "{looks:#?}");
+    assert!(
+        matches!(&looks[0].state, AttemptState::Cancelled { reason } if reason.contains("my-dev was let go")),
+        "{looks:#?}"
+    );
+}
+
 /// Back at `try` after a resume: the frontend comes up again before the
 /// tester's cancelled attempt is asked about, nothing runs until the
 /// answer, and `tried` then says what is served.
 fn tested_again(env: &mut Env, id: &str) {
-    serving(env, id, 2);
     let rerun = |t: &Ticket| {
         t.pending_decisions()
             .into_iter()
             .find(|d| d.name == "rerun" && d.stage == "try")
             .cloned()
     };
+    env.steps_until(id, "the frontend's before", |t, _| {
+        t.services
+            .iter()
+            .any(|s| s.n == 2 && s.state == ServiceState::Before)
+    });
+    env.step();
+    env.step();
+    let t = env.ticket(id);
+    assert!(
+        t.services
+            .iter()
+            .any(|s| s.n == 2 && s.state == ServiceState::Before),
+        "{t:#?}"
+    );
+    assert!(rerun(&t).is_none(), "asked before the frontend is up");
+    serving(env, id, 2);
     env.steps_until(id, "the tester question", |t, _| rerun(t).is_some());
     let t = env.ticket(id);
     assert_eq!(stage_name(&t), "try", "{t:#?}");

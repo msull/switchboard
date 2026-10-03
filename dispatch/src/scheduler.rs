@@ -4393,7 +4393,9 @@ impl Runner {
                             next_n(t, &stage.name),
                             now_ms,
                         )?;
-                    } else if asks_again(t, &a, sent_back) {
+                    } else if served && asks_again(t, &a, sent_back) {
+                        // Asked once its services are up, so the answer
+                        // is about a run that could start.
                         self.ask_rerun(t, ps, &a, now_ms)?;
                     }
                 }

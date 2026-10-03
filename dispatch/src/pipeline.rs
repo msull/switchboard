@@ -493,9 +493,7 @@ impl Stage {
         }
     }
 
-    /// A gate-only stage whose gate is a command (a deploy): the stages
-    /// whose result a later hold of the same resource can go stale
-    /// against.
+    /// A gate-only stage whose gate is a command (a deploy).
     #[must_use]
     pub fn is_command_stage(&self) -> bool {
         self.kind() == StageKind::GateOnly && matches!(self.gate, Some(Gate::Command { .. }))
@@ -1043,7 +1041,11 @@ impl Pipeline {
 
     /// Each `[[resources]]` name in `needs` is named by one run of
     /// stages with no gap, so "held until the last stage needing it
-    /// ends" is a fact the file states.
+    /// ends" is a fact the file states. A hold retaken partway through
+    /// the run cancels what the earlier stages completed and goes back
+    /// to them, which a review's rounds or a workflow's run cannot be
+    /// sent back through, so neither may stand before the run's last
+    /// stage.
     fn validate_contiguous_needs(&self) -> Result<()> {
         for r in &self.resources {
             let Some((first, last)) = self.hold_range(&r.name) else {
@@ -1056,6 +1058,16 @@ impl Pipeline {
                 bail!(
                     "stage {:?} breaks the run of stages needing {:?}; needs must name a resource on stages next to each other",
                     gap.name,
+                    r.name
+                );
+            }
+            if let Some(s) = self.stages[first..last]
+                .iter()
+                .find(|s| matches!(s.kind(), StageKind::Review | StageKind::Workflow))
+            {
+                bail!(
+                    "stage {:?} is a review or workflow stage in the run of stages needing {:?}; only the run's last stage may be one",
+                    s.name,
                     r.name
                 );
             }
@@ -1991,6 +2003,21 @@ ports = [3100, 3199]
             "name = \"try\"\noperator = \"tester\"\ncontext = \"joined\"\nneeds = [\"my-dev\"]\nservices = [\"frontend\", \"snp\"]\nbefore = { frontend = [\"npm\", \"run\", \"link-env\"], snp = [\"npm\", \"run\", \"link-env\"] }\n",
             "name = \"try\"\noperator = \"tester\"\ncontext = \"joined\"\n",
             "breaks the run of stages needing \"my-dev\"",
+        );
+    }
+
+    #[test]
+    fn a_review_or_workflow_stands_only_last_in_a_needs_run() {
+        let mut p = Pipeline::parse(ORCHARD_BACK_HALF).unwrap();
+        p.stages[4].reviewers = vec!["correctness".into()];
+        p.validate_contiguous_needs().unwrap();
+        p.stages[4].reviewers.clear();
+        p.stages[3].operator = None;
+        p.stages[3].review = Some("tester".into());
+        let err = p.validate_contiguous_needs().unwrap_err().to_string();
+        assert!(
+            err.contains("stage \"try\" is a review or workflow stage"),
+            "{err}"
         );
     }
 
