@@ -187,49 +187,40 @@ prompt test checks the instruction.
 
 **Size.** Prompt builder in `review.rs`. An hour.
 
-## 11. A rebase or a fix round pushes when the PR exists
+## 11. A refresh at `ready` pushes when the lane has a pull request
 
-**Problem.** After `implement` opened PR 17 at one head, the refresh step
-rebased the tree and five fix rounds committed, and none of them pushed.
-`ready` then found the PR behind the tree and asked for a push by hand, a
-question with one possible answer. The push also had to be forced, since
-the refresh had rewritten the PR's commit.
+**Problem, as first seen.** After `implement` opened PR 17 at one head, the
+refresh step rebased the tree and five fix rounds committed, and none of
+them pushed. `ready` then asked for a push by hand, and the push had to be
+forced, since the refresh had rewritten the PR's commit.
 
-**Change.** When the lane has a pull request, the refresh step and each
-in-review fix round that passes its checks push the branch with
-`--force-with-lease` on the head the PR was last seen at. The `ready`
-question stays for the case where the push itself fails.
+**Most of it is gone by structure.** The Switchboard pipeline now opens the
+pull request at a `pr` stage after code review, as Delta always did: the
+fix rounds and the refreshes before it touch a branch that has no PR, and
+nothing needs pushing until the `pr` stage pushes once. CI runs once per
+reviewed branch, and nothing unreviewed is public.
 
-**Acceptance.** A fix round on a lane with a PR ends with the fake repo's
-push list naming the branch and the lease; a lane without a PR pushes
-nothing.
+**What remains.** The refresh at the transition into `ready` runs after
+the PR exists. When main moved between the `pr` stage and `ready`, the
+mechanical rebase (or the rebaser) rewrites the PR's commits and must
+push with `--force-with-lease` on the head the PR was last seen at, or
+`ready` asks its one-answer question. The merge gate's rebaser already
+pushes.
 
-**Size.** `Repo::push_with_lease`, two call sites, two tests. Half a day.
+**Acceptance.** A refresh that rebases a lane with a PR pushes once with
+the lease; a lane without a PR pushes nothing; a lease failure leaves the
+`ready` question as today.
 
-## 12. The pull request body is checked against the branch at `ready`
+**Size.** `Repo::push_with_lease`, one call site in `refresh_lane`, two
+tests. Half a day. Issue #23, narrowed.
 
-**Problem.** Switchboard's pipeline opens the PR at `implement`, before the
-review rounds. On #21 the body still said "the Switchboard app is
-untouched" after a review point moved two card words into the wire crate,
-and on #10 it described the activity rule from before two correctness
-fixes. The approver corrected both by hand before the merge.
+## 12. Withdrawn: the pull request body is written once
 
-**Change.** Two layers. First, wording, already in the live file: the
-fixer and the rebaser edit the body for what they changed, in the same
-round. Second, a `ready`-stage pass by a cheap fresh agent (sonnet) that
-reads the body against the final diff and the round files, rewrites any
-claim the branch no longer supports, and adds the review's changes under
-"Beyond the issue" where the fixer forgot. It changes no code; its notes
-say what it corrected. Delta needs neither: its PR is opened at the `pr`
-stage over the finished branch.
-
-**Acceptance.** A ticket whose fix round changed a claim reaches `merge`
-with the body corrected and the reviser's notes naming the claim; a body
-that is already true is left byte for byte.
-
-**Size.** A `reviser` operator in the Switchboard pipeline and a new
-agent stage before `ready`, no scheduler change. An hour of pipeline
-work once item 11 pushes the branch for it.
+The `ready`-stage body check is not needed once the PR is opened over the
+reviewed branch (item 11). The body describes the final code, and the
+fixer and rebaser have no PR to keep true. Delta was already shaped this
+way. The merge gate's rebaser, the one agent that still touches a branch
+with a PR, keeps its instruction to fix any claim its rebase changed.
 
 ## Not changing
 
@@ -247,5 +238,5 @@ work once item 11 pushes the branch for it.
 ## Order
 
 9 first: it failed three attempts in one night. 1, 2 and 3 cut the
-round count directly and are small. 4 and 5 are filed bugs. 11 removes a question with one answer. 6, 8, 10 and 12 are prompt text. 7 is a taste call for the user before anyone
+round count directly and are small. 4 and 5 are filed bugs. 11 removes a question with one answer. 6, 8 and 10 are prompt text; 12 is withdrawn. 7 is a taste call for the user before anyone
 builds it.
