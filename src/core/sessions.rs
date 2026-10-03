@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use crate::core::action::{AppCore, Clock, Effect, Flight, FlightKind, Out, View};
 use crate::core::model::{
     Activity, AgentKind, CardLayout, Discarded, Launch, ProjectId, RecordId, ResumeHandle,
-    SessionKind, SessionRecord,
+    SessionKind, SessionRecord, Workspace,
 };
 use crate::core::reconcile::env_with_record_id;
 use crate::ports::agent::AgentLaunch;
@@ -26,8 +26,8 @@ impl AppCore {
         now: Clock,
         out: &mut Out,
     ) {
-        if let Some(reason) = self.host_error.clone() {
-            self.error(format!("cannot start {name}: {reason}"));
+        if let Some(text) = self.host_unavailable("start", &name) {
+            self.error(text);
             return;
         }
         if let Some(id) = self.add_record(project, name, kind, cwd, launch, now, out) {
@@ -53,12 +53,7 @@ impl AppCore {
             self.error("cannot start a session: unknown project");
             return None;
         };
-        let order = workspace
-            .sessions
-            .iter()
-            .map(|s| s.layout.order + 1)
-            .max()
-            .unwrap_or(0);
+        let order = next_order(workspace);
         let id = RecordId::new();
         workspace.sessions.push(SessionRecord {
             id,
@@ -212,23 +207,19 @@ impl AppCore {
         let Some(record) = self.session(id).cloned() else {
             return;
         };
-        let record = &record;
-        if let Some(reason) = self.host_error.clone() {
-            let name = record.name.clone();
-            self.error_about(record.id, format!("cannot return to {name}: {reason}"));
+        if let Some(text) = self.host_unavailable("return to", &record.name) {
+            self.error_about(record.id, text);
             return;
         }
         let liveness = self.host_status(id).map(|h| h.liveness.clone());
         if let Some(Liveness::Exited { .. }) = liveness {
             // A dead pane kept by the host is cold: clear it so the
             // resume or relaunch below can reuse the name.
-            let host = HostId(id.host_name());
-            out.push(Effect::Kill(host.clone()));
-            self.host.retain(|h| h.id != host);
+            self.kill_and_forget(id, out);
         }
         match liveness {
             Some(Liveness::Running { .. }) => {
-                out.push(attach(record));
+                out.push(attach(&record));
             }
             Some(Liveness::Exited { .. } | Liveness::Missing) | None => {
                 match (record.kind, &record.resume) {
@@ -264,18 +255,59 @@ impl AppCore {
             self.return_to_session(id, now, out);
             return;
         }
-        if let Some(reason) = self.host_error.clone() {
-            let name = record.name.clone();
-            self.error_about(record.id, format!("cannot restart {name}: {reason}"));
+        if let Some(text) = self.host_unavailable("restart", &record.name) {
+            self.error_about(id, text);
             return;
         }
-        let host = HostId(id.host_name());
         if self.host_status(id).is_some() {
             self.keep_last_output(id, out);
-            out.push(Effect::Kill(host.clone()));
-            self.host.retain(|h| h.id != host);
+            self.kill_and_forget(id, out);
         }
         self.launch_fresh(id, now, out);
+    }
+
+    /// Whether the host process for this record is alive.
+    #[must_use]
+    pub fn is_running(&self, id: RecordId) -> bool {
+        self.running_status(id).is_some()
+    }
+
+    /// The host id of this record's live pane, if it has one.
+    #[must_use]
+    pub fn running_host(&self, id: RecordId) -> Option<HostId> {
+        self.running_status(id).map(|h| h.id.clone())
+    }
+
+    pub(super) fn running_status(&self, id: RecordId) -> Option<&HostStatus> {
+        self.host_status(id)
+            .filter(|h| matches!(h.liveness, Liveness::Running { .. }))
+    }
+
+    /// Why a session waiting on the user waits: Claude's folder trust
+    /// question when the pane shows it, otherwise the reason its last
+    /// event gave, if any.
+    #[must_use]
+    pub fn waiting_reason(&self, id: RecordId) -> Option<String> {
+        if self.at_trust_prompt(id) {
+            Some(TRUST_PROMPT_REASON.to_owned())
+        } else {
+            self.session(id).and_then(|s| s.activity_reason.clone())
+        }
+    }
+
+    /// Kill the record's pane and drop its status, so a launch right
+    /// after can reuse the name before the next host poll.
+    fn kill_and_forget(&mut self, id: RecordId, out: &mut Out) {
+        let host = HostId(id.host_name());
+        out.push(Effect::Kill(host.clone()));
+        self.host.retain(|h| h.id != host);
+    }
+
+    /// The notice for an action that needs the host while it is
+    /// unavailable: `cannot <verb> <name>: <reason>`.
+    pub(super) fn host_unavailable(&self, verb: &str, name: &str) -> Option<String> {
+        let reason = self.host_error.as_ref()?;
+        Some(format!("cannot {verb} {name}: {reason}"))
     }
 
     pub(super) fn transcript_checked(
@@ -336,11 +368,7 @@ impl AppCore {
         let record = self.session(id)?;
         let name = record.name.clone();
         match (&record.kind, record.resume.clone()) {
-            (SessionKind::Agent(AgentKind::ClaudeCode), Some(handle))
-                if handle.transcript().is_some() && before >= 1 =>
-            {
-                Some(handle)
-            }
+            (_, Some(handle)) if can_fork(record) && before >= 1 => Some(handle),
             (SessionKind::Agent(AgentKind::ClaudeCode), _) => {
                 self.error_about(
                     id,
@@ -447,10 +475,7 @@ impl AppCore {
     }
 
     fn stop_if_running(&mut self, id: RecordId, out: &mut Out) {
-        self.keep_last_output(id, out);
-        if let Some(status) = self.host_status(id) {
-            out.push(Effect::Kill(status.id.clone()));
-        }
+        self.kill_pane(id, out);
     }
 
     /// The copy exists: a new cold record beside the source, resumable
@@ -480,12 +505,7 @@ impl AppCore {
         else {
             return;
         };
-        let order = workspace
-            .sessions
-            .iter()
-            .map(|s| s.layout.order + 1)
-            .max()
-            .unwrap_or(0);
+        let order = next_order(workspace);
         let id = RecordId::new();
         workspace.sessions.push(SessionRecord {
             id,
@@ -532,12 +552,7 @@ impl AppCore {
             .workspaces
             .iter_mut()
             .find(|w| w.project.id == record.project)?;
-        let order = workspace
-            .sessions
-            .iter()
-            .map(|s| s.layout.order + 1)
-            .max()
-            .unwrap_or(0);
+        let order = next_order(workspace);
         let id = RecordId::new();
         workspace.sessions.push(SessionRecord {
             id,
@@ -790,9 +805,7 @@ impl AppCore {
         }
         self.advance_codex_queue(now, out);
     }
-}
 
-impl AppCore {
     /// Another record already resumes with this handle's provider id.
     fn bound_elsewhere(&self, id: RecordId, handle: &ResumeHandle) -> bool {
         let provider = handle.provider_id();
@@ -812,4 +825,28 @@ fn attach(record: &SessionRecord) -> Effect {
         title: record.id.host_name(),
         cwd: record.cwd.clone(),
     }
+}
+
+/// The waiting reason for a pane at Claude's folder trust question.
+const TRUST_PROMPT_REASON: &str = "Claude asks whether to trust this folder";
+
+/// The `layout.order` that puts a new card at the end of the board.
+pub(super) fn next_order(workspace: &Workspace) -> u32 {
+    workspace
+        .sessions
+        .iter()
+        .map(|s| s.layout.order + 1)
+        .max()
+        .unwrap_or(0)
+}
+
+/// Whether a copy of the record's conversation can be made: a Claude
+/// Code session with a transcript.
+#[must_use]
+pub fn can_fork(record: &SessionRecord) -> bool {
+    record.kind == SessionKind::Agent(AgentKind::ClaudeCode)
+        && record
+            .resume
+            .as_ref()
+            .is_some_and(|h| h.transcript().is_some())
 }

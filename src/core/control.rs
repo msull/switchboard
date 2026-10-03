@@ -2,7 +2,8 @@
 //! for, run quietly (no view changes, no terminal windows), with the
 //! operation id stamped on every record made so the asker can find them
 //! again. The wire format lives in the `switchboard-control` crate; the
-//! app translates it to `ControlAction` and back.
+//! `TryFrom<wire::Body>` at the end of this file translates it to
+//! `ControlAction`, and the read models answer in its shapes.
 
 use std::path::PathBuf;
 use std::time::SystemTime;
@@ -193,8 +194,8 @@ impl AppCore {
                 prompt,
                 notes,
             } => {
-                if let Some(reason) = self.host_error.clone() {
-                    self.error(format!("cannot start {name}: {reason}"));
+                if let Some(text) = self.host_unavailable("start", &name) {
+                    self.error(text);
                     return Vec::new();
                 }
                 let Some(id) = self.add_record(project, name, kind, cwd, launch, now, out) else {
@@ -213,8 +214,8 @@ impl AppCore {
                 prompt,
                 notes,
             } => {
-                if let Some(reason) = self.host_error.clone() {
-                    self.error(format!("cannot start {name}: {reason}"));
+                if let Some(text) = self.host_unavailable("start", &name) {
+                    self.error(text);
                     return Vec::new();
                 }
                 self.clone_into(source, name, prompt, notes, now, out)
@@ -392,11 +393,7 @@ impl AppCore {
                 return;
             }
         }
-        self.update_views(out, |v| {
-            if let Some(s) = v.sets.iter_mut().find(|s| s.id == id) {
-                s.items = items;
-            }
-        });
+        self.update_set(out, id, |s| s.items = items);
     }
 
     // --- read models, in the wire's shapes

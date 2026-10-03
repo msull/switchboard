@@ -10,6 +10,7 @@ use crate::core::model::{
     Activity, AgentKind, CardLayout, HandoffMode, Launch, RecordId, ResumeHandle, Round, RunState,
     SessionKind, SessionRecord, Verdict, WorkflowDefinition, WorkflowId, WorkflowRun,
 };
+use crate::core::sessions::next_order;
 use crate::ports::host::Liveness;
 use crate::ports::round_files::{FileStamp, Probed};
 
@@ -46,12 +47,48 @@ fn round_count(run: &WorkflowRun) -> u32 {
 /// `<stem>.response-<n>.md`.
 #[must_use]
 pub fn round_paths(plan: &Path, n: u32) -> (PathBuf, PathBuf) {
-    let stem = plan.file_stem().and_then(|s| s.to_str()).unwrap_or("plan");
+    let stem = plan_stem(plan);
     let dir = plan.parent().unwrap_or_else(|| Path::new("/"));
     (
         dir.join(format!("{stem}.feedback-{n}.md")),
         dir.join(format!("{stem}.response-{n}.md")),
     )
+}
+
+/// The plan's file name without its extension, which names the round
+/// files and the reviewer.
+fn plan_stem(plan: &Path) -> &str {
+    plan.file_stem().and_then(|s| s.to_str()).unwrap_or("plan")
+}
+
+/// Round `n` with nothing in it yet, its files beside the plan.
+fn fresh_round(plan: &Path, n: u32) -> Round {
+    let (feedback, response) = round_paths(plan, n);
+    Round {
+        n,
+        feedback,
+        response,
+        verdict: None,
+        user_feedback: None,
+        responded: false,
+        snapshot: false,
+    }
+}
+
+/// The word a round goes by in the rounds list: who is at work on it,
+/// or what came of it.
+#[must_use]
+pub fn round_status(run: &WorkflowRun, round: &Round) -> &'static str {
+    let at_work = run.current().map(|r| r.n) == Some(round.n) && run.awaiting().is_some();
+    match (round.user_feedback.is_some(), round.verdict, &run.state) {
+        (_, _, RunState::AwaitingResponse) if at_work => "answering",
+        (true, _, _) => "your feedback",
+        (false, Some(Verdict::Nothing), _) => "nothing further",
+        (false, Some(Verdict::Changes), _) if round.responded => "answered",
+        (false, Some(Verdict::Changes), _) => "changes asked",
+        (false, None, RunState::Starting) => "starting",
+        (false, None, _) => "reviewing",
+    }
 }
 
 impl AppCore {
@@ -123,14 +160,6 @@ impl AppCore {
         self.workflows().find(|r| r.id == id)
     }
 
-    /// The runs that drive `record`, in either role.
-    #[must_use]
-    pub fn workflows_of(&self, record: RecordId) -> Vec<&WorkflowRun> {
-        self.workflows()
-            .filter(|r| r.reviewer == record || r.planner == Some(record))
-            .collect()
-    }
-
     /// The definition a run uses, falling back to the built-in when the
     /// user's copy is gone.
     #[must_use]
@@ -200,15 +229,11 @@ impl AppCore {
             self.error("the plan path must be absolute");
             return;
         }
-        if let Some(reason) = self.host_error.clone() {
-            self.error(format!("cannot start a review: {reason}"));
+        if let Some(text) = self.host_unavailable("start", "a review") {
+            self.error(text);
             return;
         }
-        let stem = plan
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("plan")
-            .to_owned();
+        let stem = plan_stem(plan).to_owned();
         let Some(reviewer) = self.add_record(
             record.project,
             format!("{stem} review"),
@@ -225,16 +250,7 @@ impl AppCore {
             return;
         };
         let cap = def.cap.unwrap_or(self.settings.workflow_round_cap).max(1);
-        let (feedback, response) = round_paths(plan, 1);
-        let round = Round {
-            n: 1,
-            feedback,
-            response,
-            verdict: None,
-            user_feedback: None,
-            responded: false,
-            snapshot: false,
-        };
+        let round = fresh_round(plan, 1);
         let id = WorkflowId::new();
         let run = WorkflowRun {
             id,
@@ -298,12 +314,7 @@ impl AppCore {
         else {
             return;
         };
-        let order = workspace
-            .sessions
-            .iter()
-            .map(|s| s.layout.order + 1)
-            .max()
-            .unwrap_or(0);
+        let order = next_order(workspace);
         let planner = RecordId::new();
         workspace.sessions.push(SessionRecord {
             id: planner,
@@ -392,8 +403,7 @@ impl AppCore {
     /// again clears the mark, so a later stall is noticed again.
     fn watch_for_stall(&mut self, run: WorkflowId, agent: RecordId, path: &Path, now: Clock) {
         let quiet = self
-            .host_status(agent)
-            .filter(|h| matches!(h.liveness, Liveness::Running { .. }))
+            .running_status(agent)
             .and_then(|h| h.last_activity)
             .and_then(|t| now.wall.duration_since(t).ok());
         let stalled = quiet.is_some_and(|q| q >= STALL_AFTER);
@@ -533,16 +543,7 @@ impl AppCore {
         };
         let def = self.definition_of(&run);
         let n = round_count(&run) + 1;
-        let (feedback, response) = round_paths(&run.plan, n);
-        let round = Round {
-            n,
-            feedback,
-            response,
-            verdict: None,
-            user_feedback: None,
-            responded: false,
-            snapshot: false,
-        };
+        let round = fresh_round(&run.plan, n);
         // `{response}` in the reviewer's round prompt is the previous
         // round's, the one it is asked to read; `{feedback}` is the new
         // file to write.
@@ -572,11 +573,7 @@ impl AppCore {
     /// Send text into a running agent, or make it the first prompt of
     /// a launch when the pane is gone.
     fn prompt_agent(&mut self, agent: RecordId, prompt: &str, now: Clock, out: &mut Out) {
-        let running = self
-            .host_status(agent)
-            .filter(|h| matches!(h.liveness, Liveness::Running { .. }))
-            .map(|h| h.id.clone());
-        if let Some(host) = running {
+        if let Some(host) = self.running_host(agent) {
             out.push(Effect::SendInput {
                 host,
                 text: prompt.to_owned(),
@@ -644,10 +641,7 @@ impl AppCore {
                     }
                 };
                 self.edit_run(id, now, out, |r| r.state = state);
-                let running = self
-                    .host_status(agent)
-                    .is_some_and(|h| matches!(h.liveness, Liveness::Running { .. }));
-                if !running {
+                if !self.is_running(agent) {
                     let prompt = def.render(&template, &round, &run.plan, run.cap);
                     self.prompt_agent(agent, &prompt, now, out);
                 }
@@ -708,11 +702,7 @@ impl AppCore {
                 run.source
             }
             HandoffMode::Compact => {
-                let running = self
-                    .host_status(run.source)
-                    .filter(|h| matches!(h.liveness, Liveness::Running { .. }))
-                    .map(|h| h.id.clone());
-                let Some(host) = running else {
+                let Some(host) = self.running_host(run.source) else {
                     self.error(format!(
                         "{} is not running; return to it first, or hand off as is",
                         source.name
@@ -760,15 +750,10 @@ impl AppCore {
         }
         let def = self.definition_of(&run);
         let n = round_count(&run) + 1;
-        let (feedback, response) = round_paths(&run.plan, n);
         let round = Round {
-            n,
-            feedback,
-            response,
             verdict: Some(Verdict::Changes),
             user_feedback: Some(text.to_owned()),
-            responded: false,
-            snapshot: false,
+            ..fresh_round(&run.plan, n)
         };
         let prompt = def
             .render(&def.respond_to_user, &round, &run.plan, run.cap)

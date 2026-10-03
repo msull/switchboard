@@ -155,9 +155,10 @@ impl TicketListing {
     }
 }
 
-/// The space and project the console lives in, and its name.
-pub const CONSOLE_SPACE: &str = "Dispatch";
-pub const CONSOLE_NAME: &str = "console";
+/// The space and project the console lives in.
+pub(crate) const CONSOLE_SPACE: &str = "Dispatch";
+/// The console session's name.
+pub(crate) const CONSOLE_NAME: &str = "console";
 
 #[derive(Debug, Default)]
 pub struct DispatchState {
@@ -213,7 +214,22 @@ pub fn close_offered(t: &TicketView) -> bool {
     t.closable || t.trees_retryable
 }
 
+/// Whether the ticket is parked, which is when Resume is offered.
+#[must_use]
+pub fn parked(t: &TicketView) -> bool {
+    t.state == "parked"
+}
+
 impl AppCore {
+    /// Send `body` to the runner, or say it is not running.
+    fn dispatch_call(&mut self, out: &mut Out, body: Body) {
+        if !self.dispatch.connected {
+            self.error("Dispatch is not running; start it from the console");
+            return;
+        }
+        out.push(Effect::DispatchCall(body));
+    }
+
     #[must_use]
     pub fn dispatch_state(&self) -> &DispatchState {
         &self.dispatch
@@ -224,7 +240,8 @@ impl AppCore {
         self.dispatch.status.tickets.iter().find(|t| t.id == id)
     }
 
-    /// Every pending decision across every ticket, newest ticket first.
+    /// Every pending decision across every ticket, oldest question
+    /// first.
     #[must_use]
     pub fn pending_decisions(&self) -> Vec<&DecisionView> {
         // Oldest question first, and the same order every poll: the
@@ -257,13 +274,9 @@ impl AppCore {
                 if !self.counts_as_waiting(session) {
                     return None;
                 }
-                let reason = if self.at_trust_prompt(session) {
-                    "Claude asks whether to trust this folder".to_owned()
-                } else {
-                    self.session(session)
-                        .and_then(|s| s.activity_reason.clone())
-                        .unwrap_or_else(|| "waiting on you".to_owned())
-                };
+                let reason = self
+                    .waiting_reason(session)
+                    .unwrap_or_else(|| "waiting on you".to_owned());
                 Some(WaitingAgent {
                     session,
                     ticket: t.id.clone(),
@@ -443,6 +456,29 @@ impl AppCore {
             .collect()
     }
 
+    /// `pending_decisions`, narrowed to the tickets of one project
+    /// (`None` keeps every project).
+    #[must_use]
+    pub fn pending_decisions_in(&self, project: Option<&str>) -> Vec<&DecisionView> {
+        let mut pending = self.pending_decisions();
+        pending.retain(|d| self.ticket_in(&d.ticket, project));
+        pending
+    }
+
+    /// `waiting_agents`, narrowed to the tickets of one project (`None`
+    /// keeps every project).
+    #[must_use]
+    pub fn waiting_agents_in(&self, project: Option<&str>) -> Vec<WaitingAgent> {
+        let mut agents = self.waiting_agents();
+        agents.retain(|a| self.ticket_in(&a.ticket, project));
+        agents
+    }
+
+    fn ticket_in(&self, ticket: &str, project: Option<&str>) -> bool {
+        self.ticket(ticket)
+            .is_some_and(|t| project.is_none_or(|p| p == t.project))
+    }
+
     /// The ticket one of whose attempts ran in `session`.
     #[must_use]
     pub fn ticket_of_session(&self, session: RecordId) -> Option<&TicketView> {
@@ -489,40 +525,30 @@ impl AppCore {
                 answer,
                 note,
             } => {
-                if !self.dispatch.connected {
-                    self.error("Dispatch is not running; start it from the console");
-                    return;
-                }
-                out.push(Effect::DispatchCall(Body::Decide {
-                    ticket,
-                    decision,
-                    answer,
-                    note,
-                }));
+                self.dispatch_call(
+                    out,
+                    Body::Decide {
+                        ticket,
+                        decision,
+                        answer,
+                        note,
+                    },
+                );
             }
             AppAction::DispatchResume(ticket) => {
-                if !self.dispatch.connected {
-                    self.error("Dispatch is not running; start it from the console");
-                    return;
-                }
-                out.push(Effect::DispatchCall(Body::Resume { ticket }));
+                self.dispatch_call(out, Body::Resume { ticket });
             }
             AppAction::DispatchClose(ticket) => {
-                if !self.dispatch.connected {
-                    self.error("Dispatch is not running; start it from the console");
-                    return;
-                }
-                out.push(Effect::DispatchCall(Body::Close {
-                    ticket,
-                    reason: None,
-                }));
+                self.dispatch_call(
+                    out,
+                    Body::Close {
+                        ticket,
+                        reason: None,
+                    },
+                );
             }
             AppAction::DispatchWorktrees { path, migrate } => {
-                if !self.dispatch.connected {
-                    self.error("Dispatch is not running; start it from the console");
-                    return;
-                }
-                out.push(Effect::DispatchCall(Body::Worktrees { path, migrate }));
+                self.dispatch_call(out, Body::Worktrees { path, migrate });
             }
             AppAction::DispatchReadArtifact { ticket, path } => {
                 if self.dispatch.artifacts.contains_key(&path) {

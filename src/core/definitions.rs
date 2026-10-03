@@ -15,6 +15,7 @@ use crate::core::model::{
     Activity, CardLayout, Definition, Launch, ProjectId, RecordId, SessionKind, SessionRecord,
     Workspace,
 };
+use crate::core::sessions::next_order;
 use crate::ports::project_config::{DefinedEntry, ProjectConfig};
 
 /// Content hash of a definition: everything that changes what runs.
@@ -146,7 +147,7 @@ impl AppCore {
             Ok(()) => {
                 if let Some(root) = self.workspace(project).map(|w| w.project.root.clone()) {
                     self.info_in(project, format!("{name}: project.json saved"), now);
-                    out.push(Effect::ReadProjectConfig { project, root });
+                    out.push(read_config(project, root));
                 }
             }
             Err(e) => self.error_in(project, format!("{name}: project.json not saved: {e}")),
@@ -221,12 +222,7 @@ fn upsert(
         record.outputs.clone_from(&entry.outputs);
         return record.id;
     }
-    let order = workspace
-        .sessions
-        .iter()
-        .map(|s| s.layout.order + 1)
-        .max()
-        .unwrap_or(0);
+    let order = next_order(workspace);
     let id = RecordId::new();
     workspace.sessions.push(SessionRecord {
         id,

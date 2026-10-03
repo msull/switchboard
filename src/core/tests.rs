@@ -4150,7 +4150,8 @@ mod workflow {
     use crate::core::model::{
         BUILTIN_WORKFLOW, HandoffMode, RunState, Verdict, WorkflowDefinition, WorkflowId,
     };
-    use crate::core::{SETTLE_PROBES, round_paths};
+    use crate::core::round_paths;
+    use crate::core::workflow::SETTLE_PROBES;
     use crate::ports::round_files::{FileStamp, Probed};
 
     const PLAN: &str = "/tmp/proj/docs/plan.md";
@@ -6363,7 +6364,7 @@ mod control {
 
 mod dispatch_page {
     use super::*;
-    use crate::core::{CONSOLE_NAME, CONSOLE_SPACE};
+    use crate::core::dispatch::{CONSOLE_NAME, CONSOLE_SPACE};
     use crate::ports::dispatch::{
         AttemptView, Body, DecisionView, ProjectView, Reply, Status, TicketView, WorktreesView,
     };
@@ -6887,7 +6888,7 @@ mod dispatch_page {
         assert!(effects.iter().any(|e| matches!(
             e,
             Effect::SendKeys { host, bytes }
-                if host.0 == id.host_name() && bytes == crate::core::TRUST_YES_KEYS
+                if host.0 == id.host_name() && bytes == crate::core::action::TRUST_YES_KEYS
         )));
         assert!(
             !core.at_trust_prompt(id),

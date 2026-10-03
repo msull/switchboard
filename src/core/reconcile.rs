@@ -13,7 +13,7 @@ use crate::ports::store::{Loaded, StoreError};
 
 /// An agent without hooks whose pane has printed nothing for this long is
 /// shown idle: it is waiting at its prompt, or for the user.
-pub const QUIET_AFTER: std::time::Duration = std::time::Duration::from_secs(20);
+const QUIET_AFTER: std::time::Duration = std::time::Duration::from_secs(20);
 
 /// Injected into every pane so hooks and shells can report the record
 /// they belong to without relying on cwd.
@@ -295,7 +295,7 @@ impl AppCore {
 /// The host spec for a record's own `Launch`. Scrollback is left for the
 /// app, which knows the data directory.
 #[must_use]
-pub fn spawn_spec(record: &SessionRecord) -> SpawnSpec {
+pub(super) fn spawn_spec(record: &SessionRecord) -> SpawnSpec {
     let command = match &record.launch {
         Launch::Shell => None,
         Launch::Argv(argv) => Some(argv.clone()),
@@ -315,7 +315,10 @@ pub fn spawn_spec(record: &SessionRecord) -> SpawnSpec {
 /// `env` with the record id set exactly once (an agent launcher may have
 /// added it already).
 #[must_use]
-pub fn env_with_record_id(mut env: Vec<(String, String)>, id: RecordId) -> Vec<(String, String)> {
+pub(super) fn env_with_record_id(
+    mut env: Vec<(String, String)>,
+    id: RecordId,
+) -> Vec<(String, String)> {
     env.retain(|(k, _)| k != RECORD_ID_ENV);
     env.push((RECORD_ID_ENV.into(), id.0.to_string()));
     env
