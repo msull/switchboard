@@ -1,8 +1,11 @@
-# Dispatch pipeline improvements (draft, 2026-10-02)
+# Dispatch pipeline improvements
 
-Drawn from tickets #4 (PR 13, five code review attempts) and #10 (plan review
-rerun after the reboot). The agents' output was good on both; the cost was
-in the machinery around them. Ordered by expected return.
+The living backlog for the Dispatch pipeline. Items 1 to 12 were drawn
+from tickets #4 (PR 13, five code review attempts) and #10 (plan review
+rerun after the reboot) on 2026-10-02; later items are added as tickets
+show them. Each item carries a **Built** paragraph once an issue lands it.
+The Backlog section at the end holds items not yet sized into issues; it
+is gone through periodically and entries become issues.
 
 ## 1. A review attempt carries its settled points forward
 
@@ -315,3 +318,31 @@ with a PR, keeps its instruction to fix any claim its rebase changed.
 9, 4 and 5 are built (#21), and 11 (#23); 1, 2, 8 and 10 are built
 (#22). 3 cuts the round count directly and is small. 6 is prompt text;
 12 is withdrawn. 7 is built (#30).
+
+## Backlog
+
+Observed, not yet issues. Each line says where it was seen.
+
+- **The style reviewer's convergence line counts as a point.** The style
+  guidance says "when every point you have left is wording, say so in your
+  first line". On #30's round 2 that line was parsed as `r2/style-1` and
+  listed under "Left to the merge", so the round reported two points where
+  there was one. The parser should drop a point whose text is that
+  declaration, or the guidance should put it outside the numbered list.
+- **A `keep` answer on the rewrite-failure decision.** #30's plan noted it:
+  when a `fold` cannot apply (a conflicting fixup), the only answers are
+  `rerun | park`, and a rerun will fold the same way. `keep` would complete
+  the stage with the history as it is.
+- **The CLI blocks behind a long runner pass.** `dispatch take` waited about
+  three minutes while the runner was closing #23 (worktree removal, a
+  release). The runner holds the lock across a whole pass; the lock should
+  be held per ticket write, or `take` should queue the request.
+- **The planner's response described edits that were not in the file**
+  (#25, plan review round 2). Fixed as prompt text on 2026-10-03: the
+  `respond` prompt now orders read, edit, re-read, then response. Listed
+  so the pattern is remembered if it recurs under other prompts.
+- **`fixup!` without the feature live.** Until a ticket's frozen pipeline
+  copy carries `commits = "fold"`, a fixer told to use `--fixup` would
+  land `fixup!` commits on main. The live Switchboard pipeline gets the
+  key and the fixer guidance together, after the runner that folds is
+  installed (2026-10-03, after PR 31).
