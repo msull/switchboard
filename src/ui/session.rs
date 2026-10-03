@@ -1435,8 +1435,15 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(50));
             drop(term);
         }
-        std::thread::sleep(std::time::Duration::from_millis(500));
-        let after = open_fds();
+        // The threads close their ends after the drop returns, and on a
+        // loaded machine that takes longer than a fixed pause; wait for
+        // the release rather than assume its speed.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let mut after = open_fds();
+        while after > baseline + 2 && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            after = open_fds();
+        }
         assert!(
             after <= baseline + 2,
             "{baseline} descriptors before, {after} after twenty terminals"
