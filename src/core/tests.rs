@@ -1576,6 +1576,9 @@ fn remove_rename_pin_unpin_project() {
 
     let e = core.dispatch(AppAction::RemoveProject(id), Clock::at(5));
     assert!(e.contains(&Effect::Delete(id)), "{e:?}");
+    // A Save of the removed workspace would rewrite its record after the
+    // Delete and bring the project back at the next start.
+    assert_eq!(saves(&e), 0, "{e:?}");
     assert!(
         e.contains(&Effect::SaveSettings(Settings::default())),
         "{e:?}"
