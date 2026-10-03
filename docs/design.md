@@ -1727,7 +1727,9 @@ to carry the rule and the dismissals. The control port's `set` replies
 carry `rule`, with `items` the members laid out at 24 columns. Script
 lines: `new-recent-set`, `set-hours`, `dismiss-from-set`; the last two
 take a multi-word set name (every word but the last). Hours from any
-sender are clamped to 1 to 720.
+sender are clamped to 1 to 720. The rail lists rule sets before hand
+sets, each in record order (`AppCore::working_sets_in_rail_order`); the
+control port's `set` replies keep record order.
 
 Known edges: a pane that redraws forever (`top`, a clock in a prompt)
 cannot stay dismissed past its next redraw; Kill and dismiss is the way

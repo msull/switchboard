@@ -5358,6 +5358,23 @@ fn recent_set(core: &mut AppCore, hours: u32, at: u64) -> SetId {
     core.working_sets().last().unwrap().id
 }
 
+#[test]
+fn the_rail_lists_rule_sets_before_hand_sets_in_record_order() {
+    let mut core = AppCore::new();
+    let a = new_set(&mut core, 1);
+    let r1 = recent_set(&mut core, 24, 2);
+    let b = new_set(&mut core, 3);
+    let r2 = recent_set(&mut core, 48, 4);
+    let rail: Vec<SetId> = core
+        .working_sets_in_rail_order()
+        .iter()
+        .map(|s| s.id)
+        .collect();
+    assert_eq!(rail, vec![r1, r2, a, b]);
+    let record: Vec<SetId> = core.working_sets().iter().map(|s| s.id).collect();
+    assert_eq!(record, vec![a, r1, b, r2]);
+}
+
 fn tick(core: &mut AppCore, at: u64) -> Vec<Effect> {
     core.dispatch(AppAction::Tick, Clock::at(at))
 }
