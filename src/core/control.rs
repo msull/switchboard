@@ -292,6 +292,8 @@ impl AppCore {
                     items: Vec::new(),
                     space,
                     op: self.quiet_op.clone(),
+                    rule: None,
+                    dismissed: Vec::new(),
                 };
                 let id = set.id;
                 self.update_views(out, |v| v.sets.push(set));
@@ -361,6 +363,10 @@ impl AppCore {
             self.error("no such working set");
             return;
         };
+        if set.rule.is_some() {
+            self.error("the set is chosen by a rule");
+            return;
+        }
         let space = set.space;
         let items: Vec<PinnedItem> = items
             .into_iter()
@@ -487,8 +493,15 @@ impl AppCore {
                 id: s.id.0.to_string(),
                 name: s.name.clone(),
                 space: s.space.0.to_string(),
-                items: s.items.iter().map(pin_view).collect(),
+                items: self
+                    .set_cards(s, crate::core::RULE_COLUMNS)
+                    .iter()
+                    .map(pin_view)
+                    .collect(),
                 op: s.op.clone(),
+                rule: s.rule.map(|r| match r {
+                    crate::core::SetRule::Recent { hours } => wire::SetRule::Recent { hours },
+                }),
             })
             .collect()
     }

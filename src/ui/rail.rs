@@ -341,12 +341,15 @@ fn working_set_rows(cx: &mut DrawCtx<'_>, ui: &mut Ui, view: &View, compact: boo
         theme::kicker(ui, "Working sets", p.n600);
         ui.add_space(4.0);
     }
-    let sets: Vec<(crate::core::SetId, String, usize)> = cx
+    let sets: Vec<(crate::core::SetId, String, usize, bool)> = cx
         .core
         .visible_working_sets()
-        .map(|s| (s.id, s.name.clone(), s.items.len()))
+        .map(|s| {
+            let count = cx.core.set_cards(s, cx.state.working_set_columns).len();
+            (s.id, s.name.clone(), count, s.rule.is_some())
+        })
         .collect();
-    for (id, name, count) in &sets {
+    for (id, name, count, ruled) in &sets {
         let response = row(
             ui,
             &RowSpec {
@@ -359,6 +362,16 @@ fn working_set_rows(cx: &mut DrawCtx<'_>, ui: &mut Ui, view: &View, compact: boo
                 initial: &initial(name),
             },
         );
+        // A rule set is marked so it is not taken for one arranged by hand.
+        if *ruled && !compact {
+            ui.painter().text(
+                response.rect.right_center() - egui::vec2(8.0, 0.0),
+                Align2::RIGHT_CENTER,
+                "recent",
+                FontId::new(11.0, egui::FontFamily::Proportional),
+                p.n600,
+            );
+        }
         if response.on_hover_text(name).clicked() {
             cx.dispatch(AppAction::ShowWorkingSet(*id));
         }
@@ -381,6 +394,24 @@ fn working_set_rows(cx: &mut DrawCtx<'_>, ui: &mut Ui, view: &View, compact: boo
             clone_of: None,
             with: None,
             columns: cx.state.working_set_columns,
+        });
+    }
+    let recent = if compact { "+R" } else { "+ Recent sessions" };
+    if ui
+        .add(
+            egui::Button::new(
+                RichText::new(recent)
+                    .text_style(theme::meta())
+                    .color(p.accent_text),
+            )
+            .frame_when_inactive(false),
+        )
+        .on_hover_text("A working set of every session active in the last 24 hours")
+        .clicked()
+    {
+        cx.dispatch(AppAction::NewRuleSet {
+            name: None,
+            rule: crate::core::SetRule::Recent { hours: 24 },
         });
     }
 }

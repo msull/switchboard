@@ -44,11 +44,12 @@ its caption bar and preview panel appear on, the sessions open in
 windows of their own and where each window sits, where the main
 window sits, the zoom of each display, the workflow round cap and the
 user's workflow definitions),
-`views.json` (schema v5: the workspaces, and the working sets: each
+`views.json` (schema v6: the workspaces, and the working sets: each
 one's name, workspace, which sessions and files are on it, and where
 each card sits on its grid, with a `.bak`; a set made in the global
 workspace, "Everywhere", is in no real workspace and may hold cards
-from all of them),
+from all of them; a rule set stores its rule, such as "active in the
+last 24 hours", and the sessions dismissed from it instead of cards),
 the
 tmux config and socket name, `claude-hooks.json` (passed to Claude Code
 with `--settings`), `events.log` (the hook event log), `wake.sock`, and
@@ -144,7 +145,8 @@ Dev aids, all environment variables:
   `files`, `side-position`, `terminal`, `select-file`, `set-env`, `set-secret`, `dotenv`, `environment`, `config`,
   `send`, `interrupt`, `return`, `kill`, `remove`, `approve`, `revoke`, `side`,
   `switchboard`, `working-set`, `new-working-set`, `clone-working-set`,
-  `rename-working-set`, `delete-working-set`, `add-to-working-set`,
+  `rename-working-set`, `delete-working-set`, `new-recent-set`,
+  `set-hours`, `dismiss-from-set`, `add-to-working-set`,
   `add-file-to-working-set`, `arrange`, `show-message`, `clone-session`,
   `discard-to`, `undo-discard`, `review-plan`, `show-review`,
   `show-dispatch`, `show-ticket`, `close-ticket`,

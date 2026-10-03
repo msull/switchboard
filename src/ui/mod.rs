@@ -189,6 +189,8 @@ pub struct UiState {
     pub file_modes: HashMap<PathBuf, working_set::FileMode>,
     /// A working set's name being edited in its header.
     pub set_rename: Option<(SetId, String)>,
+    /// A rule set's hours being typed in its header, until committed.
+    pub set_hours: Option<(SetId, String)>,
     /// The working set whose deletion is being confirmed.
     pub delete_set: Option<SetId>,
     /// The space name dialog: a new space (`None`) or a rename, with
@@ -309,6 +311,7 @@ impl Default for UiState {
             previews: HashMap::new(),
             file_modes: HashMap::new(),
             set_rename: None,
+            set_hours: None,
             delete_set: None,
             space_editor: None,
             input_drafts: HashMap::new(),

@@ -2795,6 +2795,118 @@ fn working_sets_are_renamed_cloned_and_deleted_from_the_header() {
     assert_eq!(harness.state().core().view(), View::WorkingSet(sets[1].id));
 }
 
+/// The claude agent, printing just now, on a 24-hour rule set that is
+/// showing in a large window; the ticks of the frames make it a member.
+fn recent_set_of_one(
+    harness: &mut Harness<'static, SwitchboardApp>,
+    ids: &Seeded,
+) -> (switchboard::core::SetId, RecordId) {
+    let id = seed_claude(harness, ids);
+    let core = harness.state_mut().core_mut_for_seeding();
+    let workspaces = core.workspaces().to_vec();
+    core.seed(
+        workspaces,
+        vec![HostStatus {
+            id: HostId(id.host_name()),
+            liveness: Liveness::Running {
+                pid: 43,
+                command: "claude".into(),
+            },
+            cwd: None,
+            last_activity: Some(SystemTime::now()),
+            title: None,
+        }],
+    );
+    core.dispatch(
+        AppAction::NewRuleSet {
+            name: None,
+            rule: switchboard::core::SetRule::Recent { hours: 24 },
+        },
+        switchboard::core::Clock::at(1),
+    );
+    let set = first_set(harness);
+    harness.set_size(egui::vec2(1400.0, 900.0));
+    showing(harness, View::WorkingSet(set));
+    (set, id)
+}
+
+#[test]
+fn a_rule_set_card_is_dismissed_from_its_corner() {
+    let (mut harness, ids) = harness();
+    let (set, id) = recent_set_of_one(&mut harness, &ids);
+    assert_eq!(harness.state().core().rule_members(set), &[id]);
+    harness.get_by_label("claude-agent");
+    harness.get_by_label("×").click();
+    harness.run_steps(2);
+    // The press also selects the card, as a press anywhere on one does.
+    assert_eq!(
+        actions(&harness).last(),
+        Some(&AppAction::DismissFromSet { set, record: id })
+    );
+    assert!(harness.state().core().rule_members(set).is_empty());
+    harness.get_by_label("No session active in the last 24 h");
+}
+
+#[test]
+fn a_running_rule_set_card_is_killed_and_dismissed_from_its_menu() {
+    let (mut harness, ids) = harness();
+    let (set, id) = recent_set_of_one(&mut harness, &ids);
+    harness.get_by_label("claude-agent").click_secondary();
+    harness.run_steps(2);
+    // Nothing can be pinned into a rule set, so its menu does not list it.
+    assert!(harness.query_by_label("   Recent sessions").is_none());
+    click(&mut harness, "Kill and dismiss");
+    assert_eq!(
+        actions(&harness),
+        vec![
+            AppAction::KillSession(id),
+            AppAction::DismissFromSet { set, record: id }
+        ]
+    );
+}
+
+#[test]
+fn a_rule_sets_hours_are_typed_in_its_header_and_it_cannot_be_arranged() {
+    let (mut harness, ids) = harness();
+    let (set, _) = recent_set_of_one(&mut harness, &ids);
+    assert!(harness.query_by_label("Arrange").is_none());
+    harness.get_by_label("Sessions active in the last").focus();
+    harness.run_steps(1);
+    harness.key_press(egui::Key::Backspace);
+    harness.key_press(egui::Key::Backspace);
+    harness
+        .get_by_label("Sessions active in the last")
+        .type_text("48");
+    harness.step();
+    harness.key_press(egui::Key::Enter);
+    harness.run_steps(2);
+    assert_eq!(
+        actions(&harness),
+        vec![AppAction::SetRuleHours { set, hours: 48 }]
+    );
+    assert_eq!(
+        harness.state().core().working_set(set).unwrap().rule,
+        Some(switchboard::core::SetRule::Recent { hours: 48 })
+    );
+}
+
+#[test]
+fn the_rail_makes_a_recent_sessions_set() {
+    let (mut harness, _) = harness();
+    harness.set_size(egui::vec2(1200.0, 800.0));
+    harness.run_steps(2);
+    click(&mut harness, "+ Recent sessions");
+    harness.run_steps(2);
+    let set = first_set(&harness);
+    let made = harness.state().core().working_set(set).unwrap().clone();
+    assert_eq!(made.name, "Recent sessions");
+    assert_eq!(
+        made.rule,
+        Some(switchboard::core::SetRule::Recent { hours: 24 })
+    );
+    assert_eq!(harness.state().core().view(), View::WorkingSet(set));
+}
+
 /// Press, move, release with the primary button, a few frames apart.
 fn drag(harness: &mut Harness<'static, SwitchboardApp>, from: egui::Pos2, to: egui::Pos2) {
     harness.event(egui::Event::PointerMoved(from));

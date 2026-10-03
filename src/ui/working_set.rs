@@ -13,7 +13,7 @@ use super::{DrawCtx, UiState, theme};
 use crate::core::grid::{MIN_HEIGHT, MIN_WIDTH};
 use crate::core::{
     AppAction, AppCore, CardState, GridRect, MenuKind, PinTarget, PinnedItem, RadialMenu, RecordId,
-    SessionKind, SessionRecord, SetId, UiRequest,
+    SessionKind, SessionRecord, SetId, SetRule, UiRequest,
 };
 
 /// Arrange mode: while on, cards are moved and resized instead of
@@ -99,23 +99,35 @@ pub fn cell_rect(origin: egui::Pos2, rect: GridRect) -> egui::Rect {
 pub fn show(cx: &mut DrawCtx<'_>, ui: &mut Ui, set: SetId) {
     let p = theme::palette(ui);
     ui.spacing_mut().item_spacing = egui::vec2(10.0, 6.0);
-    let Some((name, mut items)) = cx
-        .core
-        .working_set(set)
-        .map(|s| (s.name.clone(), s.items.clone()))
-    else {
+    let columns = columns(ui.available_width());
+    let Some((name, rule, mut items)) = cx.core.working_set(set).map(|s| {
+        (
+            s.name.clone(),
+            s.rule,
+            cx.core.set_cards(s, columns).into_owned(),
+        )
+    }) else {
         ui.label("This working set no longer exists.");
         return;
     };
-    header(cx, ui, set, &name, items.is_empty());
+    header(cx, ui, set, &name, items.is_empty() || rule.is_some());
+    if let Some(rule) = rule {
+        rule_line(cx, ui, set, rule);
+    }
     ui.label(theme::meta_text(
         ui,
-        match items.len() {
-            0 => "Nothing here yet.".to_owned(),
-            1 => "1 card".to_owned(),
-            n => format!("{n} cards"),
+        match (items.len(), rule) {
+            (0, Some(SetRule::Recent { hours })) => {
+                format!("No session active in the last {hours} h")
+            }
+            (0, None) => "Nothing here yet.".to_owned(),
+            (1, _) => "1 card".to_owned(),
+            (n, _) => format!("{n} cards"),
         },
     ));
+    if items.is_empty() && rule.is_some() {
+        return;
+    }
     if items.is_empty() {
         ui.add_space(8.0);
         ui.label(
@@ -127,7 +139,8 @@ pub fn show(cx: &mut DrawCtx<'_>, ui: &mut Ui, set: SetId) {
         return;
     }
     ui.add_space(8.0);
-    let arranging = cx.state.arrange.on;
+    // A rule set's cards are laid out by the core, never dragged.
+    let arranging = cx.state.arrange.on && rule.is_none();
     // The card being dragged is drawn where it would land, so it snaps
     // along under the pointer; the record itself moves on release.
     if let Some(drag) = &cx.state.arrange.drag
@@ -135,7 +148,6 @@ pub fn show(cx: &mut DrawCtx<'_>, ui: &mut Ui, set: SetId) {
     {
         item.rect = drag.preview;
     }
-    let columns = columns(ui.available_width());
     let width_units = items
         .iter()
         .map(|i| i.rect.x + i.rect.w)
@@ -170,7 +182,7 @@ pub fn show(cx: &mut DrawCtx<'_>, ui: &mut Ui, set: SetId) {
                     if arranging {
                         ui.disable();
                     }
-                    card(cx, ui, set, item);
+                    card(cx, ui, set, rule.is_some(), item);
                 });
                 if active.as_ref() == Some(&item.target) {
                     selected(cx, ui, set, item, cell, follow);
@@ -318,7 +330,8 @@ fn arrange_handles(
     painter.rect_filled(handle, egui::CornerRadius::same(2), color);
 }
 
-fn card(cx: &mut DrawCtx<'_>, ui: &mut Ui, set: SetId, item: &PinnedItem) {
+fn card(cx: &mut DrawCtx<'_>, ui: &mut Ui, set: SetId, ruled: bool, item: &PinnedItem) {
+    let rule_set = ruled.then_some(set);
     match &item.target {
         PinTarget::Session(id) => {
             let Some(record) = cx.core.session(*id) else {
@@ -326,9 +339,9 @@ fn card(cx: &mut DrawCtx<'_>, ui: &mut Ui, set: SetId, item: &PinnedItem) {
             };
             match record.kind {
                 SessionKind::Command | SessionKind::Service => {
-                    super::runs::set_card(cx, ui, record);
+                    super::runs::set_card(cx, ui, record, rule_set);
                 }
-                SessionKind::Agent(_) | SessionKind::Shell => set_card(cx, ui, record),
+                SessionKind::Agent(_) | SessionKind::Shell => set_card(cx, ui, record, rule_set),
             }
         }
         PinTarget::File(pid, rel) => file_card(cx, ui, set, *pid, rel),
@@ -455,6 +468,7 @@ fn set_card_top(
     kicker: &str,
     state: &CardState,
     agent: bool,
+    rule_set: Option<SetId>,
 ) -> bool {
     let p = theme::palette(ui);
     let mut listen = false;
@@ -462,6 +476,9 @@ fn set_card_top(
         theme::kicker(ui, kicker, p.state_text(state));
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             theme::status_dot(ui, state, 8.0);
+            if let Some(set) = rule_set {
+                dismiss_button(cx, ui, set, record.id);
+            }
             if agent && cx.core.settings().prompt_box {
                 let listening = cx.state.prompt_boxes.listening() == Some(record.id);
                 let hint = if listening {
@@ -478,7 +495,7 @@ fn set_card_top(
     listen
 }
 
-fn set_card(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord) {
+fn set_card(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord, rule_set: Option<SetId>) {
     let p = theme::palette(ui);
     let SetCardText {
         kicker,
@@ -499,7 +516,7 @@ fn set_card(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord) {
             ui.set_min_size(ui.available_size());
             ui.spacing_mut().item_spacing = vec2(6.0, 4.0);
             ui.style_mut().interaction.selectable_labels = false;
-            if set_card_top(cx, ui, record, &kicker, &state, agent) {
+            if set_card_top(cx, ui, record, &kicker, &state, agent, rule_set) {
                 super::prompt_box::toggle_listening(cx, record);
             }
             let title = ui
@@ -511,7 +528,9 @@ fn set_card(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord) {
                 .on_hover_cursor(egui::CursorIcon::PointingHand);
             open = title.clicked();
             title.context_menu(|ui| {
-                if set_menu(cx, ui, &PinTarget::Session(record.id)) {
+                if set_menu(cx, ui, &PinTarget::Session(record.id))
+                    | kill_and_dismiss(cx, ui, rule_set, record.id, running)
+                {
                     ui.close();
                 }
             });
@@ -567,7 +586,7 @@ fn set_card(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord) {
                 }
             }
             let view = answer.as_deref().filter(|_| rendered);
-            set_footer(cx, ui, record, running, agent, view);
+            set_footer(cx, ui, record, running, agent, view, rule_set);
         });
     if let Some(text) = show_raw {
         cx.state.raw_message = Some(text);
@@ -627,10 +646,24 @@ fn set_footer(
     running: bool,
     agent: bool,
     view: Option<&str>,
+    rule_set: Option<SetId>,
 ) {
     ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
         ui.horizontal(|ui| {
             actions(cx, ui, record, running);
+            // A stopped session on a rule set has nothing to send to;
+            // taking it off is the likelier next step.
+            if let Some(set) = rule_set
+                && !running
+                && theme::ghost_muted(ui, "Dismiss")
+                    .on_hover_text(DISMISS_HINT)
+                    .clicked()
+            {
+                cx.dispatch(AppAction::DismissFromSet {
+                    set,
+                    record: record.id,
+                });
+            }
             if let Some(answer) = view
                 && theme::ghost_muted(ui, "View")
                     .on_hover_text("Open the answer in a dialog, rendered or raw")
@@ -646,6 +679,40 @@ fn set_footer(
         });
         send_line(cx, ui, record, running);
     });
+}
+
+/// What the dismiss controls of a rule-set card promise.
+const DISMISS_HINT: &str = "Dismiss until it is active again";
+
+/// The muted "×" at the top right of a rule-set card.
+pub(super) fn dismiss_button(cx: &mut DrawCtx<'_>, ui: &mut Ui, set: SetId, record: RecordId) {
+    let p = theme::palette(ui);
+    let button = egui::Button::new(RichText::new("×").color(p.n600)).frame_when_inactive(false);
+    if ui.add(button).on_hover_text(DISMISS_HINT).clicked() {
+        cx.dispatch(AppAction::DismissFromSet { set, record });
+    }
+}
+
+/// "Kill and dismiss" in a running rule-set card's menu: the pane is
+/// stopped and the card goes, and the end the kill sends does not bring
+/// it back. Returns whether it was chosen.
+pub(super) fn kill_and_dismiss(
+    cx: &mut DrawCtx<'_>,
+    ui: &mut Ui,
+    rule_set: Option<SetId>,
+    record: RecordId,
+    running: bool,
+) -> bool {
+    let Some(set) = rule_set.filter(|_| running) else {
+        return false;
+    };
+    ui.separator();
+    if !ui.button("Kill and dismiss").clicked() {
+        return false;
+    }
+    cx.dispatch(AppAction::KillSession(record));
+    cx.dispatch(AppAction::DismissFromSet { set, record });
+    true
 }
 
 /// Lines of the pane a hover over "Terminal" shows.
@@ -1014,7 +1081,8 @@ pub fn set_menu_actions(
     let holding = core.sets_holding(target);
     let mut actions = Vec::new();
     ui.label(theme::meta_text(ui, "Working sets").color(p.n600));
-    for set in core.visible_working_sets() {
+    // A rule set chooses its own cards; nothing can be put on one.
+    for set in core.visible_working_sets().filter(|s| s.rule.is_none()) {
         let on = holding.contains(&set.id);
         let label = if on {
             format!("✓ {}", set.name)
@@ -1073,12 +1141,13 @@ pub fn set_menu(cx: &mut DrawCtx<'_>, ui: &mut Ui, target: &PinTarget) -> bool {
 }
 
 /// The set's name (or its editor), with Arrange, Rename, Clone, and
-/// Delete on the right.
-fn header(cx: &mut DrawCtx<'_>, ui: &mut Ui, set: SetId, name: &str, empty: bool) {
+/// Delete on the right. `fixed` hides Arrange: an empty set has nothing
+/// to move, and a rule set's cards are laid out by the core.
+fn header(cx: &mut DrawCtx<'_>, ui: &mut Ui, set: SetId, name: &str, fixed: bool) {
     ui.horizontal(|ui| {
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.spacing_mut().item_spacing.x = 6.0;
-            if !empty {
+            if !fixed {
                 let arranging = cx.state.arrange.on;
                 let button = if arranging {
                     theme::primary(ui, "Done")
@@ -1132,6 +1201,39 @@ fn header(cx: &mut DrawCtx<'_>, ui: &mut Ui, set: SetId, name: &str, empty: bool
                 }
             });
         });
+    });
+}
+
+/// A rule set's rule under its name, the hours a small field that
+/// commits on Enter or when it loses focus; Escape puts it back.
+fn rule_line(cx: &mut DrawCtx<'_>, ui: &mut Ui, set: SetId, rule: SetRule) {
+    let SetRule::Recent { hours } = rule;
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 4.0;
+        let label = ui
+            .label(theme::meta_text(ui, "Sessions active in the last"))
+            .id;
+        let mut draft = match &cx.state.set_hours {
+            Some((id, draft)) if *id == set => draft.clone(),
+            _ => hours.to_string(),
+        };
+        let response = ui
+            .add(egui::TextEdit::singleline(&mut draft).desired_width(40.0))
+            .labelled_by(label);
+        if response.changed() {
+            cx.state.set_hours = Some((set, draft));
+        }
+        if response.lost_focus() {
+            let escape = ui.input(|i| i.key_pressed(egui::Key::Escape));
+            let typed = cx.state.set_hours.take().filter(|(id, _)| *id == set);
+            if !escape
+                && let Some(asked) = typed.and_then(|(_, d)| d.trim().parse::<u32>().ok())
+                && asked != hours
+            {
+                cx.dispatch(AppAction::SetRuleHours { set, hours: asked });
+            }
+        }
+        ui.label(theme::meta_text(ui, "h"));
     });
 }
 
