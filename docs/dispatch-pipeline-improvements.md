@@ -233,10 +233,12 @@ tests. Half a day. Issue #23, narrowed.
 lane's branch, a branch the refresh brought up (mechanically, or on the
 pass after the rebaser stops) is pushed with `--force-with-lease` on the
 head the lane's records last saw: the newest non-refresh attempt in its
-context that recorded one, never the remote-tracking ref. This holds at
-any stage the refresh runs, so the rebaser is told not to push. A lane
-without a PR pushes nothing. A refused lease or a failed push leaves
-`ready` to ask its `pr` question about the head.
+context that recorded one, or the head a refresh last pushed (the lane's
+`pushed`, record version 3) when that came later, never the
+remote-tracking ref. This holds at any stage the refresh runs, so the
+rebaser is told not to push, and a second refresh leases on the first
+one's push. A lane without a PR pushes nothing. A refused lease or a
+failed push leaves `ready` to ask its `pr` question about the head.
 
 ## 12. Withdrawn: the pull request body is written once
 

@@ -209,7 +209,9 @@ from a newer `dispatch` and bring an older one up through
 `store::migrate`; every write stamps the current version and refuses
 to write over a newer one. Version 2 adds a ledger operation's
 `settled` flag, which older records had only as recovery's verdict in
-`error`; the migration reads it from those words.
+`error`; the migration reads it from those words. Version 3 adds a
+lane's `pushed`, the head a refresh last pushed, which older records
+never had and read as absent.
 
 The "never resume automatically" rule holds on both sides. New
 launches happen because the scheduler finds a runnable ticket at the
@@ -1188,21 +1190,21 @@ base moved and names the range, so a plan written against the old
 code is read with that in mind. When the provider reports an open
 pull request for the lane's branch, a branch the refresh rewrote is
 pushed with `--force-with-lease` on the head the lane's records last
-saw (the newest attempt in its context that recorded one), after the
-rebase or the rebaser, at whatever stage the refresh runs; a lane
-without one pushes nothing, and a refused lease is left to the `pr`
-question about the head. A
-rebase that stops on a conflict is aborted, and the policy's `rebaser`
-is continued from the lane's last finished agent, told the base and
-the stage's checks, and asked to resolve without pushing or, when a
-conflict's intent is unclear, to leave the branch as it was and say
-why; the stage waits for it, reads the branch again
-when it stops, and after `max_rebases` such attempts, or without a
-rebaser, asks a `refresh` question with `recheck`. The attempts and
-the question carry the pseudo-stage `refresh`, so no stage mistakes
-them for its own. Pull-request tickets are someone else's branch and
-are never refreshed; `lanes`, a human look and the merge watch launch
-nothing and are not refreshed either.
+saw (the newest attempt in its context that recorded one, or the
+lane's `pushed`, the head a refresh last pushed, when that came
+later), after the rebase or the rebaser, at whatever stage the refresh
+runs; a lane without one pushes nothing, and a refused lease is left
+to the `pr` question about the head. A rebase that stops on a conflict
+is aborted, and the policy's `rebaser` is continued from the lane's
+last finished agent, told the base and the stage's checks, and asked
+to resolve without pushing or, when a conflict's intent is unclear, to
+leave the branch as it was and say why; the stage waits for it, reads
+the branch again when it stops, and after `max_rebases` such attempts,
+or without a rebaser, asks a `refresh` question with `recheck`. The
+attempts and the question carry the pseudo-stage `refresh`, so no
+stage mistakes them for its own. Pull-request tickets are someone
+else's branch and are never refreshed; `lanes`, a human look and the
+merge watch launch nothing and are not refreshed either.
 
 Red checks on the PR at the tree's head are handled the same way by
 the policy's `fixer`: cloned from the lane's last finished agent, told

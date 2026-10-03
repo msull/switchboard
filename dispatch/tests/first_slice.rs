@@ -5976,6 +5976,75 @@ fn a_refresh_at_ready_pushes_after_the_rebaser_resolves_it() {
     );
 }
 
+/// Two refreshes in one lane, each after main moved, with an agent
+/// stage between them that records no head: the second lease is on the
+/// head the first refresh pushed, not the older one the implement
+/// checks recorded, so `ready` reads the PR with no question.
+#[test]
+fn a_second_refresh_leases_on_the_head_the_first_one_pushed() {
+    let mut env = Env::new();
+    let path = env.data.pipeline(PROJECT);
+    let text = std::fs::read_to_string(&path).unwrap();
+    std::fs::write(
+        &path,
+        text.replace(
+            "[[stages]]\nname = \"ready\"",
+            "[[stages]]\nname = \"polish\"\noperator = \"implementer\"\ncontext = \"each\"\nwrites = [\"notes\"]\nprompt = \"Polish {branch}.\"\n\n[[stages]]\nname = \"ready\"",
+        ),
+    )
+    .unwrap();
+    let (id, tree) = main_moved_before_ready(&mut env, "rebased2", 1);
+    env.inspect(&id, "proceed", None);
+    env.steps_until(&id, "the polisher", |t, _| {
+        t.attempts_of("polish").last().is_some_and(Attempt::is_open)
+    });
+    let t = env.ticket(&id);
+    let branch = t.lanes[0].branch.clone();
+    assert_eq!(
+        env.repo.lock().unwrap().pushed,
+        vec![(
+            tree.clone(),
+            "origin".into(),
+            branch.clone(),
+            "base0000".into()
+        )]
+    );
+    let clone = env.runner.data.repo_dir(PROJECT);
+    {
+        let mut repo = env.repo.lock().unwrap();
+        repo.bases.insert(clone, "main0003".into());
+        repo.behind.insert(tree.clone(), 1);
+        repo.rebase_heads.insert(tree.clone(), "rebased2".into());
+    }
+    env.finish(
+        &session_of(&t, "polish"),
+        &artifact_of(&t, "polish", "notes"),
+        "# polished\nnothing to commit",
+    );
+    env.steps_until(&id, "the ready attempt done", |t, _| {
+        t.attempts_of("ready").last().is_some_and(|a| !a.is_open())
+    });
+    let t = env.ticket(&id);
+    assert_eq!(
+        env.repo.lock().unwrap().pushed,
+        vec![
+            (
+                tree.clone(),
+                "origin".into(),
+                branch.clone(),
+                "base0000".into()
+            ),
+            (tree, "origin".into(), branch, "rebased1".into()),
+        ]
+    );
+    assert_eq!(t.lanes[0].base_sha.as_deref(), Some("main0003"));
+    assert!(t.pending_decisions().is_empty(), "{t:#?}");
+    assert_eq!(
+        t.attempts_of("ready").last().unwrap().state,
+        AttemptState::Complete
+    );
+}
+
 /// Without a rebaser in the policy a conflicting refresh is a question
 /// with `recheck`, answered after the user rebased by hand.
 #[test]

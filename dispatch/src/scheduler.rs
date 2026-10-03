@@ -692,31 +692,35 @@ impl Runner {
     /// head and ask for the one push there is. A lane without a PR pushes
     /// nothing. A refused or failed push, or a provider that cannot be
     /// read, is logged, not an error: the `pr` question about the head is
-    /// the fallback.
-    fn push_refreshed(&mut self, t: &Ticket, p: &Pipeline, i: usize, remote: &str) -> Result<()> {
+    /// the fallback. Returns the head the remote now holds when the push
+    /// went through or found it there already.
+    fn push_refreshed(
+        &mut self,
+        t: &Ticket,
+        p: &Pipeline,
+        i: usize,
+        remote: &str,
+    ) -> Result<Option<String>> {
         let lane = &t.lanes[i];
         let (id, name, branch) = (&t.id, &lane.name, &lane.branch);
-        let Some((stage, provider)) = p.stages.iter().find_map(|s| match &s.gate {
-            Some(Gate::External {
-                check, provider, ..
-            }) if check == "pr-checks" || check == "pr-merged" => Some((s, provider.as_deref())),
-            _ => None,
-        }) else {
-            return Ok(());
+        // The PR is looked up the way the pipeline's PR stage will look
+        // it up, through that stage's provider.
+        let Some((stage, provider)) = pr_stage(p) else {
+            return Ok(None);
         };
-        let Some(seen) = pr_head_seen(t, name) else {
-            return Ok(());
+        let Some(seen) = pr_head_seen(t, lane) else {
+            return Ok(None);
         };
         let head = self.git.head(&lane.worktree)?;
         if same_commit(&head, &seen) {
-            return Ok(());
+            return Ok(None);
         }
         let origin = self.git.remote_url(&lane.worktree)?;
         let target = match pr_target(t, p, stage, Some(name), provider, origin) {
             Ok(target) => target,
             Err(why) => {
                 log::info!("ticket {id} lane {name}: {why}; {branch} not pushed");
-                return Ok(());
+                return Ok(None);
             }
         };
         match self.find_pr(&target) {
@@ -725,13 +729,13 @@ impl Runner {
                 log::info!(
                     "ticket {id} lane {name}: no open pull request for {branch}; nothing pushed"
                 );
-                return Ok(());
+                return Ok(None);
             }
             Err(e) => {
                 log::warn!(
                     "ticket {id} lane {name}: the pull request for {branch} could not be read, so it is not pushed: {e:#}"
                 );
-                return Ok(());
+                return Ok(None);
             }
         }
         match self
@@ -740,16 +744,25 @@ impl Runner {
         {
             Ok(Push::Pushed) => {
                 log::info!("ticket {id} lane {name}: pushed {branch} over {seen} (lease)");
+                Ok(Some(head))
             }
-            Ok(Push::UpToDate) => log::info!(
-                "ticket {id} lane {name}: {remote}'s {branch} already at {head}; nothing pushed"
-            ),
-            Ok(Push::Refused) => log::info!(
-                "ticket {id} lane {name}: {remote} moved off {seen}; {branch} not pushed, left to the pr question"
-            ),
-            Err(e) => log::warn!("ticket {id} lane {name}: push of {branch} failed: {e:#}"),
+            Ok(Push::UpToDate) => {
+                log::info!(
+                    "ticket {id} lane {name}: {remote}'s {branch} already at {head}; nothing pushed"
+                );
+                Ok(Some(head))
+            }
+            Ok(Push::Refused) => {
+                log::info!(
+                    "ticket {id} lane {name}: {remote} moved off {seen}; {branch} not pushed, left to the pr question"
+                );
+                Ok(None)
+            }
+            Err(e) => {
+                log::warn!("ticket {id} lane {name}: push of {branch} failed: {e:#}");
+                Ok(None)
+            }
         }
-        Ok(())
     }
 
     /// One lane's branch against its base; true when the stage must
@@ -807,7 +820,12 @@ impl Runner {
             );
             // Before the save, so a crash repeats the push rather than
             // skipping it.
-            self.push_refreshed(t, p, i, &remote)?;
+            if let Some(head) = self.push_refreshed(t, p, i, &remote)? {
+                t.lanes[i].pushed = Some(crate::ticket::PushedHead {
+                    head,
+                    at_ms: now_ms,
+                });
+            }
             t.lanes[i].refreshed = Some(crate::ticket::Refreshed {
                 from,
                 to: onto_sha.clone(),
@@ -1946,6 +1964,7 @@ impl Runner {
                 setup_done: false,
                 base_sha,
                 refreshed: None,
+                pushed: None,
                 removed: false,
             });
             self.save_ticket(t, now_ms)?;
@@ -5224,6 +5243,17 @@ fn reads_pr(stage: &Stage) -> bool {
     matches!(&stage.gate, Some(Gate::External { check, .. }) if check == "pr-checks")
 }
 
+/// The pipeline's first stage that reads a pull request (the
+/// `pr-checks` or `pr-merged` watch), with the provider it names.
+fn pr_stage(p: &Pipeline) -> Option<(&Stage, Option<&str>)> {
+    p.stages.iter().find_map(|s| match &s.gate {
+        Some(Gate::External {
+            check, provider, ..
+        }) if check == "pr-checks" || check == "pr-merged" => Some((s, provider.as_deref())),
+        _ => None,
+    })
+}
+
 /// Whether two hashes name one commit; a provider may report a short
 /// one.
 fn same_commit(a: &str, b: &str) -> bool {
@@ -5253,22 +5283,32 @@ fn head_moved_ms(t: &Ticket, a: &Attempt) -> u64 {
     ended.chain(rechecked).fold(a.started_ms, u64::max)
 }
 
-/// The head the lane's pull request was last seen at: the newest attempt
-/// in the lane's context, refreshes aside, that recorded one, preferring
-/// the full hash from local git over the provider's. The lease for a
-/// push. Never the remote-tracking ref: a fetch moves that with anyone's
-/// push, and a lease on it would overwrite exactly the commit the lease
-/// is there to keep.
-fn pr_head_seen(t: &Ticket, lane: &str) -> Option<String> {
-    t.attempts
+/// The head the lane's records last saw on its branch, the lease for a
+/// push: the newest attempt in the lane's context, refreshes aside,
+/// that recorded one (the full hash from local git over the
+/// provider's), or the head a refresh pushed after that attempt ended.
+/// Before a stage reads the PR this is usually an agent's local head,
+/// not a reading of the PR. Never the remote-tracking ref: a fetch
+/// moves that with anyone's push, and a lease on it would overwrite
+/// exactly the commit the lease is there to keep.
+fn pr_head_seen(t: &Ticket, lane: &LaneRecord) -> Option<String> {
+    let recorded = t
+        .attempts
         .iter()
         .rev()
-        .filter(|a| a.context == lane && a.stage != REFRESH)
+        .filter(|a| a.context == lane.name && a.stage != REFRESH)
         .find_map(|a| {
-            a.head
+            let head = a
+                .head
                 .clone()
-                .or_else(|| a.pr.as_ref().map(|p| p.head.clone()))
-        })
+                .or_else(|| a.pr.as_ref().map(|p| p.head.clone()));
+            head.map(|h| (h, a.ended_ms.unwrap_or(a.started_ms)))
+        });
+    match (recorded, &lane.pushed) {
+        (Some((head, at_ms)), Some(pushed)) if at_ms > pushed.at_ms => Some(head),
+        (_, Some(pushed)) => Some(pushed.head.clone()),
+        (recorded, None) => recorded.map(|(head, _)| head),
+    }
 }
 
 /// What a reading of the PR means: its summary for the record, and

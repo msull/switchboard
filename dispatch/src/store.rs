@@ -18,7 +18,7 @@ use crate::ticket::{ProjectState, Ticket};
 /// carried a version reads as 0 and is brought up by `migrate`. A
 /// record above it was written by a newer `dispatch` and is refused
 /// both ways, so this build never drops fields it does not know.
-pub const RECORD_VERSION: u32 = 2;
+pub const RECORD_VERSION: u32 = 3;
 
 /// The writer lock, held while this lives.
 #[derive(Debug)]
@@ -332,6 +332,9 @@ pub fn migrate(mut value: Value) -> Value {
         //
         // 1 to 2: a ledger operation gains `settled`, which before was
         // read off recovery's verdict in `error`.
+        //
+        // 2 to 3: a lane gains `pushed`, absent until a refresh pushes,
+        // which its serde default gives.
         if version == 1 {
             settle_from_verdicts(&mut value);
         }
