@@ -206,6 +206,31 @@ nothing.
 
 **Size.** `Repo::push_with_lease`, two call sites, two tests. Half a day.
 
+## 12. The pull request body is checked against the branch at `ready`
+
+**Problem.** Switchboard's pipeline opens the PR at `implement`, before the
+review rounds. On #21 the body still said "the Switchboard app is
+untouched" after a review point moved two card words into the wire crate,
+and on #10 it described the activity rule from before two correctness
+fixes. The approver corrected both by hand before the merge.
+
+**Change.** Two layers. First, wording, already in the live file: the
+fixer and the rebaser edit the body for what they changed, in the same
+round. Second, a `ready`-stage pass by a cheap fresh agent (sonnet) that
+reads the body against the final diff and the round files, rewrites any
+claim the branch no longer supports, and adds the review's changes under
+"Beyond the issue" where the fixer forgot. It changes no code; its notes
+say what it corrected. Delta needs neither: its PR is opened at the `pr`
+stage over the finished branch.
+
+**Acceptance.** A ticket whose fix round changed a claim reaches `merge`
+with the body corrected and the reviser's notes naming the claim; a body
+that is already true is left byte for byte.
+
+**Size.** A `reviser` operator in the Switchboard pipeline and a new
+agent stage before `ready`, no scheduler change. An hour of pipeline
+work once item 11 pushes the branch for it.
+
 ## Not changing
 
 - The reviewers' standard. They found real bugs every attempt (recovery on
@@ -222,5 +247,5 @@ nothing.
 ## Order
 
 9 first: it failed three attempts in one night. 1, 2 and 3 cut the
-round count directly and are small. 4 and 5 are filed bugs. 11 removes a question with one answer. 6, 8 and 10 are prompt text. 7 is a taste call for the user before anyone
+round count directly and are small. 4 and 5 are filed bugs. 11 removes a question with one answer. 6, 8, 10 and 12 are prompt text. 7 is a taste call for the user before anyone
 builds it.
