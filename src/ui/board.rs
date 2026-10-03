@@ -106,7 +106,8 @@ pub fn show(cx: &mut DrawCtx<'_>, ui: &mut Ui, pid: ProjectId) {
                         )
                         .clicked()
                     {
-                        cx.state.config_dialog = super::config::ConfigDraft::open(cx, pid);
+                        cx.state.config_dialog =
+                            super::config::ConfigDraft::read(cx.core, cx.services, pid);
                     }
                     if let Some(from) = cx.core.project_space(pid) {
                         super::dialogs::move_to_space_menu(cx, ui, from, |space| {

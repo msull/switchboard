@@ -2,10 +2,16 @@
 //! text: the last lines of what the pane showed, for records whose pane
 //! is gone (after a reboot, say). Escape sequences are stripped rather
 //! than interpreted, which is right for line-oriented output and rough
-//! for full-screen programs; the design's parser-fed history is later.
+//! for full-screen programs.
 
 use std::io::{Read, Seek, SeekFrom};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+/// Where the host pipes every session's and run's raw output.
+#[must_use]
+pub fn scrollback_dir(data_dir: &Path) -> PathBuf {
+    data_dir.join("scrollback")
+}
 
 /// How much of the end of the file is read.
 const TAIL_BYTES: u64 = 128 * 1024;
@@ -31,7 +37,7 @@ pub fn tail_text(path: &Path, max_lines: usize) -> std::io::Result<String> {
 /// Drop ANSI escape sequences and control characters, honoring `\r` as
 /// "overwrite this line from the start" the way a terminal would.
 #[must_use]
-pub fn strip_escapes(text: &str) -> String {
+fn strip_escapes(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut line = String::new();
     let mut chars = text.chars().peekable();

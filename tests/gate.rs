@@ -11,9 +11,9 @@
 //! Tests that run a real agent are `#[ignore]`d; run one with
 //!
 //! ```sh
-//! cargo test --test gate -- --ignored claude_sessions_map_to_their_cards --nocapture
-//! cargo test --test gate -- --ignored hook_events_while_down_apply_in_order --nocapture
-//! cargo test --test gate -- --ignored codex_launches_bind_distinct_ids --nocapture
+//! cargo test --locked --test gate -- --ignored claude_sessions_map_to_their_cards --nocapture
+//! cargo test --locked --test gate -- --ignored hook_events_while_down_apply_in_order --nocapture
+//! cargo test --locked --test gate -- --ignored codex_launches_bind_distinct_ids --nocapture
 //! ```
 //!
 //! Interactive `claude` shows a trust dialog for a directory it has not
@@ -123,7 +123,7 @@ impl Gate {
             project_config: Box::new(FileConfigReader::new()),
             round_files: Box::new(switchboard::adapters::round_files::DiskRoundFiles),
             artifacts: Box::new(switchboard::adapters::artifacts::DiskArtifacts),
-            controller: Box::new(FakeController::default()),
+            controller: Box::new(FakeController),
             operations: Box::new(FakeOperations::default()),
             dispatch: Some(Box::new(FakeDispatch::default())),
             wake: None,

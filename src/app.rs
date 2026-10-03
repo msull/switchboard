@@ -12,6 +12,7 @@ use switchboard_control as wire;
 
 use crate::adapters::control::{ControlSocket, Incoming};
 use crate::adapters::hooks::WakeSocket;
+use crate::adapters::scrollback::scrollback_dir;
 use crate::core::{
     Activity, AgentKind, AppAction, AppCore, Clock, ControlAction, ControlOutcome, Effect,
     ProjectId, RecordId, Resolved, ResumeHandle, SessionKind, SpaceId, View, WorkflowId,
@@ -22,7 +23,7 @@ use crate::ports::control::{OpLine, Operations};
 use crate::ports::controller::Controller;
 use crate::ports::dispatch::{Body, DispatchPort, Reply, Status};
 use crate::ports::events::EventSource;
-use crate::ports::host::{HostId, Liveness, ProcessHost};
+use crate::ports::host::{HostId, ProcessHost};
 use crate::ports::opener::Opener;
 use crate::ports::project_config::ProjectConfigReader;
 use crate::ports::round_files::RoundFiles;
@@ -38,11 +39,11 @@ const POLL_INTERVAL: Duration = Duration::from_secs(1);
 const TRUST_PROMPT_MARK: &str = "trust this folder";
 const TRUST_PROMPT_LINES: usize = 20;
 
-/// How often card captions and the session snapshot are refreshed.
 /// How often definition files are checked for a change.
 const CONFIG_INTERVAL: Duration = Duration::from_secs(5);
 /// How often Dispatch is asked for its status.
 const DISPATCH_INTERVAL: Duration = Duration::from_secs(2);
+/// How often card captions and the session snapshot are refreshed.
 const CAPTION_INTERVAL: Duration = Duration::from_secs(2);
 /// How long a Codex id discovery keeps looking. Codex writes its rollout
 /// file on the first prompt, not at launch, so this is generous; a
@@ -216,11 +217,7 @@ impl SwitchboardApp {
             .filter(|r| {
                 matches!(r.kind, SessionKind::Agent(AgentKind::Codex)) && r.resume.is_none()
             })
-            .filter(|r| {
-                self.core
-                    .host_status(r.id)
-                    .is_some_and(|h| matches!(h.liveness, Liveness::Running { .. }))
-            })
+            .filter(|r| self.core.is_running(r.id))
             .map(|r| (r.id, r.cwd.clone(), r.created))
             .collect();
         for (id, cwd, since) in pending {
@@ -240,7 +237,7 @@ impl SwitchboardApp {
         &self.core
     }
 
-    /// See [`AppCore::seed`]; tests and the demo launcher only.
+    /// See [`AppCore::seed`]; tests only.
     pub fn core_mut_for_seeding(&mut self) -> &mut AppCore {
         &mut self.core
     }
@@ -356,38 +353,10 @@ impl SwitchboardApp {
             Effect::DeleteSecret(account) => failed(self.services.secrets.delete(&account), || {
                 format!("delete secret {account}")
             }),
-            Effect::PrepareLaunch { .. }
-            | Effect::PrepareResume { .. }
-            | Effect::CheckTranscript { .. }
-            | Effect::CloneTranscript { .. }
-            | Effect::CloneAllTranscript { .. }
-            | Effect::CloneTranscriptInto { .. }
-            | Effect::DiscardTranscript { .. }
-            | Effect::Discover { .. }
-            | Effect::Spawn { .. }
-            | Effect::Attach { .. }
-            | Effect::Kill(_)
-            | Effect::SendInput { .. }
-            | Effect::SendKeys { .. }
-            | Effect::ReadProjectConfig { .. }
-            | Effect::WriteProjectConfig { .. }
-            | Effect::ProbeRoundFile { .. }
-            | Effect::SnapshotRound { .. }
-            | Effect::RemoveRoundFiles { .. }
-            | Effect::FindArtifacts { .. }
-            | Effect::RemoveLog(_)
-            | Effect::LogOperation { .. }
-            | Effect::DispatchCall(_)
-            | Effect::OpenPath(_)
-            | Effect::Forget(_)
-            | Effect::OpenInEditor { .. }
-            | Effect::FocusWindow(_)
-            | Effect::Reveal(_) => unreachable!("not a store effect"),
+            _ => unreachable!("not a store effect"),
         }
     }
 
-    /// Performs one effect; returns the action reporting its result, or
-    /// `None` when the result arrives later (discovery) or has no report.
     /// The effects answered by the agent launcher and the transcript
     /// reader, kept out of `run_effect` for length.
     fn run_agent_effect(&self, effect: Effect) -> AppAction {
@@ -453,6 +422,8 @@ impl SwitchboardApp {
         }
     }
 
+    /// Performs one effect; returns the action reporting its result, or
+    /// `None` when the result arrives later (discovery) or has no report.
     fn run_effect(&mut self, effect: Effect) -> Option<AppAction> {
         let s = &self.services;
         match effect {
@@ -563,7 +534,7 @@ impl SwitchboardApp {
         match effect {
             Effect::Forget(host) => {
                 // The record's own log and every run's (`<host>-r<n>.vt`).
-                let dir = self.services.store.data_dir().join("scrollback");
+                let dir = scrollback_dir(&self.services.store.data_dir());
                 let prefix = format!("{}-r", host.0);
                 let mut paths = vec![self.scrollback_path(&host)];
                 if let Ok(entries) = std::fs::read_dir(&dir) {
@@ -579,7 +550,7 @@ impl SwitchboardApp {
                 None
             }
             Effect::RemoveLog(name) => {
-                remove_quietly(&self.services.store.data_dir().join("scrollback").join(name));
+                remove_quietly(&scrollback_dir(&self.services.store.data_dir()).join(name));
                 None
             }
             Effect::LogOperation { op, kind, ids } => {
@@ -659,8 +630,8 @@ impl SwitchboardApp {
         let Ok(text) = crate::adapters::scrollback::tail_text(&path, 200) else {
             return;
         };
-        if let Some(last) = text.lines().rev().find(|l| !l.trim().is_empty()) {
-            self.ui_state.captions.insert(id, last.trim().to_owned());
+        if let Some(last) = caption_of(&text) {
+            self.ui_state.captions.insert(id, last);
         }
         if on_screen {
             self.ui_state.snapshots.insert(id, text);
@@ -710,10 +681,7 @@ impl SwitchboardApp {
     fn poll_discoveries(&mut self) {
         let mut finished = Vec::new();
         for (i, d) in self.discoveries.iter().enumerate() {
-            let alive = self
-                .core
-                .host_status(d.id)
-                .is_some_and(|h| matches!(h.liveness, Liveness::Running { .. }));
+            let alive = self.core.is_running(d.id);
             match self.services.agents.discover(d.kind, &d.cwd, d.since) {
                 Ok(None) if alive && Instant::now() < d.deadline => {}
                 Ok(None) => finished.push((i, Ok(None))),
@@ -781,23 +749,14 @@ impl SwitchboardApp {
 
     /// Where the host pipes a session's raw output.
     fn scrollback_path(&self, host: &HostId) -> PathBuf {
-        self.services
-            .store
-            .data_dir()
-            .join("scrollback")
-            .join(format!("{}.vt", host.0))
+        scrollback_dir(&self.services.store.data_dir()).join(format!("{}.vt", host.0))
     }
 
     /// Where a record's output goes and is read from: its latest run's
     /// log when it has runs, else the one file named after the host.
     fn log_path(&self, id: RecordId, host: &HostId) -> PathBuf {
         match self.core.session(id).and_then(|s| s.runs.last()) {
-            Some(run) => self
-                .services
-                .store
-                .data_dir()
-                .join("scrollback")
-                .join(&run.log),
+            Some(run) => scrollback_dir(&self.services.store.data_dir()).join(&run.log),
             None => self.scrollback_path(host),
         }
     }
@@ -811,13 +770,7 @@ impl SwitchboardApp {
             .all_sessions_sorted()
             .iter()
             .filter(|s| matches!(s.kind, SessionKind::Agent(AgentKind::ClaudeCode)))
-            .filter(|s| {
-                s.activity == Activity::Unknown
-                    && self
-                        .core
-                        .host_status(s.id)
-                        .is_some_and(|h| matches!(h.liveness, Liveness::Running { .. }))
-            })
+            .filter(|s| s.activity == Activity::Unknown && self.core.is_running(s.id))
             .map(|s| s.id)
             .collect();
         for id in candidates {
@@ -912,10 +865,7 @@ impl SwitchboardApp {
             let wants_snapshot = on_screen || run_set.contains(&id) || set_ids.contains(&id);
             // A pane that exited still exists (`remain-on-exit`), but its
             // output on disk is complete, so read that like a gone pane.
-            let running = self
-                .core
-                .host_status(id)
-                .is_some_and(|h| matches!(h.liveness, Liveness::Running { .. }));
+            let running = self.core.is_running(id);
             let host = HostId(id.host_name());
             if !running {
                 self.cold_scrollback(id, &host, wants_snapshot);
@@ -926,16 +876,16 @@ impl SwitchboardApp {
                 if wants_snapshot {
                     self.ui_state.snapshots.insert(id, text.clone());
                 }
-                if let Some(last) = text.lines().rev().find(|l| !l.trim().is_empty()) {
-                    self.ui_state.captions.insert(id, last.trim().to_owned());
+                if let Some(last) = caption_of(&text) {
+                    self.ui_state.captions.insert(id, last);
                 }
             }
         }
     }
 
     /// One full poll right now, ignoring the timers: events, host list,
-    /// Codex discoveries, captions. For tests and the launcher, which
-    /// drive the app without a frame loop.
+    /// Codex discoveries, captions. For tests and the startup script,
+    /// which drive the app without a frame loop.
     pub fn poll_now(&mut self) {
         self.last_poll = Some(Instant::now());
         self.last_caption = Some(Instant::now());
@@ -993,10 +943,14 @@ impl SwitchboardApp {
 
     /// Ask Dispatch's port for its status. No runner is a quick error
     /// (no socket, or nobody listening), reported to the core as such.
-    fn poll_dispatch(&mut self) {
-        if let Some((_, result)) = self.dispatch_port.poll_status() {
-            self.dispatch(AppAction::DispatchStatus(status_of(result)));
-        }
+    /// Whether the answer came back at once (from a port that does not
+    /// block).
+    fn poll_dispatch(&mut self) -> bool {
+        let Some((_, result)) = self.dispatch_port.poll_status() else {
+            return false;
+        };
+        self.dispatch(AppAction::DispatchStatus(status_of(result)));
+        true
     }
 
     /// Ask Dispatch for its status and wait up to `timeout` for the
@@ -1006,8 +960,7 @@ impl SwitchboardApp {
     /// arrived.
     pub fn await_dispatch_status(&mut self, timeout: Duration) -> bool {
         self.last_dispatch = Some(Instant::now());
-        if let Some((_, result)) = self.dispatch_port.poll_status() {
-            self.dispatch(AppAction::DispatchStatus(status_of(result)));
+        if self.poll_dispatch() {
             return true;
         }
         let deadline = Instant::now() + timeout;
@@ -1176,7 +1129,7 @@ impl SwitchboardApp {
     /// One request, one reply. A query reads; a command runs through the
     /// core under its operation id, and its reply is logged so a repeat
     /// of the same id is answered from the log without running again.
-    pub fn serve(&mut self, request: &wire::Request) -> wire::Reply {
+    fn serve(&mut self, request: &wire::Request) -> wire::Reply {
         if !request.body.is_command() {
             return self.answer(&request.body);
         }
@@ -1344,12 +1297,13 @@ impl SwitchboardApp {
     /// line with no reply line can only mean the app died between the
     /// two; so can a record still marked as launching.
     fn op_status(&self, op: &str) -> wire::OpStatus {
-        let lines = self.services.operations.find(op);
-        let replied = lines.iter().find_map(|l| match l {
-            OpLine::Replied { reply, .. } => wire::Reply::parse(reply).ok(),
-            OpLine::Requested { .. } => None,
-        });
-        let requested = lines.iter().any(|l| matches!(l, OpLine::Requested { .. }));
+        let replied = self.replied(op);
+        let requested = self
+            .services
+            .operations
+            .find(op)
+            .iter()
+            .any(|l| matches!(l, OpLine::Requested { .. }));
         let interrupted = self.core.interrupted_ops().iter().any(|o| o == op);
         if interrupted {
             return wire::OpStatus::Interrupted;
@@ -1362,6 +1316,14 @@ impl SwitchboardApp {
             None => wire::OpStatus::Unknown,
         }
     }
+}
+
+/// A card's caption: the last line of a pane with something on it.
+fn caption_of(text: &str) -> Option<String> {
+    text.lines()
+        .rev()
+        .find(|l| !l.trim().is_empty())
+        .map(|l| l.trim().to_owned())
 }
 
 /// A status reply as the core takes it: a status, or `None` for no
@@ -1385,8 +1347,9 @@ type DispatchDone = (Body, io::Result<Reply>);
 /// The Dispatch port, called from a thread of its own when it may
 /// block: a runner holds its writer lock while a ticket's step fetches
 /// or launches, and a frame must not wait for that. Calls are answered
-/// in order through `drain`. A port that cannot block (the fakes) is
-/// called in place, so a test sees its reply on the same frame.
+/// in order through `drain`. Only the real adapter blocks; a port that
+/// says it cannot (`may_block`) is called in place, so a test with a
+/// fake sees its reply on the same frame.
 struct DispatchWorker {
     command: PathBuf,
     data_dir: PathBuf,

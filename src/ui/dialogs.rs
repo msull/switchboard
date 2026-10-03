@@ -1,5 +1,7 @@
-//! Small modal dialogs: add a project, start a session. Each is a draft
-//! struct in `UiState` that exists only while its window is open.
+//! Small modal dialogs: add a project, start a session, edit or delete
+//! a space or a working set, and the message dialogs (a message raw,
+//! its links, a pane's text). Each is a draft or a value in `UiState`
+//! that exists only while its window is open.
 
 use std::path::PathBuf;
 
@@ -70,20 +72,12 @@ impl NewSessionDraft {
 
 /// Patterns as typed: separated by newlines or commas, blanks dropped.
 #[must_use]
-pub fn split_patterns(text: &str) -> Vec<String> {
+fn split_patterns(text: &str) -> Vec<String> {
     text.split(['\n', ','])
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(str::to_owned)
         .collect()
-}
-
-impl NewSessionDraft {
-    /// Kept for symmetry with `into_action`; nothing else yet.
-    #[must_use]
-    pub fn is_command(&self) -> bool {
-        self.kind == SessionKind::Command
-    }
 }
 
 pub fn show(cx: &mut DrawCtx<'_>, ctx: &Context) {
@@ -206,9 +200,6 @@ fn delete_set(cx: &mut DrawCtx<'_>, ctx: &Context) {
     }
 }
 
-/// One message as the transcript holds it, in a monospace box that
-/// scrolls, with nothing rendered: the fallback when Markdown goes
-/// wrong. The text is shown read-only and selectable.
 /// The two ways the message dialog shows a message.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum MessageView {
@@ -219,6 +210,9 @@ pub enum MessageView {
     Rendered,
 }
 
+/// One message as the transcript holds it, in a monospace box that
+/// scrolls, with nothing rendered: the fallback when Markdown goes
+/// wrong. The text is shown read-only and selectable.
 fn raw_message(cx: &mut DrawCtx<'_>, ctx: &Context) {
     let Some(text) = cx.state.raw_message.clone() else {
         return;
@@ -574,7 +568,7 @@ fn new_session(cx: &mut DrawCtx<'_>, ctx: &Context) {
         if needs_command {
             field(ui, "Command line", &mut draft.command);
         }
-        if draft.is_command() {
+        if draft.kind == SessionKind::Command {
             field(ui, "Output files", &mut draft.outputs);
             ui.label(theme::meta_text(
                 ui,

@@ -325,7 +325,6 @@ fn quiet_codex_pane_reads_idle_until_output_resumes() {
     status.last_activity = Some(now.wall - Duration::from_secs(30));
     core.dispatch(AppAction::HostListed(vec![status.clone()]), now);
     assert_eq!(core.card_state(id), CardState::Idle);
-    // Claude Code has hooks, so silence means nothing for it.
     let mut w2 = Workspace::new(project("q"));
     let r2 = record(w2.project.id, agent(), 0);
     let id2 = r2.id;
@@ -944,7 +943,7 @@ fn moving_a_project_between_spaces_takes_it_off_the_old_space_sets() {
         Clock::at(6),
     );
     assert_eq!(core.working_set(set).unwrap().items.len(), 1);
-    // A space's waiting count is its own; the badge counts every space.
+    // A space's waiting count is its own.
     core.dispatch(AppAction::ShowSpace(SpaceId::DEFAULT), Clock::at(7));
     assert_eq!(core.waiting_count_in(client), 0);
     // Notices about the project carry its space.
@@ -1342,30 +1341,6 @@ fn host_unavailable_blocks_launches_with_a_notice() {
 // --- 2. card state
 
 #[test]
-fn card_state_follows_activity_while_running() {
-    let (mut core, _, ids) = with_records(&[agent()], |s| Some(running(s.id)));
-    let cases = [
-        (
-            EventKind::PermissionRequested { tool: None },
-            CardState::WaitingOnYou,
-        ),
-        (EventKind::PromptSubmitted, CardState::Working),
-        (EventKind::Stopped { last_message: None }, CardState::Idle),
-    ];
-    for (i, (kind, expected)) in cases.into_iter().enumerate() {
-        core.dispatch(
-            AppAction::Events(vec![SessionEvent {
-                record_id: Some(ids[0]),
-                // strictly increasing timestamps so none is ignored as stale
-                ..event(kind, 100 + 1_000 * u64::try_from(i).unwrap())
-            }]),
-            Clock::at(1),
-        );
-        assert_eq!(core.card_state(ids[0]), expected);
-    }
-}
-
-#[test]
 fn a_stop_is_remembered_on_its_own_and_an_outside_wait_reads_as_waiting() {
     let (mut core, _, ids) = with_records(&[agent()], |s| Some(running(s.id)));
     let id = ids[0];
@@ -1605,6 +1580,8 @@ fn remove_rename_pin_unpin_project() {
     assert!(core.workspace(id).unwrap().project.pinned.is_empty());
 
     let e = core.dispatch(AppAction::RemoveProject(id), Clock::at(5));
+    // Exact: a Save of the removed workspace after its Delete would
+    // rewrite the record and bring the project back at the next start.
     assert_eq!(
         e,
         vec![
@@ -1677,7 +1654,7 @@ fn new_agent_session_saves_then_prepares_launch() {
 fn new_shell_command_service_spawn_directly() {
     let (mut core, pid, _) = with_records(&[], |_| None);
     let (id, e) = new_session(&mut core, pid, SessionKind::Shell, Launch::Shell);
-    let Effect::Spawn { spec, .. } = &e[1] else {
+    let Some(Effect::Spawn { spec, .. }) = spawns(&e).first().copied() else {
         panic!("{e:?}")
     };
     assert_eq!(spec.command, None);
@@ -1693,7 +1670,7 @@ fn new_shell_command_service_spawn_directly() {
         SessionKind::Command,
         Launch::Argv(vec!["ls".into(), "-l".into()]),
     );
-    let Effect::Spawn { spec, .. } = &e[1] else {
+    let Some(Effect::Spawn { spec, .. }) = spawns(&e).first().copied() else {
         panic!("{e:?}")
     };
     assert_eq!(spec.command, Some(vec!["ls".into(), "-l".into()]));
@@ -1707,7 +1684,7 @@ fn new_shell_command_service_spawn_directly() {
             shell: "/bin/bash".into(),
         },
     );
-    let Effect::Spawn { spec, .. } = &e[1] else {
+    let Some(Effect::Spawn { spec, .. }) = spawns(&e).first().copied() else {
         panic!("{e:?}")
     };
     assert_eq!(
@@ -1735,7 +1712,7 @@ fn launch_prepared_stores_resume_and_spawns_with_record_id() {
     );
     assert_eq!(core.session(id).unwrap().resume, Some(handle));
     assert_eq!(saves(&effects), 1);
-    let Effect::Spawn { spec, .. } = &effects[1] else {
+    let Some(Effect::Spawn { spec, .. }) = spawns(&effects).first().copied() else {
         panic!("{effects:?}")
     };
     assert_eq!(spec.command.as_ref().unwrap()[0], "claude");
@@ -2402,6 +2379,26 @@ fn return_to_running_attaches_and_return_to_exited_relaunches() {
 }
 
 #[test]
+fn return_to_an_exited_pane_keeps_its_last_output_before_the_kill() {
+    let output = Clock::at(50_000).wall;
+    let (mut core, _, ids) = with_records(&[SessionKind::Shell], |s| {
+        Some(HostStatus {
+            last_activity: Some(output),
+            ..exited(s.id, Some(0))
+        })
+    });
+    let id = ids[0];
+    let e = core.dispatch(AppAction::ReturnToSession(id), Clock::at(60_000));
+    assert!(
+        matches!(&e[0], Effect::Save(w) if w.sessions[0].last_seen == output),
+        "{e:?}"
+    );
+    assert!(matches!(&e[1], Effect::Kill(h) if h.0 == id.host_name()));
+    assert_eq!(spawns(&e).len(), 1);
+    assert!(core.session(id).unwrap().last_seen >= output);
+}
+
+#[test]
 fn repeated_return_while_in_flight_spawns_once() {
     let (mut core, _, ids) = with_records(&[SessionKind::Shell], |_| None);
     let id = ids[0];
@@ -2419,13 +2416,7 @@ fn repeated_return_while_in_flight_spawns_once() {
 
 #[test]
 fn repeated_return_during_agent_resume_is_ignored() {
-    let p = project("p");
-    let mut w = Workspace::new(p.clone());
-    let mut r = record(p.id, agent(), 0);
-    r.resume = Some(claude_handle());
-    let id = r.id;
-    w.sessions.push(r);
-    let (mut core, _) = loaded(vec![w], vec![]);
+    let (mut core, id) = resumable_agent();
     let e1 = core.dispatch(AppAction::ReturnToSession(id), Clock::at(1));
     assert!(matches!(e1[0], Effect::CheckTranscript { .. }));
     assert!(
@@ -2496,13 +2487,7 @@ fn missing_transcript_marks_not_resumable() {
 
 #[test]
 fn failed_resume_spawn_marks_not_resumable() {
-    let p = project("p");
-    let mut w = Workspace::new(p.clone());
-    let mut r = record(p.id, agent(), 0);
-    r.resume = Some(claude_handle());
-    let id = r.id;
-    w.sessions.push(r);
-    let (mut core, _) = loaded(vec![w], vec![]);
+    let (mut core, id) = resumable_agent();
     core.dispatch(AppAction::ReturnToSession(id), Clock::at(1));
     core.dispatch(
         AppAction::TranscriptChecked { id, exists: true },
@@ -2810,6 +2795,7 @@ fn event_kinds_map_to_activities() {
             },
             CardState::Idle,
         ),
+        (EventKind::PromptSubmitted, CardState::Working),
         (EventKind::ToolFinished, CardState::Working),
         (
             EventKind::Notification {
@@ -3299,51 +3285,7 @@ fn interrupt_sends_escape_only_to_a_running_pane() {
     );
 }
 
-#[test]
-fn return_to_an_exited_pane_kills_it_and_resumes() {
-    let mut core = AppCore::new();
-    let root = PathBuf::from("/tmp/p");
-    core.dispatch(AppAction::StoreLoaded(Ok(Loaded::default())), Clock::at(0));
-    core.dispatch(AppAction::HostListed(vec![]), Clock::at(1));
-    core.dispatch(
-        AppAction::AddProject {
-            name: "p".into(),
-            root: root.clone(),
-        },
-        Clock::at(2),
-    );
-    let project = core.workspaces()[0].project.id;
-    core.dispatch(
-        AppAction::NewSession {
-            project,
-            name: "sh".into(),
-            kind: SessionKind::Shell,
-            cwd: root,
-            launch: Launch::Shell,
-            outputs: Vec::new(),
-        },
-        Clock::at(3),
-    );
-    let id = core.workspaces()[0].sessions[0].id;
-    core.dispatch(AppAction::Spawned { id, result: Ok(()) }, Clock::at(4));
-    core.dispatch(
-        AppAction::HostListed(vec![HostStatus {
-            id: HostId(id.host_name()),
-            liveness: Liveness::Exited { code: Some(0) },
-            cwd: None,
-            last_activity: None,
-            title: None,
-        }]),
-        Clock::at(5),
-    );
-    assert_eq!(core.card_state(id), CardState::Exited(Some(0)));
-    let effects = core.dispatch(AppAction::ReturnToSession(id), Clock::at(6));
-    assert!(matches!(effects.first(), Some(Effect::Kill(h)) if h.0 == id.host_name()));
-    assert!(effects.iter().any(|e| matches!(e, Effect::Spawn { .. })));
-    assert!(!effects.iter().any(|e| matches!(e, Effect::Attach { .. })));
-}
-
-// --- 9. definitions from .switchboard/project.json
+// --- 10. definitions from .switchboard/project.json
 
 fn entry(name: &str, kind: SessionKind, command: &str) -> DefinedEntry {
     DefinedEntry {
@@ -3357,8 +3299,6 @@ fn entry(name: &str, kind: SessionKind, command: &str) -> DefinedEntry {
     }
 }
 
-/// The reader's success shape for a file with these entries.
-#[allow(clippy::unnecessary_wraps)]
 #[test]
 fn saving_the_config_writes_it_then_reads_it_back() {
     let (mut core, pid, _) = with_records(&[], |_| None);
@@ -3454,6 +3394,7 @@ fn the_config_files_show_list_lands_on_the_project_record() {
     assert!(core.workspace(pid).unwrap().project.shown.is_empty());
 }
 
+/// The reader's success shape for a file with these entries.
 #[allow(clippy::unnecessary_wraps)]
 fn config(entries: Vec<DefinedEntry>) -> Result<Option<ProjectConfig>, String> {
     Ok(Some(ProjectConfig {
@@ -4150,7 +4091,8 @@ mod workflow {
     use crate::core::model::{
         BUILTIN_WORKFLOW, HandoffMode, RunState, Verdict, WorkflowDefinition, WorkflowId,
     };
-    use crate::core::{SETTLE_PROBES, round_paths};
+    use crate::core::round_paths;
+    use crate::core::workflow::SETTLE_PROBES;
     use crate::ports::round_files::{FileStamp, Probed};
 
     const PLAN: &str = "/tmp/proj/docs/plan.md";
@@ -4511,10 +4453,9 @@ mod workflow {
         let effects = core.dispatch(AppAction::Tick, Clock::at(201));
         assert!(matches!(run_of(&core).state, RunState::Paused(ref why) if why.contains("exited")));
         assert!(
-            effects.is_empty()
-                || !effects
-                    .iter()
-                    .any(|e| matches!(e, Effect::ProbeRoundFile { .. }))
+            !effects
+                .iter()
+                .any(|e| matches!(e, Effect::ProbeRoundFile { .. }))
         );
         let effects = core.dispatch(AppAction::ContinueWorkflow(run), Clock::at(300));
         assert_eq!(run_of(&core).state, RunState::AwaitingFeedback);
@@ -4734,7 +4675,7 @@ mod workflow {
 
     #[test]
     fn a_loaded_run_keeps_waiting_and_removal_leaves_its_sessions() {
-        let (mut core, run, _, reviewer, planner) = started();
+        let (core, run, _, reviewer, planner) = started();
         let workspace = core.workspaces()[0].clone();
         let (mut fresh, _) = loaded(vec![workspace], vec![]);
         let effects = fresh.dispatch(AppAction::Tick, Clock::at(5));
@@ -4750,7 +4691,6 @@ mod workflow {
         assert_eq!(fresh.workflows().count(), 0);
         assert_eq!(saves(&effects), 1);
         assert!(fresh.session(reviewer).is_some() && fresh.session(planner).is_some());
-        let _ = &mut core;
     }
 
     #[test]
@@ -4936,6 +4876,8 @@ mod runs {
     }
 }
 
+// --- the hand controller
+
 /// A set of an agent (left) and a shell (right), shown.
 fn controller_set(
     core: &mut AppCore,
@@ -5098,10 +5040,7 @@ fn z_holds_a_radial_menu_on_the_selected_card_and_letting_go_picks_the_slice() {
         Some(Direction::Right)
     );
     assert_eq!(core.active_card(set), Some(PinTarget::Session(agent_id)));
-    core.dispatch(
-        AppAction::Controller(ControllerEvent::StickCentred),
-        Clock::at(4000),
-    );
+    centre(&mut core, 4000);
     assert_eq!(core.radial_menu().unwrap().highlighted, None);
     // Letting go on nothing does nothing.
     press(&mut core, Button::Z, false, 5000);
@@ -5247,10 +5186,7 @@ fn c_on_a_file_card_holds_it_for_the_stick_to_scroll() {
     flick(&mut core, Direction::Right, 3);
     assert_eq!(core.scroll_hold(), Some((&file, Some(Direction::Right))));
     assert_eq!(core.active_card(set), Some(file.clone()));
-    core.dispatch(
-        AppAction::Controller(ControllerEvent::StickCentred),
-        Clock::at(4),
-    );
+    centre(&mut core, 4);
     assert_eq!(core.scroll_hold(), Some((&file, None)));
     press(&mut core, Button::C, false, 5);
     assert_eq!(core.scroll_hold(), None);
@@ -5348,10 +5284,7 @@ fn the_stick_is_read_for_scrolling_except_while_a_menu_has_it() {
     assert_eq!(core.stick(), None, "the menu has the stick");
     press(&mut core, Button::Z, false, 1_100);
     assert_eq!(core.stick(), Some(Direction::Down));
-    core.dispatch(
-        AppAction::Controller(ControllerEvent::StickCentred),
-        Clock::at(1_200),
-    );
+    centre(&mut core, 1_200);
     assert_eq!(core.stick(), None);
 }
 
@@ -5361,10 +5294,7 @@ fn on_a_session_page_left_and_right_ask_for_a_jump_between_messages() {
     let id = ids[0];
     core.dispatch(AppAction::ShowSession(id), Clock::at(1));
     flick(&mut core, Direction::Left, 100);
-    core.dispatch(
-        AppAction::Controller(ControllerEvent::StickCentred),
-        Clock::at(200),
-    );
+    centre(&mut core, 200);
     flick(&mut core, Direction::Right, 300);
     assert_eq!(
         core.take_ui_requests(),
@@ -5394,10 +5324,7 @@ fn a_stick_still_held_from_a_menu_pick_moves_nothing_until_it_comes_back() {
     assert!(core.take_ui_requests().is_empty());
     assert_eq!(core.stick(), None);
     // Let go, then a fresh flick counts.
-    core.dispatch(
-        AppAction::Controller(ControllerEvent::StickCentred),
-        Clock::at(1_600),
-    );
+    centre(&mut core, 1_600);
     flick(&mut core, Direction::Right, 1_700);
     assert_eq!(
         core.take_ui_requests(),
@@ -5407,10 +5334,7 @@ fn a_stick_still_held_from_a_menu_pick_moves_nothing_until_it_comes_back() {
         }]
     );
     // Same going Back: the selection on the working set stays put.
-    core.dispatch(
-        AppAction::Controller(ControllerEvent::StickCentred),
-        Clock::at(2_000),
-    );
+    centre(&mut core, 2_000);
     press(&mut core, Button::Z, true, 3_000);
     flick(&mut core, Direction::Right, 3_100);
     press(&mut core, Button::Z, false, 3_200);
@@ -5889,7 +5813,7 @@ mod control {
         )
     }
 
-    fn new_session(project: ProjectId, prompt: Option<&str>) -> ControlAction {
+    fn new_session_op(project: ProjectId, prompt: Option<&str>) -> ControlAction {
         ControlAction::NewSession {
             project,
             name: "investigator".into(),
@@ -5995,7 +5919,7 @@ mod control {
         let effects = control(
             &mut core,
             "op-1",
-            new_session(pid, Some("Investigate #1")),
+            new_session_op(pid, Some("Investigate #1")),
             10,
         );
         // The log line leads, the save follows, then the launch.
@@ -6030,7 +5954,7 @@ mod control {
     #[test]
     fn a_failed_launch_clears_the_pending_mark_and_a_bad_command_is_an_error_not_a_notice() {
         let (mut core, pid, _) = with_records(&[], |_| None);
-        control(&mut core, "op-2", new_session(pid, None), 10);
+        control(&mut core, "op-2", new_session_op(pid, None), 10);
         let id = core.workspace(pid).unwrap().sessions[0].id;
         core.dispatch(
             AppAction::LaunchPrepared {
@@ -6040,7 +5964,12 @@ mod control {
             Clock::at(11),
         );
         assert!(!core.session(id).unwrap().pending_launch);
-        let effects = control(&mut core, "op-3", new_session(ProjectId::new(), None), 12);
+        let effects = control(
+            &mut core,
+            "op-3",
+            new_session_op(ProjectId::new(), None),
+            12,
+        );
         assert!(
             !effects
                 .iter()
@@ -6315,7 +6244,7 @@ mod control {
     #[test]
     fn an_interrupted_launch_is_listed_after_a_reload() {
         let (mut core, pid, _) = with_records(&[], |_| None);
-        control(&mut core, "op-9", new_session(pid, None), 1);
+        control(&mut core, "op-9", new_session_op(pid, None), 1);
         let saved = core.workspace(pid).unwrap().clone();
         assert!(saved.sessions[0].pending_launch);
         // The app dies here; the next start loads what was saved.
@@ -6363,7 +6292,7 @@ mod control {
 
 mod dispatch_page {
     use super::*;
-    use crate::core::{CONSOLE_NAME, CONSOLE_SPACE};
+    use crate::core::dispatch::{CONSOLE_NAME, CONSOLE_SPACE};
     use crate::ports::dispatch::{
         AttemptView, Body, DecisionView, ProjectView, Reply, Status, TicketView, WorktreesView,
     };
@@ -6887,7 +6816,7 @@ mod dispatch_page {
         assert!(effects.iter().any(|e| matches!(
             e,
             Effect::SendKeys { host, bytes }
-                if host.0 == id.host_name() && bytes == crate::core::TRUST_YES_KEYS
+                if host.0 == id.host_name() && bytes == crate::core::action::TRUST_YES_KEYS
         )));
         assert!(
             !core.at_trust_prompt(id),

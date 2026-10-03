@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use egui::{RichText, Ui};
 
-use super::cards::{is_running, kind_label};
+use super::cards::kind_label;
 use super::session::code_block;
 use super::{DrawCtx, theme};
 use crate::app::resolve_project_env;
@@ -106,12 +106,11 @@ fn ensure_env(cx: &mut DrawCtx<'_>, pid: ProjectId) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// One entry's line: kind glyph, name, state, and its buttons. Shared
-/// with the board, which lists commands and services the same way.
+/// One entry's line: kind glyph, name, state, and its buttons.
 pub fn row(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord) {
     let p = theme::palette(ui);
     let state = cx.core.card_state(record.id);
-    let running = is_running(cx.core, record.id);
+    let running = cx.core.is_running(record.id);
     ui.horizontal(|ui| {
         theme::kicker(
             ui,

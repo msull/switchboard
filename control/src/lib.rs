@@ -40,15 +40,13 @@ impl Request {
 
     /// Parse one line as it arrives on the socket.
     pub fn parse(line: &str) -> Result<Self, String> {
-        serde_json::from_str(line).map_err(|e| e.to_string())
+        parse_line(line)
     }
 
     /// One line, newline included, ready for the socket.
     #[must_use]
     pub fn to_line(&self) -> String {
-        let mut s = serde_json::to_string(self).unwrap_or_default();
-        s.push('\n');
-        s
+        to_line(self)
     }
 }
 
@@ -539,15 +537,13 @@ impl Reply {
 
     /// Parse one line as it arrives on the socket.
     pub fn parse(line: &str) -> Result<Self, String> {
-        serde_json::from_str(line).map_err(|e| e.to_string())
+        parse_line(line)
     }
 
     /// One line, newline included, ready for the socket.
     #[must_use]
     pub fn to_line(&self) -> String {
-        let mut s = serde_json::to_string(self).unwrap_or_default();
-        s.push('\n');
-        s
+        to_line(self)
     }
 
     /// The ids a creation made, if this is a creation's reply.
@@ -558,6 +554,18 @@ impl Reply {
             _ => &[],
         }
     }
+}
+
+/// One socket line as a request or reply.
+fn parse_line<T: serde::de::DeserializeOwned>(line: &str) -> Result<T, String> {
+    serde_json::from_str(line).map_err(|e| e.to_string())
+}
+
+/// A request or reply as one socket line, newline included.
+fn to_line<T: Serialize>(value: &T) -> String {
+    let mut s = serde_json::to_string(value).unwrap_or_default();
+    s.push('\n');
+    s
 }
 
 #[cfg(test)]

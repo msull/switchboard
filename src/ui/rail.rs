@@ -17,21 +17,10 @@ use crate::core::{
 /// The rail's width when it opens; the user may drag it.
 pub const DEFAULT_WIDTH: f32 = 200.0;
 /// Below this the rail draws dots and initials only.
-pub const COMPACT_BELOW: f32 = 120.0;
-/// Inner padding: 22 top, 16 right, 20 bottom, 22 left in the design;
-/// one value keeps rows aligned with the brand.
+const COMPACT_BELOW: f32 = 120.0;
+/// Inner padding, the same on every side, so rows line up with the
+/// head.
 const PAD: i8 = 16;
-
-/// The most urgent state among a project's sessions, or `None` when it
-/// has none: the dot next to its name.
-#[must_use]
-pub fn project_state(core: &AppCore, project: ProjectId) -> Option<CardState> {
-    core.workspace(project)?
-        .sessions
-        .iter()
-        .map(|s| core.card_state(s.id))
-        .min_by_key(CardState::rank)
-}
 
 fn waiting_in(core: &AppCore, project: ProjectId) -> usize {
     core.workspace(project).map_or(0, |w| {
@@ -174,7 +163,7 @@ fn project_rows(cx: &mut DrawCtx<'_>, ui: &mut Ui, active: Option<ProjectId>, co
             ui.add_space(4.0);
         }
         for (pid, name) in rows {
-            let state = project_state(cx.core, *pid);
+            let state = cx.core.project_state(*pid);
             let running = state.as_ref().is_some_and(|s| {
                 !matches!(
                     s,
@@ -225,15 +214,14 @@ fn project_rows(cx: &mut DrawCtx<'_>, ui: &mut Ui, active: Option<ProjectId>, co
     }
 }
 
-/// The rail's head: the active space's name where the wordmark was,
-/// opening the one menu that names the other spaces (each with its
-/// waiting count), with New, Rename, and Delete under them. Outside the
-/// global space nothing else on screen names another space, so a shared
-/// screen gives away only the space being worked in; the global space
-/// lifts that boundary on purpose, naming each space over its projects.
-/// The menu starts with the global space when
-/// [`AppCore::global_space_offered`] says so; it can be neither renamed
-/// nor deleted.
+/// The rail's head: the active space's name, opening the one menu that
+/// names the other spaces (each with its waiting count), with New,
+/// Rename, and Delete under them. Outside the global space nothing else
+/// on screen names another space, so a shared screen gives away only
+/// the space being worked in; the global space lifts that boundary on
+/// purpose, naming each space over its projects. The menu starts with
+/// the global space when [`AppCore::global_space_offered`] says so; it
+/// can be neither renamed nor deleted.
 fn space_menu(cx: &mut DrawCtx<'_>, ui: &mut Ui, compact: bool) {
     let p = theme::palette(ui);
     let active = cx.core.active_space();
@@ -493,7 +481,7 @@ fn entry_row(
     compact: bool,
 ) {
     let state = cx.core.card_state(sid);
-    let running = super::cards::is_running(cx.core, sid);
+    let running = cx.core.is_running(sid);
     let response = row(
         ui,
         &RowSpec {
@@ -562,7 +550,7 @@ fn bottom(cx: &mut DrawCtx<'_>, ui: &mut Ui, view: &View, compact: bool) {
 
 /// A pinned bottom row: label in neutral-700 with its shortcut in mono
 /// neutral-500 after it.
-pub fn bottom_item(ui: &mut Ui, label: &str, shortcut: &str, compact: bool) -> Response {
+fn bottom_item(ui: &mut Ui, label: &str, shortcut: &str, compact: bool) -> Response {
     let p = theme::palette(ui);
     let text = if compact {
         RichText::new(shortcut)

@@ -58,6 +58,15 @@ fn runner() -> Result<Runner> {
     ))
 }
 
+/// A runner for the commands that never talk to Switchboard.
+fn offline_runner() -> Result<Runner> {
+    Ok(Runner::new(
+        DataDir::from_env()?,
+        Box::new(NoPort),
+        Box::new(GitCli::default()),
+    ))
+}
+
 fn main() -> Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("dispatch=info"))
         .init();
@@ -138,11 +147,7 @@ fn run(once: bool) -> Result<()> {
 }
 
 fn decide(ticket: &str, decision: &str, answer: &str, note: Option<&str>) -> Result<()> {
-    let runner = Runner::new(
-        DataDir::from_env()?,
-        Box::new(NoPort),
-        Box::new(GitCli::default()),
-    );
+    let runner = offline_runner()?;
     let d = runner.decide(ticket, decision, answer, note, now_ms())?;
     say!(
         "{ticket} {}: {answer} (the runner acts on it on its next pass)",
@@ -175,11 +180,7 @@ fn worktrees(args: &[&str]) -> Result<()> {
 }
 
 fn decisions() -> Result<()> {
-    let runner = Runner::new(
-        DataDir::from_env()?,
-        Box::new(NoPort),
-        Box::new(GitCli::default()),
-    );
+    let runner = offline_runner()?;
     let mut any = false;
     for t in runner.tickets()? {
         for d in t.waiting_on_you() {
@@ -206,11 +207,7 @@ fn decisions() -> Result<()> {
 }
 
 fn status() -> Result<()> {
-    let runner = Runner::new(
-        DataDir::from_env()?,
-        Box::new(NoPort),
-        Box::new(GitCli::default()),
-    );
+    let runner = offline_runner()?;
     let tickets = runner.tickets()?;
     if tickets.is_empty() {
         say!("no tickets");
@@ -240,14 +237,9 @@ fn status() -> Result<()> {
                 a.stage,
                 a.context,
                 a.n,
-                match &a.state {
-                    dispatch::ticket::AttemptState::Starting => "starting".to_owned(),
-                    dispatch::ticket::AttemptState::Running => "running".to_owned(),
-                    dispatch::ticket::AttemptState::Complete => "complete".to_owned(),
-                    dispatch::ticket::AttemptState::Failed { reason } =>
-                        format!("failed: {reason}"),
-                    dispatch::ticket::AttemptState::Cancelled { reason } =>
-                        format!("cancelled: {reason}"),
+                match dispatch::serve::attempt_state(&a.state) {
+                    (word, None) => word.to_owned(),
+                    (word, Some(reason)) => format!("{word}: {reason}"),
                 }
             )
         });
@@ -276,11 +268,7 @@ fn status() -> Result<()> {
 }
 
 fn resume(ticket: &str) -> Result<()> {
-    let runner = Runner::new(
-        DataDir::from_env()?,
-        Box::new(NoPort),
-        Box::new(GitCli::default()),
-    );
+    let runner = offline_runner()?;
     let t = runner.resume(ticket, now_ms())?;
     say!(
         "{} {} {} active again",
@@ -324,11 +312,7 @@ fn close(ticket: &str, reason: Option<&str>) -> Result<()> {
 }
 
 fn queue(project: &str, order: &[&str]) -> Result<()> {
-    let mut runner = Runner::new(
-        DataDir::from_env()?,
-        Box::new(NoPort),
-        Box::new(GitCli::default()),
-    );
+    let mut runner = offline_runner()?;
     let ps = if order.is_empty() {
         runner.load_project(project)?
     } else {

@@ -72,6 +72,7 @@ fn build_line(event: &str, fields: &[(String, String)]) -> String {
     let at = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| d.as_millis());
+    // `core::RECORD_ID_ENV`; spelled out because this binary is std-only.
     let record_id = std::env::var("SWITCHBOARD_RECORD_ID").ok();
 
     let mut out = String::with_capacity(512);

@@ -173,28 +173,8 @@ impl Store for JsonStore {
         let json = serde_json::to_vec_pretty(workspace)
             .map_err(|e| StoreError::Io(format!("serialize: {e}")))?;
 
-        let dir = self.projects_dir();
-        ensure_dir(&dir)?;
         let path = self.record_path(workspace.project.id);
-        let tmp = Self::temp_path(&path);
-        let bak = Self::backup_path(&path);
-
-        // The whole record goes to a temp file that is fsynced before it
-        // takes the real name, so a crash mid-write can only leave a
-        // stray `.tmp`, which loads ignore and the next save overwrites.
-        let mut file = open_private(&tmp, true)?;
-        file.write_all(&json)
-            .and_then(|()| file.sync_all())
-            .map_err(|e| io_err("write", &tmp, &e))?;
-        drop(file);
-
-        match fs::rename(&path, &bak) {
-            Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => return Err(io_err("back up", &path, &e)),
-        }
-        fs::rename(&tmp, &path).map_err(|e| io_err("rename", &tmp, &e))?;
-        sync_dir(&dir)
+        Self::write_atomic(&self.projects_dir(), &path, &json, true)
     }
 
     fn delete(&self, id: ProjectId) -> Result<(), StoreError> {
@@ -218,16 +198,7 @@ impl Store for JsonStore {
         }
         let json = serde_json::to_vec_pretty(settings)
             .map_err(|e| StoreError::Io(format!("serialize: {e}")))?;
-        ensure_dir(&self.dir)?;
-        let path = self.settings_path();
-        let tmp = Self::temp_path(&path);
-        let mut file = open_private(&tmp, true)?;
-        file.write_all(&json)
-            .and_then(|()| file.sync_all())
-            .map_err(|e| io_err("write", &tmp, &e))?;
-        drop(file);
-        fs::rename(&tmp, &path).map_err(|e| io_err("rename", &tmp, &e))?;
-        sync_dir(&self.dir)
+        Self::write_atomic(&self.dir, &self.settings_path(), &json, false)
     }
 
     fn save_views(&self, views: &Views) -> Result<(), StoreError> {
@@ -254,22 +225,31 @@ impl JsonStore {
         }
         let json = serde_json::to_vec_pretty(views)
             .map_err(|e| StoreError::Io(format!("serialize: {e}")))?;
-        ensure_dir(&self.dir)?;
-        let path = self.views_path();
-        let tmp = Self::temp_path(&path);
-        let bak = Self::backup_path(&path);
+        Self::write_atomic(&self.dir, &self.views_path(), &json, true)
+    }
+
+    /// The one way a file in the store is written. The whole of it goes
+    /// to a temp file that is fsynced before it takes the real name, so a
+    /// crash mid-write can only leave a stray `.tmp`, which loads ignore
+    /// and the next save overwrites. With `backup`, the file it replaces
+    /// becomes `.bak` first. The directory is synced last.
+    fn write_atomic(dir: &Path, path: &Path, bytes: &[u8], backup: bool) -> Result<(), StoreError> {
+        ensure_dir(dir)?;
+        let tmp = Self::temp_path(path);
         let mut file = open_private(&tmp, true)?;
-        file.write_all(&json)
+        file.write_all(bytes)
             .and_then(|()| file.sync_all())
             .map_err(|e| io_err("write", &tmp, &e))?;
         drop(file);
-        match fs::rename(&path, &bak) {
-            Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => return Err(io_err("back up", &path, &e)),
+        if backup {
+            match fs::rename(path, Self::backup_path(path)) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(io_err("back up", path, &e)),
+            }
         }
-        fs::rename(&tmp, &path).map_err(|e| io_err("rename", &tmp, &e))?;
-        sync_dir(&self.dir)
+        fs::rename(&tmp, path).map_err(|e| io_err("rename", &tmp, &e))?;
+        sync_dir(dir)
     }
 
     /// The arranged views. An unreadable file is logged and the app

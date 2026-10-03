@@ -24,7 +24,7 @@ const SETTLE: Duration = Duration::from_millis(800);
 
 /// The viewport that shows this session.
 #[must_use]
-pub fn viewport_id(id: RecordId) -> ViewportId {
+fn viewport_id(id: RecordId) -> ViewportId {
     ViewportId::from_hash_of(("popout", id))
 }
 
@@ -48,7 +48,7 @@ pub fn show_all(cx: &mut DrawCtx<'_>, ctx: &Context) {
 
 /// The Dispatch window's viewport.
 #[must_use]
-pub fn dispatch_viewport_id() -> ViewportId {
+fn dispatch_viewport_id() -> ViewportId {
     ViewportId::from_hash_of("dispatch-window")
 }
 
@@ -74,29 +74,20 @@ fn dispatch_window(cx: &mut DrawCtx<'_>, ctx: &Context) {
     let mut builder = ViewportBuilder::default()
         .with_title("Dispatch · Switchboard")
         .with_inner_size(DEFAULT_SIZE);
-    let opened = *cx.state.dispatch_opened.get_or_insert_with(|| {
-        page.frame
-            .as_ref()
-            .filter(|f| zoom::monitor_attached(&f.monitor))
-            .map(|f| {
-                let r = rect_of(f);
-                (r.min / factor, r.size() / factor)
-            })
-    });
+    let opened = *cx
+        .state
+        .dispatch_opened
+        .get_or_insert_with(|| opening(page.frame.as_ref(), factor));
     if let Some((pos, size)) = opened {
         builder = builder.with_position(pos).with_inner_size(size);
     }
     let main_zoom = zoom::install(ctx, percent);
     ctx.show_viewport_immediate(dispatch_viewport_id(), builder, |ctx, _class| {
-        let (close_requested, frame) = ctx.input(|i| {
-            let v = i.viewport();
-            (v.close_requested(), v.inner_rect.zip(v.outer_rect))
-        });
-        if close_requested || ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::W)) {
+        let (close, frame) = window_input(ctx, factor, &monitor);
+        if close {
             cx.dispatch(AppAction::CloseDispatchWindow);
         }
-        if let Some((inner, outer)) = frame {
-            let now = frame_of(inner * factor, outer * factor, monitor.clone());
+        if let Some(now) = frame {
             let seen = cx
                 .state
                 .dispatch_frame
@@ -111,12 +102,7 @@ fn dispatch_window(cx: &mut DrawCtx<'_>, ctx: &Context) {
             .frame(
                 egui::Frame::new()
                     .fill(theme::palette_of(ctx).bg)
-                    .inner_margin(egui::Margin {
-                        left: 28,
-                        right: 28,
-                        top: 24,
-                        bottom: 20,
-                    }),
+                    .inner_margin(super::page_margin(&View::Dispatch)),
             )
             .show(ctx, |ui| match cx.state.dispatch_window_ticket.clone() {
                 Some(id) => super::dispatch::ticket(cx, ui, &id),
@@ -141,7 +127,7 @@ pub fn raise_or_pop_out_dispatch(cx: &mut DrawCtx<'_>, ctx: &Context) {
 /// page lives in its own window: then it only points there.
 #[must_use]
 pub fn dispatch_is_elsewhere(cx: &DrawCtx<'_>, view: &View) -> bool {
-    matches!(view, View::Dispatch | View::Ticket(_))
+    super::dispatch::is_dispatch_view(view)
         && cx.core.settings().dispatch_window.is_some()
         && cx.state.surface != super::Surface::DispatchWindow
 }
@@ -167,33 +153,21 @@ fn window(cx: &mut DrawCtx<'_>, ctx: &Context, popout: &Popout) {
     let mut builder = ViewportBuilder::default()
         .with_title(format!("{} · Switchboard", record.name))
         .with_inner_size(DEFAULT_SIZE);
-    // The opening geometry is fixed when the window is first shown and
-    // given unchanged after, so the builder never moves the window.
-    let opened = *cx.state.popout_opened.entry(id).or_insert_with(|| {
-        popout
-            .frame
-            .as_ref()
-            .filter(|f| zoom::monitor_attached(&f.monitor))
-            .map(|f| {
-                let r = rect_of(f);
-                (r.min / factor, r.size() / factor)
-            })
-    });
+    let opened = *cx
+        .state
+        .popout_opened
+        .entry(id)
+        .or_insert_with(|| opening(popout.frame.as_ref(), factor));
     if let Some((pos, size)) = opened {
         builder = builder.with_position(pos).with_inner_size(size);
     }
     let main_zoom = zoom::install(ctx, percent);
     ctx.show_viewport_immediate(viewport_id(id), builder, |ctx, _class| {
-        let (close_requested, frame) = ctx.input(|i| {
-            let v = i.viewport();
-            (v.close_requested(), v.inner_rect.zip(v.outer_rect))
-        });
-        // The window's own close button, or Cmd+W in it.
-        if close_requested || ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::W)) {
+        let (close, frame) = window_input(ctx, factor, &monitor);
+        if close {
             cx.dispatch(AppAction::ClosePopout(id));
         }
-        if let Some((inner, outer)) = frame {
-            let now = frame_of(inner * factor, outer * factor, monitor.clone());
+        if let Some(now) = frame {
             let seen = cx
                 .state
                 .popout_frames
@@ -213,6 +187,31 @@ fn window(cx: &mut DrawCtx<'_>, ctx: &Context, popout: &Popout) {
         super::switcher::toasts(cx, ctx, Some(id));
     });
     zoom::restore(ctx, main_zoom);
+}
+
+/// Where a window first opens, in its own zoomed points: its saved
+/// frame, unless that display is gone. Fixed when the window is first
+/// shown and given unchanged after, so the builder never moves it.
+fn opening(saved: Option<&WindowFrame>, factor: f32) -> Option<(egui::Pos2, egui::Vec2)> {
+    saved
+        .filter(|f| zoom::monitor_attached(&f.monitor))
+        .map(|f| {
+            let r = rect_of(f);
+            (r.min / factor, r.size() / factor)
+        })
+}
+
+/// Whether the window was asked to close (its own close button, or
+/// Cmd+W in it), and its frame now in native points.
+fn window_input(ctx: &Context, factor: f32, monitor: &str) -> (bool, Option<WindowFrame>) {
+    let (close_requested, frame) = ctx.input(|i| {
+        let v = i.viewport();
+        (v.close_requested(), v.inner_rect.zip(v.outer_rect))
+    });
+    let close = close_requested || ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::W));
+    let frame =
+        frame.map(|(inner, outer)| frame_of(inner * factor, outer * factor, monitor.to_owned()));
+    (close, frame)
 }
 
 pub(super) fn rect_of(f: &WindowFrame) -> egui::Rect {
@@ -241,12 +240,7 @@ fn body(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &crate::core::SessionRecord) 
         .frame(
             egui::Frame::new()
                 .fill(theme::palette(ui).bg)
-                .inner_margin(egui::Margin {
-                    left: 24,
-                    right: 24,
-                    top: 20,
-                    bottom: 16,
-                }),
+                .inner_margin(super::page_margin(&View::Session(record.id))),
         )
         .show(ui, |ui| session::show(cx, ui, record.id));
 }

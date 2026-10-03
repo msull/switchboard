@@ -14,7 +14,7 @@ pub const MIN_HEIGHT: u32 = 2;
 /// size on a rule set.
 pub const SESSION_CARD: (u32, u32) = (10, 8);
 
-/// The size a target's card starts at. Today's board cards are 7 units
+/// The size a target's card starts at. Board cards are 7 units
 /// wide; working-set cards show more and get more room.
 #[must_use]
 pub fn default_size(target: &PinTarget, kind: Option<SessionKind>) -> (u32, u32) {
@@ -62,8 +62,9 @@ pub fn flow(n: usize, w: u32, h: u32, columns: u32) -> Vec<GridRect> {
         .collect()
 }
 
-/// Keep `rect` on the grid: at least the minimum size, and never past
-/// the left edge. The right edge is open; the view scrolls to it.
+/// Keep `rect` at least the minimum size. Position is left alone: the
+/// unsigned coordinates already stop at the left edge, and the right
+/// edge is open; the view scrolls to it.
 #[must_use]
 pub fn clamp(rect: GridRect) -> GridRect {
     GridRect {

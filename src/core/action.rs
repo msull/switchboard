@@ -1,7 +1,7 @@
 //! The state machine. `AppCore` holds the workspaces and derived state;
 //! `dispatch` applies one action at an explicit time and returns effects.
 //!
-//! Contract for the implementation (Milestone 1):
+//! Contract for the implementation:
 //! - Startup is a reconcile: `StoreLoaded` then `HostListed` produce card
 //!   states, never launches, except `Effect::Spawn` for trusted
 //!   `autostart` services.
@@ -58,7 +58,10 @@ impl Clock {
 
 /// Down arrow then Enter: the trust question's "Yes" is the second
 /// choice of its menu.
-pub const TRUST_YES_KEYS: &[u8] = b"\x1b[B\r";
+pub(crate) const TRUST_YES_KEYS: &[u8] = b"\x1b[B\r";
+
+/// The Escape key, which interrupts an agent's turn.
+pub(super) const ESCAPE: &[u8] = &[0x1b];
 
 /// Which screen is showing.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -307,9 +310,6 @@ pub enum AppAction {
     DeleteSpace(SpaceId),
     MoveProjectToSpace(ProjectId, SpaceId),
     MoveSetToSpace(SetId, SpaceId),
-    /// The project's `.switchboard/project.json` was read (or is absent,
-    /// or unusable). Entries become records that cannot run until
-    /// approved.
     /// Replace `<root>/.switchboard/project.json` with `text`: the config
     /// editor's Save, the one write into a project directory.
     SaveProjectConfig {
@@ -322,6 +322,9 @@ pub enum AppAction {
         project: ProjectId,
         result: Result<(), String>,
     },
+    /// The project's `.switchboard/project.json` was read (or is absent,
+    /// or unusable). Entries become records that cannot run until
+    /// approved.
     ProjectConfigRead {
         project: ProjectId,
         result: Result<Option<ProjectConfig>, String>,
@@ -644,14 +647,14 @@ pub enum Effect {
         host: HostId,
         bytes: Vec<u8>,
     },
-    /// Read `<root>/.switchboard/project.json`; answered with
-    /// `ProjectConfigRead`.
     /// Write the config file's text (reports `ProjectConfigWritten`).
     WriteProjectConfig {
         project: ProjectId,
         root: PathBuf,
         text: String,
     },
+    /// Read `<root>/.switchboard/project.json`; answered with
+    /// `ProjectConfigRead`.
     ReadProjectConfig {
         project: ProjectId,
         root: PathBuf,
@@ -727,7 +730,7 @@ const NOTICE_TTL: Duration = Duration::from_secs(4);
 /// How long a removed session can be put back. Cards move as states
 /// change, so a click meant for one can land on another; the record is
 /// held here, untouched on disk, until the window closes.
-pub const UNDO_WINDOW: Duration = Duration::from_secs(10);
+pub(crate) const UNDO_WINDOW: Duration = Duration::from_secs(10);
 /// How far back a rule set may look, in hours: an hour to a month.
 pub const RULE_HOURS: std::ops::RangeInclusive<u32> = 1..=720;
 /// The width, in grid units, a rule set is laid out at where no view
@@ -817,7 +820,7 @@ pub struct AppCore {
     /// How long each waiting run's file has looked the same.
     pub(super) probes: Vec<crate::core::workflow::Probe>,
     /// Waiting runs whose agent's pane has printed nothing for
-    /// [`crate::core::STALL_AFTER`]: noticed once, and shown as waiting
+    /// `STALL_AFTER`: noticed once, and shown as waiting
     /// on the user until the pane moves again. Transient.
     pub(super) stalled: Vec<WorkflowId>,
     /// The hand controller: held buttons and the selected card per set.
@@ -1056,7 +1059,7 @@ impl AppCore {
             }
             AppAction::Interrupt(id) => self.aim_at_pane(id, out, |host| Effect::SendKeys {
                 host,
-                bytes: vec![0x1b],
+                bytes: ESCAPE.to_vec(),
             }),
             AppAction::KillSession(id) => self.kill_pane(id, out),
             AppAction::RemoveSession(id) => self.trash_session(id, now),
@@ -1173,7 +1176,7 @@ impl AppCore {
 
     /// Kill a session's pane, if it has one. Every kill of a session
     /// goes through here, so a step added to killing reaches them all.
-    fn kill_pane(&mut self, id: RecordId, out: &mut Out) {
+    pub(super) fn kill_pane(&mut self, id: RecordId, out: &mut Out) {
         self.keep_last_output(id, out);
         if let Some(status) = self.host_status(id) {
             out.push(Effect::Kill(status.id.clone()));
@@ -1207,7 +1210,12 @@ impl AppCore {
     }
 
     /// Change one working set by id; an unknown id changes nothing.
-    fn update_set(&mut self, out: &mut Out, id: SetId, change: impl FnOnce(&mut WorkingSet)) {
+    pub(super) fn update_set(
+        &mut self,
+        out: &mut Out,
+        id: SetId,
+        change: impl FnOnce(&mut WorkingSet),
+    ) {
         self.update_views(out, |v| {
             if let Some(set) = v.sets.iter_mut().find(|s| s.id == id) {
                 change(set);
@@ -1478,22 +1486,24 @@ impl AppCore {
         effects
     }
 
-    /// Populate state directly, bypassing dispatch. For UI tests and the
-    /// demo launcher only; the app itself always goes through `dispatch`.
     /// The views (sets and spaces) directly, bypassing dispatch. Tests
     /// only.
-    pub fn seed_views(&mut self, views: Views) {
+    #[cfg(test)]
+    pub(crate) fn seed_views(&mut self, views: Views) {
         self.views = views;
     }
 
     /// Set a record's outside waiting reason directly. Tests only; the
     /// control port sets it through its own action.
-    pub fn seed_waiting_on(&mut self, id: RecordId, reason: Option<String>) {
+    #[cfg(test)]
+    pub(crate) fn seed_waiting_on(&mut self, id: RecordId, reason: Option<String>) {
         if let Some(s) = self.session_mut(id) {
             s.waiting_on = reason;
         }
     }
 
+    /// Populate state directly, bypassing dispatch. For tests only; the
+    /// app itself always goes through `dispatch`.
     pub fn seed(&mut self, workspaces: Vec<Workspace>, host: Vec<HostStatus>) {
         self.workspaces = workspaces;
         self.host = host;
@@ -1564,7 +1574,9 @@ impl AppCore {
         }
     }
 
-    /// Once a second: notices age out and waiting workflows probe.
+    /// Once a second: notices age out, the controller's dwell runs,
+    /// trashed records past their undo window are removed, and waiting
+    /// workflows probe.
     fn tick(&mut self, now: Clock, out: &mut Out) {
         self.expire_notices(now);
         self.controller_tick(now, out);
@@ -2081,8 +2093,9 @@ impl AppCore {
         &self.workspaces
     }
     /// Workspaces most recently active first, for the switcher.
+    #[cfg(test)]
     #[must_use]
-    pub fn workspaces_by_recency(&self) -> Vec<&Workspace> {
+    pub(crate) fn workspaces_by_recency(&self) -> Vec<&Workspace> {
         let mut all: Vec<&Workspace> = self.workspaces.iter().collect();
         all.sort_by_key(|w| std::cmp::Reverse(w.project.last_active));
         all
@@ -2155,8 +2168,9 @@ impl AppCore {
 
     /// Whether the UI may show this project at all: it is in the space
     /// being worked in, or the global space is.
+    #[cfg(test)]
     #[must_use]
-    pub fn project_visible(&self, id: ProjectId) -> bool {
+    pub(crate) fn project_visible(&self, id: ProjectId) -> bool {
         self.project_space(id)
             .is_some_and(|s| self.settings.space.contains(s))
     }
@@ -2487,11 +2501,7 @@ impl AppCore {
         out: &mut Out,
         effect: impl FnOnce(HostId) -> Effect,
     ) {
-        let host = self
-            .host_status(id)
-            .filter(|h| matches!(h.liveness, Liveness::Running { .. }))
-            .map(|h| h.id.clone());
-        if let Some(host) = host {
+        if let Some(host) = self.running_host(id) {
             out.push(effect(host));
         } else {
             let name = self.session_name(id);
@@ -2663,16 +2673,10 @@ impl AppCore {
     pub fn queued_codex(&self, id: RecordId) -> bool {
         self.codex_queue.contains(&id)
     }
-    /// Sessions across all projects that are waiting on the user.
-    #[must_use]
     /// Sessions waiting on the user in every space, and Dispatch's
     /// pending decisions: the Dock badge.
+    #[must_use]
     pub fn waiting_count(&self) -> usize {
-        self.workspaces
-            .iter()
-            .flat_map(|w| &w.sessions)
-            .filter(|s| self.counts_as_waiting(s.id))
-            .count()
-            + self.pending_decisions().len()
+        self.waiting_count_in(SpaceId::GLOBAL) + self.pending_decisions().len()
     }
 }

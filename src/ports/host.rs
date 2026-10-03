@@ -1,6 +1,6 @@
 //! Process host: where session processes live. The tmux adapter is the
 //! product; a fake plays scripted state in tests. From the process-host
-//! spike's proposed trait, trimmed to what Milestone 1 uses.
+//! spike's proposed trait.
 
 use std::path::PathBuf;
 use std::time::SystemTime;

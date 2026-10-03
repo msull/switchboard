@@ -36,14 +36,12 @@ impl Request {
     }
 
     pub fn parse(line: &str) -> Result<Self, String> {
-        serde_json::from_str(line).map_err(|e| e.to_string())
+        parse_line(line)
     }
 
     #[must_use]
     pub fn to_line(&self) -> String {
-        let mut s = serde_json::to_string(self).unwrap_or_default();
-        s.push('\n');
-        s
+        to_line(self)
     }
 }
 
@@ -75,11 +73,13 @@ pub enum Body {
     Take { project: String, issue: String },
     /// A parked ticket back to active.
     Resume { ticket: String },
-    /// Close a ticket: its worktrees removed, its branch, directory and
-    /// record kept. On a closed ticket whose trees were kept, the
-    /// removal is tried again. Answered with the ticket as it stands:
-    /// `closing` once the intent is saved, and the runner's next pass
-    /// does the rest, since that asks the caller's own control socket.
+    /// Close a ticket: its worktrees are removed, and its branch,
+    /// directory and record are kept. On a ticket already closed with
+    /// its trees kept, the removal is tried again. The answer is the
+    /// ticket as it stands, `closing` once the intent is saved; the
+    /// runner's next pass does the rest: that work asks the caller's
+    /// own control socket, so it is not done while the caller waits on
+    /// this reply.
     Close {
         ticket: String,
         #[serde(default)]
@@ -144,14 +144,12 @@ impl Reply {
     }
 
     pub fn parse(line: &str) -> Result<Self, String> {
-        serde_json::from_str(line).map_err(|e| e.to_string())
+        parse_line(line)
     }
 
     #[must_use]
     pub fn to_line(&self) -> String {
-        let mut s = serde_json::to_string(self).unwrap_or_default();
-        s.push('\n');
-        s
+        to_line(self)
     }
 }
 
@@ -174,19 +172,21 @@ pub struct ProjectView {
     pub name: String,
     /// Ticket ids in queue order.
     pub queue: Vec<String>,
-    /// The policy's limits: tickets with something running at once,
-    /// and decisions that may wait on the user before nothing new
-    /// starts.
+    /// The policy's limit on tickets with something running at once.
     pub slots: u32,
+    /// The policy's limit on decisions that may wait on the user before
+    /// nothing new starts.
     pub waiting_on_me: u32,
-    /// Where the project stands against them: active tickets with an
-    /// open attempt, and pending decisions across its tickets.
+    /// Active tickets with an open attempt, against `slots`.
     pub running: u32,
+    /// Pending decisions across the project's tickets, against
+    /// `waiting_on_me`.
     pub pending: u32,
     /// The policy's floor for free space on the worktrees' volume, in
-    /// GB, and what is free now; nothing new starts under the floor.
+    /// GB; nothing new starts under it.
     #[serde(default)]
     pub min_free_gb: u32,
+    /// Free space on the worktrees' volume now, in GB.
     #[serde(default)]
     pub free_gb: Option<u32>,
 }
@@ -280,13 +280,14 @@ pub struct AttemptView {
     pub stage: String,
     pub n: u32,
     pub context: String,
-    /// `agent`, `workflow` or `gate-only`.
+    /// `agent`, `workflow`, `review` or `gate-only`.
     pub kind: String,
     /// `starting`, `running`, `complete`, `failed` or `cancelled`.
     pub state: String,
     pub reason: Option<String>,
-    /// The Switchboard session and review run, when the attempt has one.
+    /// The Switchboard session, when the attempt has one.
     pub session: Option<String>,
+    /// The Switchboard review run, when the attempt has one.
     pub run: Option<String>,
     /// Artifact name and its file.
     pub artifacts: Vec<(String, PathBuf)>,
@@ -366,6 +367,18 @@ pub struct DecisionView {
     pub answer: Option<String>,
     pub note: Option<String>,
     pub made_ms: u64,
+}
+
+/// One socket line as a request or reply.
+fn parse_line<T: serde::de::DeserializeOwned>(line: &str) -> Result<T, String> {
+    serde_json::from_str(line).map_err(|e| e.to_string())
+}
+
+/// A request or reply as one socket line, newline included.
+fn to_line<T: Serialize>(value: &T) -> String {
+    let mut s = serde_json::to_string(value).unwrap_or_default();
+    s.push('\n');
+    s
 }
 
 #[cfg(test)]

@@ -88,56 +88,42 @@ impl TranscriptReader for ClaudeTranscripts {
 /// The copy behind both clones: up to a prompt, or (`None`) the whole
 /// conversation.
 fn write_fork(handle: &ResumeHandle, before: Option<usize>) -> Result<ResumeHandle, String> {
-    {
-        let ResumeHandle::ClaudeCode {
-            session_id,
-            transcript: Some(path),
-        } = handle
-        else {
-            return Err("only Claude Code sessions with a transcript can be cloned".into());
-        };
-        let path = &locate(path);
-        let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
-        let new_id = uuid::Uuid::new_v4();
-        let (old_id, new) = (session_id.to_string(), new_id.to_string());
-        let forked = match before {
-            Some(before) => fork(&text, before, &old_id, &new)
-                .ok_or_else(|| format!("the transcript has no prompt #{before}"))?,
-            None => relabel(&text, &old_id, &new),
-        };
-        let dir = path
-            .parent()
-            .ok_or_else(|| format!("{}: no parent directory", path.display()))?;
-        let dst = dir.join(format!("{new_id}.jsonl"));
-        write_private(&dst, &forked).map_err(|e| format!("{}: {e}", dst.display()))?;
-        Ok(ResumeHandle::ClaudeCode {
-            session_id: new_id,
-            transcript: Some(dst),
-        })
-    }
-}
-
-/// Every record, re-labelled; half-written last lines dropped as in
-/// [`fork`].
-fn relabel(text: &str, old_id: &str, new_id: &str) -> String {
-    let mut out = String::new();
-    for line in text.lines().filter(|l| !l.trim().is_empty()) {
-        if serde_json::from_str::<Value>(line).is_err() {
-            continue;
-        }
-        out.push_str(&line.replace(old_id, new_id));
-        out.push('\n');
-    }
-    out
+    let ResumeHandle::ClaudeCode {
+        session_id,
+        transcript: Some(path),
+    } = handle
+    else {
+        return Err("only Claude Code sessions with a transcript can be cloned".into());
+    };
+    let path = &locate(path);
+    let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let new_id = uuid::Uuid::new_v4();
+    let (old_id, new) = (session_id.to_string(), new_id.to_string());
+    let forked = fork(&text, before, &old_id, &new).ok_or_else(|| {
+        format!(
+            "the transcript has no prompt #{}",
+            before.unwrap_or_default()
+        )
+    })?;
+    let dir = path
+        .parent()
+        .ok_or_else(|| format!("{}: no parent directory", path.display()))?;
+    let dst = dir.join(format!("{new_id}.jsonl"));
+    write_private(&dst, &forked).map_err(|e| format!("{}: {e}", dst.display()))?;
+    Ok(ResumeHandle::ClaudeCode {
+        session_id: new_id,
+        transcript: Some(dst),
+    })
 }
 
 /// The transcript's records before the `before`th typed prompt (the
-/// turn numbering of [`parse`]), re-labelled with `new_id` wherever the
-/// old session id appears. `None` when the prompt does not exist, so a
-/// stale turn number never clones the whole conversation. The cut is a
-/// prefix, so the `parentUuid` chain needs no repair.
+/// turn numbering of [`parse`]), or every record for `None`, re-labelled
+/// with `new_id` wherever the old session id appears. `None` when the
+/// prompt does not exist, so a stale turn number never clones the whole
+/// conversation. The cut is a prefix, so the `parentUuid` chain needs
+/// no repair.
 #[must_use]
-pub fn fork(text: &str, before: usize, old_id: &str, new_id: &str) -> Option<String> {
+fn fork(text: &str, before: Option<usize>, old_id: &str, new_id: &str) -> Option<String> {
     let mut out = String::new();
     let mut seen = 0;
     for line in text.lines().filter(|l| !l.trim().is_empty()) {
@@ -151,7 +137,7 @@ pub fn fork(text: &str, before: usize, old_id: &str, new_id: &str) -> Option<Str
                 .map_or_else(String::new, text_of);
             if !systemish(&content) {
                 seen += 1;
-                if seen == before {
+                if Some(seen) == before {
                     return Some(out);
                 }
             }
@@ -159,7 +145,7 @@ pub fn fork(text: &str, before: usize, old_id: &str, new_id: &str) -> Option<Str
         out.push_str(&line.replace(old_id, new_id));
         out.push('\n');
     }
-    None
+    before.is_none().then_some(out)
 }
 
 /// The file a shell command writes with `>`/`>>` or `tee`, as agents
@@ -168,7 +154,7 @@ pub fn fork(text: &str, before: usize, old_id: &str, new_id: &str) -> Option<Str
 /// relative for the caller's directory. `None` for a command that
 /// redirects nowhere, or only to `/dev/null`.
 #[must_use]
-pub fn shell_write_target(command: &str) -> Option<PathBuf> {
+fn shell_write_target(command: &str) -> Option<PathBuf> {
     let first_line = command.lines().next().unwrap_or("");
     let tokens: Vec<&str> = first_line.split_whitespace().collect();
     let mut dir: Option<PathBuf> = None;
@@ -252,7 +238,7 @@ struct ToolResult {
 
 /// Parse a whole transcript. Public so tests can feed it text directly.
 #[must_use]
-pub fn parse(text: &str) -> Conversation {
+fn parse(text: &str) -> Conversation {
     let recs: Vec<Value> = text
         .lines()
         .filter(|l| !l.trim().is_empty())
@@ -730,7 +716,7 @@ mod tests {
     fn fork_keeps_the_turns_before_the_cut_under_the_new_id() {
         let text = std::fs::read_to_string(fixture()).unwrap();
         let old = &conversation_id(&text);
-        let forked = fork(&text, 2, old, "new-id").unwrap();
+        let forked = fork(&text, Some(2), old, "new-id").unwrap();
         let c = parse(&forked);
         assert_eq!(c.turns.len(), 1);
         assert_eq!(c.turns[0].user, "reply with the single word pong");
@@ -738,8 +724,11 @@ mod tests {
         assert!(!forked.contains(old), "the old id is gone");
         assert!(forked.contains("\"sessionId\":\"new-id\""));
         // Before the first prompt: only the preamble. Past the end: nothing.
-        assert_eq!(parse(&fork(&text, 1, old, "n").unwrap()).turns.len(), 0);
-        assert!(fork(&text, 99, old, "n").is_none());
+        assert_eq!(
+            parse(&fork(&text, Some(1), old, "n").unwrap()).turns.len(),
+            0
+        );
+        assert!(fork(&text, Some(99), old, "n").is_none());
     }
 
     fn conversation_id(text: &str) -> String {

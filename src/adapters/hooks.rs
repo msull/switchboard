@@ -7,8 +7,12 @@
 //! byte offset (`events.offset`), so nothing is lost while the app is
 //! down and a crash between poll and checkpoint only replays events.
 //! `WakeSocket` is the listener whose only job is to flip a flag.
+//!
+//! The helper (`src/bin/switchboard-hook.rs`) repeats some of this
+//! module's names and paths on purpose: it is std-only so it starts in
+//! well under a millisecond, and cannot link this crate.
 
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, File};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
@@ -27,13 +31,14 @@ const LOG_FILE: &str = "events.log";
 const ROTATED_FILE: &str = "events.log.1";
 const OFFSET_FILE: &str = "events.offset";
 const SOCKET_FILE: &str = "wake.sock";
-const SETTINGS_FILE: &str = "claude-hooks.json";
+/// The settings file handed to `claude --settings`, in the data dir.
+pub const HOOK_SETTINGS_FILE: &str = "claude-hooks.json";
 
 /// Rotate the log once it is fully consumed and larger than this.
-pub const COMPACT_THRESHOLD: u64 = 1024 * 1024;
+const COMPACT_THRESHOLD: u64 = 1024 * 1024;
 
 /// The events `switchboard-hook` is registered for (spike 03).
-pub const HOOK_EVENTS: [&str; 10] = [
+const HOOK_EVENTS: [&str; 10] = [
     "SessionStart",
     "UserPromptSubmit",
     "PermissionRequest",
@@ -135,6 +140,7 @@ impl HookLog {
         self.data_dir.join(LOG_FILE)
     }
 
+    #[cfg(test)]
     #[must_use]
     pub fn offset(&self) -> u64 {
         self.offset
@@ -207,15 +213,8 @@ impl EventSource for HookLog {
     }
 
     fn checkpoint(&mut self) {
-        let final_path = self.data_dir.join(OFFSET_FILE);
-        let tmp = self.data_dir.join(format!("{OFFSET_FILE}.tmp"));
-        let write = || -> io::Result<()> {
-            let mut f = File::create(&tmp)?;
-            f.write_all(self.offset.to_string().as_bytes())?;
-            f.sync_all()?;
-            fs::rename(&tmp, &final_path)
-        };
-        if let Err(e) = write() {
+        let offset = self.offset.to_string();
+        if let Err(e) = replace_file(&self.data_dir, OFFSET_FILE, offset.as_bytes()) {
             log::warn!("hook log checkpoint failed: {e}");
         }
     }
@@ -302,7 +301,7 @@ impl Drop for WakeSocket {
 /// events from spike 03, each running `<hook_binary> <Event>` with a
 /// 5 s timeout and no matcher.
 #[must_use]
-pub fn hook_settings_json(hook_binary: &Path) -> serde_json::Value {
+fn hook_settings_json(hook_binary: &Path) -> serde_json::Value {
     let binary = shell_quote(&hook_binary.to_string_lossy());
     let hooks: serde_json::Map<String, serde_json::Value> = HOOK_EVENTS
         .iter()
@@ -335,18 +334,19 @@ fn shell_quote(s: &str) -> String {
 /// returns that path, for `claude --settings <path>`.
 pub fn write_hook_settings(data_dir: &Path, hook_binary: &Path) -> io::Result<PathBuf> {
     fs::create_dir_all(data_dir)?;
-    let path = data_dir.join(SETTINGS_FILE);
-    let tmp = data_dir.join(format!("{SETTINGS_FILE}.tmp"));
     let text = serde_json::to_string_pretty(&hook_settings_json(hook_binary))?;
-    {
-        let mut f = OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .open(&tmp)?;
-        f.write_all(text.as_bytes())?;
-        f.sync_all()?;
-    }
+    replace_file(data_dir, HOOK_SETTINGS_FILE, text.as_bytes())
+}
+
+/// Write `<dir>/<name>` whole through a synced temp file and a rename,
+/// so a reader sees the old contents or the new, never part of either.
+fn replace_file(dir: &Path, name: &str, bytes: &[u8]) -> io::Result<PathBuf> {
+    let path = dir.join(name);
+    let tmp = dir.join(format!("{name}.tmp"));
+    let mut f = File::create(&tmp)?;
+    f.write_all(bytes)?;
+    f.sync_all()?;
+    drop(f);
     fs::rename(&tmp, &path)?;
     Ok(path)
 }
@@ -361,6 +361,7 @@ pub fn unix_millis(t: SystemTime) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs::OpenOptions;
 
     fn line(at: u64, event: &str, extra: &str) -> String {
         format!(
@@ -582,7 +583,7 @@ mod tests {
     fn writes_settings_file() {
         let dir = tempfile::tempdir().unwrap();
         let path = write_hook_settings(dir.path(), Path::new("/opt/sb/switchboard-hook")).unwrap();
-        assert_eq!(path, dir.path().join(SETTINGS_FILE));
+        assert_eq!(path, dir.path().join(HOOK_SETTINGS_FILE));
         let v: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
         assert!(v["hooks"]["SessionEnd"].is_array());

@@ -1,10 +1,9 @@
 # Dispatch
 
 A system that sits on top of Switchboard the way Switchboard sits on top
-of tmux and Prompt Box. Nothing here is built; this is the design to
-argue with, with three real pipelines written by hand to test the
-vocabulary before any code. Decisions made without you are collected
-at the end.
+of tmux and Prompt Box. This is its design, with three real pipelines
+written by hand to test the vocabulary. The choices behind it are
+collected at the end, under "Design choices".
 
 The idea in one line, moved up a level: **tickets are data, sessions are
 a cache.** Switchboard keeps sessions and files durable on top of tmux
@@ -67,8 +66,7 @@ commands to the tree (a sandbox) is filed as an issue and not built.
   number. For a task file, a hash of the task line's text with the
   marker removed and whitespace normalised; moving the line does not
   make a new ticket, editing its text does. A ticket is taken once per
-  identity. `dispatch retake` makes a new ticket from the same identity
-  on purpose, and closes the old one. The text as it was when taken is
+  identity. The text as it was when taken is
   kept on the record, so what an operator was told is always known.
 - **Lane.** One repository the ticket touches: a worktree, a branch,
   and the Switchboard project made for it. A lane with no worktree
@@ -307,7 +305,7 @@ interrupted attempt.
 - Prompts are text and take template values verbatim. Commands never
   do: a command is a fixed argv from the pipeline file, and template
   values reach it as environment variables (`DISPATCH_TICKET`,
-  `DISPATCH_LANE`, `DISPATCH_BRANCH`, `DISPATCH_NOTES`, and so on),
+  `DISPATCH_LANE`, `DISPATCH_BRANCH`, and so on),
   never spliced into shell source.
 
 ## Decisions
@@ -368,8 +366,7 @@ clean; and only then release the holds and move the ticket to
 end of a stage runs the same check over the ticket's whole process
 list, not the current attempt's. If any writer cannot be confirmed
 gone or the tree cannot be made clean, the holds stay and a decision
-says why. `dispatch retake` closes the old ticket by the same sequence
-before making the new one.
+says why.
 
 A cancelled decision cannot be answered, and a parked ticket counts
 nothing against `waiting_on_me`. A `parking` record whose decisions
@@ -1545,7 +1542,7 @@ with its in-place hold; the Orchard pipeline with the deploy gate and
 the persisted `my-dev` hold; budget reporting; the `recommend`
 dial.
 
-## Decisions I made (review these)
+## Design choices
 
 1. **Dispatch is a separate process over a control socket**, not a
    library user of the switchboard crate and not a thread inside the

@@ -55,9 +55,11 @@ pub fn sync_queue(
         (None, None) => return Ok(()),
     };
     if ps.set.is_none() {
-        let reply = runner.send_for_view(
+        // The queue view is not an attempt's, so the request names none.
+        let reply = runner.send(
             t,
             ps,
+            None,
             "set",
             Body::SetNew {
                 space,
@@ -87,7 +89,7 @@ pub fn sync_queue(
             },
         })
         .collect();
-    let reply = runner.send_for_view(t, ps, "sync", Body::SetSync { set, items }, now_ms)?;
+    let reply = runner.send(t, ps, None, "sync", Body::SetSync { set, items }, now_ms)?;
     if let Reply::Failed { reason } = reply {
         bail!("set.sync: {reason}");
     }

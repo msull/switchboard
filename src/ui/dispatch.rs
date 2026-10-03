@@ -10,7 +10,7 @@ use egui_extras::{Column, TableBuilder};
 
 use super::dialogs::{dialog, dialog_actions};
 use super::{DrawCtx, GAP, markdown, theme};
-use crate::core::dispatch::{close_offered, ticket_stage};
+use crate::core::dispatch::{close_offered, parked, ticket_source, ticket_stage};
 use crate::core::{AppAction, RecordId, TicketOnly, TicketSort, View, WaitingAgent};
 use crate::ports::dispatch::{AttemptView, DecisionView, ProjectView, TicketView};
 
@@ -68,27 +68,11 @@ pub fn show(cx: &mut DrawCtx<'_>, ui: &mut Ui) {
             }
             let pending: Vec<DecisionView> = cx
                 .core
-                .pending_decisions()
+                .pending_decisions_in(chosen.as_deref())
                 .into_iter()
-                .filter(|d| {
-                    tickets
-                        .iter()
-                        .find(|t| t.id == d.ticket)
-                        .is_some_and(|t| shown(&t.project))
-                })
                 .cloned()
                 .collect();
-            let agents: Vec<WaitingAgent> = cx
-                .core
-                .waiting_agents()
-                .into_iter()
-                .filter(|a| {
-                    tickets
-                        .iter()
-                        .find(|t| t.id == a.ticket)
-                        .is_some_and(|t| shown(&t.project))
-                })
-                .collect();
+            let agents = cx.core.waiting_agents_in(chosen.as_deref());
             waiting_section(cx, ui, seen, &pending, &agents, &tickets);
 
             theme::section(ui, "Tickets");
@@ -227,9 +211,9 @@ fn waiting_section(
     let fold = ui.make_persistent_id("dispatch-waiting");
     let mut st =
         egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), fold, true);
-    if seen && cx.state.dispatch_waiting_folded.is_none() {
+    if seen && !cx.state.dispatch_waiting_fold_set {
         st.set_open(waiting <= 3);
-        cx.state.dispatch_waiting_folded = Some(waiting > 3);
+        cx.state.dispatch_waiting_fold_set = true;
     }
     // The heading toggles the fold too, not only the small arrow.
     let mut clicked = false;
@@ -376,7 +360,7 @@ fn ticket_table(cx: &mut DrawCtx<'_>, ui: &mut Ui) {
                         if core.ticket_waits(t) && theme::ghost(ui, "Answer").clicked() {
                             open_ticket(cx, &t.id);
                         }
-                        if t.state == "parked" && theme::secondary(ui, "Resume").clicked() {
+                        if parked(t) && theme::secondary(ui, "Resume").clicked() {
                             cx.dispatch(AppAction::DispatchResume(t.id.clone()));
                         }
                         if theme::ghost_muted(ui, "Open").clicked() {
@@ -441,10 +425,9 @@ fn go_back(cx: &mut DrawCtx<'_>) {
 }
 
 fn title_of(t: &TicketView) -> String {
-    match t.number {
-        Some(n) if t.kind == "pull-request" => format!("PR #{n} {}", t.title),
-        Some(n) => format!("#{n} {}", t.title),
-        None => t.title.clone(),
+    match ticket_source(t) {
+        source if source.is_empty() => t.title.clone(),
+        source => format!("{source} {}", t.title),
     }
 }
 
@@ -555,9 +538,6 @@ fn decision_card(
         });
 }
 
-/// A decision that takes several options: a checkbox each, ticked from
-/// the recommendation to start, and one Answer button that sends the
-/// ticked ones joined by commas. Nothing is sent by a tick alone.
 /// An agent at a prompt of its own: the ticket, the attempt, why, and
 /// the session to open and answer it in.
 fn agent_card(cx: &mut DrawCtx<'_>, ui: &mut Ui, a: &WaitingAgent, ticket: Option<&TicketView>) {
@@ -600,6 +580,9 @@ fn agent_card(cx: &mut DrawCtx<'_>, ui: &mut Ui, a: &WaitingAgent, ticket: Optio
         });
 }
 
+/// A decision that takes several options: a checkbox each, ticked from
+/// the recommendation to start, and one Answer button that sends the
+/// ticked ones joined by commas. Nothing is sent by a tick alone.
 fn multiple_choice(cx: &mut DrawCtx<'_>, ui: &mut Ui, d: &DecisionView) {
     let key = format!("{}/{}", d.ticket, d.id);
     let suggested: Vec<String> = d
@@ -862,7 +845,7 @@ fn ticket_header(cx: &mut DrawCtx<'_>, ui: &mut Ui, t: &TicketView) {
 /// Resume and Close, in the header's right-to-left row, where the
 /// ticket's state allows them.
 fn ticket_actions(cx: &mut DrawCtx<'_>, ui: &mut Ui, t: &TicketView) {
-    if t.state == "parked"
+    if parked(t)
         && theme::secondary(ui, "Resume")
             .on_hover_text("Back to active; the runner takes it from its current stage")
             .clicked()
@@ -938,7 +921,7 @@ fn pr_labels(ui: &mut Ui, pr: &crate::ports::dispatch::PullRequestView) {
             &pr.url,
         );
     }
-    let short: String = pr.head.chars().take(8).collect();
+    let short = short_sha(&pr.head);
     ui.label(theme::meta_text(
         ui,
         if short.is_empty() {
@@ -984,7 +967,7 @@ fn attempt_row(cx: &mut DrawCtx<'_>, ui: &mut Ui, t: &TicketView, a: &AttemptVie
                     );
                 }
                 if let Some(checks) = &a.checks {
-                    let short: String = checks.head.chars().take(8).collect();
+                    let short = short_sha(&checks.head);
                     ui.label(theme::meta_text(
                         ui,
                         match checks.exit {
@@ -1048,7 +1031,7 @@ fn round_line(ui: &mut Ui, round: &crate::ports::dispatch::ReviewRoundView) {
     let p = theme::palette(ui);
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing.x = 6.0;
-        let short: String = round.head.chars().take(8).collect();
+        let short = short_sha(&round.head);
         ui.label(theme::meta_text(
             ui,
             format!("round {} at {short}", round.n),
@@ -1070,7 +1053,7 @@ fn round_line(ui: &mut Ui, round: &crate::ports::dispatch::ReviewRoundView) {
             ui.label(theme::meta_text(ui, format!("{name}: {state}")));
         }
         if let Some(after) = &round.head_after {
-            let short: String = after.chars().take(8).collect();
+            let short = short_sha(after);
             ui.label(theme::meta_text(ui, format!("fixed to {short}")));
         }
     });
@@ -1116,4 +1099,9 @@ fn artifact_column(cx: &mut DrawCtx<'_>, ui: &mut Ui, t: &TicketView) {
 #[must_use]
 pub fn is_dispatch_view(view: &View) -> bool {
     matches!(view, View::Dispatch | View::Ticket(_))
+}
+
+/// A commit's first eight characters, as the page names it.
+fn short_sha(sha: &str) -> String {
+    sha.chars().take(8).collect()
 }

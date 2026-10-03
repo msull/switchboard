@@ -32,11 +32,11 @@ pub const PR_POLL_MS: u64 = 60_000;
 /// How long lookups may keep failing before the gate asks.
 pub const PR_ERROR_GRACE_MS: u64 = 3_600_000;
 
-/// Everything the runner acts through.
 /// The pseudo-stage a refresh rebaser's attempts and questions carry:
 /// not in any pipeline, so no stage mistakes them for its own.
 pub const REFRESH: &str = "refresh";
 
+/// Everything the runner acts through.
 pub struct Runner {
     pub data: DataDir,
     pub port: Box<dyn Port>,
@@ -53,6 +53,9 @@ pub struct Runner {
     /// one a second.
     low_disk: Option<String>,
 }
+
+/// The contexts a stage runs in: `(name, cwd, lane)`.
+pub(crate) type Contexts = Vec<(String, PathBuf, Option<String>)>;
 
 /// What one ticket's step changed in the project's counts: a slot
 /// taken, and questions asked without one.
@@ -245,12 +248,13 @@ impl Runner {
                 pipeline.project.name
             );
         }
-        self.transaction(|r| r.take_locked(project, pipeline_text, source, now_ms))
+        self.transaction(|r| r.take_locked(project, &pipeline, pipeline_text, source, now_ms))
     }
 
     fn take_locked(
         &mut self,
         project: &str,
+        pipeline: &Pipeline,
         pipeline_text: &str,
         source: SourceSnapshot,
         now_ms: u64,
@@ -269,9 +273,8 @@ impl Runner {
         }
         // The tree's path reaches the repository's own tooling; one it
         // may not survive is refused before anything is made.
-        let pipeline = Pipeline::parse(pipeline_text)?;
         if pipeline.cuts_worktrees()
-            && let Some(why) = shell_unsafe(&self.worktree_root(&pipeline))
+            && let Some(why) = shell_unsafe(&self.worktree_root(pipeline))
         {
             bail!("worktrees: {why}; set another with `dispatch worktrees <path>`");
         }
@@ -312,7 +315,7 @@ impl Runner {
     /// Where a pipeline's tickets' trees go: its own `worktrees`, else
     /// the data directory's setting or default.
     #[must_use]
-    pub fn worktree_root(&self, p: &Pipeline) -> PathBuf {
+    fn worktree_root(&self, p: &Pipeline) -> PathBuf {
         p.project
             .worktrees
             .clone()
@@ -410,9 +413,7 @@ impl Runner {
             lane.worktree = to.join(rest);
             let has_repo = p.lane(&lane.name).is_some_and(|l| l.repo.is_some());
             if has_repo {
-                let lane_clone = self
-                    .data
-                    .repo_dir(&format!("{}@{}", p.project.name, lane.name));
+                let lane_clone = self.data.lane_repo_dir(&p.project.name, &lane.name);
                 self.git.worktree_repair(&lane_clone, &lane.worktree)?;
             }
         }
@@ -528,13 +529,7 @@ impl Runner {
         ps: &mut ProjectState,
         now_ms: u64,
     ) -> Result<()> {
-        let pending: Vec<usize> = t
-            .ledger
-            .iter()
-            .enumerate()
-            .filter(|(_, o)| o.unresolved())
-            .map(|(i, _)| i)
-            .collect();
+        let pending = t.unsettled();
         let recovered = !pending.is_empty();
         for i in pending {
             self.recover_one(t, ps, i, now_ms)?;
@@ -700,8 +695,7 @@ impl Runner {
         };
         let (clone, remote, onto) = if lane.repo.is_some() {
             (
-                self.data
-                    .repo_dir(&format!("{}@{}", p.project.name, lane.name)),
+                self.data.lane_repo_dir(&p.project.name, &lane.name),
                 p.lane_remote(&lane).to_owned(),
                 format!("{}/{}", p.lane_remote(&lane), p.lane_base(&lane)),
             )
@@ -823,16 +817,11 @@ impl Runner {
         let notes = dir.join("notes.md");
         let mut vars = vars_for(t, p, Some(&name));
         vars.set("notes", notes.display().to_string());
-        let mut prompt = String::new();
         let guidance = p
             .operators
             .get(operator)
-            .map(|o| o.guidance.trim())
-            .unwrap_or_default();
-        if !guidance.is_empty() {
-            prompt.push_str(&vars.render(guidance));
-            prompt.push_str("\n\n");
-        }
+            .map_or("", |o| o.guidance.as_str());
+        let mut prompt = guidance_prelude(guidance, &vars);
         let plan = t
             .input("plan")
             .map(|plan| format!(" (the plan is at {})", plan.display()))
@@ -841,11 +830,8 @@ impl Runner {
             .stages
             .iter()
             .find_map(|s| match &s.gate {
-                Some(Gate::Command { argv, per_lane, .. }) => Some(
-                    per_lane
-                        .as_ref()
-                        .and_then(|m| m.get(&name))
-                        .or(argv.as_ref())
+                Some(gate @ Gate::Command { .. }) => Some(
+                    lane_gate_argv(gate, Some(&name))
                         .cloned()
                         .unwrap_or_default()
                         .join(" "),
@@ -861,17 +847,7 @@ impl Runner {
             cwd.display(),
             notes.display()
         );
-        let clone_of = t
-            .attempts
-            .iter()
-            .filter(|x| {
-                x.context == name
-                    && x.kind == AttemptKind::Agent
-                    && x.state == AttemptState::Complete
-                    && x.session.is_some()
-            })
-            .max_by_key(|x| x.started_ms)
-            .and_then(|x| x.session.clone());
+        let clone_of = lane_clone_of(t, &name);
         log::info!(
             "ticket {} lane {name}: the branch conflicts with {onto}; {operator} starting{}",
             t.id,
@@ -1067,9 +1043,7 @@ impl Runner {
         let mut kept: Vec<String> = Vec::new();
         for i in lanes {
             let lane = t.lanes[i].clone();
-            let clone = self
-                .data
-                .repo_dir(&format!("{}@{}", p.project.name, lane.name));
+            let clone = self.data.lane_repo_dir(&p.project.name, &lane.name);
             match self.git.worktree_remove(&clone, &lane.worktree) {
                 Ok(()) => {
                     log::info!("ticket {} lane {} removed", t.id, lane.name);
@@ -1252,12 +1226,7 @@ impl Runner {
     /// back as paused), everything on the process list killed and read
     /// back as gone, and only then `Parked`. Run again on every pass
     /// until it gets there, so a restart at any point resumes it whole.
-    pub(crate) fn finish_parking(
-        &mut self,
-        t: &mut Ticket,
-        ps: &mut ProjectState,
-        now_ms: u64,
-    ) -> Result<()> {
+    fn finish_parking(&mut self, t: &mut Ticket, ps: &mut ProjectState, now_ms: u64) -> Result<()> {
         let TicketState::Parking { reason } = t.state.clone() else {
             return Ok(());
         };
@@ -1333,16 +1302,12 @@ impl Runner {
                 return Ok(false);
             }
         }
-        let mine = self.processes_of(t, a)?;
+        let mine = self.processes_of(a)?;
         if !self.retire_processes(t, ps, &mine, now_ms)? {
             return Ok(false);
         }
         self.kill_review_commands(t, a);
-        if let Some(attempt) = t
-            .attempts
-            .iter_mut()
-            .find(|x| x.stage == a.stage && x.n == a.n)
-        {
+        if let Some(attempt) = find_attempt_mut(t, &a.stage, a.n) {
             attempt.state = AttemptState::Cancelled {
                 reason: reason.into(),
             };
@@ -1354,7 +1319,7 @@ impl Runner {
 
     /// The sessions an attempt owns: its own, or its run's reviewer and
     /// planner clone.
-    pub(crate) fn processes_of(&mut self, t: &Ticket, a: &Attempt) -> Result<Vec<String>> {
+    fn processes_of(&mut self, a: &Attempt) -> Result<Vec<String>> {
         let mut ids: Vec<String> = a.session.iter().cloned().collect();
         for round in &a.rounds {
             ids.extend(round.reviewers.iter().filter_map(|r| r.session.clone()));
@@ -1366,7 +1331,6 @@ impl Runner {
             ids.push(run.reviewer);
             ids.extend(run.planner);
         }
-        let _ = t;
         Ok(ids)
     }
 
@@ -1686,37 +1650,18 @@ impl Runner {
             }
             match (name.as_str(), answer.as_str()) {
                 ("lanes", lanes) => self.choose_lanes(t, ps, p, &lane_names(lanes), now_ms)?,
-                ("finalize", "finalize") => {
+                ("finalize", "finalize") | ("paused", "continue") => {
                     if let Some(run) = attempt
                         .as_ref()
-                        .and_then(|(s, n)| t.attempts.iter().find(|a| &a.stage == s && a.n == *n))
+                        .and_then(|(s, n)| find_attempt(t, s, *n))
                         .and_then(|a| a.run.clone())
                     {
-                        self.send(
-                            t,
-                            ps,
-                            attempt.clone(),
-                            "finalize",
-                            Body::WorkflowFinalize { run },
-                            now_ms,
-                        )?;
-                    }
-                    self.unmark(t, ps, now_ms)?;
-                }
-                ("paused", "continue") => {
-                    if let Some(run) = attempt
-                        .as_ref()
-                        .and_then(|(s, n)| t.attempts.iter().find(|a| &a.stage == s && a.n == *n))
-                        .and_then(|a| a.run.clone())
-                    {
-                        self.send(
-                            t,
-                            ps,
-                            attempt.clone(),
-                            "continue",
-                            Body::WorkflowContinue { run },
-                            now_ms,
-                        )?;
+                        let body = if answer == "finalize" {
+                            Body::WorkflowFinalize { run }
+                        } else {
+                            Body::WorkflowContinue { run }
+                        };
+                        self.send(t, ps, attempt.clone(), &answer, body, now_ms)?;
                     }
                     self.unmark(t, ps, now_ms)?;
                 }
@@ -1795,11 +1740,8 @@ impl Runner {
         note: Option<(String, String)>,
         now_ms: u64,
     ) -> Result<bool> {
-        if let Some(a) = attempt
-            .and_then(|(s, n)| t.attempts.iter().find(|a| &a.stage == s && a.n == *n))
-            .cloned()
-        {
-            let mine = self.processes_of(t, &a)?;
+        if let Some(a) = attempt.and_then(|(s, n)| find_attempt(t, s, *n)).cloned() {
+            let mine = self.processes_of(&a)?;
             if !self.retire_processes(t, ps, &mine, now_ms)? {
                 return Ok(false);
             }
@@ -1880,9 +1822,7 @@ impl Runner {
             let lane_branch = pr.map_or_else(|| branch.clone(), |pr| pr.local().to_owned());
             let dir = tree.join(&lane.path);
             if let Some(url) = &lane.repo {
-                let clone = self
-                    .data
-                    .repo_dir(&format!("{}@{}", p.project.name, lane.name));
+                let clone = self.data.lane_repo_dir(&p.project.name, &lane.name);
                 let remote = p.lane_remote(lane).to_owned();
                 let start = format!("{remote}/{}", p.lane_base(lane));
                 let what = format!("lane {}", lane.name);
@@ -1928,23 +1868,23 @@ impl Runner {
         Ok(())
     }
 
-    /// The commit a lane is cut from, resolved once at the cut: what a
-    /// code review diffs against however far the remote moves later.
+    /// The commit a lane is cut from, resolved at the cut: what a code
+    /// review diffs against however far the remote moves later. Only a
+    /// refresh that brings the lane onto a newer base moves it.
     fn lane_base_sha(
         &self,
         p: &Pipeline,
         lane: &crate::pipeline::Lane,
         pr: Option<&PullRequestSource>,
     ) -> Option<String> {
-        let clone_of = |name: &str| self.data.repo_dir(name);
         // A pull request's base is the branch it targets on its own
         // remote, where its branch forked from it: what its reviewers
         // see is what the pull request shows.
         if let Some(pr) = pr {
             let clone = if lane.repo.is_some() {
-                clone_of(&format!("{}@{}", p.project.name, lane.name))
+                self.data.lane_repo_dir(&p.project.name, &lane.name)
             } else {
-                clone_of(&p.project.name)
+                self.data.repo_dir(&p.project.name)
             };
             return self
                 .git
@@ -1953,8 +1893,7 @@ impl Runner {
         }
         let (clone, start) = if lane.repo.is_some() {
             (
-                self.data
-                    .repo_dir(&format!("{}@{}", p.project.name, lane.name)),
+                self.data.lane_repo_dir(&p.project.name, &lane.name),
                 format!("{}/{}", p.lane_remote(lane), p.lane_base(lane)),
             )
         } else {
@@ -1985,8 +1924,7 @@ impl Runner {
                 continue;
             };
             let clone = if lane.repo.is_some() {
-                self.data
-                    .repo_dir(&format!("{}@{}", p.project.name, lane.name))
+                self.data.lane_repo_dir(&p.project.name, &lane.name)
             } else {
                 self.data.repo_dir(&p.project.name)
             };
@@ -2205,14 +2143,14 @@ impl Runner {
                         && matches!(d.state, DecisionState::Answered { .. })
                 });
                 if p.lanes.len() == 1 || !p.cuts_worktrees() || answered {
-                    self.finish_gate_only(t, ps, stage, now_ms)?;
+                    self.finish_gate_only(t, stage, now_ms)?;
                     return Ok(());
                 }
                 let hinted = lane_hints(p, &t.source.labels);
                 if p.dial("lanes") == "auto" && !hinted.is_empty() {
                     self.choose_lanes(t, ps, p, &hinted, now_ms)?;
                     if t.active() {
-                        self.finish_gate_only(t, ps, stage, now_ms)?;
+                        self.finish_gate_only(t, stage, now_ms)?;
                     }
                     return Ok(());
                 }
@@ -2282,15 +2220,9 @@ impl Runner {
         stage: &Stage,
         now_ms: u64,
     ) -> Result<()> {
-        let contexts = Self::contexts(t, p, stage);
-        if contexts.is_empty() {
-            return self.park(
-                t,
-                ps,
-                &format!("stage {} needs lanes the ticket has not cut", stage.name),
-                now_ms,
-            );
-        }
+        let Some(contexts) = self.contexts_or_park(t, ps, p, stage, now_ms)? else {
+            return Ok(());
+        };
         let mut all_complete = true;
         for (ctx, cwd, lane) in contexts {
             if self.poll_rebaser(t, ps, p, stage, &ctx, &cwd, lane.as_deref(), now_ms)? {
@@ -2301,37 +2233,121 @@ impl Runner {
                 continue;
             };
             all_complete = false;
-            self.poll_pr_checks(t, ps, p, stage, &attempt, &cwd, lane.as_deref(), now_ms)?;
+            let poll = PrPoll {
+                stage,
+                attempt: &attempt,
+                cwd: &cwd,
+                lane: lane.as_deref(),
+            };
+            self.poll_pr_checks(t, ps, p, &poll, now_ms)?;
             if !t.active() {
                 return Ok(());
             }
         }
         if all_complete {
-            self.advance(t, ps, now_ms)?;
+            self.advance(t, now_ms)?;
         }
         Ok(())
     }
 
-    /// One reading of the PR for an open `pr-checks` attempt, at most
-    /// once per `PR_POLL_MS` unless a recheck answer cleared the clock.
-    #[allow(clippy::too_many_arguments)]
+    /// The start of a PR-reading poll: where to look and the tree's
+    /// head. `None` while the attempt's poll interval runs (at most one
+    /// reading per `PR_POLL_MS` unless a recheck answer cleared the
+    /// clock), or once the ticket is parked because the stage names a
+    /// remote no provider serves.
+    fn pr_poll_target(
+        &mut self,
+        t: &mut Ticket,
+        ps: &mut ProjectState,
+        p: &Pipeline,
+        poll: &PrPoll<'_>,
+        provider: Option<&str>,
+        now_ms: u64,
+    ) -> Result<Option<(PrTarget, String)>> {
+        let PrPoll {
+            stage,
+            attempt: a,
+            cwd,
+            lane,
+        } = *poll;
+        if a.pr
+            .as_ref()
+            .is_some_and(|pr| pr.checked_ms != 0 && now_ms < pr.checked_ms + PR_POLL_MS)
+        {
+            return Ok(None);
+        }
+        // A project named by `root` has no remote in the pipeline; the
+        // tree's own origin is what its PRs are against.
+        let origin = self.git.remote_url(cwd)?;
+        let target = match pr_target(t, p, stage, lane, provider, origin) {
+            Ok(target) => target,
+            Err(why) => {
+                self.park(t, ps, &why, now_ms)?;
+                return Ok(None);
+            }
+        };
+        let head = self.git.head(cwd)?;
+        Ok(Some((target, head)))
+    }
+
+    /// No pull request for the branch: the attempt's record of one
+    /// cleared, and the question to ask.
+    fn no_pr(
+        &mut self,
+        t: &mut Ticket,
+        a: &Attempt,
+        target: &PrTarget,
+        now_ms: u64,
+    ) -> Result<String> {
+        record_of(t, &a.stage, a.n).pr = None;
+        self.save_ticket(t, now_ms)?;
+        Ok(format!(
+            "no pull request for branch {} in {}; open one, then answer recheck",
+            target.branch, target.repo
+        ))
+    }
+
+    /// The end of a PR-reading poll that met a problem: the `pr`
+    /// question, answered by a recheck or a park.
+    fn ask_pr(
+        &mut self,
+        t: &mut Ticket,
+        ps: &mut ProjectState,
+        a: &Attempt,
+        question: &str,
+        now_ms: u64,
+    ) -> Result<()> {
+        self.ensure_decision(
+            t,
+            ps,
+            Ask {
+                stage: &a.stage,
+                name: "pr",
+                kind: DecisionKind::Permission,
+                question: format!("{} ({}): {question}", a.stage, a.context),
+                options: &["recheck", "park"],
+                recommendation: None,
+                attempt: Some((a.stage.clone(), a.n)),
+            },
+            now_ms,
+        )
+    }
+
+    /// One reading of the PR for an open `pr-checks` attempt.
     fn poll_pr_checks(
         &mut self,
         t: &mut Ticket,
         ps: &mut ProjectState,
         p: &Pipeline,
-        stage: &Stage,
-        a: &Attempt,
-        cwd: &Path,
-        lane: Option<&str>,
+        poll: &PrPoll<'_>,
         now_ms: u64,
     ) -> Result<()> {
-        if a.pr
-            .as_ref()
-            .is_some_and(|pr| pr.checked_ms != 0 && now_ms < pr.checked_ms + PR_POLL_MS)
-        {
-            return Ok(());
-        }
+        let PrPoll {
+            stage,
+            attempt: a,
+            cwd,
+            lane,
+        } = *poll;
         let Some(Gate::External {
             provider, checks, ..
         }) = &stage.gate
@@ -2339,44 +2355,34 @@ impl Runner {
             return Ok(());
         };
         let none_expected = checks.as_deref() == Some("none");
-        // A project named by `root` has no remote in the pipeline; the
-        // tree's own origin is what its PRs are against.
-        let origin = self.git.remote_url(cwd)?;
-        let target = match pr_target(t, p, stage, lane, provider.as_deref(), origin) {
-            Ok(target) => target,
-            Err(why) => return self.park(t, ps, &why, now_ms),
+        let Some((target, head)) =
+            self.pr_poll_target(t, ps, p, poll, provider.as_deref(), now_ms)?
+        else {
+            return Ok(());
         };
-        let head = self.git.head(cwd)?;
         let reading = self.read_pr(&target, none_expected);
         let question = match reading {
             Err(e) => match self.record_pr_error(t, a, &target, &head, &e, now_ms)? {
                 None => return Ok(()),
                 Some(question) => question,
             },
-            Ok(None) => {
-                attempt_mut(t, a).pr = None;
-                self.save_ticket(t, now_ms)?;
-                format!(
-                    "no pull request for branch {} in {}; open one, then answer recheck",
-                    target.branch, target.repo
-                )
-            }
+            Ok(None) => self.no_pr(t, a, &target, now_ms)?,
             Ok(Some((pr, _)))
                 if pr.state == "open" && pr.mergeable.as_deref() == Some("conflicting") =>
             {
-                attempt_mut(t, a).pr = Some(PullRequestRecord {
+                record_of(t, &a.stage, a.n).pr = Some(PullRequestRecord {
                     number: pr.number,
                     url: pr.url.clone(),
                     checks: "conflicting".into(),
                     ..target.record(&pr.head, now_ms)
                 });
                 self.save_ticket(t, now_ms)?;
-                let a = attempt_mut(t, a).clone();
+                let a = record_of(t, &a.stage, a.n).clone();
                 return self.remedy(t, ps, p, &a, cwd, lane, &pr, &Remedy::Rebase, now_ms);
             }
             Ok(Some((pr, checks))) => {
                 let (summary, verdict) = judge_pr(&pr, checks.as_ref(), &head, none_expected);
-                let attempt = attempt_mut(t, a);
+                let attempt = record_of(t, &a.stage, a.n);
                 attempt.pr = Some(PullRequestRecord {
                     number: pr.number,
                     url: pr.url.clone(),
@@ -2389,7 +2395,7 @@ impl Runner {
                     && same_commit(&pr.head, &head)
                 {
                     self.save_ticket(t, now_ms)?;
-                    let a = attempt_mut(t, a).clone();
+                    let a = record_of(t, &a.stage, a.n).clone();
                     let remedy = Remedy::Fix(names.clone());
                     return self.remedy(t, ps, p, &a, cwd, lane, &pr, &remedy, now_ms);
                 }
@@ -2415,20 +2421,7 @@ impl Runner {
                 }
             }
         };
-        self.ensure_decision(
-            t,
-            ps,
-            Ask {
-                stage: &a.stage,
-                name: "pr",
-                kind: DecisionKind::Permission,
-                question: format!("{} ({}): {question}", a.stage, a.context),
-                options: &["recheck", "park"],
-                recommendation: None,
-                attempt: Some((a.stage.clone(), a.n)),
-            },
-            now_ms,
-        )
+        self.ask_pr(t, ps, a, &question, now_ms)
     }
 
     /// The PR for a branch and, when it is open and checks are
@@ -2480,15 +2473,9 @@ impl Runner {
         confirm: bool,
         now_ms: u64,
     ) -> Result<()> {
-        let contexts = Self::contexts(t, p, stage);
-        if contexts.is_empty() {
-            return self.park(
-                t,
-                ps,
-                &format!("stage {} needs lanes the ticket has not cut", stage.name),
-                now_ms,
-            );
-        }
+        let Some(contexts) = self.contexts_or_park(t, ps, p, stage, now_ms)? else {
+            return Ok(());
+        };
         // Someone else's branches are read as they are now, once per
         // opening of the gate.
         if t.source.is_pull_request() && !t.attempts_of(&stage.name).any(Attempt::is_open) {
@@ -2528,7 +2515,7 @@ impl Runner {
             }
         }
         if all_complete {
-            self.advance(t, ps, now_ms)?;
+            self.advance(t, now_ms)?;
         }
         Ok(())
     }
@@ -2651,19 +2638,14 @@ impl Runner {
         let Some((stage, n)) = attempt else {
             return Ok(());
         };
-        let Some(a) = t
-            .attempts
-            .iter()
-            .find(|a| &a.stage == stage && a.n == *n)
-            .cloned()
-        else {
+        let Some(a) = find_attempt(t, stage, *n).cloned() else {
             return Ok(());
         };
         let head = match tree_of(t, p, &a.context) {
             Some(cwd) => Some(self.git.head(&cwd)?),
             None => None,
         };
-        let record = attempt_mut(t, &a);
+        let record = record_of(t, &a.stage, a.n);
         record.head = head;
         record.state = AttemptState::Complete;
         record.ended_ms = Some(now_ms);
@@ -2691,12 +2673,7 @@ impl Runner {
         let Some((stage, n)) = attempt else {
             return Ok(());
         };
-        let Some(gate) = t
-            .attempts
-            .iter()
-            .find(|a| &a.stage == stage && a.n == *n)
-            .cloned()
-        else {
+        let Some(gate) = find_attempt(t, stage, *n).cloned() else {
             return Ok(());
         };
         let Some(back_to) = p
@@ -2715,7 +2692,7 @@ impl Runner {
         let target = p.stages[back_to].name.clone();
         let note = note.unwrap_or_else(|| format!("sent back from {from} without a note"));
         let reason = format!("{SENT_BACK_FROM}{from}: {note}");
-        let record = attempt_mut(t, &gate);
+        let record = record_of(t, &gate.stage, gate.n);
         record.state = AttemptState::Cancelled {
             reason: reason.clone(),
         };
@@ -2756,15 +2733,9 @@ impl Runner {
         decision: &str,
         now_ms: u64,
     ) -> Result<()> {
-        let contexts = Self::contexts(t, p, stage);
-        if contexts.is_empty() {
-            return self.park(
-                t,
-                ps,
-                &format!("stage {} needs lanes the ticket has not cut", stage.name),
-                now_ms,
-            );
-        }
+        let Some(contexts) = self.contexts_or_park(t, ps, p, stage, now_ms)? else {
+            return Ok(());
+        };
         let mut all_complete = true;
         for (ctx, cwd, lane) in contexts {
             if self.poll_rebaser(t, ps, p, stage, &ctx, &cwd, lane.as_deref(), now_ms)? {
@@ -2777,53 +2748,45 @@ impl Runner {
             all_complete = false;
             let poll = PrPoll {
                 stage,
-                decision,
                 attempt: &attempt,
                 cwd: &cwd,
                 lane: lane.as_deref(),
             };
-            self.poll_pr_merged(t, ps, p, &poll, now_ms)?;
+            self.poll_pr_merged(t, ps, p, &poll, decision, now_ms)?;
             if !t.active() {
                 return Ok(());
             }
         }
         if all_complete {
-            self.advance(t, ps, now_ms)?;
+            self.advance(t, now_ms)?;
         }
         Ok(())
     }
 
+    /// One reading of the PR for an open `pr-merged` attempt, whose
+    /// question while the PR is open is `decision`.
     fn poll_pr_merged(
         &mut self,
         t: &mut Ticket,
         ps: &mut ProjectState,
         p: &Pipeline,
         poll: &PrPoll<'_>,
+        decision: &str,
         now_ms: u64,
     ) -> Result<()> {
         let PrPoll {
             stage,
-            decision,
             attempt: a,
             cwd,
             lane,
         } = *poll;
-        if a.pr
-            .as_ref()
-            .is_some_and(|pr| pr.checked_ms != 0 && now_ms < pr.checked_ms + PR_POLL_MS)
-        {
-            return Ok(());
-        }
         let provider = match &stage.gate {
             Some(Gate::External { provider, .. }) => provider.as_deref(),
             _ => None,
         };
-        let origin = self.git.remote_url(cwd)?;
-        let target = match pr_target(t, p, stage, lane, provider, origin) {
-            Ok(target) => target,
-            Err(why) => return self.park(t, ps, &why, now_ms),
+        let Some((target, head)) = self.pr_poll_target(t, ps, p, poll, provider, now_ms)? else {
+            return Ok(());
         };
-        let head = self.git.head(cwd)?;
         let found = self
             .prs_for(&target.provider)
             .find(&target.repo, &target.branch);
@@ -2832,16 +2795,9 @@ impl Runner {
                 None => return Ok(()),
                 Some(question) => question,
             },
-            Ok(None) => {
-                attempt_mut(t, a).pr = None;
-                self.save_ticket(t, now_ms)?;
-                format!(
-                    "no pull request for branch {} in {}; open one, then answer recheck",
-                    target.branch, target.repo
-                )
-            }
+            Ok(None) => self.no_pr(t, a, &target, now_ms)?,
             Ok(Some(pr)) => {
-                attempt_mut(t, a).pr = Some(PullRequestRecord {
+                record_of(t, &a.stage, a.n).pr = Some(PullRequestRecord {
                     number: pr.number,
                     url: pr.url.clone(),
                     checks: pr.state.clone(),
@@ -2852,7 +2808,7 @@ impl Runner {
                     "merged" => return self.merged(t, ps, a, decision, &pr, now_ms),
                     "closed" => format!("PR #{} is closed without being merged", pr.number),
                     _ if pr.mergeable.as_deref() == Some("conflicting") => {
-                        let a = attempt_mut(t, a).clone();
+                        let a = record_of(t, &a.stage, a.n).clone();
                         let remedy = Remedy::Rebase;
                         return self.remedy(t, ps, p, &a, cwd, lane, &pr, &remedy, now_ms);
                     }
@@ -2883,20 +2839,7 @@ impl Runner {
                 }
             }
         };
-        self.ensure_decision(
-            t,
-            ps,
-            Ask {
-                stage: &a.stage,
-                name: "pr",
-                kind: DecisionKind::Permission,
-                question: format!("{} ({}): {question}", a.stage, a.context),
-                options: &["recheck", "park"],
-                recommendation: None,
-                attempt: Some((a.stage.clone(), a.n)),
-            },
-            now_ms,
-        )
+        self.ask_pr(t, ps, a, &question, now_ms)
     }
 
     /// The provider reports the merge: the attempt completes at the
@@ -2910,7 +2853,7 @@ impl Runner {
         pr: &crate::github::PullRequest,
         now_ms: u64,
     ) -> Result<()> {
-        let record = attempt_mut(t, a);
+        let record = record_of(t, &a.stage, a.n);
         record.head = Some(pr.head.clone());
         record.state = AttemptState::Complete;
         record.ended_ms = Some(now_ms);
@@ -2956,7 +2899,7 @@ impl Runner {
             a.pr.as_ref()
                 .and_then(|pr| pr.error_since_ms)
                 .unwrap_or(now_ms);
-        attempt_mut(t, a).pr = Some(PullRequestRecord {
+        record_of(t, &a.stage, a.n).pr = Some(PullRequestRecord {
             number: 0,
             url: String::new(),
             checks: format!("error: {e:#}"),
@@ -2973,13 +2916,7 @@ impl Runner {
         )))
     }
 
-    fn finish_gate_only(
-        &mut self,
-        t: &mut Ticket,
-        ps: &mut ProjectState,
-        stage: &Stage,
-        now_ms: u64,
-    ) -> Result<()> {
+    fn finish_gate_only(&mut self, t: &mut Ticket, stage: &Stage, now_ms: u64) -> Result<()> {
         let n = u32::try_from(t.attempts_of(&stage.name).count()).unwrap_or(u32::MAX) + 1;
         t.attempts.push(new_attempt(
             &stage.name,
@@ -2990,30 +2927,42 @@ impl Runner {
             BTreeMap::new(),
             now_ms,
         ));
-        self.advance(t, ps, now_ms)
+        self.advance(t, now_ms)
     }
 
-    pub(crate) fn advance(
-        &mut self,
-        t: &mut Ticket,
-        ps: &mut ProjectState,
-        now_ms: u64,
-    ) -> Result<()> {
+    pub(crate) fn advance(&mut self, t: &mut Ticket, now_ms: u64) -> Result<()> {
         t.stage += 1;
-        self.save_ticket(t, now_ms)?;
-        let _ = ps;
-        Ok(())
+        self.save_ticket(t, now_ms)
     }
 
     // --- contexts and projects
 
-    /// The contexts a stage runs in: `(name, cwd, lane)`. Empty when the
-    /// stage needs lanes the ticket has not cut.
-    pub(crate) fn contexts(
-        t: &Ticket,
+    /// The stage's contexts, or `None` once the ticket is parked because
+    /// the stage needs lanes it has not cut.
+    pub(crate) fn contexts_or_park(
+        &mut self,
+        t: &mut Ticket,
+        ps: &mut ProjectState,
         p: &Pipeline,
         stage: &Stage,
-    ) -> Vec<(String, PathBuf, Option<String>)> {
+        now_ms: u64,
+    ) -> Result<Option<Contexts>> {
+        let contexts = Self::contexts(t, p, stage);
+        if contexts.is_empty() {
+            self.park(
+                t,
+                ps,
+                &format!("stage {} needs lanes the ticket has not cut", stage.name),
+                now_ms,
+            )?;
+            return Ok(None);
+        }
+        Ok(Some(contexts))
+    }
+
+    /// The contexts a stage runs in: `(name, cwd, lane)`. Empty when the
+    /// stage needs lanes the ticket has not cut.
+    pub(crate) fn contexts(t: &Ticket, p: &Pipeline, stage: &Stage) -> Contexts {
         let Some(tree) = primary_tree(t, p) else {
             return Vec::new();
         };
@@ -3077,7 +3026,6 @@ impl Runner {
             .ok_or_else(|| anyhow!("space.new: {reply:?}"))
     }
 
-    /// The Switchboard project for a context, made once per ticket.
     /// The ticket's one Switchboard project, `#<n> <title>`, rooted at
     /// the ticket's tree; sessions in other lanes carry their own cwd.
     pub(crate) fn ensure_project(
@@ -3116,8 +3064,8 @@ impl Runner {
         stage: &Stage,
         now_ms: u64,
     ) -> Result<()> {
-        // A command gate runs after the agent, in its context; the
-        // other gates on an agent stage are later work.
+        // A command gate runs after the agent, in its context; an agent
+        // stage with any other gate parks.
         match &stage.gate {
             None | Some(Gate::Command { .. }) => {}
             Some(Gate::External { check, .. }) => {
@@ -3140,23 +3088,12 @@ impl Runner {
                 );
             }
         }
-        let contexts = Self::contexts(t, p, stage);
-        if contexts.is_empty() {
-            return self.park(
-                t,
-                ps,
-                &format!("stage {} needs lanes the ticket has not cut", stage.name),
-                now_ms,
-            );
-        }
+        let Some(contexts) = self.contexts_or_park(t, ps, p, stage, now_ms)? else {
+            return Ok(());
+        };
         let mut all_complete = true;
         for (ctx, cwd, lane) in contexts {
-            let last = t
-                .attempts
-                .iter()
-                .filter(|a| a.stage == stage.name && a.context == ctx)
-                .max_by_key(|a| a.n)
-                .cloned();
+            let last = latest_attempt(t, &stage.name, &ctx).cloned();
             match last {
                 Some(a) if a.state == AttemptState::Complete => {}
                 Some(a) if a.is_open() => {
@@ -3200,7 +3137,7 @@ impl Runner {
             }
         }
         if all_complete {
-            self.advance(t, ps, now_ms)?;
+            self.advance(t, now_ms)?;
         }
         Ok(())
     }
@@ -3237,14 +3174,7 @@ impl Runner {
         for (name, path) in &artifacts {
             vars.set(name.clone(), path.display().to_string());
         }
-        let mut prompt = String::new();
-        // Guidance is a template like the stage prompt: it may name the
-        // branch, the worktree or an artifact.
-        let guidance = p.operators[&operator].guidance.trim();
-        if !guidance.is_empty() {
-            prompt.push_str(&vars.render(guidance));
-            prompt.push_str("\n\n");
-        }
+        let mut prompt = guidance_prelude(&p.operators[&operator].guidance, &vars);
         prompt.push_str(&vars.render(stage.prompt.as_deref().unwrap_or_default()));
         if let Some(moved) = lane
             .and_then(|l| t.lanes.iter().find(|x| x.name == l))
@@ -3464,12 +3394,7 @@ impl Runner {
         );
         let mut vars = vars_for(t, p, lane);
         vars.set("notes", notes.display().to_string());
-        let mut prompt = String::new();
-        let guidance = p.operators[&operator].guidance.trim();
-        if !guidance.is_empty() {
-            prompt.push_str(&vars.render(guidance));
-            prompt.push_str("\n\n");
-        }
+        let mut prompt = guidance_prelude(&p.operators[&operator].guidance, &vars);
         let plan = t
             .input("plan")
             .map(|plan| format!(" (the plan is at {})", plan.display()))
@@ -3503,19 +3428,7 @@ impl Runner {
             " Write what you did and why to {}.",
             notes.display()
         );
-        // The lane's last finished agent, whose transcript the operator
-        // continues from.
-        let clone_of = t
-            .attempts
-            .iter()
-            .filter(|x| {
-                x.context == a.context
-                    && x.kind == AttemptKind::Agent
-                    && x.state == AttemptState::Complete
-                    && x.session.is_some()
-            })
-            .max_by_key(|x| x.started_ms)
-            .and_then(|x| x.session.clone());
+        let clone_of = lane_clone_of(t, &a.context);
         let mut record = PullRequestRecord {
             provider: String::new(),
             repo: String::new(),
@@ -3659,7 +3572,6 @@ impl Runner {
         Ok(())
     }
 
-    /// A session as Switchboard sees it, or why it has none.
     /// The session view an open attempt is judged by. `None` when the
     /// pass is over for it: the record is gone (Switchboard's word, not
     /// a guess) and the attempt failed, or the query failed for another
@@ -3702,7 +3614,7 @@ impl Runner {
     /// Claude's folder trust question, which a fresh worktree asks
     /// before any hook: answered for the project when its policy says
     /// so, else left to the user.
-    pub(crate) fn answer_trust(
+    fn answer_trust(
         &mut self,
         t: &mut Ticket,
         ps: &mut ProjectState,
@@ -3727,6 +3639,7 @@ impl Runner {
         self.save_ticket(t, now_ms)
     }
 
+    /// A session as Switchboard sees it, or why it has none.
     pub(crate) fn session_view(
         &mut self,
         session: &str,
@@ -3757,13 +3670,10 @@ impl Runner {
         lane: Option<&str>,
         now_ms: u64,
     ) -> Result<()> {
-        let Some(Gate::Command { argv, per_lane, .. }) = &stage.gate else {
+        let Some(gate @ Gate::Command { .. }) = &stage.gate else {
             return Ok(());
         };
-        let argv = lane
-            .and_then(|l| per_lane.as_ref().and_then(|m| m.get(l)))
-            .or(argv.as_ref())
-            .cloned();
+        let argv = lane_gate_argv(gate, lane).cloned();
         let Some(argv) = argv.filter(|v| !v.is_empty()) else {
             let reason = format!("no checks command for context {}", a.context);
             return self.fail_attempt(t, ps, &a.stage, a.n, &reason, now_ms);
@@ -3773,26 +3683,17 @@ impl Runner {
             return self.fail_checks(t, ps, &a.stage, a.n, &reason, now_ms);
         }
         let head = self.git.head(cwd)?;
-        let dir = self
-            .data
-            .ticket_dir(&t.id)
-            .join(&a.stage)
-            .join(a.n.to_string())
-            .join(&a.context);
-        std::fs::create_dir_all(&dir)?;
+        let dir = self.attempt_dir(t, &a.stage, a.n, &a.context)?;
         let log = dir.join("checks.log");
         let lane_record = lane.and_then(|l| t.lanes.iter().find(|x| x.name == l));
-        let mut env = vec![
-            ("DISPATCH_TICKET".to_owned(), t.id.clone()),
-            ("DISPATCH_STAGE".to_owned(), a.stage.clone()),
-            ("DISPATCH_CONTEXT".to_owned(), a.context.clone()),
-            ("DISPATCH_TREE".to_owned(), cwd.display().to_string()),
-            ("DISPATCH_HEAD".to_owned(), head.clone()),
-        ];
-        if let Some(l) = lane_record {
-            env.push(("DISPATCH_LANE".to_owned(), l.name.clone()));
-            env.push(("DISPATCH_BRANCH".to_owned(), l.branch.clone()));
-        }
+        let env = checks_env(
+            t,
+            lane_record.map(|l| l.name.as_str()),
+            lane_record.map(|l| l.branch.as_str()),
+            a,
+            cwd,
+            &head,
+        );
         let key = gate_key(t, a);
         if let Err(e) = self.git.start_check(&key, cwd, &argv, &env, &log) {
             let reason = format!("the checks could not start: {e:#}");
@@ -3804,11 +3705,7 @@ impl Runner {
             a.stage,
             a.context
         );
-        if let Some(attempt) = t
-            .attempts
-            .iter_mut()
-            .find(|x| x.stage == a.stage && x.n == a.n)
-        {
+        if let Some(attempt) = find_attempt_mut(t, &a.stage, a.n) {
             attempt.gate = Some(GateRun {
                 head,
                 argv,
@@ -3850,11 +3747,7 @@ impl Runner {
                     a.stage,
                     a.context
                 );
-                if let Some(attempt) = t
-                    .attempts
-                    .iter_mut()
-                    .find(|x| x.stage == a.stage && x.n == a.n)
-                {
+                if let Some(attempt) = find_attempt_mut(t, &a.stage, a.n) {
                     attempt.gate = None;
                 }
                 return self.start_gate(t, ps, a, stage, cwd, lane, now_ms);
@@ -3862,10 +3755,7 @@ impl Runner {
         };
         let clean = self.git.is_clean(cwd)?;
         let head = self.git.head(cwd)?;
-        if let Some(attempt) = t
-            .attempts
-            .iter_mut()
-            .find(|x| x.stage == a.stage && x.n == a.n)
+        if let Some(attempt) = find_attempt_mut(t, &a.stage, a.n)
             && let Some(g) = &mut attempt.gate
         {
             g.exit = Some(code);
@@ -3882,11 +3772,7 @@ impl Runner {
             let reason = checks_reason(code, &gate.log);
             return self.fail_checks(t, ps, &a.stage, a.n, &reason, now_ms);
         }
-        if let Some(attempt) = t
-            .attempts
-            .iter_mut()
-            .find(|x| x.stage == a.stage && x.n == a.n)
-        {
+        if let Some(attempt) = find_attempt_mut(t, &a.stage, a.n) {
             attempt.head = Some(head);
             attempt.state = AttemptState::Complete;
             attempt.ended_ms = Some(now_ms);
@@ -3933,7 +3819,7 @@ impl Runner {
     /// `max_reruns` allows: then the ticket parks, so a broken stage
     /// cannot spend agent runs on its own.
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn fail_attempt_with(
+    fn fail_attempt_with(
         &mut self,
         t: &mut Ticket,
         ps: &mut ProjectState,
@@ -3943,7 +3829,7 @@ impl Runner {
         options: &[&str],
         now_ms: u64,
     ) -> Result<()> {
-        let Some(attempt) = t.attempts.iter_mut().find(|a| a.stage == stage && a.n == n) else {
+        let Some(attempt) = find_attempt_mut(t, stage, n) else {
             return Ok(());
         };
         attempt.state = AttemptState::Failed {
@@ -4085,13 +3971,7 @@ impl Runner {
             && stage.kind() != StageKind::GateOnly
         {
             for (ctx, _, _) in Self::contexts(t, p, stage) {
-                let Some(a) = t
-                    .attempts
-                    .iter()
-                    .filter(|a| a.stage == stage.name && a.context == ctx)
-                    .max_by_key(|a| a.n)
-                    .cloned()
-                else {
+                let Some(a) = latest_attempt(t, &stage.name, &ctx).cloned() else {
                     continue;
                 };
                 if asks_again(t, &a, sent_back(t, stage, &ctx)) {
@@ -4112,23 +3992,12 @@ impl Runner {
         stage: &Stage,
         now_ms: u64,
     ) -> Result<()> {
-        let contexts = Self::contexts(t, p, stage);
-        if contexts.is_empty() {
-            return self.park(
-                t,
-                ps,
-                &format!("stage {} needs lanes the ticket has not cut", stage.name),
-                now_ms,
-            );
-        }
+        let Some(contexts) = self.contexts_or_park(t, ps, p, stage, now_ms)? else {
+            return Ok(());
+        };
         let mut all_complete = true;
         for (ctx, _cwd, lane) in contexts {
-            let last = t
-                .attempts
-                .iter()
-                .filter(|a| a.stage == stage.name && a.context == ctx)
-                .max_by_key(|a| a.n)
-                .cloned();
+            let last = latest_attempt(t, &stage.name, &ctx).cloned();
             match last {
                 Some(a) if a.state == AttemptState::Complete => {}
                 Some(a) if a.is_open() => {
@@ -4166,7 +4035,7 @@ impl Runner {
             }
         }
         if all_complete {
-            self.advance(t, ps, now_ms)?;
+            self.advance(t, now_ms)?;
         }
         Ok(())
     }
@@ -4205,13 +4074,7 @@ impl Runner {
             Ok(found) => found,
             Err(why) => return self.park(t, ps, &format!("stage {}: {why}", stage.name), now_ms),
         };
-        let dir = self
-            .data
-            .ticket_dir(&t.id)
-            .join(&stage.name)
-            .join(n.to_string())
-            .join(ctx);
-        std::fs::create_dir_all(&dir)?;
+        let dir = self.attempt_dir(t, &stage.name, n, ctx)?;
         let copy = dir.join(format!("{subject}.md"));
         std::fs::copy(&source_path, &copy)
             .with_context(|| format!("copy {} to {}", source_path.display(), copy.display()))?;
@@ -4566,9 +4429,9 @@ impl Runner {
         Ok(())
     }
 
-    /// One ticket's step under the lock: true when the step took a
-    /// slot, false when it took none or the ticket was finishing a park
-    /// or a close, inactive or held back.
+    /// One ticket's step under the lock: what it changed in the
+    /// project's counts, or `None` when the ticket was finishing a park
+    /// or a close, inactive, or its pipeline copy unreadable.
     fn step_one(
         &mut self,
         t: &mut Ticket,
@@ -4577,70 +4440,67 @@ impl Runner {
         (running, pending, free_gb): (u32, u32, Option<u32>),
         now_ms: u64,
     ) -> Result<Option<Stepped>> {
-        {
-            if matches!(t.state, TicketState::Parking { .. }) {
-                if let Err(e) = self.finish_parking(t, ps, now_ms) {
-                    log::error!("ticket {}: {e}", t.id);
-                }
-                return Ok(None);
-            }
-            if matches!(t.state, TicketState::Closing { .. }) {
-                if let Err(e) = self.finish_closing(t, ps, now_ms) {
-                    log::error!("ticket {}: {e:#}", t.id);
-                }
-                return Ok(None);
-            }
-            if !t.active() {
-                return Ok(None);
-            }
-            let p = match self.pipeline_of(t) {
-                Ok(p) => p,
-                Err(e) => {
-                    self.park(t, ps, &format!("pipeline copy unreadable: {e}"), now_ms)?;
-                    return Ok(None);
-                }
-            };
-            let has_open = t.attempts.iter().any(Attempt::is_open);
-            // Watching what runs is free, and so is a gate-only stage
-            // (a lanes choice, a PR read) or closing a ticket past its
-            // last stage: they launch nothing. Starting
-            // an agent takes a slot and is refused while too much waits
-            // on the user.
-            let gate_only = p
-                .stages
-                .get(t.stage)
-                .is_none_or(|s| s.kind() == StageKind::GateOnly);
-            let policy = live_policy.unwrap_or(&p.policy);
-            let may_start = has_open
-                || gate_only
-                || (running < policy.slots
-                    && pending < policy.waiting_on_me
-                    && !self.disk_hold(policy, free_gb));
-            if !may_start {
-                // Asking launches nothing, so a resumed ticket's
-                // questions do not wait for a slot.
-                let asked = match self.ask_again_unslotted(t, ps, &p, now_ms) {
-                    Ok(asked) => u32::try_from(asked).unwrap_or(u32::MAX),
-                    Err(e) => {
-                        log::error!("ticket {}: {e}", t.id);
-                        0
-                    }
-                };
-                return Ok(Some(Stepped {
-                    took_slot: false,
-                    asked,
-                }));
-            }
-            let had_slot = t.attempts.iter().any(costs_slot);
-            if let Err(e) = self.step(t, ps, &p, now_ms) {
+        if matches!(t.state, TicketState::Parking { .. }) {
+            if let Err(e) = self.finish_parking(t, ps, now_ms) {
                 log::error!("ticket {}: {e}", t.id);
             }
-            let took_slot = !had_slot && t.attempts.iter().any(costs_slot);
-            Ok(Some(Stepped {
-                took_slot,
-                asked: 0,
-            }))
+            return Ok(None);
         }
+        if matches!(t.state, TicketState::Closing { .. }) {
+            if let Err(e) = self.finish_closing(t, ps, now_ms) {
+                log::error!("ticket {}: {e:#}", t.id);
+            }
+            return Ok(None);
+        }
+        if !t.active() {
+            return Ok(None);
+        }
+        let p = match self.pipeline_of(t) {
+            Ok(p) => p,
+            Err(e) => {
+                self.park(t, ps, &format!("pipeline copy unreadable: {e}"), now_ms)?;
+                return Ok(None);
+            }
+        };
+        let has_open = t.attempts.iter().any(Attempt::is_open);
+        // Watching what runs is free, and so is a gate-only stage (a
+        // lanes choice, a PR read) or closing a ticket past its last
+        // stage: they launch nothing. Starting an agent takes a slot and
+        // is refused while too much waits on the user.
+        let gate_only = p
+            .stages
+            .get(t.stage)
+            .is_none_or(|s| s.kind() == StageKind::GateOnly);
+        let policy = live_policy.unwrap_or(&p.policy);
+        let may_start = has_open
+            || gate_only
+            || (running < policy.slots
+                && pending < policy.waiting_on_me
+                && !self.disk_hold(policy, free_gb));
+        if !may_start {
+            // Asking launches nothing, so a resumed ticket's
+            // questions do not wait for a slot.
+            let asked = match self.ask_again_unslotted(t, ps, &p, now_ms) {
+                Ok(asked) => u32::try_from(asked).unwrap_or(u32::MAX),
+                Err(e) => {
+                    log::error!("ticket {}: {e}", t.id);
+                    0
+                }
+            };
+            return Ok(Some(Stepped {
+                took_slot: false,
+                asked,
+            }));
+        }
+        let had_slot = t.attempts.iter().any(costs_slot);
+        if let Err(e) = self.step(t, ps, &p, now_ms) {
+            log::error!("ticket {}: {e}", t.id);
+        }
+        let took_slot = !had_slot && t.attempts.iter().any(costs_slot);
+        Ok(Some(Stepped {
+            took_slot,
+            asked: 0,
+        }))
     }
 
     /// Every project with a state file.
@@ -4738,26 +4598,12 @@ impl Runner {
             Ok(t)
         })
     }
-
-    /// `send` for the queue view, which is not an attempt's.
-    pub fn send_for_view(
-        &mut self,
-        t: &mut Ticket,
-        ps: &mut ProjectState,
-        intent: &str,
-        body: Body,
-        now_ms: u64,
-    ) -> Result<Reply> {
-        self.send(t, ps, None, intent, body, now_ms)
-    }
 }
 
-/// A fresh attempt record.
 /// Switchboard's reply to a session query for a record it does not
 /// have; the one failure that means the session is gone.
 pub(crate) const NO_SUCH_SESSION: &str = "no such session";
 
-/// The artifacts an attempt was to write that are not files yet.
 /// An open attempt with an agent or a review run in it: what the
 /// policy's `slots` count. A gate-only attempt launches nothing.
 pub(crate) fn costs_slot(a: &Attempt) -> bool {
@@ -4825,10 +4671,7 @@ fn requeue_strays(ps: &mut ProjectState, tickets: &[Ticket]) {
 /// interval.
 fn recheck_pr(t: &mut Ticket, attempt: Option<&(String, u32)>) {
     if let Some((stage, n)) = attempt
-        && let Some(a) = t
-            .attempts
-            .iter_mut()
-            .find(|a| &a.stage == stage && a.n == *n)
+        && let Some(a) = find_attempt_mut(t, stage, *n)
         && let Some(pr) = &mut a.pr
     {
         pr.checked_ms = 0;
@@ -4850,7 +4693,7 @@ fn rerun_note(t: &Ticket, p: &Pipeline, decision: usize) -> Option<(String, Stri
     if p.stages.iter().find(|s| &s.name == stage)?.kind() != StageKind::Agent {
         return None;
     }
-    let replaced = t.attempts.iter().find(|a| &a.stage == stage && a.n == *n)?;
+    let replaced = find_attempt(t, stage, *n)?;
     let own = match &d.state {
         DecisionState::Answered { note, .. } => note.clone(),
         _ => None,
@@ -4879,12 +4722,57 @@ pub(crate) fn tree_of(t: &Ticket, p: &Pipeline, ctx: &str) -> Option<PathBuf> {
         .or_else(|| primary_tree(t, p))
 }
 
-/// The record behind a copy of an attempt the runner is polling.
-pub(crate) fn attempt_mut<'t>(t: &'t mut Ticket, a: &Attempt) -> &'t mut Attempt {
+/// The session of the context's last finished agent, whose transcript
+/// an operator sent to the lane continues from.
+fn lane_clone_of(t: &Ticket, ctx: &str) -> Option<String> {
     t.attempts
-        .iter_mut()
-        .find(|x| x.stage == a.stage && x.n == a.n)
-        .expect("the attempt polled exists")
+        .iter()
+        .filter(|x| {
+            x.context == ctx
+                && x.kind == AttemptKind::Agent
+                && x.state == AttemptState::Complete
+                && x.session.is_some()
+        })
+        .max_by_key(|x| x.started_ms)
+        .and_then(|x| x.session.clone())
+}
+
+/// The argv a command gate runs in a lane: the lane's own from
+/// `per_lane`, else the gate's `argv`. `None` for any other gate.
+pub(crate) fn lane_gate_argv<'g>(gate: &'g Gate, lane: Option<&str>) -> Option<&'g Vec<String>> {
+    let Gate::Command { argv, per_lane, .. } = gate else {
+        return None;
+    };
+    lane.and_then(|l| per_lane.as_ref().and_then(|m| m.get(l)))
+        .or(argv.as_ref())
+}
+
+/// The latest attempt of stage `stage` in context `ctx`.
+pub(crate) fn latest_attempt<'t>(t: &'t Ticket, stage: &str, ctx: &str) -> Option<&'t Attempt> {
+    t.attempts
+        .iter()
+        .filter(|a| a.stage == stage && a.context == ctx)
+        .max_by_key(|a| a.n)
+}
+
+/// The attempt `(stage, n)` names.
+pub(crate) fn find_attempt<'t>(t: &'t Ticket, stage: &str, n: u32) -> Option<&'t Attempt> {
+    t.attempts.iter().find(|a| a.stage == stage && a.n == n)
+}
+
+/// The attempt `(stage, n)` names, to change.
+pub(crate) fn find_attempt_mut<'t>(
+    t: &'t mut Ticket,
+    stage: &str,
+    n: u32,
+) -> Option<&'t mut Attempt> {
+    t.attempts.iter_mut().find(|a| a.stage == stage && a.n == n)
+}
+
+/// The record behind an attempt known to exist: a copy the runner is
+/// polling, or one it just made.
+pub(crate) fn record_of<'t>(t: &'t mut Ticket, stage: &str, n: u32) -> &'t mut Attempt {
+    find_attempt_mut(t, stage, n).expect("the attempt exists")
 }
 
 /// An agent attempt to start: who, with what prompt, writing which
@@ -4904,14 +4792,13 @@ struct AgentSpec {
 #[derive(Clone, Copy)]
 struct PrPoll<'a> {
     stage: &'a Stage,
-    decision: &'a str,
     attempt: &'a Attempt,
     cwd: &'a Path,
     lane: Option<&'a str>,
 }
 
-/// Where a `pr-checks` gate looks: the provider, its name for the
-/// repository, and the branch.
+/// Where a `pr-checks` or `pr-merged` gate looks: the provider, its
+/// name for the repository, and the branch.
 struct PrTarget {
     provider: String,
     repo: String,
@@ -5233,6 +5120,7 @@ fn judge_pr(
     (summary, verdict)
 }
 
+/// The artifacts an attempt was to write that are not files yet.
 fn missing_artifacts(attempt: &Attempt) -> Vec<String> {
     attempt
         .artifacts
@@ -5255,6 +5143,7 @@ fn gate_key(t: &Ticket, a: &Attempt) -> String {
     format!("{}/{}/{}", t.id, a.stage, a.n)
 }
 
+/// A fresh attempt record.
 pub(crate) fn new_attempt(
     stage_name: &str,
     n: u32,
@@ -5294,38 +5183,48 @@ pub(crate) fn new_attempt(
 fn settle(attempt: &mut Attempt) -> Result<bool> {
     let mut all = true;
     for (name, path) in &attempt.artifacts {
-        let meta = std::fs::metadata(path)?;
-        let mtime_ms = crate::epoch_ms(meta.modified()?);
-        let len = meta.len();
-        let entry = attempt.settle.entry(name.clone()).or_insert(Settle {
-            mtime_ms,
-            len,
-            polls: 0,
-        });
-        if entry.mtime_ms == mtime_ms && entry.len == len {
-            entry.polls += 1;
-        } else {
-            *entry = Settle {
-                mtime_ms,
-                len,
-                polls: 1,
-            };
-        }
-        if entry.polls < SETTLE_POLLS {
+        let mut entry = attempt.settle.get(name).cloned();
+        let settled = settle_file(path, &mut entry)?;
+        attempt
+            .settle
+            .insert(name.clone(), entry.expect("settle_file fills it"));
+        if !settled {
             all = false;
         }
     }
     Ok(all)
 }
 
-/// The definition a reviewer operator installs, named by its content so
-/// an edited operator is a new name and a run in flight keeps its own.
-/// The reviewer's definition with Dispatch's variables (`{worktree}`,
-/// `{branch}`, `{project.root}`, `{inputs.*}`) rendered into its
-/// templates; Switchboard's own (`{plan}`, `{feedback}`, ...) are left
-/// for it. The reviewer works in the attempt directory, so the templates
-/// are where it learns which repository the plan is about. The name's
-/// hash is of the rendered text, so each worktree gets its own.
+/// Whether a file has looked the same for `SETTLE_POLLS` polls.
+pub(crate) fn settle_file(path: &Path, settle: &mut Option<Settle>) -> Result<bool> {
+    let meta = std::fs::metadata(path)?;
+    let mtime_ms = crate::epoch_ms(meta.modified()?);
+    let len = meta.len();
+    let entry = settle.get_or_insert(Settle {
+        mtime_ms,
+        len,
+        polls: 0,
+    });
+    if entry.mtime_ms == mtime_ms && entry.len == len {
+        entry.polls += 1;
+    } else {
+        *entry = Settle {
+            mtime_ms,
+            len,
+            polls: 1,
+        };
+    }
+    Ok(entry.polls >= SETTLE_POLLS)
+}
+
+/// The definition a reviewer operator installs, with Dispatch's
+/// variables (`{worktree}`, `{branch}`, `{project.root}`, `{inputs.*}`)
+/// rendered into its templates; Switchboard's own (`{plan}`,
+/// `{feedback}`, ...) are left for it. The reviewer works in the attempt
+/// directory, so the templates are where it learns which repository the
+/// plan is about. It is named by a hash of the rendered text, so an
+/// edited operator is a new name, a run in flight keeps its own, and
+/// each worktree gets its own.
 fn definition_of(
     reviewer_name: &str,
     review: crate::pipeline::Review,
@@ -5398,8 +5297,7 @@ fn review_subject(t: &Ticket, subject: &str) -> Result<(PathBuf, String), String
     Ok((path, session))
 }
 
-/// The ticket's own tree: its first lane's worktree, or the project's
-/// root for a project that works in place. None before the cut.
+/// The kind of session an operator runs in.
 pub(crate) fn session_kind(kind: crate::pipeline::OperatorKind) -> wire::SessionKind {
     match kind {
         // A command never has a session; the pipeline refuses one as a
@@ -5411,6 +5309,9 @@ pub(crate) fn session_kind(kind: crate::pipeline::OperatorKind) -> wire::Session
     }
 }
 
+/// The ticket's own tree: the tree it was cut into, else its first
+/// lane's worktree, or the project's root for a project that works in
+/// place. None before the cut.
 pub(crate) fn primary_tree(t: &Ticket, p: &Pipeline) -> Option<PathBuf> {
     if p.cuts_worktrees() {
         t.tree
@@ -5504,12 +5405,7 @@ fn authorises_unlaunched_rerun(t: &Ticket, d: &Decision) -> bool {
     let Some((stage, n)) = &d.attempt else {
         return false;
     };
-    let Some(context) = t
-        .attempts
-        .iter()
-        .find(|a| &a.stage == stage && a.n == *n)
-        .map(|a| &a.context)
-    else {
+    let Some(context) = find_attempt(t, stage, *n).map(|a| &a.context) else {
         return false;
     };
     !t.attempts
@@ -5574,6 +5470,36 @@ pub(crate) fn vars_for(t: &Ticket, p: &Pipeline, lane: Option<&str>) -> Vars {
     vars
 }
 
+/// An operator's guidance, rendered like the stage prompt it opens (it
+/// may name the branch, the worktree or an artifact), and the blank line
+/// after it; nothing when the operator has none.
+pub(crate) fn guidance_prelude(guidance: &str, vars: &Vars) -> String {
+    let guidance = guidance.trim();
+    if guidance.is_empty() {
+        String::new()
+    } else {
+        format!("{}\n\n", vars.render(guidance))
+    }
+}
+
+/// What a stage's checks get in their environment: `env_for`'s, and
+/// which attempt they check, where, and at which head.
+pub(crate) fn checks_env(
+    t: &Ticket,
+    lane: Option<&str>,
+    branch: Option<&str>,
+    a: &Attempt,
+    cwd: &Path,
+    head: &str,
+) -> Vec<(String, String)> {
+    let mut env = env_for(t, lane, branch);
+    env.push(("DISPATCH_STAGE".to_owned(), a.stage.clone()));
+    env.push(("DISPATCH_CONTEXT".to_owned(), a.context.clone()));
+    env.push(("DISPATCH_TREE".to_owned(), cwd.display().to_string()));
+    env.push(("DISPATCH_HEAD".to_owned(), head.to_owned()));
+    env
+}
+
 /// What a command run for a ticket gets in its environment.
 pub(crate) fn env_for(
     t: &Ticket,
@@ -5618,7 +5544,7 @@ pub fn apply_reply(t: &mut Ticket, ps: &mut ProjectState, intent: &str, reply: &
             let Some((stage, n)) = op.attempt.clone() else {
                 return;
             };
-            let Some(attempt) = t.attempts.iter_mut().find(|a| a.stage == stage && a.n == n) else {
+            let Some(attempt) = find_attempt_mut(t, &stage, n) else {
                 return;
             };
             // Parking and closing wait for every launch to settle before
@@ -5647,6 +5573,7 @@ pub fn apply_reply(t: &mut Ticket, ps: &mut ProjectState, intent: &str, reply: &
             }
         }
         other => {
+            // Older ledgers hold `lane-project:` requests; none is sent now.
             if let Some(lane) = other.strip_prefix("lane-project:")
                 && let Some(id) = first(wire::RecordKind::Project)
                 && let Some(l) = t.lanes.iter_mut().find(|l| l.name == lane)

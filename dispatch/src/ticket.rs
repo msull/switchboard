@@ -232,7 +232,8 @@ pub struct Attempt {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReviewRound {
     pub n: u32,
-    /// The commit the branch was cut from, never resolved again.
+    /// The lane's base when the round began: the commit the branch was
+    /// cut from, or the base a refresh moved it onto since.
     pub base: String,
     /// The branch's head every reviewer read.
     pub head: String,
@@ -448,8 +449,9 @@ pub struct Operation {
     /// The attempt it belongs to, as `(stage, n)`, if any.
     pub attempt: Option<(String, u32)>,
     /// What the request was for (`session`, `run`, `root-project`,
-    /// `lane-project:<lane>`, `space`, `set`, ...), which is how its
-    /// reply's records are applied, now or in recovery.
+    /// `space`, `set`, ...), which is how its reply's records are
+    /// applied, now or in recovery. `lane-project:<lane>` is no longer
+    /// sent but is still applied from older ledgers.
     #[serde(default)]
     pub intent: String,
     pub sent_ms: u64,
@@ -713,6 +715,7 @@ pub struct ProjectState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::scheduler::new_attempt;
 
     /// An active ticket with nothing on it.
     fn blank() -> Ticket {
@@ -754,26 +757,16 @@ mod tests {
     fn inputs_come_from_the_latest_completed_attempt_that_wrote_them() {
         let mut t = blank();
         let attempt = |stage: &str, n: u32, state: AttemptState, path: &str| Attempt {
-            stage: stage.into(),
-            n,
-            context: "root".into(),
-            kind: AttemptKind::Agent,
-            state,
-            project: None,
             session: Some(format!("s-{stage}-{n}")),
-            run: None,
-            artifacts: BTreeMap::from([("plan".to_owned(), PathBuf::from(path))]),
-            settle: BTreeMap::new(),
-            stop_at_ms: None,
-            polls_since_stop: 0,
-            head: None,
-            gate: None,
-            pr: None,
-            rounds: Vec::new(),
-            extra_pass: false,
-            failed_at_checks: false,
-            started_ms: 0,
-            ended_ms: None,
+            ..new_attempt(
+                stage,
+                n,
+                "root",
+                AttemptKind::Agent,
+                state,
+                BTreeMap::from([("plan".to_owned(), PathBuf::from(path))]),
+                0,
+            )
         };
         t.attempts
             .push(attempt("plan", 1, AttemptState::Complete, "/a1/plan.md"));
@@ -794,28 +787,15 @@ mod tests {
     fn a_ticket_closes_by_hand_when_parked_or_active_with_nothing_open() {
         let mut t = blank();
         assert!(t.closable() && !t.trees_retryable());
-        t.attempts.push(Attempt {
-            stage: "plan".into(),
-            n: 1,
-            context: "root".into(),
-            kind: AttemptKind::Agent,
-            state: AttemptState::Running,
-            project: None,
-            session: None,
-            run: None,
-            artifacts: BTreeMap::new(),
-            settle: BTreeMap::new(),
-            stop_at_ms: None,
-            polls_since_stop: 0,
-            head: None,
-            gate: None,
-            pr: None,
-            rounds: Vec::new(),
-            extra_pass: false,
-            failed_at_checks: false,
-            started_ms: 0,
-            ended_ms: None,
-        });
+        t.attempts.push(new_attempt(
+            "plan",
+            1,
+            "root",
+            AttemptKind::Agent,
+            AttemptState::Running,
+            BTreeMap::new(),
+            0,
+        ));
         assert!(!t.closable(), "an open attempt is parked first");
         t.state = TicketState::Parked {
             reason: "by hand".into(),

@@ -15,7 +15,6 @@ use promptbox::ports::saver::FileSaver;
 use promptbox::ports::sink::PromptSink;
 use promptbox::{Editor, Voice};
 
-use super::cards::is_running;
 use super::{DrawCtx, theme};
 use crate::core::{
     AppAction, RecordId, SessionRecord, VOICE_KEY_ACCOUNT, VoiceSettings, WindowFrame,
@@ -188,7 +187,7 @@ pub fn pump(cx: &mut DrawCtx<'_>) -> Option<std::time::Duration> {
     // an editor made from a card's microphone is never drawn as a
     // panel, and its sends would otherwise be refused as not running.
     for (id, flag) in &boxes.running {
-        flag.store(is_running(core, *id), Ordering::Relaxed);
+        flag.store(core.is_running(*id), Ordering::Relaxed);
     }
     if let Some(bound) = boxes.bound
         && !boxes.editors.contains_key(&bound)
@@ -425,13 +424,13 @@ fn editor_for<'a>(cx: &'a mut DrawCtx<'_>, record: &SessionRecord) -> &'a mut Ed
     editor
 }
 
-/// Height the editor panel opens at.
-const DEFAULT_HEIGHT: f32 = 300.0;
+/// Height the editor panel opens at; the user drags it afterwards.
+pub(super) const DEFAULT_HEIGHT: f32 = 300.0;
 
 /// The message panel of an agent session: a host row (Stop) above the
 /// Prompt Box editor. Files dropped on it land in the prompt as paths.
 pub fn panel(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord) {
-    let running = is_running(cx.core, record.id);
+    let running = cx.core.is_running(record.id);
     let captions = cx.core.settings().voice.captions;
     let dropped: Vec<std::path::PathBuf> = ui.input(|i| {
         i.raw
@@ -502,6 +501,9 @@ pub fn panel(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord) {
     }
 }
 
+/// The dot and the microphone while dictation is live.
+const LISTENING_GREEN: egui::Color32 = egui::Color32::from_rgb(0x2e, 0xb8, 0x5c);
+
 /// The rail's listening row, always the same one row so nothing else
 /// moves: a green dot and "Listening · <session>" with a Stop beside it while
 /// the runtime is live (the name goes to the session), a muted "Not
@@ -509,7 +511,6 @@ pub fn panel(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord) {
 /// than widening the rail.
 pub fn rail_indicator(cx: &mut DrawCtx<'_>, ui: &mut Ui, compact: bool) {
     let p = theme::palette(ui);
-    let green = egui::Color32::from_rgb(0x2e, 0xb8, 0x5c);
     let listening = cx.state.prompt_boxes.listening().map(|id| {
         let name = cx
             .core
@@ -522,7 +523,11 @@ pub fn rail_indicator(cx: &mut DrawCtx<'_>, ui: &mut Ui, compact: bool) {
         ui.set_height(height);
         ui.spacing_mut().item_spacing.x = 6.0;
         // A painted dot, as on the cards: the text font has no circle glyph.
-        let fill = if listening.is_some() { green } else { p.n400 };
+        let fill = if listening.is_some() {
+            LISTENING_GREEN
+        } else {
+            p.n400
+        };
         let (dot, _) = ui.allocate_exact_size(egui::Vec2::splat(8.0), egui::Sense::hover());
         ui.painter().circle_filled(dot.center(), 4.0, fill);
         if compact {
@@ -562,7 +567,7 @@ pub fn rail_indicator(cx: &mut DrawCtx<'_>, ui: &mut Ui, compact: bool) {
             }
             let live = egui::Label::new(
                 RichText::new(format!("Listening · {name}"))
-                    .color(green)
+                    .color(LISTENING_GREEN)
                     .text_style(theme::meta()),
             )
             .truncate()
@@ -615,7 +620,7 @@ pub fn mic_button(ui: &mut Ui, listening: bool) -> egui::Response {
         egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), label)
     });
     let color = if listening {
-        egui::Color32::from_rgb(0x2e, 0xb8, 0x5c)
+        LISTENING_GREEN
     } else if response.hovered() {
         p.n700
     } else {
@@ -655,10 +660,4 @@ pub fn mic_button(ui: &mut Ui, listening: bool) -> egui::Response {
         egui::Stroke::new(1.2, color),
     );
     response.on_hover_cursor(egui::CursorIcon::PointingHand)
-}
-
-/// Panel height when it first opens; the user drags it afterwards.
-#[must_use]
-pub fn default_height() -> f32 {
-    DEFAULT_HEIGHT
 }

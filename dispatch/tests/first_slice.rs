@@ -1,8 +1,9 @@
-//! The first slice, end to end against a Switchboard in memory: an issue
-//! becomes a ticket, a worktree, one project and four sessions, and
-//! stops at the finalize decision; and every way the path can be cut
-//! short (a lost reply, a removed record, a launch the app died in, an
-//! agent that never wrote) ends as a decision, never a second launch.
+//! Dispatch end to end against a Switchboard in memory: an issue becomes
+//! a ticket, a worktree, one project and its sessions, and goes through
+//! agent, workflow, review and gate stages to its close; and every way
+//! the path can be cut short (a lost reply, a removed record, a launch
+//! the app died in, an agent that never wrote) ends as a decision, never
+//! a second launch.
 
 // Tests assert emptiness with `assert!` throughout.
 #![allow(clippy::assert_is_empty)]
@@ -20,7 +21,7 @@ use dispatch::ticket::RoundState;
 use dispatch::ticket::{
     Attempt, AttemptKind, AttemptState, Decision, SourceSnapshot, Ticket, TicketState,
 };
-use support::{FakeSwitchboard, SharedPort, SharedRepo};
+use support::{FakeSwitchboard, SharedPort};
 use switchboard_control::{Body, Liveness, RunState, SessionKind};
 
 const PROJECT: &str = "Switchboard";
@@ -160,7 +161,7 @@ impl Env {
         let mut runner = Runner::new(
             data.clone(),
             Box::new(SharedPort(Arc::clone(&sb))),
-            Box::new(SharedRepo(Arc::clone(&repo))),
+            Box::new(Arc::clone(&repo)),
         );
         runner.prs = Box::new(Arc::clone(&prs));
         runner.bitbucket = Box::new(Arc::clone(&bitbucket));
@@ -183,7 +184,7 @@ impl Env {
         self.runner = Runner::new(
             self.data.clone(),
             Box::new(SharedPort(Arc::clone(&self.sb))),
-            Box::new(SharedRepo(Arc::clone(&self.repo))),
+            Box::new(Arc::clone(&self.repo)),
         );
         self.runner.prs = Box::new(Arc::clone(&self.prs));
         self.runner.bitbucket = Box::new(Arc::clone(&self.bitbucket));
@@ -402,6 +403,7 @@ fn an_issue_becomes_one_project_four_sessions_one_run_and_a_finalize_decision() 
     // the ticket's one project at that tree, and the investigator in it.
     env.step();
     let t = env.ticket(&id);
+    assert!(env.data.repo_dir(PROJECT).exists(), "the private clone");
     assert_eq!(t.lanes.len(), 1, "{t:#?}");
     assert_eq!(
         t.lanes[0].branch,
@@ -570,8 +572,7 @@ fn an_issue_becomes_one_project_four_sessions_one_run_and_a_finalize_decision() 
     assert_eq!(env.sb().sessions.len(), 4);
 
     // Answered by hand: the run is finalized, its agents killed, the
-    // stage complete; the next stage is not built here, so the ticket
-    // parks with a reason rather than guessing.
+    // stage complete.
     let now = env.tick();
     env.runner
         .decide(&id, &pending[0].id, "finalize", None, now)
@@ -1126,11 +1127,6 @@ fn a_rebase_that_changes_nothing_or_past_the_cap_is_a_question() {
     assert!(env.sb().cloned.is_empty(), "no rebaser");
 }
 
-/// Red checks on the PR at the tree's head get the policy's fixer: a
-/// session cloned from the lane's implementer, told the PR and the
-/// failed checks; when it pushes and stops, the gate reads again and
-/// green checks pass it. Without a fixer, red checks stay a question
-/// (`ready_asks_about_red_moved_or_missing_checks_and_none_can_be_expected`).
 /// The test pipeline with a `fixer` operator in the policy, plus
 /// `extra` policy lines.
 fn with_fixer(env: &Env, extra: &str) {
@@ -1148,6 +1144,11 @@ fn with_fixer(env: &Env, extra: &str) {
     std::fs::write(&path, text).unwrap();
 }
 
+/// Red checks on the PR at the tree's head get the policy's fixer: a
+/// session cloned from the lane's implementer, told the PR and the
+/// failed checks; when it pushes and stops, the gate reads again and
+/// green checks pass it. Without a fixer, red checks stay a question
+/// (`ready_asks_about_red_moved_or_missing_checks_and_none_can_be_expected`).
 #[test]
 fn red_checks_are_fixed_by_a_clone_of_the_implementer() {
     let mut env = Env::new();
@@ -1403,9 +1404,6 @@ fn a_ready_stage_costs_no_slot() {
     );
 }
 
-/// `slots` is read from the project's live pipeline file on every
-/// pass, not from a ticket's frozen copy: a second ticket waits while
-/// the file says one slot and starts as soon as the file says two.
 /// A full disk holds new starts: the attempt would fail for nothing
 /// and cost the run. Running work is still watched, and the hold lifts
 /// by itself once space is back.
@@ -1455,6 +1453,9 @@ fn a_full_disk_holds_new_starts_until_space_is_back() {
     });
 }
 
+/// `slots` is read from the project's live pipeline file on every
+/// pass, not from a ticket's frozen copy: a second ticket waits while
+/// the file says one slot and starts as soon as the file says two.
 #[test]
 fn slots_come_from_the_live_pipeline_file_not_a_tickets_copy() {
     let mut env = Env::new();
@@ -1741,12 +1742,7 @@ fn a_stage_failing_past_max_reruns_parks_the_ticket() {
     let mut env = Env::new();
     let (id, implementer) = at_implement(&mut env);
     let t = env.ticket(&id);
-    for path in [env.data.pipeline(PROJECT), t.pipeline_file.clone()] {
-        let text = std::fs::read_to_string(&path)
-            .unwrap()
-            .replace("waiting_on_me = 3\n", "waiting_on_me = 3\nmax_reruns = 1\n");
-        std::fs::write(&path, text).unwrap();
-    }
+    with_max_reruns(&env, &t, 1);
     env.repo
         .lock()
         .unwrap()
@@ -2045,7 +2041,6 @@ fn an_objection_changes_the_copy_and_not_the_plan() {
     // The planner clone answers an objection by editing the copy.
     std::fs::write(&copy, "# plan v2").unwrap();
     assert_eq!(std::fs::read_to_string(&plan).unwrap(), "# plan v1");
-    assert_eq!(std::fs::read_to_string(&copy).unwrap(), "# plan v2");
     assert_eq!(
         t.input("plan"),
         Some(&plan),
@@ -2189,8 +2184,6 @@ fn a_project_that_cannot_be_saved_makes_nothing_else() {
     assert!(t.attempts.is_empty(), "no attempt was made");
     assert!(env.sb().sessions.is_empty(), "no session was made");
     assert_eq!(env.sb().kinds_called("session.new"), 0);
-    let liveness: Vec<Liveness> = env.sb().sessions.iter().map(|s| s.liveness).collect();
-    assert!(liveness.is_empty(), "nothing is alive");
 }
 
 /// The pull-request pipeline of the test project: two lanes, one in
@@ -2237,7 +2230,6 @@ waiting_on_me = 5
     )
 }
 
-/// One open PR the fake provider hands out, by repository and number.
 /// A pull request's base is where its branch forked from the branch
 /// it targets, in each lane's own clone.
 fn seed_pr_bases(env: &Env) {
@@ -2255,6 +2247,7 @@ fn assert_pr_bases(t: &Ticket) {
     assert_eq!(bases, vec![Some("fork0009"), Some("fork0003")]);
 }
 
+/// One open PR the fake provider hands out, by repository and number.
 fn open_pr(env: &Env, repo: &str, number: u64, branch: &str, title: &str) {
     env.prs.lock().unwrap().prs.push((
         repo.to_owned(),
@@ -2515,11 +2508,7 @@ fn taking_pull_requests_refuses_bad_specs_and_doubles() {
 fn a_socket_failure_ends_the_pass_without_parking() {
     let mut env = Env::new();
     let id = env.take(7).id;
-    env.runner.port = Box::new(FailBefore {
-        inner: SharedPort(Arc::clone(&env.sb)),
-        kind: "spaces",
-        fired: false,
-    });
+    env.fail_once("spaces", "the socket closed before the request went out");
     env.step();
     let t = env.ticket(&id);
     assert!(t.active(), "{:?}", t.state);
@@ -2531,36 +2520,46 @@ fn a_socket_failure_ends_the_pass_without_parking() {
     assert_eq!(t.attempts.len(), 1, "investigate started on the next pass");
 }
 
-// --- what a review of the slice found: the runner's pass and a command
-// from the terminal share one lock, idempotent requests are replayed,
-// an attempt saved without its request fails instead of waiting, a
-// record's primary is never absent, parking stops what runs, and the
-// reviewer is told which tree the plan is about.
+// --- the runner's pass and a command from the terminal share one lock,
+// idempotent requests are replayed, an attempt saved without its request
+// fails instead of waiting, a record's primary is never absent, parking
+// stops what runs, and the reviewer is told which tree the plan is about.
 
-/// A port that fails one request of the given kind before it reaches
-/// Switchboard, then behaves.
-struct FailBefore {
+/// A port that fails the first request of the given kind with a socket
+/// error, `error`, then behaves. Where the failure falls (before the
+/// request went out, or after) is the same to the runner: no reply.
+struct FailsOnce {
     inner: SharedPort,
     kind: &'static str,
+    error: &'static str,
     fired: bool,
 }
 
-impl dispatch::port::Port for FailBefore {
+impl dispatch::port::Port for FailsOnce {
     fn call(
         &mut self,
         request: &switchboard_control::Request,
     ) -> std::io::Result<switchboard_control::Reply> {
         if !self.fired && request.body.kind() == self.kind {
             self.fired = true;
-            return Err(std::io::Error::other(
-                "the socket closed before the request went out",
-            ));
+            return Err(std::io::Error::other(self.error));
         }
         self.inner.call(request)
     }
 }
 
-/// Drive a ticket to the finalize decision.
+impl Env {
+    /// The runner's next request of `kind` fails with `error`.
+    fn fail_once(&mut self, kind: &'static str, error: &'static str) {
+        self.runner.port = Box::new(FailsOnce {
+            inner: SharedPort(Arc::clone(&self.sb)),
+            kind,
+            error,
+            fired: false,
+        });
+    }
+}
+
 /// A reviewer operator of kind claude runs the review as Claude Code in
 /// the ticket's tree, where the code is and the trust was granted, with
 /// the operator's flags and the allow rule for the attempt directory on
@@ -2650,7 +2649,7 @@ fn at_finalize(env: &mut Env) -> String {
 }
 
 #[test]
-fn an_authorised_finalize_survives_a_lost_reply() {
+fn an_authorised_finalize_survives_a_lost_request() {
     let mut env = Env::new();
     let id = at_finalize(&mut env);
     let decision = env.pending(&id)[0].id.clone();
@@ -2658,11 +2657,10 @@ fn an_authorised_finalize_survives_a_lost_reply() {
     env.runner
         .decide(&id, &decision, "finalize", None, now)
         .unwrap();
-    env.runner.port = Box::new(FailBefore {
-        inner: SharedPort(Arc::clone(&env.sb)),
-        kind: "workflow.finalize",
-        fired: false,
-    });
+    env.fail_once(
+        "workflow.finalize",
+        "the socket closed before the request went out",
+    );
     env.step();
     assert_ne!(
         env.sb().runs[0].state,
@@ -2741,9 +2739,9 @@ fn an_attempt_saved_without_its_request_fails_instead_of_waiting_forever() {
     let mut env = Env::new();
     let id = env.take(7).id;
     env.step();
-    // Dispatch stopped between writing the attempt and writing its
-    // request: no session, no operation. (The runner no longer writes
-    // these apart, but a record from a crash may still look like it.)
+    // An attempt with no session and no operation: what a stop between
+    // writing the attempt and writing its request leaves, which an old
+    // record may still hold.
     let mut t = env.ticket(&id);
     let session = t.attempts[0].session.take().unwrap();
     t.attempts[0].state = AttemptState::Starting;
@@ -2817,8 +2815,7 @@ fn a_project_whose_primary_vanished_reads_its_backup() {
     let mut env = Env::new();
     let id = env.take(7).id;
     let path = env.data.project_file(PROJECT);
-    // Only a crash of an older write could leave this; the backup is
-    // still the truth.
+    // A primary gone and its backup kept: the backup is the truth.
     std::fs::rename(&path, path.with_file_name("Switchboard.json.bak")).unwrap();
     assert_eq!(
         env.runner.load_project(PROJECT).unwrap().queue,
@@ -2905,9 +2902,9 @@ fn a_rerun_retires_the_replaced_attempt_before_launching() {
     }
 }
 
-// --- the follow-up review: cleanup gates a rerun and is persisted first,
-// parking resumes whole after a restart, and the documented pipeline's
-// own reviewer is told its repository.
+// --- cleanup gates a rerun and is persisted first, parking resumes
+// whole after a restart, and the documented pipeline's own reviewer is
+// told its repository.
 
 #[test]
 fn a_rerun_waits_while_the_replaced_process_survives_its_kill() {
@@ -2942,17 +2939,23 @@ fn a_rerun_waits_while_the_replaced_process_survives_its_kill() {
     assert_ne!(env.sb().session(&old).liveness, Liveness::Running);
 }
 
+/// The intent was saved, then Dispatch died before the pause, with the
+/// finalize question still pending and the session still marked: after
+/// a restart the run is paused first, the question withdrawn and the
+/// session unmarked.
 #[test]
-fn parking_resumed_after_a_restart_still_pauses_the_run_first() {
+fn parking_resumed_after_a_restart_pauses_the_run_withdraws_and_unmarks() {
     let mut env = Env::new();
     let id = at_finalize(&mut env);
-    // The intent was saved, then Dispatch died before the pause.
+    let finalize = env.pending(&id)[0].id.clone();
     let mut t = env.ticket(&id);
     t.state = TicketState::Parking {
         reason: "parked by hand".into(),
     };
     let now = env.tick();
     env.runner.save_ticket(&mut t, now).unwrap();
+    let session = t.current_session().unwrap().clone();
+    assert!(env.sb().waiting[&session].0);
     env.restart();
     env.step();
     let t = env.ticket(&id);
@@ -2961,6 +2964,10 @@ fn parking_resumed_after_a_restart_still_pauses_the_run_first() {
         &t.attempts_of("review").last().unwrap().state,
         AttemptState::Cancelled { .. }
     ));
+    assert_eq!(
+        t.decisions.iter().find(|d| d.id == finalize).unwrap().state,
+        dispatch::ticket::DecisionState::Cancelled
+    );
     let sb = env.sb();
     assert!(
         matches!(sb.runs[0].state, RunState::Paused { .. }),
@@ -2968,6 +2975,7 @@ fn parking_resumed_after_a_restart_still_pauses_the_run_first() {
         sb.runs[0].state
     );
     assert!(sb.sessions.iter().all(|s| s.liveness != Liveness::Running));
+    assert!(!sb.waiting[&session].0);
 }
 
 #[test]
@@ -3044,26 +3052,6 @@ fn a_template_that_never_names_the_tree_is_told_it_anyway() {
 // --- the answer and its action reach disk together: a stop right after
 // either the mark or the first request leaves something recovery acts on.
 
-/// A port that fails one request of the given kind with a socket error.
-struct SocketFails {
-    inner: SharedPort,
-    kind: &'static str,
-    fired: bool,
-}
-
-impl dispatch::port::Port for SocketFails {
-    fn call(
-        &mut self,
-        request: &switchboard_control::Request,
-    ) -> std::io::Result<switchboard_control::Reply> {
-        if !self.fired && request.body.kind() == self.kind {
-            self.fired = true;
-            return Err(std::io::Error::other("the socket dropped"));
-        }
-        self.inner.call(request)
-    }
-}
-
 #[test]
 fn a_park_answer_cut_off_at_the_pause_is_finished_after_a_restart() {
     let mut env = Env::new();
@@ -3074,11 +3062,7 @@ fn a_park_answer_cut_off_at_the_pause_is_finished_after_a_restart() {
         .decide(&id, &decision, "park", None, now)
         .unwrap();
     // The pass dies at the pause: the socket error ends the pass.
-    env.runner.port = Box::new(SocketFails {
-        inner: SharedPort(Arc::clone(&env.sb)),
-        kind: "workflow.pause",
-        fired: false,
-    });
+    env.fail_once("workflow.pause", "the socket dropped");
     env.step();
     let t = env.ticket(&id);
     assert!(
@@ -3110,11 +3094,7 @@ fn a_finalize_answer_cut_off_at_its_request_is_replayed_after_a_restart() {
     env.runner
         .decide(&id, &decision, "finalize", None, now)
         .unwrap();
-    env.runner.port = Box::new(SocketFails {
-        inner: SharedPort(Arc::clone(&env.sb)),
-        kind: "workflow.finalize",
-        fired: false,
-    });
+    env.fail_once("workflow.finalize", "the socket dropped");
     env.step();
     let t = env.ticket(&id);
     assert!(
@@ -3178,23 +3158,6 @@ fn a_directory_in_the_way_that_is_not_the_worktree_parks_the_ticket() {
         env.sb().sessions.is_empty(),
         "nothing runs outside a worktree"
     );
-}
-
-#[test]
-fn the_tree_comes_from_dispatches_own_clone_fetched_first() {
-    let mut env = Env::new();
-    let id = env.take(7).id;
-    env.step();
-    let t = env.ticket(&id);
-    assert!(env.data.repo_dir(PROJECT).exists(), "the private clone");
-    assert_eq!(t.lanes[0].worktree, env.worktrees.join(&id));
-    assert_eq!(
-        t.lanes[0].branch,
-        "dispatch/7-issue-7-escape-leaves-the-field"
-    );
-    // The reviewer's and the investigator's tree are the same one.
-    let investigator = env.sb().sessions_named("investigator")[0].clone();
-    assert_eq!(investigator.cwd, t.lanes[0].worktree);
 }
 
 // --- a workspace of several repositories: the ticket's tree is the
@@ -3712,11 +3675,7 @@ fn without_a_hint_the_lanes_are_asked_and_the_answer_chooses() {
     let prompt = last_prompt_of(&env, "planner");
     assert!(prompt.ends_with("sent it back: keep it short"), "{prompt}");
     let t = env.ticket(&id);
-    let latest = t
-        .attempts_of("plan")
-        .filter(|a| a.context == "frontend")
-        .max_by_key(|a| a.n)
-        .unwrap();
+    let latest = plan_of(&t, "frontend");
     assert_eq!((latest.n, latest.is_open()), (3, true), "{t:#?}");
 }
 
@@ -3730,6 +3689,39 @@ fn inspect_instead_of_review(env: &Env, id: &str) {
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(text.contains(review), "{text}");
         std::fs::write(&path, text.replace(review, inspect)).unwrap();
+    }
+}
+
+/// `max_reruns = n` in the project's pipeline and in the ticket's copy.
+fn with_max_reruns(env: &Env, t: &Ticket, n: u32) {
+    for path in [env.data.pipeline(PROJECT), t.pipeline_file.clone()] {
+        let text = std::fs::read_to_string(&path).unwrap().replace(
+            "waiting_on_me = 3\n",
+            &format!("waiting_on_me = 3\nmax_reruns = {n}\n"),
+        );
+        std::fs::write(&path, text).unwrap();
+    }
+}
+
+/// The investigator's launch with its reply lost and the attempt back to
+/// `Starting`, after three failed attempts: failing it again spends
+/// `max_reruns`, which would park a running ticket.
+fn lost_launch_with_reruns_spent(t: &mut Ticket) {
+    let op = t
+        .ledger
+        .iter_mut()
+        .find(|o| o.kind == "session.new")
+        .unwrap();
+    op.reply = None;
+    t.attempts[0].session = None;
+    t.attempts[0].state = AttemptState::Starting;
+    for n in 1..=3 {
+        let mut failed = t.attempts[0].clone();
+        failed.n += n;
+        failed.state = AttemptState::Failed {
+            reason: "earlier".into(),
+        };
+        t.attempts.push(failed);
     }
 }
 
@@ -3928,11 +3920,7 @@ fn a_pass_cut_off_between_two_lanes_finishes_asking_on_the_next_pass() {
     let sessions = env.sb().sessions.len();
     // A question is saved before its notes go out, so the pass ends
     // with one lane asked and the other not looked at.
-    env.runner.port = Box::new(SocketFails {
-        inner: SharedPort(Arc::clone(&env.sb)),
-        kind: "session.notes",
-        fired: false,
-    });
+    env.fail_once("session.notes", "the socket dropped");
     let now = env.tick();
     env.runner.step_project("Orchard", now).unwrap();
     let t = env.ticket(&id);
@@ -3970,11 +3958,7 @@ fn a_park_cut_off_after_its_intent_asks_nothing_and_unmarks_on_the_next_pass() {
         .decide(&id, &finalize.id, "park", None, now)
         .unwrap();
     // The unmark is written down and never delivered.
-    env.runner.port = Box::new(SocketFails {
-        inner: SharedPort(Arc::clone(&env.sb)),
-        kind: "session.waiting",
-        fired: false,
-    });
+    env.fail_once("session.waiting", "the socket dropped");
     env.step();
     let t = env.ticket(&id);
     assert!(matches!(t.state, TicketState::Parking { .. }), "{t:#?}");
@@ -4025,32 +4009,6 @@ fn a_park_cut_off_after_its_intent_asks_nothing_and_unmarks_on_the_next_pass() {
 }
 
 #[test]
-fn a_parking_record_with_pending_decisions_withdraws_and_unmarks() {
-    let mut env = Env::new();
-    let id = at_finalize(&mut env);
-    let finalize = env.pending(&id)[0].id.clone();
-    // Parking, with its question still pending and the session still
-    // marked.
-    let mut t = env.ticket(&id);
-    t.state = TicketState::Parking {
-        reason: "parked by hand".into(),
-    };
-    let now = env.tick();
-    env.runner.save_ticket(&mut t, now).unwrap();
-    let session = t.current_session().unwrap().clone();
-    assert!(env.sb().waiting[&session].0);
-    env.restart();
-    env.step();
-    let t = env.ticket(&id);
-    assert!(matches!(t.state, TicketState::Parked { .. }), "{t:#?}");
-    assert_eq!(
-        t.decisions.iter().find(|d| d.id == finalize).unwrap().state,
-        dispatch::ticket::DecisionState::Cancelled
-    );
-    assert!(!env.sb().waiting[&session].0);
-}
-
-#[test]
 fn an_unanswered_mark_is_resolved_before_the_unmark_and_stays_off_after_a_restart() {
     let mut env = Env::new();
     let id = at_finalize(&mut env);
@@ -4082,11 +4040,7 @@ fn an_unanswered_mark_is_resolved_before_the_unmark_and_stays_off_after_a_restar
     let before = waiting_ops(&t).len();
     // No restart, whose recovery would replay it first: the replay
     // inside parking is the request that fails.
-    env.runner.port = Box::new(SocketFails {
-        inner: SharedPort(Arc::clone(&env.sb)),
-        kind: "session.waiting",
-        fired: false,
-    });
+    env.fail_once("session.waiting", "the socket dropped");
     env.step();
     let t = env.ticket(&id);
     assert!(matches!(t.state, TicketState::Parking { .. }), "{t:#?}");
@@ -4470,12 +4424,7 @@ fn a_resume_after_failed_checks_past_max_reruns_offers_check_again() {
     let mut env = Env::new();
     let (id, implementer) = at_implement(&mut env);
     let t = env.ticket(&id);
-    for path in [env.data.pipeline(PROJECT), t.pipeline_file.clone()] {
-        let text = std::fs::read_to_string(&path)
-            .unwrap()
-            .replace("waiting_on_me = 3\n", "waiting_on_me = 3\nmax_reruns = 0\n");
-        std::fs::write(&path, text).unwrap();
-    }
+    with_max_reruns(&env, &t, 0);
     implementer_stops(&mut env, &id, &implementer);
     env.steps_until(&id, "the checks starting", |t, _| {
         t.attempts_of("implement")
@@ -4772,10 +4721,9 @@ fn a_review_with_no_findings_completes_at_its_head_reusing_implements_checks() {
 }
 
 /// Findings: gathered with the reviewer's name and a stable id; the
-/// user's `fix` starts a fresh implementer with the file; its commit
-/// is checked at the new head; the next pass opens at that head with
-/// the earlier file in the reviewers' prompt. Returns the environment
-/// with the implementer started, and the first feedback file's path.
+/// user's `fix` starts a fresh implementer with the file. Returns the
+/// environment with the implementer started, and the first feedback
+/// file's path.
 fn findings_asked_and_fixed() -> (Env, String, PathBuf) {
     let mut env = Env::new();
     let id = at_review(&mut env);
@@ -4841,8 +4789,9 @@ fn findings_asked_and_fixed() -> (Env, String, PathBuf) {
 }
 
 /// `findings_asked_and_fixed` with the implementer's commit checked at
-/// the new head and round two opened there.
-fn fixed_once() -> (Env, String, PathBuf) {
+/// the new head and round two opened there, with the earlier file in
+/// the reviewers' prompt.
+fn fixed_once() -> (Env, String) {
     let (mut env, id, feedback_path) = findings_asked_and_fixed();
     let t = env.ticket(&id);
     let round = &review_attempt(&t).rounds[0];
@@ -4893,13 +4842,7 @@ fn fixed_once() -> (Env, String, PathBuf) {
         prompt.contains(&feedback_path.display().to_string()),
         "{prompt}"
     );
-    (env, id, feedback_path)
-}
-
-#[test]
-fn findings_are_fixed_by_a_fresh_implementer_and_checked_at_the_new_head() {
-    let (env, id, _) = fixed_once();
-    assert_eq!(review_attempt(&env.ticket(&id)).rounds.len(), 2);
+    (env, id)
 }
 
 /// Pass two after one fix: the disputed point is kept under its id,
@@ -4907,7 +4850,7 @@ fn findings_are_fixed_by_a_fresh_implementer_and_checked_at_the_new_head() {
 /// runs the checks at the reviewed head and completes the stage.
 #[test]
 fn the_cap_offers_the_reviewed_head_and_accept_completes_at_it() {
-    let (mut env, id, _feedback_path) = fixed_once();
+    let (mut env, id) = fixed_once();
     lint_exits(&mut env, &id, 2, 0, "");
     style_says(&mut env, &id, 2, "keep r1/lint-1: a macro is no excuse\n");
     env.steps_until(&id, "the cap question", |t, _| {
@@ -5033,14 +4976,12 @@ impl Env {
     }
 }
 
-/// A command reviewer that exits 2, an agent reviewer that stops with
-/// no feedback file, and a reviewer whose session vanishes each fail
-/// the round: the attempt fails into the rerun question and the
-/// siblings are killed first.
+/// A command reviewer that exits 2 and an agent reviewer that stops with
+/// no feedback file each fail the round: the attempt fails into the
+/// rerun question and the siblings are killed first.
 #[test]
 fn a_failed_reviewer_fails_the_round_after_its_siblings_are_killed() {
     let mut env = Env::new();
-    env.with_review_stage("ask");
     let id = at_review(&mut env);
     let t = env.ticket(&id);
     let style = reviewer(&t, 1, "style").session.unwrap();
@@ -5092,12 +5033,11 @@ fn a_failed_reviewer_fails_the_round_after_its_siblings_are_killed() {
     );
 }
 
-/// A command reviewer's exit 0 with output is diagnostic only; exit 1
-/// with nothing on stdout is an execution error.
+/// A command reviewer's exit 1 with nothing on stdout is an execution
+/// error, not a finding.
 #[test]
 fn a_command_reviewers_exit_codes_are_read_as_the_protocol_says() {
     let mut env = Env::new();
-    env.with_review_stage("ask");
     let id = at_review(&mut env);
     lint_exits(&mut env, &id, 1, 1, "");
     env.steps_until(&id, "the rerun question", |t, _| {
@@ -5216,7 +5156,6 @@ fn a_commit_that_lands_after_the_response_settles_is_not_a_dirty_tree() {
 #[test]
 fn an_answer_for_a_moved_head_is_stale_and_parks_the_ticket() {
     let mut env = Env::new();
-    env.with_review_stage("ask");
     let id = at_review(&mut env);
     lint_exits(&mut env, &id, 1, 0, "");
     style_says(&mut env, &id, 1, "- a point\n");
@@ -5252,7 +5191,6 @@ fn an_answer_for_a_moved_head_is_stale_and_parks_the_ticket() {
 #[test]
 fn a_lost_command_reviewer_is_failed_not_started_again() {
     let mut env = Env::new();
-    env.with_review_stage("ask");
     let id = at_review(&mut env);
     let t = env.ticket(&id);
     let key = lint_key(&t, 1);
@@ -5314,16 +5252,7 @@ fn a_plan_that_sat_is_implemented_on_a_branch_brought_up_to_its_base() {
         t.attempts_of(dispatch::scheduler::REFRESH).next().is_none(),
         "a clean rebase launches nothing"
     );
-    let prompt = env
-        .sb()
-        .calls
-        .iter()
-        .rev()
-        .find_map(|r| match &r.body {
-            Body::SessionNew { prompt, name, .. } if name == "implementer" => prompt.clone(),
-            _ => None,
-        })
-        .unwrap();
+    let prompt = last_prompt_of(&env, "implementer");
     assert!(
         prompt.contains("base moved from base0000 to main0002"),
         "{prompt}"
@@ -5896,25 +5825,7 @@ fn a_restart_during_a_close_with_a_lost_launch_still_closes() {
         sb.log.clear();
         sb.resumable.clear();
     }
-    write_closing(&env, &id, |t| {
-        let op = t
-            .ledger
-            .iter_mut()
-            .find(|o| o.kind == "session.new")
-            .unwrap();
-        op.reply = None;
-        t.attempts[0].session = None;
-        t.attempts[0].state = AttemptState::Starting;
-        // Failing this one parks the ticket: `max_reruns` is spent.
-        for n in 1..=3 {
-            let mut failed = t.attempts[0].clone();
-            failed.n += n;
-            failed.state = AttemptState::Failed {
-                reason: "earlier".into(),
-            };
-            t.attempts.push(failed);
-        }
-    });
+    write_closing(&env, &id, lost_launch_with_reruns_spent);
     let mut ps = env.runner.load_project(PROJECT).unwrap();
     ps.queue.retain(|q| q != &id);
     ps.closing.push(id.clone());
@@ -6127,25 +6038,7 @@ fn a_close_that_recovery_parks_and_then_fails_stays_closing() {
     assert!(env.ticket(&id).processes.contains(&investigator));
     // Recovery cannot find the launch, so it fails the attempt.
     env.sb().log.clear();
-    write_closing(&env, &id, |t| {
-        let op = t
-            .ledger
-            .iter_mut()
-            .find(|o| o.kind == "session.new")
-            .unwrap();
-        op.reply = None;
-        t.attempts[0].session = None;
-        t.attempts[0].state = AttemptState::Starting;
-        // Failing this one parks the ticket: `max_reruns` is spent.
-        for n in 1..=3 {
-            let mut failed = t.attempts[0].clone();
-            failed.n += n;
-            failed.state = AttemptState::Failed {
-                reason: "earlier".into(),
-            };
-            t.attempts.push(failed);
-        }
-    });
+    write_closing(&env, &id, lost_launch_with_reruns_spent);
     // Parking kills the investigator, and that reply is lost.
     env.sb().drop_reply_for = Some("session.kill".into());
     env.step();
@@ -6166,26 +6059,7 @@ fn recovery_never_saves_a_closing_ticket_parking() {
     let id = env.take(7).id;
     env.step();
     env.sb().log.clear();
-    write_closing(&env, &id, |t| {
-        let op = t
-            .ledger
-            .iter_mut()
-            .find(|o| o.kind == "session.new")
-            .unwrap();
-        op.reply = None;
-        t.attempts[0].session = None;
-        t.attempts[0].state = AttemptState::Starting;
-        // Failing this one would park a running ticket: `max_reruns` is
-        // spent.
-        for n in 1..=3 {
-            let mut failed = t.attempts[0].clone();
-            failed.n += n;
-            failed.state = AttemptState::Failed {
-                reason: "earlier".into(),
-            };
-            t.attempts.push(failed);
-        }
-    });
+    write_closing(&env, &id, lost_launch_with_reruns_spent);
     // A runner killed while the processes are killed leaves this file.
     env.sb().snapshot_on = Some(("session.kill".into(), env.data.ticket_file(&id)));
     env.step();

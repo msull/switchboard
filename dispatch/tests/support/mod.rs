@@ -4,13 +4,10 @@
 //! the crash windows: a reply dropped after acting, a launch that never
 //! reported, a record removed in the window.
 
-#![allow(dead_code)]
-
 use std::collections::BTreeMap;
 use std::io;
 use std::sync::{Arc, Mutex};
 
-use dispatch::git::{FakeRepo, Repo};
 use dispatch::port::Port;
 use switchboard_control::{
     Body, Definition, Found, Liveness, Made, OpStatus, Pin, ProjectView, RecordKind, Reply,
@@ -636,153 +633,5 @@ impl Port for SharedPort {
             ));
         }
         Ok(reply)
-    }
-}
-
-/// A fake repository shared with the test, so a runner can be replaced
-/// (a restart) over the same heads and checks.
-pub struct SharedRepo(pub Arc<Mutex<FakeRepo>>);
-
-impl Repo for SharedRepo {
-    fn ensure_clone(&mut self, url: &str, dir: &std::path::Path) -> anyhow::Result<()> {
-        self.0.lock().unwrap().ensure_clone(url, dir)
-    }
-    fn fetch(&mut self, dir: &std::path::Path, remote: &str) -> anyhow::Result<()> {
-        self.0.lock().unwrap().fetch(dir, remote)
-    }
-    fn ensure_remote(
-        &mut self,
-        dir: &std::path::Path,
-        remote: &str,
-        url: &str,
-    ) -> anyhow::Result<()> {
-        self.0.lock().unwrap().ensure_remote(dir, remote, url)
-    }
-    fn fetch_pull(
-        &mut self,
-        dir: &std::path::Path,
-        remote: &str,
-        number: u64,
-    ) -> anyhow::Result<()> {
-        self.0.lock().unwrap().fetch_pull(dir, remote, number)
-    }
-    fn worktree_add(
-        &mut self,
-        repo: &std::path::Path,
-        dir: &std::path::Path,
-        branch: &str,
-        base: &str,
-    ) -> anyhow::Result<()> {
-        self.0.lock().unwrap().worktree_add(repo, dir, branch, base)
-    }
-    fn worktree_track(
-        &mut self,
-        repo: &std::path::Path,
-        dir: &std::path::Path,
-        branch: &str,
-        remote: &str,
-    ) -> anyhow::Result<()> {
-        self.0
-            .lock()
-            .unwrap()
-            .worktree_track(repo, dir, branch, remote)
-    }
-    fn rev_parse(&self, dir: &std::path::Path, rev: &str) -> anyhow::Result<String> {
-        self.0.lock().unwrap().rev_parse(dir, rev)
-    }
-    fn merge_base(&self, dir: &std::path::Path, a: &str, b: &str) -> anyhow::Result<String> {
-        self.0.lock().unwrap().merge_base(dir, a, b)
-    }
-    fn start_reviewer(
-        &mut self,
-        key: &str,
-        dir: &std::path::Path,
-        argv: &[String],
-        env: &[(String, String)],
-        stdout: &std::path::Path,
-        stderr: &std::path::Path,
-    ) -> anyhow::Result<()> {
-        self.0
-            .lock()
-            .unwrap()
-            .start_reviewer(key, dir, argv, env, stdout, stderr)
-    }
-    fn kill_check(&mut self, key: &str) {
-        self.0.lock().unwrap().kill_check(key);
-    }
-    fn is_worktree_of(
-        &self,
-        repo: &std::path::Path,
-        dir: &std::path::Path,
-        branch: &str,
-    ) -> anyhow::Result<bool> {
-        self.0.lock().unwrap().is_worktree_of(repo, dir, branch)
-    }
-    fn head(&self, dir: &std::path::Path) -> anyhow::Result<String> {
-        self.0.lock().unwrap().head(dir)
-    }
-    fn is_clean(&self, dir: &std::path::Path) -> anyhow::Result<bool> {
-        self.0.lock().unwrap().is_clean(dir)
-    }
-    fn free_bytes(&self, dir: &std::path::Path) -> anyhow::Result<u64> {
-        self.0.lock().unwrap().free_bytes(dir)
-    }
-    fn behind(&self, dir: &std::path::Path, onto: &str) -> anyhow::Result<u64> {
-        self.0.lock().unwrap().behind(dir, onto)
-    }
-    fn rebase_onto(&mut self, dir: &std::path::Path, onto: &str) -> anyhow::Result<bool> {
-        self.0.lock().unwrap().rebase_onto(dir, onto)
-    }
-    fn remote_url(&self, dir: &std::path::Path) -> anyhow::Result<Option<String>> {
-        self.0.lock().unwrap().remote_url(dir)
-    }
-    fn summary(&self, dir: &std::path::Path, base: &str) -> anyhow::Result<String> {
-        self.0.lock().unwrap().summary(dir, base)
-    }
-    fn worktree_move(
-        &mut self,
-        repo: &std::path::Path,
-        from: &std::path::Path,
-        to: &std::path::Path,
-    ) -> anyhow::Result<()> {
-        self.0.lock().unwrap().worktree_move(repo, from, to)
-    }
-    fn worktree_remove(
-        &mut self,
-        repo: &std::path::Path,
-        dir: &std::path::Path,
-    ) -> anyhow::Result<()> {
-        self.0.lock().unwrap().worktree_remove(repo, dir)
-    }
-    fn changes(&self, dir: &std::path::Path) -> anyhow::Result<Vec<std::path::PathBuf>> {
-        self.0.lock().unwrap().changes(dir)
-    }
-    fn worktree_repair(
-        &mut self,
-        repo: &std::path::Path,
-        dir: &std::path::Path,
-    ) -> anyhow::Result<()> {
-        self.0.lock().unwrap().worktree_repair(repo, dir)
-    }
-    fn run(
-        &mut self,
-        dir: &std::path::Path,
-        argv: &[String],
-        env: &[(String, String)],
-    ) -> anyhow::Result<()> {
-        self.0.lock().unwrap().run(dir, argv, env)
-    }
-    fn start_check(
-        &mut self,
-        key: &str,
-        dir: &std::path::Path,
-        argv: &[String],
-        env: &[(String, String)],
-        log: &std::path::Path,
-    ) -> anyhow::Result<()> {
-        self.0.lock().unwrap().start_check(key, dir, argv, env, log)
-    }
-    fn poll_check(&mut self, key: &str) -> Option<anyhow::Result<i32>> {
-        self.0.lock().unwrap().poll_check(key)
     }
 }

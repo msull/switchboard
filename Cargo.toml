@@ -31,7 +31,6 @@ egui_commonmark = { version = "0.25", default-features = false, features = ["pul
 egui_extras = { version = "0.36", features = ["image", "gif", "webp"] }
 egui_term = { path = "vendor/egui_term" }
 env_logger = "0.11"
-fd-lock = "4"
 ignore = "0.4"
 glob = "0.3"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
@@ -76,7 +75,6 @@ all = { level = "warn", priority = -1 }
 pedantic = { level = "warn", priority = -1 }
 missing_errors_doc = "allow"
 missing_panics_doc = "allow"
-module_name_repetitions = "allow"
 
 # egui is slow in unoptimised builds; optimise dependencies even in dev.
 [profile.dev.package."*"]

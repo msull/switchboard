@@ -49,7 +49,7 @@ pub struct Settings {
 
 /// `~/.dispatch/worktrees`, when there is a home.
 #[must_use]
-pub fn default_worktrees_dir() -> Option<PathBuf> {
+fn default_worktrees_dir() -> Option<PathBuf> {
     let home = std::env::var_os("HOME")?;
     Some(PathBuf::from(home).join(".dispatch").join("worktrees"))
 }
@@ -142,6 +142,13 @@ impl DataDir {
         self.root.join("repos").join(project)
     }
 
+    /// Dispatch's own clone of a lane's repository, for a lane with a
+    /// repository of its own.
+    #[must_use]
+    pub fn lane_repo_dir(&self, project: &str, lane: &str) -> PathBuf {
+        self.repo_dir(&format!("{project}@{lane}"))
+    }
+
     /// Where tickets' trees go unless a pipeline says otherwise: the
     /// `worktrees` setting, else `~/.dispatch/worktrees`. Never under
     /// the data directory itself, whose path on macOS holds a space
@@ -155,14 +162,14 @@ impl DataDir {
     }
 
     #[must_use]
-    pub fn settings_file(&self) -> PathBuf {
+    fn settings_file(&self) -> PathBuf {
         self.root.join("settings.json")
     }
 
     /// The directory's own settings; absent or unreadable reads as
     /// defaults.
     #[must_use]
-    pub fn settings(&self) -> Settings {
+    fn settings(&self) -> Settings {
         read_json(&self.settings_file()).unwrap_or_default()
     }
 
@@ -275,7 +282,7 @@ pub fn record_exists(path: &Path) -> bool {
 
 /// Read a JSON record, falling back to its `.bak` when the file is
 /// unreadable.
-pub fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T> {
+fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T> {
     match fs::read(path) {
         Ok(bytes) => {
             serde_json::from_slice(&bytes).with_context(|| format!("parse {}", path.display()))
@@ -356,13 +363,7 @@ fn settle_from_verdicts(value: &mut Value) {
 /// from a newer build is refused rather than written back without the
 /// fields it carried. The caller's copy is left as it was.
 pub fn write_ticket(path: &Path, t: &Ticket) -> Result<()> {
-    if t.version > RECORD_VERSION {
-        bail!(
-            "ticket {} is version {}, written by a newer dispatch; update this one",
-            t.id,
-            t.version
-        );
-    }
+    refuse_newer("ticket", &t.id, t.version)?;
     let stamped = Ticket {
         version: RECORD_VERSION,
         ..t.clone()
@@ -372,13 +373,7 @@ pub fn write_ticket(path: &Path, t: &Ticket) -> Result<()> {
 
 /// The same for a project's state.
 pub fn write_project(path: &Path, ps: &ProjectState) -> Result<()> {
-    if ps.version > RECORD_VERSION {
-        bail!(
-            "project {} is version {}, written by a newer dispatch; update this one",
-            ps.name,
-            ps.version
-        );
-    }
+    refuse_newer("project", &ps.name, ps.version)?;
     let stamped = ProjectState {
         version: RECORD_VERSION,
         ..ps.clone()
@@ -386,7 +381,16 @@ pub fn write_project(path: &Path, ps: &ProjectState) -> Result<()> {
     write_json(path, &stamped)
 }
 
-pub fn write_json<T: serde::Serialize>(path: &Path, value: &T) -> Result<()> {
+/// A record a newer dispatch wrote is never written over: this one would
+/// drop the fields it does not know.
+fn refuse_newer(what: &str, name: &str, version: u32) -> Result<()> {
+    if version > RECORD_VERSION {
+        bail!("{what} {name} is version {version}, written by a newer dispatch; update this one");
+    }
+    Ok(())
+}
+
+fn write_json<T: serde::Serialize>(path: &Path, value: &T) -> Result<()> {
     let bytes = serde_json::to_vec_pretty(value)?;
     atomic_write(path, &bytes)
 }
@@ -419,7 +423,7 @@ mod tests {
     }
 
     #[test]
-    fn the_primary_is_never_absent_during_a_write() {
+    fn the_backup_holds_the_previous_write_and_counts_as_the_record() {
         // A hard link keeps the old bytes reachable as `.bak` while the
         // primary stays where it is; the rename swaps the new bytes in.
         let dir = tempfile::tempdir().unwrap();
@@ -598,7 +602,7 @@ mod tests {
     }
 
     #[test]
-    fn the_lock_serialises_writers_and_lists_tickets() {
+    fn writes_under_the_lock_are_listed_as_tickets() {
         let dir = tempfile::tempdir().unwrap();
         let data = DataDir::new(dir.path());
         assert!(

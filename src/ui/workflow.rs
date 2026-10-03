@@ -73,7 +73,7 @@ const CANDIDATES_SHOWN: usize = 8;
 /// Markdown files the conversation's file-writing tool calls name,
 /// newest first, each once.
 #[must_use]
-pub fn written_markdown(conversation: &Conversation, cwd: &Path) -> Vec<PathBuf> {
+fn written_markdown(conversation: &Conversation, cwd: &Path) -> Vec<PathBuf> {
     let mut out: Vec<PathBuf> = Vec::new();
     for turn in conversation.turns.iter().rev() {
         for activity in turn.activity.iter().rev() {
@@ -126,7 +126,7 @@ fn file_path_in(input: &str) -> Option<String> {
 /// The typed path as an absolute one: `~` is the home directory and a
 /// relative path is under the session's directory. `None` for blank.
 #[must_use]
-pub fn resolve_plan(typed: &str, cwd: &Path) -> Option<PathBuf> {
+fn resolve_plan(typed: &str, cwd: &Path) -> Option<PathBuf> {
     if typed.is_empty() {
         return None;
     }
@@ -507,15 +507,7 @@ fn rounds_list(cx: &mut DrawCtx<'_>, ui: &mut Ui, run: &WorkflowRun) {
         // The round in progress says who is at work; its word opens that
         // session, so the work can be watched and nudged.
         let at_work = (Some(round.n) == current).then(|| run.awaiting()).flatten();
-        let verdict = match (round.user_feedback.is_some(), round.verdict, &run.state) {
-            (_, _, RunState::AwaitingResponse) if at_work.is_some() => "answering",
-            (true, _, _) => "your feedback",
-            (false, Some(Verdict::Nothing), _) => "nothing further",
-            (false, Some(Verdict::Changes), _) if round.responded => "answered",
-            (false, Some(Verdict::Changes), _) => "changes asked",
-            (false, None, RunState::Starting) => "starting",
-            (false, None, _) => "reviewing",
-        };
+        let verdict = crate::core::round_status(run, round);
         let label = format!("Round {}", round.n);
         let is_selected = selected == Some(round.n);
         let text = if is_selected {
@@ -722,7 +714,7 @@ fn file_body(state: &mut UiState, ui: &mut Ui, path: &Path) {
 
 /// One line of a diff.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Change {
+enum Change {
     Same,
     Added,
     Removed,
@@ -735,7 +727,7 @@ const DIFF_LINE_CAP: usize = 3000;
 /// A line diff of `old` against `new`: the longest common subsequence,
 /// so a moved paragraph shows as removed and added, not garbled.
 #[must_use]
-pub fn diff_lines<'a>(old: &'a str, new: &'a str) -> Vec<(Change, &'a str)> {
+fn diff_lines<'a>(old: &'a str, new: &'a str) -> Vec<(Change, &'a str)> {
     let olds: Vec<&str> = old.lines().collect();
     let news: Vec<&str> = new.lines().collect();
     if olds.len() > DIFF_LINE_CAP || news.len() > DIFF_LINE_CAP {
@@ -791,15 +783,13 @@ fn diff_view(state: &mut UiState, ui: &mut Ui, previous: &Path, current: &Path) 
     };
     let (old, new) = (text_of(previous), text_of(current));
     let p = theme::palette(ui);
-    let changed = diff_lines(&old, &new)
-        .iter()
-        .filter(|(c, _)| *c != Change::Same)
-        .count();
+    let diff = diff_lines(&old, &new);
+    let changed = diff.iter().filter(|(c, _)| *c != Change::Same).count();
     if changed == 0 {
         ui.label(theme::meta_text(ui, "No changes from the previous round."));
     }
     ui.spacing_mut().item_spacing.y = 0.0;
-    for (change, line) in diff_lines(&old, &new) {
+    for (change, line) in diff {
         let (prefix, color, fill) = match change {
             Change::Same => (" ", p.n700, None),
             Change::Added => ("+", p.text, Some(p.accent_2_text.gamma_multiply(0.18))),

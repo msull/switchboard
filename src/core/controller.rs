@@ -6,7 +6,7 @@
 
 use std::time::Duration;
 
-use super::action::{AppCore, Clock, Effect, Out, View};
+use super::action::{AppCore, Clock, ESCAPE, Effect, Out, View};
 use super::grid;
 use super::model::{PinTarget, RecordId, SessionKind, SetId, WorkingSet};
 use crate::ports::controller::{Button, ControllerEvent, Direction};
@@ -331,7 +331,7 @@ impl AppCore {
             }
             (_, Direction::Down) => self.aim_at_pane(id, out, |host| Effect::SendKeys {
                 host,
-                bytes: vec![0x1b],
+                bytes: ESCAPE.to_vec(),
             }),
         }
     }
@@ -485,8 +485,9 @@ impl AppCore {
         std::mem::take(&mut self.controller.requests)
     }
 
+    #[cfg(test)]
     #[must_use]
-    pub fn controller_connected(&self) -> bool {
+    pub(crate) fn controller_connected(&self) -> bool {
         self.controller.connected
     }
 }

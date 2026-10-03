@@ -14,13 +14,14 @@ use switchboard_control::{self as wire, Body, Reply};
 
 use crate::pipeline::{Gate, OperatorKind, Pipeline, Stage};
 use crate::scheduler::{
-    Ask, NO_SUCH_SESSION, Runner, SocketDown, asks_again, env_for, held_in, may_rerun, new_attempt,
-    next_n, primary_tree, rework_key, sent_back, session_kind, vars_for,
+    Ask, NO_SUCH_SESSION, Runner, SocketDown, asks_again, checks_env, env_for, find_attempt,
+    find_attempt_mut, guidance_prelude, held_in, lane_gate_argv, latest_attempt, may_rerun,
+    new_attempt, next_n, primary_tree, record_of, rework_key, sent_back, session_kind, settle_file,
+    vars_for,
 };
 use crate::ticket::{
     Attempt, AttemptKind, AttemptState, DIRTY_POLLS, DecisionKind, GateRun, ProjectState,
-    ReviewRound, ReviewerResult, ReviewerRun, RoundState, SETTLE_POLLS, Settle, Ticket,
-    TicketState,
+    ReviewRound, ReviewerResult, ReviewerRun, RoundState, SETTLE_POLLS, Ticket,
 };
 
 /// What a reviewer writes when it has nothing to report, unless the
@@ -55,23 +56,12 @@ impl Runner {
         stage: &Stage,
         now_ms: u64,
     ) -> Result<()> {
-        let contexts = Self::contexts(t, p, stage);
-        if contexts.is_empty() {
-            return self.park(
-                t,
-                ps,
-                &format!("stage {} needs lanes the ticket has not cut", stage.name),
-                now_ms,
-            );
-        }
+        let Some(contexts) = self.contexts_or_park(t, ps, p, stage, now_ms)? else {
+            return Ok(());
+        };
         let mut all_complete = true;
         for (ctx, cwd, lane) in contexts {
-            let last = t
-                .attempts
-                .iter()
-                .filter(|a| a.stage == stage.name && a.context == ctx)
-                .max_by_key(|a| a.n)
-                .cloned();
+            let last = latest_attempt(t, &stage.name, &ctx).cloned();
             match last {
                 Some(a) if a.state == AttemptState::Complete => {}
                 Some(a) if a.is_open() => {
@@ -100,7 +90,7 @@ impl Runner {
             }
         }
         if all_complete {
-            self.advance(t, ps, now_ms)?;
+            self.advance(t, now_ms)?;
         }
         Ok(())
     }
@@ -204,7 +194,7 @@ impl Runner {
         }
         let head = self.git.head(cwd)?;
         let base = self.base_of(t, p, cwd, lane, now_ms)?;
-        let a = attempt_mut(t, key).clone();
+        let a = record_of(t, &key.0, key.1).clone();
         if let Some(prev) = a.rounds.last() {
             let expected = prev.head_after.clone().unwrap_or_else(|| prev.head.clone());
             if expected != head {
@@ -252,7 +242,7 @@ impl Runner {
             t.id,
             a.context
         );
-        let attempt = attempt_mut(t, key);
+        let attempt = record_of(t, &key.0, key.1);
         attempt.gate = None;
         for r in &reviewers {
             attempt
@@ -307,7 +297,7 @@ impl Runner {
         now_ms: u64,
     ) -> Result<()> {
         let op = p.operators[name].clone();
-        let a = attempt_mut(t, key).clone();
+        let a = record_of(t, &key.0, key.1).clone();
         let Some(round) = a.rounds.iter().find(|r| r.n == round_n).cloned() else {
             return Ok(());
         };
@@ -443,12 +433,7 @@ impl Runner {
                     .unwrap_or_default(),
             );
         }
-        let mut prompt = String::new();
-        let guidance = p.operators[&r.name].guidance.trim();
-        if !guidance.is_empty() {
-            prompt.push_str(&vars.render(guidance));
-            prompt.push_str("\n\n");
-        }
+        let mut prompt = guidance_prelude(&p.operators[&r.name].guidance, &vars);
         prompt.push_str(&vars.render(stage.review_prompt.as_deref().unwrap_or(REVIEW_PROMPT)));
         if carried {
             prompt.push_str("\n\n");
@@ -525,7 +510,7 @@ impl Runner {
             }
         }
         self.save_ticket(t, now_ms)?;
-        let round = attempt_mut(t, &key)
+        let round = record_of(t, &key.0, key.1)
             .rounds
             .iter()
             .find(|x| x.n == round.n)
@@ -555,19 +540,17 @@ impl Runner {
             .and_then(|r| r.dir.parent())
             .map_or_else(|| cwd.join("feedback.md"), |d| d.join("feedback.md"));
         std::fs::write(&path, text).with_context(|| format!("write {}", path.display()))?;
-        {
-            let attempt = attempt_mut(t, &key);
-            attempt
-                .artifacts
-                .insert(format!("r{}/feedback", round.n), path.clone());
-            let r = attempt
-                .rounds
-                .iter_mut()
-                .find(|x| x.n == round.n)
-                .expect("the round exists");
-            r.feedback = Some(path.clone());
-            r.open_points = open;
-        }
+        let attempt = record_of(t, &key.0, key.1);
+        attempt
+            .artifacts
+            .insert(format!("r{}/feedback", round.n), path.clone());
+        let r = attempt
+            .rounds
+            .iter_mut()
+            .find(|x| x.n == round.n)
+            .expect("the round exists");
+        r.feedback = Some(path.clone());
+        r.open_points = open;
         if open == 0 {
             log::info!(
                 "ticket {} {}/{} round {} converged at {head}",
@@ -614,7 +597,7 @@ impl Runner {
             if !self.retire_processes(t, ps, &others, now_ms)? {
                 return Ok(false);
             }
-            let a = attempt_mut(t, key).clone();
+            let a = record_of(t, &key.0, key.1).clone();
             self.kill_review_commands(t, &a);
             set_round_state(
                 t,
@@ -676,7 +659,7 @@ impl Runner {
             );
         }
         if p.dial("review-code") == "auto" {
-            attempt_mut(t, &key)
+            record_of(t, &key.0, key.1)
                 .rounds
                 .iter_mut()
                 .find(|x| x.n == round.n)
@@ -869,7 +852,7 @@ impl Runner {
         }
         let name = stage.implementer.clone().unwrap_or_default();
         let op = p.operators[&name].clone();
-        let a = attempt_mut(t, key).clone();
+        let a = record_of(t, &key.0, key.1).clone();
         let rdir = round
             .feedback
             .as_ref()
@@ -884,19 +867,17 @@ impl Runner {
         } else {
             wire::Launch::Argv(args)
         };
-        {
-            let attempt = attempt_mut(t, key);
-            attempt
-                .artifacts
-                .insert(format!("r{}/response", round.n), response.clone());
-            let r = attempt
-                .rounds
-                .iter_mut()
-                .find(|x| x.n == round.n)
-                .expect("the round exists");
-            r.response = Some(response);
-            r.state = RoundState::Fixing;
-        }
+        let attempt = record_of(t, &key.0, key.1);
+        attempt
+            .artifacts
+            .insert(format!("r{}/response", round.n), response.clone());
+        let r = attempt
+            .rounds
+            .iter_mut()
+            .find(|x| x.n == round.n)
+            .expect("the round exists");
+        r.response = Some(response);
+        r.state = RoundState::Fixing;
         let notes = format!(
             "Dispatch ticket {} · #{} {} · stage {} attempt {} · round {} implementer",
             t.id,
@@ -963,12 +944,7 @@ impl Runner {
         if let Some(plan) = t.input("plan") {
             vars.set("plan", plan.display().to_string());
         }
-        let mut prompt = String::new();
-        let guidance = op.guidance.trim();
-        if !guidance.is_empty() {
-            prompt.push_str(&vars.render(guidance));
-            prompt.push_str("\n\n");
-        }
+        let mut prompt = guidance_prelude(&op.guidance, &vars);
         prompt.push_str(&vars.render(stage.fix_prompt.as_deref().unwrap_or(FIX_PROMPT)));
         if round.n == 1
             && let Some(note) = t.rework.remove(&rework_key(&a.stage, &a.context))
@@ -1004,7 +980,7 @@ impl Runner {
             Seen::Unknown => return Ok(()),
         };
         let ticket_id = t.id.clone();
-        let rm = attempt_mut(t, &key)
+        let rm = record_of(t, &key.0, key.1)
             .rounds
             .iter_mut()
             .find(|x| x.n == round.n)
@@ -1058,17 +1034,15 @@ impl Runner {
             return self.fail_round(t, ps, &key, round.n, &reason, now_ms);
         }
         let head = self.git.head(cwd)?;
-        {
-            let attempt = attempt_mut(t, &key);
-            attempt.gate = None;
-            let r = attempt
-                .rounds
-                .iter_mut()
-                .find(|x| x.n == round.n)
-                .expect("the round exists");
-            r.head_after = Some(head.clone());
-            r.state = RoundState::Fixed;
-        }
+        let attempt = record_of(t, &key.0, key.1);
+        attempt.gate = None;
+        let r = attempt
+            .rounds
+            .iter_mut()
+            .find(|x| x.n == round.n)
+            .expect("the round exists");
+        r.head_after = Some(head.clone());
+        r.state = RoundState::Fixed;
         log::info!(
             "ticket {} {}/{} round {} fixed; head {head}; checks next",
             t.id,
@@ -1108,12 +1082,10 @@ impl Runner {
         now_ms: u64,
     ) -> Result<()> {
         let key = (a.stage.clone(), a.n);
-        let Some(Gate::Command { argv, per_lane, .. }) = p.command_gate(stage) else {
+        let Some(gate @ Gate::Command { .. }) = p.command_gate(stage) else {
             return self.fail_attempt(t, ps, &key.0, key.1, "no command gate", now_ms);
         };
-        let argv = lane
-            .and_then(|l| per_lane.as_ref().and_then(|m| m.get(l)))
-            .or(argv.as_ref())
+        let argv = lane_gate_argv(gate, lane)
             .cloned()
             .filter(|v| !v.is_empty());
         let Some(argv) = argv else {
@@ -1170,16 +1142,15 @@ impl Runner {
             .first()
             .and_then(|r| r.dir.parent())
             .map_or_else(|| cwd.join("checks.log"), |d| d.join("checks.log"));
-        let mut env = env_for(
+        let env = checks_env(
             t,
             lane,
             lane.and_then(|l| t.lanes.iter().find(|x| x.name == l))
                 .map(|l| l.branch.as_str()),
+            a,
+            cwd,
+            &head,
         );
-        env.push(("DISPATCH_STAGE".to_owned(), key.0.clone()));
-        env.push(("DISPATCH_CONTEXT".to_owned(), a.context.clone()));
-        env.push(("DISPATCH_TREE".to_owned(), cwd.display().to_string()));
-        env.push(("DISPATCH_HEAD".to_owned(), head.clone()));
         let check_key = checks_key(t, &key, round.n);
         if let Err(e) = self.git.start_check(&check_key, cwd, &argv, &env, &log) {
             let reason = format!("the checks could not start: {e:#}");
@@ -1192,7 +1163,7 @@ impl Runner {
             a.context,
             round.n
         );
-        let attempt = attempt_mut(t, &key);
+        let attempt = record_of(t, &key.0, key.1);
         attempt.gate = Some(GateRun {
             head,
             argv,
@@ -1238,14 +1209,14 @@ impl Runner {
                     key.0,
                     a.context
                 );
-                attempt_mut(t, &key).gate = None;
-                let a = attempt_mut(t, &key).clone();
+                record_of(t, &key.0, key.1).gate = None;
+                let a = record_of(t, &key.0, key.1).clone();
                 return self.start_checks(t, ps, p, stage, &a, round, cwd, lane, now_ms);
             }
         };
         let clean = self.git.is_clean(cwd)?;
         let head = self.git.head(cwd)?;
-        if let Some(g) = &mut attempt_mut(t, &key).gate {
+        if let Some(g) = &mut record_of(t, &key.0, key.1).gate {
             g.exit = Some(code);
         }
         if !clean || head != gate.head {
@@ -1268,7 +1239,7 @@ impl Runner {
             round.n
         );
         if round.state == RoundState::Fixed {
-            attempt_mut(t, &key).gate = None;
+            record_of(t, &key.0, key.1).gate = None;
             self.save_ticket(t, now_ms)?;
             return self.open_round(t, ps, p, stage, &key, cwd, lane, now_ms);
         }
@@ -1305,7 +1276,7 @@ impl Runner {
         head: &str,
         now_ms: u64,
     ) -> Result<()> {
-        let attempt = attempt_mut(t, key);
+        let attempt = record_of(t, &key.0, key.1);
         attempt.head = Some(head.to_owned());
         attempt.state = AttemptState::Complete;
         attempt.ended_ms = Some(now_ms);
@@ -1334,12 +1305,7 @@ impl Runner {
         let Some(key) = attempt.cloned() else {
             return Ok(());
         };
-        let Some(a) = t
-            .attempts
-            .iter()
-            .find(|a| a.stage == key.0 && a.n == key.1)
-            .cloned()
-        else {
+        let Some(a) = find_attempt(t, &key.0, key.1).cloned() else {
             return Ok(());
         };
         let Some(round) = a.rounds.last().cloned() else {
@@ -1369,7 +1335,7 @@ impl Runner {
                 now_ms,
             );
         }
-        let attempt = attempt_mut(t, &key);
+        let attempt = record_of(t, &key.0, key.1);
         let r = attempt
             .rounds
             .iter_mut()
@@ -1602,43 +1568,13 @@ fn waits_for_commit(rm: &mut ReviewRound, ticket: &str, stage: &str, context: &s
     true
 }
 
-/// Whether a file has looked the same for `SETTLE_POLLS` polls.
-fn settle_file(path: &Path, settle: &mut Option<Settle>) -> Result<bool> {
-    let meta = std::fs::metadata(path)?;
-    let mtime_ms = crate::epoch_ms(meta.modified()?);
-    let len = meta.len();
-    let entry = settle.get_or_insert(Settle {
-        mtime_ms,
-        len,
-        polls: 0,
-    });
-    if entry.mtime_ms == mtime_ms && entry.len == len {
-        entry.polls += 1;
-    } else {
-        *entry = Settle {
-            mtime_ms,
-            len,
-            polls: 1,
-        };
-    }
-    Ok(entry.polls >= SETTLE_POLLS)
-}
-
-/// The attempt `(stage, n)` names.
-fn attempt_mut<'a>(t: &'a mut Ticket, key: &(String, u32)) -> &'a mut Attempt {
-    t.attempts
-        .iter_mut()
-        .find(|a| a.stage == key.0 && a.n == key.1)
-        .expect("the attempt exists")
-}
-
 fn reviewer_mut<'a>(
     t: &'a mut Ticket,
     key: &(String, u32),
     round_n: u32,
     name: &str,
 ) -> &'a mut ReviewerRun {
-    attempt_mut(t, key)
+    record_of(t, &key.0, key.1)
         .rounds
         .iter_mut()
         .find(|r| r.n == round_n)
@@ -1656,7 +1592,7 @@ fn set_round_state(
     state: RoundState,
     now_ms: u64,
 ) {
-    if let Some(r) = attempt_mut(t, key)
+    if let Some(r) = record_of(t, &key.0, key.1)
         .rounds
         .iter_mut()
         .find(|r| r.n == round_n)
@@ -1713,11 +1649,7 @@ pub(crate) fn apply_review_reply(t: &mut Ticket, intent: &str, made: &[wire::Mad
     else {
         return;
     };
-    let Some(attempt) = t
-        .attempts
-        .iter_mut()
-        .find(|a| a.stage == key.0 && a.n == key.1)
-    else {
+    let Some(attempt) = find_attempt_mut(t, &key.0, key.1) else {
         return;
     };
     if let Some(rest) = intent.strip_prefix("reviewer:")
@@ -1735,10 +1667,4 @@ pub(crate) fn apply_review_reply(t: &mut Ticket, intent: &str, made: &[wire::Mad
         round.implementer = Some(id.clone());
         t.processes.push(id);
     }
-}
-
-/// Whether the ticket is parked or closing, for callers that poll.
-#[allow(dead_code)]
-fn stopped(t: &Ticket) -> bool {
-    !matches!(t.state, TicketState::Active)
 }

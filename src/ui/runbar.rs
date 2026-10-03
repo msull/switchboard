@@ -6,7 +6,6 @@
 
 use egui::{RichText, Ui};
 
-use super::cards::is_running;
 use super::{DrawCtx, theme};
 use crate::core::{AppAction, Launch, ProjectId, SessionKind, SideTab};
 
@@ -24,7 +23,7 @@ pub fn show(cx: &mut DrawCtx<'_>, ui: &mut Ui, pid: ProjectId, open_side: bool) 
         ui.spacing_mut().button_padding = egui::vec2(8.0, 5.0);
         for record in entries {
             let state = core.card_state(record.id);
-            let running = is_running(core, record.id);
+            let running = core.is_running(record.id);
             let service = record.kind == SessionKind::Service;
             let command = match &record.launch {
                 Launch::Command { command, .. } => command.clone(),

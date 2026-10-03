@@ -1,5 +1,5 @@
-//! Session events: what hooks (and later, stream parsers) tell us about
-//! a session, independent of where the signal came from.
+//! Session events: what hooks tell us about a session, independent of
+//! where the signal came from.
 
 use std::path::PathBuf;
 use std::time::SystemTime;
@@ -36,7 +36,9 @@ pub enum EventKind {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionEvent {
     pub at: SystemTime,
-    /// Per-helper-process sequence, for stable ordering within one instant.
+    /// Per-helper-process sequence, for stable ordering within one
+    /// instant. The hook helper runs once per event, so it is always 0
+    /// from there.
     pub seq: u64,
     /// From `SWITCHBOARD_RECORD_ID` in the pane's environment, when present.
     pub record_id: Option<RecordId>,

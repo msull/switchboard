@@ -12,7 +12,7 @@ use super::{DrawCtx, GAP, UiState, theme};
 use crate::core::{AppAction, PinTarget, ProjectId};
 
 /// Files above this are not read; the preview says so instead.
-pub const MAX_PREVIEW_BYTES: u64 = 2 * 1024 * 1024;
+const MAX_PREVIEW_BYTES: u64 = 2 * 1024 * 1024;
 
 /// How often the file on disk is compared with the loaded copy. A stat
 /// per frame is wasted work; a change shows up within this delay.
@@ -157,7 +157,7 @@ pub fn show(cx: &mut DrawCtx<'_>, ui: &mut Ui, pid: ProjectId, path: &Path) {
 }
 
 /// Prose stops here, however wide the window.
-const MAX_READING_WIDTH: f32 = 860.0;
+pub(super) const MAX_READING_WIDTH: f32 = 860.0;
 
 /// Give Markdown the design's colors: cyan links, a dark code block on
 /// both themes, inline code on a neutral tint. The viewer reads these

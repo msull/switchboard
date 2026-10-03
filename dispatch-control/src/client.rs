@@ -1,5 +1,6 @@
 //! A blocking client: one connection, one request at a time, one reply
-//! per request. Std only, so Dispatch and tests need nothing else.
+//! per request: what the app uses to call a runner. Std only, so the
+//! app and tests need nothing else.
 
 use std::io::{self, BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
@@ -10,7 +11,7 @@ use crate::{Reply, Request};
 
 /// How long a reply may take. A take fetches the issue from its source
 /// first, so this is generous.
-pub const REPLY_TIMEOUT: Duration = Duration::from_secs(30);
+const REPLY_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub struct Client {
     reader: BufReader<UnixStream>,
@@ -32,7 +33,7 @@ impl Client {
 
     /// Send one request and wait for its reply. A closed socket or a
     /// reply that does not parse is an error; a `Reply::Failed` is not,
-    /// since the app did answer.
+    /// since the runner did answer.
     pub fn call(&mut self, request: &Request) -> io::Result<Reply> {
         self.writer.write_all(request.to_line().as_bytes())?;
         self.writer.flush()?;

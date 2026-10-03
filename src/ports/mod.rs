@@ -1,5 +1,5 @@
 //! Capabilities the core needs from the outside world, as traits. Every
-//! adapter ships a fake next to it (see `adapters::fakes`).
+//! port has a fake in `adapters::fakes`.
 
 pub mod agent;
 pub mod artifacts;

@@ -2,9 +2,9 @@
 //! costs a few cents or opens a window. Run one with
 //!
 //! ```sh
-//! cargo test --test live -- --ignored claude_live --nocapture
-//! cargo test --test live -- --ignored codex_live --nocapture
-//! cargo test --test live -- --ignored ghostty_live --nocapture
+//! cargo test --locked --test live -- --ignored claude_live --nocapture
+//! cargo test --locked --test live -- --ignored codex_live --nocapture
+//! cargo test --locked --test live -- --ignored ghostty_live --nocapture
 //! ```
 //!
 //! `claude_live` runs, from a temp cwd with a temp data dir:

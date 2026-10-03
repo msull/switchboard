@@ -10,7 +10,7 @@ use std::time::{Duration, SystemTime};
 
 use egui::{RichText, Sense, Ui, UiBuilder, vec2};
 
-use super::cards::{file_name, is_running, removable, since_text};
+use super::cards::{ago_text, file_name, removable};
 use super::{DrawCtx, GAP, document, theme};
 use crate::core::{AppAction, Run, SessionKind, SessionRecord};
 
@@ -53,18 +53,13 @@ pub fn kicker(record: &SessionRecord, running: bool, now: SystemTime) -> String 
         None if run.open() => "stopped".to_owned(),
         None => "killed".to_owned(),
     };
-    let when = match since_text(ended) {
-        s if s == "just now" => s,
-        s => format!("{s} ago"),
-    };
-    format!("{how} · {took} · {when}")
+    format!("{how} · {took} · {}", ago_text(ended, now))
 }
 
 /// The one action row for commands and services: run or stop, open,
 /// remove. Nothing else on a card starts a run.
 pub fn actions(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord, running: bool) {
-    ui.spacing_mut().item_spacing.x = 14.0;
-    ui.spacing_mut().button_padding = vec2(0.0, 4.0);
+    super::action_spacing(ui);
     let id = record.id;
     let service = record.kind == SessionKind::Service;
     if running {
@@ -113,7 +108,7 @@ pub enum RunCardMode {
 
 /// Where a run's log lives.
 fn log_path(data_dir: &Path, run: &Run) -> PathBuf {
-    data_dir.join("scrollback").join(&run.log)
+    crate::adapters::scrollback::scrollback_dir(data_dir).join(&run.log)
 }
 
 /// A run's output, read from its log and cached until the file changes.
@@ -205,7 +200,7 @@ pub fn set_card(
 ) {
     let p = theme::palette(ui);
     let state = cx.core.card_state(record.id);
-    let running = is_running(cx.core, record.id);
+    let running = cx.core.is_running(record.id);
     let project = cx
         .core
         .workspace(record.project)
@@ -319,7 +314,7 @@ fn set_card_body(
     if let RunCardMode::Artifact(i) = mode
         && let Some(path) = run.artifacts.get(i)
     {
-        let renders = data_dir.join("renders");
+        let renders = super::renders_dir(&data_dir);
         egui::ScrollArea::vertical()
             .id_salt(("artifact", record.id, i))
             .auto_shrink(false)
@@ -345,7 +340,7 @@ const RUNS_WIDTH: f32 = 190.0;
 /// left, the selected run's log (or the live pane for the one running)
 /// in the middle, and its artifacts at the right.
 pub fn page(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord) {
-    let running = is_running(cx.core, record.id);
+    let running = cx.core.is_running(record.id);
     if record.runs.is_empty() {
         if running {
             super::session::live_pane(cx, ui, record);
@@ -584,7 +579,7 @@ fn artifacts_view(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord, run
             cx.dispatch(AppAction::RevealDocument(path.clone()));
         }
     });
-    let renders = cx.services.store.data_dir().join("renders");
+    let renders = super::renders_dir(&cx.services.store.data_dir());
     egui::ScrollArea::vertical()
         .id_salt(("artifact-page", record.id, selected))
         .auto_shrink(false)
