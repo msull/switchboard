@@ -1576,7 +1576,7 @@ parks the ticket until an adapter exists), reads its checks once a
 minute, and completes bound to the tree's head when they are green at
 it, or at once on a merged PR or, with `checks = "none"` on the
 stage, on an open PR at the head; no PR, another head, red checks or
-missing checks is one `pr` decision with `recheck` and `park`, never
+missing checks past the young-head window is one `pr` decision with `recheck` and `park`, never
 a failed attempt, and a provider that cannot be read is retried
 quietly for an hour first. The PR is recorded on the attempt and
 shown on the ticket page as a link with the last reading. A
@@ -1637,6 +1637,14 @@ link, so its primary is never absent mid-write. The reviewer's
 templates get `{worktree}`, `{branch}` and `{project.root}` rendered
 in, and a template naming neither is prefixed with the repository's
 path, since the reviewer works in the attempt directory.
+The runner is patient. A Stop with the card still `working` holds an
+agent, reviewer or fix attempt; it fails only after about thirty
+seconds idle at its prompt without its artifact, or when the pane
+exits. Only `no such run` fails a review run's query or reads a paused
+run as stopped; any other failed reply or socket error is asked again
+next pass with one warning. A `none` check reading within two minutes
+of the head's last move is pending. Answering clears every session a
+decision marked, not only the ticket's newest.
 `dispatch/tests/first_slice.rs` is the acceptance table, plus a test
 per point above; `dispatch/tests/live.rs` runs the first stage against
 a real Switchboard and a haiku agent. Known gap: Claude Code treats a
@@ -1646,6 +1654,11 @@ answered in the pane once (a plain directory under a trusted parent
 inherits the trust; a fresh repository does not). Nothing in
 Switchboard or Dispatch writes Claude's trust file. One more: `close`
 (and `retake`, which closes by it) leaves pending decisions pending.
+And: a `working` card left stale by a subagent's last hook, with the
+main agent never taking another turn, holds the attempt until it is
+parked; the Stop hook's `background_tasks`
+(`spikes/03-session-state/README.md:94`) would say it exactly but is
+not on the wire.
 
 ## Global workspace status (2026-10-01)
 

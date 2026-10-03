@@ -17,6 +17,7 @@ pub(crate) const INTERRUPTED: &str = "interrupted";
 pub(crate) const REMOVED: &str = "removed by hand";
 pub(crate) const NOT_REPEATED: &str = "reply lost; not repeated";
 pub(crate) const HARMLESS: &str = "reply lost; harmless to repeat";
+pub(crate) const SUPERSEDED: &str = "reply lost; a later request for the session replaced it";
 
 /// Recovery's verdict written on an operation: the words for the
 /// reader, and the flag that keeps a later pass from recovering it
@@ -136,6 +137,7 @@ impl Runner {
                     }
                 }
             }
+            "idempotent" if superseded(t, i) => give_verdict(&mut t.ledger[i], SUPERSEDED),
             "idempotent" => self.replay(t, ps, i),
             _ => {
                 give_verdict(&mut t.ledger[i], NOT_REPEATED);
@@ -221,6 +223,23 @@ impl Runner {
         }
         Ok(())
     }
+}
+
+/// A waiting request with no reply that a later waiting request for the
+/// same session follows on the ledger. Whether it landed or not, the
+/// later one decides the mark; sent again now it would land after that
+/// one and undo it, so it is settled without being sent.
+pub(crate) fn superseded(t: &Ticket, i: usize) -> bool {
+    let session_of = |o: &Operation| match &o.body {
+        Some(Body::SessionWaiting { session, .. }) => Some(session.clone()),
+        _ => None,
+    };
+    let Some(session) = session_of(&t.ledger[i]) else {
+        return false;
+    };
+    t.ledger[i + 1..]
+        .iter()
+        .any(|o| session_of(o).as_ref() == Some(&session))
 }
 
 /// The reply a creation would have carried, from what `find` reports.

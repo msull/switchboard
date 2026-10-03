@@ -15,11 +15,11 @@ use std::sync::{Arc, Mutex};
 
 use dispatch::git::FakeRepo;
 use dispatch::github::{Checks, FakePullRequests, PullRequest};
-use dispatch::scheduler::{PR_ERROR_GRACE_MS, PR_POLL_MS, Runner};
+use dispatch::scheduler::{PR_ERROR_GRACE_MS, PR_POLL_MS, PR_YOUNG_HEAD_MS, Runner};
 use dispatch::store::DataDir;
-use dispatch::ticket::RoundState;
 use dispatch::ticket::{
-    Attempt, AttemptKind, AttemptState, Decision, SourceSnapshot, Ticket, TicketState,
+    Attempt, AttemptKind, AttemptState, Decision, ReviewerResult, RoundState, SETTLE_POLLS,
+    STOP_IDLE_POLLS, SourceSnapshot, Ticket, TicketState,
 };
 use support::{FakeSwitchboard, SharedPort};
 use switchboard_control::{Body, Liveness, RunState, SessionKind};
@@ -318,7 +318,15 @@ impl Env {
         std::fs::write(artifact, text).unwrap();
         let now = self.now;
         self.sb().stop(session, now);
-        for _ in 0..dispatch::ticket::SETTLE_POLLS {
+        for _ in 0..SETTLE_POLLS {
+            self.step();
+        }
+    }
+
+    /// Passes enough for a stopped agent idle without its artifact to
+    /// be given up on.
+    fn idle_past_grace(&mut self) {
+        for _ in 0..STOP_IDLE_POLLS {
             self.step();
         }
     }
@@ -1522,6 +1530,8 @@ fn ready_asks_about_red_moved_or_missing_checks_and_none_can_be_expected() {
     );
     env.pr_is(&id, "base0000", "open", Checks::None);
     env.recheck(&id);
+    // Past the window in which a pushed head's checks may not exist yet.
+    env.wait(PR_YOUNG_HEAD_MS);
     env.step();
     let pending = env.pending(&id);
     assert!(
@@ -1557,6 +1567,38 @@ fn ready_asks_about_red_moved_or_missing_checks_and_none_can_be_expected() {
             .as_ref()
             .map(|p| p.checks.as_str()),
         Some("none")
+    );
+}
+
+/// Soon after the head moved, a PR with no checks may only be one whose
+/// checks GitHub has not created yet: the reading is recorded and the
+/// gate waits; past the window it asks.
+#[test]
+fn a_none_reading_soon_after_a_push_waits_then_asks() {
+    let mut env = Env::new();
+    let id = at_ready(&mut env);
+    env.pr_is(&id, "base0000", "open", Checks::None);
+    env.recheck(&id);
+    env.wait(29_000);
+    env.step();
+    assert!(env.pending(&id).is_empty(), "{:#?}", env.pending(&id));
+    let t = env.ticket(&id);
+    let ready = t.attempts_of("ready").last().unwrap();
+    assert!(ready.is_open(), "{ready:?}");
+    assert_eq!(
+        ready.pr.as_ref().map(|p| p.checks.as_str()),
+        Some("none"),
+        "{ready:?}"
+    );
+    env.wait(PR_YOUNG_HEAD_MS);
+    env.step();
+    let pending = env.pending(&id);
+    assert_eq!(pending.len(), 1, "{pending:#?}");
+    assert_eq!(pending[0].name, "pr");
+    assert!(
+        pending[0].question.contains("no checks configured"),
+        "{}",
+        pending[0].question
     );
 }
 
@@ -2013,9 +2055,7 @@ fn an_agent_that_vanishes_after_a_partial_file_fails_and_nothing_advances() {
     assert!(!t.attempts[1].artifacts["notes"].exists());
     let now = env.now;
     env.sb().stop(&second, now);
-    for _ in 0..dispatch::ticket::SETTLE_POLLS {
-        env.step();
-    }
+    env.idle_past_grace();
     let t = env.ticket(&id);
     assert!(
         matches!(&t.attempts[1].state, AttemptState::Failed { reason } if reason.contains("without writing notes"))
@@ -2629,7 +2669,8 @@ fn a_claude_reviewer_runs_in_the_tree_with_its_flags_and_an_allow_rule_for_the_a
     assert_eq!(reviewer.cwd, start.0);
 }
 
-fn at_finalize(env: &mut Env) -> String {
+/// Through the plan, its review run started.
+fn at_review_run(env: &mut Env) -> String {
     let id = through_plan(env, 7);
     let t = env.ticket(&id);
     env.finish(
@@ -2642,6 +2683,11 @@ fn at_finalize(env: &mut Env) -> String {
             .last()
             .is_some_and(|a| a.run.is_some())
     });
+    id
+}
+
+fn at_finalize(env: &mut Env) -> String {
+    let id = at_review_run(env);
     env.sb().runs[0].state = RunState::Converged;
     env.step();
     assert_eq!(env.pending(&id)[0].name, "finalize");
@@ -2732,6 +2778,80 @@ fn parking_pauses_the_run_and_kills_every_process_before_reading_as_parked() {
     let calls = env.sb().calls.len();
     env.step();
     assert_eq!(env.sb().calls.len(), calls);
+}
+
+/// A workflow query the app could not answer, as a failed reply or a
+/// socket timeout, says nothing about the run: the attempt keeps
+/// running and the next pass asks again.
+#[test]
+fn a_workflow_query_the_app_could_not_answer_leaves_the_attempt_running() {
+    for timeout in [false, true] {
+        let mut env = Env::new();
+        let id = at_review_run(&mut env);
+        env.sb().runs[0].state = RunState::Converged;
+        if timeout {
+            env.fail_once("workflow", "Resource temporarily unavailable");
+        } else {
+            env.sb().fail_workflow_query = Some("the app did not answer in time".into());
+        }
+        env.step();
+        let t = env.ticket(&id);
+        let a = t.attempts_of("review").last().unwrap();
+        assert!(a.is_open(), "{a:?}");
+        assert!(env.pending(&id).is_empty(), "nothing waits on the user");
+        env.step();
+        let pending = env.pending(&id);
+        assert_eq!(pending.len(), 1, "{pending:#?}");
+        assert_eq!(pending[0].name, "finalize");
+    }
+}
+
+/// Only Switchboard's word that it has no such run fails the attempt.
+#[test]
+fn a_run_switchboard_no_longer_has_fails_the_attempt() {
+    let mut env = Env::new();
+    let id = at_review_run(&mut env);
+    env.sb().runs.clear();
+    env.step();
+    let t = env.ticket(&id);
+    let a = t.attempts_of("review").last().unwrap();
+    assert!(
+        matches!(&a.state, AttemptState::Failed { reason } if reason == "review run gone: no such run"),
+        "{a:?}"
+    );
+    let pending = env.pending(&id);
+    assert_eq!(pending.len(), 1, "{pending:#?}");
+    assert_eq!(pending[0].name, "rerun");
+}
+
+/// A park waits while the app cannot say the run paused: the attempt is
+/// written cancelled only once the run is confirmed stopped.
+#[test]
+fn parking_waits_while_the_app_cannot_say_the_run_paused() {
+    let mut env = Env::new();
+    let id = at_finalize(&mut env);
+    let decision = env.pending(&id)[0].id.clone();
+    let now = env.tick();
+    env.runner
+        .decide(&id, &decision, "park", None, now)
+        .unwrap();
+    env.sb().fail_workflow_query = Some("the app did not answer in time".into());
+    env.step();
+    let t = env.ticket(&id);
+    assert!(!matches!(t.state, TicketState::Parked { .. }), "{t:#?}");
+    let review = t.attempts_of("review").last().unwrap();
+    assert!(
+        !matches!(review.state, AttemptState::Cancelled { .. }),
+        "{review:#?}"
+    );
+    env.step();
+    let t = env.ticket(&id);
+    assert!(matches!(t.state, TicketState::Parked { .. }), "{t:#?}");
+    let review = t.attempts_of("review").last().unwrap();
+    assert!(
+        matches!(review.state, AttemptState::Cancelled { .. }),
+        "{review:#?}"
+    );
 }
 
 #[test]
@@ -2869,9 +2989,7 @@ fn a_rerun_retires_the_replaced_attempt_before_launching() {
     // up.
     let now = env.now;
     env.sb().stop(&first, now);
-    for _ in 0..dispatch::ticket::SETTLE_POLLS {
-        env.step();
-    }
+    env.idle_past_grace();
     let t = env.ticket(&id);
     assert!(
         matches!(&t.attempts[0].state, AttemptState::Failed { .. }),
@@ -2914,9 +3032,7 @@ fn a_rerun_waits_while_the_replaced_process_survives_its_kill() {
     let old = session_of(&env.ticket(&id), "investigate");
     let now = env.now;
     env.sb().stop(&old, now);
-    for _ in 0..dispatch::ticket::SETTLE_POLLS {
-        env.step();
-    }
+    env.idle_past_grace();
     let now = env.tick();
     env.runner
         .decide(&id, &env.pending(&id)[0].id, "rerun", None, now)
@@ -3415,6 +3531,91 @@ fn a_query_the_app_could_not_answer_leaves_the_attempt_running() {
     );
 }
 
+/// A Stop while the card still reads `working` ended a turn, not the
+/// work (background agents still at it): the attempt is held however
+/// long that takes, and notes written mid-turn complete nothing until a
+/// later Stop leaves the card idle.
+#[test]
+fn a_stop_while_still_working_holds_the_attempt_until_the_notes_land() {
+    let mut env = Env::new();
+    let id = env.take(7).id;
+    env.step();
+    let t = env.ticket(&id);
+    let investigator = session_of(&t, "investigate");
+    let notes = artifact_of(&t, "investigate", "notes");
+    let now = env.now;
+    env.sb().stop(&investigator, now);
+    env.sb().session_mut(&investigator).card = "working".into();
+    for _ in 0..STOP_IDLE_POLLS + 5 {
+        env.step();
+    }
+    let t = env.ticket(&id);
+    let a = t.attempts_of("investigate").last().unwrap();
+    assert!(a.is_open(), "{a:?}");
+    assert!(env.pending(&id).is_empty(), "nothing waits on the user");
+    assert!(!env.sb().killed.contains(&investigator));
+    // Written mid-turn: settled, but no completion while it works.
+    std::fs::write(&notes, "# notes\nfindings").unwrap();
+    for _ in 0..SETTLE_POLLS + 2 {
+        env.step();
+    }
+    let t = env.ticket(&id);
+    assert!(t.attempts_of("investigate").last().unwrap().is_open());
+    assert!(!env.sb().killed.contains(&investigator));
+    let now = env.now;
+    env.sb().stop(&investigator, now);
+    env.steps_until(&id, "the investigation completing", |t, _| {
+        t.attempts_of("investigate").next().unwrap().state == AttemptState::Complete
+    });
+    assert!(env.sb().killed.contains(&investigator));
+}
+
+/// A stopped agent with no notes is given up on only after
+/// `STOP_IDLE_POLLS` passes in a row at its prompt: a card reading
+/// `waiting on you` or `working` in between starts the count again.
+#[test]
+fn a_stop_idle_without_notes_fails_after_the_grace() {
+    let mut env = Env::new();
+    let id = env.take(7).id;
+    env.step();
+    let investigator = session_of(&env.ticket(&id), "investigate");
+    let open = |env: &Env| {
+        env.ticket(&id)
+            .attempts_of("investigate")
+            .last()
+            .unwrap()
+            .is_open()
+    };
+    let now = env.now;
+    env.sb().stop(&investigator, now);
+    env.sb().session_mut(&investigator).card = "waiting on you".into();
+    for _ in 0..=STOP_IDLE_POLLS {
+        env.step();
+    }
+    assert!(open(&env), "a question to the user holds it");
+    env.sb().session_mut(&investigator).card = "idle".into();
+    for _ in 0..STOP_IDLE_POLLS - 1 {
+        env.step();
+    }
+    assert!(open(&env));
+    env.sb().session_mut(&investigator).card = "working".into();
+    env.step();
+    env.sb().session_mut(&investigator).card = "idle".into();
+    for _ in 0..STOP_IDLE_POLLS - 1 {
+        env.step();
+    }
+    assert!(open(&env), "the count started again");
+    env.step();
+    let t = env.ticket(&id);
+    assert!(
+        matches!(&t.attempts_of("investigate").last().unwrap().state, AttemptState::Failed { reason } if reason.contains("stopped without writing notes")),
+        "{t:#?}"
+    );
+    let pending = env.pending(&id);
+    assert_eq!(pending.len(), 1, "{pending:#?}");
+    assert_eq!(pending[0].name, "rerun");
+}
+
 /// A reply recovered on a pass that changes nothing else is still
 /// written, so the operation is not recovered again on every pass.
 #[test]
@@ -3677,6 +3878,187 @@ fn without_a_hint_the_lanes_are_asked_and_the_answer_chooses() {
     let t = env.ticket(&id);
     let latest = plan_of(&t, "frontend");
     assert_eq!((latest.n, latest.is_open()), (3, true), "{t:#?}");
+}
+
+/// The Orchard ticket at its two planners, the lanes question answered,
+/// then the backend planner given up on: its `rerun` question pending
+/// and marked on the frontend planner (the newest session), which has
+/// stopped without a plan. Returns the env, the ticket, the investigator
+/// and the frontend planner's session.
+fn marked_frontend_planner() -> (Env, String, String, String) {
+    let (mut env, id) = workspace_env(&["type:bug"]);
+    env.step();
+    let t = env.ticket(&id);
+    let investigator = session_of(&t, "investigate");
+    std::fs::write(artifact_of(&t, "investigate", "notes"), "# notes").unwrap();
+    let now = env.now;
+    env.sb().stop(&investigator, now);
+    env.steps_until(&id, "the lanes question", |t, _| {
+        t.pending_decisions().iter().any(|d| d.name == "lanes")
+    });
+    assert!(env.sb().waiting[&investigator].0, "the question marked it");
+    let lanes = env.pending(&id).remove(0);
+    let now = env.tick();
+    env.runner
+        .decide(&id, &lanes.id, "backend, frontend", None, now)
+        .unwrap();
+    env.steps_until(&id, "a planner per lane", |t, _| {
+        t.attempts_of("plan").filter(|a| a.is_open()).count() == 2
+    });
+    assert!(
+        !env.sb().waiting[&investigator].0,
+        "the answer unmarked the investigator, not only the newest planner"
+    );
+    let t = env.ticket(&id);
+    let backend = plan_of(&t, "backend");
+    let frontend = plan_of(&t, "frontend");
+    assert_eq!((backend.n, frontend.n), (1, 2));
+    let now = env.now;
+    env.sb().stop(backend.session.as_ref().unwrap(), now);
+    env.idle_past_grace();
+    let t = env.ticket(&id);
+    assert!(
+        matches!(plan_of(&t, "backend").state, AttemptState::Failed { .. }),
+        "{t:#?}"
+    );
+    assert!(rerun_for(&t, "backend").is_some(), "{t:#?}");
+    let frontend = frontend.session.unwrap();
+    assert!(env.sb().waiting[&frontend].0, "the question marked it");
+    let now = env.now;
+    env.sb().stop(&frontend, now);
+    for _ in 0..STOP_IDLE_POLLS + 5 {
+        env.step();
+    }
+    let t = env.ticket(&id);
+    assert!(plan_of(&t, "frontend").is_open(), "held while marked");
+    (env, id, investigator, frontend)
+}
+
+/// The `rerun` question about the backend planner, answered.
+fn rerun_backend(env: &mut Env, id: &str) {
+    let rerun = rerun_for(&env.ticket(id), "backend").unwrap();
+    let now = env.tick();
+    env.runner
+        .decide(id, &rerun.id, "rerun", None, now)
+        .unwrap();
+}
+
+fn plan_failed_without_writing(t: &Ticket, ctx: &str) -> bool {
+    matches!(&plan_of(t, ctx).state, AttemptState::Failed { reason } if reason.contains("stopped without writing plan"))
+}
+
+/// Answering clears every session a decision marked, not only the
+/// ticket's newest, so an agent held by a mark is given up on once the
+/// question it was showing is answered.
+#[test]
+fn an_answer_clears_every_mark_so_a_marked_agent_is_still_given_up_on() {
+    let (mut env, id, _, frontend) = marked_frontend_planner();
+    rerun_backend(&mut env, &id);
+    env.steps_until(&id, "the backend's rerun", |t, _| {
+        let a = plan_of(t, "backend");
+        a.n == 3 && a.session.is_some()
+    });
+    assert!(
+        env.sb().waiting.values().all(|(on, _)| !on),
+        "{:?}",
+        env.sb().waiting
+    );
+    env.idle_past_grace();
+    let t = env.ticket(&id);
+    assert!(plan_failed_without_writing(&t, "frontend"), "{t:#?}");
+    assert!(!env.sb().waiting[&frontend].0);
+}
+
+/// A `waiting off` that never reached Switchboard, or whose reply was
+/// lost, is sent again on a later pass until it lands.
+#[test]
+fn a_lost_unmark_is_sent_again_until_it_lands() {
+    for lost_reply in [false, true] {
+        let (mut env, id, _, frontend) = marked_frontend_planner();
+        rerun_backend(&mut env, &id);
+        if lost_reply {
+            env.sb().drop_reply_for = Some("session.waiting".into());
+        } else {
+            env.fail_once("session.waiting", "Resource temporarily unavailable");
+        }
+        env.step();
+        let t = env.ticket(&id);
+        let off = waiting_ops(&t)
+            .into_iter()
+            .rfind(|o| {
+                matches!(&o.body, Some(Body::SessionWaiting { session, on: false, .. }) if session == &frontend)
+            })
+            .unwrap();
+        assert!(off.reply.is_none(), "{off:#?}");
+        env.idle_past_grace();
+        let t = env.ticket(&id);
+        assert!(
+            waiting_ops(&t).iter().all(|o| o.reply.is_some()),
+            "{:#?}",
+            waiting_ops(&t)
+        );
+        assert!(!env.sb().waiting[&frontend].0);
+        assert!(plan_failed_without_writing(&t, "frontend"), "{t:#?}");
+    }
+}
+
+/// A waiting request whose reply never came, followed by a later one
+/// for the same session that was answered (what a replay that failed
+/// leaves behind), is never sent after the later one: the mark stays as
+/// the later request left it.
+#[test]
+fn a_replaced_waiting_request_is_never_sent_after_the_one_that_replaced_it() {
+    let mut env = Env::new();
+    let id = env.take(7).id;
+    env.step();
+    let mut t = env.ticket(&id);
+    let investigator = session_of(&t, "investigate");
+    assert!(t.pending_decisions().is_empty());
+    let template = t.ledger.last().unwrap().clone();
+    let waiting = |op: &str, on: bool, answered: bool| dispatch::ticket::Operation {
+        op: op.into(),
+        kind: "session.waiting".into(),
+        class: "idempotent".into(),
+        attempt: None,
+        intent: String::new(),
+        body: Some(Body::SessionWaiting {
+            session: investigator.clone(),
+            on,
+            reason: if on {
+                "decision d-1: rerun".into()
+            } else {
+                String::new()
+            },
+        }),
+        reply: answered.then(|| switchboard_control::Reply::Persisted { made: vec![] }),
+        error: (!answered).then(|| "the socket dropped".into()),
+        asked: false,
+        settled: false,
+        ..template.clone()
+    };
+    t.ledger.push(waiting("op-on", true, false));
+    t.ledger.push(waiting("op-off", false, true));
+    env.sb()
+        .waiting
+        .insert(investigator.clone(), (false, String::new()));
+    let now = env.tick();
+    env.runner.save_ticket(&mut t, now).unwrap();
+    let calls = env.sb().calls.len();
+    env.step();
+    env.step();
+    let sb = env.sb();
+    assert!(
+        !sb.calls[calls..]
+            .iter()
+            .any(|r| matches!(&r.body, Body::SessionWaiting { on: true, .. })),
+        "the replaced mark was sent again: {:?}",
+        &sb.calls[calls..]
+    );
+    assert!(!sb.waiting[&investigator].0);
+    drop(sb);
+    let t = env.ticket(&id);
+    let on = t.ledger.iter().find(|o| o.op == "op-on").unwrap();
+    assert!(on.settled && on.reply.is_none(), "{on:#?}");
 }
 
 /// The workspace pipeline, on disk and in the ticket's copy, with a
@@ -5019,9 +5401,7 @@ fn a_failed_reviewer_fails_the_round_after_its_siblings_are_killed() {
     lint_exits(&mut env, &id, 1, 0, "");
     let now = env.now;
     env.sb().stop(&style.session.clone().unwrap(), now);
-    for _ in 0..=dispatch::ticket::SETTLE_POLLS {
-        env.step();
-    }
+    env.idle_past_grace();
     env.steps_until(&id, "the rerun question", |t, _| {
         t.pending_decisions().iter().any(|d| d.name == "rerun")
     });
@@ -5030,6 +5410,85 @@ fn a_failed_reviewer_fails_the_round_after_its_siblings_are_killed() {
         matches!(&a.state, AttemptState::Failed { reason } if reason.contains("stopped without writing feedback")),
         "{:?}",
         a.state
+    );
+}
+
+/// A Claude reviewer whose Stop leaves its card `working` is held, its
+/// sibling with it, and a later write and Stop finish the round.
+#[test]
+fn a_reviewer_that_stops_busy_and_writes_later_completes_the_round() {
+    let mut env = Env::new();
+    let id = at_review(&mut env);
+    let style = reviewer(&env.ticket(&id), 1, "style").session.unwrap();
+    let now = env.now;
+    env.sb().stop(&style, now);
+    env.sb().session_mut(&style).card = "working".into();
+    for _ in 0..8 {
+        env.step();
+    }
+    let t = env.ticket(&id);
+    assert_eq!(reviewer(&t, 1, "style").result, None);
+    assert_eq!(reviewer(&t, 1, "lint").result, None);
+    assert_eq!(review_attempt(&t).rounds[0].state, RoundState::Reviewing);
+    assert!(!env.pending(&id).iter().any(|d| d.name == "rerun"));
+    assert!(!env.sb().killed.contains(&style));
+    style_says(
+        &mut env,
+        &id,
+        1,
+        "- src/x.rs: the name `tmp` says nothing\n",
+    );
+    lint_exits(&mut env, &id, 1, 0, "");
+    env.steps_until(&id, "the round question", |t, _| {
+        t.pending_decisions()
+            .iter()
+            .any(|d| d.name == "review-code")
+    });
+    let t = env.ticket(&id);
+    assert_eq!(
+        reviewer(&t, 1, "style").result,
+        Some(ReviewerResult::Findings)
+    );
+    assert_eq!(reviewer(&t, 1, "lint").result, Some(ReviewerResult::Clean));
+    assert!(review_attempt(&t).is_open());
+}
+
+/// The round's implementer is held by a busy Stop the same way, and
+/// finishes the round when it commits and answers.
+#[test]
+fn an_implementer_that_stops_busy_keeps_its_round() {
+    let (mut env, id, _) = findings_asked_and_fixed();
+    let t = env.ticket(&id);
+    let round = &review_attempt(&t).rounds[0];
+    let fixer = round.implementer.clone().unwrap();
+    let response = round.response.clone().unwrap();
+    let now = env.now;
+    env.sb().stop(&fixer, now);
+    env.sb().session_mut(&fixer).card = "working".into();
+    for _ in 0..=STOP_IDLE_POLLS {
+        env.step();
+    }
+    let t = env.ticket(&id);
+    assert_eq!(review_attempt(&t).rounds[0].state, RoundState::Fixing);
+    assert!(!env.sb().killed.contains(&fixer));
+    let tree = t.lanes[0].worktree.clone();
+    env.repo
+        .lock()
+        .unwrap()
+        .heads
+        .insert(tree, "fix00001".into());
+    env.finish(
+        &fixer,
+        &response,
+        "- r1/style-1: fixed\n- r1/style-2: fixed\n- r1/lint-1: fixed\n",
+    );
+    env.steps_until(&id, "the round fixed", |t, _| {
+        review_attempt(t).rounds[0].state == RoundState::Fixed
+    });
+    let t = env.ticket(&id);
+    assert_eq!(
+        review_attempt(&t).rounds[0].head_after.as_deref(),
+        Some("fix00001")
     );
 }
 

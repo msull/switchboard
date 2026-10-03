@@ -180,6 +180,13 @@ pub const SETTLE_POLLS: u32 = 3;
 /// lands. About five minutes at one poll a second.
 pub const DIRTY_POLLS: u32 = 300;
 
+/// Polls a stopped agent may sit idle at its prompt without its
+/// artifact before it counts as finished without it: about thirty
+/// seconds at one poll a second. A card that reads anything but idle
+/// (background agents still working, a question to the user) starts
+/// the count again.
+pub const STOP_IDLE_POLLS: u32 = 30;
+
 /// One run of one stage in one context.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Attempt {
@@ -199,8 +206,9 @@ pub struct Attempt {
     pub settle: BTreeMap<String, Settle>,
     /// The Stop the agent reported, once seen.
     pub stop_at_ms: Option<u64>,
-    /// Polls since the stop with an artifact still missing; a few are
-    /// allowed, then the attempt failed.
+    /// Polls in a row the stopped agent has sat idle at its prompt with an
+    /// artifact still missing; any other card starts the count again. At
+    /// `STOP_IDLE_POLLS` the attempt failed.
     #[serde(default)]
     pub polls_since_stop: u32,
     /// The head commit of the context's tree when the attempt completed.
@@ -256,6 +264,9 @@ pub struct ReviewRound {
     pub head_after: Option<String>,
     #[serde(default)]
     pub stop_at_ms: Option<u64>,
+    /// Polls in a row the stopped agent has sat idle at its prompt with an
+    /// artifact still missing; any other card starts the count again. At
+    /// `STOP_IDLE_POLLS` the attempt failed.
     #[serde(default)]
     pub polls_since_stop: u32,
     #[serde(default)]
@@ -305,6 +316,9 @@ pub struct ReviewerRun {
     pub launched: bool,
     #[serde(default)]
     pub stop_at_ms: Option<u64>,
+    /// Polls in a row the stopped agent has sat idle at its prompt with an
+    /// artifact still missing; any other card starts the count again. At
+    /// `STOP_IDLE_POLLS` the attempt failed.
     #[serde(default)]
     pub polls_since_stop: u32,
     #[serde(default)]

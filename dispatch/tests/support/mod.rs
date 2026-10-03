@@ -54,6 +54,9 @@ pub struct FakeSwitchboard {
     /// The next session query is answered with this failure instead of
     /// the session (the app too busy to answer, say).
     pub fail_session_query: Option<String>,
+    /// The next workflow query is answered with this failure instead of
+    /// the run (the app too busy to answer, say).
+    pub fail_workflow_query: Option<String>,
     /// Save the records and the request line, then die: no reply line,
     /// no pane, `op.status` interrupted.
     pub die_launching: Option<String>,
@@ -496,7 +499,16 @@ impl FakeSwitchboard {
             Body::Session { session } => match self.fail_session_query.take() {
                 Some(reason) => Reply::failed(reason),
                 None => match self.sessions.iter().find(|s| &s.id == session) {
-                    Some(s) => Reply::Session { session: s.clone() },
+                    Some(s) => {
+                        // Dispatch's mark wins over activity on the
+                        // card, as `card_state` does in the app.
+                        let mut s = s.clone();
+                        let marked = self.waiting.get(&s.id).is_some_and(|(on, _)| *on);
+                        if marked && s.liveness == Liveness::Running {
+                            s.card = "waiting on you".into();
+                        }
+                        Reply::Session { session: s }
+                    }
                     None => Reply::failed("no such session"),
                 },
             },
@@ -508,9 +520,12 @@ impl FakeSwitchboard {
                     .cloned()
                     .collect(),
             },
-            Body::Workflow { run } => match self.runs.iter().find(|r| &r.id == run) {
-                Some(r) => Reply::Workflow { run: r.clone() },
-                None => Reply::failed("no such run"),
+            Body::Workflow { run } => match self.fail_workflow_query.take() {
+                Some(reason) => Reply::failed(reason),
+                None => match self.runs.iter().find(|r| &r.id == run) {
+                    Some(r) => Reply::Workflow { run: r.clone() },
+                    None => Reply::failed("no such run"),
+                },
             },
             Body::Workflows { project } => Reply::Workflows {
                 runs: self

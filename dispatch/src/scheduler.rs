@@ -24,13 +24,17 @@ use crate::template::Vars;
 use crate::ticket::{
     Attempt, AttemptKind, AttemptState, CloseProgress, Decision, DecisionKind, DecisionState,
     GateRun, LaneRecord, Operation, ProjectState, PullRequestRecord, PullRequestSource,
-    SETTLE_POLLS, Settle, SourceSnapshot, Ticket, TicketState,
+    SETTLE_POLLS, STOP_IDLE_POLLS, Settle, SourceSnapshot, Ticket, TicketState,
 };
 
 /// How often a `pr-checks` gate reads the provider.
 pub const PR_POLL_MS: u64 = 60_000;
 /// How long lookups may keep failing before the gate asks.
 pub const PR_ERROR_GRACE_MS: u64 = 3_600_000;
+/// How long after the tree's head moves a `none` reading waits rather
+/// than asks: GitHub creates a new head's check runs a little after the
+/// push, so for a minute or so a repository with CI reads as one without.
+pub const PR_YOUNG_HEAD_MS: u64 = 120_000;
 
 /// The pseudo-stage a refresh rebaser's attempts and questions carry:
 /// not in any pipeline, so no stage mistakes them for its own.
@@ -557,6 +561,11 @@ impl Runner {
         self.act_on_answers(t, ps, p, now_ms)?;
         if !t.active() {
             return Ok(());
+        }
+        // A `waiting off` lost on the socket, or held back behind an
+        // older request never answered, is sent again until it lands.
+        if t.pending_decisions().is_empty() && marks_unsettled(t) {
+            self.unmark(t, ps, now_ms)?;
         }
         // The ticket's trees come before any stage: a worktree of
         // Dispatch's clone on the ticket's branch, cut from what the
@@ -1294,8 +1303,16 @@ impl Runner {
                     run.state,
                     RunState::Paused { .. } | RunState::Finalized | RunState::HandedOff
                 ),
-                // Gone is stopped too.
-                Reply::Failed { .. } => true,
+                // Gone is stopped too; any other failure (the app too
+                // busy to answer) says nothing about the run.
+                Reply::Failed { reason } if reason == NO_SUCH_RUN => true,
+                Reply::Failed { reason } => {
+                    log::warn!(
+                        "ticket {}: workflow query failed: {reason}; asking again",
+                        t.id
+                    );
+                    false
+                }
                 other => bail!("workflow query answered {other:?}"),
             };
             if !paused {
@@ -1497,17 +1514,19 @@ impl Runner {
         self.unmark(t, ps, now_ms)
     }
 
-    /// Clear the waiting mark a decision put on a session.
+    /// Clear the waiting marks decisions put on sessions, once none is
+    /// pending: every session still marked in the ledger, which need not
+    /// be the ticket's current one (another lane may have launched since).
+    /// A replay still unanswered holds the rest back; `step` calls this
+    /// again on every pass while `marks_unsettled`.
     pub(crate) fn unmark(
         &mut self,
         t: &mut Ticket,
         ps: &mut ProjectState,
         now_ms: u64,
     ) -> Result<()> {
-        if t.pending_decisions().is_empty()
-            && let Some(session) = t.current_session().cloned()
-        {
-            self.unmark_session(t, ps, session, now_ms)?;
+        if t.pending_decisions().is_empty() {
+            self.clear_marks(t, ps, now_ms)?;
         }
         Ok(())
     }
@@ -1569,37 +1588,30 @@ impl Runner {
     }
 
     /// Resolve every `session.waiting` whose reply never came, in ledger
-    /// order and under its own operation id, and only then send `on:
-    /// false` to each session whose last waiting request turned its mark
-    /// on. True once every waiting request on the ledger that can be
-    /// sent again has a reply and no session's last one is `on: true`,
+    /// order and under its own operation id (or settle it unsent when a
+    /// later request for its session replaced it), and only then send
+    /// `on: false` to each session whose last waiting request turned its
+    /// mark on. True once every waiting request on the ledger that can be
+    /// sent again is resolved and no session's last one is `on: true`,
     /// or there never was one.
     ///
-    /// Only waiting requests are replayed here: recovering a lost
+    /// Only waiting requests are recovered here: recovering a lost
     /// creation can fail an attempt and ask a new question, which a
-    /// parking ticket must not do. The rest wait for startup recovery.
+    /// parking ticket must not do. The rest wait for `step`'s recovery
+    /// or startup's.
     /// One recorded without its body cannot be sent again or say which
     /// session it marked, so it is left alone rather than waited on.
-    fn unmark_for_parking(
-        &mut self,
-        t: &mut Ticket,
-        ps: &mut ProjectState,
-        now_ms: u64,
-    ) -> Result<bool> {
-        let unanswered: Vec<usize> = t
-            .ledger
-            .iter()
-            .enumerate()
-            .filter(|(_, o)| o.kind == "session.waiting" && o.reply.is_none() && o.body.is_some())
-            .map(|(i, _)| i)
-            .collect();
+    fn clear_marks(&mut self, t: &mut Ticket, ps: &mut ProjectState, now_ms: u64) -> Result<bool> {
+        let unanswered = unanswered_waiting(t);
         let replayed = !unanswered.is_empty();
         let mut resolved = true;
         for i in unanswered {
-            self.replay(t, ps, i);
+            // Sent again, or settled unsent when a later request for
+            // its session replaced it (`superseded`).
+            self.recover_one(t, ps, i, now_ms)?;
             // Later requests wait for this one, so an older `on: true`
             // cannot land after the unmark.
-            if t.ledger[i].reply.is_none() {
+            if t.ledger[i].unresolved() {
                 resolved = false;
                 break;
             }
@@ -1616,6 +1628,17 @@ impl Runner {
             self.unmark_session(t, ps, session, now_ms)?;
         }
         Ok(still_marked(t).is_empty())
+    }
+
+    /// Every mark cleared before the ticket reads as parked; true once
+    /// all are confirmed off (`clear_marks`).
+    fn unmark_for_parking(
+        &mut self,
+        t: &mut Ticket,
+        ps: &mut ProjectState,
+        now_ms: u64,
+    ) -> Result<bool> {
+        self.clear_marks(t, ps, now_ms)
     }
 
     /// Every answer not yet acted on.
@@ -1649,7 +1672,12 @@ impl Runner {
                 *acted = true;
             }
             match (name.as_str(), answer.as_str()) {
-                ("lanes", lanes) => self.choose_lanes(t, ps, p, &lane_names(lanes), now_ms)?,
+                ("lanes", lanes) => {
+                    self.choose_lanes(t, ps, p, &lane_names(lanes), now_ms)?;
+                    // The investigator the question marked is no longer
+                    // the current session once the lanes launch.
+                    self.unmark(t, ps, now_ms)?;
+                }
                 ("finalize", "finalize") | ("paused", "continue") => {
                     if let Some(run) = attempt
                         .as_ref()
@@ -2381,7 +2409,9 @@ impl Runner {
                 return self.remedy(t, ps, p, &a, cwd, lane, &pr, &Remedy::Rebase, now_ms);
             }
             Ok(Some((pr, checks))) => {
-                let (summary, verdict) = judge_pr(&pr, checks.as_ref(), &head, none_expected);
+                let young = now_ms < head_moved_ms(t, a).saturating_add(PR_YOUNG_HEAD_MS);
+                let (summary, verdict) =
+                    judge_pr(&pr, checks.as_ref(), &head, none_expected, young);
                 let attempt = record_of(t, &a.stage, a.n);
                 attempt.pr = Some(PullRequestRecord {
                     number: pr.number,
@@ -3523,11 +3553,18 @@ impl Runner {
                 }
             };
         }
-        attempt.polls_since_stop += 1;
+        // A Stop with the card still `working` ended a turn, not the
+        // work: background agents or a tool are still at it, and the
+        // artifact may land in a later turn.
+        if busy(&view) {
+            attempt.polls_since_stop = 0;
+            return self.save_ticket(t, now_ms);
+        }
+        let running = view.liveness == wire::Liveness::Running;
         let missing = missing_artifacts(attempt);
         if !missing.is_empty() {
-            if attempt.polls_since_stop >= SETTLE_POLLS || view.liveness != wire::Liveness::Running
-            {
+            attempt.polls_since_stop = idle_polls(&view, attempt.polls_since_stop);
+            if !running || attempt.polls_since_stop >= STOP_IDLE_POLLS {
                 return self.fail_attempt(
                     t,
                     ps,
@@ -3556,7 +3593,7 @@ impl Runner {
             log::info!("ticket {} {}/{} complete", t.id, a.stage, a.context);
         }
         self.save_ticket(t, now_ms)?;
-        if view.liveness == wire::Liveness::Running {
+        if running {
             self.send(
                 t,
                 ps,
@@ -4238,7 +4275,7 @@ impl Runner {
         };
         let view = match self.ask(Body::Workflow { run: run.clone() })? {
             Reply::Workflow { run } => run,
-            Reply::Failed { reason } => {
+            Reply::Failed { reason } if reason == NO_SUCH_RUN => {
                 return self.fail_attempt(
                     t,
                     ps,
@@ -4247,6 +4284,17 @@ impl Runner {
                     &format!("review run gone: {reason}"),
                     now_ms,
                 );
+            }
+            // The app could not answer (busy, timed out on its own
+            // thread): nothing is known about the run, so ask again.
+            Reply::Failed { reason } => {
+                log::warn!(
+                    "ticket {} {}/{}: workflow query failed: {reason}; asking again",
+                    t.id,
+                    a.stage,
+                    a.context
+                );
+                return self.save_ticket(t, now_ms);
             }
             other => bail!("workflow query answered {other:?}"),
         };
@@ -4442,7 +4490,7 @@ impl Runner {
     ) -> Result<Option<Stepped>> {
         if matches!(t.state, TicketState::Parking { .. }) {
             if let Err(e) = self.finish_parking(t, ps, now_ms) {
-                log::error!("ticket {}: {e}", t.id);
+                log_step_error(&t.id, &e);
             }
             return Ok(None);
         }
@@ -4483,7 +4531,7 @@ impl Runner {
             let asked = match self.ask_again_unslotted(t, ps, &p, now_ms) {
                 Ok(asked) => u32::try_from(asked).unwrap_or(u32::MAX),
                 Err(e) => {
-                    log::error!("ticket {}: {e}", t.id);
+                    log_step_error(&t.id, &e);
                     0
                 }
             };
@@ -4494,7 +4542,7 @@ impl Runner {
         }
         let had_slot = t.attempts.iter().any(costs_slot);
         if let Err(e) = self.step(t, ps, &p, now_ms) {
-            log::error!("ticket {}: {e}", t.id);
+            log_step_error(&t.id, &e);
         }
         let took_slot = !had_slot && t.attempts.iter().any(costs_slot);
         Ok(Some(Stepped {
@@ -4603,6 +4651,25 @@ impl Runner {
 /// Switchboard's reply to a session query for a record it does not
 /// have; the one failure that means the session is gone.
 pub(crate) const NO_SUCH_SESSION: &str = "no such session";
+/// The card word for an agent at work (`CardState::Working`'s label).
+pub(crate) const BUSY_CARD: &str = "working";
+/// The card word for an agent at its prompt (`CardState::Idle`'s label).
+pub(crate) const IDLE_CARD: &str = "idle";
+/// Switchboard's reply to a `workflow` query for a run it does not have;
+/// the one failure that means the run is gone.
+pub(crate) const NO_SUCH_RUN: &str = "no such run";
+
+/// A running pane whose card says the agent is at work: after a Stop,
+/// a turn ended but the work did not (background agents, a tool).
+pub(crate) fn busy(view: &wire::SessionView) -> bool {
+    view.liveness == wire::Liveness::Running && view.card == BUSY_CARD
+}
+
+/// The idle count after one more poll with an artifact missing: only a
+/// card at the prompt counts towards giving up, any other starts again.
+pub(crate) fn idle_polls(view: &wire::SessionView, polls: u32) -> u32 {
+    if view.card == IDLE_CARD { polls + 1 } else { 0 }
+}
 
 /// An open attempt with an agent or a review run in it: what the
 /// policy's `slots` count. A gate-only attempt launches nothing.
@@ -4911,7 +4978,20 @@ pub struct SocketDown(pub String);
 
 impl From<std::io::Error> for SocketDown {
     fn from(e: std::io::Error) -> Self {
-        Self(e.to_string())
+        // The kind tells a timeout (`WouldBlock`) from a reply that did
+        // not parse (`InvalidData`) in the log line.
+        Self(format!("{:?}: {e}", e.kind()))
+    }
+}
+
+/// A ticket's pass that ended in an error, logged: the socket down is
+/// one warning, since the next pass asks again; anything else is an
+/// error. `{e:#}` prints the whole chain, not only the outer context.
+fn log_step_error(ticket: &str, e: &anyhow::Error) {
+    if e.is::<SocketDown>() {
+        log::warn!("ticket {ticket}: {e:#}; asking again next pass");
+    } else {
+        log::error!("ticket {ticket}: {e:#}");
     }
 }
 
@@ -5082,13 +5162,37 @@ fn same_commit(a: &str, b: &str) -> bool {
     n >= 7 && a[..n].eq_ignore_ascii_case(&b[..n])
 }
 
+/// When the tree's head last moved, as far as the records say: the gate
+/// attempt's start (the stage before it pushed), the end of any attempt
+/// in its context (a refresh rebaser, a remedy fixer or rebaser), or a
+/// `recheck` answered about it (the user pushed, then said so).
+fn head_moved_ms(t: &Ticket, a: &Attempt) -> u64 {
+    let key = (a.stage.clone(), a.n);
+    let ended = t
+        .attempts
+        .iter()
+        .filter(|x| x.context == a.context)
+        .filter_map(|x| x.ended_ms);
+    let rechecked = t
+        .decisions
+        .iter()
+        .filter(|d| d.attempt.as_ref() == Some(&key))
+        .filter_map(|d| match &d.state {
+            DecisionState::Answered { answer, at_ms, .. } if answer == "recheck" => Some(*at_ms),
+            _ => None,
+        });
+    ended.chain(rechecked).fold(a.started_ms, u64::max)
+}
+
 /// What a reading of the PR means: its summary for the record, and
-/// pass (`Ok(true)`), wait (`Ok(false)`) or a question.
+/// pass (`Ok(true)`), wait (`Ok(false)`) or a question. `young` is a
+/// head that moved too recently for its checks to exist yet.
 fn judge_pr(
     pr: &crate::github::PullRequest,
     checks: Option<&Checks>,
     head: &str,
     none_expected: bool,
+    young: bool,
 ) -> (String, Result<bool, String>) {
     let summary = match (pr.state.as_str(), checks) {
         ("merged", _) => "merged".to_owned(),
@@ -5109,6 +5213,7 @@ fn judge_pr(
             short(head)
         )),
         "none" if none_expected => Ok(true),
+        "none" if young => Ok(false),
         "none" => Err(format!(
             "PR #{} has no checks configured; add a workflow, or set checks = \"none\" on the stage",
             pr.number
@@ -5383,6 +5488,23 @@ fn still_marked(t: &Ticket) -> Vec<String> {
     }
     last.into_iter()
         .filter_map(|(session, on)| on.then_some(session))
+        .collect()
+}
+
+/// Whether a mark may still be on in Switchboard: a session whose last
+/// waiting request turned it on, or a waiting request with no reply yet.
+fn marks_unsettled(t: &Ticket) -> bool {
+    !still_marked(t).is_empty() || !unanswered_waiting(t).is_empty()
+}
+
+/// The ledger indices of waiting requests recovery still has to resolve
+/// and can: unanswered, unsettled, and recorded with their body.
+fn unanswered_waiting(t: &Ticket) -> Vec<usize> {
+    t.ledger
+        .iter()
+        .enumerate()
+        .filter(|(_, o)| o.kind == "session.waiting" && o.unresolved() && o.body.is_some())
+        .map(|(i, _)| i)
         .collect()
 }
 

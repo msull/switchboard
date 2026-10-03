@@ -3,6 +3,7 @@
 
 use std::io;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use switchboard_control::{Client, Reply, Request, SOCKET_FILE};
 
@@ -11,9 +12,12 @@ pub trait Port: Send {
 }
 
 /// A connection to the socket, made on the first call and remade after
-/// an error, so a Switchboard restart costs one failed request.
+/// any error, a timeout included, so a Switchboard restart or a slow
+/// reply costs one failed request.
 pub struct SocketPort {
     path: PathBuf,
+    /// How long a reply may take on the connection.
+    timeout: Duration,
     client: Option<Client>,
 }
 
@@ -22,7 +26,17 @@ impl SocketPort {
     pub fn new(switchboard_data_dir: &Path) -> Self {
         Self {
             path: switchboard_data_dir.join(SOCKET_FILE),
+            timeout: switchboard_control::client::REPLY_TIMEOUT,
             client: None,
+        }
+    }
+
+    /// The same, with a short reply timeout for a test to run into.
+    #[cfg(test)]
+    fn with_timeout(switchboard_data_dir: &Path, timeout: Duration) -> Self {
+        Self {
+            timeout,
+            ..Self::new(switchboard_data_dir)
         }
     }
 
@@ -55,7 +69,7 @@ impl Port for SocketPort {
 impl SocketPort {
     fn once(&mut self, request: &Request) -> io::Result<Reply> {
         if self.client.is_none() {
-            self.client = Some(Client::connect(&self.path)?);
+            self.client = Some(Client::connect_with_timeout(&self.path, self.timeout)?);
         }
         let result = self.client.as_mut().expect("connected above").call(request);
         if result.is_err() {
@@ -80,7 +94,7 @@ fn stale(e: &io::Error) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::io::{BufRead, BufReader, Write};
+    use std::io::{BufRead, BufReader, Read, Write};
     use std::os::unix::net::UnixListener;
 
     use switchboard_control::Body;
@@ -123,5 +137,51 @@ mod tests {
         );
         let seen = server.join().unwrap();
         assert!(seen.contains("q-2"), "the same request went again: {seen}");
+    }
+
+    /// A reply that never comes: the call fails with the timeout, is not
+    /// sent again on its own (it may have been received), and the next
+    /// call goes over a fresh connection.
+    #[test]
+    fn a_timed_out_connection_is_remade_on_the_next_call() {
+        let dir = tempfile::tempdir().unwrap();
+        let listener = UnixListener::bind(dir.path().join(SOCKET_FILE)).unwrap();
+        let server = std::thread::spawn(move || {
+            // The first connection reads the request and never answers.
+            let (first, _) = listener.accept().unwrap();
+            let mut held = BufReader::new(first);
+            let mut first_line = String::new();
+            held.read_line(&mut first_line).unwrap();
+            let (second, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(second.try_clone().unwrap());
+            let mut second_line = String::new();
+            reader.read_line(&mut second_line).unwrap();
+            let mut w = second;
+            writeln!(w, r#"{{"reply":"spaces","spaces":[]}}"#).unwrap();
+            // The port dropped the first connection: anything more on
+            // it would be the request sent twice.
+            let mut rest = String::new();
+            held.read_to_string(&mut rest).unwrap();
+            (first_line, rest, second_line)
+        });
+        let mut port = SocketPort::with_timeout(dir.path(), Duration::from_millis(200));
+        let first = Request::new("q-1".to_owned(), Body::Spaces);
+        let err = port.call(&first).unwrap_err();
+        assert!(
+            matches!(
+                err.kind(),
+                io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+            ),
+            "{err:?}"
+        );
+        let second = Request::new("q-2".to_owned(), Body::Spaces);
+        assert!(matches!(port.call(&second), Ok(Reply::Spaces { .. })));
+        let (first_line, rest, second_line) = server.join().unwrap();
+        assert!(first_line.contains("q-1"), "{first_line}");
+        assert!(
+            rest.is_empty(),
+            "sent again on the first connection: {rest}"
+        );
+        assert!(second_line.contains("q-2"), "{second_line}");
     }
 }

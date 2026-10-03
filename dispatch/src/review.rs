@@ -14,14 +14,14 @@ use switchboard_control::{self as wire, Body, Reply};
 
 use crate::pipeline::{Gate, OperatorKind, Pipeline, Stage};
 use crate::scheduler::{
-    Ask, NO_SUCH_SESSION, Runner, SocketDown, asks_again, checks_env, env_for, find_attempt,
-    find_attempt_mut, guidance_prelude, held_in, lane_gate_argv, latest_attempt, may_rerun,
-    new_attempt, next_n, primary_tree, record_of, rework_key, sent_back, session_kind, settle_file,
-    vars_for,
+    Ask, NO_SUCH_SESSION, Runner, SocketDown, asks_again, busy, checks_env, env_for, find_attempt,
+    find_attempt_mut, guidance_prelude, held_in, idle_polls, lane_gate_argv, latest_attempt,
+    may_rerun, new_attempt, next_n, primary_tree, record_of, rework_key, sent_back, session_kind,
+    settle_file, vars_for,
 };
 use crate::ticket::{
     Attempt, AttemptKind, AttemptState, DIRTY_POLLS, DecisionKind, GateRun, ProjectState,
-    ReviewRound, ReviewerResult, ReviewerRun, RoundState, SETTLE_POLLS, Ticket,
+    ReviewRound, ReviewerResult, ReviewerRun, RoundState, STOP_IDLE_POLLS, Ticket,
 };
 
 /// What a reviewer writes when it has nothing to report, unless the
@@ -781,9 +781,17 @@ impl Runner {
             }
             return Ok(());
         }
+        // Codex reports no Stop and has no hook-driven card, so only a
+        // Claude reviewer is held by a busy one.
+        if claude && busy(&view) {
+            rm.polls_since_stop = 0;
+            return Ok(());
+        }
         if !present {
-            rm.polls_since_stop += 1;
-            if !running || (claude && rm.polls_since_stop >= SETTLE_POLLS) {
+            if claude {
+                rm.polls_since_stop = idle_polls(&view, rm.polls_since_stop);
+            }
+            if !running || (claude && rm.polls_since_stop >= STOP_IDLE_POLLS) {
                 rm.result = Some(ReviewerResult::Failed {
                     reason: "stopped without writing feedback".into(),
                 });
@@ -1004,9 +1012,13 @@ impl Runner {
         let Some(response) = rm.response.clone() else {
             return Ok(());
         };
+        if busy(&view) {
+            rm.polls_since_stop = 0;
+            return self.save_ticket(t, now_ms);
+        }
         if !response.is_file() {
-            rm.polls_since_stop += 1;
-            if rm.polls_since_stop >= SETTLE_POLLS || !running {
+            rm.polls_since_stop = idle_polls(&view, rm.polls_since_stop);
+            if rm.polls_since_stop >= STOP_IDLE_POLLS || !running {
                 let reason = format!(
                     "round {}: the implementer stopped without writing {}",
                     round.n,

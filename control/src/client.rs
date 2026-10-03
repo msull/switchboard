@@ -20,9 +20,15 @@ pub struct Client {
 impl Client {
     /// Connect to the socket at `path` (`<data dir>/control.sock`).
     pub fn connect(path: &Path) -> io::Result<Self> {
+        Self::connect_with_timeout(path, REPLY_TIMEOUT)
+    }
+
+    /// The same, with replies (and writes) allowed `timeout` rather than
+    /// `REPLY_TIMEOUT`.
+    pub fn connect_with_timeout(path: &Path, timeout: Duration) -> io::Result<Self> {
         let stream = UnixStream::connect(path)?;
-        stream.set_read_timeout(Some(REPLY_TIMEOUT))?;
-        stream.set_write_timeout(Some(REPLY_TIMEOUT))?;
+        stream.set_read_timeout(Some(timeout))?;
+        stream.set_write_timeout(Some(timeout))?;
         let writer = stream.try_clone()?;
         Ok(Self {
             reader: BufReader::new(stream),

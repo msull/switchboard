@@ -254,11 +254,19 @@ interrupted attempt.
 - **Completion is evidence, recorded.** An agent attempt is complete
   when Switchboard has reported the session's Stop event (or a zero
   exit) *and* the artifact exists and has settled; both facts are
-  written on the attempt when seen. A card that merely reads idle is
-  not a stop: Switchboard shows a quiet pane as idle after twenty
-  seconds, which can be an agent thinking. A settled file with a
-  running session waits; a stop with no file, a nonzero exit, or a
-  session gone with no recorded stop is a failed attempt. Recovery
+  written on the attempt when seen. A Stop while the card reads
+  `working` is a turn ended, not the work (background agents or a
+  tool still at it), so the attempt is held, neither failed nor
+  completed, whatever the artifact says. A stop with no file fails
+  once the pane has sat idle at its prompt for about thirty seconds
+  in a row (`STOP_IDLE_POLLS`; any other card starts the count again)
+  or the pane exits. A card that reads idle is not a stop on its own:
+  for a Codex session Switchboard shows a quiet pane as idle after
+  twenty seconds, which can be an agent thinking. For Claude Code,
+  `idle` follows a Stop, and only after one does it count toward the
+  grace. A settled file with a running session waits; after that
+  grace, a stop with no file, a nonzero exit, or a session gone with
+  no recorded stop is a failed attempt. Recovery
   applies the same rule: a missing session is finished only if the
   stop and the settle were recorded before the crash.
 - **Stalls.** Switchboard's stall notice is for workflow runs only.
@@ -999,7 +1007,9 @@ range.
 previous round left it (its `head_after`, or its `head` when nothing
 was fixed); any other movement parks the ticket with both heads named.
 Every reviewer starts. A Claude reviewer is complete on its Stop with
-its feedback file settled; Codex on the file present and settled (it
+its feedback file settled, and is held like any agent while its card
+still reads `working` after the Stop: it fails for a missing file only
+after the same idle grace, so a sibling is never killed early; Codex on the file present and settled (it
 reports no Stop; gone or exited without the file is a failure); a
 command on exit: 0 is nothing to report (its output is diagnostic),
 1 with output is findings, 1 with nothing on stdout or any other exit
@@ -1033,7 +1043,9 @@ stale: the ticket parks with both heads named.
 plan, the branch and `feedback.md`, asked to address each point on the
 branch and write `response.md` answering each by id (`fixed` or
 `disputed`). It is complete on its Stop with the response settled and
-the tree clean and committed; a missing response fails the round. A
+the tree clean and committed; it is held by a busy card after its Stop
+the same way, and a response still missing after the idle grace fails
+the round. A
 tree still dirty when the response settles is waited on for about
 five minutes while the session lives (`DIRTY_POLLS`), because a commit
 whose pre-commit hook runs the test suite lands that late; dirty past
@@ -1122,7 +1134,9 @@ ticket's slot as any open attempt does).
 branch's head revision at the time of the check. Its readings are:
 pending (wait), green at the head (pass), red at the head (a decision
 with the failed check named), no PR or no checks configured (a
-decision), and any lookup error (retry with backoff, a decision after
+decision; a `none` reading within two minutes of the head's last move,
+`PR_YOUNG_HEAD_MS`, is pending instead, since GitHub creates a pushed
+head's check runs a little after the push), and any lookup error (retry with backoff, a decision after
 an hour). Green at an older head is not green: a moved head voids it
 along with every other result made against the old head set, as
 described under "Stage semantics". `pr-merged` reads the same PR and
@@ -1308,6 +1322,12 @@ differently:
   decision that shows what was sent and lets you look at the pane,
   asked once: the ledger entry is marked, recovery leaves it to your
   answer, and a `park` answer is acted on even with every slot taken.
+
+A failed reply to a query is judged by its words. Only `no such
+session` or `no such run` means the record is gone, and only that fails
+an attempt or reads a paused run as stopped; any other failed reply
+(the app too busy to answer in time) or a socket error says nothing
+about the record and is asked again on the next pass.
 
 An operation whose status is `in progress` is waited for, not judged:
 Dispatch restarting while Switchboard is still cloning a planner finds
@@ -1523,6 +1543,11 @@ and one against the real one:
 | A disputed point, no code change, the reviewer keeps it; the cap is reached | The point carries its original id, marked kept with the reason; fixed points close; `review-cap` offers accept, more, park; `accept` runs the checks at the reviewed head (not reused: a different head) and completes (`the_cap_offers_the_reviewed_head_and_accept_completes_at_it`) |
 | A disputed point the reviewer withdraws; `review-code = "auto"` | No question; the fix pass runs; the point closes in pass two, which converges (`a_withdrawn_point_closes_and_the_auto_dial_fixes_without_asking`) |
 | A command reviewer exits 2; an agent reviewer stops with no file | The round fails into `rerun`; the sibling session is killed first; neither is an approval (`a_failed_reviewer_fails_the_round_after_its_siblings_are_killed`) |
+| An agent stops while its card still reads `working`, and writes its notes in a later turn | The attempt is held with no failure, no question and no kill; notes written mid-turn complete nothing until a Stop leaves the card idle (`a_stop_while_still_working_holds_the_attempt_until_the_notes_land`; idle without notes fails only after `STOP_IDLE_POLLS`: `a_stop_idle_without_notes_fails_after_the_grace`) |
+| A Claude reviewer stops busy and writes later | No result, no rerun, no sibling killed while it works; its later write and Stop finish the round (`a_reviewer_that_stops_busy_and_writes_later_completes_the_round`; the implementer the same: `an_implementer_that_stops_busy_keeps_its_round`) |
+| A `workflow` query the app could not answer, or a socket timeout | The review attempt keeps running and the next pass reads the run; only `no such run` fails it; a park waits until the run is confirmed paused (`a_workflow_query_the_app_could_not_answer_leaves_the_attempt_running`, `a_run_switchboard_no_longer_has_fails_the_attempt`, `parking_waits_while_the_app_cannot_say_the_run_paused`) |
+| A PR reads no checks within two minutes of a push | The reading is recorded and the gate waits; past `PR_YOUNG_HEAD_MS` it is the `pr` question (`a_none_reading_soon_after_a_push_waits_then_asks`) |
+| A decision marked a session that is no longer the ticket's newest (the `lanes` question's investigator, another lane's planner) | Answering clears every session the ledger still marks, so an agent held by the mark is given up on after the grace; a lost `waiting off` is sent again; a waiting request replaced by a later one is never sent after it (`an_answer_clears_every_mark_so_a_marked_agent_is_still_given_up_on`, `a_lost_unmark_is_sent_again_until_it_lands`, `a_replaced_waiting_request_is_never_sent_after_the_one_that_replaced_it`) |
 | A command reviewer exits 1 with nothing on stdout | A failed reviewer (`a_command_reviewers_exit_codes_are_read_as_the_protocol_says`) |
 | The tree is dirty when reviewers finish; the implementer leaves it dirty | The round's evidence is void, a `rerun` question naming the change; the fix round fails the same way (`a_changed_tree_voids_the_round_and_a_dirty_implementer_fails_it`) |
 | The implementer's response settles while its commit's hook still runs | The round waits for the tree while the session lives, then goes on from the committed head (`a_commit_that_lands_after_the_response_settles_is_not_a_dirty_tree`) |

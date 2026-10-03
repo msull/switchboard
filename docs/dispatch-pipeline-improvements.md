@@ -74,6 +74,10 @@ is younger than a grace window (two minutes), then ask.
 **Size.** One branch in `judge_pr` with the head's age, one test. Half a
 day.
 
+**Built** (#21). A `none` reading within `PR_YOUNG_HEAD_MS` (two minutes)
+of the head's last move (the gate attempt's start, the end of a rebaser or
+fixer in its context, or a `recheck` answer) waits; past it, it asks.
+
 ## 5. The runner's socket client reconnects
 
 Filed as #15. One timed-out call and every later call fails with
@@ -82,6 +86,13 @@ failed their review attempts this way. Reconnect on the next call after a
 timeout, with the one-call budget kept.
 
 **Size.** `port.rs`. Half a day.
+
+**Built** (#21). The reconnect was already in place (19db35d): the port
+drops its connection on any error, a timeout included. #21 pins that with
+a real-socket test and makes the next occurrence diagnosable: the log line
+carries the io error kind and the whole error chain, and a `workflow`
+query's failed reply other than `no such run` is asked again rather than
+failing the attempt.
 
 ## 6. Scope delta in the pull request
 
@@ -163,11 +174,15 @@ still fails after the grace.
 then two code review attempts: the correctness reviewer's Stop fired while
 its subagents ran, the round failed after three one-second polls, and the
 failure killed the style reviewer mid-review. In the first of those the
-feedback file landed eight seconds after the Stop. Until this is built,
-every reviewer's guidance in the live pipeline files says to work
-in-session and write before the turn ends.
+feedback file landed eight seconds after the Stop.
 
 **Size.** `poll_agent` plus a fake-port test. Half a day. First in order.
+
+**Built** (#21). A Stop with the card `working` holds agent, reviewer and
+fix attempts with no failure and no completion; a missing artifact fails
+after thirty idle polls in a row (`STOP_IDLE_POLLS`) or when the pane
+exits. Answering a decision now clears every session it marked, so a mark
+cannot hold a stopped agent forever.
 
 ## 10. The plan's decisions reach the code reviewers as settled
 
@@ -237,6 +252,6 @@ with a PR, keeps its instruction to fix any claim its rebase changed.
 
 ## Order
 
-9 first: it failed three attempts in one night. 1, 2 and 3 cut the
-round count directly and are small. 4 and 5 are filed bugs. 11 removes a question with one answer. 6, 8 and 10 are prompt text; 12 is withdrawn. 7 is a taste call for the user before anyone
+9, 4 and 5 are built (#21). 1, 2 and 3 cut the
+round count directly and are small. 11 removes a question with one answer. 6, 8 and 10 are prompt text; 12 is withdrawn. 7 is a taste call for the user before anyone
 builds it.
