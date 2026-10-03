@@ -195,7 +195,14 @@ pub fn card_body(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord) {
 /// The working-set card of a command or service: kicker, title, the
 /// output kept in the body (or one artifact, previewed), the chips, and
 /// the action row.
-pub fn set_card(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord) {
+/// `rule_set` is the rule set the card is on, which gives it a dismiss
+/// control; `None` on a hand set.
+pub fn set_card(
+    cx: &mut DrawCtx<'_>,
+    ui: &mut Ui,
+    record: &SessionRecord,
+    rule_set: Option<crate::core::SetId>,
+) {
     let p = theme::palette(ui);
     let state = cx.core.card_state(record.id);
     let running = is_running(cx.core, record.id);
@@ -230,6 +237,9 @@ pub fn set_card(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord) {
                     } else {
                         theme::status_dot(ui, &state, 8.0);
                     }
+                    if let Some(set) = rule_set {
+                        super::working_set::dismiss_button(cx, ui, set, record.id);
+                    }
                 });
             });
             let title = ui
@@ -241,8 +251,16 @@ pub fn set_card(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord) {
                 .on_hover_cursor(egui::CursorIcon::PointingHand);
             open = title.clicked();
             title.context_menu(|ui| {
-                if super::working_set::set_menu(cx, ui, &crate::core::PinTarget::Session(record.id))
-                {
+                // Both items are drawn every frame, so neither call may be
+                // skipped when the other was clicked.
+                let set_picked = super::working_set::set_menu(
+                    cx,
+                    ui,
+                    &crate::core::PinTarget::Session(record.id),
+                );
+                let kill_picked =
+                    super::working_set::kill_and_dismiss(cx, ui, rule_set, record.id, running);
+                if set_picked || kill_picked {
                     ui.close();
                 }
             });

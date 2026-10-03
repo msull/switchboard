@@ -128,6 +128,22 @@ impl AppCore {
     /// Replaces the host snapshot. The first poll after the store loaded
     /// is the reconcile, which also brings autostart services back.
     pub(super) fn host_listed(&mut self, statuses: Vec<HostStatus>, now: Clock, out: &mut Out) {
+        // A pane that vanished (killed from outside, or the server died)
+        // takes its output time with it; keep that on the record first.
+        let gone: Vec<_> = self
+            .workspaces
+            .iter()
+            .flat_map(|w| &w.sessions)
+            .filter(|s| self.host_status(s.id).is_some())
+            .filter(|s| {
+                let name = s.id.host_name();
+                !statuses.iter().any(|h| h.id.0 == name)
+            })
+            .map(|s| s.id)
+            .collect();
+        for id in gone {
+            self.keep_last_output(id, out);
+        }
         self.host = statuses;
         self.quiet = self
             .workspaces

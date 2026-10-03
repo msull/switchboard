@@ -16,6 +16,8 @@
 //! The transitions live beside it: `reconcile` (store and host results),
 //! `sessions` (launch, return, resume), and `events` (hook events).
 
+use std::borrow::Cow;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -23,11 +25,11 @@ use crate::core::control::{ControlAction, ControlOutcome};
 use crate::core::env::SecretScope;
 use crate::core::grid;
 use crate::core::model::{
-    Activity, AgentKind, CardState, EnvVar, FileRoot, GridRect, HandoffMode, Launch, MonitorZoom,
-    PinTarget, PinnedItem, Popout, Project, ProjectEnv, ProjectId, RecordId, ResumeHandle,
-    SavedView, SessionKind, SessionRecord, SetId, Settings, SideTab, Space, SpaceId, ThemeMode,
-    VOICE_KEY_ACCOUNT, Views, VoiceSettings, WindowFrame, WorkflowDefinition, WorkflowId,
-    WorkingSet, Workspace,
+    Activity, AgentKind, CardState, Dismissal, EnvVar, FileRoot, GridRect, HandoffMode, Launch,
+    MonitorZoom, PinTarget, PinnedItem, Popout, Project, ProjectEnv, ProjectId, RecordId,
+    ResumeHandle, SavedView, SessionKind, SessionRecord, SetId, SetRule, Settings, SideTab, Space,
+    SpaceId, ThemeMode, VOICE_KEY_ACCOUNT, Views, VoiceSettings, WindowFrame, WorkflowDefinition,
+    WorkflowId, WorkingSet, Workspace,
 };
 use crate::ports::agent::AgentLaunch;
 use crate::ports::controller::{ControllerEvent, Direction};
@@ -182,6 +184,29 @@ pub enum AppAction {
     },
     /// Drop a working set; its cards were only references.
     DeleteWorkingSet(SetId),
+    /// A new set in the active space whose cards `rule` chooses, shown
+    /// at once. Named "Recent sessions" when `name` is `None`.
+    NewRuleSet {
+        name: Option<String>,
+        rule: SetRule,
+    },
+    /// Change how far back a rule set looks, clamped to
+    /// [`RULE_HOURS`]. A hand set changes nothing.
+    SetRuleHours {
+        set: SetId,
+        hours: u32,
+    },
+    /// Take a session off a rule set until it is active again.
+    DismissFromSet {
+        set: SetId,
+        record: RecordId,
+    },
+    /// Stop a session's pane and take it off a rule set, so the end the
+    /// kill sends does not bring it back.
+    KillAndDismiss {
+        set: SetId,
+        record: RecordId,
+    },
     OpenDocument(PathBuf),
     OpenInEditor(PathBuf),
     RevealDocument(PathBuf),
@@ -703,6 +728,16 @@ const NOTICE_TTL: Duration = Duration::from_secs(4);
 /// change, so a click meant for one can land on another; the record is
 /// held here, untouched on disk, until the window closes.
 pub const UNDO_WINDOW: Duration = Duration::from_secs(10);
+/// How far back a rule set may look, in hours: an hour to a month.
+pub const RULE_HOURS: std::ops::RangeInclusive<u32> = 1..=720;
+/// The width, in grid units, a rule set is laid out at where no view
+/// says how wide it is (the control port, the controller).
+pub const RULE_COLUMNS: u32 = 24;
+
+/// `hours` kept within [`RULE_HOURS`].
+fn clamp_hours(hours: u32) -> u32 {
+    hours.clamp(*RULE_HOURS.start(), *RULE_HOURS.end())
+}
 
 /// A session taken off its board, kept whole until its undo window
 /// closes: the record, the project it came from, and its cards on the
@@ -712,6 +747,9 @@ struct Trashed {
     record: SessionRecord,
     project: ProjectId,
     pins: Vec<(SetId, PinnedItem)>,
+    /// Its dismissals from rule sets, which leave views with the record
+    /// and come back with it.
+    dismissals: Vec<(SetId, Dismissal)>,
     until: Duration,
 }
 /// How a zoom notice starts, so the next one replaces it.
@@ -792,6 +830,12 @@ pub struct AppCore {
     pub(super) control_outcomes: Vec<ControlOutcome>,
     /// What Dispatch's port last said, and the console. Transient.
     pub(super) dispatch: super::dispatch::DispatchState,
+    /// The members of each rule set, newest first, as of the last
+    /// action. A cache of the rule, never saved: `dispatch` works it out
+    /// again after every action, so whatever changed the answer (a new
+    /// set, a dismissal, a move to another space, a load, the clock on a
+    /// `Tick`) shows in the same frame.
+    pub(super) rule_members: HashMap<SetId, Vec<RecordId>>,
 }
 
 impl AppCore {
@@ -830,7 +874,11 @@ impl AppCore {
             | AppAction::PlacePin { .. }
             | AppAction::NewWorkingSet { .. }
             | AppAction::RenameWorkingSet { .. }
-            | AppAction::DeleteWorkingSet(_) => self.working_set_action(action, now, &mut out),
+            | AppAction::DeleteWorkingSet(_)
+            | AppAction::NewRuleSet { .. }
+            | AppAction::SetRuleHours { .. }
+            | AppAction::DismissFromSet { .. }
+            | AppAction::KillAndDismiss { .. } => self.working_set_action(action, now, &mut out),
             AppAction::ShowBoard(id) => self.show(View::Board(id), now, &mut out),
             AppAction::ShowSession(id) => self.show_session(id, now, &mut out),
             AppAction::RenameProject(..)
@@ -957,6 +1005,7 @@ impl AppCore {
         }
         self.remember_view(&mut out);
         self.prune_working_set(&mut out);
+        self.refresh_rule_members(now.wall);
         self.finish(out)
     }
 
@@ -1009,11 +1058,7 @@ impl AppCore {
                 host,
                 bytes: vec![0x1b],
             }),
-            AppAction::KillSession(id) => {
-                if let Some(status) = self.host_status(id) {
-                    out.push(Effect::Kill(status.id.clone()));
-                }
-            }
+            AppAction::KillSession(id) => self.kill_pane(id, out),
             AppAction::RemoveSession(id) => self.trash_session(id, now),
             AppAction::UndoRemove(id) => self.undo_remove(id, out),
             AppAction::RestartSession(id) => self.restart_session(id, now, out),
@@ -1077,7 +1122,8 @@ impl AppCore {
             AppAction::PlacePin { set, target, rect } => {
                 let rect = grid::clamp(rect);
                 self.update_set(out, set, |s| {
-                    if grid::fits(&s.items, &target, rect)
+                    if s.rule.is_none()
+                        && grid::fits(&s.items, &target, rect)
                         && let Some(item) = s.items.iter_mut().find(|i| i.target == target)
                     {
                         item.rect = rect;
@@ -1101,7 +1147,49 @@ impl AppCore {
                 self.view_stack
                     .retain(|v| !matches!(v, View::WorkingSet(s) if *s == id));
             }
+            AppAction::NewRuleSet { name, rule } => {
+                self.new_rule_set(name, rule, now, out);
+            }
+            AppAction::SetRuleHours { set, hours } => {
+                let hours = clamp_hours(hours);
+                self.update_set(out, set, |s| {
+                    if let Some(SetRule::Recent { hours: h }) = &mut s.rule {
+                        *h = hours;
+                    }
+                });
+            }
+            AppAction::DismissFromSet { set, record } => {
+                self.dismiss_from_set(set, record, out);
+            }
+            AppAction::KillAndDismiss { set, record } => {
+                // The dismissal is stamped before the end arrives;
+                // `carry_dismissals` moves it up to the end when it does.
+                self.dismiss_from_set(set, record, out);
+                self.kill_pane(record, out);
+            }
             _ => unreachable!("routed by `dispatch`"),
+        }
+    }
+
+    /// Kill a session's pane, if it has one. Every kill of a session
+    /// goes through here, so a step added to killing reaches them all.
+    fn kill_pane(&mut self, id: RecordId, out: &mut Out) {
+        self.keep_last_output(id, out);
+        if let Some(status) = self.host_status(id) {
+            out.push(Effect::Kill(status.id.clone()));
+        }
+    }
+
+    /// Raise `last_seen` to the pane's last output before the pane goes.
+    /// A killed session or a dead server leaves no status behind, and
+    /// without this a shell typed into a minute ago would fall back to
+    /// its launch in `last_active` and leave every rule set at once.
+    pub(super) fn keep_last_output(&mut self, id: RecordId, out: &mut Out) {
+        let Some(output) = self.host_status(id).and_then(|h| h.last_activity) else {
+            return;
+        };
+        if self.session(id).is_some_and(|s| s.last_seen < output) {
+            self.edit_session(id, out, |s| s.last_seen = output);
         }
     }
 
@@ -1128,9 +1216,13 @@ impl AppCore {
     }
 
     /// `target`'s card, placed on `set` in the first free spot, if it
-    /// exists and is not there already.
+    /// exists and is not there already. A rule set takes no pins: its
+    /// cards are the rule's.
     fn place_new(&self, set: &mut WorkingSet, target: PinTarget, columns: u32) {
-        if !self.target_in(&target, set.space) || set.items.iter().any(|i| i.target == target) {
+        if set.rule.is_some()
+            || !self.target_in(&target, set.space)
+            || set.items.iter().any(|i| i.target == target)
+        {
             return;
         }
         let kind = match &target {
@@ -1172,6 +1264,8 @@ impl AppCore {
         set.space = self.settings.space;
         if let Some(source) = source {
             set.items = source.items;
+            set.rule = source.rule;
+            set.dismissed = source.dismissed;
         }
         if let Some(target) = with {
             self.place_new(&mut set, target, columns);
@@ -1181,16 +1275,151 @@ impl AppCore {
         self.show(View::WorkingSet(id), now, out);
     }
 
+    fn new_rule_set(&mut self, name: Option<String>, rule: SetRule, now: Clock, out: &mut Out) {
+        let name = name
+            .map(|n| n.trim().to_owned())
+            .filter(|n| !n.is_empty())
+            .unwrap_or_else(|| {
+                match self
+                    .visible_working_sets()
+                    .filter(|s| s.rule.is_some())
+                    .count()
+                {
+                    0 => "Recent sessions".to_owned(),
+                    n => format!("Recent sessions {}", n + 1),
+                }
+            });
+        let SetRule::Recent { hours } = rule;
+        let mut set = WorkingSet::named(name);
+        set.space = self.settings.space;
+        set.rule = Some(SetRule::Recent {
+            hours: clamp_hours(hours),
+        });
+        let id = set.id;
+        self.update_views(out, |v| v.sets.push(set));
+        self.show(View::WorkingSet(id), now, out);
+    }
+
+    /// Stamp the session's activity as of now on the set, replacing any
+    /// earlier dismissal of it, so it stays off until it does something.
+    fn dismiss_from_set(&mut self, set: SetId, record: RecordId, out: &mut Out) {
+        let Some(at) = self.last_active(record) else {
+            return;
+        };
+        self.update_set(out, set, |s| {
+            if s.rule.is_some() {
+                s.dismissed.retain(|d| d.record != record);
+                s.dismissed.push(Dismissal { record, at });
+            }
+        });
+    }
+
+    /// When `id` last did something, for rule sets: the latest of its
+    /// hook events, its launch, and its pane's last output. A pane counts
+    /// through what it prints, not by being alive, or an idle shell would
+    /// never leave a set. A dead pane counts too: tmux keeps its last
+    /// output time, and without it a service that printed a minute ago
+    /// and then crashed would fall back to its launch and leave the set
+    /// the moment it stops. A pane that is gone altogether (killed, or
+    /// the server died) has no status, and its last output lives on in
+    /// `last_seen`, where `keep_last_output` put it before the pane
+    /// went. `None` for an unknown id.
+    #[must_use]
+    pub fn last_active(&self, id: RecordId) -> Option<SystemTime> {
+        let s = self.session(id)?;
+        let output = self.host_status(id).and_then(|h| h.last_activity);
+        // `last_seen` already moves with every event and holds a vanished
+        // pane's last output; the other two are named so the intent
+        // reads here.
+        [Some(s.last_seen), s.last_event_at, s.last_stop_at, output]
+            .into_iter()
+            .flatten()
+            .max()
+    }
+
+    /// Work out every rule set's members again as of `now`.
+    pub(super) fn refresh_rule_members(&mut self, now: SystemTime) {
+        let members = self
+            .views
+            .sets
+            .iter()
+            .filter_map(|set| Some((set.id, self.members_at(set, set.rule?, now))))
+            .collect();
+        self.rule_members = members;
+    }
+
+    /// The sessions `rule` chooses for `set` at `now`, newest first,
+    /// ties by id so the order holds from tick to tick.
+    fn members_at(&self, set: &WorkingSet, rule: SetRule, now: SystemTime) -> Vec<RecordId> {
+        let SetRule::Recent { hours } = rule;
+        let since = now
+            .checked_sub(Duration::from_secs(u64::from(hours) * 3600))
+            .unwrap_or(UNIX_EPOCH);
+        let mut members: Vec<(SystemTime, RecordId)> = self
+            .workspaces
+            .iter()
+            .flat_map(|w| &w.sessions)
+            .filter_map(|s| Some((self.last_active(s.id)?, s.id)))
+            .filter(|(at, id)| {
+                *at > since
+                    && !set.dismissed.iter().any(|d| d.record == *id && *at <= d.at)
+                    && self.target_in(&PinTarget::Session(*id), set.space)
+            })
+            .collect();
+        members.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+        members.into_iter().map(|(_, id)| id).collect()
+    }
+
+    /// How many cards `set` shows: its pins, or its rule's members.
+    #[must_use]
+    pub fn set_card_count(&self, set: &WorkingSet) -> usize {
+        match set.rule {
+            Some(_) => self.rule_members(set.id).len(),
+            None => set.items.len(),
+        }
+    }
+
+    /// A rule set's members as of the last action; empty for a hand set.
+    #[must_use]
+    pub fn rule_members(&self, set: SetId) -> &[RecordId] {
+        self.rule_members.get(&set).map_or(&[], Vec::as_slice)
+    }
+
+    /// The cards of `set` as drawn: its pins for a hand set, its members
+    /// laid out in order, one size each, for a rule set. `Cow` lends the
+    /// hand set's own list and hands over a new one for a rule set.
+    #[must_use]
+    pub fn set_cards<'a>(&'a self, set: &'a WorkingSet, columns: u32) -> Cow<'a, [PinnedItem]> {
+        if set.rule.is_none() {
+            return Cow::Borrowed(&set.items);
+        }
+        let members = self.rule_members(set.id);
+        let (w, h) = grid::SESSION_CARD;
+        let rects = grid::flow(members.len(), w, h, columns);
+        Cow::Owned(
+            members
+                .iter()
+                .zip(rects)
+                .map(|(id, rect)| PinnedItem {
+                    target: PinTarget::Session(*id),
+                    rect,
+                })
+                .collect(),
+        )
+    }
+
     /// Drop working-set cards whose session or project is gone, after
     /// whatever action removed it (or the load that found it missing),
     /// and cards whose project is no longer in the set's space: a set
     /// shows only its own space.
+    ///
+    /// Dismissals go with their record, not its space: a session whose
+    /// project moves out and back keeps its dismissal.
     fn prune_working_set(&mut self, out: &mut Out) {
-        let stale = self
-            .views
-            .sets
-            .iter()
-            .any(|s| s.items.iter().any(|i| !self.target_in(&i.target, s.space)));
+        let stale = self.views.sets.iter().any(|s| {
+            s.items.iter().any(|i| !self.target_in(&i.target, s.space))
+                || s.dismissed.iter().any(|d| self.session(d.record).is_none())
+        });
         if !stale {
             return;
         }
@@ -1198,6 +1427,7 @@ impl AppCore {
         for set in &mut next.sets {
             let space = set.space;
             set.items.retain(|i| self.target_in(&i.target, space));
+            set.dismissed.retain(|d| self.session(d.record).is_some());
         }
         self.update_views(out, |v| *v = next);
     }
@@ -1642,6 +1872,17 @@ impl AppCore {
                     .map(move |i| (s.id, i.clone()))
             })
             .collect();
+        let dismissals = self
+            .views
+            .sets
+            .iter()
+            .flat_map(|s| {
+                s.dismissed
+                    .iter()
+                    .filter(|d| d.record == id)
+                    .map(move |d| (s.id, d.clone()))
+            })
+            .collect();
         self.view_stack
             .retain(|v| !matches!(v, View::Session(s) if *s == id));
         self.info_in(project, format!("Removed {}", record.name), now);
@@ -1653,6 +1894,7 @@ impl AppCore {
             record,
             project,
             pins,
+            dismissals,
             until: now.mono + UNDO_WINDOW,
         });
     }
@@ -1670,13 +1912,20 @@ impl AppCore {
             return;
         };
         w.sessions.push(t.record);
-        if !t.pins.is_empty() {
+        if !t.pins.is_empty() || !t.dismissals.is_empty() {
             self.update_views(out, |v| {
                 for (set, item) in t.pins {
                     if let Some(s) = v.sets.iter_mut().find(|s| s.id == set)
                         && !s.items.iter().any(|i| i.target == item.target)
                     {
                         s.items.push(item);
+                    }
+                }
+                for (set, dismissal) in t.dismissals {
+                    if let Some(s) = v.sets.iter_mut().find(|s| s.id == set)
+                        && !s.dismissed.iter().any(|d| d.record == dismissal.record)
+                    {
+                        s.dismissed.push(dismissal);
                     }
                 }
             });
@@ -1863,9 +2112,13 @@ impl AppCore {
     pub fn working_set(&self, id: SetId) -> Option<&WorkingSet> {
         self.views.sets.iter().find(|s| s.id == id)
     }
-    /// The sessions on a working set, for the card refreshes.
+    /// The sessions on a working set, for the card refreshes: a rule
+    /// set's members, or a hand set's session cards.
     #[must_use]
     pub fn working_set_sessions(&self, id: SetId) -> Vec<RecordId> {
+        if self.working_set(id).is_some_and(|s| s.rule.is_some()) {
+            return self.rule_members(id).to_vec();
+        }
         self.working_set(id)
             .map(|s| {
                 s.items
@@ -1878,7 +2131,7 @@ impl AppCore {
             })
             .unwrap_or_default()
     }
-    /// The working sets holding `target`.
+    /// The hand sets holding `target`; a rule set holds no pins.
     #[must_use]
     pub fn sets_holding(&self, target: &PinTarget) -> Vec<SetId> {
         self.views

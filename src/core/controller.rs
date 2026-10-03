@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use super::action::{AppCore, Clock, Effect, Out, View};
 use super::grid;
-use super::model::{PinTarget, RecordId, SessionKind, SetId};
+use super::model::{PinTarget, RecordId, SessionKind, SetId, WorkingSet};
 use crate::ports::controller::{Button, ControllerEvent, Direction};
 
 /// Two presses of C this close together latch listening on, so it
@@ -376,6 +376,11 @@ impl AppCore {
             return;
         };
         let next = self.working_set(set).and_then(|s| {
+            if s.rule.is_some() {
+                // The core does not know how wide the view lays a rule
+                // set out, so it steps through the members in order.
+                return step_in_list(self.rule_members(set), &from, direction);
+            }
             let rect = s.items.iter().find(|i| i.target == from)?.rect;
             grid::neighbour(&s.items, rect, direction).cloned()
         });
@@ -387,7 +392,7 @@ impl AppCore {
     pub(super) fn activate_card(&mut self, set: SetId, target: PinTarget) {
         if !self
             .working_set(set)
-            .is_some_and(|s| s.items.iter().any(|i| i.target == target))
+            .is_some_and(|s| self.shows(s, &target))
         {
             return;
         }
@@ -399,20 +404,38 @@ impl AppCore {
     /// while it is still there, else the top-left card.
     #[must_use]
     pub fn active_card(&self, set: SetId) -> Option<PinTarget> {
-        let items = &self.working_set(set)?.items;
+        let ws = self.working_set(set)?;
         let chosen = self
             .controller
             .active
             .iter()
             .find(|(s, _)| *s == set)
             .map(|(_, t)| t)
-            .filter(|t| items.iter().any(|i| i.target == **t));
-        match chosen {
-            Some(target) => Some(target.clone()),
-            None => items
+            .filter(|t| self.shows(ws, t));
+        if let Some(target) = chosen {
+            return Some(target.clone());
+        }
+        match ws.rule {
+            // A rule set's first member is its top-left card at any width.
+            Some(_) => self
+                .rule_members(set)
+                .first()
+                .map(|id| PinTarget::Session(*id)),
+            None => ws
+                .items
                 .iter()
                 .min_by_key(|i| (i.rect.y, i.rect.x))
                 .map(|i| i.target.clone()),
+        }
+    }
+
+    /// `target` is one of the cards `set` shows: a pin of a hand set, or
+    /// a member of a rule set.
+    fn shows(&self, set: &WorkingSet, target: &PinTarget) -> bool {
+        match (&set.rule, target) {
+            (None, _) => set.items.iter().any(|i| i.target == *target),
+            (Some(_), PinTarget::Session(id)) => self.rule_members(set.id).contains(id),
+            (Some(_), _) => false,
         }
     }
 
@@ -466,4 +489,18 @@ impl AppCore {
     pub fn controller_connected(&self) -> bool {
         self.controller.connected
     }
+}
+
+/// The member one step from `from` in a rule set's order: Left and Up
+/// go back, Right and Down forward. At either end nothing moves.
+fn step_in_list(members: &[RecordId], from: &PinTarget, direction: Direction) -> Option<PinTarget> {
+    let PinTarget::Session(from) = from else {
+        return None;
+    };
+    let at = members.iter().position(|m| m == from)?;
+    let next = match direction {
+        Direction::Left | Direction::Up => at.checked_sub(1)?,
+        Direction::Right | Direction::Down => at + 1,
+    };
+    members.get(next).map(|id| PinTarget::Session(*id))
 }

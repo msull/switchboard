@@ -10,7 +10,9 @@ use egui::{
 
 use super::dialogs::AddProjectDraft;
 use super::{DrawCtx, theme};
-use crate::core::{AppAction, AppCore, CardState, ProjectId, RecordId, SideTab, SpaceId, View};
+use crate::core::{
+    AppAction, AppCore, CardState, ProjectId, RecordId, SetRule, SideTab, SpaceId, View,
+};
 
 /// The rail's width when it opens; the user may drag it.
 pub const DEFAULT_WIDTH: f32 = 200.0;
@@ -341,12 +343,12 @@ fn working_set_rows(cx: &mut DrawCtx<'_>, ui: &mut Ui, view: &View, compact: boo
         theme::kicker(ui, "Working sets", p.n600);
         ui.add_space(4.0);
     }
-    let sets: Vec<(crate::core::SetId, String, usize)> = cx
+    let sets: Vec<(crate::core::SetId, String, usize, Option<SetRule>)> = cx
         .core
         .visible_working_sets()
-        .map(|s| (s.id, s.name.clone(), s.items.len()))
+        .map(|s| (s.id, s.name.clone(), cx.core.set_card_count(s), s.rule))
         .collect();
-    for (id, name, count) in &sets {
+    for (id, name, count, rule) in &sets {
         let response = row(
             ui,
             &RowSpec {
@@ -359,6 +361,21 @@ fn working_set_rows(cx: &mut DrawCtx<'_>, ui: &mut Ui, view: &View, compact: boo
                 initial: &initial(name),
             },
         );
+        // A rule set is marked so it is not taken for one arranged by hand.
+        if let Some(rule) = rule
+            && !compact
+        {
+            let tag = match rule {
+                SetRule::Recent { .. } => "recent",
+            };
+            ui.painter().text(
+                response.rect.right_center() - egui::vec2(8.0, 0.0),
+                Align2::RIGHT_CENTER,
+                tag,
+                FontId::new(11.0, egui::FontFamily::Proportional),
+                p.n600,
+            );
+        }
         if response.on_hover_text(name).clicked() {
             cx.dispatch(AppAction::ShowWorkingSet(*id));
         }
@@ -381,6 +398,27 @@ fn working_set_rows(cx: &mut DrawCtx<'_>, ui: &mut Ui, view: &View, compact: boo
             clone_of: None,
             with: None,
             columns: cx.state.working_set_columns,
+        });
+    }
+    let recent = if compact { "+R" } else { "+ Recent sessions" };
+    let SetRule::Recent { hours } = SetRule::DEFAULT;
+    if ui
+        .add(
+            egui::Button::new(
+                RichText::new(recent)
+                    .text_style(theme::meta())
+                    .color(p.accent_text),
+            )
+            .frame_when_inactive(false),
+        )
+        .on_hover_text(format!(
+            "A working set of every session active in the last {hours} hours"
+        ))
+        .clicked()
+    {
+        cx.dispatch(AppAction::NewRuleSet {
+            name: None,
+            rule: SetRule::DEFAULT,
         });
     }
 }

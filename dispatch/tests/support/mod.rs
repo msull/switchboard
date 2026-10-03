@@ -277,6 +277,7 @@ impl FakeSwitchboard {
                     space: space.clone(),
                     items: vec![],
                     op: Some(op.into()),
+                    rule: None,
                 });
                 (
                     vec![Made {

@@ -12,7 +12,7 @@ use super::definitions::entry_hash;
 use super::model::{
     Activity, AgentKind, Approval, CardState, Discarded, GridRect, Launch, PinTarget, Project,
     ProjectEnv, ProjectId, RecordId, ResumeHandle, SavedView, SessionKind, SessionRecord, SetId,
-    Settings, SideTab, Space, SpaceId, ThemeMode, Views, WindowFrame, Workspace,
+    SetRule, Settings, SideTab, Space, SpaceId, ThemeMode, Views, WindowFrame, Workspace,
 };
 use super::reconcile::RECORD_ID_ENV;
 use crate::ports::agent::AgentLaunch;
@@ -4103,6 +4103,8 @@ fn working_set_loads_and_is_pruned_and_the_view_is_restored() {
             },
         ],
         op: None,
+        rule: None,
+        dismissed: Vec::new(),
     });
     let load = |last_view: SavedView| {
         let mut core = AppCore::new();
@@ -5417,6 +5419,459 @@ fn a_stick_still_held_from_a_menu_pick_moves_nothing_until_it_comes_back() {
     assert_eq!(core.active_card(set), Some(PinTarget::Session(agent_id)));
 }
 
+// --- rule sets: sessions active in the last N hours
+
+const HOUR_MS: u64 = 3_600_000;
+
+fn recent_set(core: &mut AppCore, hours: u32, at: u64) -> SetId {
+    core.dispatch(
+        AppAction::NewRuleSet {
+            name: None,
+            rule: SetRule::Recent { hours },
+        },
+        Clock::at(at),
+    );
+    core.working_sets().last().unwrap().id
+}
+
+fn tick(core: &mut AppCore, at: u64) -> Vec<Effect> {
+    core.dispatch(AppAction::Tick, Clock::at(at))
+}
+
+fn members(core: &AppCore, set: SetId) -> Vec<RecordId> {
+    core.rule_members(set).to_vec()
+}
+
+/// A running pane that last printed at `at_ms`.
+fn printed(id: RecordId, at_ms: u64) -> HostStatus {
+    HostStatus {
+        last_activity: Some(Clock::at(at_ms).wall),
+        ..running(id)
+    }
+}
+
+/// A hook event aimed at `id` by its record id.
+fn hook(id: RecordId, kind: EventKind, at_ms: u64) -> AppAction {
+    AppAction::Events(vec![SessionEvent {
+        record_id: Some(id),
+        ..event(kind, at_ms)
+    }])
+}
+
+fn dismiss(core: &mut AppCore, set: SetId, record: RecordId, at: u64) -> Vec<Effect> {
+    core.dispatch(AppAction::DismissFromSet { set, record }, Clock::at(at))
+}
+
+#[test]
+fn a_recent_set_follows_activity() {
+    let (mut core, _, ids) = with_records(&[SessionKind::Shell, SessionKind::Shell], |_| None);
+    let set = recent_set(&mut core, 1, 1_000);
+    assert_eq!(core.view(), View::WorkingSet(set));
+    assert_eq!(core.working_set(set).unwrap().name, "Recent sessions");
+    tick(&mut core, 2_000);
+    // Both were launched at the same instant: ties go by id.
+    let mut by_id = ids.clone();
+    by_id.sort();
+    assert_eq!(members(&core, set), by_id);
+    // Pane output moves one ahead.
+    core.dispatch(
+        AppAction::HostListed(vec![printed(ids[1], 30 * 60_000)]),
+        Clock::at(30 * 60_000),
+    );
+    tick(&mut core, 30 * 60_000);
+    assert_eq!(members(&core, set), vec![ids[1], ids[0]]);
+    // An hour with nothing from the first: it leaves.
+    tick(&mut core, 61 * 60_000);
+    assert_eq!(members(&core, set), vec![ids[1]]);
+    tick(&mut core, 91 * 60_000);
+    assert!(members(&core, set).is_empty());
+    // Output brings it back.
+    core.dispatch(
+        AppAction::HostListed(vec![printed(ids[0], 95 * 60_000)]),
+        Clock::at(95 * 60_000),
+    );
+    tick(&mut core, 95 * 60_000);
+    assert_eq!(members(&core, set), vec![ids[0]]);
+    // The cards are laid out in that order, one size each.
+    let ws = core.working_set(set).unwrap();
+    let cards = core.set_cards(ws, 24);
+    assert_eq!(cards.len(), 1);
+    assert_eq!(cards[0].target, PinTarget::Session(ids[0]));
+    assert_eq!((cards[0].rect.w, cards[0].rect.h), (10, 8));
+    assert_eq!(core.working_set_sessions(set), vec![ids[0]]);
+}
+
+#[test]
+fn a_dismissed_session_stays_off_until_it_is_active_again() {
+    let (mut core, _, ids) = with_records(&[agent()], |r| Some(running(r.id)));
+    let id = ids[0];
+    let set = recent_set(&mut core, 24, 1_000);
+    tick(&mut core, 2_000);
+    assert_eq!(members(&core, set), vec![id]);
+    let effects = dismiss(&mut core, set, id, 3_000);
+    assert!(effects.iter().any(|e| matches!(e, Effect::SaveViews(_))));
+    tick(&mut core, 4_000);
+    assert!(members(&core, set).is_empty());
+    tick(&mut core, HOUR_MS);
+    assert!(members(&core, set).is_empty());
+    core.dispatch(
+        hook(id, EventKind::PromptSubmitted, HOUR_MS + 1_000),
+        Clock::at(HOUR_MS + 1_000),
+    );
+    tick(&mut core, HOUR_MS + 2_000);
+    assert_eq!(members(&core, set), vec![id]);
+}
+
+#[test]
+fn an_end_after_a_kill_does_not_undo_the_dismissal() {
+    let (mut core, _, ids) = with_records(&[agent()], |r| Some(running(r.id)));
+    let id = ids[0];
+    let set = recent_set(&mut core, 24, 1_000);
+    tick(&mut core, 2_000);
+    core.dispatch(AppAction::KillSession(id), Clock::at(10_000));
+    dismiss(&mut core, set, id, 10_000);
+    core.dispatch(
+        hook(id, EventKind::SessionEnded { reason: None }, 12_000),
+        Clock::at(12_000),
+    );
+    core.dispatch(AppAction::HostListed(vec![]), Clock::at(13_000));
+    tick(&mut core, 14_000);
+    assert!(members(&core, set).is_empty());
+    let d = &core.working_set(set).unwrap().dismissed[0];
+    assert_eq!(d.at, Clock::at(12_000).wall);
+    core.dispatch(
+        hook(id, EventKind::PromptSubmitted, 20_000),
+        Clock::at(20_000),
+    );
+    tick(&mut core, 21_000);
+    assert_eq!(members(&core, set), vec![id]);
+}
+
+#[test]
+fn kill_and_dismiss_kills_the_pane_and_the_end_does_not_bring_it_back() {
+    let (mut core, _, ids) = with_records(&[agent()], |r| Some(running(r.id)));
+    let id = ids[0];
+    let set = recent_set(&mut core, 24, 1_000);
+    tick(&mut core, 2_000);
+    let effects = core.dispatch(
+        AppAction::KillAndDismiss { set, record: id },
+        Clock::at(10_000),
+    );
+    assert!(effects.iter().any(|e| matches!(e, Effect::Kill(_))));
+    assert!(effects.iter().any(|e| matches!(e, Effect::SaveViews(_))));
+    assert!(members(&core, set).is_empty());
+    core.dispatch(
+        hook(id, EventKind::SessionEnded { reason: None }, 12_000),
+        Clock::at(12_000),
+    );
+    core.dispatch(AppAction::HostListed(vec![]), Clock::at(13_000));
+    tick(&mut core, 14_000);
+    assert!(members(&core, set).is_empty());
+}
+
+#[test]
+fn a_new_rule_sets_hours_are_clamped() {
+    let (mut core, _, _) = with_records(&[SessionKind::Shell], |_| None);
+    let low = recent_set(&mut core, 0, 1_000);
+    let high = recent_set(&mut core, 10_000, 1_000);
+    assert_eq!(
+        core.working_set(low).unwrap().rule,
+        Some(SetRule::Recent { hours: 1 })
+    );
+    assert_eq!(
+        core.working_set(high).unwrap().rule,
+        Some(SetRule::Recent { hours: 720 })
+    );
+}
+
+#[test]
+fn a_live_pane_without_output_leaves_the_window() {
+    let (mut core, _, ids) = with_records(&[SessionKind::Shell], |r| Some(running(r.id)));
+    let set = recent_set(&mut core, 1, 1_000);
+    tick(&mut core, 2_000);
+    assert_eq!(members(&core, set), vec![ids[0]]);
+    core.dispatch(
+        AppAction::HostListed(vec![printed(ids[0], 1_000)]),
+        Clock::at(61 * 60_000),
+    );
+    tick(&mut core, 61 * 60_000);
+    assert!(members(&core, set).is_empty());
+}
+
+#[test]
+fn widening_the_hours_brings_back_quiet_sessions() {
+    let (mut core, _, ids) = with_records(&[SessionKind::Shell], |_| None);
+    let set = recent_set(&mut core, 1, 1_000);
+    tick(&mut core, 2 * HOUR_MS);
+    assert!(members(&core, set).is_empty());
+    let effects = core.dispatch(
+        AppAction::SetRuleHours { set, hours: 48 },
+        Clock::at(2 * HOUR_MS),
+    );
+    assert!(effects.iter().any(|e| matches!(e, Effect::SaveViews(_))));
+    assert_eq!(members(&core, set), vec![ids[0]]);
+    let hours = |core: &AppCore| core.working_set(set).unwrap().rule;
+    for (asked, kept) in [(0, 1), (10_000, 720), (48, 48)] {
+        core.dispatch(
+            AppAction::SetRuleHours { set, hours: asked },
+            Clock::at(2 * HOUR_MS),
+        );
+        assert_eq!(hours(&core), Some(SetRule::Recent { hours: kept }));
+    }
+    // A hand set has no hours to change.
+    let hand = new_set(&mut core, 3);
+    let effects = core.dispatch(
+        AppAction::SetRuleHours {
+            set: hand,
+            hours: 5,
+        },
+        Clock::at(4),
+    );
+    assert!(!effects.iter().any(|e| matches!(e, Effect::SaveViews(_))));
+    assert_eq!(core.working_set(hand).unwrap().rule, None);
+}
+
+#[test]
+fn a_tick_never_saves_views() {
+    let (mut core, _, ids) = with_records(&[SessionKind::Shell, SessionKind::Shell], |_| None);
+    let set = recent_set(&mut core, 1, 1_000);
+    let mut effects = Vec::new();
+    for minute in 0..120 {
+        let at = minute * 60_000 + 1_000;
+        let id = ids[usize::try_from(minute % 2).unwrap()];
+        if minute < 60 {
+            core.dispatch(AppAction::HostListed(vec![printed(id, at)]), Clock::at(at));
+        }
+        effects.extend(tick(&mut core, at));
+    }
+    assert!(members(&core, set).is_empty());
+    assert!(
+        !effects.iter().any(|e| matches!(e, Effect::SaveViews(_))),
+        "{effects:?}"
+    );
+}
+
+#[test]
+fn a_rule_set_refuses_pins() {
+    let (mut core, _, ids) = with_records(&[SessionKind::Shell], |_| None);
+    let set = recent_set(&mut core, 24, 1_000);
+    tick(&mut core, 2_000);
+    let views = core.working_sets().to_vec();
+    for action in [
+        AppAction::AddToWorkingSet {
+            set,
+            target: PinTarget::Session(ids[0]),
+            columns: 24,
+        },
+        AppAction::PlacePin {
+            set,
+            target: PinTarget::Session(ids[0]),
+            rect: GridRect {
+                x: 0,
+                y: 0,
+                w: 10,
+                h: 8,
+            },
+        },
+    ] {
+        let effects = core.dispatch(action.clone(), Clock::at(3_000));
+        assert!(
+            !effects.iter().any(|e| matches!(e, Effect::SaveViews(_))),
+            "{action:?}"
+        );
+    }
+    assert_eq!(core.working_sets(), &views[..]);
+    assert!(core.sets_holding(&PinTarget::Session(ids[0])).is_empty());
+}
+
+#[test]
+fn rule_sets_keep_to_their_space() {
+    let (mut core, _, _, [sa, _]) = two_spaces();
+    let set = recent_set(&mut core, 24, 1_000);
+    assert_eq!(core.working_set(set).unwrap().space, SpaceId::DEFAULT);
+    tick(&mut core, 2_000);
+    assert_eq!(members(&core, set), vec![sa]);
+}
+
+#[test]
+fn a_global_rule_set_covers_every_workspace() {
+    let (mut core, _, _, [sa, sb]) = two_spaces();
+    core.dispatch(AppAction::ShowSpace(SpaceId::GLOBAL), Clock::at(1));
+    let set = recent_set(&mut core, 24, 1_000);
+    assert_eq!(core.working_set(set).unwrap().space, SpaceId::GLOBAL);
+    core.dispatch(
+        AppAction::HostListed(vec![printed(sa, 2_000), printed(sb, 3_000)]),
+        Clock::at(3_000),
+    );
+    tick(&mut core, 4_000);
+    assert_eq!(members(&core, set), vec![sb, sa]);
+}
+
+#[test]
+fn moving_a_rule_set_keeps_its_rule() {
+    let (mut core, b, _, [sa, sb]) = two_spaces();
+    let set = recent_set(&mut core, 24, 1_000);
+    tick(&mut core, 2_000);
+    dismiss(&mut core, set, sa, 3_000);
+    let before = core.working_set(set).unwrap().clone();
+    core.dispatch(AppAction::MoveSetToSpace(set, b), Clock::at(4_000));
+    let after = core.working_set(set).unwrap();
+    assert_eq!(after.space, b);
+    assert_eq!(after.rule, before.rule);
+    assert_eq!(after.dismissed, before.dismissed);
+    // The move itself brings the new space's sessions in, before a tick.
+    assert_eq!(members(&core, set), vec![sb]);
+}
+
+#[test]
+fn a_cloned_rule_set_has_members_before_a_tick() {
+    let (mut core, _, ids) = with_records(&[SessionKind::Shell], |_| None);
+    let set = recent_set(&mut core, 24, 1_000);
+    tick(&mut core, 2_000);
+    core.dispatch(
+        AppAction::NewWorkingSet {
+            name: None,
+            clone_of: Some(set),
+            with: None,
+            columns: 24,
+        },
+        Clock::at(3_000),
+    );
+    let clone = core.working_sets().last().unwrap().id;
+    assert_ne!(clone, set);
+    assert_eq!(members(&core, clone), vec![ids[0]]);
+}
+
+#[test]
+fn an_exited_pane_keeps_its_last_output() {
+    let (mut core, _, ids) = with_records(&[SessionKind::Service], |r| Some(running(r.id)));
+    let id = ids[0];
+    let set = recent_set(&mut core, 24, 1_000);
+    let printed_at = 30 * HOUR_MS;
+    core.dispatch(
+        AppAction::HostListed(vec![printed(id, printed_at)]),
+        Clock::at(printed_at),
+    );
+    tick(&mut core, printed_at + 60_000);
+    assert_eq!(members(&core, set), vec![id]);
+    // It crashes a minute later: tmux keeps the time of its last output.
+    let dead = HostStatus {
+        liveness: Liveness::Exited { code: Some(1) },
+        ..printed(id, printed_at)
+    };
+    core.dispatch(
+        AppAction::HostListed(vec![dead]),
+        Clock::at(printed_at + 2 * 60_000),
+    );
+    tick(&mut core, printed_at + 3 * 60_000);
+    assert_eq!(members(&core, set), vec![id]);
+    assert_eq!(core.last_active(id), Some(Clock::at(printed_at).wall));
+    // And leaves once the window has passed since that output.
+    tick(&mut core, printed_at + 25 * HOUR_MS);
+    assert!(members(&core, set).is_empty());
+}
+
+#[test]
+fn a_killed_pane_keeps_its_last_output() {
+    let (mut core, _, ids) = with_records(&[SessionKind::Shell], |r| Some(running(r.id)));
+    let id = ids[0];
+    let set = recent_set(&mut core, 24, 1_000);
+    let printed_at = 30 * HOUR_MS;
+    core.dispatch(
+        AppAction::HostListed(vec![printed(id, printed_at)]),
+        Clock::at(printed_at),
+    );
+    let effects = core.dispatch(AppAction::KillSession(id), Clock::at(printed_at + 60_000));
+    assert!(effects.iter().any(|e| matches!(e, Effect::Kill(_))));
+    assert!(effects.iter().any(|e| matches!(e, Effect::Save(_))));
+    // The kill took the pane, and its status, with it.
+    core.dispatch(
+        AppAction::HostListed(vec![]),
+        Clock::at(printed_at + 2 * 60_000),
+    );
+    tick(&mut core, printed_at + 3 * 60_000);
+    assert_eq!(members(&core, set), vec![id]);
+    assert_eq!(core.last_active(id), Some(Clock::at(printed_at).wall));
+}
+
+#[test]
+fn a_pane_lost_with_its_server_keeps_its_last_output() {
+    let (mut core, _, ids) = with_records(&[SessionKind::Service], |r| Some(running(r.id)));
+    let id = ids[0];
+    let set = recent_set(&mut core, 24, 1_000);
+    let printed_at = 30 * HOUR_MS;
+    core.dispatch(
+        AppAction::HostListed(vec![printed(id, printed_at)]),
+        Clock::at(printed_at),
+    );
+    let effects = core.dispatch(
+        AppAction::HostListed(vec![]),
+        Clock::at(printed_at + 60_000),
+    );
+    assert!(effects.iter().any(|e| matches!(e, Effect::Save(_))));
+    tick(&mut core, printed_at + 2 * 60_000);
+    assert_eq!(members(&core, set), vec![id]);
+    assert_eq!(core.last_active(id), Some(Clock::at(printed_at).wall));
+}
+
+#[test]
+fn dismissals_of_removed_sessions_are_pruned() {
+    let (mut core, _, ids) = with_records(&[SessionKind::Shell], |_| None);
+    let id = ids[0];
+    let set = recent_set(&mut core, 24, 1_000);
+    assert_eq!(core.working_sets().len(), 1);
+    tick(&mut core, 2_000);
+    dismiss(&mut core, set, id, 3_000);
+    assert_eq!(core.working_set(set).unwrap().dismissed.len(), 1);
+    let effects = core.dispatch(AppAction::RemoveSession(id), Clock::at(4_000));
+    assert!(effects.iter().any(|e| matches!(e, Effect::SaveViews(_))));
+    assert!(core.working_set(set).unwrap().dismissed.is_empty());
+    let mut later = Vec::new();
+    for at in [
+        5_000,
+        4_000 + u64::try_from(UNDO_WINDOW.as_millis()).unwrap() + 1_000,
+    ] {
+        later.extend(tick(&mut core, at));
+    }
+    assert!(core.session(id).is_none());
+    assert!(core.working_set(set).unwrap().dismissed.is_empty());
+    assert!(!later.iter().any(|e| matches!(e, Effect::SaveViews(_))));
+}
+
+#[test]
+fn undo_restores_a_dismissal() {
+    let (mut core, _, ids) = with_records(&[SessionKind::Shell], |_| None);
+    let id = ids[0];
+    let set = recent_set(&mut core, 24, 1_000);
+    tick(&mut core, 2_000);
+    dismiss(&mut core, set, id, 3_000);
+    let dismissed = core.working_set(set).unwrap().dismissed.clone();
+    core.dispatch(AppAction::RemoveSession(id), Clock::at(4_000));
+    core.dispatch(AppAction::UndoRemove(id), Clock::at(5_000));
+    tick(&mut core, 6_000);
+    assert!(core.session(id).is_some());
+    assert_eq!(core.working_set(set).unwrap().dismissed, dismissed);
+    assert!(members(&core, set).is_empty());
+}
+
+#[test]
+fn the_controller_steps_through_a_rule_set_in_order() {
+    let (mut core, _, ids) = with_records(&[SessionKind::Shell, SessionKind::Shell], |_| None);
+    let set = recent_set(&mut core, 24, 1_000);
+    core.dispatch(
+        AppAction::HostListed(vec![printed(ids[0], 2_000), printed(ids[1], 3_000)]),
+        Clock::at(3_000),
+    );
+    tick(&mut core, 4_000);
+    assert_eq!(core.active_card(set), Some(PinTarget::Session(ids[1])));
+    core.dispatch(AppAction::StepCard(Direction::Down), Clock::at(5_000));
+    assert_eq!(core.active_card(set), Some(PinTarget::Session(ids[0])));
+    core.dispatch(AppAction::StepCard(Direction::Right), Clock::at(5_000));
+    assert_eq!(core.active_card(set), Some(PinTarget::Session(ids[0])));
+    core.dispatch(AppAction::StepCard(Direction::Left), Clock::at(5_000));
+    assert_eq!(core.active_card(set), Some(PinTarget::Session(ids[1])));
+}
+
 // --- the control port: quiet commands under an operation id
 
 mod control {
@@ -5866,6 +6321,43 @@ mod control {
         // The app dies here; the next start loads what was saved.
         let (core, _) = loaded(vec![saved], vec![]);
         assert_eq!(core.interrupted_ops(), vec!["op-9".to_owned()]);
+    }
+
+    #[test]
+    fn a_rule_set_refuses_a_sync_and_reports_its_rule() {
+        let (mut core, _, ids) = with_records(&[SessionKind::Shell], |_| None);
+        let set = recent_set(&mut core, 24, 1_000);
+        tick(&mut core, 2_000);
+        let views = core.working_sets().to_vec();
+        let effects = control(
+            &mut core,
+            "s1",
+            ControlAction::SyncSet {
+                set,
+                items: vec![PinnedItem {
+                    target: PinTarget::Session(ids[0]),
+                    rect: GridRect {
+                        x: 0,
+                        y: 0,
+                        w: 10,
+                        h: 8,
+                    },
+                }],
+            },
+            3_000,
+        );
+        assert!(!effects.iter().any(|e| matches!(e, Effect::SaveViews(_))));
+        assert_eq!(
+            core.take_control_outcome("s1").unwrap().error.as_deref(),
+            Some("the set is chosen by a rule")
+        );
+        assert_eq!(core.working_sets(), &views[..]);
+        let reported = core.set_views(SpaceId::DEFAULT);
+        assert_eq!(
+            reported[0].rule,
+            Some(switchboard_control::SetRule::Recent { hours: 24 })
+        );
+        assert_eq!(reported[0].items.len(), 1);
     }
 }
 

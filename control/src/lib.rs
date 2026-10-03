@@ -411,6 +411,18 @@ pub struct SetView {
     pub space: String,
     pub items: Vec<Pin>,
     pub op: Option<String>,
+    /// What chooses the cards, for a set the user did not arrange by
+    /// hand; `items` is then the members as they are laid out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rule: Option<SetRule>,
+}
+
+/// What chooses a rule set's cards.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SetRule {
+    /// Every session active within the last `hours`.
+    Recent { hours: u32 },
 }
 
 /// Where a review run stands.
@@ -831,6 +843,7 @@ mod tests {
                     space: "sp".into(),
                     items: vec![],
                     op: None,
+                    rule: Some(SetRule::Recent { hours: 24 }),
                 }],
             },
             Reply::Sessions {

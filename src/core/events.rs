@@ -4,6 +4,8 @@
 //! no newer than the record's last applied one is ignored rather than
 //! applied out of order.
 
+use std::time::SystemTime;
+
 use uuid::Uuid;
 
 use crate::core::action::{AppCore, Clock, Out};
@@ -82,6 +84,9 @@ impl AppCore {
                 now,
             );
         }
+        if matches!(event.kind, EventKind::SessionEnded { .. }) {
+            self.carry_dismissals(id, event.at, out);
+        }
         // A hook ran, so Claude is past its own prompts.
         self.prompted.retain(|r| *r != id);
         self.edit_session(id, out, |s| {
@@ -102,6 +107,22 @@ impl AppCore {
                 match handle {
                     ResumeHandle::ClaudeCode { transcript, .. }
                     | ResumeHandle::Codex { transcript, .. } => *transcript = Some(path),
+                }
+            }
+        });
+    }
+
+    /// An end is not activity: a session killed after it was dismissed
+    /// sends its end later than the stamp, which would bring it straight
+    /// back. Dismissals in force just before the end move up to it.
+    fn carry_dismissals(&mut self, id: RecordId, at: SystemTime, out: &mut Out) {
+        let Some(before) = self.last_active(id) else {
+            return;
+        };
+        self.update_views(out, |v| {
+            for d in v.sets.iter_mut().flat_map(|s| &mut s.dismissed) {
+                if d.record == id && before <= d.at {
+                    d.at = d.at.max(at);
                 }
             }
         });

@@ -816,6 +816,8 @@ where that overlaps another card. Release dispatches `PlacePin`, which
 the core refuses on an overlap, so a bad drop snaps back. Minimum size
 is 3 by 2 units.
 
+A set can instead be chosen by a rule (2026-10-02): see "Rule sets".
+
 Cards: an agent or shell card shows state and project, the name, the
 last prompt on one line ("You: …", hover for the whole prompt), then
 the last answer above a one-line send box. An agent's final response
@@ -1356,7 +1358,7 @@ of every workspace with its waiting count, then New, Rename, and Delete
 project's board and a working set's header moves it, offered only when
 another workspace exists.
 
-Records: `Views.spaces` lists the workspaces (views.json, v5 today), and
+Records: `Views.spaces` lists the workspaces (views.json, v5 and later), and
 `Project.space` (records v8) and `WorkingSet.space` name each thing's
 workspace, defaulting to the fixed id of the default workspace, so
 files from before workspaces read as members of it with no step. The
@@ -1666,6 +1668,60 @@ is v5.
 
 Known gap: a real workspace's sets are not listed in global, so a set
 of one workspace is reached by switching to it.
+
+## Rule sets (2026-10-02)
+
+A rule set is a working set whose cards a rule chooses instead of the
+user. One rule exists: every session of the set's workspace active in
+the last N hours (default 24, 1 to 720), newest first, laid out by the
+core left to right at one card size (`grid::flow`, 10 by 8). The rule
+is the record (`WorkingSet.rule`, `SetRule::Recent { hours }`, on disk
+`{"kind": "recent", "hours": 24}`); membership is a cache
+(`AppCore::rule_members`) worked out again after every action, so nothing
+is written per card and a tick never saves. Everything that draws or
+walks a set reads `AppCore::set_cards`: a hand set's pins, or a rule
+set's members laid out. views.json is v6, so an older build leaves a
+file with rules alone; a v5 file reads as hand sets.
+
+Activity (`AppCore::last_active`) is the latest of `last_seen` (the
+launch, and every hook event), `last_event_at`, `last_stop_at`, and the
+pane's last output, alive or exited, while tmux still holds the pane.
+A live pane counts through what it prints, not by being alive, or an
+idle shell would never leave. When the pane goes (a kill, a restart, a
+stop, or the server dying), the core first raises `last_seen` to that
+output time, so the session keeps its place until the window passes.
+Every kind of session is included, Codex through its pane output.
+
+Dismissing (the "×" on a card, "Dismiss" on a stopped card, "Kill and
+dismiss" in a running card's menu) stores the session's activity time
+on the set (`WorkingSet.dismissed`), so it stays off while it is quiet
+and comes back by itself the moment it does something. A `SessionEnded`
+event moves a dismissal in force up to the end, so the end a kill sends
+does not bring the card back; Kill and dismiss is one core action
+(`KillAndDismiss`) that stamps the dismissal and kills the pane.
+Dismissals are pruned when their record is gone, ride along in the undo
+window of a removal, and are not pruned by age, so widening the hours
+does not bring back what was dismissed.
+
+A rule set takes no pins by any path (`AddToWorkingSet`, `PlacePin`,
+`NewWorkingSet { with }`, the control port's `SyncSet`, which answers
+"the set is chosen by a rule"), is left out of the "Working sets" menu,
+and has no Arrange. Its header shows "Sessions active in the last [24]
+h" with the hours as a field. A set's workspace decides which sessions
+it may hold through `target_in`, so a rule set made while Everywhere is
+active covers every workspace with no code of its own. Clone and Move
+to carry the rule and the dismissals. The control port's `set` replies
+carry `rule`, with `items` the members laid out at 24 columns. Script
+lines: `new-recent-set`, `set-hours`, `dismiss-from-set`; the last two
+take a multi-word set name (every word but the last). Hours from any
+sender are clamped to 1 to 720.
+
+Known edges: a pane that redraws forever (`top`, a clock in a prompt)
+cannot stay dismissed past its next redraw; Kill and dismiss is the way
+out. Rule sets are rule-only (no hand pins beside the rule's cards).
+The controller steps through a rule set's list in order (Left and Up
+back, Right and Down forward) rather than across the grid, since the
+core does not know the view's columns.
 
 ## Open questions
 

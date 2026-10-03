@@ -543,8 +543,9 @@ pub struct WindowFrame {
 /// reads with everything in the default space. v5 added the global
 /// space's fixed id to `WorkingSet.space`; a v4 file reads unchanged.
 /// The bump keeps an older build, which would move a global set into a
-/// real space and prune its cards, from rewriting such a file.
-pub const VIEWS_SCHEMA_VERSION: u32 = 5;
+/// real space and prune its cards, from rewriting such a file. v6 added
+/// rules and dismissals; a v5 file reads as hand sets.
+pub const VIEWS_SCHEMA_VERSION: u32 = 6;
 
 /// Switchboard's own id for a space. Never reused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -676,6 +677,12 @@ pub struct WorkingSet {
     /// reply; never shown as an id, only as a "Dispatch" mark.
     #[serde(default)]
     pub op: Option<String>,
+    /// The rule that chooses a set's cards; `None` is a hand-placed set.
+    #[serde(default)]
+    pub rule: Option<SetRule>,
+    /// Sessions taken off a rule set by hand. Meaningless without a rule.
+    #[serde(default)]
+    pub dismissed: Vec<Dismissal>,
 }
 
 impl Default for WorkingSet {
@@ -686,6 +693,8 @@ impl Default for WorkingSet {
             items: Vec::new(),
             space: SpaceId::DEFAULT,
             op: None,
+            rule: None,
+            dismissed: Vec::new(),
         }
     }
 }
@@ -700,8 +709,40 @@ impl WorkingSet {
             items: Vec::new(),
             space: SpaceId::DEFAULT,
             op: None,
+            rule: None,
+            dismissed: Vec::new(),
         }
     }
+}
+
+/// What chooses the cards of a rule set. On disk the variant name sits
+/// in a `kind` field beside its own fields, so a second kind can be
+/// added without changing the shape of the first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SetRule {
+    /// Every session active within the last `hours`.
+    Recent {
+        /// How far back the set looks, in hours; the core keeps it in
+        /// `RULE_HOURS`.
+        hours: u32,
+    },
+}
+
+impl SetRule {
+    /// The rule a new set starts with: the last day.
+    pub const DEFAULT: SetRule = SetRule::Recent { hours: 24 };
+}
+
+/// A session taken off a rule set by hand.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Dismissal {
+    /// The dismissed session's record id, never its host id or resume
+    /// handle, so the dismissal outlives a kill and a resume.
+    pub record: RecordId,
+    /// The session's activity time when it was dismissed, not the
+    /// clock: it stays off while its activity is at or before this.
+    pub at: SystemTime,
 }
 
 /// One card of a working set and where it sits on the grid.
@@ -933,6 +974,8 @@ pub struct SessionRecord {
     #[serde(default)]
     pub env_profile: Option<String>,
     pub created: SystemTime,
+    /// The newest thing known of the session: its launch, its latest
+    /// hook event, or the last output of a pane that has since gone.
     pub last_seen: SystemTime,
     #[serde(default)]
     pub notes: String,

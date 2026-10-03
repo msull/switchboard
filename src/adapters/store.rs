@@ -600,6 +600,8 @@ mod tests {
                 },
             }],
             op: None,
+            rule: None,
+            dismissed: Vec::new(),
         });
         store.save_views(&views).unwrap();
         assert_eq!(store.load_all().unwrap().views, views);
@@ -647,7 +649,41 @@ mod tests {
                 },
             }],
             op: None,
+            rule: None,
+            dismissed: Vec::new(),
         }
+    }
+
+    #[test]
+    fn a_rule_set_round_trips_and_a_v5_set_reads_as_a_hand_set() {
+        use crate::core::{Dismissal, RecordId, SetRule};
+        let dir = tempfile::tempdir().unwrap();
+        let store = locked_store(dir.path());
+        let mut views = Views::default();
+        let mut set = set_in(SpaceId::DEFAULT);
+        set.items.clear();
+        set.rule = Some(SetRule::Recent { hours: 24 });
+        set.dismissed.push(Dismissal {
+            record: RecordId::new(),
+            at: std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000),
+        });
+        views.sets.push(set);
+        store.save_views(&views).unwrap();
+        assert_eq!(store.load_all().unwrap().views, views);
+        let written: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(dir.path().join("views.json")).unwrap()).unwrap();
+        assert_eq!(
+            written["sets"][0]["rule"],
+            serde_json::json!({"kind": "recent", "hours": 24})
+        );
+        std::fs::write(
+            dir.path().join("views.json"),
+            "{\"schema_version\": 5, \"sets\": [{\"name\": \"Old\", \"items\": []}]}",
+        )
+        .unwrap();
+        let old = store.load_all().unwrap().views;
+        assert_eq!(old.sets[0].rule, None);
+        assert!(old.sets[0].dismissed.is_empty());
     }
 
     #[test]

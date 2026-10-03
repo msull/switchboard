@@ -24,9 +24,12 @@
 //! <project> <relative dir|.>` (where the file side's tree starts),
 //! `send <name> <text...>`, `interrupt <name>` (Escape to the pane),
 //! `return <name>`, `kill <name>`, `approve <name>`, `revoke <name>`
-//! (a defined command's approval), `side files|run|notes` (the side panel's
-//! tab), `switchboard`, `theme light|dark|auto`, `sleep <secs>` (then
-//! polls).
+//! (a defined command's approval), `new-recent-set <hours> [name...]`
+//! (a rule set of the sessions active in the last `hours`), `set-hours
+//! <set...> <hours>` and `dismiss-from-set <set...> <session>` (the set
+//! named by every word but the last), `side files|run|notes` (the side
+//! panel's tab), `switchboard`, `theme light|dark|auto`, `sleep <secs>`
+//! (then polls).
 //! Blank lines and `#` comments are ignored; unknown lines are logged.
 
 use std::path::PathBuf;
@@ -34,7 +37,7 @@ use std::path::PathBuf;
 use crate::app::SwitchboardApp;
 use crate::core::{
     AgentKind, AppAction, EnvVar, Launch, PinTarget, ProjectId, RecordId, SecretScope, SessionKind,
-    SetId, SideTab, SpaceId,
+    SetId, SetRule, SideTab, SpaceId,
 };
 use crate::ports::controller::ControllerEvent;
 
@@ -131,6 +134,39 @@ const REVIEW_LINES: &[&str] = &[
     "place-pop-out",
     "place-card",
 ];
+
+/// The rule-set lines `rule_set_step` handles.
+const RULE_SET_LINES: &[&str] = &["new-recent-set", "set-hours", "dismiss-from-set"];
+
+/// Rule sets: make one, change its hours, dismiss a session from it.
+fn rule_set_step(app: &mut SwitchboardApp, w: &[&str]) -> Result<(), String> {
+    match w {
+        // A rule set of the sessions active in the last `hours`, in the
+        // active workspace, named by the rest of the line if given.
+        ["new-recent-set", hours, name @ ..] => {
+            let hours: u32 = hours.parse().map_err(|_| "bad hours")?;
+            let name = (!name.is_empty()).then(|| name.join(" "));
+            app.dispatch(AppAction::NewRuleSet {
+                name,
+                rule: SetRule::Recent { hours },
+            });
+        }
+        // A set's name may hold spaces ("Recent sessions 2"), so it is
+        // every word between the line's first and last.
+        ["set-hours", name @ .., hours] if !name.is_empty() => {
+            let set = working_set(app, &name.join(" "))?;
+            let hours: u32 = hours.parse().map_err(|_| "bad hours")?;
+            app.dispatch(AppAction::SetRuleHours { set, hours });
+        }
+        ["dismiss-from-set", name @ .., record] if !name.is_empty() => {
+            let set = working_set(app, &name.join(" "))?;
+            let record = session(app, record)?;
+            app.dispatch(AppAction::DismissFromSet { set, record });
+        }
+        _ => return Err(format!("unknown line: {}", w.join(" "))),
+    }
+    Ok(())
+}
 
 /// The workspace lines `space_step` handles.
 const SPACE_LINES: &[&str] = &[
@@ -556,6 +592,7 @@ fn step(app: &mut SwitchboardApp, w: &[&str]) -> Result<(), String> {
         }
         [first, ..] if REVIEW_LINES.contains(first) => review_step(app, w)?,
         [first, ..] if SPACE_LINES.contains(first) => space_step(app, w)?,
+        [first, ..] if RULE_SET_LINES.contains(first) => rule_set_step(app, w)?,
         [first, ..] if EXTRA_LINES.contains(first) => working_set_step(app, w)?,
         _ => return Err("unknown line".into()),
     }

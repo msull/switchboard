@@ -271,6 +271,7 @@ impl AppCore {
         }
         let host = HostId(id.host_name());
         if self.host_status(id).is_some() {
+            self.keep_last_output(id, out);
             out.push(Effect::Kill(host.clone()));
             self.host.retain(|h| h.id != host);
         }
@@ -446,6 +447,7 @@ impl AppCore {
     }
 
     fn stop_if_running(&mut self, id: RecordId, out: &mut Out) {
+        self.keep_last_output(id, out);
         if let Some(status) = self.host_status(id) {
             out.push(Effect::Kill(status.id.clone()));
         }

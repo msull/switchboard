@@ -10,6 +10,10 @@ pub const MIN_WIDTH: u32 = 3;
 /// And to this many units tall.
 pub const MIN_HEIGHT: u32 = 2;
 
+/// The one size of a session's card on a working set, and every card's
+/// size on a rule set.
+pub const SESSION_CARD: (u32, u32) = (10, 8);
+
 /// The size a target's card starts at. Today's board cards are 7 units
 /// wide; working-set cards show more and get more room.
 #[must_use]
@@ -17,7 +21,7 @@ pub fn default_size(target: &PinTarget, kind: Option<SessionKind>) -> (u32, u32)
     match (target, kind) {
         (PinTarget::File(..), _) => (10, 10),
         (PinTarget::Session(_), Some(SessionKind::Command | SessionKind::Service)) => (10, 7),
-        (PinTarget::Session(_), _) => (10, 8),
+        (PinTarget::Session(_), _) => SESSION_CARD,
     }
 }
 
@@ -37,6 +41,25 @@ pub fn first_free(items: &[PinnedItem], w: u32, h: u32, columns: u32) -> GridRec
         }
     }
     unreachable!("the grid is unbounded downwards")
+}
+
+/// `n` cards `w` by `h`, laid out left to right and wrapped at
+/// `columns`: a rule set's grid, where nothing is placed by hand. A
+/// grid narrower than one card holds one card per row.
+#[must_use]
+pub fn flow(n: usize, w: u32, h: u32, columns: u32) -> Vec<GridRect> {
+    let per_row = (columns / w.max(1)).max(1);
+    (0..n)
+        .map(|i| {
+            let i = u32::try_from(i).unwrap_or(u32::MAX);
+            GridRect {
+                x: (i % per_row) * w,
+                y: (i / per_row) * h,
+                w,
+                h,
+            }
+        })
+        .collect()
 }
 
 /// Keep `rect` on the grid: at least the minimum size, and never past
@@ -131,6 +154,42 @@ mod tests {
         assert_eq!(step(d, Direction::Right), None);
         assert_eq!(step(a, Direction::Up), None);
         assert_eq!(step(b, Direction::Left), None);
+    }
+
+    #[test]
+    fn flow_wraps_at_the_column_count() {
+        let rects = flow(3, 10, 8, 24);
+        assert_eq!(
+            rects,
+            vec![
+                GridRect {
+                    x: 0,
+                    y: 0,
+                    w: 10,
+                    h: 8
+                },
+                GridRect {
+                    x: 10,
+                    y: 0,
+                    w: 10,
+                    h: 8
+                },
+                GridRect {
+                    x: 0,
+                    y: 8,
+                    w: 10,
+                    h: 8
+                },
+            ]
+        );
+        assert!(flow(0, 10, 8, 24).is_empty());
+    }
+
+    #[test]
+    fn flow_narrower_than_a_card_stacks_one_per_row() {
+        let rects = flow(2, 10, 8, 4);
+        assert_eq!((rects[0].x, rects[0].y), (0, 0));
+        assert_eq!((rects[1].x, rects[1].y), (0, 8));
     }
 
     #[test]

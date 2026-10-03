@@ -44,11 +44,12 @@ its caption bar and preview panel appear on, the sessions open in
 windows of their own and where each window sits, where the main
 window sits, the zoom of each display, the workflow round cap and the
 user's workflow definitions),
-`views.json` (schema v5: the workspaces, and the working sets: each
+`views.json` (schema v6: the workspaces, and the working sets: each
 one's name, workspace, which sessions and files are on it, and where
 each card sits on its grid, with a `.bak`; a set made in the global
 workspace, "Everywhere", is in no real workspace and may hold cards
-from all of them),
+from all of them; a rule set stores its rule, such as "active in the
+last 24 hours", and the sessions dismissed from it instead of cards),
 the
 tmux config and socket name, `claude-hooks.json` (passed to Claude Code
 with `--settings`), `events.log` (the hook event log), `wake.sock`, and
@@ -144,7 +145,8 @@ Dev aids, all environment variables:
   `files`, `side-position`, `terminal`, `select-file`, `set-env`, `set-secret`, `dotenv`, `environment`, `config`,
   `send`, `interrupt`, `return`, `kill`, `remove`, `approve`, `revoke`, `side`,
   `switchboard`, `working-set`, `new-working-set`, `clone-working-set`,
-  `rename-working-set`, `delete-working-set`, `add-to-working-set`,
+  `rename-working-set`, `delete-working-set`, `new-recent-set`,
+  `set-hours`, `dismiss-from-set`, `add-to-working-set`,
   `add-file-to-working-set`, `arrange`, `show-message`, `clone-session`,
   `discard-to`, `undo-discard`, `review-plan`, `show-review`,
   `show-dispatch`, `show-ticket`, `close-ticket`,
@@ -176,7 +178,7 @@ src/core/
   action.rs              AppAction, Effect, Clock, AppCore::dispatch, read model for the UI
   reconcile.rs           StoreLoaded / HostListed: card states, autostart services, spawn specs
   sessions.rs            launch, idempotent return, resume preflight, Codex serialization
-  grid.rs                Working Set placement: default card sizes, first free spot, overlap, minimum size, the card a step away
+  grid.rs                Working Set placement: default card sizes, first free spot, overlap, minimum size, the card a step away, a rule set's flowed layout
   controller.rs          the hand controller's meaning: the selected card per working set, Z's radial menu, the session C holds open
   definitions.rs         .switchboard/project.json entries -> records; hash-keyed approval
   events.rs              hook events -> record activity (matched by record id, ordered by time)
@@ -231,7 +233,7 @@ src/ui/
   cards.rs               the one card for every entry kind, the card grid, pinned document cards
   session.rs             session view: header, embedded terminal or conversation + message box
   switchboard.rs         every session across projects, waiting first
-  working_set.rs         a working set: the user's grid of session and file cards from any project
+  working_set.rs         a working set: the user's grid of session and file cards from any project, or a rule set's cards with its hours field and dismiss controls
   dialogs.rs             add project / create session dialogs, the full-message and links-in-message dialogs
 assets/fonts/            Source Serif 4 (Regular, Semibold, Italic; OFL), embedded by theme.rs
 tests/ui.rs              headless flows via egui_kittest with fakes
