@@ -14,7 +14,7 @@ use switchboard_control::{self as wire, Body, Reply, Request, RunState};
 use crate::bitbucket::{Bitbucket, bitbucket_repo};
 use crate::git::{Push, Repo, branch_name};
 use crate::github::{Checks, Gh, PullRequests, github_repo};
-use crate::pipeline::{Context, Gate, Pipeline, Stage, StageKind};
+use crate::pipeline::{Context, Gate, Lane, Pipeline, Stage, StageKind};
 use crate::port::Port;
 use crate::store::{
     DataDir, Lock, Settings, expand_home, read_project, read_ticket, shell_unsafe, write_project,
@@ -23,7 +23,7 @@ use crate::store::{
 use crate::template::Vars;
 use crate::ticket::{
     Attempt, AttemptKind, AttemptState, CloseProgress, Decision, DecisionKind, DecisionState,
-    GateRun, LaneRecord, Operation, ProjectState, PullRequestRecord, PullRequestSource,
+    GateRun, LaneRecord, Operation, ProjectState, PullRequestRecord, PullRequestSource, Refreshed,
     SETTLE_POLLS, STOP_IDLE_POLLS, Settle, SourceSnapshot, Ticket, TicketState,
 };
 
@@ -765,6 +765,25 @@ impl Runner {
         }
     }
 
+    /// `push_refreshed`, and the head it left on the remote recorded
+    /// on the lane as its `pushed`.
+    fn record_push(
+        &mut self,
+        t: &mut Ticket,
+        p: &Pipeline,
+        i: usize,
+        remote: &str,
+        now_ms: u64,
+    ) -> Result<()> {
+        if let Some(head) = self.push_refreshed(t, p, i, remote)? {
+            t.lanes[i].pushed = Some(crate::ticket::PushedHead {
+                head,
+                at_ms: now_ms,
+            });
+        }
+        Ok(())
+    }
+
     /// One lane's branch against its base; true when the stage must
     /// wait on a rebaser or a question for it.
     fn refresh_lane(
@@ -779,19 +798,7 @@ impl Runner {
         let Some(lane) = p.lane(&t.lanes[i].name).cloned() else {
             return Ok(false);
         };
-        let (clone, remote, onto) = if lane.repo.is_some() {
-            (
-                self.data.lane_repo_dir(&p.project.name, &lane.name),
-                p.lane_remote(&lane).to_owned(),
-                format!("{}/{}", p.lane_remote(&lane), p.lane_base(&lane)),
-            )
-        } else {
-            (
-                self.data.repo_dir(&p.project.name),
-                p.project.remote.clone(),
-                format!("{}/{}", p.project.remote, p.project.base),
-            )
-        };
+        let (clone, remote, onto) = self.lane_base_ref(p, &lane);
         let worktree = t.lanes[i].worktree.clone();
         self.git.fetch(&clone, &remote)?;
         let onto_sha = self.git.rev_parse(&clone, &onto)?;
@@ -810,9 +817,34 @@ impl Runner {
             );
             return Ok(false);
         }
+        // A lane with no `base_sha` (its base unread at the cut, or cut
+        // before the field) sits on its fork point from `onto`. It is
+        // recorded while the lane is behind, before anything moves, so
+        // the bring-up after a rebaser still reads it. A lane not behind
+        // whose fork point is `onto` never moved and has nothing to
+        // record; one whose fork point cannot be read is brought up from
+        // an unknown base. Once a rebaser has run since the lane last
+        // moved, a fork point still missing was unreadable before it,
+        // and the one read now is the rebaser's work, so the base stays
+        // unknown and that work is checked.
+        if t.lanes[i].base_sha.is_none() && !rebased_since_moved(t, &t.lanes[i]) {
+            let fork = self.git.merge_base(&worktree, "HEAD", &onto).ok();
+            let never_moved = behind == 0 && fork.as_deref() == Some(onto_sha.as_str());
+            t.lanes[i].base_sha = fork;
+            if never_moved {
+                self.save_ticket(t, now_ms)?;
+                return Ok(false);
+            }
+        }
+        // Both read before anything moves: a branch with no commits of
+        // its own sits at the commit it was cut from or last moved to,
+        // or at `onto` when that is unknown.
+        let head_before = self.git.head(&worktree)?;
+        let from = t.lanes[i].base_sha.clone().unwrap_or_default();
+        let sat_on = if from.is_empty() { &onto_sha } else { &from };
+        let commits = head_before != *sat_on;
         let brought_up = behind == 0 || self.git.rebase_onto(&worktree, &onto)?;
         if brought_up {
-            let from = t.lanes[i].base_sha.clone().unwrap_or_default();
             log::info!(
                 "ticket {} lane {}: base moved {from} -> {onto_sha}; branch brought up ({behind} behind)",
                 t.id,
@@ -820,15 +852,20 @@ impl Runner {
             );
             // Before the save, so a crash repeats the push rather than
             // skipping it.
-            if let Some(head) = self.push_refreshed(t, p, i, &remote)? {
-                t.lanes[i].pushed = Some(crate::ticket::PushedHead {
-                    head,
-                    at_ms: now_ms,
-                });
-            }
-            t.lanes[i].refreshed = Some(crate::ticket::Refreshed {
+            self.record_push(t, p, i, &remote, now_ms)?;
+            // Nothing behind means a rebaser (or a hand rebase) already
+            // did the work; its notes go to the next reviewer.
+            let notes = if behind == 0 && commits {
+                rebaser_notes(t, &lane.name, t.lanes[i].refreshed.as_ref())
+            } else {
+                None
+            };
+            t.lanes[i].refreshed = Some(Refreshed {
                 from,
                 to: onto_sha.clone(),
+                commits,
+                notes,
+                at_ms: now_ms,
             });
             t.lanes[i].base_sha = Some(onto_sha);
             self.save_ticket(t, now_ms)?;
@@ -873,6 +910,24 @@ impl Runner {
             }
         }
         Ok(true)
+    }
+
+    /// Where a lane's base is read: its clone, the remote fetched there,
+    /// and the remote-tracking ref of its base.
+    fn lane_base_ref(&self, p: &Pipeline, lane: &Lane) -> (PathBuf, String, String) {
+        if lane.repo.is_some() {
+            (
+                self.data.lane_repo_dir(&p.project.name, &lane.name),
+                p.lane_remote(lane).to_owned(),
+                format!("{}/{}", p.lane_remote(lane), p.lane_base(lane)),
+            )
+        } else {
+            (
+                self.data.repo_dir(&p.project.name),
+                p.project.remote.clone(),
+                format!("{}/{}", p.project.remote, p.project.base),
+            )
+        }
     }
 
     /// The shape a refresh rebaser's attempt is watched under: the
@@ -1978,7 +2033,7 @@ impl Runner {
     fn lane_base_sha(
         &self,
         p: &Pipeline,
-        lane: &crate::pipeline::Lane,
+        lane: &Lane,
         pr: Option<&PullRequestSource>,
     ) -> Option<String> {
         // A pull request's base is the branch it targets on its own
@@ -1995,17 +2050,7 @@ impl Runner {
                 .merge_base(&clone, &format!("{}/{}", pr.remote, pr.base), pr.local())
                 .ok();
         }
-        let (clone, start) = if lane.repo.is_some() {
-            (
-                self.data.lane_repo_dir(&p.project.name, &lane.name),
-                format!("{}/{}", p.lane_remote(lane), p.lane_base(lane)),
-            )
-        } else {
-            (
-                self.data.repo_dir(&p.project.name),
-                format!("{}/{}", p.project.remote, p.project.base),
-            )
-        };
+        let (clone, _, start) = self.lane_base_ref(p, lane);
         self.git.rev_parse(&clone, &start).ok()
     }
 
@@ -3998,7 +4043,10 @@ impl Runner {
                 stage,
                 name: "rerun",
                 kind: DecisionKind::Permission,
-                question: format!("{stage} ({ctx}) attempt {n} failed: {reason}. Run it again?"),
+                question: format!(
+                    "{stage} ({ctx}) attempt {n} failed: {reason}. Run it again?{}",
+                    rerun_carries(t, stage, n)
+                ),
                 options,
                 recommendation: None,
                 attempt: Some((stage.to_owned(), n)),
@@ -4051,8 +4099,11 @@ impl Runner {
                 name: "rerun",
                 kind: DecisionKind::Permission,
                 question: format!(
-                    "{} ({}) attempt {} {what}. Run it again?",
-                    a.stage, a.context, a.n
+                    "{} ({}) attempt {} {what}. Run it again?{}",
+                    a.stage,
+                    a.context,
+                    a.n,
+                    rerun_carries(t, &a.stage, a.n)
                 ),
                 options,
                 recommendation: None,
@@ -4834,12 +4885,16 @@ const SENT_BACK_FROM: &str = "sent back from ";
 /// The note a `rerun` answer, on decision `decision`, gives its attempt's
 /// replacement, under its `rework` key: the answer's own note, else the
 /// one a send-back gave the attempt, quoted by its cancellation reason,
-/// which a park took off `t.rework` before any attempt carried it. Only
-/// an agent stage's prompt takes a note.
+/// which a park took off `t.rework` before any attempt carried it. An
+/// agent stage's prompt takes a note, and so does a code review's first
+/// fix pass (where "start over" also drops the carried points).
 fn rerun_note(t: &Ticket, p: &Pipeline, decision: usize) -> Option<(String, String)> {
     let d = &t.decisions[decision];
     let (stage, n) = d.attempt.as_ref()?;
-    if p.stages.iter().find(|s| &s.name == stage)?.kind() != StageKind::Agent {
+    if !matches!(
+        p.stages.iter().find(|s| &s.name == stage)?.kind(),
+        StageKind::Agent | StageKind::Review
+    ) {
         return None;
     }
     let replaced = find_attempt(t, stage, *n)?;
@@ -4855,6 +4910,48 @@ fn rerun_note(t: &Ticket, p: &Pipeline, decision: usize) -> Option<(String, Stri
         _ => None,
     })?;
     Some((rework_key(stage, &replaced.context), note))
+}
+
+/// Whether a refresh rebaser has run on the lane since it last moved.
+fn rebased_since_moved(t: &Ticket, lane: &LaneRecord) -> bool {
+    t.attempts.iter().any(|a| {
+        a.stage == REFRESH
+            && a.context == lane.name
+            && lane
+                .refreshed
+                .as_ref()
+                .is_none_or(|r| a.started_ms > r.at_ms)
+    })
+}
+
+/// The notes of the latest finished refresh rebaser in `lane` that
+/// served the move being recorded: one started after the lane's previous
+/// bring-up, or any when there was none. A previous bring-up recorded
+/// before its time was kept says nothing about which move an older
+/// rebaser served, so nothing is attached after it.
+fn rebaser_notes(t: &Ticket, lane: &str, previous: Option<&Refreshed>) -> Option<PathBuf> {
+    let after = match previous {
+        None => None,
+        Some(r) if r.at_ms > 0 => Some(r.at_ms),
+        Some(_) => return None,
+    };
+    t.attempts
+        .iter()
+        .filter(|a| a.stage == REFRESH && a.context == lane && !a.is_open())
+        .filter(|a| after.is_none_or(|ms| a.started_ms > ms))
+        .filter_map(|a| Some((a.n, a.artifacts.get("notes").filter(|p| p.is_file())?)))
+        .max_by_key(|(n, _)| *n)
+        .map(|(_, path)| path.clone())
+}
+
+/// What a rerun question adds about a code review attempt: the next
+/// attempt carries its points unless the note says "start over".
+fn rerun_carries(t: &Ticket, stage: &str, n: u32) -> &'static str {
+    if find_attempt(t, stage, n).is_some_and(|a| a.kind == AttemptKind::Review) {
+        " The next attempt carries this one's settled and open points; a note saying \"start over\" reviews the whole branch again."
+    } else {
+        ""
+    }
 }
 
 /// The key a sent-back note is kept under.
@@ -5039,7 +5136,7 @@ fn pr_target(
 /// lane's own: its name and URL from the pipeline's `remotes`.
 fn extra_remote(
     p: &Pipeline,
-    lane: Option<&crate::pipeline::Lane>,
+    lane: Option<&Lane>,
     pr: &PullRequestSource,
 ) -> Option<(String, String)> {
     let default = lane
@@ -5399,6 +5496,8 @@ pub(crate) fn new_attempt(
         rounds: Vec::new(),
         extra_pass: false,
         failed_at_checks: false,
+        carried_from: None,
+        rework: None,
         settle: BTreeMap::new(),
         stop_at_ms: None,
         polls_since_stop: 0,

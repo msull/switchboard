@@ -29,6 +29,16 @@ attempt. A rerun with the note "start over" gets the plain prompt.
 
 **Size.** Scheduler prompt builder plus one test. A day.
 
+**Built** (#22). The field is flat, `Attempt.carried_from`, and a chain of
+failed attempts points at the one whose rounds gathered findings. Carried
+ids are qualified with the attempt they were raised in
+(`a<n>/r<round>/<reviewer>-<k>`), since ids are unique only within an
+attempt; the old open points are open coming into round 1, and the prompt
+lists the settled and open points in full. A note containing "start over"
+gives the plain attempt, and the rerun question says so. The send-back
+note moves onto the attempt (`Attempt.rework`) when it starts, which
+needed `RECORD_VERSION` 4.
+
 ## 2. Style does not hold convergence past round 2
 
 **Problem.** On #4, rounds 2 to 5 of the long attempt were withdrawals plus
@@ -47,6 +57,14 @@ today.
 point ends the review as converged with the point listed under "left".
 
 **Size.** `review.rs` verdict reading plus a test. Half a day.
+
+**Built** (#22). Style is tagged per point, `style:` in the point's text,
+and an untagged point from the reviewer named `style` is style too. "The
+fix agent sees them once" means the rounds before `style_rounds`: a
+style-only round at or past it converges at the head the reviewers read,
+with no extra fix pass. A carried attempt counts its rounds on from the
+old attempt's. The summary is a new artifact, `summary.md`, written when
+the attempt completes.
 
 ## 3. The fix agent tidies before it stops
 
@@ -151,6 +169,12 @@ with commits; absent for a clean move.
 
 **Size.** Prompt builder. An hour.
 
+**Built** (#22). `Refreshed` records `commits` (the head before the
+bring-up was not the old base), `notes` and `at_ms`. The check goes to the
+first round that reads the new base, not again to a later round or a
+rerun at the same base. Notes are attached only from a rebaser started
+after the lane's previous bring-up.
+
 ## 9. A Stop with the pane still busy is not completion
 
 **Problem.** #18's investigator fanned its audit out to eight background
@@ -201,6 +225,12 @@ not done" in the summary instead.
 prompt test checks the instruction.
 
 **Size.** Prompt builder in `review.rs`. An hour.
+
+**Built** (#22). The section is found by heading (a title starting with
+"Decisions" after an optional number). A plan without one is said to have
+none, rather than inlined whole. A contesting point is written
+`decided: ...`, never holds the round open, and is listed under "Found but
+not done" in the round file and the summary.
 
 ## 11. A refresh at `ready` pushes when the lane has a pull request
 
@@ -263,6 +293,6 @@ with a PR, keeps its instruction to fix any claim its rebase changed.
 
 ## Order
 
-9, 4 and 5 are built (#21), and 11 (#23). 1, 2 and 3 cut the round
-count directly and are small. 6, 8 and 10 are prompt text; 12 is
-withdrawn. 7 is a taste call for the user before anyone builds it.
+9, 4 and 5 are built (#21), and 11 (#23); 1, 2, 8 and 10 are built
+(#22). 3 cuts the round count directly and is small. 6 is prompt text;
+12 is withdrawn. 7 is a taste call for the user before anyone builds it.

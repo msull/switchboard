@@ -18,7 +18,7 @@ use crate::ticket::{ProjectState, Ticket};
 /// carried a version reads as 0 and is brought up by `migrate`. A
 /// record above it was written by a newer `dispatch` and is refused
 /// both ways, so this build never drops fields it does not know.
-pub const RECORD_VERSION: u32 = 3;
+pub const RECORD_VERSION: u32 = 4;
 
 /// The writer lock, held while this lives.
 #[derive(Debug)]
@@ -335,6 +335,13 @@ pub fn migrate(mut value: Value) -> Value {
         //
         // 2 to 3: a lane gains `pushed`, absent until a refresh pushes,
         // which its serde default gives.
+        //
+        // 3 to 4: a code review attempt gains `carried_from` and
+        // `rework`, and a lane's `refreshed` gains `commits`, `notes` and
+        // `at_ms`, all from their serde defaults. A review attempt's
+        // send-back note now lives on the attempt, so a build that would
+        // drop those fields must refuse the record; an attempt started
+        // before still finds its note on the ticket.
         if version == 1 {
             settle_from_verdicts(&mut value);
         }
@@ -546,6 +553,51 @@ mod tests {
             let settled: Vec<bool> = t.ledger.iter().map(|o| o.settled).collect();
             assert_eq!(settled, [true, false, false], "from {version:?}");
         }
+    }
+
+    #[test]
+    fn a_version_three_record_migrates_to_four_and_keeps_its_note_on_the_ticket() {
+        let attempt = r#"{"stage": "review-code", "n": 1, "context": "backend", "kind": "review", "state": "failed", "reason": "lint", "project": null, "session": null, "run": null, "artifacts": {}, "settle": {}, "stop_at_ms": null, "head": null, "started_ms": 1000, "ended_ms": 2000}"#;
+        let text = TICKET_V0
+            .replacen('{', "{\n  \"version\": 3,", 1)
+            .replacen(
+                r#""attempts": [],"#,
+                &format!(r#""attempts": [{attempt}],"#),
+                1,
+            )
+            .replacen(
+                r#""rework": {},"#,
+                r#""rework": {"review-code/backend": "rename tmp"},"#,
+                1,
+            )
+            .replacen(
+                r#""base_sha": "base0000""#,
+                r#""base_sha": "main0002", "refreshed": {"from": "base0000", "to": "main0002"}"#,
+                1,
+            );
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.json");
+        fs::write(&path, text).unwrap();
+        let mut t = read_ticket(&path).unwrap();
+        assert_eq!(t.version, RECORD_VERSION);
+        assert_eq!(t.rework["review-code/backend"], "rename tmp");
+        let a = &t.attempts[0];
+        assert_eq!((a.carried_from.clone(), a.rework.clone()), (None, None));
+        let moved = t.lanes[0].refreshed.clone().unwrap();
+        assert_eq!(
+            (moved.commits, moved.notes.clone(), moved.at_ms),
+            (false, None, 0)
+        );
+        t.attempts[0].carried_from = Some(("review-code".into(), 0));
+        t.attempts[0].rework = Some("start over".into());
+        t.lanes[0].refreshed = Some(crate::ticket::Refreshed {
+            commits: true,
+            notes: Some("/n.md".into()),
+            at_ms: 5,
+            ..moved
+        });
+        write_ticket(&path, &t).unwrap();
+        assert_eq!(read_ticket(&path).unwrap(), t);
     }
 
     #[test]

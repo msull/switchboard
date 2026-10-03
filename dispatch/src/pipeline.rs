@@ -355,6 +355,10 @@ pub struct Stage {
     pub fix_prompt: Option<String>,
     #[serde(default)]
     pub no_feedback: Option<String>,
+    /// The round from which a round with only style points converges;
+    /// default 2. Read from the live pipeline file each round.
+    #[serde(default)]
+    pub style_rounds: Option<u32>,
 }
 
 /// What a stage is, from which fields it names.
@@ -369,6 +373,10 @@ pub enum StageKind {
 
 /// Review passes a code review stage makes when the file says nothing.
 pub const DEFAULT_REVIEW_CAP: u32 = 3;
+
+/// The round from which a round with only style points converges when
+/// the file says nothing.
+pub const DEFAULT_STYLE_ROUNDS: u32 = 2;
 
 impl Stage {
     #[must_use]
@@ -388,6 +396,12 @@ impl Stage {
     #[must_use]
     pub fn review_cap(&self) -> u32 {
         self.cap.unwrap_or(DEFAULT_REVIEW_CAP)
+    }
+
+    /// The round from which a round with only style points converges.
+    #[must_use]
+    pub fn style_rounds(&self) -> u32 {
+        self.style_rounds.unwrap_or(DEFAULT_STYLE_ROUNDS)
     }
 }
 
@@ -584,9 +598,10 @@ impl Pipeline {
         Self::validate_gate(stage)?;
         if stage.kind() == StageKind::Review {
             self.validate_review_stage(stage)?;
-        } else if stage.implementer.is_some() || stage.cap.is_some() {
+        } else if stage.implementer.is_some() || stage.cap.is_some() || stage.style_rounds.is_some()
+        {
             bail!(
-                "stage {:?} has implementer or cap but no reviewers",
+                "stage {:?} has implementer, cap or style_rounds but no reviewers",
                 stage.name
             );
         }
@@ -708,6 +723,9 @@ impl Pipeline {
         }
         if stage.cap == Some(0) {
             bail!("stage {name:?}: cap must be at least 1");
+        }
+        if stage.style_rounds == Some(0) {
+            bail!("stage {name:?}: style_rounds must be at least 1");
         }
         if stage.subject.as_deref().is_some_and(|s| s != "branch") {
             bail!("stage {name:?}: a code review stage reviews the branch only");
@@ -1040,5 +1058,44 @@ writes = ["plan"]"#,
         assert!(err.contains("pushes nothing"), "{err}");
         let ok = text.replace("fixer = \"planner\"\n", "");
         assert_eq!(Pipeline::parse(&ok).unwrap().source, Source::PullRequest);
+    }
+
+    /// `SWITCHBOARD` with a code review stage after `implement`, its
+    /// review keys given as `keys`.
+    fn with_review_stage(keys: &str) -> String {
+        SWITCHBOARD.replace(
+            "[[stages]]\nname = \"ready\"\n",
+            &format!(
+                "[[stages]]\nname = \"review-code\"\ncontext = \"each\"\nreviewers = [\"planner\"]\nimplementer = \"implementer\"\n{keys}gate = {{ kind = \"command\", like = \"implement\" }}\n\n[[stages]]\nname = \"ready\"\n"
+            ),
+        )
+    }
+
+    #[test]
+    fn style_rounds_has_a_default_and_is_refused_at_zero() {
+        let p = Pipeline::parse(&with_review_stage("")).unwrap();
+        let stage = p.stages.iter().find(|s| s.name == "review-code").unwrap();
+        assert_eq!(stage.style_rounds(), DEFAULT_STYLE_ROUNDS);
+        let p = Pipeline::parse(&with_review_stage("style_rounds = 3\n")).unwrap();
+        let stage = p.stages.iter().find(|s| s.name == "review-code").unwrap();
+        assert_eq!(stage.style_rounds(), 3);
+        let err = Pipeline::parse(&with_review_stage("style_rounds = 0\n"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("style_rounds must be at least 1"), "{err}");
+    }
+
+    #[test]
+    fn style_rounds_without_reviewers_is_refused() {
+        let text = SWITCHBOARD.replace(
+            "prompt = \"Implement {inputs.plan}",
+            "style_rounds = 2\nprompt = \"Implement {inputs.plan}",
+        );
+        assert_ne!(text, SWITCHBOARD);
+        let err = Pipeline::parse(&text).unwrap_err().to_string();
+        assert!(
+            err.contains("has implementer, cap or style_rounds but no reviewers"),
+            "{err}"
+        );
     }
 }

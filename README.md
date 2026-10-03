@@ -248,9 +248,9 @@ dispatch/                the `dispatch` binary (docs/dispatch.md; docs/dispatch-
   src/main.rs            CLI: take, run, decide, decisions, status, queue, resume, close, worktrees
   src/serve.rs           Dispatch's port on <data>/dispatch.sock while `run` is up: the records as views, the commands the CLI has, one handler under one lock
   src/pipeline.rs        the TOML pipeline file, parsed in full and validated; fingerprint of the copy a ticket runs
-  src/ticket.rs          the ticket record: source, lanes, attempts (with their checks' head and exit), decisions, operation ledger, a close's progress (`CloseProgress`); the per-project queue and closing list
-  src/scheduler.rs       the runner: stage executors (agent, gate-only lanes, review workflow), completion evidence, decisions, ledgered sends, parking and closing as sequences
-  src/review.rs          the code review stage: rounds of several reviewers over a lane's branch, a fresh implementer per round, checks at every accepted head (docs/dispatch.md, "The code review stage")
+  src/ticket.rs          the ticket record: source, lanes (with their last bring-up, `Refreshed`: whether the branch had commits, when, the rebaser's notes), attempts (with their checks' head and exit, the attempt a review carries and its send-back note), decisions, operation ledger, a close's progress (`CloseProgress`); the per-project queue and closing list
+  src/scheduler.rs       the runner: stage executors (agent, gate-only lanes, review workflow), completion evidence, decisions, ledgered sends, parking and closing as sequences; bringing a lane up to its moved base, recorded with the rebaser's notes
+  src/review.rs          the code review stage: rounds of several reviewers over a lane's branch, a fresh implementer per round, checks at every accepted head; a rerun carries the last attempt's settled and open points; style and the plan's decisions do not hold a round open (docs/dispatch.md, "The code review stage")
   src/recover.rs         unanswered ledger operations resolved by class through find and op.status; nothing launched twice
   src/view.rs            the `Dispatch · <project>` working set, one card per queued ticket, redrawn through set.sync
   src/store.rs           Dispatch's data directory, flock, atomic writes; versioned `read_ticket`/`read_project` through `migrate`

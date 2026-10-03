@@ -129,8 +129,22 @@ pub struct LaneRecord {
 /// A base that moved under a branch, and the branch brought up to it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Refreshed {
+    /// The base the branch sat on; empty when it was not recorded and
+    /// could not be read from the branch.
     pub from: String,
     pub to: String,
+    /// The branch had commits of its own, so it was rebased rather
+    /// than moved: the next code review checks the rebase.
+    #[serde(default)]
+    pub commits: bool,
+    /// The rebaser's notes, when this bring-up followed a rebaser.
+    #[serde(default)]
+    pub notes: Option<PathBuf>,
+    /// When it was recorded: tells a rebaser for an earlier move apart
+    /// from one for this move. 0 is a record from before the field, after
+    /// which no rebaser's notes are attached.
+    #[serde(default)]
+    pub at_ms: u64,
 }
 
 /// A head pushed to a lane's branch, and when.
@@ -242,6 +256,17 @@ pub struct Attempt {
     /// again offers `check` too.
     #[serde(default)]
     pub failed_at_checks: bool,
+    /// A code review attempt that continues an earlier attempt of the
+    /// same stage and context: that attempt's last reviewed state, its
+    /// settled and open points, are this one's start. Written when the
+    /// attempt is made and never changed.
+    #[serde(default)]
+    pub carried_from: Option<(String, u32)>,
+    /// The note the user sent a code review attempt's stage back with,
+    /// taken off `Ticket::rework` when the attempt started: the first
+    /// fix pass is given it.
+    #[serde(default)]
+    pub rework: Option<String>,
     pub started_ms: u64,
     pub ended_ms: Option<u64>,
 }
