@@ -1689,8 +1689,8 @@ pane's last output, alive or exited, while tmux still holds the pane.
 A live pane counts through what it prints, not by being alive, or an
 idle shell would never leave. When the pane goes (a kill, a restart, a
 stop, or the server dying), the core first raises `last_seen` to that
-output time, so the session keeps its place until the window passes. Every kind of session is included, Codex through its pane
-output.
+output time, so the session keeps its place until the window passes.
+Every kind of session is included, Codex through its pane output.
 
 Dismissing (the "×" on a card, "Dismiss" on a stopped card, "Kill and
 dismiss" in a running card's menu) stores the session's activity time

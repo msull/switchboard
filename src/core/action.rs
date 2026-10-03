@@ -1320,13 +1320,17 @@ impl AppCore {
     /// never leave a set. A dead pane counts too: tmux keeps its last
     /// output time, and without it a service that printed a minute ago
     /// and then crashed would fall back to its launch and leave the set
-    /// the moment it stops. `None` for an unknown id.
+    /// the moment it stops. A pane that is gone altogether (killed, or
+    /// the server died) has no status, and its last output lives on in
+    /// `last_seen`, where `keep_last_output` put it before the pane
+    /// went. `None` for an unknown id.
     #[must_use]
     pub fn last_active(&self, id: RecordId) -> Option<SystemTime> {
         let s = self.session(id)?;
         let output = self.host_status(id).and_then(|h| h.last_activity);
-        // `last_seen` already moves with every event; the other two are
-        // named so the intent reads here.
+        // `last_seen` already moves with every event and holds a vanished
+        // pane's last output; the other two are named so the intent
+        // reads here.
         [Some(s.last_seen), s.last_event_at, s.last_stop_at, output]
             .into_iter()
             .flatten()

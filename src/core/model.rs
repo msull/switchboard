@@ -974,6 +974,8 @@ pub struct SessionRecord {
     #[serde(default)]
     pub env_profile: Option<String>,
     pub created: SystemTime,
+    /// The newest thing known of the session: its launch, its latest
+    /// hook event, or the last output of a pane that has since gone.
     pub last_seen: SystemTime,
     #[serde(default)]
     pub notes: String,
