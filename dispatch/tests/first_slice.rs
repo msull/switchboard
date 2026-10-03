@@ -5735,6 +5735,10 @@ fn a_plan_that_sat_is_implemented_on_a_branch_brought_up_to_its_base() {
         prompt.contains("base moved from base0000 to main0002"),
         "{prompt}"
     );
+    assert!(
+        env.repo.lock().unwrap().pushed.is_empty(),
+        "no pull request yet, so nothing is pushed"
+    );
 }
 
 /// The branch has commits and the mechanical rebase stops: the
@@ -5817,6 +5821,228 @@ fn a_conflicting_refresh_is_rebased_by_a_clone_of_the_lanes_last_agent() {
     let t = env.ticket(&id);
     assert_eq!(t.lanes[0].base_sha.as_deref(), Some("main0002"));
     assert!(t.pending_decisions().is_empty());
+    assert!(
+        env.repo.lock().unwrap().pushed.is_empty(),
+        "no pull request yet, so nothing is pushed"
+    );
+}
+
+/// The ticket at `inspect`, its PR reported at `pr_head`, with main
+/// moved and the tree `behind` it: the next stage, `ready`, refreshes a
+/// branch that has a pull request. A clean rebase leaves `rebased1`.
+fn main_moved_before_ready(env: &mut Env, pr_head: &str, behind: u64) -> (String, PathBuf) {
+    let id = at_inspect(env);
+    let tree = env.ticket(&id).lanes[0].worktree.clone();
+    let clone = env.runner.data.repo_dir(PROJECT);
+    {
+        let mut repo = env.repo.lock().unwrap();
+        repo.bases.insert(clone, "main0002".into());
+        repo.behind.insert(tree.clone(), behind);
+        repo.rebase_heads.insert(tree.clone(), "rebased1".into());
+    }
+    // Set before `ready` begins, so its first reading finds the PR.
+    env.pr_is(&id, pr_head, "open", Checks::Passed);
+    (id, tree)
+}
+
+/// Main moved after the PR was opened: the refresh at `ready` rebases
+/// the branch and pushes it once, leased on the head the lane's records
+/// last saw, and `ready` reads the PR at the tree's head with no
+/// question.
+#[test]
+fn a_refresh_at_ready_pushes_the_rebased_branch_once_with_the_lease() {
+    let mut env = Env::new();
+    let (id, tree) = main_moved_before_ready(&mut env, "rebased1", 1);
+    env.inspect(&id, "proceed", None);
+    env.steps_until(&id, "the ready attempt done", |t, _| {
+        t.attempts_of("ready").last().is_some_and(|a| !a.is_open())
+    });
+    let t = env.ticket(&id);
+    let branch = t.lanes[0].branch.clone();
+    assert_eq!(
+        env.repo.lock().unwrap().pushed,
+        vec![(tree, "origin".into(), branch, "base0000".into())]
+    );
+    assert_eq!(t.lanes[0].base_sha.as_deref(), Some("main0002"));
+    assert!(t.pending_decisions().is_empty(), "{t:#?}");
+    let ready = t.attempts_of("ready").last().unwrap();
+    assert_eq!(ready.state, AttemptState::Complete);
+    assert_eq!(ready.head.as_deref(), Some("rebased1"));
+    for _ in 0..3 {
+        env.step();
+    }
+    assert_eq!(env.repo.lock().unwrap().pushed.len(), 1, "pushed once");
+}
+
+/// Someone else pushed to the PR meanwhile: the lease refuses, and
+/// `ready` asks its `pr` question about the head.
+#[test]
+fn a_refused_lease_at_ready_asks_the_pr_question() {
+    let mut env = Env::new();
+    let (id, tree) = main_moved_before_ready(&mut env, "base0000", 1);
+    env.repo.lock().unwrap().lease_stale.push(tree);
+    env.inspect(&id, "proceed", None);
+    env.steps_until(&id, "the pr question", |t, _| {
+        t.pending_decisions().iter().any(|d| d.name == "pr")
+    });
+    assert_eq!(env.repo.lock().unwrap().pushed.len(), 1);
+    let d = env
+        .pending(&id)
+        .into_iter()
+        .find(|d| d.name == "pr")
+        .unwrap();
+    assert!(
+        d.question
+            .contains("PR #7 is at base0000 but the tree is at rebased1"),
+        "{}",
+        d.question
+    );
+    assert_eq!(d.options, vec!["recheck", "park"]);
+}
+
+/// The same refresh with no pull request for the branch: nothing is
+/// pushed, and `ready` asks for one to be opened.
+#[test]
+fn a_refresh_at_ready_without_a_pull_request_pushes_nothing() {
+    let mut env = Env::new();
+    let (id, _) = main_moved_before_ready(&mut env, "rebased1", 1);
+    env.prs.lock().unwrap().prs.clear();
+    env.inspect(&id, "proceed", None);
+    env.steps_until(&id, "the pr question", |t, _| {
+        t.pending_decisions().iter().any(|d| d.name == "pr")
+    });
+    let t = env.ticket(&id);
+    assert_eq!(t.lanes[0].base_sha.as_deref(), Some("main0002"));
+    assert!(env.repo.lock().unwrap().pushed.is_empty());
+    let d = env
+        .pending(&id)
+        .into_iter()
+        .find(|d| d.name == "pr")
+        .unwrap();
+    assert!(d.question.contains("no pull request"), "{}", d.question);
+}
+
+/// A conflicting refresh at `ready`: the rebaser is told not to push,
+/// and once it has brought the branch up Dispatch pushes it with the
+/// lease before `ready` reads the PR.
+#[test]
+fn a_refresh_at_ready_pushes_after_the_rebaser_resolves_it() {
+    let mut env = Env::new();
+    let (id, tree) = main_moved_before_ready(&mut env, "rebased2", 2);
+    env.repo.lock().unwrap().rebase_conflicts.push(tree.clone());
+    env.inspect(&id, "proceed", None);
+    env.steps_until(&id, "the rebaser", |t, _| {
+        t.attempts_of(dispatch::scheduler::REFRESH)
+            .any(|a| a.session.is_some())
+    });
+    assert!(env.repo.lock().unwrap().pushed.is_empty());
+    let prompt = env
+        .sb()
+        .calls
+        .iter()
+        .rev()
+        .find_map(|r| match &r.body {
+            Body::SessionClone { prompt, name, .. } if name == "rebaser" => Some(prompt.clone()),
+            Body::SessionNew { prompt, name, .. } if name == "rebaser" => prompt.clone(),
+            _ => None,
+        })
+        .unwrap();
+    assert!(prompt.contains("do not push"), "{prompt}");
+    assert!(!prompt.contains("--force-with-lease"), "{prompt}");
+    let t = env.ticket(&id);
+    let rebase = t
+        .attempts_of(dispatch::scheduler::REFRESH)
+        .last()
+        .unwrap()
+        .clone();
+    {
+        let mut repo = env.repo.lock().unwrap();
+        repo.rebase_conflicts.clear();
+        repo.behind.remove(&tree);
+        repo.heads.insert(tree.clone(), "rebased2".into());
+    }
+    env.finish(
+        &rebase.session.clone().unwrap(),
+        &rebase.artifacts["notes"].clone(),
+        "# rebased\nkept both sides",
+    );
+    env.steps_until(&id, "the ready attempt", |t, _| {
+        t.attempts_of("ready").next().is_some()
+    });
+    let branch = env.ticket(&id).lanes[0].branch.clone();
+    assert_eq!(
+        env.repo.lock().unwrap().pushed,
+        vec![(tree, "origin".into(), branch, "base0000".into())]
+    );
+}
+
+/// Two refreshes in one lane, each after main moved, with an agent
+/// stage between them that records no head: the second lease is on the
+/// head the first refresh pushed, not the older one the implement
+/// checks recorded, so `ready` reads the PR with no question.
+#[test]
+fn a_second_refresh_leases_on_the_head_the_first_one_pushed() {
+    let mut env = Env::new();
+    let path = env.data.pipeline(PROJECT);
+    let text = std::fs::read_to_string(&path).unwrap();
+    std::fs::write(
+        &path,
+        text.replace(
+            "[[stages]]\nname = \"ready\"",
+            "[[stages]]\nname = \"polish\"\noperator = \"implementer\"\ncontext = \"each\"\nwrites = [\"notes\"]\nprompt = \"Polish {branch}.\"\n\n[[stages]]\nname = \"ready\"",
+        ),
+    )
+    .unwrap();
+    let (id, tree) = main_moved_before_ready(&mut env, "rebased2", 1);
+    env.inspect(&id, "proceed", None);
+    env.steps_until(&id, "the polisher", |t, _| {
+        t.attempts_of("polish").last().is_some_and(Attempt::is_open)
+    });
+    let t = env.ticket(&id);
+    let branch = t.lanes[0].branch.clone();
+    assert_eq!(
+        env.repo.lock().unwrap().pushed,
+        vec![(
+            tree.clone(),
+            "origin".into(),
+            branch.clone(),
+            "base0000".into()
+        )]
+    );
+    let clone = env.runner.data.repo_dir(PROJECT);
+    {
+        let mut repo = env.repo.lock().unwrap();
+        repo.bases.insert(clone, "main0003".into());
+        repo.behind.insert(tree.clone(), 1);
+        repo.rebase_heads.insert(tree.clone(), "rebased2".into());
+    }
+    env.finish(
+        &session_of(&t, "polish"),
+        &artifact_of(&t, "polish", "notes"),
+        "# polished\nnothing to commit",
+    );
+    env.steps_until(&id, "the ready attempt done", |t, _| {
+        t.attempts_of("ready").last().is_some_and(|a| !a.is_open())
+    });
+    let t = env.ticket(&id);
+    assert_eq!(
+        env.repo.lock().unwrap().pushed,
+        vec![
+            (
+                tree.clone(),
+                "origin".into(),
+                branch.clone(),
+                "base0000".into()
+            ),
+            (tree, "origin".into(), branch, "rebased1".into()),
+        ]
+    );
+    assert_eq!(t.lanes[0].base_sha.as_deref(), Some("main0003"));
+    assert!(t.pending_decisions().is_empty(), "{t:#?}");
+    assert_eq!(
+        t.attempts_of("ready").last().unwrap().state,
+        AttemptState::Complete
+    );
 }
 
 /// Without a rebaser in the policy a conflicting refresh is a question

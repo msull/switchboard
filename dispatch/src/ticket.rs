@@ -115,6 +115,11 @@ pub struct LaneRecord {
     /// to the next agent, since its plan was written against `from`.
     #[serde(default)]
     pub refreshed: Option<Refreshed>,
+    /// The last head a refresh pushed to the lane's branch: what the
+    /// remote holds until an attempt records a later head, so the next
+    /// refresh's lease is on Dispatch's own push.
+    #[serde(default)]
+    pub pushed: Option<PushedHead>,
     /// The lane's worktree is removed from its clone: the ticket closed.
     /// The path stays, so a reader can still say where the work was.
     #[serde(default)]
@@ -126,6 +131,13 @@ pub struct LaneRecord {
 pub struct Refreshed {
     pub from: String,
     pub to: String,
+}
+
+/// A head pushed to a lane's branch, and when.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PushedHead {
+    pub head: String,
+    pub at_ms: u64,
 }
 
 fn yes() -> bool {

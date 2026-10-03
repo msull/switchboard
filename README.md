@@ -254,7 +254,7 @@ dispatch/                the `dispatch` binary (docs/dispatch.md; docs/dispatch-
   src/recover.rs         unanswered ledger operations resolved by class through find and op.status; nothing launched twice
   src/view.rs            the `Dispatch · <project>` working set, one card per queued ticket, redrawn through set.sync
   src/store.rs           Dispatch's data directory, flock, atomic writes; versioned `read_ticket`/`read_project` through `migrate`
-  src/git.rs             clones, worktrees and heads through fixed argv (a worktree removed, never forced; `changes`, and `uncommitted` for a close's preflight), and a stage's checks as child processes polled by key; with a fake
+  src/git.rs             clones, worktrees and heads through fixed argv (a branch pushed only with a lease; a worktree removed, never forced; `changes`, and `uncommitted` for a close's preflight), and a stage's checks as child processes polled by key; with a fake
   src/github.rs          issues and pull requests through gh, with fakes
   src/bitbucket.rs       pull requests on Bitbucket Cloud through curl; credentials from the environment or <data>/env (NAME=value lines, mode 0600, never logged)
   src/port.rs            the Port trait over the control socket client; the connection remade after any error, a timeout included

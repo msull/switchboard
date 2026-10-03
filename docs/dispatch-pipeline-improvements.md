@@ -229,6 +229,17 @@ the lease; a lane without a PR pushes nothing; a lease failure leaves the
 **Size.** `Repo::push_with_lease`, one call site in `refresh_lane`, two
 tests. Half a day. Issue #23, narrowed.
 
+**Built** (#23). When the provider reports an open pull request for the
+lane's branch, a branch the refresh brought up (mechanically, or on the
+pass after the rebaser stops) is pushed with `--force-with-lease` on the
+head the lane's records last saw: the newest non-refresh attempt in its
+context that recorded one, or the head a refresh last pushed (the lane's
+`pushed`, record version 3) when that came later, never the
+remote-tracking ref. This holds at any stage the refresh runs, so the
+rebaser is told not to push, and a second refresh leases on the first
+one's push. A lane without a PR pushes nothing. A refused lease or a
+failed push leaves `ready` to ask its `pr` question about the head.
+
 ## 12. Withdrawn: the pull request body is written once
 
 The `ready`-stage body check is not needed once the PR is opened over the
@@ -252,7 +263,6 @@ with a PR, keeps its instruction to fix any claim its rebase changed.
 
 ## Order
 
-9, 4 and 5 are built (#21). 1, 2 and 3 cut the round count directly
-and are small. 11 removes a question with one answer. 6, 8 and 10 are
-prompt text; 12 is withdrawn. 7 is a taste call for the user before
-anyone builds it.
+9, 4 and 5 are built (#21), and 11 (#23). 1, 2 and 3 cut the round
+count directly and are small. 6, 8 and 10 are prompt text; 12 is
+withdrawn. 7 is a taste call for the user before anyone builds it.

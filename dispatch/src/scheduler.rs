@@ -12,7 +12,7 @@ use dispatch_control as wire_dispatch;
 use switchboard_control::{self as wire, Body, Reply, Request, RunState};
 
 use crate::bitbucket::{Bitbucket, bitbucket_repo};
-use crate::git::{Repo, branch_name};
+use crate::git::{Push, Repo, branch_name};
 use crate::github::{Checks, Gh, PullRequests, github_repo};
 use crate::pipeline::{Context, Gate, Pipeline, Stage, StageKind};
 use crate::port::Port;
@@ -670,9 +670,7 @@ impl Runner {
         if t.refreshed_stage == Some(t.stage) {
             return Ok(false);
         }
-        let reads_pr =
-            matches!(&stage.gate, Some(Gate::External { check, .. }) if check == "pr-checks");
-        if stage.kind() == StageKind::GateOnly && !reads_pr {
+        if stage.kind() == StageKind::GateOnly && !reads_pr(stage) {
             t.refreshed_stage = Some(t.stage);
             self.save_ticket(t, now_ms)?;
             return Ok(false);
@@ -686,6 +684,85 @@ impl Runner {
         t.refreshed_stage = Some(t.stage);
         self.save_ticket(t, now_ms)?;
         Ok(waits)
+    }
+
+    /// A lane's branch the refresh rewrote, pushed when the lane has an
+    /// open pull request, with a lease on the head the lane's records
+    /// last saw, so a stage that reads the PR does not find it at the old
+    /// head and ask for the one push there is. A lane without a PR pushes
+    /// nothing. A refused or failed push, or a provider that cannot be
+    /// read, is logged, not an error: the `pr` question about the head is
+    /// the fallback. Returns the head the remote now holds when the push
+    /// went through or found it there already.
+    fn push_refreshed(
+        &mut self,
+        t: &Ticket,
+        p: &Pipeline,
+        i: usize,
+        remote: &str,
+    ) -> Result<Option<String>> {
+        let lane = &t.lanes[i];
+        let (id, name, branch) = (&t.id, &lane.name, &lane.branch);
+        // The PR is looked up the way the pipeline's PR stage will look
+        // it up, through that stage's provider.
+        let Some((stage, provider)) = pr_stage(p) else {
+            return Ok(None);
+        };
+        let Some(seen) = pr_head_seen(t, lane) else {
+            return Ok(None);
+        };
+        let head = self.git.head(&lane.worktree)?;
+        if same_commit(&head, &seen) {
+            return Ok(None);
+        }
+        let origin = self.git.remote_url(&lane.worktree)?;
+        let target = match pr_target(t, p, stage, Some(name), provider, origin) {
+            Ok(target) => target,
+            Err(why) => {
+                log::info!("ticket {id} lane {name}: {why}; {branch} not pushed");
+                return Ok(None);
+            }
+        };
+        match self.find_pr(&target) {
+            Ok(Some(pr)) if pr.state == "open" => {}
+            Ok(_) => {
+                log::info!(
+                    "ticket {id} lane {name}: no open pull request for {branch}; nothing pushed"
+                );
+                return Ok(None);
+            }
+            Err(e) => {
+                log::warn!(
+                    "ticket {id} lane {name}: the pull request for {branch} could not be read, so it is not pushed: {e:#}"
+                );
+                return Ok(None);
+            }
+        }
+        match self
+            .git
+            .push_with_lease(&lane.worktree, remote, branch, &seen)
+        {
+            Ok(Push::Pushed) => {
+                log::info!("ticket {id} lane {name}: pushed {branch} over {seen} (lease)");
+                Ok(Some(head))
+            }
+            Ok(Push::UpToDate) => {
+                log::info!(
+                    "ticket {id} lane {name}: {remote}'s {branch} already at {head}; nothing pushed"
+                );
+                Ok(Some(head))
+            }
+            Ok(Push::Refused) => {
+                log::info!(
+                    "ticket {id} lane {name}: {remote} moved off {seen}; {branch} not pushed, left to the pr question"
+                );
+                Ok(None)
+            }
+            Err(e) => {
+                log::warn!("ticket {id} lane {name}: push of {branch} failed: {e:#}");
+                Ok(None)
+            }
+        }
     }
 
     /// One lane's branch against its base; true when the stage must
@@ -741,6 +818,14 @@ impl Runner {
                 t.id,
                 lane.name
             );
+            // Before the save, so a crash repeats the push rather than
+            // skipping it.
+            if let Some(head) = self.push_refreshed(t, p, i, &remote)? {
+                t.lanes[i].pushed = Some(crate::ticket::PushedHead {
+                    head,
+                    at_ms: now_ms,
+                });
+            }
             t.lanes[i].refreshed = Some(crate::ticket::Refreshed {
                 from,
                 to: onto_sha.clone(),
@@ -852,7 +937,7 @@ impl Runner {
             .unwrap_or_default();
         let _ = write!(
             prompt,
-            "The branch {branch} in {} is behind {onto}, and a rebase onto it stops on conflicts. Fetch, rebase the branch onto {onto}, resolve every conflict keeping the change's intent{plan}, run the checks, and if the branch has a pull request push with --force-with-lease.{checks} If a conflict's intent is unclear, abort the rebase, leave the branch as it was, and say why. Write what you did to {}.",
+            "The branch {branch} in {} is behind {onto}, and a rebase onto it stops on conflicts. Fetch, rebase the branch onto {onto}, resolve every conflict keeping the change's intent{plan}, run the checks, and do not push; Dispatch pushes the branch.{checks} If a conflict's intent is unclear, abort the rebase, leave the branch as it was, and say why. Write what you did to {}.",
             cwd.display(),
             notes.display()
         );
@@ -1879,6 +1964,7 @@ impl Runner {
                 setup_done: false,
                 base_sha,
                 refreshed: None,
+                pushed: None,
                 removed: false,
             });
             self.save_ticket(t, now_ms)?;
@@ -2452,19 +2538,25 @@ impl Runner {
         target: &PrTarget,
         none_expected: bool,
     ) -> Result<Option<(crate::github::PullRequest, Option<Checks>)>> {
-        let prs = self.prs_for(&target.provider);
-        let pr = match target.number {
-            Some(n) => prs.by_number(&target.repo, n)?,
-            None => match prs.find(&target.repo, &target.branch)? {
-                Some(pr) => pr,
-                None => return Ok(None),
-            },
+        let Some(pr) = self.find_pr(target)? else {
+            return Ok(None);
         };
+        let prs = self.prs_for(&target.provider);
         if pr.state != "open" || none_expected {
             return Ok(Some((pr, None)));
         }
         let checks = prs.checks(&target.repo, pr.number)?;
         Ok(Some((pr, Some(checks))))
+    }
+
+    /// The target's pull request, by number when the ticket's source
+    /// gave one, else by branch; `None` when the branch has none.
+    fn find_pr(&self, target: &PrTarget) -> Result<Option<crate::github::PullRequest>> {
+        let prs = self.prs_for(&target.provider);
+        match target.number {
+            Some(n) => prs.by_number(&target.repo, n).map(Some),
+            None => prs.find(&target.repo, &target.branch),
+        }
     }
 
     /// The provider a target names.
@@ -5145,6 +5237,23 @@ fn lanes_wanted(t: &Ticket, p: &Pipeline) -> usize {
     }
 }
 
+/// Whether a stage reads the lane's pull request: its gate is the
+/// `pr-checks` watch.
+fn reads_pr(stage: &Stage) -> bool {
+    matches!(&stage.gate, Some(Gate::External { check, .. }) if check == "pr-checks")
+}
+
+/// The pipeline's first stage that reads a pull request (the
+/// `pr-checks` or `pr-merged` watch), with the provider it names.
+fn pr_stage(p: &Pipeline) -> Option<(&Stage, Option<&str>)> {
+    p.stages.iter().find_map(|s| match &s.gate {
+        Some(Gate::External {
+            check, provider, ..
+        }) if check == "pr-checks" || check == "pr-merged" => Some((s, provider.as_deref())),
+        _ => None,
+    })
+}
+
 /// Whether two hashes name one commit; a provider may report a short
 /// one.
 fn same_commit(a: &str, b: &str) -> bool {
@@ -5172,6 +5281,34 @@ fn head_moved_ms(t: &Ticket, a: &Attempt) -> u64 {
             _ => None,
         });
     ended.chain(rechecked).fold(a.started_ms, u64::max)
+}
+
+/// The head the lane's records last saw on its branch, the lease for a
+/// push: the newest attempt in the lane's context, refreshes aside,
+/// that recorded one (the full hash from local git over the
+/// provider's), or the head a refresh pushed after that attempt ended.
+/// Before a stage reads the PR this is usually an agent's local head,
+/// not a reading of the PR. Never the remote-tracking ref: a fetch
+/// moves that with anyone's push, and a lease on it would overwrite
+/// exactly the commit the lease is there to keep.
+fn pr_head_seen(t: &Ticket, lane: &LaneRecord) -> Option<String> {
+    let recorded = t
+        .attempts
+        .iter()
+        .rev()
+        .filter(|a| a.context == lane.name && a.stage != REFRESH)
+        .find_map(|a| {
+            let head = a
+                .head
+                .clone()
+                .or_else(|| a.pr.as_ref().map(|p| p.head.clone()));
+            head.map(|h| (h, a.ended_ms.unwrap_or(a.started_ms)))
+        });
+    match (recorded, &lane.pushed) {
+        (Some((head, at_ms)), Some(pushed)) if at_ms > pushed.at_ms => Some(head),
+        (_, Some(pushed)) => Some(pushed.head.clone()),
+        (recorded, None) => recorded.map(|(head, _)| head),
+    }
 }
 
 /// What a reading of the PR means: its summary for the record, and
