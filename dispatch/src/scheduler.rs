@@ -30,6 +30,10 @@ pub const PR_POLL_MS: u64 = 60_000;
 pub const PR_ERROR_GRACE_MS: u64 = 3_600_000;
 
 /// Everything the runner acts through.
+/// The pseudo-stage a refresh rebaser's attempts and questions carry:
+/// not in any pipeline, so no stage mistakes them for its own.
+pub const REFRESH: &str = "refresh";
+
 pub struct Runner {
     pub data: DataDir,
     pub port: Box<dyn Port>,
@@ -293,6 +297,7 @@ impl Runner {
             processes: Vec::new(),
             root_project: None,
             rework: BTreeMap::new(),
+            refreshed_stage: None,
             state: TicketState::Active,
             created_ms: now_ms,
             updated_ms: now_ms,
@@ -567,6 +572,9 @@ impl Runner {
             self.close(t, ps, "every stage is done", now_ms)?;
             return Ok(());
         };
+        if self.refresh_lanes(t, ps, p, &stage, now_ms)? || !t.active() {
+            return Ok(());
+        }
         // Agent, workflow and review stages are held per context
         // (`held_in`); attempts still running are watched either way.
         match stage.kind() {
@@ -592,6 +600,280 @@ impl Runner {
             StageKind::Review => self.review_stage(t, ps, p, &stage, now_ms)?,
         }
         Ok(())
+    }
+
+    /// Each lane's branch brought up to its base once per stage entry,
+    /// so a plan that sat is not implemented, reviewed or readied on
+    /// stale code. A branch with no commits of its own just moves; one
+    /// with commits is rebased, and when that conflicts the policy's
+    /// `rebaser` continues the lane's last agent to resolve it, up to
+    /// `max_rebases`, then the user is asked. True while the stage must
+    /// wait: a rebaser at work, or a question open. Pull-request tickets
+    /// are someone else's branch and are left alone, as is a stage that
+    /// launches nothing (`lanes`, a human look, the merge watch).
+    fn refresh_lanes(
+        &mut self,
+        t: &mut Ticket,
+        ps: &mut ProjectState,
+        p: &Pipeline,
+        stage: &Stage,
+        now_ms: u64,
+    ) -> Result<bool> {
+        if !p.policy.refresh || !p.cuts_worktrees() || !t.source.pull_requests.is_empty() {
+            return Ok(false);
+        }
+        let open = t
+            .attempts
+            .iter()
+            .filter(|a| a.stage == REFRESH && a.is_open())
+            .max_by_key(|a| a.n)
+            .cloned();
+        if let Some(a) = open {
+            let lane = t.lanes.iter().find(|l| l.name == a.context).cloned();
+            let Some(lane) = lane else {
+                return Ok(true);
+            };
+            let shape = Self::refresh_stage(p, stage);
+            let trust = p.policy.trust_folders;
+            self.poll_agent(
+                t,
+                ps,
+                &a,
+                &shape,
+                &lane.worktree,
+                Some(&lane.name),
+                trust,
+                now_ms,
+            )?;
+            let still_open = t
+                .attempts
+                .iter()
+                .any(|x| x.stage == REFRESH && x.n == a.n && x.is_open());
+            if !still_open {
+                // Whatever the rebaser did is read on the next pass.
+                t.refreshed_stage = None;
+                self.save_ticket(t, now_ms)?;
+            }
+            return Ok(true);
+        }
+        if t.decisions.iter().any(|d| d.pending() && d.name == REFRESH) {
+            return Ok(true);
+        }
+        if t.refreshed_stage == Some(t.stage) {
+            return Ok(false);
+        }
+        let reads_pr =
+            matches!(&stage.gate, Some(Gate::External { check, .. }) if check == "pr-checks");
+        if stage.kind() == StageKind::GateOnly && !reads_pr {
+            t.refreshed_stage = Some(t.stage);
+            self.save_ticket(t, now_ms)?;
+            return Ok(false);
+        }
+        let mut waits = false;
+        for i in 0..t.lanes.len() {
+            if t.lanes[i].chosen && self.refresh_lane(t, ps, p, stage, i, now_ms)? {
+                waits = true;
+            }
+        }
+        t.refreshed_stage = Some(t.stage);
+        self.save_ticket(t, now_ms)?;
+        Ok(waits)
+    }
+
+    /// One lane's branch against its base; true when the stage must
+    /// wait on a rebaser or a question for it.
+    fn refresh_lane(
+        &mut self,
+        t: &mut Ticket,
+        ps: &mut ProjectState,
+        p: &Pipeline,
+        stage: &Stage,
+        i: usize,
+        now_ms: u64,
+    ) -> Result<bool> {
+        let Some(lane) = p.lane(&t.lanes[i].name).cloned() else {
+            return Ok(false);
+        };
+        let (clone, remote, onto) = if lane.repo.is_some() {
+            (
+                self.data
+                    .repo_dir(&format!("{}@{}", p.project.name, lane.name)),
+                p.lane_remote(&lane).to_owned(),
+                format!("{}/{}", p.lane_remote(&lane), p.lane_base(&lane)),
+            )
+        } else {
+            (
+                self.data.repo_dir(&p.project.name),
+                p.project.remote.clone(),
+                format!("{}/{}", p.project.remote, p.project.base),
+            )
+        };
+        let worktree = t.lanes[i].worktree.clone();
+        self.git.fetch(&clone, &remote)?;
+        let onto_sha = self.git.rev_parse(&clone, &onto)?;
+        if t.lanes[i].base_sha.as_deref() == Some(onto_sha.as_str()) {
+            return Ok(false);
+        }
+        let behind = self.git.behind(&worktree, &onto)?;
+        let brought_up = behind == 0 || self.git.rebase_onto(&worktree, &onto)?;
+        if brought_up {
+            let from = t.lanes[i].base_sha.clone().unwrap_or_default();
+            log::info!(
+                "ticket {} lane {}: base moved {from} -> {onto_sha}; branch brought up ({behind} behind)",
+                t.id,
+                lane.name
+            );
+            t.lanes[i].refreshed = Some(crate::ticket::Refreshed {
+                from,
+                to: onto_sha.clone(),
+            });
+            t.lanes[i].base_sha = Some(onto_sha);
+            self.save_ticket(t, now_ms)?;
+            return Ok(false);
+        }
+        // A conflict: the rebaser, within the cap, else a question.
+        let tried = t
+            .attempts
+            .iter()
+            .filter(|a| a.stage == REFRESH && a.context == lane.name)
+            .count();
+        let rebaser = p.policy.rebaser.clone();
+        match rebaser {
+            Some(operator) if tried < p.policy.max_rebases as usize => {
+                self.start_refresh_rebaser(t, ps, p, i, &operator, &onto, now_ms)?;
+            }
+            _ => {
+                let why = if rebaser.is_none() {
+                    "the policy names no rebaser".to_owned()
+                } else {
+                    format!("max_rebases ({}) is spent", p.policy.max_rebases)
+                };
+                self.ensure_decision(
+                    t,
+                    ps,
+                    Ask {
+                        stage: &stage.name,
+                        name: REFRESH,
+                        kind: DecisionKind::Permission,
+                        question: format!(
+                            "{} ({}): the branch is behind {onto} and a rebase onto it conflicts; {why}. Rebase it by hand in {}, then answer recheck",
+                            stage.name,
+                            lane.name,
+                            worktree.display()
+                        ),
+                        options: &["recheck", "park"],
+                        recommendation: None,
+                        attempt: None,
+                    },
+                    now_ms,
+                )?;
+            }
+        }
+        Ok(true)
+    }
+
+    /// The shape a refresh rebaser's attempt is watched under: the
+    /// stage it holds, with no gate and its notes as the one artifact.
+    fn refresh_stage(p: &Pipeline, stage: &Stage) -> Stage {
+        let mut shape = stage.clone();
+        REFRESH.clone_into(&mut shape.name);
+        shape.operator.clone_from(&p.policy.rebaser);
+        shape.review = None;
+        shape.gate = None;
+        shape.writes = vec!["notes".to_owned()];
+        shape.prompt = None;
+        shape
+    }
+
+    /// The policy's rebaser, continued from the lane's last finished
+    /// agent so it knows the change's intent, asked to rebase the
+    /// branch onto its moved base and to leave it alone when a
+    /// conflict's intent is unclear.
+    #[allow(clippy::too_many_arguments)]
+    fn start_refresh_rebaser(
+        &mut self,
+        t: &mut Ticket,
+        ps: &mut ProjectState,
+        p: &Pipeline,
+        lane: usize,
+        operator: &str,
+        onto: &str,
+        now_ms: u64,
+    ) -> Result<()> {
+        let name = t.lanes[lane].name.clone();
+        let cwd = t.lanes[lane].worktree.clone();
+        let branch = t.lanes[lane].branch.clone();
+        let n = next_n(t, REFRESH);
+        let dir = self.attempt_dir(t, REFRESH, n, &name)?;
+        let notes = dir.join("notes.md");
+        let mut vars = vars_for(t, p, Some(&name));
+        vars.set("notes", notes.display().to_string());
+        let mut prompt = String::new();
+        let guidance = p
+            .operators
+            .get(operator)
+            .map(|o| o.guidance.trim())
+            .unwrap_or_default();
+        if !guidance.is_empty() {
+            prompt.push_str(&vars.render(guidance));
+            prompt.push_str("\n\n");
+        }
+        let plan = t
+            .input("plan")
+            .map(|plan| format!(" (the plan is at {})", plan.display()))
+            .unwrap_or_default();
+        let checks = p
+            .stages
+            .iter()
+            .find_map(|s| match &s.gate {
+                Some(Gate::Command { argv, per_lane, .. }) => Some(
+                    per_lane
+                        .as_ref()
+                        .and_then(|m| m.get(&name))
+                        .or(argv.as_ref())
+                        .cloned()
+                        .unwrap_or_default()
+                        .join(" "),
+                ),
+                _ => None,
+            })
+            .filter(|c| !c.is_empty())
+            .map(|c| format!(" The checks are: {c}."))
+            .unwrap_or_default();
+        let _ = write!(
+            prompt,
+            "The branch {branch} in {} is behind {onto}, and a rebase onto it stops on conflicts. Fetch, rebase the branch onto {onto}, resolve every conflict keeping the change's intent{plan}, run the checks, and if the branch has a pull request push with --force-with-lease.{checks} If a conflict's intent is unclear, abort the rebase, leave the branch as it was, and say why. Write what you did to {}.",
+            cwd.display(),
+            notes.display()
+        );
+        let clone_of = t
+            .attempts
+            .iter()
+            .filter(|x| {
+                x.context == name
+                    && x.kind == AttemptKind::Agent
+                    && x.state == AttemptState::Complete
+                    && x.session.is_some()
+            })
+            .max_by_key(|x| x.started_ms)
+            .and_then(|x| x.session.clone());
+        log::info!(
+            "ticket {} lane {name}: the branch conflicts with {onto}; {operator} starting{}",
+            t.id,
+            clone_of
+                .as_deref()
+                .map(|s| format!(" from {s}"))
+                .unwrap_or_default()
+        );
+        let spec = AgentSpec {
+            operator: operator.to_owned(),
+            prompt,
+            artifacts: BTreeMap::from([("notes".to_owned(), notes)]),
+            clone_of,
+            pr: None,
+            rework: None,
+        };
+        self.launch_agent(t, ps, p, REFRESH, &name, &cwd, n, spec, now_ms)
     }
 
     fn close(
@@ -1096,6 +1378,7 @@ impl Runner {
                     self.check_again(t, ps, attempt.as_ref(), now_ms)?;
                 }
                 ("pr", "recheck") => recheck_pr(t, attempt.as_ref()),
+                (REFRESH, "recheck") => t.refreshed_stage = None,
                 ("review-code" | "review-cap", "fix" | "accept" | "more") => {
                     self.review_answer(t, ps, &name, &answer, attempt.as_ref(), now_ms)?;
                 }
@@ -1291,6 +1574,7 @@ impl Runner {
                 chosen: p.lanes.len() == 1 || pr.is_some(),
                 setup_done: false,
                 base_sha,
+                refreshed: None,
             });
             self.save_ticket(t, now_ms)?;
         }
@@ -2615,6 +2899,16 @@ impl Runner {
             prompt.push_str("\n\n");
         }
         prompt.push_str(&vars.render(stage.prompt.as_deref().unwrap_or_default()));
+        if let Some(moved) = lane
+            .and_then(|l| t.lanes.iter().find(|x| x.name == l))
+            .and_then(|l| l.refreshed.as_ref())
+        {
+            let _ = write!(
+                prompt,
+                "\n\nSince the plan was written the base moved from {} to {}, and the branch was brought up to it; read git log {}..{} for what changed.",
+                moved.from, moved.to, moved.from, moved.to
+            );
+        }
         // The note is taken off only with the attempt that carries it:
         // a launch that stops short (a setup still running) keeps it.
         let key = rework_key(&stage.name, ctx);

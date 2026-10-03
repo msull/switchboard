@@ -37,6 +37,11 @@ pub trait Repo: Send {
     fn is_worktree_of(&self, repo: &Path, dir: &Path, branch: &str) -> Result<bool>;
     fn head(&self, dir: &Path) -> Result<String>;
     fn is_clean(&self, dir: &Path) -> Result<bool>;
+    /// Commits `onto` has that the branch at `dir` does not.
+    fn behind(&self, dir: &Path, onto: &str) -> Result<u64>;
+    /// `git rebase <onto>` at `dir`; `false` when it stopped on a
+    /// conflict, in which case it is aborted and the tree is as it was.
+    fn rebase_onto(&mut self, dir: &Path, onto: &str) -> Result<bool>;
     /// Bytes free on the volume holding `dir`, for the preflight that
     /// keeps a full disk from failing an attempt.
     fn free_bytes(&self, dir: &Path) -> Result<u64>;
@@ -256,6 +261,37 @@ impl Repo for GitCli {
     fn is_clean(&self, dir: &Path) -> Result<bool> {
         let status = output(git().arg("-C").arg(dir).args(["status", "--porcelain"]))?;
         Ok(status.is_empty())
+    }
+
+    fn behind(&self, dir: &Path, onto: &str) -> Result<u64> {
+        let out = output(git().arg("-C").arg(dir).args([
+            "rev-list",
+            "--count",
+            &format!("HEAD..{onto}"),
+        ]))?;
+        out.trim()
+            .parse()
+            .with_context(|| format!("rev-list printed {out:?}"))
+    }
+
+    fn rebase_onto(&mut self, dir: &Path, onto: &str) -> Result<bool> {
+        let status = git()
+            .arg("-C")
+            .arg(dir)
+            .args(["rebase", onto])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .context("git rebase")?;
+        if status.success() {
+            return Ok(true);
+        }
+        let _ = git()
+            .arg("-C")
+            .arg(dir)
+            .args(["rebase", "--abort"])
+            .status();
+        Ok(false)
     }
 
     fn free_bytes(&self, dir: &Path) -> Result<u64> {
@@ -482,6 +518,13 @@ pub struct FakeRepo {
     pub bases: std::collections::BTreeMap<PathBuf, String>,
     /// Bytes free on the fake volume; `None` is plenty.
     pub free_bytes: Option<u64>,
+    /// Commits a tree is behind its base, as a test set it; a rebase
+    /// brings it to zero.
+    pub behind: std::collections::BTreeMap<PathBuf, u64>,
+    /// Trees whose rebase stops on a conflict.
+    pub rebase_conflicts: Vec<PathBuf>,
+    /// Rebases done: dir, onto.
+    pub rebased: Vec<(PathBuf, String)>,
 }
 
 impl Repo for FakeRepo {
@@ -558,6 +601,17 @@ impl Repo for FakeRepo {
 
     fn free_bytes(&self, _dir: &Path) -> Result<u64> {
         Ok(self.free_bytes.unwrap_or(u64::MAX))
+    }
+    fn behind(&self, dir: &Path, _onto: &str) -> Result<u64> {
+        Ok(self.behind.get(dir).copied().unwrap_or(0))
+    }
+    fn rebase_onto(&mut self, dir: &Path, onto: &str) -> Result<bool> {
+        self.rebased.push((dir.to_path_buf(), onto.to_owned()));
+        if self.rebase_conflicts.iter().any(|d| d == dir) {
+            return Ok(false);
+        }
+        self.behind.remove(dir);
+        Ok(true)
     }
     fn worktree_move(&mut self, repo: &Path, from: &Path, to: &Path) -> Result<()> {
         if let Some(parent) = to.parent() {

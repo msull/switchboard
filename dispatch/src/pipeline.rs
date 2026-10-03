@@ -415,6 +415,11 @@ pub struct Policy {
     /// and costs the run. Read live, like `slots`.
     #[serde(default = "default_min_free_gb")]
     pub min_free_gb: u32,
+    /// Bring a lane's branch up to its base when a stage begins, so a
+    /// plan that sat is not implemented on stale code. A clean rebase
+    /// is mechanical; a conflict goes to the `rebaser`.
+    #[serde(default = "yes")]
+    pub refresh: bool,
     /// The operator that rebases a branch whose PR conflicts with its
     /// base, cloned from the lane's implementer; absent, a conflict is
     /// a question.
@@ -445,6 +450,10 @@ fn default_min_free_gb() -> u32 {
     10
 }
 
+fn yes() -> bool {
+    true
+}
+
 fn default_max_rebases() -> u32 {
     2
 }
@@ -460,6 +469,7 @@ impl Default for Policy {
             trust_folders: false,
             max_reruns: default_max_reruns(),
             min_free_gb: default_min_free_gb(),
+            refresh: true,
             rebaser: None,
             max_rebases: default_max_rebases(),
             fixer: None,

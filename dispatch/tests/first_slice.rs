@@ -5262,3 +5262,192 @@ fn a_lost_command_reviewer_is_failed_not_started_again() {
         "not started again"
     );
 }
+
+/// A plan sits while main moves: when the implementer's stage begins,
+/// the branch (no commits of its own yet) is brought up to the base,
+/// the lane's base is the new one, and the implementer is told the
+/// base moved. Nothing but git ran.
+#[test]
+fn a_plan_that_sat_is_implemented_on_a_branch_brought_up_to_its_base() {
+    let mut env = Env::new();
+    let id = at_finalize(&mut env);
+    let t = env.ticket(&id);
+    let tree = t.lanes[0].worktree.clone();
+    let clone = env.runner.data.repo_dir(PROJECT);
+    {
+        let mut repo = env.repo.lock().unwrap();
+        repo.bases.insert(clone, "main0002".into());
+        repo.behind.insert(tree.clone(), 3);
+    }
+    let decision = env.pending(&id)[0].id.clone();
+    let now = env.tick();
+    env.runner
+        .decide(&id, &decision, "finalize", None, now)
+        .unwrap();
+    env.steps_until(&id, "the implementer", |t, _| {
+        t.attempts_of("implement")
+            .last()
+            .is_some_and(Attempt::is_open)
+    });
+    let t = env.ticket(&id);
+    assert_eq!(
+        env.repo.lock().unwrap().rebased,
+        vec![(tree, "origin/main".to_owned())]
+    );
+    assert_eq!(t.lanes[0].base_sha.as_deref(), Some("main0002"));
+    let moved = t.lanes[0].refreshed.clone().expect("the move is recorded");
+    assert_eq!(
+        (moved.from.as_str(), moved.to.as_str()),
+        ("base0000", "main0002")
+    );
+    assert!(
+        t.attempts_of(dispatch::scheduler::REFRESH).next().is_none(),
+        "a clean rebase launches nothing"
+    );
+    let prompt = env
+        .sb()
+        .calls
+        .iter()
+        .rev()
+        .find_map(|r| match &r.body {
+            Body::SessionNew { prompt, name, .. } if name == "implementer" => prompt.clone(),
+            _ => None,
+        })
+        .unwrap();
+    assert!(
+        prompt.contains("base moved from base0000 to main0002"),
+        "{prompt}"
+    );
+}
+
+/// The branch has commits and the mechanical rebase stops: the
+/// policy's rebaser is continued from the lane's last finished agent,
+/// told the base and the checks, and the stage waits for it; when it
+/// stops the branch is read again and the stage goes on.
+#[test]
+fn a_conflicting_refresh_is_rebased_by_a_clone_of_the_lanes_last_agent() {
+    let mut env = Env::new();
+    let id = at_finalize(&mut env);
+    let t = env.ticket(&id);
+    let tree = t.lanes[0].worktree.clone();
+    let planner = session_of(&t, "plan");
+    let clone = env.runner.data.repo_dir(PROJECT);
+    {
+        let mut repo = env.repo.lock().unwrap();
+        repo.bases.insert(clone, "main0002".into());
+        repo.behind.insert(tree.clone(), 2);
+        repo.rebase_conflicts.push(tree.clone());
+    }
+    let decision = env.pending(&id)[0].id.clone();
+    let now = env.tick();
+    env.runner
+        .decide(&id, &decision, "finalize", None, now)
+        .unwrap();
+    env.steps_until(&id, "the rebaser", |t, _| {
+        t.attempts_of(dispatch::scheduler::REFRESH)
+            .any(|a| a.session.is_some())
+    });
+    let t = env.ticket(&id);
+    let rebase = t
+        .attempts_of(dispatch::scheduler::REFRESH)
+        .last()
+        .unwrap()
+        .clone();
+    assert!(rebase.is_open());
+    assert_eq!(rebase.context, "repo");
+    let rebaser = rebase.session.clone().unwrap();
+    assert_eq!(
+        env.sb().cloned,
+        vec![(planner, rebaser.clone())],
+        "cloned from the planner, the lane's last finished agent"
+    );
+    let prompt = env
+        .sb()
+        .calls
+        .iter()
+        .rev()
+        .find_map(|r| match &r.body {
+            Body::SessionClone { prompt, name, .. } if name == "rebaser" => Some(prompt.clone()),
+            _ => None,
+        })
+        .unwrap();
+    assert!(prompt.contains("behind origin/main"), "{prompt}");
+    assert!(
+        prompt.contains("The checks are: sh -c cargo test"),
+        "{prompt}"
+    );
+    assert!(prompt.contains("abort the rebase"), "{prompt}");
+    assert!(
+        t.attempts_of("implement").next().is_none(),
+        "the implementer waits for the rebaser"
+    );
+    // The rebaser resolved it and stopped.
+    {
+        let mut repo = env.repo.lock().unwrap();
+        repo.rebase_conflicts.clear();
+        repo.behind.remove(&tree);
+    }
+    env.finish(
+        &rebaser,
+        &rebase.artifacts["notes"].clone(),
+        "# rebased\nkept both sides of the scheduler change",
+    );
+    env.steps_until(&id, "the implementer", |t, _| {
+        t.attempts_of("implement")
+            .last()
+            .is_some_and(Attempt::is_open)
+    });
+    let t = env.ticket(&id);
+    assert_eq!(t.lanes[0].base_sha.as_deref(), Some("main0002"));
+    assert!(t.pending_decisions().is_empty());
+}
+
+/// Without a rebaser in the policy a conflicting refresh is a question
+/// with `recheck`, answered after the user rebased by hand.
+#[test]
+fn a_conflicting_refresh_without_a_rebaser_is_a_question() {
+    let mut env = Env::new();
+    let path = env.data.pipeline(PROJECT);
+    let text = std::fs::read_to_string(&path).unwrap();
+    std::fs::write(&path, text.replace("rebaser = \"rebaser\"\n", "")).unwrap();
+    let id = at_finalize(&mut env);
+    let t = env.ticket(&id);
+    let tree = t.lanes[0].worktree.clone();
+    let clone = env.runner.data.repo_dir(PROJECT);
+    {
+        let mut repo = env.repo.lock().unwrap();
+        repo.bases.insert(clone, "main0002".into());
+        repo.behind.insert(tree.clone(), 2);
+        repo.rebase_conflicts.push(tree.clone());
+    }
+    let decision = env.pending(&id)[0].id.clone();
+    let now = env.tick();
+    env.runner
+        .decide(&id, &decision, "finalize", None, now)
+        .unwrap();
+    env.steps_until(&id, "the refresh question", |t, _| {
+        t.pending_decisions()
+            .iter()
+            .any(|d| d.name == dispatch::scheduler::REFRESH)
+    });
+    let d = env.pending(&id)[0].clone();
+    assert_eq!(d.options, vec!["recheck", "park"]);
+    assert!(d.question.contains("names no rebaser"), "{}", d.question);
+    assert!(t.attempts_of("implement").next().is_none());
+    {
+        let mut repo = env.repo.lock().unwrap();
+        repo.rebase_conflicts.clear();
+        repo.behind.remove(&tree);
+    }
+    let now = env.tick();
+    env.runner.decide(&id, &d.id, "recheck", None, now).unwrap();
+    env.steps_until(&id, "the implementer", |t, _| {
+        t.attempts_of("implement")
+            .last()
+            .is_some_and(Attempt::is_open)
+    });
+    assert_eq!(
+        env.ticket(&id).lanes[0].base_sha.as_deref(),
+        Some("main0002")
+    );
+}

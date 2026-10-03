@@ -107,10 +107,21 @@ pub struct LaneRecord {
     /// The lane's setup ran, once, before its first agent.
     #[serde(default)]
     pub setup_done: bool,
-    /// The commit the lane was cut from, resolved once at the cut:
-    /// what a code review diffs against, whatever the remote has since.
+    /// The commit the lane was cut from, or the base it was last
+    /// brought up to: what a code review diffs against.
     #[serde(default)]
     pub base_sha: Option<String>,
+    /// The last time the branch was brought up to a moved base: told
+    /// to the next agent, since its plan was written against `from`.
+    #[serde(default)]
+    pub refreshed: Option<Refreshed>,
+}
+
+/// A base that moved under a branch, and the branch brought up to it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Refreshed {
+    pub from: String,
+    pub to: String,
 }
 
 fn yes() -> bool {
@@ -506,6 +517,10 @@ pub struct Ticket {
     /// of that stage takes it into its prompt.
     #[serde(default)]
     pub rework: BTreeMap<String, String>,
+    /// The stage whose start last brought the lanes up to their bases;
+    /// a refresh runs once per stage entry.
+    #[serde(default)]
+    pub refreshed_stage: Option<usize>,
     #[serde(flatten)]
     pub state: TicketState,
     pub created_ms: u64,
@@ -605,6 +620,7 @@ mod tests {
             processes: vec![],
             root_project: None,
             rework: BTreeMap::new(),
+            refreshed_stage: None,
             state: TicketState::Active,
             created_ms: 0,
             updated_ms: 0,

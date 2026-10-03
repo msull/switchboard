@@ -155,6 +155,7 @@ report them instead. The kinds you will see:
 | `inspect` | `proceed`, `rerun`, `park` | the owner's look at a branch before it goes anywhere; `rerun --note "<what to change>"` sends it back to the implementer with the note |
 | `rerun` | `rerun`, `park`, and `check` when tests failed | an attempt failed (no result, dirty tree, crash, failing tests); `rerun` is a fresh attempt, `check` runs the same tests again on the same commit |
 | `pr` | `recheck`, `park` | no pull request was found for the branch, or it needs attention; `recheck` after the owner fixed it |
+| `refresh` | `recheck`, `park` | the branch is behind its base and the rebase conflicts, with no rebaser left to try; `recheck` after the owner rebased the worktree by hand |
 | `merge` | `park` | a confirmation: Dispatch watches the provider and closes the ticket itself when the PR merges; it cannot be answered by hand |
 
 ```
@@ -212,8 +213,9 @@ Only when the owner has said so for a named project. Edit
 `pipelines/<project>.toml` in place with an ordinary editor or `sed`;
 nothing needs restarting. What a change reaches depends on the key:
 
-- `[policy] slots`, `waiting_on_me` and `min_free_gb` are read from
-  the live file on every pass, for every ticket of the project. Raising `slots` lets
+- `[policy] slots`, `waiting_on_me`, `min_free_gb` and `refresh` are
+  read from the live file on every pass, for every ticket of the
+  project. Raising `slots` lets
   the next waiting ticket start within a second or two and
   `dispatch status` shows the new limit at once. When a project has a
   `.pr.toml` as well, its `[policy]` counts do not apply: the

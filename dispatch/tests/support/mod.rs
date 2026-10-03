@@ -716,6 +716,12 @@ impl Repo for SharedRepo {
     fn free_bytes(&self, dir: &std::path::Path) -> anyhow::Result<u64> {
         self.0.lock().unwrap().free_bytes(dir)
     }
+    fn behind(&self, dir: &std::path::Path, onto: &str) -> anyhow::Result<u64> {
+        self.0.lock().unwrap().behind(dir, onto)
+    }
+    fn rebase_onto(&mut self, dir: &std::path::Path, onto: &str) -> anyhow::Result<bool> {
+        self.0.lock().unwrap().rebase_onto(dir, onto)
+    }
     fn remote_url(&self, dir: &std::path::Path) -> anyhow::Result<Option<String>> {
         self.0.lock().unwrap().remote_url(dir)
     }

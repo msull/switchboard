@@ -459,6 +459,7 @@ decisions = { lanes = "ask", finalize = "ask", merge = "ask", budget = "ask", re
 trust_folders = false         # true: Claude Code's folder trust question, which every fresh worktree asks, is answered for the project's agents
 max_reruns = 3                # failed attempts a stage may collect in one context before the ticket parks instead of asking again
 min_free_gb = 10              # free space on the worktrees' volume below which nothing new starts; live, like slots
+refresh = true                # each lane's branch is brought up to its base when a stage begins; a conflict goes to the rebaser
 rebaser = "rebaser"           # the operator that rebases a PR that conflicts with its base, cloned from the lane's implementer; absent, a conflict is a question
 max_rebases = 2               # rebases one PR may get before the conflict is a question
 fixer = "fixer"               # the operator that fixes a PR whose checks are red at the tree's head, cloned the same way; absent, red checks are a question
@@ -1125,6 +1126,25 @@ settled. The conflicting head is on the rebaser's attempt: a rebase
 that leaves the PR at that head, a policy without a rebaser, and a
 spent `max_rebases` are each a `pr` question with `recheck`.
 
+A branch does not wait for a PR to be brought up to date. With
+`refresh` on (the default), each stage that launches something begins
+by fetching the lane's base and, when the base moved since the lane's
+`base_sha`, bringing the branch up to it: a branch with no commits of
+its own simply moves, one with commits is rebased, and either way
+`base_sha` becomes the new base and the next agent's prompt says the
+base moved and names the range, so a plan written against the old
+code is read with that in mind. A rebase that stops on a conflict is
+aborted, and the policy's `rebaser` is continued from the lane's last
+finished agent, told the base and the stage's checks, and asked to
+resolve or, when a conflict's intent is unclear, to leave the branch
+as it was and say why; the stage waits for it, reads the branch again
+when it stops, and after `max_rebases` such attempts, or without a
+rebaser, asks a `refresh` question with `recheck`. The attempts and
+the question carry the pseudo-stage `refresh`, so no stage mistakes
+them for its own. Pull-request tickets are someone else's branch and
+are never refreshed; `lanes`, a human look and the merge watch launch
+nothing and are not refreshed either.
+
 Red checks on the PR at the tree's head are handled the same way by
 the policy's `fixer`: cloned from the lane's last finished agent, told
 the PR and the failed check names, how to read the failed run (`gh pr
@@ -1444,6 +1464,9 @@ and one against the real one:
 | The user's own feedback round after the review converged | The pending `finalize` decision is cancelled and the session unmarked while the planner answers; when the run converges again a new decision names the new round count |
 | The PR conflicts with its base at `merge` | The policy's rebaser starts in the lane, cloned from the implementer's session, with the PR, the base and the notes path in its prompt; the merge decision stays; when it stops the gate reads the PR again and, merged, the ticket closes |
 | The rebaser leaves the PR at the same head, or `max_rebases` is spent | A `pr` decision saying which; no further rebaser runs |
+| The base moved while a plan sat; implementation begins | The branch is brought up to the base, `base_sha` is the new base, the implementer is told the range; nothing but git ran (`a_plan_that_sat_is_implemented_on_a_branch_brought_up_to_its_base`) |
+| A stage begins and the rebase onto the moved base conflicts | The rebaser, a clone of the lane's last finished agent, is told the base and the checks; the stage waits, then reads the branch again (`a_conflicting_refresh_is_rebased_by_a_clone_of_the_lanes_last_agent`) |
+| The same, with no rebaser in the policy | A `refresh` question with `recheck`, answered after a rebase by hand (`a_conflicting_refresh_without_a_rebaser_is_a_question`) |
 | The PR's checks are red at the tree's head and the policy names a `fixer` | The fixer starts in the lane, cloned from the implementer, with the PR and the failed check names in its prompt; no question; when it stops the gate reads again and green checks pass it |
 | Red checks with no fixer, or `max_fixes` spent | A `pr` decision with `recheck` and `park` |
 | The provider reports the merge | The attempt completes at the merged head, the decision reads as answered `merged` by `dispatch`, and the ticket goes on (closes) |
