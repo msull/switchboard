@@ -16,7 +16,7 @@ use egui_term::{BackendSettings, PtyEvent, TerminalBackend, TerminalView};
 
 use super::cards::kind_label;
 use super::files::DraggedPath;
-use super::{DrawCtx, GAP, PAD, UiState, theme};
+use super::{DrawCtx, GAP, PAD, Renaming, UiState, theme};
 use crate::core::{
     AgentKind, AppAction, CardState, PinTarget, RecordId, ResumeHandle, SessionKind, SessionRecord,
     View,
@@ -445,20 +445,18 @@ fn name_or_editor(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord) {
         ui.add(egui::Label::new(RichText::new(&record.name).text_style(theme::h1())).truncate());
         return;
     }
-    let done = cx
-        .state
-        .rename_draft
-        .as_mut()
-        .and_then(|(_, draft)| super::rename_field(ui, "Session name", draft, 220.0));
-    match done {
-        Some(Some(name)) => {
+    let Some((_, draft)) = cx.state.rename_draft.as_mut() else {
+        return;
+    };
+    match super::rename_field(ui, "Session name", draft, 220.0) {
+        Renaming::Done(name) => {
             cx.state.rename_draft = None;
             if !name.is_empty() && name != record.name {
                 cx.dispatch(AppAction::RenameSession(record.id, name));
             }
         }
-        Some(None) => cx.state.rename_draft = None,
-        None => {}
+        Renaming::Cancelled => cx.state.rename_draft = None,
+        Renaming::Editing => {}
     }
 }
 
@@ -802,10 +800,9 @@ struct Toggles<'a> {
     expand_applied: &'a mut Option<bool>,
 }
 
-/// Header line, then the turns in a scroll area that follows new
-/// content, with the raw terminal snapshot folded away at the end.
-///
-/// The conversation under its toggles. Claude Code's own name for the
+/// The conversation under its toggles: a header line, then the turns in
+/// a scroll area that follows new content, with the raw terminal
+/// snapshot folded away at the end. Claude Code's own name for the
 /// conversation (`/rename`) is shown only when it differs from the
 /// record's name, marked as Claude's, so a rename in Switchboard does
 /// not leave the old name sitting under the new one.

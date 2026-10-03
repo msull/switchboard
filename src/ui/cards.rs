@@ -39,23 +39,30 @@ pub fn file_name(path: &Path) -> String {
     )
 }
 
-/// Whole seconds since `then`; zero for a time in the future.
-#[must_use]
-pub fn since_secs(then: SystemTime) -> u64 {
-    SystemTime::now()
-        .duration_since(then)
-        .map_or(0, |d| d.as_secs())
-}
-
 /// "3m", "2h", "5d": how long ago `then` was. The UI may read the wall
 /// clock; the core may not.
 #[must_use]
 pub fn since_text(then: SystemTime) -> String {
-    match since_secs(then) {
-        s if s < 60 => "just now".into(),
-        s if s < 3600 => format!("{}m", s / 60),
-        s if s < 86_400 => format!("{}h", s / 3600),
-        s => format!("{}d", s / 86_400),
+    age(then).unwrap_or_else(|| "just now".into())
+}
+
+/// `since_text` as a phrase: "3m ago", or "just now".
+#[must_use]
+pub fn ago_text(then: SystemTime) -> String {
+    age(then).map_or_else(|| "just now".into(), |age| format!("{age} ago"))
+}
+
+/// The age of `then` in its largest whole unit, or `None` under a
+/// minute (and for a time in the future).
+fn age(then: SystemTime) -> Option<String> {
+    let secs = SystemTime::now()
+        .duration_since(then)
+        .map_or(0, |d| d.as_secs());
+    match secs {
+        s if s < 60 => None,
+        s if s < 3600 => Some(format!("{}m", s / 60)),
+        s if s < 86_400 => Some(format!("{}h", s / 3600)),
+        s => Some(format!("{}d", s / 86_400)),
     }
 }
 

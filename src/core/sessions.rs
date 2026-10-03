@@ -259,10 +259,7 @@ impl AppCore {
             self.error_about(id, text);
             return;
         }
-        if self.host_status(id).is_some() {
-            self.keep_last_output(id, out);
-            self.kill_and_forget(id, out);
-        }
+        self.kill_and_forget(id, out);
         self.launch_fresh(id, now, out);
     }
 
@@ -309,8 +306,8 @@ impl AppCore {
     /// Kill the record's pane and drop its status, so a launch right
     /// after can reuse the name before the next host poll.
     fn kill_and_forget(&mut self, id: RecordId, out: &mut Out) {
+        self.kill_pane(id, out);
         let host = HostId(id.host_name());
-        out.push(Effect::Kill(host.clone()));
         self.host.retain(|h| h.id != host);
     }
 
@@ -445,7 +442,7 @@ impl AppCore {
         let Some(previous) = record.resume else {
             return;
         };
-        self.stop_if_running(id, out);
+        self.kill_pane(id, out);
         self.edit_session(id, out, |s| {
             s.resume = Some(handle);
             s.not_resumable = false;
@@ -476,17 +473,13 @@ impl AppCore {
             self.error_about(record.id, format!("{}: nothing to undo", record.name));
             return;
         };
-        self.stop_if_running(id, out);
+        self.kill_pane(id, out);
         self.edit_session(id, out, |s| {
             s.resume = Some(discarded.previous);
             s.not_resumable = false;
             s.discard = None;
         });
         self.info_about(record.id, format!("{}: discard undone", record.name), now);
-    }
-
-    fn stop_if_running(&mut self, id: RecordId, out: &mut Out) {
-        self.kill_pane(id, out);
     }
 
     /// The copy exists: a new cold record beside the source, resumable

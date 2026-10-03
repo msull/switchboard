@@ -10,7 +10,7 @@ use std::time::{Duration, SystemTime};
 
 use egui::{RichText, Sense, Ui, UiBuilder, vec2};
 
-use super::cards::{file_name, removable, since_secs, since_text};
+use super::cards::{ago_text, file_name, removable};
 use super::{DrawCtx, GAP, document, theme};
 use crate::core::{AppAction, Run, SessionKind, SessionRecord};
 
@@ -53,12 +53,7 @@ pub fn kicker(record: &SessionRecord, running: bool, now: SystemTime) -> String 
         None if run.open() => "stopped".to_owned(),
         None => "killed".to_owned(),
     };
-    let when = if since_secs(ended) < 60 {
-        since_text(ended)
-    } else {
-        format!("{} ago", since_text(ended))
-    };
-    format!("{how} · {took} · {when}")
+    format!("{how} · {took} · {}", ago_text(ended))
 }
 
 /// The one action row for commands and services: run or stop, open,

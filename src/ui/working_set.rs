@@ -9,7 +9,7 @@ use egui::{Pos2, RichText, Sense, Ui, UiBuilder, vec2};
 
 use super::cards::{actions, file_name, kicker_text, kind_label};
 use super::document::{self, Body};
-use super::{DrawCtx, GAP, UiState, theme};
+use super::{DrawCtx, GAP, Renaming, UiState, theme};
 use crate::core::grid::{MIN_HEIGHT, MIN_WIDTH};
 use crate::core::{
     AppAction, AppCore, CardState, GridRect, MenuKind, PinTarget, PinnedItem, RadialMenu, RecordId,
@@ -1232,20 +1232,18 @@ fn rule_line(cx: &mut DrawCtx<'_>, ui: &mut Ui, set: SetId, rule: SetRule) {
 /// The name field while a rename is under way: Enter commits, Escape
 /// cancels.
 fn name_editor(cx: &mut DrawCtx<'_>, ui: &mut Ui, set: SetId) {
-    let done = cx
-        .state
-        .set_rename
-        .as_mut()
-        .and_then(|(_, draft)| super::rename_field(ui, "Working set name", draft, 280.0));
-    match done {
-        Some(Some(name)) => {
+    let Some((_, draft)) = cx.state.set_rename.as_mut() else {
+        return;
+    };
+    match super::rename_field(ui, "Working set name", draft, 280.0) {
+        Renaming::Done(name) => {
             cx.state.set_rename = None;
             if !name.is_empty() {
                 cx.dispatch(AppAction::RenameWorkingSet { set, name });
             }
         }
-        Some(None) => cx.state.set_rename = None,
-        None => {}
+        Renaming::Cancelled => cx.state.set_rename = None,
+        Renaming::Editing => {}
     }
 }
 

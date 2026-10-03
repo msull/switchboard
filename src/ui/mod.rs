@@ -832,15 +832,18 @@ pub fn action_spacing(ui: &mut Ui) {
     ui.spacing_mut().button_padding = egui::vec2(0.0, 4.0);
 }
 
-/// A labelled single-line field that holds focus while it is drawn:
-/// `Some(Some(text))`, trimmed, on Enter, `Some(None)` on Escape, and
-/// `None` while the user is typing.
-pub fn rename_field(
-    ui: &mut Ui,
-    label: &str,
-    draft: &mut String,
-    width: f32,
-) -> Option<Option<String>> {
+/// What a [`rename_field`] did this frame.
+pub enum Renaming {
+    /// The user is still typing.
+    Editing,
+    /// Enter: the draft, trimmed.
+    Done(String),
+    /// Escape.
+    Cancelled,
+}
+
+/// A labelled single-line field that holds focus while it is drawn.
+pub fn rename_field(ui: &mut Ui, label: &str, draft: &mut String, width: f32) -> Renaming {
     let label = ui.label(label).id;
     let response = ui
         .add(egui::TextEdit::singleline(draft).desired_width(width))
@@ -853,11 +856,11 @@ pub fn rename_field(
         )
     });
     if enter {
-        Some(Some(draft.trim().to_owned()))
+        Renaming::Done(draft.trim().to_owned())
     } else if escape {
-        Some(None)
+        Renaming::Cancelled
     } else {
-        None
+        Renaming::Editing
     }
 }
 

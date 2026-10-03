@@ -214,14 +214,14 @@ fn project_rows(cx: &mut DrawCtx<'_>, ui: &mut Ui, active: Option<ProjectId>, co
     }
 }
 
-/// The rail's head: the active space's name, opening the one menu that names the other spaces (each with its
-/// waiting count), with New, Rename, and Delete under them. Outside the
-/// global space nothing else on screen names another space, so a shared
-/// screen gives away only the space being worked in; the global space
-/// lifts that boundary on purpose, naming each space over its projects.
-/// The menu starts with the global space when
-/// [`AppCore::global_space_offered`] says so; it can be neither renamed
-/// nor deleted.
+/// The rail's head: the active space's name, opening the one menu that
+/// names the other spaces (each with its waiting count), with New,
+/// Rename, and Delete under them. Outside the global space nothing else
+/// on screen names another space, so a shared screen gives away only
+/// the space being worked in; the global space lifts that boundary on
+/// purpose, naming each space over its projects. The menu starts with
+/// the global space when [`AppCore::global_space_offered`] says so; it
+/// can be neither renamed nor deleted.
 fn space_menu(cx: &mut DrawCtx<'_>, ui: &mut Ui, compact: bool) {
     let p = theme::palette(ui);
     let active = cx.core.active_space();
