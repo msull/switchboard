@@ -6262,6 +6262,92 @@ fn a_rebase_of_a_lane_without_a_recorded_base_is_checked() {
     assert!(prompt.contains("git log root0000..main0002"), "{prompt}");
 }
 
+/// The fork point of a lane with no recorded base is read before its
+/// rebaser runs; after it, the fork point would be the new base itself.
+#[test]
+fn a_rebaser_on_a_lane_without_a_recorded_base_keeps_its_fork_point() {
+    let mut env = Env::new();
+    let (id, implementer) = base_moves_before_review(&mut env, "impl0001", true);
+    let mut t = env.ticket(&id);
+    t.lanes[0].base_sha = None;
+    dispatch::store::write_ticket(&env.data.ticket_file(&id), &t).unwrap();
+    let tree = t.lanes[0].worktree.clone();
+    env.repo
+        .lock()
+        .unwrap()
+        .bases
+        .insert(tree.clone(), "root0000".into());
+    implementer_stops(&mut env, &id, &implementer);
+    env.steps_until(&id, "the checks starting", |t, _| {
+        t.attempts_of("implement")
+            .last()
+            .is_some_and(|a| a.gate.is_some())
+    });
+    env.repo
+        .lock()
+        .unwrap()
+        .check_exits
+        .insert(format!("{id}/implement/1"), 0);
+    env.steps_until(&id, "the rebaser", |t, _| {
+        t.attempts_of(dispatch::scheduler::REFRESH)
+            .any(|a| a.session.is_some())
+    });
+    // The rebaser moved the branch: its fork point is now the new base.
+    env.repo
+        .lock()
+        .unwrap()
+        .bases
+        .insert(tree, "main0002".into());
+    {
+        let mut repo = env.repo.lock().unwrap();
+        repo.rebase_conflicts.clear();
+        repo.behind.clear();
+    }
+    let rebase = env
+        .ticket(&id)
+        .attempts_of(dispatch::scheduler::REFRESH)
+        .last()
+        .unwrap()
+        .clone();
+    env.finish(
+        &rebase.session.clone().unwrap(),
+        &rebase.artifacts["notes"].clone(),
+        "# rebased\nkept both sides",
+    );
+    round_started(&mut env, &id, 1);
+    let moved = env.ticket(&id).lanes[0].refreshed.clone().unwrap();
+    assert_eq!(
+        (moved.from.as_str(), moved.to.as_str()),
+        ("root0000", "main0002")
+    );
+    assert!(moved.commits);
+    let prompt = last_prompt_of(&env, "style");
+    assert!(prompt.contains("git log root0000..main0002"), "{prompt}");
+}
+
+/// A lane with no recorded base that is already caught up (a hand
+/// rebase) has an unknown old base: its rebase is checked, naming no
+/// range.
+#[test]
+fn a_rebase_from_an_unknown_base_is_checked_without_a_range() {
+    let mut env = Env::new();
+    let (id, implementer) = base_moves_before_review(&mut env, "impl0001", false);
+    let mut t = env.ticket(&id);
+    t.lanes[0].base_sha = None;
+    dispatch::store::write_ticket(&env.data.ticket_file(&id), &t).unwrap();
+    env.repo.lock().unwrap().behind.clear();
+    review_starts(&mut env, &id, &implementer);
+    let moved = env.ticket(&id).lanes[0].refreshed.clone().unwrap();
+    assert_eq!((moved.from.as_str(), moved.to.as_str()), ("", "main0002"));
+    assert!(moved.commits);
+    let prompt = last_prompt_of(&env, "style");
+    assert!(
+        prompt.contains("rebased onto main0002 from a base that was not recorded"),
+        "{prompt}"
+    );
+    assert!(!prompt.contains("git log"), "{prompt}");
+}
+
 /// A branch with no commits of its own is moved, not rebased: no check.
 #[test]
 fn a_review_after_a_clean_move_has_no_rebase_check() {

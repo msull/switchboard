@@ -51,6 +51,9 @@ const REVIEW_CARRIED_STILL: &str = "The branch has not moved since; review the o
 /// The addition to the first review after the branch was rebased.
 const REVIEW_REBASED: &str = "The base moved from {from} to {to} (git log {from}..{to}) and the branch was rebased onto it. Check explicitly that both sides of every conflicted hunk are present and that the base's additions in {from}..{to} are unchanged by the branch.";
 
+/// The rebase check when the base the branch moved from was not recorded.
+const REVIEW_REBASED_UNKNOWN: &str = "The branch was rebased onto {to} from a base that was not recorded. Check explicitly that both sides of every conflicted hunk are present and that the base's additions the rebase brought in are unchanged by the branch.";
+
 /// The addition when the plan has a decisions section.
 const REVIEW_DECIDED: &str = "The plan at {plan} settled these decisions:\n\n{decisions}\n\nA point that contests one of them is out of scope for this review: write it as \"- decided: <the decision>: why\" and it is listed as found but not done.";
 
@@ -655,7 +658,7 @@ impl Runner {
         let carry = carry_of(t, a, &no_feedback_of(stage));
         let earlier = if round.n > 1 {
             let previous = a.rounds.iter().rev().find(|x| x.n < round.n);
-            carried_points(previous, &[])
+            carried_points(previous)
         } else {
             carry.as_ref().map(|c| c.open.clone()).unwrap_or_default()
         };
@@ -1758,25 +1761,35 @@ fn collect_points(round: &ReviewRound, no_feedback: &str) -> Points {
 }
 
 /// What the previous round left open: its points the implementer
-/// disputed (or did not answer), minus those withdrawn now.
-fn carried_points(previous: Option<&ReviewRound>, withdrawn: &[String]) -> Vec<(String, String)> {
-    let mut carried: Vec<(String, String)> = Vec::new();
-    if let Some(prev) = previous
-        && let Some(feedback) = &prev.feedback
-    {
-        let answered = prev
-            .response
-            .as_ref()
-            .map(|r| std::fs::read_to_string(r).unwrap_or_default())
-            .unwrap_or_default();
-        for (id, text) in open_points_of(&std::fs::read_to_string(feedback).unwrap_or_default()) {
-            if claims_fixed(&answered, &id) || withdrawn.iter().any(|w| w == &id) {
-                continue;
-            }
-            carried.push((id, text));
-        }
-    }
-    carried
+/// disputed (or did not answer).
+fn carried_points(previous: Option<&ReviewRound>) -> Vec<(String, String)> {
+    previous
+        .map(answered_points)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|(_, _, fixed)| !fixed)
+        .map(|(id, text, _)| (id, text))
+        .collect()
+}
+
+/// A gathered round's open points, each with whether its response
+/// answers it as fixed. Empty for a round with no feedback.
+fn answered_points(round: &ReviewRound) -> Vec<(String, String, bool)> {
+    let Some(feedback) = &round.feedback else {
+        return Vec::new();
+    };
+    let answered = round
+        .response
+        .as_ref()
+        .map(|r| std::fs::read_to_string(r).unwrap_or_default())
+        .unwrap_or_default();
+    open_points_of(&std::fs::read_to_string(feedback).unwrap_or_default())
+        .into_iter()
+        .map(|(id, text)| {
+            let fixed = claims_fixed(&answered, &id);
+            (id, text, fixed)
+        })
+        .collect()
 }
 
 /// Whether a response answers point `id` as fixed.
@@ -1951,21 +1964,11 @@ fn carry_of(t: &Ticket, a: &Attempt, no_feedback: &str) -> Option<Carry> {
     // A fix the attempt answered but no later round read is not
     // settled: the attempt may have failed on exactly that fix. Such a
     // point stays open, marked for its fix to be checked.
-    let answered = last
-        .response
-        .as_ref()
-        .map(|r| std::fs::read_to_string(r).unwrap_or_default())
-        .unwrap_or_default();
-    let feedback = last
-        .feedback
-        .as_ref()
-        .map(|f| std::fs::read_to_string(f).unwrap_or_default())
-        .unwrap_or_default();
-    let open: Vec<(String, String)> = open_points_of(&feedback)
+    let open: Vec<(String, String)> = answered_points(last)
         .into_iter()
-        .filter(|(id, _)| !withdrawn.contains(id))
-        .map(|(id, text)| {
-            let text = if claims_fixed(&answered, &id) {
+        .filter(|(id, _, _)| !withdrawn.contains(id))
+        .map(|(id, text, fixed)| {
+            let text = if fixed {
                 format!("{text} {UNCHECKED_FIX}")
             } else {
                 text
@@ -2072,7 +2075,11 @@ fn rebased_text(moved: &Refreshed) -> String {
     let mut vars = Vars::default();
     vars.set("from", moved.from.clone())
         .set("to", moved.to.clone());
-    let mut text = vars.render(REVIEW_REBASED);
+    let mut text = vars.render(if moved.from.is_empty() {
+        REVIEW_REBASED_UNKNOWN
+    } else {
+        REVIEW_REBASED
+    });
     if let Some(notes) = &moved.notes {
         let _ = write!(text, " The rebaser's notes are at {}.", notes.display());
     }

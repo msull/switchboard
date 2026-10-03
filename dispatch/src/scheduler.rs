@@ -784,17 +784,6 @@ impl Runner {
         Ok(())
     }
 
-    /// The base a lane's branch sits on before a bring-up: its recorded
-    /// `base_sha`, or for a lane cut before that was recorded, the fork
-    /// point from `onto`. Empty when neither can be read.
-    fn moved_from(&self, lane: &LaneRecord, onto: &str) -> String {
-        lane.base_sha.clone().unwrap_or_else(|| {
-            self.git
-                .merge_base(&lane.worktree, "HEAD", onto)
-                .unwrap_or_default()
-        })
-    }
-
     /// One lane's branch against its base; true when the stage must
     /// wait on a rebaser or a question for it.
     fn refresh_lane(
@@ -840,13 +829,20 @@ impl Runner {
             );
             return Ok(false);
         }
+        // A lane cut before `base_sha` was recorded sits on its fork
+        // point from `onto`, but only while it is behind: once caught up
+        // (by a hand rebase) the fork point is `onto` itself and the old
+        // base cannot be read. It is recorded now so the bring-up after
+        // a rebaser still reads it.
+        if t.lanes[i].base_sha.is_none() && behind > 0 {
+            t.lanes[i].base_sha = self.git.merge_base(&worktree, "HEAD", &onto).ok();
+        }
         // Both read before anything moves: a branch with no commits of
-        // its own sits at the commit it was cut from or last moved to.
-        // When that cannot be read the branch counts as having commits,
-        // so its rebase is still checked.
+        // its own sits at the commit it was cut from or last moved to,
+        // or at `onto` when that is unknown.
         let head_before = self.git.head(&worktree)?;
-        let from = self.moved_from(&t.lanes[i], &onto);
-        let commits = from.is_empty() || head_before != from;
+        let from = t.lanes[i].base_sha.clone().unwrap_or_default();
+        let commits = &head_before != if from.is_empty() { &onto_sha } else { &from };
         let brought_up = behind == 0 || self.git.rebase_onto(&worktree, &onto)?;
         if brought_up {
             log::info!(

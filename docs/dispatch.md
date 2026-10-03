@@ -1060,9 +1060,10 @@ open, and they read the change from that head to the new one (`git
 diff`, or `git range-diff` when the base moved). A point the old
 attempt's last fix pass answered `fixed` is still open, marked for its
 fix to be checked, since no round read that fix and the attempt may
-have failed on it. The open points are open coming into round 1 under ids qualified with the attempt they
-were raised in, `a<n>/r<round>/<reviewer>-<k>`, since ids are unique
-only within an attempt; an id carried twice keeps its first qualifier.
+have failed on it. The open points are open coming into round 1
+under ids qualified with the attempt they were raised in,
+`a<n>/r<round>/<reviewer>-<k>`, since ids are unique only within an
+attempt; an id carried twice keeps its first qualifier.
 Rounds are numbered from 1 again, but for `style_rounds` a carried
 attempt's round k counts as round N + k, N being the last round the old
 attempt read; the cap is per attempt. A note that contains `start over`
@@ -1259,19 +1260,23 @@ leave the branch as it was and say why; the stage waits for it, reads
 the branch again when it stops, and after `max_rebases` such attempts,
 or without a rebaser, asks a `refresh` question with `recheck`. The
 attempts and the question carry the pseudo-stage `refresh`, so no
-stage mistakes them for its own. Each bring-up is recorded on the lane
+stage mistakes them for its own. A lane with no `base_sha` gets its fork point from
+the base as `base_sha` while it is still behind, before anything
+moves, so the bring-up after a rebaser reads the old base; a lane
+already caught up, or whose fork point cannot be read, has an unknown
+old base and records `from` empty. Each bring-up is recorded on the lane
 (`LaneRecord.refreshed`) with `from`, `to`, whether the branch had
 commits of its own (its head before the bring-up was not the old
-`base_sha`; for a lane with no `base_sha`, not its fork point from the
-base, and a fork point that cannot be read counts as commits), when it
+`base_sha`, or, when that is unknown, not the new base), when it
 was recorded, and, when it followed a rebaser (nothing left behind),
 that rebaser's notes: the latest finished `refresh` attempt in the lane
 started after the lane's previous bring-up, none after a bring-up
 recorded before its time was. The first code review round that reads
 the new base after a rebase with commits is told to check it: both
 sides of every conflicted hunk present, and the base's additions in
-`from..to` unchanged by the branch, with the rebaser's notes when there
-are some. A later round or a rerun that already read that base is not
+`from..to` unchanged by the branch (with an empty `from`, the
+additions the rebase brought in, naming no range), with the rebaser's
+notes when there are some. A later round or a rerun that already read that base is not
 told again. Pull-request tickets are someone else's branch and are
 never refreshed; `lanes`, a human look and the merge watch launch
 nothing and are not refreshed either.
@@ -1633,6 +1638,8 @@ and one against the real one:
 | The plan has a "Decisions" section | The reviewers are given it as settled and not the rest of the plan; a `decided:` point holds nothing open and is listed as found but not done, in the round file and the summary (`the_plans_decisions_reach_the_reviewer_as_settled`) |
 | The base moved under a branch with commits before `review-code` | The branch is rebased, `refreshed.commits` is set, round 1 is told to check the rebase, and a rerun at that base is not (`a_review_after_a_rebase_with_commits_checks_the_rebase`) |
 | The same, on a lane with no recorded `base_sha` | The fork point is `from`, `commits` is set and the rebase is checked (`a_rebase_of_a_lane_without_a_recorded_base_is_checked`) |
+| The same, on a lane with no recorded `base_sha` whose rebase conflicts and a rebaser resolves | The fork point read before the rebaser is `from`, not the new base (`a_rebaser_on_a_lane_without_a_recorded_base_keeps_its_fork_point`) |
+| A lane with no recorded `base_sha` already caught up with commits | `from` is empty, `commits` is set and the rebase check names no range (`a_rebase_from_an_unknown_base_is_checked_without_a_range`) |
 | The base moved under a branch with no commits | The branch moves; no rebase check (`a_review_after_a_clean_move_has_no_rebase_check`) |
 | A command reviewer exits 2; an agent reviewer stops with no file | The round fails into `rerun`; the sibling session is killed first; neither is an approval (`a_failed_reviewer_fails_the_round_after_its_siblings_are_killed`) |
 | An agent stops while its card still reads `working`, and writes its notes in a later turn | The attempt is held with no failure, no question and no kill; notes written mid-turn complete nothing until a Stop leaves the card idle (`a_stop_while_still_working_holds_the_attempt_until_the_notes_land`; idle without notes fails only after `STOP_IDLE_POLLS`: `a_stop_idle_without_notes_fails_after_the_grace`) |

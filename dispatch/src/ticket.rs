@@ -129,6 +129,8 @@ pub struct LaneRecord {
 /// A base that moved under a branch, and the branch brought up to it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Refreshed {
+    /// The base the branch sat on; empty when it was not recorded and
+    /// could not be read from the branch.
     pub from: String,
     pub to: String,
     /// The branch had commits of its own, so it was rebased rather
