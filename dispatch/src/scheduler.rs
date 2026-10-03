@@ -715,6 +715,17 @@ impl Runner {
             return Ok(false);
         }
         let behind = self.git.behind(&worktree, &onto)?;
+        // A tree with work in it (someone's hand rebase, say) is left
+        // alone this stage; the base moves under it and is read again
+        // on the next stage, or on a recheck.
+        if behind > 0 && !self.git.is_clean(&worktree)? {
+            log::info!(
+                "ticket {} lane {}: {behind} behind {onto} but the tree is not clean; left alone",
+                t.id,
+                lane.name
+            );
+            return Ok(false);
+        }
         let brought_up = behind == 0 || self.git.rebase_onto(&worktree, &onto)?;
         if brought_up {
             let from = t.lanes[i].base_sha.clone().unwrap_or_default();

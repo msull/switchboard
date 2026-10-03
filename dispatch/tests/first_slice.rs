@@ -5451,3 +5451,37 @@ fn a_conflicting_refresh_without_a_rebaser_is_a_question() {
         Some("main0002")
     );
 }
+
+/// Work in the tree, a rebase by hand say, is never rebased over: the
+/// refresh leaves that lane alone and the stage goes on.
+#[test]
+fn a_refresh_leaves_a_tree_with_work_in_it_alone() {
+    let mut env = Env::new();
+    let id = at_finalize(&mut env);
+    let t = env.ticket(&id);
+    let tree = t.lanes[0].worktree.clone();
+    let clone = env.runner.data.repo_dir(PROJECT);
+    {
+        let mut repo = env.repo.lock().unwrap();
+        repo.bases.insert(clone, "main0002".into());
+        repo.behind.insert(tree.clone(), 2);
+        repo.dirty.push(tree.clone());
+    }
+    let decision = env.pending(&id)[0].id.clone();
+    let now = env.tick();
+    env.runner
+        .decide(&id, &decision, "finalize", None, now)
+        .unwrap();
+    env.steps_until(&id, "the implementer", |t, _| {
+        t.attempts_of("implement")
+            .last()
+            .is_some_and(Attempt::is_open)
+    });
+    let t = env.ticket(&id);
+    assert!(
+        env.repo.lock().unwrap().rebased.is_empty(),
+        "nothing rebased"
+    );
+    assert_eq!(t.lanes[0].base_sha.as_deref(), Some("base0000"));
+    assert!(t.attempts_of(dispatch::scheduler::REFRESH).next().is_none());
+}

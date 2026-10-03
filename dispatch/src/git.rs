@@ -275,6 +275,18 @@ impl Repo for GitCli {
     }
 
     fn rebase_onto(&mut self, dir: &Path, onto: &str) -> Result<bool> {
+        // A rebase someone else began is theirs: starting another would
+        // fail, and aborting on that failure would throw their work away.
+        let in_progress =
+            output(
+                git()
+                    .arg("-C")
+                    .arg(dir)
+                    .args(["rev-parse", "--git-path", "rebase-merge"]),
+            )?;
+        if Path::new(in_progress.trim()).exists() {
+            bail!("a rebase is already in progress at {}", dir.display());
+        }
         let status = git()
             .arg("-C")
             .arg(dir)
