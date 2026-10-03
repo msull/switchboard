@@ -140,6 +140,64 @@ with commits; absent for a clean move.
 
 **Size.** Prompt builder. An hour.
 
+## 9. A Stop with the pane still busy is not completion
+
+**Problem.** #18's investigator fanned its audit out to eight background
+agents and ended its turn to wait for them. Claude Code fires `Stop` at the
+end of every turn, so Dispatch saw a stop with no notes file and failed the
+attempt ("stopped without writing notes") while the session was alive and
+about to write them. A `rerun` there kills the work.
+
+**Change.** After a `Stop` with the artifact missing, hold the attempt open
+while the pane is `Running` and the session's status is not idle at a
+prompt: a background agent still working, or a tool call in flight. Fail
+only when the pane is idle at its prompt with no artifact after a grace of
+a few polls, or when it exits. The `card` state the port already reports
+("working", "idle", "waiting on you") is enough to tell these apart.
+
+**Acceptance.** A session that stops, keeps working, and writes its notes
+on a later turn completes the attempt; one that stops idle with no notes
+still fails after the grace.
+
+**Size.** `poll_agent` plus a fake-port test. Half a day.
+
+## 10. The plan's decisions reach the code reviewers as settled
+
+**Problem.** #10's plan listed four decisions with their reasons (running
+is not activity, pane output counts for every kind, every kind is
+included, a rule set covers its own workspace). The code reviewers raised
+two of them again as points, and the fix round spent itself re-arguing
+the plan.
+
+**Change.** The code review prompt carries the plan's "Decisions" section
+(or the whole plan, when it has none) as settled: a point that contests a
+listed decision is out of scope for the round and goes under "Found but
+not done" in the summary instead.
+
+**Acceptance.** The reviewer prompt contains the plan's decisions; a
+prompt test checks the instruction.
+
+**Size.** Prompt builder in `review.rs`. An hour.
+
+## 11. A rebase or a fix round pushes when the PR exists
+
+**Problem.** After `implement` opened PR 17 at one head, the refresh step
+rebased the tree and five fix rounds committed, and none of them pushed.
+`ready` then found the PR behind the tree and asked for a push by hand, a
+question with one possible answer. The push also had to be forced, since
+the refresh had rewritten the PR's commit.
+
+**Change.** When the lane has a pull request, the refresh step and each
+fix round that passes its checks push the branch with
+`--force-with-lease` on the head the PR was last seen at. The `ready`
+question stays for the case where the push itself fails.
+
+**Acceptance.** A fix round on a lane with a PR ends with the fake repo's
+push list naming the branch and the lease; a lane without a PR pushes
+nothing.
+
+**Size.** `Repo::push_with_lease`, two call sites, two tests. Half a day.
+
 ## Not changing
 
 - The reviewers' standard. They found real bugs every attempt (recovery on
@@ -155,6 +213,6 @@ with commits; absent for a clean move.
 
 ## Order
 
-1, 2 and 3 cut the round count directly and are small. 4 and 5 are filed
-bugs. 6 and 8 are prompt text. 7 is a taste call for the user before anyone
+1, 2 and 3 cut the round count directly and are small. 9 stops a live
+session being killed for waiting. 4 and 5 are filed bugs. 11 removes a question with one answer. 6, 8 and 10 are prompt text. 7 is a taste call for the user before anyone
 builds it.
