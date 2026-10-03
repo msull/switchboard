@@ -159,7 +159,15 @@ a few polls, or when it exits. The `card` state the port already reports
 on a later turn completes the attempt; one that stops idle with no notes
 still fails after the grace.
 
-**Size.** `poll_agent` plus a fake-port test. Half a day.
+**Seen three times on #18.** The investigator (eight background agents),
+then two code review attempts: the correctness reviewer's Stop fired while
+its subagents ran, the round failed after three one-second polls, and the
+failure killed the style reviewer mid-review. In the first of those the
+feedback file landed eight seconds after the Stop. Until this is built,
+every reviewer's guidance in the live pipeline files says to work
+in-session and write before the turn ends.
+
+**Size.** `poll_agent` plus a fake-port test. Half a day. First in order.
 
 ## 10. The plan's decisions reach the code reviewers as settled
 
@@ -188,7 +196,7 @@ question with one possible answer. The push also had to be forced, since
 the refresh had rewritten the PR's commit.
 
 **Change.** When the lane has a pull request, the refresh step and each
-fix round that passes its checks push the branch with
+in-review fix round that passes its checks push the branch with
 `--force-with-lease` on the head the PR was last seen at. The `ready`
 question stays for the case where the push itself fails.
 
@@ -213,6 +221,6 @@ nothing.
 
 ## Order
 
-1, 2 and 3 cut the round count directly and are small. 9 stops a live
-session being killed for waiting. 4 and 5 are filed bugs. 11 removes a question with one answer. 6, 8 and 10 are prompt text. 7 is a taste call for the user before anyone
+9 first: it failed three attempts in one night. 1, 2 and 3 cut the
+round count directly and are small. 4 and 5 are filed bugs. 11 removes a question with one answer. 6, 8 and 10 are prompt text. 7 is a taste call for the user before anyone
 builds it.
