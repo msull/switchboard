@@ -14,7 +14,7 @@ use switchboard_control::{self as wire, Body, Reply, Request, RunState};
 use crate::bitbucket::{Bitbucket, bitbucket_repo};
 use crate::git::{Push, Repo, branch_name};
 use crate::github::{Checks, Gh, PullRequests, github_repo};
-use crate::pipeline::{Context, Gate, Pipeline, Stage, StageKind};
+use crate::pipeline::{Context, Gate, Lane, Pipeline, Stage, StageKind};
 use crate::port::Port;
 use crate::store::{
     DataDir, Lock, Settings, expand_home, read_project, read_ticket, shell_unsafe, write_project,
@@ -798,19 +798,7 @@ impl Runner {
         let Some(lane) = p.lane(&t.lanes[i].name).cloned() else {
             return Ok(false);
         };
-        let (clone, remote, onto) = if lane.repo.is_some() {
-            (
-                self.data.lane_repo_dir(&p.project.name, &lane.name),
-                p.lane_remote(&lane).to_owned(),
-                format!("{}/{}", p.lane_remote(&lane), p.lane_base(&lane)),
-            )
-        } else {
-            (
-                self.data.repo_dir(&p.project.name),
-                p.project.remote.clone(),
-                format!("{}/{}", p.project.remote, p.project.base),
-            )
-        };
+        let (clone, remote, onto) = self.lane_base_ref(p, &lane);
         let worktree = t.lanes[i].worktree.clone();
         self.git.fetch(&clone, &remote)?;
         let onto_sha = self.git.rev_parse(&clone, &onto)?;
@@ -829,20 +817,29 @@ impl Runner {
             );
             return Ok(false);
         }
-        // A lane cut before `base_sha` was recorded sits on its fork
-        // point from `onto`, but only while it is behind: once caught up
-        // (by a hand rebase) the fork point is `onto` itself and the old
-        // base cannot be read. It is recorded now so the bring-up after
-        // a rebaser still reads it.
-        if t.lanes[i].base_sha.is_none() && behind > 0 {
-            t.lanes[i].base_sha = self.git.merge_base(&worktree, "HEAD", &onto).ok();
+        // A lane with no `base_sha` (its base unread at the cut, or cut
+        // before the field) sits on its fork point from `onto`. It is
+        // recorded while the lane is behind, before anything moves, so
+        // the bring-up after a rebaser still reads it. A lane not behind
+        // whose fork point is `onto` never moved and has nothing to
+        // record; one whose fork point cannot be read is brought up from
+        // an unknown base.
+        if t.lanes[i].base_sha.is_none() {
+            let fork = self.git.merge_base(&worktree, "HEAD", &onto).ok();
+            if behind == 0 && fork.as_deref() == Some(onto_sha.as_str()) {
+                t.lanes[i].base_sha = fork;
+                self.save_ticket(t, now_ms)?;
+                return Ok(false);
+            }
+            t.lanes[i].base_sha = fork;
         }
         // Both read before anything moves: a branch with no commits of
         // its own sits at the commit it was cut from or last moved to,
         // or at `onto` when that is unknown.
         let head_before = self.git.head(&worktree)?;
         let from = t.lanes[i].base_sha.clone().unwrap_or_default();
-        let commits = &head_before != if from.is_empty() { &onto_sha } else { &from };
+        let sat_on = if from.is_empty() { &onto_sha } else { &from };
+        let commits = head_before != *sat_on;
         let brought_up = behind == 0 || self.git.rebase_onto(&worktree, &onto)?;
         if brought_up {
             log::info!(
@@ -910,6 +907,24 @@ impl Runner {
             }
         }
         Ok(true)
+    }
+
+    /// Where a lane's base is read: its clone, the remote fetched there,
+    /// and the remote-tracking ref of its base.
+    fn lane_base_ref(&self, p: &Pipeline, lane: &Lane) -> (PathBuf, String, String) {
+        if lane.repo.is_some() {
+            (
+                self.data.lane_repo_dir(&p.project.name, &lane.name),
+                p.lane_remote(lane).to_owned(),
+                format!("{}/{}", p.lane_remote(lane), p.lane_base(lane)),
+            )
+        } else {
+            (
+                self.data.repo_dir(&p.project.name),
+                p.project.remote.clone(),
+                format!("{}/{}", p.project.remote, p.project.base),
+            )
+        }
     }
 
     /// The shape a refresh rebaser's attempt is watched under: the
@@ -2015,7 +2030,7 @@ impl Runner {
     fn lane_base_sha(
         &self,
         p: &Pipeline,
-        lane: &crate::pipeline::Lane,
+        lane: &Lane,
         pr: Option<&PullRequestSource>,
     ) -> Option<String> {
         // A pull request's base is the branch it targets on its own
@@ -2032,17 +2047,7 @@ impl Runner {
                 .merge_base(&clone, &format!("{}/{}", pr.remote, pr.base), pr.local())
                 .ok();
         }
-        let (clone, start) = if lane.repo.is_some() {
-            (
-                self.data.lane_repo_dir(&p.project.name, &lane.name),
-                format!("{}/{}", p.lane_remote(lane), p.lane_base(lane)),
-            )
-        } else {
-            (
-                self.data.repo_dir(&p.project.name),
-                format!("{}/{}", p.project.remote, p.project.base),
-            )
-        };
+        let (clone, _, start) = self.lane_base_ref(p, lane);
         self.git.rev_parse(&clone, &start).ok()
     }
 
@@ -5116,7 +5121,7 @@ fn pr_target(
 /// lane's own: its name and URL from the pipeline's `remotes`.
 fn extra_remote(
     p: &Pipeline,
-    lane: Option<&crate::pipeline::Lane>,
+    lane: Option<&Lane>,
     pr: &PullRequestSource,
 ) -> Option<(String, String)> {
     let default = lane

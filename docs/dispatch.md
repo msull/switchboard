@@ -1262,24 +1262,26 @@ or without a rebaser, asks a `refresh` question with `recheck`. The
 attempts and the question carry the pseudo-stage `refresh`, so no
 stage mistakes them for its own. A lane with no `base_sha` gets its fork point from
 the base as `base_sha` while it is still behind, before anything
-moves, so the bring-up after a rebaser reads the old base; a lane
-already caught up, or whose fork point cannot be read, has an unknown
-old base and records `from` empty. Each bring-up is recorded on the lane
-(`LaneRecord.refreshed`) with `from`, `to`, whether the branch had
-commits of its own (its head before the bring-up was not the old
-`base_sha`, or, when that is unknown, not the new base), when it
-was recorded, and, when it followed a rebaser (nothing left behind),
-that rebaser's notes: the latest finished `refresh` attempt in the lane
-started after the lane's previous bring-up, none after a bring-up
-recorded before its time was. The first code review round that reads
-the new base after a rebase with commits is told to check it: both
-sides of every conflicted hunk present, and the base's additions in
-`from..to` unchanged by the branch (with an empty `from`, the
-additions the rebase brought in, naming no range), with the rebaser's
-notes when there are some. A later round or a rerun that already read that base is not
-told again. Pull-request tickets are someone else's branch and are
-never refreshed; `lanes`, a human look and the merge watch launch
-nothing and are not refreshed either.
+moves, so the bring-up after a rebaser reads the old base; a lane not
+behind whose fork point is the base itself never moved, and records
+that as `base_sha` with no bring-up; one whose fork point cannot be
+read has an unknown old base and records `from` empty. Each bring-up
+is recorded on the lane (`LaneRecord.refreshed`) with `from`, `to`,
+whether the branch had commits of its own (its head before the
+bring-up was not the old `base_sha`, or, when that is unknown, not the
+new base), when it was recorded, and, when it followed a rebaser
+(nothing left behind), that rebaser's notes: the latest finished
+`refresh` attempt in the lane started after the lane's previous
+bring-up, none after a bring-up recorded before its time was. The
+first code review round that reads the new base after a rebase with
+commits is told to check it: both sides of every conflicted hunk
+present, and the base's additions in `from..to` unchanged by the
+branch (with an empty `from`, the additions the rebase brought in,
+naming no range), with the rebaser's notes when there are some. A
+later round or a rerun that already read that base is not told again.
+Pull-request tickets are someone else's branch and are never
+refreshed; `lanes`, a human look and the merge watch launch nothing
+and are not refreshed either.
 
 Red checks on the PR at the tree's head are handled the same way by
 the policy's `fixer`: cloned from the lane's last finished agent, told

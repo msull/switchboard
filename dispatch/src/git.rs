@@ -672,6 +672,8 @@ pub struct FakeRepo {
     pub removed: Vec<(PathBuf, PathBuf)>,
     /// The next removal of this directory fails, once.
     pub fail_remove: Option<PathBuf>,
+    /// Trees whose merge base with anything cannot be read.
+    pub no_merge_base: Vec<PathBuf>,
 }
 
 impl Repo for FakeRepo {
@@ -901,6 +903,9 @@ impl Repo for FakeRepo {
             .unwrap_or_else(|| "base0000".into()))
     }
     fn merge_base(&self, dir: &Path, _a: &str, _b: &str) -> Result<String> {
+        if self.no_merge_base.iter().any(|d| d == dir) {
+            bail!("no merge base in {}: the fake was told so", dir.display());
+        }
         Ok(self
             .bases
             .get(dir)

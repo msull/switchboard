@@ -6325,9 +6325,34 @@ fn a_rebaser_on_a_lane_without_a_recorded_base_keeps_its_fork_point() {
     assert!(prompt.contains("git log root0000..main0002"), "{prompt}");
 }
 
-/// A lane with no recorded base that is already caught up (a hand
-/// rebase) has an unknown old base: its rebase is checked, naming no
-/// range.
+/// A lane with no recorded base, not behind, whose fork point is the
+/// base never moved: the base is recorded and nothing is checked.
+#[test]
+fn a_lane_without_a_recorded_base_that_never_moved_records_it() {
+    let mut env = Env::new();
+    let (id, implementer) = base_moves_before_review(&mut env, "impl0001", false);
+    let mut t = env.ticket(&id);
+    t.lanes[0].base_sha = None;
+    dispatch::store::write_ticket(&env.data.ticket_file(&id), &t).unwrap();
+    {
+        let mut repo = env.repo.lock().unwrap();
+        repo.behind.clear();
+        repo.bases
+            .insert(t.lanes[0].worktree.clone(), "main0002".into());
+    }
+    review_starts(&mut env, &id, &implementer);
+    let t = env.ticket(&id);
+    assert_eq!(t.lanes[0].refreshed, None);
+    assert_eq!(t.lanes[0].base_sha.as_deref(), Some("main0002"));
+    let prompt = last_prompt_of(&env, "style");
+    assert!(
+        !prompt.contains("both sides of every conflicted hunk"),
+        "{prompt}"
+    );
+}
+
+/// A lane with no recorded base, not behind, whose fork point cannot be
+/// read has an unknown old base: its rebase is checked, naming no range.
 #[test]
 fn a_rebase_from_an_unknown_base_is_checked_without_a_range() {
     let mut env = Env::new();
@@ -6335,7 +6360,11 @@ fn a_rebase_from_an_unknown_base_is_checked_without_a_range() {
     let mut t = env.ticket(&id);
     t.lanes[0].base_sha = None;
     dispatch::store::write_ticket(&env.data.ticket_file(&id), &t).unwrap();
-    env.repo.lock().unwrap().behind.clear();
+    {
+        let mut repo = env.repo.lock().unwrap();
+        repo.behind.clear();
+        repo.no_merge_base.push(t.lanes[0].worktree.clone());
+    }
     review_starts(&mut env, &id, &implementer);
     let moved = env.ticket(&id).lanes[0].refreshed.clone().unwrap();
     assert_eq!((moved.from.as_str(), moved.to.as_str()), ("", "main0002"));
