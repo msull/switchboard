@@ -686,21 +686,54 @@ impl Runner {
         Ok(waits)
     }
 
-    /// A lane's branch the refresh rewrote, pushed with a lease on the
-    /// head its pull request was last seen at, so a stage that reads the
-    /// PR does not find it at the old head and ask for the one push
-    /// there is. A refused or failed push is logged, not an error: the
-    /// stage's own question about the head is the fallback.
-    fn push_refreshed(&mut self, t: &Ticket, i: usize, remote: &str) -> Result<()> {
+    /// A lane's branch the refresh rewrote, pushed when the lane has an
+    /// open pull request, with a lease on the head the lane's records
+    /// last saw, so a stage that reads the PR does not find it at the old
+    /// head and ask for the one push there is. A lane without a PR pushes
+    /// nothing. A refused or failed push, or a provider that cannot be
+    /// read, is logged, not an error: the `pr` question about the head is
+    /// the fallback.
+    fn push_refreshed(&mut self, t: &Ticket, p: &Pipeline, i: usize, remote: &str) -> Result<()> {
         let lane = &t.lanes[i];
-        let Some(seen) = pr_head_seen(t, &lane.name) else {
+        let (id, name, branch) = (&t.id, &lane.name, &lane.branch);
+        let Some((stage, provider)) = p.stages.iter().find_map(|s| match &s.gate {
+            Some(Gate::External {
+                check, provider, ..
+            }) if check == "pr-checks" || check == "pr-merged" => Some((s, provider.as_deref())),
+            _ => None,
+        }) else {
+            return Ok(());
+        };
+        let Some(seen) = pr_head_seen(t, name) else {
             return Ok(());
         };
         let head = self.git.head(&lane.worktree)?;
         if same_commit(&head, &seen) {
             return Ok(());
         }
-        let (id, name, branch) = (&t.id, &lane.name, &lane.branch);
+        let origin = self.git.remote_url(&lane.worktree)?;
+        let target = match pr_target(t, p, stage, Some(name), provider, origin) {
+            Ok(target) => target,
+            Err(why) => {
+                log::info!("ticket {id} lane {name}: {why}; {branch} not pushed");
+                return Ok(());
+            }
+        };
+        match self.find_pr(&target) {
+            Ok(Some(pr)) if pr.state == "open" => {}
+            Ok(_) => {
+                log::info!(
+                    "ticket {id} lane {name}: no open pull request for {branch}; nothing pushed"
+                );
+                return Ok(());
+            }
+            Err(e) => {
+                log::warn!(
+                    "ticket {id} lane {name}: the pull request for {branch} could not be read, so it is not pushed: {e:#}"
+                );
+                return Ok(());
+            }
+        }
         match self
             .git
             .push_with_lease(&lane.worktree, remote, branch, &seen)
@@ -712,7 +745,7 @@ impl Runner {
                 "ticket {id} lane {name}: {remote}'s {branch} already at {head}; nothing pushed"
             ),
             Ok(Push::Refused) => log::info!(
-                "ticket {id} lane {name}: {remote} moved off {seen}; {branch} not pushed, ready will ask"
+                "ticket {id} lane {name}: {remote} moved off {seen}; {branch} not pushed, left to the pr question"
             ),
             Err(e) => log::warn!("ticket {id} lane {name}: push of {branch} failed: {e:#}"),
         }
@@ -774,9 +807,7 @@ impl Runner {
             );
             // Before the save, so a crash repeats the push rather than
             // skipping it.
-            if reads_pr(stage) {
-                self.push_refreshed(t, i, &remote)?;
-            }
+            self.push_refreshed(t, p, i, &remote)?;
             t.lanes[i].refreshed = Some(crate::ticket::Refreshed {
                 from,
                 to: onto_sha.clone(),
@@ -2488,19 +2519,25 @@ impl Runner {
         target: &PrTarget,
         none_expected: bool,
     ) -> Result<Option<(crate::github::PullRequest, Option<Checks>)>> {
-        let prs = self.prs_for(&target.provider);
-        let pr = match target.number {
-            Some(n) => prs.by_number(&target.repo, n)?,
-            None => match prs.find(&target.repo, &target.branch)? {
-                Some(pr) => pr,
-                None => return Ok(None),
-            },
+        let Some(pr) = self.find_pr(target)? else {
+            return Ok(None);
         };
+        let prs = self.prs_for(&target.provider);
         if pr.state != "open" || none_expected {
             return Ok(Some((pr, None)));
         }
         let checks = prs.checks(&target.repo, pr.number)?;
         Ok(Some((pr, Some(checks))))
+    }
+
+    /// The target's pull request, by number when the ticket's source
+    /// gave one, else by branch; `None` when the branch has none.
+    fn find_pr(&self, target: &PrTarget) -> Result<Option<crate::github::PullRequest>> {
+        let prs = self.prs_for(&target.provider);
+        match target.number {
+            Some(n) => prs.by_number(&target.repo, n).map(Some),
+            None => prs.find(&target.repo, &target.branch),
+        }
     }
 
     /// The provider a target names.

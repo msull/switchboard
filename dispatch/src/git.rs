@@ -314,30 +314,25 @@ impl Repo for GitCli {
         expected: &str,
     ) -> Result<Push> {
         let refname = format!("refs/heads/{branch}");
+        let spec = format!("{refname}:{refname}");
         let mut cmd = git_in(dir);
         cmd.args(["push", "--porcelain"])
             .arg(format!("--force-with-lease={refname}:{expected}"))
             .arg(remote)
-            .arg(format!("{refname}:{refname}"));
+            .arg(&spec);
         let out = cmd.output().with_context(|| format!("run {cmd:?}"))?;
         let stdout = String::from_utf8_lossy(&out.stdout);
         // Porcelain lines are `<flag>\t<from>:<to>\t<summary>`; the flag
         // says what happened to the ref whatever the exit status.
-        let spec = format!("{refname}:{refname}");
-        let line = stdout.lines().find_map(|l| {
-            let mut parts = l.splitn(3, '\t');
-            let flag = parts.next()?;
-            (parts.next()? == spec)
-                .then(|| (flag.to_owned(), parts.next().unwrap_or("").to_owned()))
-        });
-        match line {
-            Some((flag, _)) if out.status.success() && flag == "=" => Ok(Push::UpToDate),
-            Some((flag, _)) if out.status.success() && matches!(flag.as_str(), "+" | " " | "*") => {
-                Ok(Push::Pushed)
-            }
-            Some((flag, summary)) if flag == "!" && summary.contains("(stale info)") => {
-                Ok(Push::Refused)
-            }
+        let line = stdout
+            .lines()
+            .map(|l| l.split('\t').collect::<Vec<_>>())
+            .find(|fields| fields.get(1) == Some(&spec.as_str()));
+        let ok = out.status.success();
+        match line.as_deref() {
+            Some(["=", ..]) if ok => Ok(Push::UpToDate),
+            Some(["+" | " " | "*", ..]) if ok => Ok(Push::Pushed),
+            Some(["!", _, summary, ..]) if summary.contains("(stale info)") => Ok(Push::Refused),
             _ => bail!(
                 "{cmd:?} exited {}: {}",
                 out.status,

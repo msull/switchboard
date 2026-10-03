@@ -1185,11 +1185,13 @@ by fetching the lane's base and, when the base moved since the lane's
 its own simply moves, one with commits is rebased, and either way
 `base_sha` becomes the new base and the next agent's prompt says the
 base moved and names the range, so a plan written against the old
-code is read with that in mind. At a stage that reads a pull request
-(`pr-checks`), a branch the refresh rewrote is pushed with
-`--force-with-lease` on the head the lane's records last saw (the
-newest attempt in its context that recorded one), after the rebase or
-the rebaser; a refused lease is left to the stage's `pr` question. A
+code is read with that in mind. When the provider reports an open
+pull request for the lane's branch, a branch the refresh rewrote is
+pushed with `--force-with-lease` on the head the lane's records last
+saw (the newest attempt in its context that recorded one), after the
+rebase or the rebaser, at whatever stage the refresh runs; a lane
+without one pushes nothing, and a refused lease is left to the `pr`
+question about the head. A
 rebase that stops on a conflict is aborted, and the policy's `rebaser`
 is continued from the lane's last finished agent, told the base and
 the stage's checks, and asked to resolve without pushing or, when a
@@ -1529,7 +1531,8 @@ and one against the real one:
 | The rebaser leaves the PR at the same head, or `max_rebases` is spent | A `pr` decision saying which; no further rebaser runs |
 | The base moved while a plan sat; implementation begins | The branch is brought up to the base, `base_sha` is the new base, the implementer is told the range; nothing but git ran (`a_plan_that_sat_is_implemented_on_a_branch_brought_up_to_its_base`) |
 | The base moved after the PR was opened; `ready` begins | The branch is rebased and pushed once with a lease on the head last seen; `ready` reads the PR at the tree's head (`a_refresh_at_ready_pushes_the_rebased_branch_once_with_the_lease`, `a_refresh_at_ready_pushes_after_the_rebaser_resolves_it`) |
-| The same, the remote moved meanwhile | The lease refuses the push; `ready` asks its `pr` question as before (`a_refused_lease_at_ready_leaves_the_question_as_today`) |
+| The same, the remote moved meanwhile | The lease refuses the push; `ready` asks its `pr` question about the head (`a_refused_lease_at_ready_asks_the_pr_question`) |
+| The same, with no pull request for the branch | Nothing is pushed; `ready` asks for a PR to be opened (`a_refresh_at_ready_without_a_pull_request_pushes_nothing`) |
 | A stage begins and the rebase onto the moved base conflicts | The rebaser, a clone of the lane's last finished agent, is told the base and the checks; the stage waits, then reads the branch again (`a_conflicting_refresh_is_rebased_by_a_clone_of_the_lanes_last_agent`) |
 | The same, with no rebaser in the policy | A `refresh` question with `recheck`, answered after a rebase by hand (`a_conflicting_refresh_without_a_rebaser_is_a_question`) |
 | A stage begins while the tree has work in it, or a rebase in progress | The lane is left alone this stage; nothing is rebased over someone's work (`a_refresh_leaves_a_tree_with_work_in_it_alone`) |

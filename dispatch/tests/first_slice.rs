@@ -5875,9 +5875,9 @@ fn a_refresh_at_ready_pushes_the_rebased_branch_once_with_the_lease() {
 }
 
 /// Someone else pushed to the PR meanwhile: the lease refuses, and
-/// `ready` asks its question about the head as before.
+/// `ready` asks its `pr` question about the head.
 #[test]
-fn a_refused_lease_at_ready_leaves_the_question_as_today() {
+fn a_refused_lease_at_ready_asks_the_pr_question() {
     let mut env = Env::new();
     let (id, tree) = main_moved_before_ready(&mut env, "base0000", 1);
     env.repo.lock().unwrap().lease_stale.push(tree);
@@ -5898,6 +5898,28 @@ fn a_refused_lease_at_ready_leaves_the_question_as_today() {
         d.question
     );
     assert_eq!(d.options, vec!["recheck", "park"]);
+}
+
+/// The same refresh with no pull request for the branch: nothing is
+/// pushed, and `ready` asks for one to be opened.
+#[test]
+fn a_refresh_at_ready_without_a_pull_request_pushes_nothing() {
+    let mut env = Env::new();
+    let (id, _) = main_moved_before_ready(&mut env, "rebased1", 1);
+    env.prs.lock().unwrap().prs.clear();
+    env.inspect(&id, "proceed", None);
+    env.steps_until(&id, "the pr question", |t, _| {
+        t.pending_decisions().iter().any(|d| d.name == "pr")
+    });
+    let t = env.ticket(&id);
+    assert_eq!(t.lanes[0].base_sha.as_deref(), Some("main0002"));
+    assert!(env.repo.lock().unwrap().pushed.is_empty());
+    let d = env
+        .pending(&id)
+        .into_iter()
+        .find(|d| d.name == "pr")
+        .unwrap();
+    assert!(d.question.contains("no pull request"), "{}", d.question);
 }
 
 /// A conflicting refresh at `ready`: the rebaser is told not to push,
