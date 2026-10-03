@@ -1696,9 +1696,10 @@ on the set (`WorkingSet.dismissed`), so it stays off while it is quiet
 and comes back by itself the moment it does something. A `SessionEnded`
 event moves a dismissal in force up to the end, so the end a kill sends
 does not bring the card back; Kill and dismiss is one core action
-(`KillAndDismiss`) that stamps the dismissal and kills the pane. Dismissals are pruned when their record
-is gone, ride along in the undo window of a removal, and are not pruned
-by age, so widening the hours does not bring back what was dismissed.
+(`KillAndDismiss`) that stamps the dismissal and kills the pane.
+Dismissals are pruned when their record is gone, ride along in the undo
+window of a removal, and are not pruned by age, so widening the hours
+does not bring back what was dismissed.
 
 A rule set takes no pins by any path (`AddToWorkingSet`, `PlacePin`,
 `NewWorkingSet { with }`, the control port's `SyncSet`, which answers

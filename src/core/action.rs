@@ -1055,11 +1055,7 @@ impl AppCore {
                 host,
                 bytes: vec![0x1b],
             }),
-            AppAction::KillSession(id) => {
-                if let Some(status) = self.host_status(id) {
-                    out.push(Effect::Kill(status.id.clone()));
-                }
-            }
+            AppAction::KillSession(id) => self.kill_pane(id, out),
             AppAction::RemoveSession(id) => self.trash_session(id, now),
             AppAction::UndoRemove(id) => self.undo_remove(id, out),
             AppAction::RestartSession(id) => self.restart_session(id, now, out),
@@ -1169,12 +1165,18 @@ impl AppCore {
                 // The dismissal is stamped before the end arrives;
                 // `carry_dismissals` moves it up to the end when it does.
                 self.dismiss_from_set(set, record, out);
-                if let Some(status) = self.host_status(record) {
-                    out.push(Effect::Kill(status.id.clone()));
-                }
+                self.kill_pane(record, out);
                 self.rule_tick(now.wall);
             }
             _ => unreachable!("routed by `dispatch`"),
+        }
+    }
+
+    /// Kill a session's pane, if it has one. Every kill of a session
+    /// goes through here, so a step added to killing reaches them all.
+    fn kill_pane(&self, id: RecordId, out: &mut Out) {
+        if let Some(status) = self.host_status(id) {
+            out.push(Effect::Kill(status.id.clone()));
         }
     }
 
