@@ -257,7 +257,7 @@ dispatch/                the `dispatch` binary (docs/dispatch.md; docs/dispatch-
   src/git.rs             clones, worktrees and heads through fixed argv (a worktree removed, never forced; `changes`, and `uncommitted` for a close's preflight), and a stage's checks as child processes polled by key; with a fake
   src/github.rs          issues and pull requests through gh, with fakes
   src/bitbucket.rs       pull requests on Bitbucket Cloud through curl; credentials from the environment or <data>/env (NAME=value lines, mode 0600, never logged)
-  src/port.rs            the Port trait over the control socket client
+  src/port.rs            the Port trait over the control socket client; the connection remade after any error, a timeout included
   src/template.rs        `{a.b}` substitution for prompts
   tests/first_slice.rs   the acceptance table against an in-memory Switchboard (tests/support)
   tests/live.rs          ignored: the first stage against a real Switchboard and a haiku agent
