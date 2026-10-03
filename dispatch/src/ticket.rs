@@ -115,6 +115,10 @@ pub struct LaneRecord {
     /// to the next agent, since its plan was written against `from`.
     #[serde(default)]
     pub refreshed: Option<Refreshed>,
+    /// The lane's worktree is removed from its clone: the ticket closed.
+    /// The path stays, so a reader can still say where the work was.
+    #[serde(default)]
+    pub removed: bool,
 }
 
 /// A base that moved under a branch, and the branch brought up to it.
@@ -122,10 +126,6 @@ pub struct LaneRecord {
 pub struct Refreshed {
     pub from: String,
     pub to: String,
-    /// The lane's worktree is removed from its clone: the ticket closed.
-    /// The path stays, so a reader can still say where the work was.
-    #[serde(default)]
-    pub removed: bool,
 }
 
 fn yes() -> bool {

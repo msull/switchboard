@@ -5494,6 +5494,8 @@ fn a_refresh_leaves_a_tree_with_work_in_it_alone() {
     );
     assert_eq!(t.lanes[0].base_sha.as_deref(), Some("base0000"));
     assert!(t.attempts_of(dispatch::scheduler::REFRESH).next().is_none());
+}
+
 // --- closing a ticket: by hand or at the pipeline's end, a sequence from
 // a saved intent; the worktrees removed lanes first and never forced,
 // the branch, the ticket directory and the record kept.
