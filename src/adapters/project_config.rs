@@ -15,11 +15,11 @@ use crate::core::SessionKind;
 use crate::ports::project_config::{DefinedEntry, ProjectConfig, ProjectConfigReader};
 
 /// Relative path of the definition file under a project root.
-pub const CONFIG_PATH: &str = ".switchboard/project.json";
+const CONFIG_PATH: &str = ".switchboard/project.json";
 
 /// Larger files are refused outright: a definitions file is a few
-/// hundred bytes, and the read happens on the poll thread.
-pub const MAX_CONFIG_BYTES: u64 = 64 * 1024;
+/// hundred bytes, and the read happens on the frame thread.
+const MAX_CONFIG_BYTES: u64 = 64 * 1024;
 
 /// The only file version this build understands.
 const VERSION: u64 = 1;

@@ -8,7 +8,6 @@
 use std::cmp::Ordering;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
 
 use ignore::{DirEntry, WalkBuilder};
 
@@ -34,8 +33,6 @@ pub struct Listing {
     pub entries: Vec<Entry>,
     /// True when the walk stopped early because `max_entries` was reached.
     pub truncated: bool,
-    /// When the scan ran, for staleness checks.
-    pub scanned_at: SystemTime,
 }
 
 /// One fuzzy-match result borrowing an entry from the searched slice.
@@ -62,7 +59,6 @@ pub struct Hit<'a> {
 /// ignore rules hide them: each is walked as its own tree, honoring its
 /// own `.gitignore` but none above it.
 pub fn scan(root: &Path, max_entries: usize, shown: &[PathBuf]) -> io::Result<Listing> {
-    let scanned_at = SystemTime::now();
     check_dir(root)?;
 
     let mut entries = Vec::new();
@@ -91,11 +87,7 @@ pub fn scan(root: &Path, max_entries: usize, shown: &[PathBuf]) -> io::Result<Li
     entries.sort_unstable_by(|a, b| a.rel.cmp(&b.rel));
     // A shown folder the root's rules did not hide was listed twice.
     entries.dedup_by(|a, b| a.rel == b.rel);
-    Ok(Listing {
-        entries,
-        truncated,
-        scanned_at,
-    })
+    Ok(Listing { entries, truncated })
 }
 
 /// The shown folders that exist as directories under `root`, absolute.

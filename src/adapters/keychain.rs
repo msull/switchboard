@@ -9,7 +9,7 @@ use security_framework::passwords;
 use crate::ports::secrets::SecretStore;
 
 /// The Keychain service every Switchboard item is filed under.
-pub const SERVICE: &str = "com.sadburger.switchboard";
+const SERVICE: &str = "com.sadburger.switchboard";
 
 pub struct KeychainStore {
     /// `None` means the user's default (login) keychain.

@@ -1,35 +1,6 @@
 //! Dev aid: `SWITCHBOARD_SCRIPT=<file>` dispatches one action per line
 //! after startup, so the real app can be put into a known state without
-//! clicking. Lines: `add-project <name> <root>`, `new-shell <project>
-//! <name>`, `new-claude <project> <name>`, `new-codex <project> <name>`,
-//! `new-service <project> <name> <command...>`, `show-board <project>`,
-//! `show-session <name>`, `show-document <project> <relative path>`,
-//! `files on|off` (the file side of a session), `side-position left|right`
-//! (where the side panel sits), `terminal on|off` (the
-//! raw pane under a conversation), `select-file <project>
-//! <relative path>` (previewed in that side),
-//! `set-env <project> NAME=VALUE`, `set-secret <project> NAME VALUE`,
-//! `dotenv <project> on|off`, `environment <project>` (opens the dialog),
-//! `config <project>` (opens the config editor),
-//! `review-plan <session> <absolute plan path>` (starts a plan review),
-//! `show-review` (the newest review's page), `show-dispatch` and
-//! `show-ticket <id>` (Dispatch's pages), `close-ticket <id>` (the
-//! ticket's page with its close confirmation open; waits up to ten
-//! seconds for Dispatch's status first), `review-file
-//! feedback|response <first line...>` (writes the newest review's
-//! awaited file to disk, as its agent would), `review-continue`,
-//! `review-finalize`, `show-artifact <name> <index>` (a command's card
-//! and page show that file of its last run), `pop-out <name>` and
-//! `close-pop-out <name>` (a session's own window), `files-root
-//! <project> <relative dir|.>` (where the file side's tree starts),
-//! `send <name> <text...>`, `interrupt <name>` (Escape to the pane),
-//! `return <name>`, `kill <name>`, `approve <name>`, `revoke <name>`
-//! (a defined command's approval), `new-recent-set <hours> [name...]`
-//! (a rule set of the sessions active in the last `hours`), `set-hours
-//! <set...> <hours>` and `dismiss-from-set <set...> <session>` (the set
-//! named by every word but the last), `side files|run|notes` (the side
-//! panel's tab), `switchboard`, `theme light|dark|auto`, `sleep <secs>`
-//! (then polls).
+//! clicking. The README's Development section lists every line.
 //! Blank lines and `#` comments are ignored; unknown lines are logged.
 
 use std::path::PathBuf;
@@ -52,6 +23,17 @@ pub fn run(app: &mut SwitchboardApp, text: &str) {
             log::warn!("script: {line}: {e}");
         }
     }
+}
+
+/// The working-set width the script's set lines use, in grid units.
+const COLUMNS: u32 = 24;
+
+/// A copy of the project's environment to change and send back.
+fn project_env(app: &SwitchboardApp, id: ProjectId) -> crate::core::ProjectEnv {
+    app.core()
+        .workspace(id)
+        .map(|w| w.project.env.clone())
+        .unwrap_or_default()
 }
 
 fn project(app: &SwitchboardApp, name: &str) -> Result<(ProjectId, PathBuf), String> {
@@ -92,9 +74,6 @@ fn new_session(
     Ok(())
 }
 
-/// The working-set lines (show it, put a session on it by name, put a
-/// file on it by project and relative path), the message dialog, the
-/// theme, and sleep: what did not fit in `step`.
 /// The lines `working_set_step` handles, kept out of `step` for length.
 const EXTRA_LINES: &[&str] = &[
     "switchboard",
@@ -168,7 +147,7 @@ fn rule_set_step(app: &mut SwitchboardApp, w: &[&str]) -> Result<(), String> {
     Ok(())
 }
 
-/// The workspace lines `space_step` handles.
+/// The workspace lines `space_step` handles, and the controller's.
 const SPACE_LINES: &[&str] = &[
     "new-workspace",
     "workspace",
@@ -179,7 +158,8 @@ const SPACE_LINES: &[&str] = &[
 ];
 
 /// Workspaces: make one, work in one, move a project or set into one.
-/// Names may have spaces: the rest of the line is the name.
+/// Names may have spaces: the rest of the line is the name. Also
+/// `controller <event>`, a controller input as if it had arrived.
 fn space_step(app: &mut SwitchboardApp, w: &[&str]) -> Result<(), String> {
     match w {
         ["new-workspace", name @ ..] => app.dispatch(AppAction::NewSpace(name.join(" "))),
@@ -210,7 +190,7 @@ fn space_step(app: &mut SwitchboardApp, w: &[&str]) -> Result<(), String> {
     Ok(())
 }
 
-/// The plan review lines, kept out of `working_set_step` for length.
+/// The plan review lines, kept out of `step` for length.
 fn review_step(app: &mut SwitchboardApp, w: &[&str]) -> Result<(), String> {
     match w {
         ["pop-out", n] => {
@@ -366,13 +346,13 @@ fn add_to_set(
         Some(set) => app.dispatch(AppAction::AddToWorkingSet {
             set,
             target,
-            columns: 24,
+            columns: COLUMNS,
         }),
         None => app.dispatch(AppAction::NewWorkingSet {
             name: None,
             clone_of: None,
             with: Some(target),
-            columns: 24,
+            columns: COLUMNS,
         }),
     }
     Ok(())
@@ -397,6 +377,9 @@ fn turn_of(
     Ok((id, before, prompt))
 }
 
+/// The working-set lines (show it, put a session on it by name, put a
+/// file on it by project and relative path), the message dialog, the
+/// theme, and sleep: what did not fit in `step`.
 fn working_set_step(app: &mut SwitchboardApp, w: &[&str]) -> Result<(), String> {
     match w {
         ["switchboard"] => app.dispatch(AppAction::ShowSwitchboard),
@@ -434,7 +417,7 @@ fn working_set_step(app: &mut SwitchboardApp, w: &[&str]) -> Result<(), String> 
                 name: None,
                 clone_of: None,
                 with: None,
-                columns: 24,
+                columns: COLUMNS,
             }),
         },
         ["working-set", name] => {
@@ -445,7 +428,7 @@ fn working_set_step(app: &mut SwitchboardApp, w: &[&str]) -> Result<(), String> 
             name: Some((*name).to_owned()),
             clone_of: None,
             with: None,
-            columns: 24,
+            columns: COLUMNS,
         }),
         ["clone-working-set", name] => {
             let id = working_set(app, name)?;
@@ -453,7 +436,7 @@ fn working_set_step(app: &mut SwitchboardApp, w: &[&str]) -> Result<(), String> 
                 name: None,
                 clone_of: Some(id),
                 with: None,
-                columns: 24,
+                columns: COLUMNS,
             });
         }
         ["rename-working-set", name, to] => {
@@ -607,11 +590,7 @@ fn env_step(app: &mut SwitchboardApp, w: &[&str]) -> Result<(), String> {
             let (name, value) = pair
                 .split_once('=')
                 .ok_or_else(|| format!("set-env wants NAME=VALUE, got {pair}"))?;
-            let mut env = app
-                .core()
-                .workspace(id)
-                .map(|w| w.project.env.clone())
-                .unwrap_or_default();
+            let mut env = project_env(app, id);
             env.vars.retain(|v| v.name != name);
             env.vars.push(EnvVar {
                 name: name.into(),
@@ -622,11 +601,7 @@ fn env_step(app: &mut SwitchboardApp, w: &[&str]) -> Result<(), String> {
         }
         ["set-secret", p, name, value] => {
             let (id, _) = project(app, p)?;
-            let mut env = app
-                .core()
-                .workspace(id)
-                .map(|w| w.project.env.clone())
-                .unwrap_or_default();
+            let mut env = project_env(app, id);
             env.vars.retain(|v| v.name != *name);
             env.vars.push(EnvVar {
                 name: (*name).into(),
@@ -642,11 +617,7 @@ fn env_step(app: &mut SwitchboardApp, w: &[&str]) -> Result<(), String> {
         }
         ["dotenv", p, on] => {
             let (id, _) = project(app, p)?;
-            let mut env = app
-                .core()
-                .workspace(id)
-                .map(|w| w.project.env.clone())
-                .unwrap_or_default();
+            let mut env = project_env(app, id);
             env.load_dotenv = *on == "on";
             app.dispatch(AppAction::SetProjectEnv(id, env));
         }

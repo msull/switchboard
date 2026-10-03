@@ -1,13 +1,17 @@
-//! Test doubles for every port. Shared by core tests, UI tests, and the
-//! app's demo mode. Each is a plain struct with public fields so tests
-//! can inspect calls and script results.
+//! Test doubles for every port, for the UI and integration tests (core
+//! tests need none: the core does no I/O). `FakeSecrets` is also the
+//! secret store off macOS. Each is a plain struct with public fields so
+//! tests can script results.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
-use crate::core::{AgentKind, ProjectId, RecordId, ResumeHandle, Settings, Views, Workspace};
+use crate::app::Services;
+use crate::core::{
+    AgentKind, ProjectId, RECORD_ID_ENV, RecordId, ResumeHandle, Settings, Views, Workspace,
+};
 use crate::ports::agent::{AgentLaunch, AgentLauncher};
 use crate::ports::control::{OpLine, Operations};
 use crate::ports::controller::{Controller, ControllerEvent};
@@ -19,13 +23,35 @@ use crate::ports::project_config::{ProjectConfig, ProjectConfigReader};
 use crate::ports::store::{Loaded, Store, StoreError};
 use crate::ports::transcript::{Conversation, TranscriptReader};
 
+/// Every port as its fake's default, Dispatch included, and no wake
+/// socket. Tests name the fields they script and take the rest from
+/// here with struct update syntax.
+#[must_use]
+pub fn services() -> Services {
+    Services {
+        store: Box::new(MemoryStore::default()),
+        host: Box::new(FakeHost::default()),
+        events: Box::new(FakeEvents),
+        agents: Box::new(FakeAgents),
+        opener: Box::new(FakeOpener::default()),
+        transcripts: Box::new(FakeTranscripts::default()),
+        secrets: Box::new(FakeSecrets::default()),
+        project_config: Box::new(FakeProjectConfig),
+        round_files: Box::new(FakeRoundFiles),
+        artifacts: Box::new(FakeArtifacts),
+        controller: Box::new(FakeController),
+        operations: Box::new(FakeOperations::default()),
+        dispatch: Some(Box::new(FakeDispatch::default())),
+        wake: None,
+    }
+}
+
 /// In-memory store. Saves are not recorded: the core's `Effect::Save`
 /// is what tests assert on, so a save here only succeeds or fails.
 #[derive(Debug, Default)]
 pub struct MemoryStore {
     pub initial: Loaded,
     pub lock_result: Option<bool>,
-    pub fail_save: Option<StoreError>,
 }
 
 impl Store for MemoryStore {
@@ -36,10 +62,7 @@ impl Store for MemoryStore {
         Ok(self.initial.clone())
     }
     fn save(&self, _workspace: &Workspace) -> Result<(), StoreError> {
-        match &self.fail_save {
-            Some(e) => Err(e.clone()),
-            None => Ok(()),
-        }
+        Ok(())
     }
     fn delete(&self, _id: ProjectId) -> Result<(), StoreError> {
         Ok(())
@@ -55,16 +78,11 @@ impl Store for MemoryStore {
     }
 }
 
-/// Scripted host: `statuses` is what `list` returns; `spawned` and
-/// `killed` record calls. Shared handles so tests keep a reference.
+/// Scripted host: `statuses` is what `list` returns. Shared handles so
+/// tests keep a reference.
 #[derive(Debug, Default)]
 pub struct FakeHostState {
     pub statuses: Vec<HostStatus>,
-    pub spawned: Vec<SpawnSpec>,
-    pub killed: Vec<HostId>,
-    pub written: Vec<(HostId, Vec<u8>)>,
-    pub probe: Option<Result<HostInfo, String>>,
-    pub fail_spawn: Option<String>,
     /// Every write fails with this message (a pane that died).
     pub fail_write: Option<String>,
     /// What `snapshot` returns per pane; unknown panes read as empty.
@@ -82,20 +100,15 @@ impl FakeHost {
 
 impl ProcessHost for FakeHost {
     fn probe(&self) -> Result<HostInfo, String> {
-        self.state().probe.clone().unwrap_or(Ok(HostInfo {
+        Ok(HostInfo {
             description: "fake host".into(),
             persistent: true,
-        }))
+        })
     }
     fn list(&self) -> std::io::Result<Vec<HostStatus>> {
         Ok(self.state().statuses.clone())
     }
-    fn spawn(&self, spec: &SpawnSpec) -> std::io::Result<()> {
-        let mut s = self.state();
-        if let Some(e) = &s.fail_spawn {
-            return Err(std::io::Error::other(e.clone()));
-        }
-        s.spawned.push(spec.clone());
+    fn spawn(&self, _spec: &SpawnSpec) -> std::io::Result<()> {
         Ok(())
     }
     fn status(&self, id: &HostId) -> std::io::Result<HostStatus> {
@@ -109,19 +122,17 @@ impl ProcessHost for FakeHost {
     fn snapshot(&self, id: &HostId, _lines: Option<usize>) -> std::io::Result<String> {
         Ok(self.state().snapshots.get(id).cloned().unwrap_or_default())
     }
-    fn write(&self, id: &HostId, bytes: &[u8]) -> std::io::Result<()> {
+    fn write(&self, _id: &HostId, _bytes: &[u8]) -> std::io::Result<()> {
         if let Some(e) = &self.state().fail_write {
             return Err(std::io::Error::other(e.clone()));
         }
-        self.state().written.push((id.clone(), bytes.to_vec()));
         Ok(())
     }
     fn write_line(&self, id: &HostId, text: &str) -> std::io::Result<()> {
         self.write(id, text.as_bytes())?;
         self.write(id, b"\r")
     }
-    fn kill(&self, id: &HostId) -> std::io::Result<()> {
-        self.state().killed.push(id.clone());
+    fn kill(&self, _id: &HostId) -> std::io::Result<()> {
         Ok(())
     }
     fn attach_command(&self, id: &HostId) -> Vec<String> {
@@ -129,29 +140,22 @@ impl ProcessHost for FakeHost {
     }
 }
 
-/// Events queued by tests, drained by `poll`.
+/// No hook events, ever.
 #[derive(Debug, Default)]
-pub struct FakeEvents {
-    pub queued: Vec<SessionEvent>,
-    pub checkpoints: usize,
-}
+pub struct FakeEvents;
 
 impl EventSource for FakeEvents {
     fn poll(&mut self) -> Vec<SessionEvent> {
-        std::mem::take(&mut self.queued)
+        Vec::new()
     }
-    fn checkpoint(&mut self) {
-        self.checkpoints += 1;
-    }
+    fn checkpoint(&mut self) {}
 }
 
 /// Dispatch as a test sets it: a status to answer with (none means no
-/// runner), and every request seen, shared so a test can read them.
+/// runner).
 #[derive(Debug, Default, Clone)]
 pub struct FakeDispatch {
     pub status: Option<Status>,
-    pub calls: Arc<Mutex<Vec<DispatchBody>>>,
-    pub artifacts: HashMap<PathBuf, String>,
     /// Answer from the app's port thread, as the real socket does.
     pub blocks: bool,
 }
@@ -167,7 +171,6 @@ impl DispatchPort for FakeDispatch {
         self.blocks
     }
     fn call(&mut self, body: &DispatchBody) -> std::io::Result<DispatchReply> {
-        self.calls.lock().unwrap().push(body.clone());
         let Some(status) = &self.status else {
             return Err(std::io::Error::other("no runner"));
         };
@@ -182,10 +185,7 @@ impl DispatchPort for FakeDispatch {
                     || DispatchReply::failed("no such ticket"),
                     DispatchReply::Ticket,
                 ),
-            DispatchBody::Artifact { path, .. } => self.artifacts.get(path).map_or_else(
-                || DispatchReply::failed("no such file"),
-                |text| DispatchReply::Artifact { text: text.clone() },
-            ),
+            DispatchBody::Artifact { .. } => DispatchReply::failed("no such file"),
             DispatchBody::Decide {
                 ticket, decision, ..
             } => status
@@ -263,29 +263,21 @@ impl Operations for FakeOperations {
     }
 }
 
-/// Events queued by a test, handed over on the next poll.
+/// No controller attached: no input, and the waiting count goes
+/// nowhere.
 #[derive(Debug, Default)]
-pub struct FakeController {
-    pub queued: Vec<ControllerEvent>,
-    /// Every waiting count the app sent down.
-    pub waiting: Vec<usize>,
-}
+pub struct FakeController;
 
 impl Controller for FakeController {
     fn poll(&mut self) -> Vec<ControllerEvent> {
-        std::mem::take(&mut self.queued)
+        Vec::new()
     }
-    fn set_waiting(&mut self, count: usize) {
-        self.waiting.push(count);
-    }
+    fn set_waiting(&mut self, _count: usize) {}
 }
 
 /// Composes deterministic command lines; never runs anything.
 #[derive(Debug, Default)]
-pub struct FakeAgents {
-    pub transcript_missing: bool,
-    pub discovered: Option<ResumeHandle>,
-}
+pub struct FakeAgents;
 
 impl AgentLauncher for FakeAgents {
     fn available(&self, _kind: AgentKind) -> bool {
@@ -307,7 +299,7 @@ impl AgentLauncher for FakeAgents {
         };
         Ok(AgentLaunch {
             argv: vec!["fake-agent".into(), kind.label().into(), name.into()],
-            env: vec![("SWITCHBOARD_RECORD_ID".into(), record.0.to_string())],
+            env: vec![(RECORD_ID_ENV.into(), record.0.to_string())],
             resume,
         })
     }
@@ -320,12 +312,12 @@ impl AgentLauncher for FakeAgents {
     ) -> Result<AgentLaunch, String> {
         Ok(AgentLaunch {
             argv: vec!["fake-agent".into(), "resume".into(), handle.provider_id()],
-            env: vec![("SWITCHBOARD_RECORD_ID".into(), record.0.to_string())],
+            env: vec![(RECORD_ID_ENV.into(), record.0.to_string())],
             resume: Some(handle.clone()),
         })
     }
     fn transcript_exists(&self, _handle: &ResumeHandle) -> bool {
-        !self.transcript_missing
+        true
     }
     fn discover(
         &self,
@@ -333,7 +325,7 @@ impl AgentLauncher for FakeAgents {
         _cwd: &Path,
         _since: SystemTime,
     ) -> Result<Option<ResumeHandle>, String> {
-        Ok(self.discovered.clone())
+        Ok(None)
     }
     fn transcript_path(&self, handle: &ResumeHandle) -> Option<PathBuf> {
         handle.transcript().cloned()
@@ -444,118 +436,47 @@ impl TranscriptReader for FakeTranscripts {
     }
 }
 
-/// Scripted definition file: `config` is what every project's read
-/// returns (`None` for no file); `error` wins when set.
+/// No project has a definition file; writes succeed and are dropped.
 #[derive(Debug, Default)]
-pub struct FakeProjectConfig {
-    pub config: Option<ProjectConfig>,
-    pub error: Option<String>,
-    pub modified: Option<SystemTime>,
-    /// The file's text: what `read_text` gives and `write_text` replaces.
-    pub text: Arc<Mutex<Option<String>>>,
-    /// Every text written, in order.
-    pub written: Arc<Mutex<Vec<String>>>,
-}
+pub struct FakeProjectConfig;
 
 impl ProjectConfigReader for FakeProjectConfig {
     fn read(&self, _root: &Path) -> Result<Option<ProjectConfig>, String> {
-        match &self.error {
-            Some(e) => Err(e.clone()),
-            None => Ok(self.config.clone()),
-        }
+        Ok(None)
     }
     fn read_text(&self, _root: &Path) -> Result<Option<String>, String> {
-        match &self.error {
-            Some(e) => Err(e.clone()),
-            None => Ok(self.text.lock().expect("fake config text").clone()),
-        }
+        Ok(None)
     }
-    fn write_text(&self, _root: &Path, text: &str) -> Result<(), String> {
-        if let Some(e) = &self.error {
-            return Err(e.clone());
-        }
-        self.written
-            .lock()
-            .expect("fake config writes")
-            .push(text.to_owned());
-        *self.text.lock().expect("fake config text") = Some(text.to_owned());
+    fn write_text(&self, _root: &Path, _text: &str) -> Result<(), String> {
         Ok(())
     }
     fn modified(&self, _root: &Path) -> Option<SystemTime> {
-        self.modified
+        None
     }
 }
 
-/// One recorded snapshot: the directory, the files, and the user's note.
-pub type Snapshot = (PathBuf, Vec<PathBuf>, Option<String>);
-
-/// Round files in memory: `files` is what a probe finds, `snapshots`
-/// and `removed` record what the run asked for.
+/// No round file is ever there; snapshots and removals succeed.
 #[derive(Debug, Default, Clone)]
-pub struct FakeRoundFiles {
-    pub files: Arc<Mutex<HashMap<PathBuf, crate::ports::round_files::Probed>>>,
-    pub snapshots: Arc<Mutex<Vec<Snapshot>>>,
-    pub removed: Arc<Mutex<Vec<PathBuf>>>,
-    /// Every snapshot and remove fails with this when set.
-    pub error: Option<String>,
-}
-
-impl FakeRoundFiles {
-    /// Make `path` exist with `first_line`, as if an agent wrote it.
-    pub fn write(&self, path: &Path, first_line: &str) {
-        let stamp = crate::ports::round_files::FileStamp {
-            modified: SystemTime::now(),
-            len: first_line.len() as u64,
-        };
-        self.files.lock().unwrap().insert(
-            path.to_path_buf(),
-            crate::ports::round_files::Probed {
-                stamp,
-                first_line: first_line.to_owned(),
-            },
-        );
-    }
-}
+pub struct FakeRoundFiles;
 
 impl crate::ports::round_files::RoundFiles for FakeRoundFiles {
-    fn probe(&self, path: &Path) -> Option<crate::ports::round_files::Probed> {
-        self.files.lock().unwrap().get(path).cloned()
+    fn probe(&self, _path: &Path) -> Option<crate::ports::round_files::Probed> {
+        None
     }
-    fn snapshot(&self, files: &[PathBuf], dir: &Path, note: Option<&str>) -> Result<(), String> {
-        if let Some(e) = &self.error {
-            return Err(e.clone());
-        }
-        self.snapshots.lock().unwrap().push((
-            dir.to_path_buf(),
-            files.to_vec(),
-            note.map(str::to_owned),
-        ));
+    fn snapshot(&self, _files: &[PathBuf], _dir: &Path, _note: Option<&str>) -> Result<(), String> {
         Ok(())
     }
-    fn remove(&self, files: &[PathBuf]) -> Result<(), String> {
-        if let Some(e) = &self.error {
-            return Err(e.clone());
-        }
-        let mut have = self.files.lock().unwrap();
-        for f in files {
-            have.remove(f);
-        }
-        self.removed.lock().unwrap().extend(files.iter().cloned());
+    fn remove(&self, _files: &[PathBuf]) -> Result<(), String> {
         Ok(())
     }
 }
 
-/// Declared outputs as the test says they were produced.
+/// No declared output is ever found.
 #[derive(Debug, Default, Clone)]
-pub struct FakeArtifacts {
-    pub found: Arc<Mutex<Vec<PathBuf>>>,
-}
+pub struct FakeArtifacts;
 
 impl crate::ports::artifacts::ArtifactFinder for FakeArtifacts {
-    fn find(&self, _cwd: &Path, patterns: &[String], _since: SystemTime) -> Vec<PathBuf> {
-        if patterns.is_empty() {
-            return Vec::new();
-        }
-        self.found.lock().unwrap().clone()
+    fn find(&self, _cwd: &Path, _patterns: &[String], _since: SystemTime) -> Vec<PathBuf> {
+        Vec::new()
     }
 }

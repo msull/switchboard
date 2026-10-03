@@ -31,7 +31,7 @@ impl MacOpener {
     /// does not restore old windows, `--quit-after-last-window-closed` so
     /// instances do not pile up, and `-e` last.
     #[must_use]
-    pub fn terminal_command(title: &str, argv: &[String], cwd: &Path) -> Vec<String> {
+    fn terminal_command(title: &str, argv: &[String], cwd: &Path) -> Vec<String> {
         let mut cmd = vec![
             "open".to_string(),
             "-na".into(),
@@ -50,7 +50,7 @@ impl MacOpener {
     /// The System Events script from spike 04: raise the Ghostty window
     /// whose title is exactly `title`. Window activation only.
     #[must_use]
-    pub fn raise_script(title: &str) -> String {
+    fn raise_script(title: &str) -> String {
         let quoted = title.replace('\\', "\\\\").replace('"', "\\\"");
         format!(
             r#"tell application "System Events"
@@ -76,25 +76,18 @@ fn find_command(name: &str) -> Option<PathBuf> {
     if candidate.is_absolute() {
         return candidate.is_file().then(|| candidate.to_path_buf());
     }
-    let home = std::env::var_os("HOME").map_or_else(|| PathBuf::from("/"), PathBuf::from);
-    std::env::var_os("PATH")
-        .map(|p| std::env::split_paths(&p).collect::<Vec<_>>())
-        .unwrap_or_default()
-        .into_iter()
-        .chain([
-            PathBuf::from("/opt/homebrew/bin"),
-            PathBuf::from("/usr/local/bin"),
-            home.join(".local/bin"),
-        ])
-        .map(|d| d.join(name))
-        .find(|p| p.is_file())
+    let dirs = super::path_dirs().into_iter().chain([
+        PathBuf::from("/opt/homebrew/bin"),
+        PathBuf::from("/usr/local/bin"),
+        super::home_dir().join(".local/bin"),
+    ]);
+    super::find_in(dirs, name)
 }
 
 fn find_ghostty() -> Option<PathBuf> {
-    let home = std::env::var_os("HOME").map_or_else(|| PathBuf::from("/"), PathBuf::from);
     let candidates = [
         PathBuf::from("/Applications/Ghostty.app"),
-        home.join("Applications/Ghostty.app"),
+        super::home_dir().join("Applications/Ghostty.app"),
     ];
     if let Some(found) = candidates.into_iter().find(|p| p.is_dir()) {
         return Some(found);

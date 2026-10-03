@@ -92,8 +92,6 @@ impl TmuxHost {
         self.pipe_to(id, new_path)
     }
 
-    /// Kill the whole server on this socket. For tests; the app never does
-    /// this because the server is what keeps sessions alive.
     /// Start and kill a throwaway session, to learn whether this tmux
     /// can host one at all. A version check is not enough: Ubuntu's
     /// tmux 3.4 dies at window spawn under `window-size manual` on
@@ -114,6 +112,8 @@ impl TmuxHost {
         started.map(|_| ())
     }
 
+    /// Kill the whole server on this socket. For tests; the app never does
+    /// this because the server is what keeps sessions alive.
     pub fn kill_server(&self) -> io::Result<()> {
         match self.run(&["kill-server"]) {
             Ok(_) => Ok(()),
@@ -371,11 +371,10 @@ fn has_utf8_locale() -> bool {
 
 /// Directories a Dock-launched app's PATH lacks but a login shell has.
 fn extra_bin_dirs() -> Vec<PathBuf> {
-    let home = std::env::var_os("HOME").map_or_else(|| PathBuf::from("/"), PathBuf::from);
     vec![
         PathBuf::from("/opt/homebrew/bin"),
         PathBuf::from("/usr/local/bin"),
-        home.join(".local/bin"),
+        super::home_dir().join(".local/bin"),
     ]
 }
 
@@ -383,22 +382,13 @@ fn extra_bin_dirs() -> Vec<PathBuf> {
 /// path so the same binary is handed to Ghostty. Falls back to the bare
 /// name, which lets the probe report "not found".
 fn locate_tmux() -> PathBuf {
-    let path_dirs = std::env::var_os("PATH")
-        .map(|p| std::env::split_paths(&p).collect::<Vec<_>>())
-        .unwrap_or_default();
-    path_dirs
-        .into_iter()
-        .chain(extra_bin_dirs())
-        .map(|d| d.join("tmux"))
-        .find(|p| p.is_file())
-        .unwrap_or_else(|| PathBuf::from("tmux"))
+    let dirs = super::path_dirs().into_iter().chain(extra_bin_dirs());
+    super::find_in(dirs, "tmux").unwrap_or_else(|| PathBuf::from("tmux"))
 }
 
 /// The current PATH with any missing [`extra_bin_dirs`] appended.
 fn augmented_path() -> std::ffi::OsString {
-    let mut dirs: Vec<PathBuf> = std::env::var_os("PATH")
-        .map(|p| std::env::split_paths(&p).collect())
-        .unwrap_or_default();
+    let mut dirs = super::path_dirs();
     for d in extra_bin_dirs() {
         if !dirs.contains(&d) {
             dirs.push(d);

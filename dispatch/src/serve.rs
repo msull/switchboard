@@ -30,7 +30,8 @@ use crate::ticket::{
     TicketState,
 };
 
-/// A Unix socket path may be at most 104 bytes on macOS.
+/// A Unix socket path may be at most 104 bytes on macOS (108 on Linux);
+/// binding a longer one fails obscurely, so it is refused with a reason.
 const MAX_SOCKET_PATH: usize = 100;
 
 /// What a request needs: the runner (its data directory, its way to

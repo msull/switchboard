@@ -95,7 +95,6 @@ impl FilesState {
                     self.listing = Some(Arc::new(Listing {
                         entries: Vec::new(),
                         truncated: false,
-                        scanned_at: std::time::SystemTime::now(),
                     }));
                     self.scan = None;
                 }

@@ -12,10 +12,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use switchboard::SwitchboardApp;
-use switchboard::adapters::fakes::{
-    FakeAgents, FakeArtifacts, FakeController, FakeDispatch, FakeEvents, FakeHost, FakeOpener,
-    FakeOperations, FakeProjectConfig, FakeRoundFiles, FakeSecrets, FakeTranscripts, MemoryStore,
-};
+use switchboard::adapters::fakes::{self, FakeHost, FakeOpener, FakeOperations, MemoryStore};
 use switchboard::app::Services;
 use switchboard::core::{AppAction, View};
 use switchboard::ports::control::OpLine;
@@ -48,18 +45,9 @@ fn port_on(initial: Loaded, operations: FakeOperations, host: FakeHost) -> Port 
             ..MemoryStore::default()
         }),
         host: Box::new(host),
-        events: Box::new(FakeEvents::default()),
-        agents: Box::new(FakeAgents::default()),
         opener: Box::new(opener.clone()),
-        transcripts: Box::new(FakeTranscripts::default()),
-        secrets: Box::new(FakeSecrets::default()),
-        project_config: Box::new(FakeProjectConfig::default()),
-        round_files: Box::new(FakeRoundFiles::default()),
-        artifacts: Box::new(FakeArtifacts::default()),
-        controller: Box::new(FakeController::default()),
         operations: Box::new(operations.clone()),
-        dispatch: Some(Box::new(FakeDispatch::default())),
-        wake: None,
+        ..fakes::services()
     };
     let mut app = SwitchboardApp::with_services(services);
     app.start();
@@ -591,19 +579,7 @@ fn a_read_only_instance_does_not_listen() {
             lock_result: Some(false),
             ..MemoryStore::default()
         }),
-        host: Box::new(FakeHost::default()),
-        events: Box::new(FakeEvents::default()),
-        agents: Box::new(FakeAgents::default()),
-        opener: Box::new(FakeOpener::default()),
-        transcripts: Box::new(FakeTranscripts::default()),
-        secrets: Box::new(FakeSecrets::default()),
-        project_config: Box::new(FakeProjectConfig::default()),
-        round_files: Box::new(FakeRoundFiles::default()),
-        artifacts: Box::new(FakeArtifacts::default()),
-        controller: Box::new(FakeController::default()),
-        operations: Box::new(FakeOperations::default()),
-        dispatch: Some(Box::new(FakeDispatch::default())),
-        wake: None,
+        ..fakes::services()
     };
     let mut app = SwitchboardApp::with_services(services);
     app.start();

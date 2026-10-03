@@ -14,8 +14,7 @@ use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;
 use switchboard::SwitchboardApp;
 use switchboard::adapters::fakes::{
-    FakeAgents, FakeArtifacts, FakeController, FakeDispatch, FakeEvents, FakeHost, FakeOpener,
-    FakeOperations, FakeProjectConfig, FakeRoundFiles, FakeSecrets, FakeTranscripts, MemoryStore,
+    self, FakeDispatch, FakeHost, FakeOpener, FakeSecrets, FakeTranscripts, MemoryStore,
 };
 use switchboard::app::Services;
 use switchboard::core::{
@@ -202,20 +201,10 @@ fn harness_build(
 
 fn fake_services(opener: FakeOpener, secrets: FakeSecrets, host: FakeHost) -> Services {
     Services {
-        store: Box::new(MemoryStore::default()),
         host: Box::new(host),
-        events: Box::new(FakeEvents::default()),
-        agents: Box::new(FakeAgents::default()),
         opener: Box::new(opener),
-        transcripts: Box::new(FakeTranscripts::default()),
         secrets: Box::new(secrets),
-        project_config: Box::new(FakeProjectConfig::default()),
-        round_files: Box::new(FakeRoundFiles::default()),
-        artifacts: Box::new(FakeArtifacts::default()),
-        controller: Box::new(FakeController::default()),
-        operations: Box::new(FakeOperations::default()),
-        dispatch: Some(Box::new(FakeDispatch::default())),
-        wake: None,
+        ..fakes::services()
     }
 }
 
@@ -2250,22 +2239,10 @@ fn claude_session_without_a_conversation_falls_back_to_the_snapshot() {
 #[test]
 fn polling_reads_the_transcript_into_the_ui_state() {
     let services = Services {
-        store: Box::new(MemoryStore::default()),
-        host: Box::new(FakeHost::default()),
-        events: Box::new(FakeEvents::default()),
-        agents: Box::new(FakeAgents::default()),
-        opener: Box::new(FakeOpener::default()),
         transcripts: Box::new(FakeTranscripts {
             conversation: Some(two_turns()),
         }),
-        secrets: Box::new(FakeSecrets::default()),
-        project_config: Box::new(FakeProjectConfig::default()),
-        round_files: Box::new(FakeRoundFiles::default()),
-        artifacts: Box::new(FakeArtifacts::default()),
-        controller: Box::new(FakeController::default()),
-        operations: Box::new(FakeOperations::default()),
-        dispatch: Some(Box::new(FakeDispatch::default())),
-        wake: None,
+        ..fakes::services()
     };
     let mut harness = Harness::builder()
         .with_size(egui::vec2(1200.0, 900.0))
@@ -4450,7 +4427,6 @@ fn scripted_harness(
     services.dispatch = Some(Box::new(FakeDispatch {
         status: Some(status),
         blocks: true,
-        ..FakeDispatch::default()
     }));
     let mut harness = Harness::builder()
         .with_size(egui::vec2(1200.0, 900.0))

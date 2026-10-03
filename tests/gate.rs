@@ -123,7 +123,7 @@ impl Gate {
             project_config: Box::new(FileConfigReader::new()),
             round_files: Box::new(switchboard::adapters::round_files::DiskRoundFiles),
             artifacts: Box::new(switchboard::adapters::artifacts::DiskArtifacts),
-            controller: Box::new(FakeController::default()),
+            controller: Box::new(FakeController),
             operations: Box::new(FakeOperations::default()),
             dispatch: Some(Box::new(FakeDispatch::default())),
             wake: None,

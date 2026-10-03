@@ -113,7 +113,7 @@ pub enum RunCardMode {
 
 /// Where a run's log lives.
 fn log_path(data_dir: &Path, run: &Run) -> PathBuf {
-    data_dir.join("scrollback").join(&run.log)
+    crate::adapters::scrollback::scrollback_dir(data_dir).join(&run.log)
 }
 
 /// A run's output, read from its log and cached until the file changes.

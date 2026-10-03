@@ -51,6 +51,7 @@ impl OperationsLog {
     }
 
     /// Every line, oldest first.
+    #[cfg(test)]
     #[must_use]
     pub fn lines(&self) -> &[OpLine] {
         &self.lines

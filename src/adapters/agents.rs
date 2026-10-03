@@ -13,7 +13,9 @@ use std::time::SystemTime;
 
 use uuid::Uuid;
 
-use crate::core::{AgentKind, RecordId, ResumeHandle};
+use super::{find_in, home_dir, path_dirs};
+use crate::adapters::hooks::HOOK_SETTINGS_FILE;
+use crate::core::{AgentKind, RECORD_ID_ENV, RecordId, ResumeHandle};
 use crate::ports::agent::{AgentLaunch, AgentLauncher};
 
 /// Real launcher. Paths are public so tests can point the provider
@@ -39,7 +41,7 @@ impl Agents {
         let data_dir = data_dir.into();
         let home = home_dir();
         Self {
-            hook_settings: data_dir.join("claude-hooks.json"),
+            hook_settings: data_dir.join(HOOK_SETTINGS_FILE),
             data_dir,
             claude_bin: find_binary("claude", &[home.join(".claude/local/claude")]),
             codex_bin: find_binary("codex", &[]),
@@ -50,7 +52,7 @@ impl Agents {
 
     fn env(&self, record: RecordId) -> Vec<(String, String)> {
         vec![
-            ("SWITCHBOARD_RECORD_ID".into(), record.0.to_string()),
+            (RECORD_ID_ENV.into(), record.0.to_string()),
             (
                 "SWITCHBOARD_DATA_DIR".into(),
                 self.data_dir.to_string_lossy().into_owned(),
@@ -71,7 +73,7 @@ impl Agents {
     /// Where Claude Code will write the transcript for a session started
     /// in `cwd`.
     #[must_use]
-    pub fn claude_transcript(&self, cwd: &Path, session_id: Uuid) -> PathBuf {
+    fn claude_transcript(&self, cwd: &Path, session_id: Uuid) -> PathBuf {
         let cwd = cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf());
         self.claude_projects
             .join(claude_slug(&cwd))
@@ -91,7 +93,7 @@ impl Agents {
 /// every `/`, `_`, and `.` replaced by `-` (spike 01, verified against
 /// `~/.claude/projects` for 2.1.x).
 #[must_use]
-pub fn claude_slug(cwd: &Path) -> String {
+fn claude_slug(cwd: &Path) -> String {
     cwd.to_string_lossy()
         .chars()
         .map(|c| if matches!(c, '/' | '_' | '.') { '-' } else { c })
@@ -296,28 +298,22 @@ fn born(m: &std::fs::Metadata) -> std::io::Result<SystemTime> {
     Ok(m.created().map_or(modified, |c| c.min(modified)))
 }
 
-fn home_dir() -> PathBuf {
-    std::env::var_os("HOME").map_or_else(|| PathBuf::from("/"), PathBuf::from)
-}
-
 /// `which`-style search: `PATH` first, then `extra`, then Homebrew and
 /// `~/.local/bin` for launches from a Finder-started app whose `PATH` is
 /// the system default.
 fn find_binary(name: &str, extra: &[PathBuf]) -> Option<PathBuf> {
-    let home = home_dir();
-    let path_dirs = std::env::var_os("PATH")
-        .map(|p| std::env::split_paths(&p).collect::<Vec<_>>())
-        .unwrap_or_default();
-    path_dirs
-        .iter()
-        .map(|d| d.join(name))
-        .chain(extra.iter().cloned())
-        .chain([
-            PathBuf::from("/opt/homebrew/bin").join(name),
-            home.join(".local/bin").join(name),
-            PathBuf::from("/usr/local/bin").join(name),
-        ])
-        .find(|p| p.is_file())
+    find_in(path_dirs(), name)
+        .or_else(|| extra.iter().find(|p| p.is_file()).cloned())
+        .or_else(|| {
+            find_in(
+                [
+                    PathBuf::from("/opt/homebrew/bin"),
+                    home_dir().join(".local/bin"),
+                    PathBuf::from("/usr/local/bin"),
+                ],
+                name,
+            )
+        })
 }
 
 #[cfg(test)]
@@ -379,7 +375,7 @@ mod tests {
         assert_eq!(
             launch.env,
             vec![
-                ("SWITCHBOARD_RECORD_ID".to_string(), record.0.to_string()),
+                (RECORD_ID_ENV.to_string(), record.0.to_string()),
                 (
                     "SWITCHBOARD_DATA_DIR".to_string(),
                     a.data_dir.to_string_lossy().into_owned()
