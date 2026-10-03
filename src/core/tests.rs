@@ -5772,6 +5772,49 @@ fn an_exited_pane_keeps_its_last_output() {
 }
 
 #[test]
+fn a_killed_pane_keeps_its_last_output() {
+    let (mut core, _, ids) = with_records(&[SessionKind::Shell], |r| Some(running(r.id)));
+    let id = ids[0];
+    let set = recent_set(&mut core, 24, 1_000);
+    let printed_at = 30 * HOUR_MS;
+    core.dispatch(
+        AppAction::HostListed(vec![printed(id, printed_at)]),
+        Clock::at(printed_at),
+    );
+    let effects = core.dispatch(AppAction::KillSession(id), Clock::at(printed_at + 60_000));
+    assert!(effects.iter().any(|e| matches!(e, Effect::Kill(_))));
+    assert!(effects.iter().any(|e| matches!(e, Effect::Save(_))));
+    // The kill took the pane, and its status, with it.
+    core.dispatch(
+        AppAction::HostListed(vec![]),
+        Clock::at(printed_at + 2 * 60_000),
+    );
+    tick(&mut core, printed_at + 3 * 60_000);
+    assert_eq!(members(&core, set), vec![id]);
+    assert_eq!(core.last_active(id), Some(Clock::at(printed_at).wall));
+}
+
+#[test]
+fn a_pane_lost_with_its_server_keeps_its_last_output() {
+    let (mut core, _, ids) = with_records(&[SessionKind::Service], |r| Some(running(r.id)));
+    let id = ids[0];
+    let set = recent_set(&mut core, 24, 1_000);
+    let printed_at = 30 * HOUR_MS;
+    core.dispatch(
+        AppAction::HostListed(vec![printed(id, printed_at)]),
+        Clock::at(printed_at),
+    );
+    let effects = core.dispatch(
+        AppAction::HostListed(vec![]),
+        Clock::at(printed_at + 60_000),
+    );
+    assert!(effects.iter().any(|e| matches!(e, Effect::Save(_))));
+    tick(&mut core, printed_at + 2 * 60_000);
+    assert_eq!(members(&core, set), vec![id]);
+    assert_eq!(core.last_active(id), Some(Clock::at(printed_at).wall));
+}
+
+#[test]
 fn dismissals_of_removed_sessions_are_pruned() {
     let (mut core, _, ids) = with_records(&[SessionKind::Shell], |_| None);
     let id = ids[0];

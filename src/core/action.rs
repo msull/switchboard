@@ -1173,9 +1173,23 @@ impl AppCore {
 
     /// Kill a session's pane, if it has one. Every kill of a session
     /// goes through here, so a step added to killing reaches them all.
-    fn kill_pane(&self, id: RecordId, out: &mut Out) {
+    fn kill_pane(&mut self, id: RecordId, out: &mut Out) {
+        self.keep_last_output(id, out);
         if let Some(status) = self.host_status(id) {
             out.push(Effect::Kill(status.id.clone()));
+        }
+    }
+
+    /// Raise `last_seen` to the pane's last output before the pane goes.
+    /// A killed session or a dead server leaves no status behind, and
+    /// without this a shell typed into a minute ago would fall back to
+    /// its launch in `last_active` and leave every rule set at once.
+    pub(super) fn keep_last_output(&mut self, id: RecordId, out: &mut Out) {
+        let Some(output) = self.host_status(id).and_then(|h| h.last_activity) else {
+            return;
+        };
+        if self.session(id).is_some_and(|s| s.last_seen < output) {
+            self.edit_session(id, out, |s| s.last_seen = output);
         }
     }
 

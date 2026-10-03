@@ -1685,9 +1685,11 @@ file with rules alone; a v5 file reads as hand sets.
 
 Activity (`AppCore::last_active`) is the latest of `last_seen` (the
 launch, and every hook event), `last_event_at`, `last_stop_at`, and the
-pane's last output while the pane is running. A live pane counts
-through what it prints, not by being alive, or an idle shell would
-never leave. Every kind of session is included, Codex through its pane
+pane's last output, alive or exited, while tmux still holds the pane.
+A live pane counts through what it prints, not by being alive, or an
+idle shell would never leave. When the pane goes (a kill, a restart, a
+stop, or the server dying), the core first raises `last_seen` to that
+output time, so the session keeps its place until the window passes. Every kind of session is included, Codex through its pane
 output.
 
 Dismissing (the "×" on a card, "Dismiss" on a stopped card, "Kill and
