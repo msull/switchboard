@@ -316,8 +316,9 @@ pub struct RewriteView {
     pub before: String,
     /// The head the rewrite produced, once it did.
     pub after: Option<String>,
-    /// Commits ahead of the base before and after.
+    /// Commits ahead of the base before the rewrite.
     pub from: u32,
+    /// Commits ahead of the base after it.
     pub to: u32,
     /// Why history was left as it was.
     pub skipped: Option<String>,

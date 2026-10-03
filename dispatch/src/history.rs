@@ -38,6 +38,7 @@ impl Commits {
 /// A commit of the branch, as `git log` reads it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Commit {
+    /// The commit's full id.
     pub sha: String,
     /// How many parents it has: one, except for a root or a merge.
     pub parents: u32,
@@ -46,6 +47,7 @@ pub struct Commit {
 }
 
 impl Commit {
+    /// The message's first line, trimmed.
     #[must_use]
     pub fn subject(&self) -> &str {
         self.message.lines().next().unwrap_or("").trim()
@@ -58,6 +60,7 @@ pub struct Group {
     /// The commits replayed into it, oldest first; the first is the one
     /// the others fold into.
     pub picks: Vec<String>,
+    /// The message the new commit carries.
     pub message: String,
     /// The commit whose author (and committer) it keeps.
     pub author_of: String,

@@ -270,7 +270,7 @@ pub struct Attempt {
     #[serde(default)]
     pub rework: Option<String>,
     /// The history rewrite a code review attempt made as it completed:
-    /// written as intent (`after` unset) before any git command runs.
+    /// written as intent (`after` unset) before git writes anything.
     #[serde(default)]
     pub rewrite: Option<Rewrite>,
     pub started_ms: u64,

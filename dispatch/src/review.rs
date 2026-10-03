@@ -548,8 +548,9 @@ impl Runner {
             RoundState::Fixed | RoundState::Converged | RoundState::Accepted => {
                 // A rewrite whose intent was saved and whose end was not:
                 // the checks passed, and the branch may have moved since.
-                if a.rewrite.as_ref().is_some_and(|r| r.after.is_none()) {
-                    self.resume_rewrite(t, ps, p, stage, a, cwd, lane, now_ms)
+                if let Some(r) = a.rewrite.as_ref().filter(|r| r.after.is_none()) {
+                    let before = r.before.clone();
+                    self.resume_rewrite(t, ps, p, stage, a, &before, cwd, lane, now_ms)
                 } else if a.gate.is_some() {
                     self.poll_checks(t, ps, p, stage, a, &round, cwd, lane, now_ms)
                 } else {
@@ -1526,7 +1527,7 @@ impl Runner {
         let ranges = fix_ranges(t, &key.0, &context);
         let planned = match mode {
             Commits::One => history::one_plan(&commits, &base, &ranges),
-            _ => history::fold_plan(&commits, &base, &ranges),
+            Commits::Fold | Commits::Keep => history::fold_plan(&commits, &base, &ranges),
         };
         let groups = match planned {
             Ok(g) => g,
@@ -1681,14 +1682,12 @@ impl Runner {
         p: &Pipeline,
         stage: &Stage,
         a: &Attempt,
+        before: &str,
         cwd: &Path,
         lane: Option<&str>,
         now_ms: u64,
     ) -> Result<()> {
         let key = (a.stage.clone(), a.n);
-        let Some(before) = a.rewrite.as_ref().map(|r| r.before.clone()) else {
-            return Ok(());
-        };
         let head = self.git.head(cwd)?;
         if head == before {
             log::info!(
@@ -1697,11 +1696,11 @@ impl Runner {
                 key.0,
                 a.context
             );
-            return self.complete_review(t, ps, p, stage, &key, cwd, lane, &before, now_ms);
+            return self.complete_review(t, ps, p, stage, &key, cwd, lane, before, now_ms);
         }
         let clean = self.git.is_clean(cwd)?;
         let tree = self.git.tree(cwd, "HEAD")?;
-        let want = self.git.tree(cwd, &before)?;
+        let want = self.git.tree(cwd, before)?;
         if clean && tree == want {
             log::info!(
                 "ticket {} {}/{} rewrite from {before} landed at {head}",

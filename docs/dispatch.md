@@ -1170,8 +1170,9 @@ count, the implementer's session, response and `head_after`, and its
 state (`reviewing`, `findings`, `fixing`, `fixed`, `converged`,
 `accepted`, `failed`), plus `carried_from` and `rework` (see "A new
 attempt") and `rewrite` (see "Clean commits": the mode, `before`,
-`after`, the commit counts `from` and `to`, and `skipped`). Artifacts per round: each reviewer's file
-(`r<n>/<reviewer>`), `r<n>/feedback`, `r<n>/response`, `r<n>/checks`;
+`after`, the commit counts `from` and `to`, and `skipped`). Artifacts
+per round: each reviewer's file (`r<n>/<reviewer>`), `r<n>/feedback`,
+`r<n>/response`, `r<n>/checks`;
 and once the attempt completes, `summary` (`summary.md` in the attempt
 directory): how it ended (converged, or accepted with how many points
 open), how its commits were folded or why they were kept, what it

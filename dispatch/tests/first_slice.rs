@@ -8141,7 +8141,11 @@ fn a_branch_pushed_by_an_agent_is_not_rewritten_by_a_rerun() {
         "{:?}",
         a.state
     );
-    env.repo.lock().unwrap().published.push(tree.clone());
+    env.repo
+        .lock()
+        .unwrap()
+        .published
+        .push((tree.clone(), "root0000".into(), "fix00002".into()));
     rerun_with(&mut env, &id, None);
     lint_exits(&mut env, &id, 1, 0, "");
     style_says(&mut env, &id, 1, "No findings.");
@@ -8178,6 +8182,51 @@ fn a_branch_pushed_by_an_agent_is_not_rewritten_by_a_rerun() {
         summary.contains("Commits kept: the branch is published."),
         "{summary}"
     );
+}
+
+/// The attempt folds its fixes and `inspect` sends the lane back. The
+/// implementer adds a commit; the review stage's completed attempt
+/// stands (a send-back reaches only an agent stage), so `inspect` asks
+/// again and the folded history, pushed or not, is not rewritten.
+#[test]
+fn a_branch_pushed_by_an_agent_is_not_rewritten_after_a_send_back() {
+    let mut env = Env::new();
+    let (id, tree) = at_final_checks(&mut env, Some("fold"));
+    let a = final_checks_pass(&mut env, &id);
+    assert_eq!(a.state, AttemptState::Complete, "{:?}", a.state);
+    assert_eq!(a.head.as_deref(), Some("fold0001"));
+    env.inspect(&id, "rerun", Some("name the error"));
+    env.steps_until(&id, "a second implementer", |t, _| {
+        t.attempts_of("implement").count() == 2
+    });
+    env.repo
+        .lock()
+        .unwrap()
+        .heads
+        .insert(tree.clone(), "impl0002".into());
+    let second = session_of(&env.ticket(&id), "implement");
+    implementer_stops(&mut env, &id, &second);
+    env.steps_until(&id, "the checks starting", |t, _| {
+        t.attempts_of("implement")
+            .last()
+            .is_some_and(|a| a.gate.is_some())
+    });
+    env.repo
+        .lock()
+        .unwrap()
+        .check_exits
+        .insert(format!("{id}/implement/2"), 0);
+    env.steps_until(&id, "inspect again", |t, _| {
+        t.attempts_of("inspect").count() == 2
+            && t.pending_decisions().iter().any(|d| d.name == "inspect")
+    });
+    let t = env.ticket(&id);
+    assert_eq!(t.attempts_of("review-code").count(), 1);
+    assert_eq!(review_attempt(&t), a, "the completed attempt stands");
+    let repo = env.repo.lock().unwrap();
+    assert_eq!(repo.replayed.len(), 1, "only the first completion's");
+    assert_eq!(repo.head_sets.len(), 1, "only the first completion's");
+    assert_eq!(repo.heads[&tree], "impl0002");
 }
 
 #[test]

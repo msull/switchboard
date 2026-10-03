@@ -1106,7 +1106,6 @@ pub fn is_dispatch_view(view: &View) -> bool {
     matches!(view, View::Dispatch | View::Ticket(_))
 }
 
-/// A commit's first eight characters, as the page names it.
 /// What a completed code review did to its branch's commits; nothing
 /// when it left them as they were.
 fn rewrite_label(r: &RewriteView) -> Option<String> {
@@ -1122,6 +1121,7 @@ fn rewrite_label(r: &RewriteView) -> Option<String> {
     })
 }
 
+/// A commit's first eight characters, as the page names it.
 fn short_sha(sha: &str) -> String {
     sha.chars().take(8).collect()
 }

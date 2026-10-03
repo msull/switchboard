@@ -888,8 +888,9 @@ pub struct FakeRepo {
     pub head_sets: Vec<(PathBuf, String, String)>,
     /// Trees left dirty by the next head move, once.
     pub dirty_on_set: Vec<PathBuf>,
-    /// Trees whose branch the remote already holds.
-    pub published: Vec<PathBuf>,
+    /// Branches the remote already holds: dir, base, head. Asked of any
+    /// other range, a tree is not published.
+    pub published: Vec<(PathBuf, String, String)>,
 }
 
 impl Repo for FakeRepo {
@@ -1174,8 +1175,11 @@ impl Repo for FakeRepo {
         }
         Ok(())
     }
-    fn published(&self, dir: &Path, _remote: &str, _base: &str, _head: &str) -> Result<bool> {
-        Ok(self.published.iter().any(|d| d == dir))
+    fn published(&self, dir: &Path, _remote: &str, base: &str, head: &str) -> Result<bool> {
+        Ok(self
+            .published
+            .iter()
+            .any(|(d, b, h)| d == dir && b == base && h == head))
     }
 }
 
