@@ -423,7 +423,7 @@ mod tests {
     }
 
     #[test]
-    fn the_primary_is_never_absent_during_a_write() {
+    fn the_backup_holds_the_previous_write_and_counts_as_the_record() {
         // A hard link keeps the old bytes reachable as `.bak` while the
         // primary stays where it is; the rename swaps the new bytes in.
         let dir = tempfile::tempdir().unwrap();
@@ -602,7 +602,7 @@ mod tests {
     }
 
     #[test]
-    fn the_lock_serialises_writers_and_lists_tickets() {
+    fn writes_under_the_lock_are_listed_as_tickets() {
         let dir = tempfile::tempdir().unwrap();
         let data = DataDir::new(dir.path());
         assert!(

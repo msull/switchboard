@@ -1076,13 +1076,12 @@ Choosing marks `HandedOff` and shows the session the draft is in.
 
 ### Actions and effects
 
-`StartWorkflow`, `WorkflowRoundFile` (the poll found or settled a
-file), `WorkflowAdvance`, `PauseWorkflow`, `ContinueWorkflow`,
-`RaiseWorkflowCap`, `FinalizeWorkflow`, `CleanupWorkflow`,
-`HandOffWorkflow`, plus results. Effects: `WatchFile`, `SnapshotRound`,
-`DeleteRoundFiles`, and the existing clone, launch, send-input, and
-save effects. The poll on `Tick` checks watched files; the file watch is
-a port with a fake.
+`StartWorkflow`, `RoundFileProbed` (the probe found or settled a
+file), `PauseWorkflow`, `ContinueWorkflow`, `RaiseWorkflowCap`,
+`FinalizeWorkflow`, `CleanUpWorkflow`, `HandOffWorkflow`, plus results.
+Effects: `ProbeRoundFile`, `SnapshotRound`, `RemoveRoundFiles`, and the
+existing clone, launch, send-input, and save effects. `Tick` probes the
+awaited files; the probe is the `RoundFiles` port, with a fake.
 
 ### Not a step language
 
@@ -1722,6 +1721,22 @@ out. Rule sets are rule-only (no hand pins beside the rule's cards).
 The controller steps through a rule set's list in order (Left and Up
 back, Right and Down forward) rather than across the grid, since the
 core does not know the view's columns.
+
+## Cleanup pass (2026-10-03)
+
+One pass over the workspace with no change in behaviour, records or
+wire formats: duplicated code merged into helpers (the core's running,
+waiting-reason and host-error checks, the store's one atomic write, the
+binary lookup, Dispatch's attempt lookups and `git -C` calls), comments
+moved to the items they describe or brought up to date, fake fields
+nothing read removed (`fakes::services()` builds the default set),
+narrower visibility, the unused `fd-lock` dependency dropped, and seven
+fewer tests, each removed or merged into another that already covers
+it.
+
+Known gap: `HookLog::compact` and `rotate_scrollback` are called only
+from tests, so `events.log` grows without bound and the compaction the
+hook section above describes does not happen yet.
 
 ## Open questions
 

@@ -379,7 +379,7 @@ fn op_status_tells_a_lost_reply_from_a_launch_the_app_died_in() {
         ids: vec!["x".into()],
         at: std::time::SystemTime::UNIX_EPOCH,
     });
-    let mut port = port_with(
+    let mut port = crate::port(
         Loaded {
             workspaces,
             views,
@@ -402,10 +402,6 @@ fn op_status_tells_a_lost_reply_from_a_launch_the_app_died_in() {
         ),
     );
     assert!(matches!(&reply, Reply::Found { records } if records.len() == 1 && records[0].removed));
-}
-
-fn port_with(initial: Loaded, operations: FakeOperations) -> Port {
-    port(initial, operations)
 }
 
 /// The global space's fixed id, as the wire spells it.

@@ -846,7 +846,7 @@ impl Pipeline {
 mod tests {
     use super::*;
 
-    pub(crate) const SWITCHBOARD: &str = r#"
+    const SWITCHBOARD: &str = r#"
 version = 1
 
 [project]

@@ -167,21 +167,10 @@ fn harness() -> (Harness<'static, SwitchboardApp>, Seeded) {
 
 /// A harness whose opener the test keeps a handle to.
 fn harness_with(opener: FakeOpener) -> (Harness<'static, SwitchboardApp>, Seeded) {
-    harness_full(opener, FakeSecrets::default())
+    harness_build(opener, FakeSecrets::default(), FakeHost::default())
 }
 
-/// A harness whose host the test scripted (a failing write, say).
-fn harness_with_host(host: FakeHost) -> (Harness<'static, SwitchboardApp>, Seeded) {
-    harness_build(FakeOpener::default(), FakeSecrets::default(), host)
-}
-
-fn harness_full(
-    opener: FakeOpener,
-    secrets: FakeSecrets,
-) -> (Harness<'static, SwitchboardApp>, Seeded) {
-    harness_build(opener, secrets, FakeHost::default())
-}
-
+/// A harness on these fakes, which the test keeps handles to.
 fn harness_build(
     opener: FakeOpener,
     secrets: FakeSecrets,
@@ -270,7 +259,6 @@ fn a_new_workspace_shows_nothing_of_the_others_until_the_selector_opens() {
     harness.get_by_label("New workspace");
     type_into(&mut harness, "Name", "Client");
     click(&mut harness, "Create");
-    harness.run_steps(2);
     assert!(
         actions(&harness).contains(&AppAction::NewSpace("Client".into())),
         "{:?}",
@@ -283,10 +271,8 @@ fn a_new_workspace_shows_nothing_of_the_others_until_the_selector_opens() {
     assert_eq!(harness.query_all_by_label("beta").count(), 0);
     assert_eq!(harness.query_all_by_label("Default").count(), 0);
     click(&mut harness, "Go to ⌘K");
-    harness.run_steps(2);
     assert_eq!(harness.query_all_by_label_contains("alpha").count(), 0);
     click(&mut harness, "All workspaces");
-    harness.run_steps(2);
     harness.get_by_label("Default · alpha");
     harness.key_press(egui::Key::Escape);
     harness.run_steps(2);
@@ -583,7 +569,6 @@ fn a_project_moves_to_another_workspace_from_its_board() {
     showing(&mut harness, View::Board(ids.alpha));
     click(&mut harness, "Move to");
     click(&mut harness, "Client");
-    harness.run_steps(2);
     let client = harness.state().core().spaces()[1].id;
     assert!(
         actions(&harness).contains(&AppAction::MoveProjectToSpace(ids.alpha, client)),
@@ -641,13 +626,7 @@ fn type_into(harness: &mut Harness<'static, SwitchboardApp>, label: &str, text: 
 }
 
 #[test]
-fn the_rail_is_headed_by_the_active_workspace() {
-    let (harness, _) = harness();
-    harness.get_by_label("Default ▾");
-}
-
-#[test]
-fn switcher_lists_projects_most_recent_first() {
+fn the_rail_lists_projects_most_recent_first() {
     let (harness, _) = harness();
     let alpha = harness.get_by_role_and_label(Role::Button, "alpha").rect();
     let beta = harness.get_by_role_and_label(Role::Button, "beta").rect();
@@ -1146,7 +1125,8 @@ fn the_boards_config_button_edits_project_json_and_save_writes_it() {
 #[test]
 fn environment_dialog_saves_variables_and_stores_secrets() {
     let secrets = FakeSecrets::default();
-    let (mut harness, ids) = harness_full(FakeOpener::default(), secrets.clone());
+    let (mut harness, ids) =
+        harness_build(FakeOpener::default(), secrets.clone(), FakeHost::default());
     showing(&mut harness, View::Board(ids.alpha));
     click(&mut harness, "Environment");
     click(&mut harness, "Add variable");
@@ -1173,10 +1153,7 @@ fn quick_switcher_opens_the_best_match_on_enter() {
     let (mut harness, ids) = harness();
     harness.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::K);
     harness.run_steps(2);
-    let field = harness.get_by_label("Search");
-    field.focus();
-    field.type_text("srv");
-    harness.run_steps(2);
+    type_into(&mut harness, "Search", "srv");
     harness.key_press(egui::Key::Enter);
     harness.run_steps(2);
     assert!(actions(&harness).contains(&AppAction::ShowSession(ids.server)));
@@ -1285,10 +1262,7 @@ fn session_view_renames_on_enter() {
     let (mut harness, ids) = harness();
     showing(&mut harness, View::Session(ids.server));
     click(&mut harness, "Rename");
-    let field = harness.get_by_label("Session name");
-    field.focus();
-    field.type_text(" v2");
-    harness.run_steps(2);
+    type_into(&mut harness, "Session name", " v2");
     harness.key_press(egui::Key::Enter);
     harness.run_steps(2);
     assert!(
@@ -1702,10 +1676,7 @@ fn message_box_is_multiline_and_enter_sends() {
     plain_message_box(&mut harness);
     let id = seed_claude(&mut harness, &ids);
     showing(&mut harness, View::Session(id));
-    let field = harness.get_by_label("Message");
-    field.focus();
-    field.type_text("first line");
-    harness.run_steps(2);
+    type_into(&mut harness, "Message", "first line");
     harness.key_press_modifiers(egui::Modifiers::SHIFT, egui::Key::Enter);
     harness.run_steps(2);
     harness.get_by_label("Message").type_text("second line");
@@ -1748,14 +1719,11 @@ fn message_box_is_multiline_and_enter_sends() {
 fn a_failed_send_keeps_the_draft() {
     let host = FakeHost::default();
     host.state().fail_write = Some("pane is dead".into());
-    let (mut harness, ids) = harness_with_host(host);
+    let (mut harness, ids) = harness_build(FakeOpener::default(), FakeSecrets::default(), host);
     plain_message_box(&mut harness);
     let id = seed_claude(&mut harness, &ids);
     showing(&mut harness, View::Session(id));
-    let field = harness.get_by_label("Message");
-    field.focus();
-    field.type_text("do not lose me");
-    harness.run_steps(2);
+    type_into(&mut harness, "Message", "do not lose me");
     harness.key_press(egui::Key::Enter);
     harness.run_steps(2);
     assert!(actions(&harness).contains(&AppAction::SendInput {
@@ -2248,9 +2216,7 @@ fn polling_reads_the_transcript_into_the_ui_state() {
         .with_size(egui::vec2(1200.0, 900.0))
         .build_eframe(move |cc| {
             switchboard::ui::theme::install(&cc.egui_ctx);
-            let mut app = SwitchboardApp::with_services(services);
-            app.ui_state.embed_terminals = false;
-            app
+            test_app(services)
         });
     let ids = seed(harness.state_mut());
     let id = seed_claude(&mut harness, &ids);
@@ -2295,38 +2261,6 @@ fn run_tab_beside_a_session_keeps_the_sides_width() {
 }
 
 #[test]
-fn conversation_wraps_beside_the_open_side() {
-    let (mut harness, ids) = harness();
-    let id = seed_claude(&mut harness, &ids);
-    let mut conversation = two_turns();
-    conversation.turns[0].final_text = "word ".repeat(120).trim_end().to_owned();
-    harness
-        .state_mut()
-        .ui_state
-        .conversations
-        .insert(id, (None, conversation));
-    showing(&mut harness, View::Session(id));
-    harness.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::B);
-    harness.run_steps(2);
-    let side = harness.get_by_label("Find").rect().left();
-    let answer = harness
-        .get_by_label("The crate is called switchboard.")
-        .rect();
-    let long = harness
-        .query_all_by_label_contains("word word")
-        .map(|n| n.rect().right())
-        .fold(0.0_f32, f32::max);
-    assert!(
-        answer.right() < side,
-        "{answer:?} runs under the side at {side}"
-    );
-    assert!(
-        long < side,
-        "the long answer reaches {long}, past the side at {side}"
-    );
-}
-
-#[test]
 fn rail_item_and_side_tab_open_and_close_the_side_and_the_text_reflows() {
     let (mut harness, ids) = harness();
     let id = seed_claude(&mut harness, &ids);
@@ -2350,6 +2284,13 @@ fn rail_item_and_side_tab_open_and_close_the_side_and_the_text_reflows() {
     assert!(is_open(&harness));
     let side = harness.get_by_label("Find").rect().left();
     assert!(long_right(&harness) < side);
+    let answer = harness
+        .get_by_label("The crate is called switchboard.")
+        .rect();
+    assert!(
+        answer.right() < side,
+        "{answer:?} runs under the side at {side}"
+    );
     // The same item closes it and the answer takes the width back.
     click(&mut harness, "Files ⌘B");
     assert!(!is_open(&harness));
@@ -2663,7 +2604,6 @@ fn the_working_set_takes_a_session_from_its_header_and_a_file_from_the_tree() {
     // None at first; the rail makes one and shows it, empty.
     harness.get_by_label("WORKING SETS");
     click(&mut harness, "+ New working set");
-    harness.run_steps(2);
     let set = first_set(&harness);
     assert_eq!(harness.state().core().view(), View::WorkingSet(set));
     harness.get_by_label("Nothing here yet.");
@@ -2672,7 +2612,6 @@ fn the_working_set_takes_a_session_from_its_header_and_a_file_from_the_tree() {
     showing(&mut harness, View::Session(id));
     click(&mut harness, "Working sets");
     click(&mut harness, "   Working Set");
-    harness.run_steps(2);
     assert_eq!(
         harness.state().core().sets_holding(&PinTarget::Session(id)),
         vec![set]
@@ -2690,7 +2629,6 @@ fn the_working_set_takes_a_session_from_its_header_and_a_file_from_the_tree() {
     harness.get_by_label("claude-agent").click_secondary();
     harness.run_steps(2);
     click(&mut harness, "✓ Working Set");
-    harness.run_steps(2);
     harness.get_by_label("Nothing here yet.");
     // A file joins from the tree's submenu and shows as a file card.
     let (_dir, pid, _) = file_project(&mut harness);
@@ -2700,7 +2638,6 @@ fn the_working_set_takes_a_session_from_its_header_and_a_file_from_the_tree() {
     harness.get_by_label("Working sets ⏵").hover();
     harness.run_steps(2);
     click(&mut harness, "   Working Set");
-    harness.run_steps(2);
     assert_eq!(
         harness
             .state()
@@ -2711,7 +2648,6 @@ fn the_working_set_takes_a_session_from_its_header_and_a_file_from_the_tree() {
     showing(&mut harness, View::WorkingSet(set));
     harness.get_by_label("README.md");
     click(&mut harness, "Take off");
-    harness.run_steps(2);
     harness.get_by_label("Nothing here yet.");
 }
 
@@ -2724,7 +2660,6 @@ fn working_sets_are_renamed_cloned_and_deleted_from_the_header() {
     harness.get_by_label("claude-agent").click_secondary();
     harness.run_steps(2);
     click(&mut harness, "New working set with this");
-    harness.run_steps(2);
     let sets = harness.state().core().working_sets().to_vec();
     assert_eq!(sets.len(), 2);
     assert_eq!(sets[1].name, "Working Set 2");
@@ -2735,7 +2670,6 @@ fn working_sets_are_renamed_cloned_and_deleted_from_the_header() {
     );
     // Rename in the header: Enter commits.
     click(&mut harness, "Rename");
-    harness.run_steps(2);
     let field = harness.get_by_label("Working set name");
     field.focus();
     harness.run_steps(1);
@@ -2752,7 +2686,6 @@ fn working_sets_are_renamed_cloned_and_deleted_from_the_header() {
     assert!(harness.query_all_by_label("Working Set 2 (hotfix)").count() >= 1);
     // Clone copies the cards and shows the copy.
     click(&mut harness, "Clone");
-    harness.run_steps(2);
     let sets = harness.state().core().working_sets().to_vec();
     assert_eq!(sets.len(), 3);
     assert_eq!(sets[2].name, "Working Set 2 (hotfix) copy");
@@ -2760,13 +2693,10 @@ fn working_sets_are_renamed_cloned_and_deleted_from_the_header() {
     assert_eq!(harness.state().core().view(), View::WorkingSet(sets[2].id));
     // Delete asks first; Cancel keeps it, Delete drops it and goes back.
     click(&mut harness, "Delete");
-    harness.run_steps(2);
     harness.get_by_label("Delete working set");
     click(&mut harness, "Cancel");
-    harness.run_steps(2);
     assert_eq!(harness.state().core().working_sets().len(), 3);
     click(&mut harness, "Delete");
-    harness.run_steps(2);
     click(&mut harness, "Delete set");
     assert_eq!(harness.state().core().working_sets().len(), 2);
     assert_eq!(harness.state().core().view(), View::WorkingSet(sets[1].id));
@@ -3144,7 +3074,6 @@ fn a_rendered_answer_on_a_working_set_card_opens_in_the_message_dialog() {
     );
     click(&mut harness, "Rendered");
     click(&mut harness, "Close");
-    harness.run_steps(2);
     assert!(harness.query_by_label("Full message").is_none());
 }
 
@@ -3806,10 +3735,7 @@ fn the_review_page_lists_rounds_and_its_controls_dispatch() {
     harness.get_by_label("nothing further");
     harness.get_by_label("converged");
     // The user's own feedback becomes a round for the planner.
-    let field = harness.get_by_label("Your feedback");
-    field.focus();
-    field.type_text("Split step 3");
-    harness.run_steps(2);
+    type_into(&mut harness, "Your feedback", "Split step 3");
     click(&mut harness, "Send my feedback");
     assert!(actions(&harness).contains(&AppAction::UserFeedback {
         run,
@@ -3981,7 +3907,7 @@ fn controller(harness: &mut Harness<'static, SwitchboardApp>, lines: &[&str]) {
 }
 
 #[test]
-fn the_radial_menus_view_and_terminal_open_their_dialogs() {
+fn the_radial_menus_view_opens_the_message_dialog() {
     let (mut harness, ids) = harness();
     let (id, _) = working_set_of_two(&mut harness, &ids);
     let mut conversation = two_turns();
@@ -3991,11 +3917,6 @@ fn the_radial_menus_view_and_terminal_open_their_dialogs() {
         .ui_state
         .conversations
         .insert(id, (None, conversation));
-    harness
-        .state_mut()
-        .ui_state
-        .snapshots
-        .insert(id, "$ cargo test\nok\n".into());
     // While Z is held the menu is on the card; letting go on View asks
     // the UI for the answer, which opens the message dialog.
     controller(&mut harness, &["Z1", "SU"]);
@@ -4080,7 +4001,6 @@ fn an_editor_made_from_a_cards_microphone_can_send_into_its_running_pane() {
     let (id, _) = working_set_of_two(&mut harness, &ids);
     harness.run_steps(2);
     click(&mut harness, "Listen here");
-    harness.run_steps(2);
     // The session page was never shown, so nothing but the pump could
     // have told the editor's sink that the pane runs.
     {
@@ -4419,15 +4339,13 @@ fn scripted_harness(
     window: bool,
     script: &'static str,
 ) -> Harness<'static, SwitchboardApp> {
-    let mut services = fake_services(
-        FakeOpener::default(),
-        FakeSecrets::default(),
-        FakeHost::default(),
-    );
-    services.dispatch = Some(Box::new(FakeDispatch {
-        status: Some(status),
-        blocks: true,
-    }));
+    let services = Services {
+        dispatch: Some(Box::new(FakeDispatch {
+            status: Some(status),
+            blocks: true,
+        })),
+        ..fakes::services()
+    };
     let mut harness = Harness::builder()
         .with_size(egui::vec2(1200.0, 900.0))
         .build_eframe(move |cc| {

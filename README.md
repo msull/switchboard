@@ -51,7 +51,7 @@ workspace, "Everywhere", is in no real workspace and may hold cards
 from all of them; a rule set stores its rule, such as "active in the
 last 24 hours", and the sessions dismissed from it instead of cards),
 the
-tmux config and socket name, `claude-hooks.json` (passed to Claude Code
+`tmux.conf`, `claude-hooks.json` (passed to Claude Code
 with `--settings`), `events.log` (the hook event log), `wake.sock`, and
 `scrollback/` (one `<host>-r<n>.vt` per run of a command or service,
 the last 20 runs kept), `renders/` (first pages of PDFs shown on cards,
@@ -181,6 +181,7 @@ src/core/
   grid.rs                Working Set placement: default card sizes, first free spot, overlap, minimum size, the card a step away, a rule set's flowed layout
   controller.rs          the hand controller's meaning: the selected card per working set, Z's radial menu, the session C holds open
   definitions.rs         .switchboard/project.json entries -> records; hash-keyed approval
+  env.rs                 environment resolution for a new session: global variables, opted-in .env files, the project's own; secrets by account name
   events.rs              hook events -> record activity (matched by record id, ordered by time)
   workflow.rs            plan review runs: reviewer and planner rounds as a state machine over records
   control.rs             the control port's commands run quietly under an operation id; read models in the wire's shapes
@@ -242,9 +243,9 @@ tests/fixtures/          a small real Claude Code transcript for the parser test
 tests/live.rs            ignored: real claude / codex / Ghostty runs
 tests/gate.rs            Milestone 1 gate: real store, tmux, hooks; agents ignored
 control/                 switchboard-control: the control port's wire contract (requests, replies, views) and a blocking client; std + serde only
-dispatch-control/        dispatch-control: the wire contract of Dispatch's own port (tickets as views, decide, queue, take, resume, close) and a blocking client; std + serde only
+dispatch-control/        dispatch-control: the wire contract of Dispatch's own port (tickets as views, decide, queue, take, resume, close, worktrees) and a blocking client; std + serde only
 dispatch/                the `dispatch` binary (docs/dispatch.md; docs/dispatch-agent-guide.md is the command-line guide for agents that take tickets; docs/dispatch-pipeline-improvements.md is the open list of pipeline changes drawn from tickets run so far): a ticket scheduler that drives Switchboard over the control port and never links the app
-  src/main.rs            CLI: take, run, decide, decisions, status, queue, resume, close
+  src/main.rs            CLI: take, run, decide, decisions, status, queue, resume, close, worktrees
   src/serve.rs           Dispatch's port on <data>/dispatch.sock while `run` is up: the records as views, the commands the CLI has, one handler under one lock
   src/pipeline.rs        the TOML pipeline file, parsed in full and validated; fingerprint of the copy a ticket runs
   src/ticket.rs          the ticket record: source, lanes, attempts (with their checks' head and exit), decisions, operation ledger, a close's progress (`CloseProgress`); the per-project queue and closing list

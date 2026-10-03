@@ -824,38 +824,108 @@ impl Repo for FakeRepo {
     }
 }
 
-#[cfg(test)]
-mod check_tests {
-    use super::*;
-
-    #[test]
-    fn a_check_runs_as_a_child_with_its_output_in_the_log_and_is_lost_to_a_new_runner() {
-        let dir = tempfile::tempdir().unwrap();
-        let log = dir.path().join("gate.log");
-        let mut cli = GitCli::default();
-        cli.start_check(
-            "k",
-            dir.path(),
-            &[
-                "sh".into(),
-                "-c".into(),
-                "echo $DISPATCH_LANE; exit 3".into(),
-            ],
-            &[("DISPATCH_LANE".into(), "backend".into())],
-            &log,
-        )
-        .unwrap();
-        let mut code = None;
-        for _ in 0..200 {
-            if let Some(result) = cli.poll_check("k") {
-                code = Some(result.unwrap());
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(20));
-        }
-        assert_eq!(code, Some(3));
-        assert_eq!(std::fs::read_to_string(&log).unwrap().trim(), "backend");
-        assert!(GitCli::default().poll_check("k").unwrap().is_err());
+/// A fake repository shared with a test, so a runner can be replaced (a
+/// restart) over the same heads and checks.
+impl Repo for std::sync::Arc<std::sync::Mutex<FakeRepo>> {
+    fn ensure_clone(&mut self, url: &str, dir: &Path) -> Result<()> {
+        self.lock().unwrap().ensure_clone(url, dir)
+    }
+    fn fetch(&mut self, dir: &Path, remote: &str) -> Result<()> {
+        self.lock().unwrap().fetch(dir, remote)
+    }
+    fn ensure_remote(&mut self, dir: &Path, remote: &str, url: &str) -> Result<()> {
+        self.lock().unwrap().ensure_remote(dir, remote, url)
+    }
+    fn fetch_pull(&mut self, dir: &Path, remote: &str, number: u64) -> Result<()> {
+        self.lock().unwrap().fetch_pull(dir, remote, number)
+    }
+    fn worktree_add(&mut self, repo: &Path, dir: &Path, branch: &str, start: &str) -> Result<()> {
+        self.lock().unwrap().worktree_add(repo, dir, branch, start)
+    }
+    fn rev_parse(&self, dir: &Path, rev: &str) -> Result<String> {
+        self.lock().unwrap().rev_parse(dir, rev)
+    }
+    fn merge_base(&self, dir: &Path, a: &str, b: &str) -> Result<String> {
+        self.lock().unwrap().merge_base(dir, a, b)
+    }
+    fn worktree_track(
+        &mut self,
+        repo: &Path,
+        dir: &Path,
+        branch: &str,
+        remote: &str,
+    ) -> Result<()> {
+        self.lock()
+            .unwrap()
+            .worktree_track(repo, dir, branch, remote)
+    }
+    fn is_worktree_of(&self, repo: &Path, dir: &Path, branch: &str) -> Result<bool> {
+        self.lock().unwrap().is_worktree_of(repo, dir, branch)
+    }
+    fn head(&self, dir: &Path) -> Result<String> {
+        self.lock().unwrap().head(dir)
+    }
+    fn is_clean(&self, dir: &Path) -> Result<bool> {
+        self.lock().unwrap().is_clean(dir)
+    }
+    fn behind(&self, dir: &Path, onto: &str) -> Result<u64> {
+        self.lock().unwrap().behind(dir, onto)
+    }
+    fn rebase_onto(&mut self, dir: &Path, onto: &str) -> Result<bool> {
+        self.lock().unwrap().rebase_onto(dir, onto)
+    }
+    fn free_bytes(&self, dir: &Path) -> Result<u64> {
+        self.lock().unwrap().free_bytes(dir)
+    }
+    fn worktree_move(&mut self, repo: &Path, from: &Path, to: &Path) -> Result<()> {
+        self.lock().unwrap().worktree_move(repo, from, to)
+    }
+    fn worktree_repair(&mut self, repo: &Path, dir: &Path) -> Result<()> {
+        self.lock().unwrap().worktree_repair(repo, dir)
+    }
+    fn worktree_remove(&mut self, repo: &Path, dir: &Path) -> Result<()> {
+        self.lock().unwrap().worktree_remove(repo, dir)
+    }
+    fn changes(&self, dir: &Path) -> Result<Vec<PathBuf>> {
+        self.lock().unwrap().changes(dir)
+    }
+    fn remote_url(&self, dir: &Path) -> Result<Option<String>> {
+        self.lock().unwrap().remote_url(dir)
+    }
+    fn summary(&self, dir: &Path, base: &str) -> Result<String> {
+        self.lock().unwrap().summary(dir, base)
+    }
+    fn run(&mut self, dir: &Path, argv: &[String], env: &[(String, String)]) -> Result<()> {
+        self.lock().unwrap().run(dir, argv, env)
+    }
+    fn start_check(
+        &mut self,
+        key: &str,
+        dir: &Path,
+        argv: &[String],
+        env: &[(String, String)],
+        log: &Path,
+    ) -> Result<()> {
+        self.lock().unwrap().start_check(key, dir, argv, env, log)
+    }
+    fn poll_check(&mut self, key: &str) -> Option<Result<i32>> {
+        self.lock().unwrap().poll_check(key)
+    }
+    fn start_reviewer(
+        &mut self,
+        key: &str,
+        dir: &Path,
+        argv: &[String],
+        env: &[(String, String)],
+        stdout: &Path,
+        stderr: &Path,
+    ) -> Result<()> {
+        self.lock()
+            .unwrap()
+            .start_reviewer(key, dir, argv, env, stdout, stderr)
+    }
+    fn kill_check(&mut self, key: &str) {
+        self.lock().unwrap().kill_check(key);
     }
 }
 
@@ -888,6 +958,35 @@ pub fn branch_name(number: u64, title: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn a_check_runs_as_a_child_with_its_output_in_the_log_and_is_lost_to_a_new_runner() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("gate.log");
+        let mut cli = GitCli::default();
+        cli.start_check(
+            "k",
+            dir.path(),
+            &[
+                "sh".into(),
+                "-c".into(),
+                "echo $DISPATCH_LANE; exit 3".into(),
+            ],
+            &[("DISPATCH_LANE".into(), "backend".into())],
+            &log,
+        )
+        .unwrap();
+        let mut code = None;
+        for _ in 0..200 {
+            if let Some(result) = cli.poll_check("k") {
+                code = Some(result.unwrap());
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert_eq!(code, Some(3));
+        assert_eq!(std::fs::read_to_string(&log).unwrap().trim(), "backend");
+        assert!(GitCli::default().poll_check("k").unwrap().is_err());
+    }
 
     #[test]
     fn branch_names_are_short_and_safe() {
@@ -902,35 +1001,10 @@ mod tests {
     #[test]
     fn the_real_git_cuts_a_worktree_and_reads_its_head() {
         let dir = tempfile::tempdir().unwrap();
-        // An "origin" with one commit on main, cloned the way Dispatch
-        // clones: the clone is the only checkout Dispatch touches.
-        let origin = dir.path().join("origin");
-        std::fs::create_dir_all(&origin).unwrap();
-        let og = |args: &[&str]| {
-            // `git()`, not a bare `Command`: run from a hook, the hook's
-            // `GIT_DIR` would point these at the repository being committed.
-            let out = git_in(&origin).args(args).output().unwrap();
-            assert!(
-                out.status.success(),
-                "{args:?}: {}",
-                String::from_utf8_lossy(&out.stderr)
-            );
-        };
-        og(&["init", "-q", "-b", "main"]);
-        og(&[
-            "-c",
-            "user.name=t",
-            "-c",
-            "user.email=t@t",
-            "commit",
-            "-q",
-            "--allow-empty",
-            "-m",
-            "root",
-        ]);
-        let repo = dir.path().join("clone");
+        // The clone is the only checkout Dispatch touches.
+        let repo = origin_and_clone(dir.path(), "p");
+        let origin = dir.path().join("p-origin");
         let mut cli = GitCli::default();
-        cli.ensure_clone(origin.to_str().unwrap(), &repo).unwrap();
         cli.ensure_clone(origin.to_str().unwrap(), &repo)
             .expect("a second call finds the clone");
         cli.fetch(&repo, "origin").unwrap();
@@ -952,22 +1026,8 @@ mod tests {
         );
         let other = dir.path().join("other");
         std::fs::create_dir_all(&other).unwrap();
-        let other_git = |args: &[&str]| {
-            let ok = git_in(&other).args(args).status().unwrap().success();
-            assert!(ok, "{args:?}");
-        };
-        other_git(&["init", "-q", "-b", "dispatch/1-x"]);
-        other_git(&[
-            "-c",
-            "user.name=t",
-            "-c",
-            "user.email=t@t",
-            "commit",
-            "-q",
-            "--allow-empty",
-            "-m",
-            "x",
-        ]);
+        sh(&other, &["init", "-q", "-b", "dispatch/1-x"]);
+        sh(&other, &["commit", "-q", "--allow-empty", "-m", "x"]);
         assert!(
             !cli.is_worktree_of(&repo, &other, "dispatch/1-x").unwrap(),
             "another repository"
@@ -978,7 +1038,7 @@ mod tests {
         assert!(cli.run(&wt, &["false".to_owned()], &[]).is_err());
     }
 
-    /// `git <args>` in `dir`, which must succeed. Through `git()`, so a
+    /// `git <args>` in `dir`, which must succeed. Through `git_in`, so a
     /// test run from a git hook, with the hook's `GIT_DIR` and
     /// `GIT_INDEX_FILE` set, works on the test's repository and never
     /// on the one being committed to.
