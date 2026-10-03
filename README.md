@@ -250,7 +250,7 @@ dispatch/                the `dispatch` binary (docs/dispatch.md; docs/dispatch-
   src/pipeline.rs        the TOML pipeline file, parsed in full and validated; fingerprint of the copy a ticket runs
   src/ticket.rs          the ticket record: source, lanes, attempts (with their checks' head and exit), decisions, operation ledger, a close's progress (`CloseProgress`); the per-project queue and closing list
   src/scheduler.rs       the runner: stage executors (agent, gate-only lanes, review workflow), completion evidence, decisions, ledgered sends, parking and closing as sequences
-  src/review.rs          the code review stage: rounds of several reviewers over a lane's branch, a fresh implementer per round, checks at every accepted head (docs/dispatch.md, "The code review stage")
+  src/review.rs          the code review stage: rounds of several reviewers over a lane's branch, a fresh implementer per round, checks at every accepted head; a rerun carries the last attempt's settled and open points; style and the plan's decisions do not hold a round open (docs/dispatch.md, "The code review stage")
   src/recover.rs         unanswered ledger operations resolved by class through find and op.status; nothing launched twice
   src/view.rs            the `Dispatch · <project>` working set, one card per queued ticket, redrawn through set.sync
   src/store.rs           Dispatch's data directory, flock, atomic writes; versioned `read_ticket`/`read_project` through `migrate`

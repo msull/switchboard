@@ -496,6 +496,7 @@ cap = 3                       # review passes before the findings left are a que
 review_prompt = "..."         # optional templates; see the section for the defaults and their variables
 fix_prompt = "..."
 no_feedback = "No findings."
+style_rounds = 2              # from this round, a round with only style points converges (live)
 
 [policy]
 slots = 1                     # tickets with a running attempt or a held resource; read live from <project>.toml on every pass, not from a ticket's copy
@@ -1030,6 +1031,45 @@ points the implementer marked `disputed` (or did not answer) stay
 open under their original id unless a reviewer in the new pass wrote
 `withdraw <id>` (bare or as a list item); `keep <id>: why` keeps one with the reason shown.
 
+Points are tagged by their text. A point that starts with `style:`
+(case-insensitive) is about wording, naming, comments or layout; so is
+any untagged point from the reviewer named `style`, so convergence does
+not depend on that reviewer remembering the prefix. A point that starts
+with `decided:` contests the plan's decisions: it never counts as open
+and is listed in the round file under `## Found but not done`, out of
+scope for the review and for the fix pass. Every other point holds the
+round open. From round `style_rounds` (default 2, read from the
+project's live pipeline file each round, the `.pr.toml` for a ticket
+taken from a pull request), a round whose open points are all style
+converges at the head the reviewers read: no fix pass runs that no
+reviewer would see, and the points go under `## Left to the merge`.
+Before that round, style points reach the fixer like any other. A
+round file's sections are `## Points`, `## Still open from earlier
+rounds`, `## Left to the merge` and `## Found but not done`, each
+written only when it lists something; a round with none open but some
+left or found says "No open point." first. Only the first two carry
+into the next round.
+
+**A new attempt** of the stage in the same context (a `rerun`, or a
+later gate's send-back) carries the latest earlier attempt whose rounds
+gathered findings (`Attempt.carried_from`; an attempt that failed
+before gathering any passes on what it carried). Its round 1 reviewers
+are told the old attempt's last gathered round: the head it read, the
+points settled there (not to be raised again) and the points still
+open, and they read the change from that head to the new one (`git
+diff`, or `git range-diff` when the base moved). The open points are
+open coming into round 1 under ids qualified with the attempt they
+were raised in, `a<n>/r<round>/<reviewer>-<k>`, since ids are unique
+only within an attempt; an id carried twice keeps its first qualifier.
+Rounds are numbered from 1 again, but for `style_rounds` a carried
+attempt's round k counts as round N + k, N being the last round the old
+attempt read; the cap is per attempt. A note that contains `start over`
+(case-insensitive) gives a plain attempt that reviews the whole branch,
+and the rerun question says so. A send-back note leaves `t.rework` when
+the attempt starts and is kept on it (`Attempt.rework`) for its first
+fix pass; an attempt that failed before any fix pass passes it on to
+the very next attempt, and only to that one.
+
 No open point converges the round: the stage's checks run at that
 head (see below) and the stage completes bound to it. Open points at
 a pass under the cap go by the `review-code` dial: `auto` starts the
@@ -1070,8 +1110,14 @@ it: each round's base, head, reviewers (name, kind, session or launch
 intent, completion, result), the aggregated feedback, the open point
 count, the implementer's session, response and `head_after`, and its
 state (`reviewing`, `findings`, `fixing`, `fixed`, `converged`,
-`accepted`, `failed`). Artifacts per round: each reviewer's file
-(`r<n>/<reviewer>`), `r<n>/feedback`, `r<n>/response`, `r<n>/checks`.
+`accepted`, `failed`), plus `carried_from` and `rework` (see "A new
+attempt"). Artifacts per round: each reviewer's file
+(`r<n>/<reviewer>`), `r<n>/feedback`, `r<n>/response`, `r<n>/checks`;
+and once the attempt completes, `summary` (`summary.md` in the attempt
+directory): how it ended (converged, or accepted with how many points
+open), what it carried, the last round's points left to the merge, its
+open points when accepted, and every round's points found but not
+done.
 The wire view carries `AttemptView.rounds`; the ticket page shows one
 line per round. Nothing in Switchboard's `model.rs`, `AppAction` or
 `Effect` changed: reviewers and implementers are ordinary sessions
@@ -1096,7 +1142,16 @@ values; when earlier points are open the reviewer is also told
 `{previous_feedback}` and `{previous_response}` and how to withdraw
 or keep each. `fix_prompt` takes `{feedback}`, `{response}`,
 `{worktree}`, `{branch}`, `{plan}`. Operator guidance is rendered with
-the same values and comes first.
+the same values and comes first. Four texts follow every agent
+reviewer's template, whatever the stage's `review_prompt`: on round 1
+of a carried attempt, the old attempt's settled and open points and the
+range to read; on the first review of a rebase (below), the check of
+it; when the ticket has a plan, its decisions section (a heading whose
+title, after an optional number, starts with "Decisions") as settled,
+with how to write a `decided:` point, or that the plan lists none (an
+unreadable plan file adds nothing); and how to tag a `style:` point.
+A command reviewer gets no prompt: its points are untagged and hold the
+round open.
 
 Out of scope for this cut: reviewers seeing each other's points, a
 workflow or a human as a reviewer, review of anything but a branch,
@@ -1202,7 +1257,18 @@ leave the branch as it was and say why; the stage waits for it, reads
 the branch again when it stops, and after `max_rebases` such attempts,
 or without a rebaser, asks a `refresh` question with `recheck`. The
 attempts and the question carry the pseudo-stage `refresh`, so no
-stage mistakes them for its own. Pull-request tickets are someone
+stage mistakes them for its own. Each bring-up is recorded on the lane
+(`LaneRecord.refreshed`) with `from`, `to`, whether the branch had
+commits of its own (its head before the bring-up was not the old
+`base_sha`), when it was recorded, and, when it followed a rebaser
+(nothing left behind), that rebaser's notes: the latest finished
+`refresh` attempt in the lane started after the lane's previous
+bring-up, none after a bring-up recorded before its time was. The first
+code review round that reads the new base after a rebase with commits
+is told to check it: both sides of every conflicted hunk present, and
+the base's additions in `from..to` unchanged by the branch, with the
+rebaser's notes when there are some. A later round or a rerun that
+already read that base is not told again. Pull-request tickets are someone
 else's branch and are never refreshed; `lanes`, a human look and the
 merge watch launch nothing and are not refreshed either.
 
@@ -1556,6 +1622,12 @@ and one against the real one:
 | Reviewers object | `feedback.md` with each point's reviewer and id; `review-code` asks; `fix` starts a fresh implementer with the file; its commit is checked at the new head; round two opens there with the earlier file in the prompt (`findings_are_fixed_by_a_fresh_implementer_and_checked_at_the_new_head`) |
 | A disputed point, no code change, the reviewer keeps it; the cap is reached | The point carries its original id, marked kept with the reason; fixed points close; `review-cap` offers accept, more, park; `accept` runs the checks at the reviewed head (not reused: a different head) and completes (`the_cap_offers_the_reviewed_head_and_accept_completes_at_it`) |
 | A disputed point the reviewer withdraws; `review-code = "auto"` | No question; the fix pass runs; the point closes in pass two, which converges (`a_withdrawn_point_closes_and_the_auto_dial_fixes_without_asking`) |
+| A rerun after three rounds and a failure | `carried_from` names the old attempt; round 1's reviewers are told the head it read through round 2, the settled points and the open ones under `a1/...` ids, and read only `git diff` since; the open point is still open in round 1's file and the settled one is not there (`a_rerun_review_carries_the_old_attempts_settled_and_open_points`) |
+| The same rerun noted "start over please" | No carry; the note is on the attempt, off the ticket, and ends the first fix pass's prompt; the rerun question names the phrase (`a_rerun_noted_start_over_reviews_the_whole_branch`) |
+| Round 3 raises only a `style:` point | The round converges at the head the reviewers read with the point under "Left to the merge"; no fix pass; the checks run there and `summary.md` lists the point (`a_style_only_round_three_converges_and_leaves_the_point_to_the_merge`) |
+| The plan has a "Decisions" section | The reviewers are given it as settled and not the rest of the plan; a `decided:` point holds nothing open and is listed as found but not done, in the round file and the summary (`the_plans_decisions_reach_the_reviewer_as_settled`) |
+| The base moved under a branch with commits before `review-code` | The branch is rebased, `refreshed.commits` is set, round 1 is told to check the rebase, and a rerun at that base is not (`a_review_after_a_rebase_with_commits_checks_the_rebase`) |
+| The base moved under a branch with no commits | The branch moves; no rebase check (`a_review_after_a_clean_move_has_no_rebase_check`) |
 | A command reviewer exits 2; an agent reviewer stops with no file | The round fails into `rerun`; the sibling session is killed first; neither is an approval (`a_failed_reviewer_fails_the_round_after_its_siblings_are_killed`) |
 | An agent stops while its card still reads `working`, and writes its notes in a later turn | The attempt is held with no failure, no question and no kill; notes written mid-turn complete nothing until a Stop leaves the card idle (`a_stop_while_still_working_holds_the_attempt_until_the_notes_land`; idle without notes fails only after `STOP_IDLE_POLLS`: `a_stop_idle_without_notes_fails_after_the_grace`) |
 | A Claude reviewer stops busy and writes later | No result, no rerun, no sibling killed while it works; its later write and Stop finish the round (`a_reviewer_that_stops_busy_and_writes_later_completes_the_round`; the implementer the same: `an_implementer_that_stops_busy_keeps_its_round`) |

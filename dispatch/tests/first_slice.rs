@@ -4939,6 +4939,27 @@ fn review_pipeline(worktrees: &std::path::Path, dial: &str) -> String {
 /// A ticket at the first review round: implement done, its checks
 /// green, both reviewers started. The lane's base is `root0000`.
 fn at_review(env: &mut Env) -> String {
+    let (id, implementer) = before_review(env);
+    review_starts(env, &id, &implementer);
+    id
+}
+
+/// `at_review` with the plan the reviewers are pointed at replaced by
+/// `text`, or removed when there is none.
+fn at_review_with_plan(env: &mut Env, text: Option<&str>) -> String {
+    let (id, implementer) = before_review(env);
+    let plan = env.ticket(&id).input("plan").cloned().unwrap();
+    match text {
+        Some(text) => std::fs::write(&plan, text).unwrap(),
+        None => std::fs::remove_file(&plan).unwrap(),
+    }
+    review_starts(env, &id, &implementer);
+    id
+}
+
+/// The first half of `at_review`: the implementer running on a lane
+/// whose base is `root0000`.
+fn before_review(env: &mut Env) -> (String, String) {
     let path = env.data.pipeline(PROJECT);
     if !std::fs::read_to_string(&path)
         .unwrap()
@@ -4952,8 +4973,14 @@ fn at_review(env: &mut Env) -> String {
         .unwrap()
         .bases
         .insert(env.data.repo_dir(PROJECT), "root0000".into());
-    let (id, implementer) = at_implement(env);
-    implementer_stops(env, &id, &implementer);
+    at_implement(env)
+}
+
+/// The second half of `at_review`: the implementer stops, its checks
+/// pass and the reviewers start.
+fn review_starts(env: &mut Env, id: &str, implementer: &str) {
+    let id = id.to_owned();
+    implementer_stops(env, &id, implementer);
     env.steps_until(&id, "the checks starting", |t, _| {
         t.attempts_of("implement")
             .last()
@@ -4973,7 +5000,6 @@ fn at_review(env: &mut Env) -> String {
             })
         })
     });
-    id
 }
 
 /// The prompt of the newest session started under `name`.
@@ -5687,6 +5713,600 @@ fn a_lost_command_reviewer_is_failed_not_started_again() {
         !env.repo.lock().unwrap().checks.iter().any(|c| c.key == key),
         "not started again"
     );
+}
+
+// --- review rounds carry forward
+
+/// `review_pipeline` with room for three rounds and the fix passes run
+/// without asking.
+fn with_three_rounds(env: &Env) {
+    let path = env.data.pipeline(PROJECT);
+    let text = review_pipeline(&env.data.root.join("wt"), "auto").replace("cap = 2\n", "cap = 4\n");
+    std::fs::write(path, text).unwrap();
+}
+
+/// Waits for round `n` of the latest review attempt to have every
+/// reviewer started.
+fn round_started(env: &mut Env, id: &str, n: usize) {
+    env.steps_until(id, "the round's reviewers", |t, _| {
+        t.attempts_of("review-code")
+            .last()
+            .and_then(|a| a.rounds.get(n - 1))
+            .is_some_and(|r| {
+                r.reviewers
+                    .iter()
+                    .all(|x| x.session.is_some() || x.launched)
+            })
+    });
+}
+
+/// Round `n`'s implementer (started without asking) commits `head`
+/// and answers with `response`; the checks after it exit `code`.
+fn fix_pass(env: &mut Env, id: &str, n: u32, head: &str, response: &str, code: i32) {
+    let i = n as usize - 1;
+    env.steps_until(id, "the implementer", |t, _| {
+        review_attempt(t)
+            .rounds
+            .get(i)
+            .is_some_and(|r| r.implementer.is_some())
+    });
+    let t = env.ticket(id);
+    let round = review_attempt(&t).rounds[i].clone();
+    env.repo
+        .lock()
+        .unwrap()
+        .heads
+        .insert(t.lanes[0].worktree.clone(), head.into());
+    env.finish(
+        &round.implementer.unwrap(),
+        &round.response.unwrap(),
+        response,
+    );
+    env.steps_until(id, "the checks", |t, _| review_attempt(t).gate.is_some());
+    let t = env.ticket(id);
+    env.repo
+        .lock()
+        .unwrap()
+        .check_exits
+        .insert(checks_key(&t, n), code);
+}
+
+/// The pending `rerun` question answered `rerun` with `note`; then the
+/// new attempt's first round started.
+fn rerun_with(env: &mut Env, id: &str, note: Option<&str>) {
+    env.steps_until(id, "the rerun question", |t, _| {
+        t.pending_decisions().iter().any(|d| d.name == "rerun")
+    });
+    let before = env.ticket(id).attempts_of("review-code").count();
+    let d = env
+        .pending(id)
+        .into_iter()
+        .find(|d| d.name == "rerun")
+        .unwrap();
+    let now = env.tick();
+    env.runner.decide(id, &d.id, "rerun", note, now).unwrap();
+    env.steps_until(id, "the new attempt", |t, _| {
+        t.attempts_of("review-code").count() == before + 1
+    });
+    round_started(env, id, 1);
+}
+
+/// Three rounds and a failure: lint raises two points, both disputed;
+/// style withdraws one and keeps the other, disputed again; lint
+/// exits 2 in round three. The rerun question is pending.
+fn three_rounds_then_a_failure(env: &mut Env) -> String {
+    with_three_rounds(env);
+    let id = at_review(env);
+    lint_exits(
+        env,
+        &id,
+        1,
+        1,
+        "- src/a.rs:3: unused import\n- src/b.rs:9: dead code\n",
+    );
+    style_says(env, &id, 1, "No findings.");
+    fix_pass(
+        env,
+        &id,
+        1,
+        "fix00001",
+        "- r1/lint-1: disputed used by a macro\n- r1/lint-2: disputed kept for the test\n",
+        0,
+    );
+    round_started(env, &id, 2);
+    lint_exits(env, &id, 2, 0, "");
+    style_says(
+        env,
+        &id,
+        2,
+        "- withdraw r1/lint-1\n- keep r1/lint-2: still dead\n",
+    );
+    fix_pass(
+        env,
+        &id,
+        2,
+        "fix00002",
+        "- r1/lint-2: disputed the test reads it\n",
+        0,
+    );
+    round_started(env, &id, 3);
+    lint_exits(env, &id, 3, 2, "");
+    env.steps_until(&id, "the rerun question", |t, _| {
+        t.pending_decisions().iter().any(|d| d.name == "rerun")
+    });
+    id
+}
+
+/// A rerun after a failed round carries the earlier attempt's last
+/// gathered state: its settled points are named so they are not raised
+/// again, its open points are open coming into round one under ids
+/// qualified with the attempt, and the reviewers read only the change
+/// since.
+#[test]
+fn a_rerun_review_carries_the_old_attempts_settled_and_open_points() {
+    let mut env = Env::new();
+    let id = three_rounds_then_a_failure(&mut env);
+    let question = env
+        .pending(&id)
+        .into_iter()
+        .find(|d| d.name == "rerun")
+        .unwrap()
+        .question;
+    assert!(question.contains("start over"), "{question}");
+    rerun_with(&mut env, &id, None);
+    let t = env.ticket(&id);
+    let a = review_attempt(&t);
+    assert_eq!(a.n, 2);
+    assert_eq!(a.carried_from, Some(("review-code".to_owned(), 1)));
+    let prompt = last_prompt_of(&env, "style");
+    assert!(
+        prompt.contains("reviewed this branch at fix00001 through round 2"),
+        "{prompt}"
+    );
+    assert!(prompt.contains("git diff fix00001 fix00002"), "{prompt}");
+    let open_at = prompt.find("These are still open").unwrap();
+    let settled = prompt
+        .find("- a1/r1/lint-1: src/a.rs:3: unused import")
+        .unwrap();
+    let open = prompt
+        .rfind("- a1/r1/lint-2: src/b.rs:9: dead code")
+        .unwrap();
+    assert!(settled < open_at && open_at < open, "{prompt}");
+    style_says(&mut env, &id, 1, "- src/c.rs: a new point\n");
+    lint_exits(&mut env, &id, 1, 0, "");
+    env.steps_until(&id, "round one gathered", |t, _| {
+        review_attempt(t).rounds[0].feedback.is_some()
+    });
+    let a = review_attempt(&env.ticket(&id));
+    assert_eq!(a.rounds[0].open_points, 2);
+    let feedback = std::fs::read_to_string(a.rounds[0].feedback.clone().unwrap()).unwrap();
+    let still = feedback.find("## Still open from earlier rounds").unwrap();
+    let kept = feedback
+        .find("- a1/r1/lint-2: src/b.rs:9: dead code")
+        .unwrap();
+    assert!(still < kept, "{feedback}");
+    assert!(
+        feedback.contains("- r1/style-1 (style): src/c.rs: a new point"),
+        "{feedback}"
+    );
+    assert!(!feedback.contains("a1/r1/lint-1"), "{feedback}");
+}
+
+/// A rerun whose note says "start over" reviews the whole branch: no
+/// carry, and the note moves onto the attempt and reaches its first fix
+/// pass.
+#[test]
+fn a_rerun_noted_start_over_reviews_the_whole_branch() {
+    let mut env = Env::new();
+    let id = three_rounds_then_a_failure(&mut env);
+    rerun_with(&mut env, &id, Some("start over please"));
+    let t = env.ticket(&id);
+    let a = review_attempt(&t);
+    assert_eq!(a.n, 2);
+    assert_eq!(a.carried_from, None);
+    assert_eq!(a.rework.as_deref(), Some("start over please"));
+    assert!(t.rework.is_empty(), "{:?}", t.rework);
+    let prompt = last_prompt_of(&env, "style");
+    assert!(!prompt.contains("earlier attempt"), "{prompt}");
+    style_says(&mut env, &id, 1, "- src/c.rs: a new point\n");
+    lint_exits(&mut env, &id, 1, 0, "");
+    env.steps_until(&id, "the implementer", |t, _| {
+        review_attempt(t).rounds[0].implementer.is_some()
+    });
+    let prompt = last_prompt_of(&env, "implementer");
+    assert!(prompt.ends_with("start over please"), "{prompt}");
+}
+
+/// A note given to an attempt that failed before any fixer saw it is
+/// passed to the next attempt; one a fixer was given is not passed on,
+/// even though an older attempt still holds it unspent.
+#[test]
+fn a_note_survives_a_review_that_fails_before_its_fix_pass() {
+    let mut env = Env::new();
+    with_three_rounds(&env);
+    let id = at_review(&mut env);
+    lint_exits(&mut env, &id, 1, 2, "");
+    rerun_with(&mut env, &id, Some("rename tmp"));
+    let t = env.ticket(&id);
+    assert_eq!(review_attempt(&t).rework.as_deref(), Some("rename tmp"));
+    assert!(t.rework.is_empty());
+    lint_exits(&mut env, &id, 1, 2, "");
+    rerun_with(&mut env, &id, None);
+    let t = env.ticket(&id);
+    assert_eq!(review_attempt(&t).n, 3);
+    assert_eq!(review_attempt(&t).rework.as_deref(), Some("rename tmp"));
+    lint_exits(&mut env, &id, 1, 1, "src/a.rs:3: unused import\n");
+    style_says(&mut env, &id, 1, "No findings.");
+    env.steps_until(&id, "the implementer", |t, _| {
+        review_attempt(t).rounds[0].implementer.is_some()
+    });
+    let prompt = last_prompt_of(&env, "implementer");
+    assert!(prompt.ends_with("rename tmp"), "{prompt}");
+    fix_pass(
+        &mut env,
+        &id,
+        1,
+        "fix00001",
+        "- r1/lint-1: fixed removed\n",
+        1,
+    );
+    rerun_with(&mut env, &id, None);
+    let a = review_attempt(&env.ticket(&id));
+    assert_eq!(a.n, 4);
+    assert_eq!(a.rework, None, "the attempt before it spent the note");
+}
+
+/// A note on an attempt that converges at round one leaves the ticket
+/// with it, so nothing stays sent back.
+#[test]
+fn a_review_that_converges_at_round_one_does_not_keep_its_note() {
+    let mut env = Env::new();
+    with_three_rounds(&env);
+    let id = at_review(&mut env);
+    lint_exits(&mut env, &id, 1, 2, "");
+    rerun_with(&mut env, &id, Some("look at the docs too"));
+    lint_exits(&mut env, &id, 1, 0, "");
+    style_says(&mut env, &id, 1, "No findings.");
+    env.steps_until(&id, "the stage completing", |t, _| {
+        review_attempt(t).state == AttemptState::Complete
+    });
+    let t = env.ticket(&id);
+    assert!(t.rework.is_empty(), "{:?}", t.rework);
+    assert_eq!(
+        review_attempt(&t).rework.as_deref(),
+        Some("look at the docs too")
+    );
+    env.step();
+    assert_eq!(env.ticket(&id).stage, 6, "on to inspect");
+}
+
+/// The acceptance: a third round with only a style point converges at
+/// the head the reviewers read, the point is left to the merge in the
+/// round file and in the summary, and the checks run at that head.
+#[test]
+fn a_style_only_round_three_converges_and_leaves_the_point_to_the_merge() {
+    let mut env = Env::new();
+    with_three_rounds(&env);
+    let id = at_review(&mut env);
+    lint_exits(&mut env, &id, 1, 1, "src/a.rs:3: unused import\n");
+    style_says(&mut env, &id, 1, "- style: rename tmp\n");
+    fix_pass(
+        &mut env,
+        &id,
+        1,
+        "fix00001",
+        "- r1/lint-1: fixed removed\n- r1/style-1: fixed renamed\n",
+        0,
+    );
+    round_started(&mut env, &id, 2);
+    lint_exits(&mut env, &id, 2, 1, "src/b.rs:9: dead code\n");
+    style_says(&mut env, &id, 2, "- style: comment wording\n");
+    fix_pass(
+        &mut env,
+        &id,
+        2,
+        "fix00002",
+        "- r2/lint-1: fixed removed\n- r2/style-1: fixed reworded\n",
+        0,
+    );
+    round_started(&mut env, &id, 3);
+    lint_exits(&mut env, &id, 3, 0, "");
+    style_says(&mut env, &id, 3, "- style: one more wording\n");
+    env.steps_until(&id, "the final checks", |t, _| {
+        review_attempt(t).gate.is_some()
+    });
+    let t = env.ticket(&id);
+    let a = review_attempt(&t);
+    assert_eq!(a.rounds[2].state, RoundState::Converged);
+    assert_eq!(a.rounds[2].open_points, 0);
+    assert!(
+        a.rounds[2].implementer.is_none(),
+        "no fix pass no one would read"
+    );
+    assert_eq!(a.gate.as_ref().unwrap().head, "fix00002");
+    let feedback = std::fs::read_to_string(a.rounds[2].feedback.clone().unwrap()).unwrap();
+    assert!(feedback.contains("No open point."), "{feedback}");
+    let left = feedback.find("## Left to the merge").unwrap();
+    let point = feedback
+        .find("- r3/style-1 (style): style: one more wording")
+        .unwrap();
+    assert!(left < point, "{feedback}");
+    env.repo
+        .lock()
+        .unwrap()
+        .check_exits
+        .insert(checks_key(&t, 3), 0);
+    env.steps_until(&id, "the stage completing", |t, _| {
+        review_attempt(t).state == AttemptState::Complete
+    });
+    let a = review_attempt(&env.ticket(&id));
+    let summary = std::fs::read_to_string(&a.artifacts["summary"]).unwrap();
+    assert!(
+        summary.contains("Converged at `fix00002` in round 3."),
+        "{summary}"
+    );
+    let left = summary.find("## Left to the merge").unwrap();
+    let point = summary
+        .find("- r3/style-1 (style): style: one more wording")
+        .unwrap();
+    let after = summary.find("## Found but not done").unwrap();
+    assert!(left < point && point < after, "{summary}");
+}
+
+/// Before `style_rounds`, style points go to the fixer like any other.
+#[test]
+fn style_points_in_round_one_go_to_the_fixer() {
+    let mut env = Env::new();
+    with_three_rounds(&env);
+    let id = at_review(&mut env);
+    lint_exits(&mut env, &id, 1, 0, "");
+    style_says(&mut env, &id, 1, "- style: rename tmp\n");
+    env.steps_until(&id, "the implementer", |t, _| {
+        review_attempt(t).rounds[0].implementer.is_some()
+    });
+    assert_eq!(review_attempt(&env.ticket(&id)).rounds[0].open_points, 1);
+}
+
+/// `style_rounds` is read from the project's live pipeline file, not
+/// the ticket's copy.
+#[test]
+fn style_rounds_is_read_from_the_live_pipeline() {
+    let mut env = Env::new();
+    with_three_rounds(&env);
+    let id = at_review(&mut env);
+    let path = env.data.pipeline(PROJECT);
+    let text = std::fs::read_to_string(&path).unwrap();
+    std::fs::write(
+        &path,
+        text.replace("cap = 4\n", "cap = 4\nstyle_rounds = 1\n"),
+    )
+    .unwrap();
+    lint_exits(&mut env, &id, 1, 0, "");
+    style_says(&mut env, &id, 1, "- style: rename tmp\n");
+    env.steps_until(&id, "round one gathered", |t, _| {
+        review_attempt(t).rounds[0].feedback.is_some()
+    });
+    let a = review_attempt(&env.ticket(&id));
+    assert_eq!(a.rounds[0].state, RoundState::Converged);
+    assert!(a.rounds[0].implementer.is_none());
+}
+
+/// The plan's decisions section reaches the reviewers as settled; a
+/// point that contests it holds nothing open and is listed as found but
+/// not done, in the round file and in the summary.
+#[test]
+fn the_plans_decisions_reach_the_reviewer_as_settled() {
+    let mut env = Env::new();
+    let id = at_review_with_plan(
+        &mut env,
+        Some("## 2. Decisions\n- D1: keep X because Y\n## Tests\n- t1\n"),
+    );
+    let prompt = last_prompt_of(&env, "style");
+    assert!(prompt.contains("settled these decisions"), "{prompt}");
+    assert!(prompt.contains("D1: keep X because Y"), "{prompt}");
+    assert!(prompt.contains("- decided:"), "{prompt}");
+    assert!(prompt.contains("style: "), "{prompt}");
+    assert!(!prompt.contains("- t1"), "{prompt}");
+    style_says(&mut env, &id, 1, "- decided: D1 should be Z\n");
+    lint_exits(&mut env, &id, 1, 0, "");
+    env.steps_until(&id, "the stage completing", |t, _| {
+        review_attempt(t).state == AttemptState::Complete
+    });
+    let a = review_attempt(&env.ticket(&id));
+    assert_eq!(a.rounds[0].state, RoundState::Converged);
+    let feedback = std::fs::read_to_string(a.rounds[0].feedback.clone().unwrap()).unwrap();
+    let section = feedback.find("## Found but not done").unwrap();
+    let point = feedback
+        .find("- r1/style-1 (style): decided: D1 should be Z")
+        .unwrap();
+    assert!(section < point, "{feedback}");
+    let summary = std::fs::read_to_string(&a.artifacts["summary"]).unwrap();
+    let section = summary.find("## Found but not done").unwrap();
+    let point = summary.find("decided: D1 should be Z").unwrap();
+    assert!(section < point, "{summary}");
+}
+
+/// A plan with no decisions section is said to have none.
+#[test]
+fn a_plan_without_decisions_says_so() {
+    let mut env = Env::new();
+    at_review_with_plan(&mut env, Some("# Plan\n## Steps\n- s1\n"));
+    let prompt = last_prompt_of(&env, "style");
+    assert!(prompt.contains("lists no decisions"), "{prompt}");
+}
+
+/// A plan file that cannot be read says nothing about decisions.
+#[test]
+fn a_plan_that_cannot_be_read_adds_nothing() {
+    let mut env = Env::new();
+    at_review_with_plan(&mut env, None);
+    let prompt = last_prompt_of(&env, "style");
+    assert!(!prompt.contains("settled these decisions"), "{prompt}");
+    assert!(!prompt.contains("lists no decisions"), "{prompt}");
+}
+
+/// The implementer running on a lane cut from `root0000` with the tree
+/// at `head`; then the base moves to `main0002`, one commit ahead, and
+/// the implementer stops. With `conflict` the rebase at `review-code`
+/// stops on a conflict.
+fn base_moves_before_review(env: &mut Env, head: &str, conflict: bool) -> (String, String) {
+    env.with_review_stage("auto");
+    let (id, implementer) = before_review(env);
+    let tree = env.ticket(&id).lanes[0].worktree.clone();
+    {
+        let mut repo = env.repo.lock().unwrap();
+        repo.heads.insert(tree.clone(), head.into());
+        repo.bases
+            .insert(env.data.repo_dir(PROJECT), "main0002".into());
+        repo.behind.insert(tree.clone(), 1);
+        if conflict {
+            repo.rebase_conflicts.push(tree);
+        }
+    }
+    (id, implementer)
+}
+
+/// The branch had commits when the base moved, so it was rebased: the
+/// first review after it is told to check the rebase, and a rerun that
+/// reads the same base is not told again.
+#[test]
+fn a_review_after_a_rebase_with_commits_checks_the_rebase() {
+    let mut env = Env::new();
+    let (id, implementer) = base_moves_before_review(&mut env, "impl0001", false);
+    review_starts(&mut env, &id, &implementer);
+    let t = env.ticket(&id);
+    let moved = t.lanes[0].refreshed.clone().unwrap();
+    assert_eq!(
+        (moved.from.as_str(), moved.to.as_str()),
+        ("root0000", "main0002")
+    );
+    assert!(moved.commits);
+    assert_eq!(moved.notes, None);
+    assert_eq!(review_attempt(&t).rounds[0].base, "main0002");
+    let prompt = last_prompt_of(&env, "style");
+    assert!(prompt.contains("git log root0000..main0002"), "{prompt}");
+    assert!(
+        prompt.contains("both sides of every conflicted hunk"),
+        "{prompt}"
+    );
+    // Round one gathers findings; its fixer vanishes, so the attempt fails.
+    lint_exits(&mut env, &id, 1, 1, "src/a.rs:3: unused import\n");
+    style_says(&mut env, &id, 1, "No findings.");
+    env.steps_until(&id, "the implementer", |t, _| {
+        review_attempt(t).rounds[0].implementer.is_some()
+    });
+    let fixer = review_attempt(&env.ticket(&id)).rounds[0]
+        .implementer
+        .clone()
+        .unwrap();
+    env.sb().vanish(&fixer);
+    rerun_with(&mut env, &id, None);
+    let prompt = last_prompt_of(&env, "style");
+    assert!(
+        !prompt.contains("both sides of every conflicted hunk"),
+        "{prompt}"
+    );
+}
+
+/// A branch with no commits of its own is moved, not rebased: no check.
+#[test]
+fn a_review_after_a_clean_move_has_no_rebase_check() {
+    let mut env = Env::new();
+    let (id, implementer) = base_moves_before_review(&mut env, "root0000", false);
+    review_starts(&mut env, &id, &implementer);
+    let t = env.ticket(&id);
+    assert!(!t.lanes[0].refreshed.clone().unwrap().commits);
+    let prompt = last_prompt_of(&env, "style");
+    assert!(!prompt.contains("rebased onto it"), "{prompt}");
+}
+
+/// The rebaser resolved the conflict that brought the branch up to its
+/// base at `review-code`; then stops: the review starts once the
+/// branch is read again.
+fn rebaser_resolves(env: &mut Env, id: &str, implementer: &str) {
+    implementer_stops(env, id, implementer);
+    env.steps_until(id, "the checks starting", |t, _| {
+        t.attempts_of("implement")
+            .last()
+            .is_some_and(|a| a.gate.is_some())
+    });
+    env.repo
+        .lock()
+        .unwrap()
+        .check_exits
+        .insert(format!("{id}/implement/1"), 0);
+    env.steps_until(id, "the rebaser", |t, _| {
+        t.attempts_of(dispatch::scheduler::REFRESH)
+            .any(|a| a.session.is_some())
+    });
+    let t = env.ticket(id);
+    let rebase = t
+        .attempts_of(dispatch::scheduler::REFRESH)
+        .last()
+        .unwrap()
+        .clone();
+    {
+        let mut repo = env.repo.lock().unwrap();
+        repo.rebase_conflicts.clear();
+        repo.behind.clear();
+    }
+    env.finish(
+        &rebase.session.clone().unwrap(),
+        &rebase.artifacts["notes"].clone(),
+        "# rebased\nkept both sides of the scheduler change",
+    );
+    round_started(env, id, 1);
+}
+
+/// A rebase a rebaser finished is checked with its notes attached; one
+/// whose lane last moved before moves were timed gets the check but not
+/// the notes, since the record cannot say which move the rebaser served.
+#[test]
+fn a_review_after_a_rebaser_attaches_its_notes() {
+    let mut env = Env::new();
+    let (id, implementer) = base_moves_before_review(&mut env, "impl0001", true);
+    rebaser_resolves(&mut env, &id, &implementer);
+    let t = env.ticket(&id);
+    let notes = t
+        .attempts_of(dispatch::scheduler::REFRESH)
+        .last()
+        .unwrap()
+        .artifacts["notes"]
+        .clone();
+    let moved = t.lanes[0].refreshed.clone().unwrap();
+    assert!(moved.commits);
+    assert_eq!(moved.notes.as_ref(), Some(&notes));
+    let prompt = last_prompt_of(&env, "style");
+    assert!(
+        prompt.contains("both sides of every conflicted hunk"),
+        "{prompt}"
+    );
+    assert!(
+        prompt.contains(&format!("The rebaser's notes are at {}.", notes.display())),
+        "{prompt}"
+    );
+
+    let mut env = Env::new();
+    let (id, implementer) = base_moves_before_review(&mut env, "impl0001", true);
+    let mut t = env.ticket(&id);
+    t.lanes[0].refreshed = Some(dispatch::ticket::Refreshed {
+        from: "old00000".into(),
+        to: "root0000".into(),
+        commits: false,
+        notes: None,
+        at_ms: 0,
+    });
+    dispatch::store::write_ticket(&env.data.ticket_file(&id), &t).unwrap();
+    rebaser_resolves(&mut env, &id, &implementer);
+    let moved = env.ticket(&id).lanes[0].refreshed.clone().unwrap();
+    assert!(moved.commits);
+    assert_eq!(moved.notes, None);
+    let prompt = last_prompt_of(&env, "style");
+    assert!(
+        prompt.contains("both sides of every conflicted hunk"),
+        "{prompt}"
+    );
+    assert!(!prompt.contains("The rebaser's notes"), "{prompt}");
 }
 
 /// A plan sits while main moves: when the implementer's stage begins,

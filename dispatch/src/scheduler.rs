@@ -23,7 +23,7 @@ use crate::store::{
 use crate::template::Vars;
 use crate::ticket::{
     Attempt, AttemptKind, AttemptState, CloseProgress, Decision, DecisionKind, DecisionState,
-    GateRun, LaneRecord, Operation, ProjectState, PullRequestRecord, PullRequestSource,
+    GateRun, LaneRecord, Operation, ProjectState, PullRequestRecord, PullRequestSource, Refreshed,
     SETTLE_POLLS, STOP_IDLE_POLLS, Settle, SourceSnapshot, Ticket, TicketState,
 };
 
@@ -765,6 +765,25 @@ impl Runner {
         }
     }
 
+    /// `push_refreshed`, and the head it left on the remote recorded
+    /// on the lane as its `pushed`.
+    fn record_push(
+        &mut self,
+        t: &mut Ticket,
+        p: &Pipeline,
+        i: usize,
+        remote: &str,
+        now_ms: u64,
+    ) -> Result<()> {
+        if let Some(head) = self.push_refreshed(t, p, i, remote)? {
+            t.lanes[i].pushed = Some(crate::ticket::PushedHead {
+                head,
+                at_ms: now_ms,
+            });
+        }
+        Ok(())
+    }
+
     /// One lane's branch against its base; true when the stage must
     /// wait on a rebaser or a question for it.
     fn refresh_lane(
@@ -810,9 +829,13 @@ impl Runner {
             );
             return Ok(false);
         }
+        // Both read before anything moves: a branch with no commits of
+        // its own sits at the commit it was cut from or last moved to.
+        let from = t.lanes[i].base_sha.clone().unwrap_or_default();
+        let head_before = self.git.head(&worktree)?;
+        let commits = !from.is_empty() && head_before != from;
         let brought_up = behind == 0 || self.git.rebase_onto(&worktree, &onto)?;
         if brought_up {
-            let from = t.lanes[i].base_sha.clone().unwrap_or_default();
             log::info!(
                 "ticket {} lane {}: base moved {from} -> {onto_sha}; branch brought up ({behind} behind)",
                 t.id,
@@ -820,15 +843,20 @@ impl Runner {
             );
             // Before the save, so a crash repeats the push rather than
             // skipping it.
-            if let Some(head) = self.push_refreshed(t, p, i, &remote)? {
-                t.lanes[i].pushed = Some(crate::ticket::PushedHead {
-                    head,
-                    at_ms: now_ms,
-                });
-            }
+            self.record_push(t, p, i, &remote, now_ms)?;
+            // Nothing behind means a rebaser (or a hand rebase) already
+            // did the work; its notes go to the next reviewer.
+            let notes = if behind == 0 && commits {
+                rebaser_notes(t, &lane.name, t.lanes[i].refreshed.as_ref())
+            } else {
+                None
+            };
             t.lanes[i].refreshed = Some(crate::ticket::Refreshed {
                 from,
                 to: onto_sha.clone(),
+                commits,
+                notes,
+                at_ms: now_ms,
             });
             t.lanes[i].base_sha = Some(onto_sha);
             self.save_ticket(t, now_ms)?;
@@ -3998,7 +4026,10 @@ impl Runner {
                 stage,
                 name: "rerun",
                 kind: DecisionKind::Permission,
-                question: format!("{stage} ({ctx}) attempt {n} failed: {reason}. Run it again?"),
+                question: format!(
+                    "{stage} ({ctx}) attempt {n} failed: {reason}. Run it again?{}",
+                    rerun_carries(t, stage, n)
+                ),
                 options,
                 recommendation: None,
                 attempt: Some((stage.to_owned(), n)),
@@ -4051,8 +4082,11 @@ impl Runner {
                 name: "rerun",
                 kind: DecisionKind::Permission,
                 question: format!(
-                    "{} ({}) attempt {} {what}. Run it again?",
-                    a.stage, a.context, a.n
+                    "{} ({}) attempt {} {what}. Run it again?{}",
+                    a.stage,
+                    a.context,
+                    a.n,
+                    rerun_carries(t, &a.stage, a.n)
                 ),
                 options,
                 recommendation: None,
@@ -4834,12 +4868,16 @@ const SENT_BACK_FROM: &str = "sent back from ";
 /// The note a `rerun` answer, on decision `decision`, gives its attempt's
 /// replacement, under its `rework` key: the answer's own note, else the
 /// one a send-back gave the attempt, quoted by its cancellation reason,
-/// which a park took off `t.rework` before any attempt carried it. Only
-/// an agent stage's prompt takes a note.
+/// which a park took off `t.rework` before any attempt carried it. An
+/// agent stage's prompt takes a note, and so does a code review's first
+/// fix pass (where "start over" also drops the carried points).
 fn rerun_note(t: &Ticket, p: &Pipeline, decision: usize) -> Option<(String, String)> {
     let d = &t.decisions[decision];
     let (stage, n) = d.attempt.as_ref()?;
-    if p.stages.iter().find(|s| &s.name == stage)?.kind() != StageKind::Agent {
+    if !matches!(
+        p.stages.iter().find(|s| &s.name == stage)?.kind(),
+        StageKind::Agent | StageKind::Review
+    ) {
         return None;
     }
     let replaced = find_attempt(t, stage, *n)?;
@@ -4855,6 +4893,36 @@ fn rerun_note(t: &Ticket, p: &Pipeline, decision: usize) -> Option<(String, Stri
         _ => None,
     })?;
     Some((rework_key(stage, &replaced.context), note))
+}
+
+/// The notes of the latest finished refresh rebaser in `lane` that
+/// served the move being recorded: one started after the lane's previous
+/// bring-up, or any when there was none. A previous bring-up recorded
+/// before its time was kept says nothing about which move an older
+/// rebaser served, so nothing is attached after it.
+fn rebaser_notes(t: &Ticket, lane: &str, previous: Option<&Refreshed>) -> Option<PathBuf> {
+    let after = match previous {
+        None => None,
+        Some(r) if r.at_ms > 0 => Some(r.at_ms),
+        Some(_) => return None,
+    };
+    t.attempts
+        .iter()
+        .filter(|a| a.stage == REFRESH && a.context == lane && !a.is_open())
+        .filter(|a| after.is_none_or(|ms| a.started_ms > ms))
+        .filter_map(|a| Some((a.n, a.artifacts.get("notes").filter(|p| p.is_file())?)))
+        .max_by_key(|(n, _)| *n)
+        .map(|(_, path)| path.clone())
+}
+
+/// What a rerun question adds about a code review attempt: the next
+/// attempt carries its points unless the note says "start over".
+fn rerun_carries(t: &Ticket, stage: &str, n: u32) -> &'static str {
+    if find_attempt(t, stage, n).is_some_and(|a| a.kind == AttemptKind::Review) {
+        " The next attempt carries this one's settled and open points; a note saying \"start over\" reviews the whole branch again."
+    } else {
+        ""
+    }
 }
 
 /// The key a sent-back note is kept under.
@@ -5399,6 +5467,8 @@ pub(crate) fn new_attempt(
         rounds: Vec::new(),
         extra_pass: false,
         failed_at_checks: false,
+        carried_from: None,
+        rework: None,
         settle: BTreeMap::new(),
         stop_at_ms: None,
         polls_since_stop: 0,

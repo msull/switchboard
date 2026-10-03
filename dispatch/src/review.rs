@@ -34,6 +34,34 @@ const REVIEW_PROMPT: &str = "Review branch {branch} in {worktree}: the commits {
 /// The addition when earlier rounds left points open.
 const REVIEW_CARRY: &str = "Points still open from earlier rounds are listed at {previous_feedback} with the implementer's answers at {previous_response}. For each open point write a line \"withdraw <id>\" if the answer satisfies you, or \"keep <id>: why\" if it does not.";
 
+/// The addition to round 1 of an attempt that continues an earlier one.
+const REVIEW_CARRIED: &str = "An earlier attempt of this review (attempt {carried_n}) reviewed this branch at {old_head} through round {through}. These points were settled there; do not raise them again:\n{settled}\nThese are still open:\n{open}\n{scope} For each open point write a line \"withdraw <id>\" if the change settles it, or \"keep <id>: why\" if it does not.";
+
+/// What a carried round reads when the branch moved since.
+const REVIEW_CARRIED_RANGE: &str =
+    "Review the change from {old_head} to {head} ({range}) and the open points only.";
+
+/// What a carried round reads when the branch did not move since.
+const REVIEW_CARRIED_STILL: &str = "The branch has not moved since; review the open points only.";
+
+/// The addition to the first review after the branch was rebased.
+const REVIEW_REBASED: &str = "The base moved from {from} to {to} (git log {from}..{to}) and the branch was rebased onto it. Check explicitly that both sides of every conflicted hunk are present and that the base's additions in {from}..{to} are unchanged by the branch.";
+
+/// The addition when the plan has a decisions section.
+const REVIEW_DECIDED: &str = "The plan at {plan} settled these decisions:\n\n{decisions}\n\nA point that contests one of them is out of scope for this review: write it as \"- decided: <the decision>: why\" and it is listed as found but not done.";
+
+/// The addition every agent reviewer gets.
+const REVIEW_STYLE: &str = "Start a point that is only about wording, naming, comments or layout with \"style: \". Style points do not hold the review open after its early rounds.";
+
+/// The reviewer whose untagged points are style points.
+const STYLE_REVIEWER: &str = "style";
+
+/// The round file's section of style points a converged round leaves.
+const LEFT_HEADING: &str = "Left to the merge";
+
+/// The round file's section of points that contest the plan.
+const DECIDED_HEADING: &str = "Found but not done";
+
 /// The implementer prompt a stage gets when it gives none.
 const FIX_PROMPT: &str = "Reviewers of branch {branch} in {worktree} left points at {feedback}. Address each one on the branch: fix it, or dispute it with your reasons. Commit so the tree is clean. Then write {response}, answering every point by its id, one line each: \"- <id>: fixed <what>\" or \"- <id>: disputed <why>\".";
 
@@ -130,9 +158,18 @@ impl Runner {
             now_ms,
         );
         attempt.project = Some(project);
-        t.attempts.push(attempt);
         // A note from a later human gate goes to the first implementer
-        // of this attempt, not to the reviewers.
+        // of this attempt, not to the reviewers. It leaves the ticket
+        // now, so it neither keeps the context sent back nor reaches a
+        // later attempt that a fixer already spent it before.
+        attempt.rework = t
+            .rework
+            .remove(&rework_key(&stage.name, ctx))
+            .or_else(|| unspent_note(t, &stage.name, ctx, n));
+        if !attempt.rework.as_deref().is_some_and(starts_over) {
+            attempt.carried_from = carry_source(t, &stage.name, ctx, n);
+        }
+        t.attempts.push(attempt);
         self.save_ticket(t, now_ms)?;
         self.open_round(t, ps, p, stage, &(stage.name.clone(), n), cwd, lane, now_ms)
     }
@@ -388,7 +425,9 @@ impl Runner {
 
     /// The reviewer's prompt: the operator's guidance, then the stage's
     /// review template (or the default), with the round's base and
-    /// head, the tree, the plan and the earlier rounds' open points.
+    /// head, the tree, the plan and the earlier rounds' open points;
+    /// then what a carried attempt settled and left open, the rebase to
+    /// check, the plan's decisions and how to tag a style point.
     #[allow(clippy::too_many_arguments)]
     fn reviewer_prompt(
         t: &Ticket,
@@ -435,10 +474,36 @@ impl Runner {
         }
         let mut prompt = guidance_prelude(&p.operators[&r.name].guidance, &vars);
         prompt.push_str(&vars.render(stage.review_prompt.as_deref().unwrap_or(REVIEW_PROMPT)));
+        if round.n == 1
+            && let Some(carry) = carry_of(t, a, &no_feedback_of(stage))
+        {
+            prompt.push_str("\n\n");
+            prompt.push_str(&carried_text(&carry, round));
+        }
         if carried {
             prompt.push_str("\n\n");
             prompt.push_str(&vars.render(REVIEW_CARRY));
         }
+        if let Some(moved) = rebase_to_check(t, a, round, lane) {
+            prompt.push_str("\n\n");
+            prompt.push_str(&rebased_text(moved));
+        }
+        if let Some(plan) = t.input("plan")
+            && let Ok(text) = std::fs::read_to_string(plan)
+        {
+            prompt.push_str("\n\n");
+            match decisions_section(&text) {
+                Some(decisions) => {
+                    vars.set("decisions", decisions);
+                    prompt.push_str(&vars.render(REVIEW_DECIDED));
+                }
+                None => {
+                    let _ = write!(prompt, "The plan at {} lists no decisions.", plan.display());
+                }
+            }
+        }
+        prompt.push_str("\n\n");
+        prompt.push_str(REVIEW_STYLE);
         prompt
     }
 
@@ -532,8 +597,12 @@ impl Runner {
             );
             return self.fail_round(t, ps, &key, round.n, &reason, now_ms);
         }
-        let previous = a.rounds.iter().rev().find(|x| x.n < round.n).cloned();
-        let (text, open) = aggregate(t, stage, &a.context, &round, previous.as_ref());
+        let Aggregated {
+            text,
+            open,
+            left,
+            decided,
+        } = self.judge(t, stage, a, &round);
         let path = round
             .reviewers
             .first()
@@ -552,8 +621,16 @@ impl Runner {
         r.feedback = Some(path.clone());
         r.open_points = open;
         if open == 0 {
+            let mut left = if left.is_empty() {
+                String::new()
+            } else {
+                format!(", {} left to the merge", left.len())
+            };
+            if !decided.is_empty() {
+                let _ = write!(left, ", {} found but not done", decided.len());
+            }
             log::info!(
-                "ticket {} {}/{} round {} converged at {head}",
+                "ticket {} {}/{} round {} converged at {head}{left}",
                 t.id,
                 key.0,
                 a.context,
@@ -564,6 +641,40 @@ impl Runner {
         }
         set_round_state(t, &key, round.n, RoundState::Findings, now_ms);
         self.ask_about_findings(t, ps, p, stage, a, &round, open, &path, now_ms)
+    }
+
+    /// A round's findings gathered and judged: the points open coming
+    /// into it (the previous round's, or a carried attempt's for its
+    /// first round), and the live `style_rounds` against the round's
+    /// number counted on from the carried attempt's rounds.
+    fn judge(&self, t: &Ticket, stage: &Stage, a: &Attempt, round: &ReviewRound) -> Aggregated {
+        let carry = carry_of(t, a, &no_feedback_of(stage));
+        let earlier = if round.n > 1 {
+            let previous = a.rounds.iter().rev().find(|x| x.n < round.n);
+            carried_points(previous, &[])
+        } else {
+            carry.as_ref().map(|c| c.open.clone()).unwrap_or_default()
+        };
+        let counted = round.n + carry.as_ref().map_or(0, |c| c.through);
+        let style_rounds = self.live_style_rounds(t, stage);
+        aggregate(t, stage, &a.context, round, &earlier, counted, style_rounds)
+    }
+
+    /// The stage's `style_rounds` from the project's live pipeline file
+    /// (the pull-request one for a ticket taken from a pull request),
+    /// so an edit takes effect at the next round; the ticket's copy
+    /// when the file cannot be read or no longer has the stage.
+    fn live_style_rounds(&self, t: &Ticket, stage: &Stage) -> u32 {
+        let path = if t.source.pull_requests.is_empty() {
+            self.data.pipeline(&t.project)
+        } else {
+            self.data.pr_pipeline(&t.project)
+        };
+        std::fs::read_to_string(path)
+            .ok()
+            .and_then(|text| Pipeline::parse(&text).ok())
+            .and_then(|p| p.stages.into_iter().find(|s| s.name == stage.name))
+            .map_or_else(|| stage.style_rounds(), |s| s.style_rounds())
     }
 
     /// A failed reviewer fails the attempt, once its siblings are
@@ -954,8 +1065,13 @@ impl Runner {
         }
         let mut prompt = guidance_prelude(&op.guidance, &vars);
         prompt.push_str(&vars.render(stage.fix_prompt.as_deref().unwrap_or(FIX_PROMPT)));
+        // An attempt started before notes moved onto the attempt still
+        // has its note on the ticket.
         if round.n == 1
-            && let Some(note) = t.rework.remove(&rework_key(&a.stage, &a.context))
+            && let Some(note) = a
+                .rework
+                .clone()
+                .or_else(|| t.rework.remove(&rework_key(&a.stage, &a.context)))
         {
             prompt.push_str("\n\nThe user looked at the previous attempt and sent it back: ");
             prompt.push_str(&note);
@@ -1288,7 +1404,15 @@ impl Runner {
         head: &str,
         now_ms: u64,
     ) -> Result<()> {
+        let a = record_of(t, &key.0, key.1).clone();
+        let path = self
+            .attempt_dir(t, &key.0, key.1, &a.context)?
+            .join("summary.md");
+        let carry = carry_of(t, &a, &stage_no_feedback(t, key));
+        std::fs::write(&path, summary_of(&a, carry.as_ref(), head))
+            .with_context(|| format!("write {}", path.display()))?;
         let attempt = record_of(t, &key.0, key.1);
+        attempt.artifacts.insert("summary".into(), path);
         attempt.head = Some(head.to_owned());
         attempt.state = AttemptState::Complete;
         attempt.ended_ms = Some(now_ms);
@@ -1383,21 +1507,109 @@ impl Runner {
     }
 }
 
+/// A round judged: the round file's text, the points that hold it
+/// open, the style points left to the merge and the points that contest
+/// the plan (each as its listed line).
+pub(crate) struct Aggregated {
+    pub text: String,
+    pub open: u32,
+    pub left: Vec<String>,
+    pub decided: Vec<String>,
+}
+
+/// How a point counts towards convergence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Tag {
+    /// Wording, naming, comments or layout: holds the early rounds only.
+    Style,
+    /// Contests the plan's decisions: never open, listed as not done.
+    Decided,
+    /// Holds the round open.
+    Other,
+}
+
+/// A point's tag, by its text's case-insensitive prefix.
+pub(crate) fn tag_of(text: &str) -> Tag {
+    let text = text.trim_start().to_ascii_lowercase();
+    if text.starts_with("style:") {
+        Tag::Style
+    } else if text.starts_with("decided:") {
+        Tag::Decided
+    } else {
+        Tag::Other
+    }
+}
+
+/// A point's tag, with an untagged point from the reviewer named
+/// `style` counted as style: convergence must not depend on that
+/// reviewer remembering the prefix.
+fn class_of(reviewer: &str, text: &str) -> Tag {
+    match tag_of(text) {
+        Tag::Other if reviewer == STYLE_REVIEWER => Tag::Style,
+        tag => tag,
+    }
+}
+
+/// The reviewer a point id names: `r2/style-1` and `a1/r2/style-1` are
+/// both `style`'s.
+fn reviewer_of(id: &str) -> &str {
+    let last = id.rsplit('/').next().unwrap_or(id);
+    last.rsplit_once('-').map_or(last, |(name, _)| name)
+}
+
 /// The findings of a round gathered into one file: every reviewer's
-/// points with its name and a stable id, then the points earlier
-/// rounds left open that no reviewer withdrew. Returns the text and
-/// the number of open points.
+/// points with its name and a stable id, then the points open coming
+/// into the round (`earlier`) that no reviewer withdrew. A point that
+/// contests the plan is never open; when every point left is style and
+/// the round, counted as `counted`, has reached `style_rounds`, they
+/// are left to the merge and the round converges.
 fn aggregate(
     t: &Ticket,
     stage: &Stage,
     ctx: &str,
     round: &ReviewRound,
-    previous: Option<&ReviewRound>,
-) -> (String, u32) {
+    earlier: &[(String, String)],
+    counted: u32,
+    style_rounds: u32,
+) -> Aggregated {
     let no_feedback = stage.no_feedback.as_deref().unwrap_or(NO_FINDINGS);
     let (points, withdrawn, kept) = collect_points(round, no_feedback);
-    let carried = carried_points(previous, &withdrawn);
-    let open = u32::try_from(points.len() + carried.len()).unwrap_or(u32::MAX);
+    let carried: Vec<&(String, String)> = earlier
+        .iter()
+        .filter(|(id, _)| !withdrawn.contains(id))
+        .collect();
+    let (decided, raised): (Vec<_>, Vec<_>) = points
+        .into_iter()
+        .partition(|(_, _, text)| tag_of(text) == Tag::Decided);
+    let classes: Vec<Tag> = raised
+        .iter()
+        .map(|(_, r, text)| class_of(r, text))
+        .chain(
+            carried
+                .iter()
+                .map(|(id, text)| class_of(reviewer_of(id), text)),
+        )
+        .collect();
+    let style = classes.iter().filter(|c| **c == Tag::Style).count();
+    let blocking = classes.len() - style;
+    let to_merge = blocking == 0 && style > 0 && counted >= style_rounds;
+    let raised: Vec<String> = raised
+        .iter()
+        .map(|(id, r, text)| format!("{id} ({r}): {text}"))
+        .collect();
+    let carried: Vec<String> = carried
+        .iter()
+        .map(|(id, text)| carried_line(id, text, &kept))
+        .collect();
+    let decided: Vec<String> = decided
+        .iter()
+        .map(|(id, r, text)| format!("{id} ({r}): {text}"))
+        .collect();
+    let (open, left) = if to_merge {
+        (0, raised.iter().chain(&carried).cloned().collect())
+    } else {
+        (classes.len(), Vec::new())
+    };
     let mut out = String::new();
     let _ = writeln!(out, "# Review round {} — {} ({ctx})\n", round.n, stage.name);
     let branch = t
@@ -1411,40 +1623,68 @@ fn aggregate(
         "Branch {branch} at {}, over {}.\n",
         round.head, round.base
     );
-    if open == 0 {
+    if open == 0 && left.is_empty() && decided.is_empty() {
         let _ = writeln!(out, "{no_feedback}");
-        return (out, 0);
-    }
-    let _ = writeln!(out, "## Points\n");
-    for (id, reviewer, text) in &points {
-        let _ = writeln!(out, "- {id} ({reviewer}): {text}");
-    }
-    if !carried.is_empty() {
-        let _ = writeln!(out, "\n## Still open from earlier rounds\n");
-        for (id, text) in &carried {
-            let why: Vec<String> = kept
-                .iter()
-                .filter(|(k, _, _)| k == id)
-                .map(|(_, r, w)| {
-                    if w.is_empty() {
-                        r.clone()
-                    } else {
-                        format!("{r}: {w}")
-                    }
-                })
-                .collect();
-            let _ = writeln!(
-                out,
-                "- {id}: {text}{}",
-                if why.is_empty() {
-                    String::new()
-                } else {
-                    format!(" (kept by {})", why.join("; "))
-                }
-            );
+    } else {
+        if open == 0 {
+            let _ = writeln!(out, "No open point.");
+        } else {
+            section(&mut out, "Points", None, &raised);
+            section(&mut out, "Still open from earlier rounds", None, &carried);
         }
+        section(&mut out, LEFT_HEADING, None, &left);
+        section(
+            &mut out,
+            DECIDED_HEADING,
+            Some(
+                "These contest the plan's decisions; they are out of scope for this review and not for the fix pass.",
+            ),
+            &decided,
+        );
     }
-    (out, open)
+    Aggregated {
+        text: out,
+        open: u32::try_from(open).unwrap_or(u32::MAX),
+        left,
+        decided,
+    }
+}
+
+/// A section of a round file, written only when it lists something.
+fn section(out: &mut String, title: &str, intro: Option<&str>, lines: &[String]) {
+    if lines.is_empty() {
+        return;
+    }
+    if !out.ends_with("\n\n") {
+        out.push('\n');
+    }
+    let _ = writeln!(out, "## {title}\n");
+    if let Some(intro) = intro {
+        let _ = writeln!(out, "{intro}\n");
+    }
+    for line in lines {
+        let _ = writeln!(out, "- {line}");
+    }
+}
+
+/// A point still open from an earlier round, with who kept it and why.
+fn carried_line(id: &str, text: &str, kept: &[(String, String, String)]) -> String {
+    let why: Vec<String> = kept
+        .iter()
+        .filter(|(k, _, _)| k == id)
+        .map(|(_, r, w)| {
+            if w.is_empty() {
+                r.clone()
+            } else {
+                format!("{r}: {w}")
+            }
+        })
+        .collect();
+    if why.is_empty() {
+        format!("{id}: {text}")
+    } else {
+        format!("{id}: {text} (kept by {})", why.join("; "))
+    }
 }
 
 /// Each reviewer's points (id, reviewer, text), the ids withdrawn,
@@ -1549,19 +1789,394 @@ fn point_text(line: &str) -> Option<String> {
     None
 }
 
-/// The point ids and texts an aggregated feedback file lists.
+/// The point ids and texts an aggregated feedback file holds open:
+/// every section before the points left to the merge or found but not
+/// done.
 fn open_points_of(text: &str) -> Vec<(String, String)> {
-    text.lines()
-        .filter_map(|line| {
-            let rest = line.trim().strip_prefix("- ")?;
-            let (id, text) = rest.split_once(':')?;
-            let id = id.split(" (").next().unwrap_or(id).trim();
-            if !id.starts_with('r') || !id.contains('/') {
-                return None;
-            }
-            Some((id.to_owned(), text.trim().to_owned()))
+    let mut out = Vec::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line == format!("## {LEFT_HEADING}") || line == format!("## {DECIDED_HEADING}") {
+            break;
+        }
+        out.extend(listed_point(line));
+    }
+    out
+}
+
+/// Every point id and text an aggregated feedback file lists, in any
+/// section.
+fn listed_points_of(text: &str) -> Vec<(String, String)> {
+    text.lines().filter_map(listed_point).collect()
+}
+
+/// The points one section of an aggregated feedback file lists, as
+/// their id and their whole line.
+fn section_points(text: &str, title: &str) -> Vec<(String, String)> {
+    let heading = format!("## {title}");
+    let mut inside = false;
+    let mut out = Vec::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.starts_with("## ") {
+            inside = line == heading;
+        } else if inside && let Some((id, _)) = listed_point(line) {
+            out.push((id, line.trim_start_matches("- ").to_owned()));
+        }
+    }
+    out
+}
+
+/// One listed point of an aggregated feedback file: `- <id>: text` or
+/// `- <id> (reviewer): text`.
+fn listed_point(line: &str) -> Option<(String, String)> {
+    let rest = line.trim().strip_prefix("- ")?;
+    let (id, text) = rest.split_once(':')?;
+    let id = id.split(" (").next().unwrap_or(id).trim();
+    is_point_id(id).then(|| (id.to_owned(), text.trim().to_owned()))
+}
+
+/// A point id: `r<round>/<reviewer>-<k>`, or one carried from an
+/// earlier attempt, `a<n>/r<round>/<reviewer>-<k>`.
+fn is_point_id(id: &str) -> bool {
+    let rest = unqualified(id).unwrap_or(id);
+    rest.strip_prefix('r')
+        .and_then(|r| r.split_once('/'))
+        .is_some_and(|(n, name)| {
+            !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()) && !name.is_empty()
         })
-        .collect()
+}
+
+/// An id's rest after its `a<n>/` qualifier, when it has one.
+fn unqualified(id: &str) -> Option<&str> {
+    let (q, rest) = id.split_once('/')?;
+    let n = q.strip_prefix('a')?;
+    (!n.is_empty() && n.bytes().all(|b| b.is_ascii_digit())).then_some(rest)
+}
+
+/// A point id as a later attempt names it: qualified with the attempt
+/// it was raised in, since ids are unique only within an attempt. An id
+/// carried twice keeps its first qualifier.
+fn qualify(n: u32, id: &str) -> String {
+    if unqualified(id).is_some() {
+        id.to_owned()
+    } else {
+        format!("a{n}/{id}")
+    }
+}
+
+/// What a new attempt of a code review continues: an earlier attempt of
+/// the same stage and context whose rounds read the branch.
+pub(crate) struct Carry {
+    pub from: (String, u32),
+    /// The last round of that attempt with gathered findings.
+    pub through: u32,
+    /// The base and head that round read.
+    pub base: String,
+    pub head: String,
+    /// The points it left open, and those settled before, qualified.
+    pub open: Vec<(String, String)>,
+    pub settled: Vec<(String, String)>,
+}
+
+/// The attempt a new attempt `n` of a review in `ctx` carries: the
+/// latest earlier one if any round of it gathered findings, otherwise
+/// whatever that one carried, so a chain of failures points at the
+/// attempt that holds the state.
+pub(crate) fn carry_source(t: &Ticket, stage: &str, ctx: &str, n: u32) -> Option<(String, u32)> {
+    let prev = previous_review(t, stage, ctx, n)?;
+    if prev.rounds.iter().any(|r| r.feedback.is_some()) {
+        Some((stage.to_owned(), prev.n))
+    } else {
+        prev.carried_from.clone()
+    }
+}
+
+/// The review attempt of `stage` in `ctx` just before attempt `n`.
+fn previous_review<'t>(t: &'t Ticket, stage: &str, ctx: &str, n: u32) -> Option<&'t Attempt> {
+    t.attempts
+        .iter()
+        .filter(|a| {
+            a.stage == stage && a.context == ctx && a.n < n && a.kind == AttemptKind::Review
+        })
+        .max_by_key(|a| a.n)
+}
+
+/// The note the attempt just before `n` was given and no fixer was:
+/// it failed before its first fix pass. Only that attempt is looked at,
+/// so a note a fixer spent is never given again.
+fn unspent_note(t: &Ticket, stage: &str, ctx: &str, n: u32) -> Option<String> {
+    let prev = previous_review(t, stage, ctx, n)?;
+    if prev.rounds.iter().any(|r| r.response.is_some()) {
+        return None;
+    }
+    prev.rework.clone()
+}
+
+/// A note that asks for the whole branch to be reviewed again.
+fn starts_over(note: &str) -> bool {
+    note.to_lowercase().contains("start over")
+}
+
+/// What attempt `a` carries, rebuilt from the carried attempt's round
+/// files and records alone, so a restart reads the same.
+pub(crate) fn carry_of(t: &Ticket, a: &Attempt, no_feedback: &str) -> Option<Carry> {
+    let (stage, m) = a.carried_from.clone()?;
+    let src = find_attempt(t, &stage, m)?;
+    let last = src.rounds.iter().rev().find(|r| r.feedback.is_some())?;
+    // A round after the last gathered one (the one that failed) may
+    // still have withdrawn points.
+    let withdrawn: Vec<String> = src
+        .rounds
+        .iter()
+        .filter(|r| r.n > last.n)
+        .flat_map(|r| collect_points(r, no_feedback).1)
+        .collect();
+    let open: Vec<(String, String)> = carried_points(Some(last), &withdrawn)
+        .into_iter()
+        .map(|(id, text)| (qualify(m, &id), text))
+        .collect();
+    let mut settled = Vec::new();
+    if let Some(before) = carry_of(t, src, no_feedback) {
+        settled.extend(before.settled);
+        settled.extend(before.open);
+    }
+    for path in src.rounds.iter().filter_map(|r| r.feedback.as_ref()) {
+        let text = std::fs::read_to_string(path).unwrap_or_default();
+        settled.extend(
+            listed_points_of(&text)
+                .into_iter()
+                .map(|(id, text)| (qualify(m, &id), text)),
+        );
+    }
+    let mut seen: std::collections::BTreeSet<String> =
+        open.iter().map(|(id, _)| id.clone()).collect();
+    settled.retain(|(id, _)| seen.insert(id.clone()));
+    Some(Carry {
+        from: (stage, m),
+        through: last.n,
+        base: last.base.clone(),
+        head: last.head.clone(),
+        open,
+        settled,
+    })
+}
+
+/// The carried attempt's state, told to round 1's reviewers: self-
+/// contained, since the old round files name the points without their
+/// qualifier.
+fn carried_text(c: &Carry, round: &ReviewRound) -> String {
+    let list = |points: &[(String, String)]| {
+        if points.is_empty() {
+            "None.".to_owned()
+        } else {
+            points
+                .iter()
+                .map(|(id, text)| format!("- {id}: {text}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        }
+    };
+    let mut vars = crate::template::Vars::default();
+    vars.set("carried_n", c.from.1.to_string())
+        .set("old_head", c.head.clone())
+        .set("head", round.head.clone())
+        .set("through", c.through.to_string())
+        .set("settled", list(&c.settled))
+        .set("open", list(&c.open));
+    let range = if c.base == round.base {
+        format!("git diff {} {}", c.head, round.head)
+    } else {
+        format!(
+            "git range-diff {}..{} {}..{}, the branch was rebased since",
+            c.base, c.head, round.base, round.head
+        )
+    };
+    vars.set("range", range);
+    let scope = if c.head == round.head {
+        REVIEW_CARRIED_STILL.to_owned()
+    } else {
+        vars.render(REVIEW_CARRIED_RANGE)
+    };
+    vars.set("scope", scope);
+    vars.render(REVIEW_CARRIED)
+}
+
+/// The lane's last bring-up, when this round is the first review of the
+/// rebase it made: the branch had commits, the round reads the new
+/// base, and no round with findings of this stage and context has read
+/// that base before.
+fn rebase_to_check<'t>(
+    t: &'t Ticket,
+    a: &Attempt,
+    round: &ReviewRound,
+    lane: Option<&str>,
+) -> Option<&'t crate::ticket::Refreshed> {
+    let moved = t
+        .lanes
+        .iter()
+        .find(|l| Some(l.name.as_str()) == lane)?
+        .refreshed
+        .as_ref()?;
+    if !moved.commits || moved.to != round.base {
+        return None;
+    }
+    let read_before = t
+        .attempts
+        .iter()
+        .filter(|x| x.stage == a.stage && x.context == a.context && x.n <= a.n)
+        .flat_map(|x| x.rounds.iter().map(move |r| (x.n, r)))
+        .any(|(n, r)| !(n == a.n && r.n == round.n) && r.feedback.is_some() && r.base == moved.to);
+    (!read_before).then_some(moved)
+}
+
+/// The rebase check, with the rebaser's notes when there are some.
+fn rebased_text(moved: &crate::ticket::Refreshed) -> String {
+    let mut vars = crate::template::Vars::default();
+    vars.set("from", moved.from.clone())
+        .set("to", moved.to.clone());
+    let mut text = vars.render(REVIEW_REBASED);
+    if let Some(notes) = &moved.notes {
+        let _ = write!(text, " The rebaser's notes are at {}.", notes.display());
+    }
+    text
+}
+
+/// The plan's decisions section: a heading of any level whose title,
+/// after an optional number such as `2.`, starts with the word
+/// "Decisions", through to the next heading of the same or a higher
+/// level. Its body, without the heading.
+fn decisions_section(plan: &str) -> Option<String> {
+    let mut level = None;
+    let mut fenced = false;
+    let mut body = Vec::new();
+    for line in plan.lines() {
+        if line.trim_start().starts_with("```") {
+            fenced = !fenced;
+        }
+        let heading = if fenced { None } else { heading_of(line) };
+        match (level, heading) {
+            (None, Some((lv, title))) if is_decisions(title) => {
+                level = Some(lv);
+                continue;
+            }
+            (Some(l), Some((lv, _))) if lv <= l => break,
+            _ => {}
+        }
+        if level.is_some() {
+            body.push(line);
+        }
+    }
+    level.map(|_| body.join("\n").trim().to_owned())
+}
+
+/// A Markdown heading's level and title.
+fn heading_of(line: &str) -> Option<(usize, &str)> {
+    let hashes = line.chars().take_while(|c| *c == '#').count();
+    if hashes == 0 || hashes > 6 {
+        return None;
+    }
+    let title = line[hashes..].strip_prefix(' ')?;
+    Some((hashes, title.trim()))
+}
+
+/// Whether a heading's title is a decisions section's.
+fn is_decisions(title: &str) -> bool {
+    let digits = title.chars().take_while(char::is_ascii_digit).count();
+    let title = if digits > 0 {
+        title[digits..]
+            .strip_prefix('.')
+            .unwrap_or(&title[digits..])
+            .trim_start()
+    } else {
+        title
+    };
+    let lower = title.to_ascii_lowercase();
+    lower
+        .strip_prefix("decisions")
+        .is_some_and(|rest| rest.chars().next().is_none_or(|c| !c.is_alphanumeric()))
+}
+
+/// The summary a completed code review attempt leaves: how it ended,
+/// what it carried, the style points left to the merge, the points open
+/// when it was accepted, and the points that contest the plan.
+fn summary_of(a: &Attempt, carry: Option<&Carry>, head: &str) -> String {
+    let read = |r: &ReviewRound| {
+        r.feedback
+            .as_ref()
+            .map(|f| std::fs::read_to_string(f).unwrap_or_default())
+            .unwrap_or_default()
+    };
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "# Review summary — {} ({}), attempt {}\n",
+        a.stage, a.context, a.n
+    );
+    let last = a.rounds.last();
+    let k = last.map_or(0, |r| r.n);
+    let accepted = last.is_some_and(|r| r.state == RoundState::Accepted);
+    if accepted {
+        let m = last.map_or(0, |r| r.open_points);
+        let _ = writeln!(
+            out,
+            "Accepted at `{head}` in round {k} with {m} point(s) open."
+        );
+    } else {
+        let _ = writeln!(out, "Converged at `{head}` in round {k}.");
+    }
+    if let Some(c) = carry {
+        let _ = writeln!(
+            out,
+            "Carried from attempt {}, read through round {} at `{}`.",
+            c.from.1, c.through, c.head
+        );
+    }
+    let last_text = last.map(read).unwrap_or_default();
+    let lines = |points: Vec<(String, String)>| -> Vec<String> {
+        points.into_iter().map(|(_, line)| line).collect()
+    };
+    summary_section(
+        &mut out,
+        LEFT_HEADING,
+        &lines(section_points(&last_text, LEFT_HEADING)),
+    );
+    if accepted {
+        let open: Vec<String> = open_points_of(&last_text)
+            .into_iter()
+            .map(|(id, text)| format!("{id}: {text}"))
+            .collect();
+        summary_section(&mut out, "Open when accepted", &open);
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    let decided: Vec<String> = a
+        .rounds
+        .iter()
+        .flat_map(|r| section_points(&read(r), DECIDED_HEADING))
+        .filter(|(id, _)| seen.insert(id.clone()))
+        .map(|(_, line)| line)
+        .collect();
+    summary_section(&mut out, DECIDED_HEADING, &decided);
+    out
+}
+
+/// A summary section; `None.` when it lists nothing.
+fn summary_section(out: &mut String, title: &str, lines: &[String]) {
+    let _ = writeln!(out, "\n## {title}\n");
+    if lines.is_empty() {
+        let _ = writeln!(out, "None.");
+    }
+    for line in lines {
+        let _ = writeln!(out, "- {line}");
+    }
+}
+
+/// The stage's sentinel for "no findings".
+fn no_feedback_of(stage: &Stage) -> String {
+    stage
+        .no_feedback
+        .clone()
+        .unwrap_or_else(|| NO_FINDINGS.to_owned())
 }
 
 /// Counts a poll with the tree still dirty after the response settled.
@@ -1678,5 +2293,82 @@ pub(crate) fn apply_review_reply(t: &mut Ticket, intent: &str, made: &[wire::Mad
     {
         round.implementer = Some(id.clone());
         t.processes.push(id);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_decisions_section_is_found_by_its_heading() {
+        let plan = "# Plan\n\n## Decisions\n\n1. Keep X.\n### Why\nBecause Y.\n## Tests\n- t1\n";
+        assert_eq!(
+            decisions_section(plan).as_deref(),
+            Some("1. Keep X.\n### Why\nBecause Y.")
+        );
+        let numbered = "## 2. Decisions that must be made before starting (recommendations given)\n- D1\n# Next\n";
+        assert_eq!(decisions_section(numbered).as_deref(), Some("- D1"));
+        assert_eq!(
+            decisions_section("## Decision for the human: which lane\n- a\n"),
+            None
+        );
+        assert_eq!(
+            decisions_section("## 3. Decision cancellation is not a thing\n- a\n"),
+            None
+        );
+        assert_eq!(decisions_section("# Plan\n## Steps\n- s1\n"), None);
+        let fenced = "## Decisions\n- D1\n```sh\n# not a heading\n```\n- D2\n## After\n";
+        assert_eq!(
+            decisions_section(fenced).as_deref(),
+            Some("- D1\n```sh\n# not a heading\n```\n- D2")
+        );
+    }
+
+    #[test]
+    fn a_point_is_tagged_by_its_prefix_and_the_style_reviewer_by_default() {
+        assert_eq!(tag_of("style: rename tmp"), Tag::Style);
+        assert_eq!(tag_of("Style: rename tmp"), Tag::Style);
+        assert_eq!(tag_of("DECIDED: D1 should be Z"), Tag::Decided);
+        assert_eq!(tag_of("src/a.rs: unused import"), Tag::Other);
+        assert_eq!(tag_of("a style: point in the middle"), Tag::Other);
+        assert_eq!(class_of("style", "src/x.rs: too clever"), Tag::Style);
+        assert_eq!(class_of("style", "decided: D1"), Tag::Decided);
+        assert_eq!(class_of("lint", "style: wording"), Tag::Style);
+        assert_eq!(class_of("lint", "src/a.rs: unused"), Tag::Other);
+        assert_eq!(reviewer_of("r2/style-1"), "style");
+        assert_eq!(reviewer_of("a1/r2/code-review-3"), "code-review");
+    }
+
+    #[test]
+    fn point_ids_may_carry_an_attempt_qualifier_once() {
+        assert!(is_point_id("r1/lint-1"));
+        assert!(is_point_id("a3/r12/style-2"));
+        assert!(!is_point_id("rename/this"));
+        assert!(!is_point_id("r/lint-1"));
+        assert!(!is_point_id("a/r1/lint-1"));
+        assert!(!is_point_id("src/a.rs"));
+        assert_eq!(qualify(1, "r1/lint-1"), "a1/r1/lint-1");
+        assert_eq!(qualify(2, "a1/r1/lint-1"), "a1/r1/lint-1");
+    }
+
+    #[test]
+    fn open_points_stop_at_the_merge_and_not_done_sections() {
+        let text = "# Review round 3 — review-code (repo)\n\nBranch b at h, over b.\n\n## Points\n\n- r3/lint-1 (lint): src/a.rs: unused\n\n## Still open from earlier rounds\n\n- a1/r1/lint-2: src/b.rs: dead\n\n## Left to the merge\n\n- r3/style-1 (style): style: wording\n\n## Found but not done\n\nThese contest the plan's decisions.\n\n- r3/style-2 (style): decided: D1 should be Z\n";
+        let ids = |points: Vec<(String, String)>| -> Vec<String> {
+            points.into_iter().map(|(id, _)| id).collect()
+        };
+        assert_eq!(ids(open_points_of(text)), ["r3/lint-1", "a1/r1/lint-2"]);
+        assert_eq!(
+            ids(listed_points_of(text)),
+            ["r3/lint-1", "a1/r1/lint-2", "r3/style-1", "r3/style-2"]
+        );
+        assert_eq!(
+            section_points(text, LEFT_HEADING),
+            [(
+                "r3/style-1".to_owned(),
+                "r3/style-1 (style): style: wording".to_owned()
+            )]
+        );
     }
 }

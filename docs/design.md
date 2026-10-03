@@ -1646,6 +1646,17 @@ run as stopped; any other failed reply or socket error is asked again
 next pass with one warning. A `none` check reading within two minutes
 of the head's last move is pending. Answering clears every session a
 decision marked, not only the ticket's newest.
+Review rounds carry forward. A new attempt of a code review stage
+carries the last attempt's settled and open points (`carried_from`,
+ids qualified `a<n>/...`) and reads only the change since, unless its
+note says "start over"; a send-back note moves onto the attempt when it
+starts (dispatch `RECORD_VERSION` 4). A `style:` point, or an untagged
+one from the `style` reviewer, holds no round open from `style_rounds`
+(default 2, live) and is left to the merge; a `decided:` point contests
+the plan's "Decisions" section, which the reviewers are given as
+settled, and is found but not done. The first review after a rebase
+with commits checks it, with the rebaser's notes. A completed review
+attempt writes `summary.md`.
 `dispatch/tests/first_slice.rs` is the acceptance table, plus a test
 per point above; `dispatch/tests/live.rs` runs the first stage against
 a real Switchboard and a haiku agent. Known gap: Claude Code treats a
@@ -1659,7 +1670,10 @@ And: a `working` card left stale by a subagent's last hook, with the
 main agent never taking another turn, holds the attempt until it is
 parked; the Stop hook's `background_tasks`
 (`spikes/03-session-state/README.md:94`) would say it exactly but is
-not on the wire.
+not on the wire. And: the ticket page does not show that an attempt was
+carried or how many points a round left to the merge (each would need a
+field on the `dispatch-control` views), and a command reviewer cannot
+tag a point as style.
 
 ## Global workspace status (2026-10-01)
 
