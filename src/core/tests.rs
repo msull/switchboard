@@ -1499,15 +1499,20 @@ fn add_project_creates_workspace_shows_board_and_saves() {
     assert_eq!(w.project.created, now.wall);
     assert_eq!(w.project.last_active, now.wall);
     assert_eq!(core.view(), View::Board(w.project.id));
-    assert!(effects.contains(&Effect::Save(w.clone())), "{effects:?}");
-    assert!(effects.contains(&Effect::ReadProjectConfig {
-        project: w.project.id,
-        root: "/r".into(),
-    }));
-    assert!(effects.contains(&Effect::SaveSettings(Settings {
-        last_view: SavedView::Board(w.project.id),
-        ..Settings::default()
-    })));
+    assert_eq!(
+        effects,
+        vec![
+            Effect::Save(w.clone()),
+            Effect::ReadProjectConfig {
+                project: w.project.id,
+                root: "/r".into(),
+            },
+            Effect::SaveSettings(Settings {
+                last_view: SavedView::Board(w.project.id),
+                ..Settings::default()
+            }),
+        ]
+    );
 }
 
 #[test]
@@ -1575,13 +1580,14 @@ fn remove_rename_pin_unpin_project() {
     assert!(core.workspace(id).unwrap().project.pinned.is_empty());
 
     let e = core.dispatch(AppAction::RemoveProject(id), Clock::at(5));
-    assert!(e.contains(&Effect::Delete(id)), "{e:?}");
-    // A Save of the removed workspace would rewrite its record after the
-    // Delete and bring the project back at the next start.
-    assert_eq!(saves(&e), 0, "{e:?}");
-    assert!(
-        e.contains(&Effect::SaveSettings(Settings::default())),
-        "{e:?}"
+    // Exact: a Save of the removed workspace after its Delete would
+    // rewrite the record and bring the project back at the next start.
+    assert_eq!(
+        e,
+        vec![
+            Effect::Delete(id),
+            Effect::SaveSettings(Settings::default())
+        ]
     );
     assert!(core.workspaces().is_empty());
     assert_eq!(
