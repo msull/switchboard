@@ -14165,6 +14165,37 @@ fn a_failed_deploy_asks_rerun_or_park_and_a_resume_does_not_deploy_again_unasked
 }
 
 #[test]
+fn a_resume_past_the_deploy_asks_to_deploy_again_before_anything_reads_it() {
+    let (mut env, id) = back_half_env(BOTH);
+    at_tried(&mut env, &id);
+    tried(&mut env, &id, "park");
+    env.step();
+    assert!(is_parked(&env.ticket(&id)));
+    assert!(env.ticket(&id).holds.is_empty());
+    let now = env.tick();
+    env.runner.resume(&id, now).unwrap();
+    let deploy_rerun = |t: &Ticket| {
+        t.pending_decisions()
+            .into_iter()
+            .find(|d| d.name == "rerun" && d.stage == "deploy")
+            .cloned()
+    };
+    env.steps_until(&id, "the deploy question", |t, _| deploy_rerun(t).is_some());
+    let t = env.ticket(&id);
+    assert_eq!(stage_name(&t), "deploy");
+    assert_eq!(holds(&t), ["my-dev"]);
+    let d = deploy_rerun(&t).unwrap();
+    assert!(d.question.contains("my-dev was let go"), "{}", d.question);
+    assert_eq!(started(&env, &deploy_key(&id, 2)), 0, "not again unasked");
+    let now = env.tick();
+    env.runner.decide(&id, &d.id, "rerun", None, now).unwrap();
+    for _ in 0..3 {
+        env.step();
+    }
+    assert_eq!(started(&env, &deploy_key(&id, 2)), 1);
+}
+
+#[test]
 fn a_deploy_lost_to_a_runner_restart_is_a_question_not_a_rerun() {
     let (mut env, id) = back_half_env(BOTH);
     deploying(&mut env, &id);
@@ -14768,6 +14799,131 @@ fn a_leaving_stop_past_the_limit_keeps_the_hold_until_answered() {
     answer_named(&mut env, &a, "stuck", "released");
     env.steps_until(&b, "the second ticket's hold", |t, _| !t.holds.is_empty());
     assert!(env.ticket(&a).holds.is_empty());
+}
+
+#[test]
+fn a_stop_that_ends_on_its_own_after_stuck_withdraws_the_question() {
+    use dispatch::services::STOP_LIMIT_MS;
+    // Leaving the range while active.
+    let (mut env, id) = back_half_env(BOTH);
+    at_tried(&mut env, &id);
+    env.repo.lock().unwrap().busy_ports.insert(3100);
+    tried(&mut env, &id, "done");
+    at_stage(&mut env, &id, "after");
+    env.step();
+    env.wait(STOP_LIMIT_MS);
+    env.step();
+    let stuck = stuck_pending(&env, &id);
+    assert_eq!(stuck.len(), 1);
+    env.repo.lock().unwrap().busy_ports.clear();
+    env.step();
+    let t = env.ticket(&id);
+    assert_eq!(
+        decision_state(&t, &stuck[0].id),
+        dispatch::ticket::DecisionState::Cancelled
+    );
+    assert!(t.pending_decisions().is_empty(), "{t:#?}");
+    assert!(t.holds.is_empty());
+    assert_eq!(t.services[0].state, ServiceState::Stopped);
+    assert_eq!(t.services[0].released, None, "the runner confirmed it");
+
+    // Parking.
+    let (mut env, id) = back_half_env(BOTH);
+    deployed(&mut env, &id);
+    served(&mut env, &id);
+    env.repo.lock().unwrap().busy_ports.insert(3100);
+    break_copy(&env, &id);
+    env.step();
+    env.wait(STOP_LIMIT_MS);
+    env.step();
+    assert_eq!(stuck_pending(&env, &id).len(), 1);
+    env.repo.lock().unwrap().busy_ports.clear();
+    env.step();
+    let t = env.ticket(&id);
+    assert!(is_parked(&t), "{t:#?}");
+    assert!(
+        t.pending_decisions().is_empty(),
+        "parked with nothing to act on"
+    );
+}
+
+/// The back half with the backend served beside the frontend at `try`.
+fn two_served_env() -> (Env, String) {
+    let mut env = Env::new();
+    let text = BACK_HALF
+        .replace("{worktrees}", &env.worktrees.display().to_string())
+        .replace(
+            "setup = [\"uv\", \"sync\"]",
+            "setup = [\"uv\", \"sync\"]\nserve = { argv = [\"uv\", \"run\", \"serve\"], env = { PORT = \"{port}\" }, url = \"http://localhost:{port}\", ready = { http = \"/\", within_secs = 120 } }",
+        )
+        .replace(
+            "services = [\"frontend\"]",
+            "services = [\"frontend\", \"backend\"]",
+        );
+    std::fs::write(env.data.pipeline("Orchard"), text).unwrap();
+    let id = take_orchard(&mut env, 42, BOTH);
+    (env, id)
+}
+
+fn services_of<'a>(t: &'a Ticket, lane: &str) -> Vec<&'a dispatch::ticket::ServiceRecord> {
+    t.services.iter().filter(|s| s.lane == lane).collect()
+}
+
+#[test]
+fn a_retry_leaves_a_failed_service_whose_stop_is_not_confirmed_to_its_stop() {
+    use dispatch::services::STOP_LIMIT_MS;
+    let (mut env, id) = two_served_env();
+    deployed(&mut env, &id);
+    for _ in 0..2 {
+        env.step();
+    }
+    let backend = services_of(&env.ticket(&id), "backend")[0].clone();
+    assert!(backend.session.is_some(), "{backend:#?}");
+    let port = backend.port.unwrap();
+    exits(&env, &before_key(&id, 1), 1);
+    env.steps_until(&id, "the service question", |t, _| {
+        t.pending_decisions().iter().any(|d| d.name == "service")
+    });
+    let d = pending_named(&env, &id, "service").unwrap();
+    assert!(!d.question.contains("backend"), "{}", d.question);
+    // The backend's probe never answers, and once killed its port stays
+    // taken.
+    env.repo.lock().unwrap().busy_ports.insert(port);
+    env.wait(121_000);
+    env.step();
+    let t = env.ticket(&id);
+    assert!(matches!(
+        services_of(&t, "backend")[0].state,
+        ServiceState::Failed { .. }
+    ));
+    answer_named(&mut env, &id, "service", "retry");
+    env.step();
+    let t = env.ticket(&id);
+    let backends = services_of(&t, "backend");
+    assert_eq!(backends.len(), 1, "no second beside it: {t:#?}");
+    assert!(matches!(backends[0].state, ServiceState::Failed { .. }));
+    assert!(t.processes.contains(backends[0].session.as_ref().unwrap()));
+    let frontends = services_of(&t, "frontend");
+    assert_eq!(frontends[0].state, ServiceState::Stopped);
+    assert_eq!(frontends.len(), 2, "the confirmed one starts again");
+    assert!(env.sb().removed_by_port.is_empty());
+    env.wait(STOP_LIMIT_MS / 2);
+    env.repo.lock().unwrap().busy_ports.clear();
+    env.steps_until(&id, "the backend asked about", |t, _| {
+        t.pending_decisions()
+            .iter()
+            .any(|d| d.name == "service" && d.question.contains("backend"))
+    });
+    let t = env.ticket(&id);
+    assert_eq!(services_of(&t, "backend").len(), 1);
+    assert_eq!(env.sb().removed_by_port, [backend.session.unwrap()]);
+    answer_named(&mut env, &id, "service", "retry");
+    env.step();
+    env.step();
+    let t = env.ticket(&id);
+    let backends = services_of(&t, "backend");
+    assert_eq!(backends[0].state, ServiceState::Stopped);
+    assert_eq!(backends.len(), 2, "{t:#?}");
 }
 
 #[test]

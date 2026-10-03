@@ -995,6 +995,8 @@ impl Pipeline {
         Ok(())
     }
 
+    /// The `[[resources]]` entry named `name`; `None` for a lane name,
+    /// which a stage's `needs` may also hold.
     #[must_use]
     pub fn resource(&self, name: &str) -> Option<&Resource> {
         self.resources.iter().find(|r| r.name == name)

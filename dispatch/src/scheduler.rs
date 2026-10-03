@@ -20,7 +20,6 @@ use crate::health::Health;
 use crate::pipeline::{Context, Gate, Lane, OnDirty, Pipeline, Stage, StageKind};
 use crate::port::Port;
 use crate::review::checks_key;
-use crate::services::skipped;
 use crate::store::{
     DataDir, Lock, Settings, expand_home, read_project, read_ticket, shell_unsafe, write_project,
     write_ticket_logged,
@@ -761,7 +760,7 @@ impl Runner {
         }
         // A stage for lanes the ticket did not choose has nothing to run
         // in: it advances with no attempt, no hold and no question.
-        if skipped(t, &stage) {
+        if Self::skipped(t, &stage) {
             log::info!(
                 "ticket {} {}: none of its lanes is chosen; skipped",
                 t.id,
@@ -2570,7 +2569,7 @@ impl Runner {
                 // The cut reads this answer from the record, later on
                 // this same pass, and marks it acted once it is used.
                 ("branch", "reuse" | "fresh") => continue,
-                (crate::services::SERVICE, "retry") => retry_services(t, p),
+                (crate::services::SERVICE, "retry") => self.retry_services(t, ps, p, now_ms)?,
                 (_, "park") => self.park_by_answer(t, ps, i, now_ms)?,
                 (name, other) => {
                     self.park(
@@ -4227,6 +4226,20 @@ impl Runner {
                 .filter(|l| names.contains(&l.name) && l.chosen)
                 .map(|l| (l.name.clone(), l.worktree.clone(), Some(l.name.clone())))
                 .collect(),
+        }
+    }
+
+    /// Whether a stage runs nowhere: it names one lane or a list of
+    /// lanes, and the ticket chose none of them (or did not cut them).
+    /// `contexts` is empty for it too, but a skipped stage advances
+    /// where an `each` stage with no lane parks.
+    #[must_use]
+    pub(crate) fn skipped(t: &Ticket, stage: &Stage) -> bool {
+        let chosen = |name: &String| t.lanes.iter().any(|l| &l.name == name && l.chosen);
+        match &stage.context {
+            Context::Lane(lane) => !chosen(lane),
+            Context::Lanes(lanes) => !lanes.iter().any(chosen),
+            _ => false,
         }
     }
 
@@ -5936,7 +5949,7 @@ impl Runner {
         let stage = p.stages.get(t.stage);
         let gate_only = stage.is_none_or(|s| s.kind() == StageKind::GateOnly);
         let takes_hold = stage.is_some_and(|s| {
-            !skipped(t, s)
+            !Self::skipped(t, s)
                 && s.needs
                     .iter()
                     .any(|n| !t.holds.iter().any(|h| &h.resource == n))
@@ -6460,21 +6473,6 @@ pub(crate) fn costs_slot(a: &Attempt) -> bool {
 #[must_use]
 pub fn ticket_costs_slot(t: &Ticket) -> bool {
     t.active() && (t.attempts.iter().any(costs_slot) || !t.holds.is_empty())
-}
-
-/// A `retry` answer to a `service` question: every failed service of
-/// the current stage, stopped before the question was asked, is
-/// written stopped, so the next pass makes fresh records (`before`
-/// again, a new port).
-fn retry_services(t: &mut Ticket, p: &Pipeline) {
-    let Some(stage) = p.stages.get(t.stage) else {
-        return;
-    };
-    for s in &mut t.services {
-        if s.stage == stage.name && matches!(s.state, ServiceState::Failed { .. }) {
-            s.state = ServiceState::Stopped;
-        }
-    }
 }
 
 /// A lane a close removes on its own: one not removed yet with a
@@ -7946,7 +7944,7 @@ pub(crate) fn vars_for(t: &Ticket, p: &Pipeline, lane: Option<&str>) -> Vars {
         let key = format!("inputs.{}.commit", s.name);
         if let Some(head) = head {
             vars.set(key, head);
-        } else if skipped(t, s) {
+        } else if Runner::skipped(t, s) {
             vars.set(key, format!("unknown ({} skipped)", s.name));
         }
     }
@@ -7974,7 +7972,6 @@ pub(crate) fn vars_for(t: &Ticket, p: &Pipeline, lane: Option<&str>) -> Vars {
 /// and each lane being served. Nothing when there is neither.
 fn deployed_and_served(t: &Ticket, p: &Pipeline) -> String {
     let mut lines: Vec<String> = Vec::new();
-    let mut deployed = false;
     for s in p.stages.iter().take(t.stage) {
         if s.kind() != StageKind::GateOnly || !matches!(s.gate, Some(Gate::Command { .. })) {
             continue;
@@ -7991,10 +7988,9 @@ fn deployed_and_served(t: &Ticket, p: &Pipeline) -> String {
             if let Some(head) = head {
                 let short: String = head.chars().take(8).collect();
                 lines.push(format!("Deployed: {} at {short} ({ctx})", s.name));
-                deployed = true;
             }
         }
-        if skipped(t, s) {
+        if Runner::skipped(t, s) {
             let named = match &s.context {
                 Context::Lane(l) => l.clone(),
                 Context::Lanes(ls) => ls.join(", "),
@@ -8003,22 +7999,21 @@ fn deployed_and_served(t: &Ticket, p: &Pipeline) -> String {
             lines.push(format!("Deployed: {} skipped (no {named} lane)", s.name));
         }
     }
-    let served: Vec<String> = t
-        .services
-        .iter()
-        .filter(|x| x.state == ServiceState::Ready)
-        .map(|x| {
-            format!(
-                "Served: {} {}",
-                x.lane,
-                x.url.as_deref().unwrap_or_default()
-            )
-        })
-        .collect();
-    if !deployed && served.is_empty() {
+    lines.extend(
+        t.services
+            .iter()
+            .filter(|x| x.state == ServiceState::Ready)
+            .map(|x| {
+                format!(
+                    "Served: {} {}",
+                    x.lane,
+                    x.url.as_deref().unwrap_or_default()
+                )
+            }),
+    );
+    if lines.is_empty() {
         return String::new();
     }
-    lines.extend(served);
     format!("\n{}", lines.join("\n"))
 }
 
@@ -8887,5 +8882,141 @@ gate = { kind = "human", decision = "inspect" }
         assert!(!unanswered(Some(5), &[9], grace - 1));
         assert!(unanswered(Some(5), &[9], grace));
         assert!(unanswered(None, &[9], grace));
+    }
+
+    const PIPELINE: &str = r#"
+version = 1
+
+[project]
+name = "Orchard"
+repo = "git@example.com:k3/orchard-workspace.git"
+space = "Dispatch · Orchard"
+
+[source]
+kind = "manual"
+
+[[lanes]]
+name = "backend"
+path = "orchard-backend"
+
+[[lanes]]
+name = "frontend"
+path = "orchard-frontend"
+
+[[stages]]
+name = "deploy"
+context = "lane:backend"
+gate = { kind = "command", in = "lane:backend", argv = ["true"] }
+
+[[stages]]
+name = "both"
+context = ["backend", "frontend"]
+gate = { kind = "human", decision = "both" }
+
+[[stages]]
+name = "each"
+context = "each"
+gate = { kind = "human", decision = "each" }
+"#;
+
+    fn ticket(chosen: &[&str]) -> Ticket {
+        let lane = |name: &str| LaneRecord {
+            name: name.into(),
+            worktree: PathBuf::from(format!("/wt/t/orchard-{name}")),
+            branch: "dispatch/1-x".into(),
+            project: None,
+            chosen: chosen.contains(&name),
+            setup_done: false,
+            base_sha: None,
+            refreshed: None,
+            pushed: None,
+            removed: false,
+            conflict: None,
+        };
+        Ticket {
+            version: 0,
+            id: "t".into(),
+            project: "Orchard".into(),
+            source: SourceSnapshot {
+                kind: "manual".into(),
+                identity: "x".into(),
+                number: Some(1),
+                title: "x".into(),
+                body: String::new(),
+                url: None,
+                labels: vec![],
+                taken_at_ms: 0,
+                pull_requests: vec![],
+                taken_by: None,
+            },
+            pipeline_fingerprint: String::new(),
+            pipeline_file: PathBuf::new(),
+            lanes: vec![lane("backend"), lane("frontend")],
+            tree: Some("/wt/t".into()),
+            stage: 0,
+            attempts: vec![],
+            decisions: vec![],
+            ledger: vec![],
+            processes: vec![],
+            root_project: None,
+            rework: BTreeMap::new(),
+            refreshed_stage: None,
+            state: TicketState::Active,
+            state_by: None,
+            close: CloseProgress::default(),
+            restarts: vec![],
+            restart: None,
+            entered: vec![],
+            holds: vec![],
+            services: vec![],
+            created_ms: 0,
+            updated_ms: 0,
+        }
+    }
+
+    fn names(t: &Ticket, p: &Pipeline, stage: usize) -> Vec<String> {
+        Runner::contexts(t, p, &p.stages[stage])
+            .into_iter()
+            .map(|(name, _, _)| name)
+            .collect()
+    }
+
+    #[test]
+    fn a_lane_context_skips_unchosen_lanes_but_each_still_parks_with_none() {
+        let p = Pipeline::parse(PIPELINE).unwrap();
+        let t = ticket(&["frontend"]);
+        assert!(names(&t, &p, 0).is_empty());
+        assert!(
+            Runner::skipped(&t, &p.stages[0]),
+            "lane:backend, not chosen"
+        );
+        assert_eq!(names(&t, &p, 1), ["frontend"]);
+        assert!(
+            !Runner::skipped(&t, &p.stages[1]),
+            "one of its lanes is chosen"
+        );
+        assert_eq!(names(&t, &p, 2), ["frontend"]);
+        let t = ticket(&["backend", "frontend"]);
+        assert_eq!(names(&t, &p, 0), ["backend"]);
+        assert!(!Runner::skipped(&t, &p.stages[0]));
+        // `each` with nothing chosen has no context and is not skipped:
+        // `contexts_or_park` parks it, as before.
+        let t = ticket(&[]);
+        assert!(names(&t, &p, 2).is_empty());
+        assert!(!Runner::skipped(&t, &p.stages[2]));
+        assert!(Runner::skipped(&t, &p.stages[1]));
+    }
+
+    #[test]
+    fn a_skipped_deploy_reads_as_skipped_with_nothing_served() {
+        let p = Pipeline::parse(PIPELINE).unwrap();
+        let mut t = ticket(&["frontend"]);
+        t.stage = 1;
+        assert_eq!(
+            deployed_and_served(&t, &p),
+            "\nDeployed: deploy skipped (no backend lane)"
+        );
+        t.stage = 0;
+        assert_eq!(deployed_and_served(&t, &p), "", "nothing before it");
     }
 }

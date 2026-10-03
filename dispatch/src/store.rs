@@ -1150,6 +1150,7 @@ mod tests {
             started_ms: 3000,
             ready_ms: None,
             stopping_ms: None,
+            stuck_on: None,
             released: None,
         });
         write_ticket(&path, &t).unwrap();

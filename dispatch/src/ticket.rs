@@ -1096,6 +1096,10 @@ pub struct ServiceRecord {
     /// counts from here, and a `wait` answer resets it.
     #[serde(default)]
     pub stopping_ms: Option<u64>,
+    /// What the stop found still alive when it asked `stuck`; a
+    /// `released` answer records it as what the user stopped.
+    #[serde(default)]
+    pub stuck_on: Option<String>,
     /// What the user said was stopped by hand (a `released` answer to
     /// `stuck`), when the stop was not confirmed by the runner.
     #[serde(default)]

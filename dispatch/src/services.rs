@@ -12,16 +12,16 @@ use std::collections::BTreeSet;
 use anyhow::Result;
 use switchboard_control::{self as wire, Body, Made, Reply};
 
-use crate::pipeline::{Pipeline, Serve, Stage};
+use crate::pipeline::{Gate, Pipeline, Serve, Stage, StageKind};
 use crate::scheduler::{Ask, NO_SUCH_SESSION, Runner, SocketDown, confine_for, env_for};
 use crate::ticket::{
-    Decision, DecisionKind, DecisionState, GateRun, Hold, LaneRecord, ProjectState, STUCK,
-    ServiceRecord, ServiceState, Ticket, TicketState,
+    AttemptState, Decision, DecisionKind, DecisionState, GateRun, Hold, LaneRecord, ProjectState,
+    STUCK, ServiceRecord, ServiceState, Ticket, TicketState,
 };
 
 /// How long a service may take to read as stopped (its `before` exited,
-/// its session gone, its port free) before the user is asked. `npm run
-/// link-env` and a dev server's exit take seconds.
+/// its session gone, its port free) before the user is asked: well
+/// past the seconds a setup command or a dev server's exit takes.
 pub const STOP_LIMIT_MS: u64 = 120_000;
 
 /// The decision a service that could not be brought up raises: `retry`
@@ -70,6 +70,16 @@ impl Runner {
                 });
                 self.held_back.remove(&t.id);
                 log::info!("ticket {} holds {need} from {}", t.id, stage.name);
+                if let Some(back) = undo_range_commands(t, p, need, now_ms) {
+                    log::info!(
+                        "ticket {} back to {}: {need} was let go since it ran",
+                        t.id,
+                        p.stages[back].name
+                    );
+                    t.stage = back;
+                    self.save_ticket(t, now_ms)?;
+                    return Ok(true);
+                }
                 self.save_ticket(t, now_ms)?;
                 continue;
             }
@@ -227,6 +237,34 @@ impl Runner {
         Ok(ready)
     }
 
+    /// A `retry` answer to a `service` question: each failed service of
+    /// the current stage is stopped, and each that reads as stopped is
+    /// written `Stopped`, so the next pass makes a fresh record (`before`
+    /// again, a new port). One whose stop is not confirmed yet stays
+    /// failed and is stopped on, then asked about, so a retry never
+    /// starts a lane beside a copy still alive.
+    pub(crate) fn retry_services(
+        &mut self,
+        t: &mut Ticket,
+        ps: &mut ProjectState,
+        p: &Pipeline,
+        now_ms: u64,
+    ) -> Result<()> {
+        let Some(stage) = p.stages.get(t.stage) else {
+            return Ok(());
+        };
+        for i in 0..t.services.len() {
+            let rec = &t.services[i];
+            if rec.stage == stage.name && matches!(rec.state, ServiceState::Failed { .. }) {
+                self.stop_service(t, ps, i, now_ms)?;
+                if !t.active() {
+                    return Ok(());
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// The index of the stage's live record for `lane`, made in `Before`
     /// when there is none.
     fn service_record(
@@ -270,6 +308,7 @@ impl Runner {
             started_ms: now_ms,
             ready_ms: None,
             stopping_ms: None,
+            stuck_on: None,
             released: None,
         });
         self.save_ticket(t, now_ms)?;
@@ -306,8 +345,8 @@ impl Runner {
                         }
                         code
                     }
-                    // Lost with a runner that restarted; `link-env` is
-                    // idempotent, so it runs again.
+                    // Lost with a runner that restarted. A `before` must
+                    // be safe to run again (docs/dispatch.md), so it is.
                     Some(Err(e)) => {
                         log::warn!(
                             "ticket {} {} before for {} lost ({e:#}); starting again",
@@ -624,10 +663,16 @@ impl Runner {
         }
         let Some(alive) = self.still_alive(t, ps, i, now_ms)? else {
             self.remove_service_session(t, ps, i, now_ms)?;
+            // A `stuck` asked while it was slow has nothing left to be
+            // about, and no later stop would read its answer.
+            let withdrawn = withdraw_stuck(t, i);
             let rec = &mut t.services[i];
-            if rec.state != end {
+            let ended = rec.state != end;
+            if ended {
                 log::info!("ticket {} {} service {} stopped", t.id, rec.stage, rec.lane);
                 rec.state = end;
+            }
+            if ended || withdrawn {
                 self.save_ticket(t, now_ms)?;
             }
             return Ok(true);
@@ -695,9 +740,14 @@ impl Runner {
             return Ok(Some(format!("its session {session}")));
         }
         // A dev server's forked child can outlive its pane and keep the
-        // port, so the port binding again is part of stopped.
+        // port, so the port binding again is part of stopped. Once the
+        // session is removed that was confirmed, and whatever binds the
+        // port since is not this service.
         if let Some(port) = rec.port
-            && rec.session.is_some()
+            && rec
+                .session
+                .as_ref()
+                .is_some_and(|s| t.processes.contains(s))
             && !self.git.port_free(port)
         {
             return Ok(Some(format!(
@@ -750,13 +800,10 @@ impl Runner {
         now_ms: u64,
     ) -> Result<()> {
         let rec = t.services[i].clone();
-        let what = t
-            .decisions
-            .iter()
-            .rev()
-            .find(|d| is_stuck_for(d, &rec))
-            .and_then(|d| named_in(&d.question))
-            .map_or_else(|| describe_alive(t, &rec), str::to_owned);
+        let what = rec
+            .stuck_on
+            .clone()
+            .unwrap_or_else(|| "the service".to_owned());
         if rec.before.as_ref().is_some_and(|b| b.exit.is_none()) {
             self.git.kill_check(&before_key(t, &rec));
         }
@@ -767,6 +814,7 @@ impl Runner {
             rec.stage,
             rec.lane
         );
+        withdraw_stuck(t, i);
         let rec = &mut t.services[i];
         rec.released = Some(what);
         rec.state = end;
@@ -787,6 +835,7 @@ impl Runner {
             STOP_LIMIT_MS / 1000
         );
         log::warn!("ticket {} decision {id} ({STUCK}): {question}", t.id);
+        t.services[i].stuck_on = Some(alive.to_owned());
         t.decisions.push(Decision {
             id,
             stage: rec.stage.clone(),
@@ -802,6 +851,36 @@ impl Runner {
         });
         self.save_ticket(t, now_ms)
     }
+}
+
+/// A hold taken past the first stage of its range (a resume, after
+/// parking let it go): what a command stage earlier in the range did to
+/// the resource (a deploy) may have been replaced by another ticket's
+/// since. Each such stage's completed attempts are cancelled, so it is
+/// a `rerun` question rather than a result, and the earliest is the
+/// stage the ticket goes back to. `None` when there is none, as when the
+/// deploy was skipped.
+fn undo_range_commands(t: &mut Ticket, p: &Pipeline, resource: &str, now_ms: u64) -> Option<usize> {
+    let (first, _) = p.hold_range(resource)?;
+    let mut back = None;
+    for i in first..t.stage {
+        let s = &p.stages[i];
+        if s.kind() != StageKind::GateOnly || !matches!(s.gate, Some(Gate::Command { .. })) {
+            continue;
+        }
+        for a in &mut t.attempts {
+            if a.stage == s.name && a.state == AttemptState::Complete {
+                a.state = AttemptState::Cancelled {
+                    reason: format!(
+                        "{resource} was let go after it ran, so another ticket may have replaced what it did"
+                    ),
+                };
+                a.ended_ms = Some(now_ms);
+                back.get_or_insert(i);
+            }
+        }
+    }
+    back
 }
 
 /// Whether the record's range (its stage to its `until`) holds stage
@@ -848,29 +927,18 @@ fn stuck_pending(t: &Ticket, i: usize) -> bool {
         .any(|d| d.pending() && is_stuck_for(d, rec))
 }
 
-/// What a `stuck` question named as still alive, as `ask_stuck` wrote
-/// it.
-fn named_in(question: &str) -> Option<&str> {
-    let (_, rest) = question.split_once("has not stopped after ")?;
-    let (_, rest) = rest.split_once("s: ")?;
-    rest.split_once(". Stop it by hand").map(|(what, _)| what)
-}
-
-/// What the record says is still alive, read off it alone: the `before`
-/// with no exit, else the session still on the ticket, else the port.
-fn describe_alive(t: &Ticket, rec: &ServiceRecord) -> String {
-    if let Some(b) = rec.before.as_ref().filter(|b| b.exit.is_none()) {
-        return format!(
-            "its before ({}, log at {})",
-            before_key(t, rec),
-            b.log.display()
-        );
+/// Each pending `stuck` question about the record withdrawn; true if
+/// there was one.
+fn withdraw_stuck(t: &mut Ticket, i: usize) -> bool {
+    let rec = &t.services[i];
+    let mut withdrawn = false;
+    for d in &mut t.decisions {
+        if d.pending() && is_stuck_for(d, rec) {
+            d.state = DecisionState::Cancelled;
+            withdrawn = true;
+        }
     }
-    if let Some(s) = rec.session.as_ref().filter(|s| t.processes.contains(s)) {
-        return format!("its session {s}");
-    }
-    rec.port
-        .map_or_else(|| "the service".to_owned(), |port| format!("port {port}"))
+    withdrawn
 }
 
 /// The ports of a ticket's services not yet stopped.
@@ -913,18 +981,6 @@ pub fn waiting_for(t: &Ticket, p: &Pipeline, all: &[Ticket]) -> Option<String> {
         })
 }
 
-/// Whether a stage runs nowhere: it names one lane or a list of lanes,
-/// and the ticket chose none of them (or did not cut them).
-#[must_use]
-pub fn skipped(t: &Ticket, stage: &Stage) -> bool {
-    let chosen = |name: &String| t.lanes.iter().any(|l| &l.name == name && l.chosen);
-    match &stage.context {
-        crate::pipeline::Context::Lane(lane) => !chosen(lane),
-        crate::pipeline::Context::Lanes(lanes) => !lanes.iter().any(chosen),
-        _ => false,
-    }
-}
-
 /// A `session.new` reply under a service intent, now or from recovery:
 /// the operation and the session it made go on the record, and the
 /// session on the ticket's process list.
@@ -951,131 +1007,5 @@ pub(crate) fn apply_service_reply(t: &mut Ticket, intent: &str, made: &[Made]) {
         if !t.processes.contains(&id) {
             t.processes.push(id);
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use std::collections::BTreeMap;
-    use std::path::PathBuf;
-
-    use super::*;
-    use crate::ticket::{CloseProgress, SourceSnapshot};
-
-    const PIPELINE: &str = r#"
-version = 1
-
-[project]
-name = "Orchard"
-repo = "git@example.com:k3/orchard-workspace.git"
-space = "Dispatch · Orchard"
-
-[source]
-kind = "manual"
-
-[[lanes]]
-name = "backend"
-path = "orchard-backend"
-
-[[lanes]]
-name = "frontend"
-path = "orchard-frontend"
-
-[[stages]]
-name = "deploy"
-context = "lane:backend"
-gate = { kind = "command", in = "lane:backend", argv = ["true"] }
-
-[[stages]]
-name = "both"
-context = ["backend", "frontend"]
-gate = { kind = "human", decision = "both" }
-
-[[stages]]
-name = "each"
-context = "each"
-gate = { kind = "human", decision = "each" }
-"#;
-
-    fn ticket(chosen: &[&str]) -> Ticket {
-        let lane = |name: &str| LaneRecord {
-            name: name.into(),
-            worktree: PathBuf::from(format!("/wt/t/orchard-{name}")),
-            branch: "dispatch/1-x".into(),
-            project: None,
-            chosen: chosen.contains(&name),
-            setup_done: false,
-            base_sha: None,
-            refreshed: None,
-            pushed: None,
-            removed: false,
-            conflict: None,
-        };
-        Ticket {
-            version: 0,
-            id: "t".into(),
-            project: "Orchard".into(),
-            source: SourceSnapshot {
-                kind: "manual".into(),
-                identity: "x".into(),
-                number: Some(1),
-                title: "x".into(),
-                body: String::new(),
-                url: None,
-                labels: vec![],
-                taken_at_ms: 0,
-                pull_requests: vec![],
-                taken_by: None,
-            },
-            pipeline_fingerprint: String::new(),
-            pipeline_file: PathBuf::new(),
-            lanes: vec![lane("backend"), lane("frontend")],
-            tree: Some("/wt/t".into()),
-            stage: 0,
-            attempts: vec![],
-            decisions: vec![],
-            ledger: vec![],
-            processes: vec![],
-            root_project: None,
-            rework: BTreeMap::new(),
-            refreshed_stage: None,
-            state: TicketState::Active,
-            state_by: None,
-            close: CloseProgress::default(),
-            restarts: vec![],
-            restart: None,
-            entered: vec![],
-            holds: vec![],
-            services: vec![],
-            created_ms: 0,
-            updated_ms: 0,
-        }
-    }
-
-    fn names(t: &Ticket, p: &Pipeline, stage: usize) -> Vec<String> {
-        Runner::contexts(t, p, &p.stages[stage])
-            .into_iter()
-            .map(|(name, _, _)| name)
-            .collect()
-    }
-
-    #[test]
-    fn a_lane_context_skips_unchosen_lanes_but_each_still_parks_with_none() {
-        let p = Pipeline::parse(PIPELINE).unwrap();
-        let t = ticket(&["frontend"]);
-        assert!(names(&t, &p, 0).is_empty());
-        assert!(skipped(&t, &p.stages[0]), "lane:backend, not chosen");
-        assert_eq!(names(&t, &p, 1), ["frontend"]);
-        assert!(!skipped(&t, &p.stages[1]), "one of its lanes is chosen");
-        assert_eq!(names(&t, &p, 2), ["frontend"]);
-        let t = ticket(&["backend", "frontend"]);
-        assert_eq!(names(&t, &p, 0), ["backend"]);
-        assert!(!skipped(&t, &p.stages[0]));
-        // `each` with nothing chosen has no context and is not skipped:
-        // `contexts_or_park` parks it, as before.
-        let t = ticket(&[]);
-        assert!(names(&t, &p, 2).is_empty());
-        assert!(!skipped(&t, &p.stages[2]));
-        assert!(skipped(&t, &p.stages[1]));
     }
 }

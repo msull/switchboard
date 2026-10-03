@@ -5230,7 +5230,8 @@ fn ticket_page_shows_a_resolution_reviews_conflict() {
 }
 
 /// A ticket's page names what it holds and the lanes it serves, each
-/// served lane a link to where it answers.
+/// served lane a link to where it answers; what it waits for is said
+/// once, by its standing.
 #[test]
 fn a_dispatch_ticket_shows_its_holds_and_services() {
     use switchboard::ports::dispatch::ServiceView;
@@ -5251,7 +5252,12 @@ fn a_dispatch_ticket_shows_its_holds_and_services() {
         t.waiting_for = Some("my-dev, held by t9 (#3)".into());
     });
     harness.run_steps(1);
-    harness.get_by_label("Waiting for my-dev, held by t9 (#3)");
+    harness.get_by_label("waiting for my-dev, held by t9 (#3)");
+    assert!(
+        harness
+            .query_by_label("Waiting for my-dev, held by t9 (#3)")
+            .is_none()
+    );
 }
 
 /// A completed code review that folded its fix rounds says so on its

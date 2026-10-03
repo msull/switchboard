@@ -723,24 +723,20 @@ fn ticket_header(cx: &mut DrawCtx<'_>, ui: &mut Ui, t: &TicketView) {
     holds_and_services(ui, t);
 }
 
-/// What the ticket holds or waits for, and the lanes it serves, each a
-/// link to where it answers.
+/// What the ticket holds, and the lanes it serves, each a link to
+/// where it answers. A resource it waits for is its standing's to say.
 fn holds_and_services(ui: &mut Ui, t: &TicketView) {
     let p = theme::palette(ui);
-    let holding = if let Some(what) = &t.waiting_for {
-        Some(format!("Waiting for {what}"))
-    } else if t.holds.is_empty() {
-        None
-    } else {
-        Some(format!("Holds: {}", t.holds.join(", ")))
-    };
-    if holding.is_none() && t.services.is_empty() {
+    if t.holds.is_empty() && t.services.is_empty() {
         return;
     }
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing.x = 6.0;
-        if let Some(text) = holding {
-            ui.label(theme::meta_text(ui, text));
+        if !t.holds.is_empty() {
+            ui.label(theme::meta_text(
+                ui,
+                format!("Holds: {}", t.holds.join(", ")),
+            ));
         }
         if !t.services.is_empty() {
             ui.label(theme::meta_text(ui, "Services:"));
