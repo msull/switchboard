@@ -291,7 +291,7 @@ fn preview(ui: &mut Ui, draft: &mut EnvDraft) {
                 None => {
                     ui.label(RichText::new("no value stored").color(p.accent_2_text));
                 }
-                Some(v) if var.secret && !draft.reveal => {
+                Some(_) if var.secret && !draft.reveal => {
                     ui.monospace("••••••••");
                 }
                 Some(v) => {

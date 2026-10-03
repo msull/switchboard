@@ -9,14 +9,12 @@ use egui::{RichText, Sense, Ui, vec2};
 
 use super::{DrawCtx, theme};
 use crate::core::{
-    AppAction, AppCore, Approval, CardState, Launch, PinTarget, ProjectId, RecordId, SessionKind,
-    SessionRecord,
+    AppAction, Approval, CardState, PinTarget, ProjectId, SessionKind, SessionRecord,
 };
-use crate::ports::host::Liveness;
 use crate::ports::transcript::Conversation;
 
 /// Cards are at least this wide; the grid adds columns as room allows.
-pub const MIN_CARD_WIDTH: f32 = 230.0;
+const MIN_CARD_WIDTH: f32 = 230.0;
 /// Agent and shell cards; command and service cards are shorter.
 pub const SESSION_CARD_HEIGHT: f32 = 172.0;
 pub const ENTRY_CARD_HEIGHT: f32 = 184.0;
@@ -41,33 +39,24 @@ pub fn file_name(path: &Path) -> String {
     )
 }
 
+/// Whole seconds since `then`; zero for a time in the future.
+#[must_use]
+pub fn since_secs(then: SystemTime) -> u64 {
+    SystemTime::now()
+        .duration_since(then)
+        .map_or(0, |d| d.as_secs())
+}
+
 /// "3m", "2h", "5d": how long ago `then` was. The UI may read the wall
 /// clock; the core may not.
 #[must_use]
 pub fn since_text(then: SystemTime) -> String {
-    let secs = SystemTime::now()
-        .duration_since(then)
-        .map_or(0, |d| d.as_secs());
-    match secs {
+    match since_secs(then) {
         s if s < 60 => "just now".into(),
         s if s < 3600 => format!("{}m", s / 60),
         s if s < 86_400 => format!("{}h", s / 3600),
         s => format!("{}d", s / 86_400),
     }
-}
-
-/// Is the host process alive for this record?
-pub fn is_running(core: &AppCore, id: RecordId) -> bool {
-    matches!(
-        core.host_status(id).map(|h| &h.liveness),
-        Some(Liveness::Running { .. })
-    )
-}
-
-/// Sort key for cards: state rank first (waiting on top), then the
-/// board order the user chose.
-pub fn card_key(core: &AppCore, record: &SessionRecord) -> (u8, u32) {
-    (core.card_state(record.id).rank(), record.layout.order)
 }
 
 /// Lay `count` cells out in a grid whose columns are as many
@@ -105,12 +94,7 @@ pub fn grid(ui: &mut Ui, count: usize, height: f32, mut cell: impl FnMut(&mut Ui
 
 /// The kicker line of a card: the state, and for commands and services
 /// the kind before it. The reason a session waits is the body instead.
-pub(super) fn kicker_text(
-    core: &AppCore,
-    record: &SessionRecord,
-    state: &CardState,
-    running: bool,
-) -> String {
+pub(super) fn kicker_text(record: &SessionRecord, state: &CardState, running: bool) -> String {
     let age = if running {
         since_text(record.last_seen)
     } else {
@@ -122,10 +106,7 @@ pub(super) fn kicker_text(
             format!("{} · {label}", kind_label(record.kind))
         }
         SessionKind::Agent(_) | SessionKind::Shell => match state {
-            CardState::WaitingOnYou => {
-                let _ = core;
-                label
-            }
+            CardState::WaitingOnYou => label,
             _ => format!("{label} · {age}"),
         },
     }
@@ -136,7 +117,7 @@ pub(super) fn kicker_text(
 pub fn session_card(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord) {
     let p = theme::palette(ui);
     let state = cx.core.card_state(record.id);
-    let running = is_running(cx.core, record.id);
+    let running = cx.core.is_running(record.id);
     let entry = matches!(record.kind, SessionKind::Command | SessionKind::Service);
     let hollow = !running && !entry;
     let conversation = cx.state.conversations.get(&record.id).map(|(_, c)| c);
@@ -159,16 +140,10 @@ pub fn session_card(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord) {
             super::runs::kicker(record, running, SystemTime::now())
         )
     } else {
-        kicker_text(cx.core, record, &state, running)
+        kicker_text(record, &state, running)
     };
     let reason = (state == CardState::WaitingOnYou)
-        .then(|| {
-            if cx.core.at_trust_prompt(record.id) {
-                Some("Claude asks whether to trust this folder".to_owned())
-            } else {
-                record.activity_reason.clone()
-            }
-        })
+        .then(|| cx.core.waiting_reason(record.id))
         .flatten();
 
     let mut frame = egui::Frame::new()
@@ -217,7 +192,7 @@ pub fn session_card(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord) {
         if entry {
             super::runs::card_body(cx, ui, record);
         } else {
-            card_body(ui, record, entry, model, reason, caption.as_deref());
+            card_body(ui, record, model, reason, caption.as_deref());
         }
         if !running && !entry && state == CardState::NotResumable {
             ui.label(
@@ -235,36 +210,23 @@ pub fn session_card(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord) {
     }
 }
 
-/// The meta line and the body of a card: kind, model, and directory (or
-/// the command for an entry), then why the session waits and the pane's
-/// last line.
+/// The meta line and the body of an agent's or a shell's card: kind,
+/// model, and directory, then why the session waits and the pane's last
+/// line.
 fn card_body(
     ui: &mut Ui,
     record: &SessionRecord,
-    entry: bool,
     model: Option<String>,
     reason: Option<String>,
     caption: Option<&str>,
 ) {
     let p = theme::palette(ui);
-    match &record.launch {
-        Launch::Command { command, .. } if entry => {
-            ui.add(egui::Label::new(theme::mono_text(ui, command)).truncate());
-        }
-        _ => {
-            let mut parts = vec![kind_label(record.kind).to_owned()];
-            parts.extend(model);
-            if !entry {
-                parts.push(file_name(&record.cwd));
-            }
-            ui.add(
-                egui::Label::new(RichText::new(parts.join(" · ")).small().color(p.n600)).truncate(),
-            );
-        }
-    }
+    let mut parts = vec![kind_label(record.kind).to_owned()];
+    parts.extend(model);
+    parts.push(file_name(&record.cwd));
+    ui.add(egui::Label::new(RichText::new(parts.join(" · ")).small().color(p.n600)).truncate());
     // The body: why the session waits, or else the excerpt, clamped to
-    // two lines so the action row below keeps its place. Commands keep
-    // theirs in mono, one line.
+    // two lines so the action row below keeps its place.
     let body_style = theme::excerpt();
     if let Some(reason) = reason {
         let text = clamp_lines(ui, &reason, &theme::meta(), 2);
@@ -280,14 +242,8 @@ fn card_body(
     }
     let body = caption.map(last_line);
     if let Some(body) = body.filter(|b| !b.is_empty()) {
-        if entry {
-            ui.add(egui::Label::new(RichText::new(body).monospace().color(p.n800)).truncate());
-        } else {
-            let text = clamp_lines(ui, &body, &body_style, 2);
-            ui.add(
-                egui::Label::new(RichText::new(text).text_style(body_style).color(p.n800)).wrap(),
-            );
-        }
+        let text = clamp_lines(ui, &body, &body_style, 2);
+        ui.add(egui::Label::new(RichText::new(text).text_style(body_style).color(p.n800)).wrap());
     }
 }
 
@@ -312,10 +268,7 @@ fn clamp_lines(ui: &Ui, text: &str, style: &egui::TextStyle, lines: usize) -> St
 /// neutral.
 pub(super) fn actions(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord, running: bool) {
     ui.horizontal(|ui| {
-        // No side padding: the text sits flush with the title above, and a
-        // negative space would push the row's edge out and grow the panel.
-        ui.spacing_mut().item_spacing.x = 14.0;
-        ui.spacing_mut().button_padding = vec2(0.0, 4.0);
+        super::action_spacing(ui);
         let id = record.id;
         match record.kind {
             SessionKind::Agent(_) | SessionKind::Shell => {
@@ -402,12 +355,7 @@ pub fn document_card(cx: &mut DrawCtx<'_>, ui: &mut Ui, pid: ProjectId, rel: &Pa
             }
             ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
                 ui.horizontal(|ui| {
-                    // No side padding: the text sits flush with the title above, and a
-
-                    // negative space would push the row's edge out and grow the panel.
-
-                    ui.spacing_mut().item_spacing.x = 14.0;
-                    ui.spacing_mut().button_padding = vec2(0.0, 4.0);
+                    super::action_spacing(ui);
                     if theme::ghost(ui, "Open in app")
                         .on_hover_text("Open with the default app")
                         .clicked()
@@ -425,8 +373,6 @@ pub fn document_card(cx: &mut DrawCtx<'_>, ui: &mut Ui, pid: ProjectId, rel: &Pa
     }
 }
 
-/// The last line of a pane with something to read on it: a bare prompt
-/// glyph is not worth a line, and the serif has no shape for it anyway.
 /// What an agent card says under its title: the first line of the last
 /// answer, else what the agent is doing, else the prompt it is on.
 fn agent_excerpt(c: &Conversation) -> Option<String> {
@@ -447,6 +393,8 @@ fn agent_excerpt(c: &Conversation) -> Option<String> {
     Some(out)
 }
 
+/// The last line of a pane with something to read on it: a bare prompt
+/// glyph is not worth a line, and the serif has no shape for it anyway.
 fn last_line(text: &str) -> String {
     text.lines()
         .rev()

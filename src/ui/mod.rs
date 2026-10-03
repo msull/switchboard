@@ -61,6 +61,9 @@ pub enum Surface {
 
 /// State the UI owns between frames: dialog drafts, text being edited,
 /// embedded terminals. Nothing here is persisted or read by the core.
+// A bag of independent flags for unrelated views, not a state machine
+// in disguise.
+#[allow(clippy::struct_excessive_bools)]
 pub struct UiState {
     /// Create real `egui_term` backends for shell sessions. Tests set
     /// this to `false` so nothing is spawned.
@@ -96,7 +99,6 @@ pub struct UiState {
     pub rename_draft: Option<(RecordId, String)>,
     /// The Dispatch console's command line being typed.
     pub dispatch_console_draft: String,
-    /// A worktree root typed on the Dispatch page, not yet sent.
     /// The Dispatch page's settings, when shown: the worktree root as
     /// typed. `None` keeps them behind the header's button.
     pub dispatch_settings: Option<String>,
@@ -109,10 +111,11 @@ pub struct UiState {
     pub dispatch_project: Option<String>,
     /// How the ticket table is narrowed and ordered.
     pub dispatch_listing: crate::core::TicketListing,
-    /// Whether the Waiting on you section was folded when the first
-    /// status arrived; `None` until then, because before it there is
-    /// nothing to count and egui would remember an empty section as open.
-    pub dispatch_waiting_folded: Option<bool>,
+    /// The default fold has been applied once to the Waiting on you
+    /// section, when the first status arrived. Not before it: there is
+    /// nothing to count until then, and egui would remember an empty
+    /// section as open.
+    pub dispatch_waiting_fold_set: bool,
     /// Options ticked so far on decisions that take several, by
     /// decision id; started from the recommendation.
     pub dispatch_choices: HashMap<String, Vec<String>>,
@@ -277,7 +280,7 @@ impl Default for UiState {
             dispatch_artifact: None,
             dispatch_project: None,
             dispatch_listing: crate::core::TicketListing::default(),
-            dispatch_waiting_folded: None,
+            dispatch_waiting_fold_set: false,
             dispatch_choices: HashMap::new(),
             surface: Surface::Main,
             dispatch_window_ticket: None,
@@ -541,7 +544,7 @@ fn side_panel(
 
 /// Sessions and documents fill their area edge to edge (terminal,
 /// preview); the board and the switchboard get the page margin.
-fn page_margin(view: &View) -> egui::Margin {
+pub(super) fn page_margin(view: &View) -> egui::Margin {
     match view {
         View::Switchboard
         | View::Board(_)
@@ -820,8 +823,53 @@ pub fn stick_delta(
     })
 }
 
+/// Spacing for a row of text actions under a card or a preview: wide
+/// gaps and no side padding, so the first action's text sits flush
+/// with the title above. (A negative item spacing would push the row's
+/// edge out and grow the panel instead.)
+pub fn action_spacing(ui: &mut Ui) {
+    ui.spacing_mut().item_spacing.x = 14.0;
+    ui.spacing_mut().button_padding = egui::vec2(0.0, 4.0);
+}
+
+/// A labelled single-line field that holds focus while it is drawn:
+/// `Some(Some(text))`, trimmed, on Enter, `Some(None)` on Escape, and
+/// `None` while the user is typing.
+pub fn rename_field(
+    ui: &mut Ui,
+    label: &str,
+    draft: &mut String,
+    width: f32,
+) -> Option<Option<String>> {
+    let label = ui.label(label).id;
+    let response = ui
+        .add(egui::TextEdit::singleline(draft).desired_width(width))
+        .labelled_by(label);
+    response.request_focus();
+    let (enter, escape) = ui.input(|i| {
+        (
+            i.key_pressed(egui::Key::Enter),
+            i.key_pressed(egui::Key::Escape),
+        )
+    });
+    if enter {
+        Some(Some(draft.trim().to_owned()))
+    } else if escape {
+        Some(None)
+    } else {
+        None
+    }
+}
+
 /// The gap between neighbouring items.
 pub const GAP: f32 = 8.0;
+/// `Margin` takes whole pixels as `i8`; this is `GAP` in that form.
+const GAP_PX: i8 = 8;
+
+/// Where rendered previews of documents are cached.
+fn renders_dir(data_dir: &std::path::Path) -> PathBuf {
+    data_dir.join("renders")
+}
 /// Inner padding of every filled block (turn blocks, preview pane,
 /// docked message panel), so boundaries line up across views.
 pub const PAD: f32 = 14.0;

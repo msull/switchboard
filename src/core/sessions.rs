@@ -6,8 +6,8 @@ use std::path::PathBuf;
 
 use crate::core::action::{AppCore, Clock, Effect, Flight, FlightKind, Out, View};
 use crate::core::model::{
-    Activity, AgentKind, CardLayout, Discarded, Launch, ProjectId, RecordId, ResumeHandle,
-    SessionKind, SessionRecord, Workspace,
+    Activity, AgentKind, CardLayout, CardState, Discarded, Launch, ProjectId, RecordId,
+    ResumeHandle, SessionKind, SessionRecord, Workspace,
 };
 use crate::core::reconcile::env_with_record_id;
 use crate::ports::agent::AgentLaunch;
@@ -281,6 +281,17 @@ impl AppCore {
     pub(super) fn running_status(&self, id: RecordId) -> Option<&HostStatus> {
         self.host_status(id)
             .filter(|h| matches!(h.liveness, Liveness::Running { .. }))
+    }
+
+    /// The most urgent state among a project's sessions, or `None` when
+    /// it has none: the rail's dot and the switchboard's project order.
+    #[must_use]
+    pub fn project_state(&self, project: ProjectId) -> Option<CardState> {
+        self.workspace(project)?
+            .sessions
+            .iter()
+            .map(|s| self.card_state(s.id))
+            .min_by_key(CardState::rank)
     }
 
     /// Why a session waiting on the user waits: Claude's folder trust

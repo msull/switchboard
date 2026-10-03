@@ -25,7 +25,7 @@ use crate::core::{AppAction, Launch, PinTarget, ProjectId, RecordId, SessionKind
 pub struct DraggedPath(pub PathBuf);
 
 /// The index stops here; the finder says so when it does.
-pub const MAX_INDEX_ENTRIES: usize = 50_000;
+const MAX_INDEX_ENTRIES: usize = 50_000;
 const MAX_HITS: usize = 60;
 /// How often `git status` is re-run for a project on screen.
 const GIT_INTERVAL: Duration = Duration::from_secs(5);
@@ -57,7 +57,7 @@ impl FilesState {
     }
 
     /// Refresh the git state every `GIT_INTERVAL`, off the UI thread.
-    pub fn poll_git(&mut self, root: &Path, ctx: &egui::Context) {
+    fn poll_git(&mut self, root: &Path, ctx: &egui::Context) {
         if let Some(rx) = &self.git_scan {
             if let Ok(state) = rx.try_recv() {
                 self.git = Some(Arc::new(state));
@@ -341,9 +341,7 @@ fn preview_pane(
             });
             ui.horizontal(|ui| {
                 // No side padding: the text sits flush with the title above, and a
-
                 // negative space would push the row's edge out and grow the panel.
-
                 ui.spacing_mut().item_spacing.x = 14.0;
                 ui.spacing_mut().button_padding = egui::vec2(0.0, 3.0);
                 if theme::ghost(ui, "Expand")
@@ -416,7 +414,7 @@ struct Side<'a> {
 /// Row colors for git status: cyan for new, magenta for conflicts,
 /// neutral for the everyday edit.
 #[must_use]
-pub fn change_color(ui: &Ui, change: Change) -> Color32 {
+fn change_color(ui: &Ui, change: Change) -> Color32 {
     let p = theme::palette(ui);
     match change {
         Change::Modified => p.n600,
@@ -447,11 +445,7 @@ impl Side<'_> {
             return;
         }
         state.selected = Some(path.to_path_buf());
-        self.preview(path);
-    }
-
-    /// What a click on a file row does beyond selecting it.
-    fn preview(&mut self, path: &Path) {
+        // Without an inline preview pane, picking opens the full view.
         if !self.inline {
             self.expand(path);
         }

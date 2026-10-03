@@ -56,7 +56,7 @@ const fn rgb(hex: u32) -> Color32 {
     Color32::from_rgb(r, g, b)
 }
 
-pub const LIGHT: Palette = Palette {
+const LIGHT: Palette = Palette {
     dark: false,
     bg: rgb(0xf3f2f2),
     surface: rgb(0xeae9e9),
@@ -78,7 +78,7 @@ pub const LIGHT: Palette = Palette {
     code_text: rgb(0xf8f4f4),
 };
 
-pub const DARK: Palette = Palette {
+const DARK: Palette = Palette {
     dark: true,
     bg: rgb(0x201e1d),
     surface: rgb(0x2d2b2b),
@@ -253,7 +253,7 @@ pub fn h1() -> TextStyle {
 pub fn card_title() -> TextStyle {
     TextStyle::Name("card-title".into())
 }
-/// Section label: 10.5, uppercase and letter-spaced at the call site.
+/// Section label: 10.5; `kicker` uppercases and letter-spaces it.
 #[must_use]
 pub fn kicker_style() -> TextStyle {
     TextStyle::Name("kicker".into())
@@ -418,8 +418,8 @@ pub fn kicker(ui: &mut Ui, text: &str, color: Color32) -> Response {
     )
 }
 
-/// The section label between a board's groups: neutral, with the 36 px
-/// above and 12 px below the design asks for.
+/// The section label between a board's groups: neutral, with 24 px
+/// above and 6 px below.
 pub fn section(ui: &mut Ui, text: &str) {
     ui.add_space(24.0);
     kicker(ui, text, palette(ui).n600);

@@ -14,7 +14,7 @@ pub struct VoiceDraft {
     pub key: String,
 }
 
-/// The Settings menu: theme, editor command, environment, exclusive.
+/// The Settings menu: theme, editor command, environment.
 /// Compact draws only a glyph, for the narrow rail.
 pub fn settings_menu(
     cx: &mut DrawCtx<'_>,
@@ -89,9 +89,6 @@ pub fn settings_menu(
     });
 }
 
-/// The embedded Prompt Box: on or off, and what it needs. Its state is
-/// Switchboard's own (this file and the Keychain), never the standalone
-/// app's.
 /// Which screen the caption bar and the preview panel use: the one the
 /// window is on, or a display by name. The names come from the system
 /// (empty off macOS), so a chosen display that is unplugged is shown as
@@ -128,6 +125,9 @@ fn overlay_screen_picker(cx: &mut DrawCtx<'_>, ui: &mut Ui, voice: &VoiceSetting
     }
 }
 
+/// The embedded Prompt Box: on or off, and what it needs. Its state is
+/// Switchboard's own (this file and the Keychain), never the standalone
+/// app's.
 fn prompt_box_settings(cx: &mut DrawCtx<'_>, ui: &mut Ui, settings: &crate::core::Settings) {
     let p = theme::palette(ui);
     theme::kicker(ui, "Prompt Box", p.n600);

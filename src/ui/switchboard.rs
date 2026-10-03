@@ -3,7 +3,7 @@
 
 use egui::{RichText, Ui};
 
-use super::cards::{SESSION_CARD_HEIGHT, card_key, grid, session_card};
+use super::cards::{SESSION_CARD_HEIGHT, grid, session_card};
 use super::{DrawCtx, theme};
 use crate::core::{AppAction, CardState, Workspace};
 
@@ -16,11 +16,9 @@ pub fn show(cx: &mut DrawCtx<'_>, ui: &mut Ui) {
     // A project's rank is its most urgent card; ties go to the most
     // recently active project.
     let rank = |w: &Workspace| {
-        w.sessions
-            .iter()
-            .map(|s| cx.core.card_state(s.id).rank())
-            .min()
-            .unwrap_or(u8::MAX)
+        cx.core
+            .project_state(w.project.id)
+            .map_or(u8::MAX, |s| s.rank())
     };
     workspaces.sort_by(|a, b| {
         rank(a)
@@ -89,8 +87,7 @@ pub fn show(cx: &mut DrawCtx<'_>, ui: &mut Ui) {
                 ui.add_space(4.0);
                 // Agents and shells only: commands and services belong to
                 // the board, where the run bar starts them.
-                let mut sessions = cx.core.board_sessions(workspace.project.id);
-                sessions.sort_by_key(|s| card_key(cx.core, s));
+                let sessions = cx.core.board_sessions(workspace.project.id);
                 if sessions.is_empty() {
                     ui.label(theme::meta_text(ui, "no sessions"));
                 }

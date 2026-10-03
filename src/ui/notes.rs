@@ -8,7 +8,7 @@ use super::{DrawCtx, theme};
 use crate::core::{AppAction, RecordId};
 
 /// The accessible name of the field; the tab itself is "Notes".
-pub const FIELD_NAME: &str = "Session notes";
+const FIELD_NAME: &str = "Session notes";
 
 pub fn show(cx: &mut DrawCtx<'_>, ui: &mut Ui, id: RecordId) {
     let Some(record) = cx.core.session(id) else {

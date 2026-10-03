@@ -7,9 +7,9 @@ use std::path::Path;
 
 use egui::{Pos2, RichText, Sense, Ui, UiBuilder, vec2};
 
-use super::cards::{actions, file_name, is_running, kicker_text, kind_label};
+use super::cards::{actions, file_name, kicker_text, kind_label};
 use super::document::{self, Body};
-use super::{DrawCtx, UiState, theme};
+use super::{DrawCtx, GAP, UiState, theme};
 use crate::core::grid::{MIN_HEIGHT, MIN_WIDTH};
 use crate::core::{
     AppAction, AppCore, CardState, GridRect, MenuKind, PinTarget, PinnedItem, RadialMenu, RecordId,
@@ -44,7 +44,7 @@ const HANDLE: f32 = 16.0;
 /// nearest whole number of units, never past the left or top edge and
 /// never below the minimum size.
 #[must_use]
-pub fn dragged_rect(from: GridRect, resize: bool, delta: egui::Vec2) -> GridRect {
+fn dragged_rect(from: GridRect, resize: bool, delta: egui::Vec2) -> GridRect {
     #[allow(clippy::cast_possible_truncation)]
     let (dx, dy) = (
         (delta.x / UNIT).round() as i64,
@@ -73,15 +73,12 @@ pub fn dragged_rect(from: GridRect, resize: bool, delta: egui::Vec2) -> GridRect
 /// One grid unit in points, gap included: seven units make a board
 /// card's 230 px.
 pub const UNIT: f32 = 34.0;
-/// The gap between neighbouring cards, taken off each card's right and
-/// bottom edge.
-const GAP_PX: f32 = 8.0;
 
 /// How many whole units fit in `width` points.
 #[must_use]
 pub fn columns(width: f32) -> u32 {
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    let n = ((width + GAP_PX) / UNIT).floor() as u32;
+    let n = ((width + GAP) / UNIT).floor() as u32;
     n.max(crate::core::grid::MIN_WIDTH)
 }
 
@@ -92,7 +89,7 @@ pub fn cell_rect(origin: egui::Pos2, rect: GridRect) -> egui::Rect {
     let (x, y, w, h) = (rect.x as f32, rect.y as f32, rect.w as f32, rect.h as f32);
     egui::Rect::from_min_size(
         origin + vec2(x * UNIT, y * UNIT),
-        vec2(w * UNIT - GAP_PX, h * UNIT - GAP_PX),
+        vec2(w * UNIT - GAP, h * UNIT - GAP),
     )
 }
 
@@ -160,8 +157,8 @@ pub fn show(cx: &mut DrawCtx<'_>, ui: &mut Ui, set: SetId) {
         .show(ui, |ui| {
             #[allow(clippy::cast_precision_loss)]
             let total = vec2(
-                width_units as f32 * UNIT - GAP_PX,
-                height_units as f32 * UNIT - GAP_PX,
+                width_units as f32 * UNIT - GAP,
+                height_units as f32 * UNIT - GAP,
             );
             let (rect, _) = ui.allocate_exact_size(total, Sense::hover());
             let origin = rect.min;
@@ -192,7 +189,7 @@ pub fn show(cx: &mut DrawCtx<'_>, ui: &mut Ui, set: SetId) {
                     && ui.rect_contains_pointer(cell)
                     && ui.input(|i| i.pointer.primary_pressed())
                 {
-                    cx.actions.push(AppAction::ActivateCard {
+                    cx.dispatch(AppAction::ActivateCard {
                         set,
                         target: item.target.clone(),
                     });
@@ -243,8 +240,7 @@ fn grid_dots(ui: &Ui, rect: egui::Rect, width_units: u32, height_units: u32, cel
     for y in 0..=height_units {
         for x in 0..=width_units {
             #[allow(clippy::cast_precision_loss)]
-            let at = rect.min + vec2(x as f32 * UNIT, y as f32 * UNIT)
-                - vec2(GAP_PX / 2.0, GAP_PX / 2.0);
+            let at = rect.min + vec2(x as f32 * UNIT, y as f32 * UNIT) - vec2(GAP / 2.0, GAP / 2.0);
             if cells.iter().any(|c| c.contains(at)) {
                 continue;
             }
@@ -380,15 +376,6 @@ fn capped(text: &str) -> String {
 /// Height kept under the body for the send line and the action row.
 const FOOTER: f32 = 62.0;
 
-/// An agent or shell on the working set: state and project, name, the
-/// last prompt on one line, the last answer (an agent's rendered as
-/// Markdown and scrolling, so the whole of it can be read on the set;
-/// a shell: the pane's tail), a one-line send box, and the usual
-/// actions. Hovering the prompt shows more of it. A rendered answer
-/// has "View" in the actions row, which opens it in the message dialog
-/// (rendered or raw, for reading a long one or copying). A plain
-/// answer (an agent still working, or a shell) shows more on hover and
-/// opens unformatted on click.
 /// What an agent or shell card says, gathered before drawing.
 struct SetCardText {
     kicker: String,
@@ -405,7 +392,7 @@ struct SetCardText {
 
 fn set_card_text(cx: &DrawCtx<'_>, record: &SessionRecord) -> SetCardText {
     let state = cx.core.card_state(record.id);
-    let running = is_running(cx.core, record.id);
+    let running = cx.core.is_running(record.id);
     let agent = matches!(record.kind, SessionKind::Agent(_));
     let project = cx
         .core
@@ -442,10 +429,7 @@ fn set_card_text(cx: &DrawCtx<'_>, record: &SessionRecord) -> SetCardText {
     parts.extend(conversation.and_then(|c| c.model.clone()));
     parts.push(file_name(&record.cwd));
     SetCardText {
-        kicker: format!(
-            "{} · {project}",
-            kicker_text(cx.core, record, &state, running)
-        ),
+        kicker: format!("{} · {project}", kicker_text(record, &state, running)),
         meta: parts.join(" · "),
         prompt,
         answer,
@@ -494,6 +478,15 @@ fn set_card_top(
     listen
 }
 
+/// An agent or shell on the working set: state and project, name, the
+/// last prompt on one line, the last answer (an agent's rendered as
+/// Markdown and scrolling, so the whole of it can be read on the set;
+/// a shell: the pane's tail), a one-line send box, and the usual
+/// actions. Hovering the prompt shows more of it. A rendered answer
+/// has "View" in the actions row, which opens it in the message dialog
+/// (rendered or raw, for reading a long one or copying). A plain
+/// answer (an agent still working, or a shell) shows more on hover and
+/// opens unformatted on click.
 fn set_card(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord, rule_set: Option<SetId>) {
     let p = theme::palette(ui);
     let SetCardText {
@@ -750,8 +743,6 @@ pub(super) fn pane_tail(snapshot: &str, lines: usize) -> String {
     kept.into_iter().rev().collect::<Vec<_>>().join("\n")
 }
 
-/// One line to type into the session without opening it: Enter sends
-/// it as a line to the pane. Off while the session is not running.
 /// What the core asked for that this view knows how to show: the
 /// answer text of a card in the message dialog, its pane, or the
 /// controller's Escape (a dialog closed, a text field left).
@@ -845,6 +836,8 @@ pub fn send_field_id(id: RecordId) -> egui::Id {
     egui::Id::new(("quick-send", id))
 }
 
+/// One line to type into the session without opening it: Enter sends
+/// it as a line to the pane. Off while the session is not running.
 fn send_line(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord, running: bool) {
     let p = theme::palette(ui);
     let field_id = send_field_id(record.id);
@@ -961,14 +954,13 @@ fn file_card(
                 egui::Rect::from_min_size(ui.cursor().min, vec2(ui.available_width(), body_height));
             let mut body = ui.new_child(UiBuilder::new().max_rect(body_rect));
             body.set_clip_rect(body_rect.intersect(ui.clip_rect()));
-            let renders = cx.services.store.data_dir().join("renders");
+            let renders = super::renders_dir(&cx.services.store.data_dir());
             let nudge = stick_scroll(cx, ui, &target);
             file_body(cx.state, &mut body, &path, mode, &renders, nudge);
             ui.advance_cursor_after_rect(body_rect);
             ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
                 ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 14.0;
-                    ui.spacing_mut().button_padding = vec2(0.0, 4.0);
+                    super::action_spacing(ui);
                     if theme::ghost(ui, "Open in app").clicked() {
                         cx.dispatch(AppAction::OpenDocument(path.clone()));
                     }
@@ -990,8 +982,6 @@ fn file_card(
     }
 }
 
-/// The file inside its card: a scroll area, wrapped or sideways, with
-/// the preview rendered or its source.
 /// How far the held stick scrolls this card this frame, while C holds
 /// the card: a steady speed, up and left as the stick points.
 fn stick_scroll(cx: &DrawCtx<'_>, ui: &Ui, target: &PinTarget) -> Option<egui::Vec2> {
@@ -1003,6 +993,8 @@ fn stick_scroll(cx: &DrawCtx<'_>, ui: &Ui, target: &PinTarget) -> Option<egui::V
     super::stick_delta(ui, stick)
 }
 
+/// The file inside its card: a scroll area, wrapped or sideways, with
+/// the preview rendered or its source.
 fn file_body(
     state: &mut UiState,
     ui: &mut Ui,
@@ -1240,25 +1232,11 @@ fn rule_line(cx: &mut DrawCtx<'_>, ui: &mut Ui, set: SetId, rule: SetRule) {
 /// The name field while a rename is under way: Enter commits, Escape
 /// cancels.
 fn name_editor(cx: &mut DrawCtx<'_>, ui: &mut Ui, set: SetId) {
-    let mut done = None;
-    if let Some((_, draft)) = cx.state.set_rename.as_mut() {
-        let label = ui.label("Working set name").id;
-        let response = ui
-            .add(egui::TextEdit::singleline(draft).desired_width(280.0))
-            .labelled_by(label);
-        response.request_focus();
-        let (enter, escape) = ui.input(|i| {
-            (
-                i.key_pressed(egui::Key::Enter),
-                i.key_pressed(egui::Key::Escape),
-            )
-        });
-        if enter {
-            done = Some(Some(draft.trim().to_owned()));
-        } else if escape {
-            done = Some(None);
-        }
-    }
+    let done = cx
+        .state
+        .set_rename
+        .as_mut()
+        .and_then(|(_, draft)| super::rename_field(ui, "Working set name", draft, 280.0));
     match done {
         Some(Some(name)) => {
             cx.state.set_rename = None;

@@ -54,12 +54,6 @@ pub struct ConfigDraft {
 impl ConfigDraft {
     /// The file as it is now, or the template for a project without one.
     #[must_use]
-    pub fn open(cx: &DrawCtx<'_>, pid: ProjectId) -> Option<Self> {
-        Self::read(cx.core, cx.services, pid)
-    }
-
-    /// The same, from the app itself (the script dev aid).
-    #[must_use]
     pub fn read(core: &AppCore, services: &Services, pid: ProjectId) -> Option<Self> {
         let workspace = core.workspace(pid)?;
         let (text, read_error, fresh) =

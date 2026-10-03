@@ -99,7 +99,7 @@ pub fn split(text: &str) -> Vec<Segment<'_>> {
 /// a column of short values stays narrow. Below the minimums the table
 /// is wider than the view and scrolls.
 #[must_use]
-pub fn column_widths(min: &[f32], max: &[f32], available: f32) -> Vec<f32> {
+fn column_widths(min: &[f32], max: &[f32], available: f32) -> Vec<f32> {
     let want: f32 = max.iter().sum();
     if want <= available {
         return max.to_vec();

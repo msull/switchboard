@@ -14,7 +14,7 @@ use egui::{CornerRadius, Frame, Margin, RichText, Stroke, Ui};
 use egui_commonmark::CommonMarkCache;
 use egui_term::{BackendSettings, PtyEvent, TerminalBackend, TerminalView};
 
-use super::cards::{is_running, kind_label};
+use super::cards::kind_label;
 use super::files::DraggedPath;
 use super::{DrawCtx, GAP, PAD, UiState, theme};
 use crate::core::{
@@ -123,9 +123,6 @@ pub fn show(cx: &mut DrawCtx<'_>, ui: &mut Ui, id: RecordId) {
     }
 }
 
-/// `Margin` takes whole pixels as `i8`; this is `GAP` in that form.
-const GAP_PX: i8 = 8;
-
 /// Below this width the header's actions get their own row.
 const TIGHT_HEADER: f32 = 640.0;
 
@@ -140,7 +137,7 @@ const TIGHT_HEADER: f32 = 640.0;
 fn header(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord) {
     let p = theme::palette(ui);
     let state = cx.core.card_state(record.id);
-    let running = is_running(cx.core, record.id);
+    let running = cx.core.is_running(record.id);
     // Claude's own folder trust question, answerable from here.
     if cx.core.at_trust_prompt(record.id) {
         ui.horizontal(|ui| {
@@ -448,25 +445,11 @@ fn name_or_editor(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord) {
         ui.add(egui::Label::new(RichText::new(&record.name).text_style(theme::h1())).truncate());
         return;
     }
-    let mut done = None;
-    if let Some((_, draft)) = cx.state.rename_draft.as_mut() {
-        let label = ui.label("Session name").id;
-        let response = ui
-            .add(egui::TextEdit::singleline(draft).desired_width(220.0))
-            .labelled_by(label);
-        response.request_focus();
-        let (enter, escape) = ui.input(|i| {
-            (
-                i.key_pressed(egui::Key::Enter),
-                i.key_pressed(egui::Key::Escape),
-            )
-        });
-        if enter {
-            done = Some(Some(draft.trim().to_owned()));
-        } else if escape {
-            done = Some(None);
-        }
-    }
+    let done = cx
+        .state
+        .rename_draft
+        .as_mut()
+        .and_then(|(_, draft)| super::rename_field(ui, "Session name", draft, 220.0));
     match done {
         Some(Some(name)) => {
             cx.state.rename_draft = None;
@@ -495,7 +478,7 @@ fn agent_body(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord) {
     let prompt_box = cx.core.settings().prompt_box;
     let mut panel = egui::Panel::bottom("message_panel").resizable(prompt_box);
     if prompt_box {
-        panel = panel.default_size(super::prompt_box::default_height());
+        panel = panel.default_size(super::prompt_box::DEFAULT_HEIGHT);
     }
     let panel = panel
         .frame(Frame::new().stroke(stroke).inner_margin(Margin {
@@ -552,7 +535,7 @@ fn agent_body(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord) {
             });
     }
     Frame::new()
-        .inner_margin(Margin::symmetric(0, GAP_PX / 2))
+        .inner_margin(Margin::symmetric(0, super::GAP_PX / 2))
         .show(ui, |ui| conversation_or_pane(cx, ui, record));
 }
 
@@ -562,11 +545,7 @@ fn conversation_or_pane(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecor
     let p = theme::palette(ui);
     // Cloning is offered on the user's own messages of a Claude Code
     // session that has a transcript; the core refuses the rest anyway.
-    let cloneable = matches!(record.kind, SessionKind::Agent(AgentKind::ClaudeCode))
-        && record
-            .resume
-            .as_ref()
-            .is_some_and(|h| h.transcript().is_some());
+    let cloneable = crate::core::can_fork(record);
     let mut clone_at: Option<usize> = None;
     let mut discard_at: Option<usize> = None;
     ui.set_min_size(ui.available_size());
@@ -672,7 +651,7 @@ const MESSAGE_MAX_ROWS: usize = 8;
 /// side, land in the draft as paths, which is how an agent is pointed
 /// at an image or a document.
 fn message_box(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord) {
-    let running = is_running(cx.core, record.id);
+    let running = cx.core.is_running(record.id);
     let dropped: Vec<PathBuf> = ui.input(|i| {
         i.raw
             .dropped_files
@@ -785,9 +764,6 @@ pub(super) fn append_path(draft: &mut String, path: &std::path::Path) {
     draft.push_str(&word);
 }
 
-/// Header line, then the turns in a scroll area that follows new
-/// content, with the raw terminal snapshot folded away at the end.
-/// The activity fold's state, written back to the UI state.
 /// A flick left or right on a session's page: the cursor steps to the
 /// previous or next of the user's messages and the conversation is
 /// scrolled to it. Past the end means the end of the conversation,
@@ -821,10 +797,14 @@ struct Toggles<'a> {
     /// The turn a jump scrolls to the top this frame; the turns' count
     /// is the end.
     jump: Option<usize>,
+    /// The activity fold's state, written back to the UI state.
     expand: &'a mut bool,
     expand_applied: &'a mut Option<bool>,
 }
 
+/// Header line, then the turns in a scroll area that follows new
+/// content, with the raw terminal snapshot folded away at the end.
+///
 /// The conversation under its toggles. Claude Code's own name for the
 /// conversation (`/rename`) is shown only when it differs from the
 /// record's name, marked as Claude's, so a rename in Switchboard does
@@ -881,7 +861,7 @@ fn conversation_view(
         // Measured once, before any turn: a word egui cannot break
         // widens the layout for everything after it, and a cap read
         // back per turn would only carry that widening along.
-        let width = ui.available_width().min(MAX_READING_WIDTH);
+        let width = ui.available_width().min(super::document::MAX_READING_WIDTH);
         for (i, turn) in conversation.turns.iter().enumerate() {
             let block =
                 ui.scope(|ui| turn_block(ui, turn, open, markdown, width, menus.reborrow()));
@@ -898,7 +878,7 @@ fn meta_line(c: &Conversation) -> String {
             "{} → {} ({})",
             time_text(c.start),
             time_text(c.end),
-            duration_text(c.start, c.end)
+            elapsed_text(c.start, c.end)
         ),
         format!("{} turns", c.turns.len()),
     ];
@@ -937,7 +917,7 @@ fn time_text(t: Option<SystemTime>) -> String {
 }
 
 /// "5m" or "1.5h" between two times; empty when either is missing.
-fn duration_text(a: Option<SystemTime>, b: Option<SystemTime>) -> String {
+fn elapsed_text(a: Option<SystemTime>, b: Option<SystemTime>) -> String {
     let (Some(a), Some(b)) = (a, b) else {
         return String::new();
     };
@@ -1140,9 +1120,6 @@ fn agent_block(
         .rect
 }
 
-/// Prose stops here, however wide the window; the mock reads at 860.
-const MAX_READING_WIDTH: f32 = 860.0;
-
 /// Text that wraps at the visible width but, where a word or a table
 /// cannot wrap, scrolls sideways inside its block instead of widening
 /// the block and everything under it.
@@ -1157,14 +1134,6 @@ fn scrolls_sideways(ui: &mut Ui, salt: impl egui::AsIdSalt, add: impl FnOnce(&mu
         });
 }
 
-/// The right-click menu of one message (the user's prompt or the
-/// agent's answer) covering `rect`: Copy; View raw, which opens the
-/// text unformatted in a dialog for when the Markdown renders badly;
-/// and View links, which lists the message's web links to click.
-///
-/// The block is not made clickable: that would put it above the labels
-/// and links inside it in egui's hit test and take their clicks. The
-/// pointer is checked directly instead, and the menu is opened by hand.
 /// What the message menus write back: the text to show in the raw
 /// dialog, the links to list, and (when the session can be cloned) the
 /// turn number the user chose to fork before.
@@ -1196,8 +1165,15 @@ impl Menus<'_> {
     }
 }
 
-/// The right-click menu on a message. "Clone session" is offered on the
-/// user's own messages of a cloneable session.
+/// The right-click menu of one message (the user's prompt or the
+/// agent's answer) covering `rect`: Copy; View raw, which opens the
+/// text unformatted in a dialog for when the Markdown renders badly;
+/// and View links, which lists the message's web links to click. "Clone
+/// session" is offered on the user's own messages of a cloneable session.
+///
+/// The block is not made clickable: that would put it above the labels
+/// and links inside it in egui's hit test and take their clicks. The
+/// pointer is checked directly instead, and the menu is opened by hand.
 fn message_menu(
     ui: &mut Ui,
     rect: egui::Rect,
@@ -1267,7 +1243,7 @@ fn stats_line(t: &Turn) -> String {
     if t.errors > 0 {
         parts.push(format!("{} errors", t.errors));
     }
-    let d = duration_text(t.at, t.end);
+    let d = elapsed_text(t.at, t.end);
     parts.push(if d.is_empty() { "0m".into() } else { d });
     parts.join(" · ")
 }
@@ -1361,7 +1337,7 @@ pub fn code_block(ui: &mut Ui, text: &str) {
 }
 
 pub(super) fn terminal_body(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord) {
-    if !is_running(cx.core, record.id) {
+    if !cx.core.is_running(record.id) {
         let note = if cx.state.snapshots.contains_key(&record.id) {
             "Not running. Return starts it again; below is the last output kept on disk."
         } else {
