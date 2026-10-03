@@ -493,6 +493,14 @@ impl Stage {
         }
     }
 
+    /// A gate-only stage whose gate is a command (a deploy): the stages
+    /// whose result a later hold of the same resource can go stale
+    /// against.
+    #[must_use]
+    pub fn is_command_stage(&self) -> bool {
+        self.kind() == StageKind::GateOnly && matches!(self.gate, Some(Gate::Command { .. }))
+    }
+
     /// The review passes a code review stage may make.
     #[must_use]
     pub fn review_cap(&self) -> u32 {

@@ -1196,18 +1196,18 @@ What this pipeline showed, and what it added to the vocabulary:
   `before` command runs as a child of the runner, with its log in the
   ticket directory, and must exit zero (it must also be safe to run
   again: one lost to a runner restart is started again, and a retry
-  runs it anew); Dispatch allocates a port from
-  the policy's `ports` range, testing that it binds before choosing
-  it, so a server you started by hand on the default port is simply
-  not chosen; the service is a Switchboard service session made with
-  `session.new`, launched through the login shell as `env
-  <serve.env> <serve.argv>` with `{port}` filled in, so `serve.env`
-  must hold no secrets (the argv is kept on the record and the pane's
-  command line); and readiness is the `ready` probe answering on that
-  URL within its limit. A `before` failure, no free port, or a probe
-  that never answers is a decision before the tester is launched. The tester is
-  told each URL and not to start a server of its own. Services live on
-  the ticket record until the last stage holding the resource ends.
+  runs it anew); Dispatch allocates a port from the policy's `ports`
+  range, testing that it binds before choosing it, so a server you
+  started by hand on the default port is simply not chosen; the
+  service is a Switchboard service session made with `session.new`,
+  launched through the login shell as `env <serve.env> <serve.argv>`
+  with `{port}` filled in, so `serve.env` must hold no secrets (the
+  argv is kept on the record and the pane's command line); and
+  readiness is the `ready` probe answering on that URL within its
+  limit. A `before` failure, no free port, or a probe that never
+  answers is a decision before the tester is launched. The tester is
+  told each URL and not to start a server of its own. Services live
+  on the ticket record until the last stage holding the resource ends.
 - **One owner of the deploy.** Dispatch runs it as a command gate,
   records the commit, and the tester is told the commit and told not
   to deploy. The `tried` decision shows the tester's evidence file and
@@ -1624,11 +1624,15 @@ ticket's slot as any open attempt does).
   without the runner's confirmation. A stop that ends on its own
   after asking withdraws the question in the write that records it.
 - A hold taken past the first stage of its range (a ticket parked at
-  `try` or `tried`, then resumed) cannot trust what a command stage
-  earlier in the range did: another ticket may have deployed since.
-  That stage's completed attempt is cancelled and the ticket goes back
-  to it, where the `rerun` question asks before anything deploys or
-  reads the old commit.
+  `try` or `tried`, then resumed) cannot trust what the range's earlier
+  stages did: another ticket may have deployed since, and parking
+  stopped the services the tester ran against. Every completed attempt
+  of a command or agent stage earlier in the range is cancelled and
+  the ticket goes back to the earliest, where a `rerun` question asks
+  before anything deploys or reads the old commit. Each later agent
+  stage brings its services up again before asking the same, so
+  `tried` is never asked with nothing served. A frontend-only ticket,
+  with no deploy, goes back to `try`.
 - The in-place lane hold above is not built: a stage whose `needs`
   names a lane parks, saying so.
 - Holds cover Dispatch tickets only. Dispatch cannot see a manual
@@ -2373,7 +2377,8 @@ and one against the real one:
 | A ticket reaches `deploy` in its backend lane | One gate-only attempt in that lane, no session, the command in the lane's clean tree with `DISPATCH_STAGE=deploy` and its log in `checks.log`; exit 0 binds the head and the tester is told that commit; the command ran once (`a_deploy_runs_once_at_the_lanes_clean_head_and_the_tester_is_told_the_commit`) |
 | A frontend-only ticket reaches `deploy` | No attempt and no command; the tester reads `unknown (deploy skipped)`, and `tried` says the deploy was skipped and what is served (`a_deploy_for_a_lane_not_chosen_is_skipped_and_reads_as_skipped`) |
 | The deploy exits 1 | A `rerun` question with `rerun` and `park`; parked and resumed, the question again and no second run; `rerun` runs attempt 2 with its own log (`a_failed_deploy_asks_rerun_or_park_and_a_resume_does_not_deploy_again_unasked`) |
-| A ticket parked at `tried` is resumed | It takes `my-dev` again and goes back to `deploy`, whose attempt is cancelled; a `rerun` question, and no deploy until it is answered (`a_resume_past_the_deploy_asks_to_deploy_again_before_anything_reads_it`) |
+| A ticket parked at `tried` is resumed | It takes `my-dev` again and goes back to `deploy`; the deploy's and the tester's attempts are cancelled; a `rerun` question, and no deploy until it is answered; after the deploy, `try` serves the frontend again and asks before the tester runs, and `tried` says what is served (`a_resume_past_the_deploy_asks_to_deploy_again_before_anything_reads_it`) |
+| A frontend-only ticket parked at `tried` is resumed | It goes back to `try`, serves the frontend again and asks before the tester runs again (`a_resume_with_the_deploy_skipped_serves_again_and_asks_before_the_tester`) |
 | The runner restarts while the deploy runs | The attempt fails "it may have run" and asks; nothing runs again; the hold stays (`a_deploy_lost_to_a_runner_restart_is_a_question_not_a_rerun`) |
 | A ticket parks while its deploy runs | `parking` until the command exits, never killed; then `parked` with no hold (`parking_during_a_deploy_waits_for_it_to_exit_then_releases_the_hold`) |
 | A stage in `lane:<x>` for a ticket without that lane chosen | No context and skipped; an `each` stage with nothing chosen still parks (`a_lane_context_skips_unchosen_lanes_but_each_still_parks_with_none`) |

@@ -12,7 +12,7 @@ use std::collections::BTreeSet;
 use anyhow::Result;
 use switchboard_control::{self as wire, Body, Made, Reply};
 
-use crate::pipeline::{Gate, Pipeline, Serve, Stage, StageKind};
+use crate::pipeline::{Pipeline, Serve, Stage, StageKind};
 use crate::scheduler::{Ask, NO_SUCH_SESSION, Runner, SocketDown, confine_for, env_for};
 use crate::ticket::{
     AttemptState, Decision, DecisionKind, DecisionState, GateRun, Hold, LaneRecord, ProjectState,
@@ -70,7 +70,7 @@ impl Runner {
                 });
                 self.held_back.remove(&t.id);
                 log::info!("ticket {} holds {need} from {}", t.id, stage.name);
-                if let Some(back) = undo_range_commands(t, p, need, now_ms) {
+                if let Some(back) = undo_range(t, p, need, now_ms) {
                     log::info!(
                         "ticket {} back to {}: {need} was let go since it ran",
                         t.id,
@@ -346,7 +346,8 @@ impl Runner {
                         code
                     }
                     // Lost with a runner that restarted. A `before` must
-                    // be safe to run again (docs/dispatch.md), so it is.
+                    // be safe to run again (docs/dispatch.md), so it is
+                    // started again.
                     Some(Err(e)) => {
                         log::warn!(
                             "ticket {} {} before for {} lost ({e:#}); starting again",
@@ -740,9 +741,9 @@ impl Runner {
             return Ok(Some(format!("its session {session}")));
         }
         // A dev server's forked child can outlive its pane and keep the
-        // port, so the port binding again is part of stopped. Once the
-        // session is removed that was confirmed, and whatever binds the
-        // port since is not this service.
+        // port, so the port binding again is part of stopped. Removing
+        // the session confirmed the stop; whatever binds the port after
+        // that is not this service.
         if let Some(port) = rec.port
             && rec
                 .session
@@ -854,25 +855,27 @@ impl Runner {
 }
 
 /// A hold taken past the first stage of its range (a resume, after
-/// parking let it go): what a command stage earlier in the range did to
-/// the resource (a deploy) may have been replaced by another ticket's
-/// since. Each such stage's completed attempts are cancelled, so it is
-/// a `rerun` question rather than a result, and the earliest is the
-/// stage the ticket goes back to. `None` when there is none, as when the
-/// deploy was skipped.
-fn undo_range_commands(t: &mut Ticket, p: &Pipeline, resource: &str, now_ms: u64) -> Option<usize> {
+/// parking let it go): what the range's stages did with the resource
+/// may have been replaced by another ticket's since, a deploy, and the
+/// tester that ran against it with services that parking stopped. Each
+/// command or agent stage earlier in the range has its completed
+/// attempts cancelled, so it is a `rerun` question rather than a
+/// result (and an agent stage brings its services up again before
+/// asking), and the earliest is the stage the ticket goes back to.
+/// `None` when nothing in the range ran.
+fn undo_range(t: &mut Ticket, p: &Pipeline, resource: &str, now_ms: u64) -> Option<usize> {
     let (first, _) = p.hold_range(resource)?;
     let mut back = None;
     for i in first..t.stage {
         let s = &p.stages[i];
-        if s.kind() != StageKind::GateOnly || !matches!(s.gate, Some(Gate::Command { .. })) {
+        if !s.is_command_stage() && s.kind() != StageKind::Agent {
             continue;
         }
         for a in &mut t.attempts {
             if a.stage == s.name && a.state == AttemptState::Complete {
                 a.state = AttemptState::Cancelled {
                     reason: format!(
-                        "{resource} was let go after it ran, so another ticket may have replaced what it did"
+                        "{resource} was let go after it ran, so what it ran against may have been replaced by another ticket"
                     ),
                 };
                 a.ended_ms = Some(now_ms);

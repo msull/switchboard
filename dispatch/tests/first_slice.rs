@@ -13965,7 +13965,16 @@ fn service_launches(env: &Env) -> Vec<switchboard_control::Request> {
 /// The frontend's `before` exits 0, its service launches on a port and
 /// answers, and the tester starts.
 fn served(env: &mut Env, id: &str) {
-    let key = before_key(id, 1);
+    serving(env, id, 1);
+    env.steps_until(id, "the tester", |t, _| {
+        t.attempts_of("try").next().is_some()
+    });
+}
+
+/// The frontend's service record `n`: its `before` exits 0, it launches
+/// on a port, and that port answers until the record reads `Ready`.
+fn serving(env: &mut Env, id: &str, n: u32) {
+    let key = before_key(id, n);
     for _ in 0..6 {
         if started(env, &key) > 0 {
             break;
@@ -13974,12 +13983,20 @@ fn served(env: &mut Env, id: &str) {
     }
     exits(env, &key, 0);
     env.steps_until(id, "the service launched", |t, _| {
-        t.services.iter().any(|s| s.session.is_some())
+        t.services.iter().any(|s| s.n == n && s.session.is_some())
     });
-    let port = env.ticket(id).services[0].port.unwrap();
+    let port = env
+        .ticket(id)
+        .services
+        .iter()
+        .find(|s| s.n == n)
+        .and_then(|s| s.port)
+        .unwrap();
     env.repo.lock().unwrap().answering.insert(port);
-    env.steps_until(id, "the tester", |t, _| {
-        t.attempts_of("try").next().is_some()
+    env.steps_until(id, "the service ready", |t, _| {
+        t.services
+            .iter()
+            .any(|s| s.n == n && s.state == ServiceState::Ready)
     });
 }
 
@@ -14193,6 +14210,54 @@ fn a_resume_past_the_deploy_asks_to_deploy_again_before_anything_reads_it() {
         env.step();
     }
     assert_eq!(started(&env, &deploy_key(&id, 2)), 1);
+    exits(&env, &deploy_key(&id, 2), 0);
+    at_stage(&mut env, &id, "try");
+    tested_again(&mut env, &id);
+}
+
+#[test]
+fn a_resume_with_the_deploy_skipped_serves_again_and_asks_before_the_tester() {
+    let (mut env, id) = back_half_env(&["area:frontend"]);
+    at_stage(&mut env, &id, "try");
+    served(&mut env, &id);
+    tester_done(&mut env, &id);
+    tried(&mut env, &id, "park");
+    env.step();
+    assert!(is_parked(&env.ticket(&id)));
+    let now = env.tick();
+    env.runner.resume(&id, now).unwrap();
+    at_stage(&mut env, &id, "try");
+    tested_again(&mut env, &id);
+}
+
+/// Back at `try` after a resume: the frontend comes up again before the
+/// tester's cancelled attempt is asked about, nothing runs until the
+/// answer, and `tried` then says what is served.
+fn tested_again(env: &mut Env, id: &str) {
+    serving(env, id, 2);
+    let rerun = |t: &Ticket| {
+        t.pending_decisions()
+            .into_iter()
+            .find(|d| d.name == "rerun" && d.stage == "try")
+            .cloned()
+    };
+    env.steps_until(id, "the tester question", |t, _| rerun(t).is_some());
+    let t = env.ticket(id);
+    assert_eq!(stage_name(&t), "try", "{t:#?}");
+    assert_eq!(t.attempts_of("try").count(), 1, "not again unasked");
+    let d = rerun(&t).unwrap();
+    assert!(d.question.contains("my-dev was let go"), "{}", d.question);
+    let now = env.tick();
+    env.runner.decide(id, &d.id, "rerun", None, now).unwrap();
+    env.steps_until(id, "the second tester", |t, _| {
+        t.attempts_of("try").count() == 2
+    });
+    tester_done(env, id);
+    env.steps_until(id, "the tried question", |t, _| {
+        t.pending_decisions().iter().any(|d| d.name == "tried")
+    });
+    let question = pending_named(env, id, "tried").unwrap().question;
+    assert!(question.contains("Served: frontend"), "{question}");
 }
 
 #[test]

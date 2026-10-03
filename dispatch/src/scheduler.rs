@@ -7973,7 +7973,7 @@ pub(crate) fn vars_for(t: &Ticket, p: &Pipeline, lane: Option<&str>) -> Vars {
 fn deployed_and_served(t: &Ticket, p: &Pipeline) -> String {
     let mut lines: Vec<String> = Vec::new();
     for s in p.stages.iter().take(t.stage) {
-        if s.kind() != StageKind::GateOnly || !matches!(s.gate, Some(Gate::Command { .. })) {
+        if !s.is_command_stage() {
             continue;
         }
         let contexts: std::collections::BTreeSet<&str> = t
