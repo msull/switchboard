@@ -300,8 +300,28 @@ pub struct AttemptView {
     pub pr: Option<PullRequestView>,
     /// A code review attempt's rounds, first to last.
     pub rounds: Vec<ReviewRoundView>,
+    /// The history rewrite a code review attempt made as it completed.
+    pub rewrite: Option<RewriteView>,
     pub started_ms: u64,
     pub ended_ms: Option<u64>,
+}
+
+/// A code review attempt's rewrite of its branch's commits.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RewriteView {
+    /// `fold` or `one`.
+    pub mode: String,
+    /// The head the checks passed at.
+    pub before: String,
+    /// The head the rewrite produced, once it did.
+    pub after: Option<String>,
+    /// Commits ahead of the base before the rewrite.
+    pub from: u32,
+    /// Commits ahead of the base after it.
+    pub to: u32,
+    /// Why history was left as it was.
+    pub skipped: Option<String>,
 }
 
 /// One round of a code review: what every reviewer read, what each
@@ -498,5 +518,26 @@ mod tests {
             panic!("a status")
         };
         assert_eq!(status.tickets[0].id, "t");
+    }
+
+    #[test]
+    fn an_attempt_without_a_rewrite_reads_as_none() {
+        let a: AttemptView =
+            serde_json::from_str(r#"{"stage": "review-code", "n": 1, "state": "complete"}"#)
+                .unwrap();
+        assert_eq!(a.rewrite, None);
+        let a = AttemptView {
+            rewrite: Some(RewriteView {
+                mode: "fold".into(),
+                before: "aaaa".into(),
+                after: Some("bbbb".into()),
+                from: 4,
+                to: 2,
+                skipped: None,
+            }),
+            ..a
+        };
+        let back: AttemptView = serde_json::from_str(&serde_json::to_string(&a).unwrap()).unwrap();
+        assert_eq!(back, a);
     }
 }

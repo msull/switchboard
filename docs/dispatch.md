@@ -211,7 +211,11 @@ to write over a newer one. Version 2 adds a ledger operation's
 `settled` flag, which older records had only as recovery's verdict in
 `error`; the migration reads it from those words. Version 3 adds a
 lane's `pushed`, the head a refresh last pushed, which older records
-never had and read as absent.
+never had and read as absent. Version 4 adds a code review attempt's
+`carried_from` and `rework`, and a lane's `refreshed` gains `commits`,
+`notes` and `at_ms`, all read as absent in older records; a send-back
+note now lives on the attempt. Version 5 adds a code review attempt's
+`rewrite`, absent in older records.
 
 The "never resume automatically" rule holds on both sides. New
 launches happen because the scheduler finds a runnable ticket at the
@@ -497,6 +501,7 @@ review_prompt = "..."         # optional templates; see the section for the defa
 fix_prompt = "..."
 no_feedback = "No findings."
 style_rounds = 2              # from this round, a round with only style points converges (live)
+commits = "keep"              # "fold": fix rounds fold into the commits they amend; "one": one commit; at completion, tree unchanged
 
 [policy]
 slots = 1                     # tickets with a running attempt or a held resource; read live from <project>.toml on every pass, not from a ticket's copy
@@ -1108,17 +1113,70 @@ question (`rerun`, `check`, `park`); `check` runs them again on the
 same head. A check lost to a runner restart starts again on the same
 clean head, the one child that does.
 
+**Clean commits.** `commits` says what the stage does to the branch's
+history once the checks pass at the head it completes at: `keep` (the
+default) leaves the commits as the implementer and the fixers made
+them; `fold` folds each fix round's commits into the commits they
+amend; `one` makes the whole branch one commit, with the message and
+author of the first commit no fix round made. A `fixup!` or `squash!`
+commit folds into its target the way git's autosquash finds it (the
+subject, then a sha prefix, then a subject prefix; a `squash!` keeps
+its body). Any other commit a fix round made, from that round's
+reviewed head to its `head_after`, folds into the tip of the folded
+history at the head that round reviewed. Every review attempt of the
+stage in the context counts, so a carried rerun folds the earlier
+attempt's fixes too; a round whose heads a refresh has since rebased
+away drops out and its commits stay as they are. A merge among the
+commits fails the attempt. The fixer convention that makes this
+useful: commit with `git commit --fixup=<sha>` naming the
+implementation commit the fix amends when that is clear, and a plain
+commit otherwise.
+
+The rewrite happens in the attempt's completion, never as a new launch
+and never with a push. The tree must be clean; the new commits are
+built with `git merge-tree` and `git commit-tree` (no hook runs), and
+their tree must equal the tree the checks passed at before the branch
+moves; the move is a compare-and-swap (`git update-ref HEAD <new>
+<old>`); after it the head, a clean tree and the same tree are checked
+again, and the branch is moved back if any fails. The checks are not
+run again: the tree is identical. Any failure fails the attempt with
+`rerun | park`, the branch at the reviewed head. The intent (`rewrite`
+with no `after`) is saved before git writes anything: a restart that
+finds the branch still at `before` rewrites again, one at another head
+with the same clean tree completes there, and anything else fails. The
+old commits stay reachable through the branch's reflog
+(`gc.reflogExpireUnreachable`, 30 days by default). A tree dirty when
+the checks start or finish keeps the checks question (`rerun | check |
+park`): the checks did not run on what is in the tree, so running them
+again is a fair answer, and the rewrite never starts. Only a tree the
+rewrite itself finds dirty (after a restart) fails with `rerun |
+park`.
+
+A branch the remote already holds is not rewritten: the rewrite is
+recorded with `skipped = "the branch is published"` and the history
+left alone, since folding it would make the next ordinary push a
+non-fast-forward. Published means the lane's `pushed` is set, an
+attempt in the context has a pull request, or the remote-tracking ref
+of the checked-out branch (`refs/remotes/<remote>/<branch>`, read
+locally, no fetch) holds a commit of `base..head`. The ref is the
+signal that matters: an agent's `git push` records nothing on the
+ticket. A ref holding only commits of the base or older does not
+count. A pull-request pipeline takes only `keep`.
+
 **Records.** One attempt per context per stage run, with `rounds` on
 it: each round's base, head, reviewers (name, kind, session or launch
 intent, completion, result), the aggregated feedback, the open point
 count, the implementer's session, response and `head_after`, and its
 state (`reviewing`, `findings`, `fixing`, `fixed`, `converged`,
 `accepted`, `failed`), plus `carried_from` and `rework` (see "A new
-attempt"). Artifacts per round: each reviewer's file
-(`r<n>/<reviewer>`), `r<n>/feedback`, `r<n>/response`, `r<n>/checks`;
+attempt") and `rewrite` (see "Clean commits": the mode, `before`,
+`after`, the commit counts `from` and `to`, and `skipped`). Artifacts
+per round: each reviewer's file (`r<n>/<reviewer>`), `r<n>/feedback`,
+`r<n>/response`, `r<n>/checks`;
 and once the attempt completes, `summary` (`summary.md` in the attempt
 directory): how it ended (converged, or accepted with how many points
-open), what it carried, the last round's points left to the merge, its
+open), how its commits were folded or why they were kept, what it
+carried, the last round's points left to the merge, its
 open points when accepted, and every round's points found but not
 done.
 The wire view carries `AttemptView.rounds`; the ticket page shows one
@@ -1137,7 +1195,9 @@ reviewer with no `argv`, a missing implementer or one that is not
 Claude Code, `cap = 0`, a subject other than `branch`, no command
 gate, `operator`, `review` or `writes` beside `reviewers`, a project
 without branches, a command operator anywhere but as a reviewer, and
-a `like` that names no earlier stage with a command gate of its own.
+a `like` that names no earlier stage with a command gate of its own,
+and `commits` on a stage without reviewers, or other than `keep` in a
+pull-request pipeline (an unknown value is a parse error).
 
 **Templates.** `review_prompt` takes `{base}`, `{head}`, `{worktree}`,
 `{feedback}`, `{no_feedback}`, `{plan}`, `{branch}` and the `{issue.*}`

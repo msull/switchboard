@@ -12,7 +12,7 @@ use super::dialogs::{dialog, dialog_actions};
 use super::{DrawCtx, GAP, markdown, theme};
 use crate::core::dispatch::{close_offered, parked, ticket_source, ticket_stage};
 use crate::core::{AppAction, RecordId, TicketOnly, TicketSort, View, WaitingAgent};
-use crate::ports::dispatch::{AttemptView, DecisionView, ProjectView, TicketView};
+use crate::ports::dispatch::{AttemptView, DecisionView, ProjectView, RewriteView, TicketView};
 
 /// The console pane's height on the overview.
 const CONSOLE_HEIGHT: f32 = 280.0;
@@ -980,6 +980,11 @@ fn attempt_row(cx: &mut DrawCtx<'_>, ui: &mut Ui, t: &TicketView, a: &AttemptVie
                 if let Some(pr) = &a.pr {
                     pr_labels(ui, pr);
                 }
+                if a.state == "complete"
+                    && let Some(text) = a.rewrite.as_ref().and_then(rewrite_label)
+                {
+                    ui.label(theme::meta_text(ui, text));
+                }
             });
             for round in &a.rounds {
                 round_line(ui, round);
@@ -1099,6 +1104,21 @@ fn artifact_column(cx: &mut DrawCtx<'_>, ui: &mut Ui, t: &TicketView) {
 #[must_use]
 pub fn is_dispatch_view(view: &View) -> bool {
     matches!(view, View::Dispatch | View::Ticket(_))
+}
+
+/// What a completed code review did to its branch's commits; nothing
+/// when it left them as they were.
+fn rewrite_label(r: &RewriteView) -> Option<String> {
+    if r.skipped.is_some() {
+        return Some("commits kept: the branch is published".to_owned());
+    }
+    let after = r.after.as_deref().filter(|a| *a != r.before)?;
+    let (before, after) = (short_sha(&r.before), short_sha(after));
+    Some(if r.mode == "one" {
+        format!("squashed {} commits to one: {before} → {after}", r.from)
+    } else {
+        format!("commits folded {} → {}: {before} → {after}", r.from, r.to)
+    })
 }
 
 /// A commit's first eight characters, as the page names it.

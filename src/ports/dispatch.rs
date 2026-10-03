@@ -8,7 +8,7 @@ use std::path::PathBuf;
 
 pub use dispatch_control::{
     AttemptView, Body, DecisionView, LaneView, ProjectView, PullRequestView, Reply,
-    ReviewRoundView, Status, TicketView, WorktreesView,
+    ReviewRoundView, RewriteView, Status, TicketView, WorktreesView,
 };
 
 pub trait DispatchPort: Send {

@@ -466,6 +466,14 @@ fn ticket_view(t: &Ticket, p: Option<&Pipeline>) -> TicketView {
                         head: pr.head.clone(),
                         checks: pr.checks.clone(),
                     }),
+                    rewrite: a.rewrite.as_ref().map(|r| dispatch_control::RewriteView {
+                        mode: r.mode.as_str().to_owned(),
+                        before: r.before.clone(),
+                        after: r.after.clone(),
+                        from: r.from,
+                        to: r.to,
+                        skipped: r.skipped.clone(),
+                    }),
                     started_ms: a.started_ms,
                     ended_ms: a.ended_ms,
                 }

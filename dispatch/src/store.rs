@@ -18,7 +18,7 @@ use crate::ticket::{ProjectState, Ticket};
 /// carried a version reads as 0 and is brought up by `migrate`. A
 /// record above it was written by a newer `dispatch` and is refused
 /// both ways, so this build never drops fields it does not know.
-pub const RECORD_VERSION: u32 = 4;
+pub const RECORD_VERSION: u32 = 5;
 
 /// The writer lock, held while this lives.
 #[derive(Debug)]
@@ -342,6 +342,11 @@ pub fn migrate(mut value: Value) -> Value {
         // send-back note now lives on the attempt, so a build that would
         // drop those fields must refuse the record; an attempt started
         // before still finds its note on the ticket.
+        //
+        // 4 to 5: a code review attempt gains `rewrite`, absent until it
+        // rewrites its commits, which its serde default gives. Nothing is
+        // transformed; a build that would drop it on its next write must
+        // refuse the record.
         if version == 1 {
             settle_from_verdicts(&mut value);
         }
@@ -597,6 +602,35 @@ mod tests {
             ..moved
         });
         write_ticket(&path, &t).unwrap();
+        assert_eq!(read_ticket(&path).unwrap(), t);
+    }
+
+    #[test]
+    fn a_version_four_record_migrates_to_five_without_a_rewrite() {
+        let attempt = r#"{"stage": "review-code", "n": 1, "context": "backend", "kind": "review", "state": "complete", "project": null, "session": null, "run": null, "artifacts": {}, "settle": {}, "stop_at_ms": null, "head": "fix00002", "carried_from": null, "rework": null, "started_ms": 1000, "ended_ms": 2000}"#;
+        let text = TICKET_V0.replacen('{', "{\n  \"version\": 4,", 1).replacen(
+            r#""attempts": [],"#,
+            &format!(r#""attempts": [{attempt}],"#),
+            1,
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.json");
+        fs::write(&path, text).unwrap();
+        let mut t = read_ticket(&path).unwrap();
+        assert_eq!(t.attempts[0].rewrite, None);
+        t.attempts[0].rewrite = Some(crate::ticket::Rewrite {
+            mode: crate::history::Commits::Fold,
+            before: "fix00002".into(),
+            after: Some("fold0001".into()),
+            from: 4,
+            to: 2,
+            skipped: None,
+            at_ms: 3000,
+        });
+        write_ticket(&path, &t).unwrap();
+        let written: Value = read_json(&path).unwrap();
+        assert_eq!(written["version"], 5);
+        assert_eq!(written["attempts"][0]["rewrite"]["mode"], "fold");
         assert_eq!(read_ticket(&path).unwrap(), t);
     }
 

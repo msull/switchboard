@@ -15,11 +15,12 @@ use std::sync::{Arc, Mutex};
 
 use dispatch::git::FakeRepo;
 use dispatch::github::{Checks, FakePullRequests, PullRequest};
+use dispatch::history::{Commit, Commits, Group};
 use dispatch::scheduler::{PR_ERROR_GRACE_MS, PR_POLL_MS, PR_YOUNG_HEAD_MS, Runner};
 use dispatch::store::DataDir;
 use dispatch::ticket::{
-    Attempt, AttemptKind, AttemptState, Decision, ReviewerResult, RoundState, SETTLE_POLLS,
-    STOP_IDLE_POLLS, SourceSnapshot, Ticket, TicketState,
+    Attempt, AttemptKind, AttemptState, Decision, PushedHead, ReviewerResult, Rewrite, RoundState,
+    SETTLE_POLLS, STOP_IDLE_POLLS, SourceSnapshot, Ticket, TicketState,
 };
 use support::{FakeSwitchboard, SharedPort};
 use switchboard_control::{Body, Liveness, RunState, SessionKind};
@@ -5796,6 +5797,11 @@ fn rerun_with(env: &mut Env, id: &str, note: Option<&str>) {
 /// exits 2 in round three. The rerun question is pending.
 fn three_rounds_then_a_failure(env: &mut Env) -> String {
     with_three_rounds(env);
+    three_rounds_failing(env)
+}
+
+/// `three_rounds_then_a_failure` on the pipeline the test already wrote.
+fn three_rounds_failing(env: &mut Env) -> String {
     let id = at_review(env);
     lint_exits(
         env,
@@ -7754,4 +7760,587 @@ fn a_dirty_tree_at_the_pipelines_end_is_kept_and_removed_by_hand_later() {
         env.repo.lock().unwrap().removed,
         [(env.data.repo_dir(PROJECT), tree)]
     );
+}
+
+// --- a code review stage leaves clean commits
+
+/// `commits = "<mode>"` added to the review stage of the pipeline the
+/// test already wrote.
+fn with_commits(env: &Env, mode: &str) {
+    let path = env.data.pipeline(PROJECT);
+    let text = std::fs::read_to_string(&path).unwrap();
+    let stage = "\nimplementer = \"implementer\"\n";
+    assert!(text.contains(stage));
+    let text = text.replace(stage, &format!("{stage}commits = \"{mode}\"\n"));
+    std::fs::write(path, text).unwrap();
+}
+
+/// The branch the fake reports for the lane: the implementer's two
+/// commits, then a fixup the first fix pass made and a plain fix the
+/// second made.
+fn seed_commits(env: &Env, id: &str) -> PathBuf {
+    let tree = env.ticket(id).lanes[0].worktree.clone();
+    let c = |sha: &str, message: &str| Commit {
+        sha: sha.to_owned(),
+        parents: 1,
+        message: message.to_owned(),
+    };
+    env.repo.lock().unwrap().commits.insert(
+        tree.clone(),
+        vec![
+            c("impl0001", "A"),
+            c("base0000", "B"),
+            c("fix00001", "fixup! A"),
+            c("fix00002", "plain fix"),
+        ],
+    );
+    tree
+}
+
+/// From the first round: two fix passes (`fix00001`, `fix00002`) and a
+/// third round with no findings, up to its checks starting.
+fn two_fixes_then_the_final_checks(env: &mut Env, id: &str) {
+    lint_exits(env, id, 1, 1, "src/a.rs:3: unused import\n");
+    style_says(env, id, 1, "No findings.");
+    fix_pass(env, id, 1, "fix00001", "- r1/lint-1: fixed removed\n", 0);
+    round_started(env, id, 2);
+    lint_exits(env, id, 2, 1, "src/b.rs:9: dead code\n");
+    style_says(env, id, 2, "No findings.");
+    fix_pass(env, id, 2, "fix00002", "- r2/lint-1: fixed removed\n", 0);
+    round_started(env, id, 3);
+    lint_exits(env, id, 3, 0, "");
+    style_says(env, id, 3, "No findings.");
+    env.steps_until(id, "the final checks", |t, _| {
+        review_attempt(t).gate.is_some()
+    });
+}
+
+/// A ticket whose review stage has `commits = mode` (none when `None`)
+/// at its final checks, with the branch seeded.
+fn at_final_checks(env: &mut Env, mode: Option<&str>) -> (String, PathBuf) {
+    with_three_rounds(env);
+    if let Some(mode) = mode {
+        with_commits(env, mode);
+    }
+    let id = at_review(env);
+    let tree = seed_commits(env, &id);
+    two_fixes_then_the_final_checks(env, &id);
+    (id, tree)
+}
+
+/// The final checks pass; the attempt ends one way or the other.
+fn final_checks_pass(env: &mut Env, id: &str) -> Attempt {
+    let t = env.ticket(id);
+    env.repo
+        .lock()
+        .unwrap()
+        .check_exits
+        .insert(checks_key(&t, 3), 0);
+    env.steps_until(id, "the attempt ending", |t, _| {
+        !review_attempt(t).is_open()
+    });
+    review_attempt(&env.ticket(id))
+}
+
+fn group(picks: &[&str], message: &str) -> Group {
+    Group {
+        picks: picks.iter().map(|p| (*p).to_owned()).collect(),
+        message: message.to_owned(),
+        author_of: picks[0].to_owned(),
+    }
+}
+
+/// The rewrite without its time.
+fn rewrite_of(a: &Attempt) -> Option<Rewrite> {
+    a.rewrite.clone().map(|r| Rewrite { at_ms: 0, ..r })
+}
+
+/// The acceptance: the fixup folds into the commit it names, the plain
+/// fix into the tip the second round reviewed; the branch moves once,
+/// to a head with the same tree, and the checks are not run again.
+#[test]
+fn fold_completes_with_the_fix_rounds_folded_and_the_checks_run_once() {
+    let mut env = Env::new();
+    let (id, tree) = at_final_checks(&mut env, Some("fold"));
+    let checks_before = env.repo.lock().unwrap().checks.len();
+    let a = final_checks_pass(&mut env, &id);
+    assert_eq!(a.state, AttemptState::Complete);
+    let t = env.ticket(&id);
+    {
+        let repo = env.repo.lock().unwrap();
+        assert_eq!(
+            repo.replayed,
+            [(
+                tree.clone(),
+                "root0000".to_owned(),
+                vec![
+                    group(&["impl0001", "fix00001"], "A"),
+                    group(&["base0000", "fix00002"], "B"),
+                ]
+            )]
+        );
+        assert_eq!(
+            repo.head_sets,
+            [(tree.clone(), "fold0001".to_owned(), "fix00002".to_owned())]
+        );
+        assert_eq!(repo.heads[&tree], "fold0001");
+        assert_eq!(
+            repo.checks.len(),
+            checks_before,
+            "no checks after the rewrite"
+        );
+        let key = checks_key(&t, 3);
+        assert_eq!(repo.checks.iter().filter(|c| c.key == key).count(), 1);
+    }
+    assert_eq!(a.head.as_deref(), Some("fold0001"));
+    assert_eq!(
+        a.gate.as_ref().unwrap().head,
+        "fix00002",
+        "where the checks ran"
+    );
+    assert_eq!(
+        rewrite_of(&a),
+        Some(Rewrite {
+            mode: Commits::Fold,
+            before: "fix00002".into(),
+            after: Some("fold0001".into()),
+            from: 4,
+            to: 2,
+            skipped: None,
+            at_ms: 0,
+        })
+    );
+    let summary = std::fs::read_to_string(&a.artifacts["summary"]).unwrap();
+    assert!(
+        summary.contains("Commits folded from 4 to 2: `fix00002` → `fold0001`."),
+        "{summary}"
+    );
+}
+
+#[test]
+fn one_completes_with_one_commit() {
+    let mut env = Env::new();
+    let (id, tree) = at_final_checks(&mut env, Some("one"));
+    let a = final_checks_pass(&mut env, &id);
+    assert_eq!(a.state, AttemptState::Complete);
+    assert_eq!(
+        env.repo.lock().unwrap().replayed,
+        [(
+            tree,
+            "root0000".to_owned(),
+            vec![group(
+                &["impl0001", "base0000", "fix00001", "fix00002"],
+                "A"
+            )]
+        )]
+    );
+    let r = a.rewrite.clone().unwrap();
+    assert_eq!((r.mode, r.from, r.to), (Commits::One, 4, 1));
+    assert_eq!(a.head.as_deref(), Some("fold0001"));
+    let summary = std::fs::read_to_string(&a.artifacts["summary"]).unwrap();
+    assert!(
+        summary.contains("Squashed 4 commits to one: `fix00002` → `fold0001`."),
+        "{summary}"
+    );
+}
+
+#[test]
+fn keep_or_no_key_leaves_history_alone() {
+    for mode in [None, Some("keep")] {
+        let mut env = Env::new();
+        let (id, _) = at_final_checks(&mut env, mode);
+        let a = final_checks_pass(&mut env, &id);
+        assert_eq!(a.state, AttemptState::Complete, "{mode:?}");
+        let repo = env.repo.lock().unwrap();
+        assert!(repo.replayed.is_empty(), "{mode:?}");
+        assert!(repo.head_sets.is_empty(), "{mode:?}");
+        assert_eq!(a.rewrite, None, "{mode:?}");
+        assert_eq!(a.head.as_deref(), Some("fix00002"), "{mode:?}");
+    }
+}
+
+/// The attempt failed into `rerun | park` with the branch at the head
+/// the checks passed at.
+fn failed_with_the_branch_at_the_reviewed_head(
+    env: &Env,
+    id: &str,
+    a: &Attempt,
+    tree: &std::path::Path,
+) {
+    assert!(
+        matches!(a.state, AttemptState::Failed { .. }),
+        "{:?}",
+        a.state
+    );
+    assert_eq!(env.repo.lock().unwrap().heads[tree], "fix00002");
+    let d = env
+        .pending(id)
+        .into_iter()
+        .find(|d| d.name == "rerun")
+        .unwrap();
+    assert_eq!(d.options, vec!["rerun", "park"]);
+}
+
+#[test]
+fn a_rewritten_tree_that_differs_fails_with_the_branch_unmoved() {
+    let mut env = Env::new();
+    let (id, tree) = at_final_checks(&mut env, Some("fold"));
+    env.repo
+        .lock()
+        .unwrap()
+        .trees
+        .insert("fold0001".into(), "tree-bad".into());
+    let a = final_checks_pass(&mut env, &id);
+    failed_with_the_branch_at_the_reviewed_head(&env, &id, &a, &tree);
+    assert!(env.repo.lock().unwrap().head_sets.is_empty());
+    let r = a.rewrite.clone().unwrap();
+    assert_eq!(
+        (r.before.as_str(), r.after.as_deref()),
+        ("fix00002", Some("fold0001"))
+    );
+    let AttemptState::Failed { reason } = &a.state else {
+        unreachable!()
+    };
+    assert!(
+        reason.contains("the rewritten head fold0001 has tree tree-bad, not tree0000 as fix00002 has; the branch stays at fix00002"),
+        "{reason}"
+    );
+}
+
+#[test]
+fn a_tree_dirty_after_the_move_is_moved_back_and_fails() {
+    let mut env = Env::new();
+    let (id, tree) = at_final_checks(&mut env, Some("fold"));
+    env.repo.lock().unwrap().dirty_on_set.push(tree.clone());
+    let a = final_checks_pass(&mut env, &id);
+    failed_with_the_branch_at_the_reviewed_head(&env, &id, &a, &tree);
+    assert_eq!(
+        env.repo.lock().unwrap().head_sets,
+        [
+            (tree.clone(), "fold0001".to_owned(), "fix00002".to_owned()),
+            (tree.clone(), "fix00002".to_owned(), "fold0001".to_owned()),
+        ]
+    );
+    let AttemptState::Failed { reason } = &a.state else {
+        unreachable!()
+    };
+    assert!(
+        reason.ends_with("the branch is back at fix00002"),
+        "{reason}"
+    );
+}
+
+/// A completed fold attempt written back as a restart would find it
+/// had the runner stopped after the intent was saved; the fake's head
+/// set to `head`, then the restart.
+fn restarted_mid_rewrite(env: &mut Env, id: &str, head: &str, tree: &std::path::Path) {
+    let mut t = env.ticket(id);
+    let a = t
+        .attempts
+        .iter_mut()
+        .rev()
+        .find(|a| a.stage == "review-code")
+        .unwrap();
+    a.state = AttemptState::Running;
+    a.head = None;
+    a.ended_ms = None;
+    if let Some(r) = &mut a.rewrite {
+        r.after = None;
+    }
+    // Back at `review-code`, in case the pass that completed it also
+    // moved on.
+    t.stage = 5;
+    env.runner.save_ticket(&mut t, env.now).unwrap();
+    env.repo
+        .lock()
+        .unwrap()
+        .heads
+        .insert(tree.to_path_buf(), head.to_owned());
+    env.restart();
+}
+
+#[test]
+fn a_restart_after_the_move_adopts_the_head() {
+    let mut env = Env::new();
+    let (id, tree) = at_final_checks(&mut env, Some("fold"));
+    final_checks_pass(&mut env, &id);
+    restarted_mid_rewrite(&mut env, &id, "fold0001", &tree);
+    env.steps_until(&id, "the stage completing", |t, _| {
+        review_attempt(t).state == AttemptState::Complete
+    });
+    let t = env.ticket(&id);
+    assert_eq!(t.state, TicketState::Active);
+    let a = review_attempt(&t);
+    assert_eq!(a.head.as_deref(), Some("fold0001"));
+    assert_eq!(a.rewrite.unwrap().after.as_deref(), Some("fold0001"));
+    let repo = env.repo.lock().unwrap();
+    assert_eq!(repo.replayed.len(), 1, "no second replay");
+    assert_eq!(repo.head_sets.len(), 1);
+}
+
+#[test]
+fn a_restart_before_the_move_replays_again() {
+    let mut env = Env::new();
+    let (id, tree) = at_final_checks(&mut env, Some("fold"));
+    final_checks_pass(&mut env, &id);
+    restarted_mid_rewrite(&mut env, &id, "fix00002", &tree);
+    env.steps_until(&id, "the stage completing", |t, _| {
+        review_attempt(t).state == AttemptState::Complete
+    });
+    let t = env.ticket(&id);
+    assert_eq!(t.state, TicketState::Active);
+    assert_eq!(review_attempt(&t).head.as_deref(), Some("fold0001"));
+    let repo = env.repo.lock().unwrap();
+    assert_eq!(repo.replayed.len(), 2, "replayed once more");
+    assert_eq!(repo.heads[&tree], "fold0001");
+}
+
+/// Both normal paths refuse a dirty tree at the checks (with `check`
+/// among the answers); the rewrite's own check is reached after a
+/// restart, and fails without touching history.
+#[test]
+fn a_dirty_tree_at_completion_fails_without_touching_history() {
+    let mut env = Env::new();
+    let (id, tree) = at_final_checks(&mut env, Some("fold"));
+    final_checks_pass(&mut env, &id);
+    restarted_mid_rewrite(&mut env, &id, "fix00002", &tree);
+    env.repo.lock().unwrap().dirty.push(tree.clone());
+    env.steps_until(&id, "the attempt failing", |t, _| {
+        !review_attempt(t).is_open()
+    });
+    let a = review_attempt(&env.ticket(&id));
+    failed_with_the_branch_at_the_reviewed_head(&env, &id, &a, &tree);
+    let AttemptState::Failed { reason } = &a.state else {
+        unreachable!()
+    };
+    assert!(
+        reason.contains("is not clean when its commits would be rewritten"),
+        "{reason}"
+    );
+    let repo = env.repo.lock().unwrap();
+    assert_eq!(repo.replayed.len(), 1, "only the first completion's");
+    assert_eq!(repo.head_sets.len(), 1);
+}
+
+/// The case the record cannot see: the first attempt's rewrite failed,
+/// an agent then pushed the branch (the remote's copy holds its
+/// commits, and nothing on the record says so), and the rerun converges.
+/// It leaves the history alone.
+#[test]
+fn a_branch_pushed_by_an_agent_is_not_rewritten_by_a_rerun() {
+    let mut env = Env::new();
+    let (id, tree) = at_final_checks(&mut env, Some("fold"));
+    env.repo
+        .lock()
+        .unwrap()
+        .trees
+        .insert("fold0001".into(), "tree-bad".into());
+    let a = final_checks_pass(&mut env, &id);
+    assert!(
+        matches!(a.state, AttemptState::Failed { .. }),
+        "{:?}",
+        a.state
+    );
+    env.repo
+        .lock()
+        .unwrap()
+        .published
+        .push((tree.clone(), "root0000".into(), "fix00002".into()));
+    rerun_with(&mut env, &id, None);
+    lint_exits(&mut env, &id, 1, 0, "");
+    style_says(&mut env, &id, 1, "No findings.");
+    env.steps_until(&id, "the final checks", |t, _| {
+        review_attempt(t).gate.is_some()
+    });
+    let t = env.ticket(&id);
+    env.repo
+        .lock()
+        .unwrap()
+        .check_exits
+        .insert(checks_key(&t, 1), 0);
+    env.steps_until(&id, "the rerun ending", |t, _| !review_attempt(t).is_open());
+    let t = env.ticket(&id);
+    let a = review_attempt(&t);
+    assert_eq!(a.state, AttemptState::Complete, "{:?}", a.state);
+    assert_eq!(a.n, 2);
+    assert!(t.attempts_of("ready").next().is_none());
+    assert!(t.lanes[0].pushed.is_none());
+    assert!(t.attempts.iter().all(|a| a.pr.is_none()));
+    let r = a.rewrite.clone().unwrap();
+    assert_eq!(r.skipped.as_deref(), Some("the branch is published"));
+    assert_eq!(
+        (r.before.as_str(), r.after.as_deref()),
+        ("fix00002", Some("fix00002"))
+    );
+    assert_eq!(a.head.as_deref(), Some("fix00002"));
+    let repo = env.repo.lock().unwrap();
+    assert_eq!(repo.replayed.len(), 1, "only the first attempt's");
+    assert!(repo.head_sets.is_empty());
+    drop(repo);
+    let summary = std::fs::read_to_string(&a.artifacts["summary"]).unwrap();
+    assert!(
+        summary.contains("Commits kept: the branch is published."),
+        "{summary}"
+    );
+}
+
+/// The attempt folds its fixes and `inspect` sends the lane back. The
+/// implementer adds a commit; the review stage's completed attempt
+/// stands (a send-back reaches only an agent stage), so `inspect` asks
+/// again and the folded history, pushed or not, is not rewritten.
+#[test]
+fn a_branch_pushed_by_an_agent_is_not_rewritten_after_a_send_back() {
+    let mut env = Env::new();
+    let (id, tree) = at_final_checks(&mut env, Some("fold"));
+    let a = final_checks_pass(&mut env, &id);
+    assert_eq!(a.state, AttemptState::Complete, "{:?}", a.state);
+    assert_eq!(a.head.as_deref(), Some("fold0001"));
+    env.inspect(&id, "rerun", Some("name the error"));
+    env.steps_until(&id, "a second implementer", |t, _| {
+        t.attempts_of("implement").count() == 2
+    });
+    env.repo
+        .lock()
+        .unwrap()
+        .heads
+        .insert(tree.clone(), "impl0002".into());
+    let second = session_of(&env.ticket(&id), "implement");
+    implementer_stops(&mut env, &id, &second);
+    env.steps_until(&id, "the checks starting", |t, _| {
+        t.attempts_of("implement")
+            .last()
+            .is_some_and(|a| a.gate.is_some())
+    });
+    env.repo
+        .lock()
+        .unwrap()
+        .check_exits
+        .insert(format!("{id}/implement/2"), 0);
+    env.steps_until(&id, "inspect again", |t, _| {
+        t.attempts_of("inspect").count() == 2
+            && t.pending_decisions().iter().any(|d| d.name == "inspect")
+    });
+    let t = env.ticket(&id);
+    assert_eq!(t.attempts_of("review-code").count(), 1);
+    assert_eq!(review_attempt(&t), a, "the completed attempt stands");
+    let repo = env.repo.lock().unwrap();
+    assert_eq!(repo.replayed.len(), 1, "only the first completion's");
+    assert_eq!(repo.head_sets.len(), 1, "only the first completion's");
+    assert_eq!(repo.heads[&tree], "impl0002");
+}
+
+#[test]
+fn a_published_branch_is_not_rewritten() {
+    let mut env = Env::new();
+    with_three_rounds(&env);
+    with_commits(&env, "fold");
+    let id = at_review(&mut env);
+    seed_commits(&env, &id);
+    let mut t = env.ticket(&id);
+    t.lanes[0].pushed = Some(PushedHead {
+        head: "base0000".into(),
+        at_ms: env.now,
+    });
+    env.runner.save_ticket(&mut t, env.now).unwrap();
+    two_fixes_then_the_final_checks(&mut env, &id);
+    let a = final_checks_pass(&mut env, &id);
+    assert_eq!(a.state, AttemptState::Complete);
+    let r = a.rewrite.clone().unwrap();
+    assert_eq!(r.skipped.as_deref(), Some("the branch is published"));
+    assert_eq!(a.head.as_deref(), Some("fix00002"));
+    assert!(env.repo.lock().unwrap().replayed.is_empty());
+}
+
+/// A rerun carries the failed attempt's state; its fix rounds fold too,
+/// since they are fixes all the same.
+#[test]
+fn a_carried_rerun_folds_the_earlier_attempts_fixes() {
+    let mut env = Env::new();
+    with_three_rounds(&env);
+    with_commits(&env, "fold");
+    let id = three_rounds_failing(&mut env);
+    let tree = seed_commits(&env, &id);
+    rerun_with(&mut env, &id, None);
+    lint_exits(&mut env, &id, 1, 0, "");
+    style_says(&mut env, &id, 1, "- withdraw a1/r1/lint-2\n");
+    env.steps_until(&id, "the final checks", |t, _| {
+        review_attempt(t).gate.is_some()
+    });
+    let t = env.ticket(&id);
+    env.repo
+        .lock()
+        .unwrap()
+        .check_exits
+        .insert(checks_key(&t, 1), 0);
+    env.steps_until(&id, "the attempt ending", |t, _| {
+        !review_attempt(t).is_open()
+    });
+    let a = review_attempt(&env.ticket(&id));
+    assert_eq!(a.state, AttemptState::Complete, "{:?}", a.state);
+    assert_eq!(a.n, 2);
+    assert!(
+        a.rounds.iter().all(|r| r.head_after.is_none()),
+        "no fix in this attempt"
+    );
+    assert_eq!(
+        env.repo.lock().unwrap().replayed,
+        [(
+            tree,
+            "root0000".to_owned(),
+            vec![
+                group(&["impl0001", "fix00001"], "A"),
+                group(&["base0000", "fix00002"], "B"),
+            ]
+        )]
+    );
+    assert_eq!(a.head.as_deref(), Some("fold0001"));
+}
+
+/// Converged in round one at the implementer's head with its checks
+/// reused: nothing to fold, so nothing is replayed.
+#[test]
+fn a_review_converging_at_round_one_with_fold_rewrites_nothing() {
+    let mut env = Env::new();
+    env.with_review_stage("ask");
+    with_commits(&env, "fold");
+    let id = at_review(&mut env);
+    let tree = env.ticket(&id).lanes[0].worktree.clone();
+    env.repo.lock().unwrap().commits.insert(
+        tree,
+        vec![
+            Commit {
+                sha: "impl0001".into(),
+                parents: 1,
+                message: "A".into(),
+            },
+            Commit {
+                sha: "base0000".into(),
+                parents: 1,
+                message: "B".into(),
+            },
+        ],
+    );
+    lint_exits(&mut env, &id, 1, 0, "");
+    style_says(&mut env, &id, 1, "No findings.");
+    env.steps_until(&id, "the stage completing", |t, _| {
+        review_attempt(t).state == AttemptState::Complete
+    });
+    let a = review_attempt(&env.ticket(&id));
+    assert!(a.gate.is_none(), "implement's checks reused");
+    assert_eq!(
+        rewrite_of(&a),
+        Some(Rewrite {
+            mode: Commits::Fold,
+            before: "base0000".into(),
+            after: Some("base0000".into()),
+            from: 2,
+            to: 2,
+            skipped: None,
+            at_ms: 0,
+        })
+    );
+    assert_eq!(a.head.as_deref(), Some("base0000"));
+    let repo = env.repo.lock().unwrap();
+    assert!(repo.replayed.is_empty());
+    assert!(repo.head_sets.is_empty());
 }

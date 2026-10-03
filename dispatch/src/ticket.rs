@@ -8,6 +8,8 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 use switchboard_control::{Body, Reply};
 
+use crate::history::Commits;
+
 /// Where a ticket came from, as it was when taken.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SourceSnapshot {
@@ -267,8 +269,36 @@ pub struct Attempt {
     /// fix pass is given it.
     #[serde(default)]
     pub rework: Option<String>,
+    /// The history rewrite a code review attempt made as it completed:
+    /// written as intent (`after` unset) before git writes anything.
+    #[serde(default)]
+    pub rewrite: Option<Rewrite>,
     pub started_ms: u64,
     pub ended_ms: Option<u64>,
+}
+
+/// A code review attempt's rewrite of its branch's commits, from the
+/// head its checks passed at to one with the same tree.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Rewrite {
+    /// `fold` or `one`; `keep` writes no record.
+    pub mode: Commits,
+    /// The head the checks passed at: the branch before the rewrite.
+    pub before: String,
+    /// The head the rewrite produced. On a complete attempt the branch
+    /// is here; on a failed one the branch is back at `before`.
+    #[serde(default)]
+    pub after: Option<String>,
+    /// Commits ahead of the base before the rewrite.
+    #[serde(default)]
+    pub from: u32,
+    /// Commits ahead of the base after it.
+    #[serde(default)]
+    pub to: u32,
+    /// Why history was left as it was (the branch is published).
+    #[serde(default)]
+    pub skipped: Option<String>,
+    pub at_ms: u64,
 }
 
 /// One round of a code review: every reviewer read `base..head`, then

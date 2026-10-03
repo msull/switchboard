@@ -130,7 +130,7 @@ instruction is present.
 
 **Size.** Prompt plus the PR template. An hour.
 
-## 7. One commit per round is noise; squash at the merge
+## 7. A code review stage leaves clean commits
 
 **Problem.** PR 13 carries twelve commits named "code review round N" and
 "Rebased onto main: ...". None is a unit anyone would check out.
@@ -151,6 +151,25 @@ which the refresh step already does.
 
 **Size.** One instruction in the ready-stage prompt plus a `Repo::squash`
 helper if done mechanically. A day.
+
+**Built** (#30). Neither option as written: the code review stage takes
+`commits = "keep" | "fold" | "one"`, and with `fold` its completion folds
+each fix round's commits into the commits they amend (a `fixup!` into its
+target, any other fix into the tip of the folded history at the head that
+round reviewed), so the implementation commits survive as units and the
+round commits disappear; `one` squashes the branch with its first
+implementation commit's message. The rewrite never changes the tree (it
+is checked before and after a compare-and-swap move, and moved back on
+any failure), so the checks are not run again, and nothing is pushed: the
+`pr` stage publishes the clean history once. The record is
+`Attempt.rewrite`, written as intent before git runs, which needed
+`RECORD_VERSION` 5. A branch already on the remote (its remote-tracking
+ref holds the branch's commits, since an agent's push records nothing
+on the ticket) is skipped, not folded. One departure from the issue's
+acceptance: a tree dirty when the checks finish keeps the checks
+question (`rerun | check | park`), not `rerun | park`, because the
+checks did not run on that tree; `rerun | park` is for a tree the
+rewrite itself finds dirty (after a restart).
 
 ## 8. A refreshed review reviews the rebase too
 
@@ -295,4 +314,4 @@ with a PR, keeps its instruction to fix any claim its rebase changed.
 
 9, 4 and 5 are built (#21), and 11 (#23); 1, 2, 8 and 10 are built
 (#22). 3 cuts the round count directly and is small. 6 is prompt text;
-12 is withdrawn. 7 is a taste call for the user before anyone builds it.
+12 is withdrawn. 7 is built (#30).
