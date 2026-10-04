@@ -278,6 +278,11 @@ pub struct Attempt {
     /// written as intent (`after` unset) before git writes anything.
     #[serde(default)]
     pub rewrite: Option<Rewrite>,
+    /// When each nudge was sent into the agent's session after it
+    /// stopped with a dirty tree, in ms. Pushed before the send, so a
+    /// restart never sends one twice.
+    #[serde(default)]
+    pub nudges: Vec<u64>,
     pub started_ms: u64,
     pub ended_ms: Option<u64>,
 }
@@ -358,6 +363,10 @@ pub struct ReviewRound {
     /// settled; the wait is bounded by `DIRTY_WAIT_MS` from here.
     #[serde(default)]
     pub dirty_since_ms: Option<u64>,
+    /// When each nudge was sent into the implementer's session after it
+    /// stopped with a dirty tree, in ms; each round starts at none.
+    #[serde(default)]
+    pub nudges: Vec<u64>,
     pub started_ms: u64,
     pub ended_ms: Option<u64>,
 }

@@ -645,10 +645,11 @@ fn print_attempts(view: &dispatch_control::TicketView) -> Result<()> {
             format!(" rewrite {} {}→{}", r.mode, r.from, r.to)
         });
         say!(
-            "  #{} {} {state} head {}{gate}{rewrite}",
+            "  #{} {} {state} head {}{gate}{rewrite}{}",
             a.n,
             a.context,
-            a.head.as_deref().map_or("-", short)
+            a.head.as_deref().map_or("-", short),
+            nudged_clause(a.nudges.len())
         );
         if let Some(pr) = &a.pr {
             say!(
@@ -660,10 +661,22 @@ fn print_attempts(view: &dispatch_control::TicketView) -> Result<()> {
             );
         }
         for r in &a.rounds {
-            say!("    r{} {} open {}", r.n, r.state, r.open_points);
+            say!(
+                "    r{} {} open {}{}",
+                r.n,
+                r.state,
+                r.open_points,
+                nudged_clause(r.nudges.len())
+            );
         }
     }
     Ok(())
+}
+
+/// `, nudged N times` after an attempt, round or stage line, worded as
+/// the page words it, or nothing.
+fn nudged_clause(n: usize) -> String {
+    dispatch_control::nudged(n).map_or_else(String::new, |n| format!(", {n}"))
 }
 
 /// The decisions that wait on the user, with the exact line that
@@ -788,8 +801,9 @@ fn print_report(r: &TicketReport) -> Result<()> {
         if s.attempts == 0 {
             continue;
         }
+        let nudges = nudged_clause(s.nudges as usize);
         say!(
-            "  {}: {} over {} attempt(s), waiting on you {}",
+            "  {}: {} over {} attempt(s), waiting on you {}{nudges}",
             s.stage,
             span(s.ms),
             s.attempts,

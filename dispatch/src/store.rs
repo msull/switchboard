@@ -23,7 +23,7 @@ use crate::ticket::{ProjectState, Ticket};
 /// carried a version reads as 0 and is brought up by `migrate`. A
 /// record above it was written by a newer `dispatch` and is refused
 /// both ways, so this build never drops fields it does not know.
-pub const RECORD_VERSION: u32 = 6;
+pub const RECORD_VERSION: u32 = 7;
 
 /// A lock file held while this lives: the writer lock, the runner's
 /// claim, or a ticket's close.
@@ -465,6 +465,12 @@ pub fn migrate(mut value: Value) -> Value {
         // pass finds the tree dirty after the response, which its serde
         // default gives. Nothing is transformed; a build that would drop
         // it on its next write must refuse the record.
+        //
+        // 6 to 7: an attempt and a review round gain `nudges`, empty
+        // until a dirty stop is nudged, which their serde default gives.
+        // Nothing is transformed; a build that would drop them on its
+        // next write must refuse the record, or a restart would send a
+        // nudge already sent.
         if version == 1 {
             settle_from_verdicts(&mut value);
         }
@@ -851,11 +857,38 @@ mod tests {
         t.attempts[0].rounds[0].dirty_since_ms = Some(5_000);
         write_ticket(&path, &t).unwrap();
         let written: Value = read_json(&path).unwrap();
-        assert_eq!(written["version"], 6);
+        assert_eq!(written["version"], RECORD_VERSION);
         assert_eq!(
             read_ticket(&path).unwrap().attempts[0].rounds[0].dirty_since_ms,
             Some(5_000)
         );
+    }
+
+    #[test]
+    fn a_version_six_record_migrates_to_seven_with_no_nudges() {
+        let round = r#"{"n": 1, "base": "base0000", "head": "head0001", "reviewers": [], "round_state": "fixing", "feedback": null, "open_points": 2, "fix_authorised": true, "implementer": "s-9", "response": "/r.md", "head_after": null, "stop_at_ms": 1500, "polls_since_stop": 0, "settle": null, "dirty_polls": 0, "dirty_since_ms": null, "started_ms": 1000, "ended_ms": null}"#;
+        let attempt = format!(
+            r#"{{"stage": "review-code", "n": 1, "context": "backend", "kind": "review", "state": "running", "project": null, "session": null, "run": null, "artifacts": {{}}, "settle": {{}}, "stop_at_ms": null, "head": null, "carried_from": null, "rework": null, "rounds": [{round}], "started_ms": 1000, "ended_ms": null}}"#
+        );
+        let text = TICKET_V0.replacen('{', "{\n  \"version\": 6,", 1).replacen(
+            r#""attempts": [],"#,
+            &format!(r#""attempts": [{attempt}],"#),
+            1,
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.json");
+        fs::write(&path, text).unwrap();
+        let mut t = read_ticket(&path).unwrap();
+        assert_eq!(t.version, RECORD_VERSION);
+        assert!(t.attempts[0].nudges.is_empty());
+        assert!(t.attempts[0].rounds[0].nudges.is_empty());
+        t.attempts[0].nudges.push(4_000);
+        t.attempts[0].rounds[0].nudges.push(5_000);
+        write_ticket(&path, &t).unwrap();
+        let written: Value = read_json(&path).unwrap();
+        assert_eq!(written["version"], 7);
+        assert_eq!(written["attempts"][0]["nudges"][0], 4_000);
+        assert_eq!(read_ticket(&path).unwrap(), t);
     }
 
     #[test]

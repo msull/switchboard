@@ -366,6 +366,10 @@ pub struct Stage {
     /// ticket's mode never changes halfway.
     #[serde(default)]
     pub commits: Option<Commits>,
+    /// What this stage's agent (a code review stage's implementer) gets
+    /// when it stops with a dirty tree; absent, the policy's.
+    #[serde(default)]
+    pub on_dirty: Option<OnDirty>,
 }
 
 /// What a stage is, from which fields it names.
@@ -418,6 +422,56 @@ impl Stage {
     }
 }
 
+/// What an agent that stops with its tree not clean gets before the
+/// question: `"ask"` puts the question at once; `{ nudge = N }` first
+/// types a line into its session, up to N times, each after a stop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "OnDirtyFile", into = "OnDirtyFile")]
+pub enum OnDirty {
+    Ask,
+    Nudge(u32),
+}
+
+impl Default for OnDirty {
+    fn default() -> Self {
+        Self::Nudge(1)
+    }
+}
+
+/// `OnDirty` as the file spells it: a word or a table.
+#[derive(Serialize, Deserialize)]
+#[serde(untagged)]
+enum OnDirtyFile {
+    Word(String),
+    Table { nudge: u32 },
+}
+
+impl TryFrom<OnDirtyFile> for OnDirty {
+    type Error = String;
+
+    fn try_from(file: OnDirtyFile) -> Result<Self, String> {
+        match file {
+            OnDirtyFile::Word(w) if w == "ask" => Ok(Self::Ask),
+            OnDirtyFile::Word(w) => {
+                Err(format!("on_dirty: {w:?} is not \"ask\" or {{ nudge = N }}"))
+            }
+            OnDirtyFile::Table { nudge: 0 } => {
+                Err("on_dirty: nudge = 0 sends nothing; use \"ask\"".into())
+            }
+            OnDirtyFile::Table { nudge } => Ok(Self::Nudge(nudge)),
+        }
+    }
+}
+
+impl From<OnDirty> for OnDirtyFile {
+    fn from(on: OnDirty) -> Self {
+        match on {
+            OnDirty::Ask => Self::Word("ask".into()),
+            OnDirty::Nudge(nudge) => Self::Table { nudge },
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Policy {
@@ -464,6 +518,11 @@ pub struct Policy {
     /// How many fixes one PR may get before red checks are a question.
     #[serde(default = "default_max_fixes")]
     pub max_fixes: u32,
+    /// What an agent that stops with a dirty tree gets before the
+    /// question; a stage's own `on_dirty` overrides it. Read from the
+    /// ticket's copy, like `max_reruns`.
+    #[serde(default)]
+    pub on_dirty: OnDirty,
 }
 
 fn default_max_fixes() -> u32 {
@@ -502,6 +561,7 @@ impl Default for Policy {
             max_rebases: default_max_rebases(),
             fixer: None,
             max_fixes: default_max_fixes(),
+            on_dirty: OnDirty::default(),
         }
     }
 }
@@ -574,6 +634,13 @@ impl Pipeline {
             .map_or("ask", String::as_str)
     }
 
+    /// What `stage`'s agent gets when it stops with a dirty tree: the
+    /// stage's own rule, else the policy's.
+    #[must_use]
+    pub fn on_dirty(&self, stage: &Stage) -> OnDirty {
+        stage.on_dirty.unwrap_or(self.policy.on_dirty)
+    }
+
     #[must_use]
     pub fn lane(&self, name: &str) -> Option<&Lane> {
         self.lanes.iter().find(|l| l.name == name)
@@ -603,12 +670,31 @@ impl Pipeline {
         Ok(())
     }
 
+    /// A stage's own `on_dirty` goes only where an agent stops and its
+    /// tree is judged: an agent stage with a command gate, or a code
+    /// review stage's implementer.
+    fn validate_on_dirty(stage: &Stage) -> Result<()> {
+        let judged = match stage.kind() {
+            StageKind::Review => true,
+            StageKind::Agent => matches!(stage.gate, Some(Gate::Command { .. })),
+            StageKind::Workflow | StageKind::GateOnly => false,
+        };
+        if stage.on_dirty.is_some() && !judged {
+            bail!(
+                "stage {:?}: on_dirty needs an agent stage with a command gate, or a code review stage",
+                stage.name
+            );
+        }
+        Ok(())
+    }
+
     /// One stage's references, given what earlier stages wrote.
     fn validate_stage(&self, stage: &Stage, written: &[&str]) -> Result<()> {
         if stage.operator.is_some() && stage.review.is_some() {
             bail!("stage {:?} names both an operator and a review", stage.name);
         }
         Self::validate_gate(stage)?;
+        Self::validate_on_dirty(stage)?;
         if stage.kind() == StageKind::Review {
             self.validate_review_stage(stage)?;
         } else if stage.implementer.is_some()
@@ -1177,5 +1263,59 @@ writes = ["plan"]"#,
             "{err}"
         );
         Pipeline::parse(&pull_request("commits = \"keep\"\n")).unwrap();
+    }
+
+    #[test]
+    fn on_dirty_defaults_to_one_nudge_and_reads_both_spellings() {
+        let p = Pipeline::parse(SWITCHBOARD).unwrap();
+        assert_eq!(p.policy.on_dirty, OnDirty::Nudge(1));
+        let implement = |p: &Pipeline| p.stages.iter().find(|s| s.name == "implement").cloned();
+        assert_eq!(p.on_dirty(&implement(&p).unwrap()), OnDirty::Nudge(1));
+        let text = SWITCHBOARD.replace("slots = 1\n", "slots = 1\non_dirty = \"ask\"\n");
+        let p = Pipeline::parse(&text).unwrap();
+        assert_eq!(p.policy.on_dirty, OnDirty::Ask);
+        let text = text.replace(
+            "prompt = \"Implement {inputs.plan}",
+            "on_dirty = { nudge = 2 }\nprompt = \"Implement {inputs.plan}",
+        );
+        let p = Pipeline::parse(&text).unwrap();
+        let stage = implement(&p).unwrap();
+        assert_eq!(stage.on_dirty, Some(OnDirty::Nudge(2)));
+        assert_eq!(p.on_dirty(&stage), OnDirty::Nudge(2));
+        let p = Pipeline::parse(&with_review_stage("on_dirty = \"ask\"\n")).unwrap();
+        let stage = p.stages.iter().find(|s| s.name == "review-code").unwrap();
+        assert_eq!(p.on_dirty(stage), OnDirty::Ask);
+    }
+
+    #[test]
+    fn on_dirty_refuses_zero_nudges_and_unknown_words() {
+        for value in ["{ nudge = 0 }", "\"retry\""] {
+            let text =
+                SWITCHBOARD.replace("slots = 1\n", &format!("slots = 1\non_dirty = {value}\n"));
+            let err = format!("{:#}", Pipeline::parse(&text).unwrap_err());
+            assert!(err.contains("on_dirty") && err.contains("\"ask\""), "{err}");
+            let text = with_review_stage(&format!("on_dirty = {value}\n"));
+            let err = format!("{:#}", Pipeline::parse(&text).unwrap_err());
+            assert!(err.contains("on_dirty") && err.contains("\"ask\""), "{err}");
+        }
+    }
+
+    #[test]
+    fn on_dirty_is_refused_on_a_stage_without_an_agent_behind_a_command_gate() {
+        let expect = "on_dirty needs an agent stage with a command gate, or a code review stage";
+        for (anchor, stage) in [
+            ("subject = \"plan\"\n", "review"),
+            (
+                "gate = { kind = \"human\", decision = \"lanes\" }\n",
+                "lanes",
+            ),
+            ("writes = [\"plan\"]\n", "plan"),
+        ] {
+            let text = SWITCHBOARD.replacen(anchor, &format!("{anchor}on_dirty = \"ask\"\n"), 1);
+            assert_ne!(text, SWITCHBOARD);
+            let err = Pipeline::parse(&text).unwrap_err().to_string();
+            assert!(err.contains(expect) && err.contains(stage), "{err}");
+        }
+        Pipeline::parse(&with_review_stage("on_dirty = { nudge = 3 }\n")).unwrap();
     }
 }

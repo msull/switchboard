@@ -308,6 +308,7 @@ fn round_views(a: &crate::ticket::Attempt) -> Vec<dispatch_control::ReviewRoundV
             head_after: r.head_after.clone(),
             feedback: r.feedback.clone(),
             response: r.response.clone(),
+            nudges: r.nudges.clone(),
             reviewers: r
                 .reviewers
                 .iter()
@@ -503,6 +504,7 @@ pub fn ticket_view(t: &Ticket, p: Option<&Pipeline>) -> TicketView {
                     }
                     .into(),
                     rounds: round_views(a),
+                    nudges: a.nudges.clone(),
                     state: state.into(),
                     reason,
                     session: a.session.clone(),

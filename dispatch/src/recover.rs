@@ -5,7 +5,7 @@
 use anyhow::Result;
 use switchboard_control::{Body, Found, Made, OpStatus, Reply, Request};
 
-use crate::scheduler::{Ask, Runner, apply_reply};
+use crate::scheduler::{Ask, NUDGE, Runner, apply_reply};
 use crate::ticket::{DecisionKind, Operation, Ticket, TicketState};
 
 /// Recovery's verdicts on an operation with no reply, as the reader
@@ -145,30 +145,47 @@ impl Runner {
             }
             "idempotent" if superseded(t, i) => give_verdict(&mut t.ledger[i], SUPERSEDED),
             "idempotent" => self.replay(t, ps, i),
-            _ => {
-                give_verdict(&mut t.ledger[i], NOT_REPEATED);
-                // Asked once: the answer, not another pass, settles it.
-                t.ledger[i].asked = true;
-                let stage = op.attempt.as_ref().map_or("?", |(s, _)| s.as_str());
-                self.ensure_decision(
-                    t,
-                    ps,
-                    Ask {
-                        stage,
-                        name: "lost-send",
-                        kind: DecisionKind::Permission,
-                        question: format!(
-                            "The reply to {} ({}) was lost and it cannot be repeated safely. Look at the pane, then park or rerun.",
-                            op.op, op.kind
-                        ),
-                        options: &["rerun", "park"],
-                        recommendation: None,
-                        attempt: op.attempt.clone(),
-                    },
-                    now_ms,
-                )?;
-            }
+            _ => self.not_repeated(t, ps, i, now_ms)?,
         }
+        Ok(())
+    }
+
+    /// A non-replayable operation with its reply lost is never sent
+    /// again. A nudge is on the attempt before it is sent, and one that
+    /// never arrived goes unanswered, which the idle grace turns into the
+    /// usual question; any other is asked about once.
+    fn not_repeated(
+        &mut self,
+        t: &mut Ticket,
+        ps: &mut crate::ticket::ProjectState,
+        i: usize,
+        now_ms: u64,
+    ) -> Result<()> {
+        let op = t.ledger[i].clone();
+        give_verdict(&mut t.ledger[i], NOT_REPEATED);
+        if op.intent == NUDGE {
+            return Ok(());
+        }
+        // Asked once: the answer, not another pass, settles it.
+        t.ledger[i].asked = true;
+        let stage = op.attempt.as_ref().map_or("?", |(s, _)| s.as_str());
+        self.ensure_decision(
+            t,
+            ps,
+            Ask {
+                stage,
+                name: "lost-send",
+                kind: DecisionKind::Permission,
+                question: format!(
+                    "The reply to {} ({}) was lost and it cannot be repeated safely. Look at the pane, then park or rerun.",
+                    op.op, op.kind
+                ),
+                options: &["rerun", "park"],
+                recommendation: None,
+                attempt: op.attempt.clone(),
+            },
+            now_ms,
+        )?;
         Ok(())
     }
 

@@ -181,8 +181,9 @@ line per change to `events.jsonl` in the data directory: `taken`,
 `attempt-ended` (with its state and reason), `decision` (its name,
 question and options), `answered` and `decision-cancelled`, `pr` and
 `pr-checks`, `pushed` and `refreshed`, `rewrite`, `round` (a code
-review round and its open points), `parking`, `parked`, `resumed`,
-`closing`, `closed`, and `void`. The human line is
+review round and its open points), `nudged` (a line typed into an
+agent's session after it stopped with a dirty tree), `parking`,
+`parked`, `resumed`, `closing`, `closed`, and `void`. The human line is
 `seq  hh:mm:ss  ticket  stage  kind  text`, the time in UTC.
 
 - Keep the highest `seq` you have read and pass it as `--since` next
