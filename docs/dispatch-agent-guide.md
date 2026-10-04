@@ -166,8 +166,11 @@ the lines and report them. Do not restart the runner yourself.
 
 **Show.** `dispatch show X` prints the header (id, project, source,
 title), `stage <name> (i/n)` and the state; each lane with its branch,
-worktree and the base, head and last pushed head (seven characters);
-the attempts grouped by stage, each with its state and reason, head,
+worktree and the base, head and last pushed head (seven characters),
+and, when its last bring-up resolved a rebase that conflicted, a
+clause such as `, rebased with conflicts in 2 commits, reviewed: 1
+point fixed` (or `under review`, `accepted with 1 point open`, `review
+failed`); the attempts grouped by stage, each with its state and reason, head,
 the head its checks ran at and a history rewrite, with any PR and the
 code review rounds (`r<n> <state> open <k>`) beneath it; the pending
 decisions with their options and the exact `dispatch decide` line; and
@@ -227,7 +230,10 @@ point once, however many rounds it stayed open, split by reviewer),
 fix passes, rebases (at least: a lane keeps only its last clean
 bring-up), and the commits and diff at the PR. Cost and
 turns read `not recorded`: Dispatch does not see them. A count marked
-incomplete is missing a round's file.
+incomplete is missing a round's file. A resolution review (the
+`resolution` pass after a conflicted rebase) is code review work on the
+branch: its rounds, points and fix count in those totals, and it is
+listed under the stage `resolution`.
 
 **Tail.** `dispatch tail X` prints the last lines (40, or `--lines N`
 up to 200) of each running agent of the ticket's open attempt, headed

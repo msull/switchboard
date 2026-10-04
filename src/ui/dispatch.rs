@@ -934,6 +934,20 @@ fn pr_labels(ui: &mut Ui, pr: &crate::ports::dispatch::PullRequestView) {
     ));
 }
 
+/// An attempt's notes beside its state: why it ended, how often it was
+/// nudged, and what a resolution review read.
+fn attempt_notes(ui: &mut Ui, t: &TicketView, a: &AttemptView) {
+    if let Some(reason) = &a.reason {
+        ui.label(theme::meta_text(ui, reason));
+    }
+    if let Some(text) = nudged(a.nudges.len()) {
+        ui.label(theme::meta_text(ui, text));
+    }
+    if let Some(text) = t.resolution_conflict(a) {
+        ui.label(theme::meta_text(ui, text));
+    }
+}
+
 fn attempt_row(cx: &mut DrawCtx<'_>, ui: &mut Ui, t: &TicketView, a: &AttemptView) {
     let p = theme::palette(ui);
     theme::surface(ui)
@@ -953,12 +967,7 @@ fn attempt_row(cx: &mut DrawCtx<'_>, ui: &mut Ui, t: &TicketView, a: &AttemptVie
                         _ => p.accent_text,
                     },
                 ));
-                if let Some(reason) = &a.reason {
-                    ui.label(theme::meta_text(ui, reason));
-                }
-                if let Some(text) = nudged(a.nudges.len()) {
-                    ui.label(theme::meta_text(ui, text));
-                }
+                attempt_notes(ui, t, a);
                 if let Some(w) = cx
                     .core
                     .waiting_agents_of(t)

@@ -1667,6 +1667,11 @@ review attempt writes `summary.md`. A code review stage with `commits =
 "fold"` or `"one"` rewrites the branch as it completes, with the tree
 proven unchanged and the rewrite on the attempt (dispatch
 `RECORD_VERSION` 5); a branch the remote already holds is left alone.
+A rebase that conflicts after the last code review stage, with no PR
+to push to, gets one resolution review of the range-diff between the
+reviewed and the resolved branch before the stage runs, with the
+conflict and its commits on the lane and its bring-up (dispatch
+`RECORD_VERSION` 9).
 A prompt's `{lanes}` is the lanes the ticket chose, in pipeline order
 (every lane before the `lanes` decision), and `{lanes.all}` every lane.
 A retake after close deletes each kept branch with nothing beyond its

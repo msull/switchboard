@@ -450,6 +450,17 @@ fn lane_view(t: &Ticket, l: &crate::ticket::LaneRecord) -> LaneView {
         base_sha: l.base_sha.clone(),
         head: lane_head(t, &l.name),
         pushed_head: l.pushed.as_ref().map(|p| p.head.clone()),
+        rebase_conflicts: l
+            .refreshed
+            .as_ref()
+            .and_then(|r| r.conflict.as_ref())
+            .map(|c| u32::try_from(c.commits.len()).unwrap_or(u32::MAX)),
+        resolution: l
+            .refreshed
+            .as_ref()
+            .filter(|r| r.conflict.is_some())
+            .and_then(|r| crate::scheduler::resolution_of(t, &l.name, r))
+            .map(|a| a.n),
     }
 }
 

@@ -27,8 +27,8 @@ use crate::template::Vars;
 use crate::ticket::{
     Attempt, AttemptKind, AttemptState, CheckGroup, CloseProgress, Decision, DecisionKind,
     DecisionState, GateRun, LaneRecord, Operation, OrphanKill, ProjectState, PullRequestRecord,
-    PullRequestSource, Refreshed, SETTLE_POLLS, STOP_IDLE_POLLS, Settle, SourceSnapshot, Ticket,
-    TicketState,
+    PullRequestSource, RefreshConflict, Refreshed, SETTLE_POLLS, STOP_IDLE_POLLS, Settle,
+    SourceSnapshot, Ticket, TicketState,
 };
 
 /// How often a `pr-checks` gate reads the provider.
@@ -43,6 +43,11 @@ pub const PR_YOUNG_HEAD_MS: u64 = 120_000;
 /// The pseudo-stage a refresh rebaser's attempts and questions carry:
 /// not in any pipeline, so no stage mistakes them for its own.
 pub const REFRESH: &str = "refresh";
+
+/// The pseudo-stage of the one review pass a conflicted bring-up gets
+/// after the pipeline's last code review stage, and of its question: not
+/// in any pipeline, so no stage mistakes them for its own.
+pub const RESOLUTION: &str = dispatch_control::RESOLUTION;
 
 /// The pseudo-stage the cut's questions carry: not in any pipeline, so
 /// no stage mistakes them for its own.
@@ -710,6 +715,9 @@ impl Runner {
         if self.refresh_lanes(t, ps, p, &stage, now_ms)? || !t.active() {
             return Ok(());
         }
+        if self.resolution_passes(t, ps, p, now_ms)? || !t.active() {
+            return Ok(());
+        }
         // Agent, workflow and review stages are held per context
         // (`held_in`); attempts still running are watched either way.
         match stage.kind() {
@@ -796,10 +804,14 @@ impl Runner {
             return Ok(true);
         }
         if t.refreshed_stage == Some(t.stage) {
+            if drop_stale_conflicts(t) {
+                self.save_ticket(t, now_ms)?;
+            }
             return Ok(false);
         }
         if stage.kind() == StageKind::GateOnly && !reads_pr(stage) {
             t.refreshed_stage = Some(t.stage);
+            drop_stale_conflicts(t);
             self.save_ticket(t, now_ms)?;
             return Ok(false);
         }
@@ -809,9 +821,86 @@ impl Runner {
                 waits = true;
             }
         }
+        if !waits {
+            drop_stale_conflicts(t);
+        }
         t.refreshed_stage = Some(t.stage);
         self.save_ticket(t, now_ms)?;
         Ok(waits)
+    }
+
+    /// The review of each chosen lane's conflict resolution, when its
+    /// last bring-up resolved a conflict after the pipeline's last code
+    /// review stage and pushed nothing: one reviewer reads only what the
+    /// resolution changed, before the stage's own work. True while one
+    /// is open, failed or asked about, which holds the stage.
+    fn resolution_passes(
+        &mut self,
+        t: &mut Ticket,
+        ps: &mut ProjectState,
+        p: &Pipeline,
+        now_ms: u64,
+    ) -> Result<bool> {
+        if !t.source.pull_requests.is_empty() {
+            return Ok(false);
+        }
+        let Some(shape) = resolution_stage(p) else {
+            return Ok(false);
+        };
+        let last_review = p
+            .stages
+            .iter()
+            .rposition(|s| s.kind() == StageKind::Review)
+            .unwrap_or_default();
+        let mut holds = false;
+        for i in 0..t.lanes.len() {
+            let lane = t.lanes[i].clone();
+            if !lane.chosen || lane.removed {
+                continue;
+            }
+            let Some(moved) = lane.refreshed.as_ref() else {
+                continue;
+            };
+            // A conflict brought up at or before the last code review is
+            // read there, by round 1's rebase check.
+            if moved
+                .conflict
+                .as_ref()
+                .is_none_or(|c| c.stage <= last_review)
+            {
+                continue;
+            }
+            // A bring-up that pushed has put the resolution on the PR
+            // already.
+            if lane.pushed.as_ref().is_some_and(|p| p.at_ms >= moved.at_ms) {
+                continue;
+            }
+            let last = resolution_of(t, &lane.name, moved).cloned();
+            let (ctx, cwd) = (lane.name.as_str(), lane.worktree.as_path());
+            match last {
+                Some(a) if a.state == AttemptState::Complete => continue,
+                Some(a) if a.is_open() => {
+                    self.poll_review(t, ps, p, &shape, &a, cwd, Some(ctx), now_ms)?;
+                }
+                Some(a) => {
+                    if !held_in(t, RESOLUTION, ctx) && may_rerun(t, &a) {
+                        self.start_review(t, ps, p, &shape, ctx, cwd, Some(ctx), now_ms)?;
+                    } else if asks_again(t, &a, false) {
+                        self.ask_rerun(t, ps, &a, now_ms)?;
+                    }
+                }
+                None => {
+                    if !held_in(t, RESOLUTION, ctx) {
+                        self.start_review(t, ps, p, &shape, ctx, cwd, Some(ctx), now_ms)?;
+                    }
+                }
+            }
+            holds = true;
+            if !t.active() {
+                break;
+            }
+        }
+        Ok(holds)
     }
 
     /// A lane's branch the refresh rewrote, pushed when the lane has an
@@ -988,17 +1077,22 @@ impl Runner {
             } else {
                 None
             };
+            let after = self.git.head(&worktree)?;
+            let conflict = Self::resolved_conflict(t, p, i, &head_before);
             t.lanes[i].refreshed = Some(Refreshed {
                 from,
                 to: onto_sha.clone(),
                 commits,
                 notes,
                 at_ms: now_ms,
+                conflict,
+                after: Some(after),
             });
             t.lanes[i].base_sha = Some(onto_sha);
             self.save_ticket(t, now_ms)?;
             return Ok(false);
         }
+        self.record_conflict(t, i, &head_before, &from, &onto_sha, now_ms)?;
         // A conflict: the rebaser, within the cap, else a question.
         let tried = t
             .attempts
@@ -1038,6 +1132,92 @@ impl Runner {
             }
         }
         Ok(true)
+    }
+
+    /// A rebase that stopped, on the lane's record before anything is
+    /// asked or launched: the head and base a review last read, kept from
+    /// the first time it stopped, since the stage is held until a
+    /// bring-up and nothing reads the branch meanwhile, and the base and
+    /// commits that conflict now.
+    fn record_conflict(
+        &mut self,
+        t: &mut Ticket,
+        i: usize,
+        head: &str,
+        from: &str,
+        onto_sha: &str,
+        now_ms: u64,
+    ) -> Result<()> {
+        let worktree = t.lanes[i].worktree.clone();
+        let base = if from.is_empty() {
+            self.git.merge_base(&worktree, head, onto_sha).ok()
+        } else {
+            Some(from.to_owned())
+        };
+        let commits = match base.map(|base| {
+            self.git
+                .conflicting_commits(&worktree, &base, head, onto_sha)
+        }) {
+            Some(Ok(commits)) => commits,
+            Some(Err(e)) => {
+                log::warn!(
+                    "ticket {} lane {}: the conflicting commits could not be read: {e:#}",
+                    t.id,
+                    t.lanes[i].name
+                );
+                Vec::new()
+            }
+            None => Vec::new(),
+        };
+        let stage = t.stage;
+        let lane = &mut t.lanes[i];
+        match &mut lane.conflict {
+            Some(c) => {
+                onto_sha.clone_into(&mut c.to);
+                c.commits = commits;
+                c.stage = stage;
+            }
+            None => {
+                lane.conflict = Some(RefreshConflict {
+                    before: head.to_owned(),
+                    from: from.to_owned(),
+                    to: onto_sha.to_owned(),
+                    commits,
+                    stage,
+                });
+            }
+        }
+        self.save_ticket(t, now_ms)
+    }
+
+    /// The lane's recorded conflict, taken off it at a bring-up: kept
+    /// for the bring-up when the branch was rewritten since the rebase
+    /// stopped (a rebaser or a hand rebase resolved it), dropped when
+    /// git rebased the untouched branch cleanly onto a newer base.
+    fn resolved_conflict(
+        t: &mut Ticket,
+        p: &Pipeline,
+        i: usize,
+        head_before: &str,
+    ) -> Option<RefreshConflict> {
+        let mut conflict = t.lanes[i].conflict.take()?;
+        if conflict.before == head_before {
+            log::info!(
+                "ticket {} lane {}: the branch was never rewritten after its conflict; nothing to review",
+                t.id,
+                t.lanes[i].name
+            );
+            return None;
+        }
+        conflict.stage = t.stage;
+        if !p.stages.iter().any(|s| s.kind() == StageKind::Review) {
+            log::info!(
+                "ticket {} lane {}: the conflict's resolution gets no review: the pipeline has no code review stage",
+                t.id,
+                t.lanes[i].name
+            );
+        }
+        Some(conflict)
     }
 
     /// The clone that holds a lane's commits: the lane's own, for a lane
@@ -1661,6 +1841,12 @@ impl Runner {
             attempt.state = AttemptState::Cancelled { reason };
             attempt.ended_ms = Some(now_ms);
         }
+        // A rebaser stopped here may have rewritten the branch before
+        // it went; the next pass reads the lane again, as one that
+        // finished on its own is, so its conflict reaches a bring-up.
+        if a.stage == REFRESH {
+            t.refreshed_stage = None;
+        }
         self.save_ticket(t, now_ms)?;
         Ok(true)
     }
@@ -2165,7 +2351,7 @@ impl Runner {
                 ("rerun", "keep") => self.keep_history(t, ps, p, attempt.as_ref(), now_ms)?,
                 ("pr", "recheck") => recheck_pr(t, attempt.as_ref()),
                 (REFRESH, "recheck") => t.refreshed_stage = None,
-                ("review-code" | "review-cap", "fix" | "accept" | "more") => {
+                ("review-code" | "review-cap" | RESOLUTION, "fix" | "accept" | "more") => {
                     self.review_answer(t, ps, &name, &answer, attempt.as_ref(), now_ms)?;
                 }
                 (_, "proceed" | "done") => {
@@ -2337,6 +2523,7 @@ impl Runner {
                 base_sha,
                 refreshed: None,
                 pushed: None,
+                conflict: None,
                 removed: false,
             });
             self.save_ticket(t, now_ms)?;
@@ -5963,10 +6150,78 @@ fn rebaser_notes(t: &Ticket, lane: &str, previous: Option<&Refreshed>) -> Option
         .map(|(_, path)| path.clone())
 }
 
+/// The latest resolution review in `lane` that belongs to the bring-up
+/// `moved`: started at or after it.
+pub(crate) fn resolution_of<'t>(
+    t: &'t Ticket,
+    lane: &str,
+    moved: &Refreshed,
+) -> Option<&'t Attempt> {
+    t.attempts
+        .iter()
+        .filter(|a| a.stage == RESOLUTION && a.context == lane && a.started_ms >= moved.at_ms)
+        .max_by_key(|a| a.n)
+}
+
+/// Drops every lane's recorded conflict as a stage goes ahead on the
+/// branches as they stand (a parked question resumed, or a tree left
+/// alone): whatever the stage runs reads and moves the branch, so the
+/// head the conflict kept is no longer the last one reviewed, and a
+/// later rebase records a conflict of its own. True when one was
+/// dropped.
+fn drop_stale_conflicts(t: &mut Ticket) -> bool {
+    let mut dropped = false;
+    for lane in &mut t.lanes {
+        if lane.conflict.take().is_some() {
+            log::info!(
+                "ticket {} lane {}: the stage goes ahead without a bring-up; its conflict is dropped",
+                t.id,
+                lane.name
+            );
+            dropped = true;
+        }
+    }
+    dropped
+}
+
+/// The shape a resolution review runs under: the pipeline's last code
+/// review stage with one reviewer (the policy's `resolution_reviewer`,
+/// else that stage's first that is not the style reviewer), one pass
+/// and the default sentinel, so the sentinel every reader falls back to
+/// for a stage the pipeline does not name is the one the reviewer is
+/// told. Its implementer, checks and `commits` are the stage's. `None`
+/// when the pipeline has no code review stage.
+fn resolution_stage(p: &Pipeline) -> Option<Stage> {
+    let review = p
+        .stages
+        .iter()
+        .rev()
+        .find(|s| s.kind() == StageKind::Review)?;
+    let mut shape = review.clone();
+    RESOLUTION.clone_into(&mut shape.name);
+    let reviewer = p.policy.resolution_reviewer.clone().or_else(|| {
+        review
+            .reviewers
+            .iter()
+            .find(|r| *r != crate::review::STYLE_REVIEWER)
+            .or_else(|| review.reviewers.first())
+            .cloned()
+    })?;
+    shape.reviewers = vec![reviewer];
+    shape.cap = Some(1);
+    shape.style_rounds = Some(1);
+    shape.review_prompt = None;
+    shape.no_feedback = None;
+    Some(shape)
+}
+
 /// What a rerun question adds about a code review attempt: the next
-/// attempt carries its points unless the note says "start over".
+/// attempt carries its points unless the note says "start over". A
+/// resolution review carries nothing.
 fn rerun_carries(t: &Ticket, stage: &str, n: u32) -> &'static str {
-    if find_attempt(t, stage, n).is_some_and(|a| a.kind == AttemptKind::Review) {
+    if stage == RESOLUTION {
+        " A rerun reviews the same resolution again with a fresh reviewer."
+    } else if find_attempt(t, stage, n).is_some_and(|a| a.kind == AttemptKind::Review) {
         " The next attempt carries this one's settled and open points; a note saying \"start over\" reviews the whole branch again."
     } else {
         ""
@@ -7174,6 +7429,7 @@ mod tests {
     /// `writable` of every lane whose tree it has; a lane's command gets
     /// only its own.
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn a_root_command_is_confined_with_every_lanes_writable() {
         let p = Pipeline::parse(
             r#"
@@ -7226,6 +7482,7 @@ network = "deny"
             base_sha: None,
             refreshed: None,
             pushed: None,
+            conflict: None,
             removed: false,
         };
         let t = Ticket {

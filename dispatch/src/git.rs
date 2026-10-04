@@ -83,6 +83,17 @@ pub trait Repo: Send {
     /// `git rebase <onto>` at `dir`; `false` when it stopped on a
     /// conflict, in which case it is aborted and the tree is as it was.
     fn rebase_onto(&mut self, dir: &Path, onto: &str) -> Result<bool>;
+    /// The commits of `base..head` whose replay onto `onto` conflicts,
+    /// oldest first, read without touching the tree or any ref: each
+    /// commit is merged onto the result of the one before, so once one
+    /// conflicts the rest are read against a tree with its markers.
+    fn conflicting_commits(
+        &self,
+        dir: &Path,
+        base: &str,
+        head: &str,
+        onto: &str,
+    ) -> Result<Vec<String>>;
     /// `git push --force-with-lease` of `branch` to `remote` from `dir`,
     /// replacing the remote branch only while it is at `expected`.
     fn push_with_lease(
@@ -642,6 +653,54 @@ impl Repo for GitCli {
         }
         let _ = git_in(dir).args(["rebase", "--abort"]).status();
         Ok(false)
+    }
+
+    fn conflicting_commits(
+        &self,
+        dir: &Path,
+        base: &str,
+        head: &str,
+        onto: &str,
+    ) -> Result<Vec<String>> {
+        let picks =
+            output(git_in(dir).args(["rev-list", "--reverse", &format!("{base}..{head}")]))?;
+        // A fixed identity, so a clone with no `user.name` can still
+        // write the throwaway commits; no ref ever names them.
+        let env = [
+            ("GIT_AUTHOR_NAME", "dispatch"),
+            ("GIT_AUTHOR_EMAIL", "dispatch@localhost"),
+            ("GIT_COMMITTER_NAME", "dispatch"),
+            ("GIT_COMMITTER_EMAIL", "dispatch@localhost"),
+        ];
+        let mut tip = onto.to_owned();
+        let mut conflicting = Vec::new();
+        for pick in picks.lines().map(str::trim).filter(|l| !l.is_empty()) {
+            let mut cmd = git_in(dir);
+            cmd.args(["merge-tree", "--write-tree", "--merge-base"])
+                .arg(format!("{pick}^"))
+                .args([tip.as_str(), pick]);
+            let out = cmd.output().with_context(|| format!("run {cmd:?}"))?;
+            match out.status.code() {
+                Some(0) => {}
+                Some(1) => conflicting.push(pick.to_owned()),
+                _ => bail!(
+                    "{cmd:?} exited {}: {}",
+                    out.status,
+                    String::from_utf8_lossy(&out.stderr).trim()
+                ),
+            }
+            // Written even with conflict markers in it.
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            let tree = stdout
+                .lines()
+                .next()
+                .map(str::trim)
+                .filter(|l| !l.is_empty())
+                .with_context(|| format!("{cmd:?} printed no tree"))?
+                .to_owned();
+            tip = commit_tree(dir, &tree, &tip, "dispatch: conflict probe", &env)?;
+        }
+        Ok(conflicting)
     }
 
     fn push_with_lease(
@@ -1363,6 +1422,8 @@ pub struct FakeRepo {
     pub behind: std::collections::BTreeMap<PathBuf, u64>,
     /// Trees whose rebase stops on a conflict.
     pub rebase_conflicts: Vec<PathBuf>,
+    /// What `conflicting_commits` lists for a tree; absent, nothing.
+    pub conflicting: std::collections::BTreeMap<PathBuf, Vec<String>>,
     /// Rebases done: dir, onto.
     pub rebased: Vec<(PathBuf, String)>,
     /// The head a successful rebase leaves in a tree; a tree not listed
@@ -1662,6 +1723,15 @@ impl Repo for FakeRepo {
             self.heads.insert(dir.to_path_buf(), head.clone());
         }
         Ok(true)
+    }
+    fn conflicting_commits(
+        &self,
+        dir: &Path,
+        _base: &str,
+        _head: &str,
+        _onto: &str,
+    ) -> Result<Vec<String>> {
+        Ok(self.conflicting.get(dir).cloned().unwrap_or_default())
     }
     fn push_with_lease(
         &mut self,
@@ -1984,6 +2054,17 @@ impl Repo for std::sync::Arc<std::sync::Mutex<FakeRepo>> {
     }
     fn rebase_onto(&mut self, dir: &Path, onto: &str) -> Result<bool> {
         self.lock().unwrap().rebase_onto(dir, onto)
+    }
+    fn conflicting_commits(
+        &self,
+        dir: &Path,
+        base: &str,
+        head: &str,
+        onto: &str,
+    ) -> Result<Vec<String>> {
+        self.lock()
+            .unwrap()
+            .conflicting_commits(dir, base, head, onto)
     }
     fn push_with_lease(
         &mut self,
@@ -2869,6 +2950,33 @@ mod tests {
         );
         assert_eq!(cli.head(&wt).unwrap(), fixup);
         assert!(cli.is_clean(&wt).unwrap());
+    }
+
+    /// Two branch commits over a base that moved: only the second
+    /// touches what the base changed, so only it is listed, and nothing
+    /// in the tree or its refs moves.
+    #[test]
+    fn the_real_git_lists_only_the_commits_whose_replay_conflicts() {
+        let dir = tempfile::tempdir().unwrap();
+        let (wt, base) = cut(dir.path());
+        commit(&wt, "a", "1\n", &["-m", "A"]);
+        let b = commit(&wt, "shared", "branch\n", &["-m", "B"]);
+        sh(&wt, &["checkout", "-q", "--detach", &base]);
+        let onto = commit(&wt, "shared", "base\n", &["-m", "moved"]);
+        sh(&wt, &["checkout", "-q", "dispatch/1-x"]);
+        let cli = GitCli::default();
+        let refs = sh(&wt, &["for-each-ref"]);
+        let listed = cli.conflicting_commits(&wt, &base, &b, &onto).unwrap();
+        assert_eq!(listed, vec![b.clone()]);
+        assert_eq!(cli.head(&wt).unwrap(), b);
+        assert!(cli.is_clean(&wt).unwrap());
+        assert_eq!(sh(&wt, &["for-each-ref"]), refs, "no ref was written");
+        assert!(
+            cli.conflicting_commits(&wt, &base, &b, &base)
+                .unwrap()
+                .is_empty(),
+            "onto its own base nothing conflicts"
+        );
     }
 
     #[test]

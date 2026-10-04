@@ -23,7 +23,7 @@ use crate::ticket::{ProjectState, Ticket};
 /// carried a version reads as 0 and is brought up by `migrate`. A
 /// record above it was written by a newer `dispatch` and is refused
 /// both ways, so this build never drops fields it does not know.
-pub const RECORD_VERSION: u32 = 8;
+pub const RECORD_VERSION: u32 = 9;
 
 /// A lock file held while this lives: the writer lock, the runner's
 /// claim, or a ticket's close.
@@ -477,6 +477,13 @@ pub fn migrate(mut value: Value) -> Value {
         // Nothing is transformed; a build that would drop the group on
         // its next write must refuse the record, or a restart would
         // leave the check's process group running again.
+        //
+        // 8 to 9: a lane gains `conflict`, and its `refreshed` gains
+        // `conflict` and `after`, all absent until a rebase stops on a
+        // conflict, which their serde defaults give. Nothing is
+        // transformed; a build that would drop them on its next write
+        // must refuse the record, or a conflicted bring-up would lose the
+        // review of its resolution.
         if version == 1 {
             settle_from_verdicts(&mut value);
         }
@@ -921,8 +928,43 @@ mod tests {
         });
         write_ticket(&path, &t).unwrap();
         let written: Value = read_json(&path).unwrap();
-        assert_eq!(written["version"], 8);
+        assert_eq!(written["version"], RECORD_VERSION);
         assert_eq!(written["attempts"][0]["gate"]["group"]["pgid"], 4000);
+        assert_eq!(read_ticket(&path).unwrap(), t);
+    }
+
+    #[test]
+    fn a_version_eight_record_migrates_to_nine_with_no_conflict() {
+        let text = TICKET_V0.replacen('{', "{\n  \"version\": 8,", 1).replacen(
+            r#""base_sha": "base0000""#,
+            r#""base_sha": "main0002", "refreshed": {"from": "base0000", "to": "main0002", "commits": true, "notes": null, "at_ms": 1500}"#,
+            1,
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.json");
+        fs::write(&path, text).unwrap();
+        let mut t = read_ticket(&path).unwrap();
+        assert_eq!(t.version, RECORD_VERSION);
+        assert_eq!(t.lanes[0].conflict, None);
+        let moved = t.lanes[0].refreshed.clone().unwrap();
+        assert_eq!((moved.conflict, moved.after), (None, None));
+        let conflict = crate::ticket::RefreshConflict {
+            before: "head0001".into(),
+            from: "base0000".into(),
+            to: "main0003".into(),
+            commits: vec!["pick0002".into()],
+            stage: 6,
+        };
+        t.lanes[0].conflict = Some(conflict.clone());
+        t.lanes[0].refreshed = Some(crate::ticket::Refreshed {
+            conflict: Some(conflict),
+            after: Some("rebased1".into()),
+            ..moved
+        });
+        write_ticket(&path, &t).unwrap();
+        let written: Value = read_json(&path).unwrap();
+        assert_eq!(written["version"], 9);
+        assert_eq!(written["lanes"][0]["conflict"]["commits"][0], "pick0002");
         assert_eq!(read_ticket(&path).unwrap(), t);
     }
 
