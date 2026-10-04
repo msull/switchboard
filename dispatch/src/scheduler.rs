@@ -12,7 +12,7 @@ use dispatch_control as wire_dispatch;
 use switchboard_control::{self as wire, Body, Reply, Request, RunState};
 
 use crate::bitbucket::{Bitbucket, bitbucket_repo};
-use crate::git::{Push, Repo, branch_name};
+use crate::git::{Push, Repo, branch_name, yyyymmdd};
 use crate::github::{Checks, Gh, PullRequests, github_repo};
 use crate::pipeline::{Context, Gate, Lane, Pipeline, Stage, StageKind};
 use crate::port::Port;
@@ -39,6 +39,10 @@ pub const PR_YOUNG_HEAD_MS: u64 = 120_000;
 /// The pseudo-stage a refresh rebaser's attempts and questions carry:
 /// not in any pipeline, so no stage mistakes them for its own.
 pub const REFRESH: &str = "refresh";
+
+/// The pseudo-stage the cut's questions carry: not in any pipeline, so
+/// no stage mistakes them for its own.
+pub const CUT: &str = "cut";
 
 /// Everything the runner acts through.
 pub struct Runner {
@@ -164,6 +168,38 @@ pub struct Ask<'a> {
 /// An answered decision not yet acted on: its index, name, answer and
 /// attempt.
 type Answered = (usize, String, String, Option<(String, u32)>);
+
+/// A lane the cut has yet to record: its index in the pipeline's lanes,
+/// its pull request for a ticket from pull requests, and its branch.
+struct LaneCut {
+    index: usize,
+    pr: Option<PullRequestSource>,
+    branch: String,
+}
+
+/// A context the cut has yet to make: the ticket's tree or a lane with
+/// a repository of its own, with everything its clone and worktree
+/// need.
+struct Uncut {
+    what: String,
+    url: String,
+    clone: PathBuf,
+    remote: String,
+    dir: PathBuf,
+    branch: String,
+    start: String,
+    pr: Option<PullRequestSource>,
+    extra: Option<(String, String)>,
+}
+
+/// What the cut does with a branch an earlier ticket left with commits,
+/// as the `branch` decision answered: check it out as it is, or rename
+/// it to the name given and cut a new one.
+#[derive(Debug, Clone)]
+enum Existing {
+    Reuse,
+    Fresh(String),
+}
 
 impl Runner {
     // --- records
@@ -573,7 +609,9 @@ impl Runner {
         // is never involved.
         if p.cuts_worktrees() && (t.tree.is_none() || t.lanes.len() < lanes_wanted(t, p)) {
             self.cut_trees(t, ps, p, now_ms)?;
-            if !t.active() {
+            // A cut held by a question leaves the ticket active with its
+            // trees not all there; no stage runs until they are.
+            if !t.active() || t.tree.is_none() || t.lanes.len() < lanes_wanted(t, p) {
                 return Ok(());
             }
         }
@@ -1792,12 +1830,15 @@ impl Runner {
             // The acted mark is set in memory here and reaches disk with
             // the action's own first write (the parking state, the ledger
             // entry, the lane record), never before it: an answer is
-            // either still unacted or its intent is durable. The one
-            // exception is a `rerun` answer to a `rerun` decision, marked
+            // either still unacted or its intent is durable. Two
+            // exceptions: a `rerun` answer to a `rerun` decision, marked
             // only once the replaced attempt is confirmed gone, below,
-            // since `may_rerun` launches on that mark.
-            if !(name == "rerun" && answer == "rerun")
-                && let DecisionState::Answered { acted, .. } = &mut t.decisions[i].state
+            // since `may_rerun` launches on that mark; and a `reuse` or
+            // `fresh` answer to `branch`, marked by the cut that uses it.
+            if !matches!(
+                (name.as_str(), answer.as_str()),
+                ("rerun", "rerun") | ("branch", "reuse" | "fresh")
+            ) && let DecisionState::Answered { acted, .. } = &mut t.decisions[i].state
             {
                 *acted = true;
             }
@@ -1847,6 +1888,9 @@ impl Runner {
                         continue;
                     }
                 }
+                // The cut reads this answer from the record, later on
+                // this same pass, and marks it acted once it is used.
+                ("branch", "reuse" | "fresh") => continue,
                 (_, "park") => self.park_by_answer(t, ps, i, now_ms)?,
                 (name, other) => {
                     self.park(
@@ -1922,6 +1966,12 @@ impl Runner {
     /// with a repository of its own is a worktree of Dispatch's clone of
     /// that, at the lane's path in the tree; any other lane is a path in
     /// the tree. Setups wait for the first agent in the lane.
+    ///
+    /// Every clone is fetched and surveyed before anything is cut. A
+    /// branch of the ticket's name left by an earlier, closed ticket is
+    /// deleted when it has nothing beyond its start, and asked about
+    /// (`reuse | fresh | park`) when it has commits, with the cut held
+    /// until the question is answered.
     fn cut_trees(
         &mut self,
         t: &mut Ticket,
@@ -1932,73 +1982,44 @@ impl Runner {
         let Some(url) = p.project.repo.clone() else {
             return Ok(());
         };
-        // A ticket from pull requests checks their branches out instead
-        // of cutting its own: a PR in a lane without a repository of its
-        // own is the tree's branch, and only lanes with a PR are cut.
-        let prs = t.source.pull_requests.clone();
-        let tree_pr = prs
+        // A question pending holds the cut whole, so a waiting ticket
+        // does not fetch every clone on every pass.
+        if t.decisions
             .iter()
-            .find(|pr| p.lane(&pr.lane).is_some_and(|l| l.repo.is_none()))
-            .cloned();
-        let branch = tree_pr.as_ref().map_or_else(
-            || branch_name(t.source.number.unwrap_or(0), &t.source.title),
-            |pr| pr.local().to_owned(),
-        );
+            .any(|d| d.pending() && d.stage == CUT && d.name == "branch")
+        {
+            return Ok(());
+        }
+        let tree = t
+            .tree
+            .clone()
+            .unwrap_or_else(|| self.worktree_root(p).join(&t.id));
+        let lanes = lanes_to_cut(t, p);
+        let todo = self.uncut(t, p, &url, &tree, &lanes);
+        let Some(moved) = self.survey(t, ps, &todo, now_ms)? else {
+            return Ok(());
+        };
+        let Some(existing) = self.branch_answer(t, ps, &todo, &moved, now_ms)? else {
+            return Ok(());
+        };
+
+        let mut todo = todo.into_iter().zip(existing);
         if t.tree.is_none() {
-            let dir = self.worktree_root(p).join(&t.id);
-            let clone = self.data.repo_dir(&p.project.name);
-            let start = format!("{}/{}", p.project.remote, p.project.base);
-            let extra = tree_pr.as_ref().and_then(|pr| extra_remote(p, None, pr));
-            if !self.cut(
-                t,
-                ps,
-                "the tree",
-                &url,
-                &clone,
-                &p.project.remote,
-                &dir,
-                &branch,
-                &start,
-                tree_pr.as_ref(),
-                extra,
-                now_ms,
-            )? {
+            let (u, existing) = todo.next().expect("the tree is first when uncut");
+            if !self.cut(t, ps, &u, existing, now_ms)? {
                 return Ok(());
             }
-            t.tree = Some(dir);
+            t.tree = Some(u.dir);
             self.save_ticket(t, now_ms)?;
         }
-        let tree = t.tree.clone().expect("cut above");
-        for lane in &p.lanes {
-            if t.lanes.iter().any(|l| l.name == lane.name) {
-                continue;
-            }
-            let pr = prs.iter().find(|pr| pr.lane == lane.name);
-            if !prs.is_empty() && pr.is_none() {
-                continue;
-            }
-            let lane_branch = pr.map_or_else(|| branch.clone(), |pr| pr.local().to_owned());
+        for LaneCut { index, pr, branch } in lanes {
+            let lane = &p.lanes[index];
             let dir = tree.join(&lane.path);
-            if let Some(url) = &lane.repo {
-                let clone = self.data.lane_repo_dir(&p.project.name, &lane.name);
-                let remote = p.lane_remote(lane).to_owned();
-                let start = format!("{remote}/{}", p.lane_base(lane));
-                let what = format!("lane {}", lane.name);
-                let extra = pr.and_then(|pr| extra_remote(p, Some(lane), pr));
-                if !self.cut(
-                    t,
-                    ps,
-                    &what,
-                    url,
-                    &clone,
-                    &remote,
-                    &dir,
-                    &lane_branch,
-                    &start,
-                    pr,
-                    extra,
-                    now_ms,
-                )? {
+            if lane.repo.is_some() {
+                let (u, existing) = todo
+                    .next()
+                    .expect("`uncut` lists every lane with a repository");
+                if !self.cut(t, ps, &u, existing, now_ms)? {
                     return Ok(());
                 }
             } else if !dir.is_dir() {
@@ -2009,11 +2030,11 @@ impl Runner {
                     now_ms,
                 );
             }
-            let base_sha = self.lane_base_sha(p, lane, pr);
+            let base_sha = self.lane_base_sha(p, lane, pr.as_ref(), &branch);
             t.lanes.push(LaneRecord {
                 name: lane.name.clone(),
                 worktree: dir,
-                branch: lane_branch,
+                branch,
                 project: None,
                 chosen: p.lanes.len() == 1 || pr.is_some(),
                 setup_done: false,
@@ -2024,17 +2045,252 @@ impl Runner {
             });
             self.save_ticket(t, now_ms)?;
         }
+        // The `branch` answer is spent once every context is cut. A cut
+        // that parked first left it unacted, and the parking withdrew
+        // it, so a resume asks again rather than repeat what failed.
+        if let Some(d) = latest_branch_decision(t)
+            && let DecisionState::Answered { acted, .. } = &mut d.state
+            && !*acted
+        {
+            *acted = true;
+            self.save_ticket(t, now_ms)?;
+        }
         Ok(())
+    }
+
+    /// The contexts `cut_trees` has yet to make, in pipeline order: the
+    /// tree if it is not cut, then each of `lanes` with a repository of
+    /// its own.
+    fn uncut(
+        &self,
+        t: &Ticket,
+        p: &Pipeline,
+        url: &str,
+        tree: &Path,
+        lanes: &[LaneCut],
+    ) -> Vec<Uncut> {
+        let mut todo = Vec::new();
+        if t.tree.is_none() {
+            let pr = tree_pr(t, p).cloned();
+            todo.push(Uncut {
+                what: "the tree".into(),
+                url: url.to_owned(),
+                clone: self.data.repo_dir(&p.project.name),
+                remote: p.project.remote.clone(),
+                dir: tree.to_path_buf(),
+                branch: tree_branch(t, pr.as_ref()),
+                start: format!("{}/{}", p.project.remote, p.project.base),
+                extra: pr.as_ref().and_then(|pr| extra_remote(p, None, pr)),
+                pr,
+            });
+        }
+        for l in lanes {
+            let lane = &p.lanes[l.index];
+            let Some(url) = &lane.repo else {
+                continue;
+            };
+            let remote = p.lane_remote(lane).to_owned();
+            todo.push(Uncut {
+                what: format!("lane {}", lane.name),
+                url: url.clone(),
+                clone: self.data.lane_repo_dir(&p.project.name, &lane.name),
+                start: format!("{remote}/{}", p.lane_base(lane)),
+                remote,
+                dir: tree.join(&lane.path),
+                branch: l.branch.clone(),
+                extra: l.pr.as_ref().and_then(|pr| extra_remote(p, Some(lane), pr)),
+                pr: l.pr.clone(),
+            });
+        }
+        todo
+    }
+
+    /// Every context's clone fetched, then looked at for a branch of
+    /// its name an earlier ticket left: one with nothing beyond its start
+    /// is deleted, and one with commits is returned with how many (its
+    /// index in `todo`). `None` when the ticket was parked instead.
+    fn survey(
+        &mut self,
+        t: &mut Ticket,
+        ps: &mut ProjectState,
+        todo: &[Uncut],
+        now_ms: u64,
+    ) -> Result<Option<Vec<(usize, u64)>>> {
+        let mut moved: Vec<(usize, u64)> = Vec::new();
+        for (i, u) in todo.iter().enumerate() {
+            if !self.prepare(t, ps, u, now_ms)? {
+                return Ok(None);
+            }
+            // A directory already at a context's place is adopted by
+            // `cut`, and a pull request's branch is reset by `-B`, so
+            // neither is surveyed.
+            if u.pr.is_some() || u.dir.exists() {
+                continue;
+            }
+            match self.clear_kept(&t.id, u) {
+                Ok(Some(n)) => moved.push((i, n)),
+                Ok(None) => {}
+                Err(e) => {
+                    self.park(
+                        t,
+                        ps,
+                        &format!(
+                            "{}: could not clear the kept branch {} in {}: {e:#}",
+                            u.what,
+                            u.branch,
+                            u.clone.display()
+                        ),
+                        now_ms,
+                    )?;
+                    return Ok(None);
+                }
+            }
+        }
+        Ok(Some(moved))
+    }
+
+    /// A context's branch left by an earlier ticket: deleted when it has
+    /// nothing beyond its start (`None`, as when there is none), else
+    /// how many commits it has.
+    fn clear_kept(&mut self, ticket: &str, u: &Uncut) -> Result<Option<u64>> {
+        if !self.git.branch_exists(&u.clone, &u.branch)? {
+            return Ok(None);
+        }
+        let n = self.git.branch_ahead(&u.clone, &u.branch, &u.start)?;
+        if n > 0 {
+            return Ok(Some(n));
+        }
+        self.git.delete_branch(&u.clone, &u.branch)?;
+        log::info!(
+            "ticket {ticket} {}: deleted the kept branch {} with nothing beyond {}",
+            u.what,
+            u.branch,
+            u.start
+        );
+        Ok(None)
+    }
+
+    /// What the cut does with each context's branch, by the answer to
+    /// the latest `branch` decision: one answer covers every context
+    /// with commits (`moved`), and the rest are cut as usual. With no
+    /// answer to go by (none yet, a `park`, or one a parking withdrew),
+    /// the question is asked and `None` holds the cut, as it does when
+    /// the ticket was parked instead.
+    fn branch_answer(
+        &mut self,
+        t: &mut Ticket,
+        ps: &mut ProjectState,
+        todo: &[Uncut],
+        moved: &[(usize, u64)],
+        now_ms: u64,
+    ) -> Result<Option<Vec<Option<Existing>>>> {
+        let mut existing: Vec<Option<Existing>> = vec![None; todo.len()];
+        if moved.is_empty() {
+            return Ok(Some(existing));
+        }
+        let answer = latest_branch_decision(t)
+            .and_then(|d| d.unacted_answer().map(|a| (a.to_owned(), d.made_ms)));
+        match answer {
+            Some((a, _)) if a == "reuse" => {
+                for &(i, _) in moved {
+                    existing[i] = Some(Existing::Reuse);
+                }
+            }
+            Some((a, asked_ms)) if a == "fresh" => {
+                let Some(to) = self.free_name(t, ps, todo, moved, asked_ms, now_ms)? else {
+                    return Ok(None);
+                };
+                for &(i, _) in moved {
+                    existing[i] = Some(Existing::Fresh(to.clone()));
+                }
+            }
+            _ => {
+                let Some(fresh_to) = self.free_name(t, ps, todo, moved, now_ms, now_ms)? else {
+                    return Ok(None);
+                };
+                let named: Vec<(&str, &Path, u64)> = moved
+                    .iter()
+                    .map(|&(i, n)| (todo[i].what.as_str(), todo[i].clone.as_path(), n))
+                    .collect();
+                let question = branch_question(&todo[moved[0].0].branch, &named, &fresh_to);
+                self.ensure_decision(
+                    t,
+                    ps,
+                    Ask {
+                        stage: CUT,
+                        name: "branch",
+                        kind: DecisionKind::Permission,
+                        question,
+                        options: &["reuse", "fresh", "park"],
+                        recommendation: None,
+                        attempt: None,
+                    },
+                    now_ms,
+                )?;
+                return Ok(None);
+            }
+        }
+        Ok(Some(existing))
+    }
+
+    /// The first of `<branch>.closed-<yyyymmdd>`, `…-2`, `…-3`, … that
+    /// no clone in `moved` has, the date that of `ms`: each kept branch
+    /// with commits is renamed there to make way for a fresh one, under
+    /// the one name the question gave. The suffix covers a second close
+    /// on the same day. `None` when a clone's branches could not be read
+    /// and the ticket was parked instead.
+    fn free_name(
+        &mut self,
+        t: &mut Ticket,
+        ps: &mut ProjectState,
+        todo: &[Uncut],
+        moved: &[(usize, u64)],
+        ms: u64,
+        now_ms: u64,
+    ) -> Result<Option<String>> {
+        let stem = format!("{}.closed-{}", todo[moved[0].0].branch, yyyymmdd(ms));
+        let mut name = stem.clone();
+        let mut n = 1;
+        loop {
+            let mut taken = false;
+            for &(i, _) in moved {
+                let clone = &todo[i].clone;
+                match self.git.branch_exists(clone, &name) {
+                    Ok(exists) => taken |= exists,
+                    Err(e) => {
+                        self.park(
+                            t,
+                            ps,
+                            &format!(
+                                "{}: could not read the branches in {}: {e:#}",
+                                todo[i].what,
+                                clone.display()
+                            ),
+                            now_ms,
+                        )?;
+                        return Ok(None);
+                    }
+                }
+            }
+            if !taken {
+                return Ok(Some(name));
+            }
+            n += 1;
+            name = format!("{stem}-{n}");
+        }
     }
 
     /// The commit a lane is cut from, resolved at the cut: what a code
     /// review diffs against however far the remote moves later. Only a
-    /// refresh that brings the lane onto a newer base moves it.
+    /// refresh that brings the lane onto a newer base moves it. A branch
+    /// reused with commits of its own is based where it forked from
+    /// `start`, so a review does not show upstream work as reverted.
     fn lane_base_sha(
         &self,
         p: &Pipeline,
         lane: &Lane,
         pr: Option<&PullRequestSource>,
+        branch: &str,
     ) -> Option<String> {
         // A pull request's base is the branch it targets on its own
         // remote, where its branch forked from it: what its reviewers
@@ -2051,6 +2307,13 @@ impl Runner {
                 .ok();
         }
         let (clone, _, start) = self.lane_base_ref(p, lane);
+        if self
+            .git
+            .branch_ahead(&clone, branch, &start)
+            .is_ok_and(|n| n > 0)
+        {
+            return self.git.merge_base(&clone, &start, branch).ok();
+        }
         self.git.rev_parse(&clone, &start).ok()
     }
 
@@ -2123,27 +2386,25 @@ impl Runner {
         Ok(())
     }
 
-    /// One worktree: the clone made or fetched, the worktree cut from
-    /// `start` on `branch` at `dir`, or adopted when git says it is
-    /// already that. With `pr`, the worktree is that pull request's
-    /// branch as its remote has it. False when the ticket was parked
-    /// instead.
-    #[allow(clippy::too_many_arguments)]
-    fn cut(
+    /// A context's clone made if it is not there yet and fetched (with
+    /// a pull request, its branch fetched), so a cut starts from what
+    /// the remote has now. False when the ticket was parked instead.
+    fn prepare(
         &mut self,
         t: &mut Ticket,
         ps: &mut ProjectState,
-        what: &str,
-        url: &str,
-        clone: &Path,
-        remote: &str,
-        dir: &Path,
-        branch: &str,
-        start: &str,
-        pr: Option<&PullRequestSource>,
-        extra: Option<(String, String)>,
+        u: &Uncut,
         now_ms: u64,
     ) -> Result<bool> {
+        let Uncut {
+            what,
+            url,
+            clone,
+            remote,
+            pr,
+            extra,
+            ..
+        } = u;
         if let Err(e) = self.git.ensure_clone(url, clone) {
             self.park(
                 t,
@@ -2154,10 +2415,10 @@ impl Runner {
             return Ok(false);
         }
         let fetched = match pr {
-            Some(pr) => self.fetch_pull_request(clone, pr, extra),
+            Some(pr) => self.fetch_pull_request(clone, pr, extra.clone()),
             None => self.git.fetch(clone, remote),
         };
-        let remote = pr.map_or(remote, |pr| pr.remote.as_str());
+        let remote = pr.as_ref().map_or(remote, |pr| &pr.remote);
         if let Err(e) = fetched {
             self.park(
                 t,
@@ -2170,6 +2431,35 @@ impl Runner {
             )?;
             return Ok(false);
         }
+        Ok(true)
+    }
+
+    /// One worktree, its clone already prepared: cut from `start` on
+    /// its branch at its directory, or adopted when git says it is
+    /// already that. With a pull request, the worktree is that pull
+    /// request's branch as its remote has it. With `existing`, a branch
+    /// an earlier ticket left with commits is checked out as it is, or
+    /// renamed out of the way first. False when the ticket was parked
+    /// instead.
+    fn cut(
+        &mut self,
+        t: &mut Ticket,
+        ps: &mut ProjectState,
+        u: &Uncut,
+        existing: Option<Existing>,
+        now_ms: u64,
+    ) -> Result<bool> {
+        let Uncut {
+            what,
+            clone,
+            remote,
+            dir,
+            branch,
+            start,
+            pr,
+            ..
+        } = u;
+        let remote = pr.as_ref().map_or(remote, |pr| &pr.remote);
         // A directory already there is adopted only if git says it is
         // this repository's worktree on this branch (cut before a stop
         // that came ahead of the record); anything else in the way is
@@ -2194,7 +2484,14 @@ impl Runner {
         let added = if pr.is_some() {
             self.git.worktree_track(clone, dir, branch, remote)
         } else {
-            self.git.worktree_add(clone, dir, branch, start)
+            match existing {
+                None => self.git.worktree_add(clone, dir, branch, start),
+                Some(Existing::Reuse) => self.git.worktree_checkout(clone, dir, branch),
+                Some(Existing::Fresh(to)) => self
+                    .git
+                    .rename_branch(clone, branch, &to)
+                    .and_then(|()| self.git.worktree_add(clone, dir, branch, start)),
+            }
         };
         if let Err(e) = added {
             self.park(
@@ -4828,6 +5125,104 @@ pub fn close_removes(t: &Ticket, p: &Pipeline) -> Vec<PathBuf> {
     paths
 }
 
+/// The branches a close of `t` keeps, with the clone each is in: lanes
+/// of their own repositories, then the ticket's tree, in the order
+/// `close_removes` lists their trees. Nothing for a pipeline that works
+/// in place or a ticket never cut.
+#[must_use]
+pub fn kept_branches(t: &Ticket, p: &Pipeline, data: &DataDir) -> Vec<(String, PathBuf)> {
+    if !p.cuts_worktrees() || t.tree.is_none() {
+        return Vec::new();
+    }
+    let mut kept: Vec<(String, PathBuf)> = t
+        .lanes
+        .iter()
+        .filter(|l| p.lane(&l.name).is_some_and(|lane| lane.repo.is_some()))
+        .map(|l| {
+            (
+                l.branch.clone(),
+                data.lane_repo_dir(&p.project.name, &l.name),
+            )
+        })
+        .collect();
+    kept.push((
+        tree_branch(t, tree_pr(t, p)),
+        data.repo_dir(&p.project.name),
+    ));
+    kept
+}
+
+/// The pull request whose branch is the ticket's tree: one in a lane
+/// without a repository of its own.
+fn tree_pr<'a>(t: &'a Ticket, p: &Pipeline) -> Option<&'a PullRequestSource> {
+    t.source
+        .pull_requests
+        .iter()
+        .find(|pr| p.lane(&pr.lane).is_some_and(|l| l.repo.is_none()))
+}
+
+/// The branch of the ticket's tree: its pull request's (`tree_pr`),
+/// else the one named after the issue.
+fn tree_branch(t: &Ticket, pr: Option<&PullRequestSource>) -> String {
+    pr.map_or_else(
+        || branch_name(t.source.number.unwrap_or(0), &t.source.title),
+        |pr| pr.local().to_owned(),
+    )
+}
+
+/// The lanes the cut has yet to record, in pipeline order. A ticket
+/// from pull requests checks their branches out instead of cutting its
+/// own, so only its lanes with a pull request are cut.
+fn lanes_to_cut(t: &Ticket, p: &Pipeline) -> Vec<LaneCut> {
+    let prs = &t.source.pull_requests;
+    let branch = tree_branch(t, tree_pr(t, p));
+    p.lanes
+        .iter()
+        .enumerate()
+        .filter(|(_, lane)| !t.lanes.iter().any(|l| l.name == lane.name))
+        .filter_map(|(index, lane)| {
+            let pr = prs.iter().find(|pr| pr.lane == lane.name);
+            if !prs.is_empty() && pr.is_none() {
+                return None;
+            }
+            Some(LaneCut {
+                index,
+                branch: pr.map_or_else(|| branch.clone(), |pr| pr.local().to_owned()),
+                pr: pr.cloned(),
+            })
+        })
+        .collect()
+}
+
+/// The latest `branch` decision of the cut, the one whose answer counts.
+fn latest_branch_decision(t: &mut Ticket) -> Option<&mut Decision> {
+    t.decisions
+        .iter_mut()
+        .rev()
+        .find(|d| d.stage == CUT && d.name == "branch")
+}
+
+/// The `branch` decision's question: which contexts (`what`, clone,
+/// commits) hold a branch of the ticket's name with commits, and what
+/// each answer does. Contexts whose branch had nothing are not named;
+/// the cut deleted theirs before asking.
+fn branch_question(branch: &str, moved: &[(&str, &Path, u64)], fresh_to: &str) -> String {
+    let named: Vec<String> = moved
+        .iter()
+        .map(|(what, clone, n)| {
+            let commits = if *n == 1 { "commit" } else { "commits" };
+            format!("{what}, {n} {commits}, in {}", clone.display())
+        })
+        .collect();
+    format!(
+        "the branch {branch} has commits from an earlier ticket: {}. \
+         reuse: cut on it at its head and go on from that work; \
+         fresh: rename it to {fresh_to} and cut a new one; \
+         park: park the ticket and leave the branch with commits as it is",
+        named.join("; ")
+    )
+}
+
 /// The lanes a close of `t` removes on their own, as indices into
 /// `t.lanes`, and the ticket's tree if it is still there: the one copy
 /// of the rule that the removal follows, the preflight checks and the
@@ -5937,5 +6332,40 @@ pub fn apply_reply(t: &mut Ticket, ps: &mut ProjectState, intent: &str, reply: &
                 crate::review::apply_review_reply(t, other, made);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_branch_question_names_only_the_moved_contexts() {
+        let one = branch_question(
+            "dispatch/42-x",
+            &[("lane frontend", Path::new("/d/repos/O@frontend"), 1)],
+            "dispatch/42-x.closed-19700101",
+        );
+        assert_eq!(
+            one,
+            "the branch dispatch/42-x has commits from an earlier ticket: \
+             lane frontend, 1 commit, in /d/repos/O@frontend. \
+             reuse: cut on it at its head and go on from that work; \
+             fresh: rename it to dispatch/42-x.closed-19700101 and cut a new one; \
+             park: park the ticket and leave the branch with commits as it is"
+        );
+        let two = branch_question(
+            "dispatch/42-x",
+            &[
+                ("the tree", Path::new("/d/repos/O"), 2),
+                ("lane backend", Path::new("/d/repos/O@backend"), 1),
+            ],
+            "dispatch/42-x.closed-19700101",
+        );
+        assert!(
+            two.contains("the tree, 2 commits, in /d/repos/O; lane backend, 1 commit,"),
+            "{two}"
+        );
+        assert!(two.ends_with("park: park the ticket and leave the branch with commits as it is"));
     }
 }

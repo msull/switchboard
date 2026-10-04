@@ -33,7 +33,7 @@ dispatch decide <ticket> <decision> <answer> [--note <text>]
 dispatch queue <project>                          the project's queue in order
 dispatch queue <project> <ticket>...              reorder it
 dispatch resume <ticket>                          a parked ticket back to active
-dispatch close <ticket> [--reason <text>]         a ticket closed, its trees removed (the branch is kept)
+dispatch close <ticket> [--reason <text>]         a ticket closed, its trees removed (its branches are kept; close lists them)
 ```
 
 `dispatch run` and `dispatch worktrees` are the owner's: never run
@@ -196,10 +196,11 @@ dispatch close 314cb7a1 --reason "fixed by #320"
 ```
 
 The ticket's worktrees are removed and it is closed for good; the
-branch and the record stay. It is refused while anything of the ticket
-runs (park it first) or a tree has uncommitted changes; the refusal
-names them. Closing is the owner's call unless you were told to close
-that ticket.
+branches and the record stay (`close` lists them); taking the issue
+again deletes an unmoved one and asks about one with commits. It is
+refused while anything of the ticket runs (park it first) or a tree
+has uncommitted changes; the refusal names them. Closing is the
+owner's call unless you were told to close that ticket.
 
 ## Where things live
 

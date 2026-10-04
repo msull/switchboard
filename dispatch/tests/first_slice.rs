@@ -7316,6 +7316,428 @@ fn a_close_is_refused_while_anything_runs_or_a_tree_has_changes() {
     env.runner.close_by_hand(&id, None, now).unwrap();
 }
 
+// --- a retake after close: the kept branches of the closed ticket are
+// in the clones under the same name; one with nothing beyond its base is
+// deleted, one with commits is asked about.
+
+fn retake_branch() -> String {
+    dispatch::git::branch_name(42, "Asset report column missing")
+}
+
+/// The workspace ticket closed by hand, `edit` applied to the fake
+/// repository (a kept branch moved), and the same issue taken again:
+/// the new ticket's id.
+fn close_and_retake(env: &mut Env, id: &str, edit: impl FnOnce(&mut FakeRepo)) -> String {
+    let now = env.tick();
+    let t = env.runner.close_by_hand(id, None, now).unwrap();
+    assert!(matches!(t.state, TicketState::Closed { .. }), "{t:#?}");
+    edit(&mut env.repo.lock().unwrap());
+    let now = env.tick();
+    env.runner
+        .take(
+            "Orchard",
+            &std::fs::read_to_string(env.data.pipeline("Orchard")).unwrap(),
+            SourceSnapshot {
+                kind: "github".into(),
+                identity: "k3/orchard-workspace#42".into(),
+                number: Some(42),
+                title: "Asset report column missing".into(),
+                body: String::new(),
+                url: None,
+                labels: vec!["area:backend".into()],
+                taken_at_ms: now,
+                pull_requests: Vec::new(),
+            },
+            now,
+        )
+        .unwrap()
+        .id
+}
+
+/// A kept branch given `n` commits beyond its base, at `head`.
+fn move_branch(repo: &mut FakeRepo, clone: PathBuf, head: &str, n: u64) {
+    let entry = repo
+        .branches
+        .get_mut(&(clone, retake_branch()))
+        .expect("the close kept the branch");
+    *entry = (head.into(), n);
+}
+
+/// The retaken ticket held at its `branch` question: the one pending
+/// decision, checked to be that.
+fn branch_decision(env: &Env, id: &str) -> Decision {
+    let pending = env.pending(id);
+    assert_eq!(pending.len(), 1, "{pending:#?}");
+    let d = pending[0].clone();
+    assert_eq!((d.stage.as_str(), d.name.as_str()), ("cut", "branch"));
+    assert_eq!(d.options, ["reuse", "fresh", "park"]);
+    d
+}
+
+#[test]
+fn a_retake_deletes_an_unmoved_kept_branch_and_cuts() {
+    let (mut env, id) = workspace_env(&["area:backend"]);
+    at_rerun(&mut env, &id);
+    let tree_clone = env.data.repo_dir("Orchard");
+    let backend = env.data.repo_dir("Orchard@backend");
+    let frontend = env.data.repo_dir("Orchard@frontend");
+    let branch = retake_branch();
+    let new = close_and_retake(&mut env, &id, |_| {});
+    let closed = env.ticket(&id);
+    let p = env.runner.pipeline_of(&closed).unwrap();
+    assert_eq!(
+        dispatch::scheduler::kept_branches(&closed, &p, &env.data),
+        [
+            (branch.clone(), backend.clone()),
+            (branch.clone(), frontend.clone()),
+            (branch.clone(), tree_clone.clone()),
+        ]
+    );
+    env.step();
+    let repo = env.repo.lock().unwrap();
+    assert_eq!(
+        repo.deleted_branches,
+        [
+            (tree_clone, branch.clone()),
+            (backend, branch.clone()),
+            (frontend, branch.clone()),
+        ]
+    );
+    let new_tree = env.worktrees.join(&new);
+    assert_eq!(
+        repo.worktrees
+            .iter()
+            .filter(|(_, d, _, _)| d.starts_with(&new_tree))
+            .count(),
+        3
+    );
+    drop(repo);
+    let t = env.ticket(&new);
+    assert!(t.active(), "{t:#?}");
+    assert_eq!(t.tree.as_deref(), Some(new_tree.as_path()));
+    assert_eq!(t.lanes.len(), 2);
+}
+
+#[test]
+fn a_retake_asks_about_a_kept_branch_with_commits() {
+    let (mut env, id) = workspace_env(&["area:backend"]);
+    at_rerun(&mut env, &id);
+    let frontend = env.data.repo_dir("Orchard@frontend");
+    let branch = retake_branch();
+    let investigators = env.sb().sessions_named("investigator").len();
+    let new = close_and_retake(&mut env, &id, |r| {
+        move_branch(r, frontend.clone(), "old00001", 1);
+    });
+    env.step();
+    let d = branch_decision(&env, &new);
+    for part in [
+        branch.as_str(),
+        "lane frontend",
+        &frontend.display().to_string(),
+        "1 commit,",
+    ] {
+        assert!(d.question.contains(part), "{part}: {}", d.question);
+    }
+    assert!(!d.question.contains("backend"), "{}", d.question);
+    assert!(!d.question.contains("the tree"), "{}", d.question);
+    let t = env.ticket(&new);
+    assert!(t.active() && t.tree.is_none(), "{t:#?}");
+    assert_eq!(
+        env.sb().sessions_named("investigator").len(),
+        investigators,
+        "nothing ran"
+    );
+    let fetched = env.repo.lock().unwrap().fetched.len();
+    env.step();
+    assert_eq!(
+        env.repo.lock().unwrap().fetched.len(),
+        fetched,
+        "a held cut does not fetch"
+    );
+
+    let now = env.tick();
+    env.runner.decide(&new, &d.id, "reuse", None, now).unwrap();
+    env.step();
+    let dir = env.worktrees.join(&new).join("orchard-frontend");
+    let repo = env.repo.lock().unwrap();
+    assert!(
+        repo.worktrees.contains(&(
+            frontend.clone(),
+            dir.clone(),
+            branch.clone(),
+            branch.clone()
+        )),
+        "{:#?}",
+        repo.worktrees
+    );
+    assert_eq!(repo.heads[&dir], "old00001");
+    assert!(repo.renamed_branches.is_empty());
+    drop(repo);
+    let t = env.ticket(&new);
+    assert_eq!(t.lanes.len(), 2, "{t:#?}");
+    assert!(
+        t.attempts_of("investigate").count() == 1,
+        "the ticket goes on to investigate: {t:#?}"
+    );
+}
+
+#[test]
+fn fresh_renames_the_kept_branch_and_cuts_a_new_one() {
+    let (mut env, id) = workspace_env(&["area:backend"]);
+    at_rerun(&mut env, &id);
+    let frontend = env.data.repo_dir("Orchard@frontend");
+    let branch = retake_branch();
+    let closed = format!("{branch}.closed-19700101");
+    let new = close_and_retake(&mut env, &id, |r| {
+        move_branch(r, frontend.clone(), "old00001", 1);
+        // Closed and renamed once already today.
+        r.branches
+            .insert((frontend.clone(), closed.clone()), ("older001".into(), 2));
+    });
+    env.step();
+    let d = branch_decision(&env, &new);
+    assert!(
+        d.question.contains(&format!("{closed}-2")),
+        "{}",
+        d.question
+    );
+    let now = env.tick();
+    env.runner.decide(&new, &d.id, "fresh", None, now).unwrap();
+    env.step();
+    let dir = env.worktrees.join(&new).join("orchard-frontend");
+    let repo = env.repo.lock().unwrap();
+    assert_eq!(
+        repo.renamed_branches,
+        [(frontend.clone(), branch.clone(), format!("{closed}-2"))]
+    );
+    assert!(
+        repo.worktrees.contains(&(
+            frontend.clone(),
+            dir.clone(),
+            branch.clone(),
+            "origin/dev".into()
+        )),
+        "{:#?}",
+        repo.worktrees
+    );
+    assert_eq!(repo.heads[&dir], "base0000");
+    assert_eq!(
+        repo.branches[&(frontend.clone(), format!("{closed}-2"))],
+        ("old00001".into(), 1),
+        "the earlier work is kept under the new name"
+    );
+    drop(repo);
+    assert_eq!(env.ticket(&new).lanes.len(), 2);
+}
+
+#[test]
+fn a_retake_with_one_moved_lane_of_three_deletes_the_others_and_names_only_it() {
+    let (mut env, id) = workspace_env(&["area:backend"]);
+    at_rerun(&mut env, &id);
+    let tree_clone = env.data.repo_dir("Orchard");
+    let backend = env.data.repo_dir("Orchard@backend");
+    let frontend = env.data.repo_dir("Orchard@frontend");
+    let branch = retake_branch();
+    let new = close_and_retake(&mut env, &id, |r| {
+        move_branch(r, backend.clone(), "old00002", 3);
+    });
+    env.step();
+    let d = branch_decision(&env, &new);
+    assert_eq!(
+        env.repo.lock().unwrap().deleted_branches,
+        [
+            (tree_clone, branch.clone()),
+            (frontend.clone(), branch.clone())
+        ]
+    );
+    assert!(
+        d.question.contains("lane backend, 3 commits,"),
+        "{}",
+        d.question
+    );
+    assert!(!d.question.contains("frontend"), "{}", d.question);
+    assert!(!d.question.contains("the tree"), "{}", d.question);
+    let now = env.tick();
+    env.runner.decide(&new, &d.id, "reuse", None, now).unwrap();
+    env.step();
+    let t = env.ticket(&new);
+    assert!(t.tree.is_some(), "{t:#?}");
+    let names: Vec<&str> = t.lanes.iter().map(|l| l.name.as_str()).collect();
+    assert_eq!(names, ["backend", "frontend"]);
+    let backend_dir = env.worktrees.join(&new).join("orchard-backend");
+    assert_eq!(env.repo.lock().unwrap().heads[&backend_dir], "old00002");
+}
+
+#[test]
+fn park_at_the_branch_question_parks_and_a_resume_asks_again() {
+    let (mut env, id) = workspace_env(&["area:backend"]);
+    at_rerun(&mut env, &id);
+    let frontend = env.data.repo_dir("Orchard@frontend");
+    let new = close_and_retake(&mut env, &id, |r| {
+        move_branch(r, frontend.clone(), "old00001", 1);
+    });
+    env.step();
+    let first = branch_decision(&env, &new);
+    let now = env.tick();
+    env.runner
+        .decide(&new, &first.id, "park", None, now)
+        .unwrap();
+    env.step();
+    let t = env.ticket(&new);
+    assert!(
+        matches!(&t.state, TicketState::Parked { reason } if reason == "parked by hand at decision branch"),
+        "{t:#?}"
+    );
+    assert!(t.tree.is_none());
+    let now = env.tick();
+    env.runner.resume(&new, now).unwrap();
+    env.step();
+    let again = branch_decision(&env, &new);
+    assert_ne!(again.id, first.id);
+    let t = env.ticket(&new);
+    let old = t.decisions.iter().find(|d| d.id == first.id).unwrap();
+    assert!(
+        matches!(&old.state, dispatch::ticket::DecisionState::Answered { answer, .. } if answer == "park"),
+        "{old:#?}"
+    );
+    assert!(t.tree.is_none());
+}
+
+#[test]
+fn a_reuse_whose_cut_fails_is_spent_and_a_resume_asks_again() {
+    let (mut env, id) = workspace_env(&["area:backend"]);
+    at_rerun(&mut env, &id);
+    let tree_clone = env.data.repo_dir("Orchard");
+    let frontend = env.data.repo_dir("Orchard@frontend");
+    let branch = retake_branch();
+    // A lane failing to go keeps the closed ticket's trees, with the
+    // branches checked out in them.
+    let kept = env.worktrees.join(&id).join("orchard-frontend");
+    env.repo.lock().unwrap().fail_remove = Some(kept);
+    let new = close_and_retake(&mut env, &id, |r| {
+        move_branch(r, tree_clone.clone(), "old00003", 1);
+        move_branch(r, frontend.clone(), "old00001", 1);
+    });
+    env.step();
+    let first = branch_decision(&env, &new);
+    let now = env.tick();
+    env.runner
+        .decide(&new, &first.id, "reuse", None, now)
+        .unwrap();
+    env.step();
+    let t = env.ticket(&new);
+    assert!(
+        matches!(&t.state, TicketState::Parked { reason } if reason.contains("could not cut") && reason.contains("already used by worktree")),
+        "{t:#?}"
+    );
+    let old = t.decisions.iter().find(|d| d.id == first.id).unwrap();
+    assert_eq!(old.state, dispatch::ticket::DecisionState::Cancelled);
+
+    let now = env.tick();
+    env.runner.resume(&new, now).unwrap();
+    env.step();
+    let again = branch_decision(&env, &new);
+    assert_ne!(again.id, first.id);
+    let now = env.tick();
+    env.runner
+        .decide(&new, &again.id, "fresh", None, now)
+        .unwrap();
+    env.step();
+    let t = env.ticket(&new);
+    assert!(t.active(), "{t:#?}");
+    assert_eq!(t.lanes.len(), 2, "{t:#?}");
+    let used = t.decisions.iter().find(|d| d.id == again.id).unwrap();
+    assert!(used.unacted_answer().is_none(), "{used:#?}");
+    assert_eq!(
+        env.repo.lock().unwrap().renamed_branches,
+        [
+            (
+                tree_clone,
+                branch.clone(),
+                format!("{branch}.closed-19700101")
+            ),
+            (
+                frontend,
+                branch.clone(),
+                format!("{branch}.closed-19700101")
+            ),
+        ]
+    );
+}
+
+#[test]
+fn a_kept_branch_that_cannot_be_read_parks_the_retake() {
+    let (mut env, id) = workspace_env(&["area:backend"]);
+    at_rerun(&mut env, &id);
+    let new = close_and_retake(&mut env, &id, |r| {
+        r.fail_ahead = Some("fatal: ambiguous argument 'origin/dev..'".into());
+    });
+    env.step();
+    let t = env.ticket(&new);
+    assert!(
+        matches!(&t.state, TicketState::Parked { reason } if reason.contains("could not clear the kept branch") && reason.contains("ambiguous argument")),
+        "{t:#?}"
+    );
+    assert!(t.tree.is_none());
+}
+
+#[test]
+fn fresh_renames_every_moved_branch_to_the_one_name_the_question_gave() {
+    let (mut env, id) = workspace_env(&["area:backend"]);
+    at_rerun(&mut env, &id);
+    let backend = env.data.repo_dir("Orchard@backend");
+    let frontend = env.data.repo_dir("Orchard@frontend");
+    let branch = retake_branch();
+    let closed = format!("{branch}.closed-19700101");
+    let new = close_and_retake(&mut env, &id, |r| {
+        move_branch(r, backend.clone(), "old00002", 2);
+        move_branch(r, frontend.clone(), "old00001", 1);
+        // Only the second clone was closed and renamed once already today.
+        r.branches
+            .insert((frontend.clone(), closed.clone()), ("older001".into(), 2));
+    });
+    env.step();
+    let d = branch_decision(&env, &new);
+    let to = format!("{closed}-2");
+    assert!(d.question.contains(&to), "{}", d.question);
+    let now = env.tick();
+    env.runner.decide(&new, &d.id, "fresh", None, now).unwrap();
+    env.step();
+    assert_eq!(
+        env.repo.lock().unwrap().renamed_branches,
+        [
+            (backend, branch.clone(), to.clone()),
+            (frontend, branch.clone(), to),
+        ]
+    );
+    assert_eq!(env.ticket(&new).lanes.len(), 2);
+}
+
+#[test]
+fn a_reused_lane_records_its_fork_point_as_its_base() {
+    let (mut env, id) = workspace_env(&["area:backend"]);
+    at_rerun(&mut env, &id);
+    let frontend = env.data.repo_dir("Orchard@frontend");
+    let new = close_and_retake(&mut env, &id, |r| {
+        move_branch(r, frontend.clone(), "old00001", 1);
+        r.fork_points.insert(frontend.clone(), "fork0001".into());
+    });
+    env.step();
+    let d = branch_decision(&env, &new);
+    let now = env.tick();
+    env.runner.decide(&new, &d.id, "reuse", None, now).unwrap();
+    env.step();
+    let t = env.ticket(&new);
+    let base = |name: &str| {
+        t.lanes
+            .iter()
+            .find(|l| l.name == name)
+            .and_then(|l| l.base_sha.clone())
+    };
+    assert_eq!(base("frontend").as_deref(), Some("fork0001"));
+    assert_eq!(base("backend").as_deref(), Some("base0000"));
+}
+
 #[test]
 fn a_pipeline_that_works_in_place_closes_and_removes_nothing() {
     let mut env = Env::new();
