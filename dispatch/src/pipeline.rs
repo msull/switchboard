@@ -113,6 +113,12 @@ pub struct Lane {
     pub setup: Vec<String>,
     #[serde(default)]
     pub serve: Option<Serve>,
+    /// Paths this lane's setup, gates, checks and command reviewers may
+    /// write besides the ticket's trees, when `[policy] confine` is on:
+    /// the caches its tools fill (`~/.cargo`, `~/.cache/uv`, `~/.npm`).
+    /// `~` is expanded.
+    #[serde(default)]
+    pub writable: Vec<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -286,6 +292,11 @@ pub enum Gate {
         /// the same clean head is reused rather than run again.
         #[serde(default)]
         like: Option<String>,
+        /// `allow` or `deny`: this gate's own network policy when it runs
+        /// confined, over `[policy] network`. A gate given by `like`
+        /// takes the referenced gate's.
+        #[serde(default)]
+        network: Option<crate::git::Network>,
     },
     External {
         check: String,
@@ -523,6 +534,17 @@ pub struct Policy {
     /// ticket's copy, like `max_reruns`.
     #[serde(default)]
     pub on_dirty: OnDirty,
+    /// Run setup, command gates, review checks and command reviewers
+    /// confined to the ticket's trees, the attempt directory and the
+    /// lane's `writable` paths. Off when absent, so a ticket's copy
+    /// taken before the key existed keeps running as it did.
+    #[serde(default)]
+    pub confine: bool,
+    /// `allow` or `deny`: whether a confined command may reach off this
+    /// machine. Loopback stays open either way. A command gate's own
+    /// `network` overrides it.
+    #[serde(default)]
+    pub network: crate::git::Network,
 }
 
 fn default_max_fixes() -> u32 {
@@ -562,6 +584,8 @@ impl Default for Policy {
             fixer: None,
             max_fixes: default_max_fixes(),
             on_dirty: OnDirty::default(),
+            confine: false,
+            network: crate::git::Network::default(),
         }
     }
 }
@@ -610,6 +634,11 @@ impl Pipeline {
         p.validate()?;
         if let Some(dir) = &p.project.worktrees {
             p.project.worktrees = Some(crate::store::expand_home(dir));
+        }
+        for lane in &mut p.lanes {
+            for path in &mut lane.writable {
+                *path = crate::store::expand_home(path);
+            }
         }
         Ok(p)
     }
@@ -865,6 +894,17 @@ impl Pipeline {
     /// gate of its own.
     fn validate_like(&self, stage: &Stage) -> Result<()> {
         if let Some(Gate::Command {
+            like: Some(like),
+            network: Some(_),
+            ..
+        }) = &stage.gate
+        {
+            bail!(
+                "stage {:?}: a gate given by `like` takes its network from {like}",
+                stage.name
+            );
+        }
+        if let Some(Gate::Command {
             like: Some(like), ..
         }) = &stage.gate
         {
@@ -969,6 +1009,7 @@ impl Pipeline {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::git::Network;
 
     const SWITCHBOARD: &str = r#"
 version = 1
@@ -1317,5 +1358,81 @@ writes = ["plan"]"#,
             assert!(err.contains(expect) && err.contains(stage), "{err}");
         }
         Pipeline::parse(&with_review_stage("on_dirty = { nudge = 3 }\n")).unwrap();
+    }
+
+    #[test]
+    fn writable_defaults_to_empty_and_expands_home() {
+        let p = Pipeline::parse(SWITCHBOARD).unwrap();
+        assert!(p.lanes[0].writable.is_empty());
+        let text = SWITCHBOARD.replace(
+            "setup = [\"cargo\", \"fetch\", \"--locked\"]\n",
+            "setup = [\"cargo\", \"fetch\", \"--locked\"]\nwritable = [\"~/.cargo\", \"/opt/cache\"]\n",
+        );
+        let p = Pipeline::parse(&text).unwrap();
+        let home = std::env::var_os("HOME").map(PathBuf::from).unwrap();
+        assert_eq!(
+            p.lanes[0].writable,
+            vec![home.join(".cargo"), PathBuf::from("/opt/cache")]
+        );
+    }
+
+    #[test]
+    fn confine_is_off_and_the_network_allowed_when_absent() {
+        let p = Pipeline::parse(SWITCHBOARD).unwrap();
+        assert!(!p.policy.confine);
+        assert_eq!(p.policy.network, Network::Allow);
+        // No `[policy]` table at all: `Policy::default()` must agree
+        // with the serde default.
+        let start = SWITCHBOARD.find("[policy]").unwrap();
+        let p = Pipeline::parse(&SWITCHBOARD[..start]).unwrap();
+        assert!(!p.policy.confine);
+        assert_eq!(p.policy.network, Network::Allow);
+        let text = SWITCHBOARD.replace(
+            "slots = 1\n",
+            "slots = 1\nconfine = true\nnetwork = \"deny\"\n",
+        );
+        let p = Pipeline::parse(&text).unwrap();
+        assert!(p.policy.confine);
+        assert_eq!(p.policy.network, Network::Deny);
+    }
+
+    #[test]
+    fn network_is_allow_or_deny_on_the_policy_and_on_a_gate() {
+        let text = SWITCHBOARD.replace("slots = 1\n", "slots = 1\nnetwork = \"local\"\n");
+        let err = format!("{:#}", Pipeline::parse(&text).unwrap_err());
+        assert!(err.contains("unknown variant `local`"), "{err}");
+        let gate =
+            "gate = { kind = \"command\", argv = [\"sh\", \"-c\", \"cargo test\"], in = \"lane\" }";
+        let with = |value: &str| {
+            SWITCHBOARD.replace(
+                gate,
+                &gate.replace(" }", &format!(", network = \"{value}\" }}")),
+            )
+        };
+        assert_ne!(with("deny"), SWITCHBOARD);
+        let p = Pipeline::parse(&with("deny")).unwrap();
+        let stage = p.stages.iter().find(|s| s.name == "implement").unwrap();
+        assert!(matches!(
+            &stage.gate,
+            Some(Gate::Command {
+                network: Some(Network::Deny),
+                ..
+            })
+        ));
+        let err = format!("{:#}", Pipeline::parse(&with("off")).unwrap_err());
+        assert!(err.contains("unknown variant `off`"), "{err}");
+    }
+
+    #[test]
+    fn a_gate_given_by_like_takes_its_network_from_the_gate_it_names() {
+        let text = with_review_stage("").replace(
+            "like = \"implement\" }",
+            "like = \"implement\", network = \"allow\" }",
+        );
+        let err = format!("{:#}", Pipeline::parse(&text).unwrap_err());
+        assert!(
+            err.contains("review-code") && err.contains("takes its network from implement"),
+            "{err}"
+        );
     }
 }

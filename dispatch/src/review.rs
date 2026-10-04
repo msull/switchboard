@@ -15,10 +15,10 @@ use switchboard_control::{self as wire, Body, Reply};
 use crate::history::{self, Commits};
 use crate::pipeline::{Gate, OperatorKind, Pipeline, Stage};
 use crate::scheduler::{
-    Ask, DirtyStep, NO_SUCH_SESSION, Runner, SocketDown, asks_again, busy, checks_env, dirty_step,
-    env_for, find_attempt, find_attempt_mut, guidance_prelude, held_in, idle_polls, lane_gate_argv,
-    latest_attempt, may_rerun, new_attempt, next_n, primary_tree, record_of, rework_key, sent_back,
-    session_kind, settle_file, stopped_after_nudges, vars_for,
+    Ask, DirtyStep, NO_SUCH_SESSION, Runner, SocketDown, asks_again, busy, checks_env, confine_for,
+    dirty_step, env_for, find_attempt, find_attempt_mut, gate_network, guidance_prelude, held_in,
+    idle_polls, lane_gate_argv, latest_attempt, may_rerun, new_attempt, next_n, primary_tree,
+    record_of, rework_key, sent_back, session_kind, settle_file, stopped_after_nudges, vars_for,
 };
 use crate::template::Vars;
 use crate::ticket::{
@@ -381,10 +381,22 @@ impl Runner {
             self.save_ticket(t, now_ms)?;
             let check_key = reviewer_key(t, key, round_n, name);
             let stderr = r.dir.join("stderr");
-            if let Err(e) =
-                self.git
-                    .start_reviewer(&check_key, &dir, &op.argv, &env, &r.feedback, &stderr)
-            {
+            let started = match confine_for(t, p, lane, &[&r.dir], None) {
+                Some(confine) => self.git.start_reviewer_confined(
+                    &check_key,
+                    &dir,
+                    &op.argv,
+                    &env,
+                    &r.feedback,
+                    &stderr,
+                    &confine,
+                ),
+                None => {
+                    self.git
+                        .start_reviewer(&check_key, &dir, &op.argv, &env, &r.feedback, &stderr)
+                }
+            };
+            if let Err(e) = started {
                 reviewer_mut(t, key, round_n, name).result = Some(ReviewerResult::Failed {
                     reason: format!("could not start: {e:#}"),
                 });
@@ -1319,11 +1331,8 @@ impl Runner {
             );
             return self.complete_review(t, ps, p, stage, &key, cwd, lane, &head, now_ms);
         }
-        let log = round
-            .reviewers
-            .first()
-            .and_then(|r| r.dir.parent())
-            .map_or_else(|| cwd.join("checks.log"), |d| d.join("checks.log"));
+        let round_dir = round.reviewers.first().and_then(|r| r.dir.parent());
+        let log = round_dir.map_or_else(|| cwd.join("checks.log"), |d| d.join("checks.log"));
         let env = checks_env(
             t,
             lane,
@@ -1334,7 +1343,14 @@ impl Runner {
             &head,
         );
         let check_key = checks_key(t, &key, round.n);
-        if let Err(e) = self.git.start_check(&check_key, cwd, &argv, &env, &log) {
+        let extra: Vec<&Path> = round_dir.into_iter().collect();
+        let started = match confine_for(t, p, lane, &extra, gate_network(p, stage)) {
+            Some(confine) => self
+                .git
+                .start_check_confined(&check_key, cwd, &argv, &env, &log, &confine),
+            None => self.git.start_check(&check_key, cwd, &argv, &env, &log),
+        };
+        if let Err(e) = started {
             let reason = format!("the checks could not start: {e:#}");
             return self.fail_attempt(t, ps, &key.0, key.1, &reason, now_ms);
         }

@@ -12,6 +12,31 @@ use anyhow::{Context, Result, bail};
 
 use crate::history::{Commit, Group};
 
+/// What a pipeline command may touch. The adapter turns this into the
+/// platform's mechanism; the scheduler never sees a profile.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Confine {
+    /// Directories the command may write under, besides the base set
+    /// the adapter always allows (the system temp directory, the
+    /// devices a shell needs, a linked worktree's own git directory).
+    pub writable: Vec<PathBuf>,
+    /// Whether the command may reach off this machine. Loopback stays
+    /// open under `Deny`, so a test can talk to a service it started.
+    pub network: Network,
+}
+
+/// Whether a confined command may open connections off this machine,
+/// as a pipeline spells it: `allow` or `deny`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Network {
+    /// Any connection.
+    #[default]
+    Allow,
+    /// Loopback only.
+    Deny,
+}
+
 pub trait Repo: Send {
     /// A clone of `url` at `dir`, made if it is not there yet.
     fn ensure_clone(&mut self, url: &str, dir: &Path) -> Result<()>;
@@ -95,6 +120,17 @@ pub trait Repo: Send {
     fn summary(&self, dir: &Path, base: &str) -> Result<String>;
     /// Run `argv` in `dir` with `env` set; nonzero exit is an error.
     fn run(&mut self, dir: &Path, argv: &[String], env: &[(String, String)]) -> Result<()>;
+    /// `run` under `confine`. `Ok` is the header line saying what the
+    /// command ran under (an empty `argv` runs nothing, as with `run`,
+    /// and still gets the header); an `Err` starts with it, then the
+    /// command's stderr, which ends with any writes the sandbox refused.
+    fn run_confined(
+        &mut self,
+        dir: &Path,
+        argv: &[String],
+        env: &[(String, String)],
+        confine: &Confine,
+    ) -> Result<String>;
     /// Start a check (a command gate) in `dir` as a child of the runner,
     /// in its own process group so a kill reaches its descendants, its
     /// output appended to `log`, under `key` for polling. Nothing from a
@@ -106,6 +142,18 @@ pub trait Repo: Send {
         argv: &[String],
         env: &[(String, String)],
         log: &Path,
+    ) -> Result<()>;
+    /// `start_check` under `confine`: the log starts with a header line
+    /// saying what the check runs under, and a failed check's log ends
+    /// with any writes the sandbox refused.
+    fn start_check_confined(
+        &mut self,
+        key: &str,
+        dir: &Path,
+        argv: &[String],
+        env: &[(String, String)],
+        log: &Path,
+        confine: &Confine,
     ) -> Result<()>;
     /// `None` while the check runs, `Some(Ok(code))` once it exited, and
     /// `Some(Err)` for a check this runner never started or lost: a
@@ -121,6 +169,19 @@ pub trait Repo: Send {
         env: &[(String, String)],
         stdout: &Path,
         stderr: &Path,
+    ) -> Result<()>;
+    /// `start_reviewer` under `confine`; the header and any refused
+    /// writes go to `stderr`, so the findings on `stdout` stay clean.
+    #[allow(clippy::too_many_arguments)]
+    fn start_reviewer_confined(
+        &mut self,
+        key: &str,
+        dir: &Path,
+        argv: &[String],
+        env: &[(String, String)],
+        stdout: &Path,
+        stderr: &Path,
+        confine: &Confine,
     ) -> Result<()>;
     /// Kill a running check or reviewer and its descendants, if this
     /// runner started it. A check already killed gets no second signal;
@@ -229,6 +290,101 @@ impl GitCli {
     fn sweep_killed(&mut self) {
         self.killed.retain(|_, pgid| group_alive(*pgid));
     }
+
+    /// A check's spawn, confined or not: its output appended to `log`,
+    /// the header first when it is confined.
+    fn spawn_check(
+        &mut self,
+        key: &str,
+        dir: &Path,
+        argv: &[String],
+        env: &[(String, String)],
+        log: &Path,
+        confine: Option<&Confine>,
+    ) -> Result<()> {
+        if argv.is_empty() {
+            bail!("a check with no command");
+        }
+        let mut out = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(log)
+            .with_context(|| format!("open {}", log.display()))?;
+        let argv = with_header(argv, confine, &mut out)?;
+        let err = out.try_clone()?;
+        self.spawn(key, dir, &argv, env, out, err)
+    }
+
+    /// A reviewer's spawn, confined or not: the header, when confined,
+    /// goes to `stderr`.
+    #[allow(clippy::too_many_arguments)]
+    fn spawn_reviewer(
+        &mut self,
+        key: &str,
+        dir: &Path,
+        argv: &[String],
+        env: &[(String, String)],
+        stdout: &Path,
+        stderr: &Path,
+        confine: Option<&Confine>,
+    ) -> Result<()> {
+        if argv.is_empty() {
+            bail!("a reviewer with no command");
+        }
+        let out = std::fs::File::create(stdout)
+            .with_context(|| format!("create {}", stdout.display()))?;
+        let mut err = std::fs::File::create(stderr)
+            .with_context(|| format!("create {}", stderr.display()))?;
+        let argv = with_header(argv, confine, &mut err)?;
+        self.spawn(key, dir, &argv, env, out, err)
+    }
+
+    /// `argv` in `dir` as the leader of its own process group, kept under
+    /// `key` for polling.
+    fn spawn(
+        &mut self,
+        key: &str,
+        dir: &Path,
+        argv: &[String],
+        env: &[(String, String)],
+        out: std::fs::File,
+        err: std::fs::File,
+    ) -> Result<()> {
+        let (program, rest) = argv
+            .split_first()
+            .expect("spawn_check and spawn_reviewer refuse an empty argv");
+        let mut cmd = Command::new(program);
+        cmd.args(rest)
+            .current_dir(dir)
+            .stdin(std::process::Stdio::null())
+            .stdout(out)
+            .stderr(err)
+            .process_group(0);
+        for (k, v) in env {
+            cmd.env(k, v);
+        }
+        let child = cmd
+            .spawn()
+            .with_context(|| format!("start {program} in {}", dir.display()))?;
+        self.checks.insert(key.to_owned(), child);
+        Ok(())
+    }
+}
+
+/// `argv` as it is spawned under `confine`, its header line written to
+/// `to` first; `argv` unchanged when there is no `confine`.
+fn with_header(
+    argv: &[String],
+    confine: Option<&Confine>,
+    to: &mut std::fs::File,
+) -> Result<Vec<String>> {
+    use std::io::Write as _;
+    let Some(confine) = confine else {
+        return Ok(argv.to_vec());
+    };
+    let (wrapped, header) = crate::confine::wrap(argv, confine)?;
+    writeln!(to, "{header}")?;
+    Ok(wrapped)
 }
 
 /// A `git` command with the caller's own `GIT_*` variables removed: run
@@ -579,6 +735,38 @@ impl Repo for GitCli {
         Ok(())
     }
 
+    fn run_confined(
+        &mut self,
+        dir: &Path,
+        argv: &[String],
+        env: &[(String, String)],
+        confine: &Confine,
+    ) -> Result<String> {
+        let Some((program, _)) = argv.split_first() else {
+            return Ok(crate::confine::header(confine));
+        };
+        let (wrapped, header) = crate::confine::wrap(argv, confine)?;
+        let mut cmd = Command::new(&wrapped[0]);
+        cmd.args(&wrapped[1..]).current_dir(dir);
+        for (k, v) in env {
+            cmd.env(k, v);
+        }
+        let out = cmd
+            .output()
+            .with_context(|| format!("{header}: run {program}"))?;
+        // Built from the status and stderr alone: the wrapped command's
+        // own text is the reporting script and the profile, which would
+        // bury the stderr and its deny lines.
+        if !out.status.success() {
+            bail!(
+                "{header}: {argv:?} exited {}: {}",
+                out.status,
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
+        }
+        Ok(header)
+    }
+
     fn start_check(
         &mut self,
         key: &str,
@@ -587,30 +775,19 @@ impl Repo for GitCli {
         env: &[(String, String)],
         log: &Path,
     ) -> Result<()> {
-        let Some((program, rest)) = argv.split_first() else {
-            bail!("a check with no command");
-        };
-        let out = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(log)
-            .with_context(|| format!("open {}", log.display()))?;
-        let err = out.try_clone()?;
-        let mut cmd = Command::new(program);
-        cmd.args(rest)
-            .current_dir(dir)
-            .stdin(std::process::Stdio::null())
-            .stdout(out)
-            .stderr(err)
-            .process_group(0);
-        for (k, v) in env {
-            cmd.env(k, v);
-        }
-        let child = cmd
-            .spawn()
-            .with_context(|| format!("start {program} in {}", dir.display()))?;
-        self.checks.insert(key.to_owned(), child);
-        Ok(())
+        self.spawn_check(key, dir, argv, env, log, None)
+    }
+
+    fn start_check_confined(
+        &mut self,
+        key: &str,
+        dir: &Path,
+        argv: &[String],
+        env: &[(String, String)],
+        log: &Path,
+        confine: &Confine,
+    ) -> Result<()> {
+        self.spawn_check(key, dir, argv, env, log, Some(confine))
     }
 
     fn start_reviewer(
@@ -622,28 +799,20 @@ impl Repo for GitCli {
         stdout: &Path,
         stderr: &Path,
     ) -> Result<()> {
-        let Some((program, rest)) = argv.split_first() else {
-            bail!("a reviewer with no command");
-        };
-        let out = std::fs::File::create(stdout)
-            .with_context(|| format!("create {}", stdout.display()))?;
-        let err = std::fs::File::create(stderr)
-            .with_context(|| format!("create {}", stderr.display()))?;
-        let mut cmd = Command::new(program);
-        cmd.args(rest)
-            .current_dir(dir)
-            .stdin(std::process::Stdio::null())
-            .stdout(out)
-            .stderr(err)
-            .process_group(0);
-        for (k, v) in env {
-            cmd.env(k, v);
-        }
-        let child = cmd
-            .spawn()
-            .with_context(|| format!("start {program} in {}", dir.display()))?;
-        self.checks.insert(key.to_owned(), child);
-        Ok(())
+        self.spawn_reviewer(key, dir, argv, env, stdout, stderr, None)
+    }
+
+    fn start_reviewer_confined(
+        &mut self,
+        key: &str,
+        dir: &Path,
+        argv: &[String],
+        env: &[(String, String)],
+        stdout: &Path,
+        stderr: &Path,
+        confine: &Confine,
+    ) -> Result<()> {
+        self.spawn_reviewer(key, dir, argv, env, stdout, stderr, Some(confine))
     }
 
     fn kill_check(&mut self, key: &str) {
@@ -991,6 +1160,8 @@ pub struct StartedCheck {
     pub argv: Vec<String>,
     pub env: Vec<(String, String)>,
     pub log: PathBuf,
+    /// What it was confined to, `None` when started unconfined.
+    pub confine: Option<Confine>,
 }
 
 /// A point a fake call stops at until the test lets it go, so a test
@@ -1059,6 +1230,10 @@ pub struct FakeRepo {
     pub heads: std::collections::BTreeMap<PathBuf, String>,
     pub dirty: Vec<PathBuf>,
     pub ran: Vec<(PathBuf, Vec<String>)>,
+    /// Commands run confined: dir, argv, what they were confined to.
+    pub ran_confined: Vec<(PathBuf, Vec<String>, Confine)>,
+    /// The next `run` or `run_confined` fails with this, once.
+    pub fail_run: Option<String>,
     pub fail_worktree: Option<String>,
     /// Worktrees moved: repo, from, to.
     pub moved: Vec<(PathBuf, PathBuf, PathBuf)>,
@@ -1149,6 +1324,57 @@ pub struct FakeRepo {
     /// Gates by method name; only `worktree_remove` honours one, and
     /// only through the shared `Arc<Mutex<FakeRepo>>`.
     pub gates: std::collections::BTreeMap<&'static str, std::sync::Arc<Gate>>,
+}
+
+impl FakeRepo {
+    fn record_check(
+        &mut self,
+        key: &str,
+        dir: &Path,
+        argv: &[String],
+        env: &[(String, String)],
+        log: &Path,
+        confine: Option<Confine>,
+    ) -> Result<()> {
+        std::fs::write(log, "checks ran\n")?;
+        self.checks.push(StartedCheck {
+            key: key.to_owned(),
+            dir: dir.to_path_buf(),
+            argv: argv.to_vec(),
+            env: env.to_vec(),
+            log: log.to_path_buf(),
+            confine,
+        });
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn record_reviewer(
+        &mut self,
+        key: &str,
+        dir: &Path,
+        argv: &[String],
+        env: &[(String, String)],
+        stdout: &Path,
+        stderr: &Path,
+        confine: Option<Confine>,
+    ) -> Result<()> {
+        if !stdout.exists() {
+            std::fs::write(stdout, "")?;
+        }
+        std::fs::write(stderr, "")?;
+        let started = StartedCheck {
+            key: key.to_owned(),
+            dir: dir.to_path_buf(),
+            argv: argv.to_vec(),
+            env: env.to_vec(),
+            log: stdout.to_path_buf(),
+            confine,
+        };
+        self.checks.push(started.clone());
+        self.reviewers.push((started, stderr.to_path_buf()));
+        Ok(())
+    }
 }
 
 impl Repo for FakeRepo {
@@ -1392,7 +1618,25 @@ impl Repo for FakeRepo {
     }
     fn run(&mut self, dir: &Path, argv: &[String], _env: &[(String, String)]) -> Result<()> {
         self.ran.push((dir.to_path_buf(), argv.to_vec()));
+        if let Some(why) = self.fail_run.take() {
+            bail!("{why}");
+        }
         Ok(())
+    }
+    fn run_confined(
+        &mut self,
+        dir: &Path,
+        argv: &[String],
+        _env: &[(String, String)],
+        confine: &Confine,
+    ) -> Result<String> {
+        self.ran_confined
+            .push((dir.to_path_buf(), argv.to_vec(), confine.clone()));
+        let header = crate::confine::header(confine);
+        if let Some(why) = self.fail_run.take() {
+            return Err(anyhow::anyhow!("{why}").context(header));
+        }
+        Ok(header)
     }
     fn start_check(
         &mut self,
@@ -1402,15 +1646,30 @@ impl Repo for FakeRepo {
         env: &[(String, String)],
         log: &Path,
     ) -> Result<()> {
-        std::fs::write(log, "checks ran\n")?;
-        self.checks.push(StartedCheck {
-            key: key.to_owned(),
-            dir: dir.to_path_buf(),
-            argv: argv.to_vec(),
-            env: env.to_vec(),
-            log: log.to_path_buf(),
-        });
-        Ok(())
+        self.record_check(key, dir, argv, env, log, None)
+    }
+    fn start_check_confined(
+        &mut self,
+        key: &str,
+        dir: &Path,
+        argv: &[String],
+        env: &[(String, String)],
+        log: &Path,
+        confine: &Confine,
+    ) -> Result<()> {
+        self.record_check(key, dir, argv, env, log, Some(confine.clone()))
+    }
+    fn start_reviewer_confined(
+        &mut self,
+        key: &str,
+        dir: &Path,
+        argv: &[String],
+        env: &[(String, String)],
+        stdout: &Path,
+        stderr: &Path,
+        confine: &Confine,
+    ) -> Result<()> {
+        self.record_reviewer(key, dir, argv, env, stdout, stderr, Some(confine.clone()))
     }
     fn poll_check(&mut self, key: &str) -> Option<Result<i32>> {
         if let Some(code) = self.check_exits.get(key) {
@@ -1431,20 +1690,7 @@ impl Repo for FakeRepo {
         stdout: &Path,
         stderr: &Path,
     ) -> Result<()> {
-        if !stdout.exists() {
-            std::fs::write(stdout, "")?;
-        }
-        std::fs::write(stderr, "")?;
-        let started = StartedCheck {
-            key: key.to_owned(),
-            dir: dir.to_path_buf(),
-            argv: argv.to_vec(),
-            env: env.to_vec(),
-            log: stdout.to_path_buf(),
-        };
-        self.checks.push(started.clone());
-        self.reviewers.push((started, stderr.to_path_buf()));
-        Ok(())
+        self.record_reviewer(key, dir, argv, env, stdout, stderr, None)
     }
     fn kill_check(&mut self, key: &str) {
         if !self.stubborn_checks.iter().any(|k| k == key) {
@@ -1645,6 +1891,42 @@ impl Repo for std::sync::Arc<std::sync::Mutex<FakeRepo>> {
     }
     fn run(&mut self, dir: &Path, argv: &[String], env: &[(String, String)]) -> Result<()> {
         self.lock().unwrap().run(dir, argv, env)
+    }
+    fn run_confined(
+        &mut self,
+        dir: &Path,
+        argv: &[String],
+        env: &[(String, String)],
+        confine: &Confine,
+    ) -> Result<String> {
+        self.lock().unwrap().run_confined(dir, argv, env, confine)
+    }
+    fn start_check_confined(
+        &mut self,
+        key: &str,
+        dir: &Path,
+        argv: &[String],
+        env: &[(String, String)],
+        log: &Path,
+        confine: &Confine,
+    ) -> Result<()> {
+        self.lock()
+            .unwrap()
+            .start_check_confined(key, dir, argv, env, log, confine)
+    }
+    fn start_reviewer_confined(
+        &mut self,
+        key: &str,
+        dir: &Path,
+        argv: &[String],
+        env: &[(String, String)],
+        stdout: &Path,
+        stderr: &Path,
+        confine: &Confine,
+    ) -> Result<()> {
+        self.lock()
+            .unwrap()
+            .start_reviewer_confined(key, dir, argv, env, stdout, stderr, confine)
     }
     fn start_check(
         &mut self,
@@ -2387,5 +2669,164 @@ mod tests {
         );
         sh(&wt, &["push", "-q", "origin", "dispatch/1-x"]);
         assert!(cli.published(&wt, "origin", &base, &head).unwrap());
+    }
+
+    /// Whether this Mac has `sandbox-exec`; the confined tests skip
+    /// without it.
+    #[cfg(target_os = "macos")]
+    fn sandbox_exec() -> bool {
+        Path::new("/usr/bin/sandbox-exec").exists()
+    }
+
+    /// A tree under `$HOME`, outside the temp directory the sandbox
+    /// always allows, so a write that lands in it was let through by
+    /// the tree's own grant.
+    #[cfg(target_os = "macos")]
+    fn home_tree() -> tempfile::TempDir {
+        let home = std::env::var_os("HOME").map(PathBuf::from).unwrap();
+        let dir = tempfile::Builder::new()
+            .prefix(".dispatch-tree-")
+            .tempdir_in(home)
+            .unwrap();
+        assert!(
+            !dir.path()
+                .starts_with(std::env::temp_dir().canonicalize().unwrap())
+        );
+        dir
+    }
+
+    #[cfg(target_os = "macos")]
+    fn confined_to(dir: &Path) -> Confine {
+        Confine {
+            writable: vec![dir.to_path_buf()],
+            network: Network::Allow,
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_confined_check_writes_its_tree_and_is_refused_outside_it() {
+        if !sandbox_exec() {
+            return;
+        }
+        let dir = home_tree();
+        let home = std::env::var_os("HOME").map(PathBuf::from).unwrap();
+        let probe = home.join(format!(".dispatch-probe-{}", std::process::id()));
+        let log = dir.path().join("checks.log");
+        let mut cli = GitCli::default();
+        cli.start_check_confined(
+            "k",
+            dir.path(),
+            &[
+                "sh".into(),
+                "-c".into(),
+                "touch ok && touch \"$HOME/.dispatch-probe-$PROBE\"".into(),
+            ],
+            &[("PROBE".into(), std::process::id().to_string())],
+            &log,
+            &confined_to(dir.path()),
+        )
+        .unwrap();
+        let code = poll_to("the check's exit", || cli.poll_check("k")).unwrap();
+        let exists = probe.exists();
+        let _ = std::fs::remove_file(&probe);
+        assert_ne!(code, 0);
+        assert!(dir.path().join("ok").exists());
+        assert!(!exists, "the write outside the tree was refused");
+        let text = std::fs::read_to_string(&log).unwrap();
+        assert!(text.starts_with("dispatch: confined; writable "), "{text}");
+        assert!(text.contains("Operation not permitted"), "{text}");
+        let deny = format!("deny(1) file-write-create {}", probe.display());
+        assert!(text.contains(&deny), "{text}");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_confined_check_killed_by_a_signal_polls_as_minus_one() {
+        if !sandbox_exec() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let argv: Vec<String> = vec!["sh".into(), "-c".into(), "kill -KILL $$".into()];
+        let log = dir.path().join("checks.log");
+        let mut cli = GitCli::default();
+        cli.start_check_confined("c", dir.path(), &argv, &[], &log, &confined_to(dir.path()))
+            .unwrap();
+        cli.start_check("u", dir.path(), &argv, &[], &dir.path().join("bare.log"))
+            .unwrap();
+        let confined = poll_to("the confined exit", || cli.poll_check("c")).unwrap();
+        let bare = poll_to("the bare exit", || cli.poll_check("u")).unwrap();
+        assert_eq!((confined, bare), (-1, -1));
+        let text = std::fs::read_to_string(&log).unwrap();
+        assert!(!text.contains("dispatch: sandbox:"), "{text}");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_confined_check_that_exits_over_128_keeps_its_code() {
+        if !sandbox_exec() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("checks.log");
+        let mut cli = GitCli::default();
+        cli.start_check_confined(
+            "c",
+            dir.path(),
+            &["sh".into(), "-c".into(), "exit 255".into()],
+            &[],
+            &log,
+            &confined_to(dir.path()),
+        )
+        .unwrap();
+        let code = poll_to("the check's exit", || cli.poll_check("c")).unwrap();
+        assert_eq!(code, 255);
+        let text = std::fs::read_to_string(&log).unwrap();
+        assert_eq!(text.lines().count(), 1, "only the header: {text}");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_confined_run_writes_its_tree_and_returns_the_header() {
+        if !sandbox_exec() {
+            return;
+        }
+        let dir = home_tree();
+        let mut cli = GitCli::default();
+        let header = cli
+            .run_confined(
+                dir.path(),
+                &["touch".into(), "ok".into()],
+                &[],
+                &confined_to(dir.path()),
+            )
+            .unwrap();
+        assert!(
+            header.starts_with("dispatch: confined; writable "),
+            "{header}"
+        );
+        assert!(dir.path().join("ok").exists());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_failed_confined_run_is_the_header_the_command_and_its_stderr() {
+        if !sandbox_exec() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let mut cli = GitCli::default();
+        let err = cli
+            .run_confined(
+                dir.path(),
+                &["sh".into(), "-c".into(), "echo nope >&2; exit 3".into()],
+                &[],
+                &confined_to(dir.path()),
+            )
+            .unwrap_err();
+        let text = format!("{err:#}");
+        assert!(text.starts_with("dispatch: confined; writable "), "{text}");
+        assert!(text.ends_with("exited exit status: 3: nope"), "{text}");
+        assert!(!text.contains("sandbox-exec"), "{text}");
     }
 }
