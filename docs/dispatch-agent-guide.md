@@ -198,6 +198,9 @@ agent's session after it stopped with a dirty tree), `parking`,
   the `void` arrives.
 - `--follow` looks at the file four times a second, so an event can
   lag by up to 250 ms. It runs until you stop it.
+- `--follow` with no `--since` starts at the tail: it prints what
+  happens next, not the history. Give `--since <seq>` to replay from a
+  cursor and keep following.
 - Tickets taken before this build have no events before their next
   transition. `show` and `report` read the record, so they are whole.
 

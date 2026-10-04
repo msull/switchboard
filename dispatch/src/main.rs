@@ -493,7 +493,14 @@ fn events(args: &[&str]) -> Result<()> {
     if !f.rest.is_empty() {
         usage();
     }
-    let since = f.number("--since").unwrap_or(0);
+    // A follow with no cursor starts at the tail: the reader wants what
+    // happens next, not the whole history again. A plain listing or an
+    // explicit --since replays from 0 or from the cursor.
+    let since = match f.number("--since") {
+        Some(n) => n,
+        None if f.on("--follow") => events::last_seq(&events::log_path(&DataDir::from_env()?))?,
+        None => 0,
+    };
     let tickets = f.all("--ticket");
     let project = f.value("--project");
     let json = f.on("--json");
