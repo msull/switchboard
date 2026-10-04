@@ -5786,15 +5786,19 @@ pub(crate) fn vars_for(t: &Ticket, p: &Pipeline, lane: Option<&str>) -> Vars {
         .set(
             "project.root",
             primary_tree(t, p).map_or(String::new(), |d| d.display().to_string()),
-        )
-        .set(
-            "lanes",
-            t.lanes
-                .iter()
-                .map(|l| l.name.as_str())
-                .collect::<Vec<_>>()
-                .join(", "),
         );
+    // Pipeline order, whatever order the records were cut in. Before the
+    // lanes decision no lane is chosen, and every lane is the honest
+    // answer to "which lanes" for the stages that run before it.
+    let all: Vec<&str> = p.lanes.iter().map(|l| l.name.as_str()).collect();
+    let chosen: Vec<&str> = all
+        .iter()
+        .copied()
+        .filter(|name| t.lanes.iter().any(|l| l.name == *name && l.chosen))
+        .collect();
+    let lanes = if chosen.is_empty() { &all } else { &chosen };
+    vars.set("lanes", lanes.join(", "))
+        .set("lanes.all", all.join(", "));
     // The root context is the ticket's tree on the ticket's branch.
     if let Some(l) = lane.and_then(|name| t.lanes.iter().find(|x| x.name == name)) {
         vars.set("lane", l.name.clone())

@@ -3685,8 +3685,14 @@ fn the_trust_question_is_answered_only_where_the_policy_says_so() {
 }
 
 fn workspace_env(labels: &[&str]) -> (Env, String) {
+    workspace_env_with(WORKSPACE, labels)
+}
+
+/// A ticket taken from `text`, a workspace pipeline with `{worktrees}`
+/// still in it.
+fn workspace_env_with(text: &str, labels: &[&str]) -> (Env, String) {
     let mut env = Env::new();
-    let text = WORKSPACE.replace("{worktrees}", &env.worktrees.display().to_string());
+    let text = text.replace("{worktrees}", &env.worktrees.display().to_string());
     std::fs::write(env.data.pipeline("Orchard"), text).unwrap();
     let now = env.tick();
     let id = env
@@ -3795,6 +3801,142 @@ fn the_label_hints_choose_the_lanes_and_only_those_get_a_planner() {
     // The backend setup ran once, in the lane, before its planner; the
     // frontend's never did.
     assert!(t.lanes[0].setup_done && !t.lanes[1].setup_done);
+}
+
+/// The workspace with a third lane, and investigate and plan prompts
+/// that show `{lanes}` and `{lanes.all}`; the brackets make an
+/// assertion match the whole list, not a prefix of it.
+fn three_lane_workspace() -> String {
+    WORKSPACE
+        .replace(
+            "[operators.investigator]",
+            r#"[[lanes]]
+name = "snp"
+path = "orchard-snp"
+repo = "git@example.com:k3/orchard-snp.git"
+base = "main"
+
+[operators.investigator]"#,
+        )
+        .replace(
+            "Write to {notes}.",
+            "Lanes [{lanes}] of [{lanes.all}]. Write to {notes}.",
+        )
+        .replace(
+            "Plan in {worktree}",
+            "Plan [{lanes}] of [{lanes.all}] in {worktree}",
+        )
+}
+
+#[test]
+fn lanes_is_the_chosen_lanes_and_lanes_all_every_lane_of_the_pipeline() {
+    let (mut env, id) = workspace_env_with(&three_lane_workspace(), &["area:frontend"]);
+    let now = env.tick();
+    env.runner.step_project("Orchard", now).unwrap();
+    assert!(env.data.repo_dir("Orchard@snp").exists(), "the third clone");
+    let prompt = last_prompt_of(&env, "investigator");
+    assert!(
+        prompt.contains("Lanes [backend, frontend, snp] of [backend, frontend, snp]."),
+        "before the choice every lane: {prompt}"
+    );
+    let t = env.ticket(&id);
+    let investigator = session_of(&t, "investigate");
+    std::fs::write(artifact_of(&t, "investigate", "notes"), "# notes").unwrap();
+    let now = env.now;
+    env.sb().stop(&investigator, now);
+    for _ in 0..8 {
+        let now = env.tick();
+        env.runner.step_project("Orchard", now).unwrap();
+        if env.ticket(&id).attempts_of("plan").next().is_some() {
+            break;
+        }
+    }
+    let t = env.ticket(&id);
+    let chosen: Vec<&str> = t
+        .lanes
+        .iter()
+        .filter(|l| l.chosen)
+        .map(|l| l.name.as_str())
+        .collect();
+    assert_eq!(chosen, ["frontend"]);
+    assert_eq!(t.attempts_of("plan").count(), 1, "{t:#?}");
+    let prompt = last_prompt_of(&env, "planner");
+    assert!(
+        prompt.contains("Plan [frontend] of [backend, frontend, snp] in"),
+        "{prompt}"
+    );
+}
+
+#[test]
+fn lanes_follows_the_pipeline_order_not_the_answer_order() {
+    let (mut env, id) = workspace_env_with(&three_lane_workspace(), &["type:bug"]);
+    let now = env.tick();
+    env.runner.step_project("Orchard", now).unwrap();
+    let t = env.ticket(&id);
+    let investigator = session_of(&t, "investigate");
+    std::fs::write(artifact_of(&t, "investigate", "notes"), "# notes").unwrap();
+    let now = env.now;
+    env.sb().stop(&investigator, now);
+    for _ in 0..5 {
+        let now = env.tick();
+        env.runner.step_project("Orchard", now).unwrap();
+    }
+    let pending = env.pending(&id);
+    assert_eq!(pending.len(), 1, "{pending:#?}");
+    assert_eq!(pending[0].name, "lanes");
+    let now = env.tick();
+    env.runner
+        .decide(&id, &pending[0].id, "snp, backend", None, now)
+        .unwrap();
+    for _ in 0..8 {
+        let now = env.tick();
+        env.runner.step_project("Orchard", now).unwrap();
+        if env.sb().sessions_named("planner").len() == 2 {
+            break;
+        }
+    }
+    assert_eq!(env.ticket(&id).attempts_of("plan").count(), 2);
+    let prompts: Vec<String> = env
+        .sb()
+        .calls
+        .iter()
+        .filter_map(|r| match &r.body {
+            Body::SessionNew {
+                prompt, name: n, ..
+            } if n == "planner" => prompt.clone(),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(prompts.len(), 2, "{prompts:#?}");
+    for prompt in &prompts {
+        assert!(
+            prompt.contains("Plan [backend, snp] of [backend, frontend, snp]"),
+            "{prompt}"
+        );
+    }
+}
+
+#[test]
+fn a_single_lane_pipeline_renders_its_lane_in_both() {
+    let mut env = Env::new();
+    // Before the take: the ticket freezes its own copy of the file.
+    let path = env.data.pipeline(PROJECT);
+    let text = std::fs::read_to_string(&path)
+        .unwrap()
+        .replace(
+            "Write to {notes}.",
+            "Lanes [{lanes}] of [{lanes.all}]. Write to {notes}.",
+        )
+        .replace(
+            "plan #{issue.number} to {plan}",
+            "plan [{lanes}] of [{lanes.all}] #{issue.number} to {plan}",
+        );
+    std::fs::write(&path, text).unwrap();
+    through_plan(&mut env, 7);
+    for name in ["investigator", "planner"] {
+        let prompt = last_prompt_of(&env, name);
+        assert!(prompt.contains("[repo] of [repo]"), "{name}: {prompt}");
+    }
 }
 
 #[test]
