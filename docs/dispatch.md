@@ -486,7 +486,7 @@ name = "..."
 operator = "..."              # present: an agent stage; absent with a review operator: a workflow stage; absent: gate-only
 context = "root" | "each" | "joined" | ["front"]
 writes = ["notes"]            # artifact names; each expands as {notes}, {plan}, ...
-prompt = "..."                # templates: {issue} {task} {lane} {branch} {inputs.<artifact>} {inputs.<stage>.<field>}
+prompt = "..."                # templates: {issue.number} {issue.title} {task.text} {lane} {lanes} {lanes.all} {branch} {worktree} {project.root} {inputs.<artifact>}; the full list is the table below
 gate = { kind = "command", argv = ["..."], in = "root" | "lane" | "lane:<name>" }
      | { kind = "command", per_lane = { <lane> = ["..."] }, in = "lane" }
      | { kind = "command", like = "implement" }   # an earlier stage's command gate by reference; its result at the same clean head is reused
@@ -522,6 +522,22 @@ An agent stage needs no `gate` line: "the agent stopped and every
 artifact it writes settled" is the default, described under "Stage
 semantics". A workflow stage names the artifact it reviews with
 `subject`.
+
+A prompt's templates are these keys, plus a stage's `writes` names
+(`{notes}`, `{plan}`); the review and code review variables are
+described where they are used. A key that is not set reaches the agent
+as written.
+
+| Template | Renders |
+|---|---|
+| `{ticket}` | the ticket id |
+| `{issue.number}`, `{issue.title}`, `{issue.body}`, `{issue.url}` | the source issue |
+| `{task.text}`, `{task.context}` | the source as a task (title, body) |
+| `{project.root}` | the ticket's tree, or the project root for a pipeline that works in place |
+| `{worktree}`, `{branch}`, `{lane}` | the context's tree, branch and lane (`{branch}` only where a branch is cut: a lane, or the root of a pipeline with a `repo`; `{lane}` only in a lane context) |
+| `{lanes}` | the lanes the ticket chose, comma-separated in pipeline order; every lane before the `lanes` decision, so `investigate` sees them all |
+| `{lanes.all}` | every lane of the pipeline, comma-separated in pipeline order |
+| `{inputs.<artifact>}` | the path of an earlier attempt's artifact |
 
 ### Pipeline: Switchboard
 
