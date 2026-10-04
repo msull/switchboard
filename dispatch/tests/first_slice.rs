@@ -8667,13 +8667,14 @@ fn keep_or_no_key_leaves_history_alone() {
     }
 }
 
-/// The attempt failed into `rerun | park` with the branch at the head
-/// the checks passed at.
+/// The attempt failed into a `rerun` question offering `options`, with
+/// the branch at the head the checks passed at.
 fn failed_with_the_branch_at_the_reviewed_head(
     env: &Env,
     id: &str,
     a: &Attempt,
     tree: &std::path::Path,
+    options: &[&str],
 ) {
     assert!(
         matches!(a.state, AttemptState::Failed { .. }),
@@ -8686,7 +8687,7 @@ fn failed_with_the_branch_at_the_reviewed_head(
         .into_iter()
         .find(|d| d.name == "rerun")
         .unwrap();
-    assert_eq!(d.options, vec!["rerun", "park"]);
+    assert_eq!(d.options, options);
 }
 
 #[test]
@@ -8699,7 +8700,7 @@ fn a_rewritten_tree_that_differs_fails_with_the_branch_unmoved() {
         .trees
         .insert("fold0001".into(), "tree-bad".into());
     let a = final_checks_pass(&mut env, &id);
-    failed_with_the_branch_at_the_reviewed_head(&env, &id, &a, &tree);
+    failed_with_the_branch_at_the_reviewed_head(&env, &id, &a, &tree, &["rerun", "keep", "park"]);
     assert!(env.repo.lock().unwrap().head_sets.is_empty());
     let r = a.rewrite.clone().unwrap();
     assert_eq!(
@@ -8721,7 +8722,7 @@ fn a_tree_dirty_after_the_move_is_moved_back_and_fails() {
     let (id, tree) = at_final_checks(&mut env, Some("fold"));
     env.repo.lock().unwrap().dirty_on_set.push(tree.clone());
     let a = final_checks_pass(&mut env, &id);
-    failed_with_the_branch_at_the_reviewed_head(&env, &id, &a, &tree);
+    failed_with_the_branch_at_the_reviewed_head(&env, &id, &a, &tree, &["rerun", "keep", "park"]);
     assert_eq!(
         env.repo.lock().unwrap().head_sets,
         [
@@ -8736,6 +8737,293 @@ fn a_tree_dirty_after_the_move_is_moved_back_and_fails() {
         reason.ends_with("the branch is back at fix00002"),
         "{reason}"
     );
+}
+
+/// The pending `rerun` question, answered `answer`.
+fn answer_rerun(env: &mut Env, id: &str, answer: &str) -> Decision {
+    let d = env
+        .pending(id)
+        .into_iter()
+        .find(|d| d.name == "rerun")
+        .unwrap_or_else(|| panic!("no rerun question: {:#?}", env.ticket(id)));
+    let now = env.tick();
+    env.runner.decide(id, &d.id, answer, None, now).unwrap();
+    d
+}
+
+/// A fold at its final checks whose replay conflicts: the checks pass
+/// at `fix00002` and the attempt fails into `rerun | keep | park`.
+fn a_fold_that_conflicts(env: &mut Env) -> (String, PathBuf) {
+    let (id, tree) = at_final_checks(env, Some("fold"));
+    env.repo.lock().unwrap().replay_conflicts.push(tree.clone());
+    let a = final_checks_pass(env, &id);
+    failed_with_the_branch_at_the_reviewed_head(env, &id, &a, &tree, &["rerun", "keep", "park"]);
+    (id, tree)
+}
+
+/// The attempt completed at `fix00002` with its history kept by hand
+/// and nothing run or moved since `checks`, and the ticket moved on to
+/// `inspect` with the branch still there.
+fn kept_by_hand_at_the_reviewed_head(
+    env: &mut Env,
+    id: &str,
+    tree: &std::path::Path,
+    checks: usize,
+) {
+    env.steps_until(id, "the next stage", |t, _| {
+        t.pending_decisions().iter().any(|d| d.name == "inspect")
+    });
+    let t = env.ticket(id);
+    assert_eq!(t.state, TicketState::Active, "{:?}", t.state);
+    assert_eq!(t.attempts_of("review-code").count(), 1, "no rerun");
+    let a = review_attempt(&t);
+    assert_eq!(a.state, AttemptState::Complete, "{:?}", a.state);
+    assert_eq!(a.head.as_deref(), Some("fix00002"));
+    let r = rewrite_of(&a).unwrap();
+    assert_eq!(
+        r.skipped.as_deref(),
+        Some("the user kept them after the rewrite failed")
+    );
+    assert_eq!(
+        (r.before.as_str(), r.after.as_deref()),
+        ("fix00002", Some("fix00002"))
+    );
+    let summary = std::fs::read_to_string(&a.artifacts["summary"]).unwrap();
+    assert!(
+        summary.contains("Commits kept: the user kept them after the rewrite failed."),
+        "{summary}"
+    );
+    let repo = env.repo.lock().unwrap();
+    assert_eq!(repo.heads[tree], "fix00002");
+    assert_eq!(repo.checks.len(), checks, "no checks run again");
+}
+
+#[test]
+fn a_fold_whose_replay_conflicts_is_kept_by_hand() {
+    let mut env = Env::new();
+    let (id, tree) = a_fold_that_conflicts(&mut env);
+    assert!(env.repo.lock().unwrap().head_sets.is_empty());
+    let checks = env.repo.lock().unwrap().checks.len();
+    let d = answer_rerun(&mut env, &id, "keep");
+    for o in ["`rerun`", "`keep`", "`park`", "fix00002"] {
+        assert!(d.question.contains(o), "{o}: {}", d.question);
+    }
+    kept_by_hand_at_the_reviewed_head(&mut env, &id, &tree, checks);
+    assert!(env.repo.lock().unwrap().head_sets.is_empty());
+}
+
+#[test]
+fn keep_after_a_differing_tree_completes_at_the_reviewed_head() {
+    let mut env = Env::new();
+    let (id, tree) = at_final_checks(&mut env, Some("fold"));
+    env.repo
+        .lock()
+        .unwrap()
+        .trees
+        .insert("fold0001".into(), "tree-bad".into());
+    let a = final_checks_pass(&mut env, &id);
+    assert_eq!(a.rewrite.unwrap().after.as_deref(), Some("fold0001"));
+    let checks = env.repo.lock().unwrap().checks.len();
+    answer_rerun(&mut env, &id, "keep");
+    kept_by_hand_at_the_reviewed_head(&mut env, &id, &tree, checks);
+}
+
+#[test]
+fn keep_after_a_move_back_completes_once_the_tree_is_cleaned() {
+    let mut env = Env::new();
+    let (id, tree) = at_final_checks(&mut env, Some("fold"));
+    env.repo.lock().unwrap().dirty_on_set.push(tree.clone());
+    final_checks_pass(&mut env, &id);
+    let checks = env.repo.lock().unwrap().checks.len();
+    env.repo.lock().unwrap().dirty.retain(|d| *d != tree);
+    answer_rerun(&mut env, &id, "keep");
+    kept_by_hand_at_the_reviewed_head(&mut env, &id, &tree, checks);
+}
+
+#[test]
+fn keep_after_a_move_back_on_a_tree_left_dirty_is_asked_again_and_kept_once_cleaned() {
+    let mut env = Env::new();
+    let (id, tree) = at_final_checks(&mut env, Some("fold"));
+    env.repo.lock().unwrap().dirty_on_set.push(tree.clone());
+    final_checks_pass(&mut env, &id);
+    let checks = env.repo.lock().unwrap().checks.len();
+    let kept = answer_rerun(&mut env, &id, "keep");
+    env.steps_until(&id, "a fresh question", |t, _| {
+        t.pending_decisions()
+            .iter()
+            .any(|d| d.name == "rerun" && d.id != kept.id)
+    });
+    let a = review_attempt(&env.ticket(&id));
+    failed_with_the_branch_at_the_reviewed_head(&env, &id, &a, &tree, &["rerun", "keep", "park"]);
+    assert!(a.head.is_none(), "nothing completed");
+    assert!(!a.artifacts.contains_key("summary"));
+    env.repo.lock().unwrap().dirty.retain(|d| *d != tree);
+    answer_rerun(&mut env, &id, "keep");
+    kept_by_hand_at_the_reviewed_head(&mut env, &id, &tree, checks);
+}
+
+#[test]
+fn keep_with_the_branch_moved_since_parks() {
+    let mut env = Env::new();
+    let (id, tree) = a_fold_that_conflicts(&mut env);
+    env.repo
+        .lock()
+        .unwrap()
+        .heads
+        .insert(tree.clone(), "other001".into());
+    answer_rerun(&mut env, &id, "keep");
+    env.steps_until(&id, "the park", |t, _| {
+        matches!(t.state, TicketState::Parked { .. })
+    });
+    let t = env.ticket(&id);
+    let TicketState::Parked { reason, .. } = &t.state else {
+        unreachable!()
+    };
+    assert!(
+        reason.contains("fix00002") && reason.contains("other001"),
+        "{reason}"
+    );
+    assert!(matches!(
+        review_attempt(&t).state,
+        AttemptState::Failed { .. }
+    ));
+}
+
+#[test]
+fn keep_on_a_dirty_tree_is_asked_again() {
+    let mut env = Env::new();
+    let (id, tree) = a_fold_that_conflicts(&mut env);
+    env.repo.lock().unwrap().dirty.push(tree.clone());
+    let kept = answer_rerun(&mut env, &id, "keep");
+    env.steps_until(&id, "a fresh question", |t, _| {
+        t.pending_decisions()
+            .iter()
+            .any(|d| d.name == "rerun" && d.id != kept.id)
+    });
+    let a = review_attempt(&env.ticket(&id));
+    failed_with_the_branch_at_the_reviewed_head(&env, &id, &a, &tree, &["rerun", "keep", "park"]);
+    let AttemptState::Failed { reason } = &a.state else {
+        unreachable!()
+    };
+    assert!(reason.contains("is not clean"), "{reason}");
+}
+
+#[test]
+fn a_parked_rewrite_failure_offers_keep_on_resume() {
+    let mut env = Env::new();
+    let (id, _) = a_fold_that_conflicts(&mut env);
+    let parked_from = answer_rerun(&mut env, &id, "park");
+    env.steps_until(&id, "the park", |t, _| {
+        matches!(t.state, TicketState::Parked { .. })
+    });
+    assert!(review_attempt(&env.ticket(&id)).failed_at_rewrite);
+    let now = env.tick();
+    env.runner.resume(&id, now).unwrap();
+    env.steps_until(&id, "the question again", |t, _| {
+        t.pending_decisions()
+            .iter()
+            .any(|d| d.name == "rerun" && d.id != parked_from.id)
+    });
+    let d = env
+        .pending(&id)
+        .into_iter()
+        .find(|d| d.name == "rerun")
+        .unwrap();
+    assert_eq!(d.options, vec!["rerun", "keep", "park"]);
+    assert!(
+        d.question
+            .contains("`keep` completes the stage at fix00002"),
+        "{}",
+        d.question
+    );
+}
+
+#[test]
+fn keep_answered_before_a_restart_acts_once() {
+    let mut env = Env::new();
+    let (id, tree) = a_fold_that_conflicts(&mut env);
+    let checks = env.repo.lock().unwrap().checks.len();
+    answer_rerun(&mut env, &id, "keep");
+    env.restart();
+    kept_by_hand_at_the_reviewed_head(&mut env, &id, &tree, checks);
+    let ended = review_attempt(&env.ticket(&id)).ended_ms;
+    env.restart();
+    env.step();
+    env.step();
+    let t = env.ticket(&id);
+    assert_eq!(review_attempt(&t).ended_ms, ended, "completed once");
+    assert_eq!(t.attempts_of("review-code").count(), 1);
+    assert!(
+        t.decisions
+            .iter()
+            .all(|d| !d.pending() || d.name != "rerun")
+    );
+}
+
+/// Converged in round one with `implement`'s checks reused, so the
+/// attempt has no gate of its own; its fold fails all the same, and
+/// `keep` completes it on the reused checks.
+#[test]
+fn keep_after_reused_checks_completes_without_running_them() {
+    let mut env = Env::new();
+    env.with_review_stage("ask");
+    with_commits(&env, "fold");
+    let id = at_review(&mut env);
+    let tree = env.ticket(&id).lanes[0].worktree.clone();
+    {
+        let mut repo = env.repo.lock().unwrap();
+        repo.commits.insert(
+            tree.clone(),
+            vec![
+                Commit {
+                    sha: "impl0001".into(),
+                    parents: 1,
+                    message: "A".into(),
+                },
+                Commit {
+                    sha: "base0000".into(),
+                    parents: 1,
+                    message: "fixup! A".into(),
+                },
+            ],
+        );
+        repo.replay_conflicts.push(tree.clone());
+    }
+    lint_exits(&mut env, &id, 1, 0, "");
+    style_says(&mut env, &id, 1, "No findings.");
+    env.steps_until(&id, "the attempt ending", |t, _| {
+        !review_attempt(t).is_open()
+    });
+    let a = review_attempt(&env.ticket(&id));
+    assert!(a.gate.is_none(), "implement's checks reused");
+    assert!(
+        matches!(a.state, AttemptState::Failed { .. }),
+        "{:?}",
+        a.state
+    );
+    assert_eq!(env.repo.lock().unwrap().replayed.len(), 1);
+    let d = env
+        .pending(&id)
+        .into_iter()
+        .find(|d| d.name == "rerun")
+        .unwrap();
+    assert_eq!(d.options, vec!["rerun", "keep", "park"]);
+    let checks = env.repo.lock().unwrap().checks.len();
+    answer_rerun(&mut env, &id, "keep");
+    env.steps_until(&id, "the next stage", |t, _| {
+        t.pending_decisions().iter().any(|d| d.name == "inspect")
+    });
+    let t = env.ticket(&id);
+    let a = review_attempt(&t);
+    assert_eq!(a.state, AttemptState::Complete, "{:?}", a.state);
+    assert_eq!(a.head.as_deref(), Some("base0000"));
+    assert_eq!(
+        rewrite_of(&a).unwrap().skipped.as_deref(),
+        Some("the user kept them after the rewrite failed")
+    );
+    let repo = env.repo.lock().unwrap();
+    assert_eq!(repo.checks.len(), checks, "no checks run");
+    assert_eq!(repo.heads[&tree], "base0000");
 }
 
 /// A completed fold attempt written back as a restart would find it
@@ -8817,7 +9105,7 @@ fn a_dirty_tree_at_completion_fails_without_touching_history() {
         !review_attempt(t).is_open()
     });
     let a = review_attempt(&env.ticket(&id));
-    failed_with_the_branch_at_the_reviewed_head(&env, &id, &a, &tree);
+    failed_with_the_branch_at_the_reviewed_head(&env, &id, &a, &tree, &["rerun", "park"]);
     let AttemptState::Failed { reason } = &a.state else {
         unreachable!()
     };

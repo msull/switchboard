@@ -22,9 +22,9 @@ use crate::scheduler::{
 };
 use crate::template::Vars;
 use crate::ticket::{
-    Attempt, AttemptKind, AttemptState, DIRTY_POLLS, DecisionKind, GateRun, ProjectState,
-    Refreshed, ReviewRound, ReviewerResult, ReviewerRun, Rewrite, RoundState, STOP_IDLE_POLLS,
-    Ticket,
+    Attempt, AttemptKind, AttemptState, DIRTY_POLLS, DecisionKind, GateRun, KEPT_BY_HAND,
+    PUBLISHED, ProjectState, Refreshed, ReviewRound, ReviewerResult, ReviewerRun, Rewrite,
+    RoundState, STOP_IDLE_POLLS, Ticket,
 };
 
 /// What a reviewer writes when it has nothing to report, unless the
@@ -1261,20 +1261,7 @@ impl Runner {
                 now_ms,
             );
         }
-        let accepting = matches!(round.state, RoundState::Converged | RoundState::Accepted);
-        if accepting
-            && let Some(Gate::Command {
-                like: Some(like), ..
-            }) = &stage.gate
-            && t.attempts.iter().any(|x| {
-                &x.stage == like
-                    && x.context == a.context
-                    && x.state == AttemptState::Complete
-                    && x.gate
-                        .as_ref()
-                        .is_some_and(|g| g.head == head && g.exit == Some(0) && g.argv == argv)
-            })
-        {
+        if let Some(like) = checks_reused_from(t, p, stage, a, round, lane, &head) {
             log::info!(
                 "ticket {} {}/{} checks reused from {like} at {head}",
                 t.id,
@@ -1465,6 +1452,111 @@ impl Runner {
         self.save_ticket(t, now_ms)
     }
 
+    /// A `keep` answer to a failed rewrite: the attempt completes at the
+    /// head its checks passed at, with the history as it is. Nothing runs
+    /// again, so each thing the checks proved is checked to still hold.
+    pub(crate) fn keep_history(
+        &mut self,
+        t: &mut Ticket,
+        ps: &mut ProjectState,
+        p: &Pipeline,
+        attempt: Option<&(String, u32)>,
+        now_ms: u64,
+    ) -> Result<()> {
+        let Some(key) = attempt.cloned() else {
+            return Ok(());
+        };
+        // An attempt that is no longer the failed rewrite the question
+        // was about: the answer was overtaken.
+        let Some(a) = find_attempt(t, &key.0, key.1)
+            .filter(|a| matches!(a.state, AttemptState::Failed { .. }))
+            .cloned()
+        else {
+            return Ok(());
+        };
+        let Some(before) = a.rewrite.as_ref().map(|r| r.before.clone()) else {
+            return Ok(());
+        };
+        let Some(cwd) = crate::scheduler::tree_of(t, p, &a.context) else {
+            return self.park(
+                t,
+                ps,
+                &format!(
+                    "stage {} ({}): keep was answered but the context has no tree",
+                    key.0, a.context
+                ),
+                now_ms,
+            );
+        };
+        // The branch must be where the checks passed, or keeping it
+        // keeps something nobody checked: it parks, as a stale review
+        // answer does.
+        let head = self.git.head(&cwd)?;
+        if head != before {
+            return self.park(
+                t,
+                ps,
+                &format!(
+                    "stage {} ({}): keep was answered for head {before} but the branch is at {head}; the answer is stale",
+                    key.0, a.context
+                ),
+                now_ms,
+            );
+        }
+        // The rewrite runs only after the checks pass; that is read
+        // from the record, since nothing is run again here.
+        let lane = t
+            .lanes
+            .iter()
+            .any(|l| l.name == a.context)
+            .then(|| a.context.clone());
+        let own = a
+            .gate
+            .as_ref()
+            .is_some_and(|g| g.head == before && g.exit == Some(0));
+        let passed = own
+            || p.stages
+                .iter()
+                .find(|s| s.name == a.stage)
+                .zip(a.rounds.last())
+                .is_some_and(|(stage, round)| {
+                    checks_reused_from(t, p, stage, &a, round, lane.as_deref(), &before).is_some()
+                });
+        if !passed {
+            return self.park(
+                t,
+                ps,
+                &format!(
+                    "stage {} ({}): keep was answered but the checks did not pass at {before}",
+                    key.0, a.context
+                ),
+                now_ms,
+            );
+        }
+        // A tree changed since is not what the checks saw. The branch
+        // is still at the reviewed head, so `keep` stays on offer for
+        // once the tree is cleaned.
+        if !self.git.is_clean(&cwd)? {
+            let reason = format!(
+                "the tree at {} is not clean, so the commits at {before} cannot be kept",
+                cwd.display()
+            );
+            return self.fail_rewrite(t, ps, &key.0, key.1, &reason, now_ms);
+        }
+        if let Some(r) = &mut record_of(t, &key.0, key.1).rewrite {
+            r.skipped = Some(KEPT_BY_HAND.to_owned());
+            r.after = Some(before.clone());
+        }
+        log::info!(
+            "ticket {} {}/{} commits kept by hand at {before}",
+            t.id,
+            key.0,
+            a.context
+        );
+        self.finish_review(t, &key, &before, now_ms)?;
+        self.unmark(t, ps, now_ms)
+    }
+
     /// The branch's commits at `before` rewritten as the stage's
     /// `commits` says, on a clean tree, into a head with the same tree,
     /// and the branch moved there only while it is still at `before`.
@@ -1517,13 +1609,13 @@ impl Runner {
         };
         if self.is_published(t, p, cwd, lane, key, &base, before)? {
             log::info!(
-                "ticket {} {}/{} commits kept at {before}: the branch is published",
+                "ticket {} {}/{} commits kept at {before}: {PUBLISHED}",
                 t.id,
                 key.0,
                 key.1
             );
             record.after = Some(before.to_owned());
-            record.skipped = Some("the branch is published".to_owned());
+            record.skipped = Some(PUBLISHED.to_owned());
             record_of(t, &key.0, key.1).rewrite = Some(record);
             return Ok(Some(before.to_owned()));
         }
@@ -1536,7 +1628,10 @@ impl Runner {
         let groups = match planned {
             Ok(g) => g,
             Err(e) => {
-                self.fail_attempt(t, ps, &key.0, key.1, &format!("{e:#}"), now_ms)?;
+                // On the attempt, so a `keep` answer knows the head the
+                // checks passed at.
+                record_of(t, &key.0, key.1).rewrite = Some(record);
+                self.fail_rewrite(t, ps, &key.0, key.1, &format!("{e:#}"), now_ms)?;
                 return Ok(None);
             }
         };
@@ -1570,7 +1665,7 @@ impl Runner {
         now_ms: u64,
     ) -> Result<Option<String>> {
         let fail = |this: &mut Self, t: &mut Ticket, ps: &mut ProjectState, reason: String| {
-            this.fail_attempt(t, ps, &key.0, key.1, &reason, now_ms)
+            this.fail_rewrite(t, ps, &key.0, key.1, &reason, now_ms)
                 .map(|()| None)
         };
         let after = match self.git.replay(cwd, base, groups) {
@@ -2526,6 +2621,41 @@ fn fix_ranges(t: &Ticket, stage: &str, ctx: &str) -> Vec<(String, String)> {
         .collect()
 }
 
+/// The stage the gate names by `like`, when its completed run of the
+/// same command at `head` stands for attempt `a`'s checks: only at a
+/// head `round` accepted. `round` is the attempt's last round.
+pub(crate) fn checks_reused_from<'s>(
+    t: &Ticket,
+    p: &Pipeline,
+    stage: &'s Stage,
+    a: &Attempt,
+    round: &ReviewRound,
+    lane: Option<&str>,
+    head: &str,
+) -> Option<&'s str> {
+    let Some(Gate::Command {
+        like: Some(like), ..
+    }) = &stage.gate
+    else {
+        return None;
+    };
+    let argv = p
+        .command_gate(stage)
+        .and_then(|g| lane_gate_argv(g, lane))
+        .filter(|v| !v.is_empty())?;
+    let accepting = matches!(round.state, RoundState::Converged | RoundState::Accepted);
+    (accepting
+        && t.attempts.iter().any(|x| {
+            &x.stage == like
+                && x.context == a.context
+                && x.state == AttemptState::Complete
+                && x.gate
+                    .as_ref()
+                    .is_some_and(|g| g.head == head && g.exit == Some(0) && &g.argv == argv)
+        }))
+    .then_some(like.as_str())
+}
+
 /// A length as a record's count.
 fn count(n: usize) -> u32 {
     u32::try_from(n).unwrap_or(u32::MAX)
@@ -2561,8 +2691,8 @@ fn summary_of(a: &Attempt, carry: Option<&Carry>, head: &str) -> String {
     }
     if let Some(r) = &a.rewrite {
         match (&r.skipped, &r.after) {
-            (Some(_), _) => {
-                let _ = writeln!(out, "Commits kept: the branch is published.");
+            (Some(why), _) => {
+                let _ = writeln!(out, "Commits kept: {why}.");
             }
             (None, Some(after)) if *after != r.before => {
                 let _ = if r.mode == Commits::One {
