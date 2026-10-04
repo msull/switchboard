@@ -16,6 +16,7 @@ use crate::git::{Push, Repo, branch_name, yyyymmdd};
 use crate::github::{Checks, Gh, PullRequests, github_repo};
 use crate::pipeline::{Context, Gate, Lane, Pipeline, Stage, StageKind};
 use crate::port::Port;
+use crate::review::checks_key;
 use crate::store::{
     DataDir, Lock, Settings, expand_home, read_project, read_ticket, shell_unsafe, write_project,
     write_ticket,
@@ -44,6 +45,12 @@ pub const REFRESH: &str = "refresh";
 /// no stage mistakes them for its own.
 pub const CUT: &str = "cut";
 
+/// How long a killed check may take to read as gone before a park or a
+/// close sends SIGKILL to its group and goes on, saying so in the
+/// cancellation reason: well past the seconds a test run takes to exit
+/// on TERM.
+pub const STOP_LIMIT_MS: u64 = 120_000;
+
 /// Everything the runner acts through.
 pub struct Runner {
     pub data: DataDir,
@@ -60,6 +67,21 @@ pub struct Runner {
     /// The disk hold as last logged, so a full disk is one line, not
     /// one a second.
     low_disk: Option<String>,
+    /// Checks a park or a close killed and is waiting on, by key: when
+    /// this runner first sent the kill. Not saved: a restarted runner
+    /// has lost the child, and `check_gone` reads it as gone.
+    stopping: BTreeMap<String, u64>,
+}
+
+/// Where a park's or a close's stop of an attempt's checks stands.
+enum GateStop {
+    /// Nothing of the checks is left, or none were running.
+    Gone,
+    /// Killed, and something of them still runs within the limit.
+    Waiting,
+    /// Still running at the limit, so stepped up to SIGKILL: the clause
+    /// the cancellation reason carries.
+    OverLimit(String),
 }
 
 /// The contexts a stage runs in: `(name, cwd, lane)`.
@@ -86,6 +108,7 @@ impl Runner {
             bitbucket: Box::new(Bitbucket::new(env_file)),
             held: None,
             low_disk: None,
+            stopping: BTreeMap::new(),
         }
     }
 
@@ -1154,14 +1177,9 @@ impl Runner {
         // Every launch has settled, so no reply can open an attempt
         // again; one still open is the close's to end, before its
         // processes are killed below.
-        if t.attempts.iter().any(Attempt::is_open) {
-            for a in t.attempts.iter_mut().filter(|a| a.is_open()) {
-                a.state = AttemptState::Cancelled {
-                    reason: format!("the ticket closed: {reason}"),
-                };
-                a.ended_ms = Some(now_ms);
-            }
-            self.save_ticket(t, now_ms)?;
+        if self.cancel_open_attempts(t, &reason, now_ms)? {
+            log::info!("ticket {} closing: a check is still running", t.id);
+            return Ok(());
         }
         if !self.retire_processes(t, ps, &t.processes.clone(), now_ms)? {
             log::info!("ticket {} closing: a process is still alive", t.id);
@@ -1456,9 +1474,10 @@ impl Runner {
     }
 
     /// An attempt Dispatch stops on purpose: its run paused and confirmed
-    /// paused, its processes killed, and only then its state written as
-    /// cancelled, so a record never says cancelled about something still
-    /// going. True once it is. No decision follows.
+    /// paused, its processes killed, its checks killed and read back as
+    /// gone, and only then its state written as cancelled, so a record
+    /// never says cancelled about something still going. True once it
+    /// is. No decision follows.
     fn cancel_attempt(
         &mut self,
         t: &mut Ticket,
@@ -1501,15 +1520,94 @@ impl Runner {
         if !self.retire_processes(t, ps, &mine, now_ms)? {
             return Ok(false);
         }
+        // Before the command reviewers: this is the call that sends the
+        // checks' TERM and starts the clock, and a repeated kill of the
+        // same key below sends nothing.
+        let reason = match self.stop_gate(t, a, now_ms) {
+            GateStop::Gone => reason.to_owned(),
+            GateStop::Waiting => return Ok(false),
+            GateStop::OverLimit(s) => format!("{reason}; {s}"),
+        };
         self.kill_review_commands(t, a);
         if let Some(attempt) = find_attempt_mut(t, &a.stage, a.n) {
-            attempt.state = AttemptState::Cancelled {
-                reason: reason.into(),
-            };
+            attempt.state = AttemptState::Cancelled { reason };
             attempt.ended_ms = Some(now_ms);
         }
         self.save_ticket(t, now_ms)?;
         Ok(true)
+    }
+
+    /// Ends a closing ticket's open attempts; true while one's checks
+    /// are still running. Its checks are stopped first, as a park does,
+    /// so the record never says cancelled about checks still running;
+    /// then its command reviewers. An attempt whose checks are done is
+    /// cancelled now, so a reason past the limit is not lost to a pass
+    /// that waits on another attempt's.
+    fn cancel_open_attempts(&mut self, t: &mut Ticket, reason: &str, now_ms: u64) -> Result<bool> {
+        let open: Vec<Attempt> = t.attempts.iter().filter(|a| a.is_open()).cloned().collect();
+        let mut waiting = false;
+        let mut cancelled = false;
+        for a in &open {
+            let cancelled_reason = match self.stop_gate(t, a, now_ms) {
+                GateStop::Gone => format!("the ticket closed: {reason}"),
+                GateStop::Waiting => {
+                    waiting = true;
+                    continue;
+                }
+                GateStop::OverLimit(s) => format!("the ticket closed: {reason}; {s}"),
+            };
+            self.kill_review_commands(t, a);
+            if let Some(attempt) = find_attempt_mut(t, &a.stage, a.n) {
+                attempt.state = AttemptState::Cancelled {
+                    reason: cancelled_reason,
+                };
+                attempt.ended_ms = Some(now_ms);
+                cancelled = true;
+            }
+        }
+        if cancelled {
+            self.save_ticket(t, now_ms)?;
+        }
+        Ok(waiting)
+    }
+
+    /// The attempt's running checks killed with their process group and
+    /// read back: a stage gate's, or a code review's latest round's.
+    /// Past `STOP_LIMIT_MS` from the first kill the group gets SIGKILL
+    /// and the stop goes on without reading it back.
+    fn stop_gate(&mut self, t: &Ticket, a: &Attempt, now_ms: u64) -> GateStop {
+        if a.gate.as_ref().is_none_or(|g| g.exit.is_some()) {
+            return GateStop::Gone;
+        }
+        let key = match a.rounds.last() {
+            Some(round) => checks_key(t, &(a.stage.clone(), a.n), round.n),
+            None => gate_key(t, a),
+        };
+        let started = if let Some(&started) = self.stopping.get(&key) {
+            started
+        } else {
+            self.git.kill_check(&key);
+            self.stopping.insert(key.clone(), now_ms);
+            now_ms
+        };
+        if self.git.check_gone(&key) {
+            self.stopping.remove(&key);
+            return GateStop::Gone;
+        }
+        if now_ms.saturating_sub(started) >= STOP_LIMIT_MS {
+            self.git.escalate_check(&key);
+            self.stopping.remove(&key);
+            log::warn!(
+                "ticket {}: checks {key} still running {}s after the kill; sent SIGKILL",
+                t.id,
+                STOP_LIMIT_MS / 1000
+            );
+            return GateStop::OverLimit(format!(
+                "its checks ({key}) were still running after {}s",
+                STOP_LIMIT_MS / 1000
+            ));
+        }
+        GateStop::Waiting
     }
 
     /// The sessions an attempt owns: its own, or its run's reviewer and

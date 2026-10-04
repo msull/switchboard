@@ -16,7 +16,7 @@ use std::sync::{Arc, Mutex};
 use dispatch::git::FakeRepo;
 use dispatch::github::{Checks, FakePullRequests, PullRequest};
 use dispatch::history::{Commit, Commits, Group};
-use dispatch::scheduler::{PR_ERROR_GRACE_MS, PR_POLL_MS, PR_YOUNG_HEAD_MS, Runner};
+use dispatch::scheduler::{PR_ERROR_GRACE_MS, PR_POLL_MS, PR_YOUNG_HEAD_MS, Runner, STOP_LIMIT_MS};
 use dispatch::store::DataDir;
 use dispatch::ticket::{
     Attempt, AttemptKind, AttemptState, Decision, PushedHead, ReviewerResult, Rewrite, RoundState,
@@ -3112,6 +3112,195 @@ fn parking_resumed_after_a_restart_pauses_the_run_withdraws_and_unmarks() {
     );
     assert!(sb.sessions.iter().all(|s| s.liveness != Liveness::Running));
     assert!(!sb.waiting[&session].0);
+}
+
+/// The implementer stopped and its checks running: the ticket id and
+/// the checks' key.
+fn at_running_checks(env: &mut Env) -> (String, String) {
+    let (id, implementer) = at_implement(env);
+    implementer_stops(env, &id, &implementer);
+    env.steps_until(&id, "the checks starting", |t, _| {
+        t.attempts_of("implement")
+            .last()
+            .is_some_and(|a| a.gate.is_some())
+    });
+    let key = format!("{id}/implement/1");
+    assert!(env.repo.lock().unwrap().checks.iter().any(|c| c.key == key));
+    (id, key)
+}
+
+/// The intent to park saved, as a hand park and a decision's park both
+/// leave it for `finish_parking`.
+fn park_by_hand(env: &mut Env, id: &str) {
+    let mut t = env.ticket(id);
+    t.state = TicketState::Parking {
+        reason: "parked by hand".into(),
+    };
+    let now = env.tick();
+    env.runner.save_ticket(&mut t, now).unwrap();
+}
+
+/// The intent to close saved and the id on the project's closing list.
+fn close_by_record(env: &Env, id: &str) {
+    write_closing(env, id, |_| {});
+    let mut ps = env.runner.load_project(PROJECT).unwrap();
+    ps.queue.retain(|q| q != id);
+    ps.closing.push(id.to_owned());
+    env.runner.save_project(&ps).unwrap();
+}
+
+fn first_implement(env: &Env, id: &str) -> Attempt {
+    env.ticket(id)
+        .attempts_of("implement")
+        .next()
+        .unwrap()
+        .clone()
+}
+
+fn implement_state(env: &Env, id: &str) -> AttemptState {
+    first_implement(env, id).state
+}
+
+#[test]
+fn parking_during_checks_kills_them_before_the_attempt_reads_cancelled() {
+    let mut env = Env::new();
+    let (id, key) = at_running_checks(&mut env);
+    env.repo.lock().unwrap().stubborn_checks.push(key.clone());
+    park_by_hand(&mut env, &id);
+    env.step();
+    assert_eq!(env.repo.lock().unwrap().killed_checks, vec![key.clone()]);
+    assert!(
+        first_implement(&env, &id).is_open(),
+        "not cancelled while it runs"
+    );
+    assert!(matches!(env.ticket(&id).state, TicketState::Parking { .. }));
+    {
+        let mut repo = env.repo.lock().unwrap();
+        repo.checks.retain(|c| c.key != key);
+    }
+    env.step();
+    assert!(
+        matches!(&implement_state(&env, &id), AttemptState::Cancelled { reason } if !reason.contains("still running")),
+        "{:?}",
+        implement_state(&env, &id)
+    );
+    assert!(matches!(env.ticket(&id).state, TicketState::Parked { .. }));
+    let now = env.tick();
+    env.runner.resume(&id, now).unwrap();
+    env.step();
+    let d = env
+        .pending(&id)
+        .into_iter()
+        .find(|d| d.name == "rerun")
+        .unwrap_or_else(|| panic!("no rerun: {:#?}", env.ticket(&id)));
+    let now = env.tick();
+    env.runner.decide(&id, &d.id, "rerun", None, now).unwrap();
+    env.steps_until(&id, "the second implementer", |t, _| {
+        t.attempts_of("implement")
+            .last()
+            .is_some_and(|a| a.n == 2 && a.session.is_some())
+    });
+    let implementer = session_of(&env.ticket(&id), "implement");
+    implementer_stops(&mut env, &id, &implementer);
+    env.steps_until(&id, "the second checks starting", |t, _| {
+        t.attempts_of("implement")
+            .last()
+            .is_some_and(|a| a.n == 2 && a.gate.is_some())
+    });
+    let repo = env.repo.lock().unwrap();
+    assert!(repo.killed_checks.contains(&key));
+    let started: Vec<&str> = repo.checks.iter().map(|c| c.key.as_str()).collect();
+    assert_eq!(started, vec![format!("{id}/implement/2").as_str()]);
+}
+
+#[test]
+fn closing_during_checks_kills_them_before_the_attempt_reads_cancelled() {
+    let mut env = Env::new();
+    let (id, key) = at_running_checks(&mut env);
+    env.repo.lock().unwrap().stubborn_checks.push(key.clone());
+    close_by_record(&env, &id);
+    env.step();
+    assert!(matches!(env.ticket(&id).state, TicketState::Closing { .. }));
+    assert!(
+        first_implement(&env, &id).is_open(),
+        "not cancelled while it runs"
+    );
+    assert_eq!(env.repo.lock().unwrap().killed_checks, vec![key.clone()]);
+    env.repo.lock().unwrap().checks.retain(|c| c.key != key);
+    env.step();
+    assert!(
+        matches!(&implement_state(&env, &id), AttemptState::Cancelled { reason } if reason.starts_with("the ticket closed: ") && !reason.contains("still running")),
+        "{:?}",
+        implement_state(&env, &id)
+    );
+    let t = env.ticket(&id);
+    assert!(matches!(t.state, TicketState::Closed { .. }), "{t:#?}");
+}
+
+#[test]
+fn a_check_that_ignores_the_kill_does_not_hold_the_park_past_the_limit() {
+    let mut env = Env::new();
+    let (id, key) = at_running_checks(&mut env);
+    env.repo.lock().unwrap().stubborn_checks.push(key.clone());
+    park_by_hand(&mut env, &id);
+    env.step();
+    assert!(matches!(env.ticket(&id).state, TicketState::Parking { .. }));
+    assert!(env.repo.lock().unwrap().escalated_checks.is_empty());
+    env.wait(STOP_LIMIT_MS);
+    env.step();
+    let t = env.ticket(&id);
+    assert!(matches!(t.state, TicketState::Parked { .. }), "{t:#?}");
+    assert!(
+        matches!(&implement_state(&env, &id), AttemptState::Cancelled { reason } if reason.contains("still running") && reason.contains(&key)),
+        "{:?}",
+        implement_state(&env, &id)
+    );
+    assert_eq!(env.repo.lock().unwrap().escalated_checks, vec![key]);
+}
+
+#[test]
+fn parking_after_a_restart_reads_a_lost_check_as_gone() {
+    let mut env = Env::new();
+    let (id, _) = at_running_checks(&mut env);
+    env.repo.lock().unwrap().checks.clear();
+    env.restart();
+    park_by_hand(&mut env, &id);
+    env.step();
+    assert!(matches!(
+        implement_state(&env, &id),
+        AttemptState::Cancelled { .. }
+    ));
+    let t = env.ticket(&id);
+    assert!(matches!(t.state, TicketState::Parked { .. }), "{t:#?}");
+    assert!(
+        env.repo.lock().unwrap().checks.is_empty(),
+        "nothing started again"
+    );
+}
+
+#[test]
+fn closing_during_a_review_round_kills_its_command_reviewers() {
+    let mut env = Env::new();
+    let id = at_review(&mut env);
+    let lint = lint_key(&env.ticket(&id), 1);
+    assert!(
+        env.repo
+            .lock()
+            .unwrap()
+            .checks
+            .iter()
+            .any(|c| c.key == lint)
+    );
+    close_by_record(&env, &id);
+    env.step();
+    assert!(env.repo.lock().unwrap().killed_checks.contains(&lint));
+    let t = env.ticket(&id);
+    assert!(
+        matches!(&review_attempt(&t).state, AttemptState::Cancelled { reason } if reason.starts_with("the ticket closed: ")),
+        "{:?}",
+        review_attempt(&t).state
+    );
+    assert!(matches!(t.state, TicketState::Closed { .. }), "{t:#?}");
 }
 
 #[test]

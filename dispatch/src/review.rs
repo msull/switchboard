@@ -2845,7 +2845,7 @@ fn reviewer_key(t: &Ticket, key: &(String, u32), round_n: u32, name: &str) -> St
 }
 
 /// The key a round's checks are polled under.
-fn checks_key(t: &Ticket, key: &(String, u32), round_n: u32) -> String {
+pub(crate) fn checks_key(t: &Ticket, key: &(String, u32), round_n: u32) -> String {
     format!("{}/{}/{}/r{round_n}/checks", t.id, key.0, key.1)
 }
 

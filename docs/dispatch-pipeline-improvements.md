@@ -327,6 +327,10 @@ with a PR, keeps its instruction to fix any claim its rebase changed.
 
 Observed, not yet issues. Each line says where it was seen.
 
+- **A check orphaned by a runner restart is never killed.** #39 put each
+  check in its own process group, so it outlives a runner stopped by
+  Ctrl-C. Persisting the group id on `GateRun` would let a restarted
+  runner kill the orphan before starting the checks again or cancelling.
 - **An untagged non-wording point from the `style` reviewer counts as
   style.** `class_of` (`dispatch/src/review.rs`) counts every untagged
   point from the reviewer named `style` as style, so one about behaviour
