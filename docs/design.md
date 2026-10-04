@@ -1621,10 +1621,15 @@ given before the park launches on the resume or keeps its context
 from being asked again, while a `rerun` answer to the resume's
 question puts the quoted note back; the session's waiting mark is then cleared
 and read back), the review run paused and read back as paused, every
-process killed and read back as gone, and only then does the ticket
-read as parked or the rerun's answer count as acted (which is what
-lets the replacement start); the sequence runs from the saved intent
-on every pass, so a restart at any point resumes it whole. A resumed
+process killed and read back as gone, the attempt's running checks
+killed with their process group and read back as gone (or, past a
+two-minute limit, sent SIGKILL and named in the cancellation reason),
+and only then does the ticket read as parked or the rerun's answer
+count as acted (which is what lets the replacement start); the
+sequence runs from the saved intent on every pass, so a restart at any
+point resumes it whole. A close does the same before it writes an
+open attempt cancelled: its checks stopped under the same limit, then
+its command reviewers killed. A resumed
 ticket asks `rerun` again, under a new id and without waiting for a
 slot, about each failed or cancelled attempt with no rerun question
 in flight, with the attempt's own reason (for a sent-back attempt,
@@ -1686,7 +1691,11 @@ parked; the Stop hook's `background_tasks`
 not on the wire. And: the ticket page does not show that an attempt was
 carried or how many points a round left to the merge (each would need a
 field on the `dispatch-control` views), and a command reviewer cannot
-tag a point as style.
+tag a point as style. And: a check runs in its own process group, so it
+outlives a runner killed by Ctrl-C or a closed pane; the restarted
+runner reads it as lost, an active ticket starts it again (the new run
+waits on cargo's build lock behind the orphan), and a park cancels
+without killing it.
 
 ## Global workspace status (2026-10-01)
 

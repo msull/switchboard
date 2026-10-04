@@ -96,8 +96,9 @@ pub trait Repo: Send {
     /// Run `argv` in `dir` with `env` set; nonzero exit is an error.
     fn run(&mut self, dir: &Path, argv: &[String], env: &[(String, String)]) -> Result<()>;
     /// Start a check (a command gate) in `dir` as a child of the runner,
-    /// its output appended to `log`, under `key` for polling. Nothing
-    /// from a template reaches the command line; values go in `env`.
+    /// in its own process group so a kill reaches its descendants, its
+    /// output appended to `log`, under `key` for polling. Nothing from a
+    /// template reaches the command line; values go in `env`.
     fn start_check(
         &mut self,
         key: &str,
@@ -122,8 +123,17 @@ pub trait Repo: Send {
         stderr: &Path,
     ) -> Result<()>;
     /// Kill a running check or reviewer and its descendants, if this
-    /// runner started it.
+    /// runner started it. A check already killed gets no second signal;
+    /// `escalate_check` is the step-up.
     fn kill_check(&mut self, key: &str);
+    /// After `kill_check`: true once nothing of the check is left (its
+    /// process group has no member) or this runner never started it (a
+    /// restart lost it). False while the check or anything in its group
+    /// still runs.
+    fn check_gone(&mut self, key: &str) -> bool;
+    /// SIGKILL to the group of a check `kill_check` stopped, sent once and
+    /// only if the group still has a member; the group is forgotten after.
+    fn escalate_check(&mut self, key: &str);
     /// The commits of `base..head` in `dir`, oldest first.
     fn commits(&self, dir: &Path, base: &str, head: &str) -> Result<Vec<Commit>>;
     /// The tree `rev` names in `dir`.
@@ -160,6 +170,29 @@ pub enum Push {
 #[derive(Debug, Default)]
 pub struct GitCli {
     checks: std::collections::HashMap<String, std::process::Child>,
+    /// Checks killed whose process group may still have members, by key:
+    /// the group id, which is the killed child's pid.
+    killed: std::collections::HashMap<String, u32>,
+}
+
+/// Whether process group `pgid` has a member. Signal 0 delivers nothing;
+/// `kill` succeeds only if some process in the group could be signalled.
+/// A command, not a syscall, since the crate forbids `unsafe`.
+fn group_alive(pgid: u32) -> bool {
+    Command::new("kill")
+        .args(["-0", "--", &format!("-{pgid}")])
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success())
+}
+
+impl GitCli {
+    /// Forget every killed group that is now empty, so an entry nothing
+    /// reads back (a reviewer, a failed round's checks) does not outlive
+    /// its group by more than one port call.
+    fn sweep_killed(&mut self) {
+        self.killed.retain(|_, pgid| group_alive(*pgid));
+    }
 }
 
 /// A `git` command with the caller's own `GIT_*` variables removed: run
@@ -532,7 +565,8 @@ impl Repo for GitCli {
             .current_dir(dir)
             .stdin(std::process::Stdio::null())
             .stdout(out)
-            .stderr(err);
+            .stderr(err)
+            .process_group(0);
         for (k, v) in env {
             cmd.env(k, v);
         }
@@ -577,14 +611,57 @@ impl Repo for GitCli {
     }
 
     fn kill_check(&mut self, key: &str) {
+        self.sweep_killed();
         if let Some(mut child) = self.checks.remove(key) {
-            // The group first (a reviewer runs in its own), then the
-            // child itself for one started without a group.
+            // Every check and reviewer leads its own group, so the TERM
+            // reaches its descendants; the leader itself is killed and
+            // reaped outright so no zombie keeps its pid.
+            let pgid = child.id();
             let _ = Command::new("kill")
-                .args(["-TERM", "--", &format!("-{}", child.id())])
+                .args(["-TERM", "--", &format!("-{pgid}")])
                 .output();
             let _ = child.kill();
             let _ = child.wait();
+            if group_alive(pgid) {
+                self.killed.insert(key.to_owned(), pgid);
+            }
+        }
+    }
+
+    fn check_gone(&mut self, key: &str) -> bool {
+        self.sweep_killed();
+        if let Some(child) = self.checks.get_mut(key) {
+            if matches!(child.try_wait(), Ok(None)) {
+                return false;
+            }
+            // Exited, but what it started may still run in its group.
+            let pgid = child.id();
+            self.checks.remove(key);
+            if !group_alive(pgid) {
+                return true;
+            }
+            self.killed.insert(key.to_owned(), pgid);
+        }
+        match self.killed.get(key) {
+            Some(&pgid) if group_alive(pgid) => false,
+            Some(_) => {
+                self.killed.remove(key);
+                true
+            }
+            None => true,
+        }
+    }
+
+    fn escalate_check(&mut self, key: &str) {
+        self.sweep_killed();
+        // Probed just before the signal: a group id with a live member
+        // cannot have been handed to anyone else.
+        if let Some(pgid) = self.killed.remove(key)
+            && group_alive(pgid)
+        {
+            let _ = Command::new("kill")
+                .args(["-KILL", "--", &format!("-{pgid}")])
+                .output();
         }
     }
 
@@ -894,8 +971,13 @@ pub struct FakeRepo {
     pub checks: Vec<StartedCheck>,
     /// Exit codes a test sets for a check by key; unset means running.
     pub check_exits: std::collections::BTreeMap<String, i32>,
-    /// Checks and reviewers killed by key.
+    /// Checks and reviewers killed by key, one entry per call.
     pub killed_checks: Vec<String>,
+    /// Checks whose kill is recorded but which keep running, as a check
+    /// that ignores TERM would; only `escalate_check` removes them.
+    pub stubborn_checks: Vec<String>,
+    /// Checks `escalate_check` was called on, by key.
+    pub escalated_checks: Vec<String>,
     /// Command reviewers started: the check record plus its stderr file.
     pub reviewers: Vec<(StartedCheck, PathBuf)>,
     /// What a tree's base resolves to; absent, `base0000`.
@@ -1258,8 +1340,17 @@ impl Repo for FakeRepo {
         Ok(())
     }
     fn kill_check(&mut self, key: &str) {
-        self.checks.retain(|c| c.key != key);
+        if !self.stubborn_checks.iter().any(|k| k == key) {
+            self.checks.retain(|c| c.key != key);
+        }
         self.killed_checks.push(key.to_owned());
+    }
+    fn check_gone(&mut self, key: &str) -> bool {
+        !self.checks.iter().any(|c| c.key == key) || self.check_exits.contains_key(key)
+    }
+    fn escalate_check(&mut self, key: &str) {
+        self.checks.retain(|c| c.key != key);
+        self.escalated_checks.push(key.to_owned());
     }
     fn rev_parse(&self, dir: &Path, _rev: &str) -> Result<String> {
         Ok(self
@@ -1464,6 +1555,12 @@ impl Repo for std::sync::Arc<std::sync::Mutex<FakeRepo>> {
     fn kill_check(&mut self, key: &str) {
         self.lock().unwrap().kill_check(key);
     }
+    fn check_gone(&mut self, key: &str) -> bool {
+        self.lock().unwrap().check_gone(key)
+    }
+    fn escalate_check(&mut self, key: &str) {
+        self.lock().unwrap().escalate_check(key);
+    }
     fn commits(&self, dir: &Path, base: &str, head: &str) -> Result<Vec<Commit>> {
         self.lock().unwrap().commits(dir, base, head)
     }
@@ -1556,6 +1653,99 @@ mod tests {
         assert_eq!(code, Some(3));
         assert_eq!(std::fs::read_to_string(&log).unwrap().trim(), "backend");
         assert!(GitCli::default().poll_check("k").unwrap().is_err());
+    }
+
+    /// The pid a check's script wrote to `pid` in `dir`, once it has.
+    fn written_pid(dir: &Path) -> u32 {
+        for _ in 0..200 {
+            if let Ok(text) = std::fs::read_to_string(dir.join("pid"))
+                && let Ok(pid) = text.trim().parse()
+            {
+                return pid;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        panic!("the check never wrote its pid");
+    }
+
+    fn ps_field(field: &str, pid: u32) -> u32 {
+        let out = Command::new("ps")
+            .args(["-o", &format!("{field}="), "-p", &pid.to_string()])
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).trim().parse().unwrap()
+    }
+
+    fn alive(pid: u32) -> bool {
+        Command::new("kill")
+            .args(["-0", &pid.to_string()])
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|s| s.success())
+    }
+
+    /// Polls `test` for up to two seconds.
+    fn within_2s(mut test: impl FnMut() -> bool) -> bool {
+        for _ in 0..100 {
+            if test() {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        false
+    }
+
+    #[test]
+    fn a_killed_check_takes_its_process_group_with_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cli = GitCli::default();
+        cli.start_check(
+            "k",
+            dir.path(),
+            &[
+                "sh".into(),
+                "-c".into(),
+                "sleep 30 & echo $! > pid; wait".into(),
+            ],
+            &[],
+            &dir.path().join("gate.log"),
+        )
+        .unwrap();
+        let sleep = written_pid(dir.path());
+        let sh = ps_field("ppid", sleep);
+        assert_eq!(ps_field("pgid", sleep), sh, "the check leads its group");
+        cli.kill_check("k");
+        assert!(within_2s(|| cli.check_gone("k")));
+        assert!(!alive(sleep));
+    }
+
+    #[test]
+    fn a_second_kill_of_a_check_sends_nothing_and_only_escalate_does() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cli = GitCli::default();
+        cli.start_check(
+            "k",
+            dir.path(),
+            &[
+                "sh".into(),
+                "-c".into(),
+                "sh -c 'trap \"\" TERM; sleep 30' & echo $! > pid; wait".into(),
+            ],
+            &[],
+            &dir.path().join("gate.log"),
+        )
+        .unwrap();
+        let inner = written_pid(dir.path());
+        cli.kill_check("k");
+        cli.kill_check("k");
+        assert!(alive(inner), "a second kill sends no KILL");
+        assert!(!cli.check_gone("k"));
+        cli.escalate_check("k");
+        assert!(within_2s(|| !alive(inner)), "the step-up reached the group");
+        assert!(!cli.killed.contains_key("k"));
+        cli.escalate_check("k");
+        assert!(!alive(inner));
+        assert!(cli.killed.is_empty());
     }
 
     #[test]
