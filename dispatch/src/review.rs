@@ -1982,11 +1982,14 @@ fn declares_wording(text: &str) -> bool {
         .strip_prefix("so ")
         .or_else(|| rest.strip_prefix("and "))
         .unwrap_or(rest);
+    // The reviewer may phrase the close however it likes ("on it", "on
+    // them", "now"); only an instruction after the declaration keeps the
+    // line a point, and an instruction does not talk about closing.
     declares
-        && matches!(
-            rest,
-            "" | "the round can close on it" | "the round can close" | "it can close"
-        )
+        && (rest.is_empty()
+            || ((rest.starts_with("the round can close") || rest.starts_with("it can close"))
+                && !rest.contains("rename")
+                && !rest.contains("fix")))
 }
 
 /// A point's tag, with an untagged point from the reviewer named
@@ -2969,6 +2972,8 @@ mod tests {
             "Only wording is left.",
             "All remaining points are wording.",
             "every point left is wording, so the round can close on it",
+            "style: Every point left is wording; the round can close on them.",
+            "every point left is wording; the round can close now",
         ] {
             assert!(declares_wording(yes), "{yes}");
         }
