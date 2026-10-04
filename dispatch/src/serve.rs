@@ -16,8 +16,8 @@ use std::thread::JoinHandle;
 
 use anyhow::{Context, Result, bail};
 use dispatch_control::{
-    AttemptView, Body, DecisionView, LaneView, ProjectView, Reply, Request, SOCKET_FILE, Status,
-    TicketView,
+    AttemptView, Body, DecisionView, LaneView, PathsView, ProjectView, Reply, Request, SOCKET_FILE,
+    Status, TicketView,
 };
 
 use crate::epoch_ms;
@@ -56,7 +56,10 @@ impl Handler {
             Body::Status => Reply::Status(status(&self.runner)?),
             Body::Ticket { id } => {
                 let t = self.runner.load_ticket(id)?;
-                Reply::Ticket(self.view(&t))
+                Reply::Ticket(TicketView {
+                    paths: ticket_paths(&t),
+                    ..self.view(&t)
+                })
             }
             Body::Artifact { ticket, path } => {
                 let dir = self.runner.data.ticket_dir(ticket);
@@ -303,6 +306,8 @@ fn round_views(a: &crate::ticket::Attempt) -> Vec<dispatch_control::ReviewRoundV
             },
             open_points: r.open_points,
             head_after: r.head_after.clone(),
+            feedback: r.feedback.clone(),
+            response: r.response.clone(),
             reviewers: r
                 .reviewers
                 .iter()
@@ -382,10 +387,76 @@ pub fn attempt_state(state: &AttemptState) -> (&'static str, Option<String>) {
     }
 }
 
+/// The last plan review round file beside `subject` that exists.
+fn last_round_file(subject: &Path) -> Option<PathBuf> {
+    (1..=u32::MAX)
+        .map(|n| crate::report::round_file(subject, n))
+        .take_while(|f| f.exists())
+        .last()
+}
+
+/// Where a ticket's documents are, for `show` and the port's
+/// single-ticket reply; the one part of a view that touches files.
+#[must_use]
+pub fn ticket_paths(t: &Ticket) -> PathsView {
+    let last_round = t
+        .attempts
+        .iter()
+        .rev()
+        .flat_map(|a| a.rounds.iter().rev())
+        .find_map(|r| r.feedback.clone());
+    let round_file = last_round.or_else(|| {
+        t.attempts
+            .iter()
+            .rev()
+            .filter(|a| a.kind == AttemptKind::Workflow)
+            .find_map(|a| a.artifacts.values().next())
+            .and_then(|subject| last_round_file(subject))
+    });
+    let pr = t.attempts.iter().rev().find_map(|a| a.pr.as_ref());
+    PathsView {
+        plan: t.input("plan").cloned(),
+        round_file,
+        review_summary: t
+            .attempts
+            .iter()
+            .rev()
+            .find_map(|a| a.artifacts.get("summary").cloned()),
+        notes: t.input("notes").cloned(),
+        pr_url: pr.map(|pr| pr.url.clone()),
+        pr_head: pr.map(|pr| pr.head.clone()),
+    }
+}
+
+/// The latest head an attempt in the lane recorded: the record has no
+/// head of its own for a lane, and `show` reads no git.
+fn lane_head(t: &Ticket, lane: &str) -> Option<String> {
+    t.attempts
+        .iter()
+        .filter(|a| a.context == lane && a.head.is_some())
+        .max_by_key(|a| a.started_ms)
+        .and_then(|a| a.head.clone())
+}
+
+fn lane_view(t: &Ticket, l: &crate::ticket::LaneRecord) -> LaneView {
+    LaneView {
+        name: l.name.clone(),
+        worktree: l.worktree.clone(),
+        branch: l.branch.clone(),
+        chosen: l.chosen,
+        setup_done: l.setup_done,
+        removed: l.removed,
+        base_sha: l.base_sha.clone(),
+        head: lane_head(t, &l.name),
+        pushed_head: l.pushed.as_ref().map(|p| p.head.clone()),
+    }
+}
+
 /// A ticket as a reader sees it, with what its frozen pipeline copy
 /// says (stage names, the paths a close removes) when it can be read.
+/// Its `paths` are left empty; `ticket_paths` fills them.
 #[must_use]
-fn ticket_view(t: &Ticket, p: Option<&Pipeline>) -> TicketView {
+pub fn ticket_view(t: &Ticket, p: Option<&Pipeline>) -> TicketView {
     let (state, reason) = match &t.state {
         TicketState::Active => ("active", None),
         TicketState::Parking { reason } => ("parking", Some(reason.clone())),
@@ -414,18 +485,7 @@ fn ticket_view(t: &Ticket, p: Option<&Pipeline>) -> TicketView {
         closable: t.closable(),
         trees_retryable: t.trees_retryable(),
         removes: p.map_or_else(Vec::new, |p| crate::scheduler::close_removes(t, p)),
-        lanes: t
-            .lanes
-            .iter()
-            .map(|l| LaneView {
-                name: l.name.clone(),
-                worktree: l.worktree.clone(),
-                branch: l.branch.clone(),
-                chosen: l.chosen,
-                setup_done: l.setup_done,
-                removed: l.removed,
-            })
-            .collect(),
+        lanes: t.lanes.iter().map(|l| lane_view(t, l)).collect(),
         attempts: t
             .attempts
             .iter()
@@ -484,6 +544,7 @@ fn ticket_view(t: &Ticket, p: Option<&Pipeline>) -> TicketView {
         current_session: t.current_session().cloned(),
         created_ms: t.created_ms,
         updated_ms: t.updated_ms,
+        paths: PathsView::default(),
     }
 }
 

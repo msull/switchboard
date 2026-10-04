@@ -1264,7 +1264,53 @@ impl SwitchboardApp {
             wire::Body::OpStatus { operation } => wire::Reply::OpStatus {
                 status: self.op_status(operation),
             },
+            wire::Body::SessionScreen { session, lines } => match parse_uuid("session", session) {
+                Ok(id) => self.screen(RecordId(id), *lines),
+                Err(reason) => wire::Reply::failed(reason),
+            },
             _ => wire::Reply::failed("not a query"),
+        }
+    }
+
+    /// The last lines of a running session's pane for `session.screen`,
+    /// with the values of its project's secrets replaced by their names:
+    /// the reply becomes another program's output, where a secret must
+    /// never appear.
+    fn screen(&self, id: RecordId, lines: Option<u32>) -> wire::Reply {
+        if !self.core.is_running(id) {
+            return wire::Reply::failed("not running");
+        }
+        let n = lines.unwrap_or(40).clamp(1, 200) as usize;
+        // Lines above the ones returned, redacted with them, so a value
+        // wrapped across the window's first line is still found whole.
+        let text = match self
+            .services
+            .host
+            .snapshot(&HostId(id.host_name()), Some(n + SCREEN_SLACK_LINES))
+        {
+            Ok(text) => text,
+            Err(e) => return wire::Reply::failed(format!("snapshot: {e}")),
+        };
+        let secrets: Vec<(String, String)> = self
+            .core
+            .session(id)
+            .map(|s| resolve_project_env(&self.core, &self.services, s.project))
+            .map(|resolved| {
+                resolved
+                    .vars
+                    .into_iter()
+                    .filter(|v| v.secret)
+                    .filter_map(|v| v.value.filter(|x| !x.is_empty()).map(|x| (v.name, x)))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let redacted = redact(&text, &secrets);
+        if redacted != text {
+            log::debug!("session.screen for {}: secrets redacted", id.host_name());
+        }
+        let kept: Vec<&str> = redacted.trim_end().lines().collect();
+        wire::Reply::Screen {
+            text: kept[kept.len().saturating_sub(n)..].join("\n"),
         }
     }
 
@@ -1462,5 +1508,112 @@ impl DispatchWorker {
             self.status_in_flight = false;
         }
         finished
+    }
+}
+
+/// How many lines above the asked-for ones `screen` reads and redacts.
+const SCREEN_SLACK_LINES: usize = 8;
+
+/// `text` with every occurrence of each secret's value replaced by
+/// `<NAME>`. Longer values go first, so a value that holds another is
+/// replaced whole rather than leaving a fragment around the shorter one.
+/// A pane's capture breaks a line longer than the pane where it wraps,
+/// so a value is also found with line breaks inside it.
+/// The capture also trims each row's trailing spaces, so a space in the
+/// value that fell at a wrap may be gone.
+fn redact(text: &str, secrets: &[(String, String)]) -> String {
+    let mut by_length: Vec<&(String, String)> =
+        secrets.iter().filter(|(_, v)| !v.is_empty()).collect();
+    by_length.sort_by_key(|(_, v)| std::cmp::Reverse(v.len()));
+    let mut out = text.to_owned();
+    for (name, value) in by_length {
+        let placeholder = format!("<{name}>");
+        let mut from = 0;
+        while let Some((start, end)) = find_across_breaks(&out, value, from) {
+            out.replace_range(start..end, &placeholder);
+            from = start + placeholder.len();
+        }
+    }
+    out
+}
+
+/// The byte range of the first occurrence of `value` in `text` at or
+/// after `from`, where `text` may break a line anywhere inside it and
+/// some of a run of spaces in `value` at such a break may be missing:
+/// the row before the break lost its trailing ones, and the row after
+/// holds the rest. Byte matching stays on character boundaries: a
+/// value's first byte is never a UTF-8 continuation byte, and a line
+/// break never sits inside one.
+fn find_across_breaks(text: &str, value: &str, from: usize) -> Option<(usize, usize)> {
+    let hay = text.as_bytes();
+    let needle = value.as_bytes();
+    let is_break = |b: u8| b == b'\n' || b == b'\r';
+    let spaces = |bytes: &[u8], at: usize| {
+        bytes
+            .get(at..)
+            .map_or(0, |rest| rest.iter().take_while(|&&b| b == b' ').count())
+    };
+    (from..hay.len()).find_map(|start| {
+        let mut i = start;
+        let mut k = 0;
+        while let Some(&want) = needle.get(k) {
+            let at_break = hay.get(i).copied().is_some_and(is_break);
+            if k > 0 && !is_break(want) && at_break {
+                while hay.get(i).copied().is_some_and(is_break) {
+                    i += 1;
+                }
+                if want == b' ' {
+                    let kept = spaces(hay, i);
+                    let run = spaces(needle, k);
+                    if kept > run {
+                        return None;
+                    }
+                    i += kept;
+                    k += run;
+                    continue;
+                }
+            }
+            if hay.get(i) != Some(&want) {
+                return None;
+            }
+            i += 1;
+            k += 1;
+        }
+        Some((start, i))
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::redact;
+
+    #[test]
+    fn a_value_inside_another_is_replaced_whole_in_both() {
+        let secrets = vec![
+            ("SHORT".to_owned(), "abc123".to_owned()),
+            ("LONG".to_owned(), "xx-abc123-yy".to_owned()),
+        ];
+        let text = "token xx-abc123-yy and abc123 and abc";
+        assert_eq!(redact(text, &secrets), "token <LONG> and <SHORT> and abc");
+        assert_eq!(redact("nothing here", &secrets), "nothing here");
+    }
+
+    #[test]
+    fn a_value_wrapped_across_lines_is_replaced() {
+        let secrets = vec![("API_TOKEN".to_owned(), "tok-0123456789".to_owned())];
+        let text = "$ echo $API_TOKEN\nAPI_TOKEN=tok-012\n3456789\r\nnext tok-0123456789";
+        assert_eq!(
+            redact(text, &secrets),
+            "$ echo $API_TOKEN\nAPI_TOKEN=<API_TOKEN>\r\nnext <API_TOKEN>"
+        );
+        let secrets = vec![("PASS".to_owned(), "correct horse battery staple".to_owned())];
+        let text = "PASS=correct horse\nbattery staple and correct horse \nbattery staple";
+        assert_eq!(redact(text, &secrets), "PASS=<PASS> and <PASS>");
+        let secrets = vec![("PASS".to_owned(), "pass  word".to_owned())];
+        let text = "a pass\nword b pass\n word c pass\n  word d pass\n   word";
+        assert_eq!(
+            redact(text, &secrets),
+            "a <PASS> b <PASS> c <PASS> d pass\n   word"
+        );
     }
 }

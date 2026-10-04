@@ -34,6 +34,13 @@ dispatch queue <project>                          the project's queue in order
 dispatch queue <project> <ticket>...              reorder it
 dispatch resume <ticket>                          a parked ticket back to active
 dispatch close <ticket> [--reason <text>]         a ticket closed, its trees removed (its branches are kept; close lists them)
+dispatch health [--timeout <secs>] [--stale <secs>] [--json]   is the runner alive and getting on; run it first
+dispatch show <ticket> [--json]                   one ticket: stage, lanes, attempts, rounds, decisions, files
+dispatch events [--since <seq>] [--follow] [--ticket <id>]... [--project <name>] [--json]
+dispatch wait <ticket> [--for decision|stage|pr|closed|any] [--timeout <secs>] [--json]
+dispatch report <ticket> [--json]                 how a ticket went: stage time, review points, fix passes, size
+dispatch report --project <name> [--since YYYY-MM-DD] [--json]
+dispatch tail <ticket> [--lines N]                what the ticket's running agents show
 ```
 
 `dispatch run` and `dispatch worktrees` are the owner's: never run
@@ -128,6 +135,123 @@ Copy that line; do not compose one from memory.
 `dispatch queue <project>` prints the queue in order with a rank
 number, ticket id, source and title.
 
+## Supervising
+
+When you are the one watching tickets through to the end, these are
+the commands, by the question you have:
+
+| Question | Command |
+|---|---|
+| Is the runner alive? | `dispatch health`, run first |
+| Where does ticket X stand? | `dispatch show X` |
+| What changed since I last looked? | `dispatch events --since <seq>` |
+| Tell me when it needs me | `dispatch wait X --for decision` |
+| How did it go? | `dispatch report X`, or `dispatch report --project <name>` |
+| What is the agent doing right now? | `dispatch tail X` |
+
+Every one reads and nothing else: none of them changes a ticket,
+starts an agent or spends money. `--json` gives the same thing as one
+JSON document (one per line for `events`) for a program to read.
+
+**Health.** `dispatch health` checks that `dispatch run` wrote its
+status file within `--stale` seconds (default 30) and its process is
+alive, that Switchboard's socket and Dispatch's own answer within
+`--timeout` seconds (default 2), each with its latency, and lists the
+calls to Switchboard and to the PR provider that failed in the last
+hour. A ticket with an open attempt the runner has not got on with for
+longer than `--stale` is named. Exit 1 means something is wrong; read
+the lines and report them. Do not restart the runner yourself.
+
+**Show.** `dispatch show X` prints the header (id, project, source,
+title), `stage <name> (i/n)` and the state; each lane with its branch,
+worktree and the base, head and last pushed head (seven characters);
+the attempts grouped by stage, each with its state and reason, head,
+the head its checks ran at and a history rewrite, with any PR and the
+code review rounds (`r<n> <state> open <k>`) beneath it; the pending
+decisions with their options and the exact `dispatch decide` line; and
+the files to read next: the plan, the latest round's findings, the
+code review summary, the notes, and the PR's url and head. Read those
+files rather than guessing what they say.
+
+**Events.** Every ticket write that changes something appends one
+line per change to `events.jsonl` in the data directory: `taken`,
+`stage` (forward) and `sent-back`, `attempt-started` and
+`attempt-ended` (with its state and reason), `decision` (its name,
+question and options), `answered` and `decision-cancelled`, `pr` and
+`pr-checks`, `pushed` and `refreshed`, `rewrite`, `round` (a code
+review round and its open points), `parking`, `parked`, `resumed`,
+`closing`, `closed`, and `void`. The human line is
+`seq  hh:mm:ss  ticket  stage  kind  text`, the time in UTC.
+
+- Keep the highest `seq` you have read and pass it as `--since` next
+  time. The cursor is yours: Dispatch stores nothing for you, and two
+  readers never disturb each other.
+- An event can repeat: a crash between the log line and the record's
+  write makes the next pass do the transition again and log it again.
+  Treat a repeated `answered` or `stage` as one.
+- A `void` line withdraws the seqs its `voids` names: the write they
+  described failed, so the transition did not happen. Without
+  `--follow` those lines are already left out; with it, drop them when
+  the `void` arrives.
+- `--follow` looks at the file four times a second, so an event can
+  lag by up to 250 ms. It runs until you stop it.
+- Tickets taken before this build have no events before their next
+  transition. `show` and `report` read the record, so they are whole.
+
+**Wait.** `dispatch wait X --for decision` blocks until the ticket asks
+something and prints that `decision` event with the `dispatch decide`
+line to answer it. If a decision already waits, it returns at once,
+and a decision answered before the wait reads it is passed over. A
+ticket already closed ends any wait at once with exit 3 (exit 0 for
+`--for closed`), and one already parked does too, except that
+`--for any` waits for its resume.
+`--for stage` waits for a stage move either way, `--for pr` for a PR
+bound to an attempt, `--for closed` for the close, and `--for any`
+(the default) for the next event of any kind. Every match is checked
+against the record first, so a withdrawn event is never returned.
+
+**Report.** `dispatch report X` gives the time per stage with the time
+its decisions waited on the owner apart, the plan's size, the plan
+review's rounds and points, the code review's rounds and points (each
+point once, however many rounds it stayed open, split by reviewer),
+fix passes, rebases (at least: a lane keeps only its last clean
+bring-up), and the commits and diff at the PR. Cost and
+turns read `not recorded`: Dispatch does not see them. A count marked
+incomplete is missing a round's file.
+
+**Tail.** `dispatch tail X` prints the last lines (40, or `--lines N`
+up to 200) of each running agent of the ticket's open attempt, headed
+`== <stage>/<context> <role>`. Values of the project's secrets show as
+`<NAME>`. `no agent running` means nothing of the ticket runs now. A
+Switchboard too old for it says to update the app; report that.
+
+**Answering what you find.** When `wait` or `show` gives you a
+decision, read its question and the files `show` names, then answer
+only the kinds you were allowed, by copying the `dispatch decide` line
+and adding `--note "<what to change>"` where the table below allows
+one (a `rerun` at `inspect`, a `rerun` of a failed attempt). By the
+kind of failure:
+
+- `rerun` after a crash, a missing result or a dirty tree: `rerun`,
+  once. A second failure of the same kind is the owner's.
+- `rerun` with `check` offered (the stage's tests failed): read the
+  checks' log from `show`; `check` only if the failure looks flaky,
+  else report it.
+- `rerun` with `keep` offered (a fold or squash could not apply):
+  `keep` completes the review with the history as it is.
+- A gate that exited 127: neither `rerun` nor `check` helps; see the
+  pipeline traps below and report.
+- `pr` or `refresh`: the owner fixes the PR or the rebase by hand;
+  report it, then `recheck` once told it is done.
+- `paused`, `review-code`, `review-cap`, `finalize`: only with the
+  owner's say for that project.
+
+**Exit codes.** Every command exits 0 when it did what it says and 1
+with a reason when it was refused or failed. `wait` exits 2 when its
+`--timeout` passed and 3 when the ticket parked or closed, so what it
+waited for will not come. A command line Dispatch cannot read exits
+64 with the usage.
+
 ## Ordering the queue
 
 ```
@@ -216,8 +340,12 @@ Dispatch's data directory is `$DISPATCH_DATA_DIR`, by default
   artifacts, including `pipeline.toml`, the ticket's own frozen copy
   of the pipeline it was taken under.
 - `projects/<project>.json` holds the queue.
+- `events.jsonl` is the event log `dispatch events` reads, one JSON
+  object per line, appended at every ticket write.
+- `runner.json` is the runner's status after its last pass, which
+  `dispatch health` reads.
 
-Tickets, queues and worktrees are hands-off: the commands are the
+Tickets, queues, worktrees and those two files are hands-off: the commands are the
 whole interface to them. Pipeline files are the owner's, and the
 owner may delegate them to you; the next section says how.
 
@@ -264,9 +392,16 @@ Two traps that read as plain test failures:
 
 ## What not to do
 
-- Do not edit tickets, queues or worktrees under the data directory.
-  Edit a pipeline file only when the owner has delegated that project
-  to you, as above.
+- Do not edit or delete anything under the data directory by hand:
+  tickets, queues, worktrees, `events.jsonl`, `runner.json`. Edit a
+  pipeline file only when the owner has delegated that project to you,
+  as above.
+- Do not kill processes by pattern (`pkill claude`, `pkill -f dispatch`).
+  The ticket's agents are Switchboard's and the runner is the owner's;
+  `park` stops a ticket's work properly.
+- Do not push to a ticket's branch while it is at `merge`. Dispatch
+  watches the PR at the head it recorded; a push from outside reads as
+  someone else's change.
 - Do not delete or recreate a ticket by hand. There is no subcommand
   for it yet; ask the owner.
 - Do not take an issue to "see what happens". Every ticket runs real

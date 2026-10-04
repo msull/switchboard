@@ -386,6 +386,43 @@ pub fn write_ticket(path: &Path, t: &Ticket) -> Result<()> {
     write_json(path, &stamped)
 }
 
+/// Write a ticket record and log what the write changes. The record it
+/// replaces is read and diffed against `t` (`events::between`), the
+/// events are appended and synced, and only then is the record written,
+/// so a crash between the two repeats a transition rather than losing
+/// it. A record write that fails after the append is withdrawn with a
+/// `void` event naming the appended seqs; if that append fails too, the
+/// record's error is still the one returned and the events stand
+/// unwithdrawn. An append that fails refuses the write, since the
+/// transition would otherwise never be logged. The caller holds the
+/// writer lock.
+pub fn write_ticket_logged(data: &DataDir, t: &Ticket, at_ms: u64) -> Result<()> {
+    refuse_newer("ticket", &t.id, t.version)?;
+    let path = data.ticket_file(&t.id);
+    let old = if record_exists(&path) {
+        Some(read_ticket(&path)?)
+    } else {
+        None
+    };
+    let mut events =
+        crate::events::between(old.as_ref(), t, at_ms, &|| crate::events::stage_names(t));
+    let log = crate::events::log_path(data);
+    crate::events::append(&log, &mut events)?;
+    let written = write_ticket(&path, t);
+    if let Err(err) = &written
+        && let Some(first) = events.first()
+    {
+        let seqs = events.iter().map(|ev| ev.seq).collect();
+        if let Err(void) = crate::events::append_void(&log, first, seqs, &format!("{err:#}")) {
+            log::error!(
+                "ticket {}: its write failed and the events for it could not be withdrawn: {void:#}",
+                t.id
+            );
+        }
+    }
+    written
+}
+
 /// The same for a project's state.
 pub fn write_project(path: &Path, ps: &ProjectState) -> Result<()> {
     refuse_newer("project", &ps.name, ps.version)?;
@@ -671,6 +708,69 @@ mod tests {
             ..t
         };
         assert_eq!(read_ticket(&path).unwrap(), stamped);
+    }
+
+    /// A ticket record for the logged write's tests, with no pipeline
+    /// copy to name its stages.
+    fn logged_ticket() -> Ticket {
+        Ticket {
+            version: RECORD_VERSION,
+            id: "t1".into(),
+            ..serde_json::from_str(TICKET_V0).unwrap()
+        }
+    }
+
+    #[test]
+    fn a_logged_write_refused_as_newer_appends_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = DataDir::new(dir.path());
+        let t = Ticket {
+            version: RECORD_VERSION + 1,
+            ..logged_ticket()
+        };
+        assert!(write_ticket_logged(&data, &t, 1).is_err());
+        assert!(!crate::events::log_path(&data).exists());
+        assert!(!data.ticket_file("t1").exists());
+    }
+
+    #[test]
+    fn a_logged_write_that_fails_withdraws_its_events() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = DataDir::new(dir.path());
+        let mut t = logged_ticket();
+        write_ticket_logged(&data, &t, 1).unwrap();
+        // A second write leaves a `.bak`, which still reads as the
+        // record once the primary is broken below.
+        write_ticket_logged(&data, &t, 1).unwrap();
+        t.decisions.push(crate::ticket::Decision {
+            id: "d1".into(),
+            stage: "plan".into(),
+            name: "finalize".into(),
+            kind: crate::ticket::DecisionKind::Permission,
+            question: "Finalize it?".into(),
+            options: vec!["finalize".into()],
+            recommendation: None,
+            attempt: None,
+            state: crate::ticket::DecisionState::Pending,
+            made_ms: 2,
+        });
+        // The record's place is a directory: the old record reads from
+        // its backup, and the write fails after the append.
+        let path = data.ticket_file("t1");
+        fs::remove_file(&path).unwrap();
+        fs::create_dir(&path).unwrap();
+        fs::write(path.join("x"), "x").unwrap();
+        assert!(write_ticket_logged(&data, &t, 2).is_err());
+        let events = crate::events::read_since(&crate::events::log_path(&data), 0).unwrap();
+        let kinds: Vec<_> = events.iter().map(|e| e.kind.as_str()).collect();
+        assert_eq!(kinds, ["taken", "decision", "void"]);
+        assert_eq!(events[2].voids, [events[1].seq]);
+        assert_eq!(
+            crate::events::withdrawn(&events)
+                .into_iter()
+                .collect::<Vec<_>>(),
+            [events[1].seq]
+        );
     }
 
     #[test]

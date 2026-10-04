@@ -31,6 +31,12 @@ impl SocketPort {
         }
     }
 
+    /// The socket it connects to.
+    #[must_use]
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
     /// The same, with a short reply timeout for a test to run into.
     #[cfg(test)]
     fn with_timeout(switchboard_data_dir: &Path, timeout: Duration) -> Self {

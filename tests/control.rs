@@ -12,7 +12,9 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use switchboard::SwitchboardApp;
-use switchboard::adapters::fakes::{self, FakeHost, FakeOpener, FakeOperations, MemoryStore};
+use switchboard::adapters::fakes::{
+    self, FakeHost, FakeOpener, FakeOperations, FakeSecrets, MemoryStore,
+};
 use switchboard::app::Services;
 use switchboard::core::{AppAction, View};
 use switchboard::ports::control::OpLine;
@@ -38,8 +40,19 @@ fn port(initial: Loaded, operations: FakeOperations) -> Port {
 
 /// A port whose host the test keeps a handle to.
 fn port_on(initial: Loaded, operations: FakeOperations, host: FakeHost) -> Port {
+    port_with(initial, operations, host, FakeSecrets::default())
+}
+
+/// A port whose host and secret store the test keeps handles to.
+fn port_with(
+    initial: Loaded,
+    operations: FakeOperations,
+    host: FakeHost,
+    secrets: FakeSecrets,
+) -> Port {
     let opener = FakeOpener::default();
     let services = Services {
+        secrets: Box::new(secrets),
         store: Box::new(MemoryStore {
             initial,
             ..MemoryStore::default()
@@ -647,5 +660,112 @@ fn a_pane_at_claudes_trust_question_waits_on_the_user_until_it_is_answered() {
     assert!(
         matches!(&waiting, Reply::Waiting { sessions } if sessions.is_empty()),
         "{waiting:?}"
+    );
+}
+
+/// `session.screen` reads a running pane's last lines, refuses a
+/// session that is not running, and never lets a project secret's value
+/// through: Dispatch hands the text to an agent as a tool result.
+#[test]
+fn a_screen_is_the_panes_tail_with_secret_values_named() {
+    let host = FakeHost::default();
+    let secrets = FakeSecrets::default();
+    let mut port = port_with(
+        Loaded::default(),
+        FakeOperations::default(),
+        host.clone(),
+        secrets.clone(),
+    );
+    let reply = call(
+        &mut port,
+        Request::new("sp", Body::SpaceNew { name: "D".into() }),
+    );
+    let space = made_id(&reply, RecordKind::Space);
+    let reply = call(
+        &mut port,
+        Request::new(
+            "pj",
+            Body::ProjectAdd {
+                space,
+                name: "#1".into(),
+                root: PathBuf::from("/tmp"),
+            },
+        ),
+    );
+    let project = made_id(&reply, RecordKind::Project);
+    let pid = switchboard::core::ProjectId(uuid::Uuid::parse_str(&project).unwrap());
+    port.app.dispatch(AppAction::SetProjectEnv(
+        pid,
+        switchboard::core::ProjectEnv {
+            vars: vec![switchboard::core::EnvVar {
+                name: "API_TOKEN".into(),
+                value: String::new(),
+                secret: true,
+            }],
+            ..Default::default()
+        },
+    ));
+    secrets.state().insert(
+        switchboard::core::SecretScope::Project(pid).account("API_TOKEN"),
+        "tok-5e3cr3t".into(),
+    );
+    let reply = call(&mut port, Request::new("se", session_new(&project, None)));
+    let session = made_id(&reply, RecordKind::Session);
+    let screen = |port: &mut Port, op: &str, lines: Option<u32>| {
+        call(
+            port,
+            Request::new(
+                op,
+                Body::SessionScreen {
+                    session: session.clone(),
+                    lines,
+                },
+            ),
+        )
+    };
+    // The host lists no pane for it: a session that is not running.
+    port.app.poll_now();
+    assert_eq!(screen(&mut port, "q0", None), Reply::failed("not running"));
+
+    let record = switchboard::core::RecordId(uuid::Uuid::parse_str(&session).unwrap());
+    let pane = HostId(record.host_name());
+    host.state().statuses.push(HostStatus {
+        id: pane.clone(),
+        liveness: HostLiveness::Running {
+            pid: 7,
+            command: "claude".into(),
+        },
+        cwd: None,
+        last_activity: None,
+        title: None,
+    });
+    host.state().snapshots.insert(
+        pane,
+        "one\ntwo\n$ env | grep TOKEN\nAPI_TOKEN=tok-5e3cr3t\n\n\n".into(),
+    );
+    port.app.poll_now();
+    let reply = screen(&mut port, "q1", Some(2));
+    assert_eq!(
+        reply,
+        Reply::Screen {
+            text: "$ env | grep TOKEN\nAPI_TOKEN=<API_TOKEN>".into()
+        }
+    );
+    let Reply::Screen { text } = screen(&mut port, "q2", None) else {
+        panic!("a running session has a screen");
+    };
+    assert!(text.starts_with("one\ntwo"), "{text}");
+    assert!(!text.contains("tok-5e3cr3t"), "{text}");
+
+    // A value the pane wrapped, its first half above the asked-for line.
+    host.state().snapshots.insert(
+        HostId(record.host_name()),
+        "ok\nAPI_TOKEN=tok-5e\n3cr3t\n".into(),
+    );
+    assert_eq!(
+        screen(&mut port, "q3", Some(1)),
+        Reply::Screen {
+            text: "API_TOKEN=<API_TOKEN>".into()
+        }
     );
 }

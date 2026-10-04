@@ -1697,6 +1697,25 @@ runner reads it as lost, an active ticket starts it again (the new run
 waits on cargo's build lock behind the orphan), and a park cancels
 without killing it.
 
+A supervising agent has commands of its own, all read-only:
+`dispatch health` (the runner's `runner.json`, written after every
+pass, plus one query on each socket), `show` (a ticket with its lanes'
+base, head and pushed head, its rounds' files and a `paths` view of the
+files to read next), `events` and `wait` over `events.jsonl`, `report`
+(stage time, plan and code review points counted by id, fix passes,
+rebases, the PR's range from git), and `tail`, which reads a running
+agent's pane through the new `session.screen` query with the project's
+secret values replaced by their names. The event log is diffed at the
+one ticket write path and synced before the record's rename, so a
+crash repeats a transition and never loses one, and a failed write is
+withdrawn with a `void`. Usage errors exit 64; `wait` exits 2 on a
+timeout and 3 when the ticket parks or closes. The agent guide is the
+contract, and a test holds it to the usage. Gaps: `events.jsonl` is
+never rotated; cost and turns are not recorded, so `report` says so;
+tickets from before this build have no events until their next
+transition; and a `void` whose own append fails leaves its events
+standing, which only `wait`'s check against the record covers.
+
 ## Global workspace status (2026-10-01)
 
 Built: `SpaceId::GLOBAL` and `SpaceId::contains` in the core, the rehydration

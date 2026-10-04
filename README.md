@@ -137,7 +137,9 @@ Dev aids, all environment variables:
   reads the same variable). Tickets' trees go under
   `~/.dispatch/worktrees` regardless, or wherever `dispatch worktrees
   <path>` (also on the Dispatch page) points; the setting is
-  `<dir>/settings.json`.
+  `<dir>/settings.json`. `<dir>/events.jsonl` is the event log
+  `dispatch events` and `wait` read, and `<dir>/runner.json` the
+  runner's status after its last pass, which `dispatch health` reads.
 - `SWITCHBOARD_SCRIPT=<file>`: run actions at startup, one per line, so
   the app can be put into a known state without clicking. See
   `src/script.rs` for the lines (`add-project`, `new-shell`, `new-claude`,
@@ -208,7 +210,7 @@ src/adapters/
   transcript.rs          Claude Code transcript (JSONL) -> Conversation turns
   ghostty.rs             open, reveal, Ghostty window launch and raise
   fakes.rs               test doubles for every port
-src/app.rs               SwitchboardApp: owns core + adapters; runs effects; polls host and events
+src/app.rs               SwitchboardApp: owns core + adapters; runs effects; polls host and events; answers control-port queries (`session.screen` with the project's secret values redacted)
 src/script.rs            SWITCHBOARD_SCRIPT dev aid
 src/ui/
   mod.rs                 UiState, draw loop (collect actions, then dispatch), keyboard, side panel tabs
@@ -238,14 +240,17 @@ src/ui/
   dialogs.rs             add project / create session dialogs, the full-message and links-in-message dialogs
 assets/fonts/            Source Serif 4 (Regular, Semibold, Italic; OFL), embedded by theme.rs
 tests/ui.rs              headless flows via egui_kittest with fakes
-tests/control.rs         the control port over a real socket with fakes: ops on records, logged replies, interrupted launches
+tests/control.rs         the control port over a real socket with fakes: ops on records, logged replies, interrupted launches, a pane's screen with secrets named
 tests/fixtures/          a small real Claude Code transcript for the parser tests
 tests/live.rs            ignored: real claude / codex / Ghostty runs
 tests/gate.rs            Milestone 1 gate: real store, tmux, hooks; agents ignored
 control/                 switchboard-control: the control port's wire contract (requests, replies, views) and a blocking client; std + serde only
 dispatch-control/        dispatch-control: the wire contract of Dispatch's own port (tickets as views, decide, queue, take, resume, close, worktrees) and a blocking client; std + serde only
 dispatch/                the `dispatch` binary (docs/dispatch.md; docs/dispatch-agent-guide.md is the command-line guide for agents that take tickets; docs/dispatch-pipeline-improvements.md is the open list of pipeline changes drawn from tickets run so far): a ticket scheduler that drives Switchboard over the control port and never links the app
-  src/main.rs            CLI: take, run, decide, decisions, status, queue, resume, close, worktrees
+  src/main.rs            CLI: take, run, decide, decisions, status, queue, resume, close, worktrees; for a supervising agent, events, wait, show, report, tail and health (usage errors exit 64)
+  src/events.rs          the event log `events.jsonl`: what a ticket write changed (`between`, pure), appended and synced before the record's rename, a `void` for a write that failed; read, followed, and waited on with each match checked against the record
+  src/report.rs          how a ticket went, pure: stage time, plan and code review points counted by id, fix passes, rebases, the PR's size
+  src/health.rs          the runner's call counters, written as `runner.json` after every pass, and the `health` check of that file and both sockets
   src/serve.rs           Dispatch's port on <data>/dispatch.sock while `run` is up: the records as views, the commands the CLI has, one handler under one lock
   src/pipeline.rs        the TOML pipeline file, parsed in full and validated; fingerprint of the copy a ticket runs
   src/ticket.rs          the ticket record: source, lanes (with their last bring-up, `Refreshed`: whether the branch had commits, when, the rebaser's notes), attempts (with their checks' head and exit, the attempt a review carries and its send-back note, the history rewrite a review attempt made), decisions, operation ledger, a close's progress (`CloseProgress`); the per-project queue and closing list
@@ -253,12 +258,12 @@ dispatch/                the `dispatch` binary (docs/dispatch.md; docs/dispatch-
   src/review.rs          the code review stage: rounds of several reviewers over a lane's branch, a fresh implementer per round, checks at every accepted head; a rerun carries the last attempt's settled and open points; style and the plan's decisions do not hold a round open; a reviewer's line that every point left is wording is a note, not a point; folds the fix rounds into the commits they amend as it completes, or keeps them when the user answers `keep` to a failed fold (docs/dispatch.md, "The code review stage")
   src/recover.rs         unanswered ledger operations resolved by class through find and op.status; nothing launched twice
   src/view.rs            the `Dispatch · <project>` working set, one card per queued ticket, redrawn through set.sync
-  src/store.rs           Dispatch's data directory, flock, atomic writes; versioned `read_ticket`/`read_project` through `migrate`
-  src/git.rs             clones, worktrees and heads through fixed argv (a branch pushed only with a lease; a worktree removed, never forced; `changes`, and `uncommitted` for a close's preflight), a stage's checks as child processes polled by key, commits replayed with `merge-tree`/`commit-tree`, a branch moved by compare-and-swap, and whether the remote already holds a branch's commits; a kept branch read, deleted or renamed out of a retake's way; with a fake
+  src/store.rs           Dispatch's data directory, flock, atomic writes; versioned `read_ticket`/`read_project` through `migrate`; `write_ticket_logged`, the one ticket write, which logs its events first
+  src/git.rs             clones, worktrees and heads through fixed argv (a branch pushed only with a lease; a worktree removed, never forced; `changes`, and `uncommitted` for a close's preflight), a stage's checks as child processes polled by key, commits replayed with `merge-tree`/`commit-tree`, a branch moved by compare-and-swap, and whether the remote already holds a branch's commits; a kept branch read, deleted or renamed out of a retake's way; a range's commits and diff size for a report; with a fake
   src/history.rs         which commits a code review's fix rounds fold into: pure plans for `fold` and `one`
   src/github.rs          issues and pull requests through gh, with fakes
   src/bitbucket.rs       pull requests on Bitbucket Cloud through curl; credentials from the environment or <data>/env (NAME=value lines, mode 0600, never logged)
-  src/port.rs            the Port trait over the control socket client; the connection remade after any error, a timeout included
+  src/port.rs            the Port trait over the control socket client; the connection remade after any error, a timeout included; `path()` names the socket for `health`
   src/template.rs        `{a.b}` substitution for prompts
   tests/first_slice.rs   the acceptance table against an in-memory Switchboard (tests/support)
   tests/live.rs          ignored: the first stage against a real Switchboard and a haiku agent
