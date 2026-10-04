@@ -19,8 +19,8 @@ use dispatch::history::{Commit, Commits, Group};
 use dispatch::scheduler::{PR_ERROR_GRACE_MS, PR_POLL_MS, PR_YOUNG_HEAD_MS, Runner, STOP_LIMIT_MS};
 use dispatch::store::DataDir;
 use dispatch::ticket::{
-    Attempt, AttemptKind, AttemptState, Decision, PushedHead, ReviewerResult, Rewrite, RoundState,
-    SETTLE_POLLS, STOP_IDLE_POLLS, SourceSnapshot, Ticket, TicketState,
+    Attempt, AttemptKind, AttemptState, DIRTY_WAIT_MS, Decision, PushedHead, ReviewerResult,
+    Rewrite, RoundState, SETTLE_POLLS, STOP_IDLE_POLLS, SourceSnapshot, Ticket, TicketState,
 };
 use support::{FakeSwitchboard, SharedPort, events_of};
 use switchboard_control::{Body, Liveness, RunState, SessionKind};
@@ -146,6 +146,7 @@ struct Env {
 
 impl Env {
     fn new() -> Self {
+        dispatch::store::skip_fsync_for_tests();
         let dir = tempfile::tempdir().unwrap();
         let data = DataDir::new(dir.path().join("dispatch"));
         let worktrees = dir.path().join("wt");
@@ -5983,13 +5984,16 @@ fn a_changed_tree_voids_the_round_and_a_dirty_implementer_fails_it() {
     );
     // A commit in flight: the session lives, so the round waits for
     // the tree, for a while.
-    for _ in 0..dispatch::ticket::DIRTY_POLLS - dispatch::ticket::SETTLE_POLLS - 1 {
-        env.step();
-    }
+    env.steps_until(&id, "the dirty clock", |t, _| {
+        review_attempt(t).rounds[0].dirty_since_ms.is_some()
+    });
+    env.wait(DIRTY_WAIT_MS - 2_000);
+    env.step();
     assert!(
         env.pending(&id).is_empty(),
         "no question while the tree may still be committed"
     );
+    env.wait(2_000);
     env.steps_until(&id, "the rerun question", |t, _| {
         t.pending_decisions().iter().any(|d| d.name == "rerun")
     });
@@ -6028,6 +6032,14 @@ fn a_commit_that_lands_after_the_response_settles_is_not_a_dirty_tree() {
     let t = env.ticket(&id);
     assert!(t.pending_decisions().is_empty(), "{t:#?}");
     assert!(review_attempt(&t).rounds[0].dirty_polls > 0);
+    let since = review_attempt(&t).rounds[0].dirty_since_ms;
+    assert!(since.is_some());
+    // A restarted runner keeps the clock the first dirty pass started.
+    env.restart();
+    env.step();
+    let t = env.ticket(&id);
+    assert_eq!(review_attempt(&t).rounds[0].dirty_since_ms, since);
+    assert!(t.pending_decisions().is_empty(), "{t:#?}");
     env.repo.lock().unwrap().dirty.clear();
     env.steps_until(&id, "the round fixed", |t, _| {
         review_attempt(t).rounds[0].head_after.is_some()

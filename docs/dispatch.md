@@ -218,7 +218,10 @@ never had and read as absent. Version 4 adds a code review attempt's
 `carried_from` and `rework`, and a lane's `refreshed` gains `commits`,
 `notes` and `at_ms`, all read as absent in older records; a send-back
 note now lives on the attempt. Version 5 adds a code review attempt's
-`rewrite`, absent in older records.
+`rewrite`, absent in older records. Version 6 adds a review round's
+`dirty_since_ms`, the time a pass first found the tree dirty after the
+response settled, absent in older records; a round caught mid-wait
+starts its clock on the first pass after the upgrade.
 
 ### The event log and the runner's status
 
@@ -1192,8 +1195,10 @@ branch and write `response.md` answering each by id (`fixed` or
 the tree clean and committed; it is held by a busy card after its Stop
 the same way, and a response still missing after the idle grace fails
 the round. A
-tree still dirty when the response settles is waited on for about
-five minutes while the session lives (`DIRTY_POLLS`), because a commit
+tree still dirty when the response settles is waited on for five
+minutes from the first dirty pass while the session lives
+(`DIRTY_WAIT_MS`, measured from the round's `dirty_since_ms`, so a
+restart keeps the clock), because a commit
 whose pre-commit hook runs the test suite lands that late; dirty past
 that, or with the session gone, the round fails. Its head is
 `head_after`, an authorised transition. Then

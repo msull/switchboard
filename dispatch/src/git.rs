@@ -1705,30 +1705,36 @@ mod tests {
             &log,
         )
         .unwrap();
-        let mut code = None;
-        for _ in 0..200 {
-            if let Some(result) = cli.poll_check("k") {
-                code = Some(result.unwrap());
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(20));
-        }
-        assert_eq!(code, Some(3));
+        let code = poll_to("the check's exit", || cli.poll_check("k")).unwrap();
+        assert_eq!(code, 3);
         assert_eq!(std::fs::read_to_string(&log).unwrap().trim(), "backend");
         assert!(GitCli::default().poll_check("k").unwrap().is_err());
     }
 
+    /// Polls `ready` every 25 ms until it gives a value; panics naming
+    /// `what` after ten seconds. A deadline, not a count, so a loaded
+    /// machine only makes the test slower.
+    fn poll_to<T>(what: &str, mut ready: impl FnMut() -> Option<T>) -> T {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            if let Some(value) = ready() {
+                return value;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "never saw {what} within 10 s"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+    }
+
     /// The pid a check's script wrote to `pid` in `dir`, once it has.
     fn written_pid(dir: &Path) -> u32 {
-        for _ in 0..200 {
-            if let Ok(text) = std::fs::read_to_string(dir.join("pid"))
-                && let Ok(pid) = text.trim().parse()
-            {
-                return pid;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
-        panic!("the check never wrote its pid");
+        poll_to("the check's pid", || {
+            std::fs::read_to_string(dir.join("pid"))
+                .ok()
+                .and_then(|text| text.trim().parse().ok())
+        })
     }
 
     fn ps_field(field: &str, pid: u32) -> u32 {
@@ -1745,17 +1751,6 @@ mod tests {
             .stderr(std::process::Stdio::null())
             .status()
             .is_ok_and(|s| s.success())
-    }
-
-    /// Polls `test` for up to two seconds.
-    fn within_2s(mut test: impl FnMut() -> bool) -> bool {
-        for _ in 0..100 {
-            if test() {
-                return true;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(20));
-        }
-        false
     }
 
     #[test]
@@ -1778,7 +1773,7 @@ mod tests {
         let sh = ps_field("ppid", sleep);
         assert_eq!(ps_field("pgid", sleep), sh, "the check leads its group");
         cli.kill_check("k");
-        assert!(within_2s(|| cli.check_gone("k")));
+        poll_to("the check gone", || cli.check_gone("k").then_some(()));
         assert!(!alive(sleep));
     }
 
@@ -1804,7 +1799,9 @@ mod tests {
         assert!(alive(inner), "a second kill sends no KILL");
         assert!(!cli.check_gone("k"));
         cli.escalate_check("k");
-        assert!(within_2s(|| !alive(inner)), "the step-up reached the group");
+        poll_to("the step-up reached the group", || {
+            (!alive(inner)).then_some(())
+        });
         assert!(!cli.killed.contains_key("k"));
         cli.escalate_check("k");
         assert!(!alive(inner));

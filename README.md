@@ -11,10 +11,46 @@ Requires Rust 1.95 or newer.
 
 ```sh
 cargo run --locked                                   # launch the app
-cargo test --locked                                  # unit + headless UI + tmux integration tests
-cargo clippy --locked --all-targets -- -D warnings   # lint
+cargo test --locked --workspace                      # unit + headless UI + tmux integration tests, every crate
+cargo clippy --locked --workspace --all-targets -- -D warnings   # lint
 cargo fmt --all                                      # format
+./scripts/test-times.sh                              # every test timed serially, the slowest ten, the budget checked
 ```
+
+Test times. The budget is no test over 5 s and the whole workspace
+under two minutes locally; `scripts/test-times.sh` checks the first and
+exits non-zero past it. Measured on an M-series Mac with the script
+(serial):
+
+```
+slowest ten:
+  2.26 s  gate  project_config_is_listed_but_never_run_until_approved
+  2.19 s  gate  killing_the_attached_client_keeps_the_session
+  1.52 s  switchboard (lib)  ui::session::tests::a_dropped_terminal_releases_its_descriptors
+  1.51 s  dispatch/dispatch (lib)  health::tests::a_socket_that_never_answers_times_out_and_one_that_does_is_timed
+  0.88 s  dispatch/first_slice  a_lost_unmark_is_sent_again_until_it_lands
+  0.74 s  dispatch/first_slice  keep_or_no_key_leaves_history_alone
+  0.70 s  dispatch/first_slice  a_rebase_that_changes_nothing_or_past_the_cap_is_a_question
+  0.66 s  gate  restart_reattaches_to_live_sessions
+  0.62 s  dispatch/first_slice  a_branch_pushed_by_an_agent_is_not_rewritten_after_a_send_back
+  0.60 s  switchboard (lib)  adapters::tmux::tests::shell_session_with_env_cwd_and_scrollback
+each binary, serially:
+ 40.07 s  dispatch/first_slice
+  5.54 s  dispatch/dispatch (lib)
+  5.44 s  gate
+  3.48 s  switchboard (lib)
+  1.11 s  ui
+  0.28 s  control
+ 55.92 s  in all
+```
+
+`cargo test --locked --workspace` took 37 s of wall time in parallel on
+the same machine, built. The two gate tests at the top spend most of
+their time holding still on purpose (half-second and two-second windows
+in which nothing may happen). Measure on a quiet machine: another
+checkout running its tests at the same time makes every file operation
+wait behind its device flushes, and the same script then reads ten
+times slower.
 
 Requirements: macOS, `tmux` 3.2 or newer (`brew install tmux`), Ghostty
 for agent sessions, `cmake` (`brew install cmake`; the embedded Prompt Box
@@ -244,6 +280,8 @@ tests/control.rs         the control port over a real socket with fakes: ops on 
 tests/fixtures/          a small real Claude Code transcript for the parser tests
 tests/live.rs            ignored: real claude / codex / Ghostty runs
 tests/gate.rs            Milestone 1 gate: real store, tmux, hooks; agents ignored
+scripts/test-times.sh    every test's time, serially, through libtest's `--report-time`; the slowest ten, each binary's total, the 5 s budget
+scripts/ci-test.sh       CI's test step: the workspace, then one retry of the failed tests, warning `flaky:` for each that passes on it
 control/                 switchboard-control: the control port's wire contract (requests, replies, views) and a blocking client; std + serde only
 dispatch-control/        dispatch-control: the wire contract of Dispatch's own port (tickets as views, decide, queue, take, resume, close, worktrees) and a blocking client; std + serde only
 dispatch/                the `dispatch` binary (docs/dispatch.md; docs/dispatch-agent-guide.md is the command-line guide for agents that take tickets; docs/dispatch-pipeline-improvements.md is the open list of pipeline changes drawn from tickets run so far): a ticket scheduler that drives Switchboard over the control port and never links the app
@@ -286,6 +324,15 @@ no sleeping. Adapters get their own tests where they have logic. UI tests
 run the real `eframe::App` headlessly with fake adapters, find widgets by
 label, and advance frames with `harness.run_steps(2)`: one frame to
 process the click, one to render its result.
+
+A test that waits on a real process (a tmux pane, a child process, a
+thread's result) polls to a deadline through its file's helper
+(`poll_on` in the tmux adapter, `poll_to`, `wait_until` and `hold` in
+`tests/gate.rs`, `frames_until` in `tests/ui.rs`, `poll_to` in
+Dispatch's `git.rs`) and never sleeps a fixed time before an assert.
+Dispatch's integration tests skip the device flush
+(`store::skip_fsync_for_tests`) and move time with `Env::wait` rather
+than stepping through it.
 
 Tests that hit real services (a model, a paid API) go in their own
 `tests/*.rs` file, marked `#[ignore]`, with the command to run them

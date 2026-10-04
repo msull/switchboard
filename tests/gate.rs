@@ -197,7 +197,20 @@ impl Gate {
     }
 }
 
-/// Polls the app every `step` until `ready`, failing after `timeout`.
+/// Checks `ready` every 25 ms until it holds, failing after `timeout`.
+/// Every wait in this file comes down to this loop, so a slow machine
+/// only makes a test slower, never wrong.
+fn poll_to(what: &str, timeout: Duration, mut ready: impl FnMut() -> bool) {
+    let deadline = Instant::now() + timeout;
+    while !ready() {
+        assert!(Instant::now() < deadline, "timed out waiting for {what}");
+        std::thread::sleep(Duration::from_millis(25));
+    }
+}
+
+/// Polls the app until `ready`, failing after `timeout`. `step` is the
+/// least time between two of the app's polls, as the app's own once a
+/// second is: a poll reads tmux and the hook log.
 fn wait_until(
     app: &mut SwitchboardApp,
     what: &str,
@@ -205,15 +218,43 @@ fn wait_until(
     step: Duration,
     mut ready: impl FnMut(&SwitchboardApp) -> bool,
 ) {
-    let deadline = Instant::now() + timeout;
-    loop {
-        app.poll_now();
-        if ready(app) {
-            return;
+    let mut next = Instant::now();
+    poll_to(what, timeout, || {
+        if Instant::now() < next {
+            return false;
         }
-        assert!(Instant::now() < deadline, "timed out waiting for {what}");
-        std::thread::sleep(step);
-    }
+        next = Instant::now() + step;
+        app.poll_now();
+        ready(app)
+    });
+}
+
+/// Half a second of polls in which `marker` must not appear: a command
+/// that must not have run.
+fn never_appears(app: &mut SwitchboardApp, what: &str, marker: &Path) {
+    hold(app, what, Duration::from_millis(500), |_| marker.exists());
+}
+
+/// Polls the app every `QUICK` for `window`, failing with `what` the
+/// moment `never` holds: the windows in which nothing may happen.
+fn hold(
+    app: &mut SwitchboardApp,
+    what: &str,
+    window: Duration,
+    mut never: impl FnMut(&SwitchboardApp) -> bool,
+) {
+    let end = Instant::now() + window;
+    let mut next = Instant::now();
+    // The deadline only backs up `end`, which always comes first.
+    poll_to(what, window + Duration::from_secs(5), || {
+        let now = Instant::now();
+        if now >= next {
+            next = now + QUICK;
+            app.poll_now();
+            assert!(!never(app), "{what}");
+        }
+        now >= end
+    });
 }
 
 const QUICK: Duration = Duration::from_millis(100);
@@ -520,22 +561,30 @@ fn killing_the_attached_client_keeps_the_session() {
         .stderr(Stdio::null())
         .spawn()
         .expect("script + tmux attach");
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while gate.attached_sessions() != [id.host_name()] {
-        assert!(Instant::now() < deadline, "client never attached");
-        std::thread::sleep(QUICK);
-    }
-    std::thread::sleep(Duration::from_secs(2));
+    poll_to("the client attached", Duration::from_secs(5), || {
+        gate.attached_sessions() == [id.host_name()]
+    });
+    // Only the attached client is checked; polling the app meanwhile is
+    // incidental to `hold`.
+    hold(
+        &mut app,
+        "the client stays attached",
+        Duration::from_secs(2),
+        |_| gate.attached_sessions() != [id.host_name()],
+    );
     client.kill().unwrap();
     client.wait().unwrap();
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while !gate.attached_sessions().is_empty() {
-        assert!(Instant::now() < deadline, "client never detached");
-        std::thread::sleep(QUICK);
-    }
+    poll_to("the client detached", Duration::from_secs(5), || {
+        gate.attached_sessions().is_empty()
+    });
 
-    app.poll_now();
-    assert_eq!(app.core().card_state(id), CardState::Idle);
+    wait_until(
+        &mut app,
+        "the shell seen idle",
+        Duration::from_secs(5),
+        QUICK,
+        |app| app.core().card_state(id) == CardState::Idle,
+    );
     assert!(matches!(
         app.core().host_status(id).unwrap().liveness,
         Liveness::Running { pid, .. } if pid == pid_before
@@ -974,11 +1023,7 @@ fn project_config_is_listed_but_never_run_until_approved() {
 
     let mut app = gate.started();
     let project = add_project(&mut app, &root);
-    for _ in 0..5 {
-        app.poll_now();
-        std::thread::sleep(QUICK);
-    }
-    let listed = |app: &SwitchboardApp| {
+    let find = |app: &SwitchboardApp| {
         app.core()
             .workspace(project)
             .unwrap()
@@ -986,8 +1031,16 @@ fn project_config_is_listed_but_never_run_until_approved() {
             .iter()
             .find(|s| s.name == "evil")
             .cloned()
-            .expect("the entry is listed")
     };
+    let listed = |app: &SwitchboardApp| find(app).expect("the entry is listed");
+    wait_until(
+        &mut app,
+        "the entry listed",
+        Duration::from_secs(10),
+        QUICK,
+        |app| find(app).is_some(),
+    );
+    never_appears(&mut app, "the unapproved entry never runs", &marker);
     let evil = listed(&app);
     assert_eq!(evil.kind, SessionKind::Service);
     assert_eq!(evil.approval(), Approval::Pending);
@@ -997,10 +1050,11 @@ fn project_config_is_listed_but_never_run_until_approved() {
     // The reconcile on a restart sees an unapproved entry: still nothing.
     drop(app);
     let mut app = gate.started();
-    for _ in 0..5 {
-        app.poll_now();
-        std::thread::sleep(QUICK);
-    }
+    never_appears(
+        &mut app,
+        "the unapproved entry never runs after a restart",
+        &marker,
+    );
     assert_eq!(listed(&app).id, evil.id, "same record after a restart");
     assert_eq!(listed(&app).approval(), Approval::Pending);
     assert!(!marker.exists());
@@ -1008,10 +1062,7 @@ fn project_config_is_listed_but_never_run_until_approved() {
 
     // Approval alone launches nothing; the reconcile after a restart does.
     app.dispatch(AppAction::ApproveDefinition(evil.id));
-    for _ in 0..3 {
-        app.poll_now();
-        std::thread::sleep(QUICK);
-    }
+    never_appears(&mut app, "approval alone launches nothing", &marker);
     assert_eq!(listed(&app).approval(), Approval::Approved);
     assert!(!marker.exists());
     drop(app);
@@ -1027,17 +1078,20 @@ fn project_config_is_listed_but_never_run_until_approved() {
 
     // An edit to the entry drops the approval: the new command never runs.
     let marker2 = gate.tmp.path().join("pwned-2");
-    std::thread::sleep(Duration::from_millis(1100));
     write(&format!("touch {}", marker2.display()));
+    // Ahead of the clock, so the edit reads as one even within the
+    // second the file was first written.
+    fs::File::options()
+        .write(true)
+        .open(&file)
+        .unwrap()
+        .set_modified(SystemTime::now() + Duration::from_secs(2))
+        .unwrap();
     wait_until(&mut app, "changed definition", launch, QUICK, |app| {
         listed(app).approval() == Approval::Changed
     });
     app.dispatch(AppAction::RestartSession(evil.id));
-    for _ in 0..5 {
-        app.poll_now();
-        std::thread::sleep(QUICK);
-    }
-    assert!(!marker2.exists());
+    never_appears(&mut app, "the changed command never runs", &marker2);
     assert!(
         app.core()
             .notices()
@@ -1182,9 +1236,12 @@ fn autostart_service_starts_and_agent_does_not() {
         "service running",
         Duration::from_secs(5),
         QUICK,
-        |app| is_running(app, svc),
+        |app| is_running(app, svc) && app.core().card_state(svc) == CardState::Idle,
     );
-    assert_eq!(app.core().card_state(svc), CardState::Idle);
+    let pid = match &app.core().host_status(svc).unwrap().liveness {
+        Liveness::Running { pid, .. } => *pid,
+        other => panic!("{other:?}"),
+    };
     let listed = gate.list();
     assert_eq!(listed.len(), 1);
     assert_eq!(listed[0].id.0, svc.host_name());
@@ -1195,8 +1252,20 @@ fn autostart_service_starts_and_agent_does_not() {
     // A second start finds the pane warm and does not start it again.
     drop(app);
     let mut app = gate.started();
-    app.poll_now();
-    assert_eq!(app.core().card_state(svc), CardState::Idle);
+    wait_until(
+        &mut app,
+        "service seen warm",
+        Duration::from_secs(10),
+        QUICK,
+        |app| app.core().card_state(svc) == CardState::Idle,
+    );
+    assert!(
+        matches!(
+            app.core().host_status(svc).unwrap().liveness,
+            Liveness::Running { pid: again, .. } if again == pid
+        ),
+        "the same process, not a second start"
+    );
     assert_eq!(gate.list().len(), 1);
     assert!(app.core().notices().iter().all(|n| !n.is_error));
 }

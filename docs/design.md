@@ -1812,6 +1812,26 @@ Known gap: `HookLog::compact` and `rotate_scrollback` are called only
 from tests, so `events.log` grows without bound and the compaction the
 hook section above describes does not happen yet.
 
+## Test waits and times (2026-10-04)
+
+A test that waits on a real process (a tmux pane, a child check, the
+file index's thread) polls to a deadline through its file's helper and
+never sleeps a fixed time before an assert, so a loaded machine makes a
+test slower, not red. Dispatch's dirty-tree wait after an implementer's
+response moved from a count of passes to the clock: five minutes from
+the round's `dirty_since_ms`, which the record now carries (record
+version 6), so a restart keeps the clock and the acceptance table steps
+over it with `Env::wait`. Dispatch's integration tests skip the device
+flush in `store::atomic_write`, which was most of their time on macOS.
+`scripts/test-times.sh` measures every test serially against a budget
+of 5 s a test, and the README records the slowest.
+
+Known gap: tmux 3.4 on the Linux runner can leave a pane dead without
+a status. The exit-code test accepts that on a tmux older than 3.5,
+and CI (`scripts/ci-test.sh`) retries a failed test once and warns
+`flaky:` when the retry passes. A test binary that crashes without
+naming its failed tests fails CI with no retry.
+
 ## Open questions
 
 - Shared project config runs with a hash-and-approve flow and no

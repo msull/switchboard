@@ -7,7 +7,7 @@
 #![allow(clippy::assert_is_empty)]
 
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use egui::accesskit::Role;
 use egui_kittest::Harness;
@@ -233,6 +233,24 @@ fn actions(harness: &Harness<'static, SwitchboardApp>) -> Vec<AppAction> {
         .filter(|a| **a != AppAction::Tick)
         .cloned()
         .collect()
+}
+
+/// Runs frames until `ready`, for state that lands from a thread;
+/// panics naming `what` after ten seconds.
+fn frames_until(
+    harness: &mut Harness<'static, SwitchboardApp>,
+    what: &str,
+    mut ready: impl FnMut(&Harness<'static, SwitchboardApp>) -> bool,
+) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        harness.run_steps(2);
+        if ready(harness) {
+            return;
+        }
+        assert!(Instant::now() < deadline, "timed out waiting for {what}");
+        std::thread::sleep(Duration::from_millis(25));
+    }
 }
 
 fn click(harness: &mut Harness<'static, SwitchboardApp>, label: &str) {
@@ -1036,14 +1054,10 @@ fn finder_matches_across_the_project() {
     let (mut harness, _) = harness();
     let (_dir, pid, _) = file_project(&mut harness);
     type_into(&mut harness, "Find", "dsgn");
-    // The index is built on a thread; give it a moment.
-    for _ in 0..40 {
-        if harness.query_by_label("docs/design.md").is_some() {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(50));
-        harness.run_steps(2);
-    }
+    // The index is built on a thread.
+    frames_until(&mut harness, "the finder's match", |h| {
+        h.query_by_label("docs/design.md").is_some()
+    });
     click(&mut harness, "docs/design.md");
     harness.get_by_label("Design");
     assert_eq!(harness.state().core().view(), View::Board(pid));
@@ -1809,14 +1823,10 @@ fn a_directory_can_become_the_file_sides_top_and_the_project_root_comes_back() {
     let find = harness.get_by_label("Find");
     find.focus();
     find.type_text("md");
-    // The index is built on a thread; a few frames let it land.
-    for _ in 0..50 {
-        harness.run_steps(2);
-        if harness.query_by_label("docs/design.md").is_some() {
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(20));
-    }
+    // The index is built on a thread.
+    frames_until(&mut harness, "the finder's match", |h| {
+        h.query_by_label("docs/design.md").is_some()
+    });
     harness.get_by_label("docs/design.md");
     // The board's pinned README card is the one "README.md" on screen;
     // the finder adds none while narrowed, one once the root is back.
