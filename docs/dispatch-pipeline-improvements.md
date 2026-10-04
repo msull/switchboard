@@ -85,6 +85,13 @@ point, not a correctness point" (which keeps it under item 2).
 
 **Size.** An hour.
 
+**Built** as prompt text (2026-10-03). The fixer's guidance carries the
+checklist (everything added is read by something, no block left from
+moving code, every doc comment on one item, the three checks before the
+commit), and the style reviewer names "debris a fix round left" as its
+own. #43 adds the mechanical half: an agent that stops with a dirty tree
+is told to finish before its attempt fails.
+
 ## 4. A young head is pending, not "no checks"
 
 Filed as #16. `judge_pr` reads `Checks::None` as a question. In the first
@@ -102,7 +109,7 @@ fixer in its context, or a `recheck` answer) waits; past it, it asks.
 ## 5. The runner's socket client reconnects
 
 Filed as #15. One timed-out call and every later call fails with
-`SocketDown` until the runner restarts; after the reboot three Delta tickets
+`SocketDown` until the runner restarts; after the reboot three client-pipeline tickets
 failed their review attempts this way. Reconnect on the next call after a
 timeout, with the one-call budget kept.
 
@@ -132,6 +139,11 @@ written as "Nothing".
 instruction is present.
 
 **Size.** Prompt plus the PR template. An hour.
+
+**Built** as prompt text (2026-10-03). The `pr` stage's body has a
+"Beyond the issue" section, one line per thing the branch does that the
+issue did not ask for and which review round asked for it, and the PR is
+opened after review so the body describes the final branch.
 
 ## 7. A code review stage leaves clean commits
 
@@ -266,7 +278,7 @@ them pushed. `ready` then asked for a push by hand, and the push had to be
 forced, since the refresh had rewritten the PR's commit.
 
 **Most of it is gone by structure.** The Switchboard pipeline now opens the
-pull request at a `pr` stage after code review, as Delta always did: the
+pull request at a `pr` stage after code review, as the client pipeline always did: the
 fix rounds and the refreshes before it touch a branch that has no PR, and
 nothing needs pushing until the `pr` stage pushes once. CI runs once per
 reviewed branch, and nothing unreviewed is public.
@@ -300,7 +312,7 @@ failed push leaves `ready` to ask its `pr` question about the head.
 
 The `ready`-stage body check is not needed once the PR is opened over the
 reviewed branch (item 11). The body describes the final code, and the
-fixer and rebaser have no PR to keep true. Delta was already shaped this
+fixer and rebaser have no PR to keep true. The client pipeline was already shaped this
 way. The merge gate's rebaser, the one agent that still touches a branch
 with a PR, keeps its instruction to fix any claim its rebase changed.
 
@@ -325,7 +337,11 @@ with a PR, keeps its instruction to fix any claim its rebase changed.
 
 ## Backlog
 
-Observed, not yet issues. Each line says where it was seen.
+Observed, not yet issues. Each line says where it was seen. Entries that
+became issues: the style declaration line and the remedy log line (#38,
+built), checks left running on a park (#39, built), `keep` on a fold
+failure (#40, built), the CLI blocking behind a pass (#41), a dirty tree
+nudges the agent (#43), the supervising agent's CLI (#44).
 
 - **A check orphaned by a runner restart is never killed.** #39 put each
   check in its own process group, so it outlives a runner stopped by
@@ -336,16 +352,30 @@ Observed, not yet issues. Each line says where it was seen.
   point from the reviewer named `style` as style, so one about behaviour
   never holds a round open. Seen on #33's round 2. Whether it should block
   is open.
-- **The CLI blocks behind a long runner pass.** `dispatch take` waited about
-  three minutes while the runner was closing #23 (worktree removal, a
-  release). The runner holds the lock across a whole pass; the lock should
-  be held per ticket write, or `take` should queue the request.
+
 - **The planner's response described edits that were not in the file**
   (#25, plan review round 2). Fixed as prompt text on 2026-10-03: the
   `respond` prompt now orders read, edit, re-read, then response. Listed
   so the pattern is remembered if it recurs under other prompts.
-- **`fixup!` without the feature live.** Until a ticket's frozen pipeline
-  copy carries `commits = "fold"`, a fixer told to use `--fixup` would
-  land `fixup!` commits on main. The live Switchboard pipeline gets the
-  key and the fixer guidance together, after the runner that folds is
-  installed (2026-10-03, after PR 31).
+- **The commit message goes stale after a fold.** A `fixup!` keeps the
+  implementation commit's message, so when a review round renames
+  something the message's contract list names, the PR body is corrected
+  and the message is not (PRs 45 and 46). The fixer should commit with
+  `squash!` when its fix changes a name the message carries, or the `pr`
+  stage should check the message against the body.
+- **A `pr`-stage rebase with conflicts is reviewed by nobody.** The
+  refresh at `pr` entry rebases the reviewed branch; the checks run again
+  at the new head, but no reviewer reads the resolution, so a dropped line
+  that breaks no test lands (#40 and #39 on 2026-10-04). One delta pass by
+  the correctness reviewer when the rebase had conflicts, as item 8 does
+  for review rounds.
+- **tmux adapter tests flake on the Linux runner.** `command_exit_code_is_reported`
+  and `long_input_is_typed_in_full` each failed once on PR 45's CI, in
+  different jobs, and passed on rerun; `a_dropped_terminal_releases_its_descriptors`
+  and `autostart_service_starts_and_agent_does_not` did the same earlier.
+  Each wait in those tests should poll to a deadline, as the descriptor
+  test now does.
+- **Agents stop one step short.** A planner described edits it had not
+  made (#25), an implementer stopped with ten files uncommitted (#40).
+  Prompt text now says the stage is not done until the file or the tree
+  says so; #43 makes the tree check mechanical.

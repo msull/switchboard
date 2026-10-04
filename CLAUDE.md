@@ -70,6 +70,11 @@ outside a `cfg(target_os = "macos")` table may need macOS to compile.
 - Agents are never resumed automatically (a resume costs money). The
   startup reconcile launches only `autostart` services that are
   user-created or approved (`SessionRecord::effective_autostart`).
+- Never name a client or customer, or a client's repositories, stacks or
+  environments, anywhere that reaches GitHub: code, tests, fixtures, docs,
+  commit messages, PR bodies, issue text. Say "the client project" or "a
+  pipeline". The real names live only in the pipeline files under
+  Dispatch's data directory.
 
 ## Architecture
 
