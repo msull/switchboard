@@ -4645,6 +4645,43 @@ fn ticket_page_shows_an_attempts_nudges() {
     harness.get_by_label("nudged once");
 }
 
+/// A resolution review's card says how many commits the bring-up it
+/// read had conflicts in, and what the review made of it.
+#[test]
+fn ticket_page_shows_a_resolution_reviews_conflict() {
+    use switchboard::ports::dispatch::{AttemptView, LaneView, ReviewRoundView};
+    let (mut harness, _ids) = harness();
+    let mut status = dispatch_status();
+    status.tickets[0].lanes = vec![LaneView {
+        name: "repo".into(),
+        rebase_conflicts: Some(2),
+        resolution: Some(1),
+        ..LaneView::default()
+    }];
+    status.tickets[0].attempts = vec![AttemptView {
+        stage: "resolution".into(),
+        n: 1,
+        context: "repo".into(),
+        kind: "review".into(),
+        state: "complete".into(),
+        rounds: vec![ReviewRoundView {
+            n: 1,
+            head: "aaaaaaaa1111".into(),
+            state: "converged".into(),
+            ..ReviewRoundView::default()
+        }],
+        ..AttemptView::default()
+    }];
+    harness
+        .state_mut()
+        .dispatch(AppAction::DispatchStatus(Some(status)));
+    harness
+        .state_mut()
+        .dispatch(AppAction::ShowTicket("t1".into()));
+    harness.run_steps(2);
+    harness.get_by_label("rebased with conflicts in 2 commits, reviewed");
+}
+
 /// A completed code review that folded its fix rounds says so on its
 /// attempt's row, with both heads.
 #[test]

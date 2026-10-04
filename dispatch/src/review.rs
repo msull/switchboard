@@ -15,8 +15,8 @@ use switchboard_control::{self as wire, Body, Reply};
 use crate::history::{self, Commits};
 use crate::pipeline::{Gate, OperatorKind, Pipeline, Stage};
 use crate::scheduler::{
-    Ask, DirtyStep, GateStop, NO_SUCH_SESSION, Runner, SocketDown, asks_again, busy, checks_env,
-    confine_for, dirty_step, env_for, find_attempt, find_attempt_mut, gate_network,
+    Ask, DirtyStep, GateStop, NO_SUCH_SESSION, RESOLUTION, Runner, SocketDown, asks_again, busy,
+    checks_env, confine_for, dirty_step, env_for, find_attempt, find_attempt_mut, gate_network,
     guidance_prelude, held_in, idle_polls, lane_gate_argv, latest_attempt, may_rerun, new_attempt,
     next_n, primary_tree, record_of, rework_key, sent_back, session_kind, settle_file,
     stopped_after_nudges, vars_for,
@@ -24,8 +24,8 @@ use crate::scheduler::{
 use crate::template::Vars;
 use crate::ticket::{
     Attempt, AttemptKind, AttemptState, DIRTY_WAIT_MS, DecisionKind, GateRun, KEPT_BY_HAND,
-    PUBLISHED, ProjectState, Refreshed, ReviewRound, ReviewerResult, ReviewerRun, Rewrite,
-    RoundState, STOP_IDLE_POLLS, Ticket,
+    PUBLISHED, ProjectState, RefreshConflict, Refreshed, ReviewRound, ReviewerResult, ReviewerRun,
+    Rewrite, RoundState, STOP_IDLE_POLLS, Ticket,
 };
 
 /// What a reviewer writes when it has nothing to report, unless the
@@ -57,6 +57,17 @@ const REVIEW_REBASED: &str = "The base moved from {from} to {to} (git log {from}
 /// The rebase check when the base the branch moved from was not recorded.
 const REVIEW_REBASED_UNKNOWN: &str = "The branch was rebased onto {to} from a base that was not recorded. Check explicitly that both sides of every conflicted hunk are present and that the base's additions the rebase brought in are unchanged by the branch.";
 
+/// What a resolution review reads: the branch as it was last reviewed
+/// against the branch brought up after the conflict, commit by commit.
+const REVIEW_RESOLUTION: &str = "Branch {branch} in {worktree} was reviewed at {before} over {from}, then rebased onto {to}, and the rebase had conflicts in {commits}. Read only the resolution: git range-diff {from}..{before} {to}..{after}. Check that both sides of every conflicted hunk are present, that nothing the reviewed branch did was dropped, and that the base's additions in {from}..{to} are unchanged.";
+
+/// The resolution review when the base the reviewed branch sat on was
+/// not recorded and could not be read.
+const REVIEW_RESOLUTION_UNKNOWN: &str = "Branch {branch} in {worktree} was reviewed at {before}, then rebased onto {to}, and the rebase had conflicts in {commits}. The base it sat on was not recorded; compare {before} and {after} commit by commit. Check that both sides of every conflicted hunk are present, that nothing the reviewed branch did was dropped, and that the base's additions the rebase brought in are unchanged.";
+
+/// Where a resolution reviewer writes, worded as `REVIEW_PROMPT` says it.
+const REVIEW_RESOLUTION_WRITE: &str = "Write your findings to {feedback} as a Markdown list, one point per line starting with \"- \", each naming the file and saying why it matters. If you find nothing, write exactly this line alone: {no_feedback}. Change nothing in {worktree}.";
+
 /// The addition when the plan has a decisions section.
 const REVIEW_DECIDED: &str = "The plan at {plan} settled these decisions:\n\n{decisions}\n\nA point that contests one of them is out of scope for this review: write it as \"- decided: <the decision>: why\" and it is listed as found but not done.";
 
@@ -64,7 +75,7 @@ const REVIEW_DECIDED: &str = "The plan at {plan} settled these decisions:\n\n{de
 const REVIEW_STYLE: &str = "Start a point that is only about wording, naming, comments or layout with \"style: \". Style points do not hold the review open after its early rounds.";
 
 /// The reviewer whose untagged points are style points.
-const STYLE_REVIEWER: &str = "style";
+pub(crate) const STYLE_REVIEWER: &str = "style";
 
 /// The round file's section of style points a converged round leaves.
 pub(crate) const LEFT_HEADING: &str = "Left to the merge";
@@ -139,7 +150,7 @@ impl Runner {
 
     /// A new attempt of the stage in a context, and its first round.
     #[allow(clippy::too_many_arguments)]
-    fn start_review(
+    pub(crate) fn start_review(
         &mut self,
         t: &mut Ticket,
         ps: &mut ProjectState,
@@ -175,13 +186,17 @@ impl Runner {
         // A note from a later human gate goes to the first implementer
         // of this attempt, not to the reviewers. It leaves the ticket
         // now, so it does not keep the context sent back, and a note a
-        // fix pass has used is not given to the next attempt.
-        attempt.rework = t
-            .rework
-            .remove(&rework_key(&stage.name, ctx))
-            .or_else(|| unspent_note(t, &stage.name, ctx, n));
-        if !attempt.rework.as_deref().is_some_and(starts_over) {
-            attempt.carried_from = carry_source(t, &stage.name, ctx, n);
+        // fix pass has used is not given to the next attempt. A
+        // resolution review takes no note and carries nothing: a rerun
+        // reviews the same resolution afresh.
+        if stage.name != RESOLUTION {
+            attempt.rework = t
+                .rework
+                .remove(&rework_key(&stage.name, ctx))
+                .or_else(|| unspent_note(t, &stage.name, ctx, n));
+            if !attempt.rework.as_deref().is_some_and(starts_over) {
+                attempt.carried_from = carry_source(t, &stage.name, ctx, n);
+            }
         }
         t.attempts.push(attempt);
         self.save_ticket(t, now_ms)?;
@@ -405,7 +420,7 @@ impl Runner {
             return self.save_ticket(t, now_ms);
         }
         let project = a.project.clone().unwrap_or_default();
-        let prompt = Self::reviewer_prompt(t, p, stage, &a, &round, &r, cwd, lane);
+        let prompt = self.prompt_of(t, p, stage, &a, &round, &r, cwd, lane);
         let mut args = op.args.clone();
         let session_cwd = if op.kind.reviews_in_tree() {
             args.extend(op.kind.write_flags(&r.dir));
@@ -535,9 +550,92 @@ impl Runner {
         prompt
     }
 
+    /// An agent reviewer's prompt: `reviewer_prompt`, or for a resolution
+    /// review `resolution_prompt` over the lane's last bring-up and its
+    /// conflict, with the fork point of the reviewed head from the new
+    /// base standing in for a base that was not recorded.
+    #[allow(clippy::too_many_arguments)]
+    fn prompt_of(
+        &self,
+        t: &Ticket,
+        p: &Pipeline,
+        stage: &Stage,
+        a: &Attempt,
+        round: &ReviewRound,
+        r: &ReviewerRun,
+        cwd: &Path,
+        lane: Option<&str>,
+    ) -> String {
+        if a.stage != RESOLUTION {
+            return Self::reviewer_prompt(t, p, stage, a, round, r, cwd, lane);
+        }
+        // A resolution attempt starts only for a bring-up with a conflict.
+        let moved = lane
+            .and_then(|l| t.lanes.iter().find(|x| x.name == l))
+            .and_then(|l| l.refreshed.as_ref());
+        let Some(moved) = moved else {
+            return Self::reviewer_prompt(t, p, stage, a, round, r, cwd, lane);
+        };
+        let Some(conflict) = moved.conflict.as_ref() else {
+            return Self::reviewer_prompt(t, p, stage, a, round, r, cwd, lane);
+        };
+        let from = if conflict.from.is_empty() {
+            self.git
+                .merge_base(cwd, &conflict.before, &conflict.to)
+                .ok()
+        } else {
+            Some(conflict.from.clone())
+        };
+        Self::resolution_prompt(t, p, moved, conflict, from.as_deref(), round, r, cwd, lane)
+    }
+
+    /// A resolution reviewer's prompt: the operator's guidance, what the
+    /// conflict was and the one range to read (from `from`, the base the
+    /// reviewed head sat on, when it is known), the rebaser's notes when
+    /// there are some, where to write and how to tag a style point.
+    #[allow(clippy::too_many_arguments)]
+    fn resolution_prompt(
+        t: &Ticket,
+        p: &Pipeline,
+        moved: &Refreshed,
+        conflict: &RefreshConflict,
+        from: Option<&str>,
+        round: &ReviewRound,
+        r: &ReviewerRun,
+        cwd: &Path,
+        lane: Option<&str>,
+    ) -> String {
+        let mut vars = vars_for(t, p, lane);
+        vars.set("worktree", cwd.display().to_string())
+            .set("feedback", r.feedback.display().to_string())
+            .set("no_feedback", NO_FINDINGS)
+            .set("before", conflict.before.clone())
+            .set("to", conflict.to.clone())
+            .set(
+                "after",
+                moved.after.clone().unwrap_or_else(|| round.head.clone()),
+            )
+            .set("commits", conflicted_commits(&conflict.commits))
+            .set("from", from.unwrap_or_default());
+        let mut prompt = guidance_prelude(&p.operators[&r.name].guidance, &vars);
+        prompt.push_str(&vars.render(if from.is_some() {
+            REVIEW_RESOLUTION
+        } else {
+            REVIEW_RESOLUTION_UNKNOWN
+        }));
+        if let Some(notes) = &moved.notes {
+            let _ = write!(prompt, " The rebaser's notes are at {}.", notes.display());
+        }
+        prompt.push_str("\n\n");
+        prompt.push_str(&vars.render(REVIEW_RESOLUTION_WRITE));
+        prompt.push_str("\n\n");
+        prompt.push_str(REVIEW_STYLE);
+        prompt
+    }
+
     /// An open attempt, by its last round's state.
     #[allow(clippy::too_many_arguments)]
-    fn poll_review(
+    pub(crate) fn poll_review(
         &mut self,
         t: &mut Ticket,
         ps: &mut ProjectState,
@@ -570,6 +668,10 @@ impl Runner {
                 if let Some(r) = a.rewrite.as_ref().filter(|r| r.after.is_none()) {
                     let before = r.before.clone();
                     self.resume_rewrite(t, ps, p, stage, a, &before, cwd, lane, now_ms)
+                } else if a.stage == RESOLUTION && round.head_after.is_none() {
+                    // Nothing changed since the head the stage's own
+                    // checks or the bring-up left, so nothing runs.
+                    self.finish_review(t, &key, &round.head, now_ms)
                 } else if a.gate.is_some() {
                     self.poll_checks(t, ps, p, stage, a, &round, cwd, lane, now_ms)
                 } else {
@@ -779,6 +881,9 @@ impl Runner {
         let passes = u32::try_from(a.rounds.len()).unwrap_or(u32::MAX);
         let cap = stage.review_cap() + u32::from(a.extra_pass);
         let short: String = head.chars().take(8).collect();
+        if key.0 == RESOLUTION {
+            return self.ask_about_resolution(t, ps, p, a, round, open, path, now_ms);
+        }
         if passes >= cap {
             let question = format!(
                 "{} ({}): round {} of {cap} left {open} point(s) open at {short} (findings at {}). accept takes the reviewed head as it is; more is one fix pass, the checks, then one more review pass; park stops.",
@@ -824,6 +929,50 @@ impl Runner {
             Ask {
                 stage: &key.0,
                 name: "review-code",
+                kind: DecisionKind::Permission,
+                question,
+                options: &["fix", "accept", "park"],
+                recommendation: None,
+                attempt: Some(key.clone()),
+            },
+            now_ms,
+        )
+    }
+
+    /// A resolution review's findings: fixed without asking only when
+    /// its own dial says `auto`, since a `review-code` dial set to fix
+    /// on its own was set for a review of the whole branch. There is no
+    /// cap and no `more`: the review is one pass.
+    #[allow(clippy::too_many_arguments)]
+    fn ask_about_resolution(
+        &mut self,
+        t: &mut Ticket,
+        ps: &mut ProjectState,
+        p: &Pipeline,
+        a: &Attempt,
+        round: &ReviewRound,
+        open: u32,
+        path: &Path,
+        now_ms: u64,
+    ) -> Result<()> {
+        let key = (a.stage.clone(), a.n);
+        if p.dial(RESOLUTION) == "auto" {
+            round_of(t, &key, round.n).fix_authorised = true;
+            return self.save_ticket(t, now_ms);
+        }
+        let short: String = round.head.chars().take(8).collect();
+        let question = format!(
+            "{} ({}): the review of the conflict's resolution found {open} point(s) at {short} (findings at {}). fix starts a fresh implementer on them, then the checks, and the stage goes on; accept takes the head as it is; park stops.",
+            key.0,
+            a.context,
+            path.display()
+        );
+        self.ensure_decision(
+            t,
+            ps,
+            Ask {
+                stage: &key.0,
+                name: RESOLUTION,
                 kind: DecisionKind::Permission,
                 question,
                 options: &["fix", "accept", "park"],
@@ -1443,7 +1592,9 @@ impl Runner {
             a.context,
             round.n
         );
-        if round.state == RoundState::Fixed {
+        // A resolution review is one pass: its fix, checked, completes
+        // it with no second reviewer.
+        if round.state == RoundState::Fixed && a.stage != RESOLUTION {
             record_of(t, &key.0, key.1).gate = None;
             self.save_ticket(t, now_ms)?;
             return self.open_round(t, ps, p, stage, &key, cwd, lane, now_ms);
@@ -2731,6 +2882,16 @@ pub(crate) fn checks_reused_from<'s>(
     .then_some(like.as_str())
 }
 
+/// The commits a conflict names, as a resolution reviewer reads them.
+fn conflicted_commits(commits: &[String]) -> String {
+    let what = dispatch_control::commit_count(count(commits.len()));
+    if commits.is_empty() {
+        what
+    } else {
+        format!("{what} ({})", commits.join(", "))
+    }
+}
+
 /// A length as a record's count.
 fn count(n: usize) -> u32 {
     u32::try_from(n).unwrap_or(u32::MAX)
@@ -2755,7 +2916,16 @@ fn summary_of(a: &Attempt, carry: Option<&Carry>, head: &str) -> String {
     let last = a.rounds.last();
     let k = last.map_or(0, |r| r.n);
     let accepted = last.is_some_and(|r| r.state == RoundState::Accepted);
-    if accepted {
+    // Only a resolution review completes on a fixed round, with no
+    // review of the fix.
+    let fixed = last.is_some_and(|r| r.state == RoundState::Fixed);
+    if fixed {
+        let m = last.map_or(0, |r| r.open_points);
+        let _ = writeln!(
+            out,
+            "Fixed at `{head}` after round {k}, {m} point(s); the checks passed."
+        );
+    } else if accepted {
         let m = last.map_or(0, |r| r.open_points);
         let _ = writeln!(
             out,

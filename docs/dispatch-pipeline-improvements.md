@@ -343,8 +343,8 @@ became issues: the style declaration line and the remedy log line (#38,
 built), checks left running on a park (#39, built), `keep` on a fold
 failure (#40, built), the CLI blocking behind a pass (#41), a dirty tree
 nudges the agent (#43, built), the supervising agent's CLI (#44, built),
-the orphaned check (#53, built), the unreviewed conflict rebase (#54),
-the stale folded commit message (#55).
+the orphaned check (#53, built), the unreviewed conflict rebase (#54,
+built), the stale folded commit message (#55).
 
 - **A command reviewer orphaned by a runner restart is never killed.**
   `start_reviewer` (`dispatch/src/git.rs`) puts a command reviewer in its
@@ -382,7 +382,13 @@ the stale folded commit message (#55).
   at the new head, but no reviewer reads the resolution, so a dropped line
   that breaks no test lands (#40 and #39 on 2026-10-04). One delta pass by
   the correctness reviewer when the rebase had conflicts, as item 8 does
-  for review rounds.
+  for review rounds. Issue #54, built: a conflicted bring-up after the
+  last code review stage that pushed nothing gets one `resolution`
+  review of the range-diff between the reviewed and the resolved branch.
+- **A conflicted rebase at `ready` with an open PR is not reviewed.**
+  The bring-up pushes the resolution before anything could read it, and
+  a fix would need a push leased on the fixed head, which the pass's
+  attempt does not hold. #54 leaves such a bring-up to the PR's checks.
 - **tmux adapter tests flake on the Linux runner.** #48 made every wait
   in the tmux and dispatch tests poll to a deadline and skipped fsync in
   tests (the dispatch suite went from about two minutes to half a

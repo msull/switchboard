@@ -122,6 +122,12 @@ pub struct LaneRecord {
     /// refresh's lease is on Dispatch's own push.
     #[serde(default)]
     pub pushed: Option<PushedHead>,
+    /// A rebase onto a moved base that stopped on a conflict and has not
+    /// been brought up yet: the head that was reviewed, kept while a
+    /// rebaser or a hand rebase works, so the bring-up can say what the
+    /// resolution changed.
+    #[serde(default)]
+    pub conflict: Option<RefreshConflict>,
     /// The lane's worktree is removed from its clone: the ticket closed.
     /// The path stays, so a reader can still say where the work was.
     #[serde(default)]
@@ -147,6 +153,35 @@ pub struct Refreshed {
     /// which no rebaser's notes are attached.
     #[serde(default)]
     pub at_ms: u64,
+    /// The conflict this bring-up resolved, when the branch was rewritten
+    /// by a rebaser or by hand after the rebase stopped; `None` for a
+    /// clean rebase.
+    #[serde(default)]
+    pub conflict: Option<RefreshConflict>,
+    /// The head the branch was brought up to.
+    #[serde(default)]
+    pub after: Option<String>,
+}
+
+/// A rebase of a lane's branch that stopped on a conflict.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RefreshConflict {
+    /// The branch's head when the rebase first stopped: the last head a
+    /// review read.
+    pub before: String,
+    /// The base the branch sat on; empty when it was not recorded.
+    pub from: String,
+    /// The base it would not rebase onto, the latest one tried.
+    pub to: String,
+    /// The branch's commits whose replay onto `to` conflicts, oldest
+    /// first; empty when they could not be read.
+    #[serde(default)]
+    pub commits: Vec<String>,
+    /// The index of the pipeline stage it was last seen at, and at the
+    /// bring-up the stage of the bring-up: what decides whether a code
+    /// review still reads it.
+    #[serde(default)]
+    pub stage: usize,
 }
 
 /// A head pushed to a lane's branch, and when.

@@ -1089,6 +1089,7 @@ mod tests {
                 base_sha: Some("base0000".into()),
                 refreshed: None,
                 pushed: None,
+                conflict: None,
                 removed: false,
             }],
             tree: None,
@@ -1305,6 +1306,8 @@ mod tests {
             commits: true,
             notes: None,
             at_ms: 1,
+            conflict: None,
+            after: None,
         });
         assert_eq!(kinds(Some(&t), &pushed), [Kind::Refreshed, Kind::Pushed]);
 

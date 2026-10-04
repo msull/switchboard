@@ -473,6 +473,7 @@ mod tests {
             base_sha: Some("base0000".into()),
             refreshed: None,
             pushed: None,
+            conflict: None,
             removed: false,
         }
     }
@@ -537,6 +538,8 @@ mod tests {
             commits: true,
             notes: None,
             at_ms,
+            conflict: None,
+            after: None,
         };
         let mut rebased = lane();
         rebased.refreshed = Some(refreshed(12_000));
@@ -633,6 +636,35 @@ mod tests {
         assert_eq!(r.code_reviews[1].rounds[0].new, Some(0));
         let total = total(&[r.clone(), r]);
         assert_eq!((total.tickets, total.code_points), (2, 4));
+    }
+
+    /// A resolution review is code review work on the branch: its round,
+    /// its point and its fix count in the totals, and it is listed under
+    /// its own stage.
+    #[test]
+    fn a_resolution_pass_counts_in_the_code_review_totals() {
+        let mut t = crate::ticket::blank();
+        t.lanes.push(lane());
+        let mut code = attempt("review-code", 1, AttemptKind::Review, 0, 10);
+        code.rounds = vec![round(1, RoundState::Converged, 0, "/rc1.md", false)];
+        let mut pass = attempt(crate::scheduler::RESOLUTION, 1, AttemptKind::Review, 20, 30);
+        pass.rounds = vec![round(1, RoundState::Fixed, 1, "/res1.md", true)];
+        t.attempts = vec![code, pass];
+        let read = files(&[
+            ("/rc1.md", "No open points.\n"),
+            (
+                "/res1.md",
+                "## Open\n\n- r1/correctness-1 (correctness): the base's guard is gone\n",
+            ),
+        ]);
+        let r = of(&t, &stages(), &read, None, 50);
+        assert_eq!((r.code_rounds, r.code_points, r.fix_passes), (2, 1, 1));
+        assert_eq!(
+            r.code_points_by_reviewer,
+            BTreeMap::from([("correctness".into(), 1)])
+        );
+        assert_eq!(r.code_reviews[1].stage, "resolution");
+        assert_eq!(r.code_reviews[1].rounds[0].new, Some(1));
     }
 
     #[test]

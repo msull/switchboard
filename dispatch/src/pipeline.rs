@@ -545,6 +545,11 @@ pub struct Policy {
     /// `network` overrides it.
     #[serde(default)]
     pub network: crate::git::Network,
+    /// The reviewer of a conflict's resolution brought up after the last
+    /// code review stage; absent, that stage's first reviewer that is
+    /// not `style`.
+    #[serde(default)]
+    pub resolution_reviewer: Option<String>,
 }
 
 fn default_max_fixes() -> u32 {
@@ -586,6 +591,7 @@ impl Default for Policy {
             on_dirty: OnDirty::default(),
             confine: false,
             network: crate::git::Network::default(),
+            resolution_reviewer: None,
         }
     }
 }
@@ -970,6 +976,15 @@ impl Pipeline {
                 bail!("[policy] {key}: a pull-request pipeline pushes nothing");
             }
         }
+        if let Some(name) = &self.policy.resolution_reviewer {
+            match self.operators.get(name) {
+                None => bail!("[policy] resolution_reviewer names an unknown operator {name:?}"),
+                Some(op) if op.kind == OperatorKind::Command && op.argv.is_empty() => {
+                    bail!("[policy] resolution_reviewer {name:?} is a command with no argv")
+                }
+                Some(_) => {}
+            }
+        }
         match (&self.project.repo, &self.project.root) {
             (Some(_), None) | (None, Some(_)) => {}
             (Some(_), Some(_)) => bail!("[project] takes repo or root, not both"),
@@ -1189,6 +1204,24 @@ writes = ["plan"]"#,
             let err = Pipeline::parse(&text).unwrap_err().to_string();
             assert!(err.contains(expected), "{from}: {err}");
         }
+    }
+
+    #[test]
+    fn a_resolution_reviewer_must_be_an_operator() {
+        let text =
+            SWITCHBOARD.replace("[policy]\n", "[policy]\nresolution_reviewer = \"nobody\"\n");
+        assert_ne!(text, SWITCHBOARD);
+        let err = Pipeline::parse(&text).unwrap_err().to_string();
+        assert!(
+            err.contains("resolution_reviewer names an unknown operator \"nobody\""),
+            "{err}"
+        );
+        let text = SWITCHBOARD.replace(
+            "[policy]\n",
+            "[policy]\nresolution_reviewer = \"planner\"\n",
+        );
+        let p = Pipeline::parse(&text).unwrap();
+        assert_eq!(p.policy.resolution_reviewer.as_deref(), Some("planner"));
     }
 
     /// A pipeline for someone else's pull requests reads their

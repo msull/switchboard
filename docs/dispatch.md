@@ -262,7 +262,12 @@ response settled, absent in older records; a round caught mid-wait
 starts its clock on the first pass after the upgrade. Version 7 adds an
 attempt's and a round's `nudges`, empty in older records. Version 8
 adds a gate run's `group`, the check's process group as started, and
-an attempt's `orphans_killed`, both absent in older records.
+an attempt's `orphans_killed`, both absent in older records. Version 9 adds
+a lane's `conflict`, a rebase that stopped and has not been brought up,
+and the `conflict` and `after` of a lane's `refreshed`, the conflict a
+bring-up resolved and the head it reached; all are absent in older
+records, so a bring-up recorded before the upgrade gets no resolution
+review.
 
 ### The event log and the runner's status
 
@@ -632,7 +637,7 @@ commits = "keep"              # "fold": fix rounds fold into the commits they am
 slots = 1                     # tickets with a running attempt or a held resource; read live from <project>.toml on every pass, not from a ticket's copy
 waiting_on_me = 2             # pending decisions across the project before nothing new starts; live as well
 rates = { "claude-sonnet-5" = [3.0, 15.0], ... }   # $ per million input, output tokens
-decisions = { lanes = "ask", finalize = "ask", merge = "ask", budget = "ask", review-code = "ask" }
+decisions = { lanes = "ask", finalize = "ask", merge = "ask", budget = "ask", review-code = "ask", resolution = "ask" }
 trust_folders = false         # true: Claude Code's folder trust question, which every fresh worktree asks, is answered for the project's agents
 max_reruns = 3                # failed attempts a stage may collect in one context before the ticket parks instead of asking again
 on_dirty = { nudge = 1 } | "ask"   # an agent that stops with a dirty tree is nudged in its session up to N times, each after a stop, before the question; "ask" asks at once. Read from the ticket's copy; a copy without the key, including one taken before the key existed, nudges once
@@ -640,6 +645,7 @@ min_free_gb = 10              # free space on the worktrees' volume below which 
 refresh = true                # each lane's branch is brought up to its base when a stage begins; a conflict goes to the rebaser
 rebaser = "rebaser"           # the operator that rebases a PR that conflicts with its base, cloned from the lane's implementer; absent, a conflict is a question
 max_rebases = 2               # rebases one PR may get before the conflict is a question
+resolution_reviewer = "correctness"  # the one reviewer of a conflict's resolution brought up after the last code review stage; absent, that stage's first reviewer that is not `style`
 fixer = "fixer"               # the operator that fixes a PR whose checks are red at the tree's head, cloned the same way; absent, red checks are a question
 max_fixes = 2                 # fixes one PR may get before red checks are a question
 confine = false               # true: setup, command gates, review checks and command reviewers run sandboxed (see the start of this document); absent, off
@@ -1545,6 +1551,46 @@ present, and the base's additions in `from..to` unchanged by the
 branch (with an empty `from`, the additions the rebase brought in,
 naming no range), with the rebaser's notes when there are some. A
 later round or a rerun that already read that base is not told again.
+
+A rebase that stops is recorded on the lane (`LaneRecord.conflict`)
+before the rebaser starts or the question is asked: the head the branch
+was at, which is the last head a review read, its base, the base it
+would not rebase onto, the stage, and the branch's commits whose
+replay conflicts (`Repo::conflicting_commits`: each commit merged with
+`git merge-tree` onto the result of the one before, writing no ref;
+empty when it cannot be read). A conflict seen again keeps its head and
+base, since the stage is held and nothing has read the branch since, and
+updates the rest. A stage that goes ahead without a bring-up (a parked
+question resumed, a tree left alone) drops the record: the stage reads
+and moves the branch, and a later rebase that stops records its own.
+The bring-up moves it to `refreshed.conflict` when the branch was
+rewritten since the rebase stopped (by the rebaser or by hand), with the
+bring-up's stage, and records the head it reached as `refreshed.after`;
+a branch git rebased untouched onto a newer base resolved nothing, and
+the record is dropped. A bring-up with a conflict at a stage after the
+pipeline's last code review stage, which pushed nothing (no open PR),
+gets one resolution review before the stage runs: an ordinary `review`
+attempt under the pseudo-stage `resolution`, shaped as the last code
+review stage with one reviewer (the policy's `resolution_reviewer`,
+else that stage's first that is not `style`), one pass, style points
+left to the merge and the default `No findings.` sentinel. Its prompt
+names the reviewed head and base, the new base and head, the
+conflicting commits, and the one range to read, `git range-diff
+<from>..<before> <to>..<after>` (with the base unknown, the fork point
+of the reviewed head from the new base, or else a commit-by-commit
+comparison), with the rebaser's notes. A clean review completes it at
+the head with nothing run. Points are a `resolution` question, `fix |
+accept | park`, auto only when the `resolution` dial says so (not the
+`review-code` dial): `fix` is one fixer, the stage's checks and its
+`commits` mode (a published branch keeps its commits), and the attempt
+completes with no second reviewer; `accept` completes at the reviewed
+head. A failed pass asks `rerun`, and a rerun reviews the same
+resolution afresh, carrying nothing. A conflict brought up at or
+before the last code review stage is read by that stage's rebase
+check, and a conflict at `ready` with an open PR was pushed by the
+bring-up already; neither gets a pass. A pass belongs to the bring-up
+it started at or after, so a later one gets its own.
+
 Pull-request tickets are someone else's branch and are never
 refreshed; `lanes`, a human look and the merge watch launch nothing
 and are not refreshed either.
@@ -1914,6 +1960,15 @@ and one against the real one:
 | The same, with no pull request for the branch | Nothing is pushed; `ready` asks for a PR to be opened (`a_refresh_at_ready_without_a_pull_request_pushes_nothing`) |
 | A stage begins and the rebase onto the moved base conflicts | The rebaser, a clone of the lane's last finished agent, is told the base and the checks; the stage waits, then reads the branch again (`a_conflicting_refresh_is_rebased_by_a_clone_of_the_lanes_last_agent`) |
 | The same, with no rebaser in the policy | A `refresh` question with `recheck`, answered after a rebase by hand (`a_conflicting_refresh_without_a_rebaser_is_a_question`) |
+| The base moved after `review-code`; the rebase at `pr` is clean | The branch is brought up; no reviewer starts and `pr` runs (`a_clean_refresh_at_pr_launches_no_reviewer`) |
+| The rebase at `pr` conflicts and the rebaser resolves it | The reviewed head and the conflicting commits are on the lane before the rebaser starts; then one `resolution` reviewer reads the range-diff of the reviewed and the resolved branch, and `pr` waits; a clean answer completes it with nothing run (`a_conflicting_refresh_at_pr_is_reviewed_before_the_pr_opens`) |
+| The resolution review finds points, with `review-code = "auto"` | A `resolution` question with `fix`, `accept` and `park`; `fix` is one fixer and the checks, no second reviewer; `accept` completes at the reviewed head (`a_resolution_pass_with_points_asks_fix_accept_park`) |
+| The conflict was brought up at `implement` and the base has not moved since | `review-code`'s first round checks the rebase; no resolution review at `pr` (`a_conflict_before_review_code_gets_no_resolution_pass`) |
+| A resolution fix on a branch the remote already holds | The commits are kept, the rewrite recorded as skipped (`a_resolution_fix_on_a_published_branch_keeps_its_commits`) |
+| The resolution reviewer fails | A `rerun` question that says a rerun reviews the same resolution with a fresh reviewer; nothing launches while it waits (`a_failed_resolution_pass_asks_rerun_without_carry_wording`) |
+| A hand rebase, then `recheck` | The same review, with no rebaser's notes (`a_hand_rebase_after_the_refresh_question_is_reviewed`) |
+| The rebaser leaves the branch alone and a newer base rebases cleanly | The conflict is dropped; no review (`a_clean_rebase_after_an_aborted_rebaser_drops_the_conflict`) |
+| A restart while the resolution reviewer runs | It is polled from the record; nothing launches again (`a_restart_mid_resolution_reattaches_the_reviewer`) |
 | A stage begins while the tree has work in it, or a rebase in progress | The lane is left alone this stage; nothing is rebased over someone's work (`a_refresh_leaves_a_tree_with_work_in_it_alone`) |
 | The PR's checks are red at the tree's head and the policy names a `fixer` | The fixer starts in the lane, cloned from the implementer, with the PR and the failed check names in its prompt; no question; when it stops the gate reads again and green checks pass it |
 | Red checks with no fixer, or `max_fixes` spent | A `pr` decision with `recheck` and `park` |

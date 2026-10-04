@@ -613,14 +613,15 @@ fn show(args: &[&str]) -> Result<()> {
     for l in &view.lanes {
         let sha = |s: &Option<String>| s.as_deref().map_or("-".to_owned(), |s| short(s).to_owned());
         say!(
-            "  {} {} {} base {} head {} pushed {}{}",
+            "  {} {} {} base {} head {} pushed {}{}{}",
             l.name,
             l.branch,
             l.worktree.display(),
             sha(&l.base_sha),
             sha(&l.head),
             sha(&l.pushed_head),
-            if l.removed { " (removed)" } else { "" }
+            if l.removed { " (removed)" } else { "" },
+            conflict_clause(&view, l)
         );
     }
     print_attempts(&view)?;
@@ -689,6 +690,13 @@ fn print_attempts(view: &dispatch_control::TicketView) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// `, rebased with conflicts in N commits, reviewed` after a lane whose
+/// last bring-up resolved a conflict, worded as the ticket page words it.
+fn conflict_clause(view: &dispatch_control::TicketView, l: &dispatch_control::LaneView) -> String {
+    view.lane_conflict(l)
+        .map_or_else(String::new, |c| format!(", {c}"))
 }
 
 /// `, nudged N times` after an attempt, round or stage line, worded as

@@ -265,6 +265,30 @@ pub struct TicketView {
     pub paths: PathsView,
 }
 
+impl TicketView {
+    /// A lane's last bring-up, when it resolved a conflict, in
+    /// `rebased_with_conflicts`'s words with the review of it.
+    #[must_use]
+    pub fn lane_conflict(&self, l: &LaneView) -> Option<String> {
+        let commits = l.rebase_conflicts?;
+        let pass = self.attempts.iter().find(|a| reviews_resolution(a, l));
+        Some(rebased_with_conflicts(commits, pass))
+    }
+
+    /// What a resolution review read, in the same words: the conflicted
+    /// bring-up of its lane.
+    #[must_use]
+    pub fn resolution_conflict(&self, a: &AttemptView) -> Option<String> {
+        let l = self.lanes.iter().find(|l| reviews_resolution(a, l))?;
+        Some(rebased_with_conflicts(l.rebase_conflicts?, Some(a)))
+    }
+}
+
+/// `a` is the resolution review of the lane's last bring-up.
+fn reviews_resolution(a: &AttemptView, l: &LaneView) -> bool {
+    a.stage == RESOLUTION && a.context == l.name && l.resolution == Some(a.n)
+}
+
 /// Where a ticket's documents are, and its pull request.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -301,6 +325,11 @@ pub struct LaneView {
     pub head: Option<String>,
     /// The last head a refresh pushed to the lane's branch.
     pub pushed_head: Option<String>,
+    /// The lane's last bring-up resolved a rebase that conflicted: how
+    /// many commits conflicted, 0 when they could not be listed.
+    pub rebase_conflicts: Option<u32>,
+    /// The `n` of the resolution review of that bring-up, once one began.
+    pub resolution: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -390,6 +419,55 @@ pub fn nudged(n: usize) -> Option<String> {
         1 => Some("nudged once".into()),
         n => Some(format!("nudged {n} times")),
     }
+}
+
+/// The stage name of a resolution review's attempts: the one review
+/// pass a conflicted bring-up gets after the pipeline's last code review.
+pub const RESOLUTION: &str = "resolution";
+
+/// How many commits a rebase conflicted in, as the page and a
+/// resolution reviewer read it: `1 commit`, `N commits`, or `commits it
+/// could not list` for 0.
+#[must_use]
+pub fn commit_count(commits: u32) -> String {
+    match commits {
+        0 => "commits it could not list".to_owned(),
+        1 => "1 commit".to_owned(),
+        n => format!("{n} commits"),
+    }
+}
+
+/// How a bring-up that had conflicts reads on the page and in `show`:
+/// how many commits conflicted, then what its resolution review (the
+/// `resolution` attempt `pass`) made of it, once one began.
+#[must_use]
+pub fn rebased_with_conflicts(commits: u32, pass: Option<&AttemptView>) -> String {
+    let text = format!("rebased with conflicts in {}", commit_count(commits));
+    let Some(a) = pass else {
+        return text;
+    };
+    let points = |k: u32| {
+        if k == 1 {
+            "1 point".to_owned()
+        } else {
+            format!("{k} points")
+        }
+    };
+    let last = a.rounds.last();
+    let outcome = match a.state.as_str() {
+        "complete" => match last {
+            Some(r) if r.state == "accepted" => {
+                format!("accepted with {} open", points(r.open_points))
+            }
+            Some(r) if r.head_after.is_some() => {
+                format!("reviewed: {} fixed", points(r.open_points))
+            }
+            _ => "reviewed".to_owned(),
+        },
+        "failed" | "cancelled" => "review failed".to_owned(),
+        _ => "under review".to_owned(),
+    };
+    format!("{text}, {outcome}")
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -595,5 +673,71 @@ mod tests {
         assert_eq!(nudged(0), None);
         assert_eq!(nudged(1).as_deref(), Some("nudged once"));
         assert_eq!(nudged(3).as_deref(), Some("nudged 3 times"));
+    }
+
+    #[test]
+    fn a_conflicted_bring_up_reads_with_its_review() {
+        let round = |state: &str, open: u32, fixed: bool| ReviewRoundView {
+            n: 1,
+            state: state.into(),
+            open_points: open,
+            head_after: fixed.then(|| "fix00001".to_owned()),
+            ..ReviewRoundView::default()
+        };
+        let pass = |state: &str, r: ReviewRoundView| AttemptView {
+            stage: RESOLUTION.into(),
+            n: 1,
+            state: state.into(),
+            rounds: vec![r],
+            ..AttemptView::default()
+        };
+        assert_eq!(
+            rebased_with_conflicts(1, None),
+            "rebased with conflicts in 1 commit"
+        );
+        assert_eq!(
+            rebased_with_conflicts(0, None),
+            "rebased with conflicts in commits it could not list"
+        );
+        let cases = [
+            (
+                2,
+                pass("complete", round("converged", 0, false)),
+                "rebased with conflicts in 2 commits, reviewed",
+            ),
+            (
+                1,
+                pass("complete", round("fixed", 1, true)),
+                "rebased with conflicts in 1 commit, reviewed: 1 point fixed",
+            ),
+            (
+                2,
+                pass("complete", round("fixed", 2, true)),
+                "rebased with conflicts in 2 commits, reviewed: 2 points fixed",
+            ),
+            (
+                2,
+                pass("complete", round("accepted", 1, false)),
+                "rebased with conflicts in 2 commits, accepted with 1 point open",
+            ),
+            (
+                2,
+                pass("complete", round("accepted", 2, false)),
+                "rebased with conflicts in 2 commits, accepted with 2 points open",
+            ),
+            (
+                2,
+                pass("running", round("reviewing", 0, false)),
+                "rebased with conflicts in 2 commits, under review",
+            ),
+            (
+                2,
+                pass("failed", round("failed: gone", 0, false)),
+                "rebased with conflicts in 2 commits, review failed",
+            ),
+        ];
+        for (commits, a, want) in cases {
+            assert_eq!(rebased_with_conflicts(commits, Some(&a)), want);
+        }
     }
 }
