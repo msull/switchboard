@@ -1014,6 +1014,16 @@ fn a_conflicting_pr_is_rebased_by_a_clone_of_the_implementer() {
             .is_some_and(|a| a.state == AttemptState::Complete)
     });
     assert!(env.sb().killed.contains(&rebaser), "the rebaser is done");
+    // The completed rebase still records `conflicting`, which is what
+    // makes its completion line name the rebaser rather than the merge.
+    assert_eq!(
+        env.ticket(&id)
+            .attempts_of("merge")
+            .find(|a| a.kind == AttemptKind::Agent)
+            .and_then(|a| a.pr.as_ref().map(|p| p.checks.clone()))
+            .as_deref(),
+        Some("conflicting")
+    );
     env.wait(PR_POLL_MS);
     env.step();
     let t = env.ticket(&id);
@@ -1026,7 +1036,16 @@ fn a_conflicting_pr_is_rebased_by_a_clone_of_the_implementer() {
     env.pr_is_with(&id, "rebased1", "merged", Checks::Passed, None);
     env.wait(PR_POLL_MS);
     env.steps_until(&id, "the ticket closing", |t, _| !t.active());
-    assert!(matches!(&env.ticket(&id).state, TicketState::Closed { .. }));
+    let t = env.ticket(&id);
+    assert!(matches!(&t.state, TicketState::Closed { .. }));
+    // The gate's own attempt is not a remedy: it records `merged`, so its
+    // completion is the stage's.
+    assert_eq!(
+        t.attempts_of("merge")
+            .find(|a| a.kind == AttemptKind::GateOnly)
+            .and_then(|a| a.pr.as_ref().map(|p| p.checks.as_str())),
+        Some("merged")
+    );
 }
 
 /// A rebaser that could not start (no transcript to clone) is a rerun
@@ -6227,6 +6246,131 @@ fn a_style_only_round_three_converges_and_leaves_the_point_to_the_merge() {
         .unwrap();
     let after = summary.find("## Found but not done").unwrap();
     assert!(left < point && point < after, "{summary}");
+}
+
+/// Two rounds of lint and style points, each fixed, then round three
+/// started: the setup of the round-three tests.
+fn two_fixed_rounds(env: &mut Env, id: &str) {
+    lint_exits(env, id, 1, 1, "src/a.rs:3: unused import\n");
+    style_says(env, id, 1, "- style: rename tmp\n");
+    fix_pass(
+        env,
+        id,
+        1,
+        "fix00001",
+        "- r1/lint-1: fixed removed\n- r1/style-1: fixed renamed\n",
+        0,
+    );
+    round_started(env, id, 2);
+    lint_exits(env, id, 2, 1, "src/b.rs:9: dead code\n");
+    style_says(env, id, 2, "- style: comment wording\n");
+    fix_pass(
+        env,
+        id,
+        2,
+        "fix00002",
+        "- r2/lint-1: fixed removed\n- r2/style-1: fixed reworded\n",
+        0,
+    );
+    round_started(env, id, 3);
+    lint_exits(env, id, 3, 0, "");
+}
+
+/// Runs a converged round three's checks to the stage's end and returns
+/// its summary.
+fn summary_after_checks(env: &mut Env, id: &str) -> String {
+    let t = env.ticket(id);
+    env.repo
+        .lock()
+        .unwrap()
+        .check_exits
+        .insert(checks_key(&t, 3), 0);
+    env.steps_until(id, "the stage completing", |t, _| {
+        review_attempt(t).state == AttemptState::Complete
+    });
+    let a = review_attempt(&env.ticket(id));
+    std::fs::read_to_string(&a.artifacts["summary"]).unwrap()
+}
+
+/// The acceptance: a style reviewer's line that every point left is
+/// wording is a note under `## Reviewer notes`, not a point, so the
+/// round leaves the one real point to the merge.
+#[test]
+fn a_wording_declaration_is_a_note_and_the_round_leaves_one_point() {
+    let mut env = Env::new();
+    with_three_rounds(&env);
+    let id = at_review(&mut env);
+    two_fixed_rounds(&mut env, &id);
+    style_says(
+        &mut env,
+        &id,
+        3,
+        "- Every point left is wording; the round can close on it.\n- style: one more wording\n",
+    );
+    env.steps_until(&id, "the final checks", |t, _| {
+        review_attempt(t).gate.is_some()
+    });
+    let t = env.ticket(&id);
+    let a = review_attempt(&t);
+    assert_eq!(a.rounds[2].state, RoundState::Converged);
+    assert_eq!(a.rounds[2].open_points, 0);
+    let feedback = std::fs::read_to_string(a.rounds[2].feedback.clone().unwrap()).unwrap();
+    let left = feedback.find("## Left to the merge").unwrap();
+    let point = feedback
+        .find("- r3/style-1 (style): style: one more wording")
+        .unwrap();
+    let notes = feedback.find("## Reviewer notes").unwrap();
+    let note = feedback
+        .find("- style: Every point left is wording; the round can close on it.")
+        .unwrap();
+    assert!(left < point && point < notes && notes < note, "{feedback}");
+    assert!(!feedback.contains("r3/style-2"), "{feedback}");
+    let summary = summary_after_checks(&mut env, &id);
+    let left = summary.find("## Left to the merge").unwrap();
+    let after = summary.find("## Found but not done").unwrap();
+    assert_eq!(
+        summary[left..after].trim(),
+        "## Left to the merge\n\n- r3/style-1 (style): style: one more wording",
+        "{summary}"
+    );
+}
+
+/// A round whose only style feedback is the declaration has nothing
+/// left: it converges with the sentinel and the note.
+#[test]
+fn a_round_whose_only_style_feedback_is_the_declaration_converges_with_nothing_left() {
+    let mut env = Env::new();
+    with_three_rounds(&env);
+    let id = at_review(&mut env);
+    two_fixed_rounds(&mut env, &id);
+    style_says(
+        &mut env,
+        &id,
+        3,
+        "Every point left is wording; the round can close on it.\n",
+    );
+    env.steps_until(&id, "the final checks", |t, _| {
+        review_attempt(t).gate.is_some()
+    });
+    let t = env.ticket(&id);
+    let a = review_attempt(&t);
+    assert_eq!(a.rounds[2].state, RoundState::Converged);
+    assert_eq!(a.rounds[2].open_points, 0);
+    let feedback = std::fs::read_to_string(a.rounds[2].feedback.clone().unwrap()).unwrap();
+    assert!(!feedback.contains("## Left to the merge"), "{feedback}");
+    assert!(feedback.contains("## Reviewer notes"), "{feedback}");
+    assert!(
+        feedback.contains("- style: Every point left is wording; the round can close on it."),
+        "{feedback}"
+    );
+    let summary = summary_after_checks(&mut env, &id);
+    let left = summary.find("## Left to the merge").unwrap();
+    let after = summary.find("## Found but not done").unwrap();
+    assert_eq!(
+        summary[left..after].trim(),
+        "## Left to the merge\n\nNone.",
+        "{summary}"
+    );
 }
 
 /// Before `style_rounds`, style points go to the fixer like any other.

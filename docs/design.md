@@ -1597,7 +1597,8 @@ the policy's `rebaser`, a session the new `session.clone` port command
 makes from the lane's implementer's transcript (the record is made
 first, so the reply carries its id and recovery finds it by its op;
 the copy and the resumed launch follow), capped by `max_rebases` and
-never repeated at the same head. Everything else in that document (external and
+never repeated at the same head; a rebaser's or fixer's completion
+logs with its role and the head it left. Everything else in that document (external and
 human gates on agent stages, gate-only command stages, budgets, the
 other pipelines) parks the ticket with a reason. The runner's pass over a project is
 one transaction under the data directory's writer lock, and `decide`,
@@ -1654,9 +1655,10 @@ starts (dispatch `RECORD_VERSION` 4). A `style:` point, or an untagged
 one from the `style` reviewer, holds no round open from `style_rounds`
 (default 2, live) and is left to the merge; a `decided:` point contests
 the plan's "Decisions" section, which the reviewers are given as
-settled, and is found but not done. The first review after a rebase
-with commits checks it, with the rebaser's notes. A completed review
-attempt writes `summary.md`. A code review stage with `commits =
+settled, and is found but not done; a reviewer's line that every point
+left is wording is a note, not a point. The first review after a
+rebase with commits checks it, with the rebaser's notes. A completed
+review attempt writes `summary.md`. A code review stage with `commits =
 "fold"` or `"one"` rewrites the branch as it completes, with the tree
 proven unchanged and the rewrite on the attempt (dispatch
 `RECORD_VERSION` 5); a branch the remote already holds is left alone.

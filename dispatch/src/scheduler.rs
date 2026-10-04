@@ -4014,7 +4014,14 @@ impl Runner {
         } else {
             attempt.state = AttemptState::Complete;
             attempt.ended_ms = Some(now_ms);
-            log::info!("ticket {} {}/{} complete", t.id, a.stage, a.context);
+            let role = attempt.pr.as_ref().and_then(remedy_role);
+            // The head is for the log line only, so a failed read must
+            // not fail the poll.
+            let head = role.and_then(|_| self.git.head(cwd).ok());
+            log::info!(
+                "{}",
+                completion_line(&t.id, &a.stage, &a.context, role, head.as_deref())
+            );
         }
         self.save_ticket(t, now_ms)?;
         if running {
@@ -5631,6 +5638,37 @@ impl Remedy {
     }
 }
 
+/// The role of the remedy an attempt with this record was launched as,
+/// read from the `checks` that `Remedy::tag` wrote; none for any other.
+/// The log names the role, not the policy's operator, whose name could
+/// be anything.
+fn remedy_role(record: &PullRequestRecord) -> Option<&'static str> {
+    if record.checks == "conflicting" {
+        Some("rebaser")
+    } else if record.checks.starts_with("failed:") {
+        Some("fixer")
+    } else {
+        None
+    }
+}
+
+/// An agent stage's completion line: a remedy's names its role and,
+/// when it was read, the head it left, so it is never mistaken for the
+/// stage's own completion.
+fn completion_line(
+    id: &str,
+    stage: &str,
+    ctx: &str,
+    role: Option<&str>,
+    head: Option<&str>,
+) -> String {
+    match (role, head) {
+        (None, _) => format!("ticket {id} {stage}/{ctx} complete"),
+        (Some(role), Some(head)) => format!("ticket {id} {stage}/{ctx} {role} complete at {head}"),
+        (Some(role), None) => format!("ticket {id} {stage}/{ctx} {role} complete"),
+    }
+}
+
 /// Why a stopped PR is a question rather than a run: no operator in
 /// the policy for it, the last run changed nothing, or the cap is spent.
 fn remedy_reason(
@@ -6338,6 +6376,77 @@ pub fn apply_reply(t: &mut Ticket, ps: &mut ProjectState, intent: &str, reply: &
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_remedys_completion_names_its_role_and_head() {
+        let record = |checks: &str| PullRequestRecord {
+            provider: "github".into(),
+            repo: "o/r".into(),
+            number: 7,
+            url: String::new(),
+            head: "h".into(),
+            checks: checks.into(),
+            checked_ms: 0,
+            error_since_ms: None,
+        };
+        let conflicting = record("conflicting");
+        let failed = record("failed: ci");
+        assert_eq!(
+            completion_line(
+                "t",
+                "merge",
+                "repo",
+                remedy_role(&conflicting),
+                Some("rebased1")
+            ),
+            "ticket t merge/repo rebaser complete at rebased1"
+        );
+        assert_eq!(
+            completion_line("t", "ready", "repo", remedy_role(&failed), Some("abc")),
+            "ticket t ready/repo fixer complete at abc"
+        );
+        assert_eq!(
+            completion_line("t", "merge", "repo", remedy_role(&failed), None),
+            "ticket t merge/repo fixer complete"
+        );
+        assert_eq!(
+            completion_line(
+                "t",
+                "merge",
+                "repo",
+                remedy_role(&record("merged")),
+                Some("x")
+            ),
+            "ticket t merge/repo complete"
+        );
+        assert_eq!(
+            completion_line("t", "merge", "repo", None, None),
+            "ticket t merge/repo complete"
+        );
+        for checks in ["pending", "passed", "none", "merged"] {
+            assert_eq!(remedy_role(&record(checks)), None, "{checks}");
+        }
+        for checks in [
+            "conflicting",
+            "failed: ci",
+            "pending",
+            "passed",
+            "none",
+            "merged",
+        ] {
+            let r = record(checks);
+            assert_eq!(
+                Remedy::Rebase.owns(&r),
+                remedy_role(&r) == Some("rebaser"),
+                "{checks}"
+            );
+            assert_eq!(
+                Remedy::Fix(Vec::new()).owns(&r),
+                remedy_role(&r) == Some("fixer"),
+                "{checks}"
+            );
+        }
+    }
 
     #[test]
     fn the_branch_question_names_only_the_moved_contexts() {
