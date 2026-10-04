@@ -1109,8 +1109,8 @@ pub fn is_dispatch_view(view: &View) -> bool {
 /// What a completed code review did to its branch's commits; nothing
 /// when it left them as they were.
 fn rewrite_label(r: &RewriteView) -> Option<String> {
-    if r.skipped.is_some() {
-        return Some("commits kept: the branch is published".to_owned());
+    if let Some(why) = &r.skipped {
+        return Some(format!("commits kept: {why}"));
     }
     let after = r.after.as_deref().filter(|a| *a != r.before)?;
     let (before, after) = (short_sha(&r.before), short_sha(after));

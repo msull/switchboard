@@ -4634,6 +4634,39 @@ fn ticket_page_shows_how_a_review_rewrote_its_commits() {
     harness.get_by_label("commits folded 4 → 2: aaaaaaaa → bbbbbbbb");
 }
 
+/// A review whose fold failed and that the user answered `keep` says
+/// why its commits were left as they were.
+#[test]
+fn ticket_page_shows_commits_kept_by_hand() {
+    use switchboard::ports::dispatch::{AttemptView, RewriteView};
+    let (mut harness, _ids) = harness();
+    let mut status = dispatch_status();
+    status.tickets[0].attempts = vec![AttemptView {
+        stage: "review-code".into(),
+        n: 1,
+        context: "repo".into(),
+        kind: "review".into(),
+        state: "complete".into(),
+        rewrite: Some(RewriteView {
+            mode: "fold".into(),
+            before: "aaaaaaaa1111".into(),
+            after: Some("aaaaaaaa1111".into()),
+            from: 4,
+            to: 2,
+            skipped: Some("the user kept them after the rewrite failed".into()),
+        }),
+        ..AttemptView::default()
+    }];
+    harness
+        .state_mut()
+        .dispatch(AppAction::DispatchStatus(Some(status)));
+    harness
+        .state_mut()
+        .dispatch(AppAction::ShowTicket("t1".into()));
+    harness.run_steps(2);
+    harness.get_by_label("commits kept: the user kept them after the rewrite failed");
+}
+
 #[test]
 fn dispatch_page_sets_the_worktree_root() {
     let (mut harness, _) = harness();

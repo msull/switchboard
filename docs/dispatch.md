@@ -1164,8 +1164,9 @@ accepted head whose checks that stage already ran (same command, same
 head, exit 0, the tree clean) is not checked twice; any other head,
 and any other gate, runs. A failing check is the ordinary checks
 question (`rerun`, `check`, `park`); `check` runs them again on the
-same head. A check lost to a runner restart starts again on the same
-clean head, the one child that does.
+same head. The rewrite after the checks pass has its own question,
+`rerun | keep | park` (see "Clean commits"). A check lost to a runner
+restart starts again on the same clean head, the one child that does.
 
 **Clean commits.** `commits` says what the stage does to the branch's
 history once the checks pass at the head it completes at: `keep` (the
@@ -1193,8 +1194,23 @@ their tree must equal the tree the checks passed at before the branch
 moves; the move is a compare-and-swap (`git update-ref HEAD <new>
 <old>`); after it the head, a clean tree and the same tree are checked
 again, and the branch is moved back if any fails. The checks are not
-run again: the tree is identical. Any failure fails the attempt with
-`rerun | park`, the branch at the reviewed head. The intent (`rewrite`
+run again: the tree is identical. The rewrite's own failures (no plan,
+such as a merge among the commits; a replay conflict; a different
+tree; a refused move; a move undone because the tree read wrong after
+it) fail the attempt with `rerun | keep | park`, the branch at the
+reviewed head. `rerun` reviews the branch again and folds it the same
+way, which usually fails the same way. `keep` completes the stage at
+the reviewed head with the history as it is, recorded as `skipped =
+"the user kept them after the rewrite failed"`, and runs nothing: it
+parks if the branch has moved from the reviewed head or if the checks
+did not pass there (the attempt's own, or the ones reused from the
+`like` stage), and fails the attempt again with `rerun | keep | park`
+if the tree is not clean, so `keep` works once it is cleaned. A move
+undone because the move left the tree dirty usually leaves it dirty,
+so clean the tree before answering `keep`. The attempt keeps
+`failed_at_rewrite`, so a park and a resume ask `rerun | keep | park`
+again. Any other failure of the completion fails the attempt with
+`rerun | park`. The intent (`rewrite`
 with no `after`) is saved before git writes anything: a restart that
 finds the branch still at `before` rewrites again, one at another head
 with the same clean tree completes there, and anything else fails. The
@@ -1698,6 +1714,12 @@ and one against the real one:
 | The implementer stops on a clean tree | The checks start at the tree's head in the lane with `DISPATCH_*` in their environment; the agent is killed; the attempt stays open until they exit; exit 0 binds the head and completes it |
 | The checks fail | A failed attempt and a rerun decision with `rerun`, `check` and `park`; nothing retried on its own; a rerun is a fresh agent, `check` runs the checks again on the same attempt with no agent |
 | The tree is dirty when the agent stops | No check runs; a failed attempt and the same decision |
+| A review's fold whose replay conflicts | A failed attempt and a rerun decision with `rerun`, `keep` and `park`, the branch at the reviewed head; `keep` completes the stage there with `skipped = "the user kept them after the rewrite failed"` and no check run (`a_fold_whose_replay_conflicts_is_kept_by_hand`) |
+| Checks reused from `implement`, then the fold fails | `keep` completes the same way on the reused checks, with none run (`keep_after_reused_checks_completes_without_running_them`) |
+| A move undone over a tree the move left dirty | `keep` fails the attempt again with `rerun`, `keep` and `park` while the tree is dirty; once the tree is cleaned, before or after that, `keep` completes at the reviewed head (`keep_after_a_move_back_on_a_tree_left_dirty_is_asked_again_and_kept_once_cleaned`, `keep_after_a_move_back_completes_once_the_tree_is_cleaned`) |
+| `keep` with the branch moved since the question | The ticket parks naming both heads; the attempt stays failed (`keep_with_the_branch_moved_since_parks`) |
+| `keep` on a tree dirtied since the question | A fresh rerun decision with `rerun`, `keep` and `park` (`keep_on_a_dirty_tree_is_asked_again`) |
+| A ticket parked over a rewrite failure is resumed | The question offers `rerun`, `keep` and `park` (`a_parked_rewrite_failure_offers_keep_on_resume`) |
 | A stage fails past the policy's `max_reruns` in one context | The ticket parks with the count and the last reason; nothing is asked |
 | Free space on the worktrees' volume is under the policy's `min_free_gb` | Nothing new starts and `status` says why; running attempts are still watched; the hold lifts on its own (`a_full_disk_holds_new_starts_until_space_is_back`) |
 | A ticket with two pending decisions is parked from one | The other is cancelled in the same write as the parking intent; the park answer reads acted; the session is unmarked before the ticket reads parked; none is pending, `waiting_on_me` no longer counts it, the cancelled one cannot be answered; a resume asks a fresh rerun per lane and launches nothing (`parking_cancels_every_pending_decision_and_a_resume_asks_afresh`) |

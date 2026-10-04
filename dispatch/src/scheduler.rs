@@ -1867,6 +1867,7 @@ impl Runner {
                 ("rerun", "check") => {
                     self.check_again(t, ps, attempt.as_ref(), now_ms)?;
                 }
+                ("rerun", "keep") => self.keep_history(t, ps, p, attempt.as_ref(), now_ms)?,
                 ("pr", "recheck") => recheck_pr(t, attempt.as_ref()),
                 (REFRESH, "recheck") => t.refreshed_stage = None,
                 ("review-code" | "review-cap", "fix" | "accept" | "more") => {
@@ -4282,6 +4283,21 @@ impl Runner {
         self.fail_attempt_with(t, ps, stage, n, reason, &["rerun", "check", "park"], now_ms)
     }
 
+    /// A failure of a code review's rewrite of its commits, with the
+    /// branch still at the head its checks passed at: the work stands,
+    /// so the stage can complete there with the history as it is.
+    pub(crate) fn fail_rewrite(
+        &mut self,
+        t: &mut Ticket,
+        ps: &mut ProjectState,
+        stage: &str,
+        n: u32,
+        reason: &str,
+        now_ms: u64,
+    ) -> Result<()> {
+        self.fail_attempt_with(t, ps, stage, n, reason, &["rerun", "keep", "park"], now_ms)
+    }
+
     /// The attempt fails and the user is asked what next, unless the
     /// stage has failed in this context as often as the policy's
     /// `max_reruns` allows: then the ticket parks, so a broken stage
@@ -4307,6 +4323,7 @@ impl Runner {
         // Kept on the attempt, not only on the question: a park past
         // `max_reruns` asks nothing, and a resume asks afresh.
         attempt.failed_at_checks = options.contains(&"check");
+        attempt.failed_at_rewrite = options.contains(&"keep");
         let ctx = attempt.context.clone();
         log::warn!("ticket {} {stage}/{ctx} attempt {n} failed: {reason}", t.id);
         self.save_ticket(t, now_ms)?;
@@ -4330,6 +4347,8 @@ impl Runner {
             })
             .count();
         let max_reruns = self.pipeline_of(t).map_or(3, |p| p.policy.max_reruns);
+        let choices =
+            find_attempt(t, stage, n).map_or_else(String::new, |a| rewrite_choices(a, options));
         if failed > max_reruns as usize {
             return self.park(
                 t,
@@ -4348,7 +4367,7 @@ impl Runner {
                 name: "rerun",
                 kind: DecisionKind::Permission,
                 question: format!(
-                    "{stage} ({ctx}) attempt {n} failed: {reason}. Run it again?{}",
+                    "{stage} ({ctx}) attempt {n} failed: {reason}. Run it again?{}{choices}",
                     rerun_carries(t, stage, n)
                 ),
                 options,
@@ -4372,17 +4391,20 @@ impl Runner {
     ) -> Result<()> {
         let (what, options): (String, &[&str]) = match &a.state {
             AttemptState::Failed { reason } => {
-                // A failure at the checks was offered `check` too. A
-                // ticket written before the attempt kept that has only
-                // the earlier question about it to say so.
-                let at_checks = a.failed_at_checks
-                    || t.decisions
-                        .iter()
-                        .rev()
-                        .find(|d| d.name == "rerun" && d.attempt == Some((a.stage.clone(), a.n)))
-                        .is_some_and(|d| d.options.iter().any(|o| o == "check"));
-                let options: &[&str] = if at_checks {
+                // A failure at the checks was offered `check` too, and
+                // one at the rewrite `keep`. A ticket written before the
+                // attempt kept that has only the earlier question about
+                // it to say so.
+                let earlier = t
+                    .decisions
+                    .iter()
+                    .rev()
+                    .find(|d| d.name == "rerun" && d.attempt == Some((a.stage.clone(), a.n)));
+                let offered = |o: &str| earlier.is_some_and(|d| d.options.iter().any(|x| x == o));
+                let options: &[&str] = if a.failed_at_checks || offered("check") {
                     &["rerun", "check", "park"]
+                } else if a.failed_at_rewrite || offered("keep") {
+                    &["rerun", "keep", "park"]
                 } else {
                     &["rerun", "park"]
                 };
@@ -4403,11 +4425,12 @@ impl Runner {
                 name: "rerun",
                 kind: DecisionKind::Permission,
                 question: format!(
-                    "{} ({}) attempt {} {what}. Run it again?{}",
+                    "{} ({}) attempt {} {what}. Run it again?{}{}",
                     a.stage,
                     a.context,
                     a.n,
-                    rerun_carries(t, &a.stage, a.n)
+                    rerun_carries(t, &a.stage, a.n),
+                    rewrite_choices(a, options)
                 ),
                 options,
                 recommendation: None,
@@ -5361,6 +5384,18 @@ pub(crate) fn rework_key(stage: &str, ctx: &str) -> String {
     format!("{stage}/{ctx}")
 }
 
+/// What each answer to a failed rewrite does, when the question offers
+/// `keep`; nothing otherwise.
+fn rewrite_choices(a: &Attempt, options: &[&str]) -> String {
+    match &a.rewrite {
+        Some(r) if options.contains(&"keep") => format!(
+            " `rerun` reviews the branch again and rewrites it the same way; `keep` completes the stage at {} with the history as it is, once the tree is clean; `park` stops.",
+            r.before
+        ),
+        _ => String::new(),
+    }
+}
+
 /// The tree a context runs in: the lane's worktree, or the ticket's.
 pub(crate) fn tree_of(t: &Ticket, p: &Pipeline, ctx: &str) -> Option<PathBuf> {
     t.lanes
@@ -5929,6 +5964,7 @@ pub(crate) fn new_attempt(
         rounds: Vec::new(),
         extra_pass: false,
         failed_at_checks: false,
+        failed_at_rewrite: false,
         carried_from: None,
         rework: None,
         rewrite: None,

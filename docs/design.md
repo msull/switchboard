@@ -1667,6 +1667,9 @@ A prompt's `{lanes}` is the lanes the ticket chose, in pipeline order
 A retake after close deletes each kept branch with nothing beyond its
 base and asks `reuse | fresh | park` about one with commits, holding
 the ticket at the cut; `close` lists the branches it keeps.
+A fold or squash that cannot rewrite the branch asks `rerun | keep |
+park`, and `keep` completes the review at the reviewed head with the
+history as it is, once the head, the checks and a clean tree say it may.
 `dispatch/tests/first_slice.rs` is the acceptance table, plus a test
 per point above; `dispatch/tests/live.rs` runs the first stage against
 a real Switchboard and a haiku agent. Known gap: Claude Code treats a

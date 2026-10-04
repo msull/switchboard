@@ -258,6 +258,10 @@ pub struct Attempt {
     /// again offers `check` too.
     #[serde(default)]
     pub failed_at_checks: bool,
+    /// Its last failure was the rewrite of its commits, with the branch
+    /// at the reviewed head, so asking about it again offers `keep` too.
+    #[serde(default)]
+    pub failed_at_rewrite: bool,
     /// A code review attempt that continues an earlier attempt of the
     /// same stage and context: that attempt's last reviewed state, its
     /// settled and open points, are this one's start. Written when the
@@ -277,6 +281,12 @@ pub struct Attempt {
     pub ended_ms: Option<u64>,
 }
 
+/// `Rewrite::skipped` when the branch is already on the remote.
+pub const PUBLISHED: &str = "the branch is published";
+
+/// `Rewrite::skipped` when the user answered `keep` to a failed rewrite.
+pub const KEPT_BY_HAND: &str = "the user kept them after the rewrite failed";
+
 /// A code review attempt's rewrite of its branch's commits, from the
 /// head its checks passed at to one with the same tree.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -295,7 +305,8 @@ pub struct Rewrite {
     /// Commits ahead of the base after it.
     #[serde(default)]
     pub to: u32,
-    /// Why history was left as it was (the branch is published).
+    /// Why history was left as it was: [`PUBLISHED`] or [`KEPT_BY_HAND`],
+    /// a clause that reads after "commits kept:".
     #[serde(default)]
     pub skipped: Option<String>,
     pub at_ms: u64,

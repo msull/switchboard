@@ -172,7 +172,11 @@ on the ticket) is skipped, not folded. One departure from the issue's
 acceptance: a tree dirty when the checks finish keeps the checks
 question (`rerun | check | park`), not `rerun | park`, because the
 checks did not run on that tree; `rerun | park` is for a tree the
-rewrite itself finds dirty (after a restart).
+rewrite itself finds dirty (after a restart). #40 added `keep` to the
+rewrite's own failures (`rerun | keep | park`): it completes the stage at
+the reviewed head with the history as it is, recorded as `skipped =
+"the user kept them after the rewrite failed"`, since a rerun folds
+the same way and fails again.
 
 ## 8. A refreshed review reviews the rebase too
 
@@ -328,10 +332,6 @@ Observed, not yet issues. Each line says where it was seen.
   point from the reviewer named `style` as style, so one about behaviour
   never holds a round open. Seen on #33's round 2. Whether it should block
   is open.
-- **A `keep` answer on the rewrite-failure decision.** #30's plan noted it:
-  when a `fold` cannot apply (a conflicting fixup), the only answers are
-  `rerun | park`, and a rerun will fold the same way. `keep` would complete
-  the stage with the history as it is.
 - **The CLI blocks behind a long runner pass.** `dispatch take` waited about
   three minutes while the runner was closing #23 (worktree removal, a
   release). The runner holds the lock across a whole pass; the lock should
