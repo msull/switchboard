@@ -342,12 +342,15 @@ Observed, not yet issues. Each line says where it was seen. Entries that
 became issues: the style declaration line and the remedy log line (#38,
 built), checks left running on a park (#39, built), `keep` on a fold
 failure (#40, built), the CLI blocking behind a pass (#41), a dirty tree
-nudges the agent (#43, built), the supervising agent's CLI (#44).
+nudges the agent (#43, built), the supervising agent's CLI (#44,
+built), the orphaned check (#53), the unreviewed conflict rebase (#54),
+the stale folded commit message (#55).
 
 - **A check orphaned by a runner restart is never killed.** #39 put each
   check in its own process group, so it outlives a runner stopped by
   Ctrl-C. Persisting the group id on `GateRun` would let a restarted
   runner kill the orphan before starting the checks again or cancelling.
+  Issue #53.
 - **An untagged non-wording point from the `style` reviewer counts as
   style.** `class_of` (`dispatch/src/review.rs`) counts every untagged
   point from the reviewer named `style` as style, so one about behaviour
@@ -362,20 +365,21 @@ nudges the agent (#43, built), the supervising agent's CLI (#44).
   implementation commit's message, so when a review round renames
   something the message's contract list names, the PR body is corrected
   and the message is not (PRs 45 and 46). The fixer should commit with
-  `squash!` when its fix changes a name the message carries, or the `pr`
-  stage should check the message against the body.
+  `squash!` when its fix changes a name the message carries (the fixer's
+  guidance says so since 2026-10-04), or the `pr` stage should check the
+  message against the tree. Issue #55.
 - **A `pr`-stage rebase with conflicts is reviewed by nobody.** The
   refresh at `pr` entry rebases the reviewed branch; the checks run again
   at the new head, but no reviewer reads the resolution, so a dropped line
   that breaks no test lands (#40 and #39 on 2026-10-04). One delta pass by
   the correctness reviewer when the rebase had conflicts, as item 8 does
   for review rounds.
-- **tmux adapter tests flake on the Linux runner.** `command_exit_code_is_reported`
-  and `long_input_is_typed_in_full` each failed once on PR 45's CI, in
-  different jobs, and passed on rerun; `a_dropped_terminal_releases_its_descriptors`
-  and `autostart_service_starts_and_agent_does_not` did the same earlier.
-  Each wait in those tests should poll to a deadline, as the descriptor
-  test now does.
+- **tmux adapter tests flake on the Linux runner.** #48 made every wait
+  in the tmux and dispatch tests poll to a deadline and skipped fsync in
+  tests (the dispatch suite went from about two minutes to half a
+  minute). `command_exit_code_is_reported` and
+  `a_killed_check_takes_its_process_group_with_it` still failed once each
+  on CI afterwards and passed on rerun; the remaining cause is open.
 - **Agents stop one step short.** A planner described edits it had not
   made (#25), an implementer stopped with ten files uncommitted (#40).
   Prompt text now says the stage is not done until the file or the tree
