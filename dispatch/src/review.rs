@@ -22,7 +22,7 @@ use crate::scheduler::{
 };
 use crate::template::Vars;
 use crate::ticket::{
-    Attempt, AttemptKind, AttemptState, DIRTY_POLLS, DecisionKind, GateRun, KEPT_BY_HAND,
+    Attempt, AttemptKind, AttemptState, DIRTY_WAIT_MS, DecisionKind, GateRun, KEPT_BY_HAND,
     PUBLISHED, ProjectState, Refreshed, ReviewRound, ReviewerResult, ReviewerRun, Rewrite,
     RoundState, STOP_IDLE_POLLS, Ticket,
 };
@@ -315,6 +315,7 @@ impl Runner {
             polls_since_stop: 0,
             settle: None,
             dirty_polls: 0,
+            dirty_since_ms: None,
             started_ms: now_ms,
             ended_ms: None,
         });
@@ -1169,7 +1170,7 @@ impl Runner {
             // A commit whose hook is still running leaves the tree
             // dirty for minutes after the response settles; while the
             // session lives the round waits for it, within a bound.
-            if running && waits_for_commit(rm, &ticket_id, &key.0, &a.context) {
+            if running && waits_for_commit(rm, &ticket_id, &key.0, &a.context, now_ms) {
                 return self.save_ticket(t, now_ms);
             }
             let reason = format!(
@@ -2771,9 +2772,18 @@ fn no_feedback_of(stage: &Stage) -> String {
 }
 
 /// Counts a poll with the tree still dirty after the response settled.
-/// True while the round should keep waiting for the commit to land.
-fn waits_for_commit(rm: &mut ReviewRound, ticket: &str, stage: &str, context: &str) -> bool {
-    if rm.dirty_polls >= DIRTY_POLLS {
+/// True while the round should keep waiting for the commit to land:
+/// until `DIRTY_WAIT_MS` after the first dirty pass, which the round
+/// records so a restarted runner keeps the same clock.
+fn waits_for_commit(
+    rm: &mut ReviewRound,
+    ticket: &str,
+    stage: &str,
+    context: &str,
+    now_ms: u64,
+) -> bool {
+    let since = *rm.dirty_since_ms.get_or_insert(now_ms);
+    if now_ms.saturating_sub(since) >= DIRTY_WAIT_MS {
         return false;
     }
     if rm.dirty_polls == 0 {
@@ -3021,6 +3031,7 @@ mod tests {
             polls_since_stop: 0,
             settle: None,
             dirty_polls: 0,
+            dirty_since_ms: None,
             started_ms: 0,
             ended_ms: None,
         }

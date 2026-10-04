@@ -7,6 +7,7 @@
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{Context, Result, bail};
 use serde_json::Value;
@@ -18,7 +19,7 @@ use crate::ticket::{ProjectState, Ticket};
 /// carried a version reads as 0 and is brought up by `migrate`. A
 /// record above it was written by a newer `dispatch` and is refused
 /// both ways, so this build never drops fields it does not know.
-pub const RECORD_VERSION: u32 = 5;
+pub const RECORD_VERSION: u32 = 6;
 
 /// The writer lock, held while this lives.
 #[derive(Debug)]
@@ -245,10 +246,25 @@ impl DataDir {
     }
 }
 
+/// Whether `atomic_write` flushes to the device. Only
+/// `skip_fsync_for_tests` clears it; an atomic because test binaries
+/// write from many threads, and `Relaxed` because nothing else
+/// synchronises on it.
+static FLUSH: AtomicBool = AtomicBool::new(true);
+
+/// Tests only: `atomic_write` skips its two device flushes from now on,
+/// in this process. The temp file, `.bak` link and rename still run, so
+/// the write path and its fallback read stay covered; only durability
+/// across a power cut is given up, which no test exercises.
+pub fn skip_fsync_for_tests() {
+    FLUSH.store(false, Ordering::Relaxed);
+}
+
 /// Write `bytes` to `path` so a crash leaves either the old file or the
 /// new one, never a torn one and never none: temp file, fsync, the
 /// previous version linked as `.bak` (the primary stays in place until
-/// the rename replaces it), rename, directory fsync.
+/// the rename replaces it), rename, directory fsync. A test process can
+/// skip both fsyncs with `skip_fsync_for_tests`.
 pub fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
     let dir = path.parent().context("a path with a parent")?;
     fs::create_dir_all(dir)?;
@@ -256,7 +272,9 @@ pub fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
     {
         let mut file = File::create(&tmp).with_context(|| format!("create {}", tmp.display()))?;
         file.write_all(bytes)?;
-        file.sync_all()?;
+        if FLUSH.load(Ordering::Relaxed) {
+            file.sync_all()?;
+        }
     }
     if path.exists() {
         let bak = with_suffix(path, "bak");
@@ -268,7 +286,9 @@ pub fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
         fs::hard_link(path, &bak).with_context(|| format!("keep {}", bak.display()))?;
     }
     fs::rename(&tmp, path)?;
-    if let Ok(d) = File::open(dir) {
+    if FLUSH.load(Ordering::Relaxed)
+        && let Ok(d) = File::open(dir)
+    {
         let _ = d.sync_all();
     }
     Ok(())
@@ -347,6 +367,11 @@ pub fn migrate(mut value: Value) -> Value {
         // rewrites its commits, which its serde default gives. Nothing is
         // transformed; a build that would drop it on its next write must
         // refuse the record.
+        //
+        // 5 to 6: a review round gains `dirty_since_ms`, absent until a
+        // pass finds the tree dirty after the response, which its serde
+        // default gives. Nothing is transformed; a build that would drop
+        // it on its next write must refuse the record.
         if version == 1 {
             settle_from_verdicts(&mut value);
         }
@@ -666,9 +691,37 @@ mod tests {
         });
         write_ticket(&path, &t).unwrap();
         let written: Value = read_json(&path).unwrap();
-        assert_eq!(written["version"], 5);
+        assert_eq!(written["version"], RECORD_VERSION);
         assert_eq!(written["attempts"][0]["rewrite"]["mode"], "fold");
         assert_eq!(read_ticket(&path).unwrap(), t);
+    }
+
+    #[test]
+    fn a_version_five_record_migrates_to_six_and_reads_no_dirty_clock() {
+        let round = r#"{"n": 1, "base": "base0000", "head": "head0001", "reviewers": [], "round_state": "fixing", "feedback": null, "open_points": 2, "fix_authorised": true, "implementer": "s-9", "response": "/r.md", "head_after": null, "stop_at_ms": 1500, "polls_since_stop": 0, "settle": null, "dirty_polls": 4, "started_ms": 1000, "ended_ms": null}"#;
+        let attempt = format!(
+            r#"{{"stage": "review-code", "n": 1, "context": "backend", "kind": "review", "state": "running", "project": null, "session": null, "run": null, "artifacts": {{}}, "settle": {{}}, "stop_at_ms": null, "head": null, "carried_from": null, "rework": null, "rounds": [{round}], "started_ms": 1000, "ended_ms": null}}"#
+        );
+        let text = TICKET_V0.replacen('{', "{\n  \"version\": 5,", 1).replacen(
+            r#""attempts": [],"#,
+            &format!(r#""attempts": [{attempt}],"#),
+            1,
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.json");
+        fs::write(&path, text).unwrap();
+        let mut t = read_ticket(&path).unwrap();
+        assert_eq!(t.version, RECORD_VERSION);
+        let rm = &t.attempts[0].rounds[0];
+        assert_eq!((rm.dirty_since_ms, rm.dirty_polls), (None, 4));
+        t.attempts[0].rounds[0].dirty_since_ms = Some(5_000);
+        write_ticket(&path, &t).unwrap();
+        let written: Value = read_json(&path).unwrap();
+        assert_eq!(written["version"], 6);
+        assert_eq!(
+            read_ticket(&path).unwrap().attempts[0].rounds[0].dirty_since_ms,
+            Some(5_000)
+        );
     }
 
     #[test]

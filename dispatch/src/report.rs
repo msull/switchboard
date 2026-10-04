@@ -447,6 +447,7 @@ mod tests {
             polls_since_stop: 0,
             settle: None,
             dirty_polls: 0,
+            dirty_since_ms: None,
             started_ms: 0,
             ended_ms: None,
         }

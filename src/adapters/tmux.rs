@@ -626,20 +626,70 @@ mod tests {
     /// failure on a machine that cannot be reached afterwards (CI) says
     /// which of missing, still running or dead-without-status it was.
     fn poll_on(server: Option<&Server>, what: &str, ready: &mut dyn FnMut() -> bool) {
-        // Generous: a cold CI runner needs the headroom to start a
-        // server and report a pane's exit.
-        let deadline = Instant::now() + Duration::from_secs(20);
+        if let Err(seen) = try_poll_on(server, ready) {
+            panic!("timed out waiting for {what}{seen}");
+        }
+    }
+
+    /// The deadline loop under `poll_on` at its 20 s default, for a
+    /// caller that writes its own failure message: on timeout, what
+    /// `server` had. Generous because a cold CI runner needs the
+    /// headroom to start a server and report a pane's exit.
+    fn try_poll_on(server: Option<&Server>, ready: &mut dyn FnMut() -> bool) -> Result<(), String> {
+        poll_for(server, Duration::from_secs(20), ready)
+    }
+
+    fn poll_for(
+        server: Option<&Server>,
+        timeout: Duration,
+        ready: &mut dyn FnMut() -> bool,
+    ) -> Result<(), String> {
+        let deadline = Instant::now() + timeout;
         while !ready() {
             if Instant::now() >= deadline {
-                let seen = server.map_or(String::new(), |s| {
+                return Err(server.map_or(String::new(), |s| {
                     let panes = s.host.run(&["list-panes", "-a", "-F", STATUS_FORMAT]);
                     let sessions = s.host.run(&["list-sessions"]);
-                    format!("; panes: {panes:?}; sessions: {sessions:?}")
-                });
-                panic!("timed out waiting for {what}{seen}");
+                    format!(
+                        "; panes: {panes:?}; sessions: {sessions:?}{}",
+                        pane_process_states(s)
+                    )
+                }));
             }
-            std::thread::sleep(Duration::from_millis(50));
+            std::thread::sleep(Duration::from_millis(25));
         }
+        Ok(())
+    }
+
+    /// Each pane's process state from `/proc`: a `Z` means tmux never
+    /// reaped its child, which tells a tmux defect from a slow exit.
+    #[cfg(target_os = "linux")]
+    fn pane_process_states(s: &Server) -> String {
+        let pids = s
+            .host
+            .run(&["list-panes", "-a", "-F", "#{pane_pid}"])
+            .unwrap_or_default();
+        let states: Vec<String> = pids
+            .split_whitespace()
+            .map(|pid| {
+                // The state follows the command name, which is in
+                // parentheses and may itself hold spaces or parentheses.
+                let state = std::fs::read_to_string(format!("/proc/{pid}/stat"))
+                    .ok()
+                    .and_then(|stat| {
+                        let (_, rest) = stat.rsplit_once(')')?;
+                        rest.split_whitespace().next().map(str::to_owned)
+                    })
+                    .unwrap_or_else(|| "gone".into());
+                format!("{pid}={state}")
+            })
+            .collect();
+        format!("; pane processes: {}", states.join(" "))
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn pane_process_states(_: &Server) -> String {
+        String::new()
     }
 
     fn shell_spec(id: &str, dir: &Path, scrollback: Option<PathBuf>) -> SpawnSpec {
@@ -753,17 +803,23 @@ mod tests {
         s.host.write_line(&id, &text).unwrap();
         // `cat` writes as lines complete; the Enter after the text ends the
         // last one.
-        let deadline = Instant::now() + Duration::from_secs(10);
-        while !std::fs::read_to_string(&out).is_ok_and(|got| got.contains("Paragraph 11:")) {
-            assert!(
-                Instant::now() < deadline,
-                "typed text did not arrive; pane:\n{}",
+        let mut last = String::new();
+        let arrived = try_poll_on(Some(&s), &mut || {
+            last = std::fs::read_to_string(&out).unwrap_or_default();
+            last.trim_end() == text.trim_end()
+        });
+        if let Err(seen) = arrived {
+            // The whole text is 21 kB; its length and tail say whether
+            // the file stopped short or went wrong.
+            let tail_from = last.floor_char_boundary(last.len().saturating_sub(200));
+            panic!(
+                "the whole text never reached the file: {} of {} bytes, ending {:?}; pane:\n{}{seen}",
+                last.len(),
+                text.len(),
+                &last[tail_from..],
                 s.host.snapshot(&id, Some(20)).unwrap_or_default()
             );
-            std::thread::sleep(Duration::from_millis(50));
         }
-        let got = std::fs::read_to_string(&out).unwrap();
-        assert_eq!(got.trim_end(), text.trim_end());
         s.host.kill(&id).unwrap();
     }
 
@@ -849,9 +905,32 @@ mod tests {
             scrollback: None,
         };
         s.host.spawn(&spec).unwrap();
-        poll_on(Some(&s), "exit status", &mut || {
+        poll_on(Some(&s), "the pane's exit", &mut || {
+            matches!(
+                s.host.status(&id).unwrap().liveness,
+                Liveness::Exited { .. }
+            )
+        });
+        // tmux can report the death a moment before its status.
+        let with_code = poll_for(Some(&s), Duration::from_secs(5), &mut || {
             s.host.status(&id).unwrap().liveness == Liveness::Exited { code: Some(3) }
         });
+        if let Err(seen) = with_code {
+            // An unreadable version takes the strict path: comparing the
+            // `Option`s would let `None < Some((3, 5))` pass silently.
+            let old_tmux = s
+                .host
+                .probe()
+                .ok()
+                .and_then(|info| parse_version(&info.description))
+                .is_some_and(|v| v < (3, 5));
+            if old_tmux && s.host.status(&id).unwrap().liveness == (Liveness::Exited { code: None })
+            {
+                eprintln!("this tmux left the pane dead without a status{seen}");
+                return;
+            }
+            panic!("timed out waiting for exit status 3{seen}");
+        }
         let listed = s.host.list().unwrap();
         let job = listed.iter().find(|h| h.id == id).expect("listed");
         assert_eq!(job.liveness, Liveness::Exited { code: Some(3) });

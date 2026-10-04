@@ -202,11 +202,12 @@ pub struct Settle {
 /// Polls an artifact must look the same for before it counts as written.
 pub const SETTLE_POLLS: u32 = 3;
 
-/// Polls an implementer's tree may stay dirty after its stop while its
-/// session still runs: a commit whose pre-commit hook runs the whole
-/// test suite takes minutes, and the response can settle before it
-/// lands. About five minutes at one poll a second.
-pub const DIRTY_POLLS: u32 = 300;
+/// How long an implementer's tree may stay dirty after its response
+/// settled while its session still runs: a commit whose pre-commit hook
+/// runs the whole test suite takes minutes, and the response can settle
+/// before it lands. Five minutes, from the first pass that found the
+/// tree dirty.
+pub const DIRTY_WAIT_MS: u64 = 300_000;
 
 /// Polls a stopped agent may sit idle at its prompt without its
 /// artifact before it counts as finished without it: about thirty
@@ -348,10 +349,15 @@ pub struct ReviewRound {
     pub polls_since_stop: u32,
     #[serde(default)]
     pub settle: Option<Settle>,
-    /// Polls the tree has been dirty since the response settled, while
-    /// the implementer's session still runs (a commit in flight).
+    /// Passes that found the tree dirty after the response settled, kept
+    /// for the record and so the wait is logged once; it bounds nothing,
+    /// `dirty_since_ms` does.
     #[serde(default)]
     pub dirty_polls: u32,
+    /// When a pass first found the tree dirty after the response
+    /// settled; the wait is bounded by `DIRTY_WAIT_MS` from here.
+    #[serde(default)]
+    pub dirty_since_ms: Option<u64>,
     pub started_ms: u64,
     pub ended_ms: Option<u64>,
 }
