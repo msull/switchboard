@@ -182,7 +182,10 @@ line per change to `events.jsonl` in the data directory: `taken`,
 question and options), `answered` and `decision-cancelled`, `pr` and
 `pr-checks`, `pushed` and `refreshed`, `rewrite`, `round` (a code
 review round and its open points), `nudged` (a line typed into an
-agent's session after it stopped with a dirty tree), `parking`,
+agent's session after it stopped with a dirty tree),
+`check-orphan-killed` (checks a previous runner left running, stopped
+by this one before they ran again or the attempt was cancelled),
+`parking`,
 `parked`, `resumed`, `closing`, `closed`, and `void`. The human line is
 `seq  hh:mm:ss  ticket  stage  kind  text`, the time in the machine's
 local zone (the stored `at_ms` under `--json` is UTC milliseconds).

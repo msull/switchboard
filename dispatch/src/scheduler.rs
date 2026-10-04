@@ -13,7 +13,7 @@ use dispatch_control as wire_dispatch;
 use switchboard_control::{self as wire, Body, Reply, Request, RunState};
 
 use crate::bitbucket::{Bitbucket, bitbucket_repo};
-use crate::git::{Confine, Network, Push, Repo, branch_name, yyyymmdd};
+use crate::git::{Adopted, Confine, Network, Push, Repo, branch_name, yyyymmdd};
 use crate::github::{Checks, Gh, PullRequests, github_repo};
 use crate::health::Health;
 use crate::pipeline::{Context, Gate, Lane, OnDirty, Pipeline, Stage, StageKind};
@@ -25,9 +25,10 @@ use crate::store::{
 };
 use crate::template::Vars;
 use crate::ticket::{
-    Attempt, AttemptKind, AttemptState, CloseProgress, Decision, DecisionKind, DecisionState,
-    GateRun, LaneRecord, Operation, ProjectState, PullRequestRecord, PullRequestSource, Refreshed,
-    SETTLE_POLLS, STOP_IDLE_POLLS, Settle, SourceSnapshot, Ticket, TicketState,
+    Attempt, AttemptKind, AttemptState, CheckGroup, CloseProgress, Decision, DecisionKind,
+    DecisionState, GateRun, LaneRecord, Operation, OrphanKill, ProjectState, PullRequestRecord,
+    PullRequestSource, Refreshed, SETTLE_POLLS, STOP_IDLE_POLLS, Settle, SourceSnapshot, Ticket,
+    TicketState,
 };
 
 /// How often a `pr-checks` gate reads the provider.
@@ -81,9 +82,10 @@ pub struct Runner {
     /// The disk hold as last logged, so a full disk is one line, not
     /// one a second.
     low_disk: Option<String>,
-    /// Checks a park or a close killed and is waiting on, by key: when
-    /// this runner first sent the kill. Not saved: a restarted runner
-    /// has lost the child, and `check_gone` reads it as gone.
+    /// Checks a park, a close or a lost check's restart killed and is
+    /// waiting on, by key: when the first kill was sent. Not saved: a
+    /// restarted runner rebuilds an entry from the gate's recorded
+    /// group, with the time of that group's first kill.
     stopping: BTreeMap<String, u64>,
     /// What this runner's calls to Switchboard and the providers did,
     /// for `runner.json`. Kept in memory only. A `RefCell` because the
@@ -93,8 +95,9 @@ pub struct Runner {
     pub health: RefCell<Health>,
 }
 
-/// Where a park's or a close's stop of an attempt's checks stands.
-enum GateStop {
+/// Where a stop of an attempt's checks stands: a park's, a close's, or
+/// one before lost checks start again.
+pub(crate) enum GateStop {
     /// Nothing of the checks is left, or none were running.
     Gone,
     /// Killed, and something of them still runs within the limit.
@@ -1648,7 +1651,7 @@ impl Runner {
         // Before the command reviewers: this is the call that sends the
         // checks' TERM and starts the clock, and a repeated kill of the
         // same key below sends nothing.
-        let reason = match self.stop_gate(t, a, now_ms) {
+        let reason = match self.stop_gate(t, a, now_ms)? {
             GateStop::Gone => reason.to_owned(),
             GateStop::Waiting => return Ok(false),
             GateStop::OverLimit(s) => format!("{reason}; {s}"),
@@ -1673,7 +1676,7 @@ impl Runner {
         let mut waiting = false;
         let mut cancelled = false;
         for a in &open {
-            let cancelled_reason = match self.stop_gate(t, a, now_ms) {
+            let cancelled_reason = match self.stop_gate(t, a, now_ms)? {
                 GateStop::Gone => format!("the ticket closed: {reason}"),
                 GateStop::Waiting => {
                     waiting = true;
@@ -1698,12 +1701,19 @@ impl Runner {
 
     /// The attempt's running checks killed with their process group and
     /// read back: a stage gate's, or a code review's latest round's.
-    /// Past `STOP_LIMIT_MS` from the first kill the group gets SIGKILL
-    /// and the stop goes on without reading it back.
-    fn stop_gate(&mut self, t: &Ticket, a: &Attempt, now_ms: u64) -> GateStop {
-        if a.gate.as_ref().is_none_or(|g| g.exit.is_some()) {
-            return GateStop::Gone;
-        }
+    /// Checks a previous runner left running are found by the gate's
+    /// recorded group and killed the same way. Past `STOP_LIMIT_MS` from
+    /// the first kill the group gets SIGKILL and the stop goes on without
+    /// reading it back.
+    pub(crate) fn stop_gate(
+        &mut self,
+        t: &mut Ticket,
+        a: &Attempt,
+        now_ms: u64,
+    ) -> Result<GateStop> {
+        let Some(gate) = a.gate.as_ref().filter(|g| g.exit.is_none()) else {
+            return Ok(GateStop::Gone);
+        };
         let key = match a.rounds.last() {
             Some(round) => checks_key(t, &(a.stage.clone(), a.n), round.n),
             None => gate_key(t, a),
@@ -1711,13 +1721,20 @@ impl Runner {
         let started = if let Some(&started) = self.stopping.get(&key) {
             started
         } else {
-            self.git.kill_check(&key);
-            self.stopping.insert(key.clone(), now_ms);
-            now_ms
+            let adopted = match &gate.group {
+                Some(group) => self.adopt_orphan(t, a, &key, group, &gate.head, now_ms)?,
+                None => None,
+            };
+            let started = adopted.unwrap_or_else(|| {
+                self.git.kill_check(&key);
+                now_ms
+            });
+            self.stopping.insert(key.clone(), started);
+            started
         };
         if self.git.check_gone(&key) {
             self.stopping.remove(&key);
-            return GateStop::Gone;
+            return Ok(GateStop::Gone);
         }
         if now_ms.saturating_sub(started) >= STOP_LIMIT_MS {
             self.git.escalate_check(&key);
@@ -1727,12 +1744,67 @@ impl Runner {
                 t.id,
                 STOP_LIMIT_MS / 1000
             );
-            return GateStop::OverLimit(format!(
+            return Ok(GateStop::OverLimit(format!(
                 "its checks ({key}) were still running after {}s",
                 STOP_LIMIT_MS / 1000
-            ));
+            )));
         }
-        GateStop::Waiting
+        Ok(GateStop::Waiting)
+    }
+
+    /// The gate's recorded group looked up after a restart: cleared from
+    /// the record if nothing of ours is left under it, or killed and
+    /// recorded as an orphan if it still runs. The time of the group's
+    /// first kill when it was killed, so the limit counts from it across
+    /// restarts while the leader lives; a leader that died of the TERM
+    /// reads as gone and its members are left. A group under a reused id
+    /// gets its own entry and the full limit.
+    fn adopt_orphan(
+        &mut self,
+        t: &mut Ticket,
+        a: &Attempt,
+        key: &str,
+        group: &CheckGroup,
+        head: &str,
+        now_ms: u64,
+    ) -> Result<Option<u64>> {
+        match self.git.adopt_check(key, group) {
+            Adopted::Known => Ok(None),
+            Adopted::Gone => {
+                if let Some(attempt) = find_attempt_mut(t, &a.stage, a.n)
+                    && let Some(run) = &mut attempt.gate
+                {
+                    run.group = None;
+                }
+                self.save_ticket(t, now_ms)?;
+                Ok(None)
+            }
+            Adopted::Killed => {
+                log::info!(
+                    "ticket {}: checks {key} left running by a previous runner (group {}); waiting for them to stop",
+                    t.id,
+                    group.pgid
+                );
+                let Some(attempt) = find_attempt_mut(t, &a.stage, a.n) else {
+                    return Ok(Some(now_ms));
+                };
+                let first = attempt
+                    .orphans_killed
+                    .iter()
+                    .find(|o| o.pgid == group.pgid && o.leader_started == group.leader_started)
+                    .map(|o| o.at_ms);
+                if first.is_none() {
+                    attempt.orphans_killed.push(OrphanKill {
+                        pgid: group.pgid,
+                        leader_started: group.leader_started.clone(),
+                        head: head.to_owned(),
+                        at_ms: now_ms,
+                    });
+                }
+                self.save_ticket(t, now_ms)?;
+                Ok(Some(first.unwrap_or(now_ms)))
+            }
+        }
     }
 
     /// The sessions an attempt owns: its own, or its run's reviewer and
@@ -4502,6 +4574,7 @@ impl Runner {
                 log: log.clone(),
                 started_ms: now_ms,
                 exit: None,
+                group: self.git.check_group(&key),
             });
             attempt.artifacts.insert("checks".into(), log);
         }
@@ -4532,6 +4605,11 @@ impl Runner {
             None => return Ok(()),
             Some(Ok(code)) => code,
             Some(Err(e)) => {
+                // What a previous runner left running is stopped before
+                // the checks start again in the same tree.
+                if let GateStop::Waiting = self.stop_gate(t, a, now_ms)? {
+                    return Ok(());
+                }
                 log::warn!(
                     "ticket {} {}/{} checks lost ({e:#}); starting again",
                     t.id,
@@ -6485,6 +6563,7 @@ pub(crate) fn new_attempt(
         rework: None,
         rewrite: None,
         nudges: Vec::new(),
+        orphans_killed: Vec::new(),
         settle: BTreeMap::new(),
         stop_at_ms: None,
         polls_since_stop: 0,

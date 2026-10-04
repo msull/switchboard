@@ -3754,6 +3754,197 @@ fn parking_after_a_restart_reads_a_lost_check_as_gone() {
     );
 }
 
+/// The runner dies but the check it started keeps running in its own
+/// group, and a new runner comes up over the same records.
+fn orphan_and_restart(env: &mut Env, key: &str) {
+    {
+        let mut repo = env.repo.lock().unwrap();
+        repo.checks.retain(|c| c.key != key);
+        repo.orphans.insert(key.to_owned());
+    }
+    env.restart();
+}
+
+fn started_under(env: &Env, key: &str) -> usize {
+    env.repo
+        .lock()
+        .unwrap()
+        .checks
+        .iter()
+        .filter(|c| c.key == key)
+        .count()
+}
+
+fn orphan_events(env: &Env, id: &str) -> usize {
+    events_of(&env.data, id)
+        .iter()
+        .filter(|k| *k == "check-orphan-killed")
+        .count()
+}
+
+#[test]
+fn an_orphaned_check_is_stopped_before_the_checks_start_again() {
+    let mut env = Env::new();
+    let (id, key) = at_running_checks(&mut env);
+    let group = first_implement(&env, &id).gate.unwrap().group.unwrap();
+    orphan_and_restart(&mut env, &key);
+    for _ in 0..3 {
+        env.step();
+    }
+    assert_eq!(env.repo.lock().unwrap().adopted, vec![key.clone()]);
+    assert_eq!(started_under(&env, &key), 0, "nothing starts beside it");
+    assert!(first_implement(&env, &id).is_open());
+    env.repo.lock().unwrap().orphans.remove(&key);
+    env.step();
+    assert_eq!(started_under(&env, &key), 1);
+    let a = first_implement(&env, &id);
+    let gate = a.gate.unwrap();
+    assert_eq!((gate.head.as_str(), gate.exit), ("base0000", None));
+    assert!(gate.group.is_some_and(|g| g != group));
+    assert_eq!(a.orphans_killed.len(), 1);
+    assert_eq!(
+        (
+            a.orphans_killed[0].pgid,
+            &a.orphans_killed[0].leader_started
+        ),
+        (group.pgid, &group.leader_started)
+    );
+    assert_eq!(orphan_events(&env, &id), 1);
+    assert!(env.repo.lock().unwrap().escalated_checks.is_empty());
+}
+
+#[test]
+fn an_orphan_that_ignores_term_is_killed_past_the_limit() {
+    let mut env = Env::new();
+    let (id, key) = at_running_checks(&mut env);
+    orphan_and_restart(&mut env, &key);
+    env.step();
+    env.step();
+    assert!(env.repo.lock().unwrap().escalated_checks.is_empty());
+    assert_eq!(started_under(&env, &key), 0);
+    env.wait(STOP_LIMIT_MS);
+    env.step();
+    assert_eq!(env.repo.lock().unwrap().escalated_checks, vec![key.clone()]);
+    assert_eq!(started_under(&env, &key), 1);
+    env.step();
+    assert_eq!(started_under(&env, &key), 1, "started once");
+    assert_eq!(first_implement(&env, &id).orphans_killed.len(), 1);
+}
+
+#[test]
+fn a_stale_orphan_group_is_cleared() {
+    let mut env = Env::new();
+    let (id, key) = at_running_checks(&mut env);
+    let group = first_implement(&env, &id).gate.unwrap().group.unwrap();
+    env.repo.lock().unwrap().checks.clear();
+    env.restart();
+    env.step();
+    assert_eq!(started_under(&env, &key), 1);
+    let a = first_implement(&env, &id);
+    assert!(a.gate.unwrap().group.is_some_and(|g| g != group));
+    assert!(a.orphans_killed.is_empty());
+    assert!(env.repo.lock().unwrap().adopted.is_empty());
+    assert_eq!(orphan_events(&env, &id), 0);
+}
+
+#[test]
+fn a_second_orphan_under_a_reused_pgid_gets_its_own_kill() {
+    let mut env = Env::new();
+    let (id, key) = at_running_checks(&mut env);
+    let first = first_implement(&env, &id).gate.unwrap().group.unwrap();
+    orphan_and_restart(&mut env, &key);
+    env.step();
+    {
+        let mut repo = env.repo.lock().unwrap();
+        repo.orphans.remove(&key);
+        // The kernel hands the emptied group's id to the next check.
+        repo.next_pgid = first.pgid;
+    }
+    env.step();
+    let second = first_implement(&env, &id).gate.unwrap().group.unwrap();
+    assert_eq!(second.pgid, first.pgid);
+    assert_ne!(second.leader_started, first.leader_started);
+    // Long after the first kill, the new check is orphaned too.
+    env.wait(STOP_LIMIT_MS);
+    orphan_and_restart(&mut env, &key);
+    env.step();
+    assert!(
+        env.repo.lock().unwrap().escalated_checks.is_empty(),
+        "a TERM and the full grace, not a SIGKILL"
+    );
+    let a = first_implement(&env, &id);
+    assert_eq!(a.orphans_killed.len(), 2);
+    assert!(a.orphans_killed.iter().all(|o| o.pgid == first.pgid));
+    assert_eq!(a.orphans_killed[1].leader_started, second.leader_started);
+    assert_eq!(orphan_events(&env, &id), 2);
+    assert_eq!(started_under(&env, &key), 0);
+}
+
+#[test]
+fn parking_after_a_restart_waits_on_an_orphaned_check() {
+    let mut env = Env::new();
+    let (id, key) = at_running_checks(&mut env);
+    orphan_and_restart(&mut env, &key);
+    park_by_hand(&mut env, &id);
+    env.step();
+    env.step();
+    assert!(
+        first_implement(&env, &id).is_open(),
+        "not cancelled while it runs"
+    );
+    assert!(matches!(env.ticket(&id).state, TicketState::Parking { .. }));
+    env.repo.lock().unwrap().orphans.remove(&key);
+    env.step();
+    assert!(
+        matches!(&implement_state(&env, &id), AttemptState::Cancelled { reason } if !reason.contains("still running")),
+        "{:?}",
+        implement_state(&env, &id)
+    );
+    assert_eq!(first_implement(&env, &id).orphans_killed.len(), 1);
+    assert_eq!(env.repo.lock().unwrap().adopted, vec![key.clone()]);
+    assert!(matches!(env.ticket(&id).state, TicketState::Parked { .. }));
+    assert_eq!(started_under(&env, &key), 0, "nothing started again");
+}
+
+#[test]
+fn a_review_rounds_orphaned_checks_are_stopped_before_they_start_again() {
+    let (mut env, id, _) = findings_asked_and_fixed();
+    let t = env.ticket(&id);
+    let round = &review_attempt(&t).rounds[0];
+    let fixer = round.implementer.clone().unwrap();
+    let response = round.response.clone().unwrap();
+    env.repo
+        .lock()
+        .unwrap()
+        .heads
+        .insert(t.lanes[0].worktree.clone(), "fix00001".into());
+    env.finish(
+        &fixer,
+        &response,
+        "- r1/style-1: fixed\n- r1/style-2: fixed\n- r1/lint-1: fixed\n",
+    );
+    env.steps_until(&id, "the checks after the fix", |t, _| {
+        review_attempt(t).gate.is_some()
+    });
+    let key = checks_key(&env.ticket(&id), 1);
+    orphan_and_restart(&mut env, &key);
+    for _ in 0..3 {
+        env.step();
+    }
+    assert_eq!(env.repo.lock().unwrap().adopted, vec![key.clone()]);
+    assert_eq!(started_under(&env, &key), 0);
+    env.repo.lock().unwrap().orphans.remove(&key);
+    env.step();
+    assert_eq!(started_under(&env, &key), 1);
+    let a = review_attempt(&env.ticket(&id));
+    assert!(
+        a.gate
+            .is_some_and(|g| g.head == "fix00001" && g.group.is_some())
+    );
+    assert_eq!(a.orphans_killed.len(), 1);
+    assert_eq!(orphan_events(&env, &id), 1);
+}
+
 #[test]
 fn closing_during_a_review_round_kills_its_command_reviewers() {
     let mut env = Env::new();

@@ -15,10 +15,11 @@ use switchboard_control::{self as wire, Body, Reply};
 use crate::history::{self, Commits};
 use crate::pipeline::{Gate, OperatorKind, Pipeline, Stage};
 use crate::scheduler::{
-    Ask, DirtyStep, NO_SUCH_SESSION, Runner, SocketDown, asks_again, busy, checks_env, confine_for,
-    dirty_step, env_for, find_attempt, find_attempt_mut, gate_network, guidance_prelude, held_in,
-    idle_polls, lane_gate_argv, latest_attempt, may_rerun, new_attempt, next_n, primary_tree,
-    record_of, rework_key, sent_back, session_kind, settle_file, stopped_after_nudges, vars_for,
+    Ask, DirtyStep, GateStop, NO_SUCH_SESSION, Runner, SocketDown, asks_again, busy, checks_env,
+    confine_for, dirty_step, env_for, find_attempt, find_attempt_mut, gate_network,
+    guidance_prelude, held_in, idle_polls, lane_gate_argv, latest_attempt, may_rerun, new_attempt,
+    next_n, primary_tree, record_of, rework_key, sent_back, session_kind, settle_file,
+    stopped_after_nudges, vars_for,
 };
 use crate::template::Vars;
 use crate::ticket::{
@@ -1368,6 +1369,7 @@ impl Runner {
             log: log.clone(),
             started_ms: now_ms,
             exit: None,
+            group: self.git.check_group(&check_key),
         });
         attempt
             .artifacts
@@ -1401,6 +1403,11 @@ impl Runner {
             None => return Ok(()),
             Some(Ok(code)) => code,
             Some(Err(e)) => {
+                // What a previous runner left running is stopped before
+                // the checks start again in the same tree.
+                if let GateStop::Waiting = self.stop_gate(t, a, now_ms)? {
+                    return Ok(());
+                }
                 log::warn!(
                     "ticket {} {}/{} checks lost ({e:#}); starting again",
                     t.id,

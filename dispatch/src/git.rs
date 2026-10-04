@@ -11,6 +11,7 @@ use std::process::Command;
 use anyhow::{Context, Result, bail};
 
 use crate::history::{Commit, Group};
+use crate::ticket::CheckGroup;
 
 /// What a pipeline command may touch. The adapter turns this into the
 /// platform's mechanism; the scheduler never sees a profile.
@@ -156,8 +157,10 @@ pub trait Repo: Send {
         confine: &Confine,
     ) -> Result<()>;
     /// `None` while the check runs, `Some(Ok(code))` once it exited, and
-    /// `Some(Err)` for a check this runner never started or lost: a
-    /// restart means the process is gone with it.
+    /// `Some(Err)` for a check this runner never started, or one it can
+    /// no longer wait on. A check this runner started stays its own after
+    /// an error, so `adopt_check` answers `Known` for it and `kill_check`
+    /// still stops it; only a previous runner's check can be adopted.
     fn poll_check(&mut self, key: &str) -> Option<Result<i32>>;
     /// A command reviewer: like a check, with stdout and stderr kept
     /// apart, since the stdout is its findings.
@@ -187,14 +190,20 @@ pub trait Repo: Send {
     /// runner started it. A check already killed gets no second signal;
     /// `escalate_check` is the step-up.
     fn kill_check(&mut self, key: &str);
-    /// After `kill_check`: true once nothing of the check is left (its
-    /// process group has no member) or this runner never started it (a
-    /// restart lost it). False while the check or anything in its group
-    /// still runs.
+    /// After `kill_check` or an `adopt_check` that answered `Killed`:
+    /// true once nothing of the check is left (its process group has no
+    /// member) or this runner neither started nor adopted it (a restart
+    /// lost it). False while the check or anything in its group still
+    /// runs.
     fn check_gone(&mut self, key: &str) -> bool;
     /// SIGKILL to the group of a check `kill_check` stopped, sent once and
     /// only if the group still has a member; the group is forgotten after.
     fn escalate_check(&mut self, key: &str);
+    /// The process group of a check or reviewer this runner started.
+    fn check_group(&self, key: &str) -> Option<CheckGroup>;
+    /// A check a previous runner started and left running, signalled by
+    /// its recorded group if it is still ours.
+    fn adopt_check(&mut self, key: &str, group: &CheckGroup) -> Adopted;
     /// The commits of `base..head` in `dir`, oldest first.
     fn commits(&self, dir: &Path, base: &str, head: &str) -> Result<Vec<Commit>>;
     /// The tree `rev` names in `dir`.
@@ -250,6 +259,20 @@ fn parse_shortstat(line: &str) -> (u32, u32, u32) {
     out
 }
 
+/// What `adopt_check` found under a recorded group.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Adopted {
+    /// This runner already holds the key: nothing to adopt.
+    Known,
+    /// Nothing of ours is left under the id, or nothing there can be
+    /// shown to be ours (its leader is gone, started at another time, or
+    /// could not be read); the record's group can go.
+    Gone,
+    /// Ours and still running: TERM sent to the group, which
+    /// `check_gone` and `escalate_check` now follow under `key`.
+    Killed,
+}
+
 /// What a leased push did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Push {
@@ -281,6 +304,22 @@ fn group_alive(pgid: u32) -> bool {
         .stderr(std::process::Stdio::null())
         .status()
         .is_ok_and(|s| s.success())
+}
+
+/// When process `pid` started, as `ps` prints it with the locale and the
+/// zone fixed, so every runner on the machine prints the same text for
+/// the same process; `None` if there is no such process or `ps` could
+/// not say.
+fn leader_started(pid: u32) -> Option<String> {
+    let out = Command::new("ps")
+        .args(["-o", "lstart=", "-p", &pid.to_string()])
+        .env("LC_ALL", "C")
+        .env("TZ", "UTC")
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    let text = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+    (out.status.success() && !text.is_empty()).then_some(text)
 }
 
 impl GitCli {
@@ -860,7 +899,10 @@ impl Repo for GitCli {
     fn escalate_check(&mut self, key: &str) {
         self.sweep_killed();
         // Probed just before the signal: a group id with a live member
-        // cannot have been handed to anyone else.
+        // cannot have been handed to anyone else. A group this runner
+        // did not start is only here once `adopt_check` found its leader
+        // alive with the recorded start time, so the members still under
+        // the id are ours.
         if let Some(pgid) = self.killed.remove(key)
             && group_alive(pgid)
         {
@@ -882,11 +924,52 @@ impl Repo for GitCli {
                 self.checks.remove(key);
                 Some(Ok(status.code().unwrap_or(-1)))
             }
-            Err(e) => {
-                self.checks.remove(key);
-                Some(Err(anyhow::anyhow!("waiting on the check: {e}")))
-            }
+            // The child is kept: it is still this runner's to kill.
+            Err(e) => Some(Err(anyhow::anyhow!("waiting on the check: {e}"))),
         }
+    }
+
+    fn check_group(&self, key: &str) -> Option<CheckGroup> {
+        let pgid = self.checks.get(key)?.id();
+        Some(CheckGroup {
+            pgid,
+            leader_started: leader_started(pgid)?,
+        })
+    }
+
+    fn adopt_check(&mut self, key: &str, group: &CheckGroup) -> Adopted {
+        self.sweep_killed();
+        if self.checks.contains_key(key) || self.killed.contains_key(key) {
+            return Adopted::Known;
+        }
+        if !group_alive(group.pgid) {
+            return Adopted::Gone;
+        }
+        // Only a live leader with the recorded start time proves the
+        // group ours. A leader that started at another time took the pid
+        // after our group emptied. A gone leader proves nothing: our group
+        // may have emptied, its id gone to a new group whose leader then
+        // exited. An unread start time is no proof either, so a leaderless
+        // orphan, or one `ps` could not read, is missed rather than risk
+        // signalling someone else's group.
+        let started = leader_started(group.pgid);
+        if started.as_deref() != Some(group.leader_started.as_str()) {
+            log::warn!(
+                "checks {key}: group {} is led by {}, not a process started {}; left alone",
+                group.pgid,
+                started.map_or_else(
+                    || "no process whose start time could be read".to_owned(),
+                    |s| format!("a process started {s}")
+                ),
+                group.leader_started
+            );
+            return Adopted::Gone;
+        }
+        let _ = Command::new("kill")
+            .args(["-TERM", "--", &format!("-{}", group.pgid)])
+            .output();
+        self.killed.insert(key.to_owned(), group.pgid);
+        Adopted::Killed
     }
 
     fn commits(&self, dir: &Path, base: &str, head: &str) -> Result<Vec<Commit>> {
@@ -1254,6 +1337,21 @@ pub struct FakeRepo {
     pub stubborn_checks: Vec<String>,
     /// Checks `escalate_check` was called on, by key.
     pub escalated_checks: Vec<String>,
+    /// Keys of check groups a previous runner left running: `adopt_check`
+    /// kills them and `check_gone` is false until a test removes them or
+    /// `escalate_check` does.
+    pub orphans: std::collections::BTreeSet<String>,
+    /// Keys `adopt_check` answered `Killed` for, one entry per answer.
+    pub adopted: Vec<String>,
+    /// The group id the next check or reviewer gets; 0 reads as 4000. A
+    /// test that wants a pid reused sets it back.
+    pub next_pgid: u32,
+    /// The group of each check or reviewer started, by key, as it
+    /// started.
+    pub groups: std::collections::BTreeMap<String, CheckGroup>,
+    /// Checks and reviewers started, counted, so two groups under one
+    /// group id still have different leader start times.
+    pub starts: u32,
     /// Command reviewers started: the check record plus its stderr file.
     pub reviewers: Vec<(StartedCheck, PathBuf)>,
     /// What a tree's base resolves to; absent, `base0000`.
@@ -1337,6 +1435,7 @@ impl FakeRepo {
         confine: Option<Confine>,
     ) -> Result<()> {
         std::fs::write(log, "checks ran\n")?;
+        self.take_pgid(key);
         self.checks.push(StartedCheck {
             key: key.to_owned(),
             dir: dir.to_path_buf(),
@@ -1363,6 +1462,7 @@ impl FakeRepo {
             std::fs::write(stdout, "")?;
         }
         std::fs::write(stderr, "")?;
+        self.take_pgid(key);
         let started = StartedCheck {
             key: key.to_owned(),
             dir: dir.to_path_buf(),
@@ -1374,6 +1474,23 @@ impl FakeRepo {
         self.checks.push(started.clone());
         self.reviewers.push((started, stderr.to_path_buf()));
         Ok(())
+    }
+
+    /// One more start: the next group id and a start time of its own,
+    /// recorded under `key`.
+    fn take_pgid(&mut self, key: &str) {
+        if self.next_pgid == 0 {
+            self.next_pgid = 4000;
+        }
+        self.starts += 1;
+        self.groups.insert(
+            key.to_owned(),
+            CheckGroup {
+                pgid: self.next_pgid,
+                leader_started: format!("fake-{}", self.starts),
+            },
+        );
+        self.next_pgid += 1;
     }
 }
 
@@ -1699,11 +1816,29 @@ impl Repo for FakeRepo {
         self.killed_checks.push(key.to_owned());
     }
     fn check_gone(&mut self, key: &str) -> bool {
-        !self.checks.iter().any(|c| c.key == key) || self.check_exits.contains_key(key)
+        !self.orphans.contains(key)
+            && (!self.checks.iter().any(|c| c.key == key) || self.check_exits.contains_key(key))
     }
     fn escalate_check(&mut self, key: &str) {
         self.checks.retain(|c| c.key != key);
+        self.orphans.remove(key);
         self.escalated_checks.push(key.to_owned());
+    }
+    fn check_group(&self, key: &str) -> Option<CheckGroup> {
+        if !self.checks.iter().any(|c| c.key == key) {
+            return None;
+        }
+        self.groups.get(key).cloned()
+    }
+    fn adopt_check(&mut self, key: &str, _group: &CheckGroup) -> Adopted {
+        if self.checks.iter().any(|c| c.key == key) {
+            Adopted::Known
+        } else if self.orphans.contains(key) {
+            self.adopted.push(key.to_owned());
+            Adopted::Killed
+        } else {
+            Adopted::Gone
+        }
     }
     fn rev_parse(&self, dir: &Path, _rev: &str) -> Result<String> {
         Ok(self
@@ -1963,6 +2098,12 @@ impl Repo for std::sync::Arc<std::sync::Mutex<FakeRepo>> {
     fn escalate_check(&mut self, key: &str) {
         self.lock().unwrap().escalate_check(key);
     }
+    fn check_group(&self, key: &str) -> Option<CheckGroup> {
+        self.lock().unwrap().check_group(key)
+    }
+    fn adopt_check(&mut self, key: &str, group: &CheckGroup) -> Adopted {
+        self.lock().unwrap().adopt_check(key, group)
+    }
     fn commits(&self, dir: &Path, base: &str, head: &str) -> Result<Vec<Commit>> {
         self.lock().unwrap().commits(dir, base, head)
     }
@@ -2117,6 +2258,105 @@ mod tests {
         cli.kill_check("k");
         poll_to("the check gone", || cli.check_gone("k").then_some(()));
         assert!(!alive(sleep));
+    }
+
+    /// A `sleep` check started in one runner, its group as recorded, and
+    /// its child handed to a thread that reaps it, as init reaps what a
+    /// dead runner left. Forgetting the child instead would leave a
+    /// killed leader a zombie of the test process, and `kill -0` reaches
+    /// a zombie, so the group would never read as gone.
+    fn orphaned_sleep(dir: &Path) -> CheckGroup {
+        let mut previous = GitCli::default();
+        previous
+            .start_check(
+                "k",
+                dir,
+                &["sleep".into(), "30".into()],
+                &[],
+                &dir.join("gate.log"),
+            )
+            .unwrap();
+        let group = previous.check_group("k").unwrap();
+        let mut child = previous.checks.remove("k").unwrap();
+        std::thread::spawn(move || child.wait());
+        group
+    }
+
+    #[test]
+    fn an_adopted_orphan_is_stopped_by_its_group() {
+        let dir = tempfile::tempdir().unwrap();
+        let group = orphaned_sleep(dir.path());
+        assert_eq!(ps_field("pgid", group.pgid), group.pgid);
+        let mut cli = GitCli::default();
+        assert_eq!(cli.adopt_check("k", &group), Adopted::Killed);
+        poll_to("the orphan gone", || cli.check_gone("k").then_some(()));
+        assert!(!alive(group.pgid));
+    }
+
+    #[test]
+    fn a_group_whose_leader_started_at_another_time_is_not_signalled() {
+        let dir = tempfile::tempdir().unwrap();
+        let group = orphaned_sleep(dir.path());
+        let other = CheckGroup {
+            leader_started: "never".into(),
+            ..group.clone()
+        };
+        let mut cli = GitCli::default();
+        assert_eq!(cli.adopt_check("k", &other), Adopted::Gone);
+        assert!(group_alive(group.pgid));
+        assert!(cli.killed.is_empty());
+        let _ = Command::new("kill")
+            .args(["-KILL", &group.pgid.to_string()])
+            .output();
+        poll_to("the sleeper gone", || (!alive(group.pgid)).then_some(()));
+    }
+
+    #[test]
+    fn a_group_whose_leader_is_gone_is_not_signalled() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut previous = GitCli::default();
+        previous
+            .start_check(
+                "k",
+                dir.path(),
+                &["sh".into(), "-c".into(), "sleep 30 & echo $! > pid".into()],
+                &[],
+                &dir.path().join("gate.log"),
+            )
+            .unwrap();
+        let group = previous.check_group("k").unwrap();
+        let sleep = written_pid(dir.path());
+        let mut leader = previous.checks.remove("k").unwrap();
+        leader.wait().unwrap();
+        assert!(group_alive(group.pgid), "the sleep is left in the group");
+        let mut cli = GitCli::default();
+        assert_eq!(cli.adopt_check("k", &group), Adopted::Gone);
+        assert!(alive(sleep));
+        assert!(cli.killed.is_empty());
+        let _ = Command::new("kill")
+            .args(["-KILL", &sleep.to_string()])
+            .output();
+        poll_to("the sleeper gone", || (!alive(sleep)).then_some(()));
+    }
+
+    #[test]
+    fn an_empty_group_is_gone() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut previous = GitCli::default();
+        previous
+            .start_check(
+                "k",
+                dir.path(),
+                &["sleep".into(), "30".into()],
+                &[],
+                &dir.path().join("gate.log"),
+            )
+            .unwrap();
+        let group = previous.check_group("k").unwrap();
+        previous.kill_check("k");
+        poll_to("the check gone", || previous.check_gone("k").then_some(()));
+        let mut cli = GitCli::default();
+        assert_eq!(cli.adopt_check("k", &group), Adopted::Gone);
     }
 
     #[test]
