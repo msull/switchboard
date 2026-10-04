@@ -176,6 +176,9 @@ Dev aids, all environment variables:
   `<dir>/settings.json`. `<dir>/events.jsonl` is the event log
   `dispatch events` and `wait` read, and `<dir>/runner.json` the
   runner's status after its last pass, which `dispatch health` reads.
+  `<dir>/lock` is the writer lock, with a line naming its holder, and
+  `<dir>/tickets/<id>/closing.lock` is held by whichever `dispatch` is
+  finishing that ticket's close; both are lock files, not records.
 - `SWITCHBOARD_SCRIPT=<file>`: run actions at startup, one per line, so
   the app can be put into a known state without clicking. See
   `src/script.rs` for the lines (`add-project`, `new-shell`, `new-claude`,

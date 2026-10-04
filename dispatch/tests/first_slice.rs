@@ -13,7 +13,7 @@ mod support;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use dispatch::git::FakeRepo;
+use dispatch::git::{FakeRepo, Gate};
 use dispatch::github::{Checks, FakePullRequests, PullRequest};
 use dispatch::history::{Commit, Commits, Group};
 use dispatch::scheduler::{PR_ERROR_GRACE_MS, PR_POLL_MS, PR_YOUNG_HEAD_MS, Runner, STOP_LIMIT_MS};
@@ -277,26 +277,8 @@ impl Env {
     }
 
     fn take(&mut self, number: u64) -> Ticket {
-        let text = std::fs::read_to_string(self.data.pipeline(PROJECT)).unwrap();
         let now = self.tick();
-        self.runner
-            .take(
-                PROJECT,
-                &text,
-                SourceSnapshot {
-                    kind: "github".into(),
-                    identity: format!("msull/switchboard#{number}"),
-                    number: Some(number),
-                    title: format!("Issue {number}: escape leaves the field"),
-                    body: "Escape should leave the field, not the set.".into(),
-                    url: None,
-                    labels: vec!["dispatch".into()],
-                    taken_at_ms: now,
-                    pull_requests: Vec::new(),
-                },
-                now,
-            )
-            .unwrap()
+        take_issue(&mut self.runner, &self.data, number, now).unwrap()
     }
 
     /// One runner tick over every project, so a test's tickets advance
@@ -360,6 +342,33 @@ impl Env {
         let t = self.ticket(id);
         panic!("never reached {what}: {t:#?}");
     }
+}
+
+/// Issue `number` taken into the Switchboard project by `runner`, which
+/// may be another process's.
+fn take_issue(
+    runner: &mut Runner,
+    data: &DataDir,
+    number: u64,
+    now: u64,
+) -> anyhow::Result<Ticket> {
+    let text = std::fs::read_to_string(data.pipeline(PROJECT)).unwrap();
+    runner.take(
+        PROJECT,
+        &text,
+        SourceSnapshot {
+            kind: "github".into(),
+            identity: format!("msull/switchboard#{number}"),
+            number: Some(number),
+            title: format!("Issue {number}: escape leaves the field"),
+            body: "Escape should leave the field, not the set.".into(),
+            url: None,
+            labels: vec!["dispatch".into()],
+            taken_at_ms: now,
+            pull_requests: Vec::new(),
+        },
+        now,
+    )
 }
 
 /// `want` appears in `kinds` in this order, not necessarily together.
@@ -8675,8 +8684,22 @@ fn a_close_beside_a_parked_ticket_still_clears_its_card() {
 #[test]
 fn a_dirty_tree_at_the_pipelines_end_is_kept_and_removed_by_hand_later() {
     let mut env = Env::new();
-    let (id, implementer) = at_implement(&mut env);
-    implementer_stops(&mut env, &id, &implementer);
+    let (id, tree) = closed_with_a_kept_tree(&mut env);
+    let now = env.tick();
+    let t = env.runner.close_by_hand(&id, None, now).unwrap();
+    assert!(t.close.tree_removed && t.close.trees_kept.is_none());
+    assert!(matches!(&t.state, TicketState::Closed { reason } if reason == "every stage is done"));
+    assert_eq!(
+        env.repo.lock().unwrap().removed,
+        [(env.data.repo_dir(PROJECT), tree)]
+    );
+}
+
+/// A ticket driven to its merge decision with clean checks and an open
+/// PR.
+fn at_merge_decision(env: &mut Env) -> String {
+    let (id, implementer) = at_implement(env);
+    implementer_stops(env, &id, &implementer);
     env.steps_until(&id, "the checks starting", |t, _| {
         t.attempts_of("implement")
             .last()
@@ -8689,6 +8712,13 @@ fn a_dirty_tree_at_the_pipelines_end_is_kept_and_removed_by_hand_later() {
     env.steps_until(&id, "the merge decision", |t, _| {
         t.pending_decisions().iter().any(|d| d.name == "merge")
     });
+    id
+}
+
+/// A ticket closed past its last stage with its tree kept because it
+/// was dirty, and the tree since cleaned: a hand close retries it.
+fn closed_with_a_kept_tree(env: &mut Env) -> (String, PathBuf) {
+    let id = at_merge_decision(env);
     let tree = env.ticket(&id).tree.clone().unwrap();
     env.repo.lock().unwrap().dirty.push(tree.clone());
     env.pr_is(&id, "base0000", "merged", Checks::Passed);
@@ -8701,13 +8731,272 @@ fn a_dirty_tree_at_the_pipelines_end_is_kept_and_removed_by_hand_later() {
     assert!(!t.close.tree_removed && tree.exists());
     assert!(env.repo.lock().unwrap().removed.is_empty());
     env.repo.lock().unwrap().dirty.clear();
+    (id, tree)
+}
+
+// --- a close's tree removal runs with the writer lock let go
+
+/// Every `worktree_remove` from now on stops at the returned gate.
+fn gate_removals(env: &Env) -> Arc<Gate> {
+    let gate = Arc::new(Gate::default());
+    env.repo
+        .lock()
+        .unwrap()
+        .gates
+        .insert("worktree_remove", Arc::clone(&gate));
+    gate
+}
+
+/// What another `dispatch` process needs to build its own runner over
+/// the same records, Switchboard and repository.
+#[derive(Clone)]
+struct Cli {
+    data: DataDir,
+    sb: Arc<Mutex<FakeSwitchboard>>,
+    repo: Arc<Mutex<FakeRepo>>,
+}
+
+impl Cli {
+    fn of(env: &Env) -> Self {
+        Self {
+            data: env.data.clone(),
+            sb: Arc::clone(&env.sb),
+            repo: Arc::clone(&env.repo),
+        }
+    }
+
+    fn runner(&self) -> Runner {
+        Runner::new(
+            self.data.clone(),
+            Box::new(SharedPort(Arc::clone(&self.sb))),
+            Box::new(Arc::clone(&self.repo)),
+        )
+    }
+}
+
+/// Issue 8 taken by another process once a removal is stopped at
+/// `gate`, which it then lets go: the thread returns the new ticket's id
+/// and how long the take took.
+fn take_in_the_gap(
+    gate: &Arc<Gate>,
+    cli: Cli,
+    now: u64,
+) -> std::thread::JoinHandle<(String, std::time::Duration)> {
+    let gate = Arc::clone(gate);
+    std::thread::spawn(move || {
+        gate.wait_entered();
+        let started = std::time::Instant::now();
+        let b = take_issue(&mut cli.runner(), &cli.data, 8, now + 500).unwrap();
+        let took = started.elapsed();
+        gate.release();
+        (b.id, took)
+    })
+}
+
+/// A ticket at its `rerun` decision with nothing running, closed by
+/// record: the next pass finishes the close.
+fn closing_with_nothing_running(env: &mut Env) -> String {
+    let id = env.take(7).id;
+    at_rerun(env, &id);
+    close_by_record(env, &id);
+    id
+}
+
+#[test]
+fn a_take_during_a_long_tree_removal_returns_at_once_and_runs_next_pass() {
+    let mut env = Env::new();
+    let a = closing_with_nothing_running(&mut env);
+    let gate = gate_removals(&env);
+    let cli = Cli::of(&env);
+    let taker = take_in_the_gap(&gate, cli, env.now);
+    env.step();
+    let (b, took) = taker.join().unwrap();
+    assert!(took < std::time::Duration::from_secs(1), "took {took:?}");
+    let t = env.ticket(&a);
+    assert!(matches!(t.state, TicketState::Closed { .. }), "{t:#?}");
+    let ps = env.runner.load_project(PROJECT).unwrap();
+    assert!(!ps.closing.contains(&a), "{ps:#?}");
+    assert_eq!(ps.queue, vec![b.clone()]);
+    env.step();
+    let investigator = session_of(&env.ticket(&b), "investigate");
+    assert!(env.sb().sessions.iter().any(|s| s.id == investigator));
+}
+
+#[test]
+fn a_take_while_the_last_stage_closes_the_ticket_is_kept() {
+    let mut env = Env::new();
+    let id = at_merge_decision(&mut env);
+    env.pr_is(&id, "base0000", "merged", Checks::Passed);
+    env.wait(PR_POLL_MS);
+    let gate = gate_removals(&env);
+    let cli = Cli::of(&env);
+    let taker = take_in_the_gap(&gate, cli, env.now);
+    env.steps_until(&id, "the ticket closing", |t, _| !t.active());
+    let (b, took) = taker.join().unwrap();
+    assert!(took < std::time::Duration::from_secs(1), "took {took:?}");
+    let t = env.ticket(&id);
+    assert!(
+        matches!(&t.state, TicketState::Closed { reason } if reason == "every stage is done"),
+        "{t:#?}"
+    );
+    assert!(t.close.tree_removed);
+    let ps = env.runner.load_project(PROJECT).unwrap();
+    assert!(ps.queue.contains(&b), "the take was lost: {ps:#?}");
+    assert!(!ps.closing.contains(&id));
+}
+
+#[test]
+fn a_decision_on_a_ticket_whose_trees_are_being_removed_is_refused() {
+    let mut env = Env::new();
+    let id = env.take(7).id;
+    at_rerun(&mut env, &id);
+    let decision = env.pending(&id)[0].id.clone();
+    close_by_record(&env, &id);
+    let gate = gate_removals(&env);
+    let cli = Cli::of(&env);
+    let now = env.now;
+    let decider = {
+        let gate = Arc::clone(&gate);
+        let id = id.clone();
+        std::thread::spawn(move || {
+            gate.wait_entered();
+            let runner = cli.runner();
+            let before = runner.load_ticket(&id).unwrap();
+            let refused = runner.decide(&id, &decision, "rerun", None, now + 500);
+            let after = runner.load_ticket(&id).unwrap();
+            gate.release();
+            (refused.map(|d| d.id), before, after)
+        })
+    };
+    env.step();
+    let (refused, before, after) = decider.join().unwrap();
+    assert!(refused.is_err(), "{refused:?}");
+    assert_eq!(before, after, "the refused decide wrote the record");
+    assert!(matches!(env.ticket(&id).state, TicketState::Closed { .. }));
+}
+
+#[test]
+fn a_pass_during_a_hand_close_leaves_the_removal_to_it() {
+    let mut env = Env::new();
+    let id = env.take(7).id;
+    at_rerun(&mut env, &id);
+    let gate = gate_removals(&env);
+    let cli = Cli::of(&env);
     let now = env.tick();
-    let t = env.runner.close_by_hand(&id, None, now).unwrap();
-    assert!(t.close.tree_removed && t.close.trees_kept.is_none());
-    assert!(matches!(&t.state, TicketState::Closed { reason } if reason == "every stage is done"));
+    let closer = {
+        let id = id.clone();
+        std::thread::spawn(move || cli.runner().close_by_hand(&id, None, now))
+    };
+    gate.wait_entered();
+    let calls = env.sb().calls.len();
+    env.step();
+    assert_eq!(env.sb().calls.len(), calls, "the pass sent something");
+    assert!(env.repo.lock().unwrap().removed.is_empty());
+    assert!(matches!(env.ticket(&id).state, TicketState::Closing { .. }));
+    gate.release();
+    let t = closer.join().unwrap().unwrap();
+    assert!(matches!(t.state, TicketState::Closed { .. }), "{t:#?}");
+    let removed = env.repo.lock().unwrap().removed.clone();
+    let mut once = removed.clone();
+    once.sort();
+    once.dedup();
+    assert_eq!(removed.len(), once.len(), "{removed:?}");
+    assert!(!removed.is_empty());
+}
+
+#[test]
+fn a_retry_in_progress_keeps_its_trees_retryable() {
+    let mut env = Env::new();
+    let (id, tree) = closed_with_a_kept_tree(&mut env);
+    let gate = gate_removals(&env);
+    let cli = Cli::of(&env);
+    let now = env.tick();
+    let retry = {
+        let id = id.clone();
+        std::thread::spawn(move || cli.runner().close_by_hand(&id, None, now))
+    };
+    gate.wait_entered();
+    // What a retry killed here would leave: still marked, still
+    // retryable by the next `dispatch close`.
+    let t = env.ticket(&id);
+    assert!(
+        t.close.trees_kept.is_some() && t.trees_retryable(),
+        "{t:#?}"
+    );
+    gate.release();
+    let t = retry.join().unwrap().unwrap();
+    assert!(t.close.trees_kept.is_none() && t.close.tree_removed);
+    assert_eq!(env.ticket(&id).close.trees_kept, None);
     assert_eq!(
         env.repo.lock().unwrap().removed,
         [(env.data.repo_dir(PROJECT), tree)]
+    );
+}
+
+#[test]
+fn a_second_retry_during_a_retry_is_turned_away() {
+    let mut env = Env::new();
+    let (id, tree) = closed_with_a_kept_tree(&mut env);
+    let gate = gate_removals(&env);
+    let cli = Cli::of(&env);
+    let now = env.tick();
+    let retry = {
+        let id = id.clone();
+        std::thread::spawn(move || cli.runner().close_by_hand(&id, None, now))
+    };
+    gate.wait_entered();
+    let now = env.tick();
+    let e = env.runner.close_by_hand(&id, None, now).unwrap_err();
+    assert!(
+        format!("{e:#}").contains("its trees are being removed by another dispatch"),
+        "{e:#}"
+    );
+    gate.release();
+    let t = retry.join().unwrap().unwrap();
+    assert!(t.close.trees_kept.is_none());
+    assert_eq!(
+        env.repo.lock().unwrap().removed,
+        [(env.data.repo_dir(PROJECT), tree)]
+    );
+}
+
+// --- a transaction and a command from the terminal
+
+#[test]
+fn a_decision_and_a_step_edit_in_one_transaction_both_land() {
+    let mut env = Env::new();
+    let id = at_finalize(&mut env);
+    let decision = env.pending(&id)[0].id.clone();
+    let cli = Cli::of(&env);
+    let now = env.tick();
+    // The decide can only run once the transaction ends, whenever its
+    // thread is scheduled: the step's edit is saved under the lock
+    // first, and the decide reads it back before writing.
+    let (ticket_id, decision_id) = (id.clone(), decision.clone());
+    let answered = env
+        .runner
+        .transaction(|r| {
+            let mut stale = r.load_ticket(&ticket_id)?;
+            let decider = std::thread::spawn(move || {
+                cli.runner()
+                    .decide(&ticket_id, &decision_id, "finalize", None, now + 1)
+                    .map(|d| d.id)
+            });
+            stale.source.title.push_str(" (edited by the step)");
+            r.save_ticket(&mut stale, now)?;
+            Ok(decider)
+        })
+        .unwrap()
+        .join()
+        .unwrap()
+        .unwrap();
+    assert_eq!(answered, decision);
+    let t = env.ticket(&id);
+    assert!(t.source.title.ends_with(" (edited by the step)"), "{t:#?}");
+    let d = t.decisions.iter().find(|d| d.id == decision).unwrap();
+    assert!(
+        matches!(d.state, dispatch::ticket::DecisionState::Answered { .. }),
+        "{d:#?}"
     );
 }
 

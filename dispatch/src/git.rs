@@ -993,6 +993,56 @@ pub struct StartedCheck {
     pub log: PathBuf,
 }
 
+/// A point a fake call stops at until the test lets it go, so a test
+/// can act while a slow call (a tree removal) is in progress. Both
+/// waits panic after ten seconds: a test that never reaches its release
+/// fails instead of passing late.
+#[derive(Debug, Default)]
+pub struct Gate {
+    state: std::sync::Mutex<GateState>,
+    changed: std::sync::Condvar,
+}
+
+#[derive(Debug, Default)]
+struct GateState {
+    entered: bool,
+    released: bool,
+}
+
+impl Gate {
+    const LIMIT: std::time::Duration = std::time::Duration::from_secs(10);
+
+    /// The call side: mark the gate entered, then wait for `release`.
+    pub fn pass(&self) {
+        let mut state = self.state.lock().unwrap();
+        state.entered = true;
+        self.changed.notify_all();
+        let (state, timeout) = self
+            .changed
+            .wait_timeout_while(state, Self::LIMIT, |s| !s.released)
+            .unwrap();
+        drop(state);
+        assert!(!timeout.timed_out(), "a gate was never released");
+    }
+
+    /// The test side: wait until a call is stopped at the gate.
+    pub fn wait_entered(&self) {
+        let state = self.state.lock().unwrap();
+        let (state, timeout) = self
+            .changed
+            .wait_timeout_while(state, Self::LIMIT, |s| !s.entered)
+            .unwrap();
+        drop(state);
+        assert!(!timeout.timed_out(), "no call reached the gate");
+    }
+
+    /// Let every call at the gate, and every later one, through.
+    pub fn release(&self) {
+        self.state.lock().unwrap().released = true;
+        self.changed.notify_all();
+    }
+}
+
 /// What tests use: worktrees are directories made on the spot, heads are
 /// set by the test, commands are recorded.
 #[derive(Debug, Default)]
@@ -1096,6 +1146,9 @@ pub struct FakeRepo {
     /// What `range_size` answers by `(dir, base, head)`; any other range
     /// is an error, as git's would be for a clone without the commits.
     pub ranges: std::collections::BTreeMap<(PathBuf, String, String), RangeSize>,
+    /// Gates by method name; only `worktree_remove` honours one, and
+    /// only through the shared `Arc<Mutex<FakeRepo>>`.
+    pub gates: std::collections::BTreeMap<&'static str, std::sync::Arc<Gate>>,
 }
 
 impl Repo for FakeRepo {
@@ -1572,6 +1625,13 @@ impl Repo for std::sync::Arc<std::sync::Mutex<FakeRepo>> {
         self.lock().unwrap().worktree_repair(repo, dir)
     }
     fn worktree_remove(&mut self, repo: &Path, dir: &Path) -> Result<()> {
+        // The guard is dropped before the gate is passed: a gate that
+        // blocked holding the mutex would freeze the test's own
+        // `repo.lock()` while it acts in the gap.
+        let gate = self.lock().unwrap().gates.get("worktree_remove").cloned();
+        if let Some(gate) = gate {
+            gate.pass();
+        }
         self.lock().unwrap().worktree_remove(repo, dir)
     }
     fn changes(&self, dir: &Path) -> Result<Vec<PathBuf>> {
