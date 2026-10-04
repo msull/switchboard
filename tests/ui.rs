@@ -4611,6 +4611,40 @@ fn ticket_page_shows_the_attempts_pull_request() {
     harness.get_by_label("pending at fa62f3f7");
 }
 
+/// An attempt and a review round that were nudged after a dirty stop
+/// say how many times, with no clock that would depend on the zone.
+#[test]
+fn ticket_page_shows_an_attempts_nudges() {
+    use switchboard::ports::dispatch::{AttemptView, ReviewRoundView};
+    let (mut harness, _ids) = harness();
+    let mut status = dispatch_status();
+    status.tickets[0].attempts = vec![AttemptView {
+        stage: "review-code".into(),
+        n: 1,
+        context: "repo".into(),
+        kind: "review".into(),
+        state: "running".into(),
+        nudges: vec![1_000, 2_000],
+        rounds: vec![ReviewRoundView {
+            n: 1,
+            head: "aaaaaaaa1111".into(),
+            state: "fixing".into(),
+            nudges: vec![1_500],
+            ..ReviewRoundView::default()
+        }],
+        ..AttemptView::default()
+    }];
+    harness
+        .state_mut()
+        .dispatch(AppAction::DispatchStatus(Some(status)));
+    harness
+        .state_mut()
+        .dispatch(AppAction::ShowTicket("t1".into()));
+    harness.run_steps(2);
+    harness.get_by_label("nudged 2 times");
+    harness.get_by_label("nudged once");
+}
+
 /// A completed code review that folded its fix rounds says so on its
 /// attempt's row, with both heads.
 #[test]

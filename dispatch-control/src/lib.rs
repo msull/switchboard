@@ -331,6 +331,9 @@ pub struct AttemptView {
     pub rounds: Vec<ReviewRoundView>,
     /// The history rewrite a code review attempt made as it completed.
     pub rewrite: Option<RewriteView>,
+    /// When each nudge was typed into the agent's session after it
+    /// stopped with its tree not clean, in ms.
+    pub nudges: Vec<u64>,
     pub started_ms: u64,
     pub ended_ms: Option<u64>,
 }
@@ -374,6 +377,19 @@ pub struct ReviewRoundView {
     pub feedback: Option<PathBuf>,
     /// The implementer's response to them, once written.
     pub response: Option<PathBuf>,
+    /// When each nudge was typed into the implementer's session, in ms.
+    pub nudges: Vec<u64>,
+}
+
+/// How an attempt's or a round's nudges read on the page: `None` for
+/// none, else `nudged once` or `nudged N times`.
+#[must_use]
+pub fn nudged(n: usize) -> Option<String> {
+    match n {
+        0 => None,
+        1 => Some("nudged once".into()),
+        n => Some(format!("nudged {n} times")),
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -572,5 +588,12 @@ mod tests {
         };
         let back: AttemptView = serde_json::from_str(&serde_json::to_string(&a).unwrap()).unwrap();
         assert_eq!(back, a);
+    }
+
+    #[test]
+    fn nudges_read_as_once_or_a_count() {
+        assert_eq!(nudged(0), None);
+        assert_eq!(nudged(1).as_deref(), Some("nudged once"));
+        assert_eq!(nudged(3).as_deref(), Some("nudged 3 times"));
     }
 }

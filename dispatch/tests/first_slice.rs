@@ -16,7 +16,9 @@ use std::sync::{Arc, Mutex};
 use dispatch::git::{FakeRepo, Gate};
 use dispatch::github::{Checks, FakePullRequests, PullRequest};
 use dispatch::history::{Commit, Commits, Group};
-use dispatch::scheduler::{PR_ERROR_GRACE_MS, PR_POLL_MS, PR_YOUNG_HEAD_MS, Runner, STOP_LIMIT_MS};
+use dispatch::scheduler::{
+    NUDGE_TEXT, PR_ERROR_GRACE_MS, PR_POLL_MS, PR_YOUNG_HEAD_MS, Runner, STOP_LIMIT_MS,
+};
 use dispatch::store::DataDir;
 use dispatch::ticket::{
     Attempt, AttemptKind, AttemptState, DIRTY_WAIT_MS, Decision, PushedHead, ReviewerResult,
@@ -1844,6 +1846,7 @@ fn a_stage_failing_past_max_reruns_parks_the_ticket() {
     let (id, implementer) = at_implement(&mut env);
     let t = env.ticket(&id);
     with_max_reruns(&env, &t, 1);
+    with_policy(&env, &t, "on_dirty = \"ask\"");
     env.repo
         .lock()
         .unwrap()
@@ -1877,10 +1880,13 @@ fn a_stage_failing_past_max_reruns_parks_the_ticket() {
     assert!(env.pending(&id).is_empty(), "nothing more is asked");
 }
 
+/// Under `on_dirty = "ask"` a dirty stop is the question at once, with
+/// nothing typed into the session.
 #[test]
 fn a_dirty_tree_after_the_agent_never_runs_the_checks() {
     let mut env = Env::new();
     let (id, implementer) = at_implement(&mut env);
+    with_policy(&env, &env.ticket(&id), "on_dirty = \"ask\"");
     let worktree = env.ticket(&id).lanes[0].worktree.clone();
     env.repo.lock().unwrap().dirty.push(worktree);
     implementer_stops(&mut env, &id, &implementer);
@@ -1899,6 +1905,192 @@ fn a_dirty_tree_after_the_agent_never_runs_the_checks() {
         "nothing ran on a dirty tree"
     );
     assert_eq!(env.pending(&id)[0].name, "rerun");
+    assert!(env.sb().sent.is_empty(), "no nudge under ask");
+}
+
+// --- a dirty stop is first a nudge into the same session
+
+/// The implementer, stopped dirty, nudged once: one line typed, no
+/// question, the session still open.
+fn nudged_once(env: &mut Env) -> (String, String) {
+    let (id, implementer) = at_implement(env);
+    let worktree = env.ticket(&id).lanes[0].worktree.clone();
+    env.repo.lock().unwrap().dirty.push(worktree);
+    implementer_stops(env, &id, &implementer);
+    env.steps_until(&id, "the nudge", |_, sb| !sb.sent.is_empty());
+    (id, implementer)
+}
+
+/// The implementer stops again, after its nudge.
+fn stops_again(env: &mut Env, session: &str) {
+    let now = env.tick();
+    env.sb().stop(session, now);
+}
+
+fn the_rerun_question(env: &mut Env, id: &str) -> Decision {
+    env.steps_until(id, "the rerun question", |t, _| {
+        t.pending_decisions().iter().any(|d| d.name == "rerun")
+    });
+    env.pending(id)
+        .into_iter()
+        .find(|d| d.name == "rerun")
+        .unwrap()
+}
+
+#[test]
+fn a_dirty_implementer_is_nudged_and_its_clean_stop_runs_the_checks() {
+    let mut env = Env::new();
+    let (id, implementer) = nudged_once(&mut env);
+    assert_eq!(
+        env.sb().sent,
+        vec![(implementer.clone(), NUDGE_TEXT.to_owned())]
+    );
+    env.step();
+    let t = env.ticket(&id);
+    assert!(t.pending_decisions().is_empty(), "{t:#?}");
+    assert!(!env.sb().killed.contains(&implementer), "the session lives");
+    let a = t.attempts_of("implement").last().unwrap();
+    assert_eq!(a.nudges.len(), 1);
+    assert!(a.is_open() && a.gate.is_none());
+    env.repo.lock().unwrap().dirty.clear();
+    stops_again(&mut env, &implementer);
+    env.steps_until(&id, "the checks starting", |t, _| {
+        t.attempts_of("implement")
+            .last()
+            .is_some_and(|a| a.gate.is_some())
+    });
+    let t = env.ticket(&id);
+    let a = t.attempts_of("implement").last().unwrap();
+    assert_eq!(a.gate.as_ref().unwrap().head, "base0000");
+    assert!(env.sb().killed.contains(&implementer));
+    assert_eq!(env.sb().sent.len(), 1);
+}
+
+#[test]
+fn a_dirty_implementer_after_its_nudge_is_asked_after_1_nudge() {
+    let mut env = Env::new();
+    let (id, implementer) = nudged_once(&mut env);
+    stops_again(&mut env, &implementer);
+    let d = the_rerun_question(&mut env, &id);
+    assert_eq!(d.options, vec!["rerun", "check", "park"]);
+    assert!(d.question.contains("after 1 nudge"), "{}", d.question);
+    assert_eq!(env.sb().sent.len(), 1);
+    assert!(env.sb().killed.contains(&implementer));
+    assert!(env.repo.lock().unwrap().checks.is_empty());
+}
+
+#[test]
+fn a_restart_after_a_nudge_sends_no_second_one() {
+    let mut env = Env::new();
+    let (id, implementer) = nudged_once(&mut env);
+    env.restart();
+    for _ in 0..3 {
+        env.step();
+    }
+    assert_eq!(env.sb().sent.len(), 1);
+    let t = env.ticket(&id);
+    assert_eq!(t.attempts_of("implement").last().unwrap().nudges.len(), 1);
+    assert!(t.pending_decisions().is_empty(), "{t:#?}");
+    env.repo.lock().unwrap().dirty.clear();
+    stops_again(&mut env, &implementer);
+    env.steps_until(&id, "the checks starting", |t, _| {
+        t.attempts_of("implement")
+            .last()
+            .is_some_and(|a| a.gate.is_some())
+    });
+}
+
+#[test]
+fn a_lost_nudge_reply_asks_nothing_and_the_idle_grace_ends_it() {
+    let mut env = Env::new();
+    let (id, implementer) = nudged_once(&mut env);
+    let mut t = env.ticket(&id);
+    let op = t
+        .ledger
+        .iter_mut()
+        .rev()
+        .find(|o| o.intent == "nudge")
+        .unwrap();
+    op.reply = None;
+    let op_id = op.op.clone();
+    dispatch::store::write_ticket(&env.data.ticket_file(&id), &t).unwrap();
+    env.restart();
+    let t = env.ticket(&id);
+    assert!(
+        !t.pending_decisions().iter().any(|d| d.name == "lost-send"),
+        "{t:#?}"
+    );
+    let op = t.ledger.iter().find(|o| o.op == op_id).unwrap();
+    assert_eq!(op.error.as_deref(), Some("reply lost; not repeated"));
+    assert!(op.settled);
+    // The line never reached the agent: it sits at its prompt.
+    env.sb().session_mut(&implementer).card = "idle".into();
+    env.idle_past_grace();
+    let d = the_rerun_question(&mut env, &id);
+    assert!(
+        d.question
+            .contains("after 1 nudge; no stop came after the last nudge"),
+        "{}",
+        d.question
+    );
+    assert_eq!(env.sb().sent.len(), 1);
+}
+
+#[test]
+fn an_unanswered_nudge_is_asked_about_even_with_nudges_left() {
+    let mut env = Env::new();
+    let (id, implementer) = at_implement(&mut env);
+    with_policy(&env, &env.ticket(&id), "on_dirty = { nudge = 2 }");
+    let worktree = env.ticket(&id).lanes[0].worktree.clone();
+    env.repo.lock().unwrap().dirty.push(worktree);
+    implementer_stops(&mut env, &id, &implementer);
+    env.steps_until(&id, "the nudge", |_, sb| !sb.sent.is_empty());
+    env.sb().session_mut(&implementer).card = "idle".into();
+    env.idle_past_grace();
+    let d = the_rerun_question(&mut env, &id);
+    assert!(
+        d.question
+            .contains("after 1 nudge; no stop came after the last nudge"),
+        "{}",
+        d.question
+    );
+    assert_eq!(env.sb().sent.len(), 1);
+}
+
+#[test]
+fn two_nudges_answered_by_dirty_stops_then_the_question() {
+    let mut env = Env::new();
+    let (id, implementer) = at_implement(&mut env);
+    with_policy(&env, &env.ticket(&id), "on_dirty = { nudge = 2 }");
+    let worktree = env.ticket(&id).lanes[0].worktree.clone();
+    env.repo.lock().unwrap().dirty.push(worktree);
+    implementer_stops(&mut env, &id, &implementer);
+    env.steps_until(&id, "the first nudge", |_, sb| sb.sent.len() == 1);
+    stops_again(&mut env, &implementer);
+    env.steps_until(&id, "the second nudge", |_, sb| sb.sent.len() == 2);
+    assert!(env.pending(&id).is_empty());
+    stops_again(&mut env, &implementer);
+    let d = the_rerun_question(&mut env, &id);
+    assert!(d.question.contains("after 2 nudges"), "{}", d.question);
+    assert_eq!(env.sb().sent.len(), 2);
+    let t = env.ticket(&id);
+    assert_eq!(t.attempts_of("implement").last().unwrap().nudges.len(), 2);
+}
+
+#[test]
+fn a_nudged_session_that_ends_is_asked_about_at_its_checks() {
+    let mut env = Env::new();
+    let (id, implementer) = nudged_once(&mut env);
+    env.sb().vanish(&implementer);
+    let d = the_rerun_question(&mut env, &id);
+    assert_eq!(d.options, vec!["rerun", "check", "park"]);
+    assert!(
+        d.question
+            .contains("after 1 nudge; the session ended with no stop after the last nudge"),
+        "{}",
+        d.question
+    );
+    assert!(env.repo.lock().unwrap().checks.is_empty());
 }
 
 #[test]
@@ -4466,10 +4658,16 @@ fn inspect_instead_of_review(env: &Env, id: &str) {
 
 /// `max_reruns = n` in the project's pipeline and in the ticket's copy.
 fn with_max_reruns(env: &Env, t: &Ticket, n: u32) {
+    with_policy(env, t, &format!("max_reruns = {n}"));
+}
+
+/// One more `[policy]` line in the project's pipeline and in the
+/// ticket's copy.
+fn with_policy(env: &Env, t: &Ticket, line: &str) {
     for path in [env.data.pipeline(PROJECT), t.pipeline_file.clone()] {
         let text = std::fs::read_to_string(&path).unwrap().replace(
             "waiting_on_me = 3\n",
-            &format!("waiting_on_me = 3\nmax_reruns = {n}\n"),
+            &format!("waiting_on_me = 3\n{line}\n"),
         );
         std::fs::write(&path, text).unwrap();
     }
@@ -5946,7 +6144,8 @@ fn a_command_reviewers_exit_codes_are_read_as_the_protocol_says() {
 }
 
 /// The tree changing under the reviewers voids the round; the
-/// implementer leaving it dirty fails its round.
+/// implementer leaving it dirty past the commit wait is nudged once, and
+/// a second dirty stop past the wait fails its round.
 #[test]
 fn a_changed_tree_voids_the_round_and_a_dirty_implementer_fails_it() {
     let mut env = Env::new();
@@ -6003,12 +6202,72 @@ fn a_changed_tree_voids_the_round_and_a_dirty_implementer_fails_it() {
         "no question while the tree may still be committed"
     );
     env.wait(2_000);
+    env.steps_until(&id, "the nudge", |_, sb| !sb.sent.is_empty());
+    let implementer = review_attempt(&env.ticket(&id)).rounds[0]
+        .implementer
+        .clone()
+        .unwrap();
+    assert_eq!(
+        env.sb().sent,
+        vec![(implementer.clone(), NUDGE_TEXT.into())]
+    );
+    env.step();
+    assert!(env.pending(&id).is_empty(), "a nudge, not a question");
+    // It stops again with the tree still dirty: the wait again, then the
+    // question.
+    let now = env.tick();
+    env.sb().stop(&implementer, now);
+    env.steps_until(&id, "the dirty clock again", |t, _| {
+        review_attempt(t).rounds[0].dirty_since_ms.is_some()
+    });
+    env.wait(DIRTY_WAIT_MS);
     env.steps_until(&id, "the rerun question", |t, _| {
         t.pending_decisions().iter().any(|d| d.name == "rerun")
     });
     let a = review_attempt(&env.ticket(&id));
     assert!(
-        matches!(&a.state, AttemptState::Failed { reason } if reason.contains("left the tree")),
+        matches!(&a.state, AttemptState::Failed { reason } if reason.contains("left the tree") && reason.contains("after 1 nudge")),
+        "{:?}",
+        a.state
+    );
+    assert_eq!(a.rounds[0].nudges.len(), 1);
+    assert_eq!(env.sb().sent.len(), 1);
+}
+
+/// A fixer nudged about its dirty tree whose pane then goes fails its
+/// round on the tree, saying it was nudged.
+#[test]
+fn a_nudged_fixer_whose_pane_goes_fails_on_its_dirty_tree() {
+    let mut env = Env::new();
+    env.with_review_stage("auto");
+    let id = at_review(&mut env);
+    let tree = env.ticket(&id).lanes[0].worktree.clone();
+    lint_exits(&mut env, &id, 1, 0, "");
+    style_says(&mut env, &id, 1, "- a point\n");
+    env.steps_until(&id, "the implementer", |t, _| {
+        review_attempt(t).rounds[0].implementer.is_some()
+    });
+    let round = review_attempt(&env.ticket(&id)).rounds[0].clone();
+    let implementer = round.implementer.unwrap();
+    env.repo.lock().unwrap().dirty.push(tree);
+    env.finish(
+        &implementer,
+        &round.response.unwrap(),
+        "- r1/style-1: fixed\n",
+    );
+    env.steps_until(&id, "the dirty clock", |t, _| {
+        review_attempt(t).rounds[0].dirty_since_ms.is_some()
+    });
+    env.wait(DIRTY_WAIT_MS);
+    env.steps_until(&id, "the nudge", |_, sb| !sb.sent.is_empty());
+    env.sb().vanish(&implementer);
+    env.steps_until(&id, "the rerun question", |t, _| {
+        t.pending_decisions().iter().any(|d| d.name == "rerun")
+    });
+    let a = review_attempt(&env.ticket(&id));
+    assert!(
+        matches!(&a.state, AttemptState::Failed { reason } if reason.contains("left the tree")
+            && reason.contains("after 1 nudge; the session ended with no stop after the last nudge")),
         "{:?}",
         a.state
     );
@@ -6054,6 +6313,7 @@ fn a_commit_that_lands_after_the_response_settles_is_not_a_dirty_tree() {
         review_attempt(t).rounds[0].head_after.is_some()
     });
     assert!(env.pending(&id).is_empty());
+    assert!(env.sb().sent.is_empty());
 }
 
 /// A head that moved while a question was pending makes the answer

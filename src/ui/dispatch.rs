@@ -12,7 +12,9 @@ use super::dialogs::{dialog, dialog_actions};
 use super::{DrawCtx, GAP, markdown, theme};
 use crate::core::dispatch::{close_offered, parked, ticket_source, ticket_stage};
 use crate::core::{AppAction, RecordId, TicketOnly, TicketSort, View, WaitingAgent};
-use crate::ports::dispatch::{AttemptView, DecisionView, ProjectView, RewriteView, TicketView};
+use crate::ports::dispatch::{
+    AttemptView, DecisionView, ProjectView, RewriteView, TicketView, nudged,
+};
 
 /// The console pane's height on the overview.
 const CONSOLE_HEIGHT: f32 = 280.0;
@@ -954,6 +956,9 @@ fn attempt_row(cx: &mut DrawCtx<'_>, ui: &mut Ui, t: &TicketView, a: &AttemptVie
                 if let Some(reason) = &a.reason {
                     ui.label(theme::meta_text(ui, reason));
                 }
+                if let Some(text) = nudged(a.nudges.len()) {
+                    ui.label(theme::meta_text(ui, text));
+                }
                 if let Some(w) = cx
                     .core
                     .waiting_agents_of(t)
@@ -1060,6 +1065,9 @@ fn round_line(ui: &mut Ui, round: &crate::ports::dispatch::ReviewRoundView) {
         if let Some(after) = &round.head_after {
             let short = short_sha(after);
             ui.label(theme::meta_text(ui, format!("fixed to {short}")));
+        }
+        if let Some(text) = nudged(round.nudges.len()) {
+            ui.label(theme::meta_text(ui, text));
         }
     });
 }

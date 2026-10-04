@@ -16,7 +16,7 @@ use crate::bitbucket::{Bitbucket, bitbucket_repo};
 use crate::git::{Push, Repo, branch_name, yyyymmdd};
 use crate::github::{Checks, Gh, PullRequests, github_repo};
 use crate::health::Health;
-use crate::pipeline::{Context, Gate, Lane, Pipeline, Stage, StageKind};
+use crate::pipeline::{Context, Gate, Lane, OnDirty, Pipeline, Stage, StageKind};
 use crate::port::Port;
 use crate::review::checks_key;
 use crate::store::{
@@ -52,6 +52,14 @@ pub const CUT: &str = "cut";
 /// cancellation reason: well past the seconds a test run takes to exit
 /// on TERM.
 pub const STOP_LIMIT_MS: u64 = 120_000;
+
+/// The line typed into an agent's session when it stops with its tree
+/// not clean, before the question.
+pub const NUDGE_TEXT: &str = "The stage is not done: the tree is not clean. Commit your work, or revert anything that is not part of it, then stop.";
+
+/// The ledger intent of a nudge. Recorded on the attempt before it is
+/// sent, so recovery neither repeats it nor asks about it.
+pub(crate) const NUDGE: &str = "nudge";
 
 /// Everything the runner acts through.
 pub struct Runner {
@@ -4167,15 +4175,7 @@ impl Runner {
             .position(|x| x.stage == a.stage && x.n == a.n)
             .expect("the attempt exists");
         let attempt = &mut t.attempts[idx];
-        if attempt.state == AttemptState::Starting {
-            attempt.state = AttemptState::Running;
-        }
-        if let Some(stop) = view.last_stop_at_ms {
-            attempt.stop_at_ms = Some(stop);
-        }
-        let stopped = attempt.stop_at_ms.is_some()
-            || matches!(view.liveness, wire::Liveness::Exited { code: Some(0) });
-        if !stopped {
+        if !observe_stop(attempt, &view) {
             return match view.liveness {
                 wire::Liveness::Running => self.save_ticket(t, now_ms),
                 wire::Liveness::Exited { code } => {
@@ -4215,6 +4215,11 @@ impl Runner {
             return self.save_ticket(t, now_ms);
         }
         let gated = matches!(stage.gate, Some(Gate::Command { .. }));
+        // Before the kill: a dirty tree may yet be committed by the
+        // agent in the same session, once told.
+        if gated && !self.git.is_clean(cwd)? {
+            return self.dirty_after_agent(t, ps, a, stage, idx, session, running, cwd, now_ms);
+        }
         if gated {
             log::info!(
                 "ticket {} {}/{} agent stopped; checks next",
@@ -4249,6 +4254,94 @@ impl Runner {
             self.start_gate(t, ps, a, stage, cwd, lane, now_ms)?;
         }
         Ok(())
+    }
+
+    /// A gated agent stopped (or never answered its nudge) with its
+    /// tree not clean: a nudge into its session while the stage's
+    /// `on_dirty` has one left for a stop, else the session ends and
+    /// the attempt fails at its checks, which asks.
+    #[allow(clippy::too_many_arguments)]
+    fn dirty_after_agent(
+        &mut self,
+        t: &mut Ticket,
+        ps: &mut ProjectState,
+        a: &Attempt,
+        stage: &Stage,
+        idx: usize,
+        session: String,
+        running: bool,
+        cwd: &Path,
+        now_ms: u64,
+    ) -> Result<()> {
+        let on_dirty = self.pipeline_of(t)?.on_dirty(stage);
+        let attempt = &t.attempts[idx];
+        let step = dirty_step(
+            on_dirty,
+            &attempt.nudges,
+            attempt.stop_at_ms,
+            attempt.polls_since_stop,
+            running,
+            now_ms,
+        );
+        let tree = format!("the tree at {} is not clean after the agent", cwd.display());
+        let suffix = match step {
+            DirtyStep::Nudge { at_ms, k, of } => {
+                let attempt = &mut t.attempts[idx];
+                attempt.nudges.push(at_ms);
+                attempt.polls_since_stop = 0;
+                let key = (a.stage.clone(), a.n);
+                match self.send_nudge(t, ps, key, &a.context, session.clone(), (k, of), now_ms)? {
+                    None => return Ok(()),
+                    Some(failed) => failed,
+                }
+            }
+            DirtyStep::Fail(suffix) => suffix,
+        };
+        let reason = format!("{tree}{suffix}");
+        self.save_ticket(t, now_ms)?;
+        if running {
+            self.send(
+                t,
+                ps,
+                Some((a.stage.clone(), a.n)),
+                "kill",
+                Body::SessionKill { session },
+                now_ms,
+            )?;
+        }
+        self.fail_checks(t, ps, &a.stage, a.n, &reason, now_ms)
+    }
+
+    /// Types `NUDGE_TEXT` into `session`, nudge `k` of `of`; the caller
+    /// has recorded it first. When Switchboard refused it, `Some` of the
+    /// clause the dirty-tree failure ends with.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn send_nudge(
+        &mut self,
+        t: &mut Ticket,
+        ps: &mut ProjectState,
+        key: (String, u32),
+        context: &str,
+        session: String,
+        (k, of): (usize, u32),
+        now_ms: u64,
+    ) -> Result<Option<String>> {
+        log::info!(
+            "ticket {} {}/{context} tree not clean after the stop; nudge {k} of {of}",
+            t.id,
+            key.0
+        );
+        let body = Body::SessionSend {
+            session,
+            text: NUDGE_TEXT.into(),
+        };
+        match self.send(t, ps, Some(key), NUDGE, body, now_ms)? {
+            Reply::Failed { reason } => Ok(Some(format!(
+                "{}; the nudge failed: {reason}",
+                dirty_suffix(k - 1)
+            ))),
+            _ => Ok(None),
+        }
     }
 
     /// The session view an open attempt is judged by. `None` when the
@@ -5415,6 +5508,126 @@ pub(crate) fn idle_polls(view: &wire::SessionView, polls: u32) -> u32 {
     }
 }
 
+/// Whether the agent has stopped since its last nudge: with none, any
+/// stop counts; after one, only a stop later than it.
+pub(crate) fn stopped_since(stop_at_ms: Option<u64>, last_nudge: Option<u64>) -> bool {
+    match (stop_at_ms, last_nudge) {
+        (None, _) => false,
+        (Some(_), None) => true,
+        (Some(stop), Some(nudge)) => stop > nudge,
+    }
+}
+
+/// What a session view says about an attempt's agent, taken into the
+/// record (running once seen, its last stop), and whether it counts as
+/// stopped.
+fn observe_stop(attempt: &mut Attempt, view: &wire::SessionView) -> bool {
+    if attempt.state == AttemptState::Starting {
+        attempt.state = AttemptState::Running;
+    }
+    if let Some(stop) = view.last_stop_at_ms {
+        attempt.stop_at_ms = Some(stop);
+    }
+    stopped_after_nudges(
+        view,
+        attempt.stop_at_ms,
+        &attempt.nudges,
+        &mut attempt.polls_since_stop,
+    )
+}
+
+/// Whether an agent counts as stopped: a stop since its last nudge, a
+/// clean exit, a nudged session that has ended, or a nudge gone
+/// unanswered past the idle grace, which would otherwise be waited on
+/// forever. With a nudge out and the session running, this poll is
+/// counted towards that grace.
+pub(crate) fn stopped_after_nudges(
+    view: &wire::SessionView,
+    stop_at_ms: Option<u64>,
+    nudges: &[u64],
+    polls_since_stop: &mut u32,
+) -> bool {
+    if stopped_since(stop_at_ms, nudges.last().copied())
+        || matches!(view.liveness, wire::Liveness::Exited { code: Some(0) })
+    {
+        return true;
+    }
+    if nudges.is_empty() {
+        return false;
+    }
+    // A nudge goes out only after a stop, so a session that ended since
+    // still stopped once: its tree is judged as that stop left it.
+    if view.liveness != wire::Liveness::Running {
+        return true;
+    }
+    *polls_since_stop = idle_polls(view, *polls_since_stop);
+    unanswered(stop_at_ms, nudges, *polls_since_stop)
+}
+
+/// Whether the last nudge went unanswered: no stop came after it within
+/// the idle grace. Read from the record alone, so a restart keeps it.
+pub(crate) fn unanswered(stop_at_ms: Option<u64>, nudges: &[u64], polls_since_stop: u32) -> bool {
+    !nudges.is_empty()
+        && !stopped_since(stop_at_ms, nudges.last().copied())
+        && polls_since_stop >= STOP_IDLE_POLLS
+}
+
+/// What a stop with the tree not clean comes to.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum DirtyStep {
+    /// Record a nudge stamped `at_ms` and send it, `k` of `of`.
+    Nudge { at_ms: u64, k: usize, of: u32 },
+    /// The failure, with the clause its reason ends with.
+    Fail(String),
+}
+
+/// The nudge or the failure for an agent that stopped (or never
+/// answered its nudge, or ended) with its tree not clean, read from its
+/// record and `on_dirty`. A nudge is stamped after the stop it answers,
+/// so that stop never counts as the reply to it, however late in the
+/// pass Switchboard reported it.
+pub(crate) fn dirty_step(
+    on_dirty: OnDirty,
+    nudges: &[u64],
+    stop_at_ms: Option<u64>,
+    polls_since_stop: u32,
+    running: bool,
+    now_ms: u64,
+) -> DirtyStep {
+    let sent = nudges.len();
+    let unanswered = unanswered(stop_at_ms, nudges, polls_since_stop);
+    let mut suffix = dirty_suffix(sent);
+    match on_dirty {
+        OnDirty::Nudge(of) if running && sent < of as usize && !unanswered => {
+            let at_ms = stop_at_ms.map_or(now_ms, |stop| now_ms.max(stop + 1));
+            return DirtyStep::Nudge {
+                at_ms,
+                k: sent + 1,
+                of,
+            };
+        }
+        _ if unanswered => suffix.push_str("; no stop came after the last nudge"),
+        _ if !running && sent > 0 && !stopped_since(stop_at_ms, nudges.last().copied()) => {
+            suffix.push_str("; the session ended with no stop after the last nudge");
+        }
+        OnDirty::Nudge(_) if !running && sent == 0 => {
+            suffix.push_str("; the session had ended, so it was not nudged");
+        }
+        _ => {}
+    }
+    DirtyStep::Fail(suffix)
+}
+
+/// The clause a dirty-tree failure ends with: how many nudges came
+/// before it.
+pub(crate) fn dirty_suffix(sent: usize) -> String {
+    match sent {
+        0 => String::new(),
+        1 => ", after 1 nudge".into(),
+        n => format!(", after {n} nudges"),
+    }
+}
+
 /// An open attempt with an agent or a review run in it: what the
 /// policy's `slots` count. A gate-only attempt launches nothing.
 pub(crate) fn costs_slot(a: &Attempt) -> bool {
@@ -6252,6 +6465,7 @@ pub(crate) fn new_attempt(
         carried_from: None,
         rework: None,
         rewrite: None,
+        nudges: Vec::new(),
         settle: BTreeMap::new(),
         stop_at_ms: None,
         polls_since_stop: 0,
@@ -6836,5 +7050,76 @@ mod tests {
         assert!(!crate::store::record_exists(&r.data.project_file("P")));
         r.transaction(|r| r.save_project(&ps)).unwrap();
         assert!(crate::store::record_exists(&r.data.project_file("P")));
+    }
+
+    #[test]
+    fn only_a_stop_after_the_last_nudge_counts() {
+        assert!(!stopped_since(None, None));
+        assert!(stopped_since(Some(5), None));
+        assert!(!stopped_since(Some(5), Some(9)));
+        assert!(!stopped_since(Some(9), Some(9)));
+        assert!(stopped_since(Some(12), Some(9)));
+    }
+
+    #[test]
+    fn the_dirty_reason_counts_its_nudges() {
+        assert_eq!(dirty_suffix(0), "");
+        assert_eq!(dirty_suffix(1), ", after 1 nudge");
+        assert_eq!(dirty_suffix(2), ", after 2 nudges");
+    }
+
+    #[test]
+    fn a_dirty_stop_is_a_nudge_while_one_is_left_then_the_reason() {
+        let nudge = OnDirty::Nudge(2);
+        let grace = STOP_IDLE_POLLS;
+        assert_eq!(
+            dirty_step(nudge, &[], Some(5), 0, true, 9),
+            DirtyStep::Nudge {
+                at_ms: 9,
+                k: 1,
+                of: 2
+            }
+        );
+        // A stop Switchboard stamped after the pass began.
+        assert_eq!(
+            dirty_step(nudge, &[9], Some(20), 0, true, 15),
+            DirtyStep::Nudge {
+                at_ms: 21,
+                k: 2,
+                of: 2
+            }
+        );
+        let fail = |s: &str| DirtyStep::Fail(s.into());
+        assert_eq!(dirty_step(OnDirty::Ask, &[], Some(5), 0, true, 9), fail(""));
+        assert_eq!(
+            dirty_step(nudge, &[9, 21], Some(30), 0, true, 40),
+            fail(", after 2 nudges")
+        );
+        assert_eq!(
+            dirty_step(nudge, &[9], Some(5), grace, true, 40),
+            fail(", after 1 nudge; no stop came after the last nudge")
+        );
+        assert_eq!(
+            dirty_step(nudge, &[9], Some(5), 0, false, 40),
+            fail(", after 1 nudge; the session ended with no stop after the last nudge")
+        );
+        assert_eq!(
+            dirty_step(nudge, &[9], Some(12), 0, false, 40),
+            fail(", after 1 nudge")
+        );
+        assert_eq!(
+            dirty_step(nudge, &[], Some(5), 0, false, 9),
+            fail("; the session had ended, so it was not nudged")
+        );
+    }
+
+    #[test]
+    fn a_nudge_goes_unanswered_at_the_idle_grace_with_no_stop_after_it() {
+        let grace = STOP_IDLE_POLLS;
+        assert!(!unanswered(None, &[], grace));
+        assert!(!unanswered(Some(12), &[9], grace));
+        assert!(!unanswered(Some(5), &[9], grace - 1));
+        assert!(unanswered(Some(5), &[9], grace));
+        assert!(unanswered(None, &[9], grace));
     }
 }

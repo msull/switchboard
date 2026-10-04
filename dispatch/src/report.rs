@@ -29,6 +29,8 @@ pub struct StageTime {
     pub ms: u64,
     /// The time its answered decisions waited on the user.
     pub waiting_ms: u64,
+    /// Nudges typed into its agents' sessions, its rounds' included.
+    pub nudges: u32,
 }
 
 /// One round of a review: the points it raised that no earlier round
@@ -166,11 +168,16 @@ pub fn of(
                 _ => None,
             })
             .sum();
+        let nudges: usize = mine
+            .iter()
+            .map(|a| a.nudges.len() + a.rounds.iter().map(|x| x.nudges.len()).sum::<usize>())
+            .sum();
         r.stages.push(StageTime {
             stage: name.clone(),
             attempts: u32::try_from(mine.len()).unwrap_or(u32::MAX),
             ms: start.zip(end).map_or(0, |(s, e)| e.saturating_sub(s)),
             waiting_ms,
+            nudges: u32::try_from(nudges).unwrap_or(u32::MAX),
         });
     }
     if let Some(text) = t.input("plan").and_then(|p| read(p)) {
@@ -317,6 +324,7 @@ pub fn total(reports: &[TicketReport]) -> TicketReport {
                 ..StageTime::default()
             });
             e.attempts += s.attempts;
+            e.nudges += s.nudges;
             e.ms += s.ms;
             e.waiting_ms += s.waiting_ms;
         }
@@ -448,6 +456,7 @@ mod tests {
             settle: None,
             dirty_polls: 0,
             dirty_since_ms: None,
+            nudges: Vec::new(),
             started_ms: 0,
             ended_ms: None,
         }

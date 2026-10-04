@@ -149,7 +149,8 @@ in the ledger with no reply against Switchboard's `find {op}`:
   The operation is `lost`, the attempt fails, and the stage is retried
   only through a decision. For the other command classes, see the
   port: idempotent ones are sent again, non-replayable ones become a
-  decision.
+  decision, except a nudge, which is recorded before it is sent and is
+  neither repeated nor asked about; see the control port.
 - In the log but the record removed: someone removed it in the
   window, which is allowed; Dispatch-owned records carry a visible
   "Dispatch" mark and their notes say which ticket they serve, but
@@ -223,7 +224,8 @@ note now lives on the attempt. Version 5 adds a code review attempt's
 `rewrite`, absent in older records. Version 6 adds a review round's
 `dirty_since_ms`, the time a pass first found the tree dirty after the
 response settled, absent in older records; a round caught mid-wait
-starts its clock on the first pass after the upgrade.
+starts its clock on the first pass after the upgrade. Version 7 adds an
+attempt's and a round's `nudges`, empty in older records.
 
 ### The event log and the runner's status
 
@@ -340,8 +342,13 @@ interrupted attempt.
   the attempt. The exit code is read back; then head and cleanliness
   are checked again, and the result is bound to that head only if
   both are unchanged. A dirty tree before or after is a decision, not
-  a result. A gate is never run on a polling tick, and never before
-  the agent has stopped, so it cannot pass on the untouched base.
+  a result. A dirty tree after the agent is first a nudge: one line
+  typed into the same session, telling the agent to commit or revert
+  and stop, up to the stage's `on_dirty`; only a later stop that is
+  still dirty, or a nudge never answered within the idle grace, is the
+  decision, which says how many nudges came before it. A gate is never
+  run on a polling tick, and never before the agent has stopped, so it
+  cannot pass on the untouched base.
 - **Evidence carries the heads it depends on.** A per-lane result (a
   lane's checks, its `pr-checks`) records that lane's head only; a
   joined result (a deploy, the tester's report, a `tried` answer)
@@ -364,7 +371,10 @@ interrupted attempt.
 - Failure is a decision, never a retry. A gate that fails, an agent
   that stalls (Switchboard already marks it), a review at its cap, a
   branch that no longer merges, a lost launch: each becomes a decision
-  with the suggested next step. Nothing loops silently.
+  with the suggested next step. Nothing loops silently. A nudge is not
+  a retry: it is bounded by `on_dirty`, recorded on the attempt,
+  logged as a `nudged` event, and spends no attempt and no
+  `max_reruns`.
 - Prompts are text and take template values verbatim. Commands never
   do: a command is a fixed argv from the pipeline file, and template
   values reach it as environment variables (`DISPATCH_TICKET`,
@@ -568,6 +578,7 @@ gate = { kind = "command", argv = ["..."], in = "root" | "lane" | "lane:<name>" 
      | { kind = "external", check = "review-finalized" | "pr-checks" | "pr-merged" }
      | { kind = "external", check = "pr-checks", checks = "none" }   # a repository with no CI: a PR at the head is enough
      | { kind = "human", decision = "...", confirm = true }
+on_dirty = { nudge = 1 } | "ask"   # an agent stage with a command gate, or a code review stage's implementer: overrides the policy's
 needs = ["resource name"]     # held from the first stage that names it to the last, contiguous
 reviewers = ["style", "lint"] # present: a code review stage (see "The code review stage"); operators, run at once each round
 implementer = "implementer"   # the claude operator that addresses a round's findings, fresh each round
@@ -585,6 +596,7 @@ rates = { "claude-sonnet-5" = [3.0, 15.0], ... }   # $ per million input, output
 decisions = { lanes = "ask", finalize = "ask", merge = "ask", budget = "ask", review-code = "ask" }
 trust_folders = false         # true: Claude Code's folder trust question, which every fresh worktree asks, is answered for the project's agents
 max_reruns = 3                # failed attempts a stage may collect in one context before the ticket parks instead of asking again
+on_dirty = { nudge = 1 } | "ask"   # an agent that stops with a dirty tree is nudged in its session up to N times, each after a stop, before the question; "ask" asks at once. Read from the ticket's copy; a copy without the key, including one taken before the key existed, nudges once
 min_free_gb = 10              # free space on the worktrees' volume below which nothing new starts; live, like slots
 refresh = true                # each lane's branch is brought up to its base when a stage begins; a conflict goes to the rebaser
 rebaser = "rebaser"           # the operator that rebases a PR that conflicts with its base, cloned from the lane's implementer; absent, a conflict is a question
@@ -1202,7 +1214,10 @@ minutes from the first dirty pass while the session lives
 (`DIRTY_WAIT_MS`, measured from the round's `dirty_since_ms`, so a
 restart keeps the clock), because a commit
 whose pre-commit hook runs the test suite lands that late; dirty past
-that, or with the session gone, the round fails. Its head is
+that, the implementer is nudged in its session (up to the stage's
+`on_dirty`), and its next stop gets the wait afresh; dirty past the
+wait with the nudges spent or the last one unanswered, or with the
+session gone, the round fails. Its head is
 `head_after`, an authorised transition. Then
 the stage's checks run at that head, and the next round opens there.
 
@@ -1591,6 +1606,10 @@ differently:
   decision that shows what was sent and lets you look at the pane,
   asked once: the ledger entry is marked, recovery leaves it to your
   answer, and a `park` answer is acted on even with every slot taken.
+  A lost reply to a nudge is the exception: it is neither repeated nor
+  asked about, because it is recorded on the attempt before it is
+  sent and bounded by `on_dirty`, and the idle grace ends the wait if
+  it never arrived.
 
 A failed reply to a query is judged by its words. Only `no such
 session` or `no such run` means the record is gone, and only that fails
@@ -1767,7 +1786,13 @@ and one against the real one:
 | Dispatch restarts while the planner clone is still being made | `op.status` is `in progress`; Dispatch waits; the attempt continues |
 | The implementer stops on a clean tree | The checks start at the tree's head in the lane with `DISPATCH_*` in their environment; the agent is killed; the attempt stays open until they exit; exit 0 binds the head and completes it |
 | The checks fail | A failed attempt and a rerun decision with `rerun`, `check` and `park`; nothing retried on its own; a rerun is a fresh agent, `check` runs the checks again on the same attempt with no agent |
-| The tree is dirty when the agent stops | No check runs; a failed attempt and the same decision |
+| The tree is dirty when the agent stops | No check runs and nothing is killed; one nudge is typed into the session, recorded on the attempt; a clean stop after it runs the checks at the tree's head (`a_dirty_implementer_is_nudged_and_its_clean_stop_runs_the_checks`) |
+| The tree is still dirty at the stop after the nudge | A failed attempt and the rerun decision with `rerun`, `check` and `park`, saying `after 1 nudge` (`a_dirty_implementer_after_its_nudge_is_asked_after_1_nudge`) |
+| The tree is dirty when the agent stops, under `on_dirty = "ask"` | No check runs and nothing is typed; a failed attempt and the same decision (`a_dirty_tree_after_the_agent_never_runs_the_checks`) |
+| Dispatch restarts after a nudge | No second nudge; a clean stop after it runs the checks (`a_restart_after_a_nudge_sends_no_second_one`) |
+| The reply to a nudge is lost | Not repeated and not asked about; with no stop after it, the idle grace ends in the rerun decision saying `no stop came after the last nudge` (`a_lost_nudge_reply_asks_nothing_and_the_idle_grace_ends_it`) |
+| A nudge goes unanswered with nudges left | The question, not a second nudge (`an_unanswered_nudge_is_asked_about_even_with_nudges_left`); with `{ nudge = 2 }` and two dirty stops after nudges, the question says `after 2 nudges` (`two_nudges_answered_by_dirty_stops_then_the_question`) |
+| The session ends after a nudge with no stop after it | Judged as the stop before the nudge left it: the rerun decision with `rerun`, `check` and `park`, saying `after 1 nudge; the session ended with no stop after the last nudge` (`a_nudged_session_that_ends_is_asked_about_at_its_checks`); a fixer's round fails the same way (`a_nudged_fixer_whose_pane_goes_fails_on_its_dirty_tree`) |
 | A review's fold whose replay conflicts | A failed attempt and a rerun decision with `rerun`, `keep` and `park`, the branch at the reviewed head; `keep` completes the stage there with `skipped = "the user kept them after the rewrite failed"` and no check run (`a_fold_whose_replay_conflicts_is_kept_by_hand`) |
 | Checks reused from `implement`, then the fold fails | `keep` completes the same way on the reused checks, with none run (`keep_after_reused_checks_completes_without_running_them`) |
 | A move undone over a tree the move left dirty | `keep` fails the attempt again with `rerun`, `keep` and `park` while the tree is dirty; once the tree is cleaned, before or after that, `keep` completes at the reviewed head (`keep_after_a_move_back_on_a_tree_left_dirty_is_asked_again_and_kept_once_cleaned`, `keep_after_a_move_back_completes_once_the_tree_is_cleaned`) |
@@ -1857,7 +1882,7 @@ and one against the real one:
 | A PR reads no checks within two minutes of a push | The reading is recorded and the gate waits; past `PR_YOUNG_HEAD_MS` it is the `pr` question (`a_none_reading_soon_after_a_push_waits_then_asks`) |
 | A decision marked a session that is no longer the ticket's newest (the `lanes` question's investigator, another lane's planner) | Answering clears every session the ledger still marks, so an agent held by the mark is given up on after the grace; a lost `waiting off` is sent again; a waiting request replaced by a later one is never sent after it (`an_answer_clears_every_mark_so_a_marked_agent_is_still_given_up_on`, `a_lost_unmark_is_sent_again_until_it_lands`, `a_replaced_waiting_request_is_never_sent_after_the_one_that_replaced_it`) |
 | A command reviewer exits 1 with nothing on stdout | A failed reviewer (`a_command_reviewers_exit_codes_are_read_as_the_protocol_says`) |
-| The tree is dirty when reviewers finish; the implementer leaves it dirty | The round's evidence is void, a `rerun` question naming the change; the fix round fails the same way (`a_changed_tree_voids_the_round_and_a_dirty_implementer_fails_it`) |
+| The tree is dirty when reviewers finish; the implementer leaves it dirty | The round's evidence is void, a `rerun` question naming the change; the fixer is nudged once past the commit wait, and a second dirty stop fails the round with `after 1 nudge` (`a_changed_tree_voids_the_round_and_a_dirty_implementer_fails_it`) |
 | The implementer's response settles while its commit's hook still runs | The round waits for the tree while the session lives, then goes on from the committed head (`a_commit_that_lands_after_the_response_settles_is_not_a_dirty_tree`) |
 | The head moved while `review-code` was pending | The answer is stale: the ticket parks with both heads named and nothing launches (`an_answer_for_a_moved_head_is_stale_and_parks_the_ticket`) |
 | The runner lost a running command reviewer | Failed on the next pass, not started again (`a_lost_command_reviewer_is_failed_not_started_again`) |

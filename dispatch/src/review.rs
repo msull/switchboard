@@ -15,10 +15,10 @@ use switchboard_control::{self as wire, Body, Reply};
 use crate::history::{self, Commits};
 use crate::pipeline::{Gate, OperatorKind, Pipeline, Stage};
 use crate::scheduler::{
-    Ask, NO_SUCH_SESSION, Runner, SocketDown, asks_again, busy, checks_env, env_for, find_attempt,
-    find_attempt_mut, guidance_prelude, held_in, idle_polls, lane_gate_argv, latest_attempt,
-    may_rerun, new_attempt, next_n, primary_tree, record_of, rework_key, sent_back, session_kind,
-    settle_file, vars_for,
+    Ask, DirtyStep, NO_SUCH_SESSION, Runner, SocketDown, asks_again, busy, checks_env, dirty_step,
+    env_for, find_attempt, find_attempt_mut, guidance_prelude, held_in, idle_polls, lane_gate_argv,
+    latest_attempt, may_rerun, new_attempt, next_n, primary_tree, record_of, rework_key, sent_back,
+    session_kind, settle_file, stopped_after_nudges, vars_for,
 };
 use crate::template::Vars;
 use crate::ticket::{
@@ -316,6 +316,7 @@ impl Runner {
             settle: None,
             dirty_polls: 0,
             dirty_since_ms: None,
+            nudges: Vec::new(),
             started_ms: now_ms,
             ended_ms: None,
         });
@@ -549,7 +550,7 @@ impl Runner {
                     Ok(())
                 }
             }
-            RoundState::Fixing => self.poll_fix(t, ps, a, &round, cwd, now_ms),
+            RoundState::Fixing => self.poll_fix(t, ps, stage, a, &round, cwd, now_ms),
             RoundState::Fixed | RoundState::Converged | RoundState::Accepted => {
                 // A rewrite whose intent was saved and whose end was not:
                 // the checks passed, and the branch may have moved since.
@@ -1101,10 +1102,12 @@ impl Runner {
     /// The implementer: done on its Stop with `response.md` settled and
     /// the tree clean and committed; then its session is killed and
     /// the checks at the new head are next.
+    #[allow(clippy::too_many_arguments)]
     fn poll_fix(
         &mut self,
         t: &mut Ticket,
         ps: &mut ProjectState,
+        stage: &Stage,
         a: &Attempt,
         round: &ReviewRound,
         cwd: &Path,
@@ -1132,8 +1135,8 @@ impl Runner {
             rm.stop_at_ms = Some(stop);
         }
         let running = view.liveness == wire::Liveness::Running;
-        let stopped = rm.stop_at_ms.is_some()
-            || matches!(view.liveness, wire::Liveness::Exited { code: Some(0) });
+        let stopped =
+            stopped_after_nudges(&view, rm.stop_at_ms, &rm.nudges, &mut rm.polls_since_stop);
         if !stopped {
             if running {
                 return self.save_ticket(t, now_ms);
@@ -1173,12 +1176,7 @@ impl Runner {
             if running && waits_for_commit(rm, &ticket_id, &key.0, &a.context, now_ms) {
                 return self.save_ticket(t, now_ms);
             }
-            let reason = format!(
-                "round {}: the implementer left the tree at {} dirty",
-                round.n,
-                cwd.display()
-            );
-            return self.fail_round(t, ps, &key, round.n, &reason, now_ms);
+            return self.dirty_fix(t, ps, stage, a, round.n, session, running, cwd, now_ms);
         }
         let head = self.git.head(cwd)?;
         let attempt = record_of(t, &key.0, key.1);
@@ -1209,6 +1207,56 @@ impl Runner {
             )?;
         }
         Ok(())
+    }
+
+    /// The implementer left the tree dirty past the commit wait: a nudge
+    /// into its session while the stage's `on_dirty` has one left for a
+    /// stop, else the round fails.
+    #[allow(clippy::too_many_arguments)]
+    fn dirty_fix(
+        &mut self,
+        t: &mut Ticket,
+        ps: &mut ProjectState,
+        stage: &Stage,
+        a: &Attempt,
+        round_n: u32,
+        session: String,
+        running: bool,
+        cwd: &Path,
+        now_ms: u64,
+    ) -> Result<()> {
+        let key = (a.stage.clone(), a.n);
+        let on_dirty = self.pipeline_of(t)?.on_dirty(stage);
+        let rm = round_of(t, &key, round_n);
+        let step = dirty_step(
+            on_dirty,
+            &rm.nudges,
+            rm.stop_at_ms,
+            rm.polls_since_stop,
+            running,
+            now_ms,
+        );
+        let suffix = match step {
+            DirtyStep::Nudge { at_ms, k, of } => {
+                rm.nudges.push(at_ms);
+                // The next stop gets the commit wait afresh.
+                rm.dirty_since_ms = None;
+                rm.dirty_polls = 0;
+                rm.polls_since_stop = 0;
+                let sent =
+                    self.send_nudge(t, ps, key.clone(), &a.context, session, (k, of), now_ms);
+                match sent? {
+                    None => return Ok(()),
+                    Some(failed) => failed,
+                }
+            }
+            DirtyStep::Fail(suffix) => suffix,
+        };
+        let reason = format!(
+            "round {round_n}: the implementer left the tree at {} dirty{suffix}",
+            cwd.display()
+        );
+        self.fail_round(t, ps, &key, round_n, &reason, now_ms)
     }
 
     /// The stage's checks at the round's current head: after a fix, or
@@ -2796,6 +2844,14 @@ fn waits_for_commit(
     true
 }
 
+fn round_of<'a>(t: &'a mut Ticket, key: &(String, u32), round_n: u32) -> &'a mut ReviewRound {
+    record_of(t, &key.0, key.1)
+        .rounds
+        .iter_mut()
+        .find(|r| r.n == round_n)
+        .expect("the round exists")
+}
+
 fn reviewer_mut<'a>(
     t: &'a mut Ticket,
     key: &(String, u32),
@@ -3032,6 +3088,7 @@ mod tests {
             settle: None,
             dirty_polls: 0,
             dirty_since_ms: None,
+            nudges: Vec::new(),
             started_ms: 0,
             ended_ms: None,
         }

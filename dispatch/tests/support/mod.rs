@@ -38,6 +38,8 @@ pub struct FakeSwitchboard {
     /// Every request seen, in order.
     pub calls: Vec<Request>,
     pub killed: Vec<String>,
+    /// Lines typed into sessions with `session.send`: session, text.
+    pub sent: Vec<(String, String)>,
     pub notes: BTreeMap<String, String>,
     pub waiting: BTreeMap<String, (bool, String)>,
     /// Sessions whose trust question was answered, in order.
@@ -380,6 +382,18 @@ impl FakeSwitchboard {
                     s.card = "exited".into();
                 }
                 self.killed.push(session.clone());
+                (vec![], false)
+            }
+            Body::SessionSend { session, text } => {
+                let Some(s) = self
+                    .sessions
+                    .iter_mut()
+                    .find(|s| &s.id == session && s.liveness == Liveness::Running)
+                else {
+                    return Reply::failed("session not running");
+                };
+                s.card = "working".into();
+                self.sent.push((session.clone(), text.clone()));
                 (vec![], false)
             }
             Body::SessionNotes { session, text } => {

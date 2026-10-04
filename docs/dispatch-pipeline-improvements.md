@@ -89,8 +89,9 @@ point, not a correctness point" (which keeps it under item 2).
 checklist (everything added is read by something, no block left from
 moving code, every doc comment on one item, the three checks before the
 commit), and the style reviewer names "debris a fix round left" as its
-own. #43 adds the mechanical half: an agent that stops with a dirty tree
-is told to finish before its attempt fails.
+own. #43 adds the mechanical half, built: an agent that stops with a dirty
+tree is nudged in its own session, up to the pipeline's `on_dirty`
+(default one nudge), before its attempt fails.
 
 ## 4. A young head is pending, not "no checks"
 
@@ -341,7 +342,7 @@ Observed, not yet issues. Each line says where it was seen. Entries that
 became issues: the style declaration line and the remedy log line (#38,
 built), checks left running on a park (#39, built), `keep` on a fold
 failure (#40, built), the CLI blocking behind a pass (#41), a dirty tree
-nudges the agent (#43), the supervising agent's CLI (#44).
+nudges the agent (#43, built), the supervising agent's CLI (#44).
 
 - **A check orphaned by a runner restart is never killed.** #39 put each
   check in its own process group, so it outlives a runner stopped by
@@ -378,4 +379,5 @@ nudges the agent (#43), the supervising agent's CLI (#44).
 - **Agents stop one step short.** A planner described edits it had not
   made (#25), an implementer stopped with ten files uncommitted (#40).
   Prompt text now says the stage is not done until the file or the tree
-  says so; #43 makes the tree check mechanical.
+  says so; #43 makes the tree check mechanical (built: a nudge, then
+  the question).

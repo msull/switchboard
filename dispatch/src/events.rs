@@ -88,6 +88,9 @@ pub enum Kind {
     Closed,
     /// The write these events described failed; `voids` names them.
     Void,
+    /// A nudge was typed into an agent's session after it stopped with
+    /// its tree not clean.
+    Nudged,
 }
 
 impl Kind {
@@ -115,6 +118,7 @@ impl Kind {
             Self::Closing => "closing",
             Self::Closed => "closed",
             Self::Void => "void",
+            Self::Nudged => "nudged",
         }
     }
 }
@@ -524,6 +528,7 @@ fn attempt_events(
             });
         }
     }
+    nudge_events(out, t, a, before, at_ms);
     for round in &a.rounds {
         let old = before.and_then(|b| b.rounds.iter().find(|x| x.n == round.n));
         if old.is_none_or(|o| o.state != round.state) {
@@ -542,6 +547,28 @@ fn attempt_events(
                     ),
                 )
             });
+        }
+    }
+}
+
+/// One `nudged` event per nudge recorded since `before`, on the
+/// attempt or on one of its rounds.
+fn nudge_events(
+    out: &mut Vec<Event>,
+    t: &Ticket,
+    a: &Attempt,
+    before: Option<&Attempt>,
+    at_ms: u64,
+) {
+    for k in before.map_or(0, |b| b.nudges.len())..a.nudges.len() {
+        let text = format!("nudge {}: the tree is not clean", k + 1);
+        out.push(Event::of_attempt(t, at_ms, Kind::Nudged, a, text));
+    }
+    for round in &a.rounds {
+        let old = before.and_then(|b| b.rounds.iter().find(|x| x.n == round.n));
+        for k in old.map_or(0, |o| o.nudges.len())..round.nudges.len() {
+            let text = format!("r{} nudge {}: the tree is not clean", round.n, k + 1);
+            out.push(Event::of_attempt(t, at_ms, Kind::Nudged, a, text));
         }
     }
 }
@@ -1131,6 +1158,19 @@ mod tests {
     }
 
     #[test]
+    fn a_nudge_on_an_attempt_is_one_nudged_event() {
+        let mut started = ticket();
+        started.attempts.push(running("implement", 1));
+        let mut nudged = started.clone();
+        nudged.attempts[0].nudges.push(7);
+        let events = between(Some(&started), &nudged, 5, &names);
+        assert_eq!(kinds(Some(&started), &nudged), [Kind::Nudged]);
+        assert_eq!(events[0].text, "nudge 1: the tree is not clean");
+        assert_eq!(Kind::Nudged.as_str(), "nudged");
+        assert!(between(Some(&nudged), &nudged, 5, &names).is_empty());
+    }
+
+    #[test]
     fn attempts_start_end_and_bind_a_pr_whose_checks_change() {
         let t = ticket();
         let mut started = t.clone();
@@ -1238,6 +1278,7 @@ mod tests {
             settle: None,
             dirty_polls: 0,
             dirty_since_ms: None,
+            nudges: Vec::new(),
             started_ms: 1,
             ended_ms: None,
         });
@@ -1262,6 +1303,11 @@ mod tests {
         done.attempts[0].rewrite.as_mut().unwrap().after = Some("fold0001".into());
         done.attempts[0].rewrite.as_mut().unwrap().to = 1;
         assert_eq!(kinds(Some(&rewrite), &done), [Kind::Rewrite]);
+        let mut nudged = found.clone();
+        nudged.attempts[0].rounds[0].nudges.push(7);
+        let events = between(Some(&found), &nudged, 5, &names);
+        assert_eq!(kinds(Some(&found), &nudged), [Kind::Nudged]);
+        assert_eq!(events[0].text, "r1 nudge 1: the tree is not clean");
 
         let parking = |reason: &str| TicketState::Parking {
             reason: reason.into(),
