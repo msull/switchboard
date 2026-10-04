@@ -200,14 +200,15 @@ in the ledger with no reply against Switchboard's `find {op}`:
   `Starting` with no planner clone is waited on while `op.status`
   says `in progress`, and failed once it says `interrupted`.
 
-A live session is observed, never resumed, never sent to. A session
-that is gone is judged by the attempt's completion evidence (below),
-never by the mere presence of a file. A command gate that was `sent`
-with no reply is not run again; it is a decision, because it may have
-run. Resource holds are read back from the records; nothing is
-released on restart. Switchboard's own restart is covered by the same
-reads: every record the port made is an ordinary Switchboard record
-that its reconcile treats like any other, and launches nothing.
+A live session is observed, never resumed, never sent to. A session that
+is gone is judged by the attempt's completion evidence (below), never by
+the mere presence of a file. A check a previous runner left running is
+stopped by its recorded process group before the gate runs again or its
+attempt is cancelled (see "Runner children"). Resource holds are read
+back from the records; nothing is released on restart. Switchboard's own
+restart is covered by the same reads: every record the port made is an
+ordinary Switchboard record that its reconcile treats like any other,
+and launches nothing.
 
 Closing a ticket is a sequence from a saved intent, as parking is.
 `dispatch close` (or the port's `close`, or the page's Close) refuses
@@ -259,7 +260,9 @@ note now lives on the attempt. Version 5 adds a code review attempt's
 `dirty_since_ms`, the time a pass first found the tree dirty after the
 response settled, absent in older records; a round caught mid-wait
 starts its clock on the first pass after the upgrade. Version 7 adds an
-attempt's and a round's `nudges`, empty in older records.
+attempt's and a round's `nudges`, empty in older records. Version 8
+adds a gate run's `group`, the check's process group as started, and
+an attempt's `orphans_killed`, both absent in older records.
 
 ### The event log and the runner's status
 
@@ -1274,7 +1277,8 @@ and any other gate, runs. A failing check is the ordinary checks
 question (`rerun`, `check`, `park`); `check` runs them again on the
 same head. The rewrite after the checks pass has its own question,
 `rerun | keep | park` (see "Clean commits"). A check lost to a runner
-restart starts again on the same clean head, the one child that does.
+restart starts again on the same clean head, the one child that does,
+once the orphan's group is gone or killed.
 
 **Clean commits.** `commits` says what the stage does to the branch's
 history once the checks pass at the head it completes at: `keep` (the
@@ -1367,6 +1371,27 @@ its record before it starts; a restart that finds the intent with no
 result fails the reviewer, never starts a second copy and never kills
 an unrelated process. Children run in their own process group and are
 killed with it when the ticket parks or a rerun retires the attempt.
+A check's group is recorded on its `GateRun` as the leader's pid and
+its start time (`ps -o lstart=` under `LC_ALL=C`, `TZ=UTC`). A runner
+that finds a running gate whose check it never started, on the next
+pass that polls it or on a park or a close, looks at the recorded
+group: no member left clears the record; a live leader with another
+start time took a reused pid and is left alone. A gone leader, or one
+whose start time `ps` could not read, proves nothing (the id may have
+gone to a new group whose leader exited), so its group is left alone
+too and a leaderless orphan is missed. A live leader with the recorded
+start time is ours, and the group gets TERM, then SIGKILL past the
+stop limit, counted from that group's first TERM across restarts for
+as long as the leader lives. A leader that dies of the TERM (the usual
+`sh -c`) reads as gone on the next restart, so a member that ignored
+the TERM is left running and never gets SIGKILL. The kill is recorded
+on the attempt's `orphans_killed` and logged as `check-orphan-killed`;
+only then do the checks start again or the attempt read cancelled. Two
+gaps are left: a leaderless orphan, whether its leader exited before
+the restart or died of our TERM, is left running beside the new
+checks; and a crash between the spawn and the save that records the
+group, one `fsync` long, leaves a group no record names. Command reviewers record no group and are not
+adopted.
 
 **Validation** refuses: an unknown or repeated reviewer, a command
 reviewer with no `argv`, a missing implementer or one that is not

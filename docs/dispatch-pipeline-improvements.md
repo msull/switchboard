@@ -342,15 +342,24 @@ Observed, not yet issues. Each line says where it was seen. Entries that
 became issues: the style declaration line and the remedy log line (#38,
 built), checks left running on a park (#39, built), `keep` on a fold
 failure (#40, built), the CLI blocking behind a pass (#41), a dirty tree
-nudges the agent (#43, built), the supervising agent's CLI (#44,
-built), the orphaned check (#53), the unreviewed conflict rebase (#54),
+nudges the agent (#43, built), the supervising agent's CLI (#44, built),
+the orphaned check (#53, built), the unreviewed conflict rebase (#54),
 the stale folded commit message (#55).
 
-- **A check orphaned by a runner restart is never killed.** #39 put each
-  check in its own process group, so it outlives a runner stopped by
-  Ctrl-C. Persisting the group id on `GateRun` would let a restarted
-  runner kill the orphan before starting the checks again or cancelling.
-  Issue #53.
+- **A command reviewer orphaned by a runner restart is never killed.**
+  `start_reviewer` (`dispatch/src/git.rs`) puts a command reviewer in its
+  own process group as it does a check, so it outlives a runner stopped
+  by Ctrl-C too. #53 records a check's group on `GateRun` and stops it
+  after a restart; `ReviewerRun` could take the same `group`. Seen while
+  building #53.
+- **A leaderless orphaned check is left running.** `adopt_check`
+  (`dispatch/src/git.rs`) adopts a recorded group only under a live
+  leader with the recorded start time, so a member that outlived its
+  leader, including one that ignored the TERM its `sh -c` leader died
+  of, runs on beside the checks started again. A still-running
+  `orphans_killed` entry (same pgid, within `STOP_LIMIT_MS` of its
+  `at_ms`) could serve as the proof for the second case. Seen in #53's
+  review.
 - **An untagged non-wording point from the `style` reviewer counts as
   style.** `class_of` (`dispatch/src/review.rs`) counts every untagged
   point from the reviewer named `style` as style, so one about behaviour

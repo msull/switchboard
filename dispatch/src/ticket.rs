@@ -283,6 +283,11 @@ pub struct Attempt {
     /// restart never sends one twice.
     #[serde(default)]
     pub nudges: Vec<u64>,
+    /// Check groups a previous runner left running for this attempt,
+    /// signalled by a later one before the checks ran again or the
+    /// attempt was cancelled.
+    #[serde(default)]
+    pub orphans_killed: Vec<OrphanKill>,
     pub started_ms: u64,
     pub ended_ms: Option<u64>,
 }
@@ -440,6 +445,40 @@ pub struct GateRun {
     pub log: PathBuf,
     pub started_ms: u64,
     pub exit: Option<i32>,
+    /// The check's process group as started, so a runner that restarts
+    /// while it runs can stop it. Cleared when a later runner finds the
+    /// group gone; never read once `exit` is set.
+    #[serde(default)]
+    pub group: Option<CheckGroup>,
+}
+
+/// A check's process group as started, so a later runner can tell
+/// whether what it finds under the id is the same group.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CheckGroup {
+    /// The group id, which is the leader's pid.
+    pub pgid: u32,
+    /// The leader's start time as `ps -o lstart=` printed it (under
+    /// `LC_ALL=C`, `TZ=UTC`) right after the spawn. A pid is reused once
+    /// its group is empty, and a reused one starts at another time.
+    pub leader_started: String,
+}
+
+/// A check group a previous runner left running, signalled by this one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OrphanKill {
+    /// The group id signalled, which was the orphan leader's pid.
+    pub pgid: u32,
+    /// The orphan leader's start time, copied from its `CheckGroup`:
+    /// with `pgid` it names one group, since a pid comes back once its
+    /// group is empty.
+    pub leader_started: String,
+    /// The head the orphan was checking.
+    pub head: String,
+    /// When the group got its first TERM: the stop limit counts from it
+    /// across restarts while the leader lives, before the group gets
+    /// SIGKILL.
+    pub at_ms: u64,
 }
 
 /// A pull request as a gate last read it: which one, where, the head

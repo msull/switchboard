@@ -91,6 +91,10 @@ pub enum Kind {
     /// A nudge was typed into an agent's session after it stopped with
     /// its tree not clean.
     Nudged,
+    /// A check group a previous runner left running was signalled by
+    /// this one, before the checks ran again or the attempt was
+    /// cancelled.
+    CheckOrphanKilled,
 }
 
 impl Kind {
@@ -119,6 +123,7 @@ impl Kind {
             Self::Closed => "closed",
             Self::Void => "void",
             Self::Nudged => "nudged",
+            Self::CheckOrphanKilled => "check-orphan-killed",
         }
     }
 }
@@ -529,6 +534,7 @@ fn attempt_events(
         }
     }
     nudge_events(out, t, a, before, at_ms);
+    orphan_events(out, t, a, before, at_ms);
     for round in &a.rounds {
         let old = before.and_then(|b| b.rounds.iter().find(|x| x.n == round.n));
         if old.is_none_or(|o| o.state != round.state) {
@@ -570,6 +576,29 @@ fn nudge_events(
             let text = format!("r{} nudge {}: the tree is not clean", round.n, k + 1);
             out.push(Event::of_attempt(t, at_ms, Kind::Nudged, a, text));
         }
+    }
+}
+
+/// One `check-orphan-killed` event per check group a previous runner
+/// left running that was signalled since `before`.
+fn orphan_events(
+    out: &mut Vec<Event>,
+    t: &Ticket,
+    a: &Attempt,
+    before: Option<&Attempt>,
+    at_ms: u64,
+) {
+    let seen = before.map_or(0, |b| b.orphans_killed.len());
+    for o in a.orphans_killed.iter().skip(seen) {
+        let text = format!(
+            "checks at {} left running by a previous runner (group {}) stopped",
+            short(&o.head),
+            o.pgid
+        );
+        out.push(Event {
+            head: Some(o.head.clone()),
+            ..Event::of_attempt(t, at_ms, Kind::CheckOrphanKilled, a, text)
+        });
     }
 }
 
@@ -1168,6 +1197,29 @@ mod tests {
         assert_eq!(events[0].text, "nudge 1: the tree is not clean");
         assert_eq!(Kind::Nudged.as_str(), "nudged");
         assert!(between(Some(&nudged), &nudged, 5, &names).is_empty());
+    }
+
+    #[test]
+    fn an_orphaned_check_stopped_is_one_check_orphan_killed_event() {
+        let mut started = ticket();
+        started.attempts.push(running("implement", 1));
+        let mut stopped = started.clone();
+        stopped.attempts[0]
+            .orphans_killed
+            .push(crate::ticket::OrphanKill {
+                pgid: 4000,
+                leader_started: "fake-1".into(),
+                head: "abcdef0123".into(),
+                at_ms: 7,
+            });
+        let events = between(Some(&started), &stopped, 5, &names);
+        assert_eq!(kinds(Some(&started), &stopped), [Kind::CheckOrphanKilled]);
+        assert_eq!(
+            events[0].text,
+            "checks at abcdef0 left running by a previous runner (group 4000) stopped"
+        );
+        assert_eq!(Kind::CheckOrphanKilled.as_str(), "check-orphan-killed");
+        assert!(between(Some(&stopped), &stopped, 5, &names).is_empty());
     }
 
     #[test]

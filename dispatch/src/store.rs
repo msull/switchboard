@@ -23,7 +23,7 @@ use crate::ticket::{ProjectState, Ticket};
 /// carried a version reads as 0 and is brought up by `migrate`. A
 /// record above it was written by a newer `dispatch` and is refused
 /// both ways, so this build never drops fields it does not know.
-pub const RECORD_VERSION: u32 = 7;
+pub const RECORD_VERSION: u32 = 8;
 
 /// A lock file held while this lives: the writer lock, the runner's
 /// claim, or a ticket's close.
@@ -471,6 +471,12 @@ pub fn migrate(mut value: Value) -> Value {
         // Nothing is transformed; a build that would drop them on its
         // next write must refuse the record, or a restart would send a
         // nudge already sent.
+        //
+        // 7 to 8: a gate run gains `group` and an attempt gains
+        // `orphans_killed`, absent and empty from their serde defaults.
+        // Nothing is transformed; a build that would drop the group on
+        // its next write must refuse the record, or a restart would
+        // leave the check's process group running again.
         if version == 1 {
             settle_from_verdicts(&mut value);
         }
@@ -886,8 +892,37 @@ mod tests {
         t.attempts[0].rounds[0].nudges.push(5_000);
         write_ticket(&path, &t).unwrap();
         let written: Value = read_json(&path).unwrap();
-        assert_eq!(written["version"], 7);
+        assert_eq!(written["version"], RECORD_VERSION);
         assert_eq!(written["attempts"][0]["nudges"][0], 4_000);
+        assert_eq!(read_ticket(&path).unwrap(), t);
+    }
+
+    #[test]
+    fn a_version_seven_record_migrates_to_eight_with_no_check_group() {
+        let gate = r#"{"head": "head0001", "argv": ["make", "check"], "log": "/c.log", "started_ms": 1000, "exit": null}"#;
+        let attempt = format!(
+            r#"{{"stage": "implement", "n": 1, "context": "backend", "kind": "agent", "state": "running", "project": null, "session": null, "run": null, "artifacts": {{}}, "settle": {{}}, "stop_at_ms": null, "head": null, "gate": {gate}, "nudges": [], "started_ms": 1000, "ended_ms": null}}"#
+        );
+        let text = TICKET_V0.replacen('{', "{\n  \"version\": 7,", 1).replacen(
+            r#""attempts": [],"#,
+            &format!(r#""attempts": [{attempt}],"#),
+            1,
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.json");
+        fs::write(&path, text).unwrap();
+        let mut t = read_ticket(&path).unwrap();
+        assert_eq!(t.version, RECORD_VERSION);
+        assert_eq!(t.attempts[0].gate.as_ref().unwrap().group, None);
+        assert!(t.attempts[0].orphans_killed.is_empty());
+        t.attempts[0].gate.as_mut().unwrap().group = Some(crate::ticket::CheckGroup {
+            pgid: 4000,
+            leader_started: "Sun Oct  4 10:00:00 2026".into(),
+        });
+        write_ticket(&path, &t).unwrap();
+        let written: Value = read_json(&path).unwrap();
+        assert_eq!(written["version"], 8);
+        assert_eq!(written["attempts"][0]["gate"]["group"]["pgid"], 4000);
         assert_eq!(read_ticket(&path).unwrap(), t);
     }
 
