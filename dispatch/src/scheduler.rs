@@ -66,6 +66,10 @@ pub struct Runner {
     /// The writer lock while a transaction runs; saves inside it write
     /// straight through, saves outside it take the lock for the write.
     held: Option<Lock>,
+    /// Set when `unlocked` could not take the writer lock back inside a
+    /// transaction: what the transaction read before is stale, so every
+    /// write is refused until it ends.
+    lock_lost: bool,
     /// The disk hold as last logged, so a full disk is one line, not
     /// one a second.
     low_disk: Option<String>,
@@ -115,6 +119,7 @@ impl Runner {
             prs: Box::new(Gh),
             bitbucket: Box::new(Bitbucket::new(env_file)),
             held: None,
+            lock_lost: false,
             low_disk: None,
             stopping: BTreeMap::new(),
             health: RefCell::new(Health::default()),
@@ -169,10 +174,38 @@ impl Runner {
         self.held = Some(self.data.lock()?);
         let result = f(self);
         self.held = None;
+        self.lock_lost = false;
         result
     }
 
+    /// Run slow external work with the writer lock let go, and take the
+    /// lock again before returning if it was held. The work gets only
+    /// the repository: `self` is borrowed by this call, so the compiler
+    /// keeps the closure from reaching the runner's saves. It must touch
+    /// no record either way, and the caller reads what it needs again
+    /// once this returns. Paths are computed before the call. A lock
+    /// that cannot be taken back fails the rest of the transaction:
+    /// a later save would otherwise take the lock for itself and write
+    /// over whatever landed in the gap.
+    fn unlocked<T>(&mut self, slow: impl FnOnce(&mut dyn Repo) -> T) -> Result<T> {
+        let was_held = self.held.take().is_some();
+        let out = slow(&mut *self.git);
+        if was_held {
+            match self.data.lock() {
+                Ok(lock) => self.held = Some(lock),
+                Err(e) => {
+                    self.lock_lost = true;
+                    return Err(e);
+                }
+            }
+        }
+        Ok(out)
+    }
+
     fn write_record(&self, write: impl FnOnce() -> Result<()>) -> Result<()> {
+        if self.lock_lost {
+            bail!("the writer lock was lost mid-transaction; nothing more is written");
+        }
         if self.held.is_some() {
             write()
         } else {
@@ -1163,6 +1196,13 @@ impl Runner {
         let TicketState::Closing { reason } = t.state.clone() else {
             return Ok(());
         };
+        // One finisher at a time: the tree removal below lets the writer
+        // lock go, and a pass or a hand close reaching this ticket then
+        // leaves it to whoever holds the claim. Held until this returns.
+        let Some(_close) = self.data.claim_close(&t.id)? else {
+            log::info!("ticket {} closing: another dispatch is finishing it", t.id);
+            return Ok(());
+        };
         // A kill between the ticket's save and the project's leaves the
         // id in the queue; from here on it is only in `closing`.
         let was_queued = ps.queue.contains(&t.id);
@@ -1237,7 +1277,16 @@ impl Runner {
             self.save_ticket(t, now_ms)?;
         }
         if t.close.trees_kept.is_none() {
-            self.remove_trees(t, now_ms)?;
+            // The removal lets the writer lock go, and a `take` or a
+            // reorder may land in the gap: the project is read again
+            // whatever the removal did, so no caller saves a stale copy
+            // over it. Anything held only in memory is saved first.
+            if self.load_project(&ps.name)? != *ps {
+                self.save_project(ps)?;
+            }
+            let removed = self.remove_trees(t, now_ms);
+            *ps = self.load_project(&ps.name)?;
+            removed?;
         }
         if !t.close.card_cleared {
             let others: Vec<Ticket> = ps
@@ -1274,17 +1323,27 @@ impl Runner {
             }
         };
         let (lanes, tree) = close_trees(t, &p);
-        // An owned copy: the borrowed path would hold `t` borrowed
-        // through the loop below, which changes it.
+        // Owned copies: the borrowed paths would hold `t` borrowed
+        // through the loop below, which replaces it.
+        let lanes: Vec<LaneRecord> = lanes.iter().map(|&i| t.lanes[i].clone()).collect();
         let tree = tree.map(Path::to_path_buf);
+        // Each removal lets the writer lock go and reads the record
+        // back, so anything held only in memory is saved first.
+        if (!lanes.is_empty() || tree.is_some()) && self.load_ticket(&t.id)? != *t {
+            self.save_ticket(t, now_ms)?;
+        }
+        let state = t.state.clone();
         let mut kept: Vec<String> = Vec::new();
-        for i in lanes {
-            let lane = t.lanes[i].clone();
+        for lane in lanes {
             let clone = self.data.lane_repo_dir(&p.project.name, &lane.name);
-            match self.git.worktree_remove(&clone, &lane.worktree) {
+            let removed = self.unlocked(|git| git.worktree_remove(&clone, &lane.worktree))?;
+            self.reread_unchanged(t, &state)?;
+            match removed {
                 Ok(()) => {
                     log::info!("ticket {} lane {} removed", t.id, lane.name);
-                    t.lanes[i].removed = true;
+                    for l in t.lanes.iter_mut().filter(|l| l.name == lane.name) {
+                        l.removed = true;
+                    }
                     self.save_ticket(t, now_ms)?;
                 }
                 Err(e) => kept.push(format!("lane {}: {e:#}", lane.name)),
@@ -1294,10 +1353,10 @@ impl Runner {
         if kept.is_empty()
             && let Some(tree) = tree
         {
-            match self
-                .git
-                .worktree_remove(&self.data.repo_dir(&p.project.name), &tree)
-            {
+            let repo = self.data.repo_dir(&p.project.name);
+            let removed = self.unlocked(|git| git.worktree_remove(&repo, &tree))?;
+            self.reread_unchanged(t, &state)?;
+            match removed {
                 Ok(()) => {
                     log::info!("ticket {} tree removed", t.id);
                     t.close.tree_removed = true;
@@ -1309,11 +1368,32 @@ impl Runner {
                 Err(e) => kept.push(format!("{e:#}")),
             }
         }
-        if !kept.is_empty() {
-            let why = kept.join("; ");
+        // The mark is written as found, and only here: a retry killed
+        // mid-removal keeps it, so the next `dispatch close` retries.
+        let found = (!kept.is_empty()).then(|| kept.join("; "));
+        if let Some(why) = &found {
             log::warn!("ticket {} trees kept: {why}", t.id);
-            t.close.trees_kept = Some(why);
+        }
+        if t.close.trees_kept != found {
+            t.close.trees_kept = found;
             self.save_ticket(t, now_ms)?;
+        }
+        Ok(())
+    }
+
+    /// `t` read again after the writer lock was let go, refused unless
+    /// it is still in `state`. Only the finisher holding the ticket's
+    /// `closing.lock` writes a ticket being closed or retried, so a
+    /// change here is a bug or a hand-edited record, and nothing is
+    /// saved over it.
+    fn reread_unchanged(&self, t: &mut Ticket, state: &TicketState) -> Result<()> {
+        *t = self.load_ticket(&t.id)?;
+        if &t.state != state {
+            bail!(
+                "ticket {} changed while its trees were removed: {}",
+                t.id,
+                t.state.label()
+            );
         }
         Ok(())
     }
@@ -1424,8 +1504,12 @@ impl Runner {
     /// The removal of a closed ticket's kept trees, tried again; the
     /// state and reason stay. A refusal is kept again and reported.
     fn retry_removal(&mut self, t: &mut Ticket, now_ms: u64) -> Result<()> {
-        t.close.trees_kept = None;
-        self.save_ticket(t, now_ms)?;
+        let Some(_close) = self.data.claim_close(&t.id)? else {
+            bail!(
+                "ticket {}: its trees are being removed by another dispatch",
+                t.id
+            );
+        };
         self.remove_trees(t, now_ms)?;
         if let Some(why) = &t.close.trees_kept {
             bail!("ticket {}: trees kept: {why}", t.id);
@@ -6712,5 +6796,45 @@ mod tests {
             "{two}"
         );
         assert!(two.ends_with("park: park the ticket and leave the branch with commits as it is"));
+    }
+
+    struct NoPort;
+    impl crate::port::Port for NoPort {
+        fn call(&mut self, _: &Request) -> std::io::Result<Reply> {
+            Err(std::io::Error::other("no Switchboard in this test"))
+        }
+    }
+
+    #[test]
+    fn a_lock_not_taken_back_refuses_every_later_write_in_its_transaction() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = DataDir::new(dir.path());
+        let lock = data.root.join("lock");
+        let mut r = Runner::new(
+            data,
+            Box::new(NoPort),
+            Box::new(crate::git::FakeRepo::default()),
+        );
+        let ps = ProjectState {
+            name: "P".into(),
+            ..ProjectState::default()
+        };
+        let refused = r.transaction(|r| {
+            // A directory where the lock file was: the take after the
+            // slow work cannot open it.
+            let lost = r.unlocked(|_| {
+                std::fs::remove_file(&lock).unwrap();
+                std::fs::create_dir(&lock).unwrap();
+            });
+            assert!(lost.is_err());
+            std::fs::remove_dir(&lock).unwrap();
+            // The lock could be taken now, but whatever the transaction
+            // read before the gap is stale: the save is still refused.
+            r.save_project(&ps)
+        });
+        assert!(format!("{:#}", refused.unwrap_err()).contains("writer lock was lost"),);
+        assert!(!crate::store::record_exists(&r.data.project_file("P")));
+        r.transaction(|r| r.save_project(&ps)).unwrap();
+        assert!(crate::store::record_exists(&r.data.project_file("P")));
     }
 }

@@ -23,6 +23,8 @@ short.
 
 Every subcommand prints one line per thing and exits non-zero with a
 reason on refusal. Read the reason; do not retry the same command.
+A command that waits more than two seconds for the writer lock says so
+on stderr, naming the process that holds it; stdout is unchanged.
 
 ```
 dispatch take <project> <issue-number>           ticket from a GitHub issue

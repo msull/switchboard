@@ -2,12 +2,16 @@
 //! Every write is a temp file, fsync, `.bak` of the previous version, and
 //! a rename, under one writer lock shared by the runner and the commands.
 //! The lock covers a whole read-modify-write, so the runner's pass and a
-//! command from the terminal never interleave on a record.
+//! command from the terminal never interleave on a record. Slow external
+//! work inside a step (a tree removal) runs with the lock let go, and the
+//! record is read again under the lock before the next write.
 
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::RecvTimeoutError;
+use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use serde_json::Value;
@@ -21,7 +25,8 @@ use crate::ticket::{ProjectState, Ticket};
 /// both ways, so this build never drops fields it does not know.
 pub const RECORD_VERSION: u32 = 6;
 
-/// The writer lock, held while this lives.
+/// A lock file held while this lives: the writer lock, the runner's
+/// claim, or a ticket's close.
 #[derive(Debug)]
 pub struct Lock(File);
 
@@ -203,24 +208,69 @@ impl DataDir {
         Ok(files)
     }
 
-    fn lock_file(&self, name: &str) -> Result<File> {
-        fs::create_dir_all(&self.root)?;
-        let path = self.root.join(name);
-        OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .write(true)
-            .open(&path)
-            .with_context(|| format!("open {}", path.display()))
-    }
-
     /// Take the writer lock, waiting for whoever holds it. Every
     /// read-modify-write of a record happens under it, from the runner
     /// and the commands alike, so two of them never interleave.
+    ///
+    /// The holder writes `pid <n>: <command>` into the lock file, and a
+    /// wait over two seconds logs one line naming it, to stderr, so a
+    /// command stuck behind the runner says why.
     pub fn lock(&self) -> Result<Lock> {
-        let file = self.lock_file("lock")?;
-        file.lock().context("take the writer lock")?;
+        self.lock_noting(Duration::from_secs(2), |holder| {
+            log::info!("waiting for the writer lock (held by {holder})");
+        })
+    }
+
+    /// `lock`, calling `note` with the holder's line once if the wait
+    /// passes `after`. The holder is read when the note is made, not
+    /// when the wait begins: the runner takes the lock again at every
+    /// ticket, so an earlier read would often name a holder long gone.
+    /// One blocking `lock`, never a `try_lock` loop, which would starve
+    /// behind a runner that lets go and takes it again in microseconds.
+    fn lock_noting(
+        &self,
+        after: Duration,
+        note: impl FnOnce(&str) + Send + 'static,
+    ) -> Result<Lock> {
+        let path = self.root.join("lock");
+        let file = open_lock(&path)?;
+        match file.try_lock() {
+            Ok(()) => {}
+            Err(std::fs::TryLockError::WouldBlock) => {
+                let (taken, waiting) = std::sync::mpsc::channel::<()>();
+                let noter = std::thread::spawn(move || {
+                    if let Err(RecvTimeoutError::Timeout) = waiting.recv_timeout(after) {
+                        // A handle of its own: the lock's is write-only.
+                        let text = fs::read_to_string(&path).unwrap_or_default();
+                        let holder = text.lines().next().unwrap_or("").trim();
+                        note(if holder.is_empty() {
+                            "an unknown process"
+                        } else {
+                            holder
+                        });
+                    }
+                });
+                let locked = file.lock().context("take the writer lock");
+                let _ = taken.send(());
+                let _ = noter.join();
+                locked?;
+            }
+            Err(std::fs::TryLockError::Error(e)) => {
+                return Err(e).context("take the writer lock");
+            }
+        }
+        note_holder(&file);
         Ok(Lock(file))
+    }
+
+    /// The close of ticket `id`, held by one finisher at a time, or
+    /// `None` at once when another holds it. A close lets the writer
+    /// lock go while it removes trees, and this keeps a second finisher
+    /// (a pass, another `dispatch close`) out of that gap. A lock file
+    /// in the ticket's directory, not a record; the kernel drops it with
+    /// the process.
+    pub fn claim_close(&self, id: &str) -> Result<Option<Lock>> {
+        try_lock_at(&self.ticket_dir(id).join("closing.lock"))
     }
 
     /// Run `f` holding the writer lock.
@@ -234,16 +284,59 @@ impl DataDir {
     /// Become the one runner for this directory, or fail at once if
     /// another `dispatch run` holds it. Held for the process's life.
     pub fn claim_runner(&self) -> Result<Lock> {
-        let file = self.lock_file("runner.lock")?;
-        match file.try_lock() {
-            Ok(()) => Ok(Lock(file)),
-            Err(std::fs::TryLockError::WouldBlock) => bail!(
-                "another dispatch run holds {}",
-                self.root.join("runner.lock").display()
-            ),
-            Err(std::fs::TryLockError::Error(e)) => Err(e).context("take the runner lock"),
+        let path = self.root.join("runner.lock");
+        try_lock_at(&path)?
+            .with_context(|| format!("another dispatch run holds {}", path.display()))
+    }
+}
+
+/// The lock file at `path`, created with its directory if missing.
+/// Never truncated on open: the writer lock's holder owns its contents
+/// (`note_holder`), and a waiter reads them.
+fn open_lock(path: &Path) -> Result<File> {
+    if let Some(dir) = path.parent() {
+        fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
+    }
+    OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(path)
+        .with_context(|| format!("open {}", path.display()))
+}
+
+/// The lock at `path` taken without waiting, or `None` when another
+/// holds it.
+fn try_lock_at(path: &Path) -> Result<Option<Lock>> {
+    let file = open_lock(path)?;
+    match file.try_lock() {
+        Ok(()) => Ok(Some(Lock(file))),
+        Err(std::fs::TryLockError::WouldBlock) => Ok(None),
+        Err(std::fs::TryLockError::Error(e)) => {
+            Err(e).with_context(|| format!("lock {}", path.display()))
         }
     }
+}
+
+/// Who holds the writer lock, written into the lock file by its holder:
+/// `pid <n>: <command>`. `flock` is advisory, so the contents are free.
+/// No fsync: it is a hint for a waiter, and a failed write loses only
+/// that.
+fn note_holder(file: &File) {
+    use std::os::unix::fs::FileExt as _;
+    let mut args = std::env::args();
+    let program = args
+        .next()
+        .map(|a| {
+            Path::new(&a)
+                .file_name()
+                .map_or(a.clone(), |n| n.to_string_lossy().into_owned())
+        })
+        .unwrap_or_default();
+    let command: Vec<String> = std::iter::once(program).chain(args).collect();
+    let line = format!("pid {}: {}\n", std::process::id(), command.join(" "));
+    let _ = file.set_len(0);
+    let _ = file.write_all_at(line.as_bytes(), 0);
 }
 
 /// Whether `atomic_write` flushes to the device. Only
@@ -485,6 +578,47 @@ fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_waiter_notes_the_holder_once_after_the_threshold() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = DataDir::new(dir.path());
+        let held = data.lock().unwrap();
+        let (tx, rx) = std::sync::mpsc::channel::<String>();
+        let waiter = {
+            let data = data.clone();
+            std::thread::spawn(move || {
+                data.lock_noting(Duration::from_millis(50), move |holder| {
+                    tx.send(holder.to_owned()).unwrap();
+                })
+                .unwrap()
+            })
+        };
+        let holder = rx.recv_timeout(Duration::from_secs(10)).unwrap();
+        assert!(
+            holder.starts_with(&format!("pid {}: ", std::process::id())),
+            "{holder}"
+        );
+        drop(held);
+        let lock = waiter.join().unwrap();
+        // The sender went with the closure: one note, no more.
+        assert!(rx.recv().is_err());
+        drop(lock);
+    }
+
+    #[test]
+    fn an_uncontended_lock_notes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = DataDir::new(dir.path());
+        let (tx, rx) = std::sync::mpsc::channel::<String>();
+        let lock = data
+            .lock_noting(Duration::ZERO, move |holder| {
+                tx.send(holder.to_owned()).unwrap();
+            })
+            .unwrap();
+        assert!(rx.recv().is_err());
+        drop(lock);
+    }
 
     #[test]
     fn a_write_keeps_the_previous_version_and_a_read_falls_back_to_it() {

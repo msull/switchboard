@@ -32,9 +32,11 @@ window and see every card, because Dispatch draws nothing of its own.
 Dispatch's own state lives in its own data directory
 (`~/Library/Application Support/Dispatch`), one record per ticket,
 written the way Switchboard writes records (temp file, fsync, `.bak`,
-rename) under a single-writer lock file. It never writes into a
-repository's own dot-directories; only the agents commit code. Same
-hard rule as Switchboard.
+rename) under a single-writer lock file. Slow external work inside a
+runner step, such as removing a closed ticket's tree, runs with that
+lock let go, and the record is read again before the next write. It
+never writes into a repository's own dot-directories; only the agents
+commit code. Same hard rule as Switchboard.
 
 Workspaces in Switchboard are a presentation boundary, not a filesystem
 boundary: two tickets' agents can read each other's worktrees. Dispatch
@@ -1774,6 +1776,13 @@ and one against the real one:
 | A ticket parked over a rewrite failure is resumed | The question offers `rerun`, `keep` and `park` (`a_parked_rewrite_failure_offers_keep_on_resume`) |
 | A stage fails past the policy's `max_reruns` in one context | The ticket parks with the count and the last reason; nothing is asked |
 | Free space on the worktrees' volume is under the policy's `min_free_gb` | Nothing new starts and `status` says why; running attempts are still watched; the hold lifts on its own (`a_full_disk_holds_new_starts_until_space_is_back`) |
+| `take` while a close removes a large tree | returns at once; the next pass drives it (`a_take_during_a_long_tree_removal_returns_at_once_and_runs_next_pass`) |
+| `take` while the last stage's close removes the tree | The take returns at once and stays in the queue; the ticket closes with its tree removed (`a_take_while_the_last_stage_closes_the_ticket_is_kept`) |
+| A pass reaches a ticket a hand close is removing trees for | The pass leaves it to the hand close, which removes each tree once (`a_pass_during_a_hand_close_leaves_the_removal_to_it`) |
+| A second `dispatch close` while a retry removes kept trees | Refused with "its trees are being removed by another dispatch"; the first retry finishes (`a_second_retry_during_a_retry_is_turned_away`) |
+| A retry of kept trees is cut off mid-removal | The ticket still reads `trees_kept` and the next `dispatch close` retries it (`a_retry_in_progress_keeps_its_trees_retryable`) |
+| `decide` on a ticket whose trees are being removed | Refused without writing the record; the ticket closes (`a_decision_on_a_ticket_whose_trees_are_being_removed_is_refused`) |
+| The writer lock cannot be taken back after a tree removal | Every later write in that transaction is refused, so nothing read before the gap is saved over what landed in it (`a_lock_not_taken_back_refuses_every_later_write_in_its_transaction`) |
 | A ticket with two pending decisions is parked from one | The other is cancelled in the same write as the parking intent; the park answer reads acted; the session is unmarked before the ticket reads parked; none is pending, `waiting_on_me` no longer counts it, the cancelled one cannot be answered; a resume asks a fresh rerun per lane and launches nothing (`parking_cancels_every_pending_decision_and_a_resume_asks_afresh`) |
 | The pass dies at the unmark after the parking intent | No decision is pending on disk; the next pass, without a restart, sends the same operation again and only then reads parked (`a_park_cut_off_after_its_intent_asks_nothing_and_unmarks_on_the_next_pass`) |
 | An earlier waiting mark's reply was lost when the ticket parks | It is resolved under its own id before the unmark is sent; parked only with every waiting request answered, and a restart's recovery does not turn the mark back on (`an_unanswered_mark_is_resolved_before_the_unmark_and_stays_off_after_a_restart`) |

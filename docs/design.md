@@ -1716,6 +1716,20 @@ tickets from before this build have no events until their next
 transition; and a `void` whose own append fails leaves its events
 standing, which only `wait`'s check against the record covers.
 
+A close's tree removal runs with the writer lock let go: `git worktree
+remove` of a tree with a large build directory can take minutes, and
+`take`, `decide` and `close` do not wait behind it. One finisher at a
+time holds the ticket's `closing.lock` (a pass reaching a ticket a hand
+close is finishing leaves it alone, and a second retry is refused),
+the ticket and the project are read again once the lock is back, and a
+lock that cannot be taken back refuses every later write in that
+transaction. A retry of kept trees keeps its `trees_kept` mark until
+the removal reads back, so a retry killed mid-removal stays retryable.
+A command that waits more than two seconds for the writer lock logs a
+line naming the holder, which writes `pid <n>: <command>` into the
+lock file. Gap: fetches, lane setup, rebases, port calls and PR reads
+on active tickets still run under a step's lock.
+
 ## Global workspace status (2026-10-01)
 
 Built: `SpaceId::GLOBAL` and `SpaceId::contains` in the core, the rehydration
