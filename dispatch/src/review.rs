@@ -71,6 +71,10 @@ const LEFT_HEADING: &str = "Left to the merge";
 /// The round file's section of points that contest the plan.
 const DECIDED_HEADING: &str = "Found but not done";
 
+/// The round file's section of what reviewers said of the round that
+/// is not a point.
+const NOTES_HEADING: &str = "Reviewer notes";
+
 /// The implementer prompt a stage gets when it gives none.
 const FIX_PROMPT: &str = "Reviewers of branch {branch} in {worktree} left points at {feedback}. Address each one on the branch: fix it, or dispute it with your reasons. Commit so the tree is clean. Then write {response}, answering every point by its id, one line each: \"- <id>: fixed <what>\" or \"- <id>: disputed <why>\".";
 
@@ -1838,6 +1842,58 @@ fn tag_of(text: &str) -> Tag {
     }
 }
 
+/// Whether a reviewer's line declares that every point it has left is
+/// wording, so the round can close: a note about the round, not a
+/// point. The declaration's clause must end at "wording" (or "wording
+/// is left") and hold no "not", "except" or "but", and only a closing
+/// remark such as "the round can close on it" may follow it, so a real
+/// point never hides behind the declaration. A line quoting code names
+/// something to change, so it is a point.
+fn declares_wording(text: &str) -> bool {
+    let text = text.trim();
+    let text = match text.get(..6) {
+        Some(tag) if tag.eq_ignore_ascii_case("style:") => &text[6..],
+        _ => text,
+    };
+    let text = text.trim().to_ascii_lowercase();
+    if text.contains('`') {
+        return false;
+    }
+    let (first, rest) = text.split_once([';', '.', ',', ':']).unwrap_or((&text, ""));
+    let words: Vec<&str> = first.split_whitespace().collect();
+    let ends_at_wording = words
+        .iter()
+        .rposition(|w| *w == "wording")
+        .is_some_and(|i| {
+            words[i + 1..]
+                .iter()
+                .all(|w| matches!(*w, "is" | "left" | "remains" | "remaining"))
+        });
+    let declares = ends_at_wording
+        && !words.iter().any(|w| matches!(*w, "not" | "except" | "but"))
+        && (first.contains("left") || first.contains("remain"))
+        && [
+            "every point",
+            "every remaining point",
+            "points left",
+            "remaining points",
+            "only wording",
+            "all wording",
+        ]
+        .iter()
+        .any(|p| first.contains(p));
+    let rest = rest.trim_matches(|c: char| c.is_whitespace() || matches!(c, ';' | '.' | ',' | ':'));
+    let rest = rest
+        .strip_prefix("so ")
+        .or_else(|| rest.strip_prefix("and "))
+        .unwrap_or(rest);
+    declares
+        && matches!(
+            rest,
+            "" | "the round can close on it" | "the round can close" | "it can close"
+        )
+}
+
 /// A point's tag, with an untagged point from the reviewer named
 /// `style` counted as style: convergence must not depend on that
 /// reviewer remembering the prefix.
@@ -1871,7 +1927,7 @@ fn aggregate(
     style_rounds: u32,
 ) -> Aggregated {
     let no_feedback = no_feedback_of(stage);
-    let (points, withdrawn, kept) = collect_points(round, &no_feedback);
+    let (points, withdrawn, kept, notes) = collect_points(round, &no_feedback);
     let carried: Vec<&(String, String)> = earlier
         .iter()
         .filter(|(id, _)| !withdrawn.contains(id))
@@ -1911,6 +1967,10 @@ fn aggregate(
     } else {
         (classes.len(), Vec::new())
     };
+    let note_lines: Vec<String> = notes
+        .iter()
+        .map(|(r, text)| format!("{r}: {text}"))
+        .collect();
     let mut out = String::new();
     let _ = writeln!(out, "# Review round {} — {} ({ctx})\n", round.n, stage.name);
     let branch = t
@@ -1948,6 +2008,12 @@ fn aggregate(
             &decided_lines,
         );
     }
+    section(
+        &mut out,
+        NOTES_HEADING,
+        Some("Not points: what a reviewer said of the round."),
+        &note_lines,
+    );
     Aggregated {
         text: out,
         open: u32::try_from(open).unwrap_or(u32::MAX),
@@ -1994,17 +2060,20 @@ fn carried_line(id: &str, text: &str, kept: &[(String, String, String)]) -> Stri
 }
 
 /// Each reviewer's points (id, reviewer, text), the ids withdrawn,
-/// and the ids kept with who kept them and why.
+/// the ids kept with who kept them and why, and each reviewer's notes
+/// (reviewer, text): lines declaring that every point left is wording.
 type Points = (
     Vec<(String, String, String)>,
     Vec<String>,
     Vec<(String, String, String)>,
+    Vec<(String, String)>,
 );
 
 fn collect_points(round: &ReviewRound, no_feedback: &str) -> Points {
     let mut points: Vec<(String, String, String)> = Vec::new();
     let mut withdrawn: Vec<String> = Vec::new();
     let mut kept: Vec<(String, String, String)> = Vec::new();
+    let mut notes: Vec<(String, String)> = Vec::new();
     for r in &round.reviewers {
         if r.result != Some(ReviewerResult::Findings) {
             continue;
@@ -2015,10 +2084,21 @@ fn collect_points(round: &ReviewRound, no_feedback: &str) -> Points {
         }
         let mut k = 0;
         let mut listed = false;
-        for line in text.lines() {
+        // The file's text without its declarations, for a file that
+        // lists nothing: a declaration must not swallow the prose
+        // beside it.
+        let mut prose = String::new();
+        for raw in text.lines() {
+            let line = raw.trim();
+            let said = point_text(line).unwrap_or_else(|| line.to_owned());
+            if declares_wording(&said) {
+                notes.push((r.name.clone(), said));
+                continue;
+            }
+            prose.push_str(raw);
+            prose.push('\n');
             // Reviewers write their lines as list items as often as
             // not; a bulleted `withdraw` or `keep` is the same ruling.
-            let line = line.trim();
             let ruling = line
                 .strip_prefix("- ")
                 .or_else(|| line.strip_prefix("* "))
@@ -2040,15 +2120,15 @@ fn collect_points(round: &ReviewRound, no_feedback: &str) -> Points {
                 listed = true;
             }
         }
-        if !listed && !text.trim().is_empty() {
+        if !listed && !prose.trim().is_empty() {
             points.push((
                 format!("r{}/{}-1", round.n, r.name),
                 r.name.clone(),
-                text.trim().replace('\n', " "),
+                prose.trim().replace('\n', " "),
             ));
         }
     }
-    (points, withdrawn, kept)
+    (points, withdrawn, kept, notes)
 }
 
 /// What the previous round left open: its points the implementer
@@ -2110,13 +2190,16 @@ fn point_text(line: &str) -> Option<String> {
 }
 
 /// The point ids and texts an aggregated feedback file holds open:
-/// every section before the points left to the merge or found but not
-/// done.
+/// every section before the points left to the merge, those found but
+/// not done, and the reviewers' notes.
 fn open_points_of(text: &str) -> Vec<(String, String)> {
     let mut out = Vec::new();
     for line in text.lines() {
         let line = line.trim();
-        if line == format!("## {LEFT_HEADING}") || line == format!("## {DECIDED_HEADING}") {
+        if [LEFT_HEADING, DECIDED_HEADING, NOTES_HEADING]
+            .iter()
+            .any(|h| line == format!("## {h}"))
+        {
             break;
         }
         out.extend(listed_point(line));
@@ -2746,5 +2829,89 @@ mod tests {
                 "r3/style-1 (style): style: wording".to_owned()
             )]
         );
+    }
+
+    #[test]
+    fn a_line_declaring_every_point_left_is_wording_is_a_note() {
+        for yes in [
+            "Every point left is wording; the round can close on it.",
+            "style: every point I have left is wording",
+            "Only wording is left.",
+            "All remaining points are wording.",
+            "every point left is wording, so the round can close on it",
+        ] {
+            assert!(declares_wording(yes), "{yes}");
+        }
+        for no in [
+            "style: rename tmp",
+            "style: the doc comment's wording on `free_name` is off",
+            "the wording left in the README is stale",
+            "style: every point left is wording; also rename tmp",
+            "style: every point left is wording, but rename tmp to buf",
+            "every point left is wording: rename tmp",
+            "Every point left is wording except the unwrap in scheduler.rs poll_gate",
+            "Not every point left is wording",
+        ] {
+            assert!(!declares_wording(no), "{no}");
+        }
+    }
+
+    fn round_said(dir: &std::path::Path, text: &str) -> ReviewRound {
+        let feedback = dir.join("feedback.md");
+        std::fs::write(&feedback, text).unwrap();
+        ReviewRound {
+            n: 3,
+            base: "b".into(),
+            head: "h".into(),
+            reviewers: vec![ReviewerRun {
+                name: "style".into(),
+                kind: "claude".into(),
+                dir: dir.to_owned(),
+                feedback,
+                session: None,
+                launched: true,
+                stop_at_ms: None,
+                polls_since_stop: 0,
+                settle: None,
+                result: Some(ReviewerResult::Findings),
+            }],
+            state: RoundState::Reviewing,
+            feedback: None,
+            open_points: 0,
+            fix_authorised: false,
+            implementer: None,
+            response: None,
+            head_after: None,
+            stop_at_ms: None,
+            polls_since_stop: 0,
+            settle: None,
+            dirty_polls: 0,
+            started_ms: 0,
+            ended_ms: None,
+        }
+    }
+
+    #[test]
+    fn a_declaration_is_collected_as_a_note_and_takes_no_number() {
+        let dir = tempfile::tempdir().unwrap();
+        let declaration = "Every point left is wording; the round can close on it.";
+        let note = vec![("style".to_owned(), declaration.to_owned())];
+        let point = |text: &str| ("r3/style-1".to_owned(), "style".to_owned(), text.to_owned());
+
+        let round = round_said(dir.path(), &format!("- {declaration}\n- style: x\n"));
+        let (points, _, _, notes) = collect_points(&round, "NO_FEEDBACK");
+        assert_eq!(points, [point("style: x")]);
+        assert_eq!(notes, note);
+
+        let round = round_said(dir.path(), &format!("{declaration}\n"));
+        let (points, _, _, notes) = collect_points(&round, "NO_FEEDBACK");
+        assert!(points.is_empty());
+        assert_eq!(notes, note);
+
+        let prose = "The doc comment on free_name says the wrong thing.";
+        let round = round_said(dir.path(), &format!("{declaration}\n{prose}\n"));
+        let (points, _, _, notes) = collect_points(&round, "NO_FEEDBACK");
+        assert_eq!(points, [point(prose)]);
+        assert_eq!(notes, note);
     }
 }

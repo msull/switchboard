@@ -323,12 +323,11 @@ with a PR, keeps its instruction to fix any claim its rebase changed.
 
 Observed, not yet issues. Each line says where it was seen.
 
-- **The style reviewer's convergence line counts as a point.** The style
-  guidance says "when every point you have left is wording, say so in your
-  first line". On #30's round 2 that line was parsed as `r2/style-1` and
-  listed under "Left to the merge", so the round reported two points where
-  there was one. The parser should drop a point whose text is that
-  declaration, or the guidance should put it outside the numbered list.
+- **An untagged non-wording point from the `style` reviewer counts as
+  style.** `class_of` (`dispatch/src/review.rs`) counts every untagged
+  point from the reviewer named `style` as style, so one about behaviour
+  never holds a round open. Seen on #33's round 2. Whether it should block
+  is open.
 - **A `keep` answer on the rewrite-failure decision.** #30's plan noted it:
   when a `fold` cannot apply (a conflicting fixup), the only answers are
   `rerun | park`, and a rerun will fold the same way. `keep` would complete

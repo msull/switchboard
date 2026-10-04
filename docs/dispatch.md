@@ -1076,10 +1076,18 @@ ids `r<round>/<reviewer>-<n>`, then the points earlier rounds left
 open that no reviewer withdrew. A reviewer's file that is exactly the
 sentinel (`No findings.`, or the stage's `no_feedback`) contributes
 nothing; otherwise each `- `, `* ` or `1. ` line is a point, and a
-file with no list is one point. Carried points: the previous round's
-points the implementer marked `disputed` (or did not answer) stay
-open under their original id unless a reviewer in the new pass wrote
-`withdraw <id>` (bare or as a list item); `keep <id>: why` keeps one with the reason shown.
+file with no list is one point. A reviewer's line saying every point it
+has left is wording ("Every point left is wording; the round can close
+on it.") is a note, not a point: it takes no id and is listed under
+`## Reviewer notes`. The declaration must end at "wording" (or
+"wording is left") with no "not", "except" or "but" in it, and only a
+closing remark such as "the round can close on it", "the round can
+close" or "it can close" may follow it; anything else, or a line
+quoting code, makes the line a point again. Carried points: the
+previous round's points the implementer marked `disputed` (or did not
+answer) stay open under their original id unless a reviewer in the new
+pass wrote `withdraw <id>` (bare or as a list item); `keep <id>: why`
+keeps one with the reason shown.
 
 Points are tagged by their text. A point that starts with `style:`
 (case-insensitive) is about wording, naming, comments or layout; so is
@@ -1095,10 +1103,11 @@ converges at the head the reviewers read: no fix pass runs that no
 reviewer would see, and the points go under `## Left to the merge`.
 Before that round, style points reach the fixer like any other. A
 round file's sections are `## Points`, `## Still open from earlier
-rounds`, `## Left to the merge` and `## Found but not done`, each
-written only when it lists something; a round with none open but some
-left or found says "No open point." first. Only the first two carry
-into the next round.
+rounds`, `## Left to the merge`, `## Found but not done` and
+`## Reviewer notes`, each written only when it lists something; a round
+with none open but some left or found says "No open point." first, and
+one with nothing but notes is the sentinel followed by its notes. Only
+the first two carry into the next round.
 
 **A new attempt** of the stage in the same context (a `rerun`, or a
 later gate's send-back) carries the latest earlier attempt whose rounds
@@ -1341,7 +1350,10 @@ and push with `--force-with-lease`. The gate's own attempt stays open
 and reads the PR again once the rebaser has stopped and its notes
 settled. The conflicting head is on the rebaser's attempt: a rebase
 that leaves the PR at that head, a policy without a rebaser, and a
-spent `max_rebases` are each a `pr` question with `recheck`.
+spent `max_rebases` are each a `pr` question with `recheck`. A
+remedy's completion logs as `rebaser complete at <head>` or `fixer
+complete at <head>`, never the bare `complete` of the stage's own
+agent, so the log does not read as the stage finishing.
 
 A branch does not wait for a PR to be brought up to date. With
 `refresh` on (the default), each stage that launches something begins
@@ -1711,7 +1723,7 @@ and one against the real one:
 | `rerun` with a note at `inspect` | That lane's `implement` result and the gate's attempt are cancelled, the ticket stands at `implement` again, a fresh implementer gets the note at the end of its prompt, other lanes are untouched, and `inspect` asks again on a new attempt when it is done |
 | `merge` with the PR open | A confirmation decision with only `park`, the session marked waiting; `merged` by hand is refused; the PR is read once a minute |
 | The user's own feedback round after the review converged | The pending `finalize` decision is cancelled and the session unmarked while the planner answers; when the run converges again a new decision names the new round count |
-| The PR conflicts with its base at `merge` | The policy's rebaser starts in the lane, cloned from the implementer's session, with the PR, the base and the notes path in its prompt; the merge decision stays; when it stops the gate reads the PR again and, merged, the ticket closes |
+| The PR conflicts with its base at `merge` | The policy's rebaser starts in the lane, cloned from the implementer's session, with the PR, the base and the notes path in its prompt; the merge decision stays; when it stops the gate reads the PR again and, merged, the ticket closes; the rebaser's attempt still records `conflicting`, which its completion line names as the rebaser's (`a_conflicting_pr_is_rebased_by_a_clone_of_the_implementer`; the log text in `a_remedys_completion_names_its_role_and_head`) |
 | The rebaser leaves the PR at the same head, or `max_rebases` is spent | A `pr` decision saying which; no further rebaser runs |
 | The base moved while a plan sat; implementation begins | The branch is brought up to the base, `base_sha` is the new base, the implementer is told the range; nothing but git ran (`a_plan_that_sat_is_implemented_on_a_branch_brought_up_to_its_base`) |
 | The base moved after the PR was opened; `ready` begins | The branch is rebased and pushed once with a lease on the head last seen; `ready` reads the PR at the tree's head (`a_refresh_at_ready_pushes_the_rebased_branch_once_with_the_lease`, `a_refresh_at_ready_pushes_after_the_rebaser_resolves_it`) |
@@ -1742,6 +1754,8 @@ and one against the real one:
 | A rerun after a fix pass answers `fixed` and its checks fail | The point is open in round 1 marked "check the fix", not settled (`a_rerun_after_a_failed_fix_carries_the_fixed_point_open`) |
 | The same rerun noted "start over please" | No carry; the note is on the attempt, off the ticket, and ends the first fix pass's prompt; the rerun question names the phrase (`a_rerun_noted_start_over_reviews_the_whole_branch`) |
 | Round 3 raises only a `style:` point | The round converges at the head the reviewers read with the point under "Left to the merge"; no fix pass; the checks run there and `summary.md` lists the point (`a_style_only_round_three_converges_and_leaves_the_point_to_the_merge`) |
+| Round 3's style reviewer declares every point left is wording, then lists one `style:` point | The declaration is under `## Reviewer notes`, not a point; the one point is `r3/style-1` under "Left to the merge" and the only one in `summary.md` (`a_wording_declaration_is_a_note_and_the_round_leaves_one_point`) |
+| Round 3's style reviewer writes only the declaration | The round converges with nothing left: the sentinel, then the note; the summary's "Left to the merge" is `None.` (`a_round_whose_only_style_feedback_is_the_declaration_converges_with_nothing_left`) |
 | The plan has a "Decisions" section | The reviewers are given it as settled and not the rest of the plan; a `decided:` point holds nothing open and is listed as found but not done, in the round file and the summary (`the_plans_decisions_reach_the_reviewer_as_settled`) |
 | The base moved under a branch with commits before `review-code` | The branch is rebased, `refreshed.commits` is set, round 1 is told to check the rebase, and a rerun at that base is not (`a_review_after_a_rebase_with_commits_checks_the_rebase`) |
 | The same, on a lane with no recorded `base_sha` | The fork point is `from`, `commits` is set and the rebase is checked (`a_rebase_of_a_lane_without_a_recorded_base_is_checked`) |
