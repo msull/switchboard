@@ -1662,6 +1662,9 @@ proven unchanged and the rewrite on the attempt (dispatch
 `RECORD_VERSION` 5); a branch the remote already holds is left alone.
 A prompt's `{lanes}` is the lanes the ticket chose, in pipeline order
 (every lane before the `lanes` decision), and `{lanes.all}` every lane.
+A retake after close deletes each kept branch with nothing beyond its
+base and asks `reuse | fresh | park` about one with commits, holding
+the ticket at the cut; `close` lists the branches it keeps.
 `dispatch/tests/first_slice.rs` is the acceptance table, plus a test
 per point above; `dispatch/tests/live.rs` runs the first stage against
 a real Switchboard and a haiku agent. Known gap: Claude Code treats a

@@ -192,7 +192,10 @@ answers, each lane with a repository of its own removed from its clone
 with `git worktree remove` and then the ticket's tree, never forced,
 the card taken off the set by a `set.sync` on the closing ticket's own
 ledger, and only then `closed`. The branch, the ticket's directory, the
-record and its Switchboard projects stay. A ticket past its last stage
+record and its Switchboard projects stay. A later take of the same issue
+deletes a kept branch that has nothing beyond its base, and asks
+`reuse | fresh | park` about one that has commits (see Decisions);
+`dispatch close` lists the branches it keeps. A ticket past its last stage
 closes the same way; there a refusal by git does not hold the close,
 it is recorded as the trees kept, and `close` on the closed ticket
 tries the removal again. A closing ticket starts nothing, cuts no
@@ -391,6 +394,32 @@ latest attempt, quoting the attempt's own reason and offering what the
 failure first offered (`check` too after failed checks). Asking
 launches nothing, so it does not wait for a slot, and nothing reruns
 without an answer.
+
+A ticket that takes an issue again after a close finds the closed
+ticket's branches in Dispatch's clones under its own name, since a close
+keeps them. Before anything is cut, every clone is fetched and looked
+at: a kept branch with nothing beyond its base (`<remote>/<base>`) is
+only a name, and is deleted; one with commits is asked about once for
+the whole cut, as the `branch` decision under the `cut` pseudo-stage,
+naming each repository whose branch has commits and how many. `reuse`
+checks the branch out at its head and goes on from that work (a lane's
+recorded base is where the branch forked, so a code review diffs only
+its own commits); `fresh` renames it to
+`<branch>.closed-<yyyymmdd>` (`-2`, `-3`, … until the name is free in
+every clone with commits, so each is renamed to the one name the
+question gives) and cuts a new one; `park` parks the ticket and leaves
+the branch with commits as it is. A branch the cut cannot read or
+delete parks the ticket with git's error. The `decisions` dial never
+answers this question, since both `reuse` and `fresh` change git
+state. While it is pending the ticket stays active and held at the
+cut, counted as waiting on you, rather than parked, so that the answer
+is acted on; nothing is fetched or launched until then. An answer is
+spent by the cut that uses it: a `reuse` or `fresh` whose cut fails
+(git refuses a branch still checked out in a closed ticket's kept
+tree) is withdrawn with the parking, and a resume asks again under a
+new id, as it does after `park`.
+A directory already at a tree's place is adopted as before and not
+looked at, and a pull request's branch is reset by `-B` as before.
 
 A pending decision holds its stage in the context it is about: one
 about a lane's attempt holds that lane only, so another lane's first
@@ -1732,6 +1761,7 @@ and one against the real one:
 | The runner lost a running command reviewer | Failed on the next pass, not started again (`a_lost_command_reviewer_is_failed_not_started_again`) |
 | The socket fails mid-pass (Switchboard quit or restarted under the runner) | Nothing is parked; the pass ends with a log line and the next one goes on; the port remakes its connection and sends the request again, which the operations log makes safe |
 | `close` on a parked ticket; on an active one with an open attempt; on a dirty tree; a ticket past its last stage | Each lane with its own repository, then the ticket's tree, is removed with `git worktree remove`; the branch, the ticket directory, the record and the Switchboard projects stay; the ticket leaves the queue and its card the set; pending decisions are cancelled and the session unmarked. Refused before anything is written while an attempt is open (park first) or a tree has changes. At the pipeline's end a refusal is recorded as the tree kept and the ticket still closes (`closing_by_hand_removes_the_lanes_then_the_tree_and_keeps_the_rest`, `a_close_is_refused_while_anything_runs_or_a_tree_has_changes`, `a_dirty_tree_at_the_pipelines_end_is_kept_and_removed_by_hand_later`) |
+| The same issue taken again after a close, its kept branches in the clones | A kept branch with nothing beyond its base is deleted and the trees are cut; one with commits holds the ticket at the `cut`/`branch` question naming only that repository; `reuse` checks it out at its head, `fresh` renames it to `.closed-<yyyymmdd>` and cuts a new one, `park` parks (`a_retake_deletes_an_unmoved_kept_branch_and_cuts`, `a_retake_asks_about_a_kept_branch_with_commits`, `a_retake_with_one_moved_lane_of_three_deletes_the_others_and_names_only_it`, `fresh_renames_every_moved_branch_to_the_one_name_the_question_gave`); a cut that fails after `reuse` parks and a resume asks again (`a_reuse_whose_cut_fails_is_spent_and_a_resume_asks_again`); a kept branch git cannot read parks (`a_kept_branch_that_cannot_be_read_parks_the_retake`) |
 | Dispatch killed at any point of a close | The ticket reads `closing` and starts nothing; the next pass finishes from the saved flags; nothing counts as done without its read-back (`a_close_cut_off_before_the_project_save_finishes_and_clears_the_set_once_answered` and its siblings) |
 | User is viewing another workspace during the whole path | The window stays on it through every launch and the review start; no terminal window opens |
 

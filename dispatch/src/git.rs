@@ -26,6 +26,17 @@ pub trait Repo: Send {
     /// `git worktree add <dir> -b <branch> <start>` in `repo`, where
     /// `start` is a ref like `origin/main`.
     fn worktree_add(&mut self, repo: &Path, dir: &Path, branch: &str, start: &str) -> Result<()>;
+    /// Whether `refs/heads/<branch>` exists in `repo`.
+    fn branch_exists(&self, repo: &Path, branch: &str) -> Result<bool>;
+    /// Commits on `branch` that `start` does not have, read locally.
+    fn branch_ahead(&self, repo: &Path, branch: &str, start: &str) -> Result<u64>;
+    /// `git branch -D <branch>`: only for a branch with nothing beyond its
+    /// start. Git refuses one checked out in a worktree, and so does this.
+    fn delete_branch(&mut self, repo: &Path, branch: &str) -> Result<()>;
+    /// `git branch -m <from> <to>`, never `-M`: an existing `to` is refused.
+    fn rename_branch(&mut self, repo: &Path, from: &str, to: &str) -> Result<()>;
+    /// `git worktree add <dir> <branch>`: the existing branch at its head.
+    fn worktree_checkout(&mut self, repo: &Path, dir: &Path, branch: &str) -> Result<()>;
     /// The commit `rev` names in `dir`.
     fn rev_parse(&self, dir: &Path, rev: &str) -> Result<String>;
     /// The merge base of `a` and `b` in `dir`.
@@ -233,6 +244,49 @@ impl Repo for GitCli {
                 .arg(dir)
                 .args(["-b", branch, start]),
         )?;
+        Ok(())
+    }
+
+    fn branch_exists(&self, repo: &Path, branch: &str) -> Result<bool> {
+        // A nonzero exit means the ref is absent, not that git failed.
+        let out = git_in(repo)
+            .args([
+                "rev-parse",
+                "--verify",
+                "--quiet",
+                &format!("refs/heads/{branch}"),
+            ])
+            .output()
+            .with_context(|| format!("git in {}", repo.display()))?;
+        Ok(out.status.success())
+    }
+
+    fn branch_ahead(&self, repo: &Path, branch: &str, start: &str) -> Result<u64> {
+        let count = output(git_in(repo).args([
+            "rev-list",
+            "--count",
+            &format!("{start}..refs/heads/{branch}"),
+        ]))?;
+        count
+            .parse()
+            .with_context(|| format!("rev-list --count printed {count:?}"))
+    }
+
+    fn delete_branch(&mut self, repo: &Path, branch: &str) -> Result<()> {
+        output(git_in(repo).args(["branch", "-D", branch]))?;
+        Ok(())
+    }
+
+    fn rename_branch(&mut self, repo: &Path, from: &str, to: &str) -> Result<()> {
+        output(git_in(repo).args(["branch", "-m", from, to]))?;
+        Ok(())
+    }
+
+    fn worktree_checkout(&mut self, repo: &Path, dir: &Path, branch: &str) -> Result<()> {
+        if let Some(parent) = dir.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        output(git_in(repo).args(["worktree", "add"]).arg(dir).arg(branch))?;
         Ok(())
     }
 
@@ -891,6 +945,21 @@ pub struct FakeRepo {
     /// Branches the remote already holds: dir, base, head. Asked of any
     /// other range, a tree is not published.
     pub published: Vec<(PathBuf, String, String)>,
+    /// Local branches per clone: (repo, branch) -> (head, commits beyond
+    /// its start). `worktree_add` makes one at `("base0000", 0)`; a test
+    /// moves one by editing it.
+    pub branches: std::collections::BTreeMap<(PathBuf, String), (String, u64)>,
+    /// Branches deleted: repo, branch.
+    pub deleted_branches: Vec<(PathBuf, String)>,
+    /// Branches renamed: repo, from, to.
+    pub renamed_branches: Vec<(PathBuf, String, String)>,
+    /// What `merge_base` answers in a clone, read before `bases`: a
+    /// reused branch's fork point, which a test sets apart from the
+    /// `start` that `rev_parse` resolves.
+    pub fork_points: std::collections::BTreeMap<PathBuf, String>,
+    /// `branch_ahead` fails with this, as a missing `<remote>/<base>`
+    /// makes git fail.
+    pub fail_ahead: Option<String>,
 }
 
 impl Repo for FakeRepo {
@@ -917,6 +986,11 @@ impl Repo for FakeRepo {
         if let Some(e) = &self.fail_worktree {
             bail!("{e}");
         }
+        let key = (repo.to_path_buf(), branch.to_owned());
+        if self.branches.contains_key(&key) {
+            bail!("fatal: a branch named '{branch}' already exists");
+        }
+        self.branches.insert(key, ("base0000".into(), 0));
         std::fs::create_dir_all(dir)?;
         self.worktrees.push((
             repo.to_path_buf(),
@@ -925,6 +999,81 @@ impl Repo for FakeRepo {
             base.into(),
         ));
         self.heads.insert(dir.to_path_buf(), "base0000".into());
+        Ok(())
+    }
+    fn branch_exists(&self, repo: &Path, branch: &str) -> Result<bool> {
+        Ok(self
+            .branches
+            .contains_key(&(repo.to_path_buf(), branch.to_owned())))
+    }
+    fn branch_ahead(&self, repo: &Path, branch: &str, _start: &str) -> Result<u64> {
+        if let Some(e) = &self.fail_ahead {
+            bail!("{e}");
+        }
+        Ok(self
+            .branches
+            .get(&(repo.to_path_buf(), branch.to_owned()))
+            .map_or(0, |(_, n)| *n))
+    }
+    fn delete_branch(&mut self, repo: &Path, branch: &str) -> Result<()> {
+        if let Some((_, dir, ..)) = self
+            .worktrees
+            .iter()
+            .find(|(r, _, b, _)| r == repo && b == branch)
+        {
+            bail!(
+                "error: cannot delete branch '{branch}' used by worktree at '{}'",
+                dir.display()
+            );
+        }
+        self.branches
+            .remove(&(repo.to_path_buf(), branch.to_owned()))
+            .with_context(|| format!("error: branch '{branch}' not found"))?;
+        self.deleted_branches
+            .push((repo.to_path_buf(), branch.to_owned()));
+        Ok(())
+    }
+    fn rename_branch(&mut self, repo: &Path, from: &str, to: &str) -> Result<()> {
+        let to_key = (repo.to_path_buf(), to.to_owned());
+        if self.branches.contains_key(&to_key) {
+            bail!("fatal: a branch named '{to}' already exists");
+        }
+        let entry = self
+            .branches
+            .remove(&(repo.to_path_buf(), from.to_owned()))
+            .with_context(|| format!("error: refname refs/heads/{from} not found"))?;
+        self.branches.insert(to_key, entry);
+        self.renamed_branches
+            .push((repo.to_path_buf(), from.to_owned(), to.to_owned()));
+        Ok(())
+    }
+    fn worktree_checkout(&mut self, repo: &Path, dir: &Path, branch: &str) -> Result<()> {
+        if let Some(e) = &self.fail_worktree {
+            bail!("{e}");
+        }
+        let head = self
+            .branches
+            .get(&(repo.to_path_buf(), branch.to_owned()))
+            .map(|(head, _)| head.clone())
+            .with_context(|| format!("fatal: invalid reference: {branch}"))?;
+        if let Some((_, other, ..)) = self
+            .worktrees
+            .iter()
+            .find(|(r, _, b, _)| r == repo && b == branch)
+        {
+            bail!(
+                "fatal: '{branch}' is already used by worktree at '{}'",
+                other.display()
+            );
+        }
+        std::fs::create_dir_all(dir)?;
+        self.worktrees.push((
+            repo.to_path_buf(),
+            dir.to_path_buf(),
+            branch.into(),
+            branch.into(),
+        ));
+        self.heads.insert(dir.to_path_buf(), head);
         Ok(())
     }
     fn worktree_track(
@@ -1123,6 +1272,9 @@ impl Repo for FakeRepo {
         if self.no_merge_base.iter().any(|d| d == dir) {
             bail!("no merge base in {}: the fake was told so", dir.display());
         }
+        if let Some(fork) = self.fork_points.get(dir) {
+            return Ok(fork.clone());
+        }
         Ok(self
             .bases
             .get(dir)
@@ -1200,6 +1352,21 @@ impl Repo for std::sync::Arc<std::sync::Mutex<FakeRepo>> {
     }
     fn worktree_add(&mut self, repo: &Path, dir: &Path, branch: &str, start: &str) -> Result<()> {
         self.lock().unwrap().worktree_add(repo, dir, branch, start)
+    }
+    fn branch_exists(&self, repo: &Path, branch: &str) -> Result<bool> {
+        self.lock().unwrap().branch_exists(repo, branch)
+    }
+    fn branch_ahead(&self, repo: &Path, branch: &str, start: &str) -> Result<u64> {
+        self.lock().unwrap().branch_ahead(repo, branch, start)
+    }
+    fn delete_branch(&mut self, repo: &Path, branch: &str) -> Result<()> {
+        self.lock().unwrap().delete_branch(repo, branch)
+    }
+    fn rename_branch(&mut self, repo: &Path, from: &str, to: &str) -> Result<()> {
+        self.lock().unwrap().rename_branch(repo, from, to)
+    }
+    fn worktree_checkout(&mut self, repo: &Path, dir: &Path, branch: &str) -> Result<()> {
+        self.lock().unwrap().worktree_checkout(repo, dir, branch)
     }
     fn rev_parse(&self, dir: &Path, rev: &str) -> Result<String> {
         self.lock().unwrap().rev_parse(dir, rev)
@@ -1312,6 +1479,24 @@ impl Repo for std::sync::Arc<std::sync::Mutex<FakeRepo>> {
     fn published(&self, dir: &Path, remote: &str, base: &str, head: &str) -> Result<bool> {
         self.lock().unwrap().published(dir, remote, base, head)
     }
+}
+
+/// `yyyymmdd` of `ms` since the epoch, in UTC: the suffix a branch
+/// renamed out of a retake's way carries.
+#[must_use]
+pub fn yyyymmdd(ms: u64) -> String {
+    // Hinnant's `civil_from_days`, for days since 1970-01-01 (never
+    // negative here, since `ms` is unsigned).
+    let z = ms / 86_400_000 + 719_468;
+    let era = z / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + u64::from(month <= 2);
+    format!("{year:04}{month:02}{day:02}")
 }
 
 /// `dispatch/<number>-<slug>`: the issue title, lowercased, non-word runs
@@ -1556,6 +1741,51 @@ mod tests {
         let e = cli.worktree_remove(&repo, &kept).unwrap_err();
         assert!(e.to_string().contains("not removed"), "{e:#}");
         assert!(kept.join("notes.txt").exists());
+    }
+
+    #[test]
+    fn the_real_git_reads_deletes_renames_and_checks_out_a_kept_branch() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = origin_and_clone(dir.path(), "p");
+        let mut cli = GitCli::default();
+        let wt = dir.path().join("wt").join("t1");
+        let branch = "dispatch/1-x";
+        cli.worktree_add(&repo, &wt, branch, "origin/main").unwrap();
+        cli.worktree_remove(&repo, &wt).unwrap();
+        assert!(cli.branch_exists(&repo, branch).unwrap());
+        assert_eq!(cli.branch_ahead(&repo, branch, "origin/main").unwrap(), 0);
+        assert!(!cli.branch_exists(&repo, "dispatch/9-missing").unwrap());
+
+        cli.delete_branch(&repo, branch).unwrap();
+        cli.worktree_add(&repo, &wt, branch, "origin/main").unwrap();
+        let old = commit(&wt, "f", "work\n", &["-m", "work"]);
+        let e = cli.delete_branch(&repo, branch).unwrap_err();
+        assert!(e.to_string().contains("worktree"), "{e:#}");
+        cli.worktree_remove(&repo, &wt).unwrap();
+        assert_eq!(cli.branch_ahead(&repo, branch, "origin/main").unwrap(), 1);
+
+        sh(&repo, &["branch", "taken", "origin/main"]);
+        assert!(cli.rename_branch(&repo, branch, "taken").is_err());
+        cli.rename_branch(&repo, branch, "dispatch/1-x.closed")
+            .unwrap();
+        assert!(!cli.branch_exists(&repo, branch).unwrap());
+        assert!(cli.branch_exists(&repo, "dispatch/1-x.closed").unwrap());
+
+        cli.worktree_checkout(&repo, &wt, "dispatch/1-x.closed")
+            .unwrap();
+        assert_eq!(cli.head(&wt).unwrap(), old);
+        assert!(
+            cli.is_worktree_of(&repo, &wt, "dispatch/1-x.closed")
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn yyyymmdd_is_the_utc_day() {
+        assert_eq!(yyyymmdd(0), "19700101");
+        assert_eq!(yyyymmdd(1_790_985_600_000), "20261003");
+        assert_eq!(yyyymmdd(951_782_400_000), "20000229");
+        assert_eq!(yyyymmdd(951_868_799_999), "20000229");
     }
 
     #[test]

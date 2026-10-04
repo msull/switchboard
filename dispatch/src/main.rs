@@ -8,7 +8,7 @@ use dispatch::epoch_ms;
 use dispatch::git::GitCli;
 use dispatch::github::Gh;
 use dispatch::port::SocketPort;
-use dispatch::scheduler::Runner;
+use dispatch::scheduler::{Runner, kept_branches};
 use dispatch::serve::{Handler, Server, take_issue, take_pull_requests};
 use dispatch::store::DataDir;
 use dispatch::ticket::{DecisionState, TicketState};
@@ -24,7 +24,7 @@ const USAGE: &str = "usage:
   dispatch status                          every ticket, its stage and state
   dispatch queue <project> [<ticket>...]   show, or reorder, a project's queue
   dispatch resume <ticket>                 a parked ticket back to active
-  dispatch close <ticket> [--reason <text>]  a ticket closed, its trees removed (the branch is kept)
+  dispatch close <ticket> [--reason <text>]  a ticket closed, its trees removed (its branches are kept; close lists them)
   dispatch worktrees [<path>] [--migrate]  where tickets' trees go (default ~/.dispatch/worktrees);
                                            with a path, set it; --migrate moves idle tickets' trees there
 
@@ -307,6 +307,13 @@ fn close(ticket: &str, reason: Option<&str>) -> Result<()> {
     }
     if let Some(why) = &t.close.trees_kept {
         say!("  kept: {why}");
+    }
+    // The close has happened; a pipeline that no longer reads only
+    // leaves the branches unlisted.
+    if let Ok(p) = runner.pipeline_of(&t) {
+        for (branch, clone) in kept_branches(&t, &p, &runner.data) {
+            say!("  branch kept: {branch} in {}", clone.display());
+        }
     }
     Ok(())
 }
