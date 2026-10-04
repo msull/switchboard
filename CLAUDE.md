@@ -196,6 +196,17 @@ The bundle must be signed with a stable identity: Accessibility grants
 and Keychain item ACLs are tied to the signature, so ad-hoc builds lose
 both on every rebuild. `scripts/bundle.sh` has the recipe.
 
+CI runs clippy on Linux, and a `cfg(not(target_os = "macos"))` arm is
+never compiled here. For the dispatch crate, check it before pushing:
+
+```sh
+rustup target add x86_64-unknown-linux-gnu   # once
+cargo clippy --locked -p dispatch --all-targets --target x86_64-unknown-linux-gnu -- -D warnings
+```
+
+The whole workspace cannot be cross-checked this way (`ring` needs a C
+cross compiler), so the app's Linux arms are checked by CI alone.
+
 ## Style
 
 - Comments say why, not what, and never narrate history ("milestone 3
