@@ -151,6 +151,42 @@ pub trait Repo: Send {
     /// Whether `remote`'s copy of the branch checked out at `dir`, as
     /// last fetched or pushed, holds a commit of `base..head`. No fetch.
     fn published(&self, dir: &Path, remote: &str, base: &str, head: &str) -> Result<bool>;
+    /// The size of `base..head` in `dir`: its commits, and the files and
+    /// lines its diff changes. Read in Dispatch's clone, which outlives
+    /// the ticket's trees.
+    fn range_size(&self, dir: &Path, base: &str, head: &str) -> Result<RangeSize>;
+}
+
+/// How big a range of commits is, as a report shows it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
+pub struct RangeSize {
+    /// Commits in `base..head`.
+    pub commits: u32,
+    /// Files the range's diff changes.
+    pub files: u32,
+    /// Lines the diff adds.
+    pub insertions: u32,
+    /// Lines the diff removes.
+    pub deletions: u32,
+}
+
+/// `git diff --shortstat`'s line read as numbers: ` 3 files changed, 10
+/// insertions(+), 2 deletions(-)`, any part of which may be absent.
+fn parse_shortstat(line: &str) -> (u32, u32, u32) {
+    let mut out = (0, 0, 0);
+    for part in line.split(',') {
+        let mut words = part.split_whitespace();
+        let Some(n) = words.next().and_then(|n| n.parse().ok()) else {
+            continue;
+        };
+        match words.next() {
+            Some(w) if w.starts_with("file") => out.0 = n,
+            Some(w) if w.starts_with("insertion") => out.1 = n,
+            Some(w) if w.starts_with("deletion") => out.2 = n,
+            _ => {}
+        }
+    }
+    out
 }
 
 /// What a leased push did.
@@ -777,6 +813,21 @@ impl Repo for GitCli {
             .context("run git merge-base")?;
         Ok(status.success())
     }
+
+    fn range_size(&self, dir: &Path, base: &str, head: &str) -> Result<RangeSize> {
+        let commits =
+            output(git_in(dir).args(["rev-list", "--count", &format!("{base}..{head}")]))?
+                .parse()
+                .context("a commit count")?;
+        let stat = output(git_in(dir).args(["diff", "--shortstat", base, head]))?;
+        let (files, insertions, deletions) = parse_shortstat(&stat);
+        Ok(RangeSize {
+            commits,
+            files,
+            insertions,
+            deletions,
+        })
+    }
 }
 
 /// `pick` applied on `onto` as a cherry-pick would, by a three-way
@@ -1042,6 +1093,9 @@ pub struct FakeRepo {
     /// `branch_ahead` fails with this, as a missing `<remote>/<base>`
     /// makes git fail.
     pub fail_ahead: Option<String>,
+    /// What `range_size` answers by `(dir, base, head)`; any other range
+    /// is an error, as git's would be for a clone without the commits.
+    pub ranges: std::collections::BTreeMap<(PathBuf, String, String), RangeSize>,
 }
 
 impl Repo for FakeRepo {
@@ -1424,6 +1478,12 @@ impl Repo for FakeRepo {
             .iter()
             .any(|(d, b, h)| d == dir && b == base && h == head))
     }
+    fn range_size(&self, dir: &Path, base: &str, head: &str) -> Result<RangeSize> {
+        self.ranges
+            .get(&(dir.to_path_buf(), base.to_owned(), head.to_owned()))
+            .copied()
+            .with_context(|| format!("no range {base}..{head} in {}", dir.display()))
+    }
 }
 
 /// A fake repository shared with a test, so a runner can be replaced (a
@@ -1575,6 +1635,9 @@ impl Repo for std::sync::Arc<std::sync::Mutex<FakeRepo>> {
     }
     fn published(&self, dir: &Path, remote: &str, base: &str, head: &str) -> Result<bool> {
         self.lock().unwrap().published(dir, remote, base, head)
+    }
+    fn range_size(&self, dir: &Path, base: &str, head: &str) -> Result<RangeSize> {
+        self.lock().unwrap().range_size(dir, base, head)
     }
 }
 
@@ -2104,6 +2167,29 @@ mod tests {
         all.extend_from_slice(args);
         sh(dir, &all);
         sh(dir, &["rev-parse", "HEAD"]).trim().to_owned()
+    }
+
+    #[test]
+    fn a_range_is_counted_in_commits_files_and_lines() {
+        let dir = tempfile::tempdir().unwrap();
+        let (wt, base) = cut(dir.path());
+        commit(&wt, "a", "a1\na2\n", &["-m", "A"]);
+        let head = commit(&wt, "b", "b1\n", &["-m", "B"]);
+        let size = GitCli::default().range_size(&wt, &base, &head).unwrap();
+        assert_eq!(
+            size,
+            RangeSize {
+                commits: 2,
+                files: 2,
+                insertions: 3,
+                deletions: 0
+            }
+        );
+        assert!(GitCli::default().range_size(&wt, "nope", &head).is_err());
+        assert_eq!(
+            parse_shortstat(" 1 file changed, 2 deletions(-)"),
+            (1, 0, 2)
+        );
     }
 
     #[test]

@@ -66,7 +66,7 @@ const REVIEW_STYLE: &str = "Start a point that is only about wording, naming, co
 const STYLE_REVIEWER: &str = "style";
 
 /// The round file's section of style points a converged round leaves.
-const LEFT_HEADING: &str = "Left to the merge";
+pub(crate) const LEFT_HEADING: &str = "Left to the merge";
 
 /// The round file's section of points that contest the plan.
 const DECIDED_HEADING: &str = "Found but not done";
@@ -2004,7 +2004,7 @@ fn class_of(reviewer: &str, text: &str) -> Tag {
 
 /// The reviewer a point id names: `r2/style-1` and `a1/r2/style-1` are
 /// both `style`'s.
-fn reviewer_of(id: &str) -> &str {
+pub(crate) fn reviewer_of(id: &str) -> &str {
     let last = id.rsplit('/').next().unwrap_or(id);
     last.rsplit_once('-').map_or(last, |(name, _)| name)
 }
@@ -2274,7 +2274,7 @@ fn claims_fixed(response: &str, id: &str) -> bool {
 }
 
 /// A list item's text, for `- `, `* ` and `1. ` lines.
-fn point_text(line: &str) -> Option<String> {
+pub(crate) fn point_text(line: &str) -> Option<String> {
     if let Some(rest) = line.strip_prefix("- ").or_else(|| line.strip_prefix("* ")) {
         return Some(rest.trim().to_owned());
     }
@@ -2290,7 +2290,7 @@ fn point_text(line: &str) -> Option<String> {
 /// The point ids and texts an aggregated feedback file holds open:
 /// every section before the points left to the merge, those found but
 /// not done, and the reviewers' notes.
-fn open_points_of(text: &str) -> Vec<(String, String)> {
+pub(crate) fn open_points_of(text: &str) -> Vec<(String, String)> {
     let mut out = Vec::new();
     for line in text.lines() {
         let line = line.trim();
@@ -2313,7 +2313,7 @@ fn listed_points_of(text: &str) -> Vec<(String, String)> {
 
 /// The points one section of an aggregated feedback file lists, as
 /// their id and their whole line.
-fn section_points(text: &str, title: &str) -> Vec<(String, String)> {
+pub(crate) fn section_points(text: &str, title: &str) -> Vec<(String, String)> {
     let heading = format!("## {title}");
     let mut inside = false;
     let mut out = Vec::new();
@@ -2349,7 +2349,7 @@ fn is_point_id(id: &str) -> bool {
 }
 
 /// An id's rest after its `a<n>/` qualifier, when it has one.
-fn unqualified(id: &str) -> Option<&str> {
+pub(crate) fn unqualified(id: &str) -> Option<&str> {
     let (q, rest) = id.split_once('/')?;
     let n = q.strip_prefix('a')?;
     (!n.is_empty() && n.bytes().all(|b| b.is_ascii_digit())).then_some(rest)

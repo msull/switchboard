@@ -69,6 +69,12 @@ pub struct FakeSwitchboard {
     /// a runner killed at that moment would leave on disk.
     pub snapshot_on: Option<(String, std::path::PathBuf)>,
     pub snapshots: Vec<String>,
+    /// What `session.screen` shows per session; a running session not
+    /// listed has an empty screen.
+    pub screens: BTreeMap<String, String>,
+    /// Answer `session.screen` as an app from before it does: a bad
+    /// request.
+    pub screen_unknown: bool,
     counter: u64,
 }
 
@@ -588,6 +594,20 @@ impl FakeSwitchboard {
                 };
                 Reply::OpStatus { status }
             }
+            Body::SessionScreen { session, .. } => {
+                if self.screen_unknown {
+                    return Reply::failed(
+                        "bad request: unknown variant `session.screen`, expected one of `project.add`",
+                    );
+                }
+                match self.sessions.iter().find(|s| &s.id == session) {
+                    Some(s) if s.liveness == Liveness::Running => Reply::Screen {
+                        text: self.screens.get(session).cloned().unwrap_or_default(),
+                    },
+                    Some(_) => Reply::failed("not running"),
+                    None => Reply::failed("no such session"),
+                }
+            }
             _ => Reply::failed("not a query"),
         }
     }
@@ -649,4 +669,17 @@ impl Port for SharedPort {
         }
         Ok(reply)
     }
+}
+
+/// The kinds of the ticket's events in the log, in order, without the
+/// ones a `void` withdrew.
+pub fn events_of(data: &dispatch::store::DataDir, ticket: &str) -> Vec<String> {
+    let events = dispatch::events::read_since(&dispatch::events::log_path(data), 0).unwrap();
+    let gone = dispatch::events::withdrawn(&events);
+    events
+        .iter()
+        .filter(|e| e.ticket == ticket && !gone.contains(&e.seq))
+        .filter(|e| e.kind != dispatch::events::Kind::Void)
+        .map(|e| e.kind.as_str().to_owned())
+        .collect()
 }

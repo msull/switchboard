@@ -46,9 +46,12 @@ impl Runner {
             }
             let mut ps = self.load_project(&t.project)?;
             let pending = t.unsettled();
-            for i in pending {
-                self.recover_one(&mut t, &mut ps, i, now_ms)?;
-            }
+            self.health.borrow_mut().current = Some(t.id.clone());
+            let recovered = pending
+                .into_iter()
+                .try_for_each(|i| self.recover_one(&mut t, &mut ps, i, now_ms));
+            self.health.borrow_mut().current = None;
+            recovered?;
             self.save_ticket(&mut t, now_ms)?;
             self.save_project(&ps)?;
         }
@@ -67,12 +70,15 @@ impl Runner {
         log::info!("ticket {} recovering {} ({})", t.id, op.op, op.kind);
         match op.class.as_str() {
             "creation" => {
-                let found = match self.port.call(&Request::new(
-                    format!("r-{}", uuid::Uuid::new_v4().simple()),
-                    Body::Find {
-                        operation: op.op.clone(),
-                    },
-                ))? {
+                let found = match self.call(
+                    Some(&t.id),
+                    &Request::new(
+                        format!("r-{}", uuid::Uuid::new_v4().simple()),
+                        Body::Find {
+                            operation: op.op.clone(),
+                        },
+                    ),
+                )? {
                     Reply::Found { records } => records,
                     other => anyhow::bail!("find answered {other:?}"),
                 };
@@ -180,7 +186,7 @@ impl Runner {
             give_verdict(&mut t.ledger[i], HARMLESS);
             return;
         };
-        match self.port.call(&Request::new(op.op, body)) {
+        match self.call(Some(&t.id), &Request::new(op.op, body)) {
             Ok(reply) => {
                 t.ledger[i].reply = Some(reply.clone());
                 t.ledger[i].error = None;
@@ -191,12 +197,15 @@ impl Runner {
     }
 
     fn status_of(&mut self, op: &str) -> Result<OpStatus> {
-        match self.port.call(&Request::new(
-            format!("r-{}", uuid::Uuid::new_v4().simple()),
-            Body::OpStatus {
-                operation: op.to_owned(),
-            },
-        ))? {
+        match self.call(
+            None,
+            &Request::new(
+                format!("r-{}", uuid::Uuid::new_v4().simple()),
+                Body::OpStatus {
+                    operation: op.to_owned(),
+                },
+            ),
+        )? {
             Reply::OpStatus { status } => Ok(status),
             other => anyhow::bail!("op.status answered {other:?}"),
         }

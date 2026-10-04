@@ -802,46 +802,47 @@ pub struct ProjectState {
     pub shown: Vec<(String, String)>,
 }
 
+/// An active ticket with nothing on it, for tests.
+#[cfg(test)]
+pub(crate) fn blank() -> Ticket {
+    Ticket {
+        version: 0,
+        id: "t".into(),
+        project: "p".into(),
+        source: SourceSnapshot {
+            kind: "manual".into(),
+            identity: "x".into(),
+            pull_requests: Vec::new(),
+            number: None,
+            title: String::new(),
+            body: String::new(),
+            url: None,
+            labels: vec![],
+            taken_at_ms: 0,
+        },
+        pipeline_fingerprint: String::new(),
+        pipeline_file: PathBuf::new(),
+        lanes: vec![],
+        tree: None,
+        stage: 0,
+        attempts: vec![],
+        decisions: vec![],
+        ledger: vec![],
+        processes: vec![],
+        root_project: None,
+        rework: BTreeMap::new(),
+        refreshed_stage: None,
+        state: TicketState::Active,
+        close: CloseProgress::default(),
+        created_ms: 0,
+        updated_ms: 0,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::scheduler::new_attempt;
-
-    /// An active ticket with nothing on it.
-    fn blank() -> Ticket {
-        Ticket {
-            version: 0,
-            id: "t".into(),
-            project: "p".into(),
-            source: SourceSnapshot {
-                kind: "manual".into(),
-                identity: "x".into(),
-                pull_requests: Vec::new(),
-                number: None,
-                title: String::new(),
-                body: String::new(),
-                url: None,
-                labels: vec![],
-                taken_at_ms: 0,
-            },
-            pipeline_fingerprint: String::new(),
-            pipeline_file: PathBuf::new(),
-            lanes: vec![],
-            tree: None,
-            stage: 0,
-            attempts: vec![],
-            decisions: vec![],
-            ledger: vec![],
-            processes: vec![],
-            root_project: None,
-            rework: BTreeMap::new(),
-            refreshed_stage: None,
-            state: TicketState::Active,
-            close: CloseProgress::default(),
-            created_ms: 0,
-            updated_ms: 0,
-        }
-    }
 
     #[test]
     fn inputs_come_from_the_latest_completed_attempt_that_wrote_them() {

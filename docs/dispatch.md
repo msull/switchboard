@@ -220,6 +220,47 @@ never had and read as absent. Version 4 adds a code review attempt's
 note now lives on the attempt. Version 5 adds a code review attempt's
 `rewrite`, absent in older records.
 
+### The event log and the runner's status
+
+Two files in the data directory are logs and status, not records, and
+neither goes through `migrate`.
+
+`events.jsonl` is the event log the supervising commands read
+(`dispatch events`, `dispatch wait`). Each line is one JSON object,
+`{"v":1,"seq":N,"at_ms":…,"ticket":…,"project":…,"stage":…,"kind":…,"text":…}`,
+with `attempt`, `decision`, `head`, `url` and `voids` when they apply.
+There is one writer, `store::write_ticket_logged`, at the one place a
+ticket is written (`Runner::save_ticket`, `decide` and `resume`): it
+reads the record being replaced, diffs it against the new one
+(`events::between`), appends what changed and syncs it, and only then
+writes the record. Ledger entries, settle counts, polls and
+`updated_ms` make no event, so the runner's several saves per pass
+stay quiet. The `seq` is global, taken from the file's last complete
+line under the writer lock; a torn last line is closed with a newline
+and skipped by readers.
+
+The order with the record's rename makes a crash between the two a
+duplicate, never a miss: the event is on disk, the record is not, and
+the next pass does the transition again and logs it again. A write
+that fails without a crash (a full disk, a permission change) appends
+a `void` naming the seqs it had appended, and readers drop those. If
+the `void` cannot be appended either, the record's error is still the
+one returned and the withdrawn events stand; `wait` confirms every
+match against the record, so it never returns one. An append that
+fails refuses the record's write, since the transition would
+otherwise never be logged. Text is built from record fields only (ids,
+heads, stage names, a decision's question and options, a failure's
+reason), capped at 512 bytes. The log is never rotated, and tickets
+written before it existed have events from their next transition on.
+
+`runner.json` is `dispatch run`'s status, replaced after every pass:
+its pid, start, last pass and how long it took, the last success and
+latency of a call to Switchboard, the failures of calls to Switchboard
+and the PR providers in the last hour (time, ticket, the error's
+text), and per ticket the last time the runner got on with it (a call
+for it that succeeded, or a step that finished without an error).
+`dispatch health` reads it, never taking `runner.lock`.
+
 The "never resume automatically" rule holds on both sides. New
 launches happen because the scheduler finds a runnable ticket at the
 top of a queue with a free slot, which is the same thing it would have
@@ -1602,6 +1643,12 @@ Queries:
   by that operation, with the same state)
 - `waiting`, `workflow {run}` (state, round, cap), `workflows
   {project}`
+- `session.screen {session, lines}`: the last `lines` (40 by default,
+  at most 200) of a running session's pane, with the values of its
+  project's secrets replaced by their names (`<NAME>`), since the
+  reply becomes another program's output; `not running` for a session
+  that is not. An app from before it answers `bad request`, which
+  `dispatch tail` reads as "update the app"
 - `file.stat {path}` (the round-file probe, for a path under
   Dispatch's own directory)
 

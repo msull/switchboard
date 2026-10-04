@@ -202,6 +202,14 @@ pub enum Body {
     Find { operation: String },
     #[serde(rename = "op.status")]
     OpStatus { operation: String },
+    /// The last `lines` of a running session's pane (40 when absent),
+    /// with the project's secret values replaced by their names.
+    #[serde(rename = "session.screen")]
+    SessionScreen {
+        session: String,
+        #[serde(default)]
+        lines: Option<u32>,
+    },
 }
 
 impl Body {
@@ -238,7 +246,8 @@ impl Body {
             | Self::Workflow { .. }
             | Self::Workflows { .. }
             | Self::Find { .. }
-            | Self::OpStatus { .. } => Class::Query,
+            | Self::OpStatus { .. }
+            | Self::SessionScreen { .. } => Class::Query,
         }
     }
 
@@ -531,6 +540,10 @@ pub enum Reply {
     Workflows {
         runs: Vec<RunView>,
     },
+    /// A pane's text, as `session.screen` asked for it.
+    Screen {
+        text: String,
+    },
 }
 
 impl Reply {
@@ -765,6 +778,10 @@ mod tests {
             Body::OpStatus {
                 operation: "op".into(),
             },
+            Body::SessionScreen {
+                session: "s".into(),
+                lines: Some(20),
+            },
         ];
         for body in bodies {
             assert!(!body.kind().is_empty(), "{body:?}");
@@ -779,6 +796,23 @@ mod tests {
             "find"
         );
         assert_eq!(Body::Spaces.class(), Class::Query);
+        assert_eq!(
+            Body::SessionScreen {
+                session: "s".into(),
+                lines: None
+            }
+            .class(),
+            Class::Query
+        );
+        assert_eq!(
+            Request::parse(r#"{"op":"q","kind":"session.screen","session":"s"}"#)
+                .unwrap()
+                .body,
+            Body::SessionScreen {
+                session: "s".into(),
+                lines: None
+            }
+        );
         assert_eq!(
             Body::SessionSend {
                 session: "s".into(),
@@ -869,6 +903,9 @@ mod tests {
             },
             Reply::Workflow { run: run() },
             Reply::Workflows { runs: vec![run()] },
+            Reply::Screen {
+                text: "$ ls\nsrc".into(),
+            },
         ];
         for reply in &replies {
             round_trip_reply(reply);

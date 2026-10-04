@@ -1,36 +1,35 @@
 //! `dispatch`: take a ticket, run the scheduler, answer decisions, look.
 
 use std::path::PathBuf;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::Result;
+use dispatch::USAGE;
 use dispatch::epoch_ms;
+use dispatch::events::{self, Event, For, Kind, Waited, short};
 use dispatch::git::GitCli;
 use dispatch::github::Gh;
 use dispatch::port::SocketPort;
+use dispatch::report::{self, TicketReport};
 use dispatch::scheduler::{Runner, kept_branches};
 use dispatch::serve::{Handler, Server, take_issue, take_pull_requests};
+use dispatch::serve::{ticket_paths, ticket_view};
 use dispatch::store::DataDir;
 use dispatch::ticket::{DecisionState, TicketState};
 use std::io::Write as _;
 
-const USAGE: &str = "usage:
-  dispatch take <project> <issue-number>   make a ticket from an issue and queue it
-  dispatch take <project> pr <lane>/<n>... a ticket from someone's pull requests, one per lane,
-                                           on <project>.pr.toml; the lane may be left off with one lane
-  dispatch run [--once]                    drive every ticket (once, or until stopped)
-  dispatch decide <ticket> <decision> <answer> [--note <text>]
-  dispatch decisions                       what waits on you
-  dispatch status                          every ticket, its stage and state
-  dispatch queue <project> [<ticket>...]   show, or reorder, a project's queue
-  dispatch resume <ticket>                 a parked ticket back to active
-  dispatch close <ticket> [--reason <text>]  a ticket closed, its trees removed (its branches are kept; close lists them)
-  dispatch worktrees [<path>] [--migrate]  where tickets' trees go (default ~/.dispatch/worktrees);
-                                           with a path, set it; --migrate moves idle tickets' trees there
+/// `EX_USAGE`: the command line was wrong. `wait` gives 2 and 3 their
+/// own meanings, so a usage error is never mistaken for them.
+const EXIT_USAGE: i32 = 64;
 
-Data: $DISPATCH_DATA_DIR (default ~/Library/Application Support/Dispatch).
-Switchboard: $SWITCHBOARD_DATA_DIR/control.sock (default Switchboard's).
-While `run` is up it serves the same commands on <data>/dispatch.sock.";
+/// Exit codes of `wait` past its match.
+const EXIT_TIMED_OUT: i32 = 2;
+const EXIT_ENDED: i32 = 3;
+
+fn usage() -> ! {
+    eprintln!("{USAGE}");
+    std::process::exit(EXIT_USAGE);
+}
 
 /// Print a line, and end quietly when the reader has gone: a pipe into
 /// `head` or `grep -m` closes stdout early, which is not an error.
@@ -88,10 +87,13 @@ fn main() -> Result<()> {
         ["close", ticket] => close(ticket, None),
         ["close", ticket, "--reason", reason] => close(ticket, Some(reason)),
         ["worktrees", rest @ ..] => worktrees(rest),
-        _ => {
-            eprintln!("{USAGE}");
-            std::process::exit(2);
-        }
+        ["events", rest @ ..] => events(rest),
+        ["wait", rest @ ..] => wait(rest),
+        ["show", rest @ ..] => show(rest),
+        ["report", rest @ ..] => report(rest),
+        ["tail", rest @ ..] => tail(rest),
+        ["health", rest @ ..] => health(rest),
+        _ => usage(),
     }
 }
 
@@ -136,13 +138,32 @@ fn run(once: bool) -> Result<()> {
         issues: Box::new(Gh),
     };
     let _port = Server::bind(&runner.data, handler)?;
+    let pid = std::process::id();
+    let started_ms = now_ms();
+    let pass = Instant::now();
     runner.recover(now_ms())?;
+    write_health(&runner, pid, started_ms, pass);
     loop {
+        let pass = Instant::now();
         runner.step_all(now_ms())?;
+        write_health(&runner, pid, started_ms, pass);
         if once {
             return Ok(());
         }
         std::thread::sleep(Duration::from_secs(1));
+    }
+}
+
+/// `runner.json` after a pass that began at `pass`; a failure to write
+/// it is logged, never the end of the runner.
+fn write_health(runner: &Runner, pid: u32, started_ms: u64, pass: Instant) {
+    let took = u64::try_from(pass.elapsed().as_millis()).unwrap_or(u64::MAX);
+    if let Err(e) = runner
+        .health
+        .borrow_mut()
+        .write(&runner.data, pid, started_ms, now_ms(), took)
+    {
+        log::warn!("runner.json: {e:#}");
     }
 }
 
@@ -162,10 +183,7 @@ fn worktrees(args: &[&str]) -> Result<()> {
     let path = match path[..] {
         [] => None,
         [p] => Some(PathBuf::from(p)),
-        _ => {
-            eprintln!("{USAGE}");
-            std::process::exit(2);
-        }
+        _ => usage(),
     };
     let mut runner = self::runner()?;
     let view = runner.set_worktrees(path, migrate, now_ms())?;
@@ -345,6 +363,551 @@ fn queue(project: &str, order: &[&str]) -> Result<()> {
             },
         );
         say!("- {id} {line}");
+    }
+    Ok(())
+}
+
+/// A command's flags: the values and switches it knows, and the words
+/// left over. An unknown flag or one without its value is a usage
+/// error.
+struct Flags<'a> {
+    values: Vec<(&'a str, &'a str)>,
+    switches: Vec<&'a str>,
+    rest: Vec<&'a str>,
+}
+
+impl<'a> Flags<'a> {
+    fn parse(args: &[&'a str], values: &[&str], switches: &[&str]) -> Self {
+        let mut out = Flags {
+            values: Vec::new(),
+            switches: Vec::new(),
+            rest: Vec::new(),
+        };
+        let mut words = args.iter();
+        while let Some(&word) = words.next() {
+            if values.contains(&word) {
+                let Some(&value) = words.next() else {
+                    eprintln!("{word} takes a value");
+                    usage();
+                };
+                out.values.push((word, value));
+            } else if switches.contains(&word) {
+                out.switches.push(word);
+            } else if word.starts_with("--") {
+                eprintln!("unknown flag {word}");
+                usage();
+            } else {
+                out.rest.push(word);
+            }
+        }
+        out
+    }
+
+    /// The last value given for `flag`.
+    fn value(&self, flag: &str) -> Option<&'a str> {
+        self.values
+            .iter()
+            .rev()
+            .find(|(f, _)| *f == flag)
+            .map(|(_, v)| *v)
+    }
+
+    /// Every value given for a flag that may repeat.
+    fn all(&self, flag: &str) -> Vec<&'a str> {
+        self.values
+            .iter()
+            .filter(|(f, _)| *f == flag)
+            .map(|(_, v)| *v)
+            .collect()
+    }
+
+    fn on(&self, switch: &str) -> bool {
+        self.switches.contains(&switch)
+    }
+
+    /// `flag`'s value as a number, or a usage error.
+    fn number(&self, flag: &str) -> Option<u64> {
+        self.value(flag).map(|v| {
+            v.parse().unwrap_or_else(|_| {
+                eprintln!("{flag} takes a number, not {v:?}");
+                usage()
+            })
+        })
+    }
+
+    /// The one word a command takes, or a usage error.
+    fn one(&self) -> &'a str {
+        match self.rest[..] {
+            [word] => word,
+            _ => usage(),
+        }
+    }
+}
+
+/// `hh:mm:ss` of `ms` since the epoch, in UTC.
+fn clock(ms: u64) -> String {
+    let s = (ms / 1000) % 86_400;
+    format!("{:02}:{:02}:{:02}", s / 3600, (s / 60) % 60, s % 60)
+}
+
+/// A duration for a person: `2h05m`, `4m10s`, `12s`.
+fn span(ms: u64) -> String {
+    let s = ms / 1000;
+    if s >= 3600 {
+        format!("{}h{:02}m", s / 3600, (s / 60) % 60)
+    } else if s >= 60 {
+        format!("{}m{:02}s", s / 60, s % 60)
+    } else {
+        format!("{s}s")
+    }
+}
+
+/// An event as a line: as stored with `--json`, else
+/// `seq  hh:mm:ss  ticket  stage  kind  text`.
+fn event_line(e: &Event, json: bool) -> String {
+    if json {
+        return e.to_line();
+    }
+    let text = if e.kind == Kind::Void {
+        let seqs: Vec<String> = e.voids.iter().map(u64::to_string).collect();
+        format!("withdraws {}: {}", seqs.join(", "), e.text)
+    } else {
+        e.text.clone()
+    };
+    format!(
+        "{}  {}  {}  {}  {}  {text}",
+        e.seq,
+        clock(e.at_ms),
+        e.ticket,
+        e.stage,
+        e.kind.as_str()
+    )
+}
+
+fn events(args: &[&str]) -> Result<()> {
+    let f = Flags::parse(
+        args,
+        &["--since", "--ticket", "--project"],
+        &["--follow", "--json"],
+    );
+    if !f.rest.is_empty() {
+        usage();
+    }
+    let since = f.number("--since").unwrap_or(0);
+    let tickets = f.all("--ticket");
+    let project = f.value("--project");
+    let json = f.on("--json");
+    let keep = |e: &Event| {
+        (tickets.is_empty() || tickets.contains(&e.ticket.as_str()))
+            && project.is_none_or(|p| p == e.project)
+    };
+    let path = events::log_path(&DataDir::from_env()?);
+    let all = events::read_since(&path, since)?;
+    let gone = events::withdrawn(&all);
+    let mut last = since;
+    for e in &all {
+        last = last.max(e.seq);
+        if keep(e) && !gone.contains(&e.seq) {
+            say!("{}", event_line(e, json));
+        }
+    }
+    if !f.on("--follow") {
+        return Ok(());
+    }
+    // Followed, a withdrawn event may already be printed when its void
+    // comes; the void's line says which seqs to drop.
+    let mut follow = events::follow(&path, last);
+    loop {
+        for e in follow.next_batch()? {
+            if keep(&e) {
+                say!("{}", event_line(&e, json));
+            }
+        }
+        std::thread::sleep(Duration::from_millis(events::FOLLOW_POLL_MS));
+    }
+}
+
+fn wait(args: &[&str]) -> Result<()> {
+    let f = Flags::parse(args, &["--for", "--timeout"], &["--json"]);
+    let ticket = f.one();
+    let what = match f.value("--for") {
+        None => For::Any,
+        Some(word) => For::parse(word).unwrap_or_else(|| {
+            eprintln!("--for takes decision, stage, pr, closed or any");
+            usage()
+        }),
+    };
+    let deadline = f.number("--timeout").map(|s| now_ms() + s * 1000);
+    let json = f.on("--json");
+    let data = DataDir::from_env()?;
+    let waited = events::wait(&data, ticket, what, deadline, &mut now_ms, &mut || {
+        std::thread::sleep(Duration::from_millis(events::FOLLOW_POLL_MS));
+    })?;
+    match waited {
+        Waited::Matched(e) => {
+            say!("{}", event_line(&e, json));
+            if !json
+                && e.kind == Kind::Decision
+                && let Some(d) = &e.decision
+            {
+                say!("    dispatch decide {ticket} {d} <answer> [--note <text>]");
+            }
+            Ok(())
+        }
+        Waited::Ended(e) => {
+            say!("{}", event_line(&e, json));
+            std::process::exit(EXIT_ENDED);
+        }
+        Waited::TimedOut => {
+            if json {
+                say!(r#"{{"timed_out":true}}"#);
+            } else {
+                say!("timed out");
+            }
+            std::process::exit(EXIT_TIMED_OUT);
+        }
+    }
+}
+
+fn show(args: &[&str]) -> Result<()> {
+    let f = Flags::parse(args, &[], &["--json"]);
+    let runner = offline_runner()?;
+    let t = runner.load_ticket(f.one())?;
+    let mut view = ticket_view(&t, runner.pipeline_of(&t).ok().as_ref());
+    view.paths = ticket_paths(&t);
+    if f.on("--json") {
+        say!("{}", serde_json::to_string_pretty(&view)?);
+        return Ok(());
+    }
+    let current = view.stages.get(view.stage).map_or("done", String::as_str);
+    say!(
+        "{} {} {} {}",
+        view.id,
+        view.project,
+        t.source.label(),
+        view.title
+    );
+    say!("stage {current} ({}/{})", view.stage + 1, view.stages.len());
+    say!("state {}", t.state.label());
+    if !view.lanes.is_empty() {
+        say!("lanes:");
+    }
+    for l in &view.lanes {
+        let sha = |s: &Option<String>| s.as_deref().map_or("-".to_owned(), |s| short(s).to_owned());
+        say!(
+            "  {} {} {} base {} head {} pushed {}{}",
+            l.name,
+            l.branch,
+            l.worktree.display(),
+            sha(&l.base_sha),
+            sha(&l.head),
+            sha(&l.pushed_head),
+            if l.removed { " (removed)" } else { "" }
+        );
+    }
+    print_attempts(&view)?;
+    print_pending(&view)?;
+    let p = &view.paths;
+    say!("files:");
+    for (name, path) in [
+        ("plan", &p.plan),
+        ("round", &p.round_file),
+        ("review summary", &p.review_summary),
+        ("notes", &p.notes),
+    ] {
+        if let Some(path) = path {
+            say!("  {name}: {}", path.display());
+        }
+    }
+    if let Some(url) = &p.pr_url {
+        say!("  PR: {url} at {}", p.pr_head.as_deref().map_or("-", short));
+    }
+    Ok(())
+}
+
+/// Attempts grouped by stage, each with its PR and review rounds.
+fn print_attempts(view: &dispatch_control::TicketView) -> Result<()> {
+    let mut stage_seen: Option<&str> = None;
+    for a in &view.attempts {
+        if stage_seen != Some(a.stage.as_str()) {
+            say!("{}:", a.stage);
+            stage_seen = Some(&a.stage);
+        }
+        let state = match &a.reason {
+            Some(why) => format!("{}: {why}", a.state),
+            None => a.state.clone(),
+        };
+        let gate = a
+            .checks
+            .as_ref()
+            .map_or(String::new(), |c| format!(" gate-head {}", short(&c.head)));
+        let rewrite = a.rewrite.as_ref().map_or(String::new(), |r| {
+            format!(" rewrite {} {}→{}", r.mode, r.from, r.to)
+        });
+        say!(
+            "  #{} {} {state} head {}{gate}{rewrite}",
+            a.n,
+            a.context,
+            a.head.as_deref().map_or("-", short)
+        );
+        if let Some(pr) = &a.pr {
+            say!(
+                "    PR #{} {} head {} checks {}",
+                pr.number,
+                pr.url,
+                short(&pr.head),
+                pr.checks
+            );
+        }
+        for r in &a.rounds {
+            say!("    r{} {} open {}", r.n, r.state, r.open_points);
+        }
+    }
+    Ok(())
+}
+
+/// The decisions that wait on the user, with the exact line that
+/// answers each.
+fn print_pending(view: &dispatch_control::TicketView) -> Result<()> {
+    let pending: Vec<_> = view
+        .decisions
+        .iter()
+        .filter(|d| d.state == "pending")
+        .collect();
+    if !pending.is_empty() {
+        say!("waiting on you:");
+    }
+    for d in pending {
+        say!(
+            "  {} [{}] {}\n    options: {}{}\n    dispatch decide {} {} <answer> [--note <text>]",
+            d.id,
+            d.stage,
+            d.question,
+            d.options.join(" | "),
+            d.recommendation
+                .as_ref()
+                .map_or(String::new(), |r| format!(" (suggested: {r})")),
+            view.id,
+            d.id
+        );
+    }
+    Ok(())
+}
+
+/// A ticket's report, with git asked for the size of its PR's range in
+/// Dispatch's clone of the lane's repository.
+fn report_of(runner: &Runner, t: &dispatch::ticket::Ticket) -> TicketReport {
+    let names = events::stage_names(t);
+    let range = report::pr_range(t).and_then(|(lane, base, head)| {
+        let p = runner.pipeline_of(t).ok()?;
+        let dir = runner.lane_clone(&p, p.lane(&lane)?);
+        runner.git.range_size(&dir, &base, &head).ok()
+    });
+    report::of(
+        t,
+        &names,
+        &|p| std::fs::read_to_string(p).ok(),
+        range,
+        now_ms(),
+    )
+}
+
+fn report(args: &[&str]) -> Result<()> {
+    let f = Flags::parse(args, &["--project", "--since"], &["--json"]);
+    let json = f.on("--json");
+    let runner = offline_runner()?;
+    match (&f.rest[..], f.value("--project")) {
+        ([ticket], None) => {
+            if f.value("--since").is_some() {
+                usage();
+            }
+            let r = report_of(&runner, &runner.load_ticket(ticket)?);
+            if json {
+                say!("{}", serde_json::to_string_pretty(&r)?);
+            } else {
+                print_report(&r)?;
+            }
+        }
+        ([], Some(project)) => {
+            let since = match f.value("--since") {
+                None => 0,
+                Some(day) => report::parse_date(day).unwrap_or_else(|| {
+                    eprintln!("--since takes a date as YYYY-MM-DD");
+                    usage()
+                }),
+            };
+            let mut tickets: Vec<_> = runner
+                .tickets()?
+                .into_iter()
+                .filter(|t| t.project == project && t.created_ms >= since)
+                .collect();
+            tickets.sort_by_key(|t| t.created_ms);
+            let rows: Vec<TicketReport> = tickets.iter().map(|t| report_of(&runner, t)).collect();
+            let total = report::total(&rows);
+            if json {
+                say!(
+                    "{}",
+                    serde_json::to_string_pretty(
+                        &serde_json::json!({ "tickets": rows, "total": total })
+                    )?
+                );
+                return Ok(());
+            }
+            say!("ticket    time      plan  code  fixes  rebases  commits  title");
+            let row = |id: &str, r: &TicketReport, title: &str| -> Result<()> {
+                say!(
+                    "{:<9} {:<9} {:<5} {:<5} {:<6} {:<8} {:<8} {}",
+                    id,
+                    span(r.stages.iter().map(|s| s.ms).sum()),
+                    r.plan_points,
+                    format!(
+                        "{}{}",
+                        r.code_points,
+                        if r.code_incomplete { "+" } else { "" }
+                    ),
+                    r.fix_passes,
+                    r.rebases,
+                    r.commits.map_or("-".to_owned(), |c| c.to_string()),
+                    title
+                );
+                Ok(())
+            };
+            for r in &rows {
+                row(&r.id, r, &r.title)?;
+            }
+            row("total", &total, &format!("{} ticket(s)", total.tickets))?;
+        }
+        _ => usage(),
+    }
+    Ok(())
+}
+
+fn print_report(r: &TicketReport) -> Result<()> {
+    say!("{} {} ({})", r.id, r.title, r.state);
+    for s in &r.stages {
+        if s.attempts == 0 {
+            continue;
+        }
+        say!(
+            "  {}: {} over {} attempt(s), waiting on you {}",
+            s.stage,
+            span(s.ms),
+            s.attempts,
+            span(s.waiting_ms)
+        );
+    }
+    if let (Some(lines), Some(bytes)) = (r.plan_lines, r.plan_bytes) {
+        say!("  plan: {lines} lines, {bytes} bytes");
+    } else {
+        say!("  plan: none");
+    }
+    let rounds = |rs: &[report::RoundReport]| -> String {
+        rs.iter()
+            .map(|x| match x.new {
+                Some(new) => format!("r{} new {new} open {}", x.n, x.open),
+                None => format!("r{} open {}", x.n, x.open),
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    say!(
+        "  plan review: {} round(s), {} point(s)",
+        r.plan_rounds,
+        r.plan_points
+    );
+    for p in &r.plan_reviews {
+        say!("    {} #{}: {}", p.stage, p.attempt, rounds(&p.rounds));
+    }
+    let by: Vec<String> = r
+        .code_points_by_reviewer
+        .iter()
+        .map(|(who, n)| format!("{who} {n}"))
+        .collect();
+    say!(
+        "  code review: {} round(s), {} point(s){}{}",
+        r.code_rounds,
+        r.code_points,
+        if by.is_empty() {
+            String::new()
+        } else {
+            format!(" ({})", by.join(", "))
+        },
+        if r.code_incomplete {
+            ", incomplete: a round's file is missing"
+        } else {
+            ""
+        }
+    );
+    for c in &r.code_reviews {
+        say!("    {} #{}: {}", c.stage, c.attempt, rounds(&c.rounds));
+    }
+    say!("  fix passes: {}", r.fix_passes);
+    say!("  rebases: at least {}", r.rebases);
+    match &r.pr_url {
+        None => say!("  PR: none"),
+        Some(url) => {
+            let size = match (r.range, r.commits) {
+                (Some(g), _) => format!(
+                    "{} commit(s), {} file(s), +{} -{}",
+                    g.commits, g.files, g.insertions, g.deletions
+                ),
+                (None, Some(c)) => format!("{c} commit(s) (from the rewrite), diff unknown"),
+                (None, None) => "size unknown".to_owned(),
+            };
+            say!("  PR: {url}, {size}");
+        }
+    }
+    say!("  cost and turns: not recorded");
+    Ok(())
+}
+
+/// What a ticket's running agents show. Asks Switchboard, so this takes
+/// the real port.
+fn tail(args: &[&str]) -> Result<()> {
+    let f = Flags::parse(args, &["--lines"], &[]);
+    let ticket = f.one();
+    let lines = f
+        .number("--lines")
+        .map_or(40, |n| u32::try_from(n).unwrap_or(u32::MAX));
+    let mut runner = runner()?;
+    let t = runner.load_ticket(ticket)?;
+    let screens = runner.screens(&t, lines)?;
+    if screens.is_empty() {
+        say!("no agent running");
+    }
+    for (label, text) in screens {
+        say!("== {label}");
+        say!("{text}");
+    }
+    Ok(())
+}
+
+fn health(args: &[&str]) -> Result<()> {
+    let f = Flags::parse(args, &["--timeout", "--stale"], &["--json"]);
+    if !f.rest.is_empty() {
+        usage();
+    }
+    let timeout = Duration::from_secs(f.number("--timeout").unwrap_or(2));
+    let stale_ms = f.number("--stale").unwrap_or(30) * 1000;
+    let data = DataDir::from_env()?;
+    let socket = SocketPort::from_env()?.path().to_path_buf();
+    let checked = dispatch::health::check(&data, &socket, timeout, stale_ms, now_ms());
+    if f.on("--json") {
+        say!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "ok": checked.ok,
+                "lines": checked.lines,
+            }))?
+        );
+    } else {
+        for line in &checked.lines {
+            say!("{line}");
+        }
+        say!("{}", if checked.ok { "ok" } else { "not ok" });
+    }
+    if !checked.ok {
+        std::process::exit(1);
     }
     Ok(())
 }

@@ -21,9 +21,15 @@ pub struct Client {
 impl Client {
     /// Connect to the socket at `path` (`<Dispatch data dir>/dispatch.sock`).
     pub fn connect(path: &Path) -> io::Result<Self> {
+        Self::connect_with_timeout(path, REPLY_TIMEOUT)
+    }
+
+    /// The same, with replies (and writes) allowed `timeout` rather than
+    /// the generous default: a health check wants to know quickly.
+    pub fn connect_with_timeout(path: &Path, timeout: Duration) -> io::Result<Self> {
         let stream = UnixStream::connect(path)?;
-        stream.set_read_timeout(Some(REPLY_TIMEOUT))?;
-        stream.set_write_timeout(Some(REPLY_TIMEOUT))?;
+        stream.set_read_timeout(Some(timeout))?;
+        stream.set_write_timeout(Some(timeout))?;
         let writer = stream.try_clone()?;
         Ok(Self {
             reader: BufReader::new(stream),

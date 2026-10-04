@@ -260,6 +260,28 @@ pub struct TicketView {
     pub current_session: Option<String>,
     pub created_ms: u64,
     pub updated_ms: u64,
+    /// The files a reader opens next, filled for a single ticket's view
+    /// and left empty in a status, which reads no directories.
+    pub paths: PathsView,
+}
+
+/// Where a ticket's documents are, and its pull request.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PathsView {
+    /// The latest completed plan.
+    pub plan: Option<PathBuf>,
+    /// The latest review round's findings: a code review round's
+    /// aggregated feedback, else the plan review's latest round file.
+    pub round_file: Option<PathBuf>,
+    /// The latest code review summary.
+    pub review_summary: Option<PathBuf>,
+    /// The latest notes for a human gate.
+    pub notes: Option<PathBuf>,
+    /// The last pull request an attempt bound to.
+    pub pr_url: Option<String>,
+    /// That pull request's head when the attempt bound it.
+    pub pr_head: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -272,6 +294,13 @@ pub struct LaneView {
     pub setup_done: bool,
     /// The lane's worktree is removed: the ticket closed.
     pub removed: bool,
+    /// The commit the lane was cut from, or the base it was last
+    /// brought up to.
+    pub base_sha: Option<String>,
+    /// The latest head an attempt in this lane recorded.
+    pub head: Option<String>,
+    /// The last head a refresh pushed to the lane's branch.
+    pub pushed_head: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -341,6 +370,10 @@ pub struct ReviewRoundView {
     /// Each reviewer's name and state: `starting`, `running`, `clean`,
     /// `findings` or `failed: <why>`.
     pub reviewers: Vec<(String, String)>,
+    /// The aggregated findings, once every reviewer finished.
+    pub feedback: Option<PathBuf>,
+    /// The implementer's response to them, once written.
+    pub response: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]

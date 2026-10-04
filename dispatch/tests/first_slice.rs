@@ -22,7 +22,7 @@ use dispatch::ticket::{
     Attempt, AttemptKind, AttemptState, Decision, PushedHead, ReviewerResult, Rewrite, RoundState,
     SETTLE_POLLS, STOP_IDLE_POLLS, SourceSnapshot, Ticket, TicketState,
 };
-use support::{FakeSwitchboard, SharedPort};
+use support::{FakeSwitchboard, SharedPort, events_of};
 use switchboard_control::{Body, Liveness, RunState, SessionKind};
 
 const PROJECT: &str = "Switchboard";
@@ -361,6 +361,14 @@ impl Env {
     }
 }
 
+/// `want` appears in `kinds` in this order, not necessarily together.
+fn assert_in_order(kinds: &[String], want: &[&str]) {
+    let mut rest = kinds.iter();
+    for w in want {
+        assert!(rest.any(|k| k == w), "{want:?} not in order in {kinds:?}");
+    }
+}
+
 fn session_of(t: &Ticket, stage: &str) -> String {
     t.attempts_of(stage)
         .last()
@@ -599,6 +607,23 @@ fn an_issue_becomes_one_project_four_sessions_one_run_and_a_finalize_decision() 
         let reviewer = sb.runs[0].reviewer.clone();
         assert!(sb.killed.contains(&reviewer) && sb.killed.contains(&face));
     }
+    // The log tells the same story, the decision and its answer from
+    // the terminal included.
+    let kinds = events_of(&env.data, &id);
+    assert_eq!(
+        kinds[..4],
+        ["taken", "attempt-started", "attempt-ended", "stage"]
+    );
+    assert_in_order(
+        &kinds,
+        &[
+            "stage",
+            "attempt-started",
+            "decision",
+            "answered",
+            "attempt-ended",
+        ],
+    );
     // The finalized copy is the plan the implementer is told to follow,
     // in the lane's worktree.
     env.steps_until(&id, "the implementer", |t, _| {
@@ -1315,6 +1340,10 @@ fn merge_waits_for_the_provider_and_refuses_a_hand_answer() {
     env.steps_until(&id, "the ticket closing", |t, _| !t.active());
     let t = env.ticket(&id);
     assert!(matches!(&t.state, TicketState::Closed { .. }));
+    assert_in_order(
+        &events_of(&env.data, &id),
+        &["pr", "decision", "answered", "closing", "closed"],
+    );
     let d = t.decisions.iter().find(|d| d.name == "merge").unwrap();
     assert!(
         matches!(&d.state, dispatch::ticket::DecisionState::Answered { answer, by, acted: true, .. } if answer == "merged" && by == "dispatch"),
@@ -6435,6 +6464,10 @@ fn a_style_only_round_three_converges_and_leaves_the_point_to_the_merge() {
         .unwrap();
     let after = summary.find("## Found but not done").unwrap();
     assert!(left < point && point < after, "{summary}");
+    // `show` points at the summary and at the last round's findings.
+    let paths = dispatch::serve::ticket_paths(&env.ticket(&id));
+    assert_eq!(paths.review_summary.as_ref(), Some(&a.artifacts["summary"]));
+    assert_eq!(paths.round_file, a.rounds[2].feedback);
 }
 
 /// Two rounds of lint and style points, each fixed, then round three
@@ -7201,6 +7234,13 @@ fn a_refresh_at_ready_pushes_the_rebased_branch_once_with_the_lease() {
         env.step();
     }
     assert_eq!(env.repo.lock().unwrap().pushed.len(), 1, "pushed once");
+    let kinds = events_of(&env.data, &id);
+    assert_in_order(&kinds, &["refreshed", "pushed"]);
+    assert_eq!(
+        kinds.iter().filter(|k| *k == "pushed").count(),
+        1,
+        "{kinds:?}"
+    );
 }
 
 /// Someone else pushed to the PR meanwhile: the lease refuses, and
@@ -9528,4 +9568,173 @@ fn a_review_converging_at_round_one_with_fold_rewrites_nothing() {
     let repo = env.repo.lock().unwrap();
     assert!(repo.replayed.is_empty());
     assert!(repo.head_sets.is_empty());
+}
+
+#[test]
+fn a_park_and_a_resume_are_logged() {
+    let (env, id, _) = parked_and_resumed();
+    assert_in_order(
+        &events_of(&env.data, &id),
+        &["answered", "parking", "parked", "resumed"],
+    );
+}
+
+/// `wait` over a runner a test steps between its looks: `pause` runs
+/// one pass and moves the fake clock on.
+fn wait_stepping(
+    env: &mut Env,
+    id: &str,
+    what: dispatch::events::For,
+    deadline: u64,
+) -> dispatch::events::Waited {
+    let data = env.data.clone();
+    let env = std::cell::RefCell::new(env);
+    dispatch::events::wait(
+        &data,
+        id,
+        what,
+        Some(deadline),
+        &mut || env.borrow().now,
+        &mut || {
+            let mut env = env.borrow_mut();
+            env.step();
+            env.wait(250);
+        },
+    )
+    .unwrap()
+}
+
+#[test]
+fn wait_returns_the_decision_the_next_pass_raises() {
+    let mut env = Env::new();
+    let id = at_review_run(&mut env);
+    let run = env.sb().runs[0].id.clone();
+    env.sb().run_mut(&run).state = RunState::Converged;
+    assert!(env.pending(&id).is_empty(), "nothing asked yet");
+    let deadline = env.now + 10_000;
+    let waited = wait_stepping(&mut env, &id, dispatch::events::For::Decision, deadline);
+    let dispatch::events::Waited::Matched(e) = waited else {
+        panic!("{waited:?}");
+    };
+    let finalize = env.pending(&id)[0].clone();
+    assert_eq!(finalize.name, "finalize");
+    assert_eq!(e.kind, dispatch::events::Kind::Decision);
+    assert_eq!(e.decision.as_deref(), Some(finalize.id.as_str()));
+    assert!(e.seq > 0, "read from the log");
+    assert!(
+        e.text.starts_with("finalize: The review of plan"),
+        "{}",
+        e.text
+    );
+
+    // Asked again with it pending, it answers from the record at once.
+    let again = wait_stepping(&mut env, &id, dispatch::events::For::Decision, 0);
+    assert_eq!(again, dispatch::events::Waited::Matched(e));
+}
+
+#[test]
+fn wait_times_out_on_an_idle_ticket_and_ends_on_a_parked_one() {
+    let mut env = Env::new();
+    let id = at_finalize(&mut env);
+    let deadline = env.now + 1_000;
+    let waited = wait_stepping(&mut env, &id, dispatch::events::For::Stage, deadline);
+    assert_eq!(waited, dispatch::events::Waited::TimedOut);
+
+    let d = env.pending(&id)[0].id.clone();
+    let now = env.tick();
+    env.runner.decide(&id, &d, "park", None, now).unwrap();
+    env.steps_until(&id, "parked", |t, _| {
+        matches!(t.state, TicketState::Parked { .. })
+    });
+    let deadline = env.now + 1_000;
+    let waited = wait_stepping(&mut env, &id, dispatch::events::For::Decision, deadline);
+    let dispatch::events::Waited::Ended(e) = waited else {
+        panic!("{waited:?}");
+    };
+    assert_eq!(e.kind, dispatch::events::Kind::Parked);
+    // Waiting for anything on a parked ticket waits for its resume.
+    let deadline = env.now + 1_000;
+    let waited = wait_stepping(&mut env, &id, dispatch::events::For::Any, deadline);
+    assert_eq!(waited, dispatch::events::Waited::TimedOut);
+}
+
+#[test]
+fn show_points_at_the_plan_the_notes_and_the_pr() {
+    let mut env = Env::new();
+    let id = at_ready(&mut env);
+    env.pr_is(&id, "base0000", "open", Checks::Pending);
+    env.recheck(&id);
+    env.steps_until(&id, "the PR bound", |t, _| {
+        t.attempts_of("ready")
+            .last()
+            .is_some_and(|a| a.pr.is_some())
+    });
+    let t = env.ticket(&id);
+    let mut view = dispatch::serve::ticket_view(&t, env.runner.pipeline_of(&t).ok().as_ref());
+    assert_eq!(view.paths, dispatch_control::PathsView::default());
+    view.paths = dispatch::serve::ticket_paths(&t);
+    assert_eq!(
+        view.paths.pr_url.as_deref(),
+        Some("https://github.com/msull/switchboard/pull/7")
+    );
+    assert_eq!(view.paths.pr_head.as_deref(), Some("base0000"));
+    assert_eq!(view.paths.plan, t.input("plan").cloned());
+    assert!(view.paths.plan.is_some());
+    assert_eq!(view.paths.notes, t.input("notes").cloned());
+    let review = t.attempts_of("review").last().unwrap();
+    assert_eq!(
+        view.paths.round_file,
+        None,
+        "the reviewer wrote no round file beside {}",
+        review.artifacts["plan"].display()
+    );
+    let lane = &view.lanes[0];
+    assert_eq!(lane.base_sha.as_deref(), Some("base0000"));
+    assert!(lane.head.is_some());
+    let json = serde_json::to_string_pretty(&view).unwrap();
+    let back: dispatch_control::TicketView = serde_json::from_str(&json).unwrap();
+    assert_eq!(back, view);
+}
+
+#[test]
+fn tail_reads_the_running_agents_screen_and_nothing_once_it_is_done() {
+    let mut env = Env::new();
+    let (id, implementer) = at_implement(&mut env);
+    env.sb()
+        .screens
+        .insert(implementer.clone(), "$ cargo test\nok".into());
+    let t = env.ticket(&id);
+    let screens = env.runner.screens(&t, 20).unwrap();
+    assert_eq!(
+        screens,
+        vec![(
+            "implement/repo agent".to_owned(),
+            "$ cargo test\nok".to_owned()
+        )]
+    );
+    let asked = env.sb().calls.iter().any(|r| {
+        matches!(&r.body, Body::SessionScreen { session, lines: Some(20) } if *session == implementer)
+    });
+    assert!(asked);
+
+    env.sb().screen_unknown = true;
+    let err = env.runner.screens(&t, 20).unwrap_err().to_string();
+    assert!(err.contains("update the app"), "{err}");
+    env.sb().screen_unknown = false;
+
+    implementer_stops(&mut env, &id, &implementer);
+    env.steps_until(&id, "the checks starting", |t, _| {
+        t.attempts_of("implement")
+            .last()
+            .is_some_and(|a| a.gate.is_some())
+    });
+    let key = format!("{id}/implement/1");
+    env.repo.lock().unwrap().check_exits.insert(key, 0);
+    env.steps_until(&id, "the attempt complete", |t, _| {
+        t.attempts_of("implement")
+            .last()
+            .is_some_and(|a| a.state == AttemptState::Complete)
+    });
+    let t = env.ticket(&id);
+    assert!(env.runner.screens(&t, 20).unwrap().is_empty());
 }

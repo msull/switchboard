@@ -3,6 +3,7 @@
 //! writing the ticket before and after every request. Nothing here
 //! retries on its own: a failure is a decision.
 
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
@@ -14,12 +15,13 @@ use switchboard_control::{self as wire, Body, Reply, Request, RunState};
 use crate::bitbucket::{Bitbucket, bitbucket_repo};
 use crate::git::{Push, Repo, branch_name, yyyymmdd};
 use crate::github::{Checks, Gh, PullRequests, github_repo};
+use crate::health::Health;
 use crate::pipeline::{Context, Gate, Lane, Pipeline, Stage, StageKind};
 use crate::port::Port;
 use crate::review::checks_key;
 use crate::store::{
     DataDir, Lock, Settings, expand_home, read_project, read_ticket, shell_unsafe, write_project,
-    write_ticket,
+    write_ticket_logged,
 };
 use crate::template::Vars;
 use crate::ticket::{
@@ -71,6 +73,12 @@ pub struct Runner {
     /// this runner first sent the kill. Not saved: a restarted runner
     /// has lost the child, and `check_gone` reads it as gone.
     stopping: BTreeMap<String, u64>,
+    /// What this runner's calls to Switchboard and the providers did,
+    /// for `runner.json`. Kept in memory only. A `RefCell` because the
+    /// provider calls run in `&self` methods that hold a borrow of
+    /// `self` while they call; each use is one statement that never
+    /// holds the borrow across another call.
+    pub health: RefCell<Health>,
 }
 
 /// Where a park's or a close's stop of an attempt's checks stands.
@@ -109,6 +117,7 @@ impl Runner {
             held: None,
             low_disk: None,
             stopping: BTreeMap::new(),
+            health: RefCell::new(Health::default()),
         }
     }
 
@@ -233,8 +242,7 @@ impl Runner {
 
     pub fn save_ticket(&self, t: &mut Ticket, now_ms: u64) -> Result<()> {
         t.updated_ms = now_ms;
-        let path = self.data.ticket_file(&t.id);
-        self.write_record(|| write_ticket(&path, t))
+        self.write_record(|| write_ticket_logged(&self.data, t, now_ms))
     }
 
     pub fn load_project(&self, name: &str) -> Result<ProjectState> {
@@ -547,7 +555,7 @@ impl Runner {
             settled: false,
         });
         self.save_ticket(t, now_ms)?;
-        let result = self.port.call(&Request::new(op.clone(), body));
+        let result = self.call(Some(&t.id), &Request::new(op.clone(), body));
         let entry = t
             .ledger
             .iter_mut()
@@ -571,13 +579,27 @@ impl Runner {
 
     /// A query: never in the ledger, since it changes nothing.
     pub(crate) fn ask(&mut self, body: Body) -> Result<Reply> {
-        self.port
-            .call(&Request::new(
-                format!("q-{}", uuid::Uuid::new_v4().simple()),
-                body,
-            ))
-            .map_err(SocketDown::from)
-            .context("the control socket failed")
+        self.call(
+            None,
+            &Request::new(format!("q-{}", uuid::Uuid::new_v4().simple()), body),
+        )
+        .map_err(SocketDown::from)
+        .context("the control socket failed")
+    }
+
+    /// One request to Switchboard, timed and counted in `health` for
+    /// `ticket`, or the ticket being stepped when `None`. Every call to
+    /// the port goes through here rather than through a wrapper of the
+    /// port, which a test that swaps `port` would bypass.
+    pub(crate) fn call(
+        &mut self,
+        ticket: Option<&str>,
+        request: &Request,
+    ) -> std::io::Result<Reply> {
+        let started = std::time::Instant::now();
+        let result = self.port.call(request);
+        self.health.borrow_mut().port_call(ticket, started, &result);
+        result
     }
 
     // --- one step
@@ -971,6 +993,16 @@ impl Runner {
             }
         }
         Ok(true)
+    }
+
+    /// The clone that holds a lane's commits: the lane's own, for a lane
+    /// with a repository of its own, else the project's.
+    pub fn lane_clone(&self, p: &Pipeline, lane: &Lane) -> PathBuf {
+        if lane.repo.is_some() {
+            self.data.lane_repo_dir(&p.project.name, &lane.name)
+        } else {
+            self.data.repo_dir(&p.project.name)
+        }
     }
 
     /// Where a lane's base is read: its clone, the remote fetched there,
@@ -2395,11 +2427,7 @@ impl Runner {
         // remote, where its branch forked from it: what its reviewers
         // see is what the pull request shows.
         if let Some(pr) = pr {
-            let clone = if lane.repo.is_some() {
-                self.data.lane_repo_dir(&p.project.name, &lane.name)
-            } else {
-                self.data.repo_dir(&p.project.name)
-            };
+            let clone = self.lane_clone(p, lane);
             return self
                 .git
                 .merge_base(&clone, &format!("{}/{}", pr.remote, pr.base), pr.local())
@@ -2434,11 +2462,7 @@ impl Runner {
             let Some(record) = t.lanes.iter().find(|l| l.name == pr.lane) else {
                 continue;
             };
-            let clone = if lane.repo.is_some() {
-                self.data.lane_repo_dir(&p.project.name, &lane.name)
-            } else {
-                self.data.repo_dir(&p.project.name)
-            };
+            let clone = self.lane_clone(p, lane);
             let extra = extra_remote(p, Some(lane), &pr);
             let worktree = record.worktree.clone();
             let refresh = self.fetch_pull_request(&clone, &pr, extra).and_then(|()| {
@@ -2986,18 +3010,21 @@ impl Runner {
         if pr.state != "open" || none_expected {
             return Ok(Some((pr, None)));
         }
-        let checks = prs.checks(&target.repo, pr.number)?;
-        Ok(Some((pr, Some(checks))))
+        let checks = prs.checks(&target.repo, pr.number);
+        self.health.borrow_mut().gh_call(&checks);
+        Ok(Some((pr, Some(checks?))))
     }
 
     /// The target's pull request, by number when the ticket's source
     /// gave one, else by branch; `None` when the branch has none.
     fn find_pr(&self, target: &PrTarget) -> Result<Option<crate::github::PullRequest>> {
         let prs = self.prs_for(&target.provider);
-        match target.number {
+        let found = match target.number {
             Some(n) => prs.by_number(&target.repo, n).map(Some),
             None => prs.find(&target.repo, &target.branch),
-        }
+        };
+        self.health.borrow_mut().gh_call(&found);
+        found
     }
 
     /// The provider a target names.
@@ -3343,6 +3370,7 @@ impl Runner {
         let found = self
             .prs_for(&target.provider)
             .find(&target.repo, &target.branch);
+        self.health.borrow_mut().gh_call(&found);
         let question = match found {
             Err(e) => match self.record_pr_error(t, a, &target, &head, &e, now_ms)? {
                 None => return Ok(()),
@@ -4998,6 +5026,9 @@ impl Runner {
                     }
                 };
                 let before = ps.clone();
+                // A call made without the ticket in hand (a query, a
+                // provider read) is put down to this one.
+                r.health.borrow_mut().current = Some(id.clone());
                 let result = r.step_one(
                     &mut t,
                     &mut ps,
@@ -5005,6 +5036,7 @@ impl Runner {
                     (running, pending, free_gb),
                     now_ms,
                 );
+                r.health.borrow_mut().current = None;
                 // A write is an fsync; most steps leave the project alone.
                 if ps != before {
                     r.save_project(&ps)?;
@@ -5099,8 +5131,9 @@ impl Runner {
             }));
         }
         let had_slot = t.attempts.iter().any(costs_slot);
-        if let Err(e) = self.step(t, ps, &p, now_ms) {
-            log_step_error(&t.id, &e);
+        match self.step(t, ps, &p, now_ms) {
+            Ok(()) => self.health.borrow_mut().stepped(&t.id),
+            Err(e) => log_step_error(&t.id, &e),
         }
         let took_slot = !had_slot && t.attempts.iter().any(costs_slot);
         Ok(Some(Stepped {
@@ -5181,7 +5214,7 @@ impl Runner {
             };
             let d = d.clone();
             t.updated_ms = now_ms;
-            write_ticket(&path, &t)?;
+            write_ticket_logged(&self.data, &t, now_ms)?;
             Ok(d)
         })
     }
@@ -5200,9 +5233,78 @@ impl Runner {
             log::info!("ticket {ticket} resumed (was parked: {reason})");
             t.state = TicketState::Active;
             t.updated_ms = now_ms;
-            write_ticket(&path, &t)?;
+            write_ticket_logged(&self.data, &t, now_ms)?;
             Ok(t)
         })
+    }
+}
+
+impl Runner {
+    /// What each running agent of the ticket's latest open attempt shows:
+    /// `(label, text)`, the last `lines` of its pane with the project's
+    /// secret values already replaced by Switchboard. A session that is
+    /// no longer running is left out; an app too old to answer is an
+    /// error that says to update it.
+    pub fn screens(&mut self, t: &Ticket, lines: u32) -> Result<Vec<(String, String)>> {
+        let Some(a) = t.attempts.iter().rev().find(|a| a.is_open()) else {
+            return Ok(Vec::new());
+        };
+        let mut sessions: Vec<(String, String)> = Vec::new();
+        match a.kind {
+            AttemptKind::Agent => sessions.extend(
+                a.session
+                    .iter()
+                    .map(|s| (format!("{}/{} agent", a.stage, a.context), s.clone())),
+            ),
+            AttemptKind::Review => {
+                if let Some(round) = a.rounds.last() {
+                    if let Some(implementer) = &round.implementer {
+                        sessions.push((
+                            format!("{}/{} r{} implementer", a.stage, a.context, round.n),
+                            implementer.clone(),
+                        ));
+                    } else {
+                        for r in round.reviewers.iter().filter(|r| r.result.is_none()) {
+                            if let Some(session) = &r.session {
+                                sessions.push((
+                                    format!("{}/{} r{} {}", a.stage, a.context, round.n, r.name),
+                                    session.clone(),
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+            AttemptKind::Workflow => {
+                if let Some(run) = a.run.clone()
+                    && let Reply::Workflow { run } = self.ask(Body::Workflow { run })?
+                {
+                    let label = format!("{}/{}", a.stage, a.context);
+                    sessions.extend(run.planner.map(|s| (format!("{label} planner"), s)));
+                    sessions.push((format!("{label} reviewer"), run.reviewer));
+                }
+            }
+            AttemptKind::GateOnly => {}
+        }
+        let mut out = Vec::new();
+        for (label, session) in sessions {
+            match self.ask(Body::SessionScreen {
+                session,
+                lines: Some(lines),
+            })? {
+                Reply::Screen { text } => out.push((label, text)),
+                Reply::Failed { reason }
+                    if reason == "not running" || reason == NO_SUCH_SESSION => {}
+                Reply::Failed { reason }
+                    if reason.starts_with("bad request") && reason.contains("session.screen") =>
+                {
+                    bail!("this Switchboard has no session.screen; update the app")
+                }
+                Reply::Failed { reason } => bail!("session.screen failed: {reason}"),
+                other => bail!("session.screen answered {other:?}"),
+            }
+        }
+        Ok(out)
     }
 }
 
