@@ -444,8 +444,19 @@ impl<'a> Flags<'a> {
     }
 }
 
-/// `hh:mm:ss` of `ms` since the epoch, in UTC.
+/// `hh:mm:ss` of `ms` since the epoch, in the local zone: the reader is
+/// a person or an agent on this machine, and a UTC clock next to a local
+/// one (the shell's `date`, a log file) misleads twice a day. Falls back
+/// to UTC only when the moment is out of range.
 fn clock(ms: u64) -> String {
+    use chrono::{DateTime, Local, TimeZone as _};
+    let secs = i64::try_from(ms / 1000).unwrap_or(i64::MAX);
+    if let Some(utc) = DateTime::from_timestamp(secs, 0) {
+        return Local
+            .from_utc_datetime(&utc.naive_utc())
+            .format("%H:%M:%S")
+            .to_string();
+    }
     let s = (ms / 1000) % 86_400;
     format!("{:02}:{:02}:{:02}", s / 3600, (s / 60) % 60, s % 60)
 }

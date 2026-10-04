@@ -184,7 +184,8 @@ question and options), `answered` and `decision-cancelled`, `pr` and
 review round and its open points), `nudged` (a line typed into an
 agent's session after it stopped with a dirty tree), `parking`,
 `parked`, `resumed`, `closing`, `closed`, and `void`. The human line is
-`seq  hh:mm:ss  ticket  stage  kind  text`, the time in UTC.
+`seq  hh:mm:ss  ticket  stage  kind  text`, the time in the machine's
+local zone (the stored `at_ms` under `--json` is UTC milliseconds).
 
 - Keep the highest `seq` you have read and pass it as `--since` next
   time. The cursor is yours: Dispatch stores nothing for you, and two
