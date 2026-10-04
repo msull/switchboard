@@ -13,7 +13,7 @@ use dispatch_control as wire_dispatch;
 use switchboard_control::{self as wire, Body, Reply, Request, RunState};
 
 use crate::bitbucket::{Bitbucket, bitbucket_repo};
-use crate::git::{Push, Repo, branch_name, yyyymmdd};
+use crate::git::{Confine, Network, Push, Repo, branch_name, yyyymmdd};
 use crate::github::{Checks, Gh, PullRequests, github_repo};
 use crate::health::Health;
 use crate::pipeline::{Context, Gate, Lane, OnDirty, Pipeline, Stage, StageKind};
@@ -770,6 +770,7 @@ impl Runner {
             self.poll_agent(
                 t,
                 ps,
+                p,
                 &a,
                 &shape,
                 &lane.worktree,
@@ -2769,11 +2770,20 @@ impl Runner {
             .collect();
         for (i, setup, branch) in pending {
             let name = t.lanes[i].name.clone();
-            if let Err(e) = self
-                .git
-                .run(cwd, &setup, &env_for(t, Some(&name), Some(&branch)))
-            {
-                self.park(t, ps, &format!("lane {name}: setup failed: {e:#}"), now_ms)?;
+            let env = env_for(t, Some(&name), Some(&branch));
+            let ran = match confine_for(t, p, Some(&name), &[], None) {
+                Some(confine) => self
+                    .git
+                    .run_confined(cwd, &setup, &env, &confine)
+                    .map(|header| {
+                        log::info!("ticket {} lane {name}: setup done; {header}", t.id);
+                    }),
+                None => self.git.run(cwd, &setup, &env),
+            };
+            if let Err(e) = ran {
+                let reason = format!("lane {name}: setup failed: {e:#}");
+                log::info!("ticket {}: {reason}", t.id);
+                self.park(t, ps, &reason, now_ms)?;
                 return Ok(false);
             }
             t.lanes[i].setup_done = true;
@@ -3217,7 +3227,7 @@ impl Runner {
             return Ok(false);
         };
         let trust = p.policy.trust_folders;
-        self.poll_agent(t, ps, &a, stage, cwd, lane, trust, now_ms)?;
+        self.poll_agent(t, ps, p, &a, stage, cwd, lane, trust, now_ms)?;
         Ok(true)
     }
 
@@ -3772,7 +3782,7 @@ impl Runner {
                 Some(a) if a.is_open() => {
                     all_complete = false;
                     let trust = p.policy.trust_folders;
-                    self.poll_agent(t, ps, &a, stage, &cwd, lane.as_deref(), trust, now_ms)?;
+                    self.poll_agent(t, ps, p, &a, stage, &cwd, lane.as_deref(), trust, now_ms)?;
                 }
                 Some(a) => {
                     // Failed: a rerun waits on its decision, asked again
@@ -4147,6 +4157,7 @@ impl Runner {
         &mut self,
         t: &mut Ticket,
         ps: &mut ProjectState,
+        p: &Pipeline,
         a: &Attempt,
         stage: &Stage,
         cwd: &Path,
@@ -4161,7 +4172,7 @@ impl Runner {
         // The agent is done and the gate is running or about to: the
         // session is no longer what is watched.
         if a.gate.is_some() {
-            return self.poll_gate(t, ps, a, stage, cwd, lane, now_ms);
+            return self.poll_gate(t, ps, p, a, stage, cwd, lane, now_ms);
         }
         let Some(view) = self.watched_view(t, ps, a, &session, now_ms)? else {
             return Ok(());
@@ -4251,7 +4262,7 @@ impl Runner {
             )?;
         }
         if gated {
-            self.start_gate(t, ps, a, stage, cwd, lane, now_ms)?;
+            self.start_gate(t, ps, p, a, stage, cwd, lane, now_ms)?;
         }
         Ok(())
     }
@@ -4436,6 +4447,7 @@ impl Runner {
         &mut self,
         t: &mut Ticket,
         ps: &mut ProjectState,
+        p: &Pipeline,
         a: &Attempt,
         stage: &Stage,
         cwd: &Path,
@@ -4467,7 +4479,13 @@ impl Runner {
             &head,
         );
         let key = gate_key(t, a);
-        if let Err(e) = self.git.start_check(&key, cwd, &argv, &env, &log) {
+        let started = match confine_for(t, p, lane, &[&dir], gate_network(p, stage)) {
+            Some(confine) => self
+                .git
+                .start_check_confined(&key, cwd, &argv, &env, &log, &confine),
+            None => self.git.start_check(&key, cwd, &argv, &env, &log),
+        };
+        if let Err(e) = started {
             let reason = format!("the checks could not start: {e:#}");
             return self.fail_attempt(t, ps, &a.stage, a.n, &reason, now_ms);
         }
@@ -4499,6 +4517,7 @@ impl Runner {
         &mut self,
         t: &mut Ticket,
         ps: &mut ProjectState,
+        p: &Pipeline,
         a: &Attempt,
         stage: &Stage,
         cwd: &Path,
@@ -4522,7 +4541,7 @@ impl Runner {
                 if let Some(attempt) = find_attempt_mut(t, &a.stage, a.n) {
                     attempt.gate = None;
                 }
-                return self.start_gate(t, ps, a, stage, cwd, lane, now_ms);
+                return self.start_gate(t, ps, p, a, stage, cwd, lane, now_ms);
             }
         };
         let clean = self.git.is_clean(cwd)?;
@@ -6802,6 +6821,66 @@ pub(crate) fn guidance_prelude(guidance: &str, vars: &Vars) -> String {
     }
 }
 
+/// What a pipeline command of the ticket may write when the pipeline
+/// confines its commands: every tree of the ticket, the primary tree
+/// (the project's root for one that works in place), `extra` (the
+/// attempt or round directory), and the lane's own `writable` paths. A
+/// command with no lane (a root-context stage or round) gets the
+/// `writable` paths of every lane whose tree is in the set: the
+/// ticket's lanes, and a lane at `.`, whose tree is the primary one
+/// even before any lane is chosen. `network` is a gate's own override of the policy's.
+/// `None` when the pipeline does not confine.
+pub(crate) fn confine_for(
+    t: &Ticket,
+    p: &Pipeline,
+    lane: Option<&str>,
+    extra: &[&Path],
+    network: Option<Network>,
+) -> Option<Confine> {
+    if !p.policy.confine {
+        return None;
+    }
+    let mut writable: Vec<PathBuf> = Vec::new();
+    let mut add = |path: PathBuf| {
+        if !writable.contains(&path) {
+            writable.push(path);
+        }
+    };
+    for l in &t.lanes {
+        add(l.worktree.clone());
+    }
+    if let Some(tree) = primary_tree(t, p) {
+        add(tree);
+    }
+    for path in extra {
+        add(path.to_path_buf());
+    }
+    let lanes: Vec<&Lane> = match lane {
+        Some(l) => p.lane(l).into_iter().collect(),
+        None => p
+            .lanes
+            .iter()
+            .filter(|l| l.path == Path::new(".") || t.lanes.iter().any(|r| r.name == l.name))
+            .collect(),
+    };
+    for path in lanes.iter().flat_map(|l| &l.writable) {
+        add(path.clone());
+    }
+    Some(Confine {
+        writable,
+        network: network.unwrap_or(p.policy.network),
+    })
+}
+
+/// A command gate's own `network`, read from the gate the stage runs:
+/// for a gate given by `like`, the one it names.
+pub(crate) fn gate_network(p: &Pipeline, stage: &Stage) -> Option<Network> {
+    match p.command_gate(stage) {
+        Some(Gate::Command { network, .. }) => *network,
+        _ => None,
+    }
+}
+
 /// What a stage's checks get in their environment: `env_for`'s, and
 /// which attempt they check, where, and at which head.
 pub(crate) fn checks_env(
@@ -7010,6 +7089,121 @@ mod tests {
             "{two}"
         );
         assert!(two.ends_with("park: park the ticket and leave the branch with commits as it is"));
+    }
+
+    /// A root-context command has no lane of its own, so it gets the
+    /// `writable` of every lane whose tree it has; a lane's command gets
+    /// only its own.
+    #[test]
+    fn a_root_command_is_confined_with_every_lanes_writable() {
+        let p = Pipeline::parse(
+            r#"
+version = 1
+
+[project]
+name = "P"
+repo = "git@example.com:o/p.git"
+space = "Dispatch · P"
+
+[source]
+kind = "github"
+repo = "o/p"
+label = "dispatch"
+
+[[lanes]]
+name = "api"
+path = "."
+writable = ["/cache/api"]
+
+[[lanes]]
+name = "web"
+path = "web"
+repo = "git@example.com:o/web.git"
+writable = ["/cache/web"]
+
+[operators.worker]
+kind = "claude"
+
+[[stages]]
+name = "work"
+operator = "worker"
+context = "root"
+writes = ["notes"]
+prompt = "Write {notes}."
+
+[policy]
+confine = true
+network = "deny"
+"#,
+        )
+        .unwrap();
+        let lane = |name: &str, worktree: &str| LaneRecord {
+            name: name.into(),
+            worktree: worktree.into(),
+            branch: "dispatch/7-x".into(),
+            project: None,
+            chosen: true,
+            setup_done: false,
+            base_sha: None,
+            refreshed: None,
+            pushed: None,
+            removed: false,
+        };
+        let t = Ticket {
+            version: 0,
+            id: "t1".into(),
+            project: "P".into(),
+            source: SourceSnapshot {
+                kind: "github".into(),
+                identity: "o/p#7".into(),
+                pull_requests: Vec::new(),
+                number: Some(7),
+                title: "x".into(),
+                body: String::new(),
+                url: None,
+                labels: vec![],
+                taken_at_ms: 0,
+            },
+            pipeline_fingerprint: String::new(),
+            pipeline_file: PathBuf::new(),
+            lanes: vec![lane("api", "/wt"), lane("web", "/wt/web")],
+            tree: Some("/wt".into()),
+            stage: 0,
+            attempts: vec![],
+            decisions: vec![],
+            ledger: vec![],
+            processes: vec![],
+            root_project: None,
+            rework: BTreeMap::new(),
+            refreshed_stage: None,
+            state: TicketState::Active,
+            close: crate::ticket::CloseProgress::default(),
+            created_ms: 0,
+            updated_ms: 0,
+        };
+        let root = confine_for(&t, &p, None, &[Path::new("/a")], None).unwrap();
+        assert_eq!(root.network, Network::Deny);
+        assert_eq!(
+            root.writable,
+            ["/wt", "/wt/web", "/a", "/cache/api", "/cache/web"].map(PathBuf::from)
+        );
+        // Before the lanes are chosen, the lane at `.` is the root's.
+        let unchosen = Ticket {
+            lanes: Vec::new(),
+            ..t.clone()
+        };
+        assert_eq!(
+            confine_for(&unchosen, &p, None, &[], None)
+                .unwrap()
+                .writable,
+            ["/wt", "/cache/api"].map(PathBuf::from)
+        );
+        let web = confine_for(&t, &p, Some("web"), &[], Some(Network::Allow)).unwrap();
+        assert_eq!(web.network, Network::Allow);
+        assert_eq!(
+            web.writable,
+            ["/wt", "/wt/web", "/cache/web"].map(PathBuf::from)
+        );
     }
 
     struct NoPort;

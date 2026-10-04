@@ -300,7 +300,8 @@ dispatch/                the `dispatch` binary (docs/dispatch.md; docs/dispatch-
   src/recover.rs         unanswered ledger operations resolved by class through find and op.status; nothing launched twice
   src/view.rs            the `Dispatch · <project>` working set, one card per queued ticket, redrawn through set.sync
   src/store.rs           Dispatch's data directory, flock, atomic writes; versioned `read_ticket`/`read_project` through `migrate`; `write_ticket_logged`, the one ticket write, which logs its events first
-  src/git.rs             clones, worktrees and heads through fixed argv (a branch pushed only with a lease; a worktree removed, never forced; `changes`, and `uncommitted` for a close's preflight), a stage's checks as child processes polled by key, commits replayed with `merge-tree`/`commit-tree`, a branch moved by compare-and-swap, and whether the remote already holds a branch's commits; a kept branch read, deleted or renamed out of a retake's way; a range's commits and diff size for a report; with a fake
+  src/git.rs             clones, worktrees and heads through fixed argv (a branch pushed only with a lease; a worktree removed, never forced; `changes`, and `uncommitted` for a close's preflight), a stage's checks as child processes polled by key (confined, when the pipeline says so, through `Confine`), commits replayed with `merge-tree`/`commit-tree`, a branch moved by compare-and-swap, and whether the remote already holds a branch's commits; a kept branch read, deleted or renamed out of a retake's way; a range's commits and diff size for a report; with a fake
+  src/confine.rs         a pipeline command's confinement: the seatbelt profile and wrapper built everywhere, used on macOS; elsewhere the command runs unconfined and says so
   src/history.rs         which commits a code review's fix rounds fold into: pure plans for `fold` and `one`
   src/github.rs          issues and pull requests through gh, with fakes
   src/bitbucket.rs       pull requests on Bitbucket Cloud through curl; credentials from the environment or <data>/env (NAME=value lines, mode 0600, never logged)
@@ -308,6 +309,7 @@ dispatch/                the `dispatch` binary (docs/dispatch.md; docs/dispatch-
   src/template.rs        `{a.b}` substitution for prompts
   tests/first_slice.rs   the acceptance table against an in-memory Switchboard (tests/support)
   tests/live.rs          ignored: the first stage against a real Switchboard and a haiku agent
+  tests/sandbox.rs       ignored, macOS: a confined gate's refused write fails the attempt and is named in checks.log
 vendor/egui_term/        embedded terminal widget (Harzu/egui_term @ 31bbc7ab, egui 0.36; see SWITCHBOARD-PATCHES.md)
 firmware/nunchuk/        CircuitPython for the Feather that reports the nunchuk's buttons and stick
 spikes/                  Spike 0 evidence

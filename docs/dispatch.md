@@ -54,8 +54,42 @@ trees it hands that code live under `~/.dispatch/worktrees` (the
 `dispatch worktrees` setting; a pipeline may name its own), never under
 the data directory, whose path on macOS holds a space that a
 repository's tooling may not survive, and a root holding whitespace or
-a shell-special character is refused at `take`. Confining those
-commands to the tree (a sandbox) is filed as an issue and not built.
+a shell-special character is refused at `take`.
+
+With `[policy] confine = true`, the pipeline commands Dispatch runs as
+its own children (a lane's setup, command gates, a review round's
+checks and command reviewers) run in a sandbox that allows writes only
+to:
+
+- every tree of the ticket, and the primary tree;
+- the attempt or round directory the command reports into;
+- the lane's `writable` paths, where its tools keep their caches
+  (`~/.cargo`, `~/.cache/uv`, `~/.npm`); a root-context command gets
+  those of every lane whose tree it has (the ticket's lanes, and a lane
+  at `.` even before lanes are chosen);
+- a base set that is always allowed: the system temp directory, the
+  devices a shell and a pty need (`/dev/null`, `/dev/tty`, `/dev/fd`,
+  `/dev/ptmx`, `/dev/ttys*`), and a linked worktree's own git directory
+  (`<clone>/.git/worktrees/<name>`, which holds its index), never the
+  clone's shared `.git`.
+
+Reads are not limited. `network = "deny"` (the policy's, or a command
+gate's own) closes connections off the machine and keeps loopback, so
+a test that talks to a local database still runs. A denied write fails
+the command with `EPERM`, and the check's log (`checks.log` for a gate,
+the `stderr` file for a reviewer) starts with a header naming what the
+command could write and ends with the kernel's `deny(1) file-write-…
+<path>` lines for it. A denied setup parks the ticket with the same
+header and lines in the reason. A project that works in place (`root`)
+is protected less: its tree is the user's own checkout, and that is
+writable. On macOS the mechanism is `sandbox-exec`; on any other
+platform the command runs unconfined and its header says
+`dispatch: unconfined (no sandbox on this platform)`.
+`spikes/11-gate-sandbox/README.md` has the profile and what real
+toolchains need: `setuid` programs such as `/bin/ps` cannot start
+inside it, and creating a keychain fails, so a suite that does either
+cannot be confined. Agents' panes and `serve` services are not
+confined; they run in Switchboard.
 
 ## Objects
 
@@ -538,6 +572,7 @@ repo = "git@..."              # a repository of its own (a workspace of several)
 base = "main"                 # omitted: the project's
 remotes = { github = "git@github.com:..." }   # this lane's mirrors, as the project's
 setup = ["cmd", "args"]       # run once, before the lane's first agent
+writable = ["~/.cargo"]       # under [policy] confine: extra paths the lane's setup, gates, checks and command reviewers may write
 
 [[resources]]
 name = "..."
@@ -575,6 +610,7 @@ prompt = "..."                # templates: {issue.number} {issue.title} {task.te
 gate = { kind = "command", argv = ["..."], in = "root" | "lane" | "lane:<name>" }
      | { kind = "command", per_lane = { <lane> = ["..."] }, in = "lane" }
      | { kind = "command", like = "implement" }   # an earlier stage's command gate by reference; its result at the same clean head is reused
+     | { kind = "command", argv = ["..."], network = "allow" | "deny" }   # under confine: this gate's network over the policy's; a like gate takes the named gate's
      | { kind = "external", check = "review-finalized" | "pr-checks" | "pr-merged" }
      | { kind = "external", check = "pr-checks", checks = "none" }   # a repository with no CI: a PR at the head is enough
      | { kind = "human", decision = "...", confirm = true }
@@ -603,6 +639,8 @@ rebaser = "rebaser"           # the operator that rebases a PR that conflicts wi
 max_rebases = 2               # rebases one PR may get before the conflict is a question
 fixer = "fixer"               # the operator that fixes a PR whose checks are red at the tree's head, cloned the same way; absent, red checks are a question
 max_fixes = 2                 # fixes one PR may get before red checks are a question
+confine = false               # true: setup, command gates, review checks and command reviewers run sandboxed (see the start of this document); absent, off
+network = "allow"             # or "deny": under confine, whether those commands reach off this machine; loopback stays open
 ```
 
 An agent stage needs no `gate` line: "the agent stopped and every
@@ -649,6 +687,7 @@ label = "dispatch"            # marking an issue with it is the handover
 name = "repo"
 path = "."
 setup = ["cargo", "fetch", "--locked"]
+writable = ["~/.cargo", "/tmp"]   # cargo's registry; the tests' tmux sockets and short paths under /tmp
 
 [operators.investigator]
 kind = "claude"
@@ -726,6 +765,7 @@ slots = 1
 waiting_on_me = 2
 rates = { "claude-sonnet-5" = [3.0, 15.0], "claude-opus-5-5" = [15.0, 75.0], "gpt-5-codex" = [1.25, 10.0] }
 decisions = { lanes = "auto", finalize = "ask", budget = "ask" }
+confine = false              # its tests start /bin/ps (setuid) and make a keychain, which the sandbox refuses
 ```
 
 `lanes = "auto"` is safe here because there is only one lane; the
@@ -889,6 +929,7 @@ path = "orchard-backend"
 repo = "git@bitbucket.org:example-co/orchard-backend.git"
 base = "main"
 setup = ["sh", "-c", "uv sync && uv run inv link-env --env-name my-dev"]
+writable = ["~/.cache/uv"]    # measured: uv's cache; link-env writes only inside the tree
 
 [[lanes]]
 name = "frontend"
@@ -896,6 +937,7 @@ path = "orchard-frontend"
 repo = "git@bitbucket.org:example-co/orchard-frontend.git"
 base = "dev"
 setup = ["npm", "ci", "--legacy-peer-deps"]
+writable = ["~/.npm"]         # npm's cache; not yet measured under the sandbox
 # A service Dispatch starts for a stage that asks. PORT is a port
 # Dispatch allocates per ticket; the URL is what the tester is told.
 serve = { argv = ["npm", "start"], env = { BROWSER = "none", PORT = "{port}" }, url = "http://localhost:{port}", ready = { http = "/", within_secs = 120 } }
@@ -906,6 +948,7 @@ path = "orchard-admin"
 repo = "git@bitbucket.org:example-co/orchard-admin.git"
 base = "master"
 setup = ["npm", "ci", "--legacy-peer-deps"]
+writable = ["~/.npm"]
 serve = { argv = ["npm", "start"], env = { BROWSER = "none", PORT = "{port}" }, url = "http://localhost:{port}", ready = { http = "/", within_secs = 120 } }
 
 [[resources]]
@@ -979,8 +1022,9 @@ context = "lane:backend"      # skipped when the ticket has no backend lane: the
 needs = ["my-dev"]
 # Dispatch deploys, once, after linking again so the target cannot be
 # whatever a previous checkout left; the deployed commit is recorded
-# on the attempt.
-gate = { kind = "command", in = "lane:backend", argv = ["sh", "-c", "uv run inv link-env --env-name my-dev && aws-vault exec -n orchard-dev -- uv run inv deploy -f"] }
+# on the attempt. It needs AWS, so under confine with the network
+# denied it keeps its own.
+gate = { kind = "command", in = "lane:backend", network = "allow", argv = ["sh", "-c", "uv run inv link-env --env-name my-dev && aws-vault exec -n orchard-dev -- uv run inv deploy -f"] }
 
 [[stages]]
 name = "try"
@@ -1016,6 +1060,7 @@ waiting_on_me = 2
 ports = [3100, 3199]         # for services; one per service per ticket, tested free before use
 rates = { "claude-sonnet-5" = [3.0, 15.0], "claude-opus-5-5" = [15.0, 75.0], "gpt-5-codex" = [1.25, 10.0] }
 decisions = { lanes = "ask", finalize = "ask", budget = "ask" }
+confine = false              # on once its gates have passed confined; the setup has (spikes/11-gate-sandbox)
 ```
 
 What this pipeline showed, and what it added to the vocabulary:

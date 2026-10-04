@@ -1,0 +1,7 @@
+(version 1)
+(allow default)
+(deny file-write* (with message (param "TOKEN")))
+(allow file-write* (subpath (param "W0")) (subpath (param "W1"))
+  (subpath (param "TMP")) (literal "/dev/null") (literal "/dev/tty")
+  (literal "/dev/dtracehelper") (literal "/dev/ptmx")
+  (regex #"^/dev/ttys[0-9]+$") (subpath "/dev/fd"))

@@ -13,7 +13,7 @@ mod support;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use dispatch::git::{FakeRepo, Gate};
+use dispatch::git::{FakeRepo, Gate, Network};
 use dispatch::github::{Checks, FakePullRequests, PullRequest};
 use dispatch::history::{Commit, Commits, Group};
 use dispatch::scheduler::{
@@ -766,6 +766,251 @@ fn checks_run_after_the_agent_on_a_clean_tree_and_pass_bound_to_its_head() {
     let repo = env.repo.lock().unwrap();
     assert_eq!(repo.removed, [(env.data.repo_dir(PROJECT), tree)]);
     assert_eq!(repo.worktrees.len(), 0, "only the worktree is forgotten");
+}
+
+/// The project's pipeline file with `confine` on, the policy's network
+/// set to `network`, and `/opt/cargo-cache` writable for the lane.
+fn confined(env: &Env, network: &str) {
+    let path = env.data.pipeline(PROJECT);
+    let text = std::fs::read_to_string(&path).unwrap();
+    let text = text
+        .replace(
+            "setup = [\"cargo\", \"fetch\", \"--locked\"]\n",
+            "setup = [\"cargo\", \"fetch\", \"--locked\"]\nwritable = [\"/opt/cargo-cache\"]\n",
+        )
+        .replace(
+            "[policy]\n",
+            &format!("[policy]\nconfine = true\nnetwork = \"{network}\"\n"),
+        );
+    std::fs::write(path, text).unwrap();
+}
+
+/// The implement stage's command gate given its own `network`.
+fn implement_gate_network(env: &Env, network: &str) {
+    let path = env.data.pipeline(PROJECT);
+    let gate =
+        "gate = { kind = \"command\", argv = [\"sh\", \"-c\", \"cargo test\"], in = \"lane\" }";
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert!(text.contains(gate));
+    let text = text.replace(
+        gate,
+        &gate.replace(" }", &format!(", network = \"{network}\" }}")),
+    );
+    std::fs::write(path, text).unwrap();
+}
+
+/// The implement attempt's checks, started once the implementer stops.
+fn implement_check(env: &mut Env, id: &str) -> dispatch::git::StartedCheck {
+    env.steps_until(id, "the checks starting", |t, _| {
+        t.attempts_of("implement")
+            .last()
+            .is_some_and(|a| a.gate.is_some())
+    });
+    let key = format!("{id}/implement/1");
+    let repo = env.repo.lock().unwrap();
+    repo.checks.iter().find(|c| c.key == key).unwrap().clone()
+}
+
+#[test]
+fn a_confined_pipeline_passes_the_tree_attempt_dir_and_lane_writable_to_the_gate() {
+    let mut env = Env::new();
+    confined(&env, "allow");
+    let (id, implementer) = at_implement(&mut env);
+    implementer_stops(&mut env, &id, &implementer);
+    let check = implement_check(&mut env, &id);
+    let t = env.ticket(&id);
+    let a = t.attempts_of("implement").last().unwrap();
+    let attempt_dir = a.artifacts["checks"].parent().unwrap().to_path_buf();
+    let c = check.confine.expect("started confined");
+    assert_eq!(c.network, Network::Allow);
+    for path in [
+        t.lanes[0].worktree.clone(),
+        t.tree.clone().unwrap(),
+        attempt_dir,
+        PathBuf::from("/opt/cargo-cache"),
+    ] {
+        assert!(c.writable.contains(&path), "{path:?} in {c:?}");
+    }
+    assert_eq!(c.writable.len(), {
+        let mut distinct = c.writable.clone();
+        distinct.dedup();
+        distinct.len()
+    });
+}
+
+/// With the policy denying the network, a gate that says `allow` gets it,
+/// a gate given by `like` that gate gets it too, and a command reviewer
+/// keeps the policy's; a gate without the key gets the policy's.
+#[test]
+fn a_gates_network_overrides_the_policy() {
+    let mut env = Env::new();
+    confined(&env, "deny");
+    let id = at_implement(&mut env).0;
+    let implementer = session_of(&env.ticket(&id), "implement");
+    implementer_stops(&mut env, &id, &implementer);
+    let check = implement_check(&mut env, &id);
+    assert_eq!(check.confine.unwrap().network, Network::Deny);
+
+    let mut env = Env::new();
+    env.with_review_stage("auto");
+    confined(&env, "deny");
+    implement_gate_network(&env, "allow");
+    let id = at_review(&mut env);
+    let check = env
+        .repo
+        .lock()
+        .unwrap()
+        .checks
+        .iter()
+        .find(|c| c.key == format!("{id}/implement/1"))
+        .cloned()
+        .unwrap();
+    assert_eq!(check.confine.unwrap().network, Network::Allow);
+    let t = env.ticket(&id);
+    {
+        let repo = env.repo.lock().unwrap();
+        let lint = repo
+            .checks
+            .iter()
+            .find(|c| c.key == lint_key(&t, 1))
+            .unwrap();
+        assert_eq!(lint.confine.as_ref().unwrap().network, Network::Deny);
+    }
+    lint_exits(&mut env, &id, 1, 1, "src/a.rs:3: unused import\n");
+    style_says(&mut env, &id, 1, "No findings.");
+    fix_pass(
+        &mut env,
+        &id,
+        1,
+        "fix00001",
+        "- r1/lint-1: fixed removed\n",
+        0,
+    );
+    let t = env.ticket(&id);
+    let repo = env.repo.lock().unwrap();
+    let round = repo
+        .checks
+        .iter()
+        .find(|c| c.key == checks_key(&t, 1))
+        .unwrap();
+    assert_eq!(round.confine.as_ref().unwrap().network, Network::Allow);
+}
+
+#[test]
+fn setup_under_confine_runs_through_run_confined_and_the_merge_does_not() {
+    let mut env = Env::new();
+    confined(&env, "allow");
+    let (id, _) = at_implement(&mut env);
+    let t = env.ticket(&id);
+    {
+        let repo = env.repo.lock().unwrap();
+        assert!(repo.ran.is_empty(), "{:?}", repo.ran);
+        let (dir, argv, c) = &repo.ran_confined[0];
+        assert_eq!(dir, &t.lanes[0].worktree);
+        assert_eq!(argv, &["cargo", "fetch", "--locked"]);
+        assert!(c.writable.contains(&PathBuf::from("/opt/cargo-cache")));
+        assert!(c.writable.contains(&t.lanes[0].worktree));
+    }
+
+    // The scheduler's own fast-forward of a pull request's branch is
+    // git work on the clone, never confined.
+    let mut env = Env::new();
+    let worktrees = env.data.root.join("wt");
+    let text = pr_pipeline(&worktrees).replace("[policy]\n", "[policy]\nconfine = true\n");
+    std::fs::write(env.data.pr_pipeline(PROJECT), text).unwrap();
+    open_pr(&env, "msull/switchboard", 9, "feature/escape", "Escape");
+    open_pr(&env, "msull/docs", 3, "feature/escape-docs", "Docs");
+    seed_pr_bases(&env);
+    let now = env.tick();
+    let t =
+        dispatch::serve::take_pull_requests(&mut env.runner, PROJECT, &["repo/9", "docs/3"], now)
+            .unwrap();
+    env.steps_until(&t.id, "the sign-off question", |t, _| {
+        t.pending_decisions().iter().any(|d| d.name == "inspect")
+    });
+    let repo = env.repo.lock().unwrap();
+    let merges = repo
+        .ran
+        .iter()
+        .filter(|(_, argv)| argv.join(" ").starts_with("git merge --ff-only"))
+        .count();
+    assert_eq!(merges, 2);
+    assert!(repo.ran_confined.is_empty(), "{:?}", repo.ran_confined);
+}
+
+#[test]
+fn a_failed_confined_setup_parks_with_the_header_first() {
+    let mut env = Env::new();
+    confined(&env, "allow");
+    env.repo.lock().unwrap().fail_run =
+        Some("cargo exited 101: dispatch: sandbox: cargo(9) deny(1) file-write-create /x".into());
+    let id = env.take(1).id;
+    env.steps_until(&id, "the ticket parking", |t, _| !t.active());
+    let t = env.ticket(&id);
+    let (TicketState::Parked { reason } | TicketState::Parking { reason }) = &t.state else {
+        panic!("{t:#?}");
+    };
+    assert!(
+        reason.starts_with("lane repo: setup failed: dispatch: confined; writable "),
+        "{reason}"
+    );
+    assert!(reason.contains("deny(1) file-write-create /x"), "{reason}");
+    assert!(!t.lanes[0].setup_done);
+}
+
+#[test]
+fn a_review_rounds_checks_and_command_reviewers_are_confined_to_the_round() {
+    let mut env = Env::new();
+    env.with_review_stage("auto");
+    confined(&env, "allow");
+    let id = at_review(&mut env);
+    let t = env.ticket(&id);
+    let lint = reviewer(&t, 1, "lint");
+    {
+        let repo = env.repo.lock().unwrap();
+        let (started, _) = repo
+            .reviewers
+            .iter()
+            .find(|(c, _)| c.key == lint_key(&t, 1))
+            .unwrap();
+        let c = started.confine.as_ref().unwrap();
+        assert!(c.writable.contains(&lint.dir), "{c:?}");
+        assert!(c.writable.contains(&t.lanes[0].worktree), "{c:?}");
+    }
+    lint_exits(&mut env, &id, 1, 1, "src/a.rs:3: unused import\n");
+    style_says(&mut env, &id, 1, "No findings.");
+    fix_pass(
+        &mut env,
+        &id,
+        1,
+        "fix00001",
+        "- r1/lint-1: fixed removed\n",
+        0,
+    );
+    let t = env.ticket(&id);
+    let round_dir = lint.dir.parent().unwrap().to_path_buf();
+    let repo = env.repo.lock().unwrap();
+    let checks = repo
+        .checks
+        .iter()
+        .find(|c| c.key == checks_key(&t, 1))
+        .unwrap();
+    assert_eq!(checks.log, round_dir.join("checks.log"));
+    let c = checks.confine.as_ref().unwrap();
+    assert!(c.writable.contains(&round_dir), "{c:?}");
+    assert!(c.writable.contains(&PathBuf::from("/opt/cargo-cache")));
+}
+
+#[test]
+fn confine_off_calls_the_unconfined_methods() {
+    let mut env = Env::new();
+    let (id, implementer) = at_implement(&mut env);
+    implementer_stops(&mut env, &id, &implementer);
+    let check = implement_check(&mut env, &id);
+    assert_eq!(check.confine, None);
+    let repo = env.repo.lock().unwrap();
+    assert!(repo.ran_confined.is_empty());
+    assert_eq!(repo.ran[0].1, ["cargo", "fetch", "--locked"]);
 }
 
 /// The user's own feedback round after convergence takes the finalize
