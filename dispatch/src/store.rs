@@ -23,7 +23,7 @@ use crate::ticket::{ProjectState, Ticket};
 /// carried a version reads as 0 and is brought up by `migrate`. A
 /// record above it was written by a newer `dispatch` and is refused
 /// both ways, so this build never drops fields it does not know.
-pub const RECORD_VERSION: u32 = 9;
+pub const RECORD_VERSION: u32 = 10;
 
 /// A lock file held while this lives: the writer lock, the runner's
 /// claim, or a ticket's close.
@@ -484,6 +484,12 @@ pub fn migrate(mut value: Value) -> Value {
         // transformed; a build that would drop them on its next write
         // must refuse the record, or a conflicted bring-up would lose the
         // review of its resolution.
+        //
+        // 9 to 10: a rewrite gains `stale` and `message`, from their serde
+        // defaults; nothing is transformed. A build that would drop them
+        // on its next write must refuse the record, or a restart would
+        // complete an attempt whose messages were still being asked
+        // about, or launch a second rewriter.
         if version == 1 {
             settle_from_verdicts(&mut value);
         }
@@ -840,6 +846,8 @@ mod tests {
             from: 4,
             to: 2,
             skipped: None,
+            stale: Vec::new(),
+            message: None,
             at_ms: 3000,
         });
         write_ticket(&path, &t).unwrap();
@@ -963,8 +971,46 @@ mod tests {
         });
         write_ticket(&path, &t).unwrap();
         let written: Value = read_json(&path).unwrap();
-        assert_eq!(written["version"], 9);
+        assert_eq!(written["version"], RECORD_VERSION);
         assert_eq!(written["lanes"][0]["conflict"]["commits"][0], "pick0002");
+        assert_eq!(read_ticket(&path).unwrap(), t);
+    }
+
+    #[test]
+    fn a_version_nine_rewrite_migrates_to_ten_with_nothing_stale() {
+        let attempt = r#"{"stage": "review-code", "n": 1, "context": "backend", "kind": "review", "state": "complete", "project": null, "session": null, "run": null, "artifacts": {}, "settle": {}, "stop_at_ms": null, "head": "fold0001", "carried_from": null, "rework": null, "rewrite": {"mode": "fold", "before": "fix00002", "after": "fold0001", "from": 4, "to": 2, "skipped": null, "at_ms": 3000}, "nudges": [], "orphans_killed": [], "started_ms": 1000, "ended_ms": 4000}"#;
+        let text = TICKET_V0.replacen('{', "{\n  \"version\": 9,", 1).replacen(
+            r#""attempts": [],"#,
+            &format!(r#""attempts": [{attempt}],"#),
+            1,
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.json");
+        fs::write(&path, text).unwrap();
+        let mut t = read_ticket(&path).unwrap();
+        assert_eq!(t.version, RECORD_VERSION);
+        let rewrite = t.attempts[0].rewrite.as_mut().unwrap();
+        assert!(rewrite.stale.is_empty());
+        assert_eq!(rewrite.message, None);
+        rewrite.stale.push(crate::ticket::StaleMessage {
+            index: 0,
+            subject: "A".into(),
+            names: vec!["old_name".into()],
+        });
+        rewrite.message = Some(crate::ticket::MessageFix {
+            answer: "rewrite".into(),
+            from: "fold0001".into(),
+            launched: true,
+            at_ms: 5000,
+            ..crate::ticket::MessageFix::default()
+        });
+        write_ticket(&path, &t).unwrap();
+        let written: Value = read_json(&path).unwrap();
+        assert_eq!(written["version"], RECORD_VERSION);
+        assert_eq!(
+            written["attempts"][0]["rewrite"]["stale"][0]["names"][0],
+            "old_name"
+        );
         assert_eq!(read_ticket(&path).unwrap(), t);
     }
 

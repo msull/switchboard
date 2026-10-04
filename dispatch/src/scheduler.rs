@@ -2354,6 +2354,9 @@ impl Runner {
                 ("review-code" | "review-cap" | RESOLUTION, "fix" | "accept" | "more") => {
                     self.review_answer(t, ps, &name, &answer, attempt.as_ref(), now_ms)?;
                 }
+                ("message", "accept" | "rewrite") => {
+                    self.message_answer(t, ps, &answer, attempt.as_ref(), now_ms)?;
+                }
                 (_, "proceed" | "done") => {
                     self.pass_human_gate(t, ps, p, attempt.as_ref(), now_ms)?;
                 }
@@ -7313,7 +7316,10 @@ pub fn apply_reply(t: &mut Ticket, ps: &mut ProjectState, intent: &str, reply: &
             {
                 l.project = Some(id);
             }
-            if other.starts_with("reviewer:") || other.starts_with("implementer:") {
+            if other.starts_with("reviewer:")
+                || other.starts_with("implementer:")
+                || other == "message"
+            {
                 crate::review::apply_review_reply(t, other, made);
             }
         }

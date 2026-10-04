@@ -994,8 +994,14 @@ fn attempt_row(cx: &mut DrawCtx<'_>, ui: &mut Ui, t: &TicketView, a: &AttemptVie
                 if let Some(pr) = &a.pr {
                     pr_labels(ui, pr);
                 }
-                if a.state == "complete"
-                    && let Some(text) = a.rewrite.as_ref().and_then(rewrite_label)
+                // A fold with stale messages has moved the branch and
+                // holds the attempt open while it asks or rewords, so it
+                // is shown before the attempt completes.
+                if let Some(text) = a
+                    .rewrite
+                    .as_ref()
+                    .filter(|r| a.state == "complete" || !r.stale.is_empty())
+                    .and_then(rewrite_label)
                 {
                     ui.label(theme::meta_text(ui, text));
                 }
@@ -1005,16 +1011,12 @@ fn attempt_row(cx: &mut DrawCtx<'_>, ui: &mut Ui, t: &TicketView, a: &AttemptVie
             }
             ui.horizontal_wrapped(|ui| {
                 ui.spacing_mut().item_spacing.x = 4.0;
-                if let Some(session) = a
-                    .session
-                    .as_deref()
-                    .and_then(|s| uuid::Uuid::parse_str(s).ok())
-                    .map(RecordId)
-                    .filter(|id| cx.core.session(*id).is_some())
-                    && theme::ghost(ui, "Session").clicked()
-                {
-                    cx.dispatch(AppAction::ShowSession(session));
-                }
+                session_button(cx, ui, "Session", a.session.as_deref());
+                let rewriter = a
+                    .rewrite
+                    .as_ref()
+                    .and_then(|r| r.message_session.as_deref());
+                session_button(cx, ui, "Rewriter", rewriter);
                 if let Some(run) = a
                     .run
                     .as_deref()
@@ -1042,6 +1044,18 @@ fn attempt_row(cx: &mut DrawCtx<'_>, ui: &mut Ui, t: &TicketView, a: &AttemptVie
                 }
             });
         });
+}
+
+/// A button that shows `session`, when it names a session this app has.
+fn session_button(cx: &mut DrawCtx<'_>, ui: &mut Ui, label: &str, session: Option<&str>) {
+    if let Some(session) = session
+        .and_then(|s| uuid::Uuid::parse_str(s).ok())
+        .map(RecordId)
+        .filter(|id| cx.core.session(*id).is_some())
+        && theme::ghost(ui, label).clicked()
+    {
+        cx.dispatch(AppAction::ShowSession(session));
+    }
 }
 
 /// One line per code review round: its head, its state and what each
@@ -1123,19 +1137,37 @@ pub fn is_dispatch_view(view: &View) -> bool {
     matches!(view, View::Dispatch | View::Ticket(_))
 }
 
-/// What a completed code review did to its branch's commits; nothing
-/// when it left them as they were.
+/// What a code review did to its branch's commits, and to the folded
+/// messages it asked about; nothing when it left the commits as they
+/// were.
 fn rewrite_label(r: &RewriteView) -> Option<String> {
     if let Some(why) = &r.skipped {
         return Some(format!("commits kept: {why}"));
     }
     let after = r.after.as_deref().filter(|a| *a != r.before)?;
     let (before, after) = (short_sha(&r.before), short_sha(after));
-    Some(if r.mode == "one" {
+    let rewrite = if r.mode == "one" {
         format!("squashed {} commits to one: {before} → {after}", r.from)
     } else {
         format!("commits folded {} → {}: {before} → {after}", r.from, r.to)
-    })
+    };
+    if r.stale.is_empty() {
+        return Some(rewrite);
+    }
+    if !r.message_failed
+        && let Some(head) = &r.message_head
+    {
+        return Some(format!(
+            "{rewrite} · message rewritten → {}",
+            short_sha(head)
+        ));
+    }
+    let names: Vec<String> = r.stale.iter().map(|n| format!("`{n}`")).collect();
+    Some(format!(
+        "{rewrite} · message names {} ({})",
+        names.join(", "),
+        r.message.as_deref().unwrap_or("asked")
+    ))
 }
 
 /// A commit's first eight characters, as the page names it.

@@ -243,6 +243,134 @@ fn body_of(message: &str) -> &str {
     message.split_once('\n').map_or("", |(_, rest)| rest.trim())
 }
 
+/// The names a commit message wraps in single backticks, as a check of
+/// the message against the code reads them: spans in fenced blocks are
+/// skipped, a trailing `()` and a trailing `:<line>` or
+/// `:<line>-<line>` are dropped, and only spans of at least three
+/// characters from `[A-Za-z0-9_-./:]` that are not all digits or a sha
+/// are kept, deduped in message order. Prose is never read.
+#[must_use]
+pub fn backticked(message: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut fenced = false;
+    for line in message.lines() {
+        if line.trim_start().starts_with("```") {
+            fenced = !fenced;
+            continue;
+        }
+        if fenced {
+            continue;
+        }
+        // The odd pieces between backticks are the spans; an unclosed
+        // last one is not a span.
+        let pieces: Vec<&str> = line.split('`').collect();
+        let closed = pieces.len() - (pieces.len() + 1) % 2;
+        for span in pieces.iter().take(closed).skip(1).step_by(2) {
+            if let Some(name) = name_of(span)
+                && !out.contains(&name)
+            {
+                out.push(name);
+            }
+        }
+    }
+    out
+}
+
+/// A backticked span as a name, or `None` when it is not one.
+fn name_of(span: &str) -> Option<String> {
+    let span = span.strip_suffix("()").unwrap_or(span);
+    let span = strip_location(span);
+    let ok = |c: char| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | '/' | ':');
+    if span.chars().count() < 3 || !span.chars().all(ok) {
+        return None;
+    }
+    let digits = span.chars().all(|c| c.is_ascii_digit());
+    let sha = span.len() >= 7 && span.chars().all(|c| c.is_ascii_hexdigit());
+    (!digits && !sha).then(|| span.to_owned())
+}
+
+/// `serve.rs:531` as `serve.rs`, `a.rs:3-9` as `a.rs`.
+fn strip_location(span: &str) -> &str {
+    let Some((head, tail)) = span.rsplit_once(':') else {
+        return span;
+    };
+    let number = |s: &str| !s.is_empty() && s.chars().all(|c| c.is_ascii_digit());
+    let location = match tail.split_once('-') {
+        Some((a, b)) => number(a) && number(b),
+        None => number(tail),
+    };
+    if location { head } else { span }
+}
+
+/// Whether `name` occurs in `text` as a whole word, a word being made
+/// of `[A-Za-z0-9_-]`; a name that is not a `path` also occurs when its
+/// [`segment`] does, as `Fold` stands for `Commits::Fold` under a `use`
+/// and `after` for `Rewrite.after` written as `r.after`.
+#[must_use]
+pub fn occurs(text: &str, name: &str, path: bool) -> bool {
+    word_in(text, name) || segment(name, path).is_some_and(|last| word_in(text, last))
+}
+
+/// What follows the last `::` or `.` of `name`, the fallback [`occurs`]
+/// accepts; none for a path.
+pub(crate) fn segment(name: &str, path: bool) -> Option<&str> {
+    if path {
+        return None;
+    }
+    name.rsplit([':', '.'])
+        .next()
+        .filter(|s| !s.is_empty() && *s != name)
+}
+
+fn word_in(text: &str, word: &str) -> bool {
+    if word.is_empty() {
+        return false;
+    }
+    let is_word = |c: char| c.is_ascii_alphanumeric() || c == '_' || c == '-';
+    text.match_indices(word).any(|(i, _)| {
+        let before = text[..i].chars().next_back();
+        let after = text[i + word.len()..].chars().next();
+        !before.is_some_and(is_word) && !after.is_some_and(is_word)
+    })
+}
+
+/// Whether `name` reads as a file path in a tree whose files are
+/// `paths`: it has a `/`, or it ends in an extension some file there
+/// ends in. `gone.rs` is a path in a tree of `.rs` files however it was
+/// removed; `Rewrite.after` is a field, since no file ends in `.after`.
+#[must_use]
+pub fn is_path(name: &str, paths: &[&str]) -> bool {
+    if name.contains('/') {
+        return true;
+    }
+    name.rsplit_once('.').is_some_and(|(stem, ext)| {
+        let ext = format!(".{ext}");
+        !stem.is_empty() && ext.len() > 1 && paths.iter().any(|p| p.ends_with(&ext))
+    })
+}
+
+/// The names a folded commit's message is checked for: those of the
+/// commit whose message and author the group keeps, less every name a
+/// `squash!` pick's body in the group names too. A fixer who wrote a
+/// `squash!` body about a name has addressed it; the squash bodies'
+/// own names describe the fix, and the fix is the diff.
+#[must_use]
+pub fn checked_names(commits: &[Commit], group: &Group) -> Vec<String> {
+    let Some(lead) = commits.iter().find(|c| c.sha == group.author_of) else {
+        return Vec::new();
+    };
+    let addressed: Vec<String> = commits
+        .iter()
+        .filter(|c| c.sha != lead.sha && group.picks.contains(&c.sha))
+        .filter(|c| autosquash_target(c.subject()).is_some_and(|(_, squash)| squash))
+        .flat_map(|c| backticked(body_of(&c.message)))
+        .collect();
+    backticked(&lead.message)
+        .into_iter()
+        .filter(|n| !addressed.contains(n))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -392,5 +520,74 @@ mod tests {
         ));
         assert!(one_plan(&[], "base", &[]).unwrap().is_empty());
         assert!(is_identity(&[], &[]));
+    }
+
+    #[test]
+    fn backticked_reads_names_and_skips_prose_fences_shas_and_placeholders() {
+        let message = "Adds `old_name` and `with space`, `a=b`, `<n>`.\n\n```\n`fenced_name`\n```\nCalls `run()` in `serve.rs:531`, `x.rs:3-9`, `:1234-1300`, `1234567`, `abcdef12`, `ab`, `old_name` again, `--on-dirty` and `Commits::Fold`; `open";
+        assert_eq!(
+            backticked(message),
+            [
+                "old_name",
+                "run",
+                "serve.rs",
+                "x.rs",
+                "--on-dirty",
+                "Commits::Fold"
+            ]
+        );
+    }
+
+    #[test]
+    fn occurs_matches_whole_words_and_last_segments() {
+        assert!(occurs("pass --on-dirty here", "--on-dirty", false));
+        assert!(!occurs("pass --on-dirty-x here", "--on-dirty", false));
+        assert!(!occurs("old_names", "old_name", false));
+        assert!(occurs(
+            "use crate::history::Commits::Fold;",
+            "Commits::Fold",
+            false
+        ));
+        assert!(occurs("match mode { Fold => 1 }", "Commits::Fold", false));
+        assert!(occurs("dial(x)", "p.dial", false));
+        assert!(occurs("r.after = Some(h)", "Rewrite.after", false));
+        assert!(occurs("see src/serve.rs", "serve.rs", true));
+        assert!(
+            !occurs("fn rs() {}", "serve.rs", true),
+            "a path has no segment fallback"
+        );
+        assert!(!occurs("", "x", false));
+    }
+
+    #[test]
+    fn a_path_is_a_slash_or_an_extension_the_tree_uses() {
+        let paths = ["src/lib.rs", "README.md"];
+        assert!(is_path("src/a", &paths));
+        assert!(is_path("gone.rs", &paths));
+        assert!(is_path("NOTES.md", &paths));
+        assert!(!is_path("Rewrite.after", &paths));
+        assert!(!is_path("p.dial", &paths));
+        assert!(!is_path("Commits::Fold", &paths));
+        assert!(!is_path(".rs", &paths));
+        assert!(!is_path("a.", &paths));
+    }
+
+    #[test]
+    fn a_squash_body_that_names_a_name_takes_it_off_the_check() {
+        let commits = [
+            c("aaaa1", "A\n\nAdds `old_name` and `kept_name`."),
+            c("ssss1", "squash! A\n\nRenames `old_name` to `new_name`."),
+        ];
+        let groups = fold_plan(&commits, "base", &[]).unwrap();
+        assert_eq!(checked_names(&commits, &groups[0]), ["kept_name"]);
+        let commits = [
+            c("aaaa1", "A\n\nAdds `old_name` and `kept_name`."),
+            c("ffff1", "fixup! A\n\nRenames `old_name` to `new_name`."),
+        ];
+        let groups = fold_plan(&commits, "base", &[]).unwrap();
+        assert_eq!(
+            checked_names(&commits, &groups[0]),
+            ["old_name", "kept_name"]
+        );
     }
 }

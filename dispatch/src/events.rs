@@ -458,6 +458,15 @@ pub fn short(sha: &str) -> &str {
     sha.get(..7).unwrap_or(sha)
 }
 
+/// Names as a message shows them: "`a`, `b`".
+pub(crate) fn names_list(names: &[String]) -> String {
+    names
+        .iter()
+        .map(|n| format!("`{n}`"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 fn attempt_events(
     out: &mut Vec<Event>,
     t: &Ticket,
@@ -532,6 +541,7 @@ fn attempt_events(
                 ..Event::of_attempt(t, at_ms, Kind::Rewrite, a, text)
             });
         }
+        message_events(out, t, a, r, old, at_ms);
     }
     nudge_events(out, t, a, before, at_ms);
     orphan_events(out, t, a, before, at_ms);
@@ -554,6 +564,50 @@ fn attempt_events(
                 )
             });
         }
+    }
+}
+
+/// What became of a rewrite's folded messages: found naming what the
+/// tree lacks, rewritten, or kept as written.
+fn message_events(
+    out: &mut Vec<Event>,
+    t: &Ticket,
+    a: &Attempt,
+    r: &crate::ticket::Rewrite,
+    old: Option<&crate::ticket::Rewrite>,
+    at_ms: u64,
+) {
+    let old_message = old.and_then(|o| o.message.as_ref());
+    let mut texts = Vec::new();
+    if old.is_none_or(|o| o.stale.is_empty()) && !r.stale.is_empty() {
+        texts.push(format!(
+            "folded message names {}, which the tree does not have",
+            names_list(&r.stale_names())
+        ));
+    }
+    if let Some(m) = &r.message {
+        if let Some(to) = &m.to
+            && old_message.is_none_or(|o| o.to.is_none())
+        {
+            texts.push(format!(
+                "message rewritten {} → {}",
+                short(&m.from),
+                short(to)
+            ));
+        }
+        if m.answer == "accept" && old_message.is_none_or(|o| o.answer != "accept") {
+            texts.push(if m.to.is_some() {
+                "message kept as rewritten".to_owned()
+            } else {
+                "message kept as written".to_owned()
+            });
+        }
+    }
+    for text in texts {
+        out.push(Event {
+            head: r.after.clone(),
+            ..Event::of_attempt(t, at_ms, Kind::Rewrite, a, text)
+        });
     }
 }
 
@@ -1351,6 +1405,8 @@ mod tests {
             from: 3,
             to: 0,
             skipped: None,
+            stale: Vec::new(),
+            message: None,
             at_ms: 1,
         });
         assert_eq!(kinds(Some(&found), &rewrite), [Kind::Rewrite]);
@@ -1386,6 +1442,89 @@ mod tests {
         assert_eq!(kinds(Some(&s2), &t), [Kind::Resumed]);
         assert_eq!(kinds(Some(&t), &s3), [Kind::Closing]);
         assert_eq!(kinds(Some(&s3), &s4), [Kind::Closed]);
+    }
+
+    #[test]
+    fn a_folded_messages_fate_has_its_event() {
+        let mut done = ticket();
+        let mut a = running("review-code", 1);
+        a.kind = AttemptKind::Review;
+        a.rewrite = Some(crate::ticket::Rewrite {
+            mode: crate::history::Commits::Fold,
+            before: "head0001".into(),
+            after: Some("fold0001".into()),
+            from: 3,
+            to: 1,
+            skipped: None,
+            stale: Vec::new(),
+            message: None,
+            at_ms: 1,
+        });
+        done.attempts.push(a);
+        let texts = |before: &Ticket, after: &Ticket| -> Vec<String> {
+            between(Some(before), after, 5, &names)
+                .into_iter()
+                .map(|e| e.text)
+                .collect()
+        };
+        let mut stale = done.clone();
+        stale.attempts[0].rewrite.as_mut().unwrap().stale = vec![crate::ticket::StaleMessage {
+            index: 0,
+            subject: "A".into(),
+            names: vec!["old_name".into(), "other".into()],
+        }];
+        assert_eq!(
+            texts(&done, &stale),
+            ["folded message names `old_name`, `other`, which the tree does not have"]
+        );
+        let mut asked = stale.clone();
+        asked.attempts[0].rewrite.as_mut().unwrap().message = Some(crate::ticket::MessageFix {
+            answer: "rewrite".into(),
+            from: "fold0001".into(),
+            ..crate::ticket::MessageFix::default()
+        });
+        assert!(
+            texts(&stale, &asked).is_empty(),
+            "an answer alone is not news"
+        );
+        let mut moved = asked.clone();
+        moved.attempts[0]
+            .rewrite
+            .as_mut()
+            .unwrap()
+            .message
+            .as_mut()
+            .unwrap()
+            .to = Some("word0001".into());
+        assert_eq!(
+            texts(&asked, &moved),
+            ["message rewritten fold000 → word000"]
+        );
+        let mut kept = asked.clone();
+        kept.attempts[0]
+            .rewrite
+            .as_mut()
+            .unwrap()
+            .message
+            .as_mut()
+            .unwrap()
+            .answer = "accept".into();
+        assert_eq!(texts(&asked, &kept), ["message kept as written"]);
+        let mut kept_reworded = moved.clone();
+        let m = kept_reworded.attempts[0]
+            .rewrite
+            .as_mut()
+            .unwrap()
+            .message
+            .as_mut()
+            .unwrap();
+        m.failed = Some("the rewritten message still names `old_name`".into());
+        m.answer = "accept".into();
+        assert_eq!(
+            texts(&moved, &kept_reworded),
+            ["message kept as rewritten"],
+            "a rewording that landed is what an accept keeps"
+        );
     }
 
     fn event(t: &Ticket, kind: Kind) -> Event {

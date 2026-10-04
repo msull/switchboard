@@ -12,6 +12,7 @@ use std::path::Path;
 use anyhow::{Context as _, Result};
 use switchboard_control::{self as wire, Body, Reply};
 
+use crate::events::{names_list, short};
 use crate::history::{self, Commits};
 use crate::pipeline::{Gate, OperatorKind, Pipeline, Stage};
 use crate::scheduler::{
@@ -24,8 +25,8 @@ use crate::scheduler::{
 use crate::template::Vars;
 use crate::ticket::{
     Attempt, AttemptKind, AttemptState, DIRTY_WAIT_MS, DecisionKind, GateRun, KEPT_BY_HAND,
-    PUBLISHED, ProjectState, RefreshConflict, Refreshed, ReviewRound, ReviewerResult, ReviewerRun,
-    Rewrite, RoundState, STOP_IDLE_POLLS, Ticket,
+    MessageFix, PUBLISHED, ProjectState, RefreshConflict, Refreshed, ReviewRound, ReviewerResult,
+    ReviewerRun, Rewrite, RoundState, STOP_IDLE_POLLS, StaleMessage, Ticket,
 };
 
 /// What a reviewer writes when it has nothing to report, unless the
@@ -89,6 +90,24 @@ const NOTES_HEADING: &str = "Reviewer notes";
 
 /// The implementer prompt a stage gets when it gives none.
 const FIX_PROMPT: &str = "Reviewers of branch {branch} in {worktree} left points at {feedback}. Address each one on the branch: fix it, or dispute it with your reasons. Commit so the tree is clean. Then write {response}, answering every point by its id, one line each: \"- <id>: fixed <what>\" or \"- <id>: disputed <why>\".";
+
+/// The prompt of the agent that rewords folded commit messages.
+const MESSAGE_PROMPT: &str = "Folded commits on {branch} in {worktree} carry messages naming things the code no longer has; {input} lists them. For each, write the whole new commit message to the file it names, so it matches the commit's diff (`git show <rev>`). Do not commit, amend or change any file in the tree.";
+
+/// Where a replay and a move of the branch left it.
+enum Swap {
+    /// The branch is at this new head, with the tree proven unchanged.
+    Moved(String),
+    /// The branch is where it was: nothing moved, or the move was
+    /// undone. `built` is the replayed head, when the replay made one.
+    Refused {
+        built: Option<String>,
+        reason: String,
+    },
+    /// The move could not be undone and the ticket parked; the
+    /// replayed head.
+    Parked(String),
+}
 
 /// A reviewer's or an implementer's session view, or why there is none
 /// this pass.
@@ -672,6 +691,11 @@ impl Runner {
                     // Nothing changed since the head the stage's own
                     // checks or the bring-up left, so nothing runs.
                     self.finish_review(t, &key, &round.head, now_ms)
+                } else if a.rewrite.as_ref().is_some_and(|r| !r.stale.is_empty()) {
+                    // The rewrite landed and its messages name what the
+                    // code lacks: the question, or the rewording, holds
+                    // the attempt open.
+                    self.poll_message(t, ps, p, stage, a, cwd, lane, now_ms)
                 } else if a.gate.is_some() {
                     self.poll_checks(t, ps, p, stage, a, &round, cwd, lane, now_ms)
                 } else {
@@ -1626,8 +1650,8 @@ impl Runner {
     }
 
     /// The stage's checks passed at `head`: the commits are rewritten
-    /// as the stage says, and the attempt completes at the head that
-    /// leaves.
+    /// as the stage says, their messages are checked, and the attempt
+    /// completes at the head that leaves.
     #[allow(clippy::too_many_arguments)]
     fn complete_review(
         &mut self,
@@ -1645,7 +1669,7 @@ impl Runner {
         else {
             return Ok(());
         };
-        self.finish_review(t, key, &head, now_ms)
+        self.check_messages(t, ps, p, key, cwd, lane, &head, now_ms)
     }
 
     /// The summary written and the attempt complete at `head`.
@@ -1828,6 +1852,8 @@ impl Runner {
             from,
             to: from,
             skipped: None,
+            stale: Vec::new(),
+            message: None,
             at_ms: now_ms,
         };
         if self.is_published(t, p, cwd, lane, key, &base, before)? {
@@ -1887,78 +1913,109 @@ impl Runner {
         groups: &[history::Group],
         now_ms: u64,
     ) -> Result<Option<String>> {
-        let fail = |this: &mut Self, t: &mut Ticket, ps: &mut ProjectState, reason: String| {
-            this.fail_rewrite(t, ps, &key.0, key.1, &reason, now_ms)
-                .map(|()| None)
+        let swap = self.replay_and_swap(t, ps, key, cwd, base, before, groups, now_ms)?;
+        let built = match &swap {
+            Swap::Moved(after) | Swap::Parked(after) => Some(after.clone()),
+            Swap::Refused { built, .. } => built.clone(),
         };
+        if let Some(after) = built
+            && let Some(r) = &mut record_of(t, &key.0, key.1).rewrite
+        {
+            r.after = Some(after);
+        }
+        match swap {
+            Swap::Moved(after) => {
+                if let Some(r) = find_attempt(t, &key.0, key.1).and_then(|a| a.rewrite.as_ref()) {
+                    log::info!(
+                        "ticket {} rewrote {before} → {after} ({}, {} → {} commits)",
+                        t.id,
+                        r.mode.as_str(),
+                        r.from,
+                        r.to
+                    );
+                }
+                Ok(Some(after))
+            }
+            Swap::Refused { reason, .. } => {
+                self.fail_rewrite(t, ps, &key.0, key.1, &reason, now_ms)?;
+                Ok(None)
+            }
+            Swap::Parked(_) => {
+                self.save_ticket(t, now_ms)?;
+                Ok(None)
+            }
+        }
+    }
+
+    /// `groups` replayed onto `base` and the branch moved from `from` to
+    /// the result only while it is still at `from`, the tree proven the
+    /// same before and after the move, and the move undone if it is not.
+    /// Writes no record.
+    #[allow(clippy::too_many_arguments)]
+    fn replay_and_swap(
+        &mut self,
+        t: &mut Ticket,
+        ps: &mut ProjectState,
+        key: &(String, u32),
+        cwd: &Path,
+        base: &str,
+        from: &str,
+        groups: &[history::Group],
+        now_ms: u64,
+    ) -> Result<Swap> {
         let after = match self.git.replay(cwd, base, groups) {
             Ok(a) => a,
             Err(e) => {
-                return fail(self, t, ps, format!("{e:#}; the branch stays at {before}"));
+                return Ok(Swap::Refused {
+                    built: None,
+                    reason: format!("{e:#}; the branch stays at {from}"),
+                });
             }
         };
-        let want = self.git.tree(cwd, before)?;
+        let want = self.git.tree(cwd, from)?;
         let got = self.git.tree(cwd, &after)?;
-        if let Some(r) = &mut record_of(t, &key.0, key.1).rewrite {
-            r.after = Some(after.clone());
-        }
         if got != want {
-            return fail(
-                self,
-                t,
-                ps,
-                format!(
-                    "the rewritten head {after} has tree {got}, not {want} as {before} has; the branch stays at {before}"
+            return Ok(Swap::Refused {
+                reason: format!(
+                    "the rewritten head {after} has tree {got}, not {want} as {from} has; the branch stays at {from}"
                 ),
-            );
+                built: Some(after),
+            });
         }
-        if let Err(e) = self.git.set_head(cwd, &after, before) {
-            return fail(
-                self,
-                t,
-                ps,
-                format!("the branch could not be moved from {before} to {after}: {e:#}"),
-            );
+        if let Err(e) = self.git.set_head(cwd, &after, from) {
+            return Ok(Swap::Refused {
+                reason: format!("the branch could not be moved from {from} to {after}: {e:#}"),
+                built: Some(after),
+            });
         }
         let head = self.git.head(cwd)?;
         let clean = self.git.is_clean(cwd)?;
         let tree = self.git.tree(cwd, "HEAD")?;
         if head != after || !clean || tree != want {
             let problem = format!(
-                "after the move from {before} to {after} the tree at {} reads head {head}, tree {tree}{}",
+                "after the move from {from} to {after} the tree at {} reads head {head}, tree {tree}{}",
                 cwd.display(),
                 if clean { "" } else { ", not clean" }
             );
-            if let Err(e) = self.git.set_head(cwd, before, &after) {
+            if let Err(e) = self.git.set_head(cwd, from, &after) {
                 self.park(
                     t,
                     ps,
                     &format!(
-                        "stage {} ({}): {problem}, and the branch could not be moved back to {before}: {e:#}",
+                        "stage {} ({}): {problem}, and the branch could not be moved back to {from}: {e:#}",
                         key.0,
                         cwd.display()
                     ),
                     now_ms,
                 )?;
-                return Ok(None);
+                return Ok(Swap::Parked(after));
             }
-            return fail(
-                self,
-                t,
-                ps,
-                format!("{problem}; the branch is back at {before}"),
-            );
+            return Ok(Swap::Refused {
+                reason: format!("{problem}; the branch is back at {from}"),
+                built: Some(after),
+            });
         }
-        if let Some(r) = find_attempt(t, &key.0, key.1).and_then(|a| a.rewrite.as_ref()) {
-            log::info!(
-                "ticket {} rewrote {before} → {after} ({}, {} → {} commits)",
-                t.id,
-                r.mode.as_str(),
-                r.from,
-                r.to
-            );
-        }
-        Ok(Some(after))
+        Ok(Swap::Moved(after))
     }
 
     /// Whether the branch at `cwd` is on the remote already: a refresh
@@ -2033,7 +2090,7 @@ impl Runner {
             if let Some(r) = &mut record_of(t, &key.0, key.1).rewrite {
                 r.after = Some(head.clone());
             }
-            return self.finish_review(t, &key, &head, now_ms);
+            return self.check_messages(t, ps, p, &key, cwd, lane, &head, now_ms);
         }
         let reason = format!(
             "the rewrite from {before} was interrupted and the tree at {} is at head {head}, tree {tree}{}, not {want}",
@@ -2041,6 +2098,838 @@ impl Runner {
             if clean { "" } else { ", not clean" }
         );
         self.fail_attempt(t, ps, &key.0, key.1, &reason, now_ms)
+    }
+
+    /// A rewrite that moved the branch to `head`: each folded commit
+    /// that absorbed a fix has its message checked against its own diff
+    /// and the tree. The attempt completes when no name is missing, and
+    /// asks `message` otherwise. A read error is logged and the attempt
+    /// completes as it would have: the check is a backstop, and failing
+    /// to read it must not hold back a history that is correct.
+    #[allow(clippy::too_many_arguments)]
+    fn check_messages(
+        &mut self,
+        t: &mut Ticket,
+        ps: &mut ProjectState,
+        p: &Pipeline,
+        key: &(String, u32),
+        cwd: &Path,
+        lane: Option<&str>,
+        head: &str,
+        now_ms: u64,
+    ) -> Result<()> {
+        let Some(r) = find_attempt(t, &key.0, key.1).and_then(|a| a.rewrite.clone()) else {
+            return self.finish_review(t, key, head, now_ms);
+        };
+        if r.skipped.is_some() || r.before == head {
+            return self.finish_review(t, key, head, now_ms);
+        }
+        let stale = match self.stale_messages(t, p, key, cwd, lane, &r, head, now_ms) {
+            Ok(stale) => stale,
+            Err(e) => {
+                log::warn!(
+                    "ticket {} {}/{}: the folded messages could not be checked: {e:#}",
+                    t.id,
+                    key.0,
+                    key.1
+                );
+                Vec::new()
+            }
+        };
+        if stale.is_empty() {
+            return self.finish_review(t, key, head, now_ms);
+        }
+        log::info!(
+            "ticket {} {}/{} folded messages at {head} name what the code lacks: {}",
+            t.id,
+            key.0,
+            key.1,
+            stale
+                .iter()
+                .map(|s| names_list(&s.names))
+                .collect::<Vec<_>>()
+                .join("; ")
+        );
+        if let Some(r) = &mut record_of(t, &key.0, key.1).rewrite {
+            r.stale = stale;
+        }
+        self.save_ticket(t, now_ms)?;
+        self.ask_message(t, ps, p, key, now_ms)
+    }
+
+    /// The folded commits at `head` whose messages name what neither
+    /// their diff nor the tree has. The groups are planned again from
+    /// the history at `before`, which gives the groups that were
+    /// replayed; only a group that absorbed a fix is read.
+    #[allow(clippy::too_many_arguments)]
+    fn stale_messages(
+        &mut self,
+        t: &mut Ticket,
+        p: &Pipeline,
+        key: &(String, u32),
+        cwd: &Path,
+        lane: Option<&str>,
+        r: &Rewrite,
+        head: &str,
+        now_ms: u64,
+    ) -> Result<Vec<StaleMessage>> {
+        let base = self.base_of(t, p, cwd, lane, now_ms)?;
+        let commits = self.git.commits(cwd, &base, &r.before)?;
+        let context = record_of(t, &key.0, key.1).context.clone();
+        let ranges = fix_ranges(t, &key.0, &context);
+        let groups = match r.mode {
+            Commits::One => history::one_plan(&commits, &base, &ranges)?,
+            Commits::Fold | Commits::Keep => history::fold_plan(&commits, &base, &ranges)?,
+        };
+        let n = groups.len();
+        let mut stale = Vec::new();
+        for (i, g) in groups.iter().enumerate() {
+            if g.picks.len() < 2 {
+                continue;
+            }
+            let names = history::checked_names(&commits, g);
+            if names.is_empty() {
+                continue;
+            }
+            let rev = format!("{head}~{}", n - 1 - i);
+            let missing = self.git.absent(cwd, &rev, head, &names)?;
+            if !missing.is_empty() {
+                stale.push(StaleMessage {
+                    index: count(i),
+                    subject: g.message.lines().next().unwrap_or("").trim().to_owned(),
+                    names: missing,
+                });
+            }
+        }
+        Ok(stale)
+    }
+
+    /// The `message` question about the stale messages: `rewrite |
+    /// accept | park`, or `accept | park` once a rewrite failed. A
+    /// `message` dial of `auto` accepts without asking, since `rewrite`
+    /// spends an agent run.
+    fn ask_message(
+        &mut self,
+        t: &mut Ticket,
+        ps: &mut ProjectState,
+        p: &Pipeline,
+        key: &(String, u32),
+        now_ms: u64,
+    ) -> Result<()> {
+        let attempt = record_of(t, &key.0, key.1).clone();
+        let Some(rewrite) = attempt.rewrite else {
+            return Ok(());
+        };
+        let Some(after) = rewrite.after.clone() else {
+            return Ok(());
+        };
+        let failed = rewrite.message.as_ref().and_then(|m| m.failed.clone());
+        if failed.is_none() && p.dial("message") == "auto" {
+            if let Some(r) = &mut record_of(t, &key.0, key.1).rewrite {
+                r.message = Some(MessageFix {
+                    answer: "accept".into(),
+                    from: after.clone(),
+                    at_ms: now_ms,
+                    ..MessageFix::default()
+                });
+            }
+            log::info!(
+                "ticket {} {}/{} folded messages kept as written: the message dial is auto",
+                t.id,
+                key.0,
+                attempt.context
+            );
+            return self.finish_review(t, key, &after, now_ms);
+        }
+        let at = short(&after);
+        let listed = rewrite
+            .stale
+            .iter()
+            .map(|stale| {
+                let back = rewrite.to.saturating_sub(1).saturating_sub(stale.index);
+                format!(
+                    "\"{}\" ({at}~{back}) names {}",
+                    stale.subject,
+                    names_list(&stale.names)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("; ");
+        let (question, options): (String, &[&str]) = match &failed {
+            None => (
+                format!(
+                    "{} ({}): folded commit messages name what neither the commit nor the tree at {at} has: {listed}. git show <rev> reads a commit. rewrite starts an agent to reword them with the tree unchanged; accept keeps them as written; park stops.",
+                    key.0, attempt.context
+                ),
+                &["rewrite", "accept", "park"],
+            ),
+            Some(why) => (
+                format!(
+                    "{} ({}): rewording the folded commit messages failed: {why}. They name what neither the commit nor the tree at {at} has: {listed}. accept keeps them as they are; park stops.",
+                    key.0, attempt.context
+                ),
+                &["accept", "park"],
+            ),
+        };
+        self.ensure_decision(
+            t,
+            ps,
+            Ask {
+                stage: &key.0,
+                name: "message",
+                kind: DecisionKind::Permission,
+                question,
+                options,
+                recommendation: None,
+                attempt: Some(key.clone()),
+            },
+            now_ms,
+        )
+    }
+
+    /// An attempt held open by stale messages, by what was answered and
+    /// how far the rewording got.
+    #[allow(clippy::too_many_arguments)]
+    fn poll_message(
+        &mut self,
+        t: &mut Ticket,
+        ps: &mut ProjectState,
+        p: &Pipeline,
+        stage: &Stage,
+        a: &Attempt,
+        cwd: &Path,
+        lane: Option<&str>,
+        now_ms: u64,
+    ) -> Result<()> {
+        let key = (a.stage.clone(), a.n);
+        let Some(rewrite) = a.rewrite.clone() else {
+            return Ok(());
+        };
+        let Some(m) = rewrite.message.clone() else {
+            return self.ask_message(t, ps, p, &key, now_ms);
+        };
+        if m.answer == "accept" {
+            let after = rewrite.after.unwrap_or(rewrite.before);
+            self.finish_review(t, &key, &after, now_ms)?;
+            return self.unmark(t, ps, now_ms);
+        }
+        if m.failed.is_some() {
+            return self.ask_message(t, ps, p, &key, now_ms);
+        }
+        if m.moving {
+            return match m.to {
+                Some(to) => self.message_landed(t, ps, p, &key, cwd, lane, &to, now_ms),
+                None => self.resume_message(t, ps, p, &key, cwd, lane, now_ms),
+            };
+        }
+        if !m.launched {
+            return self.start_message(t, ps, p, stage, &key, cwd, lane, now_ms);
+        }
+        // Launched and its reply not applied yet: the ledger entry's
+        // reply, now or through recovery, records the session. Nothing
+        // is sent again.
+        let Some(session) = m.session else {
+            return Ok(());
+        };
+        self.poll_rewriter(t, ps, p, &key, cwd, lane, &session, now_ms)
+    }
+
+    /// The rewriter started on the stale messages: its input written,
+    /// `launched` saved before the send, so a lost reply never sends a
+    /// second one.
+    #[allow(clippy::too_many_arguments)]
+    fn start_message(
+        &mut self,
+        t: &mut Ticket,
+        ps: &mut ProjectState,
+        p: &Pipeline,
+        stage: &Stage,
+        key: &(String, u32),
+        cwd: &Path,
+        lane: Option<&str>,
+        now_ms: u64,
+    ) -> Result<()> {
+        let attempt = record_of(t, &key.0, key.1).clone();
+        let name = stage.implementer.clone().unwrap_or_default();
+        let Some(op) = p.operators.get(&name).cloned() else {
+            let reason = format!("the stage's implementer {name:?} is not an operator");
+            return self.message_failed(t, ps, p, key, &reason, now_ms);
+        };
+        let dir = self.message_dir(t, key)?;
+        let input = match self.message_input(t, p, key, cwd, lane, &dir, now_ms)? {
+            Ok(input) => input,
+            Err(reason) => return self.message_failed(t, ps, p, key, &reason, now_ms),
+        };
+        if let Some(m) = record_of(t, &key.0, key.1)
+            .rewrite
+            .as_mut()
+            .and_then(|r| r.message.as_mut())
+        {
+            m.launched = true;
+        }
+        self.save_ticket(t, now_ms)?;
+        let mut args = op.args.clone();
+        args.extend(op.kind.write_flags(&dir));
+        let launch = if args.is_empty() {
+            wire::Launch::Shell
+        } else {
+            wire::Launch::Argv(args)
+        };
+        let mut vars = vars_for(t, p, lane);
+        vars.set("worktree", cwd.display().to_string())
+            .set("input", input.display().to_string());
+        let mut prompt = guidance_prelude(&op.guidance, &vars);
+        prompt.push_str(&vars.render(MESSAGE_PROMPT));
+        let notes = format!(
+            "Dispatch ticket {} · #{} {} · stage {} attempt {} · message rewriter",
+            t.id,
+            t.source.number.unwrap_or(0),
+            t.source.title,
+            key.0,
+            key.1
+        );
+        let reply = self.send(
+            t,
+            ps,
+            Some(key.clone()),
+            "message",
+            Body::SessionNew {
+                project: attempt.project.unwrap_or_default(),
+                name,
+                session_kind: session_kind(op.kind),
+                cwd: cwd.to_path_buf(),
+                launch,
+                prompt: Some(prompt),
+                notes,
+            },
+            now_ms,
+        )?;
+        if let Reply::Failed { reason } = reply {
+            let reason = format!("the rewriter could not start: {reason}");
+            return self.message_failed(t, ps, p, key, &reason, now_ms);
+        }
+        self.unmark(t, ps, now_ms)
+    }
+
+    /// The rewriter's `input.md` in `dir`: each stale commit with its
+    /// message, the names it lacks and the file its new message goes
+    /// to, then the rounds' responses and the plan. Every file is put
+    /// on the attempt's artifacts. `Err` is why it cannot be written.
+    #[allow(clippy::too_many_arguments)]
+    fn message_input(
+        &mut self,
+        t: &mut Ticket,
+        p: &Pipeline,
+        key: &(String, u32),
+        cwd: &Path,
+        lane: Option<&str>,
+        dir: &Path,
+        now_ms: u64,
+    ) -> Result<std::result::Result<std::path::PathBuf, String>> {
+        let attempt = record_of(t, &key.0, key.1).clone();
+        let Some(rewrite) = attempt.rewrite.clone() else {
+            return Ok(Err("the attempt has no rewrite".into()));
+        };
+        let from = rewrite
+            .message
+            .as_ref()
+            .map_or_else(|| rewrite.before.clone(), |m| m.from.clone());
+        let base = self.base_of(t, p, cwd, lane, now_ms)?;
+        let commits = match self.git.commits(cwd, &base, &from) {
+            Ok(c) => c,
+            Err(e) => return Ok(Err(format!("the folded commits could not be read: {e:#}"))),
+        };
+        let mut input = format!(
+            "# Folded commit messages to reword\n\nThe branch is at {from}. Each commit below has a message naming something that neither its own diff nor the tree has. Write its whole new message to the file named, so it says what the commit's diff does. Change nothing else.\n"
+        );
+        let mut outputs = Vec::new();
+        for stale in &rewrite.stale {
+            let index = stale.index as usize;
+            let Some(commit) = commits.get(index) else {
+                return Ok(Err(format!(
+                    "commit {index} of the folded history is not in {base}..{from}"
+                )));
+            };
+            let out = dir.join(format!("{}.txt", short(&commit.sha)));
+            let rev = format!("{from}~{}", commits.len() - 1 - index);
+            let _ = write!(
+                input,
+                "\n## `{rev}` {}\n\nIts message now:\n\n```\n{}\n```\n\nIt names {}, which neither `git show {rev}` nor the tree has.\n\nWrite the new message to {}\n",
+                stale.subject,
+                commit.message.trim_end(),
+                names_list(&stale.names),
+                out.display()
+            );
+            outputs.push((short(&commit.sha).to_owned(), out));
+        }
+        let responses: Vec<String> = attempt
+            .rounds
+            .iter()
+            .filter_map(|round| round.response.as_ref())
+            .filter(|f| f.is_file())
+            .map(|f| format!("- {}", f.display()))
+            .collect();
+        if !responses.is_empty() {
+            let _ = write!(
+                input,
+                "\nWhat the review's fixers answered, round by round:\n\n{}\n",
+                responses.join("\n")
+            );
+        }
+        if let Some(plan) = t.input("plan") {
+            let _ = write!(input, "\nThe plan: {}\n", plan.display());
+        }
+        let path = dir.join("input.md");
+        std::fs::write(&path, input).with_context(|| format!("write {}", path.display()))?;
+        let artifacts = &mut record_of(t, &key.0, key.1).artifacts;
+        artifacts.insert("message/input".into(), path.clone());
+        for (sha8, out) in outputs {
+            artifacts.insert(format!("message/{sha8}"), out);
+        }
+        Ok(Ok(path))
+    }
+
+    /// The rewriter: done on its Stop with every output file settled;
+    /// then its session is killed, the folded commits are replayed one
+    /// for one with the new messages, and the branch moves there with
+    /// the tree proven unchanged.
+    #[allow(clippy::too_many_arguments)]
+    fn poll_rewriter(
+        &mut self,
+        t: &mut Ticket,
+        ps: &mut ProjectState,
+        p: &Pipeline,
+        key: &(String, u32),
+        cwd: &Path,
+        lane: Option<&str>,
+        session: &str,
+        now_ms: u64,
+    ) -> Result<()> {
+        let view = match self.seen(session)? {
+            Seen::View(v) => *v,
+            Seen::Gone => {
+                return self.message_failed(
+                    t,
+                    ps,
+                    p,
+                    key,
+                    "the rewriter's session is gone",
+                    now_ms,
+                );
+            }
+            Seen::Unknown => return Ok(()),
+        };
+        let outputs: Vec<std::path::PathBuf> = record_of(t, &key.0, key.1)
+            .artifacts
+            .iter()
+            .filter(|(k, _)| k.starts_with("message/") && *k != "message/input")
+            .map(|(_, f)| f.clone())
+            .collect();
+        let m = message_of(t, key);
+        if let Some(stop) = view.last_stop_at_ms {
+            m.stop_at_ms = Some(stop);
+        }
+        let running = view.liveness == wire::Liveness::Running;
+        let stopped = stopped_after_nudges(&view, m.stop_at_ms, &[], &mut m.polls_since_stop);
+        if !stopped {
+            if running {
+                return self.save_ticket(t, now_ms);
+            }
+            let reason = format!("the rewriter {:?} before finishing", view.liveness);
+            return self.message_failed(t, ps, p, key, &reason, now_ms);
+        }
+        if busy(&view) {
+            m.polls_since_stop = 0;
+            return self.save_ticket(t, now_ms);
+        }
+        if let Some(missing) = outputs.iter().find(|f| !f.is_file()) {
+            m.polls_since_stop = idle_polls(&view, m.polls_since_stop);
+            if m.polls_since_stop >= STOP_IDLE_POLLS || !running {
+                let reason = format!("the rewriter stopped without writing {}", missing.display());
+                return self.message_failed(t, ps, p, key, &reason, now_ms);
+            }
+            return self.save_ticket(t, now_ms);
+        }
+        let mut settled = true;
+        for f in &outputs {
+            let name = f.display().to_string();
+            let mut settle = m.settle.get(&name).cloned();
+            settled &= settle_file(f, &mut settle)?;
+            if let Some(settle) = settle {
+                m.settle.insert(name, settle);
+            }
+        }
+        if !settled {
+            return self.save_ticket(t, now_ms);
+        }
+        let from = m.from.clone();
+        // The rewriter's work is over, whatever comes of it.
+        self.kill_rewriter(t, ps, key, now_ms)?;
+        let head = self.git.head(cwd)?;
+        let clean = self.git.is_clean(cwd)?;
+        if !clean || head != from {
+            let context = record_of(t, &key.0, key.1).context.clone();
+            return self.park(
+                t,
+                ps,
+                &format!(
+                    "stage {} ({context}): the commit messages were being reworded at {from} but the branch is at {head}{}",
+                    key.0,
+                    if clean { "" } else { " with the tree not clean" }
+                ),
+                now_ms,
+            );
+        }
+        let (base, groups) = match self.reworded(t, p, key, cwd, lane, &from, now_ms)? {
+            Ok(rebuilt) => rebuilt,
+            Err(reason) => return self.message_failed(t, ps, p, key, &reason, now_ms),
+        };
+        message_of(t, key).moving = true;
+        self.save_ticket(t, now_ms)?;
+        self.swap_messages(t, ps, p, key, cwd, lane, &base, &from, &groups, now_ms)
+    }
+
+    /// The reworded commits replayed and the branch moved to them.
+    #[allow(clippy::too_many_arguments)]
+    fn swap_messages(
+        &mut self,
+        t: &mut Ticket,
+        ps: &mut ProjectState,
+        p: &Pipeline,
+        key: &(String, u32),
+        cwd: &Path,
+        lane: Option<&str>,
+        base: &str,
+        from: &str,
+        groups: &[history::Group],
+        now_ms: u64,
+    ) -> Result<()> {
+        match self.replay_and_swap(t, ps, key, cwd, base, from, groups, now_ms)? {
+            Swap::Moved(new) => self.message_landed(t, ps, p, key, cwd, lane, &new, now_ms),
+            // Not through `fail_rewrite`: its `keep` assumes the branch
+            // is at `before`, and it is at the folded head.
+            Swap::Refused { reason, .. } => self.message_failed(t, ps, p, key, &reason, now_ms),
+            Swap::Parked(_) => Ok(()),
+        }
+    }
+
+    /// The folded history at `from` as one single-pick group per commit,
+    /// each with its own message, or the rewriter's for a stale one; and
+    /// the base it sits on. `Err` is why it cannot be.
+    #[allow(clippy::too_many_arguments)]
+    fn reworded(
+        &mut self,
+        t: &mut Ticket,
+        p: &Pipeline,
+        key: &(String, u32),
+        cwd: &Path,
+        lane: Option<&str>,
+        from: &str,
+        now_ms: u64,
+    ) -> Result<std::result::Result<(String, Vec<history::Group>), String>> {
+        let base = self.base_of(t, p, cwd, lane, now_ms)?;
+        let commits = match self.git.commits(cwd, &base, from) {
+            Ok(c) => c,
+            Err(e) => return Ok(Err(format!("the folded commits could not be read: {e:#}"))),
+        };
+        let Some(r) = find_attempt(t, &key.0, key.1).and_then(|a| a.rewrite.clone()) else {
+            return Ok(Err("the attempt has no rewrite".into()));
+        };
+        if count(commits.len()) != r.to {
+            return Ok(Err(format!(
+                "{base}..{from} has {} commits, not the {} the fold made",
+                commits.len(),
+                r.to
+            )));
+        }
+        let dir = self.message_dir(t, key)?;
+        let mut groups = Vec::with_capacity(commits.len());
+        for (i, c) in commits.iter().enumerate() {
+            let message = if r.stale.iter().any(|s| s.index as usize == i) {
+                let path = dir.join(format!("{}.txt", short(&c.sha)));
+                let text = match std::fs::read_to_string(&path) {
+                    Ok(text) => text,
+                    Err(e) => return Ok(Err(format!("{} could not be read: {e}", path.display()))),
+                };
+                if text.lines().next().is_none_or(|l| l.trim().is_empty()) {
+                    return Ok(Err(format!(
+                        "the rewriter wrote no subject line to {}",
+                        path.display()
+                    )));
+                }
+                text.trim_end().to_owned()
+            } else {
+                c.message.clone()
+            };
+            groups.push(history::Group {
+                picks: vec![c.sha.clone()],
+                message,
+                author_of: c.sha.clone(),
+            });
+        }
+        Ok(Ok((base, groups)))
+    }
+
+    /// The reworded head the branch moved to: on the record, the
+    /// rewriter's session killed if it still runs, and the new messages
+    /// checked as the folded ones were. The attempt completes there, or
+    /// asks `accept | park` with the branch left at `head`.
+    #[allow(clippy::too_many_arguments)]
+    fn message_landed(
+        &mut self,
+        t: &mut Ticket,
+        ps: &mut ProjectState,
+        p: &Pipeline,
+        key: &(String, u32),
+        cwd: &Path,
+        lane: Option<&str>,
+        head: &str,
+        now_ms: u64,
+    ) -> Result<()> {
+        let from = {
+            let m = message_of(t, key);
+            m.to = Some(head.to_owned());
+            m.from.clone()
+        };
+        if let Some(r) = &mut record_of(t, &key.0, key.1).rewrite {
+            r.after = Some(head.to_owned());
+        }
+        log::info!(
+            "ticket {} {}/{} messages reworded {from} → {head}",
+            t.id,
+            key.0,
+            key.1
+        );
+        self.kill_rewriter(t, ps, key, now_ms)?;
+        let groups = match self.reworded(t, p, key, cwd, lane, &from, now_ms)? {
+            Ok((_, groups)) => groups,
+            Err(reason) => return self.message_failed(t, ps, p, key, &reason, now_ms),
+        };
+        let Some(rewrite) = find_attempt(t, &key.0, key.1).and_then(|a| a.rewrite.clone()) else {
+            return Ok(());
+        };
+        let mut still: Vec<String> = Vec::new();
+        for stale in &rewrite.stale {
+            let Some(group) = groups.get(stale.index as usize) else {
+                continue;
+            };
+            let back = rewrite.to.saturating_sub(1).saturating_sub(stale.index);
+            let rev = format!("{head}~{back}");
+            match self
+                .git
+                .absent(cwd, &rev, head, &history::backticked(&group.message))
+            {
+                Ok(missing) => {
+                    for name in missing {
+                        if !still.contains(&name) {
+                            still.push(name);
+                        }
+                    }
+                }
+                Err(e) => log::warn!(
+                    "ticket {} {}/{}: the reworded messages could not be checked: {e:#}",
+                    t.id,
+                    key.0,
+                    key.1
+                ),
+            }
+        }
+        if !still.is_empty() {
+            let reason = format!("the rewritten message still names {}", names_list(&still));
+            return self.message_failed(t, ps, p, key, &reason, now_ms);
+        }
+        self.finish_review(t, key, head, now_ms)?;
+        self.unmark(t, ps, now_ms)
+    }
+
+    /// A rewording whose `moving` was saved before a restart, read as
+    /// `resume_rewrite` reads a rewrite: the branch still at the folded
+    /// head (the move never landed) swaps again; another head with the
+    /// same clean tree is where it landed; anything else fails the
+    /// attempt. The folded head is `message.from`, which never changes.
+    #[allow(clippy::too_many_arguments)]
+    fn resume_message(
+        &mut self,
+        t: &mut Ticket,
+        ps: &mut ProjectState,
+        p: &Pipeline,
+        key: &(String, u32),
+        cwd: &Path,
+        lane: Option<&str>,
+        now_ms: u64,
+    ) -> Result<()> {
+        let from = message_of(t, key).from.clone();
+        let head = self.git.head(cwd)?;
+        if head == from {
+            log::info!(
+                "ticket {} {}/{} rewording at {from} never moved the branch; again",
+                t.id,
+                key.0,
+                key.1
+            );
+            let (base, groups) = match self.reworded(t, p, key, cwd, lane, &from, now_ms)? {
+                Ok(rebuilt) => rebuilt,
+                Err(reason) => return self.message_failed(t, ps, p, key, &reason, now_ms),
+            };
+            return self.swap_messages(t, ps, p, key, cwd, lane, &base, &from, &groups, now_ms);
+        }
+        let clean = self.git.is_clean(cwd)?;
+        let tree = self.git.tree(cwd, "HEAD")?;
+        let want = self.git.tree(cwd, &from)?;
+        if clean && tree == want {
+            log::info!(
+                "ticket {} {}/{} rewording from {from} landed at {head}",
+                t.id,
+                key.0,
+                key.1
+            );
+            return self.message_landed(t, ps, p, key, cwd, lane, &head, now_ms);
+        }
+        let reason = format!(
+            "the rewording of the messages at {from} was interrupted and the tree at {} is at head {head}, tree {tree}{}, not {want}",
+            cwd.display(),
+            if clean { "" } else { ", not clean" }
+        );
+        self.fail_attempt(t, ps, &key.0, key.1, &reason, now_ms)
+    }
+
+    /// The rewording ended without a clean result: the rewriter killed
+    /// if it still runs, the reason on the record, and `accept | park`
+    /// asked. A second agent run is never spent unless the user says.
+    fn message_failed(
+        &mut self,
+        t: &mut Ticket,
+        ps: &mut ProjectState,
+        p: &Pipeline,
+        key: &(String, u32),
+        reason: &str,
+        now_ms: u64,
+    ) -> Result<()> {
+        self.kill_rewriter(t, ps, key, now_ms)?;
+        let m = message_of(t, key);
+        m.failed = Some(reason.to_owned());
+        m.moving = false;
+        log::warn!(
+            "ticket {} {}/{} rewording the messages failed: {reason}",
+            t.id,
+            key.0,
+            key.1
+        );
+        self.save_ticket(t, now_ms)?;
+        self.ask_message(t, ps, p, key, now_ms)
+    }
+
+    /// The rewriter's session killed, if it has one that still runs.
+    fn kill_rewriter(
+        &mut self,
+        t: &mut Ticket,
+        ps: &mut ProjectState,
+        key: &(String, u32),
+        now_ms: u64,
+    ) -> Result<()> {
+        let Some(session) = find_attempt(t, &key.0, key.1)
+            .and_then(|a| a.rewrite.as_ref())
+            .and_then(|r| r.message.as_ref())
+            .and_then(|m| m.session.clone())
+        else {
+            return Ok(());
+        };
+        if let Seen::View(v) = self.seen(&session)?
+            && v.liveness == wire::Liveness::Running
+        {
+            self.send(
+                t,
+                ps,
+                Some(key.clone()),
+                "kill",
+                Body::SessionKill { session },
+                now_ms,
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Where the rewriter's input and output files go: the attempt's
+    /// `message` directory, made.
+    fn message_dir(&self, t: &Ticket, key: &(String, u32)) -> Result<std::path::PathBuf> {
+        let context = find_attempt(t, &key.0, key.1)
+            .map(|a| a.context.clone())
+            .unwrap_or_default();
+        let dir = self
+            .attempt_dir(t, &key.0, key.1, &context)?
+            .join("message");
+        std::fs::create_dir_all(&dir)?;
+        Ok(dir)
+    }
+
+    /// An answer to `message`: `accept` completes the attempt with the
+    /// messages as they are, `rewrite` starts the rewriter on the next
+    /// pass. A head that moved since the question makes the answer
+    /// stale: the ticket parks with the two heads named.
+    pub(crate) fn message_answer(
+        &mut self,
+        t: &mut Ticket,
+        ps: &mut ProjectState,
+        answer: &str,
+        attempt: Option<&(String, u32)>,
+        now_ms: u64,
+    ) -> Result<()> {
+        let Some(key) = attempt.cloned() else {
+            return Ok(());
+        };
+        let Some(a) = find_attempt(t, &key.0, key.1)
+            .filter(|a| a.is_open())
+            .cloned()
+        else {
+            return Ok(());
+        };
+        let Some(r) = a.rewrite.clone().filter(|r| !r.stale.is_empty()) else {
+            return Ok(());
+        };
+        let Some(after) = r.after.clone() else {
+            return Ok(());
+        };
+        let cwd =
+            crate::scheduler::tree_of(t, &self.pipeline_of(t)?, &a.context).unwrap_or_default();
+        let head = self.git.head(&cwd)?;
+        if head != after {
+            return self.park(
+                t,
+                ps,
+                &format!(
+                    "stage {} ({}): message was answered for head {after} but the branch is at {head}; the answer is stale",
+                    key.0, a.context
+                ),
+                now_ms,
+            );
+        }
+        let rewrite = record_of(t, &key.0, key.1)
+            .rewrite
+            .as_mut()
+            .expect("the rewrite exists");
+        if answer == "accept" {
+            match &mut rewrite.message {
+                Some(m) => m.answer = "accept".into(),
+                None => {
+                    rewrite.message = Some(MessageFix {
+                        answer: "accept".into(),
+                        from: after.clone(),
+                        at_ms: now_ms,
+                        ..MessageFix::default()
+                    });
+                }
+            }
+            self.finish_review(t, &key, &after, now_ms)?;
+        } else {
+            rewrite.message = Some(MessageFix {
+                answer: "rewrite".into(),
+                from: after,
+                at_ms: now_ms,
+                ..MessageFix::default()
+            });
+            self.save_ticket(t, now_ms)?;
+        }
+        self.unmark(t, ps, now_ms)
     }
 
     /// An answer to a round's question, on the attempt's last round:
@@ -2836,6 +3725,15 @@ fn is_decisions(title: &str) -> bool {
         .is_some_and(|rest| rest.chars().next().is_none_or(|c| !c.is_alphanumeric()))
 }
 
+/// The rewrite's message record, which the caller knows exists.
+fn message_of<'t>(t: &'t mut Ticket, key: &(String, u32)) -> &'t mut MessageFix {
+    record_of(t, &key.0, key.1)
+        .rewrite
+        .as_mut()
+        .and_then(|r| r.message.as_mut())
+        .expect("the message record exists")
+}
+
 /// The fix rounds' `(head, head_after)` of every review attempt of
 /// `stage` in `ctx`, so a carried rerun's earlier fixes still fold.
 fn fix_ranges(t: &Ticket, stage: &str, ctx: &str) -> Vec<(String, String)> {
@@ -2955,6 +3853,16 @@ fn summary_of(a: &Attempt, carry: Option<&Carry>, head: &str) -> String {
                 };
             }
             _ => {}
+        }
+        if !r.stale.is_empty() {
+            let outcome = r
+                .message_outcome()
+                .unwrap_or_else(|| "kept as written".to_owned());
+            let _ = writeln!(
+                out,
+                "The folded message named {}, which neither the commit nor the tree has; {outcome}.",
+                names_list(&r.stale_names())
+            );
         }
     }
     if let Some(c) = carry {
@@ -3112,7 +4020,8 @@ pub(crate) fn checks_key(t: &Ticket, key: &(String, u32), round_n: u32) -> Strin
 }
 
 /// A reply to a reviewer's or an implementer's `session.new`, applied
-/// to its round: the intent names the round and the reviewer.
+/// to its round: the intent names the round and the reviewer. A
+/// `message` reply is the message rewriter's, applied to the rewrite.
 pub(crate) fn apply_review_reply(t: &mut Ticket, intent: &str, made: &[wire::Made]) {
     let Some(op) = t.ledger.iter().rev().find(|o| o.intent == intent) else {
         return;
@@ -3143,6 +4052,11 @@ pub(crate) fn apply_review_reply(t: &mut Ticket, intent: &str, made: &[wire::Mad
         && let Some(round) = attempt.rounds.iter_mut().find(|r| r.n == n)
     {
         round.implementer = Some(id.clone());
+        t.processes.push(id);
+    } else if intent == "message"
+        && let Some(m) = attempt.rewrite.as_mut().and_then(|r| r.message.as_mut())
+    {
+        m.session = Some(id.clone());
         t.processes.push(id);
     }
 }

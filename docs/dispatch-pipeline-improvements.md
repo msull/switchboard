@@ -376,7 +376,13 @@ built), the stale folded commit message (#55).
   and the message is not (PRs 45 and 46). The fixer should commit with
   `squash!` when its fix changes a name the message carries (the fixer's
   guidance says so since 2026-10-04), or the `pr` stage should check the
-  message against the tree. Issue #55.
+  message against the tree. Issue #55. Built in #55, at the review stage
+  rather than at `pr`: the fold happens as the review attempt completes,
+  and the `pr` agent pushes and opens the PR itself, so a check after
+  the fold and before the attempt completes is the last point where a
+  reworded commit needs no force push. A stale name asks `rewrite |
+  accept | park`; `rewrite` rewords the folded commits one for one with
+  the tree proven unchanged (docs/dispatch.md, "Folded messages").
 - **A `pr`-stage rebase with conflicts is reviewed by nobody.** The
   refresh at `pr` entry rebases the reviewed branch; the checks run again
   at the new head, but no reviewer reads the resolution, so a dropped line
