@@ -1192,16 +1192,22 @@ pub fn wait(
     // when a write lands between the reads of one batch. A held event the
     // record has passed and contradicts is dropped, so it cannot match
     // later when the record happens to agree with it again.
-    let landed = |held: &mut Vec<Event>, fresh: &Ticket| {
+    // One borne out whose transition a later line logs again gives way
+    // to that line: it is the write that landed, and the loop reaches it.
+    // The batch loop does the same for an event borne out at first read.
+    let landed = |held: &mut Vec<Event>, fresh: &Ticket| -> Result<Option<Event>> {
         for e in std::mem::take(held) {
             if confirmed(&e, &before, fresh, what, &names, e.seq <= start) {
-                return Some(e);
+                if superseded(&log, &e)? {
+                    continue;
+                }
+                return Ok(Some(e));
             }
             if in_flight(&e, fresh) {
                 held.push(e);
             }
         }
-        None
+        Ok(None)
     };
     loop {
         let batch: Vec<Event> = follow
@@ -1213,7 +1219,7 @@ pub fn wait(
         held.retain(|e| !gone.contains(&e.seq));
         if !held.is_empty() {
             let fresh = read_ticket(&data.ticket_file(ticket))?;
-            if let Some(e) = landed(&mut held, &fresh) {
+            if let Some(e) = landed(&mut held, &fresh)? {
                 return Ok(Waited::Matched(e));
             }
         }
@@ -1233,7 +1239,10 @@ pub fn wait(
                 }
                 continue;
             }
-            if let Some(older) = landed(&mut held, &fresh) {
+            if superseded(&log, &e)? {
+                continue;
+            }
+            if let Some(older) = landed(&mut held, &fresh)? {
                 return Ok(Waited::Matched(older));
             }
             return Ok(if what.candidate(e.kind) {
@@ -1247,6 +1256,34 @@ pub fn wait(
         }
         pause();
     }
+}
+
+/// Whether a later line of `e`'s ticket, not withdrawn, logs the same
+/// transition. A write that agrees with a phantom (one whose rename and
+/// `void` both failed) makes the transition the record lacks, so it logs
+/// the transition again, and appends that line before its rename: by
+/// the time a record bears `e` out, such a line is already in the log.
+fn superseded(log: &Path, e: &Event) -> Result<bool> {
+    let later = read_since(log, e.seq)?;
+    let gone = withdrawn(&later);
+    Ok(later
+        .iter()
+        .any(|x| x.ticket == e.ticket && !gone.contains(&x.seq) && same_transition(e, x)))
+}
+
+/// Whether `b` logs the transition `a` does: a decision by its id, or a
+/// pull request by its url on the same attempt. Those subjects happen
+/// once, so a second line for one is the phantom asked again. Every
+/// other kind can recur for real (a second nudge, a stage entered again,
+/// a park after a resume), and a later line of it is a new transition
+/// the caller must not miss, so it never stands in for an earlier one.
+fn same_transition(a: &Event, b: &Event) -> bool {
+    a.kind == b.kind
+        && match a.kind {
+            Kind::Decision => a.decision == b.decision,
+            Kind::Pr => a.url == b.url && a.attempt == b.attempt,
+            _ => false,
+        }
 }
 
 /// Whether the write that logged `e` may not have landed in `fresh` yet.
@@ -2327,6 +2364,207 @@ mod tests {
                 _ => assert_eq!(waited, Waited::TimedOut, "case {case}"),
             }
         }
+    }
+
+    /// A decision raised after the wait starts, through the runner's
+    /// write, is returned with the time the record carries.
+    #[test]
+    fn a_stamped_decision_is_matched_at_the_records_time() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = DataDir::new(dir.path());
+        let mut t = ticket();
+        t.attempts.push(running("plan", 1));
+        crate::store::write_ticket_stamped(&data, &mut t, 10).unwrap();
+        let waited = wait_looking(&data, "t1", For::Decision, None, &mut |looks| {
+            if looks == 1 {
+                t.decisions.push(decision("d1"));
+                crate::store::write_ticket_stamped(&data, &mut t, 50).unwrap();
+            }
+        });
+        let Waited::Matched(e) = waited else {
+            panic!("{waited:?}")
+        };
+        assert_eq!(e.decision.as_deref(), Some("d1"));
+        assert_eq!(e.at_ms, 50);
+        let back = crate::store::read_ticket(&data.ticket_file(&t.id)).unwrap();
+        assert_eq!(back.updated_ms, e.at_ms);
+    }
+
+    /// A write of poll bookkeeping alone keeps `updated_ms`, so it does
+    /// not let a replayed event through; the event's `void` drops it.
+    #[test]
+    fn a_quiet_write_does_not_let_a_held_event_through() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = DataDir::new(dir.path());
+        let log = log_path(&data);
+        let mut started = ticket();
+        started.attempts.push(running("implement", 1));
+        crate::store::write_ticket_stamped(&data, &mut started, 40).unwrap();
+        let mut nudged = started.clone();
+        nudged.attempts[0].nudges.push(7);
+        let mut events = between(Some(&started), &nudged, 50, &names);
+        append(&log, &mut events).unwrap();
+        let event = events[0].clone();
+        let waited = wait_looking(&data, "t1", For::Any, Some(event.seq - 1), &mut |looks| {
+            if looks == 1 {
+                started.attempts[0].polls_since_stop += 1;
+                crate::store::write_ticket_stamped(&data, &mut started, 60).unwrap();
+                assert_eq!(started.updated_ms, 40);
+            } else if looks == 2 {
+                append_void(&log, &event, vec![event.seq], "disk full").unwrap();
+            }
+        });
+        assert_eq!(waited, Waited::TimedOut);
+    }
+
+    /// A `decision` line for `d1` on `t` at 50, appended with no rename
+    /// and no `void`, as a write whose rename and withdrawal both failed
+    /// leaves it; the record it would have written, and the line.
+    fn phantom_decision_on(data: &DataDir, t: &Ticket) -> (Ticket, Event) {
+        let mut asked = t.clone();
+        asked.decisions.push(decision("d1"));
+        asked.updated_ms = 50;
+        let mut events = between(Some(t), &asked, 50, &names);
+        assert_eq!(events.len(), 1);
+        append(&log_path(data), &mut events).unwrap();
+        (asked, events.remove(0))
+    }
+
+    /// The same decision asked again after a phantom of it returns the
+    /// line of the write that landed, even with a quiet write between.
+    #[test]
+    fn a_reasked_decision_returns_the_write_that_landed_not_its_phantom() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = DataDir::new(dir.path());
+        let mut t = ticket();
+        t.attempts.push(running("plan", 1));
+        crate::store::write_ticket_stamped(&data, &mut t, 40).unwrap();
+        let mut phantom = None;
+        let waited = wait_looking(&data, "t1", For::Decision, None, &mut |looks| match looks {
+            1 => phantom = Some(phantom_decision_on(&data, &t).1),
+            2 => {
+                t.attempts[0].polls_since_stop += 1;
+                crate::store::write_ticket_stamped(&data, &mut t, 60).unwrap();
+            }
+            3 => {
+                t.decisions.push(decision("d1"));
+                crate::store::write_ticket_stamped(&data, &mut t, 70).unwrap();
+            }
+            _ => {}
+        });
+        let Waited::Matched(e) = waited else {
+            panic!("{waited:?}")
+        };
+        let phantom = phantom.unwrap();
+        assert!(e.seq > phantom.seq, "{e:?}");
+        assert_eq!(e.decision.as_deref(), Some("d1"));
+        assert_eq!(e.at_ms, 70);
+    }
+
+    /// A phantom decision a later write contradicts is dropped, as it is
+    /// by any write that moves `updated_ms` past it; asking it later
+    /// returns that line.
+    #[test]
+    fn a_phantom_decision_a_real_write_contradicts_is_dropped() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = DataDir::new(dir.path());
+        let mut t = ticket();
+        t.attempts.push(running("plan", 1));
+        crate::store::write_ticket_stamped(&data, &mut t, 40).unwrap();
+        let mut phantom = None;
+        let waited = wait_looking(&data, "t1", For::Decision, None, &mut |looks| match looks {
+            1 => phantom = Some(phantom_decision_on(&data, &t).1),
+            2 => {
+                t.attempts[0].nudges.push(65);
+                crate::store::write_ticket_stamped(&data, &mut t, 65).unwrap();
+                assert_eq!(t.updated_ms, 65);
+            }
+            3 => {
+                t.decisions.push(decision("d1"));
+                crate::store::write_ticket_stamped(&data, &mut t, 80).unwrap();
+            }
+            _ => {}
+        });
+        let Waited::Matched(e) = waited else {
+            panic!("{waited:?}")
+        };
+        assert!(e.seq > phantom.unwrap().seq, "{e:?}");
+        assert_eq!(e.at_ms, 80);
+    }
+
+    /// A held event whose own write lands late, with no later line for
+    /// the same transition, is still the one returned.
+    #[test]
+    fn a_held_event_whose_write_lands_late_is_returned() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = DataDir::new(dir.path());
+        let mut t = ticket();
+        t.attempts.push(running("plan", 1));
+        crate::store::write_ticket_stamped(&data, &mut t, 40).unwrap();
+        let mut phantom = None;
+        let waited = wait_looking(&data, "t1", For::Decision, None, &mut |looks| match looks {
+            1 => phantom = Some(phantom_decision_on(&data, &t)),
+            2 => {
+                let (asked, _) = phantom.as_ref().unwrap();
+                crate::store::write_ticket(&data.ticket_file(&t.id), asked).unwrap();
+            }
+            _ => {}
+        });
+        assert_eq!(waited, Waited::Matched(phantom.unwrap().1));
+    }
+
+    /// A replayed phantom the record already bears out at the first look
+    /// gives way to the re-ask that landed.
+    #[test]
+    fn a_replayed_phantom_borne_out_at_once_returns_the_write_that_landed() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = DataDir::new(dir.path());
+        let mut t = ticket();
+        t.attempts.push(running("plan", 1));
+        crate::store::write_ticket_stamped(&data, &mut t, 40).unwrap();
+        let (_, phantom) = phantom_decision_on(&data, &t);
+        t.decisions.push(decision("d1"));
+        crate::store::write_ticket_stamped(&data, &mut t, 70).unwrap();
+        let waited = wait_looking(&data, "t1", For::Any, Some(phantom.seq - 1), &mut |_| {});
+        let Waited::Matched(e) = waited else {
+            panic!("{waited:?}")
+        };
+        assert!(e.seq > phantom.seq, "{e:?}");
+        assert_eq!(e.kind, Kind::Decision);
+        assert_eq!(e.at_ms, 70);
+    }
+
+    /// A held event whose write lands late is returned even when a second
+    /// transition of its kind follows before the next look.
+    #[test]
+    fn a_held_nudge_is_returned_before_the_next_nudge() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = DataDir::new(dir.path());
+        let log = log_path(&data);
+        let mut t = ticket();
+        t.attempts.push(running("implement", 1));
+        crate::store::write_ticket_stamped(&data, &mut t, 40).unwrap();
+        let mut first = None;
+        let waited = wait_looking(&data, "t1", For::Any, None, &mut |looks| match looks {
+            1 => {
+                let mut nudged = t.clone();
+                nudged.attempts[0].nudges.push(50);
+                nudged.updated_ms = 50;
+                let mut events = between(Some(&t), &nudged, 50, &names);
+                append(&log, &mut events).unwrap();
+                first = Some(events.remove(0));
+                t = nudged;
+            }
+            2 => {
+                crate::store::write_ticket(&data.ticket_file(&t.id), &t).unwrap();
+                t.attempts[0].nudges.push(60);
+                crate::store::write_ticket_stamped(&data, &mut t, 60).unwrap();
+            }
+            _ => {}
+        });
+        let first = first.unwrap();
+        assert_eq!(first.kind, Kind::Nudged);
+        assert_eq!(waited, Waited::Matched(first));
     }
 
     /// A cursor taken at the tail just before a resume returns the

@@ -1759,11 +1759,21 @@ tickets from before this build have no events until their next
 transition; and a `void` whose own append fails leaves its events
 standing, which only `wait`'s check against the record covers. A
 replayed event of a kind with no record check is covered only by the
-`updated_ms` hold. When the
-event's write and its `void` both failed, the hold lets the event
-through in two cases: once any later write of the ticket lands, and at
-once when the clock did not move forward between two writes (the same
-millisecond, or a step backwards) and the later write's rename failed.
+`updated_ms` hold. A ticket's `updated_ms` moves only on a write that
+changes more than poll bookkeeping (`store::write_ticket_stamped`), and
+every write that logs an event moves it. When the event's write and its
+`void` both failed, three cases remain. An event the record bears
+out, held or replayed, is returned only if no later line logs the same
+transition (a decision by its id, a pull request by its url and
+attempt; no other kind, since every other kind can recur for real); if
+one does, the event gives way to that line, so a decision asked again
+returns the write that landed, not the phantom. A replayed event with
+no check of its own is let through once any later write that changes
+the ticket lands; a write of poll bookkeeping alone does not move
+`updated_ms` and lets nothing through. And the hold lets an event
+through at once when the clock did not move forward between two writes
+(the same millisecond, or a step backwards) and the later write's
+rename failed.
 
 A close's tree removal runs with the writer lock let go: `git worktree
 remove` of a tree with a large build directory can take minutes, and
@@ -1977,8 +1987,11 @@ files and each lane's clone) on `DispatchState.details`; both are
 transient and fill on the page's first draw. The page asks only when
 `AppCore::events_read_due` and `ticket_read_due` say so: connected, not in flight, and
 not yet asked at the ticket's `updated_ms` from the status poll, so an
-idle ticket costs nothing. A runner from before the events read
-answers it `Failed`; the page then builds the timeline from the record
+idle ticket costs nothing. `updated_ms` moves only when the ticket
+changes in more than poll bookkeeping (settle counts, idle-poll
+counters, a pull request's `checked_ms`), so a ticket waiting on a
+decision keeps its place in the list and its "updated" time. A runner
+from before the events read answers it `Failed`; the page then builds the timeline from the record
 (attempts started and ended, decisions made and answered, restarts)
 without a notice, and asks again when a runner reconnects. The single
 ticket view is kept while the runner is away, so the plan and changes
@@ -1996,6 +2009,9 @@ Known gaps:
   rewritten on an active ticket stays stale until the app restarts.
 - `read_since` reads the whole event log on every events read; the
   log is never rotated.
+- A failed artifact read is retried only on a change to the ticket
+  other than poll bookkeeping, or on a click, so "Not written yet." can
+  stay while an artifact settles.
 - The Changes tab reads trees on this machine, so it cannot show a
   runner's on another machine.
 
