@@ -372,7 +372,10 @@ that fails without a crash (a full disk, a permission change) appends
 a `void` naming the seqs it had appended, and readers drop those. If
 the `void` cannot be appended either, the record's error is still the
 one returned and the withdrawn events stand; `wait` confirms every
-match against the record, so it never returns one. An append that
+match against the record, so it never returns one. A match whose
+write may still be in flight, appended but not yet renamed in, is
+held until the record bears it out, passes its write, or its `void`
+is read. An append that
 fails refuses the record's write, since the transition would
 otherwise never be logged. Text is built from record fields only (ids,
 heads, stage names, a decision's question and options, a failure's

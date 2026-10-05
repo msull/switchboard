@@ -1744,16 +1744,16 @@ crash repeats a transition and never loses one, and a failed write is
 withdrawn with a `void`. Usage errors exit 64; `wait` exits 2 on a
 timeout and 3 when the ticket parks or closes. `wait` reads the record
 first, so a parked or closed ticket and a pending decision return at
-once, and `--since <seq>` replays the log from a cursor; a replayed
-event of a kind with no record check is held until the record's
-`updated_ms` reaches its write. The agent guide is the
+once, and `--since <seq>` replays the log from a cursor; any event
+the record does not bear out yet, live or replayed, is held until the
+record's `updated_ms` passes its write. The agent guide is the
 contract, and a test holds it to the usage. Gaps: `events.jsonl` is
 never rotated; cost and turns are not recorded, so `report` says so;
 tickets from before this build have no events until their next
 transition; and a `void` whose own append fails leaves its events
-standing, which only `wait`'s check against the record covers. An
-event `wait --since` replays from before the wait, of a kind with no
-record check, is covered only by the `updated_ms` hold. When the
+standing, which only `wait`'s check against the record covers. A
+replayed event of a kind with no record check is covered only by the
+`updated_ms` hold. When the
 event's write and its `void` both failed, the hold lets the event
 through in two cases: once any later write of the ticket lands, and at
 once when the clock did not move forward between two writes (the same
