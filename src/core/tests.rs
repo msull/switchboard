@@ -6373,7 +6373,10 @@ mod control {
 
 mod dispatch_page {
     use super::*;
-    use crate::core::dispatch::{ArtifactRead, CONSOLE_NAME, CONSOLE_SPACE};
+    use crate::core::dispatch::{
+        ArtifactRead, CONSOLE_NAME, CONSOLE_SPACE, RUNNER_NAME, RUNNER_NO_COMMAND, RUNNER_OUTSIDE,
+        RUNNER_STILL_ANSWERS, RunnerStanding, RunnerStop,
+    };
     use crate::ports::dispatch::{
         AttemptView, Body, DecisionView, EventView, EventsView, ProjectView, Reply, Status,
         TicketView, WorktreesView,
@@ -6761,6 +6764,7 @@ mod dispatch_page {
             AppAction::DispatchConfigured {
                 command: "/opt/sb/dispatch".into(),
                 data_dir: "/dispatch".into(),
+                switchboard_data_dir: "/sb".into(),
             },
             Clock::at(1),
         );
@@ -6815,6 +6819,315 @@ mod dispatch_page {
         core.dispatch(AppAction::DispatchConsole("status".into()), Clock::at(8));
         let again = core.console().expect("made again");
         assert_ne!(again, console);
+    }
+
+    fn configured(core: &mut AppCore, command: &str) {
+        core.dispatch(
+            AppAction::DispatchConfigured {
+                command: command.into(),
+                data_dir: "/dispatch".into(),
+                switchboard_data_dir: "/sb".into(),
+            },
+            Clock::at(1),
+        );
+    }
+
+    fn runner_argv(command: &str) -> Launch {
+        Launch::Argv(
+            [
+                "/usr/bin/env",
+                "RUST_LOG=info",
+                "DISPATCH_DATA_DIR=/dispatch",
+                "SWITCHBOARD_DATA_DIR=/sb",
+                command,
+                "run",
+            ]
+            .map(String::from)
+            .to_vec(),
+        )
+    }
+
+    fn spawns(effects: &[Effect], id: RecordId) -> usize {
+        effects
+            .iter()
+            .filter(|e| matches!(e, Effect::Spawn { id: x, .. } if *x == id))
+            .count()
+    }
+
+    /// A runner the app started, up and answering.
+    fn runner_up(core: &mut AppCore) -> RecordId {
+        core.dispatch(AppAction::DispatchRunnerStart, Clock::at(2));
+        let id = core.runner().expect("a runner");
+        core.dispatch(AppAction::Spawned { id, result: Ok(()) }, Clock::at(3));
+        core.dispatch(AppAction::HostListed(vec![running(id)]), Clock::at(4));
+        id
+    }
+
+    #[test]
+    fn the_runner_toggle_makes_one_autostart_service_beside_the_console() {
+        let (mut core, _) = loaded(vec![], vec![]);
+        configured(&mut core, "/opt/sb/dispatch");
+        core.dispatch(AppAction::OpenDispatchConsole, Clock::at(2));
+        let console = core.console().unwrap();
+        let e = core.dispatch(AppAction::DispatchRunnerStart, Clock::at(3));
+        let id = core.runner().expect("a runner was made");
+        let record = core.session(id).unwrap().clone();
+        assert_eq!(record.name, RUNNER_NAME);
+        assert_eq!(record.kind, SessionKind::Service);
+        assert_eq!(record.project, core.session(console).unwrap().project);
+        assert_eq!(record.cwd, PathBuf::from("/dispatch"));
+        assert_eq!(record.launch, runner_argv("/opt/sb/dispatch"));
+        assert!(record.autostart && record.effective_autostart());
+        assert_eq!(core.settings().dispatch_runner, Some(id));
+        assert_eq!(spawns(&e, id), 1);
+        assert!(e.iter().any(|e| matches!(e, Effect::Save(_))));
+        assert!(e.iter().any(|e| matches!(e, Effect::SaveSettings(_))));
+        assert_eq!(record.runs.len(), 1);
+        core.dispatch(AppAction::Spawned { id, result: Ok(()) }, Clock::at(4));
+        core.dispatch(AppAction::HostListed(vec![running(id)]), Clock::at(5));
+        let e = core.dispatch(AppAction::DispatchRunnerStart, Clock::at(6));
+        assert_eq!(spawns(&e, id), 0, "a running runner is left as it is");
+        assert_eq!(core.workspace(record.project).unwrap().sessions.len(), 2);
+        let e = core.dispatch(AppAction::DispatchRunnerStop, Clock::at(7));
+        assert!(e.iter().any(|e| matches!(e, Effect::Kill(_))));
+        let record = core.session(id).unwrap();
+        assert!(!record.autostart);
+        let run = record.last_run().unwrap();
+        assert!(run.ended.is_some());
+        assert_eq!(run.exit, None);
+        assert!(!core.is_running(id));
+    }
+
+    #[test]
+    fn stop_then_start_before_any_poll_waits_for_the_old_runner() {
+        let (mut core, _) = loaded(vec![], vec![]);
+        configured(&mut core, "/opt/sb/dispatch");
+        let id = runner_up(&mut core);
+        core.dispatch(AppAction::DispatchStatus(Some(status(None))), Clock::at(5));
+        core.dispatch(AppAction::DispatchRunnerStop, Clock::at(1000));
+        let e = core.dispatch(AppAction::DispatchRunnerStart, Clock::at(1100));
+        assert_eq!(spawns(&e, id), 0, "the old runner may still hold the lock");
+        assert!(core.notice().is_none());
+        assert_eq!(core.session(id).unwrap().runs.len(), 1);
+        assert!(core.session(id).unwrap().autostart);
+        assert!(matches!(
+            core.dispatch_state().runner_stop,
+            RunnerStop::StartWhenStopped { .. }
+        ));
+        // The killed runner still answering, then a silence too soon.
+        let e = core.dispatch(
+            AppAction::DispatchStatus(Some(status(None))),
+            Clock::at(2000),
+        );
+        assert_eq!(spawns(&e, id), 0);
+        let e = core.dispatch(AppAction::DispatchStatus(None), Clock::at(3000));
+        assert_eq!(spawns(&e, id), 0, "a silence before RUNNER_LET_GO");
+        let e = core.dispatch(AppAction::DispatchStatus(None), Clock::at(4000));
+        assert_eq!(spawns(&e, id), 1);
+        assert_eq!(core.session(id).unwrap().runs.len(), 2);
+        assert_eq!(core.dispatch_state().runner_stop, RunnerStop::None);
+        let e = core.dispatch(AppAction::DispatchStatus(None), Clock::at(5000));
+        assert_eq!(spawns(&e, id), 0, "launched once");
+
+        // Up but never answered, as while it starts: the same wait.
+        core.dispatch(AppAction::Spawned { id, result: Ok(()) }, Clock::at(5100));
+        core.dispatch(AppAction::HostListed(vec![running(id)]), Clock::at(5200));
+        assert!(!core.dispatch_state().connected);
+        core.dispatch(AppAction::DispatchRunnerStop, Clock::at(6000));
+        let e = core.dispatch(AppAction::DispatchRunnerStart, Clock::at(6100));
+        assert_eq!(spawns(&e, id), 0);
+        let e = core.dispatch(AppAction::DispatchStatus(None), Clock::at(9000));
+        assert_eq!(spawns(&e, id), 1);
+
+        // Stopped with no pane, a Start launches at once.
+        core.dispatch(AppAction::Spawned { id, result: Ok(()) }, Clock::at(9100));
+        core.dispatch(AppAction::HostListed(vec![]), Clock::at(9200));
+        core.dispatch(AppAction::DispatchRunnerStop, Clock::at(9300));
+        assert_eq!(core.dispatch_state().runner_stop, RunnerStop::None);
+        let e = core.dispatch(AppAction::DispatchRunnerStart, Clock::at(9400));
+        assert_eq!(spawns(&e, id), 1);
+    }
+
+    #[test]
+    fn a_stop_withdraws_a_start_queued_behind_an_earlier_stop() {
+        let (mut core, _) = loaded(vec![], vec![]);
+        configured(&mut core, "/opt/sb/dispatch");
+        let id = runner_up(&mut core);
+        core.dispatch(AppAction::DispatchRunnerStop, Clock::at(1000));
+        core.dispatch(AppAction::DispatchRunnerStart, Clock::at(1100));
+        core.dispatch(AppAction::DispatchRunnerStop, Clock::at(1200));
+        let e = core.dispatch(AppAction::DispatchStatus(None), Clock::at(5000));
+        assert_eq!(spawns(&e, id), 0);
+        assert!(!core.session(id).unwrap().autostart);
+    }
+
+    #[test]
+    fn start_is_refused_while_a_runner_outside_the_app_answers() {
+        let (mut core, _) = loaded(vec![], vec![]);
+        configured(&mut core, "/opt/sb/dispatch");
+        core.dispatch(AppAction::DispatchStatus(Some(status(None))), Clock::at(2));
+        let e = core.dispatch(AppAction::DispatchRunnerStart, Clock::at(3));
+        assert!(!e.iter().any(|e| matches!(e, Effect::Spawn { .. })));
+        assert_eq!(core.notice().map(|n| n.text.as_str()), Some(RUNNER_OUTSIDE));
+    }
+
+    #[test]
+    fn start_is_refused_without_a_dispatch_beside_the_app() {
+        let (mut core, _) = loaded(vec![], vec![]);
+        configured(&mut core, "dispatch");
+        let e = core.dispatch(AppAction::DispatchRunnerStart, Clock::at(2));
+        assert!(core.runner().is_none());
+        assert!(core.settings().dispatch_runner.is_none());
+        assert!(!e.iter().any(|e| matches!(e, Effect::Spawn { .. })));
+        assert_eq!(
+            core.notice().map(|n| n.text.as_str()),
+            Some(RUNNER_NO_COMMAND)
+        );
+    }
+
+    #[test]
+    fn a_queued_start_is_dropped_while_a_runner_keeps_answering() {
+        let (mut core, _) = loaded(vec![], vec![]);
+        configured(&mut core, "/opt/sb/dispatch");
+        let id = runner_up(&mut core);
+        core.dispatch(AppAction::DispatchStatus(Some(status(None))), Clock::at(5));
+        core.dispatch(AppAction::DispatchRunnerStop, Clock::at(1000));
+        core.dispatch(AppAction::DispatchRunnerStart, Clock::at(1100));
+        let e = core.dispatch(
+            AppAction::DispatchStatus(Some(status(None))),
+            Clock::at(3000),
+        );
+        assert_eq!(spawns(&e, id), 0);
+        assert_eq!(core.runner_standing(), RunnerStanding::StartQueued);
+        let e = core.dispatch(
+            AppAction::DispatchStatus(Some(status(None))),
+            Clock::at(4000),
+        );
+        assert_eq!(spawns(&e, id), 0);
+        assert_eq!(core.dispatch_state().runner_stop, RunnerStop::None);
+        assert_eq!(core.runner_standing(), RunnerStanding::Outside);
+        assert_eq!(
+            core.notice().map(|n| n.text.as_str()),
+            Some(RUNNER_STILL_ANSWERS)
+        );
+        assert!(!core.session(id).unwrap().autostart);
+        assert_eq!(core.runner_refusal(), Some(RUNNER_OUTSIDE));
+    }
+
+    #[test]
+    fn the_runner_standing_follows_the_pane_the_stop_and_the_port() {
+        let (mut core, _) = loaded(vec![], vec![]);
+        configured(&mut core, "dispatch");
+        assert_eq!(core.runner_standing(), RunnerStanding::Stopped);
+        assert_eq!(core.runner_refusal(), Some(RUNNER_NO_COMMAND));
+        configured(&mut core, "/opt/sb/dispatch");
+        assert_eq!(core.runner_refusal(), None);
+        core.dispatch(AppAction::DispatchStatus(Some(status(None))), Clock::at(2));
+        assert_eq!(core.runner_standing(), RunnerStanding::Outside);
+        core.dispatch(AppAction::DispatchStatus(None), Clock::at(3));
+        assert_eq!(core.runner_standing(), RunnerStanding::Gone);
+        let id = runner_up(&mut core);
+        assert_eq!(core.runner_standing(), RunnerStanding::Starting);
+        core.dispatch(AppAction::DispatchStatus(Some(status(None))), Clock::at(5));
+        let up = core.runner_standing();
+        assert!(matches!(up, RunnerStanding::Up { .. }));
+        assert!(up.up() && up.stoppable());
+        core.dispatch(AppAction::DispatchRunnerStop, Clock::at(1000));
+        assert_eq!(core.runner_standing(), RunnerStanding::Stopping);
+        assert!(!core.runner_standing().stoppable());
+        core.dispatch(AppAction::DispatchRunnerStart, Clock::at(1100));
+        assert_eq!(core.runner_standing(), RunnerStanding::StartQueued);
+        assert!(core.runner_standing().stoppable());
+        core.dispatch(AppAction::HostListed(vec![running(id)]), Clock::at(1200));
+        assert!(matches!(core.runner_standing(), RunnerStanding::Up { .. }));
+    }
+
+    #[test]
+    fn a_bare_dispatch_never_replaces_a_started_runner_s_executable() {
+        let proj = project(CONSOLE_SPACE);
+        let mut ws = Workspace::new(proj.clone());
+        let mut r = record(proj.id, SessionKind::Service, 0);
+        r.name = RUNNER_NAME.into();
+        r.cwd = "/dispatch".into();
+        r.launch = runner_argv("/old/dispatch");
+        r.autostart = true;
+        let id = r.id;
+        ws.sessions.push(r);
+        let mut core = AppCore::new();
+        core.dispatch(
+            AppAction::StoreLoaded(Ok(Loaded {
+                workspaces: vec![ws],
+                settings: Settings {
+                    dispatch_runner: Some(id),
+                    ..Settings::default()
+                },
+                ..Loaded::default()
+            })),
+            Clock::at(0),
+        );
+        configured(&mut core, "dispatch");
+        assert_eq!(
+            core.session(id).unwrap().launch,
+            runner_argv("/old/dispatch")
+        );
+        let listed = core.dispatch(AppAction::HostListed(vec![]), Clock::at(2));
+        assert!(listed.iter().any(|e| matches!(
+            e,
+            Effect::Spawn { id: x, spec } if *x == id
+                && spec.command.as_ref().unwrap().contains(&"/old/dispatch".to_owned())
+        )));
+    }
+
+    #[test]
+    fn a_started_runner_comes_back_on_the_next_load_with_the_current_executable() {
+        for autostart in [true, false] {
+            let proj = project(CONSOLE_SPACE);
+            let mut ws = Workspace::new(proj.clone());
+            let mut r = record(proj.id, SessionKind::Service, 0);
+            r.name = RUNNER_NAME.into();
+            r.cwd = "/dispatch".into();
+            r.launch = runner_argv("/old/dispatch");
+            r.autostart = autostart;
+            let id = r.id;
+            ws.sessions.push(r);
+            let mut core = AppCore::new();
+            core.dispatch(
+                AppAction::StoreLoaded(Ok(Loaded {
+                    workspaces: vec![ws],
+                    settings: Settings {
+                        dispatch_runner: Some(id),
+                        ..Settings::default()
+                    },
+                    ..Loaded::default()
+                })),
+                Clock::at(0),
+            );
+            configured(&mut core, "/new/dispatch");
+            assert_eq!(
+                core.session(id).unwrap().launch,
+                runner_argv("/new/dispatch")
+            );
+            let listed = core.dispatch(AppAction::HostListed(vec![]), Clock::at(2));
+            let spawned: Vec<_> = listed
+                .iter()
+                .filter_map(|e| match e {
+                    Effect::Spawn { id: x, spec } if *x == id => Some(spec.clone()),
+                    _ => None,
+                })
+                .collect();
+            if autostart {
+                assert_eq!(spawned.len(), 1);
+                assert!(
+                    spawned[0]
+                        .command
+                        .as_ref()
+                        .unwrap()
+                        .contains(&"/new/dispatch".to_owned())
+                );
+            } else {
+                assert!(spawned.is_empty());
+            }
+        }
     }
 
     /// Dispatch marks a ticket's session waiting for the same decision

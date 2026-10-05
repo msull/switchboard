@@ -2075,6 +2075,90 @@ Known gap: the offset is not persisted, as the rail's width is not;
 after a restart the rail starts at the top and follows the restored
 selection.
 
+## The Dispatch runner as a service (2026-10-05)
+
+The Dispatch overview's standing line is a toggle. Start makes one
+`Service` record named `runner` in the `Dispatch` project beside the
+console (remembered as `Settings.dispatch_runner`, made again if
+removed) and launches it; Stop kills it. The record's launch is
+`Launch::Argv(["/usr/bin/env", "RUST_LOG=info",
+"DISPATCH_DATA_DIR=<Dispatch data dir>", "SWITCHBOARD_DATA_DIR=<this
+app's data dir>", "<dispatch>", "run"])` with Dispatch's data directory
+as its cwd: no shell, and the pane's pid is the runner's. Both data
+directories are explicit because the tmux server keeps the environment
+it was started with, not this app's, so without them a runner started
+from a dev instance could work on another Dispatch directory or make
+its sessions in the production app.
+
+The record's launch is otherwise frozen, so `DispatchConfigured` (sent
+by `start()` before the first host listing) and every Start rewrite it
+from the executable the app found. In the bundle that is
+`Contents/MacOS/dispatch`, so a rebundle plus Stop and Start runs the
+new build. Outside the bundle a bare `dispatch` (no sibling binary) is
+refused with a notice, since nothing says which one would run, and is
+never written over the record, so the reconcile relaunches the last
+absolute `dispatch` a Start wrote rather than whichever one is on the
+tmux server's `PATH`.
+
+`autostart` is the toggle's state: Start sets it, Stop clears it. It is
+written by the app on a click, never read from a project directory, so
+the trust boundary is unchanged, and the startup reconcile relaunches
+the runner exactly when the last toggle was Start. **This is the one
+deliberate exception to "agents are never resumed automatically".** The
+runner resumes nothing itself, but it reads an attempt lost with the
+old runner and starts it again for an active ticket, so after an app
+launch or a reboot agents start and spend money without a click. It is
+accepted because Start is a standing, visible instruction to run
+Dispatch, as typing `dispatch run` was; Stop withdraws it durably;
+Dispatch's own slots and parks still bound the work; and nothing else
+Switchboard launches at start changes. The Start button's hover says
+so.
+
+Stop clears `autostart`, closes the open run as killed and kills the
+pane. A killed runner can hold `runner.lock` for a moment, and a runner
+launched then exits 1. So the core keeps a transient
+`DispatchState::runner_stop`: a Stop that killed a pane is `Stopping`
+until a status arrives `RUNNER_LET_GO` (`DISPATCH_POLL`, the app's
+two-second status poll, plus a second) after it; a Start in between
+queues as `StartWhenStopped`. A silent answer then launches it. A
+runner still answering with the app's pane gone may be the killed one,
+slow to exit, or one the app did not start; the port cannot tell them
+apart, so the queued Start is dropped with `RUNNER_STILL_ANSWERS`, which
+says to Start again once it is gone, and its `autostart` cleared. A
+Start while a runner the app did not start answers the port is refused
+with `RUNNER_OUTSIDE`, which the disabled Start's hover repeats. The
+row's state is `AppCore::runner_standing`, and the refusal is
+`runner_refusal`, which both the click and the button read. Board-card
+Start and Stop on the same record stay plain service actions and leave
+`autostart` alone.
+
+The row reads `runner up · pid N · K ticket(s)` with Stop, `runner
+starting…` while the pane runs but has not answered, `runner
+stopping…` or `starting after the old runner stops…` during a Stop,
+`runner up outside the app`, `runner gone; showing its last status`, or
+`runner stopped`; stopped, it adds the last run's kicker (`exit 1 · …`,
+`killed · …`). A Runner section above the console shows the live pane
+while it runs and the tail of the last run's log when it does not.
+
+Known gaps:
+
+- Stop is `kill-session` mid-pass. A check runs in its own process
+  group, so a Stop during a check leaves that check running orphaned;
+  the next runner reads the attempt as lost and starts it again, and
+  that run waits on cargo's build lock behind the orphan. Killing the
+  check's group on Stop, or a graceful stop, needs a signal handler or
+  a port call in Dispatch.
+- No restart on a crash while the app is up; the runner stays down
+  until Start or the next app launch, like every service.
+- A rebundle with the runner up is left to the Stop button's hover.
+- The runner's children inherit `SWITCHBOARD_RECORD_ID` and `TMUX`.
+- `runner stopping…` ends on the first status `RUNNER_LET_GO` after
+  the Stop, answered or not. A kill that fails leaves the pane running,
+  and the next host listing shows it `Up` again. A killed runner that
+  takes longer than that to exit still answers, so the row reads
+  `runner up outside the app` until it exits, and a queued Start is
+  dropped with a notice to Start again.
+
 ## Open questions
 
 - Shared project config runs with a hash-and-approve flow and no

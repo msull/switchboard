@@ -8,14 +8,17 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use super::action::{AppAction, AppCore, Clock, Effect, Out, View};
 use super::model::{
-    CardState, Launch, PageWindow, RecordId, SessionKind, SessionRecord, Space, SpaceId,
+    CardState, Launch, PageWindow, ProjectId, RecordId, Run, SessionKind, SessionRecord, Space,
+    SpaceId,
 };
 use crate::ports::dispatch::{
     Body, DecisionView, EventView, ProjectView, Reply, Status, TicketView,
 };
+use crate::ports::host::Liveness;
 
 /// An agent of a ticket that waits on the user for itself, with the
 /// attempt it runs and why it waits.
@@ -305,6 +308,103 @@ pub struct Timeline {
 pub(crate) const CONSOLE_SPACE: &str = "Dispatch";
 /// The console session's name.
 pub(crate) const CONSOLE_NAME: &str = "console";
+/// The runner service's name, beside the console.
+pub(crate) const RUNNER_NAME: &str = "runner";
+
+/// How often the app asks Dispatch for its status.
+pub const DISPATCH_POLL: Duration = Duration::from_secs(2);
+
+/// How long after a Stop the old runner is taken to have let go of
+/// `runner.lock`: one status poll plus a margin, so a no-runner answer
+/// this late is to a request sent after the kill.
+pub(crate) const RUNNER_LET_GO: Duration = DISPATCH_POLL.saturating_add(Duration::from_secs(1));
+
+/// A Stop of the runner the app started, tracked until the port has
+/// been silent for [`RUNNER_LET_GO`], since the killed runner can hold
+/// `runner.lock` for a moment and a runner launched then would exit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum RunnerStop {
+    /// No Stop under way.
+    #[default]
+    None,
+    /// Killed at `since` (the clock's monotonic time).
+    Stopping { since: Duration },
+    /// Killed at `since`, and a Start waits for it to let go.
+    StartWhenStopped { since: Duration },
+}
+
+impl RunnerStop {
+    /// When the Stop was clicked, while one is under way.
+    fn since(self) -> Option<Duration> {
+        match self {
+            Self::None => None,
+            Self::Stopping { since } | Self::StartWhenStopped { since } => Some(since),
+        }
+    }
+}
+
+/// Where the runner stands, as the overview's row reads it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunnerStanding {
+    /// The app's runner pane runs and the port answers; `pid` is `None`
+    /// for a pane just spawned, which has none until the next host poll.
+    Up { pid: Option<u32> },
+    /// The app's runner pane runs but the port has not answered yet.
+    Starting,
+    /// A Start waits for the stopped runner to let go.
+    StartQueued,
+    /// A Stop is letting go.
+    Stopping,
+    /// A runner the app did not start answers the port.
+    Outside,
+    /// No runner answers; the page keeps the last status it had.
+    Gone,
+    /// No runner has answered since the app started.
+    Stopped,
+}
+
+impl RunnerStanding {
+    /// Whether a runner answers the port or the app's pane runs.
+    #[must_use]
+    pub fn up(self) -> bool {
+        matches!(self, Self::Up { .. } | Self::Starting | Self::Outside)
+    }
+
+    /// Whether the toggle offers Stop rather than Start.
+    #[must_use]
+    pub fn stoppable(self) -> bool {
+        matches!(self, Self::Up { .. } | Self::Starting | Self::StartQueued)
+    }
+}
+
+/// The runner's launch: `env` sets the log level and both data
+/// directories, then execs `dispatch run`, so the pane's pid is the
+/// runner's. Both directories are explicit because the tmux server
+/// keeps the environment it started with, not this app's.
+#[must_use]
+pub fn runner_launch(state: &DispatchState) -> Launch {
+    Launch::Argv(vec![
+        "/usr/bin/env".into(),
+        "RUST_LOG=info".into(),
+        format!("DISPATCH_DATA_DIR={}", state.data_dir.display()),
+        format!(
+            "SWITCHBOARD_DATA_DIR={}",
+            state.switchboard_data_dir.display()
+        ),
+        state.command.display().to_string(),
+        "run".into(),
+    ])
+}
+
+/// Why Start is refused when no `dispatch` sits beside the app.
+pub(crate) const RUNNER_NO_COMMAND: &str =
+    "no `dispatch` beside this app: build it with `cargo build -p dispatch`, or run the bundle";
+/// Why Start is refused while a runner the app did not start answers.
+pub(crate) const RUNNER_OUTSIDE: &str = "a runner outside the app is already up; stop it first";
+/// Why a Start queued behind a Stop is dropped while a runner still
+/// answers: the port cannot tell the killed runner, slow to exit, from
+/// one the app did not start.
+pub(crate) const RUNNER_STILL_ANSWERS: &str = "a runner still answers after Stop: the old one slow to exit, or one outside the app; Start again once it is gone";
 
 #[derive(Debug, Default)]
 pub struct DispatchState {
@@ -325,8 +425,14 @@ pub struct DispatchState {
     pub artifact_reads: HashMap<PathBuf, ArtifactRead>,
     /// The `dispatch` executable the console types.
     pub command: PathBuf,
-    /// Dispatch's data directory: the console's working directory.
+    /// Dispatch's data directory: the console's and the runner's
+    /// working directory.
     pub data_dir: PathBuf,
+    /// This app's data directory, which the runner finds the app's
+    /// control socket through.
+    pub switchboard_data_dir: PathBuf,
+    /// A Stop of the runner service still letting go. Never saved.
+    pub(crate) runner_stop: RunnerStop,
 }
 
 /// `#104` for an issue, `PR #3` for a pull request, nothing for a
@@ -957,29 +1063,66 @@ impl AppCore {
             .filter(|id| self.session(*id).is_some())
     }
 
+    /// The runner service, if it still exists.
+    #[must_use]
+    pub fn runner(&self) -> Option<RecordId> {
+        self.settings
+            .dispatch_runner
+            .filter(|id| self.session(*id).is_some())
+    }
+
+    /// Where the runner stands: the app's pane first, then a Stop
+    /// under way, then what the port says.
+    #[must_use]
+    pub fn runner_standing(&self) -> RunnerStanding {
+        let pid = self
+            .runner()
+            .and_then(|id| self.host_status(id))
+            .and_then(|h| match h.liveness {
+                Liveness::Running { pid, .. } => Some(pid),
+                Liveness::Exited { .. } | Liveness::Missing => None,
+            });
+        let state = &self.dispatch;
+        match (pid, state.runner_stop) {
+            (Some(pid), _) if state.connected => RunnerStanding::Up {
+                pid: Some(pid).filter(|pid| *pid != 0),
+            },
+            (Some(_), _) => RunnerStanding::Starting,
+            (None, RunnerStop::StartWhenStopped { .. }) => RunnerStanding::StartQueued,
+            (None, RunnerStop::Stopping { .. }) => RunnerStanding::Stopping,
+            (None, RunnerStop::None) if state.connected => RunnerStanding::Outside,
+            (None, RunnerStop::None) if state.seen => RunnerStanding::Gone,
+            (None, RunnerStop::None) => RunnerStanding::Stopped,
+        }
+    }
+
+    /// Why a Start would be refused now, if it would.
+    #[must_use]
+    pub fn runner_refusal(&self) -> Option<&'static str> {
+        if !self.dispatch.command.is_absolute() {
+            Some(RUNNER_NO_COMMAND)
+        } else if self.runner_standing() == RunnerStanding::Outside {
+            Some(RUNNER_OUTSIDE)
+        } else {
+            None
+        }
+    }
+
     pub(super) fn dispatch_action(&mut self, action: AppAction, now: Clock, out: &mut Out) {
         match action {
-            AppAction::DispatchConfigured { command, data_dir } => {
+            AppAction::DispatchConfigured {
+                command,
+                data_dir,
+                switchboard_data_dir,
+            } => {
                 self.dispatch.command = command;
                 self.dispatch.data_dir = data_dir;
+                self.dispatch.switchboard_data_dir = switchboard_data_dir;
+                self.refresh_runner(out);
             }
-            AppAction::DispatchStatus(status) => {
-                if status.is_some() && !self.dispatch.connected {
-                    // A runner back, perhaps a newer build: ask again
-                    // for what the last one would not serve.
-                    for e in self.dispatch.events.values_mut() {
-                        if e.unavailable {
-                            e.unavailable = false;
-                            e.asked_at = None;
-                        }
-                    }
-                }
-                self.dispatch.connected = status.is_some();
-                if let Some(status) = status {
-                    self.dispatch.status = status;
-                    self.dispatch.seen = true;
-                }
-            }
+            AppAction::DispatchRunnerStart => self.runner_start(now, out),
+            AppAction::DispatchRunnerStop => self.runner_stop(now, out),
+            AppAction::DispatchStatus(status) => self.dispatch_status(status, now, out),
             AppAction::ShowDispatch => self.show(View::Dispatch, now, out),
             AppAction::ShowTicket(id) => {
                 if self.ticket(&id).is_some() {
@@ -1056,6 +1199,26 @@ impl AppCore {
             | AppAction::CloseDispatchWindow
             | AppAction::DispatchWindowMoved(_) => self.dispatch_window_action(action, out),
             _ => {}
+        }
+    }
+
+    /// A status poll's answer; `None` is no runner.
+    fn dispatch_status(&mut self, status: Option<Status>, now: Clock, out: &mut Out) {
+        self.runner_let_go(status.is_some(), now, out);
+        if status.is_some() && !self.dispatch.connected {
+            // A runner back, perhaps a newer build: ask again
+            // for what the last one would not serve.
+            for e in self.dispatch.events.values_mut() {
+                if e.unavailable {
+                    e.unavailable = false;
+                    e.asked_at = None;
+                }
+            }
+        }
+        self.dispatch.connected = status.is_some();
+        if let Some(status) = status {
+            self.dispatch.status = status;
+            self.dispatch.seen = true;
         }
     }
 
@@ -1237,13 +1400,31 @@ impl AppCore {
         }
     }
 
-    /// The console session: found, or made in a `Dispatch` space and
-    /// project of its own with Dispatch's data directory as its cwd.
-    /// The one made is remembered in the settings.
+    /// The console session: found, or made in the `Dispatch` project
+    /// with Dispatch's data directory as its cwd. The one made is
+    /// remembered in the settings.
     fn ensure_console(&mut self, now: Clock, out: &mut Out) -> Option<RecordId> {
         if let Some(id) = self.console() {
             return Some(id);
         }
+        let project = self.ensure_dispatch_project(now, out);
+        let id = self.add_record(
+            project,
+            CONSOLE_NAME.into(),
+            SessionKind::Shell,
+            self.dispatch.data_dir.clone(),
+            Launch::Shell,
+            now,
+            out,
+        )?;
+        self.update_settings(out, |s| s.dispatch_console = Some(id));
+        self.launch_fresh(id, now, out);
+        Some(id)
+    }
+
+    /// The `Dispatch` space and project the console and the runner live
+    /// in: found, or made with Dispatch's data directory as the root.
+    fn ensure_dispatch_project(&mut self, now: Clock, out: &mut Out) -> ProjectId {
         let found = self
             .views
             .spaces
@@ -1261,26 +1442,137 @@ impl AppCore {
             });
         }
         let root = self.dispatch.data_dir.clone();
-        let project = match self
+        match self
             .workspaces
             .iter()
             .find(|w| w.project.space == space && w.project.name == CONSOLE_SPACE)
             .map(|w| w.project.id)
         {
             Some(id) => id,
-            None => self.add_project_record(CONSOLE_SPACE.into(), root.clone(), space, now, out),
-        };
+            None => self.add_project_record(CONSOLE_SPACE.into(), root, space, now, out),
+        }
+    }
+
+    /// The runner service: found, or made cold in the `Dispatch`
+    /// project and remembered in the settings.
+    fn ensure_runner(&mut self, now: Clock, out: &mut Out) -> Option<RecordId> {
+        if let Some(id) = self.runner() {
+            return Some(id);
+        }
+        let project = self.ensure_dispatch_project(now, out);
         let id = self.add_record(
             project,
-            CONSOLE_NAME.into(),
-            SessionKind::Shell,
-            root,
-            Launch::Shell,
+            RUNNER_NAME.into(),
+            SessionKind::Service,
+            self.dispatch.data_dir.clone(),
+            runner_launch(&self.dispatch),
             now,
             out,
         )?;
-        self.update_settings(out, |s| s.dispatch_console = Some(id));
-        self.launch_fresh(id, now, out);
+        self.update_settings(out, |s| s.dispatch_runner = Some(id));
         Some(id)
+    }
+
+    /// The runner record's launch and cwd brought up to the executable
+    /// and directories the app knows now, since the executable's path
+    /// and either data directory can differ between runs (the bundle
+    /// against `cargo run`, a changed `DISPATCH_DATA_DIR`). A bare
+    /// `dispatch` is never written: nothing says which one would run,
+    /// and the startup reconcile would launch it.
+    fn refresh_runner(&mut self, out: &mut Out) {
+        let Some(id) = self.runner() else {
+            return;
+        };
+        if !self.dispatch.command.is_absolute() {
+            return;
+        }
+        let launch = runner_launch(&self.dispatch);
+        let cwd = self.dispatch.data_dir.clone();
+        let stale = self
+            .session(id)
+            .is_some_and(|s| s.launch != launch || s.cwd != cwd);
+        if stale {
+            self.edit_session(id, out, |s| {
+                s.launch = launch;
+                s.cwd = cwd;
+            });
+        }
+    }
+
+    /// Start: the runner made if need be, marked to come back on the
+    /// next app start, and launched unless its pane runs, an old one
+    /// is still letting go, or a runner the app did not start answers.
+    fn runner_start(&mut self, now: Clock, out: &mut Out) {
+        if let Some(why) = self.runner_refusal() {
+            self.error(why);
+            return;
+        }
+        let Some(id) = self.ensure_runner(now, out) else {
+            return;
+        };
+        self.refresh_runner(out);
+        self.edit_session(id, out, |s| s.autostart = true);
+        if self.is_running(id) {
+            return;
+        }
+        match self.dispatch.runner_stop {
+            RunnerStop::Stopping { since } => {
+                self.dispatch.runner_stop = RunnerStop::StartWhenStopped { since };
+            }
+            RunnerStop::StartWhenStopped { .. } => {}
+            RunnerStop::None => self.return_to_session(id, now, out),
+        }
+    }
+
+    /// Stop: no relaunch on the next app start, the open run closed as
+    /// killed, and the pane killed and forgotten so the page sees it
+    /// gone at once. A pane killed is tracked until it lets go.
+    fn runner_stop(&mut self, now: Clock, out: &mut Out) {
+        let Some(id) = self.runner() else {
+            return;
+        };
+        self.edit_session(id, out, |s| s.autostart = false);
+        if self
+            .session(id)
+            .and_then(|s| s.last_run())
+            .is_some_and(Run::open)
+        {
+            self.close_run(id, None, now, out);
+        }
+        if self.host_status(id).is_some() {
+            self.dispatch.runner_stop = RunnerStop::Stopping { since: now.mono };
+        } else if let RunnerStop::StartWhenStopped { since } = self.dispatch.runner_stop {
+            // The Start queued behind an earlier Stop is withdrawn.
+            self.dispatch.runner_stop = RunnerStop::Stopping { since };
+        }
+        self.kill_and_forget(id, out);
+    }
+
+    /// A status answer `RUNNER_LET_GO` after a Stop ends it. Silent,
+    /// the old runner has let go and a queued Start launches. Answered,
+    /// the killed runner is slow to exit or another holds the port, and
+    /// the two look alike, so a queued Start is dropped and stops coming
+    /// back, with a notice that a second Start is the fix.
+    fn runner_let_go(&mut self, answered: bool, now: Clock, out: &mut Out) {
+        let stop = self.dispatch.runner_stop;
+        let Some(since) = stop.since() else {
+            return;
+        };
+        if now.mono < since + RUNNER_LET_GO {
+            return;
+        }
+        self.dispatch.runner_stop = RunnerStop::None;
+        let Some(id) = self.runner() else {
+            return;
+        };
+        if !matches!(stop, RunnerStop::StartWhenStopped { .. }) || self.is_running(id) {
+            return;
+        }
+        if answered {
+            self.edit_session(id, out, |s| s.autostart = false);
+            self.error(RUNNER_STILL_ANSWERS);
+        } else {
+            self.return_to_session(id, now, out);
+        }
     }
 }

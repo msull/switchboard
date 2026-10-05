@@ -4394,6 +4394,49 @@ fn dispatch_table_filters_sorts_and_resumes() {
     assert!(shown(&harness, "#12 Night sync"));
 }
 
+/// The overview's runner toggle: Start with no runner, Stop once the
+/// app's runner pane runs and answers.
+#[test]
+fn dispatch_runner_toggle_starts_and_stops() {
+    let (mut harness, _) = harness();
+    harness.state_mut().dispatch(AppAction::DispatchConfigured {
+        command: "/opt/sb/dispatch".into(),
+        data_dir: "/dispatch".into(),
+        switchboard_data_dir: "/sb".into(),
+    });
+    harness.state_mut().dispatched.clear();
+    harness.run_steps(2);
+    click(&mut harness, "Dispatch");
+    harness.get_by_label("runner stopped");
+    click(&mut harness, "▶ Start");
+    assert!(actions(&harness).contains(&AppAction::DispatchRunnerStart));
+    let runner = harness.state().core().runner().expect("a runner was made");
+    harness
+        .state_mut()
+        .dispatch(AppAction::HostListed(vec![HostStatus {
+            id: HostId(runner.host_name()),
+            liveness: Liveness::Running {
+                pid: 77,
+                command: "dispatch".into(),
+            },
+            cwd: None,
+            last_activity: None,
+            title: None,
+        }]));
+    harness
+        .state_mut()
+        .dispatch(AppAction::DispatchStatus(Some(dispatch_status())));
+    harness.run_steps(2);
+    let up = harness
+        .query_all_by_label_contains("runner up")
+        .next()
+        .is_some();
+    assert!(up, "the row says the runner is up");
+    click(&mut harness, "Stop");
+    assert!(actions(&harness).contains(&AppAction::DispatchRunnerStop));
+    assert!(!harness.state().core().is_running(runner));
+}
+
 /// A ticket's page with `edit` applied to Orchard's ticket first.
 fn ticket_page(
     edit: impl FnOnce(&mut switchboard::ports::dispatch::TicketView),

@@ -131,6 +131,9 @@ pub struct Settings {
     /// The shell session `dispatch` commands are typed into from the
     /// Dispatch page, once made.
     pub dispatch_console: Option<RecordId>,
+    /// The service session that runs `dispatch run`, once made from the
+    /// Dispatch page's Start.
+    pub dispatch_runner: Option<RecordId>,
     /// The Dispatch page in a window of its own, while it has one.
     pub dispatch_window: Option<PageWindow>,
 }
@@ -165,6 +168,7 @@ impl Default for Settings {
             workflow_round_cap: DEFAULT_ROUND_CAP,
             workflows: Vec::new(),
             dispatch_console: None,
+            dispatch_runner: None,
             dispatch_window: None,
         }
     }

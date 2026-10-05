@@ -484,10 +484,13 @@ pub enum AppAction {
         op: String,
         action: ControlAction,
     },
-    /// Where Dispatch is: its executable and data directory.
+    /// Where Dispatch is: its executable and data directory, and this
+    /// app's own data directory, which the runner is told to reach the
+    /// app through.
     DispatchConfigured {
         command: PathBuf,
         data_dir: PathBuf,
+        switchboard_data_dir: PathBuf,
     },
     /// The runner's answer to a status poll; `None` is no runner.
     DispatchStatus(Option<crate::ports::dispatch::Status>),
@@ -542,6 +545,11 @@ pub enum AppAction {
     /// Type a `dispatch` command line into the console; a line starting
     /// with `!` goes to the shell as it is.
     DispatchConsole(String),
+    /// Run `dispatch run` as the app's runner service, and keep it
+    /// running across app starts until Stop.
+    DispatchRunnerStart,
+    /// Kill the runner service and stop relaunching it.
+    DispatchRunnerStop,
     /// The Dispatch page in a window of its own; the main window goes
     /// back to what was under it.
     PopOutDispatch,
@@ -1021,6 +1029,8 @@ impl AppCore {
             | AppAction::DispatchReplied { .. }
             | AppAction::OpenDispatchConsole
             | AppAction::DispatchConsole(_)
+            | AppAction::DispatchRunnerStart
+            | AppAction::DispatchRunnerStop
             | AppAction::PopOutDispatch
             | AppAction::CloseDispatchWindow
             | AppAction::DispatchWindowMoved(_) => self.dispatch_action(action, now, &mut out),

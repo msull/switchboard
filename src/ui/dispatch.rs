@@ -10,17 +10,21 @@ use egui_extras::{Column, TableBuilder};
 
 use super::{DrawCtx, GAP, theme};
 use crate::core::dispatch::{parked, ticket_source, ticket_stage};
-use crate::core::{AppAction, SupervisorState, TicketOnly, TicketSort, View, WaitingAgent};
+use crate::core::{
+    AppAction, RunnerStanding, SupervisorState, TicketOnly, TicketSort, View, WaitingAgent,
+};
 use crate::ports::dispatch::{DecisionView, ProjectView, TicketView};
 
 /// The console pane's height on the overview.
 const CONSOLE_HEIGHT: f32 = 280.0;
+/// The runner pane's height on the overview.
+const RUNNER_HEIGHT: f32 = 220.0;
 
 pub fn show(cx: &mut DrawCtx<'_>, ui: &mut Ui) {
     let p = theme::palette(ui);
     ui.spacing_mut().item_spacing = egui::vec2(GAP, GAP);
     let state = cx.core.dispatch_state();
-    let (connected, seen) = (state.connected, state.seen);
+    let seen = state.seen;
     let tickets = state.status.tickets.clone();
     let projects = state.status.projects.clone();
     ui.horizontal(|ui| {
@@ -41,16 +45,7 @@ pub fn show(cx: &mut DrawCtx<'_>, ui: &mut Ui) {
     ui.horizontal(|ui| {
         ui.add(egui::Label::new(RichText::new("Tickets").text_style(theme::h1())).truncate());
         ui.label(theme::meta_text(ui, "·"));
-        let standing = match (connected, seen) {
-            (true, _) => format!("runner up · {} ticket(s)", tickets.len()),
-            (false, true) => "runner gone; showing its last status".to_owned(),
-            (false, false) => "no runner: start one from the console".to_owned(),
-        };
-        ui.label(
-            RichText::new(standing)
-                .text_style(theme::meta())
-                .color(if connected { p.n700 } else { p.accent_2_text }),
-        );
+        runner_row(cx, ui, tickets.len());
     });
     project_chips(cx, ui, &projects);
     let chosen = cx.state.dispatch_project.clone();
@@ -78,6 +73,11 @@ pub fn show(cx: &mut DrawCtx<'_>, ui: &mut Ui) {
             project_limits(cx, ui, projects.iter().filter(|p| shown(&p.name)));
             listing_controls(cx, ui);
             ticket_table(cx, ui);
+
+            if let Some(record) = cx.core.runner().and_then(|id| cx.core.session(id).cloned()) {
+                theme::section(ui, "Runner");
+                runner(cx, ui, &record);
+            }
 
             theme::section(ui, "Console");
             console(cx, ui);
@@ -753,6 +753,86 @@ fn console(cx: &mut DrawCtx<'_>, ui: &mut Ui) {
                 }
             });
         }
+    }
+}
+
+/// Where the runner stands, and the toggle: Stop while the runner is
+/// stoppable (its pane runs, or a Start is queued behind a Stop), Start
+/// otherwise. Start is what relaunches it on every app
+/// start, so its hover says so.
+fn runner_row(cx: &mut DrawCtx<'_>, ui: &mut Ui, tickets: usize) {
+    let p = theme::palette(ui);
+    let standing = cx.core.runner_standing();
+    let text = match standing {
+        RunnerStanding::Up { pid } => {
+            let pid = pid.map(|pid| format!(" · pid {pid}")).unwrap_or_default();
+            format!("runner up{pid} · {tickets} ticket(s)")
+        }
+        RunnerStanding::Starting => "runner starting…".to_owned(),
+        RunnerStanding::StartQueued => "starting after the old runner stops…".to_owned(),
+        RunnerStanding::Stopping => "runner stopping…".to_owned(),
+        RunnerStanding::Outside => format!("runner up outside the app · {tickets} ticket(s)"),
+        RunnerStanding::Gone => "runner gone; showing its last status".to_owned(),
+        RunnerStanding::Stopped => "runner stopped".to_owned(),
+    };
+    ui.label(
+        RichText::new(text)
+            .text_style(theme::meta())
+            .color(if standing.up() {
+                p.n700
+            } else {
+                p.accent_2_text
+            }),
+    );
+    if standing.stoppable() {
+        if theme::ghost_muted(ui, "Stop")
+            .on_hover_text(
+                "Kill the runner; it stays stopped across app starts until Start. \
+                 After a rebundle, Stop then Start to run the new build",
+            )
+            .clicked()
+        {
+            cx.dispatch(AppAction::DispatchRunnerStop);
+        }
+    } else {
+        let refusal = cx.core.runner_refusal();
+        let hint = refusal.map_or_else(
+            || {
+                format!(
+                    "Run `dispatch run` in {}. Started, it comes back when the app starts, \
+                     and active tickets' agents start with it",
+                    cx.core.dispatch_state().data_dir.display()
+                )
+            },
+            str::to_owned,
+        );
+        if ui
+            .add_enabled_ui(refusal.is_none(), |ui| theme::ghost(ui, "▶ Start"))
+            .inner
+            .on_hover_text(hint)
+            .clicked()
+        {
+            cx.dispatch(AppAction::DispatchRunnerStart);
+        }
+        let record = cx.core.runner().and_then(|id| cx.core.session(id));
+        if let Some(record) = record.filter(|r| r.last_run().is_some()) {
+            let last = super::runs::kicker(record, false, std::time::SystemTime::now());
+            ui.label(theme::meta_text(ui, format!("last run: {last}")));
+        }
+    }
+}
+
+/// The runner's pane while it runs; stopped, the tail of its last run's
+/// log, so an exit says why.
+fn runner(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &crate::core::SessionRecord) {
+    if cx.core.is_running(record.id) {
+        ui.allocate_ui_with_layout(
+            egui::vec2(ui.available_width(), RUNNER_HEIGHT),
+            egui::Layout::top_down(egui::Align::Min),
+            |ui| super::session::live_pane(cx, ui, record),
+        );
+    } else if record.last_run().is_some() {
+        super::runs::last_output(cx, ui, record, RUNNER_HEIGHT);
     }
 }
 
