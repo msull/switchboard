@@ -669,6 +669,162 @@ fn clicking_a_project_dispatches_show_board() {
     assert_eq!(actions(&harness), vec![AppAction::ShowBoard(ids.beta)]);
 }
 
+/// Frames for an animated scroll to arrive: egui eases `scroll_to_me`
+/// over several frames rather than jumping.
+const SCROLLED: usize = 8;
+
+/// Thirty projects `p00`..`p29`, most recent first, and on `p00` thirty
+/// shells and five commands, in a window too short for the rail's list.
+fn crowded_rail(harness: &mut Harness<'static, SwitchboardApp>) -> Vec<Workspace> {
+    let mut spaces: Vec<Workspace> = (0..30u64)
+        .map(|n| Workspace::new(project(&format!("p{n:02}"), at(1000 - n))))
+        .collect();
+    let pid = spaces[0].project.id;
+    spaces[0].sessions = (0..35u32)
+        .map(|n| {
+            if n < 30 {
+                record(pid, &format!("shell{n:02}"), SessionKind::Shell, n)
+            } else {
+                record(pid, &format!("cmd{n:02}"), SessionKind::Command, n)
+            }
+        })
+        .collect();
+    harness
+        .state_mut()
+        .core_mut_for_seeding()
+        .seed(spaces.clone(), Vec::new());
+    harness.set_size(egui::vec2(1200.0, 420.0));
+    harness.run_steps(2);
+    spaces
+}
+
+/// The rail's node for `label`: the leftmost of those so named.
+fn rail_node<'h>(
+    harness: &'h Harness<'static, SwitchboardApp>,
+    label: &'h str,
+) -> egui_kittest::Node<'h> {
+    harness
+        .query_all_by_label(label)
+        .min_by(|a, b| a.rect().left().total_cmp(&b.rect().left()))
+        .unwrap_or_else(|| panic!("no {label} in the rail"))
+}
+
+#[test]
+fn the_rail_scrolls_its_list_between_a_fixed_head_and_bottom() {
+    let (mut harness, _) = harness();
+    let spaces = crowded_rail(&mut harness);
+    let window = 420.0;
+    let go_to = harness.get_by_label("Go to ⌘K").rect();
+    assert!(go_to.bottom() <= window, "Go to is on screen: {go_to:?}");
+    let settings = harness.get_by_label("Settings").rect();
+    assert!(settings.bottom() <= window, "Settings is on screen");
+    // The head stays put above the list.
+    let all = rail_node(&harness, "All sessions").rect();
+    assert!(all.bottom() < go_to.top());
+    // The list stops at Go to: p29 starts below Go to's top, off the
+    // list until it is scrolled to.
+    let p29 = rail_node(&harness, "p29").rect();
+    assert!(p29.top() > go_to.top(), "p29 starts off the list");
+    rail_node(&harness, "p29").scroll_to_me();
+    harness.run_steps(SCROLLED);
+    let p29 = rail_node(&harness, "p29").rect();
+    assert!(
+        p29.bottom() <= go_to.top(),
+        "p29 scrolled above Go to: {p29:?} vs {go_to:?}"
+    );
+    assert_eq!(
+        harness.get_by_label("Go to ⌘K").rect(),
+        go_to,
+        "Go to stays"
+    );
+    harness.state_mut().dispatched.clear();
+    rail_node(&harness, "p29").click();
+    harness.run_steps(2);
+    assert_eq!(
+        actions(&harness),
+        vec![AppAction::ShowBoard(spaces[29].project.id)]
+    );
+    click(&mut harness, "Go to ⌘K");
+    assert!(harness.state().ui_state.palette.is_some());
+}
+
+#[test]
+fn the_rail_scrolls_a_sessions_neighbours() {
+    let (mut harness, _) = harness();
+    let spaces = crowded_rail(&mut harness);
+    let first = spaces[0].sessions[0].id;
+    showing(&mut harness, View::Session(first));
+    let window = 420.0;
+    for label in ["Terminal ⌘T", "Files ⌘B", "Notes ⌘N", "Go to ⌘K"] {
+        let rect = rail_node(&harness, label).rect();
+        assert!(rect.bottom() <= window, "{label} is on screen: {rect:?}");
+    }
+    let terminal = rail_node(&harness, "Terminal ⌘T").rect();
+    let last = rail_node(&harness, "cmd34").rect();
+    assert!(
+        last.top() > terminal.top(),
+        "the last command starts off the list"
+    );
+    rail_node(&harness, "cmd34").scroll_to_me();
+    harness.run_steps(SCROLLED);
+    let last = rail_node(&harness, "cmd34").rect();
+    assert!(
+        last.bottom() <= terminal.top(),
+        "cmd34 scrolled above Terminal: {last:?} vs {terminal:?}"
+    );
+    harness.state_mut().dispatched.clear();
+    rail_node(&harness, "cmd34").click();
+    harness.run_steps(2);
+    assert_eq!(
+        actions(&harness),
+        vec![AppAction::ShowSession(spaces[0].sessions[34].id)]
+    );
+    showing(&mut harness, View::Session(first));
+    harness.state_mut().dispatched.clear();
+    rail_node(&harness, "Files ⌘B").click();
+    harness.run_steps(2);
+    assert!(
+        actions(&harness)
+            .iter()
+            .any(|a| matches!(a, AppAction::SetFilesOpen(_)))
+    );
+}
+
+#[test]
+fn the_rail_does_not_scroll_when_it_fits() {
+    let (mut harness, _) = harness();
+    let alpha = rail_node(&harness, "alpha").rect();
+    rail_node(&harness, "alpha").scroll_down();
+    harness.run_steps(SCROLLED);
+    assert_eq!(rail_node(&harness, "alpha").rect(), alpha);
+}
+
+#[test]
+fn the_rail_follows_a_new_selection_once() {
+    let (mut harness, _) = harness();
+    let spaces = crowded_rail(&mut harness);
+    let go_to = harness.get_by_label("Go to ⌘K").rect();
+    let p00 = rail_node(&harness, "p00").rect();
+    showing(&mut harness, View::Board(spaces[29].project.id));
+    harness.run_steps(SCROLLED);
+    let p29 = rail_node(&harness, "p29").rect();
+    assert!(
+        p29.top() >= p00.top() - 1.0 && p29.bottom() <= go_to.top(),
+        "the selected row is followed into sight: {p29:?}"
+    );
+    // A manual scroll back up is left alone.
+    for _ in 0..10 {
+        rail_node(&harness, "p29").scroll_up();
+        harness.run_steps(1);
+    }
+    harness.run_steps(SCROLLED);
+    let back = rail_node(&harness, "p00").rect();
+    assert_eq!(back, p00, "the first rows are back");
+    // Long enough for any late follow to have pulled the list down.
+    harness.run_steps(SCROLLED);
+    assert_eq!(rail_node(&harness, "p00").rect(), p00, "and stay");
+}
+
 #[test]
 fn switchboard_lists_sessions_from_both_projects() {
     let (harness, _) = harness();

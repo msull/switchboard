@@ -2053,6 +2053,25 @@ Known gaps:
 - The flags pass the allow rules on the command line; whether a second
   `--settings` would have replaced Switchboard's hooks was not tried.
 
+## The rail scrolls (2026-10-05)
+
+The rail's head (the workspace menu, All sessions, Dispatch) is fixed
+and its bottom (the listening indicator, Settings, Go to, and beside a
+session Terminal, Files and Notes) is pinned; the middle, the working
+sets and then the project list or a session's neighbours, scrolls
+between them. Before, nothing bounded that middle, so a long list
+painted over the bottom items. The project list and each project's
+neighbours keep their own offset, so a visit to a session leaves the
+project list where it was. A change of view scrolls the selected row
+into sight once (`UiState::rail_followed`), the rule the working set
+grid follows, so a manual scroll is left alone. The scroll bar takes
+egui's defaults, as the file tree does: it shows only when the list
+overflows and floats over the rows while hovered.
+
+Known gap: the offset is not persisted, as the rail's width is not;
+after a restart the rail starts at the top and follows the restored
+selection.
+
 ## Open questions
 
 - Shared project config runs with a hash-and-approve flow and no
