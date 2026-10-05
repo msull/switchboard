@@ -98,6 +98,10 @@ pub enum Kind {
     /// this one, before the checks ran again or the attempt was
     /// cancelled.
     CheckOrphanKilled,
+    /// The ticket was put at a stage under a fresh copy of the live
+    /// pipeline; it replaces the stage move and the resume the same
+    /// write would otherwise log.
+    Restarted,
 }
 
 impl Kind {
@@ -127,6 +131,7 @@ impl Kind {
             Self::Void => "void",
             Self::Nudged => "nudged",
             Self::CheckOrphanKilled => "check-orphan-killed",
+            Self::Restarted => "restarted",
         }
     }
 }
@@ -358,7 +363,14 @@ pub fn between(
         return out;
     };
     let mut moved: Option<Kind> = None;
-    if new.stage != old.stage {
+    // A restart renumbers the stages under a new copy, so its index can
+    // move without the ticket moving: its own event says what happened.
+    let restarted = new.restarts.len() > old.restarts.len();
+    if let Some(e) = restarted.then(|| restart_event(new, at_ms)).flatten() {
+        whole.push(out.len());
+        out.push(e);
+    }
+    if new.stage != old.stage && !restarted {
         let kind = if new.stage > old.stage {
             Kind::Stage
         } else {
@@ -368,7 +380,8 @@ pub fn between(
         whole.push(out.len());
         out.push(Event::new(new, at_ms, kind, "", String::new()));
     }
-    let state = state_event(old, new);
+    // The restart's own event says the ticket is active again.
+    let state = state_event(old, new).filter(|_| !(restarted && new.active()));
     // A resume comes before the reruns it answered in the same write:
     // a waiter on a parked ticket wants the resume, and must never be
     // handed a `rerun` question that was born answered.
@@ -481,6 +494,18 @@ fn state_event(old: &Ticket, new: &Ticket) -> Option<(Kind, String)> {
     Some((Kind::Resumed, text))
 }
 
+/// The `restarted` event for the ticket's last restart.
+fn restart_event(t: &Ticket, at_ms: u64) -> Option<Event> {
+    let r = t.restarts.last()?;
+    Some(Event::new(
+        t,
+        at_ms,
+        Kind::Restarted,
+        "",
+        format!("at {} from {} under {}", r.to, r.from, base_name(&r.after)),
+    ))
+}
+
 /// The stage of every whole-ticket event, and a move's text, from the
 /// pipeline's names.
 fn name_stages(
@@ -509,6 +534,14 @@ fn name_stages(
 #[must_use]
 pub fn short(sha: &str) -> &str {
     sha.get(..7).unwrap_or(sha)
+}
+
+/// A path's last component, as a message names a pipeline copy; empty
+/// for a path with none.
+#[must_use]
+pub fn base_name(path: &std::path::Path) -> String {
+    path.file_name()
+        .map_or_else(String::new, |f| f.to_string_lossy().into_owned())
 }
 
 /// Names as a message shows them: "`a`, `b`".
@@ -1005,7 +1038,7 @@ impl Follow {
 pub enum For {
     /// A decision waiting on the user.
     Decision,
-    /// A stage move, forward or sent back.
+    /// A stage move, forward or sent back, or a restart.
     Stage,
     /// A pull request bound to an attempt.
     Pr,
@@ -1032,7 +1065,7 @@ impl For {
     fn candidate(self, kind: Kind) -> bool {
         match self {
             Self::Decision => kind == Kind::Decision,
-            Self::Stage => matches!(kind, Kind::Stage | Kind::SentBack),
+            Self::Stage => matches!(kind, Kind::Stage | Kind::SentBack | Kind::Restarted),
             Self::Pr => kind == Kind::Pr,
             Self::Closed => kind == Kind::Closed,
             Self::Any => kind != Kind::Void,
@@ -1144,7 +1177,13 @@ pub fn wait(
 fn checked(kind: Kind) -> bool {
     matches!(
         kind,
-        Kind::Decision | Kind::Stage | Kind::SentBack | Kind::Pr | Kind::Closed | Kind::Parked
+        Kind::Decision
+            | Kind::Stage
+            | Kind::SentBack
+            | Kind::Restarted
+            | Kind::Pr
+            | Kind::Closed
+            | Kind::Parked
     )
 }
 
@@ -1216,6 +1255,9 @@ fn confirmed(
             }
         }),
         Kind::Stage | Kind::SentBack => stage_name(names, fresh.stage) == e.stage,
+        // A plain restart leaves the stage's name as it was, so only the
+        // restart itself, saved in the same write, bears the line out.
+        Kind::Restarted => fresh.restarts.iter().any(|r| r.at_ms == e.at_ms),
         Kind::Pr => e.url.as_ref().is_some_and(|url| {
             fresh
                 .attempts
@@ -1290,6 +1332,9 @@ mod tests {
             refreshed_stage: None,
             state: TicketState::Active,
             close: CloseProgress::default(),
+            restarts: Vec::new(),
+            restart: None,
+            entered: Vec::new(),
             created_ms: 0,
             updated_ms: 0,
         }
@@ -2155,6 +2200,52 @@ mod tests {
             matches!(&waited, Waited::Matched(e) if e.kind == Kind::Resumed),
             "{waited:?}"
         );
+    }
+
+    /// A restart's write renumbers the stage and turns the parking
+    /// ticket active: one `restarted` line says so, with no `sent-back`
+    /// or `resumed` beside it, and `--for stage` waits for it.
+    #[test]
+    fn a_restart_is_one_restarted_event_in_place_of_the_move_and_the_resume() {
+        let mut old = ticket();
+        old.stage = 2;
+        old.state = TicketState::Parking {
+            reason: "restarting at plan".into(),
+        };
+        let mut new = ticket();
+        new.restarts.push(crate::ticket::Restart {
+            at_ms: 9,
+            from: "merge".into(),
+            to: "plan".into(),
+            before: "/t/pipeline.toml".into(),
+            after: "/t/pipeline.2.toml".into(),
+            discarded: vec![],
+            reset: vec![],
+            setup_again: vec![],
+        });
+        let events = between(Some(&old), &new, 9, &names);
+        assert_eq!(
+            events.iter().map(|e| e.kind).collect::<Vec<_>>(),
+            [Kind::Restarted]
+        );
+        assert_eq!(events[0].stage, "plan");
+        assert_eq!(events[0].text, "at plan from merge under pipeline.2.toml");
+        assert!(For::Stage.candidate(Kind::Restarted));
+        // Held, the restart writes `parked` and no restart.
+        let mut held = old.clone();
+        held.state = TicketState::Parked {
+            reason: "restart at plan held: dirty".into(),
+        };
+        assert_eq!(kinds(Some(&old), &held), [Kind::Parked]);
+        // A line whose write did not land is not borne out, though a
+        // plain restart's stage reads the same before it lands.
+        let confirms =
+            |fresh: &Ticket| confirmed(&events[0], &old, fresh, For::Stage, &names(), false);
+        assert!(confirms(&new));
+        let mut unlanded = old.clone();
+        unlanded.stage = new.stage;
+        assert!(!confirms(&unlanded));
+        assert!(!confirms(&held));
     }
 
     #[test]

@@ -426,6 +426,9 @@ impl Runner {
             refreshed_stage: None,
             state: TicketState::Active,
             close: CloseProgress::default(),
+            restarts: Vec::new(),
+            restart: None,
+            entered: Vec::new(),
             created_ms: now_ms,
             updated_ms: now_ms,
         };
@@ -712,6 +715,11 @@ impl Runner {
             if !t.active() || t.tree.is_none() || t.lanes.len() < lanes_wanted(t, p) {
                 return Ok(());
             }
+        }
+        // The first stage's entry: the trees as cut, before anything ran.
+        if t.stage == 0 && t.entered.is_empty() && t.attempts.is_empty() && t.tree.is_some() {
+            self.record_entry(t, now_ms);
+            self.save_ticket(t, now_ms)?;
         }
         let Some(stage) = p.stages.get(t.stage).cloned() else {
             return self.begin_close(t, ps, "every stage is done", now_ms);
@@ -1419,6 +1427,8 @@ impl Runner {
         t.state = TicketState::Closing {
             reason: reason.into(),
         };
+        // A close supersedes a restart held part way.
+        t.restart = None;
         self.save_ticket(t, now_ms)?;
         ps.queue.retain(|id| id != &t.id);
         if !ps.closing.contains(&t.id) {
@@ -1837,6 +1847,11 @@ impl Runner {
         }
         settled &= self.retire_processes(t, ps, &t.processes.clone(), now_ms)?;
         if settled && unmarked {
+            // Everything is read back as gone: a restart that rode on the
+            // park applies now, instead of the park ending.
+            if t.restart.is_some() {
+                return self.apply_restart(t, now_ms);
+            }
             log::warn!("ticket {} parked: {reason}", t.id);
             t.state = TicketState::Parked { reason };
             self.save_ticket(t, now_ms)?;
@@ -3076,6 +3091,26 @@ impl Runner {
         cwd: &Path,
         now_ms: u64,
     ) -> Result<bool> {
+        match self.run_setup(t, p, cwd, now_ms)? {
+            Some(reason) => {
+                self.park(t, ps, &reason, now_ms)?;
+                Ok(false)
+            }
+            None => Ok(true),
+        }
+    }
+
+    /// The setup of each lane at `cwd` not yet run (or changed by a
+    /// restart), each marked done and saved as it passes. The first
+    /// failure stops the rest and is returned as the reason, with that
+    /// lane's setup still pending; the caller decides what it costs.
+    pub(crate) fn run_setup(
+        &mut self,
+        t: &mut Ticket,
+        p: &Pipeline,
+        cwd: &Path,
+        now_ms: u64,
+    ) -> Result<Option<String>> {
         let pending: Vec<(usize, Vec<String>, String)> = t
             .lanes
             .iter()
@@ -3102,13 +3137,12 @@ impl Runner {
             if let Err(e) = ran {
                 let reason = format!("lane {name}: setup failed: {e:#}");
                 log::info!("ticket {}: {reason}", t.id);
-                self.park(t, ps, &reason, now_ms)?;
-                return Ok(false);
+                return Ok(Some(reason));
             }
             t.lanes[i].setup_done = true;
             self.save_ticket(t, now_ms)?;
         }
-        Ok(true)
+        Ok(None)
     }
 
     // --- gate-only stages
@@ -3934,6 +3968,7 @@ impl Runner {
 
     pub(crate) fn advance(&mut self, t: &mut Ticket, now_ms: u64) -> Result<()> {
         t.stage += 1;
+        self.record_entry(t, now_ms);
         self.save_ticket(t, now_ms)
     }
 
@@ -4781,6 +4816,13 @@ impl Runner {
             let reason = format!("no checks command for context {}", a.context);
             return self.fail_attempt(t, ps, &a.stage, a.n, &reason, now_ms);
         };
+        // A setup a restart changed runs before the checks a `check`
+        // answer starts, which launch no agent to run it first. Failing
+        // fails the checks rather than parking, so `check` is offered
+        // again once the setup is fixed.
+        if let Some(reason) = self.run_setup(t, p, cwd, now_ms)? {
+            return self.fail_checks(t, ps, &a.stage, a.n, &reason, now_ms);
+        }
         if !self.git.is_clean(cwd)? {
             let reason = format!("the tree at {} is not clean after the agent", cwd.display());
             return self.fail_checks(t, ps, &a.stage, a.n, &reason, now_ms);
@@ -4984,12 +5026,17 @@ impl Runner {
         ) {
             return Ok(());
         }
+        // Failures under a copy a restart replaced say nothing about
+        // the new one. Counted by when they ended, not started: a `check`
+        // after a restart carries the earlier attempt into the new copy.
+        let since = t.restarts.last().map_or(0, |r| r.at_ms);
         let failed = t
             .attempts
             .iter()
             .filter(|a| {
                 a.stage == stage
                     && a.context == ctx
+                    && a.ended_ms.unwrap_or(a.started_ms) >= since
                     && matches!(a.state, AttemptState::Failed { .. })
             })
             .count();
@@ -5796,6 +5843,16 @@ impl Runner {
             let TicketState::Parked { reason } = t.state.clone() else {
                 bail!("ticket {ticket} is not parked");
             };
+            // A resume would forget a branch reset half done.
+            if let Some(intent) = &t.restart {
+                let (at, command) = match &intent.stage {
+                    Some(stage) => (stage.as_str(), format!("dispatch restart {ticket} {stage}")),
+                    None => ("its stage", format!("dispatch restart {ticket}")),
+                };
+                bail!(
+                    "ticket {ticket}: a restart at {at} is part done; run `{command}` again to finish it, or close the ticket"
+                );
+            }
             let mut no_reruns = None;
             let candidates = if rerun {
                 match self.park_reruns(&t, &reason) {
@@ -6162,7 +6219,7 @@ fn tree_pr<'a>(t: &'a Ticket, p: &Pipeline) -> Option<&'a PullRequestSource> {
 
 /// The branch of the ticket's tree: its pull request's (`tree_pr`),
 /// else the one named after the issue.
-fn tree_branch(t: &Ticket, pr: Option<&PullRequestSource>) -> String {
+pub(crate) fn tree_branch(t: &Ticket, pr: Option<&PullRequestSource>) -> String {
     pr.map_or_else(
         || branch_name(t.source.number.unwrap_or(0), &t.source.title),
         |pr| pr.local().to_owned(),
@@ -6616,6 +6673,12 @@ fn rerun_ask(t: &Ticket, a: &Attempt) -> Option<(String, &'static [&'static str]
             };
             (format!("failed: {reason}"), options)
         }
+        // A restart flags the attempts whose checks may be run again
+        // under its new copy.
+        AttemptState::Cancelled { reason } if a.failed_at_checks => (
+            format!("was cancelled: {reason}"),
+            &["rerun", "check", "park"],
+        ),
         AttemptState::Cancelled { reason } => {
             (format!("was cancelled: {reason}"), &["rerun", "park"])
         }
@@ -7037,7 +7100,7 @@ pub(crate) fn checks_reason(code: i32, log: &Path) -> String {
     let base = format!("checks exited {code}; output at {}", log.display());
     if code == 127 {
         format!(
-            "{base}. Exit 127 means a command was not found: the lane's setup did not install it and the runner's PATH has no copy; fix the pipeline's setup or gate (new tickets pick it up; this ticket runs on its own copy) rather than running the same checks again"
+            "{base}. Exit 127 means a command was not found: the lane's setup did not install it and the runner's PATH has no copy; fix the pipeline's setup or gate, then run `dispatch restart <ticket>` and answer `check`; checking again without a restart runs the old copy"
         )
     } else {
         base
@@ -7933,6 +7996,9 @@ network = "deny"
             refreshed_stage: None,
             state: TicketState::Active,
             close: crate::ticket::CloseProgress::default(),
+            restarts: Vec::new(),
+            restart: None,
+            entered: Vec::new(),
             created_ms: 0,
             updated_ms: 0,
         };
@@ -8078,6 +8144,9 @@ gate = { kind = "human", decision = "inspect" }
                 reason: "parked".into(),
             },
             close: crate::ticket::CloseProgress::default(),
+            restarts: Vec::new(),
+            restart: None,
+            entered: Vec::new(),
             created_ms: 0,
             updated_ms: 0,
         }

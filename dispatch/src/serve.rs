@@ -568,6 +568,24 @@ pub fn ticket_view(t: &Ticket, p: Option<&Pipeline>) -> TicketView {
         created_ms: t.created_ms,
         updated_ms: t.updated_ms,
         paths: PathsView::default(),
+        restarts: t.restarts.iter().map(restart_view).collect(),
+    }
+}
+
+fn restart_view(r: &crate::ticket::Restart) -> dispatch_control::RestartView {
+    dispatch_control::RestartView {
+        at_ms: r.at_ms,
+        from: r.from.clone(),
+        to: r.to.clone(),
+        before: r.before.clone(),
+        after: r.after.clone(),
+        discarded: r
+            .discarded
+            .iter()
+            .map(|(s, n)| format!("{s}/{n}"))
+            .collect(),
+        reset: r.reset.iter().map(ToString::to_string).collect(),
+        setup_again: r.setup_again.clone(),
     }
 }
 

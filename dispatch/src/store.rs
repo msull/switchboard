@@ -23,7 +23,7 @@ use crate::ticket::{ProjectState, Ticket};
 /// carried a version reads as 0 and is brought up by `migrate`. A
 /// record above it was written by a newer `dispatch` and is refused
 /// both ways, so this build never drops fields it does not know.
-pub const RECORD_VERSION: u32 = 11;
+pub const RECORD_VERSION: u32 = 12;
 
 /// A lock file held while this lives: the writer lock, the runner's
 /// claim, or a ticket's close.
@@ -496,6 +496,13 @@ pub fn migrate(mut value: Value) -> Value {
         // a build that would drop it on its next write must refuse the
         // record, or a bring-up would credit a rebaser from before the
         // conflict.
+        //
+        // 11 to 12: a ticket gains `restarts`, `restart` and `entered`,
+        // empty and absent from their serde defaults; nothing is
+        // transformed. A build that would drop them on its next write
+        // must refuse the record, or a restart cut short would be
+        // forgotten with a branch half reset, and a ranged restart would
+        // lose the heads it resets to.
         if version == 1 {
             settle_from_verdicts(&mut value);
         }
@@ -1040,6 +1047,39 @@ mod tests {
         let written: Value = read_json(&path).unwrap();
         assert_eq!(written["version"], RECORD_VERSION);
         assert_eq!(written["lanes"][0]["conflict"]["at_ms"], 2500);
+        assert_eq!(read_ticket(&path).unwrap(), t);
+    }
+
+    #[test]
+    fn a_version_eleven_ticket_migrates_to_twelve_with_no_restarts() {
+        let text = TICKET_V0.replacen('{', "{\n  \"version\": 11,", 1);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.json");
+        fs::write(&path, text).unwrap();
+        let mut t = read_ticket(&path).unwrap();
+        assert_eq!(t.version, RECORD_VERSION);
+        assert!(t.restarts.is_empty() && t.entered.is_empty());
+        assert_eq!(t.restart, None);
+        t.restart = Some(crate::ticket::RestartIntent {
+            stage: Some("plan".into()),
+            made_ms: 5000,
+            reset: vec![crate::ticket::HeadReset {
+                key: "root".into(),
+                from: "head0002".into(),
+                to: "head0001".into(),
+            }],
+        });
+        t.entered.push(crate::ticket::StageEntry {
+            stage: "plan".into(),
+            at_ms: 4000,
+            heads: std::collections::BTreeMap::from([("root".into(), "head0001".into())]),
+            lanes: std::collections::BTreeMap::new(),
+        });
+        write_ticket(&path, &t).unwrap();
+        let written: Value = read_json(&path).unwrap();
+        assert_eq!(written["version"], RECORD_VERSION);
+        assert_eq!(written["restart"]["reset"][0]["to"], "head0001");
+        assert_eq!(written["entered"][0]["heads"]["root"], "head0001");
         assert_eq!(read_ticket(&path).unwrap(), t);
     }
 

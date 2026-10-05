@@ -295,8 +295,9 @@ pub struct Attempt {
     /// is allowed.
     #[serde(default)]
     pub extra_pass: bool,
-    /// Its last failure was at the stage's checks, so asking about it
-    /// again offers `check` too.
+    /// Asking about it again offers `check` too: its last failure was at
+    /// the stage's checks, or a restart cancelled it with its checks
+    /// started and, for a code review, before its rewrite.
     #[serde(default)]
     pub failed_at_checks: bool,
     /// Its last failure was the rewrite of its commits, with the branch
@@ -834,7 +835,8 @@ pub struct Ticket {
     pub project: String,
     pub source: SourceSnapshot,
     pub pipeline_fingerprint: String,
-    /// The pipeline as copied when the ticket was taken.
+    /// The newest copy of the pipeline: the one taken with the ticket,
+    /// or the one its last restart wrote.
     pub pipeline_file: PathBuf,
     pub lanes: Vec<LaneRecord>,
     /// The ticket's own tree: a worktree of the project's repository on
@@ -842,7 +844,7 @@ pub struct Ticket {
     /// it. None until cut, and for a project that works in place.
     #[serde(default)]
     pub tree: Option<PathBuf>,
-    /// Index of the current stage in the pipeline copy.
+    /// Index of the current stage in the newest pipeline copy.
     pub stage: usize,
     pub attempts: Vec<Attempt>,
     pub decisions: Vec<Decision>,
@@ -865,8 +867,116 @@ pub struct Ticket {
     /// How far a close has got.
     #[serde(default)]
     pub close: CloseProgress,
+    /// Every restart, oldest first.
+    #[serde(default)]
+    pub restarts: Vec<Restart>,
+    /// A restart asked for and not yet applied; it rides on `Parking`.
+    #[serde(default)]
+    pub restart: Option<RestartIntent>,
+    /// What each branch stood at as the ticket advanced into a stage,
+    /// oldest first; the newest entry for a stage name is the one a
+    /// ranged restart resets to.
+    #[serde(default)]
+    pub entered: Vec<StageEntry>,
     pub created_ms: u64,
     pub updated_ms: u64,
+}
+
+/// A restart applied: the ticket put at a stage under a fresh copy of
+/// the live pipeline, the later work discarded.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Restart {
+    /// When it applied: the write that saved it, and its event's time.
+    pub at_ms: u64,
+    /// The stage the ticket stood at.
+    pub from: String,
+    /// The stage it stands at now: `from` unless a stage was named.
+    pub to: String,
+    /// The copy earlier attempts ran under.
+    pub before: PathBuf,
+    /// The copy this restart wrote.
+    pub after: PathBuf,
+    /// The attempts it discarded, as `(stage, n)`.
+    #[serde(default)]
+    pub discarded: Vec<(String, u32)>,
+    /// The branches it moved back.
+    #[serde(default)]
+    pub reset: Vec<HeadReset>,
+    /// The lanes whose setup changed, so it runs again.
+    #[serde(default)]
+    pub setup_again: Vec<String>,
+}
+
+/// A restart asked for and not yet applied.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RestartIntent {
+    /// The stage named, or `None` for the current one.
+    pub stage: Option<String>,
+    /// When it was asked. Nothing reads it: it is there for whoever
+    /// opens the record of a held restart and wants to know how long it
+    /// has been held.
+    pub made_ms: u64,
+    /// Resets already done, saved one by one, so a cut-short apply
+    /// carries on rather than moving a branch twice.
+    #[serde(default)]
+    pub reset: Vec<HeadReset>,
+}
+
+/// One branch moved back by a restart: `root` for the ticket's tree, a
+/// lane's name for a lane with a repository of its own.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HeadReset {
+    /// `root` or the lane's name.
+    pub key: String,
+    /// The head the branch was at before the reset, a commit and not a
+    /// stage name, unlike `Restart::from`.
+    pub from: String,
+    /// The head it was reset to: the one recorded at the stage's entry.
+    pub to: String,
+}
+
+/// `root abc1234 → def5678`: how the CLI, the view and an error show it.
+impl std::fmt::Display for HeadReset {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{} {} → {}",
+            self.key,
+            short(&self.from),
+            short(&self.to)
+        )
+    }
+}
+
+/// What each branch stood at as the ticket advanced into a stage.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StageEntry {
+    /// The stage advanced into, by name.
+    pub stage: String,
+    /// When the ticket advanced into it.
+    pub at_ms: u64,
+    /// Heads by key: `root` for the ticket's tree, a lane's name for
+    /// each lane not removed. A head that could not be read is absent.
+    #[serde(default)]
+    pub heads: BTreeMap<String, String>,
+    /// Each lane's own fields at entry, by lane name.
+    #[serde(default)]
+    pub lanes: BTreeMap<String, LaneAtEntry>,
+}
+
+/// The lane fields that describe its head at a stage entry, restored
+/// with it by a ranged restart.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LaneAtEntry {
+    /// The lane's `base_sha` then.
+    #[serde(default)]
+    pub base_sha: Option<String>,
+    /// The lane's `refreshed` then.
+    #[serde(default)]
+    pub refreshed: Option<Refreshed>,
+    /// The lane's `conflict` then.
+    #[serde(default)]
+    pub conflict: Option<RefreshConflict>,
 }
 
 impl Ticket {
@@ -1023,6 +1133,9 @@ pub(crate) fn blank() -> Ticket {
         refreshed_stage: None,
         state: TicketState::Active,
         close: CloseProgress::default(),
+        restarts: vec![],
+        restart: None,
+        entered: vec![],
         created_ms: 0,
         updated_ms: 0,
     }

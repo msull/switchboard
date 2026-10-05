@@ -237,6 +237,11 @@ pub trait Repo: Send {
     /// out. The index and files are left alone: the caller moves only
     /// between heads with the same tree.
     fn set_head(&mut self, dir: &Path, new: &str, old: &str) -> Result<()>;
+    /// The branch checked out at `dir` reset to `to` with `git reset
+    /// --keep`: refused when `dir` has no branch checked out, when its
+    /// head is not `expected_from`, or when git would lose a change in
+    /// the tree. Local; nothing is fetched or pushed.
+    fn reset_branch(&mut self, dir: &Path, to: &str, expected_from: &str) -> Result<()>;
     /// Whether `remote`'s copy of the branch checked out at `dir`, as
     /// last fetched or pushed, holds a commit of `base..head`. No fetch.
     fn published(&self, dir: &Path, remote: &str, base: &str, head: &str) -> Result<bool>;
@@ -1146,6 +1151,19 @@ impl Repo for GitCli {
         Ok(())
     }
 
+    fn reset_branch(&mut self, dir: &Path, to: &str, expected_from: &str) -> Result<()> {
+        // On a detached head the reset would move HEAD alone and leave
+        // the branch where it was.
+        output(git_in(dir).args(["symbolic-ref", "-q", "HEAD"]))
+            .with_context(|| format!("{} has no branch checked out", dir.display()))?;
+        let head = output(git_in(dir).args(["rev-parse", "HEAD"]))?;
+        if head != expected_from {
+            bail!("{} is at {head}, not {expected_from}", dir.display());
+        }
+        output(git_in(dir).args(["reset", "-q", "--keep", to]))?;
+        Ok(())
+    }
+
     fn published(&self, dir: &Path, remote: &str, base: &str, head: &str) -> Result<bool> {
         let branch = output(git_in(dir).args(["symbolic-ref", "--short", "HEAD"]))?;
         let remote_ref = format!("refs/remotes/{remote}/{branch}");
@@ -1565,6 +1583,11 @@ pub struct FakeRepo {
     pub head_sets: Vec<(PathBuf, String, String)>,
     /// Trees left dirty by the next head move, once.
     pub dirty_on_set: Vec<PathBuf>,
+    /// Branches reset by a restart: dir, to, from. A refused reset is
+    /// not recorded.
+    pub resets: Vec<(PathBuf, String, String)>,
+    /// The next `reset_branch` fails with this, once, as git refusing.
+    pub fail_reset: Option<String>,
     /// Branches the remote already holds: dir, base, head. Asked of any
     /// other range, a tree is not published.
     pub published: Vec<(PathBuf, String, String)>,
@@ -2102,6 +2125,30 @@ impl Repo for FakeRepo {
         }
         Ok(())
     }
+    fn reset_branch(&mut self, dir: &Path, to: &str, expected_from: &str) -> Result<()> {
+        if self
+            .mid_rebase
+            .iter()
+            .chain(&self.detached)
+            .any(|d| d == dir)
+        {
+            bail!("{} has no branch checked out", dir.display());
+        }
+        if self.dirty.iter().any(|d| d == dir) {
+            bail!("{} has local changes the reset would lose", dir.display());
+        }
+        let head = self.head(dir)?;
+        if head != expected_from {
+            bail!("{} is at {head}, not {expected_from}", dir.display());
+        }
+        if let Some(why) = self.fail_reset.take() {
+            bail!("{why}");
+        }
+        self.heads.insert(dir.to_path_buf(), to.to_owned());
+        self.resets
+            .push((dir.to_path_buf(), to.to_owned(), expected_from.to_owned()));
+        Ok(())
+    }
     fn published(&self, dir: &Path, _remote: &str, base: &str, head: &str) -> Result<bool> {
         Ok(self
             .published
@@ -2336,6 +2383,9 @@ impl Repo for std::sync::Arc<std::sync::Mutex<FakeRepo>> {
     }
     fn set_head(&mut self, dir: &Path, new: &str, old: &str) -> Result<()> {
         self.lock().unwrap().set_head(dir, new, old)
+    }
+    fn reset_branch(&mut self, dir: &Path, to: &str, expected_from: &str) -> Result<()> {
+        self.lock().unwrap().reset_branch(dir, to, expected_from)
     }
     fn published(&self, dir: &Path, remote: &str, base: &str, head: &str) -> Result<bool> {
         self.lock().unwrap().published(dir, remote, base, head)
@@ -3265,6 +3315,51 @@ mod tests {
         let e = cli.set_head(&wt, &base, &one).unwrap_err();
         assert!(format!("{e:#}").contains("no branch checked out"), "{e:#}");
         assert_eq!(cli.head(&wt).unwrap(), one);
+    }
+
+    #[test]
+    fn reset_branch_is_refused_when_the_branch_moved_the_tree_is_dirty_or_detached() {
+        let dir = tempfile::tempdir().unwrap();
+        let (wt, base) = cut(dir.path());
+        let one = commit(&wt, "a", "1\n", &["-m", "one"]);
+        let mut cli = GitCli::default();
+        assert!(
+            cli.reset_branch(&wt, &base, &base).is_err(),
+            "not at the expected head"
+        );
+        assert_eq!(cli.head(&wt).unwrap(), one);
+        // A change to a file the reset would rewrite is kept by refusing.
+        std::fs::write(wt.join("a"), "edited\n").unwrap();
+        assert!(cli.reset_branch(&wt, &base, &one).is_err(), "dirty");
+        assert_eq!(cli.head(&wt).unwrap(), one);
+        sh(&wt, &["checkout", "-q", "--", "a"]);
+        sh(&wt, &["checkout", "-q", "--detach"]);
+        let e = cli.reset_branch(&wt, &base, &one).unwrap_err();
+        assert!(format!("{e:#}").contains("no branch checked out"), "{e:#}");
+        sh(&wt, &["checkout", "-q", "dispatch/1-x"]);
+        cli.reset_branch(&wt, &base, &one).unwrap();
+        assert_eq!(cli.head(&wt).unwrap(), base);
+        assert!(cli.is_clean(&wt).unwrap());
+    }
+
+    #[test]
+    fn the_fake_reset_branch_refuses_as_git_does() {
+        let dir = PathBuf::from("/wt");
+        let mut fake = FakeRepo::default();
+        fake.heads.insert(dir.clone(), "head0002".into());
+        assert!(fake.reset_branch(&dir, "head0001", "head0009").is_err());
+        fake.dirty.push(dir.clone());
+        assert!(fake.reset_branch(&dir, "head0001", "head0002").is_err());
+        fake.dirty.clear();
+        fake.detached.push(dir.clone());
+        assert!(fake.reset_branch(&dir, "head0001", "head0002").is_err());
+        fake.detached.clear();
+        fake.mid_rebase.push(dir.clone());
+        assert!(fake.reset_branch(&dir, "head0001", "head0002").is_err());
+        fake.mid_rebase.clear();
+        assert!(fake.resets.is_empty() && fake.head(&dir).unwrap() == "head0002");
+        fake.reset_branch(&dir, "head0001", "head0002").unwrap();
+        assert_eq!(fake.head(&dir).unwrap(), "head0001");
     }
 
     #[test]
