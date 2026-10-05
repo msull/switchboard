@@ -512,7 +512,7 @@ impl SwitchboardApp {
                         result: result.map_err(|e| e.to_string()),
                     })
             }
-            // Windows are the UI's; it raises the one asked for next frame.
+            // Windows are the UI's; `logic` raises the one asked for.
             Effect::FocusWindow(id) => {
                 self.ui_state.focus_windows.push(id);
                 None
@@ -899,8 +899,8 @@ impl SwitchboardApp {
 
     fn pump(&mut self) {
         self.serve_pending();
-        // Every frame, not every poll: a button press should land in
-        // the frame its wake-up requested.
+        // Every `logic` call, not every poll: a button press should land
+        // in the pass its wake-up requested.
         for event in self.services.controller.poll() {
             self.dispatch(AppAction::Controller(event));
         }
@@ -1000,12 +1000,17 @@ impl SwitchboardApp {
 }
 
 impl eframe::App for SwitchboardApp {
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+    /// eframe 0.36 skips `ui` while the root window is occluded or
+    /// minimized and calls only this, so anything that must keep ticking
+    /// (the control port, hook wakes, polls, the tick's own re-arm, the
+    /// window raises they ask for) lives here rather than in `ui`.
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.dispatch(AppAction::Tick);
         if self.last_poll.is_some() {
-            // Only after `start`: tests never poll, and never badge.
+            // Only after `start`: UI tests never call it, so they never
+            // poll or badge.
             self.pump();
-            ui.ctx().request_repaint_after(POLL_INTERVAL);
+            ctx.request_repaint_after(POLL_INTERVAL);
             let waiting = self.core.waiting_count();
             if self.badge != Some(waiting) {
                 crate::adapters::dock::set_waiting_badge(waiting);
@@ -1013,6 +1018,14 @@ impl eframe::App for SwitchboardApp {
                 self.badge = Some(waiting);
             }
         }
+        crate::ui::popout::raise(
+            ctx,
+            &self.core.settings().popouts,
+            std::mem::take(&mut self.ui_state.focus_windows),
+        );
+    }
+
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         crate::ui::draw(self, ui);
     }
 
@@ -1112,8 +1125,9 @@ impl SwitchboardApp {
         Ok(path)
     }
 
-    /// Answer every request that has arrived. Called once per frame; a
-    /// test calls it while its client waits.
+    /// Answer every request that has arrived. Called from `logic`, which
+    /// runs before every frame and while the window is hidden; a test
+    /// calls it while its client waits.
     pub fn serve_pending(&mut self) {
         let incoming: Vec<Incoming> = self
             .control

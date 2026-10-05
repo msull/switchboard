@@ -17,6 +17,7 @@ kept for reference and are not built by the main crate.
 | `09-popout` | Can a session live in a window of its own? | Yes: an immediate viewport drawn from the main frame holds the page, terminal, and side panel; its frame is saved to settings and restored. |
 | `10-nunchuk-serial` | Can a nunchuk drive the working set over USB serial? | Yes: one line per button change or stick flick from the Feather, read on a thread that reconnects; round trip 2 to 9 ms. Firmware in `firmware/nunchuk`. |
 | `11-gate-sandbox` | Can Dispatch's pipeline commands be confined to the ticket's tree on macOS? | Yes: `sandbox-exec` with `(allow default)`, writes denied except the tree, the attempt directory, the lane's caches and a base set; ~5 ms start-up; a refused write is `EPERM` and a tagged `deny(1)` line in the unified log. `setuid` programs and keychain creation fail inside it. |
+| `12-hidden-frames` | Does the frame loop keep running while the window is occluded or minimized? | Not before the fix: with the app hidden, a control query timed out after 10 s and was answered at once on unhide. With the tick and `pump` in `App::logic`, hidden queries answer in 75 to 103 ms (eframe's 100 ms throttle for invisible windows). The sleep and wake cycle is not yet measured. |
 | `04-terminal-view` | Embedded terminal or hand-off? | Hand off agents to Ghostty (`open -na Ghostty --args ... -e cmd`, raise by title); embed `egui_term` for shells, commands, services. |
 
 Findings are folded into `docs/design.md` under "Spike 0 results".

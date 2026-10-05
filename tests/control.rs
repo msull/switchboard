@@ -81,13 +81,25 @@ fn port_with(
 
 /// One call from a client thread, served by the app on this thread.
 fn call(port: &mut Port, request: Request) -> Reply {
+    call_with(port, request, SwitchboardApp::serve_pending)
+}
+
+/// Send `request` from a client thread and run `turn` on the app until
+/// the reply arrives, failing after five seconds.
+fn call_with(
+    port: &mut Port,
+    request: Request,
+    mut turn: impl FnMut(&mut SwitchboardApp),
+) -> Reply {
     let path = port.path.clone();
     let client = std::thread::spawn(move || {
         let mut client = Client::connect(&path).expect("connect");
         client.call(&request).expect("reply")
     });
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
     while !client.is_finished() {
-        port.app.serve_pending();
+        assert!(std::time::Instant::now() < deadline, "no reply");
+        turn(&mut port.app);
         std::thread::sleep(Duration::from_millis(2));
     }
     client.join().expect("client thread")
@@ -768,4 +780,19 @@ fn a_screen_is_the_panes_tail_with_secret_values_named() {
             text: "API_TOKEN=<API_TOKEN>".into()
         }
     );
+}
+
+/// eframe calls only `logic` while the window is occluded or minimized,
+/// so a request must be answered with no `ui` frame at all.
+#[test]
+fn served_while_the_window_is_hidden() {
+    let mut port = port(Loaded::default(), FakeOperations::default());
+    let ctx = egui::Context::default();
+    let mut frame = eframe::Frame::_new_kittest();
+    let reply = call_with(
+        &mut port,
+        Request::new("q", Body::Projects { space: None }),
+        |app| eframe::App::logic(app, &ctx, &mut frame),
+    );
+    assert!(matches!(reply, Reply::Projects { .. }), "{reply:?}");
 }

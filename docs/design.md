@@ -1855,6 +1855,22 @@ and CI (`scripts/ci-test.sh`) retries a failed test once and warns
 `flaky:` when the retry passes. A test binary that crashes without
 naming its failed tests fails CI with no retry.
 
+## Frames while hidden (2026-10-04)
+
+eframe 0.36 runs no egui pass while the root window is occluded or
+minimized; it calls only `App::logic`, once per honored repaint
+request. The tick, `pump` (the control port, the hook wake, the host
+and hook-log polls), the tick's `request_repaint_after` re-arm and the
+Dock badge therefore live in `SwitchboardApp::logic`, and so does
+raising a session window the core asked for; `ui` only draws. Work
+that must keep running while the window is hidden belongs in `logic`.
+While hidden, eframe throttles repaints to one per 100 ms, so a
+control request is answered within about 100 ms. Spike 12 has the
+measurements.
+
+Known gap: the sleep and wake cycle and the Dock badge while hidden
+were not measured; spike 12 lists the steps.
+
 ## Open questions
 
 - Shared project config runs with a hash-and-approve flow and no
