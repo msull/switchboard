@@ -1771,6 +1771,26 @@ line naming the holder, which writes `pid <n>: <command>` into the
 lock file. Gap: fetches, lane setup, rebases, port calls and PR reads
 on active tickets still run under a step's lock.
 
+`dispatch restart <ticket> [<stage>]` (`src/restart.rs`) gives a
+ticket a fixed pipeline: it puts the ticket at its stage, or an earlier
+one, under a fresh copy of the live file (`pipeline.<n>.toml`, the
+first copy never rewritten), with stages mapped by name. The intent
+rides on the park sequence, so nothing moves until every process is
+read back as gone. A ranged restart cancels the later completed work as
+discarded and resets each branch with `git reset --keep` to the head
+recorded as the ticket last advanced into that stage (`entered`, record
+version 12), restoring the lane's base and bring-up record; each reset
+is saved as it lands, and a refusal holds the restart parked with its
+intent, which `resume` will not drop. A lane whose `setup` changed runs
+it again, before a `check` answer's checks too, failing the checks
+rather than parking. No agent of the stage launches until its `rerun`
+question is answered, and attempts whose checks may be run again under
+the new copy are offered `check`. Gaps: no port body or Switchboard
+button yet (the CLI only); a ranged restart asks `rerun` again at each
+later agent stage it reaches, since those attempts are discarded too;
+and a ticket taken before version 12 has no entries, so it can only be
+restarted at its current stage.
+
 ## Global workspace status (2026-10-01)
 
 Built: `SpaceId::GLOBAL` and `SpaceId::contains` in the core, the rehydration

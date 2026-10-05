@@ -12581,3 +12581,1176 @@ fn the_message_dial_at_auto_keeps_the_message_without_asking() {
             .all(|d| d.name != "message")
     );
 }
+
+// --- restart
+
+/// The project's live pipeline file with `from` replaced by `to`; every
+/// ticket's copy is left as it was.
+fn live_edit(env: &Env, from: &str, to: &str) {
+    let path = env.data.pipeline(PROJECT);
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert!(text.contains(from), "{from} is not in the live file");
+    std::fs::write(path, text.replacen(from, to, 1)).unwrap();
+}
+
+const SETUP: &str = r#"setup = ["cargo", "fetch", "--locked"]"#;
+const FIXED_SETUP: &str = r#"setup = ["cargo", "fetch"]"#;
+const GATE_ARGV: &str = r#"argv = ["sh", "-c", "cargo test"]"#;
+const FIXED_ARGV: &str = r#"argv = ["sh", "-c", "cargo nextest run"]"#;
+
+fn restart_at(env: &mut Env, id: &str, stage: Option<&str>) -> Ticket {
+    let now = env.tick();
+    env.runner.restart(id, stage, now).unwrap()
+}
+
+fn restart_refused(env: &mut Env, id: &str, stage: Option<&str>) -> String {
+    let now = env.tick();
+    let e = env.runner.restart(id, stage, now).unwrap_err();
+    format!("{e:#}")
+}
+
+/// The one pending `rerun` decision about `stage`'s attempt `n`.
+fn rerun_about(env: &Env, id: &str, stage: &str, n: u32) -> Decision {
+    env.pending(id)
+        .into_iter()
+        .find(|d| d.name == "rerun" && d.attempt == Some((stage.to_owned(), n)))
+        .unwrap_or_else(|| {
+            panic!(
+                "no rerun question about {stage}/{n}: {:#?}",
+                env.pending(id)
+            )
+        })
+}
+
+fn answer(env: &mut Env, id: &str, d: &Decision, with: &str) {
+    let now = env.tick();
+    env.runner.decide(id, &d.id, with, None, now).unwrap();
+}
+
+/// Runs of `argv`, confined or not.
+fn setups_run(env: &Env, argv: &[&str]) -> usize {
+    let repo = env.repo.lock().unwrap();
+    let plain = repo.ran.iter().filter(|(_, a)| a == argv).count();
+    let confined = repo
+        .ran_confined
+        .iter()
+        .filter(|(_, a, _)| a == argv)
+        .count();
+    plain + confined
+}
+
+/// `implement`'s checks started after the implementer stopped; the key
+/// they run under.
+fn implement_checking(env: &mut Env) -> (String, String) {
+    let (id, implementer) = at_implement(env);
+    implementer_stops(env, &id, &implementer);
+    env.steps_until(&id, "the checks starting", |t, _| {
+        t.attempts_of("implement")
+            .last()
+            .is_some_and(|a| a.gate.is_some())
+    });
+    let key = format!("{id}/implement/1");
+    (id, key)
+}
+
+/// `implement`'s checks exited 127; the next start of the same checks
+/// runs until a test says otherwise.
+fn implement_checks_127(env: &mut Env) -> String {
+    let (id, key) = implement_checking(env);
+    env.repo
+        .lock()
+        .unwrap()
+        .check_exits
+        .insert(key.clone(), 127);
+    env.steps_until(&id, "the failure", |t, _| {
+        t.attempts_of("implement")
+            .last()
+            .is_some_and(|a| matches!(a.state, AttemptState::Failed { .. }))
+    });
+    env.repo.lock().unwrap().check_exits.remove(&key);
+    id
+}
+
+/// The 127 the issue was about: the pipeline is fixed, the ticket
+/// restarted at its stage, and `check` runs the new setup and the new
+/// gate on the same attempt, with no agent and no bring-up.
+#[test]
+fn a_restart_at_the_current_stage_runs_the_fixed_setup_and_gate_on_check() {
+    let mut env = Env::new();
+    let id = implement_checks_127(&mut env);
+    let d = rerun_about(&env, &id, "implement", 1);
+    assert_eq!(d.options, vec!["rerun", "check", "park"]);
+    assert!(d.question.contains("dispatch restart"), "{}", d.question);
+    live_edit(&env, SETUP, FIXED_SETUP);
+    live_edit(&env, GATE_ARGV, FIXED_ARGV);
+    let first = env.ticket(&id).pipeline_file.clone();
+    let first_text = std::fs::read_to_string(&first).unwrap();
+    let (fetched, rebased) = {
+        let repo = env.repo.lock().unwrap();
+        (repo.fetched.len(), repo.rebased.len())
+    };
+    let sessions = env.sb().sessions.len();
+    let t = restart_at(&mut env, &id, None);
+    assert!(t.active(), "{:?}", t.state);
+    assert_eq!(t.pipeline_file, first.with_file_name("pipeline.2.toml"));
+    assert_eq!(std::fs::read_to_string(&first).unwrap(), first_text);
+    assert!(
+        std::fs::read_to_string(&t.pipeline_file)
+            .unwrap()
+            .contains("nextest")
+    );
+    let r = &t.restarts[0];
+    assert_eq!((r.from.as_str(), r.to.as_str()), ("implement", "implement"));
+    assert_eq!(r.setup_again, vec!["repo"]);
+    assert!(r.reset.is_empty() && r.discarded.is_empty());
+    assert!(!t.lanes[0].setup_done);
+    assert_eq!(t.refreshed_stage, Some(t.stage), "no bring-up on re-entry");
+    assert_eq!(t.restart, None);
+    let kinds = events_of(&env.data, &id);
+    assert_eq!(
+        kinds.last().map(String::as_str),
+        Some("restarted"),
+        "{kinds:?}"
+    );
+    env.step();
+    let d = rerun_about(&env, &id, "implement", 1);
+    assert_eq!(d.options, vec!["rerun", "check", "park"]);
+    assert_eq!(
+        setups_run(&env, &["cargo", "fetch"]),
+        0,
+        "not before the answer"
+    );
+    answer(&mut env, &id, &d, "check");
+    env.steps_until(&id, "the new checks", |t, _| {
+        t.attempts_of("implement")
+            .last()
+            .is_some_and(|a| a.is_open() && a.gate.is_some())
+    });
+    assert_eq!(setups_run(&env, &["cargo", "fetch"]), 1);
+    let repo = env.repo.lock().unwrap();
+    assert_eq!(
+        repo.checks.last().unwrap().argv,
+        vec!["sh", "-c", "cargo nextest run"]
+    );
+    assert_eq!(
+        (repo.fetched.len(), repo.rebased.len()),
+        (fetched, rebased),
+        "no bring-up between the restart and the checks"
+    );
+    drop(repo);
+    assert_eq!(env.sb().sessions.len(), sessions, "no agent launched");
+    let t = env.ticket(&id);
+    assert_eq!(t.attempts_of("implement").count(), 1, "the same attempt");
+    assert!(t.lanes[0].setup_done);
+}
+
+/// A code review's checks exit 127 after a fix: the fixed setup runs
+/// before the review's checks start again on `check`.
+#[test]
+fn a_restart_at_a_review_stage_runs_the_fixed_setup_before_its_checks() {
+    let (mut env, id, _) = findings_asked_and_fixed();
+    let t = env.ticket(&id);
+    let round = &review_attempt(&t).rounds[0];
+    let fixer = round.implementer.clone().unwrap();
+    let response = round.response.clone().unwrap();
+    env.repo
+        .lock()
+        .unwrap()
+        .heads
+        .insert(t.lanes[0].worktree.clone(), "fix00001".into());
+    env.finish(
+        &fixer,
+        &response,
+        "- r1/style-1: fixed renamed it\n- r1/style-2: fixed added the line\n- r1/lint-1: fixed removed it\n",
+    );
+    env.steps_until(&id, "the checks after the fix", |t, _| {
+        review_attempt(t).gate.is_some()
+    });
+    let key = checks_key(&env.ticket(&id), 1);
+    env.repo
+        .lock()
+        .unwrap()
+        .check_exits
+        .insert(key.clone(), 127);
+    env.steps_until(&id, "the review failing at its checks", |t, _| {
+        matches!(review_attempt(t).state, AttemptState::Failed { .. })
+    });
+    env.repo.lock().unwrap().check_exits.remove(&key);
+    let n = review_attempt(&env.ticket(&id)).n;
+    assert_eq!(
+        rerun_about(&env, &id, "review-code", n).options,
+        vec!["rerun", "check", "park"]
+    );
+    live_edit(&env, SETUP, FIXED_SETUP);
+    assert!(restart_at(&mut env, &id, None).active());
+    env.step();
+    let d = rerun_about(&env, &id, "review-code", n);
+    assert_eq!(d.options, vec!["rerun", "check", "park"]);
+    let checks_before = env.repo.lock().unwrap().checks.len();
+    answer(&mut env, &id, &d, "check");
+    env.steps_until(&id, "the review's checks again", |t, _| {
+        let a = review_attempt(t);
+        a.is_open() && a.gate.is_some()
+    });
+    assert_eq!(setups_run(&env, &["cargo", "fetch"]), 1);
+    let repo = env.repo.lock().unwrap();
+    assert_eq!(repo.checks.len(), checks_before + 1);
+    assert_eq!(repo.checks.last().unwrap().key, key);
+}
+
+/// The fixed setup still fails: the checks fail with `check` offered
+/// again, and the ticket stays active rather than parking.
+#[test]
+fn a_setup_that_fails_on_check_fails_the_checks_and_keeps_check() {
+    let mut env = Env::new();
+    let id = implement_checks_127(&mut env);
+    live_edit(&env, SETUP, FIXED_SETUP);
+    restart_at(&mut env, &id, None);
+    env.step();
+    let d = rerun_about(&env, &id, "implement", 1);
+    env.repo.lock().unwrap().fail_run = Some("cargo: no such command".into());
+    answer(&mut env, &id, &d, "check");
+    env.steps_until(&id, "the checks failing on the setup", |t, _| {
+        t.pending_decisions().iter().any(|x| x.name == "rerun")
+    });
+    let t = env.ticket(&id);
+    assert!(t.active(), "{:?}", t.state);
+    let a = t.attempts_of("implement").last().unwrap();
+    let AttemptState::Failed { reason } = &a.state else {
+        panic!("{a:#?}")
+    };
+    assert!(reason.contains("setup failed"), "{reason}");
+    assert!(!t.lanes[0].setup_done);
+    let d = rerun_about(&env, &id, "implement", 1);
+    assert_eq!(d.options, vec!["rerun", "check", "park"]);
+    // Fixed for real this time: `check` runs it and starts the checks.
+    answer(&mut env, &id, &d, "check");
+    env.steps_until(&id, "the checks", |t, _| {
+        t.attempts_of("implement")
+            .last()
+            .is_some_and(|a| a.is_open() && a.gate.is_some())
+    });
+    assert!(env.ticket(&id).lanes[0].setup_done);
+}
+
+/// Checks the park stops mid-run: the attempt is cancelled, and its
+/// question offers `check`, which runs them again with no agent.
+#[test]
+fn a_cancelled_attempt_mid_check_is_offered_check() {
+    let mut env = Env::new();
+    let (id, key) = implement_checking(&mut env);
+    let started = env
+        .ticket(&id)
+        .attempts_of("implement")
+        .last()
+        .unwrap()
+        .gate
+        .clone()
+        .unwrap()
+        .started_ms;
+    let t = restart_at(&mut env, &id, None);
+    assert!(t.active(), "{:?}", t.state);
+    let a = t.attempts_of("implement").last().unwrap();
+    assert!(
+        matches!(&a.state, AttemptState::Cancelled { .. }) && a.failed_at_checks,
+        "{a:#?}"
+    );
+    env.step();
+    let d = rerun_about(&env, &id, "implement", 1);
+    assert_eq!(d.options, vec!["rerun", "check", "park"]);
+    answer(&mut env, &id, &d, "check");
+    env.steps_until(&id, "the checks again", |t, _| {
+        t.attempts_of("implement")
+            .last()
+            .is_some_and(|a| a.gate.is_some() && a.is_open())
+    });
+    {
+        // The fake forgets a killed check, so the one listed is the new one.
+        let repo = env.repo.lock().unwrap();
+        assert_eq!(repo.killed_checks, vec![key.clone()]);
+        assert_eq!(repo.checks.len(), 1);
+        assert_eq!(repo.checks[0].key, key);
+    }
+    let gate = env
+        .ticket(&id)
+        .attempts_of("implement")
+        .last()
+        .unwrap()
+        .gate
+        .clone()
+        .unwrap();
+    assert!(gate.started_ms > started, "a new run of the checks");
+    assert_eq!(env.sb().sessions_named("implementer").len(), 1);
+}
+
+/// Checks that ignore TERM hold the restart: the ticket stays parking
+/// with the intent until they are gone, then the restart applies.
+#[test]
+fn a_restart_waits_for_running_checks_then_applies() {
+    let mut env = Env::new();
+    let (id, key) = implement_checking(&mut env);
+    env.repo.lock().unwrap().stubborn_checks.push(key);
+    let t = restart_at(&mut env, &id, None);
+    assert!(
+        matches!(t.state, TicketState::Parking { .. }),
+        "{:?}",
+        t.state
+    );
+    assert!(t.restart.is_some());
+    env.step();
+    env.step();
+    let t = env.ticket(&id);
+    assert!(
+        matches!(t.state, TicketState::Parking { .. }),
+        "{:?}",
+        t.state
+    );
+    assert!(t.restart.is_some() && t.restarts.is_empty());
+    env.wait(STOP_LIMIT_MS);
+    env.steps_until(&id, "the restart applied", |t, _| t.active());
+    let t = env.ticket(&id);
+    assert_eq!(t.restarts.len(), 1);
+    assert_eq!(t.restart, None);
+}
+
+/// A runner that restarts while a restart waits on its checks carries
+/// it on from the record.
+#[test]
+fn a_runner_restart_mid_restart_carries_it_on() {
+    let mut env = Env::new();
+    let (id, key) = implement_checking(&mut env);
+    env.repo.lock().unwrap().stubborn_checks.push(key);
+    restart_at(&mut env, &id, None);
+    env.restart();
+    env.step();
+    assert!(env.ticket(&id).restart.is_some());
+    env.wait(STOP_LIMIT_MS);
+    env.steps_until(&id, "the restart applied", |t, _| t.active());
+    assert_eq!(env.ticket(&id).restarts.len(), 1);
+}
+
+/// At a gate-only stage the watch opens again under the new copy, with
+/// nothing launched.
+#[test]
+fn a_plain_restart_at_a_gate_only_stage_opens_the_gate_again() {
+    let mut env = Env::new();
+    let id = at_ready(&mut env);
+    let sessions = env.sb().sessions.len();
+    let t = restart_at(&mut env, &id, None);
+    assert!(t.active(), "{:?}", t.state);
+    let ready = t.attempts_of("ready").last().unwrap();
+    assert!(matches!(ready.state, AttemptState::Cancelled { .. }));
+    env.steps_until(&id, "a new ready attempt", |t, _| {
+        t.attempts_of("ready").last().is_some_and(|a| a.n == 2)
+    });
+    let t = env.ticket(&id);
+    let a = t.attempts_of("ready").last().unwrap();
+    assert_eq!(a.kind, AttemptKind::GateOnly);
+    assert!(a.is_open());
+    assert_eq!(env.sb().sessions.len(), sessions, "nothing launched");
+}
+
+/// The failures of the copy a restart replaced do not count against the
+/// new one's `max_reruns`.
+#[test]
+fn failures_under_the_old_copy_do_not_count_toward_max_reruns() {
+    let mut env = Env::new();
+    let (id, key) = implement_checking(&mut env);
+    with_max_reruns(&env, &env.ticket(&id), 1);
+    env.repo.lock().unwrap().check_exits.insert(key, 1);
+    env.steps_until(&id, "the first failure", |t, _| {
+        !t.pending_decisions().is_empty()
+    });
+    restart_at(&mut env, &id, None);
+    env.step();
+    let d = rerun_about(&env, &id, "implement", 1);
+    answer(&mut env, &id, &d, "rerun");
+    env.steps_until(&id, "a second implementer", |t, _| {
+        t.attempts_of("implement")
+            .last()
+            .is_some_and(|a| a.n == 2 && a.is_open())
+    });
+    let second = session_of(&env.ticket(&id), "implement");
+    implementer_stops(&mut env, &id, &second);
+    env.steps_until(&id, "the second checks", |t, _| {
+        t.attempts_of("implement")
+            .last()
+            .is_some_and(|a| a.gate.is_some())
+    });
+    env.repo
+        .lock()
+        .unwrap()
+        .check_exits
+        .insert(format!("{id}/implement/2"), 1);
+    env.steps_until(&id, "the second failure", |t, _| {
+        t.attempts_of("implement")
+            .last()
+            .is_some_and(|a| matches!(a.state, AttemptState::Failed { .. }))
+    });
+    let t = env.ticket(&id);
+    assert!(t.active(), "asked, not parked: {:?}", t.state);
+    rerun_about(&env, &id, "implement", 2);
+}
+
+/// An attempt carried into the new copy by `check` counts when it fails
+/// there: its failure and a rerun's make two, past a `max_reruns` of one.
+#[test]
+fn a_checked_attempt_failing_under_the_new_copy_counts_toward_max_reruns() {
+    let mut env = Env::new();
+    let (id, key) = implement_checking(&mut env);
+    with_max_reruns(&env, &env.ticket(&id), 1);
+    env.repo.lock().unwrap().check_exits.insert(key, 1);
+    env.steps_until(&id, "the first failure", |t, _| {
+        !t.pending_decisions().is_empty()
+    });
+    restart_at(&mut env, &id, None);
+    env.step();
+    let d = rerun_about(&env, &id, "implement", 1);
+    answer(&mut env, &id, &d, "check");
+    env.steps_until(&id, "the checks failing again", |t, _| {
+        t.pending_decisions().iter().any(|q| q.id != d.id)
+    });
+    let d = rerun_about(&env, &id, "implement", 1);
+    answer(&mut env, &id, &d, "rerun");
+    env.steps_until(&id, "a second implementer", |t, _| {
+        t.attempts_of("implement")
+            .last()
+            .is_some_and(|a| a.n == 2 && a.is_open())
+    });
+    let second = session_of(&env.ticket(&id), "implement");
+    implementer_stops(&mut env, &id, &second);
+    env.steps_until(&id, "the second checks", |t, _| {
+        t.attempts_of("implement")
+            .last()
+            .is_some_and(|a| a.gate.is_some())
+    });
+    env.repo
+        .lock()
+        .unwrap()
+        .check_exits
+        .insert(format!("{id}/implement/2"), 1);
+    env.steps_until(&id, "parked past max_reruns", |t, _| {
+        matches!(t.state, TicketState::Parked { .. })
+    });
+    let t = env.ticket(&id);
+    assert!(
+        matches!(&t.state, TicketState::Parked { reason } if reason.contains("failed 2 times")),
+        "{:?}",
+        t.state
+    );
+}
+
+/// Refusals: a closed ticket, a stage after the current one, and a live
+/// file that names a stage the ticket never ran before the target.
+#[test]
+fn a_restart_is_refused_for_a_closed_ticket() {
+    let mut env = Env::new();
+    let id = env.take(30).id;
+    let now = env.tick();
+    env.runner.close_by_hand(&id, None, now).unwrap();
+    let e = restart_refused(&mut env, &id, None);
+    assert!(e.contains("retake"), "{e}");
+}
+
+/// A ticket still parking for its own reasons is refused: the park
+/// sequence owns it until it reads parked.
+#[test]
+fn a_restart_is_refused_while_still_parking() {
+    let mut env = Env::new();
+    let (id, _) = at_implement(&mut env);
+    let mut t = env.ticket(&id);
+    t.state = TicketState::Parking {
+        reason: "by hand".into(),
+    };
+    env.runner.save_ticket(&mut t, env.now).unwrap();
+    let before = env.ticket(&id);
+    let e = restart_refused(&mut env, &id, None);
+    assert!(e.contains("still parking"), "{e}");
+    assert_eq!(env.ticket(&id), before, "nothing written");
+}
+
+#[test]
+fn a_restart_is_refused_for_a_stage_after_the_current_one() {
+    let mut env = Env::new();
+    let (id, _) = at_implement(&mut env);
+    let before = env.ticket(&id);
+    let e = restart_refused(&mut env, &id, Some("inspect"));
+    assert!(e.contains("comes after"), "{e}");
+    let e = restart_refused(&mut env, &id, Some("nowhere"));
+    assert!(e.contains("not a stage"), "{e}");
+    live_edit(
+        &env,
+        "[[stages]]\nname = \"implement\"",
+        "[[stages]]\nname = \"design\"\noperator = \"planner\"\ncontext = \"each\"\nwrites = [\"design\"]\nprompt = \"Design to {design}.\"\n\n[[stages]]\nname = \"implement\"",
+    );
+    let e = restart_refused(&mut env, &id, None);
+    assert!(e.contains("adds design before implement"), "{e}");
+    assert_eq!(env.ticket(&id), before, "nothing written");
+}
+
+/// A restart that discards work needs the heads recorded as the ticket
+/// entered the stage; a ticket taken before they were recorded has none.
+#[test]
+fn a_ranged_restart_is_refused_without_an_entry() {
+    let mut env = Env::new();
+    let id = at_inspect(&mut env);
+    let mut t = env.ticket(&id);
+    assert!(t.entered.iter().any(|e| e.stage == "implement"));
+    t.entered.clear();
+    dispatch::store::write_ticket(&env.data.ticket_file(&id), &t).unwrap();
+    let e = restart_refused(&mut env, &id, Some("implement"));
+    assert!(e.contains("no head is recorded for implement"), "{e}");
+    assert!(env.ticket(&id).active());
+}
+
+/// `at_inspect` with the implementer's commit at `work0001`: the tree
+/// moved during `implement`.
+fn at_inspect_with_work(env: &mut Env) -> String {
+    let (id, implementer) = at_implement(env);
+    let tree = env.ticket(&id).tree.clone().unwrap();
+    env.repo
+        .lock()
+        .unwrap()
+        .heads
+        .insert(tree, "work0001".into());
+    implementer_stops(env, &id, &implementer);
+    env.steps_until(&id, "the checks starting", |t, _| {
+        t.attempts_of("implement")
+            .last()
+            .is_some_and(|a| a.gate.is_some())
+    });
+    env.repo
+        .lock()
+        .unwrap()
+        .check_exits
+        .insert(format!("{id}/implement/1"), 0);
+    env.steps_until(&id, "the inspect question", |t, _| {
+        t.pending_decisions().iter().any(|d| d.name == "inspect")
+    });
+    id
+}
+
+/// A bring-up after the entry moved the lane's base; the restart back
+/// to the stage puts the base and the bring-up record back as they were
+/// at entry, and leaves what the remote holds alone.
+#[test]
+fn a_ranged_restart_restores_base_and_refreshed_from_the_entry() {
+    let mut env = Env::new();
+    let id = at_inspect_with_work(&mut env);
+    let mut t = env.ticket(&id);
+    let entry = t
+        .entered
+        .iter()
+        .rev()
+        .find(|e| e.stage == "implement")
+        .cloned()
+        .unwrap();
+    let at_entry = entry.lanes["repo"].clone();
+    let pushed = PushedHead {
+        head: "work0001".into(),
+        at_ms: 5,
+    };
+    t.lanes[0].base_sha = Some("moved001".into());
+    t.lanes[0].refreshed = Some(dispatch::ticket::Refreshed {
+        from: "base0000".into(),
+        to: "moved001".into(),
+        commits: true,
+        notes: None,
+        at_ms: 5,
+        conflict: None,
+        after: Some("work0001".into()),
+    });
+    t.lanes[0].pushed = Some(pushed.clone());
+    dispatch::store::write_ticket(&env.data.ticket_file(&id), &t).unwrap();
+    let t = restart_at(&mut env, &id, Some("implement"));
+    assert!(t.active(), "{:?}", t.state);
+    assert_eq!(t.lanes[0].base_sha, at_entry.base_sha);
+    assert_eq!(t.lanes[0].refreshed, at_entry.refreshed);
+    assert_eq!(t.lanes[0].pushed, Some(pushed), "what the remote holds");
+    assert_eq!(entry.heads["root"], "base0000");
+    assert_eq!(
+        env.repo.lock().unwrap().heads[t.tree.as_ref().unwrap()],
+        "base0000"
+    );
+}
+
+/// A send-back moves the stage and no branch, so the entry for
+/// `implement` is still the head before it first ran.
+#[test]
+fn a_ranged_restart_after_a_send_back_resets_to_the_head_before_the_stage_first_ran() {
+    let mut env = Env::new();
+    let id = at_inspect_with_work(&mut env);
+    env.inspect(&id, "rerun", Some("tighten it"));
+    env.steps_until(&id, "a second implementer", |t, _| {
+        t.attempts_of("implement")
+            .last()
+            .is_some_and(|a| a.n == 2 && a.is_open())
+    });
+    let tree = env.ticket(&id).tree.clone().unwrap();
+    env.repo
+        .lock()
+        .unwrap()
+        .heads
+        .insert(tree.clone(), "work0002".into());
+    let second = session_of(&env.ticket(&id), "implement");
+    implementer_stops(&mut env, &id, &second);
+    env.steps_until(&id, "the second checks", |t, _| {
+        t.attempts_of("implement")
+            .last()
+            .is_some_and(|a| a.gate.is_some())
+    });
+    env.repo
+        .lock()
+        .unwrap()
+        .check_exits
+        .insert(format!("{id}/implement/2"), 0);
+    env.steps_until(&id, "inspect again", |t, _| {
+        t.pending_decisions().iter().any(|d| d.name == "inspect")
+    });
+    let t = restart_at(&mut env, &id, Some("implement"));
+    assert!(t.active(), "{:?}", t.state);
+    let reset = &t.restarts[0].reset;
+    assert_eq!(reset.len(), 1);
+    assert_eq!(
+        (
+            reset[0].key.as_str(),
+            reset[0].from.as_str(),
+            reset[0].to.as_str()
+        ),
+        ("root", "work0002", "base0000")
+    );
+    assert_eq!(env.repo.lock().unwrap().heads[&tree], "base0000");
+}
+
+/// Git refuses the reset: the restart holds, parked with git's reason
+/// and its intent kept; a resume is refused while it is held, and the
+/// restart again finishes it.
+#[test]
+fn a_reset_refused_by_git_keeps_the_intent_and_resume_refuses() {
+    let mut env = Env::new();
+    let id = at_inspect_with_work(&mut env);
+    env.repo.lock().unwrap().fail_reset =
+        Some("error: Entry 'src/a.rs' not uptodate. Cannot merge.".into());
+    let t = restart_at(&mut env, &id, Some("implement"));
+    let TicketState::Parked { reason } = &t.state else {
+        panic!("{:?}", t.state)
+    };
+    assert!(
+        reason.starts_with("restart at implement held: ") && reason.contains("not uptodate"),
+        "{reason}"
+    );
+    assert!(t.restart.is_some() && t.restarts.is_empty());
+    let now = env.tick();
+    let Err(e) = env.runner.resume(&id, now) else {
+        panic!("a resume with a restart held")
+    };
+    assert!(format!("{e:#}").contains("part done"), "{e:#}");
+    // A pass leaves a held restart alone.
+    env.step();
+    assert!(matches!(env.ticket(&id).state, TicketState::Parked { .. }));
+    let t = restart_at(&mut env, &id, Some("implement"));
+    assert!(t.active(), "{:?}", t.state);
+    assert_eq!(t.restarts[0].reset.len(), 1);
+}
+
+/// A copy with a stage gone before the current one: the recorded
+/// conflicts move with their stage names, one at the stage gone is
+/// dropped, and no resolution review starts.
+#[test]
+fn a_restart_keeps_and_remaps_conflict_stages() {
+    let mut env = Env::new();
+    let id = at_inspect(&mut env);
+    let mut t = env.ticket(&id);
+    assert_eq!(t.stage, 5);
+    let conflict = |stage: usize| dispatch::ticket::RefreshConflict {
+        before: "head0001".into(),
+        from: "base0000".into(),
+        to: "main0002".into(),
+        commits: vec![],
+        stage,
+        at_ms: 0,
+    };
+    // `lanes` is stage 1, `implement` stage 4.
+    t.lanes[0].conflict = Some(conflict(1));
+    t.lanes[0].refreshed = Some(dispatch::ticket::Refreshed {
+        from: "base0000".into(),
+        to: "main0002".into(),
+        commits: true,
+        notes: None,
+        at_ms: 5,
+        conflict: Some(conflict(4)),
+        after: None,
+    });
+    dispatch::store::write_ticket(&env.data.ticket_file(&id), &t).unwrap();
+    live_edit(
+        &env,
+        "[[stages]]\nname = \"lanes\"\ngate = { kind = \"human\", decision = \"lanes\" }\n\n",
+        "",
+    );
+    let t = restart_at(&mut env, &id, None);
+    assert!(t.active(), "{:?}", t.state);
+    assert_eq!(t.stage, 4, "inspect, one stage earlier in the new copy");
+    assert_eq!(t.refreshed_stage, Some(4));
+    assert_eq!(t.lanes[0].conflict, None, "its stage is gone");
+    let moved = t.lanes[0].refreshed.as_ref().unwrap();
+    assert_eq!(moved.conflict.as_ref().map(|c| c.stage), Some(3));
+    env.step();
+    env.step();
+    assert!(env.ticket(&id).attempts_of(RESOLUTION).next().is_none());
+}
+
+/// A two-lane pipeline: the project's repository at `.`, a docs
+/// repository of its own at `docs`, each with a setup; the lanes
+/// question, a plan and an implement stage per lane, and a look.
+fn two_lane_pipeline(worktrees: &std::path::Path) -> String {
+    format!(
+        r#"
+version = 1
+
+[project]
+name = "Switchboard"
+repo = "git@github.com:msull/switchboard.git"
+worktrees = "{worktrees}"
+space = "Dispatch · Switchboard"
+
+[source]
+kind = "github"
+repo = "msull/switchboard"
+label = "dispatch"
+
+[[lanes]]
+name = "repo"
+path = "."
+setup = ["cargo", "fetch", "--locked"]
+
+[[lanes]]
+name = "docs"
+path = "docs"
+repo = "git@github.com:msull/docs.git"
+setup = ["mdbook", "build"]
+
+[operators.planner]
+kind = "claude"
+
+[operators.implementer]
+kind = "claude"
+
+[[stages]]
+name = "lanes"
+gate = {{ kind = "human", decision = "lanes" }}
+
+[[stages]]
+name = "plan"
+operator = "planner"
+context = "each"
+writes = ["plan"]
+prompt = "Plan to {{plan}} on {{branch}}."
+
+[[stages]]
+name = "implement"
+operator = "implementer"
+context = "each"
+writes = ["notes"]
+prompt = "Implement {{inputs.plan}} on {{branch}}."
+gate = {{ kind = "command", argv = ["sh", "-c", "cargo test"], in = "lane" }}
+
+[[stages]]
+name = "inspect"
+context = "each"
+gate = {{ kind = "human", decision = "inspect" }}
+
+[policy]
+slots = 4
+waiting_on_me = 6
+decisions = {{ lanes = "ask" }}
+"#,
+        worktrees = worktrees.display()
+    )
+}
+
+/// Every open attempt of `stage` finished with its artifact.
+fn finish_all(env: &mut Env, id: &str, stage: &str, artifact: &str) {
+    let t = env.ticket(id);
+    let open: Vec<Attempt> = t
+        .attempts_of(stage)
+        .filter(|a| a.is_open())
+        .cloned()
+        .collect();
+    for a in open {
+        env.finish(
+            a.session.as_ref().unwrap(),
+            &a.artifacts[artifact],
+            "# done",
+        );
+    }
+}
+
+/// A two-lane ticket with both lanes chosen, both plans done and both
+/// implementers running.
+fn two_lanes(env: &mut Env, pipeline_text: &str) -> String {
+    std::fs::write(env.data.pipeline(PROJECT), pipeline_text).unwrap();
+    let id = env.take(21).id;
+    env.steps_until(&id, "the lanes question", |t, _| {
+        t.pending_decisions().iter().any(|d| d.name == "lanes")
+    });
+    let d = env
+        .pending(&id)
+        .into_iter()
+        .find(|d| d.name == "lanes")
+        .unwrap();
+    answer(env, &id, &d, "repo,docs");
+    env.steps_until(&id, "both planners", |t, _| {
+        t.attempts_of("plan").filter(|a| a.is_open()).count() == 2
+    });
+    finish_all(env, &id, "plan", "plan");
+    env.steps_until(&id, "both implementers", |t, _| {
+        t.attempts_of("implement").filter(|a| a.is_open()).count() == 2
+    });
+    id
+}
+
+/// Both implementers stop and their checks start; each lane's attempt
+/// number and checks key.
+fn two_lanes_checking(env: &mut Env, id: &str) -> Vec<(String, u32, String)> {
+    finish_all(env, id, "implement", "notes");
+    env.steps_until(id, "both checks", |t, _| {
+        t.attempts_of("implement")
+            .filter(|a| a.gate.is_some())
+            .count()
+            == 2
+    });
+    env.ticket(id)
+        .attempts_of("implement")
+        .map(|a| (a.context.clone(), a.n, format!("{id}/implement/{}", a.n)))
+        .collect()
+}
+
+/// One lane passed its checks and one failed at them: a plain restart
+/// discards the pass too, so both lanes meet the new gate, each asked
+/// with `check`, and neither launches an agent.
+#[test]
+fn a_plain_restart_of_an_each_stage_discards_the_lanes_that_passed() {
+    let mut env = Env::new();
+    let text = two_lane_pipeline(&env.worktrees);
+    let id = two_lanes(&mut env, &text);
+    let lanes = two_lanes_checking(&mut env, &id);
+    {
+        let mut repo = env.repo.lock().unwrap();
+        repo.check_exits.insert(lanes[0].2.clone(), 0);
+        repo.check_exits.insert(lanes[1].2.clone(), 1);
+    }
+    env.steps_until(&id, "one pass and one failure", |t, _| {
+        !t.pending_decisions().is_empty()
+    });
+    {
+        let mut repo = env.repo.lock().unwrap();
+        repo.check_exits.clear();
+    }
+    live_edit(&env, GATE_ARGV, FIXED_ARGV);
+    let implementers = env.sb().sessions_named("implementer").len();
+    let t = restart_at(&mut env, &id, None);
+    assert!(t.active(), "{:?}", t.state);
+    assert_eq!(
+        t.restarts[0].discarded,
+        vec![("implement".to_owned(), lanes[0].1)]
+    );
+    env.step();
+    let checks_before = env.repo.lock().unwrap().checks.len();
+    for (_, n, _) in &lanes {
+        let d = rerun_about(&env, &id, "implement", *n);
+        assert_eq!(d.options, vec!["rerun", "check", "park"]);
+        answer(&mut env, &id, &d, "check");
+    }
+    env.steps_until(&id, "both checks again", |t, _| {
+        t.attempts_of("implement")
+            .filter(|a| a.is_open() && a.gate.is_some())
+            .count()
+            == 2
+    });
+    let repo = env.repo.lock().unwrap();
+    assert_eq!(repo.checks.len(), checks_before + 2);
+    for c in &repo.checks[checks_before..] {
+        assert_eq!(c.argv, vec!["sh", "-c", "cargo nextest run"]);
+    }
+    drop(repo);
+    assert_eq!(env.sb().sessions_named("implementer").len(), implementers);
+}
+
+/// Only the lane whose setup changed runs it again.
+#[test]
+fn a_restart_reruns_setup_only_where_it_changed() {
+    let mut env = Env::new();
+    let text = two_lane_pipeline(&env.worktrees);
+    let id = two_lanes(&mut env, &text);
+    let t = env.ticket(&id);
+    assert!(t.lanes.iter().all(|l| l.setup_done));
+    live_edit(
+        &env,
+        r#"setup = ["mdbook", "build"]"#,
+        r#"setup = ["mdbook", "build", "--strict"]"#,
+    );
+    let t = restart_at(&mut env, &id, None);
+    assert_eq!(t.restarts[0].setup_again, vec!["docs"]);
+    let done: Vec<(&str, bool)> = t
+        .lanes
+        .iter()
+        .map(|l| (l.name.as_str(), l.setup_done))
+        .collect();
+    assert_eq!(done, vec![("repo", true), ("docs", false)]);
+}
+
+/// Back to `plan` from `inspect`: the ticket's tree and the docs lane's
+/// own branch are reset to their heads as the ticket entered `plan`,
+/// `plan` and `implement` are discarded, `plan` asks before it runs,
+/// and the next pass brings the branches up again.
+#[test]
+fn a_restart_at_an_earlier_stage_resets_each_lane_to_its_entry_head() {
+    let mut env = Env::new();
+    let text = two_lane_pipeline(&env.worktrees);
+    let id = two_lanes(&mut env, &text);
+    let t = env.ticket(&id);
+    let plan_entry = t
+        .entered
+        .iter()
+        .rev()
+        .find(|e| e.stage == "plan")
+        .cloned()
+        .unwrap();
+    let tree = t.tree.clone().unwrap();
+    let docs = t.lanes[1].worktree.clone();
+    {
+        let mut repo = env.repo.lock().unwrap();
+        repo.heads.insert(tree.clone(), "work0001".into());
+        repo.heads.insert(docs.clone(), "docs0001".into());
+    }
+    let lanes = two_lanes_checking(&mut env, &id);
+    {
+        let mut repo = env.repo.lock().unwrap();
+        for (_, _, key) in &lanes {
+            repo.check_exits.insert(key.clone(), 0);
+        }
+    }
+    env.steps_until(&id, "inspect", |t, _| {
+        t.pending_decisions().iter().any(|d| d.name == "inspect")
+    });
+    let planners = env.sb().sessions_named("planner").len();
+    let t = restart_at(&mut env, &id, Some("plan"));
+    assert!(t.active(), "{:?}", t.state);
+    assert_eq!(t.stage, 1);
+    assert_eq!(t.refreshed_stage, None, "brought up on re-entry");
+    {
+        let repo = env.repo.lock().unwrap();
+        assert_eq!(repo.heads[&tree], plan_entry.heads["root"]);
+        assert_eq!(repo.heads[&docs], plan_entry.heads["docs"]);
+    }
+    let keys: Vec<&str> = t.restarts[0].reset.iter().map(|h| h.key.as_str()).collect();
+    assert_eq!(keys, vec!["root", "docs"]);
+    for a in t.attempts_of("plan").chain(t.attempts_of("implement")) {
+        assert!(
+            matches!(&a.state, AttemptState::Cancelled { reason } if reason == "discarded by restart at plan"),
+            "{a:#?}"
+        );
+    }
+    assert!(t.pending_decisions().is_empty());
+    let entry = t.entered.last().unwrap();
+    assert_eq!(entry.stage, "plan");
+    assert_eq!(entry.heads["root"], plan_entry.heads["root"]);
+    env.step();
+    let t = env.ticket(&id);
+    for a in t.attempts_of("plan") {
+        let d = rerun_about(&env, &id, "plan", a.n);
+        assert_eq!(d.options, vec!["rerun", "park"]);
+    }
+    assert_eq!(
+        env.sb().sessions_named("planner").len(),
+        planners,
+        "nothing launched"
+    );
+}
+
+/// Back to `lanes`: the answer is withdrawn, every lane is chosen
+/// again, and the question is asked afresh.
+#[test]
+fn a_restart_before_lanes_asks_lanes_again() {
+    let mut env = Env::new();
+    let text = two_lane_pipeline(&env.worktrees);
+    std::fs::write(env.data.pipeline(PROJECT), &text).unwrap();
+    let id = env.take(22).id;
+    env.steps_until(&id, "the lanes question", |t, _| {
+        t.pending_decisions().iter().any(|d| d.name == "lanes")
+    });
+    let first = env
+        .pending(&id)
+        .into_iter()
+        .find(|d| d.name == "lanes")
+        .unwrap();
+    answer(&mut env, &id, &first, "repo");
+    env.steps_until(&id, "the planner", |t, _| {
+        t.attempts_of("plan").next().is_some()
+    });
+    let t = env.ticket(&id);
+    assert_eq!(t.lanes.iter().filter(|l| l.chosen).count(), 1);
+    assert_eq!(
+        t.entered[0].stage, "lanes",
+        "the first stage's entry, at the cut"
+    );
+    let t = restart_at(&mut env, &id, Some("lanes"));
+    assert!(t.active(), "{:?}", t.state);
+    assert!(t.lanes.iter().all(|l| l.chosen));
+    assert!(matches!(
+        t.decisions.iter().find(|d| d.id == first.id).unwrap().state,
+        DecisionState::Cancelled
+    ));
+    env.steps_until(&id, "the lanes question again", |t, _| {
+        t.pending_decisions().iter().any(|d| d.name == "lanes")
+    });
+}
+
+#[test]
+fn a_restart_is_refused_when_the_live_file_drops_a_lane() {
+    let mut env = Env::new();
+    let text = two_lane_pipeline(&env.worktrees);
+    let id = two_lanes(&mut env, &text);
+    live_edit(
+        &env,
+        "[[lanes]]\nname = \"docs\"\npath = \"docs\"\nrepo = \"git@github.com:msull/docs.git\"\nsetup = [\"mdbook\", \"build\"]\n",
+        "",
+    );
+    let e = restart_refused(&mut env, &id, None);
+    assert!(e.contains("drops lane docs"), "{e}");
+    std::fs::write(
+        env.data.pipeline(PROJECT),
+        text.replace("path = \"docs\"", "path = \"documentation\""),
+    )
+    .unwrap();
+    let e = restart_refused(&mut env, &id, None);
+    assert!(e.contains("changes lane docs"), "{e}");
+}
+
+/// Someone else's branches are never reset: a ticket from pull requests
+/// restarts only at its current stage.
+#[test]
+fn a_restart_is_refused_ranged_on_a_pull_request_ticket() {
+    let mut env = Env::new();
+    let worktrees = env.data.root.join("wt");
+    std::fs::write(env.data.pr_pipeline(PROJECT), pr_pipeline(&worktrees)).unwrap();
+    open_pr(
+        &env,
+        "msull/switchboard",
+        9,
+        "feature/escape",
+        "Escape leaves the field",
+    );
+    open_pr(
+        &env,
+        "msull/docs",
+        3,
+        "feature/escape-docs",
+        "Document escape",
+    );
+    seed_pr_bases(&env);
+    let now = env.tick();
+    let t =
+        dispatch::serve::take_pull_requests(&mut env.runner, PROJECT, &["repo/9", "docs/3"], now)
+            .unwrap();
+    let id = t.id.clone();
+    for _ in 0..2 {
+        env.inspect(&id, "proceed", None);
+    }
+    env.steps_until(&id, "the merge stage", |t, _| t.stage == 1);
+    let e = restart_refused(&mut env, &id, Some("inspect"));
+    assert!(e.contains("someone else's branches"), "{e}");
+    let t = restart_at(&mut env, &id, None);
+    assert!(t.active(), "{:?}", t.state);
+    assert!(t.pipeline_file.ends_with("pipeline.2.toml"));
+}
+
+/// An `each` code review with one lane finished and one failed at its
+/// checks: the finished lane is asked `rerun | park` (its fold and
+/// summary are done; checks that pass would rewrite it again), the
+/// failed one `rerun | check | park`, and the restart rewrites nothing.
+#[test]
+fn a_plain_restart_of_a_review_stage_offers_a_finished_lane_rerun_or_park() {
+    let mut env = Env::new();
+    let text = two_lane_pipeline(&env.worktrees)
+        .replace(
+            "[operators.implementer]\n",
+            "[operators.lint]\nkind = \"command\"\nargv = [\"sh\", \"-c\", \"lint\"]\n\n[operators.implementer]\n",
+        )
+        .replace(
+            "[[stages]]\nname = \"inspect\"\n",
+            "[[stages]]\nname = \"review-code\"\ncontext = \"each\"\nreviewers = [\"lint\"]\nimplementer = \"implementer\"\ncap = 2\ngate = { kind = \"command\", like = \"implement\" }\n\n[[stages]]\nname = \"inspect\"\n",
+        );
+    let id = two_lanes(&mut env, &text);
+    let lanes = two_lanes_checking(&mut env, &id);
+    {
+        let mut repo = env.repo.lock().unwrap();
+        for (_, _, key) in &lanes {
+            repo.check_exits.insert(key.clone(), 0);
+        }
+    }
+    env.steps_until(&id, "both reviews", |t, _| {
+        t.attempts_of("review-code")
+            .filter(|a| {
+                a.rounds
+                    .last()
+                    .is_some_and(|r| r.reviewers.iter().all(|x| x.launched))
+            })
+            .count()
+            == 2
+    });
+    let t = env.ticket(&id);
+    for a in t.attempts_of("review-code") {
+        let r = &a.rounds[0].reviewers[0];
+        std::fs::write(&r.feedback, "No findings.\n").unwrap();
+        env.repo
+            .lock()
+            .unwrap()
+            .check_exits
+            .insert(format!("{id}/review-code/{}/r1/lint", a.n), 0);
+    }
+    env.steps_until(&id, "both rounds converged", |t, _| {
+        t.attempts_of("review-code")
+            .filter(|a| a.rounds[0].state == RoundState::Converged)
+            .count()
+            == 2
+    });
+    let docs = env.ticket(&id).lanes[1].worktree.clone();
+    env.repo.lock().unwrap().dirty.push(docs);
+    env.steps_until(&id, "one complete, one failed at its checks", |t, _| {
+        let states: Vec<&AttemptState> = t.attempts_of("review-code").map(|a| &a.state).collect();
+        states.contains(&&AttemptState::Complete)
+            && states
+                .iter()
+                .any(|s| matches!(s, AttemptState::Failed { .. }))
+    });
+    env.repo.lock().unwrap().dirty.clear();
+    let t = env.ticket(&id);
+    let done = t
+        .attempts_of("review-code")
+        .find(|a| a.state == AttemptState::Complete)
+        .unwrap()
+        .n;
+    let failed = t
+        .attempts_of("review-code")
+        .find(|a| matches!(a.state, AttemptState::Failed { .. }))
+        .unwrap()
+        .n;
+    let (replays, sets) = {
+        let repo = env.repo.lock().unwrap();
+        (repo.replayed.len(), repo.head_sets.len())
+    };
+    let t = restart_at(&mut env, &id, None);
+    assert!(t.active(), "{:?}", t.state);
+    env.step();
+    assert_eq!(
+        rerun_about(&env, &id, "review-code", done).options,
+        vec!["rerun", "park"]
+    );
+    assert_eq!(
+        rerun_about(&env, &id, "review-code", failed).options,
+        vec!["rerun", "check", "park"]
+    );
+    let repo = env.repo.lock().unwrap();
+    assert_eq!((repo.replayed.len(), repo.head_sets.len()), (replays, sets));
+}

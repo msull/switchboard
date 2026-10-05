@@ -1473,6 +1473,11 @@ impl Runner {
             let reason = format!("no checks command for context {}", a.context);
             return self.fail_attempt(t, ps, &key.0, key.1, &reason, now_ms);
         };
+        // A setup a restart changed runs before the checks, as a command
+        // gate's does, and a failure fails the checks.
+        if let Some(reason) = self.run_setup(t, p, cwd, now_ms)? {
+            return self.fail_checks(t, ps, &key.0, key.1, &reason, now_ms);
+        }
         if !self.git.is_clean(cwd)? {
             let reason = format!(
                 "the tree at {} is not clean before the checks",

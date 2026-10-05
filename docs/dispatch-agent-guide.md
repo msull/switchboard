@@ -37,6 +37,7 @@ dispatch queue <project> <ticket>...              reorder it
 dispatch park <ticket> [--reason <text>]          a ticket's work stopped, its questions withdrawn
 dispatch resume <ticket> [--no-rerun]             a parked ticket back to active; what the park cancelled runs again
 dispatch close <ticket> [--reason <text>]         a ticket closed, its trees removed (its branches are kept; close lists them)
+dispatch restart <ticket> [<stage>]               a ticket at its stage, or an earlier one, under the live pipeline; later work discarded
 dispatch health [--timeout <secs>] [--stale <secs>] [--json]   is the runner alive and getting on; run it first
 dispatch show <ticket> [--json]                   one ticket: stage, lanes, attempts, rounds, decisions, files
 dispatch events [--since <seq>] [--follow] [--ticket <id>]... [--project <name>] [--json]
@@ -183,7 +184,8 @@ files rather than guessing what they say.
 
 **Events.** Every ticket write that changes something appends one
 line per change to `events.jsonl` in the data directory: `taken`,
-`stage` (forward) and `sent-back`, `attempt-started` and
+`stage` (forward) and `sent-back`, `restarted` (a `dispatch restart`
+applied, in place of the stage move), `attempt-started` and
 `attempt-ended` (with its state and reason), `decision` (its name,
 question and options), `answered` and `decision-cancelled`, `pr` and
 `pr-checks`, `pushed` and `refreshed`, `rewrite`, `round` (a code
@@ -234,13 +236,14 @@ waits, `--for decision` returns it at once, printed, with exit 0, and a
 decision answered before the wait reads it is passed over. A ticket
 already parked or closed ends every wait at once with exit 3 and the
 reason, except `--for closed` on a closed ticket, which exits 0.
-`--for stage` waits for a stage move, `--for pr` for a PR bound to an
-attempt, `--for closed` for the close, and `--for any` (the default)
-for the next event of any kind. A stage move or a PR needs a before
-state, so without a cursor `--for stage` and `--for pr` wait for the
-next one. With `--since <seq>`, the first matching event after the
-cursor returns at once, whoever caused it. Every match is checked
-against the record first, so a withdrawn event is never returned.
+`--for stage` waits for a stage move or a restart, `--for pr` for a
+PR bound to an attempt, `--for closed` for the close, and `--for any`
+(the default) for the next event of any kind. A stage move or a PR
+needs a before state, so without a cursor `--for stage` and `--for pr`
+wait for the next one. With `--since <seq>`, the first matching event
+after the cursor returns at once, whoever caused it. Every match is
+checked against the record first, so a withdrawn event is never
+returned.
 
 To wait on your own action, take the log's tail just before you act,
 act, then wait with `--since`. The tail is the `seq` of the last line
@@ -443,13 +446,20 @@ nothing needs restarting. What a change reaches depends on the key:
   one line per project for that reason.
 - Everything else (lanes, `setup`, gates, operators, stages, prompts,
   the `decisions` dials) is copied into a ticket when it is taken.
-  Tickets already running keep their copy to the end, so a fix to a
-  lane's `setup` or gate command reaches only tickets taken after it.
-  To apply such a fix to a ticket that has already failed on the old
-  command, the owner has to retake it; say so in your report rather
-  than answering `rerun` or `check`, which both run the old copy.
-- A lane's `setup` runs once per worktree, when it is cut. It is not
-  run again later, whatever the file says now.
+  Tickets already running keep their copy until they are restarted, so
+  a fix to a lane's `setup` or gate command reaches only tickets taken
+  after it and tickets restarted after it. To apply such a fix to a
+  ticket that has already failed on the old command: fix the pipeline
+  (when the owner delegated that), run `dispatch restart <ticket>`, then
+  answer the `rerun` question `check` to run the new checks on the same
+  work (or `rerun` for a fresh agent). Answering `check` without the
+  restart runs the old copy. Name a stage (`dispatch restart <ticket>
+  plan`) to go back to it and discard the later work; the branches go
+  back to where they were as the ticket entered that stage. A restart
+  launches no agent by itself.
+- A lane's `setup` runs once per worktree, before the lane's first
+  agent, and again after a restart that changed it: before the next
+  agent or the checks a `check` answer starts.
 
 Before saving, read the file back: a pipeline that does not parse is
 refused at the next `take` with the parser's reason, and `status`

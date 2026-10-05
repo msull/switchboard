@@ -263,6 +263,31 @@ pub struct TicketView {
     /// The files a reader opens next, filled for a single ticket's view
     /// and left empty in a status, which reads no directories.
     pub paths: PathsView,
+    /// Every restart, oldest first.
+    pub restarts: Vec<RestartView>,
+}
+
+/// A restart: the ticket put at a stage under a fresh copy of the live
+/// pipeline.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RestartView {
+    /// When it applied.
+    pub at_ms: u64,
+    /// The stage it stood at.
+    pub from: String,
+    /// The stage it was put at.
+    pub to: String,
+    /// The copy earlier attempts ran under.
+    pub before: PathBuf,
+    /// The copy the restart wrote.
+    pub after: PathBuf,
+    /// Attempts discarded, as `stage/n`.
+    pub discarded: Vec<String>,
+    /// Branches moved back, as `key from → to` with short heads.
+    pub reset: Vec<String>,
+    /// Lanes whose setup runs again.
+    pub setup_again: Vec<String>,
 }
 
 impl TicketView {

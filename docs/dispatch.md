@@ -117,8 +117,10 @@ confined; they run in Switchboard.
   operator, a prompt, which context it runs in (the root, each lane,
   or all lanes joined), and a gate that says when it is done. When a
   ticket is taken, the pipeline file is copied whole into the ticket's
-  directory, and the ticket runs from that copy until it finishes;
-  editing the project's file changes only tickets taken afterwards.
+  directory, and the ticket runs from that copy until it finishes or is
+  restarted (`dispatch restart`, below); editing the project's file
+  changes only tickets taken afterwards and tickets restarted after the
+  edit.
   Reviewer definitions are installed into Switchboard under
   `Dispatch: <operator>@<content hash>`, so an edited definition is a
   new name and a run in flight keeps looking up the one it started
@@ -244,6 +246,52 @@ ticket fails a lost launch without parking it or asking. A card left on the
 set with nothing else to show (a close stopped before the project was
 saved) is cleared on the next pass under that ticket's ledger.
 
+Restarting a ticket is the way to give it a fixed pipeline. `dispatch
+restart <ticket> [<stage>]` puts the ticket at its current stage, or at
+an earlier one named, under a fresh copy of the project's live file
+(`<project>.pr.toml` for a ticket from pull requests). It is checked
+before anything is written, and refused for a closing or closed ticket
+(that is a retake), for one still parking, for a live file that is
+missing, does not parse, names another project, lacks the stage, adds a
+stage before it that the ticket never ran, drops one of the ticket's
+lanes, or changes a lane's `path`, `repo`, `base` or `remote` or the
+project's `repo`, `base`, `remote` or `worktrees`, and for a stage after
+the current one. Then the intent is saved on the ticket together with
+`parking`, and the park sequence runs: open attempts cancelled, every
+process read back as gone. Only then, on that call or a later pass, does
+the restart apply; until it does, `dispatch restart` says the runner
+finishes it. Stages are mapped by name into the new copy, which is
+written beside the old ones as `pipeline.<n>.toml`; the first copy is
+never rewritten. A stage named earlier than the current one discards
+the later work: every completed attempt from that stage on is
+cancelled as discarded, with its decisions and the stages' decisions
+(an answered `lanes` question too, which chooses every lane again), and
+each branch (the ticket's tree, and each lane with a repository of its
+own) is reset with `git reset --keep` to the head it had as the ticket
+last advanced into that stage, with the lane's base, bring-up record
+and conflict put back as they were then. A ticket records those heads
+on every advance (`entered`); one taken before that has none, and a
+ranged restart of it is refused, as it is for a project that works in
+place and for a ticket from pull requests. Each branch is checked (on
+its branch, not mid-rebase, clean) before any moves, and each reset is
+saved as it lands; a refused one parks the ticket with git's reason and
+the intent kept, `resume` refuses while a restart is held, and
+`dispatch restart` again carries it on. A restart at the current stage
+discards that stage's completed attempts too, gate-only ones included,
+and keeps the stage as brought up, so no bring-up runs. A lane whose
+`setup` differs between the copies runs it again: before its next
+agent, and before the checks a `check` answer starts, where a failing
+setup fails the checks (with `check` offered again) rather than parking.
+No agent of the stage launches until its `rerun` question is answered:
+an attempt that failed at its checks, an agent attempt cancelled or
+discarded with its checks started, and a code review cancelled mid-check
+before its rewrite are offered `rerun | check | park`, so `check` runs
+the new gate on the same head; any other attempt, a finished code
+review included, is offered `rerun | park`. A gate-only stage opens its
+watch or question again at once, and after a ranged restart the reset
+branches are brought up on re-entry, as on any stage entry. Failures
+under an earlier copy do not count against `max_reruns`.
+
 Ticket and project records carry a `version`. Every read goes through
 `store::read_ticket` and `store::read_project`, which refuse a record
 from a newer `dispatch` and bring an older one up through
@@ -269,6 +317,9 @@ bring-up resolved and the head it reached; all are absent in older
 records, so a bring-up recorded before the upgrade gets no resolution
 review.
 Version 10 adds a rewrite's `stale` and `message`, empty and absent in
+older records.
+Version 11 adds a conflict's `at_ms`, 0 in older records. Version 12
+adds a ticket's `restarts`, `restart` and `entered`, empty and absent in
 older records.
 
 ### The event log and the runner's status
@@ -2092,7 +2143,14 @@ and one against the real one:
 | Plan file from an earlier attempt exists | The new attempt's own path is empty, so nothing advances |
 | `project.add` fails to save | `failed` reply; attempt failed; nothing else made |
 | `slots` raised in the project's live pipeline file while a ticket waits on a copy that says one | The waiting ticket starts on the next pass; the limits are the live file's, a ticket's frozen copy standing in only when the live file is unreadable (`slots_come_from_the_live_pipeline_file_not_a_tickets_copy`) |
-| A gate exits 127 | The `rerun` question says a command was not found, names the lane's `setup` and the runner's `PATH` as the cause, and says new tickets pick up a fixed pipeline while this one runs on its copy |
+| A gate exits 127 | The `rerun` question says a command was not found, names the lane's `setup` and the runner's `PATH` as the cause, and says to fix the pipeline, run `dispatch restart <ticket>` and answer `check`, since checking again without a restart runs the old copy |
+| The pipeline is fixed, the ticket restarted at its stage, `check` answered | The new setup and the new gate run on the same attempt, with no agent and no bring-up (`a_restart_at_the_current_stage_runs_the_fixed_setup_and_gate_on_check`) |
+| A restart while the stage's checks ignore TERM | The ticket stays `parking` with the intent until they are gone, then the restart applies (`a_restart_waits_for_running_checks_then_applies`) |
+| `dispatch restart` on a ticket still parking without a restart | Refused with "still parking"; nothing written (`a_restart_is_refused_while_still_parking`) |
+| Git refuses a ranged restart's reset | The ticket parks with git's reason and the intent kept; `resume` is refused while it is held; `dispatch restart` again finishes it (`a_reset_refused_by_git_keeps_the_intent_and_resume_refuses`) |
+| A ranged restart of a ticket taken before version 12 | Refused: no head is recorded for the stage; the ticket stays active (`a_ranged_restart_is_refused_without_an_entry`) |
+| A ranged restart of a ticket from pull requests | Refused: someone else's branches are never reset; only its current stage restarts (`a_restart_is_refused_ranged_on_a_pull_request_ticket`) |
+| A restart, `check` fails under the new copy, then a rerun fails, with `max_reruns = 1` | Two failures under the new copy: the ticket parks; failures under the old copy are not counted (`a_checked_attempt_failing_under_the_new_copy_counts_toward_max_reruns`, `failures_under_the_old_copy_do_not_count_toward_max_reruns`) |
 | `status` and `queue` list a pull-request ticket | Its source reads `pr <lane>/<n>` (lanes joined by `+`), never `#<n>`, so it cannot be mistaken for the issue of that number; piping either command into `head` ends quietly |
 | `take <project> pr <lane>/<n>...` | A ticket on `<project>.pr.toml` with one PR per named lane, refused for a closed PR, an unknown or repeated lane, an unknown remote, two lanes in one repository, or a PR already on a live ticket |
 | A pull-request ticket's first pass | Each PR's lane is a worktree on the PR's branch tracking the remote (a GitHub PR from its pull ref on `pr/<n>`), chosen; no branch of Dispatch's own; lanes without a PR are not cut |

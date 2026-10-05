@@ -23,6 +23,8 @@
 //! - `scheduler`: one step of one ticket; decides from a probe of the
 //!   world, then acts through the traits.
 //! - `review`: the code review stage's rounds, stepped by the scheduler.
+//! - `restart`: a ticket put at a stage under a fresh copy of the live
+//!   pipeline, applied by the park sequence.
 //! - `recover`: the ledger reconciled against Switchboard at start.
 //! - `view`: the queue's working set, redrawn whole.
 //! - `serve`: Dispatch's own port, tickets as views and the commands.
@@ -42,6 +44,7 @@ pub mod pipeline;
 pub mod port;
 pub mod recover;
 pub mod report;
+pub mod restart;
 pub mod review;
 pub mod scheduler;
 pub mod serve;
@@ -85,6 +88,7 @@ pub const USAGE: &str = "usage:
   dispatch park <ticket> [--reason <text>]  a ticket's work stopped, its questions withdrawn; resume brings it back
   dispatch resume <ticket> [--no-rerun]    a parked ticket back to active; what the park cancelled runs again
   dispatch close <ticket> [--reason <text>]  a ticket closed, its trees removed (its branches are kept; close lists them)
+  dispatch restart <ticket> [<stage>]      a ticket at its stage, or an earlier one, under the live pipeline; later work discarded
   dispatch worktrees [<path>] [--migrate]  where tickets' trees go (default ~/.dispatch/worktrees);
                                            with a path, set it; --migrate moves idle tickets' trees there
 

@@ -5,8 +5,8 @@ use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::Result;
 use dispatch::epoch_ms;
-use dispatch::events::{self, Event, For, Kind, Waited, short};
-use dispatch::git::GitCli;
+use dispatch::events::{self, Event, For, Kind, Waited, base_name, short};
+use dispatch::git::{GitCli, yyyymmdd};
 use dispatch::github::Gh;
 use dispatch::port::SocketPort;
 use dispatch::report::{self, TicketReport};
@@ -102,6 +102,8 @@ fn command(args: &[&str]) -> Result<()> {
         ["resume", ticket, "--no-rerun"] => resume(ticket, false),
         ["close", ticket] => close(ticket, None),
         ["close", ticket, "--reason", reason] => close(ticket, Some(reason)),
+        ["restart", ticket] => restart(ticket, None),
+        ["restart", ticket, stage] => restart(ticket, Some(stage)),
         ["worktrees", rest @ ..] => worktrees(rest),
         ["events", rest @ ..] => events(rest),
         ["wait", rest @ ..] => wait(rest),
@@ -339,6 +341,50 @@ fn resume(ticket: &str, rerun: bool) -> Result<()> {
     }
     if let Some(why) = &resumed.no_reruns {
         say!("  nothing reruns: {why}");
+    }
+    Ok(())
+}
+
+/// Restart a ticket through Switchboard, as a park would run: its
+/// processes are read back as gone before anything moves, so this takes
+/// the real port.
+fn restart(ticket: &str, stage: Option<&str>) -> Result<()> {
+    let mut runner = runner()?;
+    let t = runner.restart(ticket, stage, now_ms())?;
+    let standing = if matches!(t.state, TicketState::Parking { .. }) {
+        "restarting (the runner finishes it on its next pass)".to_owned()
+    } else {
+        t.state.label()
+    };
+    say!(
+        "{} {} {} {standing}",
+        t.id,
+        t.source.label(),
+        t.source.title
+    );
+    if t.restart.is_some() {
+        return Ok(());
+    }
+    let Some(r) = t.restarts.last() else {
+        return Ok(());
+    };
+    say!("  at {} from {}, under {}", r.to, r.from, r.after.display());
+    for (stage, n) in &r.discarded {
+        say!("  discarded {stage}/{n}");
+    }
+    for h in &r.reset {
+        say!("  reset {h}");
+    }
+    for lane in &r.setup_again {
+        say!("  setup runs again in lane {lane}");
+    }
+    if !r.reset.is_empty() {
+        for lane in t.lanes.iter().filter(|l| l.pushed.is_some()) {
+            say!(
+                "  lane {} was pushed: its PR is force-updated at the next push",
+                lane.name
+            );
+        }
     }
     Ok(())
 }
@@ -675,6 +721,16 @@ fn show(args: &[&str]) -> Result<()> {
     );
     say!("stage {current} ({}/{})", view.stage + 1, view.stages.len());
     say!("state {}", t.state.label());
+    for r in &view.restarts {
+        say!(
+            "restarted {} at {} from {} ({} → {})",
+            date_of(r.at_ms),
+            r.to,
+            r.from,
+            base_name(&r.before),
+            base_name(&r.after)
+        );
+    }
     if !view.lanes.is_empty() {
         say!("lanes:");
     }
@@ -710,6 +766,12 @@ fn show(args: &[&str]) -> Result<()> {
         say!("  PR: {url} at {}", p.pr_head.as_deref().map_or("-", short));
     }
     Ok(())
+}
+
+/// `YYYY-MM-DD` of `ms` since the epoch, in UTC.
+fn date_of(ms: u64) -> String {
+    let d = yyyymmdd(ms);
+    format!("{}-{}-{}", &d[..4], &d[4..6], &d[6..])
 }
 
 /// Attempts grouped by stage, each with its PR and review rounds.
