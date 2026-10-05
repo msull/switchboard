@@ -357,15 +357,19 @@ decision outside its `decides`, saved on the decision, which still
 waits. `by` and `conflicts` are only on
 `refreshed`: `conflicts` is 0 for `git`, and is absent for a `rebaser`,
 `hand` or `stopped` bring-up with no conflict recorded.
-There is one writer, `store::write_ticket_logged`, at the one place a
-ticket is written (`Runner::save_ticket`, `decide` and `resume`): it
-reads the record being replaced, diffs it against the new one
-(`events::between`), appends what changed and syncs it, and only then
-writes the record. Ledger entries, settle counts, polls and
+There is one writer, `store::write_ticket_stamped`, at the one place a
+ticket is written (`Runner::save_ticket`, `decide`, `request_park` and
+`resume`): it reads the record being replaced, diffs it against the
+new one (`events::between`), appends what changed and syncs it, and
+only then writes the record. Ledger entries, settle counts, polls and
 `updated_ms` make no event, so the runner's several saves per pass
-stay quiet. The `seq` is global, taken from the file's last complete
-line under the writer lock; a torn last line is closed with a newline
-and skipped by readers.
+stay quiet. The same writer moves `updated_ms` only on a change other
+than poll bookkeeping (settle counts, idle-poll counters, a pull
+request's `checked_ms`), so every write that logs an event moves it,
+and a record equal to the one on disk is not written at all. The
+`seq` is global, taken from the file's last complete line under the
+writer lock; a torn last line is closed with a newline and skipped by
+readers.
 
 The order with the record's rename makes a crash between the two a
 duplicate, never a miss: the event is on disk, the record is not, and

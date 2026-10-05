@@ -15191,3 +15191,84 @@ fn a_lost_service_reply_is_found_again_not_started_twice() {
     assert!(t.processes.contains(&made));
     assert!(t.services[0].op.is_some());
 }
+
+/// A ticket waiting on a decision is not written again while it waits:
+/// its record, `updated_ms` included, stays as it was.
+#[test]
+fn a_ticket_waiting_on_a_decision_keeps_its_record_and_updated_time() {
+    let mut env = Env::new();
+    let id = at_finalize(&mut env);
+    let waiting = env.ticket(&id);
+    for _ in 0..5 {
+        env.step();
+    }
+    assert_eq!(env.ticket(&id), waiting);
+}
+
+/// A pull request read again moves its `checked_ms`, so the poll
+/// interval still holds, and not the ticket's `updated_ms`, which moves
+/// only once the checks change.
+#[test]
+fn a_pr_poll_moves_its_checked_time_and_not_the_tickets() {
+    let mut env = Env::new();
+    let id = at_ready(&mut env);
+    env.pr_is(&id, "base0000", "open", Checks::Pending);
+    env.recheck(&id);
+    env.step();
+    env.step();
+    let checked = |t: &Ticket| {
+        t.attempts_of("ready")
+            .last()
+            .and_then(|a| a.pr.as_ref())
+            .unwrap()
+            .checked_ms
+    };
+    let before = env.ticket(&id);
+    let looked = env.prs.lock().unwrap().looked;
+    env.wait(PR_POLL_MS);
+    env.step();
+    env.step();
+    let polled = env.ticket(&id);
+    assert_eq!(env.prs.lock().unwrap().looked, looked + 1, "once a minute");
+    assert!(checked(&polled) > checked(&before));
+    assert_eq!(polled.updated_ms, before.updated_ms);
+    env.pr_is(&id, "base0000", "open", Checks::Passed);
+    env.wait(PR_POLL_MS);
+    env.step();
+    let passed = env.ticket(&id);
+    assert!(passed.updated_ms > before.updated_ms);
+    assert_eq!(passed.updated_ms, env.now);
+}
+
+/// An agent's artifact settling is poll bookkeeping: `updated_ms` stays
+/// put through the settle passes and moves when the attempt moves on to
+/// its checks.
+#[test]
+fn an_artifact_settling_moves_the_updated_time_only_when_the_attempt_does() {
+    let mut env = Env::new();
+    let (id, implementer) = at_implement(&mut env);
+    let t = env.ticket(&id);
+    std::fs::write(artifact_of(&t, "implement", "notes"), "# done\nchanged").unwrap();
+    let now = env.now;
+    env.sb().stop(&implementer, now);
+    let mut prev = env.ticket(&id);
+    let (mut quiet, mut moved) = (0, 0);
+    for _ in 0..=SETTLE_POLLS {
+        env.step();
+        let cur = env.ticket(&id);
+        if dispatch::store::same_but_polls(&prev, &cur) {
+            assert_eq!(cur.updated_ms, prev.updated_ms);
+            if cur != prev {
+                quiet += 1;
+            }
+        } else {
+            assert_eq!(cur.updated_ms, env.now);
+            moved += 1;
+        }
+        prev = cur;
+    }
+    assert!(quiet > 0, "a settle pass wrote poll bookkeeping alone");
+    let a = prev.attempts_of("implement").last().unwrap();
+    assert!(a.gate.is_some(), "the checks started: {a:#?}");
+    assert!(moved > 0, "the stop and the checks starting moved it");
+}

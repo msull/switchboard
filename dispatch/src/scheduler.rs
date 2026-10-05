@@ -22,7 +22,7 @@ use crate::port::Port;
 use crate::review::checks_key;
 use crate::store::{
     DataDir, Lock, Settings, expand_home, read_project, read_ticket, shell_unsafe, write_project,
-    write_ticket_logged,
+    write_ticket_stamped,
 };
 use crate::template::Vars;
 use crate::ticket::{
@@ -328,8 +328,7 @@ impl Runner {
     }
 
     pub fn save_ticket(&self, t: &mut Ticket, now_ms: u64) -> Result<()> {
-        t.updated_ms = now_ms;
-        self.write_record(|| write_ticket_logged(&self.data, t, now_ms))
+        self.write_record(|| write_ticket_stamped(&self.data, t, now_ms))
     }
 
     pub fn load_project(&self, name: &str) -> Result<ProjectState> {
@@ -6072,8 +6071,7 @@ impl Runner {
                     answer: answer.to_owned(),
                     at_ms: now_ms,
                 });
-                t.updated_ms = now_ms;
-                write_ticket_logged(&self.data, &t, now_ms)?;
+                write_ticket_stamped(&self.data, &mut t, now_ms)?;
                 bail!("the supervisor may not answer `{name}`; the owner does");
             }
             d.state = DecisionState::Answered {
@@ -6084,8 +6082,7 @@ impl Runner {
                 acted: false,
             };
             let d = d.clone();
-            t.updated_ms = now_ms;
-            write_ticket_logged(&self.data, &t, now_ms)?;
+            write_ticket_stamped(&self.data, &mut t, now_ms)?;
             Ok(d)
         })
     }
@@ -6120,8 +6117,7 @@ impl Runner {
             }
             log::warn!("ticket {ticket} parking: {reason}");
             Self::parking_intent(&mut t, reason, self.actor.clone());
-            t.updated_ms = now_ms;
-            write_ticket_logged(&self.data, &t, now_ms)?;
+            write_ticket_stamped(&self.data, &mut t, now_ms)?;
             Ok(t)
         })
     }
@@ -6211,8 +6207,7 @@ impl Runner {
             }
             t.state = TicketState::Active;
             t.state_by.clone_from(&self.actor);
-            t.updated_ms = now_ms;
-            write_ticket_logged(&self.data, &t, now_ms)?;
+            write_ticket_stamped(&self.data, &mut t, now_ms)?;
             Ok(Resumed {
                 ticket: t,
                 reruns,

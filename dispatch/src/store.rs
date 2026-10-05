@@ -562,26 +562,101 @@ pub fn write_ticket(path: &Path, t: &Ticket) -> Result<()> {
     write_json(path, &stamped)
 }
 
-/// Write a ticket record and log what the write changes. The record it
-/// replaces is read and diffed against `t` (`events::between`), the
-/// events are appended and synced, and only then is the record written,
-/// so a crash between the two repeats a transition rather than losing
-/// it. A record write that fails after the append is withdrawn with a
-/// `void` event naming the appended seqs; if that append fails too, the
-/// record's error is still the one returned and the events stand
-/// unwithdrawn. An append that fails refuses the write, since the
-/// transition would otherwise never be logged. The caller holds the
-/// writer lock.
-pub fn write_ticket_logged(data: &DataDir, t: &Ticket, at_ms: u64) -> Result<()> {
+/// Write a ticket the runner changed, with `updated_ms` moved to
+/// `now_ms` only when the record changed in more than poll bookkeeping
+/// (`same_but_polls`). The kept or moved time is left in `t`, so a
+/// second save in the same pass compares against what was written. A
+/// record equal to the one on disk is not written at all: no events, no
+/// fsync, no `.bak`. It may stay at an older `version` on disk, which
+/// is harmless because readers migrate on read. Any other record goes
+/// through `write_logged`, which logs its events first. This is the one
+/// ticket write that logs events, so every runner save goes through it.
+///
+/// Every change `events::between` logs is to a field that is not poll
+/// bookkeeping, so a write that logs an event always moves `updated_ms`
+/// to its `at_ms`. `events::wait` holds a replayed event until the
+/// record's `updated_ms` passes it, and depends on that. The caller
+/// holds the writer lock.
+pub fn write_ticket_stamped(data: &DataDir, t: &mut Ticket, now_ms: u64) -> Result<()> {
     refuse_newer("ticket", &t.id, t.version)?;
     let path = data.ticket_file(&t.id);
-    let old = if record_exists(&path) {
-        Some(read_ticket(&path)?)
+    if !record_exists(&path) {
+        t.updated_ms = now_ms;
+        return write_logged(data, None, t, now_ms).map(drop);
+    }
+    let old = read_ticket(&path)?;
+    t.updated_ms = if same_but_polls(&old, t) {
+        old.updated_ms
     } else {
-        None
+        now_ms
     };
-    let mut events =
-        crate::events::between(old.as_ref(), t, at_ms, &|| crate::events::stage_names(t));
+    let as_on_disk = Ticket {
+        version: old.version,
+        ..t.clone()
+    };
+    if as_on_disk == old {
+        return Ok(());
+    }
+    let logged = write_logged(data, Some(&old), t, now_ms)?;
+    debug_assert!(
+        logged == 0 || t.updated_ms == now_ms,
+        "ticket {}: a write that logs an event must move updated_ms",
+        t.id
+    );
+    Ok(())
+}
+
+/// Whether two tickets differ only in poll bookkeeping: the settle
+/// counts and idle-poll counters of an attempt, its rewriter, rounds
+/// and reviewers, a pull request's `checked_ms`, and `updated_ms` and
+/// `version` themselves. Nothing on the page reads these, and
+/// `events::between` logs none of them.
+#[must_use]
+pub fn same_but_polls(a: &Ticket, b: &Ticket) -> bool {
+    quiet(a) == quiet(b)
+}
+
+/// A copy of `t` with every poll bookkeeping field cleared.
+fn quiet(t: &Ticket) -> Ticket {
+    let mut q = t.clone();
+    q.version = 0;
+    q.updated_ms = 0;
+    for a in &mut q.attempts {
+        a.settle.clear();
+        a.polls_since_stop = 0;
+        if let Some(m) = a.rewrite.as_mut().and_then(|r| r.message.as_mut()) {
+            m.settle.clear();
+            m.polls_since_stop = 0;
+        }
+        if let Some(pr) = &mut a.pr {
+            pr.checked_ms = 0;
+        }
+        for round in &mut a.rounds {
+            round.settle = None;
+            round.polls_since_stop = 0;
+            round.dirty_polls = 0;
+            for rv in &mut round.reviewers {
+                rv.settle = None;
+                rv.polls_since_stop = 0;
+            }
+        }
+    }
+    q
+}
+
+/// Write a ticket record and log what the write changes, given the
+/// record it replaces; how many events it logged. `old` is diffed
+/// against `t` (`events::between`), the events are appended and synced,
+/// and only then is the record written, so a crash between the two
+/// repeats a transition rather than losing it. A record write that
+/// fails after the append is withdrawn with a `void` event naming the
+/// appended seqs; if that append fails too, the record's error is still
+/// the one returned and the events stand unwithdrawn. An append that
+/// fails refuses the write, since the transition would otherwise never
+/// be logged.
+fn write_logged(data: &DataDir, old: Option<&Ticket>, t: &Ticket, at_ms: u64) -> Result<usize> {
+    let path = data.ticket_file(&t.id);
+    let mut events = crate::events::between(old, t, at_ms, &|| crate::events::stage_names(t));
     let log = crate::events::log_path(data);
     crate::events::append(&log, &mut events)?;
     let written = write_ticket(&path, t);
@@ -596,7 +671,7 @@ pub fn write_ticket_logged(data: &DataDir, t: &Ticket, at_ms: u64) -> Result<()>
             );
         }
     }
-    written
+    written.map(|()| events.len())
 }
 
 /// The same for a project's state.
@@ -1214,11 +1289,11 @@ mod tests {
     fn a_logged_write_refused_as_newer_appends_nothing() {
         let dir = tempfile::tempdir().unwrap();
         let data = DataDir::new(dir.path());
-        let t = Ticket {
+        let mut t = Ticket {
             version: RECORD_VERSION + 1,
             ..logged_ticket()
         };
-        assert!(write_ticket_logged(&data, &t, 1).is_err());
+        assert!(write_ticket_stamped(&data, &mut t, 1).is_err());
         assert!(!crate::events::log_path(&data).exists());
         assert!(!data.ticket_file("t1").exists());
     }
@@ -1228,10 +1303,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let data = DataDir::new(dir.path());
         let mut t = logged_ticket();
-        write_ticket_logged(&data, &t, 1).unwrap();
+        write_ticket_stamped(&data, &mut t, 1).unwrap();
         // A second write leaves a `.bak`, which still reads as the
-        // record once the primary is broken below.
-        write_ticket_logged(&data, &t, 1).unwrap();
+        // record once the primary is broken below. An equal record is
+        // skipped by the stamped write, so this one goes in plain.
+        write_ticket(&data.ticket_file("t1"), &t).unwrap();
         t.decisions.push(crate::ticket::Decision {
             id: "d1".into(),
             stage: "plan".into(),
@@ -1251,7 +1327,7 @@ mod tests {
         fs::remove_file(&path).unwrap();
         fs::create_dir(&path).unwrap();
         fs::write(path.join("x"), "x").unwrap();
-        assert!(write_ticket_logged(&data, &t, 2).is_err());
+        assert!(write_ticket_stamped(&data, &mut t, 2).is_err());
         let events = crate::events::read_since(&crate::events::log_path(&data), 0).unwrap();
         let kinds: Vec<_> = events.iter().map(|e| e.kind.as_str()).collect();
         assert_eq!(kinds, ["taken", "decision", "void"]);
@@ -1262,6 +1338,163 @@ mod tests {
                 .collect::<Vec<_>>(),
             [events[1].seq]
         );
+    }
+
+    /// `logged_ticket` with a running attempt that has a pull request
+    /// and a review round with one reviewer, written once at 10.
+    fn stamped_ticket(data: &DataDir) -> Ticket {
+        use crate::ticket::{
+            AttemptKind, AttemptState, PullRequestRecord, ReviewRound, ReviewerRun, RoundState,
+        };
+        let mut a = crate::scheduler::new_attempt(
+            "plan",
+            1,
+            "root",
+            AttemptKind::Agent,
+            AttemptState::Running,
+            std::collections::BTreeMap::new(),
+            1,
+        );
+        a.pr = Some(PullRequestRecord {
+            provider: "github".into(),
+            repo: "o/r".into(),
+            number: 3,
+            url: "https://example.com/pr/3".into(),
+            head: "head0001".into(),
+            checks: "pending".into(),
+            checked_ms: 5,
+            error_since_ms: None,
+        });
+        a.rounds.push(ReviewRound {
+            n: 1,
+            base: "base0000".into(),
+            head: "head0001".into(),
+            reviewers: vec![ReviewerRun {
+                name: "r".into(),
+                kind: "claude".into(),
+                dir: "/wt".into(),
+                feedback: "/wt/feedback.md".into(),
+                session: None,
+                launched: false,
+                stop_at_ms: None,
+                polls_since_stop: 0,
+                settle: None,
+                result: None,
+            }],
+            state: RoundState::Reviewing,
+            feedback: None,
+            open_points: 0,
+            fix_authorised: false,
+            implementer: None,
+            response: None,
+            head_after: None,
+            stop_at_ms: None,
+            polls_since_stop: 0,
+            settle: None,
+            dirty_polls: 0,
+            dirty_since_ms: None,
+            nudges: Vec::new(),
+            started_ms: 1,
+            ended_ms: None,
+        });
+        let mut t = logged_ticket();
+        t.attempts.push(a);
+        write_ticket_stamped(data, &mut t, 10).unwrap();
+        t
+    }
+
+    fn logged_kinds(data: &DataDir) -> Vec<&'static str> {
+        crate::events::read_since(&crate::events::log_path(data), 0)
+            .unwrap()
+            .iter()
+            .map(|e| e.kind.as_str())
+            .collect()
+    }
+
+    #[test]
+    fn a_stamped_write_with_no_record_stamps_now() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = DataDir::new(dir.path());
+        let t = stamped_ticket(&data);
+        assert_eq!(t.updated_ms, 10);
+        assert_eq!(read_ticket(&data.ticket_file("t1")).unwrap().updated_ms, 10);
+        assert_eq!(logged_kinds(&data), ["taken"]);
+    }
+
+    #[test]
+    fn an_equal_stamped_write_keeps_its_time_and_is_not_written() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = DataDir::new(dir.path());
+        let mut t = stamped_ticket(&data);
+        let path = data.ticket_file("t1");
+        write_ticket_stamped(&data, &mut t, 20).unwrap();
+        assert_eq!(t.updated_ms, 10);
+        assert!(!with_suffix(&path, "bak").exists());
+        assert_eq!(read_ticket(&path).unwrap().updated_ms, 10);
+        assert_eq!(logged_kinds(&data), ["taken"]);
+    }
+
+    #[test]
+    fn a_write_of_poll_bookkeeping_alone_lands_and_keeps_its_time() {
+        let bumps: [fn(&mut Ticket); 5] = [
+            |t| t.attempts[0].polls_since_stop += 1,
+            |t| {
+                t.attempts[0].settle.insert(
+                    "plan".into(),
+                    crate::ticket::Settle {
+                        mtime_ms: 3,
+                        len: 4,
+                        polls: 1,
+                    },
+                );
+            },
+            |t| t.attempts[0].rounds[0].dirty_polls += 1,
+            |t| t.attempts[0].rounds[0].reviewers[0].polls_since_stop += 1,
+            |t| t.attempts[0].pr.as_mut().unwrap().checked_ms = 99,
+        ];
+        for (i, bump) in bumps.iter().enumerate() {
+            let dir = tempfile::tempdir().unwrap();
+            let data = DataDir::new(dir.path());
+            let mut t = stamped_ticket(&data);
+            bump(&mut t);
+            write_ticket_stamped(&data, &mut t, 20).unwrap();
+            assert_eq!(t.updated_ms, 10, "bump {i}");
+            let back = read_ticket(&data.ticket_file("t1")).unwrap();
+            assert_eq!(
+                back,
+                Ticket {
+                    version: RECORD_VERSION,
+                    ..t
+                },
+                "bump {i}"
+            );
+            assert_eq!(logged_kinds(&data), ["taken"], "bump {i}");
+        }
+    }
+
+    #[test]
+    fn a_new_decision_stamps_now_and_is_logged() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = DataDir::new(dir.path());
+        let mut t = stamped_ticket(&data);
+        t.attempts[0].polls_since_stop += 1;
+        t.decisions.push(crate::ticket::Decision {
+            id: "d1".into(),
+            stage: "plan".into(),
+            name: "finalize".into(),
+            kind: crate::ticket::DecisionKind::Permission,
+            question: "Finalize it?".into(),
+            options: vec!["finalize".into()],
+            recommendation: None,
+            attempt: None,
+            state: crate::ticket::DecisionState::Pending,
+            made_ms: 20,
+            refusals: Vec::new(),
+        });
+        write_ticket_stamped(&data, &mut t, 20).unwrap();
+        assert_eq!(t.updated_ms, 20);
+        assert_eq!(read_ticket(&data.ticket_file("t1")).unwrap().updated_ms, 20);
+        assert_eq!(logged_kinds(&data), ["taken", "decision"]);
     }
 
     #[test]
