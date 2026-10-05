@@ -27,7 +27,7 @@ pub struct SerialController {
 
 impl SerialController {
     /// Starts the port thread. `port` names the device
-    /// (`SWITCHBOARD_CONTROLLER`), else the Feather's `usbmodem` port is
+    /// (`SWITCHBOARD_CONTROLLER`), else the nunchuk board's `usbmodem` port is
     /// used, so the thread also waits for one to be plugged in. `wake`
     /// runs on the thread after each event, for a repaint request.
     #[must_use]
@@ -53,24 +53,26 @@ impl Controller for SerialController {
     }
 }
 
-/// The port to open: the Feather, found by its USB product name, and
-/// nothing else. An unrelated board on a `usbmodem` port (a Trinkey,
-/// say) must never be opened as a fallback: opening a CDC port whose
-/// firmware never answers blocks inside the kernel, uninterruptibly,
-/// and a thread stuck there pins the whole process at exit, immune to
-/// force quit. Any other device is opted into with
-/// `SWITCHBOARD_CONTROLLER`.
+/// USB product names of the boards the nunchuk firmware runs on. Only
+/// these are opened without `SWITCHBOARD_CONTROLLER`. An unrelated board
+/// on a `usbmodem` port (a Trinkey, say) must never be opened as a
+/// fallback: opening a CDC port whose firmware never answers blocks
+/// inside the kernel, uninterruptibly, and a thread stuck there pins the
+/// whole process at exit, immune to force quit.
+const BOARDS: &[&str] = &["Feather", "MagTag"];
+
+/// The port to open: the first `usbmodem` port whose USB product name is
+/// one of `BOARDS`, and nothing else.
 fn find_port() -> Option<String> {
     let ports = serialport::available_ports().unwrap_or_default();
     let mut names: Vec<String> = ports
         .into_iter()
         .filter(|p| p.port_name.contains("usbmodem"))
         .filter(|p| match &p.port_type {
-            serialport::SerialPortType::UsbPort(usb) => usb
-                .product
-                .as_deref()
-                .unwrap_or_default()
-                .contains("Feather"),
+            serialport::SerialPortType::UsbPort(usb) => {
+                let product = usb.product.as_deref().unwrap_or_default();
+                BOARDS.iter().any(|b| product.contains(b))
+            }
             _ => false,
         })
         // macOS lists each device twice; the callout one is for us.
