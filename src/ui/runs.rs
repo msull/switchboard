@@ -540,6 +540,25 @@ fn parse_offset(text: &str) -> Option<i64> {
     Some(sign * (h * 3600 + m * 60))
 }
 
+/// The tail of the record's last run's log in a scroll area `height`
+/// tall, kept to the bottom.
+pub(super) fn last_output(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord, height: f32) {
+    let Some(run) = record.last_run() else {
+        return;
+    };
+    let data_dir = cx.services.store.data_dir();
+    let text = run_log(&mut cx.state.run_logs, &data_dir, record, run).to_owned();
+    if text.is_empty() {
+        ui.label(theme::meta_text(ui, "No output was kept for the last run."));
+        return;
+    }
+    egui::ScrollArea::both()
+        .id_salt(("last-output", record.id, run.n))
+        .max_height(height)
+        .stick_to_bottom(true)
+        .show(ui, |ui| super::session::code_block(ui, &text));
+}
+
 fn log_view(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord, run: &Run) {
     theme::section(ui, "Output");
     let data_dir = cx.services.store.data_dir();

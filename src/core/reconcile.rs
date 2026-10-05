@@ -267,27 +267,33 @@ impl AppCore {
             })
             .collect();
         for (id, code) in over {
-            let mut find = None;
-            self.edit_session(id, out, |s| {
-                let cwd = s.cwd.clone();
-                let patterns = s.outputs.clone();
-                if let Some(run) = s.runs.last_mut() {
-                    run.ended = Some(now.wall);
-                    run.exit = code;
-                    if !patterns.is_empty() {
-                        find = Some(Effect::FindArtifacts {
-                            id,
-                            n: run.n,
-                            cwd,
-                            patterns,
-                            since: run.started,
-                        });
-                    }
+            self.close_run(id, code, now, out);
+        }
+    }
+
+    /// The record's last run ended now with `code`; its declared
+    /// outputs are looked for.
+    pub(super) fn close_run(&mut self, id: RecordId, code: Option<i32>, now: Clock, out: &mut Out) {
+        let mut find = None;
+        self.edit_session(id, out, |s| {
+            let cwd = s.cwd.clone();
+            let patterns = s.outputs.clone();
+            if let Some(run) = s.runs.last_mut() {
+                run.ended = Some(now.wall);
+                run.exit = code;
+                if !patterns.is_empty() {
+                    find = Some(Effect::FindArtifacts {
+                        id,
+                        n: run.n,
+                        cwd,
+                        patterns,
+                        since: run.started,
+                    });
                 }
-            });
-            if let Some(find) = find {
-                out.push(find);
             }
+        });
+        if let Some(find) = find {
+            out.push(find);
         }
     }
 }

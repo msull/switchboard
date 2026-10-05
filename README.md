@@ -184,6 +184,12 @@ Dev aids, all environment variables:
   which the session keeps, and `handoff.<stamp>.md`, each earlier
   hand-off kept when a fresh session replaced it. The supervisor works
   in `supervisor-<project>` under the worktrees root.
+  The overview's Start runs `dispatch run` as the app's `runner`
+  service in that directory, and the runner reaches this app through its
+  own `SWITCHBOARD_DATA_DIR`, so a dev instance should point
+  `DISPATCH_DATA_DIR` at a throwaway directory before Start. A `cargo
+  run` finds a runner to start only once `cargo build -p dispatch` has
+  put `dispatch` beside the app binary; otherwise Start is refused.
 - `SWITCHBOARD_SCRIPT=<file>`: run actions at startup, one per line, so
   the app can be put into a known state without clicking. See
   `src/script.rs` for the lines (`add-project`, `new-shell`, `new-claude`,
@@ -195,7 +201,8 @@ Dev aids, all environment variables:
   `set-hours`, `dismiss-from-set`, `add-to-working-set`,
   `add-file-to-working-set`, `arrange`, `show-message`, `clone-session`,
   `discard-to`, `undo-discard`, `review-plan`, `show-review`,
-  `show-dispatch`, `show-ticket`, `close-ticket`, `ticket-tab`,
+  `show-dispatch`, `dispatch-runner-start`, `dispatch-runner-stop`,
+  `show-ticket`, `close-ticket`, `ticket-tab`,
   `review-file`, `review-continue`, `review-finalize`, `show-artifact`,
   `pop-out`, `close-pop-out`, `files-root`, `zoom`, `place-pop-out`,
   `place-card`, `new-workspace`, `workspace`, `workspace-global`,

@@ -328,7 +328,7 @@ impl AppCore {
 
     /// Kill the record's pane and drop its status, so a launch right
     /// after can reuse the name before the next host poll.
-    fn kill_and_forget(&mut self, id: RecordId, out: &mut Out) {
+    pub(super) fn kill_and_forget(&mut self, id: RecordId, out: &mut Out) {
         self.kill_pane(id, out);
         let host = HostId(id.host_name());
         self.host.retain(|h| h.id != host);

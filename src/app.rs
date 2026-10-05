@@ -14,8 +14,8 @@ use crate::adapters::control::{ControlSocket, Incoming};
 use crate::adapters::hooks::WakeSocket;
 use crate::adapters::scrollback::scrollback_dir;
 use crate::core::{
-    Activity, AgentKind, AppAction, AppCore, Clock, ControlAction, ControlOutcome, Effect,
-    ProjectId, RecordId, Resolved, ResumeHandle, SessionKind, SpaceId, View, WorkflowId,
+    Activity, AgentKind, AppAction, AppCore, Clock, ControlAction, ControlOutcome, DISPATCH_POLL,
+    Effect, ProjectId, RecordId, Resolved, ResumeHandle, SessionKind, SpaceId, View, WorkflowId,
 };
 use crate::ports::agent::AgentLauncher;
 use crate::ports::artifacts::ArtifactFinder;
@@ -41,8 +41,6 @@ const TRUST_PROMPT_LINES: usize = 20;
 
 /// How often definition files are checked for a change.
 const CONFIG_INTERVAL: Duration = Duration::from_secs(5);
-/// How often Dispatch is asked for its status.
-const DISPATCH_INTERVAL: Duration = Duration::from_secs(2);
 /// How often card captions and the session snapshot are refreshed.
 const CAPTION_INTERVAL: Duration = Duration::from_secs(2);
 /// How long a Codex id discovery keeps looking. Codex writes its rollout
@@ -203,6 +201,7 @@ impl SwitchboardApp {
         self.dispatch(AppAction::DispatchConfigured {
             command: self.dispatch_port.command.clone(),
             data_dir: self.dispatch_port.data_dir.clone(),
+            switchboard_data_dir: self.services.store.data_dir(),
         });
         self.last_poll = Some(Instant::now());
         self.poll_events();
@@ -938,7 +937,7 @@ impl SwitchboardApp {
         self.drain_dispatch();
         if self
             .last_dispatch
-            .is_none_or(|t| t.elapsed() >= DISPATCH_INTERVAL)
+            .is_none_or(|t| t.elapsed() >= DISPATCH_POLL)
         {
             self.last_dispatch = Some(Instant::now());
             self.poll_dispatch();

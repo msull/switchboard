@@ -104,6 +104,8 @@ const REVIEW_LINES: &[&str] = &[
     "review-finalize",
     "show-artifact",
     "show-dispatch",
+    "dispatch-runner-start",
+    "dispatch-runner-stop",
     "show-ticket",
     "close-ticket",
     "ticket-tab",
@@ -252,6 +254,8 @@ fn review_step(app: &mut SwitchboardApp, w: &[&str]) -> Result<(), String> {
             app.dispatch(AppAction::ShowWorkflow(id));
         }
         ["show-dispatch"] => app.dispatch(AppAction::ShowDispatch),
+        ["dispatch-runner-start"] => app.dispatch(AppAction::DispatchRunnerStart),
+        ["dispatch-runner-stop"] => app.dispatch(AppAction::DispatchRunnerStop),
         ["show-ticket", id] => app.dispatch(AppAction::ShowTicket((*id).to_owned())),
         ["close-ticket", id] => close_ticket(app, id)?,
         ["ticket-tab", id, tab] => ticket_tab(app, id, tab)?,
