@@ -27,6 +27,9 @@
 //!   pipeline, applied by the park sequence.
 //! - `recover`: the ledger reconciled against Switchboard at start.
 //! - `view`: the queue's working set, redrawn whole.
+//! - `supervisor`: a project's supervisor session: its seed, its flags,
+//!   which commands it may run, and the runner's making and replacing of
+//!   it.
 //! - `serve`: Dispatch's own port, tickets as views and the commands.
 
 // Tests assert emptiness with `assert!` throughout; the rest of the
@@ -49,6 +52,7 @@ pub mod review;
 pub mod scheduler;
 pub mod serve;
 pub mod store;
+pub mod supervisor;
 pub mod template;
 pub mod ticket;
 pub mod view;
@@ -93,8 +97,13 @@ pub const USAGE: &str = "usage:
                                            with a path, set it; --migrate moves idle tickets' trees there
 
 Supervising (see docs/dispatch-agent-guide.md):
-  dispatch events [--since <seq>] [--follow] [--ticket <id>]... [--project <name>] [--json]
-                                           what happened, from the event log
+  dispatch brief <project>                 the project at a glance: tickets, what waits, recent events, the hand-off
+  dispatch supervisor <project> [--fresh [--setup] | --resume | --kill [--reason <text>]]
+                                           the project's supervisor session: show it, start a new one,
+                                           resume it, or kill it
+  dispatch events [--since <seq>] [--follow [--timeout <secs>]] [--ticket <id>]... [--project <name>] [--json]
+                                           what happened, from the event log; with --timeout, exit 0
+                                           once something printed, 2 when nothing came
   dispatch wait <ticket> [--for decision|stage|pr|closed|any] [--since <seq>] [--timeout <secs>] [--json]
                                            block until it happens: exit 0 matched,
                                            2 timed out, 3 the ticket parked or closed

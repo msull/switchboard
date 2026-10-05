@@ -102,6 +102,9 @@ pub enum Kind {
     /// pipeline; it replaces the stage move and the resume the same
     /// write would otherwise log.
     Restarted,
+    /// A supervisor answered a decision its `decides` does not list; the
+    /// decision still waits on the owner.
+    Refused,
 }
 
 impl Kind {
@@ -132,6 +135,7 @@ impl Kind {
             Self::Nudged => "nudged",
             Self::CheckOrphanKilled => "check-orphan-killed",
             Self::Restarted => "restarted",
+            Self::Refused => "refused",
         }
     }
 }
@@ -180,6 +184,10 @@ pub struct Event {
     /// conflict was recorded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conflicts: Option<u32>,
+    /// Who did it, when not the owner: `supervisor` on a take, park,
+    /// resume, close, answer or refusal a supervisor session made.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actor: Option<String>,
 }
 
 impl Event {
@@ -200,6 +208,7 @@ impl Event {
             voids: Vec::new(),
             by: None,
             conflicts: None,
+            actor: None,
         }
     }
 
@@ -352,13 +361,7 @@ pub fn between(
     let mut whole: Vec<usize> = Vec::new();
     let Some(old) = old else {
         whole.push(out.len());
-        out.push(Event::new(
-            new,
-            at_ms,
-            Kind::Taken,
-            "",
-            format!("{} {}", new.source.label(), new.source.title),
-        ));
+        out.push(taken_event(new, at_ms));
         name_stages(&mut out, &whole, new, None, names);
         return out;
     };
@@ -387,7 +390,10 @@ pub fn between(
     // handed a `rerun` question that was born answered.
     if let Some((Kind::Resumed, text)) = &state {
         whole.push(out.len());
-        out.push(Event::new(new, at_ms, Kind::Resumed, "", text.clone()));
+        out.push(state_by(
+            new,
+            Event::new(new, at_ms, Kind::Resumed, "", text.clone()),
+        ));
     }
     for a in &new.attempts {
         let before = old
@@ -447,12 +453,50 @@ pub fn between(
         && kind != Kind::Resumed
     {
         whole.push(out.len());
-        out.push(Event::new(new, at_ms, kind, "", text));
+        out.push(state_by(new, Event::new(new, at_ms, kind, "", text)));
     }
     if !out.is_empty() {
         name_stages(&mut out, &whole, new, moved.map(|_| old.stage), names);
     }
     out
+}
+
+/// The `taken` event of a ticket written for the first time.
+fn taken_event(t: &Ticket, at_ms: u64) -> Event {
+    let text = format!(
+        "{} {}{}",
+        t.source.label(),
+        t.source.title,
+        by_clause(t.source.taken_by.as_deref())
+    );
+    Event {
+        actor: t.source.taken_by.clone(),
+        ..Event::new(t, at_ms, Kind::Taken, "", text)
+    }
+}
+
+/// ` (by supervisor)` after the text of an event someone other than the
+/// owner caused, or nothing.
+fn by_clause(actor: Option<&str>) -> String {
+    actor.map_or_else(String::new, |a| format!(" (by {a})"))
+}
+
+/// A park, resume or close event with the ticket's `state_by` as its
+/// actor, named in its text; any other event as it is, since `parked`
+/// and `closed` finish what the actor asked for.
+fn state_by(t: &Ticket, e: Event) -> Event {
+    if !matches!(e.kind, Kind::Parking | Kind::Resumed | Kind::Closing) {
+        return e;
+    }
+    let Some(actor) = t.state_by.clone() else {
+        return e;
+    };
+    let text = capped(format!("{}{}", e.text, by_clause(Some(&actor))));
+    Event {
+        actor: Some(actor),
+        text,
+        ..e
+    }
 }
 
 /// The ticket's own state change from `old` to `new`, as an event's
@@ -761,29 +805,52 @@ fn decision_events(
     let was = before.map(|b| &b.state);
     let answered_before = matches!(was, Some(DecisionState::Answered { .. }));
     let cancelled_before = matches!(was, Some(DecisionState::Cancelled));
-    match &d.state {
-        DecisionState::Answered {
-            answer, note, by, ..
-        } if !answered_before => {
-            let note = note.as_ref().map_or(String::new(), |n| format!(" — {n}"));
-            out.push(Event::of_decision(
+    if let DecisionState::Answered {
+        answer, note, by, ..
+    } = &d.state
+        && !answered_before
+    {
+        let note = note.as_ref().map_or(String::new(), |n| format!(" — {n}"));
+        out.push(Event {
+            actor: (by == scheduler::BY_SUPERVISOR).then(|| by.clone()),
+            ..Event::of_decision(
                 t,
                 at_ms,
                 Kind::Answered,
                 d,
                 format!("{} by {by}: {answer}{note}", d.name),
-            ));
-        }
-        DecisionState::Cancelled if !cancelled_before => {
-            out.push(Event::of_decision(
+            )
+        });
+    }
+    // A refusal leaves the decision pending: its own event says who
+    // asked what.
+    for r in d
+        .refusals
+        .iter()
+        .skip(before.map_or(0, |b| b.refusals.len()))
+    {
+        out.push(Event {
+            actor: Some(r.by.clone()),
+            ..Event::of_decision(
                 t,
                 at_ms,
-                Kind::DecisionCancelled,
+                Kind::Refused,
                 d,
-                d.name.clone(),
-            ));
-        }
-        _ => {}
+                format!(
+                    "{}: the {} asked {}; refused, the owner answers",
+                    d.name, r.by, r.answer
+                ),
+            )
+        });
+    }
+    if d.state == DecisionState::Cancelled && !cancelled_before {
+        out.push(Event::of_decision(
+            t,
+            at_ms,
+            Kind::DecisionCancelled,
+            d,
+            d.name.clone(),
+        ));
     }
 }
 
@@ -847,6 +914,7 @@ pub fn append_void(path: &Path, about: &Event, seqs: Vec<u64>, why: &str) -> Res
         voids: seqs,
         by: None,
         conflicts: None,
+        actor: None,
     }];
     append(path, &mut void)
 }
@@ -1305,6 +1373,7 @@ mod tests {
                 url: None,
                 labels: vec![],
                 taken_at_ms: 0,
+                taken_by: None,
             },
             pipeline_fingerprint: String::new(),
             pipeline_file: PathBuf::new(),
@@ -1331,6 +1400,7 @@ mod tests {
             rework: BTreeMap::new(),
             refreshed_stage: None,
             state: TicketState::Active,
+            state_by: None,
             close: CloseProgress::default(),
             restarts: Vec::new(),
             restart: None,
@@ -1375,6 +1445,7 @@ mod tests {
             attempt: Some(("plan".into(), 1)),
             state: DecisionState::Pending,
             made_ms: 3,
+            refusals: Vec::new(),
         }
     }
 
@@ -2324,6 +2395,7 @@ mod tests {
                 acted: true,
             },
             made_ms: at_ms,
+            refusals: Vec::new(),
         }
     }
 

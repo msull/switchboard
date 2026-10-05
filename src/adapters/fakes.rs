@@ -280,6 +280,19 @@ impl DispatchPort for FakeDispatch {
                         DispatchReply::Ticket(t)
                     },
                 ),
+            // As the runner answers: the intent saved, the status at once.
+            DispatchBody::SupervisorFresh { project } => {
+                let mut status = status.clone();
+                if let Some(s) = status
+                    .projects
+                    .iter_mut()
+                    .find(|p| &p.name == project)
+                    .and_then(|p| p.supervisor.as_mut())
+                {
+                    s.fresh_pending = true;
+                }
+                DispatchReply::Status(status)
+            }
         })
     }
 }

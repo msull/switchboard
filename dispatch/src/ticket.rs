@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
-use switchboard_control::{Body, Reply};
+use switchboard_control::{Body, Class, Reply};
 
 use crate::events::short;
 use crate::history::Commits;
@@ -29,6 +29,9 @@ pub struct SourceSnapshot {
     /// one per lane. Empty for an issue.
     #[serde(default)]
     pub pull_requests: Vec<PullRequestSource>,
+    /// Who took it: `supervisor`, or `None` for the owner.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub taken_by: Option<String>,
 }
 
 impl SourceSnapshot {
@@ -684,6 +687,21 @@ pub struct Decision {
     #[serde(flatten)]
     pub state: DecisionState,
     pub made_ms: u64,
+    /// Answers a supervisor gave that its `decides` did not allow; the
+    /// decision still waits on the owner.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub refusals: Vec<Refusal>,
+}
+
+/// A supervisor's answer refused because the decision is the owner's.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Refusal {
+    /// Who answered: `supervisor`.
+    pub by: String,
+    /// The answer it gave, which was not applied.
+    pub answer: String,
+    /// When, in Unix ms.
+    pub at_ms: u64,
 }
 
 impl Decision {
@@ -755,6 +773,37 @@ pub struct Operation {
 }
 
 impl Operation {
+    /// A request about to be sent, with no reply yet: what a ledger
+    /// writes before the call.
+    #[must_use]
+    pub fn new(
+        op: String,
+        body: &Body,
+        attempt: Option<(String, u32)>,
+        intent: &str,
+        sent_ms: u64,
+    ) -> Self {
+        let class = match body.class() {
+            Class::Creation => "creation",
+            Class::Idempotent => "idempotent",
+            Class::NonReplayable => "non-replayable",
+            Class::Query => "query",
+        };
+        Self {
+            op,
+            kind: body.kind(),
+            class: class.into(),
+            attempt,
+            intent: intent.into(),
+            sent_ms,
+            body: Some(body.clone()),
+            reply: None,
+            error: None,
+            asked: false,
+            settled: false,
+        }
+    }
+
     /// Whether recovery still has to resolve it.
     #[must_use]
     pub fn unresolved(&self) -> bool {
@@ -864,6 +913,10 @@ pub struct Ticket {
     pub refreshed_stage: Option<usize>,
     #[serde(flatten)]
     pub state: TicketState,
+    /// Who made the last park, resume or close: `supervisor`, or `None`
+    /// for the owner and for Dispatch itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state_by: Option<String>,
     /// How far a close has got.
     #[serde(default)]
     pub close: CloseProgress,
@@ -1082,7 +1135,7 @@ impl Ticket {
 }
 
 /// Per project: what Dispatch made in Switchboard for it, and the queue.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ProjectState {
     /// The record's format; see `store::RECORD_VERSION`.
@@ -1099,6 +1152,88 @@ pub struct ProjectState {
     pub closing: Vec<String>,
     /// What the set last showed, so it is redrawn only on a change.
     pub shown: Vec<(String, String)>,
+    /// The project's supervisor session and its workspace.
+    pub supervisor: Supervision,
+}
+
+/// A project's supervisor: where it works, the session now, the ones it
+/// replaced, and the one request to Switchboard in flight for it.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Supervision {
+    /// The Switchboard project rooted at the workspace, made once.
+    pub project: Option<String>,
+    /// The workspace, recorded the first time it is set up.
+    pub workspace: Option<PathBuf>,
+    /// The session now, if one was made and not killed.
+    pub current: Option<SupervisorRecord>,
+    /// The sessions it replaced and the ones killed, oldest first.
+    pub past: Vec<PastSupervisor>,
+    /// Written by the port's `supervisor-fresh`; done and cleared by the
+    /// runner.
+    pub intent: Option<SupervisorIntent>,
+    /// The one request to Switchboard in flight; this project's ledger.
+    pub op: Option<Operation>,
+    /// Why the last fresh, resume or kill failed, until one succeeds.
+    pub error: Option<String>,
+}
+
+impl Supervision {
+    /// Whether `session` is this project's supervisor, now or before.
+    #[must_use]
+    pub fn knows(&self, session: &str) -> bool {
+        self.current.as_ref().is_some_and(|c| c.session == session)
+            || self.past.iter().any(|p| p.session == session)
+    }
+
+    /// Whether the current session was seeded from something other than
+    /// `table`; false with no session.
+    #[must_use]
+    pub fn seed_stale(&self, project: &str, table: &crate::pipeline::Supervisor) -> bool {
+        self.current
+            .as_ref()
+            .is_some_and(|c| c.seed_hash != crate::supervisor::seed_hash(project, table))
+    }
+}
+
+/// The supervisor session now. `session` is Switchboard's record id,
+/// never a resume handle.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SupervisorRecord {
+    /// Switchboard's record id of the session.
+    pub session: String,
+    /// The hash of the owner's inputs it was seeded from.
+    pub seed_hash: String,
+    /// When its `session.new` was sent, in Unix ms.
+    pub created_ms: u64,
+    /// The model its flags name, when the table set one.
+    #[serde(default)]
+    pub model: Option<String>,
+}
+
+/// A supervisor session that was replaced or killed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PastSupervisor {
+    /// Switchboard's record id of the session; still a supervisor's for
+    /// the actor check.
+    pub session: String,
+    /// The hash it was seeded from.
+    pub seed_hash: String,
+    /// When it was asked for, in Unix ms.
+    pub created_ms: u64,
+    /// When it was killed or replaced, in Unix ms.
+    pub replaced_ms: u64,
+    /// `fresh`, or `kill: <reason>`.
+    pub why: String,
+}
+
+/// What the runner is asked to do for the supervisor on its next pass.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum SupervisorIntent {
+    /// A new session, replacing the current one; the workspace is set
+    /// up again only when it is missing.
+    Fresh,
 }
 
 /// An active ticket with nothing on it, for tests.
@@ -1118,6 +1253,7 @@ pub(crate) fn blank() -> Ticket {
             url: None,
             labels: vec![],
             taken_at_ms: 0,
+            taken_by: None,
         },
         pipeline_fingerprint: String::new(),
         pipeline_file: PathBuf::new(),
@@ -1132,6 +1268,7 @@ pub(crate) fn blank() -> Ticket {
         rework: BTreeMap::new(),
         refreshed_stage: None,
         state: TicketState::Active,
+        state_by: None,
         close: CloseProgress::default(),
         restarts: vec![],
         restart: None,

@@ -23,7 +23,7 @@ use crate::ticket::{ProjectState, Ticket};
 /// carried a version reads as 0 and is brought up by `migrate`. A
 /// record above it was written by a newer `dispatch` and is refused
 /// both ways, so this build never drops fields it does not know.
-pub const RECORD_VERSION: u32 = 12;
+pub const RECORD_VERSION: u32 = 13;
 
 /// A lock file held while this lives: the writer lock, the runner's
 /// claim, or a ticket's close.
@@ -186,6 +186,14 @@ impl DataDir {
     #[must_use]
     pub fn project_file(&self, project: &str) -> PathBuf {
         self.root.join("projects").join(format!("{project}.json"))
+    }
+
+    /// A project's supervisor files: its seed and its hand-off. Its
+    /// workspace lives under the worktrees root, whose path is safe for
+    /// a repository's tooling.
+    #[must_use]
+    pub fn supervisor_dir(&self, project: &str) -> PathBuf {
+        self.root.join("projects").join(project).join("supervisor")
     }
 
     /// Every ticket file, in no particular order.
@@ -503,6 +511,13 @@ pub fn migrate(mut value: Value) -> Value {
         // must refuse the record, or a restart cut short would be
         // forgotten with a branch half reset, and a ranged restart would
         // lose the heads it resets to.
+        //
+        // 12 to 13: a project gains `supervisor`, a decision `refusals`,
+        // a ticket `state_by` and its source `taken_by`, all empty or
+        // absent from their serde defaults; nothing is transformed. A
+        // build that would drop them on its next write must refuse the
+        // record, or a project would forget its supervisor session and
+        // the request in flight for it.
         if version == 1 {
             settle_from_verdicts(&mut value);
         }
@@ -764,6 +779,23 @@ mod tests {
             let value: Value = read_json(path).unwrap();
             assert_eq!(value["version"], RECORD_VERSION);
         }
+    }
+
+    #[test]
+    fn a_version_twelve_project_reads_with_no_supervisor() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("p.json");
+        fs::write(&project, PROJECT_V0.replacen('{', "{\"version\": 12,", 1)).unwrap();
+        let ps = read_project(&project).unwrap();
+        assert_eq!(ps.version, RECORD_VERSION);
+        assert_eq!(ps.supervisor, crate::ticket::Supervision::default());
+        assert_eq!(ps.queue, ["a1b2c3d4"]);
+        let ticket = dir.path().join("t.json");
+        fs::write(&ticket, TICKET_V0.replacen('{', "{\"version\": 12,", 1)).unwrap();
+        let t = read_ticket(&ticket).unwrap();
+        assert_eq!(t.state_by, None);
+        assert_eq!(t.source.taken_by, None);
+        assert!(t.decisions.iter().all(|d| d.refusals.is_empty()));
     }
 
     #[test]
@@ -1165,6 +1197,7 @@ mod tests {
             attempt: None,
             state: crate::ticket::DecisionState::Pending,
             made_ms: 2,
+            refusals: Vec::new(),
         });
         // The record's place is a directory: the old record reads from
         // its backup, and the write fails after the append.

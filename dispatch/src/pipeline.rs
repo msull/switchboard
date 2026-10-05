@@ -28,7 +28,80 @@ pub struct Pipeline {
     pub stages: Vec<Stage>,
     #[serde(default)]
     pub policy: Policy,
+    /// The project's supervisor session, when it has one. Read only from
+    /// the live `pipelines/<project>.toml`, never from a ticket's copy.
+    #[serde(default)]
+    pub supervisor: Option<Supervisor>,
 }
+
+/// `[supervisor]`: one long-lived agent per project that watches its
+/// tickets and answers the decisions `decides` lists.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Supervisor {
+    /// What the supervisor is for, in the owner's words; the seed opens
+    /// with it.
+    pub guidance: String,
+    /// Files to read first, relative to the workspace.
+    #[serde(default)]
+    pub read: Vec<PathBuf>,
+    /// What makes the workspace: one argv, or `[[supervisor.setup]]`
+    /// entries for several. Absent, `git clone <repo> .` for a project
+    /// with a `repo`, an empty directory for one with a `root`.
+    #[serde(default)]
+    pub setup: SupervisorSetup,
+    /// `--model` for the session.
+    #[serde(default)]
+    pub model: Option<String>,
+    /// The decisions the supervisor may answer; every other is the
+    /// owner's.
+    #[serde(default)]
+    pub decides: Vec<String>,
+}
+
+/// `setup = [...]` (one argv, the shape of a lane's `setup`) or
+/// `[[supervisor.setup]] argv = [...]` (several).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum SupervisorSetup {
+    One(Vec<String>),
+    Many(Vec<SetupEntry>),
+}
+
+impl Default for SupervisorSetup {
+    fn default() -> Self {
+        Self::One(Vec::new())
+    }
+}
+
+/// One command of a supervisor's setup.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SetupEntry {
+    pub argv: Vec<String>,
+}
+
+impl SupervisorSetup {
+    /// Every argv in order; empty when the table names none.
+    #[must_use]
+    pub fn argvs(&self) -> Vec<Vec<String>> {
+        match self {
+            Self::One(argv) if argv.is_empty() => Vec::new(),
+            Self::One(argv) => vec![argv.clone()],
+            Self::Many(entries) => entries.iter().map(|e| e.argv.clone()).collect(),
+        }
+    }
+}
+
+/// Answers that are easily mistaken for decisions in `decides`, with
+/// the decisions that take them.
+const ANSWERS: &[(&str, &str)] = &[
+    ("recheck", "`pr` and `refresh`"),
+    ("continue", "`paused`"),
+    ("keep", "`rerun`"),
+    ("check", "`rerun`"),
+    ("proceed", "a human gate's decision"),
+    ("reuse", "`branch`"),
+    ("fresh", "`branch`"),
+];
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProjectSection {
@@ -1017,6 +1090,63 @@ impl Pipeline {
                 bail!("decision {name:?}: the dial is ask, recommend or auto, not {dial:?}");
             }
         }
+        if let Some(sup) = &self.supervisor {
+            self.validate_supervisor(sup)?;
+        }
+        Ok(())
+    }
+
+    /// The decisions a gate of this file asks: a human gate's, an
+    /// external gate's, and `merge` for a `pr-merged` gate that names
+    /// none.
+    #[must_use]
+    pub fn gate_decisions(&self) -> Vec<&str> {
+        self.stages
+            .iter()
+            .filter_map(|s| match &s.gate {
+                Some(Gate::Human { decision, .. }) => Some(decision.as_str()),
+                Some(Gate::External {
+                    decision: Some(d), ..
+                }) => Some(d.as_str()),
+                Some(Gate::External {
+                    check,
+                    decision: None,
+                    ..
+                }) if check == "pr-merged" => Some(crate::scheduler::DEFAULT_MERGE),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn validate_supervisor(&self, sup: &Supervisor) -> Result<()> {
+        if sup.guidance.trim().is_empty() {
+            bail!("[supervisor] guidance is empty; say what the supervisor is for");
+        }
+        if let Some(path) = sup.read.iter().find(|p| p.is_absolute()) {
+            bail!(
+                "[supervisor] read: {} is absolute; paths are relative to the workspace",
+                path.display()
+            );
+        }
+        if let SupervisorSetup::Many(entries) = &sup.setup
+            && entries.iter().any(|e| e.argv.is_empty())
+        {
+            bail!("[supervisor] setup: an entry has an empty argv");
+        }
+        let asked = self.gate_decisions();
+        for name in &sup.decides {
+            if crate::scheduler::DECISIONS.contains(&name.as_str())
+                || asked.contains(&name.as_str())
+            {
+                continue;
+            }
+            if let Some((_, takes)) = ANSWERS.iter().find(|(a, _)| a == name) {
+                bail!("[supervisor] decides: `{name}` is an answer to {takes}; name the decision");
+            }
+            bail!(
+                "[supervisor] decides: `{name}` is not a decision Dispatch asks or a gate of this file asks"
+            );
+        }
         Ok(())
     }
 }
@@ -1115,6 +1245,110 @@ waiting_on_me = 2
 rates = { "claude-sonnet-5" = [3.0, 15.0] }
 decisions = { lanes = "auto", finalize = "ask", budget = "ask" }
 "#;
+
+    /// The Switchboard pipeline with `table` appended as its
+    /// `[supervisor]`.
+    fn supervised(table: &str) -> Result<Pipeline> {
+        Pipeline::parse(&format!("{SWITCHBOARD}\n[supervisor]\n{table}"))
+    }
+
+    #[test]
+    fn a_supervisor_table_reads_in_both_setup_shapes() {
+        let p = supervised(
+            r#"
+guidance = "Keep the queue moving."
+read = ["CLAUDE.md"]
+setup = ["git", "clone", "git@example.com:o/r.git", "."]
+model = "haiku"
+decides = ["finalize", "rerun", "merge", "lanes"]
+"#,
+        )
+        .unwrap();
+        let sup = p.supervisor.unwrap();
+        assert_eq!(sup.model.as_deref(), Some("haiku"));
+        assert_eq!(
+            sup.setup.argvs(),
+            [vec!["git", "clone", "git@example.com:o/r.git", "."]]
+        );
+        let p = supervised(
+            r#"
+guidance = "Keep the queue moving."
+decides = []
+[[supervisor.setup]]
+argv = ["git", "clone", "git@example.com:o/r.git", "."]
+[[supervisor.setup]]
+argv = ["make", "deps"]
+"#,
+        )
+        .unwrap();
+        assert_eq!(
+            p.supervisor.unwrap().setup.argvs(),
+            [
+                vec!["git", "clone", "git@example.com:o/r.git", "."],
+                vec!["make", "deps"]
+            ]
+        );
+        let none = supervised("guidance = \"g\"").unwrap().supervisor.unwrap();
+        assert!(none.setup.argvs().is_empty());
+        assert!(none.decides.is_empty());
+    }
+
+    #[test]
+    fn a_file_without_a_supervisor_table_parses_as_before() {
+        assert_eq!(Pipeline::parse(SWITCHBOARD).unwrap().supervisor, None);
+    }
+
+    #[test]
+    fn decides_names_decisions_and_only_decisions() {
+        let err = |table: &str| supervised(table).unwrap_err().to_string();
+        let e = err("guidance = \"g\"\ndecides = [\"approve\"]");
+        assert!(e.contains("`approve` is not a decision"), "{e}");
+        let e = err("guidance = \"g\"\ndecides = [\"recheck\"]");
+        assert_eq!(
+            e,
+            "[supervisor] decides: `recheck` is an answer to `pr` and `refresh`; name the decision"
+        );
+        // A gate of this file asks it: a human gate's own name.
+        supervised("guidance = \"g\"\ndecides = [\"lanes\", \"merge\"]").unwrap();
+    }
+
+    #[test]
+    fn merge_is_a_decision_only_where_a_gate_asks_it() {
+        let table = "\n[supervisor]\nguidance = \"g\"\ndecides = [\"merge\"]";
+        // Named on the gate.
+        Pipeline::parse(&format!("{SWITCHBOARD}{table}")).unwrap();
+        // A `pr-merged` gate that names none asks `merge`.
+        let unnamed = SWITCHBOARD.replace(
+            r#"check = "pr-merged", decision = "merge" }"#,
+            r#"check = "pr-merged" }"#,
+        );
+        assert_ne!(unnamed, SWITCHBOARD);
+        Pipeline::parse(&format!("{unnamed}{table}")).unwrap();
+        // No gate asks it.
+        let none = SWITCHBOARD.replace(
+            r#"gate = { kind = "external", check = "pr-merged", decision = "merge" }"#,
+            r#"gate = { kind = "human", decision = "ship" }"#,
+        );
+        assert_ne!(none, SWITCHBOARD);
+        let e = Pipeline::parse(&format!("{none}{table}"))
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("`merge` is not a decision"), "{e}");
+    }
+
+    #[test]
+    fn a_supervisor_needs_guidance_and_relative_reads() {
+        let e = supervised("guidance = \"  \"").unwrap_err().to_string();
+        assert!(e.contains("guidance is empty"), "{e}");
+        let e = supervised("guidance = \"g\"\nread = [\"/etc/passwd\"]")
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("/etc/passwd is absolute"), "{e}");
+        let e = supervised("guidance = \"g\"\n[[supervisor.setup]]\nargv = []")
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("empty argv"), "{e}");
+    }
 
     #[test]
     fn the_switchboard_pipeline_parses_whole() {

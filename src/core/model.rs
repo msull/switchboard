@@ -1135,6 +1135,13 @@ impl SessionRecord {
             },
         }
     }
+    /// Whether a return resumes a conversation: an agent with a resume
+    /// handle that has not been found missing. A return on any other
+    /// record launches it fresh, with its first prompt again.
+    #[must_use]
+    pub fn resumable(&self) -> bool {
+        matches!(self.kind, SessionKind::Agent(_)) && self.resume.is_some() && !self.not_resumable
+    }
     /// Whether the record may be launched at all.
     #[must_use]
     pub fn runnable(&self) -> bool {

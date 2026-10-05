@@ -1,6 +1,7 @@
 //! `dispatch`: take a ticket, run the scheduler, answer decisions, look.
 
 use std::path::PathBuf;
+use std::sync::OnceLock;
 use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::Result;
@@ -14,6 +15,7 @@ use dispatch::scheduler::{Runner, attempt_label, kept_branches};
 use dispatch::serve::{Handler, Server, take_issue, take_pull_requests};
 use dispatch::serve::{ticket_paths, ticket_view};
 use dispatch::store::{DataDir, read_ticket};
+use dispatch::supervisor::{self, Actor};
 use dispatch::ticket::{DecisionState, Ticket, TicketState};
 use dispatch::{USAGE, UsageError};
 use std::io::Write as _;
@@ -51,21 +53,51 @@ fn now_ms() -> u64 {
     epoch_ms(SystemTime::now())
 }
 
+/// Who runs this command, worked out once in `command`: finding it reads
+/// every project's record.
+static ACTOR: OnceLock<Actor> = OnceLock::new();
+
+/// This command's actor; the owner until `command` has set it.
+fn actor() -> &'static Actor {
+    static OWNER: Actor = Actor::Owner;
+    ACTOR.get().unwrap_or(&OWNER)
+}
+
 fn runner() -> Result<Runner> {
-    Ok(Runner::new(
+    Ok(with_actor(Runner::new(
         DataDir::from_env()?,
         Box::new(SocketPort::from_env()?),
         Box::new(GitCli::default()),
-    ))
+    )))
 }
 
 /// A runner for the commands that never talk to Switchboard.
 fn offline_runner() -> Result<Runner> {
-    Ok(Runner::new(
+    Ok(with_actor(Runner::new(
         DataDir::from_env()?,
         Box::new(NoPort),
         Box::new(GitCli::default()),
-    ))
+    )))
+}
+
+/// The runner stamped with who runs this command: a supervisor session
+/// or the owner.
+fn with_actor(mut runner: Runner) -> Runner {
+    runner.actor = actor().by();
+    runner
+}
+
+/// The command a printed `decide` line starts with. A supervisor's only
+/// permission matches the full path, so its lines carry that path; the
+/// owner types `dispatch`.
+fn decide_command() -> String {
+    match actor() {
+        Actor::Owner => "dispatch decide".to_owned(),
+        Actor::Supervisor(_) => std::env::current_exe().map_or_else(
+            |_| "dispatch decide".to_owned(),
+            |exe| format!("{} decide", exe.display()),
+        ),
+    }
 }
 
 fn main() -> Result<()> {
@@ -84,6 +116,11 @@ fn main() -> Result<()> {
 }
 
 fn command(args: &[&str]) -> Result<()> {
+    // A supervisor session may run only some commands, on its own
+    // project; the owner runs anything.
+    let data = DataDir::from_env()?;
+    let actor = supervisor::actor(&data)?;
+    supervisor::permit(ACTOR.get_or_init(|| actor), args, &data)?;
     match args {
         ["take", project, "pr", specs @ ..] => take_prs(project, specs),
         ["take", project, issue] => take(project, issue),
@@ -111,6 +148,8 @@ fn command(args: &[&str]) -> Result<()> {
         ["report", rest @ ..] => report(rest),
         ["tail", rest @ ..] => tail(rest),
         ["health", rest @ ..] => health(rest),
+        ["brief", rest @ ..] => brief(rest),
+        ["supervisor", rest @ ..] => supervise(rest),
         _ => usage(),
     }
 }
@@ -222,7 +261,7 @@ fn decisions() -> Result<()> {
         for d in t.waiting_on_you() {
             any = true;
             say!(
-                "{} {} [{}] {}\n    options: {}{}\n    dispatch decide {} {} <answer>",
+                "{} {} [{}] {}\n    options: {}{}\n    {} {} {} <answer>",
                 t.id,
                 d.id,
                 d.stage,
@@ -231,6 +270,7 @@ fn decisions() -> Result<()> {
                 d.recommendation
                     .as_ref()
                     .map_or(String::new(), |r| format!(" (suggested: {r})")),
+                decide_command(),
                 t.id,
                 d.id
             );
@@ -293,10 +333,12 @@ fn status() -> Result<()> {
             }
         );
         for d in &t.decisions {
-            if let DecisionState::Answered { answer, acted, .. } = &d.state
+            if let DecisionState::Answered {
+                answer, acted, by, ..
+            } = &d.state
                 && !acted
             {
-                say!("    {} answered {answer}, not yet acted on", d.id);
+                say!("    {} answered {answer} by {by}, not yet acted on", d.id);
             }
         }
     }
@@ -590,12 +632,14 @@ fn event_line(e: &Event, json: bool) -> String {
 fn events(args: &[&str]) -> Result<()> {
     let f = Flags::parse(
         args,
-        &["--since", "--ticket", "--project"],
+        &["--since", "--ticket", "--project", "--timeout"],
         &["--follow", "--json"],
     );
-    if !f.rest.is_empty() {
+    if !f.rest.is_empty() || (f.value("--timeout").is_some() && !f.on("--follow")) {
         usage();
     }
+    let deadline = f.number("--timeout").map(|s| now_ms() + s * 1000);
+    let mut printed = false;
     // A follow with no cursor starts at the tail: the reader wants what
     // happens next, not the whole history again. A plain listing or an
     // explicit --since replays from 0 or from the cursor.
@@ -619,6 +663,7 @@ fn events(args: &[&str]) -> Result<()> {
         last = last.max(e.seq);
         if keep(e) && !gone.contains(&e.seq) {
             say!("{}", event_line(e, json));
+            printed = true;
         }
     }
     if !f.on("--follow") {
@@ -626,12 +671,22 @@ fn events(args: &[&str]) -> Result<()> {
     }
     // Followed, a withdrawn event may already be printed when its void
     // comes; the void's line says which seqs to drop.
+    // With a timeout it ends as `wait` does: 0 as soon as a batch
+    // printed something, so the watcher acts on it now, and 2 when
+    // nothing came in the time.
     let mut follow = events::follow(&path, last);
     loop {
         for e in follow.next_batch()? {
             if keep(&e) {
                 say!("{}", event_line(&e, json));
+                printed = true;
             }
+        }
+        if deadline.is_some() && printed {
+            return Ok(());
+        }
+        if deadline.is_some_and(|d| now_ms() >= d) {
+            std::process::exit(EXIT_TIMED_OUT);
         }
         std::thread::sleep(Duration::from_millis(events::FOLLOW_POLL_MS));
     }
@@ -695,10 +750,13 @@ fn wait(args: &[&str]) -> Result<()> {
 /// that decision still waits on the user.
 fn decide_hint(e: &Event, t: &Ticket) -> Option<String> {
     let d = e.decision.as_ref()?;
-    t.waiting_on_you()
-        .iter()
-        .any(|w| &w.id == d)
-        .then(|| format!("    dispatch decide {} {d} <answer> [--note <text>]", t.id))
+    t.waiting_on_you().iter().any(|w| &w.id == d).then(|| {
+        format!(
+            "    {} {} {d} <answer> [--note <text>]",
+            decide_command(),
+            t.id
+        )
+    })
 }
 
 fn show(args: &[&str]) -> Result<()> {
@@ -749,6 +807,7 @@ fn show(args: &[&str]) -> Result<()> {
         );
     }
     print_attempts(&view)?;
+    print_answered(&t)?;
     print_pending(&view)?;
     let p = &view.paths;
     say!("files:");
@@ -844,6 +903,49 @@ fn nudged_clause(n: usize) -> String {
     dispatch_control::nudged(n).map_or_else(String::new, |n| format!(", {n}"))
 }
 
+/// The answered decisions with who answered, and every answer a
+/// supervisor gave that was refused.
+fn print_answered(t: &Ticket) -> Result<()> {
+    let answered: Vec<_> = t
+        .decisions
+        .iter()
+        .filter(|d| matches!(d.state, DecisionState::Answered { .. }))
+        .collect();
+    if !answered.is_empty() {
+        say!("answered:");
+    }
+    for d in answered {
+        if let DecisionState::Answered { answer, by, .. } = &d.state {
+            say!(
+                "  {} [{}] {}: answered {answer} by {by}",
+                d.id,
+                d.stage,
+                d.name
+            );
+        }
+    }
+    let refused: Vec<_> = t
+        .decisions
+        .iter()
+        .flat_map(|d| d.refusals.iter().map(move |r| (d, r)))
+        .collect();
+    if !refused.is_empty() {
+        say!("refused:");
+    }
+    for (d, r) in refused {
+        say!(
+            "  {} [{}] {}: the {} asked {} at {}; the owner answers",
+            d.id,
+            d.stage,
+            d.name,
+            r.by,
+            r.answer,
+            clock(r.at_ms)
+        );
+    }
+    Ok(())
+}
+
 /// The decisions that wait on the user, with the exact line that
 /// answers each.
 fn print_pending(view: &dispatch_control::TicketView) -> Result<()> {
@@ -857,7 +959,7 @@ fn print_pending(view: &dispatch_control::TicketView) -> Result<()> {
     }
     for d in pending {
         say!(
-            "  {} [{}] {}\n    options: {}{}\n    dispatch decide {} {} <answer> [--note <text>]",
+            "  {} [{}] {}\n    options: {}{}\n    {} {} {} <answer> [--note <text>]",
             d.id,
             d.stage,
             d.question,
@@ -865,6 +967,7 @@ fn print_pending(view: &dispatch_control::TicketView) -> Result<()> {
             d.recommendation
                 .as_ref()
                 .map_or(String::new(), |r| format!(" (suggested: {r})")),
+            decide_command(),
             view.id,
             d.id
         );
@@ -960,6 +1063,24 @@ fn report(args: &[&str]) -> Result<()> {
     Ok(())
 }
 
+/// `N by you, M by supervisor`, then anyone else who answered.
+fn answered_line(by: &std::collections::BTreeMap<String, u32>) -> String {
+    let count = |who: &str| by.get(who).copied().unwrap_or(0);
+    let mut parts = vec![
+        format!("{} by you", count(dispatch::scheduler::BY_HAND)),
+        format!(
+            "{} by supervisor",
+            count(dispatch::scheduler::BY_SUPERVISOR)
+        ),
+    ];
+    for (who, n) in by {
+        if who != dispatch::scheduler::BY_HAND && who != dispatch::scheduler::BY_SUPERVISOR {
+            parts.push(format!("{n} by {who}"));
+        }
+    }
+    parts.join(", ")
+}
+
 fn print_report(r: &TicketReport) -> Result<()> {
     say!("{} {} ({})", r.id, r.title, r.state);
     for s in &r.stages {
@@ -1020,6 +1141,7 @@ fn print_report(r: &TicketReport) -> Result<()> {
     for c in &r.code_reviews {
         say!("    {} #{}: {}", c.stage, c.attempt, rounds(&c.rounds));
     }
+    say!("  answered: {}", answered_line(&r.answered_by));
     say!("  fix passes: {}", r.fix_passes);
     say!("  rebases: at least {}", r.rebases);
     match &r.pr_url {
@@ -1091,6 +1213,177 @@ fn health(args: &[&str]) -> Result<()> {
     Ok(())
 }
 
+/// `dispatch brief <project>`: what a supervisor reads first. Read-only.
+fn brief(args: &[&str]) -> Result<()> {
+    let f = Flags::parse(args, &[], &[]);
+    let project = f.one();
+    let runner = offline_runner()?;
+    let now = now_ms();
+    match runner.supervisor_standing(project) {
+        Ok(s) => say!("{}", supervisor_line(project, &s, now)),
+        Err(e) => say!("supervisor: {e:#}"),
+    }
+    let tickets: Vec<Ticket> = runner
+        .tickets()?
+        .into_iter()
+        .filter(|t| t.project == project && !matches!(t.state, TicketState::Closed { .. }))
+        .collect();
+    say!("\ntickets:");
+    if tickets.is_empty() {
+        say!("  none");
+    }
+    for t in &tickets {
+        let stage = runner
+            .pipeline_of(t)
+            .ok()
+            .and_then(|p| p.stages.get(t.stage).map(|s| s.name.clone()))
+            .unwrap_or_else(|| "done".to_owned());
+        say!(
+            "  {} {} {} · stage {stage} · {}",
+            t.id,
+            t.source.label(),
+            t.source.title,
+            t.state.label()
+        );
+    }
+    say!("\nwaiting on you:");
+    let mut any = false;
+    for t in &tickets {
+        for d in t.waiting_on_you() {
+            any = true;
+            say!(
+                "  {} {} [{}] {}: {}\n    options: {}\n    {} {} {} <answer> [--note <text>]",
+                t.id,
+                d.id,
+                d.stage,
+                d.name,
+                d.question,
+                d.options.join(" | "),
+                decide_command(),
+                t.id,
+                d.id
+            );
+        }
+    }
+    if !any {
+        say!("  nothing");
+    }
+    let log = events::log_path(&runner.data);
+    let all = events::read_since(&log, 0)?;
+    let gone = events::withdrawn(&all);
+    let mine: Vec<&Event> = all
+        .iter()
+        .filter(|e| e.project == project && e.kind != Kind::Void && !gone.contains(&e.seq))
+        .collect();
+    say!("\nlast events:");
+    for e in &mine[mine.len().saturating_sub(20)..] {
+        say!("  {}", event_line(e, false));
+    }
+    say!("  follow from seq {}", events::last_seq(&log)?);
+    say!("\nopen worktrees:");
+    let mut trees = false;
+    for t in &tickets {
+        for lane in t.lanes.iter().filter(|l| !l.removed) {
+            trees = true;
+            say!("  {} {}: {}", t.id, lane.name, lane.worktree.display());
+        }
+    }
+    if !trees {
+        say!("  none");
+    }
+    let handoff = runner.data.supervisor_dir(project).join("handoff.md");
+    say!("\nhand-off ({}):", handoff.display());
+    if let Ok(text) = std::fs::read_to_string(&handoff) {
+        say!("{}", text.trim_end());
+    } else {
+        say!("(no hand-off yet)");
+    }
+    Ok(())
+}
+
+/// The supervisor in one line: its session, age and seed.
+fn supervisor_line(project: &str, s: &supervisor::Standing, now: u64) -> String {
+    if s.table.is_none() {
+        return format!("supervisor: none (no [supervisor] table in pipelines/{project}.toml)");
+    }
+    let Some(c) = &s.ps.supervisor.current else {
+        return format!("supervisor: none; `dispatch supervisor {project} --fresh` starts one");
+    };
+    let seed = if s.stale {
+        "stale: `[supervisor]` changed, `--fresh` to reseed"
+    } else {
+        "current"
+    };
+    format!(
+        "supervisor: session {}, {} old, seed {} ({seed})",
+        c.session,
+        span(now.saturating_sub(c.created_ms)),
+        c.seed_hash
+    )
+}
+
+/// `dispatch supervisor <project> [--fresh [--setup] | --resume | --kill
+/// [--reason <text>]]`. The read is offline; the rest talk to
+/// Switchboard.
+fn supervise(args: &[&str]) -> Result<()> {
+    let f = Flags::parse(
+        args,
+        &["--reason"],
+        &["--fresh", "--setup", "--resume", "--kill"],
+    );
+    let project = f.one();
+    let chosen = ["--fresh", "--resume", "--kill"]
+        .iter()
+        .filter(|s| f.on(s))
+        .count();
+    if chosen > 1
+        || (f.on("--setup") && !f.on("--fresh"))
+        || (f.value("--reason").is_some() && !f.on("--kill"))
+    {
+        usage();
+    }
+    let now = now_ms();
+    if f.on("--fresh") {
+        let mut runner = runner()?;
+        let c = runner.supervisor_fresh(project, f.on("--setup"), "fresh", now)?;
+        say!("{project}: supervisor session {} started", c.session);
+        say!("open it from the Dispatch page in Switchboard");
+        return Ok(());
+    }
+    if f.on("--resume") {
+        let mut runner = runner()?;
+        let session = runner.supervisor_resume(project)?;
+        // Switchboard answers before its transcript check: one with no
+        // transcript is then marked not resumable and stays cold.
+        say!("{project}: resume of supervisor session {session} asked");
+        say!("the Dispatch page shows whether it came back");
+        return Ok(());
+    }
+    if f.on("--kill") {
+        let mut runner = runner()?;
+        let why = f.value("--reason").unwrap_or("killed by hand");
+        runner.supervisor_kill(project, why, now)?;
+        say!("{project}: supervisor killed: {why}");
+        return Ok(());
+    }
+    let runner = offline_runner()?;
+    let s = runner.supervisor_standing(project)?;
+    say!("{}", supervisor_line(project, &s, now));
+    say!("workspace {}", s.workspace.display());
+    say!("hand-off {}", s.handoff.display());
+    say!("replaced {} supervisor(s)", s.ps.supervisor.past.len());
+    if let Some(e) = &s.ps.supervisor.error {
+        say!("error: {e}");
+    }
+    if s.ps.supervisor.intent.is_some() {
+        say!("a fresh one starts on the runner's next pass");
+    }
+    if s.ps.supervisor.current.is_some() {
+        say!("open it from the Dispatch page in Switchboard");
+    }
+    Ok(())
+}
+
 /// The commands that never talk to Switchboard.
 struct NoPort;
 
@@ -1152,6 +1445,7 @@ mod tests {
             attempt: Some(("implement".into(), 1)),
             state,
             made_ms: 3,
+            refusals: Vec::new(),
         }
     }
 

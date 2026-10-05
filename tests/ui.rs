@@ -4128,6 +4128,7 @@ fn dispatch_status() -> switchboard::ports::dispatch::Status {
                 pending: 1,
                 min_free_gb: 0,
                 free_gb: None,
+                supervisor: None,
             },
             ProjectView {
                 name: "PTA".into(),
@@ -4138,6 +4139,7 @@ fn dispatch_status() -> switchboard::ports::dispatch::Status {
                 pending: 0,
                 min_free_gb: 0,
                 free_gb: None,
+                supervisor: None,
             },
         ],
         tickets: vec![
@@ -4276,6 +4278,127 @@ fn ticket_page_on(
     harness.run_steps(2);
     harness.state_mut().dispatched.clear();
     harness
+}
+
+/// The Dispatch page with a supervisor session `edit`ed into beta's
+/// project: Orchard has a `[supervisor]` table whose session is that
+/// record, PTA has none.
+fn supervised_page(
+    edit: impl FnOnce(&mut SessionRecord),
+) -> (Harness<'static, SwitchboardApp>, RecordId) {
+    let (mut harness, ids) = harness();
+    let mut sup = record(
+        ids.beta,
+        "Supervisor · Orchard",
+        SessionKind::Agent(AgentKind::ClaudeCode),
+        1,
+    );
+    sup.resume = Some(ResumeHandle::ClaudeCode {
+        session_id: uuid::Uuid::nil(),
+        transcript: Some(PathBuf::from("/nowhere/x.jsonl")),
+    });
+    edit(&mut sup);
+    let id = sup.id;
+    let core = harness.state_mut().core_mut_for_seeding();
+    let mut workspaces = core.workspaces().to_vec();
+    workspaces
+        .iter_mut()
+        .find(|w| w.project.id == ids.beta)
+        .unwrap()
+        .sessions
+        .push(sup);
+    core.seed(workspaces, vec![]);
+    let mut status = dispatch_status();
+    status.projects[0].supervisor = Some(switchboard::ports::dispatch::SupervisorView {
+        session: Some(id.0.to_string()),
+        created_ms: 1,
+        ..Default::default()
+    });
+    harness
+        .state_mut()
+        .dispatch(AppAction::DispatchStatus(Some(status)));
+    harness.state_mut().dispatch(AppAction::ShowDispatch);
+    harness.run_steps(2);
+    harness.state_mut().dispatched.clear();
+    (harness, id)
+}
+
+/// One chip, on the project with the table: it says what the session
+/// is doing, opens it, resumes it, and starts a new one only after a
+/// confirmation, since that kills the current one.
+#[test]
+fn the_supervisor_chip_opens_resumes_and_freshens_after_a_confirmation() {
+    let (mut harness, id) = supervised_page(|_| {});
+    assert_eq!(
+        harness.query_all_by_label("Fresh supervisor").count(),
+        1,
+        "one chip"
+    );
+    harness.get_by_label("Supervisor · cold");
+    click(&mut harness, "Open supervisor");
+    assert!(actions(&harness).contains(&AppAction::ShowSession(id)));
+    harness.state_mut().dispatch(AppAction::ShowDispatch);
+    harness.run_steps(2);
+    harness.state_mut().dispatched.clear();
+    click(&mut harness, "Resume supervisor");
+    assert_eq!(actions(&harness), [AppAction::ReturnToSession(id)]);
+    harness.state_mut().dispatched.clear();
+    click(&mut harness, "Fresh supervisor");
+    harness.get_by_label("Start a new supervisor");
+    assert!(
+        actions(&harness).is_empty(),
+        "the button alone sends nothing"
+    );
+    click(&mut harness, "Cancel");
+    assert!(harness.query_by_label("Start a new supervisor").is_none());
+    assert!(actions(&harness).is_empty());
+    click(&mut harness, "Fresh supervisor");
+    click(&mut harness, "Start new");
+    assert!(
+        actions(&harness).contains(&AppAction::DispatchSupervisorFresh("Orchard".into())),
+        "{:?}",
+        actions(&harness)
+    );
+    assert!(harness.state().ui_state.confirm_supervisor_fresh.is_none());
+}
+
+/// Resume on a record that cannot resume would launch it fresh, with
+/// its first prompt again; only Fresh is offered.
+#[test]
+fn a_supervisor_that_cannot_resume_offers_only_fresh() {
+    for no_handle in [false, true] {
+        let (harness, _) = supervised_page(|r| {
+            if no_handle {
+                r.resume = None;
+            } else {
+                r.not_resumable = true;
+            }
+        });
+        harness.get_by_label("Fresh supervisor");
+        harness.get_by_label("Open supervisor");
+        assert!(
+            harness.query_by_label("Resume supervisor").is_none(),
+            "no handle: {no_handle}"
+        );
+    }
+}
+
+/// A decision a supervisor answered says so in the ticket's timeline.
+#[test]
+fn a_decision_answered_by_the_supervisor_says_so() {
+    let (mut harness, _) = harness();
+    let mut status = dispatch_status();
+    status.tickets[0].decisions[0].state = "answered".into();
+    status.tickets[0].decisions[0].answer = Some("frontend".into());
+    status.tickets[0].decisions[0].answered_by = Some("supervisor".into());
+    harness
+        .state_mut()
+        .dispatch(AppAction::DispatchStatus(Some(status)));
+    harness
+        .state_mut()
+        .dispatch(AppAction::ShowTicket("t1".into()));
+    harness.run_steps(2);
+    harness.get_by_label("→ frontend by supervisor");
 }
 
 /// Close is behind a confirmation that names the paths the runner says

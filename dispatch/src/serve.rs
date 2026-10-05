@@ -126,6 +126,10 @@ impl Handler {
                 let t = take_issue(&mut self.runner, &*self.issues, project, issue, now_ms)?;
                 Reply::Taken(self.view(&t))
             }
+            Body::SupervisorFresh { project } => {
+                self.runner.request_supervisor_fresh(project)?;
+                Reply::Status(status(&self.runner)?)
+            }
         })
     }
 
@@ -222,6 +226,7 @@ pub fn take_pull_requests(
         url: Some(first.url.clone()),
         labels: Vec::new(),
         taken_at_ms: now_ms,
+        taken_by: None,
         pull_requests: prs,
     };
     runner.take(project, &text, source, now_ms)
@@ -354,11 +359,14 @@ pub fn status(runner: &Runner) -> Result<Status> {
         // The limits come from the project's current pipeline file; the
         // counts are the scheduler's: an active ticket with an open
         // attempt holds a slot, and every pending decision counts.
-        let policy = fs::read_to_string(runner.data.pipeline(&name))
+        let live = fs::read_to_string(runner.data.pipeline(&name))
             .ok()
-            .and_then(|text| Pipeline::parse(&text).ok())
-            .map(|p| p.policy)
-            .unwrap_or_default();
+            .and_then(|text| Pipeline::parse(&text).ok());
+        let supervisor = live
+            .as_ref()
+            .and_then(|p| p.supervisor.as_ref())
+            .map(|table| supervisor_view(&name, &ps.supervisor, table));
+        let policy = live.map(|p| p.policy).unwrap_or_default();
         let mine = records.iter().filter(|t| t.project == name);
         let running = mine
             .clone()
@@ -374,6 +382,7 @@ pub fn status(runner: &Runner) -> Result<Status> {
             pending: u32::try_from(pending).unwrap_or(u32::MAX),
             min_free_gb: policy.min_free_gb,
             free_gb: runner.free_gb(),
+            supervisor,
         });
     }
     let mut tickets = Vec::new();
@@ -387,6 +396,22 @@ pub fn status(runner: &Runner) -> Result<Status> {
         projects,
         tickets,
     })
+}
+
+/// A project's supervisor as the page shows it.
+fn supervisor_view(
+    project: &str,
+    s: &crate::ticket::Supervision,
+    table: &crate::pipeline::Supervisor,
+) -> dispatch_control::SupervisorView {
+    dispatch_control::SupervisorView {
+        session: s.current.as_ref().map(|c| c.session.clone()),
+        created_ms: s.current.as_ref().map_or(0, |c| c.created_ms),
+        seed_stale: s.seed_stale(project, table),
+        replaced: u32::try_from(s.past.len()).unwrap_or(u32::MAX),
+        fresh_pending: s.intent.is_some(),
+        error: s.error.clone(),
+    }
 }
 
 /// An attempt's state as a word, and the reason a failed or cancelled
@@ -1011,6 +1036,7 @@ slots = 1
             voids: Vec::new(),
             by: None,
             conflicts: None,
+            actor: None,
         }
     }
 
@@ -1107,6 +1133,7 @@ slots = 1
                 acted: false,
             },
             made_ms: 1_200,
+            refusals: Vec::new(),
         });
         h.runner.save_ticket(&mut t, 1_500).unwrap();
         let reply = h.handle(&Request::new("1", Body::Ticket { id: view.id }), 2_000);

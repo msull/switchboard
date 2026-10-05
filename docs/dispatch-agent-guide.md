@@ -40,15 +40,17 @@ dispatch close <ticket> [--reason <text>]         a ticket closed, its trees rem
 dispatch restart <ticket> [<stage>]               a ticket at its stage, or an earlier one, under the live pipeline; later work discarded
 dispatch health [--timeout <secs>] [--stale <secs>] [--json]   is the runner alive and getting on; run it first
 dispatch show <ticket> [--json]                   one ticket: stage, lanes, attempts, rounds, decisions, files
-dispatch events [--since <seq>] [--follow] [--ticket <id>]... [--project <name>] [--json]
+dispatch events [--since <seq>] [--follow [--timeout <secs>]] [--ticket <id>]... [--project <name>] [--json]
+dispatch brief <project>                          the project at a glance: tickets, what waits, recent events, the hand-off
+dispatch supervisor <project>                     the project's supervisor session: its id, age, seed, workspace
 dispatch wait <ticket> [--for decision|stage|pr|closed|any] [--since <seq>] [--timeout <secs>] [--json]
 dispatch report <ticket> [--json]                 how a ticket went: stage time, review points, fix passes, size
 dispatch report --project <name> [--since YYYY-MM-DD] [--json]
 dispatch tail <ticket> [--lines N]                what the ticket's running agents show
 ```
 
-`dispatch run` and `dispatch worktrees` are the owner's: never run
-them. The runner is already up; if a command says it cannot reach the
+`dispatch run`, `dispatch worktrees` and `dispatch supervisor <project>
+--fresh`, `--resume` or `--kill` are the owner's: never run them. The runner is already up; if a command says it cannot reach the
 socket, stop and report that instead of starting one.
 
 ## Projects and what they take
@@ -194,7 +196,11 @@ agent's session after it stopped with a dirty tree),
 `check-orphan-killed` (checks a previous runner left running, stopped
 by this one before they ran again or the attempt was cancelled),
 `parking`,
-`parked`, `resumed`, `closing`, `closed`, and `void`. The human line is
+`parked`, `resumed`, `closing`, `closed`, `refused` (a supervisor's
+answer to a decision that is not its to answer), and `void`. A take,
+park, resume, close or answer a supervisor session made carries
+`"actor":"supervisor"` and its text ends `(by supervisor)` or reads
+`by supervisor`. The human line is
 `seq  hh:mm:ss  ticket  stage  kind  text`, the time in the machine's
 local zone (the stored `at_ms` under `--json` is UTC milliseconds).
 
@@ -314,6 +320,39 @@ tickets keep running; the order only decides which waiting ticket
 starts next when a slot frees. This is the one lever a grooming agent
 should use freely.
 
+**With a timeout.** `dispatch events --follow --timeout <secs>` exits
+0 as soon as it has printed something and 2 if nothing came in that
+long, as `wait` does. An agent's Bash call is cut off after two
+minutes by default, so a watcher keeps the timeout under that and
+loops on it: `dispatch events --project <name> --since <seq> --follow
+--timeout 100`, noting the last seq it printed and starting again from
+it.
+
+**Brief.** `dispatch brief <project>` is what a supervisor reads
+first: its own session's line, the project's open tickets with stage
+and state, what waits on the owner with the `decide` line for each,
+the last 20 events with the seq to follow from, the open worktrees,
+and the supervisor's hand-off. It reads and changes nothing.
+
+### Supervisor sessions
+
+A project whose pipeline has a `[supervisor]` table gets one
+long-lived Claude Code session that watches its tickets: the owner
+starts it with `dispatch supervisor <project> --fresh` or the Fresh
+button on the Dispatch page. Its seed names the `dispatch` executable
+by full path, the decisions it may answer (`decides`), and its
+hand-off file, which it keeps current for the next supervisor.
+
+A command run from a supervisor's session is the supervisor's: the
+session's `SWITCHBOARD_RECORD_ID` names it. It may run the read-only
+commands, `take` and `queue` on its own project, and `decide`, `park`,
+`resume --no-rerun` and `close` on its own project's tickets. A plain
+`resume` (which reruns, a paid run) needs `rerun` in `decides`.
+Everything else is refused with exit 1: `restart`, `run`, `worktrees
+<path>` and `--migrate`, `supervisor --fresh`, `--resume` and `--kill`,
+and any other project's tickets. This is a guard against mistakes, not
+a boundary: an agent can unset the variable.
+
 ## Answering decisions
 
 A decision is a question Dispatch has recorded for the owner. The
@@ -333,6 +372,11 @@ report them instead. The kinds you will see:
 | `pr` | `recheck`, `park` | no pull request was found for the branch, or it needs attention; `recheck` after the owner fixed it |
 | `refresh` | `recheck`, `park` | the branch is behind its base and the rebase conflicts, with no rebaser left to try, or the worktree is mid-rebase or off its branch; `recheck` after the owner rebased, finished, aborted or checked it out by hand |
 | `merge` | `park` | a confirmation: Dispatch watches the provider and closes the ticket itself when the PR merges; it cannot be answered by hand |
+
+A supervisor's `decide` on a decision whose name is not in its
+`decides` is refused with exit 1: the refusal is saved on the decision
+(`show` lists it under `refused:`), logged as a `refused` event, and
+the decision still waits on the owner.
 
 ```
 dispatch decide 3e0dcacd d2 proceed
@@ -420,7 +464,12 @@ Dispatch's data directory is `$DISPATCH_DATA_DIR`, by default
 - `tickets/<id>.json` is a ticket's record and `tickets/<id>/` its
   artifacts, including `pipeline.toml`, the ticket's own frozen copy
   of the pipeline it was taken under.
-- `projects/<project>.json` holds the queue.
+- `projects/<project>.json` holds the queue and the supervisor's
+  record (its session, the ones it replaced, its workspace).
+- `projects/<project>/supervisor/` holds the supervisor's `seed.md`,
+  its `handoff.md`, and each earlier hand-off as
+  `handoff.<yyyymmdd-hhmmss>.md`. Its workspace is
+  `supervisor-<project>` under the worktrees root.
 - `events.jsonl` is the event log `dispatch events` reads, one JSON
   object per line, appended at every ticket write.
 - `runner.json` is the runner's status after its last pass, which

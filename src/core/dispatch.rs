@@ -10,8 +10,12 @@ use std::fmt::Write as _;
 use std::path::PathBuf;
 
 use super::action::{AppAction, AppCore, Clock, Effect, Out, View};
-use super::model::{Launch, PageWindow, RecordId, SessionKind, Space, SpaceId};
-use crate::ports::dispatch::{Body, DecisionView, EventView, Reply, Status, TicketView};
+use super::model::{
+    CardState, Launch, PageWindow, RecordId, SessionKind, SessionRecord, Space, SpaceId,
+};
+use crate::ports::dispatch::{
+    Body, DecisionView, EventView, ProjectView, Reply, Status, TicketView,
+};
 
 /// An agent of a ticket that waits on the user for itself, with the
 /// attempt it runs and why it waits.
@@ -22,6 +26,51 @@ pub struct WaitingAgent {
     pub stage: String,
     pub context: String,
     pub reason: String,
+}
+
+/// What a project's supervisor session is doing, as its chip says.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SupervisorState {
+    /// No session, or one this window does not have.
+    None,
+    /// Its pane is starting or in a turn.
+    Working,
+    /// Its card waits on the owner.
+    WaitingOnYou,
+    /// Its pane runs and its turn is over.
+    Idle,
+    /// No pane: it ended or was never started here.
+    Cold,
+    /// Claude asks whether to trust the workspace.
+    AsksTrust,
+}
+
+impl SupervisorState {
+    /// The chip's word for the state.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Working => "working",
+            Self::WaitingOnYou => "waiting on you",
+            Self::Idle => "idle",
+            Self::Cold => "cold",
+            Self::AsksTrust => "asks to trust its folder",
+        }
+    }
+}
+
+/// A project's supervisor for the board: its session in this window,
+/// its state, and whether Resume is offered.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SupervisorChip {
+    /// The session's record in this window; `None` when the project has
+    /// no session or this window does not hold it.
+    pub session: Option<RecordId>,
+    /// What the session is doing.
+    pub state: SupervisorState,
+    /// An agent with a conversation to resume and no pane running.
+    pub resumable: bool,
 }
 
 /// A column the ticket table can be ordered by.
@@ -655,6 +704,49 @@ impl AppCore {
             .collect()
     }
 
+    /// A project's supervisor as the board's chip shows it: its session
+    /// in this window, what it is doing, and whether Resume may be
+    /// offered. `None` when the project has no `[supervisor]` table.
+    #[must_use]
+    pub fn supervisor_chip(&self, project: &ProjectView) -> Option<SupervisorChip> {
+        let view = project.supervisor.as_ref()?;
+        let session = view
+            .session
+            .as_deref()
+            .and_then(|s| uuid::Uuid::parse_str(s).ok())
+            .map(RecordId)
+            .filter(|id| self.session(*id).is_some());
+        let Some(id) = session else {
+            return Some(SupervisorChip {
+                session: None,
+                state: SupervisorState::None,
+                resumable: false,
+            });
+        };
+        let state = if self.at_trust_prompt(id) {
+            SupervisorState::AsksTrust
+        } else {
+            match self.card_state(id) {
+                CardState::WaitingOnYou => SupervisorState::WaitingOnYou,
+                CardState::Working | CardState::Starting => SupervisorState::Working,
+                CardState::Idle => SupervisorState::Idle,
+                CardState::NotRunning | CardState::NotResumable | CardState::Exited(_) => {
+                    SupervisorState::Cold
+                }
+            }
+        };
+        // Offered only where the port's resume would not refuse it, since
+        // a fresh launch would skip the seed, the hand-off and the record
+        // of what it replaced, at a cost.
+        let resumable =
+            !self.is_running(id) && self.session(id).is_some_and(SessionRecord::resumable);
+        Some(SupervisorChip {
+            session: Some(id),
+            state,
+            resumable,
+        })
+    }
+
     /// `investigate running`, `parked: <reason>`, `2 waiting on you`, an
     /// agent at a prompt of its own, or why a ticket with nothing open
     /// is not moving when its project is at a limit.
@@ -914,6 +1006,9 @@ impl AppCore {
             }
             AppAction::DispatchResume(ticket) => {
                 self.dispatch_call(out, Body::Resume { ticket });
+            }
+            AppAction::DispatchSupervisorFresh(project) => {
+                self.dispatch_call(out, Body::SupervisorFresh { project });
             }
             AppAction::DispatchClose(ticket) => {
                 self.dispatch_call(

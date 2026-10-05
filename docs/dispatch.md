@@ -320,7 +320,23 @@ Version 10 adds a rewrite's `stale` and `message`, empty and absent in
 older records.
 Version 11 adds a conflict's `at_ms`, 0 in older records. Version 12
 adds a ticket's `restarts`, `restart` and `entered`, empty and absent in
-older records.
+older records. Version 13 adds a project's `supervisor`, a decision's
+`refusals`, a ticket's `state_by` and its source's `taken_by`, all
+empty or absent in older records.
+
+A project's record (`projects/<project>.json`) holds, besides its
+space, set and queue, its supervisor (see "Supervisor"): `supervisor`
+is `{project, workspace, current, past, intent, op, error}`. `current`
+is `{session, seed_hash, created_ms, model}`, where `session` is
+Switchboard's record id, never a resume handle; `past` keeps every
+session it replaced, each with `replaced_ms` and why (`fresh` or
+`kill: <reason>`); `intent` is a fresh asked for through the port and
+not yet carried out; `op` is the one request to Switchboard in flight
+for it, written before it is sent and its reply after, as a ticket's
+ledger is, and recovered at start the same way. A ticket's `state_by`
+says who made its last park, resume or close and its source's
+`taken_by` who took it: `supervisor`, or absent for the owner and for
+Dispatch itself.
 
 ### The event log and the runner's status
 
@@ -330,8 +346,13 @@ neither goes through `migrate`.
 `events.jsonl` is the event log the supervising commands read
 (`dispatch events`, `dispatch wait`). Each line is one JSON object,
 `{"v":1,"seq":N,"at_ms":…,"ticket":…,"project":…,"stage":…,"kind":…,"text":…}`,
-with `attempt`, `decision`, `head`, `url`, `voids`, `by` and
-`conflicts` when they apply. `by` and `conflicts` are only on
+with `attempt`, `decision`, `head`, `url`, `voids`, `by`, `conflicts`
+and `actor` when they apply. `actor` is `supervisor` on a `taken`,
+`parking`, `resumed`, `closing`, `answered` or `refused` a supervisor
+session caused, and absent for the owner; the text of the first four
+ends `(by supervisor)`. `refused` is a supervisor's answer to a
+decision outside its `decides`, saved on the decision, which still
+waits. `by` and `conflicts` are only on
 `refreshed`: `conflicts` is 0 for `git`, and is absent for a `rebaser`,
 `hand` or `stopped` bring-up with no conflict recorded.
 There is one writer, `store::write_ticket_logged`, at the one place a
@@ -1864,7 +1885,8 @@ differently:
   `workflow.finalize`, `workflow.remove`, `set.sync`) is recovered
   from the state itself: repeating one is harmless, so a lost reply
   is answered by sending it again.
-- *Non-replayable* (`session.send`, `workflow.continue`): a repeat
+- *Non-replayable* (`session.send`, `session.resume`,
+  `workflow.continue`): a repeat
   can spend money twice. A lost reply to one is not repeated; it is a
   decision that shows what was sent and lets you look at the pane,
   asked once: the ledger entry is marked, recovery leaves it to your
@@ -1901,7 +1923,10 @@ Commands:
   Code session whose conversation is a copy of `source`'s whole
   transcript, in its project and cwd, launched with `prompt`; the
   record exists (with the op) before the copy does, and a source with
-  no transcript is refused
+  no transcript is refused; `session.resume {session}`: an agent's
+  conversation resumed from its handle with no terminal opened, a
+  running pane left alone, and a session with no handle or one marked
+  not resumable refused rather than launched fresh
 - `service.new {project, name, argv, env}` → `session`: a service
   record Dispatch owns, killed and removed by it; whether it is
   listening is Dispatch's probe, not Switchboard's reply
@@ -1952,6 +1977,91 @@ Trust: anything that can write the socket can already write the data
 directory. The port launches agents on request, which is the same
 trust the script runner has. Switchboard's own restart still launches
 nothing; every session the port made is an ordinary record afterwards.
+
+## Supervisor
+
+A project may have one supervisor: a long-lived Claude Code session
+that watches its tickets and answers the decisions the owner lets it.
+It comes from a table in the live `pipelines/<project>.toml` (never a
+ticket's frozen copy, never `<project>.pr.toml`):
+
+```toml
+[supervisor]
+guidance = "Keep the queue moving; the owner reviews code."
+read = ["CLAUDE.md", "docs/design.md"]    # relative to the workspace
+setup = ["git", "clone", "git@example.com:o/r.git", "."]
+# or several: [[supervisor.setup]] argv = [...]
+model = "sonnet"
+decides = ["finalize", "rerun", "pr"]
+```
+
+`decides` takes decision names: those Dispatch asks of its own accord
+(`finalize`, `paused`, `rerun`, `pr`, `branch`, `lanes`, `refresh`,
+`review-cap`, `review-code`, `message`, `resolution`, `lost-send`) and
+those a gate of the same file asks (a human gate's `decision`, an
+external gate's, and `merge` for a `pr-merged` gate that names none).
+An answer such as `recheck` is refused with the decisions that take it.
+
+**Where it lives.** `projects/<project>/supervisor/` in the data
+directory holds `seed.md`, `handoff.md` and every earlier hand-off as
+`handoff.<yyyymmdd-hhmmss>.md`. The workspace, the session's cwd, is
+`supervisor-<project>` under the root a ticket's trees use (the
+pipeline's `worktrees`, else the data directory's setting), refused if
+a shell would split its path, as a ticket's tree is; it is recorded the
+first time it is made, so moving the worktrees root does not orphan it.
+Setup runs there when it is missing or `--setup` is given: the table's
+argvs, else `git clone <repo> .` for a project with a `repo`, else
+nothing. A setup that fails removes a workspace it made and leaves the
+current supervisor as it was.
+
+**The seed** is the guidance, the `read` paths made absolute, what
+each listed decision's answers do and that every other is the owner's,
+that `merge` is answered `park` only, the full path of the `dispatch`
+executable (its allow rule matches that path), "run `dispatch brief
+<project>` first", the hand-off to keep current, and the commands it
+works with. The session's first prompt is "Read `<seed.md>` and do
+what it says". The seed is stale when a hash of the table, the
+project's name and the commands' text no longer matches the one the
+session was seeded with; the rendered seed's paths are left out, since
+they differ between builds.
+
+**The session** is made through the control port as a ticket's are,
+each creation on the project's record before it is sent: the space,
+a Switchboard project `Supervisor · <project>` rooted at the workspace
+(made once), and a Claude session of the same name with the model,
+`--allowedTools Bash(<dispatch>:*)`, and read and write rules for the
+supervisor directory. No settings file is written: `--settings`
+already carries Switchboard's hooks. `dispatch supervisor <project>
+--fresh [--setup]` (or Fresh on the Dispatch page, through the port's
+intent) sets up, writes the seed, kills the current session and keeps
+it in `past`, rotates the hand-off under `## From the session of
+<date>`, and makes the new one. `--resume` sends `session.resume`;
+`--kill [--reason]` kills it and keeps it in `past`. Nothing resumes or
+starts a supervisor by itself.
+
+**The actor.** `dispatch` reads `SWITCHBOARD_RECORD_ID`, which the
+supervisor's pane sets and its Bash tool inherits. When it names a
+project's current or past supervisor, the command is that
+supervisor's: it may read anything, `take` and `queue` on its own
+project, and `decide`, `park`, `resume --no-rerun` and `close` on its
+own project's tickets; a plain `resume`, which reruns what the park
+cancelled, needs `rerun` in `decides`. `restart`, `run`, `worktrees`
+with a path or `--migrate`, `supervisor --fresh`, `--resume` and
+`--kill`, any verb not on the list, and any other project are refused
+with exit 1. A `decide` on a name outside `decides` saves a refusal on
+the decision and logs a `refused` event; the decision still waits on
+the owner. What a supervisor does is stamped `supervisor`: the
+answer's `by`, `state_by`, `taken_by`, and the events' `actor`.
+
+The rule guards against a supervisor's mistakes, not against a hostile
+agent, which can unset the variable. Gaps: nothing wakes an idle
+supervisor (a `session.send` costs money and cannot be replayed), so
+it follows the log with `events --follow --timeout`; setup runs
+unconfined and under the writer lock, like a lane's; with a
+non-default `DISPATCH_DATA_DIR` the supervisor's commands need the
+variable set, which its allow rule does not cover; and a refused
+`resume`, `restart`, `worktrees` or `supervisor` is an exit and a
+message, not an event, since no decision carries it.
 
 ## Surfacing
 
@@ -2007,7 +2117,13 @@ ticket's directory and nothing outside it, `events` a ticket's lines
 of the event log after a cursor (with the next cursor and the seqs a
 `void` withdrew), and `decide`,
 `queue`, `take`, `resume`, `close` and `worktrees` do exactly what the command
-line does, through the same runner methods under the same writer lock. Switchboard's Dispatch
+line does, through the same runner methods under the same writer lock.
+`supervisor-fresh {project}` writes the intent for a new supervisor and
+answers with the status at once; the runner's next pass does the work,
+which asks the caller's own control socket. A project's view carries
+`supervisor` when its live pipeline has the table: the session's id,
+its age, whether its seed is stale, how many it replaced, a fresh
+pending, and the last error. Switchboard's Dispatch
 page is a client of this port and knows nothing of the records; a
 runner on another machine looks the same through a forwarded socket.
 The port is served only by the runner that holds `runner.lock`, so a
