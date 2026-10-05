@@ -39,7 +39,7 @@ dispatch close <ticket> [--reason <text>]         a ticket closed, its trees rem
 dispatch health [--timeout <secs>] [--stale <secs>] [--json]   is the runner alive and getting on; run it first
 dispatch show <ticket> [--json]                   one ticket: stage, lanes, attempts, rounds, decisions, files
 dispatch events [--since <seq>] [--follow] [--ticket <id>]... [--project <name>] [--json]
-dispatch wait <ticket> [--for decision|stage|pr|closed|any] [--timeout <secs>] [--json]
+dispatch wait <ticket> [--for decision|stage|pr|closed|any] [--since <seq>] [--timeout <secs>] [--json]
 dispatch report <ticket> [--json]                 how a ticket went: stage time, review points, fix passes, size
 dispatch report --project <name> [--since YYYY-MM-DD] [--json]
 dispatch tail <ticket> [--lines N]                what the ticket's running agents show
@@ -213,15 +213,27 @@ local zone (the stored `at_ms` under `--json` is UTC milliseconds).
 
 **Wait.** `dispatch wait X --for decision` blocks until the ticket asks
 something and prints that `decision` event with the `dispatch decide`
-line to answer it. If a decision already waits, it returns at once,
-and a decision answered before the wait reads it is passed over. A
-ticket already closed ends any wait at once with exit 3 (exit 0 for
-`--for closed`), and one already parked does too, except that
-`--for any` waits for its resume.
-`--for stage` waits for a stage move either way, `--for pr` for a PR
-bound to an attempt, `--for closed` for the close, and `--for any`
-(the default) for the next event of any kind. Every match is checked
+line to answer it. The record is read first. If a decision already
+waits, `--for decision` returns it at once, printed, with exit 0, and a
+decision answered before the wait reads it is passed over. A ticket
+already parked or closed ends every wait at once with exit 3 and the
+reason, except `--for closed` on a closed ticket, which exits 0.
+`--for stage` waits for a stage move, `--for pr` for a PR bound to an
+attempt, `--for closed` for the close, and `--for any` (the default)
+for the next event of any kind. A stage move or a PR needs a before
+state, so without a cursor `--for stage` and `--for pr` wait for the
+next one. With `--since <seq>`, the first matching event after the
+cursor returns at once, whoever caused it. Every match is checked
 against the record first, so a withdrawn event is never returned.
+
+To wait on your own action, take the log's tail just before you act,
+act, then wait with `--since`. The tail is the `seq` of the last line
+of an unfiltered `dispatch events --json`, or 0 when it prints nothing.
+A listing filtered with `--ticket` or `--project` gives an older seq,
+and a wait from it can return an event from before your action, under
+`--for any` most of all. The same recipe blocks on a resume: take the
+tail, `dispatch resume X`, then `dispatch wait X --for any --since
+<tail>`.
 
 **Report.** `dispatch report X` gives the time per stage with the time
 its decisions waited on the owner apart, the plan's size, the plan

@@ -546,7 +546,7 @@ fn events(args: &[&str]) -> Result<()> {
 }
 
 fn wait(args: &[&str]) -> Result<()> {
-    let f = Flags::parse(args, &["--for", "--timeout"], &["--json"]);
+    let f = Flags::parse(args, &["--for", "--timeout", "--since"], &["--json"]);
     let ticket = f.one();
     let what = match f.value("--for") {
         None => For::Any,
@@ -558,9 +558,18 @@ fn wait(args: &[&str]) -> Result<()> {
     let deadline = f.number("--timeout").map(|s| now_ms() + s * 1000);
     let json = f.on("--json");
     let data = DataDir::from_env()?;
-    let waited = events::wait(&data, ticket, what, deadline, &mut now_ms, &mut || {
-        std::thread::sleep(Duration::from_millis(events::FOLLOW_POLL_MS));
-    })?;
+    let since = f.number("--since");
+    let waited = events::wait(
+        &data,
+        ticket,
+        what,
+        since,
+        deadline,
+        &mut now_ms,
+        &mut || {
+            std::thread::sleep(Duration::from_millis(events::FOLLOW_POLL_MS));
+        },
+    )?;
     match waited {
         Waited::Matched(e) => {
             say!("{}", event_line(&e, json));

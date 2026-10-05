@@ -76,7 +76,7 @@ pub const USAGE: &str = "usage:
 Supervising (see docs/dispatch-agent-guide.md):
   dispatch events [--since <seq>] [--follow] [--ticket <id>]... [--project <name>] [--json]
                                            what happened, from the event log
-  dispatch wait <ticket> [--for decision|stage|pr|closed|any] [--timeout <secs>] [--json]
+  dispatch wait <ticket> [--for decision|stage|pr|closed|any] [--since <seq>] [--timeout <secs>] [--json]
                                            block until it happens: exit 0 matched,
                                            2 timed out, 3 the ticket parked or closed
   dispatch show <ticket> [--json]          one ticket: stage, lanes, attempts, decisions, files

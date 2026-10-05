@@ -1718,12 +1718,22 @@ secret values replaced by their names. The event log is diffed at the
 one ticket write path and synced before the record's rename, so a
 crash repeats a transition and never loses one, and a failed write is
 withdrawn with a `void`. Usage errors exit 64; `wait` exits 2 on a
-timeout and 3 when the ticket parks or closes. The agent guide is the
+timeout and 3 when the ticket parks or closes. `wait` reads the record
+first, so a parked or closed ticket and a pending decision return at
+once, and `--since <seq>` replays the log from a cursor; a replayed
+event of a kind with no record check is held until the record's
+`updated_ms` reaches its write. The agent guide is the
 contract, and a test holds it to the usage. Gaps: `events.jsonl` is
 never rotated; cost and turns are not recorded, so `report` says so;
 tickets from before this build have no events until their next
 transition; and a `void` whose own append fails leaves its events
-standing, which only `wait`'s check against the record covers.
+standing, which only `wait`'s check against the record covers. An
+event `wait --since` replays from before the wait, of a kind with no
+record check, is covered only by the `updated_ms` hold. When the
+event's write and its `void` both failed, the hold lets the event
+through in two cases: once any later write of the ticket lands, and at
+once when the clock did not move forward between two writes (the same
+millisecond, or a step backwards) and the later write's rename failed.
 
 A close's tree removal runs with the writer lock let go: `git worktree
 remove` of a tree with a large build directory can take minutes, and
