@@ -349,6 +349,23 @@ launched the next agent into a tree still mid-rebase (#58, built: the
 stage holds on a `recheck | park` question until the rebase is finished
 or aborted by hand).
 
+- **A look at the work before the PR opens.** #71 produced screenshots
+  of the new ticket page, but only after the PR was open, and the two
+  notes they raised (a meta line that wraps so the PR chip sits alone,
+  a pinned-decision area no closed ticket exercises) had no stage to
+  land in short of another ticket. Two shapes, not yet chosen: a
+  `look` stage (`gate = { kind = "human", decision = "look" }`) between
+  `review-code` and `pr` on pipelines that draw UI, whose question
+  carries the attempt's screenshot paths and whose `fix` answer runs
+  the fixer once with the owner's note and folds, so the PR opens
+  with the fix in; or a `respond_to_user` on the code review, so an
+  owner's note at the review-cap question is one more round for the
+  same fixer. The first keeps the owner's look separate from the
+  reviewers' rounds and is the one to plan. Either way the implementer
+  needs a path that can read the data directory: its classifier
+  refused the copy of a closed ticket on #71, so the throwaway data
+  directory for screenshots should be made by Dispatch (a `dispatch
+  stage-copy <ticket> <dir>` the implementer runs), not by the agent.
 - **A command reviewer orphaned by a runner restart is never killed.**
   `start_reviewer` (`dispatch/src/git.rs`) puts a command reviewer in its
   own process group as it does a check, so it outlives a runner stopped
