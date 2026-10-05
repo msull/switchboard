@@ -10,6 +10,7 @@
 //! supervisor's mistakes, not against a hostile agent, which can unset
 //! any variable.
 
+use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
@@ -631,6 +632,7 @@ impl Runner {
                     launch: wire::Launch::Argv(flags.clone()),
                     prompt: Some(first_prompt(&seed_path)),
                     notes: format!("Dispatch supervisor of {project}"),
+                    env: BTreeMap::new(),
                 },
                 now_ms,
             )?;

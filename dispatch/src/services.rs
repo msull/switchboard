@@ -15,8 +15,8 @@ use switchboard_control::{self as wire, Body, Made, Reply};
 use crate::pipeline::{Pipeline, Serve, Stage};
 use crate::scheduler::{Ask, NO_SUCH_SESSION, Runner, SocketDown, confine_for, env_for};
 use crate::ticket::{
-    AttemptState, Decision, DecisionKind, DecisionState, GateRun, Hold, LaneRecord, ProjectState,
-    STUCK, ServiceRecord, ServiceState, Ticket, TicketState,
+    Attempt, AttemptState, Decision, DecisionKind, DecisionState, Forgotten, GateRun, Hold,
+    LaneRecord, ProjectState, STUCK, ServiceRecord, ServiceState, Ticket, TicketState,
 };
 
 /// How long a service may take to read as stopped (its `before` exited,
@@ -111,6 +111,7 @@ impl Runner {
         p: &Pipeline,
         now_ms: u64,
     ) -> Result<bool> {
+        self.forget_secrets(t, Some(p), now_ms)?;
         let leaving: Vec<usize> = t
             .services
             .iter()
@@ -153,6 +154,104 @@ impl Runner {
         }
         self.save_ticket(t, now_ms)?;
         Ok(false)
+    }
+
+    /// Every secret artifact whose reason to exist has ended deleted,
+    /// and the deletion recorded: its attempt failed, was cancelled or
+    /// was replaced, the ticket left the range its stage's hold covers,
+    /// or the ticket is parking or closing. An attempt still starting
+    /// or running is never swept, since its command may yet write the
+    /// file. The file goes first and the record after, so a crash in
+    /// between is recorded on the next pass. Without the ticket's
+    /// pipeline the hold's range is not judged. True when anything was
+    /// recorded.
+    pub(crate) fn forget_secrets(
+        &mut self,
+        t: &mut Ticket,
+        p: Option<&Pipeline>,
+        now_ms: u64,
+    ) -> Result<bool> {
+        if !t
+            .attempts
+            .iter()
+            .any(|a| a.secret.iter().any(|n| !a.forgotten.contains_key(n)))
+        {
+            return Ok(false);
+        }
+        let mut gone: Vec<(usize, String, String)> = Vec::new();
+        for (i, a) in t.attempts.iter().enumerate() {
+            if a.is_open() {
+                continue;
+            }
+            let Some(why) = Self::forget_reason(t, p, a) else {
+                continue;
+            };
+            for name in a.secret.iter().filter(|n| !a.forgotten.contains_key(*n)) {
+                if let Some(path) = a.artifacts.get(name) {
+                    match std::fs::remove_file(path) {
+                        Ok(()) => {}
+                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                        Err(e) => {
+                            log::warn!(
+                                "ticket {} could not delete secret {name} at {}: {}",
+                                t.id,
+                                path.display(),
+                                e.kind()
+                            );
+                            continue;
+                        }
+                    }
+                }
+                gone.push((i, name.clone(), why.clone()));
+            }
+        }
+        if gone.is_empty() {
+            return Ok(false);
+        }
+        for (i, name, why) in gone {
+            log::info!("ticket {} deleted secret {name}: {why}", t.id);
+            t.attempts[i]
+                .forgotten
+                .insert(name, Forgotten { at_ms: now_ms, why });
+        }
+        self.save_ticket(t, now_ms)?;
+        Ok(true)
+    }
+
+    /// Why a stopped attempt's secret artifacts are to be deleted now;
+    /// `None` while they are still the stage's to use.
+    fn forget_reason(t: &Ticket, p: Option<&Pipeline>, a: &Attempt) -> Option<String> {
+        match a.state {
+            AttemptState::Failed { .. } => return Some("attempt failed".to_owned()),
+            AttemptState::Cancelled { .. } => return Some("attempt cancelled".to_owned()),
+            AttemptState::Starting | AttemptState::Running | AttemptState::Complete => {}
+        }
+        let newer = t.attempts.iter().any(|b| {
+            b.stage == a.stage
+                && b.context == a.context
+                && b.n > a.n
+                && b.state == AttemptState::Complete
+        });
+        if newer {
+            return Some("attempt replaced".to_owned());
+        }
+        if let Some(p) = p {
+            let index = p.stages.iter().position(|s| s.name == a.stage);
+            let held = index
+                .and_then(|i| p.needs_range(i))
+                .is_some_and(|(first, last)| (first..=last).contains(&t.stage));
+            if !held {
+                let resource = index
+                    .and_then(|i| p.stages[i].needs.iter().find(|n| p.resource(n).is_some()))
+                    .map_or("the hold", String::as_str);
+                return Some(format!("{resource} released"));
+            }
+        }
+        match t.state {
+            TicketState::Parking { .. } | TicketState::Parked { .. } => Some("parked".to_owned()),
+            TicketState::Closing { .. } | TicketState::Closed { .. } => Some("closed".to_owned()),
+            TicketState::Active => None,
+        }
     }
 
     // --- services
@@ -523,6 +622,7 @@ impl Runner {
                 rec.lane,
                 rec.stage
             ),
+            env: std::collections::BTreeMap::new(),
         };
         let reply = self.send(t, ps, None, &rec.intent(), body, now_ms)?;
         if let Reply::Failed { reason } = reply {

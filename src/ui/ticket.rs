@@ -955,12 +955,9 @@ fn attempt_row(cx: &mut DrawCtx<'_>, ui: &mut Ui, t: &TicketView, a: &AttemptVie
                 }
                 artifact_buttons(cx, ui, t, a);
             });
-            if let Some(path) = cx
-                .state
-                .dispatch_artifact
-                .clone()
-                .filter(|chosen| a.artifacts.iter().any(|(_, p)| p == chosen))
-            {
+            if let Some(path) = cx.state.dispatch_artifact.clone().filter(|chosen| {
+                a.artifacts.iter().any(|(_, p)| p == chosen) && !a.secret_at(chosen)
+            }) {
                 ui.label(theme::mono_text(ui, path.display().to_string()).color(p.n700));
                 artifact_text(cx, ui, t, &path);
             }
@@ -968,9 +965,20 @@ fn attempt_row(cx: &mut DrawCtx<'_>, ui: &mut Ui, t: &TicketView, a: &AttemptVie
 }
 
 /// A button per artifact of the attempt; the chosen one is filled, and
-/// a click on it again hides it.
+/// a click on it again hides it. A secret artifact is a plain label:
+/// Dispatch never reads it, so there is nothing to show.
 fn artifact_buttons(cx: &mut DrawCtx<'_>, ui: &mut Ui, t: &TicketView, a: &AttemptView) {
     for (name, path) in &a.artifacts {
+        if a.is_secret(name) {
+            let label = if a.forgotten.contains(name) {
+                format!("{name} (deleted)")
+            } else {
+                name.clone()
+            };
+            ui.label(theme::meta_text(ui, label))
+                .on_hover_text("secret; deleted when its hold is released");
+            continue;
+        }
         let selected = cx.state.dispatch_artifact.as_ref() == Some(path);
         let button = if selected {
             theme::secondary(ui, name)

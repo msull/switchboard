@@ -253,6 +253,7 @@ fn upsert(
         waiting_on: None,
         pending_launch: false,
         last_stop_at: None,
+        env: Vec::new(),
     });
     id
 }

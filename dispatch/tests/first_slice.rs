@@ -15272,3 +15272,405 @@ fn an_artifact_settling_moves_the_updated_time_only_when_the_attempt_does() {
     assert!(a.gate.is_some(), "the checks started: {a:#?}");
     assert!(moved > 0, "the stop and the checks starting moved it");
 }
+
+// --- secret artifacts: a gate-only stage that writes them, kept only
+// through the hold
+
+/// The back half with a gate-only `try-setup` after `deploy` that writes
+/// a secret `personas` file for the tester.
+const SECRET_STAGES: [&str; 6] = ["lanes", "deploy", "try-setup", "try", "tried", "after"];
+
+/// What the fake command "writes": the test stands in for it.
+const TOKEN: &str = "tok-SEKRET-0451";
+
+fn secret_env() -> (Env, String) {
+    let mut env = Env::new();
+    let text = BACK_HALF
+        .replace("{worktrees}", &env.worktrees.display().to_string())
+        .replace(
+            "[[stages]]\nname = \"try\"\n",
+            "[[stages]]\nname = \"try-setup\"\ncontext = \"lane:backend\"\nneeds = [\"my-dev\"]\nwrites = [{ name = \"personas\", secret = true }]\ngate = { kind = \"command\", in = \"lane:backend\", argv = [\"sh\", \"-c\", \"inv personas\"] }\n\n[[stages]]\nname = \"try\"\n",
+        )
+        .replace(
+            "Report to {notes}.",
+            "Personas at {inputs.personas} and {inputs.try-setup.personas}. Report to {notes}.",
+        );
+    std::fs::write(env.data.pipeline("Orchard"), text).unwrap();
+    let id = take_orchard(&mut env, 42, BOTH);
+    (env, id)
+}
+
+fn secret_stage(t: &Ticket) -> &'static str {
+    SECRET_STAGES.get(t.stage).copied().unwrap_or("done")
+}
+
+fn setup_key(id: &str, n: u32) -> String {
+    format!("{id}/try-setup/{n}")
+}
+
+/// The deploy done and try-setup's command started: the path it was
+/// told to write `personas` to.
+fn setup_started(env: &mut Env, id: &str) -> PathBuf {
+    deploying(env, id);
+    exits(env, &deploy_key(id, 1), 0);
+    let key = setup_key(id, 1);
+    for _ in 0..8 {
+        if started(env, &key) > 0 {
+            break;
+        }
+        env.step();
+    }
+    let repo = env.repo.lock().unwrap();
+    let check = repo
+        .checks
+        .iter()
+        .find(|c| c.key == key)
+        .unwrap_or_else(|| panic!("try-setup never started"));
+    let path = check
+        .env
+        .iter()
+        .find(|(k, _)| k == "DISPATCH_WRITES_PERSONAS")
+        .map_or_else(
+            || panic!("no DISPATCH_WRITES_PERSONAS: {:?}", check.env),
+            |(_, v)| PathBuf::from(v),
+        );
+    assert!(
+        !check.env.iter().any(|(k, _)| k == "DISPATCH_WRITES_CHECKS"),
+        "{:?}",
+        check.env
+    );
+    path
+}
+
+/// try-setup writes the file and exits 0; the ticket stands at `try`.
+fn set_up(env: &mut Env, id: &str) -> PathBuf {
+    let path = setup_started(env, id);
+    std::fs::write(&path, TOKEN).unwrap();
+    exits(env, &setup_key(id, 1), 0);
+    env.steps_until(id, "try", |t, _| secret_stage(t) == "try");
+    path
+}
+
+/// Through `try`'s tester to the `tried` question.
+fn secret_at_tried(env: &mut Env, id: &str) -> PathBuf {
+    let path = set_up(env, id);
+    served(env, id);
+    let t = env.ticket(id);
+    let tester = session_of(&t, "try");
+    env.finish(&tester, &artifact_of(&t, "try", "notes"), "it works");
+    env.steps_until(id, "tried", |t, _| secret_stage(t) == "tried");
+    path
+}
+
+/// The `session.new` requests for sessions named `name`.
+fn session_news(
+    env: &Env,
+    name: &str,
+) -> Vec<(String, std::collections::BTreeMap<String, String>)> {
+    env.sb()
+        .calls
+        .iter()
+        .filter_map(|r| match &r.body {
+            Body::SessionNew {
+                name: n,
+                prompt,
+                env,
+                ..
+            } if n == name => Some((prompt.clone().unwrap_or_default(), env.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The `forgotten` events of the ticket, as their text.
+fn forgotten_events(env: &Env, id: &str) -> Vec<String> {
+    dispatch::events::read_since(&dispatch::events::log_path(&env.data), 0)
+        .unwrap()
+        .into_iter()
+        .filter(|e| e.ticket == id && e.kind == dispatch::events::Kind::Forgotten)
+        .map(|e| e.text)
+        .collect()
+}
+
+fn setup_attempt(t: &Ticket) -> Attempt {
+    t.attempts_of("try-setup").last().unwrap().clone()
+}
+
+#[test]
+fn a_gate_only_stage_writes_an_artifact_the_tester_is_given_by_path_and_environment() {
+    let (mut env, id) = secret_env();
+    let path = set_up(&mut env, &id);
+    let a = setup_attempt(&env.ticket(&id));
+    assert_eq!(a.state, AttemptState::Complete);
+    assert_eq!(a.artifacts.get("personas"), Some(&path));
+    assert_eq!(a.secret.iter().collect::<Vec<_>>(), ["personas"]);
+    served(&mut env, &id);
+    let testers = session_news(&env, "tester");
+    assert_eq!(testers.len(), 1);
+    let (prompt, vars) = &testers[0];
+    let shown = path.display().to_string();
+    assert!(
+        prompt.contains(&format!("Personas at {shown} and {shown}.")),
+        "{prompt}"
+    );
+    assert_eq!(vars.get("DISPATCH_INPUT_PERSONAS"), Some(&shown));
+    assert_eq!(vars.len(), 1, "{vars:?}");
+    assert!(!prompt.contains(TOKEN));
+}
+
+#[test]
+fn a_gate_only_stage_that_exits_0_without_its_artifact_fails_and_asks_rerun() {
+    let (mut env, id) = secret_env();
+    setup_started(&mut env, &id);
+    exits(&env, &setup_key(&id, 1), 0);
+    env.steps_until(&id, "the rerun question", |t, _| {
+        t.pending_decisions().iter().any(|d| d.name == "rerun")
+    });
+    let a = setup_attempt(&env.ticket(&id));
+    assert!(
+        matches!(&a.state, AttemptState::Failed { reason } if reason.contains("without writing personas")),
+        "{a:#?}"
+    );
+    env.step();
+    let a = setup_attempt(&env.ticket(&id));
+    assert_eq!(a.forgotten["personas"].why, "attempt failed");
+}
+
+#[test]
+fn a_secret_artifact_is_private_and_never_read_into_a_view_a_report_or_the_log() {
+    use std::os::unix::fs::PermissionsExt;
+    let (mut env, id) = secret_env();
+    let path = set_up(&mut env, &id);
+    let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o600);
+    let dir_mode = std::fs::metadata(path.parent().unwrap())
+        .unwrap()
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(dir_mode, 0o700);
+    let t = env.ticket(&id);
+    let mut view = dispatch::serve::ticket_view(&t, env.runner.pipeline_of(&t).ok().as_ref());
+    view.paths = dispatch::serve::ticket_paths(&t);
+    let attempt = view
+        .attempts
+        .iter()
+        .find(|a| a.stage == "try-setup")
+        .unwrap();
+    assert_eq!(attempt.secret, ["personas"]);
+    let shown = serde_json::to_string(&view).unwrap();
+    assert!(!shown.contains(TOKEN));
+    let report = dispatch::report::of(
+        &t,
+        &dispatch::events::stage_names(&t),
+        &|p| std::fs::read_to_string(p).ok(),
+        None,
+        env.now,
+    );
+    assert!(!serde_json::to_string(&report).unwrap().contains(TOKEN));
+    let log = std::fs::read_to_string(dispatch::events::log_path(&env.data)).unwrap();
+    assert!(!log.contains(TOKEN));
+    let mut handler = dispatch::serve::Handler {
+        runner: Runner::new(
+            env.data.clone(),
+            Box::new(SharedPort(Arc::clone(&env.sb))),
+            Box::new(Arc::clone(&env.repo)),
+        ),
+        issues: Box::new(dispatch::github::FakeIssues::default()),
+    };
+    let reply = handler.handle(
+        &dispatch_control::Request::new("t", dispatch_control::Body::Ticket { id: id.clone() }),
+        env.now,
+    );
+    assert!(
+        matches!(reply, dispatch_control::Reply::Ticket(_)),
+        "{reply:?}"
+    );
+    assert!(!serde_json::to_string(&reply).unwrap().contains(TOKEN));
+    let reply = handler.handle(
+        &dispatch_control::Request::new(
+            "a",
+            dispatch_control::Body::Artifact {
+                ticket: id.clone(),
+                path: path.clone(),
+            },
+        ),
+        env.now,
+    );
+    let text = serde_json::to_string(&reply).unwrap();
+    assert!(text.contains("personas is secret"), "{text}");
+    assert!(!text.contains(TOKEN));
+}
+
+#[test]
+fn a_secret_is_deleted_when_tried_releases_the_hold() {
+    let (mut env, id) = secret_env();
+    let path = secret_at_tried(&mut env, &id);
+    assert!(path.is_file(), "kept through tried");
+    tried(&mut env, &id, "done");
+    env.steps_until(&id, "the hold released", |t, _| t.holds.is_empty());
+    assert!(!path.exists());
+    let t = env.ticket(&id);
+    let a = setup_attempt(&t);
+    assert_eq!(a.forgotten["personas"].why, "my-dev released");
+    assert_eq!(a.artifacts.get("personas"), Some(&path), "still listed");
+    assert_eq!(
+        forgotten_events(&env, &id),
+        ["personas deleted: my-dev released"]
+    );
+    assert_eq!(
+        t.input("personas"),
+        None,
+        "a later prompt gets no dead path"
+    );
+    let after = session_news(&env, "implementer");
+    assert!(!after.is_empty());
+    assert!(after.iter().all(|(_, vars)| vars.is_empty()), "{after:?}");
+}
+
+#[test]
+fn a_secret_is_deleted_when_the_ticket_parks() {
+    let (mut env, id) = secret_env();
+    let path = set_up(&mut env, &id);
+    break_copy(&env, &id);
+    env.steps_until(&id, "parked", |t, _| is_parked(t));
+    assert!(!path.exists());
+    assert_eq!(
+        setup_attempt(&env.ticket(&id)).forgotten["personas"].why,
+        "parked"
+    );
+    assert_eq!(forgotten_events(&env, &id), ["personas deleted: parked"]);
+}
+
+#[test]
+fn a_restart_inside_the_secrets_hold_deletes_it_and_writes_it_again() {
+    let (mut env, id) = secret_env();
+    let path = secret_at_tried(&mut env, &id);
+    restart_at(&mut env, &id, Some("try"));
+    env.steps_until(&id, "the restart applied", |t, _| {
+        !is_parking(t) && t.restart.is_none()
+    });
+    assert!(!path.exists());
+    let a = setup_attempt(&env.ticket(&id));
+    assert_eq!(a.forgotten["personas"].why, "parked");
+    assert_eq!(forgotten_events(&env, &id), ["personas deleted: parked"]);
+    // The hold the secret was made under was let go, so retaking it at
+    // `try` sends the ticket back to write the secret again.
+    env.steps_until(&id, "the deploy question", |t, _| {
+        t.pending_decisions()
+            .iter()
+            .any(|d| d.name == "rerun" && d.stage == "deploy")
+    });
+    let d = rerun_about(&env, &id, "deploy", 1);
+    assert!(d.question.contains("my-dev was let go"), "{}", d.question);
+    answer(&mut env, &id, &d, "rerun");
+    for _ in 0..8 {
+        if started(&env, &deploy_key(&id, 2)) > 0 {
+            break;
+        }
+        env.step();
+    }
+    assert_eq!(started(&env, &deploy_key(&id, 2)), 1, "the second deploy");
+    exits(&env, &deploy_key(&id, 2), 0);
+    env.steps_until(&id, "the try-setup question", |t, _| {
+        t.pending_decisions()
+            .iter()
+            .any(|d| d.name == "rerun" && d.stage == "try-setup")
+    });
+    let d = rerun_about(&env, &id, "try-setup", 1);
+    answer(&mut env, &id, &d, "rerun");
+    for _ in 0..8 {
+        if started(&env, &setup_key(&id, 2)) > 0 {
+            break;
+        }
+        env.step();
+    }
+    assert_eq!(started(&env, &setup_key(&id, 2)), 1, "try-setup again");
+    let again = setup_attempt(&env.ticket(&id)).artifacts["personas"].clone();
+    assert_ne!(again, path);
+    std::fs::write(&again, TOKEN).unwrap();
+    exits(&env, &setup_key(&id, 2), 0);
+    env.steps_until(&id, "try", |t, _| secret_stage(t) == "try");
+    let before = session_news(&env, "tester").len();
+    serving(&mut env, &id, 2);
+    env.steps_until(&id, "the restart's question", |t, _| {
+        t.pending_decisions()
+            .iter()
+            .any(|d| d.name == "rerun" && d.stage == "try")
+    });
+    let d = rerun_about(&env, &id, "try", 1);
+    answer(&mut env, &id, &d, "rerun");
+    env.steps_until(&id, "the new tester", |t, _| {
+        t.attempts_of("try").any(Attempt::is_open)
+    });
+    let testers = session_news(&env, "tester");
+    assert_eq!(testers.len(), before + 1, "a new tester");
+    let (prompt, vars) = testers.last().unwrap();
+    let shown = again.display().to_string();
+    assert!(
+        prompt.contains(&format!("Personas at {shown} and {shown}.")),
+        "{prompt}"
+    );
+    assert_eq!(vars.get("DISPATCH_INPUT_PERSONAS"), Some(&shown));
+}
+
+#[test]
+fn a_secret_is_deleted_when_the_ticket_closes() {
+    let (mut env, id) = secret_env();
+    let path = secret_at_tried(&mut env, &id);
+    let now = env.tick();
+    env.runner.close_by_hand(&id, None, now).unwrap();
+    env.steps_until(&id, "closed", |t, _| {
+        matches!(t.state, TicketState::Closed { .. })
+    });
+    assert!(!path.exists());
+    assert_eq!(
+        setup_attempt(&env.ticket(&id)).forgotten["personas"].why,
+        "closed"
+    );
+    assert_eq!(forgotten_events(&env, &id), ["personas deleted: closed"]);
+}
+
+#[test]
+fn a_secret_is_never_swept_while_its_command_runs() {
+    let (mut env, id) = secret_env();
+    let path = setup_started(&mut env, &id);
+    std::fs::write(&path, TOKEN).unwrap();
+    for _ in 0..4 {
+        env.step();
+    }
+    assert!(path.is_file());
+    let a = setup_attempt(&env.ticket(&id));
+    assert!(a.is_open() && a.forgotten.is_empty(), "{a:#?}");
+    exits(&env, &setup_key(&id, 1), 0);
+    env.steps_until(&id, "try", |t, _| secret_stage(t) == "try");
+    assert_eq!(
+        setup_attempt(&env.ticket(&id)).state,
+        AttemptState::Complete
+    );
+    assert!(path.is_file());
+}
+
+#[test]
+fn a_park_asked_while_the_secrets_command_runs_deletes_it_once_cancelled() {
+    let (mut env, id) = secret_env();
+    let path = setup_started(&mut env, &id);
+    std::fs::write(&path, TOKEN).unwrap();
+    break_copy(&env, &id);
+    env.step();
+    env.step();
+    let t = env.ticket(&id);
+    assert!(is_parking(&t), "{t:#?}");
+    assert!(setup_attempt(&t).forgotten.is_empty());
+    assert!(path.is_file());
+    exits(&env, &setup_key(&id, 1), 0);
+    env.steps_until(&id, "parked", |t, _| is_parked(t));
+    let a = setup_attempt(&env.ticket(&id));
+    assert!(matches!(a.state, AttemptState::Cancelled { .. }), "{a:#?}");
+    assert!(!path.exists());
+    assert_eq!(a.forgotten["personas"].why, "attempt cancelled");
+    assert_eq!(
+        forgotten_events(&env, &id),
+        ["personas deleted: attempt cancelled"]
+    );
+}

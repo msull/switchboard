@@ -2202,6 +2202,35 @@ that did not, so a plain shell pane still runs pasted lines one by one.
 Known gap: off macOS a plain paste still sends ^V (an upstream hotfix);
 only Cmd+Shift pastes the text.
 
+## Secret artifacts (2026-10-05)
+
+A gate-only command stage writes artifacts: its command gets
+`DISPATCH_WRITES_<NAME>` for each, and its exit 0 fails the attempt
+when one is missing. An artifact may be `secret`: the attempt records
+which names are, the port refuses to read one, the ticket page draws
+it as a label, and it is deleted (`Attempt.forgotten`, a `forgotten`
+event) when the ticket leaves its stage's hold range, when its attempt
+is replaced, failed or cancelled, and when the ticket parks or closes.
+Agent sessions get each input their prompt names as
+`DISPATCH_INPUT_<NAME>`, carried on the Switchboard record
+(`SessionRecord.env`) so a resume keeps it. `{inputs.<stage>.<name>}`
+names one stage's artifact.
+
+Known gaps:
+
+- The `checks` log holds whatever the command prints, and is readable.
+- The file is chmodded 0600 after the command exits, not created so;
+  the 0700 attempt directory covers the window.
+- No secret on agent stages: an agent that wrote one would hold it in
+  its transcript.
+- The consuming agent's transcript: a tester that reads the file holds
+  its contents in its Claude Code transcript, which Dispatch cannot
+  forget.
+- Switchboard's scrollback (`<data dir>/scrollback/*.vt`) and run
+  logs, if the agent prints the file. Only the path reaches a
+  Switchboard record (`SessionRecord.env`); the contents reach these
+  files only through the agent's own output.
+
 ## Open questions
 
 - Shared project config runs with a hash-and-approve flow and no

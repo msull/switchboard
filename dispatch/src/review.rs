@@ -6,6 +6,7 @@
 //! completion and every check's exit is on the attempt's round record,
 //! bound to the head it was made at.
 
+use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::path::Path;
 
@@ -198,7 +199,7 @@ impl Runner {
             ctx,
             AttemptKind::Review,
             AttemptState::Running,
-            std::collections::BTreeMap::new(),
+            BTreeMap::new(),
             now_ms,
         );
         attempt.project = Some(project);
@@ -473,6 +474,7 @@ impl Runner {
                 launch,
                 prompt: Some(prompt),
                 notes,
+                env: BTreeMap::new(),
             },
             now_ms,
         )?;
@@ -1225,6 +1227,7 @@ impl Runner {
                 launch,
                 prompt: Some(prompt),
                 notes,
+                env: BTreeMap::new(),
             },
             now_ms,
         )?;
@@ -2406,6 +2409,7 @@ impl Runner {
                 launch,
                 prompt: Some(prompt),
                 notes,
+                env: BTreeMap::new(),
             },
             now_ms,
         )?;

@@ -511,8 +511,30 @@ pub struct AttemptView {
     /// When each nudge was typed into the agent's session after it
     /// stopped with its tree not clean, in ms.
     pub nudges: Vec<u64>,
+    /// The artifact names that are secret: listed, never read.
+    pub secret: Vec<String>,
+    /// The secret artifacts whose files were deleted.
+    pub forgotten: Vec<String>,
     pub started_ms: u64,
     pub ended_ms: Option<u64>,
+}
+
+impl AttemptView {
+    /// Whether the artifact `name` is secret, so nothing may ask to
+    /// read it.
+    #[must_use]
+    pub fn is_secret(&self, name: &str) -> bool {
+        self.secret.iter().any(|s| s == name)
+    }
+
+    /// Whether the file at `path` is one of this attempt's secret
+    /// artifacts.
+    #[must_use]
+    pub fn secret_at(&self, path: &std::path::Path) -> bool {
+        self.artifacts
+            .iter()
+            .any(|(name, p)| p == path && self.is_secret(name))
+    }
 }
 
 /// A code review attempt's rewrite of its branch's commits.

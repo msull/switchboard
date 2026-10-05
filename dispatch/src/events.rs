@@ -105,6 +105,9 @@ pub enum Kind {
     /// A supervisor answered a decision its `decides` does not list; the
     /// decision still waits on the owner.
     Refused,
+    /// A secret artifact's file was deleted; the text names it and why,
+    /// never what it held.
+    Forgotten,
 }
 
 impl Kind {
@@ -136,6 +139,7 @@ impl Kind {
             Self::CheckOrphanKilled => "check-orphan-killed",
             Self::Restarted => "restarted",
             Self::Refused => "refused",
+            Self::Forgotten => "forgotten",
         }
     }
 }
@@ -675,6 +679,7 @@ fn attempt_events(
     }
     nudge_events(out, t, a, before, at_ms);
     orphan_events(out, t, a, before, at_ms);
+    forgotten_events(out, t, a, before, at_ms);
     for round in &a.rounds {
         let old = before.and_then(|b| b.rounds.iter().find(|x| x.n == round.n));
         if old.is_none_or(|o| o.state != round.state) {
@@ -783,6 +788,22 @@ fn orphan_events(
             head: Some(o.head.clone()),
             ..Event::of_attempt(t, at_ms, Kind::CheckOrphanKilled, a, text)
         });
+    }
+}
+
+/// One `forgotten` event per secret artifact deleted since `before`.
+fn forgotten_events(
+    out: &mut Vec<Event>,
+    t: &Ticket,
+    a: &Attempt,
+    before: Option<&Attempt>,
+    at_ms: u64,
+) {
+    for (name, f) in &a.forgotten {
+        if before.is_none_or(|b| !b.forgotten.contains_key(name)) {
+            let text = format!("{name} deleted: {}", f.why);
+            out.push(Event::of_attempt(t, at_ms, Kind::Forgotten, a, text));
+        }
     }
 }
 
@@ -1546,6 +1567,28 @@ mod tests {
         assert_eq!(events[0].text, "nudge 1: the tree is not clean");
         assert_eq!(Kind::Nudged.as_str(), "nudged");
         assert!(between(Some(&nudged), &nudged, 5, &names).is_empty());
+    }
+
+    #[test]
+    fn a_secret_deleted_is_one_forgotten_event_with_the_name_and_why() {
+        let mut done = ticket();
+        let mut a = running("implement", 1);
+        a.state = AttemptState::Complete;
+        a.secret.insert("personas".into());
+        done.attempts.push(a);
+        let mut deleted = done.clone();
+        deleted.attempts[0].forgotten.insert(
+            "personas".into(),
+            crate::ticket::Forgotten {
+                at_ms: 7,
+                why: "dev-stack released".into(),
+            },
+        );
+        let events = between(Some(&done), &deleted, 5, &names);
+        assert_eq!(kinds(Some(&done), &deleted), [Kind::Forgotten]);
+        assert_eq!(events[0].text, "personas deleted: dev-stack released");
+        assert_eq!(Kind::Forgotten.as_str(), "forgotten");
+        assert!(between(Some(&deleted), &deleted, 5, &names).is_empty());
     }
 
     #[test]

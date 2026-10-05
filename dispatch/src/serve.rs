@@ -84,6 +84,10 @@ impl Handler {
                 if !file.starts_with(&dir) {
                     bail!("{} is not a file of ticket {ticket}", path.display());
                 }
+                let t = self.runner.load_ticket(ticket)?;
+                if let Some(name) = secret_named(&t, &file) {
+                    bail!("{name} is secret; Dispatch never reads it");
+                }
                 let text = fs::read_to_string(&file)
                     .with_context(|| format!("read {}", file.display()))?;
                 Reply::Artifact { text }
@@ -136,6 +140,18 @@ impl Handler {
     fn view(&self, t: &Ticket) -> TicketView {
         ticket_view(t, self.runner.pipeline_of(t).ok().as_ref())
     }
+}
+
+/// The name of the secret artifact at `file`, already canonical, when
+/// it is one of any attempt of `t`.
+fn secret_named<'t>(t: &'t Ticket, file: &Path) -> Option<&'t str> {
+    t.attempts.iter().find_map(|a| {
+        a.secret.iter().find_map(|name| {
+            let path = a.artifacts.get(name)?;
+            let path = path.canonicalize().unwrap_or_else(|_| path.clone());
+            (path == file).then_some(name.as_str())
+        })
+    })
 }
 
 /// Make a ticket from the project's source, as `dispatch take` does.
@@ -588,65 +604,7 @@ pub fn ticket_view(t: &Ticket, p: Option<&Pipeline>) -> TicketView {
         trees_retryable: t.trees_retryable(),
         removes: p.map_or_else(Vec::new, |p| crate::scheduler::close_removes(t, p)),
         lanes: t.lanes.iter().map(|l| lane_view(t, l)).collect(),
-        attempts: t
-            .attempts
-            .iter()
-            .map(|a| {
-                let (state, reason) = attempt_state(&a.state);
-                AttemptView {
-                    stage: a.stage.clone(),
-                    n: a.n,
-                    context: a.context.clone(),
-                    kind: match a.kind {
-                        AttemptKind::Agent => "agent",
-                        AttemptKind::Workflow => "workflow",
-                        AttemptKind::GateOnly => "gate-only",
-                        AttemptKind::Review => "review",
-                    }
-                    .into(),
-                    rounds: round_views(a),
-                    nudges: a.nudges.clone(),
-                    state: state.into(),
-                    reason,
-                    session: a.session.clone(),
-                    run: a.run.clone(),
-                    artifacts: a
-                        .artifacts
-                        .iter()
-                        .map(|(k, v)| (k.clone(), v.clone()))
-                        .collect(),
-                    head: a.head.clone(),
-                    checks: a.gate.as_ref().map(|g| dispatch_control::ChecksView {
-                        head: g.head.clone(),
-                        exit: g.exit,
-                        log: g.log.clone(),
-                    }),
-                    pr: a.pr.as_ref().map(|pr| dispatch_control::PullRequestView {
-                        provider: pr.provider.clone(),
-                        repo: pr.repo.clone(),
-                        number: pr.number,
-                        url: pr.url.clone(),
-                        head: pr.head.clone(),
-                        checks: pr.checks.clone(),
-                    }),
-                    rewrite: a.rewrite.as_ref().map(|r| dispatch_control::RewriteView {
-                        mode: r.mode.as_str().to_owned(),
-                        before: r.before.clone(),
-                        after: r.after.clone(),
-                        from: r.from,
-                        to: r.to,
-                        skipped: r.skipped.clone(),
-                        stale: r.stale_names(),
-                        message: r.message_outcome(),
-                        message_head: r.message.as_ref().and_then(|m| m.to.clone()),
-                        message_failed: r.message.as_ref().is_some_and(|m| m.failed.is_some()),
-                        message_session: r.message.as_ref().and_then(|m| m.session.clone()),
-                    }),
-                    started_ms: a.started_ms,
-                    ended_ms: a.ended_ms,
-                }
-            })
-            .collect(),
+        attempts: t.attempts.iter().map(attempt_view).collect(),
         decisions: t.decisions.iter().map(|d| decision_view(t, d)).collect(),
         root_project: t.root_project.clone(),
         current_session: t.current_session().cloned(),
@@ -658,6 +616,65 @@ pub fn ticket_view(t: &Ticket, p: Option<&Pipeline>) -> TicketView {
         updated_ms: t.updated_ms,
         paths: PathsView::default(),
         restarts: t.restarts.iter().map(restart_view).collect(),
+    }
+}
+
+/// One attempt as the port shows it: secret artifacts by name only.
+fn attempt_view(a: &crate::ticket::Attempt) -> AttemptView {
+    let (state, reason) = attempt_state(&a.state);
+    AttemptView {
+        stage: a.stage.clone(),
+        n: a.n,
+        context: a.context.clone(),
+        kind: match a.kind {
+            AttemptKind::Agent => "agent",
+            AttemptKind::Workflow => "workflow",
+            AttemptKind::GateOnly => "gate-only",
+            AttemptKind::Review => "review",
+        }
+        .into(),
+        rounds: round_views(a),
+        nudges: a.nudges.clone(),
+        secret: a.secret.iter().cloned().collect(),
+        forgotten: a.forgotten.keys().cloned().collect(),
+        state: state.into(),
+        reason,
+        session: a.session.clone(),
+        run: a.run.clone(),
+        artifacts: a
+            .artifacts
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect(),
+        head: a.head.clone(),
+        checks: a.gate.as_ref().map(|g| dispatch_control::ChecksView {
+            head: g.head.clone(),
+            exit: g.exit,
+            log: g.log.clone(),
+        }),
+        pr: a.pr.as_ref().map(|pr| dispatch_control::PullRequestView {
+            provider: pr.provider.clone(),
+            repo: pr.repo.clone(),
+            number: pr.number,
+            url: pr.url.clone(),
+            head: pr.head.clone(),
+            checks: pr.checks.clone(),
+        }),
+        rewrite: a.rewrite.as_ref().map(|r| dispatch_control::RewriteView {
+            mode: r.mode.as_str().to_owned(),
+            before: r.before.clone(),
+            after: r.after.clone(),
+            from: r.from,
+            to: r.to,
+            skipped: r.skipped.clone(),
+            stale: r.stale_names(),
+            message: r.message_outcome(),
+            message_head: r.message.as_ref().and_then(|m| m.to.clone()),
+            message_failed: r.message.as_ref().is_some_and(|m| m.failed.is_some()),
+            message_session: r.message.as_ref().and_then(|m| m.session.clone()),
+        }),
+        started_ms: a.started_ms,
+        ended_ms: a.ended_ms,
     }
 }
 

@@ -23,7 +23,7 @@ use crate::ticket::{ProjectState, Ticket};
 /// carried a version reads as 0 and is brought up by `migrate`. A
 /// record above it was written by a newer `dispatch` and is refused
 /// both ways, so this build never drops fields it does not know.
-pub const RECORD_VERSION: u32 = 14;
+pub const RECORD_VERSION: u32 = 15;
 
 /// A lock file held while this lives: the writer lock, the runner's
 /// claim, or a ticket's close.
@@ -523,6 +523,12 @@ pub fn migrate(mut value: Value) -> Value {
         // their serde defaults. Nothing is transformed; a build that would
         // drop them on its next write must refuse the record, or a hold
         // would vanish and a second ticket deploy over it.
+        //
+        // 14 to 15: an attempt gains `secret` and `forgotten`, both empty
+        // from their serde defaults. Nothing is transformed; a build that
+        // would drop them on its next write must refuse the record, or a
+        // secret artifact would be read, or its deletion forgotten and
+        // its name offered to a later prompt again.
         if version == 1 {
             settle_from_verdicts(&mut value);
         }
@@ -1193,6 +1199,25 @@ mod tests {
         assert_eq!(written["restart"]["reset"][0]["to"], "head0001");
         assert_eq!(written["entered"][0]["heads"]["root"], "head0001");
         assert_eq!(read_ticket(&path).unwrap(), t);
+    }
+
+    #[test]
+    fn a_version_fourteen_attempt_migrates_to_fifteen_with_no_secrets() {
+        let attempt = r#"{"stage": "try-setup", "n": 1, "context": "root", "kind": "gate-only", "state": "complete", "project": null, "session": null, "run": null, "artifacts": {"personas": "/a/personas.md"}, "settle": {}, "stop_at_ms": null, "head": null, "started_ms": 1000, "ended_ms": 2000}"#;
+        let text = TICKET_V0
+            .replacen('{', "{\n  \"version\": 14,", 1)
+            .replacen(
+                r#""attempts": [],"#,
+                &format!(r#""attempts": [{attempt}],"#),
+                1,
+            );
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.json");
+        fs::write(&path, text).unwrap();
+        let t = read_ticket(&path).unwrap();
+        assert_eq!(t.version, RECORD_VERSION);
+        assert!(t.attempts[0].secret.is_empty());
+        assert!(t.attempts[0].forgotten.is_empty());
     }
 
     #[test]

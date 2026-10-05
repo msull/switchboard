@@ -84,6 +84,7 @@ impl AppCore {
             waiting_on: None,
             pending_launch: false,
             last_stop_at: None,
+            env: Vec::new(),
         });
         out.touch(project);
         Some(id)
@@ -605,6 +606,8 @@ impl AppCore {
             waiting_on: None,
             pending_launch: true,
             last_stop_at: None,
+            // A clone is a new Dispatch attempt and is sent its own.
+            env: Vec::new(),
             ..record
         });
         out.touch(record.project);

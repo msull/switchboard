@@ -2,7 +2,7 @@
 //! rest left as written. Commands never go through this; their values
 //! travel as environment variables.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// The values a prompt may name.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -49,7 +49,36 @@ impl Vars {
 fn is_field(s: &str) -> bool {
     !s.is_empty()
         && s.chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_')
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+}
+
+/// Each input `text` names, as `{inputs.X}` (no stage) or
+/// `{inputs.S.X}` (stage `S`), leaving out `{inputs.S.commit}`, which
+/// is a commit and not a file.
+#[must_use]
+pub fn input_names(text: &str) -> BTreeSet<(Option<String>, String)> {
+    let mut out = BTreeSet::new();
+    let mut rest = text;
+    while let Some(start) = rest.find("{inputs.") {
+        let after = &rest[start + "{inputs.".len()..];
+        let Some(end) = after.find('}') else {
+            break;
+        };
+        let field = &after[..end];
+        if is_field(field) {
+            match field.split_once('.') {
+                None => {
+                    out.insert((None, field.to_owned()));
+                }
+                Some((stage, name)) if !name.contains('.') && name != "commit" => {
+                    out.insert((Some(stage.to_owned()), name.to_owned()));
+                }
+                Some(_) => {}
+            }
+        }
+        rest = &after[end..];
+    }
+    out
 }
 
 #[cfg(test)]
@@ -68,5 +97,19 @@ mod tests {
         );
         assert_eq!(vars.render("no fields"), "no fields");
         assert_eq!(vars.render("{notes"), "{notes");
+    }
+
+    #[test]
+    fn input_names_finds_both_forms_and_skips_commits() {
+        let names = input_names(
+            "Use {inputs.personas} and {inputs.try-setup.personas}; at {inputs.deploy.commit}; {inputs.} {issue.title} {inputs.bad name}",
+        );
+        assert_eq!(
+            names,
+            BTreeSet::from([
+                (None, "personas".to_owned()),
+                (Some("try-setup".to_owned()), "personas".to_owned()),
+            ])
+        );
     }
 }

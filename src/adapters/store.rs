@@ -341,12 +341,12 @@ pub fn migrate(value: serde_json::Value) -> Result<Workspace, String> {
         .and_then(serde_json::Value::as_u64)
         .ok_or_else(|| "missing schema_version".to_string())?;
     match version {
-        // v2 to v9 added optional fields only (v8: the project's space;
+        // v2 to v10 added optional fields only (v8: the project's space;
         // v9: the control port's operation id, the outside waiting
-        // reason, the pending-launch mark and the last stop time), so an
-        // older document reads with their defaults; it is written back
-        // at the current version.
-        1..=9 => serde_json::from_value(value)
+        // reason, the pending-launch mark and the last stop time; v10: a
+        // session's launcher environment), so an older document reads
+        // with their defaults; it is written back at the current version.
+        1..=10 => serde_json::from_value(value)
             .map(|mut w: Workspace| {
                 w.schema_version = SCHEMA_VERSION;
                 w
@@ -494,6 +494,7 @@ mod tests {
             waiting_on: None,
             pending_launch: false,
             last_stop_at: None,
+            env: Vec::new(),
         };
         let mut agent = session(
             "claude",
@@ -992,5 +993,19 @@ mod tests {
                 && !s.pending_launch
                 && s.last_stop_at.is_none()
         }));
+    }
+
+    #[test]
+    fn v9_records_read_with_no_launcher_environment() {
+        let mut w = workspace("v9");
+        w.schema_version = 9;
+        let mut value = serde_json::to_value(&w).unwrap();
+        assert!(!value["sessions"].as_array().unwrap().is_empty());
+        for s in value["sessions"].as_array_mut().unwrap() {
+            s.as_object_mut().unwrap().remove("env");
+        }
+        let loaded = migrate(value).unwrap();
+        assert_eq!(loaded.schema_version, SCHEMA_VERSION);
+        assert!(loaded.sessions.iter().all(|s| s.env.is_empty()));
     }
 }

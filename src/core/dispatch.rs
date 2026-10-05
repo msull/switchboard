@@ -679,10 +679,12 @@ impl AppCore {
 
     /// Whether the ticket page should ask for the artifact at `path` of
     /// ticket `t`: connected, no text yet, not already asking, and not
-    /// asked at the ticket's current `updated_ms`.
+    /// asked at the ticket's current `updated_ms`. Never for a secret
+    /// artifact, which the runner refuses to read.
     #[must_use]
     pub fn artifact_read_due(&self, t: &TicketView, path: &std::path::Path) -> bool {
-        self.dispatch.connected
+        !t.attempts.iter().any(|a| a.secret_at(path))
+            && self.dispatch.connected
             && !self.dispatch.artifacts.contains_key(path)
             && self
                 .dispatch
