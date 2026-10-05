@@ -809,6 +809,17 @@ impl Runner {
             }
             return Ok(false);
         }
+        // A rerun question about a rebaser carries the pseudo-stage. It
+        // holds only a stage not yet refreshed: a rebaser stopping
+        // clears the mark, so one asked in this stage always lands here,
+        // while one an older runner left pending past a refreshed stage
+        // is about a superseded attempt and must not freeze it.
+        if t.decisions
+            .iter()
+            .any(|d| d.pending() && d.stage == REFRESH)
+        {
+            return Ok(true);
+        }
         if stage.kind() == StageKind::GateOnly && !reads_pr(stage) {
             t.refreshed_stage = Some(t.stage);
             drop_stale_conflicts(t);
@@ -823,8 +834,12 @@ impl Runner {
         }
         if !waits {
             drop_stale_conflicts(t);
+            // A stage held on a lane is not refreshed yet: whatever
+            // releases the hold (an answer, a rebaser stopping, a park
+            // and resume that withdrew the question) must find the lanes
+            // still to be read.
+            t.refreshed_stage = Some(t.stage);
         }
-        t.refreshed_stage = Some(t.stage);
         self.save_ticket(t, now_ms)?;
         Ok(waits)
     }
@@ -1017,13 +1032,30 @@ impl Runner {
         };
         let (clone, remote, onto) = self.lane_base_ref(p, &lane);
         let worktree = t.lanes[i].worktree.clone();
+        // Mid-rebase, `HEAD` is not the branch, so nothing read from it
+        // is the branch's, and the stage must not run in a tree someone
+        // is rebasing, whether or not the base moved.
+        if self.git.rebase_in_progress(&worktree)? {
+            let why = format!(
+                "is mid-rebase{}; finish it (git rebase --continue) or abort it by hand",
+                self.at_head(&worktree)
+            );
+            return self.hold_lane(t, ps, stage, i, &why, now_ms);
+        }
         self.git.fetch(&clone, &remote)?;
         let onto_sha = self.git.rev_parse(&clone, &onto)?;
         if t.lanes[i].base_sha.as_deref() == Some(onto_sha.as_str()) {
             return Ok(false);
         }
+        // Read before anything moves. A detached `HEAD` is not the
+        // branch: a rebase there would move the detached commit and
+        // record a bring-up of the branch it never touched.
+        let Some(head_before) = self.git.branch_head(&worktree, &t.lanes[i].branch)? else {
+            let why = format!("is not on {}; check it out by hand", t.lanes[i].branch);
+            return self.hold_lane(t, ps, stage, i, &why, now_ms);
+        };
         let behind = self.git.behind(&worktree, &onto)?;
-        // A tree with work in it (someone's hand rebase, say) is left
+        // A tree with work in it (uncommitted edits, say) is left
         // alone this stage; the base moves under it and is read again
         // on the next stage, or on a recheck.
         if behind > 0 && !self.git.is_clean(&worktree)? {
@@ -1053,10 +1085,9 @@ impl Runner {
                 return Ok(false);
             }
         }
-        // Both read before anything moves: a branch with no commits of
-        // its own sits at the commit it was cut from or last moved to,
-        // or at `onto` when that is unknown.
-        let head_before = self.git.head(&worktree)?;
+        // A branch with no commits of its own sits at `sat_on`, the
+        // commit it was cut from or last moved to, or `onto` when that
+        // is unknown; the head read above says whether it still does.
         let from = t.lanes[i].base_sha.clone().unwrap_or_default();
         let sat_on = if from.is_empty() { &onto_sha } else { &from };
         let commits = head_before != *sat_on;
@@ -1110,28 +1141,70 @@ impl Runner {
                 } else {
                     format!("max_rebases ({}) is spent", p.policy.max_rebases)
                 };
-                self.ensure_decision(
-                    t,
-                    ps,
-                    Ask {
-                        stage: &stage.name,
-                        name: REFRESH,
-                        kind: DecisionKind::Permission,
-                        question: format!(
-                            "{} ({}): the branch is behind {onto} and a rebase onto it conflicts; {why}. Rebase it by hand in {}, then answer recheck",
-                            stage.name,
-                            lane.name,
-                            worktree.display()
-                        ),
-                        options: &["recheck", "park"],
-                        recommendation: None,
-                        attempt: None,
-                    },
-                    now_ms,
-                )?;
+                let question = format!(
+                    "{} ({}): the branch is behind {onto} and a rebase onto it conflicts; {why}. Rebase it by hand in {}, then answer recheck",
+                    stage.name,
+                    lane.name,
+                    worktree.display()
+                );
+                self.ask_refresh(t, ps, stage, question, now_ms)?;
             }
         }
         Ok(true)
+    }
+
+    /// Lane `i`'s worktree is in a state only its owner can put right
+    /// (`why` says which and how): the stage waits on a `refresh`
+    /// question. Always true.
+    fn hold_lane(
+        &mut self,
+        t: &mut Ticket,
+        ps: &mut ProjectState,
+        stage: &Stage,
+        i: usize,
+        why: &str,
+        now_ms: u64,
+    ) -> Result<bool> {
+        let lane = &t.lanes[i];
+        log::info!(
+            "ticket {} lane {}: the worktree {why}; the stage waits",
+            t.id,
+            lane.name
+        );
+        let question = format!(
+            "{} ({}): the worktree {} {why}, then answer recheck",
+            stage.name,
+            lane.name,
+            lane.worktree.display()
+        );
+        self.ask_refresh(t, ps, stage, question, now_ms)?;
+        Ok(true)
+    }
+
+    /// The `refresh` question about a lane the stage waits on, answered
+    /// `recheck` once the owner has put it right by hand.
+    fn ask_refresh(
+        &mut self,
+        t: &mut Ticket,
+        ps: &mut ProjectState,
+        stage: &Stage,
+        question: String,
+        now_ms: u64,
+    ) -> Result<()> {
+        self.ensure_decision(
+            t,
+            ps,
+            Ask {
+                stage: &stage.name,
+                name: REFRESH,
+                kind: DecisionKind::Permission,
+                question,
+                options: &["recheck", "park"],
+                recommendation: None,
+                attempt: None,
+            },
+            now_ms,
+        )
     }
 
     /// A rebase that stopped, on the lane's record before anything is
@@ -1310,7 +1383,7 @@ impl Runner {
             .unwrap_or_default();
         let _ = write!(
             prompt,
-            "The branch {branch} in {} is behind {onto}, and a rebase onto it stops on conflicts. Fetch, rebase the branch onto {onto}, resolve every conflict keeping the change's intent{plan}, run the checks, and do not push; Dispatch pushes the branch.{checks} If a conflict's intent is unclear, abort the rebase, leave the branch as it was, and say why. Write what you did to {}.",
+            "The branch {branch} in {} is behind {onto}, and a rebase onto it stops on conflicts. Fetch, rebase the branch onto {onto}, resolve every conflict keeping the change's intent{plan}, finish the rebase with git rebase --continue (a rebase left stopped holds the stage), run the checks, and do not push; Dispatch pushes the branch.{checks} If a conflict's intent is unclear, abort the rebase, leave the branch as it was, and say why. Write what you did to {}.",
             cwd.display(),
             notes.display()
         );
@@ -4957,7 +5030,8 @@ impl Runner {
                 name: "rerun",
                 kind: DecisionKind::Permission,
                 question: format!(
-                    "{stage} ({ctx}) attempt {n} failed: {reason}. Run it again?{}{choices}",
+                    "{stage} ({ctx}) attempt {n} failed: {reason}. Run it again?{}{}{choices}",
+                    self.mid_rebase_note(t, stage, &ctx),
                     rerun_carries(t, stage, n)
                 ),
                 options,
@@ -4966,6 +5040,34 @@ impl Runner {
             },
             now_ms,
         )
+    }
+
+    /// What a rerun question about a rebaser adds when it left its lane
+    /// mid-rebase: a rerun cannot start over a stopped rebase.
+    fn mid_rebase_note(&self, t: &Ticket, stage: &str, ctx: &str) -> String {
+        if stage != REFRESH {
+            return String::new();
+        }
+        let Some(lane) = t.lanes.iter().find(|l| l.name == ctx) else {
+            return String::new();
+        };
+        if !matches!(self.git.rebase_in_progress(&lane.worktree), Ok(true)) {
+            return String::new();
+        }
+        format!(
+            " The worktree {} is mid-rebase{}; finish or abort it by hand, then answer rerun.",
+            lane.worktree.display(),
+            self.at_head(&lane.worktree)
+        )
+    }
+
+    /// " at <sha>" for a mid-rebase tree's `HEAD`, or nothing when it
+    /// cannot be read, so a question never names an empty commit.
+    fn at_head(&self, dir: &Path) -> String {
+        self.git
+            .head(dir)
+            .map(|h| format!(" at {h}"))
+            .unwrap_or_default()
     }
 
     /// A failed or cancelled attempt with no rerun question open about
@@ -6167,11 +6269,10 @@ pub(crate) fn resolution_of<'t>(
 }
 
 /// Drops every lane's recorded conflict as a stage goes ahead on the
-/// branches as they stand (a parked question resumed, or a tree left
-/// alone): whatever the stage runs reads and moves the branch, so the
-/// head the conflict kept is no longer the last one reviewed, and a
-/// later rebase records a conflict of its own. True when one was
-/// dropped.
+/// branches as they stand (a tree left alone): whatever the stage runs
+/// reads and moves the branch, so the head the conflict kept is no
+/// longer the last one reviewed, and a later rebase records a conflict
+/// of its own. True when one was dropped.
 fn drop_stale_conflicts(t: &mut Ticket) -> bool {
     let mut dropped = false;
     for lane in &mut t.lanes {

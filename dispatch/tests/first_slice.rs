@@ -22,8 +22,9 @@ use dispatch::scheduler::{
 };
 use dispatch::store::DataDir;
 use dispatch::ticket::{
-    Attempt, AttemptKind, AttemptState, DIRTY_WAIT_MS, Decision, PushedHead, ReviewerResult,
-    Rewrite, RoundState, SETTLE_POLLS, STOP_IDLE_POLLS, SourceSnapshot, Ticket, TicketState,
+    Attempt, AttemptKind, AttemptState, DIRTY_WAIT_MS, Decision, DecisionState, LaneRecord,
+    PushedHead, ReviewerResult, Rewrite, RoundState, SETTLE_POLLS, STOP_IDLE_POLLS, SourceSnapshot,
+    Ticket, TicketState,
 };
 use support::{FakeSwitchboard, SharedPort, events_of};
 use switchboard_control::{Body, Liveness, RunState, SessionKind};
@@ -8415,9 +8416,10 @@ fn a_clean_rebase_after_an_aborted_rebaser_drops_the_conflict() {
 }
 
 /// A conflict at `review-code` parked on instead of resolved: the
-/// resumed stage reviews the branch as it stands and drops the
-/// conflict, so a clean rebase at `pr` has resolved nothing and starts
-/// no reviewer.
+/// resume reads the lane again and asks again, and once the owner
+/// leaves work in the tree and answers `recheck`, the stage goes ahead
+/// on the branch as it stands and drops the conflict, so a clean rebase
+/// at `pr` has resolved nothing and starts no reviewer.
 #[test]
 fn a_conflict_parked_on_is_dropped_when_the_stage_goes_ahead() {
     let mut env = Env::new();
@@ -8455,6 +8457,32 @@ fn a_conflict_parked_on_is_dropped_when_the_stage_goes_ahead() {
     });
     let now = env.tick();
     env.runner.resume(&id, now).unwrap();
+    env.steps_until(&id, "the refresh question again", |t, _| {
+        t.pending_decisions()
+            .iter()
+            .any(|x| x.name == REFRESH && x.id != d.id)
+    });
+    assert!(env.ticket(&id).attempts_of("review-code").next().is_none());
+    env.repo.lock().unwrap().dirty.push(tree.clone());
+    let again = env.pending(&id)[0].clone();
+    let now = env.tick();
+    env.runner
+        .decide(&id, &again.id, "recheck", None, now)
+        .unwrap();
+    // The stage goes ahead on the tree as it stands, which the review
+    // round refuses while it is dirty; the owner cleans it and reruns.
+    env.steps_until(&id, "the not-clean rerun question", |t, _| {
+        t.pending_decisions()
+            .iter()
+            .any(|x| x.name == "rerun" && x.stage == "review-code")
+    });
+    assert_eq!(env.ticket(&id).lanes[0].conflict, None);
+    env.repo.lock().unwrap().dirty.clear();
+    let rerun = env.pending(&id)[0].clone();
+    let now = env.tick();
+    env.runner
+        .decide(&id, &rerun.id, "rerun", None, now)
+        .unwrap();
     env.steps_until(&id, "the review round", |t, _| {
         t.attempts_of("review-code").last().is_some_and(|a| {
             a.rounds.last().is_some_and(|r| {
@@ -8508,6 +8536,33 @@ fn a_park_mid_rebaser_keeps_the_conflict_for_review() {
     assert_eq!(moved.conflict.map(|c| c.before), Some("base0000".into()));
     assert_eq!(moved.after.as_deref(), Some("resolv01"));
     assert!(t.attempts_of("pr").next().is_none(), "pr waits for it");
+}
+
+/// A record from before a rebaser's rerun question held the stage: one
+/// left pending about a superseded rebaser, past a stage already
+/// refreshed, does not freeze it; the resolution and `pr` go on.
+#[test]
+fn a_stale_rebaser_rerun_does_not_hold_a_refreshed_stage() {
+    let mut env = Env::new();
+    let (id, tree, rebase) = rebaser_at_pr(&mut env);
+    resolution_review_started(&mut env, &id, &tree, &rebase);
+    let mut t = env.ticket(&id);
+    assert_eq!(t.refreshed_stage, Some(t.stage));
+    let mut stale = t.decisions.last().unwrap().clone();
+    stale.id = "stale-rerun".into();
+    stale.stage = REFRESH.into();
+    stale.name = "rerun".into();
+    stale.attempt = Some((REFRESH.into(), rebase.n));
+    stale.state = DecisionState::Pending;
+    t.decisions.push(stale);
+    let now = env.tick();
+    env.runner.save_ticket(&mut t, now).unwrap();
+    resolver_says(&mut env, &id, "No findings.");
+    pr_started(&mut env, &id);
+    assert!(
+        env.pending(&id).iter().any(|d| d.id == "stale-rerun"),
+        "nothing withdraws it"
+    );
 }
 
 /// A restart while the reviewer runs finds it on the record and polls
@@ -8839,6 +8894,197 @@ fn a_refresh_leaves_a_tree_with_work_in_it_alone() {
     );
     assert_eq!(t.lanes[0].base_sha.as_deref(), Some("base0000"));
     assert!(t.attempts_of(dispatch::scheduler::REFRESH).next().is_none());
+}
+
+/// `rebaser_at_pr`, then the rebaser stops with the tree mid-rebase at
+/// `replay01` and no notes, and is failed for it; the ticket at its
+/// rerun question, with the lane as it was before the rebaser.
+fn rebaser_stopped_mid_rebase(env: &mut Env) -> (String, PathBuf, LaneRecord) {
+    let (id, tree, rebase) = rebaser_at_pr(env);
+    let lane = env.ticket(&id).lanes[0].clone();
+    assert!(lane.conflict.is_some());
+    {
+        let mut repo = env.repo.lock().unwrap();
+        repo.rebase_conflicts.clear();
+        repo.behind.clear();
+        repo.mid_rebase.push(tree.clone());
+        repo.heads.insert(tree.clone(), "replay01".into());
+    }
+    let t = env.ticket(&id);
+    assert_ne!(t.refreshed_stage, Some(t.stage), "held while it runs");
+    let now = env.now;
+    env.sb().stop(rebase.session.as_deref().unwrap(), now);
+    env.idle_past_grace();
+    env.steps_until(&id, "the rebaser's rerun question", |t, _| {
+        t.pending_decisions()
+            .iter()
+            .any(|d| d.name == "rerun" && d.stage == REFRESH)
+    });
+    (id, tree, lane)
+}
+
+/// The lane untouched and no `pr` attempt after a few passes.
+fn held_at_pr(env: &mut Env, id: &str, lane: &LaneRecord, pushes: usize) {
+    for _ in 0..4 {
+        env.step();
+    }
+    let t = env.ticket(id);
+    assert!(t.attempts_of("pr").next().is_none(), "{t:#?}");
+    assert_ne!(t.refreshed_stage, Some(t.stage));
+    assert_eq!(t.lanes[0].base_sha, lane.base_sha);
+    assert_eq!(t.lanes[0].refreshed, lane.refreshed);
+    assert_eq!(t.lanes[0].conflict, lane.conflict);
+    assert_eq!(env.repo.lock().unwrap().pushed.len(), pushes);
+}
+
+/// A rebaser that stops with the rebase stopped part way: its rerun
+/// question says so and holds `pr`, and the lane is not read as
+/// brought up from the detached head; a `rerun` while the tree is
+/// still mid-rebase asks the `refresh` question instead of launching.
+#[test]
+fn a_rebaser_that_stops_mid_rebase_holds_the_stage() {
+    let mut env = Env::new();
+    let (id, _, lane) = rebaser_stopped_mid_rebase(&mut env);
+    let pushes = env.repo.lock().unwrap().pushed.len();
+    let rerun = env.pending(&id)[0].clone();
+    assert_eq!(env.pending(&id).len(), 1);
+    assert!(
+        rerun.question.contains("mid-rebase at replay01"),
+        "{}",
+        rerun.question
+    );
+    held_at_pr(&mut env, &id, &lane, pushes);
+    let now = env.tick();
+    env.runner
+        .decide(&id, &rerun.id, "rerun", None, now)
+        .unwrap();
+    env.steps_until(&id, "the mid-rebase question", |t, _| {
+        t.pending_decisions()
+            .iter()
+            .any(|d| d.name == REFRESH && d.question.contains("mid-rebase"))
+    });
+    held_at_pr(&mut env, &id, &lane, pushes);
+    assert_eq!(env.ticket(&id).attempts_of(REFRESH).count(), 1);
+}
+
+/// The owner finishes the stopped rebase by hand and answers `rerun`:
+/// the lane is read again and brought up from the branch, and the
+/// resolution is reviewed; no second rebaser.
+#[test]
+fn a_hand_finished_rebase_after_a_stopped_rebaser_is_brought_up() {
+    let mut env = Env::new();
+    let (id, tree, _) = rebaser_stopped_mid_rebase(&mut env);
+    {
+        let mut repo = env.repo.lock().unwrap();
+        repo.mid_rebase.clear();
+        repo.heads.insert(tree, "resolv01".into());
+    }
+    let rerun = env.pending(&id)[0].clone();
+    let now = env.tick();
+    env.runner
+        .decide(&id, &rerun.id, "rerun", None, now)
+        .unwrap();
+    resolver_started(&mut env, &id);
+    let t = env.ticket(&id);
+    assert_eq!(t.lanes[0].base_sha.as_deref(), Some("main0002"));
+    let moved = t.lanes[0].refreshed.clone().unwrap();
+    assert_eq!(moved.after.as_deref(), Some("resolv01"));
+    assert!(moved.conflict.is_some());
+    assert_eq!(t.attempts_of(REFRESH).count(), 1);
+}
+
+/// A worktree whose `HEAD` is detached off its branch is never read as
+/// the branch: the stage waits on a `refresh` question and nothing is
+/// rebased or recorded.
+#[test]
+fn a_detached_worktree_is_held_not_brought_up() {
+    let mut env = Env::new();
+    let id = at_finalize(&mut env);
+    let tree = env.ticket(&id).lanes[0].worktree.clone();
+    let clone = env.runner.data.repo_dir(PROJECT);
+    {
+        let mut repo = env.repo.lock().unwrap();
+        repo.bases.insert(clone, "main0002".into());
+        repo.detached.push(tree);
+    }
+    let decision = env.pending(&id)[0].id.clone();
+    let now = env.tick();
+    env.runner
+        .decide(&id, &decision, "finalize", None, now)
+        .unwrap();
+    env.steps_until(&id, "the refresh question", |t, _| {
+        t.pending_decisions()
+            .iter()
+            .any(|d| d.name == REFRESH && d.question.contains("not on"))
+    });
+    for _ in 0..4 {
+        env.step();
+    }
+    let t = env.ticket(&id);
+    assert!(t.attempts_of("implement").next().is_none(), "{t:#?}");
+    assert!(env.repo.lock().unwrap().rebased.is_empty());
+    assert_eq!(t.lanes[0].base_sha.as_deref(), Some("base0000"));
+}
+
+/// Parks `id` by answering `park` to `decision`, then resumes it.
+fn park_and_resume(env: &mut Env, id: &str, decision: &str) {
+    let now = env.tick();
+    env.runner.decide(id, decision, "park", None, now).unwrap();
+    env.steps_until(id, "parked", |t, _| {
+        matches!(t.state, TicketState::Parked { .. })
+    });
+    let now = env.tick();
+    env.runner.resume(id, now).unwrap();
+}
+
+/// After a park and resume the held lane is read again: still
+/// mid-rebase, it asks again and `pr` still waits.
+fn asks_again_after_resume(
+    env: &mut Env,
+    id: &str,
+    before: &str,
+    lane: &LaneRecord,
+    pushes: usize,
+) {
+    env.steps_until(id, "the mid-rebase question again", |t, _| {
+        t.pending_decisions()
+            .iter()
+            .any(|d| d.name == REFRESH && d.id != before && d.question.contains("mid-rebase"))
+    });
+    held_at_pr(env, id, lane, pushes);
+    assert_eq!(env.ticket(id).attempts_of(REFRESH).count(), 1);
+}
+
+/// A park on the mid-rebase question withdraws it; the resume reads
+/// the lane again rather than running `pr` in the half-rebased tree.
+#[test]
+fn a_park_on_the_mid_rebase_question_asks_again_on_resume() {
+    let mut env = Env::new();
+    let (id, _, lane) = rebaser_stopped_mid_rebase(&mut env);
+    let pushes = env.repo.lock().unwrap().pushed.len();
+    let rerun = env.pending(&id)[0].clone();
+    let now = env.tick();
+    env.runner
+        .decide(&id, &rerun.id, "rerun", None, now)
+        .unwrap();
+    env.steps_until(&id, "the mid-rebase question", |t, _| {
+        t.pending_decisions().iter().any(|d| d.name == REFRESH)
+    });
+    let asked = env.pending(&id)[0].clone();
+    park_and_resume(&mut env, &id, &asked.id);
+    asks_again_after_resume(&mut env, &id, &asked.id, &lane, pushes);
+}
+
+/// A park on a stopped rebaser's rerun question: the resume asks the
+/// mid-rebase question rather than running `pr`.
+#[test]
+fn a_park_on_a_stopped_rebasers_rerun_asks_again_on_resume() {
+    let mut env = Env::new();
+    let (id, _, lane) = rebaser_stopped_mid_rebase(&mut env);
+    let pushes = env.repo.lock().unwrap().pushed.len();
+    let rerun = env.pending(&id)[0].clone();
+    park_and_resume(&mut env, &id, &rerun.id);
+    asks_again_after_resume(&mut env, &id, &rerun.id, &lane, pushes);
 }
 
 // --- closing a ticket: by hand or at the pipeline's end, a sequence from
