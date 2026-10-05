@@ -2167,6 +2167,25 @@ Known gaps:
   `runner up outside the app` until it exits, and a queued Start is
   dropped with a notice to Start again.
 
+## Bracketed paste in the embedded terminal (2026-10-05)
+
+A multi-line paste into a Claude Code session in the embedded terminal
+arrived as one Enter per line: the vendored widget wrote the clipboard
+raw, so Claude Code submitted the first line and the rest landed as
+separate input. The widget now frames a paste in `ESC[200~` ..
+`ESC[201~` whenever the terminal has bracketed-paste mode (DECSET 2004),
+with line breaks as LF and ESC dropped inside the bracket, and each line
+break as CR when the mode is off (patch 4 in
+`vendor/egui_term/SWITCHBOARD-PATCHES.md`).
+
+The widget always sees the mode on, because its pty runs a tmux client
+and tmux enables 2004 at the client on every attach. tmux passes the
+markers through to a pane that asked for 2004 and strips them for one
+that did not, so a plain shell pane still runs pasted lines one by one.
+
+Known gap: off macOS a plain paste still sends ^V (an upstream hotfix);
+only Cmd+Shift pastes the text.
+
 ## Open questions
 
 - Shared project config runs with a hash-and-approve flow and no

@@ -12,6 +12,7 @@ Requires Rust 1.95 or newer.
 ```sh
 cargo run --locked                                   # launch the app
 cargo test --locked --workspace                      # unit + headless UI + tmux integration tests, every crate
+cargo test --locked -p egui_term --lib               # the vendored terminal widget (outside the workspace)
 cargo clippy --locked --workspace --all-targets -- -D warnings   # lint
 cargo fmt --all                                      # format
 ./scripts/test-times.sh                              # every test timed serially, the slowest ten, the budget checked
@@ -365,8 +366,9 @@ documented here.
 ### Pre-commit hook
 
 `.githooks/pre-commit` checks formatting, runs Clippy, and runs the tests
-before each commit. It never modifies or stages files. Enable it once per
-clone:
+before each commit, including the vendored terminal widget's tests, which
+`--workspace` does not reach because `vendor/egui_term` is excluded. It
+never modifies or stages files. Enable it once per clone:
 
 ```sh
 git config core.hooksPath .githooks
