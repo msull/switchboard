@@ -111,8 +111,9 @@ Supervising (see docs/dispatch-agent-guide.md):
   dispatch report <ticket> [--json]        how a ticket went
   dispatch report --project <name> [--since YYYY-MM-DD] [--json]
   dispatch tail <ticket> [--lines N]       what its running agents' panes show
-  dispatch health [--timeout <secs>] [--stale <secs>] [--json]
-                                           is the runner alive and getting on (exit 1 if not)
+  dispatch health [--timeout <secs>] [--stale <secs>] [--verbose] [--json]
+                                           is the runner alive and getting on (exit 1 if not);
+                                           repeated failures folded; --verbose lists each
 
 Data: $DISPATCH_DATA_DIR (default ~/Library/Application Support/Dispatch).
 Switchboard: $SWITCHBOARD_DATA_DIR/control.sock (default Switchboard's).

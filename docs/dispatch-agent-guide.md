@@ -38,7 +38,7 @@ dispatch park <ticket> [--reason <text>]          a ticket's work stopped, its q
 dispatch resume <ticket> [--no-rerun]             a parked ticket back to active; what the park cancelled runs again
 dispatch close <ticket> [--reason <text>]         a ticket closed, its trees removed (its branches are kept; close lists them)
 dispatch restart <ticket> [<stage>]               a ticket at its stage, or an earlier one, under the live pipeline; later work discarded
-dispatch health [--timeout <secs>] [--stale <secs>] [--json]   is the runner alive and getting on; run it first
+dispatch health [--timeout <secs>] [--stale <secs>] [--verbose] [--json]   is the runner alive and getting on; run it first
 dispatch show <ticket> [--json]                   one ticket: stage, lanes, attempts, rounds, decisions, files
 dispatch events [--since <seq>] [--follow [--timeout <secs>]] [--ticket <id>]... [--project <name>] [--json]
 dispatch brief <project>                          the project at a glance: tickets, what waits, recent events, the hand-off
@@ -164,8 +164,10 @@ status file within `--stale` seconds (default 30) and its process is
 alive, that Switchboard's socket and Dispatch's own answer within
 `--timeout` seconds (default 2), each with its latency, and lists the
 calls to Switchboard and to the PR provider that failed in the last
-hour. A ticket with an open attempt the runner has not got on with for
-longer than `--stale` is named. Exit 1 means something is wrong; read
+hour. Failures that repeat for one ticket with one error are one line
+with a count and the last and first time; `--verbose` lists each. A
+ticket with an open attempt the runner has not got on with for longer
+than `--stale` is named. Exit 1 means something is wrong; read
 the lines and report them. Do not restart the runner yourself.
 
 **Show.** `dispatch show X` prints the header (id, project, source,

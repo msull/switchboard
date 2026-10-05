@@ -1731,9 +1731,10 @@ finished and that is brought up in the pass right after another lane's
 
 A supervising agent has commands of its own, all read-only:
 `dispatch health` (the runner's `runner.json`, written after every
-pass, plus one query on each socket), `show` (a ticket with its lanes'
-base, head and pushed head, its rounds' files and a `paths` view of the
-files to read next), `events` and `wait` over `events.jsonl`, `report`
+pass, plus one query on each socket, with repeated failures folded
+into one line per ticket and error and `--verbose` to list each),
+`show` (a ticket with its lanes' base, head and pushed head, its
+rounds' files and a `paths` view of the files to read next), `events` and `wait` over `events.jsonl`, `report`
 (stage time, plan and code review points counted by id, fix passes,
 rebases, the PR's range from git), and `tail`, which reads a running
 agent's pane through the new `session.screen` query with the project's
@@ -2036,6 +2037,8 @@ long-lived Claude Code session that watches its tickets
   launches it fresh with its first prompt), Trust, and Fresh behind a
   confirmation (`UiState.confirm_supervisor_fresh`). A decision card
   and the timeline say who answered.
+- A rotation keeps one `## From the session of <date>` heading over the
+  session's own text, replacing the ones earlier rotations left on top.
 
 Known gaps:
 

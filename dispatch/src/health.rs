@@ -264,11 +264,73 @@ fn ago(now_ms: u64, at_ms: u64) -> String {
     format!("{}s ago", now_ms.saturating_sub(at_ms) / 1000)
 }
 
+/// Failures that share a ticket and an error, folded into one line.
+struct Group {
+    count: usize,
+    first_ms: u64,
+    last_ms: u64,
+}
+
+/// The lines for one kind of failure (`what` is `port` or `gh`). With
+/// `verbose`, one per failure. Otherwise failures with the same ticket
+/// and error fold into one line with a count and the last and first
+/// time; a failure that happened once reads as it does with `verbose`.
+/// Either way the newest trouble comes last.
+fn failure_lines(what: &str, failures: &[Failure], now_ms: u64, verbose: bool) -> Vec<String> {
+    let single = |at_ms: u64, ticket: Option<&str>, text: &str| {
+        format!(
+            "{what} failure {} {}: {text}",
+            ago(now_ms, at_ms),
+            ticket.unwrap_or("-")
+        )
+    };
+    if verbose {
+        return failures
+            .iter()
+            .map(|x| single(x.at_ms, x.ticket.as_deref(), &x.what))
+            .collect();
+    }
+    let mut groups: BTreeMap<(Option<&str>, &str), Group> = BTreeMap::new();
+    for x in failures {
+        let g = groups
+            .entry((x.ticket.as_deref(), x.what.as_str()))
+            .or_insert(Group {
+                count: 0,
+                first_ms: x.at_ms,
+                last_ms: x.at_ms,
+            });
+        g.count += 1;
+        g.first_ms = g.first_ms.min(x.at_ms);
+        g.last_ms = g.last_ms.max(x.at_ms);
+    }
+    let mut groups: Vec<_> = groups.into_iter().collect();
+    // Stable, so equal last times keep the map's key order.
+    groups.sort_by_key(|(_, g)| g.last_ms);
+    groups
+        .into_iter()
+        .map(|((ticket, text), g)| {
+            if g.count == 1 {
+                single(g.last_ms, ticket, text)
+            } else {
+                format!(
+                    "{what} failure ×{} {}: {text}, last {}, first {}",
+                    g.count,
+                    ticket.unwrap_or("-"),
+                    ago(now_ms, g.last_ms),
+                    ago(now_ms, g.first_ms)
+                )
+            }
+        })
+        .collect()
+}
+
 /// Whether the runner is up and getting on: its status file fresh and
 /// its process alive, both sockets answering within `timeout`, no port
 /// failure since its last success, and no active ticket with an open
 /// attempt left unstepped for longer than `stale_ms`. It never takes
-/// `runner.lock`, which could make a starting runner exit.
+/// `runner.lock`, which could make a starting runner exit. Failures
+/// that repeat for one ticket with one error are a single line with a
+/// count unless `verbose`, which lists each.
 #[must_use]
 pub fn check(
     data: &DataDir,
@@ -276,6 +338,7 @@ pub fn check(
     timeout: Duration,
     stale_ms: u64,
     now_ms: u64,
+    verbose: bool,
 ) -> Checked {
     let mut lines = Vec::new();
     let mut ok = true;
@@ -336,14 +399,7 @@ pub fn check(
         ("port", recent(&f.port.failures)),
         ("gh", recent(&f.gh.failures)),
     ] {
-        for x in &failures {
-            lines.push(format!(
-                "{what} failure {} {}: {}",
-                ago(now_ms, x.at_ms),
-                x.ticket.as_deref().unwrap_or("-"),
-                x.what
-            ));
-        }
+        lines.extend(failure_lines(what, &failures, now_ms, verbose));
     }
     let last_failure = f.port.failures.iter().map(|x| x.at_ms).max();
     if last_failure.is_some_and(|at| f.port.last_ok_ms.is_none_or(|ok_ms| at > ok_ms)) {
@@ -390,6 +446,7 @@ mod tests {
             Duration::from_secs(1),
             30_000,
             wall_ms(),
+            false,
         );
         assert!(!checked.ok);
         assert!(
@@ -420,7 +477,14 @@ mod tests {
             drop(stream);
         });
         let started = Instant::now();
-        let checked = check(&data, &silent, Duration::from_secs(1), 30_000, wall_ms());
+        let checked = check(
+            &data,
+            &silent,
+            Duration::from_secs(1),
+            30_000,
+            wall_ms(),
+            false,
+        );
         assert!(started.elapsed() < Duration::from_secs(5));
         assert!(!checked.ok);
         let line = checked
@@ -442,7 +506,14 @@ mod tests {
             let mut w = stream;
             writeln!(w, r#"{{"reply":"waiting","sessions":[]}}"#).unwrap();
         });
-        let checked = check(&data, &answering, Duration::from_secs(1), 30_000, wall_ms());
+        let checked = check(
+            &data,
+            &answering,
+            Duration::from_secs(1),
+            30_000,
+            wall_ms(),
+            false,
+        );
         server.join().unwrap();
         assert!(
             checked
@@ -452,6 +523,46 @@ mod tests {
             "{:?}",
             checked.lines
         );
+    }
+
+    fn failures_for_folding() -> Vec<Failure> {
+        let failure = |at_ms, ticket: Option<&str>, what: &str| Failure {
+            at_ms,
+            ticket: ticket.map(Into::into),
+            what: what.into(),
+        };
+        vec![
+            failure(10_000, Some("t1"), "NotFound"),
+            failure(20_000, Some("t2"), "timed out"),
+            failure(30_000, Some("t1"), "NotFound"),
+            failure(40_000, Some("t1"), "refused"),
+            failure(50_000, Some("t1"), "NotFound"),
+            failure(60_000, Some("t2"), "timed out"),
+            failure(70_000, None, "refused"),
+        ]
+    }
+
+    #[test]
+    fn repeated_failures_fold_into_one_line_per_ticket_and_error() {
+        let lines = failure_lines("port", &failures_for_folding(), 100_000, false);
+        assert_eq!(
+            lines,
+            [
+                "port failure 60s ago t1: refused",
+                "port failure ×3 t1: NotFound, last 50s ago, first 90s ago",
+                "port failure ×2 t2: timed out, last 40s ago, first 80s ago",
+                "port failure 30s ago -: refused",
+            ]
+        );
+    }
+
+    #[test]
+    fn verbose_lists_every_failure() {
+        let failures = failures_for_folding();
+        let lines = failure_lines("gh", &failures, 100_000, true);
+        assert_eq!(lines.len(), failures.len());
+        assert_eq!(lines[0], "gh failure 90s ago t1: NotFound");
+        assert_eq!(lines[6], "gh failure 30s ago -: refused");
     }
 
     #[test]

@@ -220,12 +220,29 @@ fn model_of(body: Option<&Body>) -> Option<String> {
         .and_then(|i| argv.get(i + 1).cloned())
 }
 
-/// `handoff.md`'s text after a rotation: the old text under a heading
-/// naming the session it came from.
+/// The heading a rotation puts over the old hand-off.
+const ROTATED_HEADING: &str = "## From the session of ";
+
+/// `handoff.md`'s text after a rotation: the old text under one heading
+/// naming the session it came from. The headings earlier rotations left
+/// on top are replaced rather than stacked, since each kept
+/// `handoff.<stamp>.md` already records them; the same heading further
+/// down, below the session's own text, is left alone. Text that is empty
+/// once those are gone gets no heading.
 #[must_use]
 pub fn rotated_handoff(old: &str, from_ms: u64) -> String {
+    let mut rest = old;
+    while let Some(line) = rest.split_inclusive('\n').next() {
+        if !(line.trim().is_empty() || line.starts_with(ROTATED_HEADING)) {
+            break;
+        }
+        rest = &rest[line.len()..];
+    }
+    if rest.trim().is_empty() {
+        return rest.to_owned();
+    }
     format!(
-        "## From the session of {}\n\n{old}",
+        "{ROTATED_HEADING}{}\n\n{rest}",
         stamp(from_ms, "%Y-%m-%d %H:%M UTC")
     )
 }
@@ -1021,5 +1038,35 @@ mod tests {
             "{text}"
         );
         assert!(text.ends_with("watching #12\n"));
+    }
+
+    #[test]
+    fn rotating_a_rotated_handoff_keeps_one_heading() {
+        let mut text = "# Hand-off\n\nwatching #12\n".to_owned();
+        for ms in [1_759_000_000_000, 1_759_100_000_000, 1_759_200_000_000] {
+            text = rotated_handoff(&text, ms);
+        }
+        assert_eq!(text.matches(ROTATED_HEADING).count(), 1, "{text}");
+        assert!(
+            text.starts_with("## From the session of 2025-09-30"),
+            "{text}"
+        );
+        assert!(text.ends_with("\n\n# Hand-off\n\nwatching #12\n"), "{text}");
+    }
+
+    #[test]
+    fn a_session_heading_inside_the_body_is_kept() {
+        let old = "# Hand-off\n\n## From the session of 2025-09-01 10:00 UTC\nnotes\n";
+        let text = rotated_handoff(old, 1_759_000_000_000);
+        assert_eq!(text.matches(ROTATED_HEADING).count(), 2, "{text}");
+        assert!(text.ends_with(old), "{text}");
+    }
+
+    #[test]
+    fn an_empty_handoff_rotates_without_a_heading() {
+        assert!(!rotated_handoff("\n\n", 1_759_000_000_000).contains(ROTATED_HEADING));
+        assert!(!rotated_handoff("", 1_759_000_000_000).contains(ROTATED_HEADING));
+        let only = "## From the session of 2025-09-01 10:00 UTC\n\n";
+        assert!(!rotated_handoff(only, 1_759_000_000_000).contains(ROTATED_HEADING));
     }
 }
