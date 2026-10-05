@@ -1158,9 +1158,11 @@ pub enum Waited {
 /// at once. Then the log is followed from `since`, or from its tail when
 /// `since` is `None`, and each candidate is confirmed against a fresh read
 /// of the record, since an event can be one whose write failed and whose
-/// `void` is not read yet. An event replayed from before the wait, of a
-/// kind with no record check of its own, is held until the record's
-/// `updated_ms` reaches its write or its `void` drops it.
+/// `void` is not read yet. Any candidate, live or replayed, that the
+/// record does not bear out yet is held while its write may be in flight
+/// (`in_flight`) and checked again at each look, until the record bears
+/// it out or its `void` drops it. One the record has passed and still
+/// contradicts, whether first read or held, is dropped.
 /// `pause` runs between looks at the log: a sleep, or a test's step.
 pub fn wait(
     data: &DataDir,
@@ -1187,11 +1189,19 @@ pub fn wait(
     let mut follow = follow(&log, since.map_or(start, |s| s.min(start)));
     let mut held: Vec<Event> = Vec::new();
     // The oldest held event `fresh` bears out, so log order holds even
-    // when a write lands between the reads of one batch.
+    // when a write lands between the reads of one batch. A held event the
+    // record has passed and contradicts is dropped, so it cannot match
+    // later when the record happens to agree with it again.
     let landed = |held: &mut Vec<Event>, fresh: &Ticket| {
-        held.iter()
-            .position(|e| confirmed(e, &before, fresh, what, &names, true))
-            .map(|i| held.remove(i))
+        for e in std::mem::take(held) {
+            if confirmed(&e, &before, fresh, what, &names, e.seq <= start) {
+                return Some(e);
+            }
+            if in_flight(&e, fresh) {
+                held.push(e);
+            }
+        }
+        None
     };
     loop {
         let batch: Vec<Event> = follow
@@ -1218,7 +1228,7 @@ pub fn wait(
             let fresh = read_ticket(&data.ticket_file(ticket))?;
             let replayed = e.seq <= start;
             if !confirmed(&e, &before, &fresh, what, &names, replayed) {
-                if replayed && !checked(e.kind) {
+                if in_flight(&e, &fresh) {
                     held.push(e);
                 }
                 continue;
@@ -1239,20 +1249,15 @@ pub fn wait(
     }
 }
 
-/// Whether `confirmed` checks an event of `kind` against the record
-/// itself, rather than against what changed since the wait began: the
-/// kinds with an arm of their own there. Change the two together.
-fn checked(kind: Kind) -> bool {
-    matches!(
-        kind,
-        Kind::Decision
-            | Kind::Stage
-            | Kind::SentBack
-            | Kind::Restarted
-            | Kind::Pr
-            | Kind::Closed
-            | Kind::Parked
-    )
+/// Whether the write that logged `e` may not have landed in `fresh` yet.
+/// A line is appended before its record is renamed in, so a record older
+/// than the line cannot speak for it. Nor can one at the line's own
+/// `at_ms`: the scheduler saves a ticket twice in one millisecond (a
+/// failed attempt, then the decision it asks), so a record at `at_ms`
+/// may be the first of the two. Only a record strictly past the line
+/// has certainly taken its write.
+fn in_flight(e: &Event, fresh: &Ticket) -> bool {
+    fresh.updated_ms <= e.at_ms
 }
 
 /// What the record already says before any event is read: a pending
@@ -1305,6 +1310,8 @@ fn already(log: &Path, t: &Ticket, what: For, names: &[String]) -> Result<Option
 /// terminal answered already is not something to answer. A `replayed`
 /// event may be in `before` already, so one with no check of its own is
 /// borne out once the record's `updated_ms` reaches the write it logs.
+/// A live one, held or not, is checked against what changed since
+/// `before`, which cannot hold it yet.
 fn confirmed(
     e: &Event,
     before: &Ticket,
@@ -1313,7 +1320,6 @@ fn confirmed(
     names: &[String],
     replayed: bool,
 ) -> bool {
-    // Every kind with an arm of its own here is one `checked` lists.
     match e.kind {
         Kind::Decision => e.decision.as_ref().is_some_and(|id| {
             if what == For::Decision {
@@ -1916,6 +1922,9 @@ mod tests {
                 at_ms: 4,
                 acted: false,
             };
+            // The answered record is a write past the ask's line, so it
+            // has taken that line's write and contradicts it: dropped.
+            answered.updated_ms = 2;
             let clock = std::cell::Cell::new(0);
             let mut looks = 0;
             let waited = wait(
@@ -2090,6 +2099,114 @@ mod tests {
             "{waited:?}"
         );
         let waited = wait_looking(&data, &t.id, For::Stage, None, &mut |_| {});
+        assert_eq!(waited, Waited::TimedOut);
+    }
+
+    /// A line is appended before its record is renamed in, so a wait can
+    /// read it while the record still lacks it: live or replayed, of any
+    /// kind, it is held until the record takes its write. The record
+    /// before it may stand at the line's own millisecond, as the first of
+    /// two saves in one millisecond does.
+    #[test]
+    fn a_live_event_read_before_its_rename_is_held_until_it_lands() {
+        let mut t = ticket();
+        t.attempts.push(running("implement", 1));
+        let mut asked = t.clone();
+        asked.decisions.push(decision("d1"));
+        asked.updated_ms = 50;
+        let mut nudged = t.clone();
+        nudged.attempts[0].nudges.push(7);
+        nudged.updated_ms = 50;
+        let mut moved = t.clone();
+        moved.stage = 1;
+        moved.updated_ms = 50;
+        let by_name: &dyn Fn() -> Vec<String> = &names;
+        let by_index: &dyn Fn() -> Vec<String> = &Vec::new;
+        for prior in [40, 50] {
+            t.updated_ms = prior;
+            // Live cases. The stage case is logged by index, as the wait
+            // names stages without a pipeline copy.
+            for (what, next, named) in [
+                (For::Any, &asked, by_name),
+                (For::Decision, &asked, by_name),
+                (For::Any, &nudged, by_name),
+                (For::Stage, &moved, by_index),
+            ] {
+                let dir = tempfile::tempdir().unwrap();
+                let data = DataDir::new(dir.path());
+                let file = data.ticket_file(&t.id);
+                let log = log_path(&data);
+                crate::store::write_ticket(&file, &t).unwrap();
+                let mut logged = None;
+                let mut looked = 0;
+                let waited = wait_looking(&data, &t.id, what, None, &mut |looks| {
+                    looked = looks;
+                    if looks == 1 {
+                        let mut events = between(Some(&t), next, 50, named);
+                        assert_eq!(events.len(), 1, "{what:?} after {prior}");
+                        append(&log, &mut events).unwrap();
+                        logged = Some(events.remove(0));
+                    } else if looks == 2 {
+                        crate::store::write_ticket(&file, next).unwrap();
+                    }
+                });
+                let logged = logged.unwrap();
+                assert_eq!(waited, Waited::Matched(logged), "{what:?} after {prior}");
+                assert_eq!(looked, 2, "{what:?} after {prior}: looks");
+            }
+            // A replayed decision whose write lands after the wait begins.
+            let dir = tempfile::tempdir().unwrap();
+            let data = DataDir::new(dir.path());
+            let file = data.ticket_file(&t.id);
+            let log = log_path(&data);
+            crate::store::write_ticket(&file, &t).unwrap();
+            let mut events = between(Some(&t), &asked, 50, &names);
+            assert_eq!(events.len(), 1);
+            append(&log, &mut events).unwrap();
+            let event = events.remove(0);
+            let mut looked = 0;
+            let waited = wait_looking(&data, &t.id, For::Any, Some(event.seq - 1), &mut |looks| {
+                looked = looks;
+                if looks == 1 {
+                    crate::store::write_ticket(&file, &asked).unwrap();
+                }
+            });
+            assert_eq!(waited, Waited::Matched(event), "replayed after {prior}");
+            assert_eq!(looked, 1, "replayed after {prior}: looks");
+        }
+    }
+
+    /// A held line the record passes and contradicts is dropped, so the
+    /// record coming back to agree with it later does not return it.
+    #[test]
+    fn a_held_event_the_record_overtakes_is_dropped() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = DataDir::new(dir.path());
+        let mut t = ticket();
+        t.attempts.push(running("implement", 1));
+        t.updated_ms = 40;
+        let file = data.ticket_file(&t.id);
+        let log = log_path(&data);
+        crate::store::write_ticket(&file, &t).unwrap();
+        let mut moved = t.clone();
+        moved.stage = 1;
+        moved.updated_ms = 50;
+        let mut past = t.clone();
+        past.stage = 2;
+        past.updated_ms = 60;
+        let mut back = t.clone();
+        back.stage = 1;
+        back.updated_ms = 70;
+        let waited = wait_looking(&data, &t.id, For::Stage, None, &mut |looks| match looks {
+            1 => {
+                let mut events = between(Some(&t), &moved, 50, &Vec::new);
+                assert_eq!(events.len(), 1);
+                append(&log, &mut events).unwrap();
+            }
+            2 => crate::store::write_ticket(&file, &past).unwrap(),
+            3 => crate::store::write_ticket(&file, &back).unwrap(),
+            _ => {}
+        });
         assert_eq!(waited, Waited::TimedOut);
     }
 

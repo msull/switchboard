@@ -251,7 +251,8 @@ needs a before state, so without a cursor `--for stage` and `--for pr`
 wait for the next one. With `--since <seq>`, the first matching event
 after the cursor returns at once, whoever caused it. Every match is
 checked against the record first, so a withdrawn event is never
-returned.
+returned. An event logged just before its record lands is held until
+the record catches up, so a `--for any` watch does not miss it.
 
 To wait on your own action, take the log's tail just before you act,
 act, then wait with `--since`. The tail is the `seq` of the last line
