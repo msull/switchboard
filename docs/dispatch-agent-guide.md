@@ -298,7 +298,7 @@ report them instead. The kinds you will see:
 | `inspect` | `proceed`, `rerun`, `park` | the owner's look at a branch before it goes anywhere; `rerun --note "<what to change>"` sends it back to the implementer with the note |
 | `rerun` | `rerun`, `park`, and `check` when tests failed, or `keep` when a review's fold or squash failed | an attempt failed (no result, dirty tree, crash, failing tests, a fold that cannot apply); `rerun` is a fresh attempt, `check` runs the same tests again on the same commit, `keep` completes the stage with the history as it is |
 | `pr` | `recheck`, `park` | no pull request was found for the branch, or it needs attention; `recheck` after the owner fixed it |
-| `refresh` | `recheck`, `park` | the branch is behind its base and the rebase conflicts, with no rebaser left to try; `recheck` after the owner rebased the worktree by hand |
+| `refresh` | `recheck`, `park` | the branch is behind its base and the rebase conflicts, with no rebaser left to try, or the worktree is mid-rebase or off its branch; `recheck` after the owner rebased, finished, aborted or checked it out by hand |
 | `merge` | `park` | a confirmation: Dispatch watches the provider and closes the ticket itself when the PR merges; it cannot be answered by hand |
 
 ```

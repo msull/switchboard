@@ -78,7 +78,15 @@ pub trait Repo: Send {
     fn is_worktree_of(&self, repo: &Path, dir: &Path, branch: &str) -> Result<bool>;
     fn head(&self, dir: &Path) -> Result<String>;
     fn is_clean(&self, dir: &Path) -> Result<bool>;
-    /// Commits `onto` has that the branch at `dir` does not.
+    /// Whether `dir` has a rebase stopped part way, of either backend.
+    fn rebase_in_progress(&self, dir: &Path) -> Result<bool>;
+    /// The commit `branch` names when it is what `dir` has checked out;
+    /// `None` when `HEAD` is detached (a stopped rebase, a hand
+    /// `checkout --detach`) or on another branch.
+    fn branch_head(&self, dir: &Path, branch: &str) -> Result<Option<String>>;
+    /// Commits `onto` has that `HEAD` at `dir` does not. It counts from
+    /// `HEAD`, so it is the branch's count only when `branch_head`
+    /// returned `Some`.
     fn behind(&self, dir: &Path, onto: &str) -> Result<u64>;
     /// `git rebase <onto>` at `dir`; `false` when it stopped on a
     /// conflict, in which case it is aborted and the tree is as it was.
@@ -632,6 +640,41 @@ impl Repo for GitCli {
         Ok(status.is_empty())
     }
 
+    fn rebase_in_progress(&self, dir: &Path) -> Result<bool> {
+        // `--git-path` answers relative to `dir` in a main checkout and
+        // absolute in a linked worktree; `join` takes both.
+        for state in ["rebase-merge", "rebase-apply"] {
+            let path = output(git_in(dir).args(["rev-parse", "--git-path", state]))?;
+            if dir.join(path.trim()).exists() {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    fn branch_head(&self, dir: &Path, branch: &str) -> Result<Option<String>> {
+        let out = git_in(dir)
+            .args(["symbolic-ref", "-q", "HEAD"])
+            .output()
+            .with_context(|| format!("git symbolic-ref in {}", dir.display()))?;
+        match out.status.code() {
+            Some(0) => {}
+            // Detached.
+            Some(1) => return Ok(None),
+            _ => bail!(
+                "git symbolic-ref in {} exited {}: {}",
+                dir.display(),
+                out.status,
+                String::from_utf8_lossy(&out.stderr).trim()
+            ),
+        }
+        let full = format!("refs/heads/{branch}");
+        if String::from_utf8_lossy(&out.stdout).trim() != full {
+            return Ok(None);
+        }
+        output(git_in(dir).args(["rev-parse", &full])).map(Some)
+    }
+
     fn behind(&self, dir: &Path, onto: &str) -> Result<u64> {
         let out = output(git_in(dir).args(["rev-list", "--count", &format!("HEAD..{onto}")]))?;
         out.trim()
@@ -642,8 +685,7 @@ impl Repo for GitCli {
     fn rebase_onto(&mut self, dir: &Path, onto: &str) -> Result<bool> {
         // A rebase someone else began is theirs: starting another would
         // fail, and aborting on that failure would throw their work away.
-        let in_progress = output(git_in(dir).args(["rev-parse", "--git-path", "rebase-merge"]))?;
-        if Path::new(in_progress.trim()).exists() {
+        if self.rebase_in_progress(dir)? {
             bail!("a rebase is already in progress at {}", dir.display());
         }
         let status = git_in(dir)
@@ -1430,6 +1472,11 @@ pub struct FakeRepo {
     pub fetched_pulls: Vec<(PathBuf, String, u64)>,
     pub heads: std::collections::BTreeMap<PathBuf, String>,
     pub dirty: Vec<PathBuf>,
+    /// Trees with a rebase stopped part way; their `HEAD` is detached,
+    /// as git leaves it.
+    pub mid_rebase: Vec<PathBuf>,
+    /// Trees whose `HEAD` is detached off their branch.
+    pub detached: Vec<PathBuf>,
     pub ran: Vec<(PathBuf, Vec<String>)>,
     /// Commands run confined: dir, argv, what they were confined to.
     pub ran_confined: Vec<(PathBuf, Vec<String>, Confine)>,
@@ -1768,6 +1815,20 @@ impl Repo for FakeRepo {
     fn is_clean(&self, dir: &Path) -> Result<bool> {
         Ok(!self.dirty.iter().any(|d| d == dir))
     }
+    fn rebase_in_progress(&self, dir: &Path) -> Result<bool> {
+        Ok(self.mid_rebase.iter().any(|d| d == dir))
+    }
+    fn branch_head(&self, dir: &Path, _branch: &str) -> Result<Option<String>> {
+        if self
+            .mid_rebase
+            .iter()
+            .chain(&self.detached)
+            .any(|d| d == dir)
+        {
+            return Ok(None);
+        }
+        self.head(dir).map(Some)
+    }
 
     fn free_bytes(&self, _dir: &Path) -> Result<u64> {
         Ok(self.free_bytes.unwrap_or(u64::MAX))
@@ -1776,6 +1837,9 @@ impl Repo for FakeRepo {
         Ok(self.behind.get(dir).copied().unwrap_or(0))
     }
     fn rebase_onto(&mut self, dir: &Path, onto: &str) -> Result<bool> {
+        if self.mid_rebase.iter().any(|d| d == dir) {
+            bail!("a rebase is already in progress at {}", dir.display());
+        }
         self.rebased.push((dir.to_path_buf(), onto.to_owned()));
         if self.rebase_conflicts.iter().any(|d| d == dir) {
             return Ok(false);
@@ -2118,6 +2182,12 @@ impl Repo for std::sync::Arc<std::sync::Mutex<FakeRepo>> {
     }
     fn is_clean(&self, dir: &Path) -> Result<bool> {
         self.lock().unwrap().is_clean(dir)
+    }
+    fn rebase_in_progress(&self, dir: &Path) -> Result<bool> {
+        self.lock().unwrap().rebase_in_progress(dir)
+    }
+    fn branch_head(&self, dir: &Path, branch: &str) -> Result<Option<String>> {
+        self.lock().unwrap().branch_head(dir, branch)
     }
     fn behind(&self, dir: &Path, onto: &str) -> Result<u64> {
         self.lock().unwrap().behind(dir, onto)
@@ -3049,6 +3119,79 @@ mod tests {
                 .unwrap()
                 .is_empty(),
             "onto its own base nothing conflicts"
+        );
+    }
+
+    /// A branch and a moved base that conflict on `shared`: the
+    /// worktree on the branch, and the base's commit.
+    fn diverged(root: &Path) -> (PathBuf, String) {
+        let (wt, base) = cut(root);
+        commit(&wt, "shared", "branch\n", &["-m", "B"]);
+        sh(&wt, &["checkout", "-q", "--detach", &base]);
+        let onto = commit(&wt, "shared", "base\n", &["-m", "moved"]);
+        sh(&wt, &["checkout", "-q", "dispatch/1-x"]);
+        (wt, onto)
+    }
+
+    /// `git rebase` with `args`, which must stop on the conflict.
+    fn rebase_stops(dir: &Path, args: &[&str]) {
+        let status = git_in(dir)
+            .args(["-c", "user.name=t", "-c", "user.email=t@t", "rebase"])
+            .args(args)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .unwrap();
+        assert!(!status.success(), "{args:?} stopped");
+    }
+
+    #[test]
+    fn the_real_git_sees_a_stopped_rebase_of_either_backend() {
+        let dir = tempfile::tempdir().unwrap();
+        let (wt, onto) = diverged(dir.path());
+        let mut cli = GitCli::default();
+        assert!(!cli.rebase_in_progress(&wt).unwrap());
+        rebase_stops(&wt, &[&onto]);
+        assert!(cli.rebase_in_progress(&wt).unwrap(), "rebase-merge");
+        sh(&wt, &["rebase", "--abort"]);
+        assert!(!cli.rebase_in_progress(&wt).unwrap());
+        rebase_stops(&wt, &["--apply", &onto]);
+        assert!(cli.rebase_in_progress(&wt).unwrap(), "rebase-apply");
+        let err = cli.rebase_onto(&wt, &onto).unwrap_err();
+        assert!(err.to_string().contains("already in progress"), "{err}");
+        assert!(cli.rebase_in_progress(&wt).unwrap(), "left as it was");
+        // A main checkout's `--git-path` is relative to it, not to the
+        // process's directory.
+        let main = dir.path().join("p-origin");
+        commit(&main, "shared", "main\n", &["-m", "main"]);
+        sh(&main, &["checkout", "-q", "-b", "side", "HEAD~1"]);
+        commit(&main, "shared", "side\n", &["-m", "side"]);
+        assert!(!cli.rebase_in_progress(&main).unwrap());
+        rebase_stops(&main, &["main"]);
+        assert!(cli.rebase_in_progress(&main).unwrap(), "a main checkout");
+    }
+
+    #[test]
+    fn the_real_git_branch_head_is_none_off_the_branch() {
+        let dir = tempfile::tempdir().unwrap();
+        let (wt, onto) = diverged(dir.path());
+        let cli = GitCli::default();
+        let tip = cli.head(&wt).unwrap();
+        let branch = "dispatch/1-x";
+        assert_eq!(cli.branch_head(&wt, branch).unwrap(), Some(tip.clone()));
+        sh(&wt, &["checkout", "-q", "--detach", &onto]);
+        assert_eq!(cli.branch_head(&wt, branch).unwrap(), None);
+        assert_eq!(cli.behind(&wt, &onto).unwrap(), 0, "HEAD is not the branch");
+        sh(&wt, &["checkout", "-q", branch]);
+        rebase_stops(&wt, &[&onto]);
+        assert_eq!(cli.branch_head(&wt, branch).unwrap(), None);
+        sh(&wt, &["rebase", "--abort"]);
+        sh(&wt, &["checkout", "-q", "-b", "other"]);
+        assert_eq!(cli.branch_head(&wt, branch).unwrap(), None);
+        assert_eq!(
+            sh(&wt, &["rev-parse", branch]).trim(),
+            tip,
+            "the branch untouched"
         );
     }
 

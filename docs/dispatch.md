@@ -1592,10 +1592,24 @@ to resolve without pushing or, when a conflict's intent is unclear, to
 leave the branch as it was and say why; the stage waits for it, reads
 the branch again when it stops, and after `max_rebases` such attempts,
 or without a rebaser, asks a `refresh` question with `recheck`. The
-attempts and the question carry the pseudo-stage `refresh`, so no
-stage mistakes them for its own. A lane with no `base_sha` gets its fork point from
-the base as `base_sha` while it is still behind, before anything
-moves, so the bring-up after a rebaser reads the old base; a lane not
+rebaser's attempts, and the `rerun` questions about them, carry the
+pseudo-stage `refresh`, so no stage mistakes them for its own; the
+`refresh` question carries the real stage and is named `refresh`.
+Either holds the stage. A worktree with a rebase stopped part way
+(`Repo::rebase_in_progress`, either backend), or whose `HEAD` is not
+the lane's branch (`Repo::branch_head`), is not read at all, since
+nothing read from `HEAD` there is the branch's: the stage waits on a
+`refresh` question saying so, answered `recheck` once the owner has
+finished, aborted or checked out by hand. A rebaser that fails holds
+the stage on its `rerun` question, which says when it left the tree
+mid-rebase; `rerun` reads the lane again rather than launching
+another, so a hand-finished rebase is brought up, an aborted one
+conflicts again, and one still stopped asks the `refresh` question. A
+stage held on a lane is not marked refreshed, so a park and resume,
+which withdraws the question, reads the lane again.
+
+A lane with no `base_sha` gets its fork point from the base as
+`base_sha` while it is still behind, before anything moves, so the bring-up after a rebaser reads the old base; a lane not
 behind whose fork point is the base itself never moved, and records
 that as `base_sha` with no bring-up; one whose fork point cannot be
 read has an unknown old base and records `from` empty. Each bring-up
@@ -1621,8 +1635,8 @@ replay conflicts (`Repo::conflicting_commits`: each commit merged with
 `git merge-tree` onto the result of the one before, writing no ref;
 empty when it cannot be read). A conflict seen again keeps its head and
 base, since the stage is held and nothing has read the branch since, and
-updates the rest. A stage that goes ahead without a bring-up (a parked
-question resumed, a tree left alone) drops the record: the stage reads
+updates the rest. A stage that goes ahead without a bring-up (a tree
+left alone) drops the record: the stage reads
 and moves the branch, and a later rebase that stops records its own.
 The bring-up moves it to `refreshed.conflict` when the branch was
 rewritten since the rebase stopped (by the rebaser or by hand), with the
@@ -2037,7 +2051,12 @@ and one against the real one:
 | A hand rebase, then `recheck` | The same review, with no rebaser's notes (`a_hand_rebase_after_the_refresh_question_is_reviewed`) |
 | The rebaser leaves the branch alone and a newer base rebases cleanly | The conflict is dropped; no review (`a_clean_rebase_after_an_aborted_rebaser_drops_the_conflict`) |
 | A restart while the resolution reviewer runs | It is polled from the record; nothing launches again (`a_restart_mid_resolution_reattaches_the_reviewer`) |
-| A stage begins while the tree has work in it, or a rebase in progress | The lane is left alone this stage; nothing is rebased over someone's work (`a_refresh_leaves_a_tree_with_work_in_it_alone`) |
+| A stage begins while the tree has work in it | The lane is left alone this stage; nothing is rebased over someone's work (`a_refresh_leaves_a_tree_with_work_in_it_alone`) |
+| The rebaser stops with the rebase stopped part way | Its `rerun` question says the tree is mid-rebase and holds `pr`; the lane's base, bring-up and conflict are untouched; `rerun` while still mid-rebase asks the `refresh` question and launches nothing (`a_rebaser_that_stops_mid_rebase_holds_the_stage`) |
+| The owner finishes that rebase by hand and answers `rerun` | The lane is brought up from the branch, the conflict moves to the bring-up and is reviewed; no second rebaser (`a_hand_finished_rebase_after_a_stopped_rebaser_is_brought_up`) |
+| A stage begins with the worktree's `HEAD` detached off its branch | A `refresh` question says it is not on the branch; nothing is rebased or recorded and the stage waits (`a_detached_worktree_is_held_not_brought_up`) |
+| A park on the mid-rebase `refresh` question, then resume | The lane is read again and asked about again; `pr` still waits (`a_park_on_the_mid_rebase_question_asks_again_on_resume`) |
+| A park on a stopped rebaser's `rerun` question, then resume | The mid-rebase `refresh` question is asked; `pr` still waits (`a_park_on_a_stopped_rebasers_rerun_asks_again_on_resume`) |
 | The PR's checks are red at the tree's head and the policy names a `fixer` | The fixer starts in the lane, cloned from the implementer, with the PR and the failed check names in its prompt; no question; when it stops the gate reads again and green checks pass it |
 | Red checks with no fixer, or `max_fixes` spent | A `pr` decision with `recheck` and `park` |
 | The provider reports the merge | The attempt completes at the merged head, the decision reads as answered `merged` by `dispatch`, and the ticket goes on (closes) |

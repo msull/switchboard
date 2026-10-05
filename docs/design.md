@@ -1672,6 +1672,10 @@ to push to, gets one resolution review of the range-diff between the
 reviewed and the resolved branch before the stage runs, with the
 conflict and its commits on the lane and its bring-up (dispatch
 `RECORD_VERSION` 9).
+A refresh holds a lane whose worktree is mid-rebase or off its branch
+with a `refresh` question instead of reading it, and a failed
+rebaser's `rerun` question holds the stage and reads the lane again
+(no record change).
 A prompt's `{lanes}` is the lanes the ticket chose, in pipeline order
 (every lane before the `lanes` decision), and `{lanes.all}` every lane.
 A retake after close deletes each kept branch with nothing beyond its
