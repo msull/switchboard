@@ -2015,7 +2015,12 @@ argvs, else `git clone <repo> .` for a project with a `repo`, else
 nothing. A setup that fails removes a workspace it made and leaves the
 current supervisor as it was.
 
-**The seed** is the guidance, the `read` paths made absolute, what
+**The seed** is the guidance, how the supervisor works (the owner hands
+it work in the session and it takes no initiative of its own; at start it
+runs `brief`, compares it with the hand-off, arms a background watch per
+ticket in flight and then waits; watches are background calls, never a
+foreground loop; the hand-off is written with the Edit tool, never a shell
+script), the `read` paths made absolute, what
 each listed decision's answers do and that every other is the owner's,
 that `merge` is answered `park` only, the full path of the `dispatch`
 executable (its allow rule matches that path), "run `dispatch brief

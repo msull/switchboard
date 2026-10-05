@@ -27,16 +27,16 @@ use crate::ticket::{Operation, PastSupervisor, ProjectState, SupervisorIntent, S
 pub const GUIDE_ESSENTIALS: &str = "\
 - `{exe} brief <project>`: the project at a glance: tickets, what waits, \
 the last events with the seq to follow from, open worktrees, the hand-off.
-- `{exe} wait <ticket> --for any --timeout 540`: while you drive one \
-ticket, this is how you wait: one call that returns on its next decision, \
-stage change, pull request or close (exit 0), or after 540 seconds with \
-nothing (exit 2; run it again). Give your Bash tool a 600000 ms timeout \
-for it. Never wrap it in a shell loop and never poll with `show`.
+- `{exe} wait <ticket> --for any --timeout 540`: your watch on one \
+ticket, always as a background call: it returns on the ticket's next \
+decision, stage change, pull request or close (exit 0), or after 540 \
+seconds with nothing (exit 2; arm it again). Give the call a 600000 ms \
+tool timeout. Never in the foreground, never in a shell loop.
 - `{exe} events --project <project> --since <seq> --follow --timeout 540`: \
-the same for the whole project: it exits 0 as soon as it prints events \
-(note the last seq and start again from it) and 2 when nothing happened. \
-Never run `--follow` without `--timeout`: a tool call that never returns \
-is cut off.
+the same for the whole project, for the Monitor tool or a background \
+call: it exits 0 as soon as it prints events (note the last seq and start \
+again from it) and 2 when nothing happened. Never run `--follow` without \
+`--timeout`.
 - `{exe} show <ticket>`: one ticket: stage, lanes, attempts, decisions, \
 files, and the exact `decide` line for each pending decision.
 - `{exe} report <ticket>`: how a ticket went.
@@ -93,9 +93,30 @@ pub fn seed(
          directory is {workspace}.\n\n\
          Dispatch's command is `{exe_text}`. Type every command with that full path: your \
          permission to run it matches the path, and nothing else.\n\n\
-         Run `{exe_text} brief {project}` first.\n\n\
+         ## How you work\n\n\
+         The owner talks to you in this session and hands you work; you take no initiative \
+         of your own. You do not take issues, file issues, answer decisions, merge, or edit \
+         the repository unless the owner asked for that in this session. When they hand \
+         you a ticket, you drive it through every stage: you answer its decisions from the \
+         list below with a note that says why, you handle its pull request as the Pull \
+         requests section says, and you tell the owner in a line or two at each stage \
+         change and the moment it needs them.\n\n\
+         When you start: run `{exe_text} brief {project}` first; compare what it says with \
+         the hand-off at {handoff} and say in a few lines what changed; check \
+         `{exe_text} health`; for every ticket that is in flight, arm a background watch \
+         (below); then stop and wait for the owner. Do not fill the wait with reading or \
+         polling.\n\n\
+         Watching never blocks this session. A watch is a background call: run \
+         `{exe_text} wait <ticket> --for any --timeout 540` with your Bash tool's \
+         run-in-background option (or the Monitor tool over `events --follow`), so its \
+         result arrives as a notification while you stay free to talk. Never run `wait` or \
+         `events --follow` in the foreground, and never wrap either in a shell loop. When \
+         a watch returns, read what it says, act only on tickets the owner handed you, and \
+         arm it again if that ticket is still in flight.\n\n\
          Keep {handoff} current as you work: what you watch, what you answered and why, \
-         what is left. The next supervisor starts from it.\n\n",
+         what is left. The next supervisor starts from it. Write it with your Edit or Write \
+         tool, which your permissions allow; never through a shell script or a heredoc, \
+         which the permission classifier refuses as instruction poisoning.\n\n",
         guidance = sup.guidance.trim(),
         workspace = workspace.display(),
         handoff = handoff.display(),
@@ -869,11 +890,14 @@ mod tests {
             "- `rerun`: `rerun` runs a failed",
             "Every other decision is the owner's: say so and move on.",
             "`park` only",
-            "Run `/opt/bin/dispatch brief orchard` first.",
+            "run `/opt/bin/dispatch brief orchard` first",
             "/data/projects/orchard/supervisor/handoff.md current",
             "`/opt/bin/dispatch events --project <project>",
             "`/opt/bin/dispatch wait <ticket> --for any --timeout 540`",
             "You never merge a pull request.",
+            "you take no initiative",
+            "Watching never blocks this session.",
+            "Write it with your Edit or Write",
         ] {
             assert!(s.contains(want), "the seed lacks {want:?}:\n{s}");
         }
