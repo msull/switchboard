@@ -426,3 +426,12 @@ or aborted by hand).
   Prompt text now says the stage is not done until the file or the tree
   says so; #43 makes the tree check mechanical (built: a nudge, then
   the question).
+- **A gate that fails for the environment reads as a code failure.** The
+  client pipeline's backend checks need a local container runtime; after
+  a reboot it was down, and the gate failed with 825 fixture errors and a
+  `rerun | check | park` question that looked like a broken branch. The
+  pipeline now runs `docker info` first and says what is wrong in one
+  line. A Dispatch shape worth considering: a per-lane `preflight` argv
+  run before any gate or agent in that lane, whose failure is reported
+  as the environment's, not the attempt's, and retried on the next pass
+  without a question.
