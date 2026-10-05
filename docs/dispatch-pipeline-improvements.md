@@ -445,3 +445,14 @@ or aborted by hand).
   lint step reformats a committed file fails as "the tree changed while
   the checks ran", which reads as an agent problem; naming the formatter
   and the file would send the fix to the right place.
+- **`wait --for any` returns on every line, one at a time.** A stage
+  change logs several lines within a second or two (`attempt-ended`,
+  `stage`, `attempt-started`, `round`), and each one ends the
+  supervisor's watch, so it is re-armed once per line: on #95 the step
+  from lanes to plan took four re-arms, and the step from implement to
+  review-code took three. Two shapes, not yet chosen: a `--for move`
+  that returns only on a stage change, a decision, a pull request or a
+  close; or `wait` gathering lines for about two seconds after the
+  first one and printing them all, with the last seq to follow from.
+  The second keeps `--for any` meaning every line and needs no new
+  filter. Seen supervising #95.
