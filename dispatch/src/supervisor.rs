@@ -27,12 +27,16 @@ use crate::ticket::{Operation, PastSupervisor, ProjectState, SupervisorIntent, S
 pub const GUIDE_ESSENTIALS: &str = "\
 - `{exe} brief <project>`: the project at a glance: tickets, what waits, \
 the last events with the seq to follow from, open worktrees, the hand-off.
-- `{exe} events --project <project> --since <seq> --follow --timeout 100`: \
-what happens next. Run it in a loop: it exits 0 as soon as it prints \
-events (note the last seq), and 2 when nothing happened in 100 seconds; \
-run it again from the last seq. Keep `--timeout` under your Bash tool's \
-timeout (two minutes unless you pass a longer one), and never run \
-`--follow` without it: a tool call that never returns is cut off.
+- `{exe} wait <ticket> --for any --timeout 540`: while you drive one \
+ticket, this is how you wait: one call that returns on its next decision, \
+stage change, pull request or close (exit 0), or after 540 seconds with \
+nothing (exit 2; run it again). Give your Bash tool a 600000 ms timeout \
+for it. Never wrap it in a shell loop and never poll with `show`.
+- `{exe} events --project <project> --since <seq> --follow --timeout 540`: \
+the same for the whole project: it exits 0 as soon as it prints events \
+(note the last seq and start again from it) and 2 when nothing happened. \
+Never run `--follow` without `--timeout`: a tool call that never returns \
+is cut off.
 - `{exe} show <ticket>`: one ticket: stage, lanes, attempts, decisions, \
 files, and the exact `decide` line for each pending decision.
 - `{exe} report <ticket>`: how a ticket went.
@@ -112,10 +116,23 @@ pub fn seed(
     }
     out.push_str(
         "\nEvery other decision is the owner's: say so and move on. A `merge` question is \
-         answered `park` only; you never merge. You may not restart a ticket, move the \
-         worktrees, run the runner, resume with reruns unless `rerun` is yours, or replace \
-         yourself.\n\n",
+         answered `park` only: Dispatch resolves it when the provider reports the merge. \
+         You may not restart a ticket, move the worktrees, run the runner, resume with \
+         reruns unless `rerun` is yours, or replace yourself.\n\n",
     );
+    out.push_str(if sup.merges {
+        "## Pull requests\n\nThe pull request itself is yours to merge: once Dispatch logs \
+         `pr-checks passed`, read the pull request's body and commit message and check that \
+         they carry no client name and no attribution line, then merge it with \
+         `gh pr merge <n> --merge` and pull main in this workspace. Dispatch closes the \
+         ticket when it sees the merge. A failed check is yours to look at; a fix by hand \
+         goes on the ticket's branch, amended into its one commit and pushed with a lease, \
+         then answer `recheck`.\n\n"
+    } else {
+        "## Pull requests\n\nYou never merge a pull request. When Dispatch logs \
+         `pr-checks passed`, read the pull request's body and commit message, say to the \
+         owner that it is green and whether the body is clean, and stop: the owner merges.\n\n"
+    });
     out.push_str("## Commands\n\n");
     out.push_str(&GUIDE_ESSENTIALS.replace("{exe}", &exe_text));
     out
@@ -132,8 +149,9 @@ pub fn seed_hash(project: &str, sup: &Supervisor) -> String {
 
 /// The session's flags: a model when set, an allow rule for the
 /// `dispatch` executable, a read rule and a write rule for the
-/// supervisor directory. No settings file: `--settings` already carries
-/// Switchboard's hooks.
+/// supervisor directory, and with `merges` the `gh pr` and `git pull`
+/// rules. No settings file: `--settings` already carries Switchboard's
+/// hooks.
 #[must_use]
 pub fn launch_flags(sup: &Supervisor, exe: &Path, dir: &Path) -> Vec<String> {
     let mut flags = Vec::new();
@@ -147,8 +165,25 @@ pub fn launch_flags(sup: &Supervisor, exe: &Path, dir: &Path) -> Vec<String> {
         format!("Read(//{}/**)", dir.display()),
     ]);
     flags.extend(OperatorKind::Claude.write_flags(dir));
+    if sup.merges {
+        for rule in MERGE_RULES {
+            flags.extend(["--allowedTools".to_owned(), (*rule).to_owned()]);
+        }
+    }
     flags
 }
+
+/// The commands a merging supervisor runs on a pull request: read it,
+/// read its checks, merge it, and bring its workspace up to main. Nothing
+/// that pushes or rewrites a branch.
+pub const MERGE_RULES: &[&str] = &[
+    "Bash(gh pr view:*)",
+    "Bash(gh pr checks:*)",
+    "Bash(gh pr diff:*)",
+    "Bash(gh pr merge:*)",
+    "Bash(git pull:*)",
+    "Bash(git log:*)",
+];
 
 /// The model a launch's flags name.
 fn model_of(body: Option<&Body>) -> Option<String> {
@@ -813,6 +848,7 @@ mod tests {
             setup: SupervisorSetup::default(),
             model: Some("haiku".into()),
             decides: vec!["finalize".into(), "rerun".into()],
+            merges: false,
         }
     }
 
@@ -836,10 +872,34 @@ mod tests {
             "Run `/opt/bin/dispatch brief orchard` first.",
             "/data/projects/orchard/supervisor/handoff.md current",
             "`/opt/bin/dispatch events --project <project>",
+            "`/opt/bin/dispatch wait <ticket> --for any --timeout 540`",
+            "You never merge a pull request.",
         ] {
             assert!(s.contains(want), "the seed lacks {want:?}:\n{s}");
         }
         assert!(!s.contains("{exe}"));
+        assert!(!s.contains("--timeout 100"));
+    }
+
+    #[test]
+    fn a_merging_supervisor_is_told_to_merge_and_allowed_gh_pr() {
+        let mut sup = table();
+        sup.merges = true;
+        let s = seed(
+            "orchard",
+            &sup,
+            Path::new("/opt/bin/dispatch"),
+            Path::new("/data/projects/orchard/supervisor/handoff.md"),
+            Path::new("/trees/supervisor-orchard"),
+        );
+        assert!(s.contains("`gh pr merge <n> --merge`"), "{s}");
+        assert!(!s.contains("You never merge a pull request."));
+        assert!(s.contains("answered `park` only"));
+        let flags = launch_flags(&sup, Path::new("/opt/bin/dispatch"), Path::new("/d/s"));
+        for rule in MERGE_RULES {
+            assert!(flags.contains(&(*rule).to_owned()), "missing {rule}");
+        }
+        assert_ne!(seed_hash("orchard", &sup), seed_hash("orchard", &table()));
     }
 
     #[test]

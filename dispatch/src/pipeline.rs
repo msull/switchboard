@@ -56,6 +56,12 @@ pub struct Supervisor {
     /// owner's.
     #[serde(default)]
     pub decides: Vec<String>,
+    /// Whether the supervisor merges a ticket's pull request itself once
+    /// its checks pass and its body is clean. True gives the session
+    /// allow rules for `gh pr` and `git pull`; false (the default) has
+    /// it report a green pull request and stop, so the owner merges.
+    #[serde(default)]
+    pub merges: bool,
 }
 
 /// `setup = [...]` (one argv, the shape of a lane's `setup`) or

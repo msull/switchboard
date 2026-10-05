@@ -1993,6 +1993,7 @@ setup = ["git", "clone", "git@example.com:o/r.git", "."]
 # or several: [[supervisor.setup]] argv = [...]
 model = "sonnet"
 decides = ["finalize", "rerun", "pr"]
+merges = true      # it merges a green, clean pull request itself; false (default): it reports and the owner merges
 ```
 
 `decides` takes decision names: those Dispatch asks of its own accord
@@ -2029,8 +2030,12 @@ they differ between builds.
 each creation on the project's record before it is sent: the space,
 a Switchboard project `Supervisor · <project>` rooted at the workspace
 (made once), and a Claude session of the same name with the model,
-`--allowedTools Bash(<dispatch>:*)`, and read and write rules for the
-supervisor directory. No settings file is written: `--settings`
+`--allowedTools Bash(<dispatch>:*)`, read and write rules for the
+supervisor directory, and with `merges = true` rules for `gh pr view`,
+`checks`, `diff` and `merge` and `git pull` and `log`, so a merging
+supervisor is not stopped at the merge. `merges` also chooses the seed's
+pull request paragraph: merge on green with a clean body, or report and
+stop for the owner. No settings file is written: `--settings`
 already carries Switchboard's hooks. `dispatch supervisor <project>
 --fresh [--setup]` (or Fresh on the Dispatch page, through the port's
 intent) sets up, writes the seed, kills the current session and keeps

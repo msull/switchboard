@@ -323,10 +323,13 @@ should use freely.
 **With a timeout.** `dispatch events --follow --timeout <secs>` exits
 0 as soon as it has printed something and 2 if nothing came in that
 long, as `wait` does. An agent's Bash call is cut off after two
-minutes by default, so a watcher keeps the timeout under that and
-loops on it: `dispatch events --project <name> --since <seq> --follow
---timeout 100`, noting the last seq it printed and starting again from
-it.
+minutes by default and ten at most, so a watcher passes its tool the
+longer timeout and keeps `--timeout` under it: `dispatch events
+--project <name> --since <seq> --follow --timeout 540`, noting the last
+seq it printed and starting again from it, one call at a time. While
+driving one ticket, `dispatch wait <ticket> --for any --timeout 540` is
+the better call: it returns on that ticket's next decision, stage
+change, pull request or close.
 
 **Brief.** `dispatch brief <project>` is what a supervisor reads
 first: its own session's line, the project's open tickets with stage
