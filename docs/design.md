@@ -1747,7 +1747,10 @@ crash repeats a transition and never loses one, and a failed write is
 withdrawn with a `void`. Usage errors exit 64; `wait` exits 2 on a
 timeout and 3 when the ticket parks or closes. `wait` reads the record
 first, so a parked or closed ticket and a pending decision return at
-once, and `--since <seq>` replays the log from a cursor; any event
+once, and `--since <seq>` replays the log from a cursor. A supervisor's
+watch re-arms from the seq it last printed (the same one after a
+timeout), so a decision raised between two watches is returned and one
+left pending is not returned again. Any event
 the record does not bear out yet, live or replayed, is held until the
 record's `updated_ms` passes its write. The agent guide is the
 contract, and a test holds it to the usage. Gaps: `events.jsonl` is
@@ -2014,7 +2017,9 @@ long-lived Claude Code session that watches its tickets
 - `dispatch supervisor <project> [--fresh [--setup] | --resume |
   --kill [--reason]]`, `dispatch brief <project>`, and `dispatch
   events --follow --timeout <secs>` (exit 0 once something printed, 2
-  when nothing came) for a supervisor's watch loop.
+  when nothing came) for a supervisor's watch loop, beside `dispatch
+  wait <ticket> --for any --since <seq> --timeout 540` as its watch on
+  one ticket.
 - The actor: `SWITCHBOARD_RECORD_ID` naming a project's current or
   past supervisor makes a command that supervisor's. It may read
   anything, `take` and `queue` on its own project, and `decide`,

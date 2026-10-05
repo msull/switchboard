@@ -2104,6 +2104,71 @@ mod tests {
         assert_eq!(waited, Waited::TimedOut);
     }
 
+    /// A decision raised between two watches is returned by the watch
+    /// that re-arms from the seq the last one printed; one armed at the
+    /// tail misses it.
+    #[test]
+    fn a_watch_from_its_cursor_returns_a_decision_raised_since() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = DataDir::new(dir.path());
+        let t = ticket();
+        let file = data.ticket_file(&t.id);
+        crate::store::write_ticket(&file, &t).unwrap();
+        let log = log_path(&data);
+        let s = last_seq(&log).unwrap();
+        let mut asked = t.clone();
+        asked.decisions.push(decision("d1"));
+        append(&log, &mut between(Some(&t), &asked, 1, &Vec::new)).unwrap();
+        crate::store::write_ticket(&file, &asked).unwrap();
+        let waited = wait_looking(&data, &t.id, For::Any, Some(s), &mut |_| {
+            panic!("waited on a decision raised before the watch");
+        });
+        assert!(
+            matches!(&waited, Waited::Matched(e)
+                if e.kind == Kind::Decision && e.decision.as_deref() == Some("d1")),
+            "{waited:?}"
+        );
+        let waited = wait_looking(&data, &t.id, For::Any, None, &mut |_| {});
+        assert_eq!(waited, Waited::TimedOut);
+    }
+
+    /// A watch re-armed from the seq of a decision it returned does not
+    /// return that decision again while it stays pending: it waits for
+    /// the ticket's next event.
+    #[test]
+    fn a_watch_past_a_pending_decision_waits_for_the_next_event() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = DataDir::new(dir.path());
+        let t = ticket();
+        let file = data.ticket_file(&t.id);
+        crate::store::write_ticket(&file, &t).unwrap();
+        let log = log_path(&data);
+        let mut asked = t.clone();
+        asked.decisions.push(decision("d1"));
+        append(&log, &mut between(Some(&t), &asked, 1, &Vec::new)).unwrap();
+        crate::store::write_ticket(&file, &asked).unwrap();
+        let d = read_since(&log, 0)
+            .unwrap()
+            .into_iter()
+            .find(|e| e.kind == Kind::Decision)
+            .unwrap()
+            .seq;
+        let waited = wait_looking(&data, &t.id, For::Any, Some(d), &mut |_| {});
+        assert_eq!(waited, Waited::TimedOut);
+        let mut moved = asked.clone();
+        moved.stage = 1;
+        let waited = wait_looking(&data, &t.id, For::Any, Some(d), &mut |looks| {
+            if looks == 1 {
+                append(&log, &mut between(Some(&asked), &moved, 2, &Vec::new)).unwrap();
+                crate::store::write_ticket(&file, &moved).unwrap();
+            }
+        });
+        assert!(
+            matches!(&waited, Waited::Matched(e) if e.kind == Kind::Stage && e.stage == "#1"),
+            "{waited:?}"
+        );
+    }
+
     /// A line is appended before its record is renamed in, so a wait can
     /// read it while the record still lacks it: live or replayed, of any
     /// kind, it is held until the record takes its write. The record
