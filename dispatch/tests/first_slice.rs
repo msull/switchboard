@@ -8057,6 +8057,11 @@ fn a_clean_refresh_at_pr_launches_no_reviewer() {
     assert_eq!(t.lanes[0].conflict, None);
     assert!(t.attempts_of(RESOLUTION).next().is_none());
     assert_eq!(launches_of(&env, "resolver"), 0);
+    assert!(
+        refreshed_text(&env, &id).ends_with(", rebased cleanly"),
+        "{}",
+        refreshed_text(&env, &id)
+    );
 }
 
 /// The rebase at `pr` conflicts: the reviewed head and the commits that
@@ -8384,6 +8389,11 @@ fn a_hand_rebase_after_the_refresh_question_is_reviewed() {
         "{prompt}"
     );
     assert!(!prompt.contains("rebaser's notes"), "{prompt}");
+    let text = refreshed_text(&env, &id);
+    assert!(
+        text.ends_with(", rebased by hand (adopted), conflicts in 1 commit"),
+        "{text}"
+    );
 }
 
 /// A rebaser that leaves the branch alone, then a base that moves again
@@ -8536,6 +8546,11 @@ fn a_park_mid_rebaser_keeps_the_conflict_for_review() {
     assert_eq!(moved.conflict.map(|c| c.before), Some("base0000".into()));
     assert_eq!(moved.after.as_deref(), Some("resolv01"));
     assert!(t.attempts_of("pr").next().is_none(), "pr waits for it");
+    let text = refreshed_text(&env, &id);
+    assert!(
+        text.ends_with(", rebased after the rebaser stopped, conflicts in 1 commit"),
+        "{text}"
+    );
 }
 
 /// A record from before a rebaser's rerun question held the stage: one
@@ -8740,6 +8755,11 @@ fn a_refresh_at_ready_pushes_after_the_rebaser_resolves_it() {
     assert_eq!(
         env.repo.lock().unwrap().pushed,
         vec![(tree, "origin".into(), branch, "base0000".into())]
+    );
+    let text = refreshed_text(&env, &id);
+    assert!(
+        text.contains(", rebased by the rebaser, conflicts in "),
+        "{text}"
     );
 }
 
@@ -8991,6 +9011,11 @@ fn a_hand_finished_rebase_after_a_stopped_rebaser_is_brought_up() {
     assert_eq!(moved.after.as_deref(), Some("resolv01"));
     assert!(moved.conflict.is_some());
     assert_eq!(t.attempts_of(REFRESH).count(), 1);
+    let text = refreshed_text(&env, &id);
+    assert!(
+        text.contains(", rebased by hand (adopted), conflicts in "),
+        "{text}"
+    );
 }
 
 /// A worktree whose `HEAD` is detached off its branch is never read as
@@ -11656,6 +11681,16 @@ fn event_texts(env: &Env, id: &str) -> Vec<String> {
         .filter(|e| e.ticket == id)
         .map(|e| e.text)
         .collect()
+}
+
+/// The text of `id`'s latest `refreshed` event.
+fn refreshed_text(env: &Env, id: &str) -> String {
+    dispatch::events::read_since(&dispatch::events::log_path(&env.data), 0)
+        .unwrap()
+        .into_iter()
+        .rfind(|e| e.ticket == id && e.kind == dispatch::events::Kind::Refreshed)
+        .map(|e| e.text)
+        .unwrap_or_default()
 }
 
 /// The pending `message` question, answered `answer`.

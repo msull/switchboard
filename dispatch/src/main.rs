@@ -630,7 +630,7 @@ fn show(args: &[&str]) -> Result<()> {
             sha(&l.head),
             sha(&l.pushed_head),
             if l.removed { " (removed)" } else { "" },
-            conflict_clause(&view, l)
+            brought_up_clause(&view, l)
         );
     }
     print_attempts(&view)?;
@@ -706,10 +706,14 @@ fn print_attempts(view: &dispatch_control::TicketView) -> Result<()> {
     Ok(())
 }
 
-/// `, rebased with conflicts in N commits, reviewed` after a lane whose
-/// last bring-up resolved a conflict, worded as the ticket page words it.
-fn conflict_clause(view: &dispatch_control::TicketView, l: &dispatch_control::LaneView) -> String {
-    view.lane_conflict(l)
+/// `, rebased cleanly` or `, rebased by the rebaser, conflicts in N
+/// commits, reviewed` after a lane that was brought up, in the words of
+/// its `refreshed` event, or nothing.
+fn brought_up_clause(
+    view: &dispatch_control::TicketView,
+    l: &dispatch_control::LaneView,
+) -> String {
+    view.lane_brought_up(l)
         .map_or_else(String::new, |c| format!(", {c}"))
 }
 

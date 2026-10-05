@@ -19,8 +19,10 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
+use dispatch_control::{BroughtUpBy, brought_up};
 use serde::{Deserialize, Serialize};
 
+use crate::scheduler;
 use crate::store::{DataDir, read_ticket};
 use crate::ticket::{
     Attempt, AttemptKind, AttemptState, Decision, DecisionState, RoundState, Ticket, TicketState,
@@ -164,6 +166,14 @@ pub struct Event {
     /// For a `void`: the seqs it withdraws.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub voids: Vec<u64>,
+    /// For a `refreshed`: who rewrote the branch onto its new base.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub by: Option<BroughtUpBy>,
+    /// For a `refreshed`: how many commits conflicted, 0 for git's
+    /// bring-up and when they could not be listed; absent when no
+    /// conflict was recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conflicts: Option<u32>,
 }
 
 impl Event {
@@ -182,6 +192,8 @@ impl Event {
             head: None,
             url: None,
             voids: Vec::new(),
+            by: None,
+            conflicts: None,
         }
     }
 
@@ -371,20 +383,24 @@ pub fn between(
         if let Some(r) = &lane.refreshed
             && before.is_none_or(|b| b.refreshed.as_ref() != Some(r))
         {
+            let by = scheduler::brought_up_by(new, &lane.name, r);
+            let conflicts = scheduler::conflict_count(r, by);
             whole.push(out.len());
             out.push(Event {
                 head: Some(r.to.clone()),
+                by: Some(by),
+                conflicts,
                 ..Event::new(
                     new,
                     at_ms,
                     Kind::Refreshed,
                     "",
                     format!(
-                        "{} from {} to {}{}",
+                        "{} from {} to {}, {}",
                         lane.name,
                         short(&r.from),
                         short(&r.to),
-                        if r.commits { ", rebased" } else { "" }
+                        brought_up(by, r.commits, conflicts)
                     ),
                 )
             });
@@ -759,6 +775,8 @@ pub fn append_void(path: &Path, about: &Event, seqs: Vec<u64>, why: &str) -> Res
         head: None,
         url: None,
         voids: seqs,
+        by: None,
+        conflicts: None,
     }];
     append(path, &mut void)
 }
@@ -2010,5 +2028,284 @@ mod tests {
         let mut next = [event(&t, Kind::Stage)];
         append(&path, &mut next).unwrap();
         assert_eq!(next[0].seq, 2, "its seq still counts");
+    }
+
+    /// A bring-up of `backend` at 100, with `conflict` commits
+    /// conflicting since 5 when some.
+    fn brought_up_at_100(commits: bool, conflict: Option<usize>) -> crate::ticket::Refreshed {
+        crate::ticket::Refreshed {
+            from: "base0000".into(),
+            to: "main0000".into(),
+            commits,
+            notes: None,
+            at_ms: 100,
+            conflict: conflict.map(|k| crate::ticket::RefreshConflict {
+                before: "head0000".into(),
+                from: "base0000".into(),
+                to: "main0000".into(),
+                commits: (0..k).map(|i| format!("c{i}")).collect(),
+                stage: 0,
+                at_ms: 5,
+            }),
+            after: None,
+        }
+    }
+
+    /// The `refreshed` event `t` makes once `r` is its lane's bring-up.
+    fn refreshed(t: &Ticket, r: crate::ticket::Refreshed) -> Event {
+        let mut new = t.clone();
+        new.lanes[0].refreshed = Some(r);
+        between(Some(t), &new, 5, &names)
+            .into_iter()
+            .find(|e| e.kind == Kind::Refreshed)
+            .expect("a refreshed event")
+    }
+
+    fn rebaser(n: u32, context: &str, state: AttemptState, started_ms: u64) -> Attempt {
+        new_attempt(
+            "refresh",
+            n,
+            context,
+            AttemptKind::Agent,
+            state,
+            BTreeMap::new(),
+            started_ms,
+        )
+    }
+
+    fn answered(name: &str, answer: &str, attempt: Option<u32>, at_ms: u64) -> Decision {
+        Decision {
+            id: format!("{name}-{at_ms}"),
+            stage: "implement".into(),
+            name: name.into(),
+            kind: DecisionKind::Permission,
+            question: "?".into(),
+            options: vec![answer.into(), "park".into()],
+            recommendation: None,
+            attempt: attempt.map(|n| ("refresh".into(), n)),
+            state: DecisionState::Answered {
+                answer: answer.into(),
+                note: None,
+                by: "cli".into(),
+                at_ms,
+                acted: true,
+            },
+            made_ms: at_ms,
+        }
+    }
+
+    fn with(attempts: Vec<Attempt>, decisions: Vec<Decision>) -> Ticket {
+        let mut t = ticket();
+        t.attempts = attempts;
+        t.decisions = decisions;
+        t
+    }
+
+    fn says(e: &Event) -> (&str, Option<BroughtUpBy>, Option<u32>) {
+        let words = e.text.split_once(", ").map_or("", |(_, w)| w);
+        (words, e.by, e.conflicts)
+    }
+
+    #[test]
+    fn a_refreshed_event_says_who_brought_the_lane_up_and_how_many_commits_conflicted() {
+        use BroughtUpBy::{Git, Rebaser};
+        let t = ticket();
+        let moved = refreshed(&t, brought_up_at_100(false, None));
+        assert_eq!(
+            moved.text,
+            "backend from base000 to main000, brought up with no commits of its own"
+        );
+        assert_eq!((moved.by, moved.conflicts), (Some(Git), Some(0)));
+        assert_eq!(
+            says(&refreshed(&t, brought_up_at_100(true, None))),
+            ("rebased cleanly", Some(Git), Some(0))
+        );
+
+        let done = with(
+            vec![rebaser(1, "backend", AttemptState::Complete, 10)],
+            vec![],
+        );
+        assert_eq!(
+            says(&refreshed(&done, brought_up_at_100(true, Some(2)))),
+            (
+                "rebased by the rebaser, conflicts in 2 commits",
+                Some(Rebaser),
+                Some(2)
+            )
+        );
+        assert_eq!(
+            says(&refreshed(&done, brought_up_at_100(true, Some(0)))),
+            (
+                "rebased by the rebaser, conflicts in commits it could not list",
+                Some(Rebaser),
+                Some(0)
+            )
+        );
+        let mut noted = brought_up_at_100(true, None);
+        noted.notes = Some("/d/t1/notes.md".into());
+        assert_eq!(
+            says(&refreshed(&done, noted)),
+            ("rebased by the rebaser", Some(Rebaser), None)
+        );
+    }
+
+    #[test]
+    fn a_refreshed_event_after_a_conflict_says_whether_a_hand_rebase_was_adopted() {
+        use BroughtUpBy::{Hand, Rebaser, Stopped};
+        let failed = AttemptState::Failed {
+            reason: "gone".into(),
+        };
+        let stopped_words = (
+            "rebased after the rebaser stopped, conflicts in 2 commits",
+            Some(Stopped),
+            Some(2),
+        );
+        let mut withdrawn = answered("rerun", "rerun", Some(1), 20);
+        withdrawn.state = DecisionState::Cancelled;
+        for t in [
+            with(vec![rebaser(1, "backend", failed.clone(), 10)], vec![]),
+            with(
+                vec![rebaser(
+                    1,
+                    "backend",
+                    AttemptState::Cancelled {
+                        reason: "parked".into(),
+                    },
+                    10,
+                )],
+                vec![],
+            ),
+            with(
+                vec![rebaser(1, "backend", failed.clone(), 10)],
+                vec![withdrawn],
+            ),
+            with(
+                vec![rebaser(1, "backend", failed.clone(), 10)],
+                vec![answered("rerun", "park", Some(1), 20)],
+            ),
+        ] {
+            assert_eq!(
+                says(&refreshed(&t, brought_up_at_100(true, Some(2)))),
+                stopped_words
+            );
+        }
+
+        let hand_words = (
+            "rebased by hand (adopted), conflicts in 1 commit",
+            Some(Hand),
+            Some(1),
+        );
+        for t in [
+            with(
+                vec![rebaser(1, "backend", failed.clone(), 10)],
+                vec![answered("rerun", "rerun", Some(1), 20)],
+            ),
+            with(
+                vec![rebaser(1, "backend", AttemptState::Complete, 10)],
+                vec![answered("refresh", "recheck", None, 20)],
+            ),
+            with(vec![], vec![answered("refresh", "recheck", None, 20)]),
+            with(
+                vec![rebaser(1, "backend", AttemptState::Complete, 10)],
+                vec![answered("rerun", "rerun", Some(1), 20)],
+            ),
+        ] {
+            assert_eq!(
+                says(&refreshed(&t, brought_up_at_100(true, Some(1)))),
+                hand_words
+            );
+        }
+
+        let relaunched = with(
+            vec![
+                rebaser(1, "backend", failed.clone(), 10),
+                rebaser(2, "backend", AttemptState::Complete, 30),
+            ],
+            vec![answered("rerun", "rerun", Some(1), 20)],
+        );
+        assert_eq!(
+            says(&refreshed(&relaunched, brought_up_at_100(true, Some(1)))).1,
+            Some(Rebaser)
+        );
+        let elsewhere = with(
+            vec![
+                rebaser(1, "backend", AttemptState::Complete, 10),
+                rebaser(2, "frontend", failed.clone(), 15),
+            ],
+            vec![answered("rerun", "rerun", Some(2), 20)],
+        );
+        assert_eq!(
+            says(&refreshed(&elsewhere, brought_up_at_100(true, Some(1)))).1,
+            Some(Rebaser)
+        );
+        let later = with(
+            vec![rebaser(1, "backend", AttemptState::Complete, 10)],
+            vec![answered("refresh", "recheck", None, 200)],
+        );
+        assert_eq!(
+            says(&refreshed(&later, brought_up_at_100(true, Some(1)))).1,
+            Some(Rebaser),
+            "an answer after the bring-up does not count"
+        );
+    }
+
+    #[test]
+    fn a_rebaser_from_before_the_conflict_did_not_bring_the_lane_up() {
+        // The rebaser served an earlier bring-up; the conflict came at 50
+        // with max_rebases spent, and its question was withdrawn by a
+        // park before a hand rebase was read.
+        let t = with(
+            vec![rebaser(1, "backend", AttemptState::Complete, 10)],
+            vec![],
+        );
+        let mut r = brought_up_at_100(true, Some(2));
+        r.conflict.as_mut().unwrap().at_ms = 50;
+        assert_eq!(
+            says(&refreshed(&t, r.clone())),
+            (
+                "rebased by hand (adopted), conflicts in 2 commits",
+                Some(BroughtUpBy::Hand),
+                Some(2)
+            )
+        );
+
+        let relaunched = with(
+            vec![
+                rebaser(1, "backend", AttemptState::Complete, 10),
+                rebaser(2, "backend", AttemptState::Complete, 50),
+            ],
+            vec![],
+        );
+        assert_eq!(
+            says(&refreshed(&relaunched, r.clone())).1,
+            Some(BroughtUpBy::Rebaser),
+            "a rebaser launched in the pass that recorded the conflict counts"
+        );
+
+        r.conflict.as_mut().unwrap().at_ms = 0;
+        assert_eq!(
+            says(&refreshed(&t, r)).1,
+            Some(BroughtUpBy::Rebaser),
+            "a conflict from before its time was kept bounds nothing"
+        );
+    }
+
+    #[test]
+    fn a_refreshed_event_keeps_who_and_how_many_through_a_line() {
+        let mut t = ticket();
+        t.attempts
+            .push(rebaser(1, "backend", AttemptState::Complete, 10));
+        let e = refreshed(&t, brought_up_at_100(true, Some(2)));
+        let line = e.to_line();
+        assert!(line.contains(r#""by":"rebaser""#), "{line}");
+        let back: Event = serde_json::from_str(&line).unwrap();
+        assert_eq!(
+            (back.by, back.conflicts),
+            (Some(BroughtUpBy::Rebaser), Some(2))
+        );
+
+        let old = r#"{"v":1,"seq":3,"at_ms":5,"ticket":"t1","project":"p","stage":"","kind":"refreshed","text":"backend from base000 to main000, rebased","head":"main0000"}"#;
+        let back: Event = serde_json::from_str(old).unwrap();
+        assert_eq!((back.by, back.conflicts), (None, None));
     }
 }

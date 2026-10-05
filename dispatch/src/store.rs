@@ -23,7 +23,7 @@ use crate::ticket::{ProjectState, Ticket};
 /// carried a version reads as 0 and is brought up by `migrate`. A
 /// record above it was written by a newer `dispatch` and is refused
 /// both ways, so this build never drops fields it does not know.
-pub const RECORD_VERSION: u32 = 10;
+pub const RECORD_VERSION: u32 = 11;
 
 /// A lock file held while this lives: the writer lock, the runner's
 /// claim, or a ticket's close.
@@ -490,6 +490,12 @@ pub fn migrate(mut value: Value) -> Value {
         // on its next write must refuse the record, or a restart would
         // complete an attempt whose messages were still being asked
         // about, or launch a second rewriter.
+        //
+        // 10 to 11: a conflict gains `at_ms`, 0 from its serde default,
+        // which reads as a record from before it. Nothing is transformed;
+        // a build that would drop it on its next write must refuse the
+        // record, or a bring-up would credit a rebaser from before the
+        // conflict.
         if version == 1 {
             settle_from_verdicts(&mut value);
         }
@@ -962,6 +968,7 @@ mod tests {
             to: "main0003".into(),
             commits: vec!["pick0002".into()],
             stage: 6,
+            at_ms: 0,
         };
         t.lanes[0].conflict = Some(conflict.clone());
         t.lanes[0].refreshed = Some(crate::ticket::Refreshed {
@@ -1011,6 +1018,28 @@ mod tests {
             written["attempts"][0]["rewrite"]["stale"][0]["names"][0],
             "old_name"
         );
+        assert_eq!(read_ticket(&path).unwrap(), t);
+    }
+
+    #[test]
+    fn a_version_ten_conflict_migrates_to_eleven_with_no_time() {
+        let text = TICKET_V0.replacen('{', "{\n  \"version\": 10,", 1).replacen(
+            r#""base_sha": "base0000""#,
+            r#""base_sha": "base0000", "conflict": {"before": "head0001", "from": "base0000", "to": "main0003", "commits": ["pick0002"], "stage": 6}"#,
+            1,
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.json");
+        fs::write(&path, text).unwrap();
+        let mut t = read_ticket(&path).unwrap();
+        assert_eq!(t.version, RECORD_VERSION);
+        let conflict = t.lanes[0].conflict.as_mut().unwrap();
+        assert_eq!(conflict.at_ms, 0);
+        conflict.at_ms = 2500;
+        write_ticket(&path, &t).unwrap();
+        let written: Value = read_json(&path).unwrap();
+        assert_eq!(written["version"], RECORD_VERSION);
+        assert_eq!(written["lanes"][0]["conflict"]["at_ms"], 2500);
         assert_eq!(read_ticket(&path).unwrap(), t);
     }
 
