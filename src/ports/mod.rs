@@ -3,6 +3,7 @@
 
 pub mod agent;
 pub mod artifacts;
+pub mod changes;
 pub mod control;
 pub mod controller;
 pub mod dispatch;

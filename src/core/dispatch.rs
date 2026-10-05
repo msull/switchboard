@@ -1,17 +1,17 @@
 //! Dispatch as the app shows it: the runner's last status, the
-//! artifacts read for the ticket page, and the console, a shell session
-//! of the app's own where `dispatch` commands are typed. The core holds
-//! views from Dispatch's port and never its records; a status is data
-//! that arrived, a decision answered is a call the app runs, and the
-//! reply is one more action.
+//! artifacts, events and full tickets read for the ticket page, and the
+//! console, a shell session of the app's own where `dispatch` commands
+//! are typed. The core holds views from Dispatch's port and never its
+//! records; a status is data that arrived, a decision answered is a call
+//! the app runs, and the reply is one more action.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 use std::path::PathBuf;
 
 use super::action::{AppAction, AppCore, Clock, Effect, Out, View};
 use super::model::{Launch, PageWindow, RecordId, SessionKind, Space, SpaceId};
-use crate::ports::dispatch::{Body, DecisionView, Reply, Status, TicketView};
+use crate::ports::dispatch::{Body, DecisionView, EventView, Reply, Status, TicketView};
 
 /// An agent of a ticket that waits on the user for itself, with the
 /// attempt it runs and why it waits.
@@ -155,6 +155,103 @@ impl TicketListing {
     }
 }
 
+/// A ticket's events as read through the port so far. Transient: on
+/// launch it starts empty and fills on the ticket page's first draw.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TicketEvents {
+    /// The cursor: the highest seq the runner has read for this ticket.
+    pub last: u64,
+    /// The ticket's events, oldest first, none withdrawn.
+    pub events: Vec<EventView>,
+    /// The ticket's `updated_ms` at the last ask; `None` before the
+    /// first, or after a call that never reached the runner.
+    pub asked_at: Option<u64>,
+    /// A read is on its way; nothing more is asked until it answers.
+    pub in_flight: bool,
+    /// The runner does not serve events (an older build); the page reads
+    /// the record instead until the runner reconnects.
+    pub unavailable: bool,
+}
+
+/// A ticket read in full, with what only that reply carries (its paths,
+/// its lanes' clones). Transient, like `TicketEvents`; kept when the
+/// runner goes away, so the page still reads.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Fetched {
+    /// The last reply, kept until the next replaces it.
+    pub view: Option<TicketView>,
+    /// The ticket's `updated_ms` at the last ask, as on `TicketEvents`.
+    pub asked_at: Option<u64>,
+    /// A read is on its way; nothing more is asked until it answers.
+    pub in_flight: bool,
+}
+
+/// One artifact's reads that have not brought its text yet. Transient,
+/// like `TicketEvents`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ArtifactRead {
+    /// The ticket's `updated_ms` at the last ask: a failed read is asked
+    /// again on the page once the ticket changes, since an agent writes
+    /// its notes after the runner hands out their path. `None` after a
+    /// call that never reached the runner.
+    pub asked_at: Option<u64>,
+    /// A read is on its way; nothing more is asked until it answers.
+    pub in_flight: bool,
+    /// Why the last read failed, as the runner said.
+    pub failed: Option<String>,
+}
+
+impl ArtifactRead {
+    /// The last read failed because the file is not there: the runner
+    /// reports the OS's error, and `ENOENT` is 2 on every platform it
+    /// runs on.
+    #[must_use]
+    pub fn missing(&self) -> bool {
+        self.failed
+            .as_deref()
+            .is_some_and(|r| r.ends_with("(os error 2)"))
+    }
+}
+
+/// One line of a ticket's timeline.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TimelineRow {
+    /// When it happened, in milliseconds since the epoch.
+    pub at_ms: u64,
+    /// The event log's word: `attempt-started`, `answered`, ...
+    pub kind: String,
+    /// The log's line, or one made from the record in its words.
+    pub text: String,
+    /// The attempt the row is about, as stage and number.
+    pub attempt: Option<(String, u32)>,
+    /// The decision the row is about, by id.
+    pub decision: Option<String>,
+    /// How long the attempt ran, on an `attempt-ended` row.
+    pub duration_ms: Option<u64>,
+    /// The attempt whose card is drawn under this row: each attempt's
+    /// newest end row, or its newest start row while it runs.
+    pub details: Option<(String, u32)>,
+}
+
+/// Consecutive timeline rows of one stage.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TimelineGroup {
+    /// The stage the rows happened in; empty for the whole ticket.
+    pub stage: String,
+    /// Newest first.
+    pub rows: Vec<TimelineRow>,
+}
+
+/// A ticket's timeline as the page draws it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Timeline {
+    /// Newest first, a new group each time the stage changes.
+    pub groups: Vec<TimelineGroup>,
+    /// Attempts no row carries, newest first, as stage and number: drawn
+    /// after the groups as earlier attempts.
+    pub earlier: Vec<(String, u32)>,
+}
+
 /// The space and project the console lives in.
 pub(crate) const CONSOLE_SPACE: &str = "Dispatch";
 /// The console session's name.
@@ -171,6 +268,12 @@ pub struct DispatchState {
     pub seen: bool,
     /// Artifact text by path, as read through the port.
     pub artifacts: HashMap<PathBuf, String>,
+    /// Events by ticket id, as read through the port.
+    pub events: HashMap<String, TicketEvents>,
+    /// Single-ticket replies by ticket id.
+    pub details: HashMap<String, Fetched>,
+    /// Artifact reads with no text yet, by path.
+    pub artifact_reads: HashMap<PathBuf, ArtifactRead>,
     /// The `dispatch` executable the console types.
     pub command: PathBuf,
     /// Dispatch's data directory: the console's working directory.
@@ -214,6 +317,159 @@ pub fn close_offered(t: &TicketView) -> bool {
     t.closable || t.trees_retryable
 }
 
+/// How long an attempt ran, once it ended.
+fn attempt_duration(t: &TicketView, stage: &str, n: u32) -> Option<u64> {
+    let a = t.attempts.iter().find(|a| a.stage == stage && a.n == n)?;
+    Some(a.ended_ms?.saturating_sub(a.started_ms))
+}
+
+/// The timeline's rows from the record, for a runner that serves no
+/// events: attempts starting and ending, decisions made and answered,
+/// restarts. Oldest first, as the log would have them.
+fn record_rows(t: &TicketView) -> Vec<(String, TimelineRow)> {
+    let mut rows = Vec::new();
+    let row = |at_ms: u64, kind: &str, text: String| TimelineRow {
+        at_ms,
+        kind: kind.to_owned(),
+        text,
+        attempt: None,
+        decision: None,
+        duration_ms: None,
+        details: None,
+    };
+    for a in &t.attempts {
+        let attempt = Some((a.stage.clone(), a.n));
+        rows.push((
+            a.stage.clone(),
+            TimelineRow {
+                attempt: attempt.clone(),
+                ..row(
+                    a.started_ms,
+                    "attempt-started",
+                    format!("{}/{} ({}) started", a.stage, a.n, a.context),
+                )
+            },
+        ));
+        if let Some(ended) = a.ended_ms {
+            let reason = a
+                .reason
+                .as_ref()
+                .map_or(String::new(), |r| format!(": {r}"));
+            rows.push((
+                a.stage.clone(),
+                TimelineRow {
+                    attempt,
+                    duration_ms: Some(ended.saturating_sub(a.started_ms)),
+                    ..row(
+                        ended,
+                        "attempt-ended",
+                        format!("{}/{} {}{reason}", a.stage, a.n, a.state),
+                    )
+                },
+            ));
+        }
+    }
+    for d in &t.decisions {
+        let decision = Some(d.id.clone());
+        rows.push((
+            d.stage.clone(),
+            TimelineRow {
+                decision: decision.clone(),
+                ..row(d.made_ms, "decision", d.question.clone())
+            },
+        ));
+        if let (Some(at), Some(answer)) = (d.answered_ms, &d.answer) {
+            let by = d.answered_by.as_deref().unwrap_or("someone");
+            rows.push((
+                d.stage.clone(),
+                TimelineRow {
+                    decision,
+                    ..row(at, "answered", format!("{} by {by}: {answer}", d.name))
+                },
+            ));
+        }
+    }
+    for r in &t.restarts {
+        rows.push((
+            r.to.clone(),
+            row(
+                r.at_ms,
+                "restarted",
+                format!("restarted at {} from {}", r.to, r.from),
+            ),
+        ));
+    }
+    rows.sort_by_key(|(_, r)| r.at_ms);
+    rows
+}
+
+/// Rows newest first, a new group each time the stage changes.
+fn grouped(rows: impl Iterator<Item = (String, TimelineRow)>) -> Vec<TimelineGroup> {
+    let mut groups: Vec<TimelineGroup> = Vec::new();
+    for (stage, row) in rows {
+        match groups.last_mut() {
+            Some(g) if g.stage == stage => g.rows.push(row),
+            _ => groups.push(TimelineGroup {
+                stage,
+                rows: vec![row],
+            }),
+        }
+    }
+    groups
+}
+
+/// What makes a timeline row the same happening in the log and in the
+/// record: a decision's rows by decision, an attempt's by attempt.
+type RowKey<'a> = (&'a str, Option<&'a (String, u32)>, Option<&'a String>);
+
+fn row_key<'a>(
+    kind: &'a str,
+    attempt: Option<&'a (String, u32)>,
+    decision: Option<&'a String>,
+) -> RowKey<'a> {
+    match decision {
+        Some(_) => (kind, None, decision),
+        None => (kind, attempt, None),
+    }
+}
+
+/// Marks the row each attempt's card goes under, in groups newest
+/// first: its newest end row, else (it runs) its newest start row.
+/// Returns the attempts no row carries, newest first.
+fn place_details(t: &TicketView, groups: &mut [TimelineGroup]) -> Vec<(String, u32)> {
+    let ended: HashSet<(String, u32)> = groups
+        .iter()
+        .flat_map(|g| &g.rows)
+        .filter(|r| r.kind == "attempt-ended")
+        .filter_map(|r| r.attempt.clone())
+        .collect();
+    let mut placed: HashSet<(String, u32)> = HashSet::new();
+    for row in groups.iter_mut().flat_map(|g| &mut g.rows) {
+        let Some(key) = &row.attempt else {
+            continue;
+        };
+        let carries = match row.kind.as_str() {
+            "attempt-ended" => true,
+            "attempt-started" => !ended.contains(key),
+            _ => false,
+        };
+        if carries
+            && t.attempts
+                .iter()
+                .any(|a| (&a.stage, a.n) == (&key.0, key.1))
+            && placed.insert(key.clone())
+        {
+            row.details = Some(key.clone());
+        }
+    }
+    t.attempts
+        .iter()
+        .rev()
+        .map(|a| (a.stage.clone(), a.n))
+        .filter(|key| !placed.contains(key))
+        .collect()
+}
+
 /// Whether the ticket is parked, which is when Resume is offered.
 #[must_use]
 pub fn parked(t: &TicketView) -> bool {
@@ -238,6 +494,117 @@ impl AppCore {
     #[must_use]
     pub fn ticket(&self, id: &str) -> Option<&TicketView> {
         self.dispatch.status.tickets.iter().find(|t| t.id == id)
+    }
+
+    /// Whether the ticket page should ask for ticket `id`'s events,
+    /// given its `updated_ms` in the last status: connected, not already
+    /// asking, the runner serves them, and not asked at this
+    /// `updated_ms`. The page dispatches a read only when this says so.
+    #[must_use]
+    pub fn events_read_due(&self, id: &str, updated_ms: u64) -> bool {
+        self.dispatch.connected
+            && self
+                .dispatch
+                .events
+                .get(id)
+                .is_none_or(|e| !e.in_flight && !e.unavailable && e.asked_at != Some(updated_ms))
+    }
+
+    /// Whether the ticket page should ask for ticket `id` in full, as
+    /// `events_read_due` decides for its events.
+    #[must_use]
+    pub fn ticket_read_due(&self, id: &str, updated_ms: u64) -> bool {
+        self.dispatch.connected
+            && self
+                .dispatch
+                .details
+                .get(id)
+                .is_none_or(|f| !f.in_flight && f.asked_at != Some(updated_ms))
+    }
+
+    /// Whether the ticket page should ask for the artifact at `path` of
+    /// ticket `t`: connected, no text yet, not already asking, and not
+    /// asked at the ticket's current `updated_ms`.
+    #[must_use]
+    pub fn artifact_read_due(&self, t: &TicketView, path: &std::path::Path) -> bool {
+        self.dispatch.connected
+            && !self.dispatch.artifacts.contains_key(path)
+            && self
+                .dispatch
+                .artifact_reads
+                .get(path)
+                .is_none_or(|r| !r.in_flight && r.asked_at != Some(t.updated_ms))
+    }
+
+    /// The reads of the artifact at `path` that brought no text yet.
+    #[must_use]
+    pub fn artifact_read(&self, path: &std::path::Path) -> Option<&ArtifactRead> {
+        self.dispatch.artifact_reads.get(path)
+    }
+
+    /// The last single-ticket reply for `id`, if one came.
+    #[must_use]
+    pub fn ticket_details(&self, id: &str) -> Option<&TicketView> {
+        self.dispatch.details.get(id)?.view.as_ref()
+    }
+
+    /// Ticket `t`'s timeline, newest first in groups by stage: its
+    /// events as read through the port, else (a runner that serves
+    /// none, or none read yet) rows made from the record. The log
+    /// begins when the runner that writes it was installed, so the
+    /// record's rows from before its first event are kept, less those
+    /// the log has too. Each attempt's card goes under one row; those
+    /// no row carries are the timeline's earlier attempts.
+    #[must_use]
+    pub fn ticket_timeline(&self, t: &TicketView) -> Timeline {
+        let events = self
+            .dispatch
+            .events
+            .get(&t.id)
+            .map_or(&[][..], |e| e.events.as_slice());
+        let rows = match events.first() {
+            None => record_rows(t),
+            Some(first) => {
+                let logged: HashSet<RowKey<'_>> = events
+                    .iter()
+                    .map(|e| row_key(&e.kind, e.attempt.as_ref(), e.decision.as_ref()))
+                    .collect();
+                let mut rows: Vec<(String, TimelineRow)> = record_rows(t)
+                    .into_iter()
+                    .filter(|(_, r)| {
+                        r.at_ms < first.at_ms
+                            && !logged.contains(&row_key(
+                                &r.kind,
+                                r.attempt.as_ref(),
+                                r.decision.as_ref(),
+                            ))
+                    })
+                    .collect();
+                rows.extend(events.iter().map(|e| {
+                    let duration_ms = e
+                        .attempt
+                        .as_ref()
+                        .filter(|_| e.kind == "attempt-ended")
+                        .and_then(|(stage, n)| attempt_duration(t, stage, *n));
+                    (
+                        e.stage.clone(),
+                        TimelineRow {
+                            at_ms: e.at_ms,
+                            kind: e.kind.clone(),
+                            text: e.text.clone(),
+                            attempt: e.attempt.clone(),
+                            decision: e.decision.clone(),
+                            duration_ms,
+                            details: None,
+                        },
+                    )
+                }));
+                rows
+            }
+        };
+        let mut groups = grouped(rows.into_iter().rev());
+        let earlier = place_details(t, &mut groups);
+        Timeline { groups, earlier }
     }
 
     /// Every pending decision across every ticket, oldest question
@@ -505,6 +872,16 @@ impl AppCore {
                 self.dispatch.data_dir = data_dir;
             }
             AppAction::DispatchStatus(status) => {
+                if status.is_some() && !self.dispatch.connected {
+                    // A runner back, perhaps a newer build: ask again
+                    // for what the last one would not serve.
+                    for e in self.dispatch.events.values_mut() {
+                        if e.unavailable {
+                            e.unavailable = false;
+                            e.asked_at = None;
+                        }
+                    }
+                }
                 self.dispatch.connected = status.is_some();
                 if let Some(status) = status {
                     self.dispatch.status = status;
@@ -551,10 +928,13 @@ impl AppCore {
                 self.dispatch_call(out, Body::Worktrees { path, migrate });
             }
             AppAction::DispatchReadArtifact { ticket, path } => {
-                if self.dispatch.artifacts.contains_key(&path) {
-                    return;
-                }
-                out.push(Effect::DispatchCall(Body::Artifact { ticket, path }));
+                self.read_artifact(ticket, path, out);
+            }
+            AppAction::DispatchReadEvents { ticket, updated_ms } => {
+                self.read_events(ticket, updated_ms, out);
+            }
+            AppAction::DispatchReadTicket { id, updated_ms } => {
+                self.read_ticket(id, updated_ms, out);
             }
             AppAction::DispatchReplied { body, result } => {
                 self.dispatch_replied(body, result, now);
@@ -584,17 +964,110 @@ impl AppCore {
         }
     }
 
+    /// A read of an artifact's text, asked unless it is already read or
+    /// on its way; a page's click asks again after a failure.
+    fn read_artifact(&mut self, ticket: String, path: PathBuf, out: &mut Out) {
+        if self.dispatch.artifacts.contains_key(&path) {
+            return;
+        }
+        let updated_ms = self.ticket(&ticket).map(|t| t.updated_ms);
+        let r = self
+            .dispatch
+            .artifact_reads
+            .entry(path.clone())
+            .or_default();
+        if r.in_flight {
+            return;
+        }
+        r.asked_at = updated_ms;
+        r.in_flight = true;
+        out.push(Effect::DispatchCall(Body::Artifact { ticket, path }));
+    }
+
+    /// A ticket page's read of a ticket's events, sent only when
+    /// `events_read_due` says it is due, and marked in flight until its
+    /// reply.
+    fn read_events(&mut self, ticket: String, updated_ms: u64, out: &mut Out) {
+        if !self.events_read_due(&ticket, updated_ms) {
+            return;
+        }
+        let e = self.dispatch.events.entry(ticket.clone()).or_default();
+        e.asked_at = Some(updated_ms);
+        e.in_flight = true;
+        let since = e.last;
+        out.push(Effect::DispatchCall(Body::Events { ticket, since }));
+    }
+
+    /// A ticket page's read of the ticket in full, as `read_events`.
+    fn read_ticket(&mut self, id: String, updated_ms: u64, out: &mut Out) {
+        if !self.ticket_read_due(&id, updated_ms) {
+            return;
+        }
+        let f = self.dispatch.details.entry(id.clone()).or_default();
+        f.asked_at = Some(updated_ms);
+        f.in_flight = true;
+        out.push(Effect::DispatchCall(Body::Ticket { id }));
+    }
+
     /// What a call to Dispatch's port came back with: an error marks
     /// the runner gone, a failure is a notice, and an answer lands on
     /// the status it belongs to.
     fn dispatch_replied(&mut self, body: Body, result: Result<Reply, String>, now: Clock) {
+        let failed = result.is_err();
+        match &body {
+            Body::Events { ticket, .. } => {
+                if let Some(e) = self.dispatch.events.get_mut(ticket) {
+                    e.in_flight = false;
+                    if failed {
+                        e.asked_at = None;
+                    }
+                }
+            }
+            Body::Ticket { id } => {
+                if let Some(f) = self.dispatch.details.get_mut(id) {
+                    f.in_flight = false;
+                    if failed {
+                        f.asked_at = None;
+                    }
+                }
+            }
+            Body::Artifact { path, .. } => {
+                if let Some(r) = self.dispatch.artifact_reads.get_mut(path) {
+                    r.in_flight = false;
+                    if failed {
+                        r.asked_at = None;
+                    }
+                }
+            }
+            _ => {}
+        }
         match (body, result) {
+            (Body::Events { ticket, .. }, Ok(Reply::Events(v))) => {
+                let e = self.dispatch.events.entry(ticket).or_default();
+                e.events.retain(|x| !v.withdrawn.contains(&x.seq));
+                e.events.extend(v.events);
+                e.last = v.last;
+            }
+            // A runner older than the events read answers it as a bad
+            // request; the page falls back to the record, quietly.
+            (Body::Events { ticket, .. }, Ok(Reply::Failed { .. })) => {
+                self.dispatch.events.entry(ticket).or_default().unavailable = true;
+            }
+            (Body::Ticket { id }, Ok(Reply::Ticket(t))) => {
+                self.dispatch.details.entry(id).or_default().view = Some(t);
+            }
+            // The page says why under the artifact's name; a notes file
+            // not written yet is no reason for a notice.
+            (Body::Artifact { path, .. }, Ok(Reply::Failed { reason })) => {
+                self.dispatch.artifact_reads.entry(path).or_default().failed = Some(reason);
+            }
             (_, Err(e)) => {
                 self.dispatch.connected = false;
                 self.error(format!("Dispatch did not answer: {e}"));
             }
             (_, Ok(Reply::Failed { reason })) => self.error(format!("Dispatch: {reason}")),
             (Body::Artifact { path, .. }, Ok(Reply::Artifact { text })) => {
+                self.dispatch.artifact_reads.remove(&path);
                 self.dispatch.artifacts.insert(path, text);
             }
             (Body::Worktrees { .. }, Ok(Reply::Worktrees(v))) => {

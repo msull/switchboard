@@ -110,7 +110,7 @@ fn dispatch_window(cx: &mut DrawCtx<'_>, ctx: &Context) {
                     .inner_margin(super::page_margin(&View::Dispatch)),
             )
             .show(ctx, |ui| match cx.state.dispatch_window_ticket.clone() {
-                Some(id) => super::dispatch::ticket(cx, ui, &id),
+                Some(id) => super::ticket::ticket(cx, ui, &id),
                 None => super::dispatch::show(cx, ui),
             });
         cx.state.surface = super::Surface::Main;

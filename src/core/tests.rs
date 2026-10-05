@@ -6309,9 +6309,10 @@ mod control {
 
 mod dispatch_page {
     use super::*;
-    use crate::core::dispatch::{CONSOLE_NAME, CONSOLE_SPACE};
+    use crate::core::dispatch::{ArtifactRead, CONSOLE_NAME, CONSOLE_SPACE};
     use crate::ports::dispatch::{
-        AttemptView, Body, DecisionView, ProjectView, Reply, Status, TicketView, WorktreesView,
+        AttemptView, Body, DecisionView, EventView, EventsView, ProjectView, Reply, Status,
+        TicketView, WorktreesView,
     };
 
     fn status(session: Option<RecordId>) -> Status {
@@ -7091,5 +7092,448 @@ mod dispatch_page {
             Clock::at(8),
         );
         assert!(e.is_empty(), "a closed window's frame is not kept");
+    }
+
+    fn logged(seq: u64, stage: &str, kind: &str, text: &str) -> EventView {
+        EventView {
+            seq,
+            at_ms: seq * 1_000,
+            stage: stage.into(),
+            kind: kind.into(),
+            text: text.into(),
+            ..EventView::default()
+        }
+    }
+
+    fn read_events(updated_ms: u64) -> AppAction {
+        AppAction::DispatchReadEvents {
+            ticket: "t1".into(),
+            updated_ms,
+        }
+    }
+
+    fn events_replied(since: u64, reply: Reply) -> AppAction {
+        AppAction::DispatchReplied {
+            body: Body::Events {
+                ticket: "t1".into(),
+                since,
+            },
+            result: Ok(reply),
+        }
+    }
+
+    fn connected() -> AppCore {
+        let (mut core, _) = loaded(vec![], vec![]);
+        core.dispatch(AppAction::DispatchStatus(Some(status(None))), Clock::at(1));
+        core
+    }
+
+    /// The page asks for a ticket's events once per `updated_ms`, never
+    /// twice at once, and each reply moves the cursor and drops what the
+    /// runner withdrew.
+    #[test]
+    fn a_tickets_events_are_read_once_per_change_and_merged_after_the_cursor() {
+        let mut core = connected();
+        assert!(core.events_read_due("t1", 50) && core.ticket_read_due("t1", 50));
+        let e = core.dispatch(read_events(50), Clock::at(2));
+        assert_eq!(
+            e,
+            vec![Effect::DispatchCall(Body::Events {
+                ticket: "t1".into(),
+                since: 0
+            })]
+        );
+        assert!(
+            core.dispatch(read_events(60), Clock::at(3)).is_empty(),
+            "in flight"
+        );
+        core.dispatch(
+            events_replied(
+                0,
+                Reply::Events(EventsView {
+                    events: vec![
+                        logged(3, "investigate", "attempt-started", "a"),
+                        logged(5, "investigate", "attempt-ended", "b"),
+                    ],
+                    last: 7,
+                    withdrawn: Vec::new(),
+                }),
+            ),
+            Clock::at(4),
+        );
+        assert!(
+            core.dispatch(read_events(50), Clock::at(5)).is_empty(),
+            "asked at 50"
+        );
+        assert!(!core.events_read_due("t1", 50));
+        let e = core.dispatch(read_events(60), Clock::at(6));
+        assert_eq!(
+            e,
+            vec![Effect::DispatchCall(Body::Events {
+                ticket: "t1".into(),
+                since: 7
+            })]
+        );
+        core.dispatch(
+            events_replied(
+                7,
+                Reply::Events(EventsView {
+                    events: vec![logged(8, "lanes", "decision", "c")],
+                    last: 9,
+                    withdrawn: vec![5],
+                }),
+            ),
+            Clock::at(7),
+        );
+        let cached = &core.dispatch_state().events["t1"];
+        assert_eq!(
+            cached.events.iter().map(|e| e.seq).collect::<Vec<_>>(),
+            vec![3, 8]
+        );
+        assert_eq!(cached.last, 9);
+        assert!(core.notices().is_empty());
+    }
+
+    /// A runner that does not know the events read answers it as a bad
+    /// request: no notice, and no asking again until a runner comes back.
+    #[test]
+    fn an_older_runner_without_events_is_not_asked_again_until_it_reconnects() {
+        let mut core = connected();
+        core.dispatch(read_events(50), Clock::at(2));
+        core.dispatch(
+            events_replied(0, Reply::failed("bad request: unknown variant `events`")),
+            Clock::at(3),
+        );
+        assert!(core.notices().is_empty(), "{:?}", core.notices());
+        assert!(core.dispatch_state().connected);
+        assert!(core.dispatch(read_events(60), Clock::at(4)).is_empty());
+        core.dispatch(AppAction::DispatchStatus(None), Clock::at(5));
+        core.dispatch(AppAction::DispatchStatus(Some(status(None))), Clock::at(6));
+        assert_eq!(
+            core.dispatch(read_events(60), Clock::at(7)).len(),
+            1,
+            "a runner back may be a newer build"
+        );
+        // A call that never reached the runner asks again once it is back.
+        core.dispatch(
+            AppAction::DispatchReplied {
+                body: Body::Events {
+                    ticket: "t1".into(),
+                    since: 0,
+                },
+                result: Err("connection reset".into()),
+            },
+            Clock::at(8),
+        );
+        assert!(!core.dispatch_state().connected);
+        core.dispatch(AppAction::DispatchStatus(Some(status(None))), Clock::at(9));
+        assert_eq!(core.dispatch(read_events(60), Clock::at(10)).len(), 1);
+    }
+
+    #[test]
+    fn a_full_ticket_is_read_once_per_change_and_kept() {
+        let mut core = connected();
+        let read = |updated_ms| AppAction::DispatchReadTicket {
+            id: "t1".into(),
+            updated_ms,
+        };
+        assert_eq!(
+            core.dispatch(read(50), Clock::at(2)),
+            vec![Effect::DispatchCall(Body::Ticket { id: "t1".into() })]
+        );
+        assert!(core.dispatch(read(50), Clock::at(3)).is_empty());
+        let mut full = status(None).tickets.remove(0);
+        full.paths.plan = Some("/dispatch/t1/plan.md".into());
+        core.dispatch(
+            AppAction::DispatchReplied {
+                body: Body::Ticket { id: "t1".into() },
+                result: Ok(Reply::Ticket(full.clone())),
+            },
+            Clock::at(4),
+        );
+        assert_eq!(core.ticket_details("t1"), Some(&full));
+        assert!(core.dispatch(read(50), Clock::at(5)).is_empty());
+        assert_eq!(core.dispatch(read(51), Clock::at(6)).len(), 1);
+        core.dispatch(AppAction::DispatchStatus(None), Clock::at(7));
+        assert!(!core.events_read_due("t1", 52) && !core.ticket_read_due("t1", 52));
+        assert_eq!(core.ticket_details("t1"), Some(&full), "kept while gone");
+    }
+
+    /// The timeline is the event log's, newest first in stage groups,
+    /// with an attempt's duration joined from the record; without
+    /// events it is made from the record's attempts, decisions and
+    /// restarts.
+    #[test]
+    fn a_tickets_timeline_reads_the_log_else_the_record() {
+        let mut core = connected();
+        let mut t = status(None).tickets.remove(0);
+        t.attempts[0].started_ms = 1_000;
+        t.attempts[0].ended_ms = Some(4_000);
+        t.decisions[0].made_ms = 5_000;
+        t.decisions.push(DecisionView {
+            id: "d0".into(),
+            ticket: "t1".into(),
+            stage: "investigate".into(),
+            name: "rerun".into(),
+            question: "Run it again?".into(),
+            state: "acted".into(),
+            answer: Some("no".into()),
+            answered_by: Some("user".into()),
+            answered_ms: Some(4_500),
+            made_ms: 4_200,
+            ..DecisionView::default()
+        });
+        t.restarts.push(dispatch_control::RestartView {
+            at_ms: 6_000,
+            from: "lanes".into(),
+            to: "lanes".into(),
+            ..Default::default()
+        });
+        let shape = |groups: Vec<crate::core::dispatch::TimelineGroup>| {
+            groups
+                .into_iter()
+                .map(|g| {
+                    (
+                        g.stage,
+                        g.rows
+                            .into_iter()
+                            .map(|r| (r.kind, r.duration_ms))
+                            .collect::<Vec<_>>(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        let s = |x: &str| x.to_owned();
+        assert_eq!(
+            shape(core.ticket_timeline(&t).groups),
+            vec![
+                (
+                    s("lanes"),
+                    vec![(s("restarted"), None), (s("decision"), None)]
+                ),
+                (
+                    s("investigate"),
+                    vec![
+                        (s("answered"), None),
+                        (s("decision"), None),
+                        (s("attempt-ended"), Some(3_000)),
+                        (s("attempt-started"), None),
+                    ]
+                ),
+            ]
+        );
+        let answered = &core.ticket_timeline(&t).groups[1].rows[0];
+        assert_eq!(answered.text, "rerun by user: no");
+        assert_eq!(answered.decision.as_deref(), Some("d0"));
+        core.dispatch(read_events(50), Clock::at(2));
+        let mut ended = logged(2, "investigate", "attempt-ended", "investigate/1 complete");
+        ended.attempt = Some(("investigate".into(), 1));
+        core.dispatch(
+            events_replied(
+                0,
+                Reply::Events(EventsView {
+                    events: vec![
+                        logged(1, "investigate", "attempt-started", "started"),
+                        ended,
+                        logged(3, "lanes", "stage", "to lanes"),
+                        logged(4, "lanes", "decision", "Which lanes?"),
+                    ],
+                    last: 4,
+                    withdrawn: Vec::new(),
+                }),
+            ),
+            Clock::at(3),
+        );
+        assert_eq!(
+            shape(core.ticket_timeline(&t).groups),
+            vec![
+                (s("lanes"), vec![(s("decision"), None), (s("stage"), None)]),
+                (
+                    s("investigate"),
+                    vec![
+                        (s("attempt-ended"), Some(3_000)),
+                        (s("attempt-started"), None)
+                    ]
+                ),
+            ]
+        );
+    }
+
+    /// A ticket in progress when the log began keeps its record's
+    /// earlier history: rows before the first event are merged in, less
+    /// those the log has for the same attempt or decision.
+    #[test]
+    fn a_timeline_keeps_the_records_rows_from_before_the_log() {
+        let mut core = connected();
+        let mut t = status(None).tickets.remove(0);
+        t.attempts[0].started_ms = 500;
+        t.attempts[0].ended_ms = Some(2_900);
+        t.decisions[0].made_ms = 4_500;
+        t.decisions.push(DecisionView {
+            id: "d0".into(),
+            ticket: "t1".into(),
+            stage: "investigate".into(),
+            name: "rerun".into(),
+            question: "Run it again?".into(),
+            state: "acted".into(),
+            answer: Some("yes".into()),
+            answered_by: Some("user".into()),
+            answered_ms: Some(700),
+            made_ms: 600,
+            ..DecisionView::default()
+        });
+        core.dispatch(read_events(50), Clock::at(2));
+        let mut ended = logged(3, "investigate", "attempt-ended", "investigate/1 complete");
+        ended.attempt = Some(("investigate".into(), 1));
+        core.dispatch(
+            events_replied(
+                0,
+                Reply::Events(EventsView {
+                    events: vec![ended, logged(4, "lanes", "stage", "to lanes")],
+                    last: 4,
+                    withdrawn: Vec::new(),
+                }),
+            ),
+            Clock::at(3),
+        );
+        let rows: Vec<(String, u64)> = core
+            .ticket_timeline(&t)
+            .groups
+            .into_iter()
+            .flat_map(|g| g.rows)
+            .map(|r| (r.kind, r.at_ms))
+            .collect();
+        let s = |x: &str| x.to_owned();
+        assert_eq!(
+            rows,
+            vec![
+                (s("stage"), 4_000),
+                // The record's end at 2 900 is the log's at 3 000.
+                (s("attempt-ended"), 3_000),
+                (s("answered"), 700),
+                (s("decision"), 600),
+                (s("attempt-started"), 500),
+            ]
+        );
+    }
+
+    /// Each attempt's card goes under its newest end row, else its start
+    /// row while it runs; attempts no row carries are the earlier ones.
+    #[test]
+    fn a_timeline_places_each_attempts_card_once() {
+        let mut core = connected();
+        let mut t = status(None).tickets.remove(0);
+        t.attempts[0].started_ms = 1_000;
+        t.attempts[0].ended_ms = Some(2_000);
+        t.decisions[0].made_ms = 3_500;
+        t.attempts.push(AttemptView {
+            stage: "lanes".into(),
+            n: 1,
+            state: "running".into(),
+            ..AttemptView::default()
+        });
+        t.attempts.push(AttemptView {
+            stage: "lanes".into(),
+            n: 2,
+            state: "running".into(),
+            started_ms: 3_500,
+            ..AttemptView::default()
+        });
+        core.dispatch(read_events(50), Clock::at(2));
+        let of = |seq, kind: &str, stage: &str, n| {
+            let mut e = logged(seq, stage, kind, "");
+            e.attempt = Some((stage.to_owned(), n));
+            e
+        };
+        core.dispatch(
+            events_replied(
+                0,
+                Reply::Events(EventsView {
+                    events: vec![
+                        of(1, "attempt-started", "investigate", 1),
+                        of(2, "attempt-ended", "investigate", 1),
+                        of(3, "attempt-started", "lanes", 1),
+                    ],
+                    last: 3,
+                    withdrawn: Vec::new(),
+                }),
+            ),
+            Clock::at(3),
+        );
+        let timeline = core.ticket_timeline(&t);
+        let carried: Vec<(String, Option<(String, u32)>)> = timeline
+            .groups
+            .into_iter()
+            .flat_map(|g| g.rows)
+            .map(|r| (r.kind, r.details))
+            .collect();
+        let s = |x: &str| x.to_owned();
+        assert_eq!(
+            carried,
+            vec![
+                (s("attempt-started"), Some((s("lanes"), 1))),
+                (s("attempt-ended"), Some((s("investigate"), 1))),
+                (s("attempt-started"), None),
+            ]
+        );
+        assert_eq!(timeline.earlier, vec![(s("lanes"), 2)]);
+    }
+
+    /// A failed artifact read is said on the page, not as a notice, and
+    /// asked again once the ticket changes or on a click; a call that
+    /// never reached the runner is asked again when it is back.
+    #[test]
+    fn a_failed_artifact_read_is_asked_again_when_the_ticket_changes() {
+        let mut core = connected();
+        let path = std::path::PathBuf::from("/dispatch/t1/notes.md");
+        let read = AppAction::DispatchReadArtifact {
+            ticket: "t1".into(),
+            path: path.clone(),
+        };
+        let replied = |result| AppAction::DispatchReplied {
+            body: Body::Artifact {
+                ticket: "t1".into(),
+                path: path.clone(),
+            },
+            result,
+        };
+        let t = |updated_ms| TicketView {
+            updated_ms,
+            ..status(None).tickets.remove(0)
+        };
+        assert!(core.artifact_read_due(&t(0), &path));
+        assert_eq!(core.dispatch(read.clone(), Clock::at(2)).len(), 1);
+        assert!(!core.artifact_read_due(&t(0), &path), "in flight");
+        assert!(core.dispatch(read.clone(), Clock::at(3)).is_empty());
+        core.dispatch(
+            replied(Ok(Reply::failed(
+                "read /dispatch/t1/notes.md: No such file or directory (os error 2)",
+            ))),
+            Clock::at(4),
+        );
+        assert!(core.notices().is_empty(), "{:?}", core.notices());
+        assert!(core.artifact_read(&path).is_some_and(ArtifactRead::missing));
+        assert!(!core.artifact_read_due(&t(0), &path), "asked at 0");
+        assert!(core.artifact_read_due(&t(10), &path), "the ticket changed");
+        assert_eq!(
+            core.dispatch(read.clone(), Clock::at(5)).len(),
+            1,
+            "a click"
+        );
+        core.dispatch(replied(Err("connection reset".into())), Clock::at(6));
+        core.dispatch(AppAction::DispatchStatus(Some(status(None))), Clock::at(7));
+        assert!(
+            core.artifact_read_due(&t(0), &path),
+            "never reached the runner"
+        );
+        core.dispatch(read, Clock::at(8));
+        core.dispatch(
+            replied(Ok(Reply::Artifact {
+                text: "# notes".into(),
+            })),
+            Clock::at(9),
+        );
+        assert!(core.artifact_read(&path).is_none());
+        assert!(!core.artifact_read_due(&t(10), &path), "read");
     }
 }

@@ -516,6 +516,19 @@ pub enum AppAction {
         ticket: String,
         path: PathBuf,
     },
+    /// Read a ticket's events after the cached cursor, once per
+    /// `updated_ms` the page sees: a ticket that has not changed is not
+    /// asked again.
+    DispatchReadEvents {
+        ticket: String,
+        updated_ms: u64,
+    },
+    /// Read one ticket in full (its paths, its lanes' clones), once per
+    /// `updated_ms` the page sees.
+    DispatchReadTicket {
+        id: String,
+        updated_ms: u64,
+    },
     /// What a `DispatchCall` came back with.
     DispatchReplied {
         body: crate::ports::dispatch::Body,
@@ -996,6 +1009,8 @@ impl AppCore {
             | AppAction::ShowTicket(_)
             | AppAction::DispatchDecide { .. }
             | AppAction::DispatchReadArtifact { .. }
+            | AppAction::DispatchReadEvents { .. }
+            | AppAction::DispatchReadTicket { .. }
             | AppAction::DispatchResume(_)
             | AppAction::DispatchClose(_)
             | AppAction::DispatchWorktrees { .. }

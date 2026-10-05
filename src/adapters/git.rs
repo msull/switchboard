@@ -7,6 +7,8 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use crate::ports::changes::{BranchChanges, Changes, Commit, FileStat};
+
 /// How a path differs from the index and HEAD.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Change {
@@ -144,6 +146,75 @@ fn git(repo: &Path, args: &[&str]) -> Option<String> {
         .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
+/// A branch's changes over its base, through `git log` and
+/// `git diff --numstat`.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct GitChanges;
+
+impl BranchChanges for GitChanges {
+    fn read(&self, dir: &Path, base: &str, head: &str) -> Result<Changes, String> {
+        let log = git_or_why(
+            dir,
+            &[
+                "log",
+                "--format=%H%x1f%s%x1f%ct",
+                &format!("{base}..{head}"),
+            ],
+        )?;
+        let numstat = git_or_why(dir, &["diff", "--numstat", &format!("{base}...{head}")])?;
+        Ok(Changes {
+            commits: parse_log(&log),
+            files: parse_numstat(&numstat),
+        })
+    }
+}
+
+/// `git` in `repo`, with its own complaint when it fails.
+fn git_or_why(repo: &Path, args: &[&str]) -> Result<String, String> {
+    let out = without_git_env(&mut Command::new("git"))
+        .arg("-C")
+        .arg(repo)
+        .args(args)
+        .env("GIT_OPTIONAL_LOCKS", "0")
+        .output()
+        .map_err(|e| format!("git: {e}"))?;
+    if out.status.success() {
+        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    } else {
+        Err(String::from_utf8_lossy(&out.stderr).trim().to_owned())
+    }
+}
+
+/// `%H%x1f%s%x1f%ct` lines: sha, subject, committer time in seconds.
+fn parse_log(out: &str) -> Vec<Commit> {
+    out.lines()
+        .filter_map(|line| {
+            let mut f = line.split('\x1f');
+            let (sha, subject, at) = (f.next()?, f.next()?, f.next()?);
+            Some(Commit {
+                sha: sha.to_owned(),
+                subject: subject.to_owned(),
+                at_ms: at.trim().parse::<u64>().unwrap_or(0) * 1000,
+            })
+        })
+        .collect()
+}
+
+/// `added<TAB>removed<TAB>path` lines; `-` (a binary file) reads as 0.
+fn parse_numstat(out: &str) -> Vec<FileStat> {
+    out.lines()
+        .filter_map(|line| {
+            let mut f = line.splitn(3, '\t');
+            let (added, removed, path) = (f.next()?, f.next()?, f.next()?);
+            Some(FileStat {
+                path: path.to_owned(),
+                added: added.parse().unwrap_or(0),
+                removed: removed.parse().unwrap_or(0),
+            })
+        })
+        .collect()
+}
+
 fn branch_of(repo: &Path) -> Option<String> {
     let name = git(repo, &["branch", "--show-current"])?;
     let name = name.trim();
@@ -219,6 +290,47 @@ mod tests {
                 ("both.rs".into(), Change::Conflict),
             ]
         );
+    }
+
+    #[test]
+    fn reads_a_branchs_commits_and_files_over_its_base() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let commit = "git -c user.name=t -c user.email=t@t commit -q";
+        sh(
+            root,
+            &format!("git init -q -b main . && {commit} --allow-empty -m init"),
+        );
+        std::fs::write(root.join("a.txt"), "one\ntwo\n").unwrap();
+        sh(
+            root,
+            &format!("git add . && {commit} -m base && git branch base"),
+        );
+        sh(root, "git checkout -q -b work");
+        std::fs::write(root.join("a.txt"), "one\nthree\nfour\n").unwrap();
+        sh(root, &format!("git add . && {commit} -m 'first change'"));
+        std::fs::write(root.join("b.txt"), "new\n").unwrap();
+        sh(root, &format!("git add . && {commit} -m 'second change'"));
+        let c = GitChanges.read(root, "base", "work").unwrap();
+        let subjects: Vec<&str> = c.commits.iter().map(|c| c.subject.as_str()).collect();
+        assert_eq!(subjects, vec!["second change", "first change"]);
+        assert!(c.commits.iter().all(|c| c.sha.len() == 40 && c.at_ms > 0));
+        assert_eq!(
+            c.files,
+            vec![
+                FileStat {
+                    path: "a.txt".into(),
+                    added: 2,
+                    removed: 1
+                },
+                FileStat {
+                    path: "b.txt".into(),
+                    added: 1,
+                    removed: 0
+                },
+            ]
+        );
+        assert!(GitChanges.read(root, "nope", "work").is_err());
     }
 
     #[test]

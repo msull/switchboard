@@ -7,6 +7,7 @@
 #![allow(clippy::assert_is_empty)]
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use egui::accesskit::Role;
@@ -14,7 +15,8 @@ use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;
 use switchboard::SwitchboardApp;
 use switchboard::adapters::fakes::{
-    self, FakeDispatch, FakeHost, FakeOpener, FakeSecrets, FakeTranscripts, MemoryStore,
+    self, FakeChanges, FakeDispatch, FakeHost, FakeOpener, FakeSecrets, FakeTranscripts,
+    MemoryStore,
 };
 use switchboard::app::Services;
 use switchboard::core::{
@@ -23,6 +25,7 @@ use switchboard::core::{
     Round, RunState, SessionKind, SessionRecord, SideTab, SpaceId, ThemeMode, Verdict, View,
     VoiceSettings, WorkflowId, WorkflowRun, Workspace, round_paths,
 };
+use switchboard::ports::changes::{Changes, Commit, FileStat};
 use switchboard::ports::host::{HostId, HostStatus, Liveness};
 use switchboard::ports::store::Store;
 use switchboard::ports::transcript::{
@@ -176,7 +179,11 @@ fn harness_build(
     secrets: FakeSecrets,
     host: FakeHost,
 ) -> (Harness<'static, SwitchboardApp>, Seeded) {
-    let services = fake_services(opener, secrets, host);
+    harness_on(fake_services(opener, secrets, host))
+}
+
+/// A seeded harness on these services.
+fn harness_on(services: Services) -> (Harness<'static, SwitchboardApp>, Seeded) {
     let mut harness = Harness::builder()
         .with_size(egui::vec2(1200.0, 900.0))
         .build_eframe(move |cc| {
@@ -4233,19 +4240,41 @@ fn dispatch_table_filters_sorts_and_resumes() {
 fn ticket_page(
     edit: impl FnOnce(&mut switchboard::ports::dispatch::TicketView),
 ) -> Harness<'static, SwitchboardApp> {
-    let (mut harness, _) = harness();
+    ticket_page_on(FakeDispatch::default(), Changes::default(), edit)
+}
+
+/// `ticket_page` against a runner that answers with the same status,
+/// with `dispatch`'s events and paths, and a branch with `changes`. The
+/// page's first reads and their replies are cleared before a test
+/// looks; it asks again only when the ticket's `updated_ms` changes.
+fn ticket_page_on(
+    mut dispatch: FakeDispatch,
+    changes: Changes,
+    edit: impl FnOnce(&mut switchboard::ports::dispatch::TicketView),
+) -> Harness<'static, SwitchboardApp> {
     let mut status = dispatch_status();
     status.tickets[0].decisions.clear();
     status.tickets[0].tree = Some("/wt/t1".into());
     edit(&mut status.tickets[0]);
+    dispatch.status = Some(status.clone());
+    let services = Services {
+        dispatch: Some(Box::new(dispatch)),
+        changes: Arc::new(FakeChanges { changes }),
+        ..fake_services(
+            FakeOpener::default(),
+            FakeSecrets::default(),
+            FakeHost::default(),
+        )
+    };
+    let (mut harness, _) = harness_on(services);
     harness
         .state_mut()
         .dispatch(AppAction::DispatchStatus(Some(status)));
     harness
         .state_mut()
         .dispatch(AppAction::ShowTicket("t1".into()));
-    harness.state_mut().dispatched.clear();
     harness.run_steps(2);
+    harness.state_mut().dispatched.clear();
     harness
 }
 
@@ -4374,6 +4403,201 @@ fn a_close_dialog_goes_with_its_page() {
     assert!(harness.state().ui_state.confirm_close_ticket.is_none());
 }
 
+fn event(seq: u64, stage: &str, kind: &str, text: &str) -> switchboard::ports::dispatch::EventView {
+    switchboard::ports::dispatch::EventView {
+        seq,
+        at_ms: seq * 60_000,
+        stage: stage.into(),
+        kind: kind.into(),
+        text: text.into(),
+        ..Default::default()
+    }
+}
+
+/// The y of the widget labelled `label`, to compare what is above what.
+fn top_of(harness: &Harness<'static, SwitchboardApp>, label: &str) -> f32 {
+    harness.get_by_label(label).rect().min.y
+}
+
+/// The timeline is the runner's event log, newest first, each run of a
+/// stage under its heading.
+#[test]
+fn the_ticket_timeline_lists_events_newest_first_under_stage_headings() {
+    let dispatch = FakeDispatch {
+        events: vec![
+            event(1, "investigate", "attempt-started", "investigate/1 started"),
+            event(2, "investigate", "attempt-ended", "investigate/1 complete"),
+            event(3, "lanes", "stage", "on to lanes"),
+        ],
+        ..FakeDispatch::default()
+    };
+    let harness = ticket_page_on(dispatch, Changes::default(), |_| {});
+    let rows = [
+        "on to lanes",
+        "investigate/1 complete",
+        "investigate/1 started",
+    ];
+    let tops: Vec<f32> = rows.iter().map(|r| top_of(&harness, r)).collect();
+    assert!(tops.windows(2).all(|w| w[0] < w[1]), "{tops:?}");
+    assert!(top_of(&harness, "LANES") < tops[0]);
+    let investigate = top_of(&harness, "INVESTIGATE");
+    assert!(tops[0] < investigate && investigate < tops[1]);
+}
+
+/// A ticket with a plan, notes and a code review summary on record.
+fn ticket_with_documents() -> (
+    FakeDispatch,
+    impl FnOnce(&mut switchboard::ports::dispatch::TicketView),
+) {
+    use switchboard::ports::dispatch::{AttemptView, PathsView, PlanRoundView};
+    let dispatch = FakeDispatch {
+        paths: PathsView {
+            plan: Some("/dispatch/tickets/t1/plan/1/plan.md".into()),
+            plan_rounds: vec![PlanRoundView {
+                n: 1,
+                feedback: "/dispatch/tickets/t1/plan/1/plan.feedback-1.md".into(),
+                response: None,
+            }],
+            ..PathsView::default()
+        },
+        ..FakeDispatch::default()
+    };
+    let edit = |t: &mut switchboard::ports::dispatch::TicketView| {
+        t.attempts = vec![
+            AttemptView {
+                stage: "investigate".into(),
+                n: 1,
+                context: "root".into(),
+                state: "complete".into(),
+                artifacts: vec![("notes".into(), "/dispatch/tickets/t1/notes.md".into())],
+                ..AttemptView::default()
+            },
+            AttemptView {
+                stage: "review-code".into(),
+                n: 1,
+                context: "repo".into(),
+                kind: "review".into(),
+                state: "complete".into(),
+                artifacts: vec![("summary".into(), "/dispatch/tickets/t1/summary.md".into())],
+                ..AttemptView::default()
+            },
+        ];
+    };
+    (dispatch, edit)
+}
+
+/// A tab click changes only the page: Timeline, Issue and Changes send
+/// nothing, and Plan, Notes and Review only read the documents they
+/// draw.
+#[test]
+fn a_ticket_tab_click_dispatches_nothing_but_the_reads_it_draws() {
+    let (dispatch, edit) = ticket_with_documents();
+    let mut harness = ticket_page_on(dispatch, Changes::default(), edit);
+    for tab in ["Issue", "Changes", "Timeline"] {
+        click(&mut harness, tab);
+        assert!(
+            actions(&harness).is_empty(),
+            "{tab}: {:?}",
+            actions(&harness)
+        );
+    }
+    for tab in ["Plan", "Notes", "Review"] {
+        harness.state_mut().dispatched.clear();
+        click(&mut harness, tab);
+        let sent = actions(&harness);
+        assert!(
+            sent.iter()
+                .any(|a| matches!(a, AppAction::DispatchReadArtifact { .. })),
+            "{tab}: {sent:?}"
+        );
+        assert!(
+            sent.iter().all(|a| matches!(
+                a,
+                AppAction::DispatchReadArtifact { .. } | AppAction::DispatchReplied { .. }
+            )),
+            "{tab}: {sent:?}"
+        );
+    }
+}
+
+/// The plan review's rounds are listed under the plan, folded.
+#[test]
+fn the_plan_tab_lists_its_review_rounds() {
+    let (dispatch, edit) = ticket_with_documents();
+    let mut harness = ticket_page_on(dispatch, Changes::default(), edit);
+    click(&mut harness, "Plan");
+    harness.get_by_label("Round 1");
+    harness.get_by_label("/dispatch/tickets/t1/plan/1/plan.md");
+}
+
+/// A decision pending on the ticket stays above the tabs, whichever is
+/// chosen.
+#[test]
+fn a_pending_decision_is_pinned_on_every_tab() {
+    let mut harness = ticket_page(|t| t.decisions = dispatch_status().tickets[0].decisions.clone());
+    for tab in ["Timeline", "Issue", "Plan", "Notes", "Review", "Changes"] {
+        click(&mut harness, tab);
+        harness.get_by_label("Which lanes does #104 need?");
+    }
+}
+
+/// The Changes tab reads the lane's commits and files over its base
+/// on a thread; a file opens from the lane's tree.
+#[test]
+fn the_changes_tab_lists_the_branchs_commits_and_files() {
+    use switchboard::ports::dispatch::LaneView;
+    let changes = Changes {
+        commits: vec![Commit {
+            sha: "abcdef1234567890".into(),
+            subject: "Add the importer".into(),
+            at_ms: 0,
+        }],
+        files: vec![FileStat {
+            path: "src/import.rs".into(),
+            added: 3,
+            removed: 1,
+        }],
+    };
+    let mut harness = ticket_page_on(FakeDispatch::default(), changes, |t| {
+        t.lanes = vec![LaneView {
+            name: "repo".into(),
+            worktree: "/wt/t1".into(),
+            branch: "dispatch/104-one-file".into(),
+            base_sha: Some("base0000".into()),
+            head: Some("head1111".into()),
+            ..LaneView::default()
+        }];
+    });
+    click(&mut harness, "Changes");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while harness.query_by_label("Add the importer").is_none() {
+        assert!(Instant::now() < deadline, "the read never arrived");
+        std::thread::sleep(Duration::from_millis(10));
+        harness.run_steps(1);
+    }
+    harness.get_by_label("abcdef12");
+    harness.get_by_label("+3 −1");
+    click(&mut harness, "Open");
+    assert!(actions(&harness).contains(&AppAction::OpenDocument("/wt/t1/src/import.rs".into())));
+    click(&mut harness, "Reveal");
+    assert!(actions(&harness).contains(&AppAction::RevealDocument("/wt/t1/src/import.rs".into())));
+}
+
+/// The `ticket-tab` script line opens the ticket's page on that tab,
+/// though nothing had asked Dispatch for its status yet.
+#[test]
+fn the_ticket_tab_script_line_opens_the_tab() {
+    let mut status = dispatch_status();
+    status.tickets[0].decisions.clear();
+    let harness = scripted_harness(status, false, "ticket-tab t1 changes");
+    assert_eq!(harness.state().core().view(), View::Ticket("t1".into()));
+    assert_eq!(
+        harness.state().ui_state.dispatch_ticket_tabs.get("t1"),
+        Some(&switchboard::ui::ticket::TicketTab::Changes)
+    );
+    harness.get_by_label("No branch.");
+}
+
 /// A harness whose app ran `script` at startup, before any frame, as
 /// `SWITCHBOARD_SCRIPT` does, against a Dispatch that answers from the
 /// port's thread like the real socket; with `window`, the Dispatch
@@ -4387,6 +4611,7 @@ fn scripted_harness(
         dispatch: Some(Box::new(FakeDispatch {
             status: Some(status),
             blocks: true,
+            ..Default::default()
         })),
         ..fakes::services()
     };
@@ -4722,6 +4947,9 @@ fn ticket_page_shows_how_a_review_rewrote_its_commits() {
 fn ticket_page_shows_what_became_of_a_stale_folded_message() {
     use switchboard::ports::dispatch::{AttemptView, RewriteView};
     let (mut harness, ids) = harness();
+    // Six attempts on one timeline: tall enough that the one clicked is
+    // on screen.
+    harness.set_size(egui::vec2(1200.0, 1600.0));
     let mut status = dispatch_status();
     let attempt = |n: u32, state: &str, message: RewriteView| AttemptView {
         stage: "review-code".into(),

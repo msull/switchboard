@@ -64,6 +64,51 @@ fn age(then: SystemTime, now: SystemTime) -> Option<String> {
     }
 }
 
+/// How long ago `then_ms` was at `now_ms`, in words: "just now" under
+/// a minute (and for a time in the future), "N min ago" under an hour,
+/// "N h M min ago" under a day ("N h ago" on the hour), then "N d ago".
+/// Empty for zero, which is how a view says it has no time.
+///
+/// Dispatch's pages have their own form rather than `ago_text`'s: their
+/// times are Dispatch's epoch milliseconds, and a timeline lists many
+/// rows within the same hour, which "1h ago" would make look alike. The
+/// ticket table uses it too, so a ticket reads the same in the list and
+/// on its page.
+#[must_use]
+pub fn ago_ms(then_ms: u64, now_ms: u64) -> String {
+    if then_ms == 0 {
+        return String::new();
+    }
+    let mins = now_ms.saturating_sub(then_ms) / 60_000;
+    match mins {
+        0 => "just now".to_owned(),
+        m if m < 60 => format!("{m} min ago"),
+        m if m < 24 * 60 => match m % 60 {
+            0 => format!("{} h ago", m / 60),
+            rest => format!("{} h {rest} min ago", m / 60),
+        },
+        m => format!("{} d ago", m / (24 * 60)),
+    }
+}
+
+/// A millisecond timestamp as local date and time, for the hover on a
+/// relative time.
+#[must_use]
+pub fn at_local(ms: u64) -> String {
+    let t = SystemTime::UNIX_EPOCH + std::time::Duration::from_millis(ms);
+    chrono::DateTime::<chrono::Local>::from(t)
+        .format("%Y-%m-%d %H:%M:%S")
+        .to_string()
+}
+
+/// Now, in milliseconds since the epoch: the page's clock for `ago_ms`.
+#[must_use]
+pub fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
+}
+
 /// Lay `count` cells out in a grid whose columns are as many
 /// `MIN_CARD_WIDTH` cards as fit the width, 14 px apart, every cell
 /// `height` tall. `cell` draws cell `i`.
@@ -407,4 +452,24 @@ fn last_line(text: &str) -> String {
         .unwrap_or("")
         .trim()
         .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ago_ms;
+
+    #[test]
+    fn a_relative_time_reads_in_its_largest_units() {
+        let now = 10_000_000_000;
+        let ago = |secs: u64| ago_ms(now - secs * 1000, now);
+        assert_eq!(ago(59), "just now");
+        assert_eq!(ago(60), "1 min ago");
+        assert_eq!(ago(59 * 60), "59 min ago");
+        assert_eq!(ago(3600), "1 h ago");
+        assert_eq!(ago(2 * 3600 + 14 * 60), "2 h 14 min ago");
+        assert_eq!(ago(24 * 3600), "1 d ago");
+        assert_eq!(ago(2 * 24 * 3600), "2 d ago");
+        assert_eq!(ago_ms(now + 5_000, now), "just now", "a clock ahead");
+        assert_eq!(ago_ms(0, now), "");
+    }
 }

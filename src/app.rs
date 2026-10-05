@@ -60,6 +60,10 @@ pub struct Services {
     pub secrets: Box<dyn SecretStore>,
     pub project_config: Box<dyn ProjectConfigReader>,
     pub round_files: Box<dyn RoundFiles>,
+    /// A branch's commits and files over its base, for the ticket page.
+    /// An `Arc` rather than a `Box`: the page hands a clone to the thread
+    /// that reads git while `Services` stays borrowed by the frame.
+    pub changes: std::sync::Arc<dyn crate::ports::changes::BranchChanges>,
     pub artifacts: Box<dyn ArtifactFinder>,
     /// The hand controller (a nunchuk over serial); a fake in tests.
     pub controller: Box<dyn Controller>,

@@ -1,20 +1,17 @@
-//! The Dispatch pages: every ticket with what waits on the user and a
-//! console for `dispatch` commands, and one ticket in full. Everything
-//! shown came through Dispatch's port as a view; a button is an action
-//! the core turns into one call.
+//! The Dispatch page: every ticket with what waits on the user and a
+//! console for `dispatch` commands; one ticket in full is `ticket.rs`.
+//! Everything shown came through Dispatch's port as a view; a button is
+//! an action the core turns into one call.
 
 use std::path::PathBuf;
 
 use egui::{RichText, Ui};
 use egui_extras::{Column, TableBuilder};
 
-use super::dialogs::{dialog, dialog_actions};
-use super::{DrawCtx, GAP, markdown, theme};
-use crate::core::dispatch::{close_offered, parked, ticket_source, ticket_stage};
-use crate::core::{AppAction, RecordId, TicketOnly, TicketSort, View, WaitingAgent};
-use crate::ports::dispatch::{
-    AttemptView, DecisionView, ProjectView, RewriteView, TicketView, nudged,
-};
+use super::{DrawCtx, GAP, theme};
+use crate::core::dispatch::{parked, ticket_source, ticket_stage};
+use crate::core::{AppAction, TicketOnly, TicketSort, View, WaitingAgent};
+use crate::ports::dispatch::{DecisionView, ProjectView, TicketView};
 
 /// The console pane's height on the overview.
 const CONSOLE_HEIGHT: f32 = 280.0;
@@ -293,6 +290,7 @@ fn ticket_table(cx: &mut DrawCtx<'_>, ui: &mut Ui) {
     let mut listing = cx.state.dispatch_listing.clone();
     listing.project.clone_from(&cx.state.dispatch_project);
     let rows = core.tickets_listed(&listing);
+    let now = super::cards::now_ms();
     if rows.is_empty() {
         ui.label(theme::meta_text(ui, "No tickets match."));
         return;
@@ -355,7 +353,13 @@ fn ticket_table(cx: &mut DrawCtx<'_>, ui: &mut Ui) {
                         .on_hover_text(standing);
                     });
                     row.col(|ui| {
-                        ui.label(theme::meta_text(ui, since(t.updated_ms)));
+                        let label = ui.label(theme::meta_text(
+                            ui,
+                            super::cards::ago_ms(t.updated_ms, now),
+                        ));
+                        if t.updated_ms > 0 {
+                            label.on_hover_text(super::cards::at_local(t.updated_ms));
+                        }
                     });
                     row.col(|ui| {
                         ui.spacing_mut().item_spacing.x = 4.0;
@@ -376,14 +380,6 @@ fn ticket_table(cx: &mut DrawCtx<'_>, ui: &mut Ui) {
                 });
             }
         });
-}
-
-/// "3m", "2h", "5d" since a millisecond timestamp; nothing for zero.
-fn since(ms: u64) -> String {
-    if ms == 0 {
-        return String::new();
-    }
-    super::cards::since_text(std::time::UNIX_EPOCH + std::time::Duration::from_millis(ms))
 }
 
 /// Pop out, or raise the window the page already has.
@@ -414,7 +410,7 @@ pub fn elsewhere(cx: &mut DrawCtx<'_>, ui: &mut Ui) {
 
 /// Go to a ticket: the window's own page inside the Dispatch window,
 /// the main view otherwise.
-fn open_ticket(cx: &mut DrawCtx<'_>, id: &str) {
+pub(super) fn open_ticket(cx: &mut DrawCtx<'_>, id: &str) {
     if cx.state.surface == super::Surface::DispatchWindow {
         cx.state.dispatch_window_ticket = Some(id.to_owned());
     } else {
@@ -422,45 +418,17 @@ fn open_ticket(cx: &mut DrawCtx<'_>, id: &str) {
     }
 }
 
-fn go_back(cx: &mut DrawCtx<'_>) {
-    if cx.state.surface == super::Surface::DispatchWindow {
-        cx.state.dispatch_window_ticket = None;
-    } else {
-        cx.dispatch(AppAction::Back);
-    }
-}
-
-fn title_of(t: &TicketView) -> String {
+/// The ticket's number and title, as links and headings name it.
+pub(super) fn title_of(t: &TicketView) -> String {
     match ticket_source(t) {
         source if source.is_empty() => t.title.clone(),
         source => format!("{source} {}", t.title),
     }
 }
 
-/// The stages in order, the current one in the text colour, the rest
-/// muted; done when past the end.
-fn stage_strip(ui: &mut Ui, t: &TicketView) {
-    let p = theme::palette(ui);
-    ui.spacing_mut().item_spacing.x = 3.0;
-    for (i, name) in t.stages.iter().enumerate() {
-        if i > 0 {
-            ui.label(theme::meta_text(ui, "›").color(p.n600));
-        }
-        let color = match i.cmp(&t.stage) {
-            std::cmp::Ordering::Less => p.n600,
-            std::cmp::Ordering::Equal => p.text,
-            std::cmp::Ordering::Greater => p.n700,
-        };
-        ui.label(RichText::new(name).text_style(theme::meta()).color(color));
-    }
-    if t.stage >= t.stages.len() && !t.stages.is_empty() {
-        ui.label(theme::meta_text(ui, "› done"));
-    }
-}
-
 /// A decision with its options as buttons, the recommended one filled.
 /// `with_ticket` names the ticket above the question, for the overview.
-fn decision_card(
+pub(super) fn decision_card(
     cx: &mut DrawCtx<'_>,
     ui: &mut Ui,
     d: &DecisionView,
@@ -695,490 +663,12 @@ fn console(cx: &mut DrawCtx<'_>, ui: &mut Ui) {
     }
 }
 
-/// The close dialog's draft, cleared once a frame before anything is
-/// drawn when the core says it no longer stands
-/// (`AppCore::close_dialog_stands`).
-pub fn drop_stale_close_dialog(cx: &mut DrawCtx<'_>) {
-    let Some(id) = cx.state.confirm_close_ticket.as_deref() else {
-        return;
-    };
-    if !cx
-        .core
-        .close_dialog_stands(id, cx.state.dispatch_window_ticket.as_deref())
-    {
-        cx.state.confirm_close_ticket = None;
-    }
-}
-
-/// One ticket: its stages, lanes, decisions and attempts on the left,
-/// the artifact being read on the right.
-pub fn ticket(cx: &mut DrawCtx<'_>, ui: &mut Ui, id: &str) {
-    let p = theme::palette(ui);
-    ui.spacing_mut().item_spacing = egui::vec2(GAP, GAP);
-    let Some(t) = cx.core.ticket(id).cloned() else {
-        theme::kicker(ui, "Dispatch ticket", p.n600);
-        ui.label("This ticket is not in Dispatch's last status.");
-        if theme::ghost(ui, "Back").clicked() {
-            go_back(cx);
-        }
-        return;
-    };
-    ticket_header(cx, ui, &t);
-    confirm_close(cx, ui.ctx(), &t);
-
-    let left = (ui.available_width() * 0.45).max(320.0);
-    ui.horizontal_top(|ui| {
-        ui.allocate_ui_with_layout(
-            egui::vec2(left, ui.available_height()),
-            egui::Layout::top_down(egui::Align::Min),
-            |ui| {
-                egui::ScrollArea::vertical()
-                    .id_salt("ticket-left")
-                    .show(ui, |ui| {
-                        theme::section(ui, "Decisions");
-                        if t.decisions.is_empty() {
-                            ui.label(theme::meta_text(ui, "None yet."));
-                        }
-                        for d in t.decisions.iter().rev() {
-                            decision_card(cx, ui, d, Some(&t), false);
-                        }
-                        theme::section(ui, "Attempts");
-                        if t.attempts.is_empty() {
-                            ui.label(theme::meta_text(ui, "Nothing has run yet."));
-                        }
-                        for a in t.attempts.iter().rev() {
-                            attempt_row(cx, ui, &t, a);
-                        }
-                    });
-            },
-        );
-        ui.allocate_ui_with_layout(
-            egui::vec2(ui.available_width(), ui.available_height()),
-            egui::Layout::top_down(egui::Align::Min),
-            |ui| artifact_column(cx, ui, &t),
-        );
-    });
-}
-
-/// Kicker, title with the issue link and Back, the meta line and the
-/// lanes.
-fn ticket_header(cx: &mut DrawCtx<'_>, ui: &mut Ui, t: &TicketView) {
-    let p = theme::palette(ui);
-    theme::kicker(ui, "Dispatch ticket", p.n600);
-    ui.horizontal(|ui| {
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if theme::ghost(ui, "Back").clicked() {
-                go_back(cx);
-            }
-            ticket_actions(cx, ui, t);
-            if let Some(url) = &t.url {
-                let what = if t.kind == "pull-request" {
-                    "Pull request"
-                } else {
-                    "Issue"
-                };
-                ui.hyperlink_to(RichText::new(what).color(p.accent_text), url);
-            }
-            ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                ui.add(
-                    egui::Label::new(RichText::new(title_of(t)).text_style(theme::h1())).truncate(),
-                );
-            });
-        });
-    });
-    ui.horizontal_wrapped(|ui| {
-        ui.spacing_mut().item_spacing.x = 6.0;
-        ui.label(theme::strong_text(&t.project));
-        ui.label(theme::meta_text(ui, "·"));
-        stage_strip(ui, t);
-        ui.label(theme::meta_text(ui, "·"));
-        ui.label(
-            RichText::new(cx.core.ticket_standing(t))
-                .text_style(theme::meta())
-                .color(if cx.core.ticket_urgent(t) {
-                    p.accent_2_text
-                } else {
-                    p.n700
-                }),
-        );
-        if let Some(tree) = &t.tree {
-            ui.label(theme::meta_text(ui, "·"));
-            if t.tree_removed {
-                ui.label(theme::meta_text(
-                    ui,
-                    format!("{} · removed", tree.display()),
-                ));
-            } else {
-                ui.label(theme::mono_text(ui, tree.display().to_string()));
-            }
-        }
-        if let Some(why) = &t.trees_kept {
-            ui.label(theme::meta_text(ui, "·"));
-            ui.label(
-                RichText::new(format!("tree kept: {why}"))
-                    .text_style(theme::meta())
-                    .color(p.accent_2_text),
-            );
-        }
-    });
-    if !t.lanes.is_empty() {
-        ui.horizontal_wrapped(|ui| {
-            ui.spacing_mut().item_spacing.x = 6.0;
-            ui.label(theme::meta_text(ui, "Lanes:"));
-            for lane in &t.lanes {
-                let text = format!(
-                    "{}{}{}{}",
-                    lane.name,
-                    if lane.chosen { "" } else { " (not chosen)" },
-                    if lane.setup_done { " · set up" } else { "" },
-                    if lane.removed { " · removed" } else { "" }
-                );
-                ui.label(
-                    RichText::new(text)
-                        .text_style(theme::meta())
-                        .color(if lane.chosen { p.text } else { p.n700 }),
-                )
-                .on_hover_text(format!(
-                    "{} on {}",
-                    lane.worktree.display(),
-                    lane.branch
-                ));
-            }
-        });
-    }
-}
-
 /// What a Resume click spends, on both Resume buttons: it is
 /// `dispatch resume`, which reruns what the park cancelled mid-run.
-const RESUME_HINT: &str = "Back to active; what the park cancelled mid-run runs again (a paid run), and the rest is asked";
-
-/// Resume and Close, in the header's right-to-left row, where the
-/// ticket's state allows them.
-fn ticket_actions(cx: &mut DrawCtx<'_>, ui: &mut Ui, t: &TicketView) {
-    if parked(t)
-        && theme::secondary(ui, "Resume")
-            .on_hover_text(RESUME_HINT)
-            .clicked()
-    {
-        cx.dispatch(AppAction::DispatchResume(t.id.clone()));
-    }
-    if !close_offered(t) {
-        return;
-    }
-    let (label, hover) = if t.trees_retryable {
-        ("Remove trees", "Try the removal again; the branch stays")
-    } else {
-        (
-            "Close",
-            "Remove the ticket's worktrees and close it; the branch and the record stay",
-        )
-    };
-    if theme::secondary(ui, label).on_hover_text(hover).clicked() {
-        cx.state.confirm_close_ticket = Some(t.id.clone());
-    }
-}
-
-/// The close confirmation: what goes, by path, and what stays. A
-/// confirmation rather than an undo, since a removed tree cannot be put
-/// back as it was (its ignored build output is gone) and a closed
-/// ticket does not resume.
-fn confirm_close(cx: &mut DrawCtx<'_>, ctx: &egui::Context, t: &TicketView) {
-    if cx.state.confirm_close_ticket.as_deref() != Some(t.id.as_str()) {
-        return;
-    }
-    let retry = t.trees_retryable;
-    let title = if retry {
-        "Remove the ticket's trees"
-    } else {
-        "Close this ticket"
-    };
-    let mut done = false;
-    dialog(ctx, title, |ui| {
-        ui.label(
-            "Removed with git worktree remove, never forced: git refuses a tree with changes.",
-        );
-        for path in &t.removes {
-            ui.label(theme::mono_text(ui, path.display().to_string()));
-        }
-        ui.label(
-            "The branch, the ticket's directory with its attempts and artifacts, and its \
-             Switchboard projects stay.",
-        );
-        let (confirmed, cancelled) =
-            dialog_actions(ui, if retry { "Try again" } else { "Close ticket" }, true);
-        if confirmed {
-            cx.dispatch(AppAction::DispatchClose(t.id.clone()));
-            done = true;
-        }
-        if cancelled {
-            done = true;
-        }
-    });
-    if done || ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
-        cx.state.confirm_close_ticket = None;
-    }
-}
-
-/// The pull request a `ready` attempt is bound to: a link when one was
-/// found, and what its checks said at the head it was read at.
-fn pr_labels(ui: &mut Ui, pr: &crate::ports::dispatch::PullRequestView) {
-    let p = theme::palette(ui);
-    if pr.number > 0 {
-        ui.hyperlink_to(
-            RichText::new(format!("PR #{}", pr.number))
-                .text_style(theme::meta())
-                .color(p.accent_text),
-            &pr.url,
-        );
-    }
-    let short = short_sha(&pr.head);
-    ui.label(theme::meta_text(
-        ui,
-        if short.is_empty() {
-            pr.checks.clone()
-        } else {
-            format!("{} at {short}", pr.checks)
-        },
-    ));
-}
-
-/// An attempt's notes beside its state: why it ended, how often it was
-/// nudged, and what a resolution review read.
-fn attempt_notes(ui: &mut Ui, t: &TicketView, a: &AttemptView) {
-    if let Some(reason) = &a.reason {
-        ui.label(theme::meta_text(ui, reason));
-    }
-    if let Some(text) = nudged(a.nudges.len()) {
-        ui.label(theme::meta_text(ui, text));
-    }
-    if let Some(text) = t.resolution_conflict(a) {
-        ui.label(theme::meta_text(ui, text));
-    }
-}
-
-fn attempt_row(cx: &mut DrawCtx<'_>, ui: &mut Ui, t: &TicketView, a: &AttemptView) {
-    let p = theme::palette(ui);
-    theme::surface(ui)
-        .inner_margin(egui::Margin::symmetric(12, 8))
-        .show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            ui.horizontal_wrapped(|ui| {
-                ui.spacing_mut().item_spacing.x = 6.0;
-                ui.label(theme::strong_text(format!(
-                    "{} · {} · #{}",
-                    a.stage, a.context, a.n
-                )));
-                ui.label(RichText::new(&a.state).text_style(theme::meta()).color(
-                    match a.state.as_str() {
-                        "failed" | "cancelled" => p.accent_2_text,
-                        "complete" => p.n700,
-                        _ => p.accent_text,
-                    },
-                ));
-                attempt_notes(ui, t, a);
-                if let Some(w) = cx
-                    .core
-                    .waiting_agents_of(t)
-                    .into_iter()
-                    .find(|w| w.stage == a.stage && w.context == a.context)
-                {
-                    ui.label(
-                        RichText::new(format!("waiting on you: {}", w.reason))
-                            .text_style(theme::meta())
-                            .color(p.accent_2_text),
-                    );
-                }
-                if let Some(checks) = &a.checks {
-                    let short = short_sha(&checks.head);
-                    ui.label(theme::meta_text(
-                        ui,
-                        match checks.exit {
-                            None => format!("checks running at {short}"),
-                            Some(0) => format!("checks passed at {short}"),
-                            Some(code) => format!("checks exited {code} at {short}"),
-                        },
-                    ));
-                }
-                if let Some(pr) = &a.pr {
-                    pr_labels(ui, pr);
-                }
-                // A fold with stale messages has moved the branch and
-                // holds the attempt open while it asks or rewords, so it
-                // is shown before the attempt completes.
-                if let Some(text) = a
-                    .rewrite
-                    .as_ref()
-                    .filter(|r| a.state == "complete" || !r.stale.is_empty())
-                    .and_then(rewrite_label)
-                {
-                    ui.label(theme::meta_text(ui, text));
-                }
-            });
-            for round in &a.rounds {
-                round_line(ui, round);
-            }
-            ui.horizontal_wrapped(|ui| {
-                ui.spacing_mut().item_spacing.x = 4.0;
-                session_button(cx, ui, "Session", a.session.as_deref());
-                let rewriter = a
-                    .rewrite
-                    .as_ref()
-                    .and_then(|r| r.message_session.as_deref());
-                session_button(cx, ui, "Rewriter", rewriter);
-                if let Some(run) = a
-                    .run
-                    .as_deref()
-                    .and_then(|s| uuid::Uuid::parse_str(s).ok())
-                    .map(crate::core::WorkflowId)
-                    .filter(|id| cx.core.workflow(*id).is_some())
-                    && theme::ghost(ui, "Review").clicked()
-                {
-                    cx.dispatch(AppAction::ShowWorkflow(run));
-                }
-                for (name, path) in &a.artifacts {
-                    let selected = cx.state.dispatch_artifact.as_ref() == Some(path);
-                    let button = if selected {
-                        theme::secondary(ui, name)
-                    } else {
-                        theme::ghost(ui, name)
-                    };
-                    if button.on_hover_text(path.display().to_string()).clicked() {
-                        cx.state.dispatch_artifact = Some(path.clone());
-                        cx.dispatch(AppAction::DispatchReadArtifact {
-                            ticket: t.id.clone(),
-                            path: path.clone(),
-                        });
-                    }
-                }
-            });
-        });
-}
-
-/// A button that shows `session`, when it names a session this app has.
-fn session_button(cx: &mut DrawCtx<'_>, ui: &mut Ui, label: &str, session: Option<&str>) {
-    if let Some(session) = session
-        .and_then(|s| uuid::Uuid::parse_str(s).ok())
-        .map(RecordId)
-        .filter(|id| cx.core.session(*id).is_some())
-        && theme::ghost(ui, label).clicked()
-    {
-        cx.dispatch(AppAction::ShowSession(session));
-    }
-}
-
-/// One line per code review round: its head, its state and what each
-/// reviewer said.
-fn round_line(ui: &mut Ui, round: &crate::ports::dispatch::ReviewRoundView) {
-    let p = theme::palette(ui);
-    ui.horizontal_wrapped(|ui| {
-        ui.spacing_mut().item_spacing.x = 6.0;
-        let short = short_sha(&round.head);
-        ui.label(theme::meta_text(
-            ui,
-            format!("round {} at {short}", round.n),
-        ));
-        let points = match round.open_points {
-            0 => String::new(),
-            n => format!(", {n} open"),
-        };
-        ui.label(
-            RichText::new(format!("{}{points}", round.state))
-                .text_style(theme::meta())
-                .color(if round.state.starts_with("failed") {
-                    p.accent_2_text
-                } else {
-                    p.n700
-                }),
-        );
-        for (name, state) in &round.reviewers {
-            ui.label(theme::meta_text(ui, format!("{name}: {state}")));
-        }
-        if let Some(after) = &round.head_after {
-            let short = short_sha(after);
-            ui.label(theme::meta_text(ui, format!("fixed to {short}")));
-        }
-        if let Some(text) = nudged(round.nudges.len()) {
-            ui.label(theme::meta_text(ui, text));
-        }
-    });
-}
-
-/// The artifact chosen on the left, rendered as markdown; the issue's
-/// own text until one is chosen.
-fn artifact_column(cx: &mut DrawCtx<'_>, ui: &mut Ui, t: &TicketView) {
-    let p = theme::palette(ui);
-    let chosen: Option<PathBuf> = cx.state.dispatch_artifact.clone().filter(|path| {
-        t.attempts
-            .iter()
-            .any(|a| a.artifacts.iter().any(|(_, p)| p == path))
-    });
-    let (title, text) = match &chosen {
-        Some(path) => (
-            path.file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("artifact")
-                .to_owned(),
-            cx.core.dispatch_state().artifacts.get(path).cloned(),
-        ),
-        None => ("Issue".to_owned(), Some(t.body.clone())),
-    };
-    theme::section(ui, &title);
-    if let Some(path) = &chosen {
-        ui.label(theme::mono_text(ui, path.display().to_string()).color(p.n700));
-    }
-    egui::ScrollArea::vertical()
-        .id_salt("ticket-artifact")
-        .show(ui, |ui| match text {
-            Some(text) if text.trim().is_empty() => {
-                ui.label(theme::meta_text(ui, "Empty."));
-            }
-            Some(text) => markdown::show(ui, &mut cx.state.markdown, &text),
-            None => {
-                ui.label(theme::meta_text(ui, "Reading…"));
-            }
-        });
-}
+pub(super) const RESUME_HINT: &str = "Back to active; what the park cancelled mid-run runs again (a paid run), and the rest is asked";
 
 /// Whether `view` is one of Dispatch's, for the rail.
 #[must_use]
 pub fn is_dispatch_view(view: &View) -> bool {
     matches!(view, View::Dispatch | View::Ticket(_))
-}
-
-/// What a code review did to its branch's commits, and to the folded
-/// messages it asked about; nothing when it left the commits as they
-/// were.
-fn rewrite_label(r: &RewriteView) -> Option<String> {
-    if let Some(why) = &r.skipped {
-        return Some(format!("commits kept: {why}"));
-    }
-    let after = r.after.as_deref().filter(|a| *a != r.before)?;
-    let (before, after) = (short_sha(&r.before), short_sha(after));
-    let rewrite = if r.mode == "one" {
-        format!("squashed {} commits to one: {before} → {after}", r.from)
-    } else {
-        format!("commits folded {} → {}: {before} → {after}", r.from, r.to)
-    };
-    if r.stale.is_empty() {
-        return Some(rewrite);
-    }
-    if !r.message_failed
-        && let Some(head) = &r.message_head
-    {
-        return Some(format!(
-            "{rewrite} · message rewritten → {}",
-            short_sha(head)
-        ));
-    }
-    let names: Vec<String> = r.stale.iter().map(|n| format!("`{n}`")).collect();
-    Some(format!(
-        "{rewrite} · message names {} ({})",
-        names.join(", "),
-        r.message.as_deref().unwrap_or("asked")
-    ))
-}
-
-/// A commit's first eight characters, as the page names it.
-fn short_sha(sha: &str) -> String {
-    sha.chars().take(8).collect()
 }

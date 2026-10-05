@@ -93,6 +93,13 @@ pub enum Body {
         #[serde(default)]
         migrate: bool,
     },
+    /// A ticket's events after the cursor `since`, from the runner's
+    /// event log.
+    Events {
+        ticket: String,
+        #[serde(default)]
+        since: u64,
+    },
 }
 
 impl Body {
@@ -109,6 +116,7 @@ impl Body {
             Self::Resume { .. } => "resume",
             Self::Close { .. } => "close",
             Self::Worktrees { .. } => "worktrees",
+            Self::Events { .. } => "events",
         }
     }
 }
@@ -123,7 +131,45 @@ pub enum Reply {
     Queue { order: Vec<String> },
     Taken(TicketView),
     Worktrees(WorktreesView),
+    Events(EventsView),
     Failed { reason: String },
+}
+
+/// A ticket's events after a cursor, from the runner's log.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct EventsView {
+    /// This ticket's events with `seq > since`, in order, none withdrawn
+    /// and no `void` lines.
+    pub events: Vec<EventView>,
+    /// The highest seq read, of any ticket, or `since`: the next cursor.
+    pub last: u64,
+    /// Seqs this ticket's `void` lines in the batch withdraw, so a
+    /// client drops ones it cached earlier.
+    pub withdrawn: Vec<u64>,
+}
+
+/// One line of the runner's event log, as a reader needs it.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct EventView {
+    pub seq: u64,
+    pub at_ms: u64,
+    /// The attempt's or decision's stage, else the ticket's stage then.
+    pub stage: String,
+    /// What happened, as the log's word: `stage`, `attempt-ended`,
+    /// `answered`, ...
+    pub kind: String,
+    /// One short line for a person.
+    pub text: String,
+    /// The attempt it is about, as stage and number.
+    pub attempt: Option<(String, u32)>,
+    /// The decision it is about, by id.
+    pub decision: Option<String>,
+    /// The commit it names.
+    pub head: Option<String>,
+    /// The pull request it names.
+    pub url: Option<String>,
 }
 
 /// The worktree root after a `worktrees` request, and what a migration
@@ -338,6 +384,20 @@ pub struct PathsView {
     pub pr_url: Option<String>,
     /// That pull request's head when the attempt bound it.
     pub pr_head: Option<String>,
+    /// The plan review's round files, first to last.
+    pub plan_rounds: Vec<PlanRoundView>,
+}
+
+/// One plan review round's files.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PlanRoundView {
+    /// The round's number, from 1.
+    pub n: u32,
+    /// The reviewer's feedback file.
+    pub feedback: PathBuf,
+    /// The response, when it exists.
+    pub response: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -368,6 +428,9 @@ pub struct LaneView {
     /// That bring-up rebased commits of the branch's own rather than
     /// moving it.
     pub brought_up_commits: bool,
+    /// Dispatch's clone holding the lane's branch; filled in a single
+    /// ticket's view only.
+    pub clone: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -611,6 +674,10 @@ pub struct DecisionView {
     pub answer: Option<String>,
     pub note: Option<String>,
     pub made_ms: u64,
+    /// Who answered it, once answered: `user` or Dispatch's own word.
+    pub answered_by: Option<String>,
+    /// When it was answered.
+    pub answered_ms: Option<u64>,
 }
 
 /// One socket line as a request or reply.
@@ -730,6 +797,63 @@ mod tests {
             Body::Close {
                 ticket: "t".into(),
                 reason: None
+            }
+        );
+    }
+
+    #[test]
+    fn the_events_read_round_trips_through_a_line() {
+        let request = Request::new(
+            "e",
+            Body::Events {
+                ticket: "t1".into(),
+                since: 41,
+            },
+        );
+        assert_eq!(Request::parse(request.to_line().trim_end()), Ok(request));
+        let reply = Reply::Events(EventsView {
+            events: vec![EventView {
+                seq: 42,
+                at_ms: 1_000,
+                stage: "investigate".into(),
+                kind: "attempt-ended".into(),
+                text: "investigate/1 complete".into(),
+                attempt: Some(("investigate".into(), 1)),
+                decision: None,
+                head: Some("abc1234".into()),
+                url: None,
+            }],
+            last: 44,
+            withdrawn: vec![40],
+        });
+        assert_eq!(Reply::parse(reply.to_line().trim_end()), Ok(reply));
+    }
+
+    #[test]
+    fn a_reply_without_the_page_fields_reads_them_as_unset() {
+        let line = r#"{"reply":"ticket","id":"t","lanes":[{"name":"repo"}],"decisions":[{"id":"d1","state":"answered"}],"paths":{"plan":"/d/plan.md"}}"#;
+        let Reply::Ticket(t) = Reply::parse(line).unwrap() else {
+            panic!("a ticket")
+        };
+        assert_eq!(t.lanes[0].clone, None);
+        assert_eq!(
+            (
+                t.decisions[0].answered_by.as_ref(),
+                t.decisions[0].answered_ms
+            ),
+            (None, None)
+        );
+        assert_eq!(t.paths.plan_rounds, Vec::new());
+        let Reply::Events(v) = Reply::parse(r#"{"reply":"events"}"#).unwrap() else {
+            panic!("events")
+        };
+        assert_eq!(v, EventsView::default());
+        let line = r#"{"op":"1","kind":"events","ticket":"t"}"#;
+        assert_eq!(
+            Request::parse(line).unwrap().body,
+            Body::Events {
+                ticket: "t".into(),
+                since: 0
             }
         );
     }
