@@ -99,7 +99,7 @@ impl Handler {
                 Reply::Worktrees(self.runner.set_worktrees(path.clone(), *migrate, now_ms)?)
             }
             Body::Resume { ticket } => {
-                let t = self.runner.resume(ticket, now_ms)?;
+                let t = self.runner.resume(ticket, now_ms)?.ticket;
                 Reply::Ticket(self.view(&t))
             }
             Body::Close { ticket, reason } => {

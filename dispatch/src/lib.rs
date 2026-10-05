@@ -58,6 +58,20 @@ pub fn epoch_ms(t: std::time::SystemTime) -> u64 {
         .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
 }
 
+/// A command that makes no sense for what it names: `main` prints the
+/// message alone, not the usage, and exits 64 as for a command line it
+/// cannot read.
+#[derive(Debug)]
+pub struct UsageError(pub String);
+
+impl std::fmt::Display for UsageError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for UsageError {}
+
 /// The command line's usage, printed on a usage error (exit 64).
 pub const USAGE: &str = "usage:
   dispatch take <project> <issue-number>   make a ticket from an issue and queue it
@@ -68,7 +82,8 @@ pub const USAGE: &str = "usage:
   dispatch decisions                       what waits on you
   dispatch status                          every ticket, its stage and state
   dispatch queue <project> [<ticket>...]   show, or reorder, a project's queue
-  dispatch resume <ticket>                 a parked ticket back to active
+  dispatch park <ticket> [--reason <text>]  a ticket's work stopped, its questions withdrawn; resume brings it back
+  dispatch resume <ticket> [--no-rerun]    a parked ticket back to active; what the park cancelled runs again
   dispatch close <ticket> [--reason <text>]  a ticket closed, its trees removed (its branches are kept; close lists them)
   dispatch worktrees [<path>] [--migrate]  where tickets' trees go (default ~/.dispatch/worktrees);
                                            with a path, set it; --migrate moves idle tickets' trees there

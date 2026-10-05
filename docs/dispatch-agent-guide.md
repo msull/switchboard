@@ -34,7 +34,8 @@ dispatch decisions                                what waits on the owner, with 
 dispatch decide <ticket> <decision> <answer> [--note <text>]
 dispatch queue <project>                          the project's queue in order
 dispatch queue <project> <ticket>...              reorder it
-dispatch resume <ticket>                          a parked ticket back to active
+dispatch park <ticket> [--reason <text>]          a ticket's work stopped, its questions withdrawn
+dispatch resume <ticket> [--no-rerun]             a parked ticket back to active; what the park cancelled runs again
 dispatch close <ticket> [--reason <text>]         a ticket closed, its trees removed (its branches are kept; close lists them)
 dispatch health [--timeout <secs>] [--stale <secs>] [--json]   is the runner alive and getting on; run it first
 dispatch show <ticket> [--json]                   one ticket: stage, lanes, attempts, rounds, decisions, files
@@ -293,8 +294,10 @@ kind of failure:
 **Exit codes.** Every command exits 0 when it did what it says and 1
 with a reason when it was refused or failed. `wait` exits 2 when its
 `--timeout` passed and 3 when the ticket parked or closed, so what it
-waited for will not come. A command line Dispatch cannot read exits
-64 with the usage.
+waited for will not come. Exit 64 is a command line Dispatch cannot
+read, printed with the usage, or a command the ticket's state never
+allows (`park` on a closing or closed ticket), printed with its reason
+instead.
 
 ## Ordering the queue
 
@@ -335,16 +338,40 @@ dispatch decide 314cb7a1 d1 accept
 ```
 
 An answer takes effect on the runner's next pass, within a second or
-two. `park` is always safe: it stops the ticket's work, kills its
-agents, and leaves the record for the owner, who can `resume` it. It
-also withdraws the ticket's other open questions; they read
-`cancelled` and cannot be answered.
+two. `park` as an answer stops the ticket at that question: it stops
+the ticket's work, kills its agents, and leaves the record for the
+owner, who can `resume` it. It also withdraws the ticket's other open
+questions; they read `cancelled` and cannot be answered. To stop a
+ticket whose open question is about something else, or that has none,
+use `dispatch park` (below), not an answer.
 
-Two things never to do: answer a `merge` decision (its only option is
-`park`, and parking a ticket at merge abandons a PR that is about to
-land), and answer `finalize`, `review-code` or `review-cap` for a
-project you have not been told to approve plans or code on. Those
-spend money and change branches.
+Two things never to do: park a ticket at `merge`, by answering its
+`merge` decision or by `dispatch park` (either abandons a PR that is
+about to land), and answer `finalize`, `review-code` or `review-cap`
+for a project you have not been told to approve plans or code on.
+Those spend money and change branches.
+
+## Parking
+
+```
+dispatch park 314cb7a1 --reason "the PR was opened mid-rebase"
+```
+
+This is how to stop a ticket now. It writes the intent to park, with
+every open question withdrawn, and the runner finishes it on its next
+pass: the running attempts are cancelled with the reason, their agents
+and checks killed, and the ticket reads `parked`. Without `--reason`
+the reason is "parked by hand". With no runner up the ticket stays
+`parking` until one starts.
+
+To know it has parked, `dispatch wait <ticket> --for stage` exits 3 at
+the park, or watch `dispatch events --ticket <id> --follow` for
+`parked`. Not `--for any`: it returns on the first cancelled attempt's
+`attempt-ended`, before the ticket reads parked.
+
+A closing or closed ticket cannot be parked (exit 64), and one already
+parking or parked is refused (exit 1). A ticket at `merge` is not
+parked without the owner's say, for the reason above.
 
 ## Resuming
 
@@ -353,10 +380,16 @@ dispatch resume 314cb7a1
 ```
 
 A parked ticket goes back to active and continues from its stage. Use
-it after the owner has fixed whatever the park reason named. A resumed
-ticket asks `rerun` again, under a new id, for each attempt that failed
-or was cancelled by the park; answer it to go on. Resuming a ticket
-parked for a reason you do not understand is the owner's call.
+it after the owner has fixed whatever the park reason named. The
+resume is the answer for what the park cancelled mid-run: each such
+attempt runs again with no question, recorded as a `rerun` answered by
+`resume`, and spends an agent run. The resumed ticket still asks
+`rerun`, under a new id, for each attempt that failed, for each that
+an earlier park cancelled, and for each that was waiting on a question
+when the park came (a converged review is not thrown away unasked);
+answer those to go on. `dispatch resume <ticket> --no-rerun` reruns
+nothing and asks about every one. Resuming a ticket parked for a
+reason you do not understand is the owner's call.
 
 ## Closing
 
@@ -443,7 +476,7 @@ Two traps that read as plain test failures:
   as above.
 - Do not kill processes by pattern (`pkill claude`, `pkill -f dispatch`).
   The ticket's agents are Switchboard's and the runner is the owner's;
-  `park` stops a ticket's work properly.
+  `dispatch park` stops a ticket's work properly.
 - Do not push to a ticket's branch while it is at `merge`. Dispatch
   watches the PR at the head it recorded; a push from outside reads as
   someone else's change.
