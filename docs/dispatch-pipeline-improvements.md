@@ -456,3 +456,20 @@ or aborted by hand).
   first one and printing them all, with the last seq to follow from.
   The second keeps `--for any` meaning every line and needs no new
   filter. Seen supervising #95.
+- **The runner cannot be restarted from away from the Mac.** After a
+  merge that touches `dispatch/`, the runner must be restarted from
+  the new bundle, and the only way is the overview's Stop/Start. The
+  `DispatchRunnerStart` and `DispatchRunnerStop` actions reach neither
+  the `dispatch` CLI nor the control port, and the `SWITCHBOARD_SCRIPT`
+  lines for them act only at app launch. The runner lives in a tmux
+  pane under the tmux server, not under the app, so quitting and
+  reopening the app does not restart it, and the supervisor's
+  classifier refuses `kill <pid>`, so the supervisor cannot do it on
+  the owner's word either. Seen after #95's merge with the owner away:
+  the runner stayed on the old build until the owner could reach the
+  Mac. A shape: `dispatch runner stop | start | restart`, answered by
+  the app over the control port and allowed to the supervisor only
+  when the owner's seed says so, with `restart` refused while an
+  attempt's check or deploy is mid-run (#85). The `!` prefix in the
+  supervisor's session is no help from the remote client, which sends
+  it as a message.
