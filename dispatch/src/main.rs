@@ -16,7 +16,7 @@ use dispatch::serve::{Handler, Server, take_issue, take_pull_requests};
 use dispatch::serve::{ticket_paths, ticket_view};
 use dispatch::store::{DataDir, read_ticket};
 use dispatch::supervisor::{self, Actor};
-use dispatch::ticket::{DecisionState, Ticket, TicketState};
+use dispatch::ticket::{DecisionState, ServiceState, Ticket, TicketState};
 use dispatch::{USAGE, UsageError};
 use std::io::Write as _;
 
@@ -300,8 +300,8 @@ fn status() -> Result<()> {
                 .map_or(String::new(), |why| format!(" · nothing new starts: {why}"))
         );
     }
-    for t in tickets {
-        let p = runner.pipeline_of(&t).ok();
+    for t in &tickets {
+        let p = runner.pipeline_of(t).ok();
         let stage = p
             .as_ref()
             .and_then(|p| p.stages.get(t.stage))
@@ -320,8 +320,19 @@ fn status() -> Result<()> {
             )
         });
         let pending = t.waiting_on_you().len();
+        let holding = if let Some(why) = p
+            .as_ref()
+            .and_then(|p| dispatch::services::waiting_for(t, p, &tickets))
+        {
+            format!(" · waiting for {why}")
+        } else if t.holds.is_empty() {
+            String::new()
+        } else {
+            let held: Vec<&str> = t.holds.iter().map(|h| h.resource.as_str()).collect();
+            format!(" · holds {}", held.join(", "))
+        };
         say!(
-            "{} {} {} {} · stage {stage} · {standing}{last}{}",
+            "{} {} {} {} · stage {stage} · {standing}{last}{holding}{}",
             t.id,
             t.project,
             t.source.label(),
@@ -332,6 +343,18 @@ fn status() -> Result<()> {
                 String::new()
             }
         );
+        for s in t
+            .services
+            .iter()
+            .filter(|s| s.state != ServiceState::Stopped)
+        {
+            say!(
+                "    {} {} {}",
+                s.lane,
+                s.url.as_deref().unwrap_or("(no port yet)"),
+                s.state.label()
+            );
+        }
         for d in &t.decisions {
             if let DecisionState::Answered {
                 answer, acted, by, ..

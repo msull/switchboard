@@ -6431,6 +6431,33 @@ mod dispatch_page {
         }
     }
 
+    /// A ticket stopped by a resource another ticket holds says so and
+    /// who holds it, ahead of its project's limits; a question or an
+    /// attempt running says that instead.
+    #[test]
+    fn ticket_standing_says_what_a_ticket_waits_for() {
+        let (mut core, _) = loaded(vec![], vec![]);
+        let mut st = status(None);
+        st.projects[0].running = 2;
+        st.tickets[0].decisions.clear();
+        st.tickets[0].waiting_for = Some("my-dev, held by baea8dbe (#56)".into());
+        core.dispatch(AppAction::DispatchStatus(Some(st.clone())), Clock::at(2));
+        assert_eq!(
+            core.ticket_standing(&st.tickets[0]),
+            "waiting for my-dev, held by baea8dbe (#56)"
+        );
+        st.tickets[0].waiting_for = None;
+        assert_eq!(
+            core.ticket_standing(&st.tickets[0]),
+            "held: all 2 slots in use"
+        );
+        st.tickets[0].waiting_for = Some("my-dev, held by baea8dbe (#56)".into());
+        st.tickets[0].attempts[0].state = "running".into();
+        assert_eq!(core.ticket_standing(&st.tickets[0]), "investigate running");
+        st.tickets[0].decisions = status(None).tickets[0].decisions.clone();
+        assert_eq!(core.ticket_standing(&st.tickets[0]), "1 waiting on you");
+    }
+
     /// The table's order and narrowing are the core's: a total order
     /// per column with ids breaking ties, state and text filters, and
     /// a header click that flips the same column or starts another the

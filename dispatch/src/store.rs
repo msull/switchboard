@@ -23,7 +23,7 @@ use crate::ticket::{ProjectState, Ticket};
 /// carried a version reads as 0 and is brought up by `migrate`. A
 /// record above it was written by a newer `dispatch` and is refused
 /// both ways, so this build never drops fields it does not know.
-pub const RECORD_VERSION: u32 = 13;
+pub const RECORD_VERSION: u32 = 14;
 
 /// A lock file held while this lives: the writer lock, the runner's
 /// claim, or a ticket's close.
@@ -518,6 +518,11 @@ pub fn migrate(mut value: Value) -> Value {
         // build that would drop them on its next write must refuse the
         // record, or a project would forget its supervisor session and
         // the request in flight for it.
+        //
+        // 13 to 14: a ticket gains `holds` and `services`, both empty from
+        // their serde defaults. Nothing is transformed; a build that would
+        // drop them on its next write must refuse the record, or a hold
+        // would vanish and a second ticket deploy over it.
         if version == 1 {
             settle_from_verdicts(&mut value);
         }
@@ -1112,6 +1117,47 @@ mod tests {
         assert_eq!(written["version"], RECORD_VERSION);
         assert_eq!(written["restart"]["reset"][0]["to"], "head0001");
         assert_eq!(written["entered"][0]["heads"]["root"], "head0001");
+        assert_eq!(read_ticket(&path).unwrap(), t);
+    }
+
+    #[test]
+    fn a_version_thirteen_ticket_migrates_to_fourteen_with_no_holds_or_services() {
+        let text = TICKET_V0.replacen('{', "{\n  \"version\": 13,", 1);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.json");
+        fs::write(&path, text).unwrap();
+        let mut t = read_ticket(&path).unwrap();
+        assert_eq!(t.version, RECORD_VERSION);
+        assert!(t.holds.is_empty() && t.services.is_empty());
+        t.holds.push(crate::ticket::Hold {
+            resource: "my-dev".into(),
+            stage: "deploy".into(),
+            taken_ms: 3000,
+        });
+        t.services.push(crate::ticket::ServiceRecord {
+            lane: "frontend".into(),
+            n: 1,
+            stage: "try".into(),
+            until: "tried".into(),
+            before: None,
+            port: Some(3100),
+            url: Some("http://localhost:3100".into()),
+            op: Some("a1b2c3d4-0001".into()),
+            session: Some("s-9".into()),
+            state: crate::ticket::ServiceState::Failed {
+                reason: "the service exited".into(),
+            },
+            started_ms: 3000,
+            ready_ms: None,
+            stopping_ms: None,
+            stuck_on: None,
+            released: None,
+        });
+        write_ticket(&path, &t).unwrap();
+        let written: Value = read_json(&path).unwrap();
+        assert_eq!(written["version"], RECORD_VERSION);
+        assert_eq!(written["holds"][0]["resource"], "my-dev");
+        assert_eq!(written["services"][0]["service_state"], "failed");
         assert_eq!(read_ticket(&path).unwrap(), t);
     }
 

@@ -28,8 +28,8 @@ use crate::template::Vars;
 use crate::ticket::{
     Attempt, AttemptKind, AttemptState, CheckGroup, CloseProgress, Decision, DecisionKind,
     DecisionState, GateRun, LaneRecord, Operation, OrphanKill, ProjectState, PullRequestRecord,
-    PullRequestSource, RefreshConflict, Refreshed, SETTLE_POLLS, STOP_IDLE_POLLS, Settle,
-    SourceSnapshot, Ticket, TicketState,
+    PullRequestSource, RefreshConflict, Refreshed, SETTLE_POLLS, STOP_IDLE_POLLS, STUCK,
+    ServiceState, Settle, SourceSnapshot, Ticket, TicketState,
 };
 
 /// How often a `pr-checks` gate reads the provider.
@@ -104,6 +104,9 @@ pub struct Runner {
     /// owner, the port and the runner itself. Stamped on what they take,
     /// answer, park, resume and close.
     pub actor: Option<String>,
+    /// The resource each ticket was last logged waiting for, by ticket
+    /// id, so a wait is one line, not one a second.
+    pub(crate) held_back: BTreeMap<String, String>,
 }
 
 /// Where a stop of an attempt's checks stands: a park's, a close's, or
@@ -146,6 +149,7 @@ impl Runner {
             stopping: BTreeMap::new(),
             health: RefCell::new(Health::default()),
             actor: None,
+            held_back: BTreeMap::new(),
         }
     }
 
@@ -461,6 +465,8 @@ impl Runner {
             restarts: Vec::new(),
             restart: None,
             entered: Vec::new(),
+            holds: Vec::new(),
+            services: Vec::new(),
             created_ms: now_ms,
             updated_ms: now_ms,
         };
@@ -736,6 +742,13 @@ impl Runner {
             self.record_entry(t, now_ms);
             self.save_ticket(t, now_ms)?;
         }
+        // Services the ticket has left behind are stopped and the holds
+        // its stage no longer needs dropped before anything else, so
+        // neither a refresh question nor the pipeline's end keeps a
+        // resource held.
+        if self.release_left(t, ps, p, now_ms)? || !t.active() {
+            return Ok(());
+        }
         let Some(stage) = p.stages.get(t.stage).cloned() else {
             return self.begin_close(t, ps, "every stage is done", now_ms);
         };
@@ -743,6 +756,19 @@ impl Runner {
             return Ok(());
         }
         if self.resolution_passes(t, ps, p, now_ms)? || !t.active() {
+            return Ok(());
+        }
+        // A stage for lanes the ticket did not choose has nothing to run
+        // in: it advances with no attempt, no hold and no question.
+        if Self::skipped(t, &stage) {
+            log::info!(
+                "ticket {} {}: none of its lanes is chosen; skipped",
+                t.id,
+                stage.name
+            );
+            return self.advance(t, now_ms);
+        }
+        if self.take_holds(t, ps, p, &stage, now_ms)? || !t.active() {
             return Ok(());
         }
         // Agent, workflow and review stages are held per context
@@ -847,7 +873,12 @@ impl Runner {
         {
             return Ok(true);
         }
-        if stage.kind() == StageKind::GateOnly && !reads_pr(stage) {
+        // A stage that holds a resource or serves lanes looks at what was
+        // inspected and deployed; moving the branch under it would not.
+        if (stage.kind() == StageKind::GateOnly && !reads_pr(stage))
+            || !stage.needs.is_empty()
+            || !stage.services.is_empty()
+        {
             t.refreshed_stage = Some(t.stage);
             drop_stale_conflicts(t);
             self.save_ticket(t, now_ms)?;
@@ -1531,6 +1562,22 @@ impl Runner {
             log::info!("ticket {} closing: a process is still alive", t.id);
             return Ok(());
         }
+        // A ticket at `try` with no tester yet is closable while its
+        // services start, so their `before` may still run.
+        let mut stopped = true;
+        for i in 0..t.services.len() {
+            if t.services[i].state != ServiceState::Stopped {
+                stopped &= self.stop_service(t, ps, i, now_ms)?;
+            }
+        }
+        if !stopped {
+            log::info!("ticket {} closing: a service is still stopping", t.id);
+            return Ok(());
+        }
+        if !t.holds.is_empty() {
+            t.holds.clear();
+            self.save_ticket(t, now_ms)?;
+        }
         if !t.close.decisions_cancelled || !t.pending_decisions().is_empty() {
             for d in &mut t.decisions {
                 if d.pending() {
@@ -1821,7 +1868,7 @@ impl Runner {
             reason: reason.into(),
         };
         t.state_by = by;
-        Self::withdraw_open_decisions(t);
+        Self::withdraw_open_decisions(t, false);
     }
 
     /// The rest of the sequence, from the saved intent: any decision
@@ -1849,21 +1896,31 @@ impl Runner {
             log::info!("ticket {} parking: a launch is still in flight", t.id);
             return Ok(());
         }
-        // A parking ticket asks nothing. `park` withdraws its questions
-        // with the intent, so this only finds work on a `Parking` record
-        // whose decisions are still open.
-        if Self::withdraw_open_decisions(t) {
+        // A parking ticket asks nothing but `stuck`, which the stop of a
+        // service asks while parking. `park` withdraws its questions with
+        // the intent, so this only finds work on a `Parking` record whose
+        // decisions are still open.
+        if Self::withdraw_open_decisions(t, true) {
             self.save_ticket(t, now_ms)?;
         }
         // Every marked session stops reading as waiting, and parking is
         // not done until Switchboard has said so for each.
         let unmarked = self.clear_marks(t, ps, now_ms)?;
+        // A deploy is never killed halfway: parking waits for it to exit.
+        if !self.gate_only_commands_exited(t, now_ms)? {
+            return Ok(());
+        }
         let open: Vec<Attempt> = t.attempts.iter().filter(|a| a.is_open()).cloned().collect();
         let mut settled = true;
         for a in open {
             settled &= self.cancel_attempt(t, ps, &a, &reason, now_ms)?;
         }
         settled &= self.retire_processes(t, ps, &t.processes.clone(), now_ms)?;
+        for i in 0..t.services.len() {
+            if t.services[i].state != ServiceState::Stopped {
+                settled &= self.stop_service(t, ps, i, now_ms)?;
+            }
+        }
         if settled && unmarked {
             // Everything is read back as gone: a restart that rode on the
             // park applies now, instead of the park ending.
@@ -1872,9 +1929,45 @@ impl Runner {
             }
             log::warn!("ticket {} parked: {reason}", t.id);
             t.state = TicketState::Parked { reason };
+            // A parked ticket holds nothing; its services are stopped.
+            t.holds.clear();
             self.save_ticket(t, now_ms)?;
         }
         Ok(())
+    }
+
+    /// Every open gate-only command (a deploy) read: false while one
+    /// still runs. An exit is written as it is read, since the real
+    /// child is gone after that read; one lost to a restart goes on.
+    fn gate_only_commands_exited(&mut self, t: &mut Ticket, now_ms: u64) -> Result<bool> {
+        let running: Vec<Attempt> = t
+            .attempts
+            .iter()
+            .filter(|a| {
+                a.is_open()
+                    && a.kind == AttemptKind::GateOnly
+                    && a.gate.as_ref().is_some_and(|g| g.exit.is_none())
+            })
+            .cloned()
+            .collect();
+        for a in running {
+            match self.git.poll_check(&gate_key(t, &a)) {
+                None => {
+                    log::info!("ticket {} parking: {} is still running", t.id, a.stage);
+                    return Ok(false);
+                }
+                Some(Ok(code)) => {
+                    if let Some(g) =
+                        find_attempt_mut(t, &a.stage, a.n).and_then(|x| x.gate.as_mut())
+                    {
+                        g.exit = Some(code);
+                    }
+                    self.save_ticket(t, now_ms)?;
+                }
+                Some(Err(_)) => {}
+            }
+        }
+        Ok(true)
     }
 
     /// An attempt Dispatch stops on purpose: its run paused and confirmed
@@ -2316,7 +2409,12 @@ impl Runner {
     /// cancellation reason quotes it, the resume's `rerun` question
     /// quotes that reason, and a `rerun` answer to it puts the note back
     /// (`rerun_note`).
-    fn withdraw_open_decisions(t: &mut Ticket) -> bool {
+    ///
+    /// With `keep_stuck`, a `stuck` question, pending or answered and not
+    /// yet acted on, is left: parking itself waits on it, and reads its
+    /// answer. The intent to park passes false, so a `stuck` asked while
+    /// the ticket was active is withdrawn with the rest and asked afresh.
+    fn withdraw_open_decisions(t: &mut Ticket, keep_stuck: bool) -> bool {
         let unlaunched: Vec<bool> = t
             .decisions
             .iter()
@@ -2324,6 +2422,9 @@ impl Runner {
             .collect();
         let mut withdrawn = false;
         for (d, unlaunched) in t.decisions.iter_mut().zip(unlaunched) {
+            if keep_stuck && d.name == STUCK {
+                continue;
+            }
             if d.pending() || d.unacted_answer().is_some() || unlaunched {
                 d.state = DecisionState::Cancelled;
                 withdrawn = true;
@@ -2388,10 +2489,12 @@ impl Runner {
         p: &Pipeline,
         now_ms: u64,
     ) -> Result<()> {
+        // A `stuck` answer is read by the stop it is about.
         let answered: Vec<Answered> = t
             .decisions
             .iter()
             .enumerate()
+            .filter(|(_, d)| d.name != STUCK)
             .filter_map(|(i, d)| {
                 d.unacted_answer()
                     .map(|a| (i, d.name.clone(), a.to_owned(), d.attempt.clone()))
@@ -2466,6 +2569,7 @@ impl Runner {
                 // The cut reads this answer from the record, later on
                 // this same pass, and marks it acted once it is used.
                 ("branch", "reuse" | "fresh") => continue,
+                (crate::services::SERVICE, "retry") => self.retry_services(t, ps, p, now_ms)?,
                 (_, "park") => self.park_by_answer(t, ps, i, now_ms)?,
                 (name, other) => {
                     self.park(
@@ -3232,6 +3336,7 @@ impl Runner {
             Some(Gate::Human { decision, confirm }) => {
                 self.human_gate(t, ps, p, stage, decision, *confirm, now_ms)
             }
+            Some(Gate::Command { .. }) => self.command_gate_stage(t, ps, p, stage, now_ms),
             Some(gate) => {
                 let kind = match gate {
                     Gate::Command { .. } => "command gate",
@@ -3290,6 +3395,82 @@ impl Runner {
             self.advance(t, now_ms)?;
         }
         Ok(())
+    }
+
+    /// A gate-only stage with a command gate (a deploy): one attempt per
+    /// context that runs the command as a child of the runner on the
+    /// context's clean tree, as an agent stage's checks run, its exit
+    /// bound to the head it ran at. A failure is a `rerun` question; a
+    /// failed or cancelled attempt is never run again unasked, since
+    /// whatever it does may have been done.
+    fn command_gate_stage(
+        &mut self,
+        t: &mut Ticket,
+        ps: &mut ProjectState,
+        p: &Pipeline,
+        stage: &Stage,
+        now_ms: u64,
+    ) -> Result<()> {
+        let Some(contexts) = self.contexts_or_park(t, ps, p, stage, now_ms)? else {
+            return Ok(());
+        };
+        let mut all_complete = true;
+        for (ctx, cwd, lane) in contexts {
+            let last = latest_attempt(t, &stage.name, &ctx).cloned();
+            match last {
+                Some(a) if a.state == AttemptState::Complete => {}
+                Some(a) if a.is_open() => {
+                    all_complete = false;
+                    if a.gate.is_some() {
+                        self.poll_gate(t, ps, p, &a, stage, &cwd, lane.as_deref(), now_ms)?;
+                    } else {
+                        self.start_gate(t, ps, p, &a, stage, &cwd, lane.as_deref(), now_ms)?;
+                    }
+                }
+                Some(a) => {
+                    all_complete = false;
+                    if !held_in(t, &stage.name, &ctx) && may_rerun(t, &a) {
+                        self.open_command_attempt(t, stage, &ctx, now_ms)?;
+                    } else if asks_again(t, &a, false) {
+                        self.ask_rerun(t, ps, &a, now_ms)?;
+                    }
+                }
+                None => {
+                    all_complete = false;
+                    self.open_command_attempt(t, stage, &ctx, now_ms)?;
+                }
+            }
+            if !t.active() {
+                return Ok(());
+            }
+        }
+        if all_complete {
+            self.advance(t, now_ms)?;
+        }
+        Ok(())
+    }
+
+    /// A fresh gate-only attempt, written before its command starts on
+    /// the next pass.
+    fn open_command_attempt(
+        &mut self,
+        t: &mut Ticket,
+        stage: &Stage,
+        ctx: &str,
+        now_ms: u64,
+    ) -> Result<()> {
+        let a = new_attempt(
+            &stage.name,
+            next_n(t, &stage.name),
+            ctx,
+            AttemptKind::GateOnly,
+            AttemptState::Running,
+            BTreeMap::new(),
+            now_ms,
+        );
+        log::info!("ticket {} {}/{ctx} attempt {}", t.id, stage.name, a.n);
+        t.attempts.push(a);
+        self.save_ticket(t, now_ms)
     }
 
     /// The start of a PR-reading poll: where to look and the tree's
@@ -3676,6 +3857,7 @@ impl Runner {
         if let Some((stage, notes)) = t.input_with_stage("notes") {
             let _ = write!(q, "\nNotes ({stage}): {}", notes.display());
         }
+        q.push_str(&deployed_and_served(t, p));
         Ok(q)
     }
 
@@ -4016,7 +4198,9 @@ impl Runner {
     }
 
     /// The contexts a stage runs in: `(name, cwd, lane)`. Empty when the
-    /// stage needs lanes the ticket has not cut.
+    /// stage needs lanes the ticket has not cut. A named lane runs only
+    /// when it is chosen; every lane's tree is cut, so one not chosen
+    /// would otherwise run a stage the ticket's work never touched.
     pub(crate) fn contexts(t: &Ticket, p: &Pipeline, stage: &Stage) -> Contexts {
         let Some(tree) = primary_tree(t, p) else {
             return Vec::new();
@@ -4033,15 +4217,29 @@ impl Runner {
             Context::Lane(name) => t
                 .lanes
                 .iter()
-                .filter(|l| &l.name == name)
+                .filter(|l| &l.name == name && l.chosen)
                 .map(|l| (l.name.clone(), l.worktree.clone(), Some(l.name.clone())))
                 .collect(),
             Context::Lanes(names) => t
                 .lanes
                 .iter()
-                .filter(|l| names.contains(&l.name))
+                .filter(|l| names.contains(&l.name) && l.chosen)
                 .map(|l| (l.name.clone(), l.worktree.clone(), Some(l.name.clone())))
                 .collect(),
+        }
+    }
+
+    /// Whether a stage runs nowhere: it names one lane or a list of
+    /// lanes, and the ticket chose none of them (or did not cut them).
+    /// `contexts` is empty for it too, but a skipped stage advances
+    /// where an `each` stage with no lane parks.
+    #[must_use]
+    pub(crate) fn skipped(t: &Ticket, stage: &Stage) -> bool {
+        let chosen = |name: &String| t.lanes.iter().any(|l| &l.name == name && l.chosen);
+        match &stage.context {
+            Context::Lane(lane) => !chosen(lane),
+            Context::Lanes(lanes) => !lanes.iter().any(chosen),
+            _ => false,
         }
     }
 
@@ -4160,6 +4358,12 @@ impl Runner {
         let Some(contexts) = self.contexts_or_park(t, ps, p, stage, now_ms)? else {
             return Ok(());
         };
+        // The stage's services come up before any of its agents starts;
+        // an agent already running is watched either way.
+        let served = stage.services.is_empty() || self.ensure_services(t, ps, p, stage, now_ms)?;
+        if !t.active() {
+            return Ok(());
+        }
         let mut all_complete = true;
         for (ctx, cwd, lane) in contexts {
             let last = latest_attempt(t, &stage.name, &ctx).cloned();
@@ -4175,7 +4379,7 @@ impl Runner {
                     // if none is open (after a park). Sent back from a
                     // later human gate: the note is the answer.
                     all_complete = false;
-                    let held = held_in(t, &stage.name, &ctx);
+                    let held = !served || held_in(t, &stage.name, &ctx);
                     let sent_back = sent_back(t, stage, &ctx);
                     if !held && (may_rerun(t, &a) || sent_back) {
                         self.start_agent(
@@ -4189,13 +4393,15 @@ impl Runner {
                             next_n(t, &stage.name),
                             now_ms,
                         )?;
-                    } else if asks_again(t, &a, sent_back) {
+                    } else if served && asks_again(t, &a, sent_back) {
+                        // Asked once its services are up, so the answer
+                        // is about a run that could start.
                         self.ask_rerun(t, ps, &a, now_ms)?;
                     }
                 }
                 None => {
                     all_complete = false;
-                    if !held_in(t, &stage.name, &ctx) {
+                    if served && !held_in(t, &stage.name, &ctx) {
                         let n = next_n(t, &stage.name);
                         self.start_agent(t, ps, p, stage, &ctx, &cwd, lane.as_deref(), n, now_ms)?;
                     }
@@ -4853,11 +5059,15 @@ impl Runner {
         // fails the checks rather than parking, so `check` is offered
         // again once the setup is fixed.
         if let Some(reason) = self.run_setup(t, p, cwd, now_ms)? {
-            return self.fail_checks(t, ps, &a.stage, a.n, &reason, now_ms);
+            return self.fail_gate(t, ps, a, &reason, now_ms);
         }
         if !self.git.is_clean(cwd)? {
-            let reason = format!("the tree at {} is not clean after the agent", cwd.display());
-            return self.fail_checks(t, ps, &a.stage, a.n, &reason, now_ms);
+            let reason = if a.kind == AttemptKind::GateOnly {
+                format!("the tree at {} is not clean", cwd.display())
+            } else {
+                format!("the tree at {} is not clean after the agent", cwd.display())
+            };
+            return self.fail_gate(t, ps, a, &reason, now_ms);
         }
         let head = self.git.head(cwd)?;
         let dir = self.attempt_dir(t, &a.stage, a.n, &a.context)?;
@@ -4925,6 +5135,18 @@ impl Runner {
         let code = match self.git.poll_check(&key) {
             None => return Ok(()),
             Some(Ok(code)) => code,
+            // A gate-only command may deploy: lost with the runner, it
+            // may have run, so it is a question, never a second run.
+            Some(Err(e)) if a.kind == AttemptKind::GateOnly => {
+                log::warn!(
+                    "ticket {} {}/{} command lost ({e:#})",
+                    t.id,
+                    a.stage,
+                    a.context
+                );
+                let reason = "the runner restarted while it ran; it may have run";
+                return self.fail_attempt(t, ps, &a.stage, a.n, reason, now_ms);
+            }
             Some(Err(e)) => {
                 // What a previous runner left running is stopped before
                 // the checks start again in the same tree.
@@ -4956,11 +5178,11 @@ impl Runner {
                 cwd.display(),
                 gate.head
             );
-            return self.fail_checks(t, ps, &a.stage, a.n, &reason, now_ms);
+            return self.fail_gate(t, ps, a, &reason, now_ms);
         }
         if code != 0 {
             let reason = checks_reason(code, &gate.log);
-            return self.fail_checks(t, ps, &a.stage, a.n, &reason, now_ms);
+            return self.fail_gate(t, ps, a, &reason, now_ms);
         }
         if let Some(attempt) = find_attempt_mut(t, &a.stage, a.n) {
             attempt.head = Some(head);
@@ -4975,6 +5197,24 @@ impl Runner {
             gate.head
         );
         self.save_ticket(t, now_ms)
+    }
+
+    /// A command gate's failure: an agent stage's checks can run again
+    /// on the same attempt (`check`); a gate-only command has no agent
+    /// whose work would stand, so its options are `rerun` and `park`.
+    fn fail_gate(
+        &mut self,
+        t: &mut Ticket,
+        ps: &mut ProjectState,
+        a: &Attempt,
+        reason: &str,
+        now_ms: u64,
+    ) -> Result<()> {
+        if a.kind == AttemptKind::GateOnly {
+            self.fail_attempt(t, ps, &a.stage, a.n, reason, now_ms)
+        } else {
+            self.fail_checks(t, ps, &a.stage, a.n, reason, now_ms)
+        }
     }
 
     pub(crate) fn fail_attempt(
@@ -5187,8 +5427,12 @@ impl Runner {
             self.park_by_answer(t, ps, i, now_ms)?;
             return Ok(0);
         }
+        // A gate-only command stage (a deploy) asks about a failed run
+        // as an agent stage does; other gate-only stages ask nothing
+        // here.
         if let Some(stage) = p.stages.get(t.stage)
-            && stage.kind() != StageKind::GateOnly
+            && (stage.kind() != StageKind::GateOnly
+                || matches!(stage.gate, Some(Gate::Command { .. })))
         {
             for (ctx, _, _) in Self::contexts(t, p, stage) {
                 let Some(a) = latest_attempt(t, &stage.name, &ctx).cloned() else {
@@ -5596,7 +5840,7 @@ impl Runner {
         let mut running = 0u32;
         let mut pending = 0u32;
         for t in &tickets {
-            if t.active() && t.attempts.iter().any(costs_slot) {
+            if ticket_costs_slot(t) {
                 running += 1;
             }
             pending += u32::try_from(t.waiting_on_you().len()).unwrap_or(u32::MAX);
@@ -5701,18 +5945,29 @@ impl Runner {
         // Watching what runs is free, and so is a gate-only stage (a
         // lanes choice, a PR read) or closing a ticket past its last
         // stage: they launch nothing. Starting an agent takes a slot and
-        // is refused while too much waits on the user.
-        let gate_only = p
-            .stages
-            .get(t.stage)
-            .is_none_or(|s| s.kind() == StageKind::GateOnly);
+        // is refused while too much waits on the user. Taking a resource
+        // takes a slot too, gate-only or not; a ticket that already
+        // holds one has its slot and starts the stage's agent in it.
+        let stage = p.stages.get(t.stage);
+        let gate_only = stage.is_none_or(|s| s.kind() == StageKind::GateOnly);
+        let takes_hold = stage.is_some_and(|s| {
+            !Self::skipped(t, s)
+                && s.needs
+                    .iter()
+                    .any(|n| !t.holds.iter().any(|h| &h.resource == n))
+        });
         let policy = live_policy.unwrap_or(&p.policy);
         let may_start = has_open
-            || gate_only
-            || (running < policy.slots
+            || (gate_only && !takes_hold)
+            || ((running < policy.slots || ticket_costs_slot(t))
                 && pending < policy.waiting_on_me
                 && !self.disk_hold(policy, free_gb));
         if !may_start {
+            // Letting go of what the ticket has left behind starts
+            // nothing, so it does not wait for a slot either.
+            if let Err(e) = self.release_left(t, ps, &p, now_ms) {
+                log_step_error(&t.id, &e);
+            }
             // Asking launches nothing, so a resumed ticket's
             // questions do not wait for a slot.
             let asked = match self.ask_again_unslotted(t, ps, &p, now_ms) {
@@ -5727,12 +5982,12 @@ impl Runner {
                 asked,
             }));
         }
-        let had_slot = t.attempts.iter().any(costs_slot);
+        let had_slot = ticket_costs_slot(t);
         match self.step(t, ps, &p, now_ms) {
             Ok(()) => self.health.borrow_mut().stepped(&t.id),
             Err(e) => log_step_error(&t.id, &e),
         }
-        let took_slot = !had_slot && t.attempts.iter().any(costs_slot);
+        let took_slot = !had_slot && ticket_costs_slot(t);
         Ok(Some(Stepped {
             took_slot,
             asked: 0,
@@ -6209,10 +6464,17 @@ pub(crate) fn dirty_suffix(sent: usize) -> String {
     }
 }
 
-/// An open attempt with an agent or a review run in it: what the
-/// policy's `slots` count. A gate-only attempt launches nothing.
+/// An open attempt with an agent or a review run in it. A gate-only
+/// attempt launches nothing.
 pub(crate) fn costs_slot(a: &Attempt) -> bool {
     a.is_open() && a.kind != AttemptKind::GateOnly
+}
+
+/// Whether a ticket counts against the policy's `slots`: active, with a
+/// running attempt or a resource held.
+#[must_use]
+pub fn ticket_costs_slot(t: &Ticket) -> bool {
+    t.active() && (t.attempts.iter().any(costs_slot) || !t.holds.is_empty())
 }
 
 /// A lane a close removes on its own: one not removed yet with a
@@ -7672,7 +7934,89 @@ pub(crate) fn vars_for(t: &Ticket, p: &Pipeline, lane: Option<&str>) -> Vars {
             vars.set(format!("inputs.{name}"), path.display().to_string());
         }
     }
+    // What an earlier stage left the tree at (a deploy's commit), or
+    // that it was skipped.
+    for s in p.stages.iter().take(t.stage) {
+        let head = t
+            .attempts
+            .iter()
+            .filter(|a| a.stage == s.name && a.state == AttemptState::Complete)
+            .max_by_key(|a| a.n)
+            .and_then(|a| a.head.clone());
+        let key = format!("inputs.{}.commit", s.name);
+        if let Some(head) = head {
+            vars.set(key, head);
+        } else if Runner::skipped(t, s) {
+            vars.set(key, format!("unknown ({} skipped)", s.name));
+        }
+    }
+    if let Some(stage) = p.stages.get(t.stage) {
+        for lane in &stage.services {
+            let ready = t.services.iter().rev().find(|x| {
+                x.stage == stage.name && &x.lane == lane && x.state == ServiceState::Ready
+            });
+            let chosen = t.lanes.iter().any(|l| &l.name == lane && l.chosen);
+            if let Some(url) = ready.and_then(|x| x.url.clone()) {
+                vars.set(format!("services.{lane}"), url);
+            } else if !chosen {
+                vars.set(
+                    format!("services.{lane}"),
+                    format!("not served (no {lane} lane)"),
+                );
+            }
+        }
+    }
     vars
+}
+
+/// What a human gate after a deploy or with services up adds: the
+/// commit each earlier gate-only command left (or that it was skipped),
+/// and each lane being served. Nothing when there is neither.
+fn deployed_and_served(t: &Ticket, p: &Pipeline) -> String {
+    let mut lines: Vec<String> = Vec::new();
+    for s in p.stages.iter().take(t.stage) {
+        if !s.is_command_stage() {
+            continue;
+        }
+        let contexts: std::collections::BTreeSet<&str> = t
+            .attempts_of(&s.name)
+            .filter(|a| a.state == AttemptState::Complete)
+            .map(|a| a.context.as_str())
+            .collect();
+        for ctx in contexts {
+            let head = latest_attempt(t, &s.name, ctx)
+                .filter(|a| a.state == AttemptState::Complete)
+                .and_then(|a| a.head.as_deref());
+            if let Some(head) = head {
+                let short: String = head.chars().take(8).collect();
+                lines.push(format!("Deployed: {} at {short} ({ctx})", s.name));
+            }
+        }
+        if Runner::skipped(t, s) {
+            let named = match &s.context {
+                Context::Lane(l) => l.clone(),
+                Context::Lanes(ls) => ls.join(", "),
+                _ => String::new(),
+            };
+            lines.push(format!("Deployed: {} skipped (no {named} lane)", s.name));
+        }
+    }
+    lines.extend(
+        t.services
+            .iter()
+            .filter(|x| x.state == ServiceState::Ready)
+            .map(|x| {
+                format!(
+                    "Served: {} {}",
+                    x.lane,
+                    x.url.as_deref().unwrap_or_default()
+                )
+            }),
+    );
+    if lines.is_empty() {
+        return String::new();
+    }
+    format!("\n{}", lines.join("\n"))
 }
 
 /// An operator's guidance, rendered like the stage prompt it opens (it
@@ -7850,6 +8194,9 @@ pub fn apply_reply(t: &mut Ticket, ps: &mut ProjectState, intent: &str, reply: &
                 || other == "message"
             {
                 crate::review::apply_review_reply(t, other, made);
+            }
+            if other.starts_with("service:") {
+                crate::services::apply_service_reply(t, other, made);
             }
         }
     }
@@ -8086,6 +8433,8 @@ network = "deny"
             restarts: Vec::new(),
             restart: None,
             entered: Vec::new(),
+            holds: Vec::new(),
+            services: Vec::new(),
             created_ms: 0,
             updated_ms: 0,
         };
@@ -8236,6 +8585,8 @@ gate = { kind = "human", decision = "inspect" }
             restarts: Vec::new(),
             restart: None,
             entered: Vec::new(),
+            holds: Vec::new(),
+            services: Vec::new(),
             created_ms: 0,
             updated_ms: 0,
         }
@@ -8533,5 +8884,141 @@ gate = { kind = "human", decision = "inspect" }
         assert!(!unanswered(Some(5), &[9], grace - 1));
         assert!(unanswered(Some(5), &[9], grace));
         assert!(unanswered(None, &[9], grace));
+    }
+
+    const PIPELINE: &str = r#"
+version = 1
+
+[project]
+name = "Orchard"
+repo = "git@example.com:k3/orchard-workspace.git"
+space = "Dispatch · Orchard"
+
+[source]
+kind = "manual"
+
+[[lanes]]
+name = "backend"
+path = "orchard-backend"
+
+[[lanes]]
+name = "frontend"
+path = "orchard-frontend"
+
+[[stages]]
+name = "deploy"
+context = "lane:backend"
+gate = { kind = "command", in = "lane:backend", argv = ["true"] }
+
+[[stages]]
+name = "both"
+context = ["backend", "frontend"]
+gate = { kind = "human", decision = "both" }
+
+[[stages]]
+name = "each"
+context = "each"
+gate = { kind = "human", decision = "each" }
+"#;
+
+    fn ticket(chosen: &[&str]) -> Ticket {
+        let lane = |name: &str| LaneRecord {
+            name: name.into(),
+            worktree: PathBuf::from(format!("/wt/t/orchard-{name}")),
+            branch: "dispatch/1-x".into(),
+            project: None,
+            chosen: chosen.contains(&name),
+            setup_done: false,
+            base_sha: None,
+            refreshed: None,
+            pushed: None,
+            removed: false,
+            conflict: None,
+        };
+        Ticket {
+            version: 0,
+            id: "t".into(),
+            project: "Orchard".into(),
+            source: SourceSnapshot {
+                kind: "manual".into(),
+                identity: "x".into(),
+                number: Some(1),
+                title: "x".into(),
+                body: String::new(),
+                url: None,
+                labels: vec![],
+                taken_at_ms: 0,
+                pull_requests: vec![],
+                taken_by: None,
+            },
+            pipeline_fingerprint: String::new(),
+            pipeline_file: PathBuf::new(),
+            lanes: vec![lane("backend"), lane("frontend")],
+            tree: Some("/wt/t".into()),
+            stage: 0,
+            attempts: vec![],
+            decisions: vec![],
+            ledger: vec![],
+            processes: vec![],
+            root_project: None,
+            rework: BTreeMap::new(),
+            refreshed_stage: None,
+            state: TicketState::Active,
+            state_by: None,
+            close: CloseProgress::default(),
+            restarts: vec![],
+            restart: None,
+            entered: vec![],
+            holds: vec![],
+            services: vec![],
+            created_ms: 0,
+            updated_ms: 0,
+        }
+    }
+
+    fn names(t: &Ticket, p: &Pipeline, stage: usize) -> Vec<String> {
+        Runner::contexts(t, p, &p.stages[stage])
+            .into_iter()
+            .map(|(name, _, _)| name)
+            .collect()
+    }
+
+    #[test]
+    fn a_lane_context_skips_unchosen_lanes_but_each_still_parks_with_none() {
+        let p = Pipeline::parse(PIPELINE).unwrap();
+        let t = ticket(&["frontend"]);
+        assert!(names(&t, &p, 0).is_empty());
+        assert!(
+            Runner::skipped(&t, &p.stages[0]),
+            "lane:backend, not chosen"
+        );
+        assert_eq!(names(&t, &p, 1), ["frontend"]);
+        assert!(
+            !Runner::skipped(&t, &p.stages[1]),
+            "one of its lanes is chosen"
+        );
+        assert_eq!(names(&t, &p, 2), ["frontend"]);
+        let t = ticket(&["backend", "frontend"]);
+        assert_eq!(names(&t, &p, 0), ["backend"]);
+        assert!(!Runner::skipped(&t, &p.stages[0]));
+        // `each` with nothing chosen has no context and is not skipped:
+        // `contexts_or_park` parks it, as before.
+        let t = ticket(&[]);
+        assert!(names(&t, &p, 2).is_empty());
+        assert!(!Runner::skipped(&t, &p.stages[2]));
+        assert!(Runner::skipped(&t, &p.stages[1]));
+    }
+
+    #[test]
+    fn a_skipped_deploy_reads_as_skipped_with_nothing_served() {
+        let p = Pipeline::parse(PIPELINE).unwrap();
+        let mut t = ticket(&["frontend"]);
+        t.stage = 1;
+        assert_eq!(
+            deployed_and_served(&t, &p),
+            "\nDeployed: deploy skipped (no backend lane)"
+        );
+        t.stage = 0;
+        assert_eq!(deployed_and_served(&t, &p), "", "nothing before it");
     }
 }

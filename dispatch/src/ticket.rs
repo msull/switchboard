@@ -735,6 +735,11 @@ impl Decision {
     }
 }
 
+/// The decision asked when a service's stop is not confirmed within
+/// the stop limit: answered `wait` or `released`, and asked even while
+/// the ticket parks or closes.
+pub const STUCK: &str = "stuck";
+
 /// One request to Switchboard: written before it is sent, its reply
 /// written after. `reply: None` after a restart is what recovery
 /// resolves.
@@ -931,6 +936,14 @@ pub struct Ticket {
     /// ranged restart resets to.
     #[serde(default)]
     pub entered: Vec<StageEntry>,
+    /// The resources the ticket holds. The record is the authority:
+    /// another ticket's hold is read from its record, under the writer
+    /// lock, when one is to be taken.
+    #[serde(default)]
+    pub holds: Vec<Hold>,
+    /// The lanes served for its stages, every record kept once stopped.
+    #[serde(default)]
+    pub services: Vec<ServiceRecord>,
     pub created_ms: u64,
     pub updated_ms: u64,
 }
@@ -1032,6 +1045,107 @@ pub struct LaneAtEntry {
     pub conflict: Option<RefreshConflict>,
 }
 
+/// A resource this ticket holds, from the first stage of its `needs`
+/// range to the last.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Hold {
+    pub resource: String,
+    /// The stage it was taken at.
+    pub stage: String,
+    pub taken_ms: u64,
+}
+
+/// A lane served for a stage: its `before`, its port, its Switchboard
+/// service session, and how far it got.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ServiceRecord {
+    pub lane: String,
+    /// 1 for the first record of this stage and lane on the ticket, then
+    /// one more per retry or re-entry: it names the record's ledger
+    /// intent and its `before` check key.
+    pub n: u32,
+    /// The stage that started it.
+    pub stage: String,
+    /// The last stage it lives through: the end of the starting stage's
+    /// `needs` range.
+    pub until: String,
+    /// The lane's `before` command, run as a child of the runner; its
+    /// head is the lane's when it started.
+    #[serde(default)]
+    pub before: Option<GateRun>,
+    #[serde(default)]
+    pub port: Option<u16>,
+    #[serde(default)]
+    pub url: Option<String>,
+    /// The `session.new` operation, copied from the ledger entry under
+    /// this record's intent.
+    #[serde(default)]
+    pub op: Option<String>,
+    /// The session it made, also on `Ticket::processes`, so parking and
+    /// closing kill it with the rest.
+    #[serde(default)]
+    pub session: Option<String>,
+    #[serde(flatten)]
+    pub state: ServiceState,
+    /// When the record was made, and again when its launch was sent:
+    /// the readiness limit counts from the launch.
+    pub started_ms: u64,
+    #[serde(default)]
+    pub ready_ms: Option<u64>,
+    /// When a stop first found the record still to stop; the stop limit
+    /// counts from here, and a `wait` answer resets it.
+    #[serde(default)]
+    pub stopping_ms: Option<u64>,
+    /// What the stop found still alive when it asked `stuck`; a
+    /// `released` answer records it as what the user stopped.
+    #[serde(default)]
+    pub stuck_on: Option<String>,
+    /// What the user said was stopped by hand (a `released` answer to
+    /// `stuck`), when the stop was not confirmed by the runner.
+    #[serde(default)]
+    pub released: Option<String>,
+}
+
+/// How far a served lane got. Tagged `service_state` so it reads apart
+/// from the ticket's and the attempts' flattened `state`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "service_state", rename_all = "kebab-case")]
+pub enum ServiceState {
+    /// The lane's `before` runs, or is about to.
+    Before,
+    /// The launch is sent; the readiness probe has not answered yet.
+    Starting,
+    Ready,
+    Failed {
+        reason: String,
+    },
+    /// Its `before` exited, its session is gone and removed, and its
+    /// port binds again; or the user said so.
+    Stopped,
+}
+
+impl ServiceState {
+    /// The state as a word, with a failure's reason.
+    #[must_use]
+    pub fn label(&self) -> String {
+        match self {
+            Self::Before => "before".to_owned(),
+            Self::Starting => "starting".to_owned(),
+            Self::Ready => "ready".to_owned(),
+            Self::Failed { reason } => format!("failed: {reason}"),
+            Self::Stopped => "stopped".to_owned(),
+        }
+    }
+}
+
+impl ServiceRecord {
+    /// The ledger intent its launch is sent under.
+    #[must_use]
+    pub fn intent(&self) -> String {
+        format!("service:{}:{}:{}", self.stage, self.lane, self.n)
+    }
+}
+
 impl Ticket {
     /// The indexes of the ledger's operations recovery still has to
     /// resolve.
@@ -1085,15 +1199,17 @@ impl Ticket {
     }
 
     /// The pending decisions that wait on the user and count against
-    /// the project's limit: none while the ticket is closing, whose
-    /// pending decisions are on their way to cancelled. Every count and
-    /// every view reads this, so the rule lives in one place.
+    /// the project's limit: while the ticket is closing, only a `stuck`
+    /// question, which the close waits on; its other pending decisions
+    /// are on their way to cancelled. Every count and every view reads
+    /// this, so the rule lives in one place.
     #[must_use]
     pub fn waiting_on_you(&self) -> Vec<&Decision> {
-        if matches!(self.state, TicketState::Closing { .. }) {
-            return Vec::new();
-        }
+        let closing = matches!(self.state, TicketState::Closing { .. });
         self.pending_decisions()
+            .into_iter()
+            .filter(|d| !closing || d.name == STUCK)
+            .collect()
     }
 
     /// The session a card for this ticket should show: the latest
@@ -1273,6 +1389,8 @@ pub(crate) fn blank() -> Ticket {
         restarts: vec![],
         restart: None,
         entered: vec![],
+        holds: Vec::new(),
+        services: Vec::new(),
         created_ms: 0,
         updated_ms: 0,
     }

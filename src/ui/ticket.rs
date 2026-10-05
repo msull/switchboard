@@ -720,6 +720,39 @@ fn ticket_header(cx: &mut DrawCtx<'_>, ui: &mut Ui, t: &TicketView) {
             );
         }
     });
+    holds_and_services(ui, t);
+}
+
+/// What the ticket holds, and the lanes it serves, each a link to
+/// where it answers. A resource it waits for is its standing's to say.
+fn holds_and_services(ui: &mut Ui, t: &TicketView) {
+    let p = theme::palette(ui);
+    if t.holds.is_empty() && t.services.is_empty() {
+        return;
+    }
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing.x = 6.0;
+        if !t.holds.is_empty() {
+            ui.label(theme::meta_text(
+                ui,
+                format!("Holds: {}", t.holds.join(", ")),
+            ));
+        }
+        if !t.services.is_empty() {
+            ui.label(theme::meta_text(ui, "Services:"));
+            for service in &t.services {
+                match &service.url {
+                    Some(url) => {
+                        ui.hyperlink_to(RichText::new(&service.lane).color(p.accent_text), url);
+                    }
+                    None => {
+                        ui.label(RichText::new(&service.lane).color(p.text));
+                    }
+                }
+                ui.label(theme::meta_text(ui, &service.state));
+            }
+        }
+    });
 }
 
 /// A small framed label on the meta row.

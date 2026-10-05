@@ -114,6 +114,13 @@ pub trait Repo: Send {
     /// Bytes free on the volume holding `dir`, for the preflight that
     /// keeps a full disk from failing an attempt.
     fn free_bytes(&self, dir: &Path) -> Result<u64>;
+    /// Whether `port` can be bound on this machine: on `0.0.0.0`, on
+    /// `127.0.0.1`, and on `[::1]` when IPv6 is up. A dev server bound
+    /// to any of them, or to the wildcard, makes it busy.
+    fn port_free(&self, port: u16) -> bool;
+    /// Whether something on `localhost:<port>` answers `GET <path>` with
+    /// an HTTP status line, whatever the status.
+    fn answers_http(&self, port: u16, path: &str) -> bool;
     /// Move a worktree of `repo` from `from` to `to`, git's own records
     /// of it included.
     fn worktree_move(&mut self, repo: &Path, from: &Path, to: &Path) -> Result<()>;
@@ -800,6 +807,53 @@ impl Repo for GitCli {
             .and_then(|s| s.parse().ok())
             .with_context(|| format!("df line not understood: {line:?}"))?;
         Ok(avail.saturating_mul(1024))
+    }
+
+    fn port_free(&self, port: u16) -> bool {
+        use std::net::{Ipv4Addr, Ipv6Addr, TcpListener};
+        // std binds with SO_REUSEADDR, under which a specific address
+        // binds beside a wildcard listener; each family's wildcard and
+        // loopback are tried, which together see every shape a dev
+        // server binds in (spike 11).
+        let v4 = [Ipv4Addr::UNSPECIFIED, Ipv4Addr::LOCALHOST]
+            .iter()
+            .all(|ip| TcpListener::bind((*ip, port)).is_ok());
+        let v6_up = TcpListener::bind((Ipv6Addr::LOCALHOST, 0)).is_ok();
+        v4 && (!v6_up || TcpListener::bind((Ipv6Addr::LOCALHOST, port)).is_ok())
+    }
+
+    fn answers_http(&self, port: u16, path: &str) -> bool {
+        use std::io::{Read as _, Write as _};
+        use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpStream};
+        use std::time::{Duration, Instant};
+        let hosts = [
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            IpAddr::V6(Ipv6Addr::LOCALHOST),
+        ];
+        let Some(mut stream) = hosts.iter().find_map(|ip| {
+            TcpStream::connect_timeout(&SocketAddr::new(*ip, port), Duration::from_millis(200)).ok()
+        }) else {
+            return false;
+        };
+        let deadline = Instant::now() + Duration::from_millis(500);
+        let _ = stream.set_write_timeout(Some(Duration::from_millis(500)));
+        let request = format!("GET {path} HTTP/1.0\r\nHost: localhost:{port}\r\n\r\n");
+        if stream.write_all(request.as_bytes()).is_err() {
+            return false;
+        }
+        let mut got = Vec::new();
+        let mut buf = [0u8; 64];
+        while got.len() < 5 {
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() || stream.set_read_timeout(Some(left)).is_err() {
+                return false;
+            }
+            match stream.read(&mut buf) {
+                Ok(0) | Err(_) => return false,
+                Ok(n) => got.extend_from_slice(&buf[..n]),
+            }
+        }
+        got.starts_with(b"HTTP/")
     }
 
     fn worktree_move(&mut self, repo: &Path, from: &Path, to: &Path) -> Result<()> {
@@ -1615,6 +1669,10 @@ pub struct FakeRepo {
     /// Gates by method name; only `worktree_remove` honours one, and
     /// only through the shared `Arc<Mutex<FakeRepo>>`.
     pub gates: std::collections::BTreeMap<&'static str, std::sync::Arc<Gate>>,
+    /// Ports something else holds: `port_free` refuses them.
+    pub busy_ports: std::collections::BTreeSet<u16>,
+    /// Ports where a server answers HTTP.
+    pub answering: std::collections::BTreeSet<u16>,
 }
 
 impl FakeRepo {
@@ -1855,6 +1913,12 @@ impl Repo for FakeRepo {
 
     fn free_bytes(&self, _dir: &Path) -> Result<u64> {
         Ok(self.free_bytes.unwrap_or(u64::MAX))
+    }
+    fn port_free(&self, port: u16) -> bool {
+        !self.busy_ports.contains(&port)
+    }
+    fn answers_http(&self, port: u16, _path: &str) -> bool {
+        self.answering.contains(&port)
     }
     fn behind(&self, dir: &Path, _onto: &str) -> Result<u64> {
         Ok(self.behind.get(dir).copied().unwrap_or(0))
@@ -2267,6 +2331,12 @@ impl Repo for std::sync::Arc<std::sync::Mutex<FakeRepo>> {
     fn free_bytes(&self, dir: &Path) -> Result<u64> {
         self.lock().unwrap().free_bytes(dir)
     }
+    fn port_free(&self, port: u16) -> bool {
+        self.lock().unwrap().port_free(port)
+    }
+    fn answers_http(&self, port: u16, path: &str) -> bool {
+        self.lock().unwrap().answers_http(port, path)
+    }
     fn worktree_move(&mut self, repo: &Path, from: &Path, to: &Path) -> Result<()> {
         self.lock().unwrap().worktree_move(repo, from, to)
     }
@@ -2662,6 +2732,59 @@ mod tests {
         cli.escalate_check("k");
         assert!(!alive(inner));
         assert!(cli.killed.is_empty());
+    }
+
+    #[test]
+    fn port_free_refuses_a_bound_port() {
+        let cli = GitCli::default();
+        let wildcard = std::net::TcpListener::bind(("0.0.0.0", 0)).unwrap();
+        let port = wildcard.local_addr().unwrap().port();
+        assert!(!cli.port_free(port), "a wildcard listener holds it");
+        drop(wildcard);
+        let loopback = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = loopback.local_addr().unwrap().port();
+        assert!(!cli.port_free(port), "a loopback listener holds it");
+        drop(loopback);
+        // Another test's connection may take a freed port as its own
+        // source port, so freedom is read over a few fresh ones.
+        let freed = (0..5).any(|_| {
+            let l = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+            let port = l.local_addr().unwrap().port();
+            drop(l);
+            cli.port_free(port)
+        });
+        assert!(freed, "a port reads free once closed");
+    }
+
+    #[test]
+    fn answers_http_reads_a_status_line() {
+        use std::io::{Read as _, Write as _};
+        let cli = GitCli::default();
+        let server = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = server.local_addr().unwrap().port();
+        let serving = std::thread::spawn(move || {
+            let (mut stream, _) = server.accept().unwrap();
+            let mut buf = [0u8; 256];
+            let n = stream.read(&mut buf).unwrap();
+            let asked = String::from_utf8_lossy(&buf[..n]).into_owned();
+            stream.write_all(b"HTTP/1.1 404 Not Found\r\n\r\n").unwrap();
+            asked
+        });
+        assert!(cli.answers_http(port, "/health"), "any status answers");
+        assert!(
+            serving
+                .join()
+                .unwrap()
+                .starts_with("GET /health HTTP/1.0\r\n")
+        );
+        // Nothing listening: refused at once.
+        assert!(!cli.answers_http(port, "/"));
+        // A listener that never answers is given up on.
+        let mute = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = mute.local_addr().unwrap().port();
+        let started = std::time::Instant::now();
+        assert!(!cli.answers_http(port, "/"));
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
     }
 
     #[test]

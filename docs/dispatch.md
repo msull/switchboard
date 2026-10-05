@@ -323,6 +323,8 @@ adds a ticket's `restarts`, `restart` and `entered`, empty and absent in
 older records. Version 13 adds a project's `supervisor`, a decision's
 `refusals`, a ticket's `state_by` and its source's `taken_by`, all
 empty or absent in older records.
+Version 14 adds a ticket's `holds` and `services`, empty in older
+records.
 
 A project's record (`projects/<project>.json`) holds, besides its
 space, set and queue, its supervisor (see "Supervisor"): `supervisor`
@@ -723,7 +725,7 @@ gate = { kind = "command", argv = ["..."], in = "root" | "lane" | "lane:<name>" 
      | { kind = "external", check = "pr-checks", checks = "none" }   # a repository with no CI: a PR at the head is enough
      | { kind = "human", decision = "...", confirm = true }
 on_dirty = { nudge = 1 } | "ask"   # an agent stage with a command gate, or a code review stage's implementer: overrides the policy's
-needs = ["resource name"]     # held from the first stage that names it to the last, contiguous
+needs = ["resource name"]     # held from the first stage that names it to the last, contiguous; a review or workflow stage only last
 reviewers = ["style", "lint"] # present: a code review stage (see "The code review stage"); operators, run at once each round
 implementer = "implementer"   # the claude operator that addresses a round's findings, fresh each round
 cap = 3                       # review passes before the findings left are a question
@@ -1191,16 +1193,21 @@ What this pipeline showed, and what it added to the vocabulary:
   for one that was not renders as `not served (no <lane> lane)`, so a
   backend-only, frontend-only or portal-only ticket names nothing
   that does not exist. For each lane that was cut, in order: the
-  `before` command runs as a tracked `command.run` operation and must
-  exit zero; Dispatch allocates a port from the policy's `ports`
+  `before` command runs as a child of the runner, with its log in the
+  ticket directory, and must exit zero (it must also be safe to run
+  again: one lost to a runner restart is started again, and a retry
+  runs it anew); Dispatch allocates a port from the policy's `ports`
   range, testing that it binds before choosing it, so a server you
   started by hand on the default port is simply not chosen; the
-  service is started through `service.new` with `{port}` filled in;
-  and readiness is the `ready` probe answering on that URL within its
+  service is a Switchboard service session made with `session.new`,
+  launched through the login shell as `env <serve.env> <serve.argv>`
+  with `{port}` filled in, so `serve.env` must hold no secrets (the
+  argv is kept on the record and the pane's command line); and
+  readiness is the `ready` probe answering on that URL within its
   limit. A `before` failure, no free port, or a probe that never
   answers is a decision before the tester is launched. The tester is
-  told each URL and not to start a server of its own. Services live on
-  the ticket record until the last stage holding the resource ends.
+  told each URL and not to start a server of its own. Services live
+  on the ticket record until the last stage holding the resource ends.
 - **One owner of the deploy.** Dispatch runs it as a command gate,
   records the commit, and the tester is told the commit and told not
   to deploy. The `tried` decision shows the tester's evidence file and
@@ -1605,7 +1612,31 @@ ticket's slot as any open attempt does).
   ticket still needs out of the tree.
 - A hold is released only after every writer that could touch the
   resource is confirmed stopped, by the cancellation sequence under
-  "Decisions"; a deploy still running keeps `my-dev`.
+  "Decisions"; a deploy still running keeps `my-dev`. As built, a hold
+  is released on the pass after the ticket leaves its range (an
+  advance, a send-back, the pipeline's end), once the services it
+  started there read back as gone: each `before` exited, each session
+  killed and read back gone, each port binding again, and each session
+  removed with `session.remove`. A park or a close releases the same
+  way. A stop not confirmed within two minutes (`STOP_LIMIT_MS`) is a
+  `stuck` decision with `wait` and `released`, asked even while the
+  ticket parks or closes; only a `released` answer lets a hold go
+  without the runner's confirmation. A stop that ends on its own
+  after asking withdraws the question in the write that records it.
+- A hold taken past the first stage of its range (a ticket parked at
+  `try` or `tried`, then resumed) cannot trust what the range's earlier
+  stages did: another ticket may have deployed since, and parking
+  stopped the services the tester ran against. Every completed attempt
+  of a stage earlier in the range is cancelled and the ticket goes back
+  to the earliest, where a `rerun` question asks before anything
+  deploys or reads the old commit. Each later agent stage brings its
+  services up again before asking the same, and a human gate in the
+  range asks afresh, so `tried` is never asked with nothing served. A
+  review or workflow stage cannot be sent back this way, so a pipeline
+  file may put one only last in a `needs` run. A frontend-only ticket,
+  with no deploy, goes back to `try`.
+- The in-place lane hold above is not built: a stage whose `needs`
+  names a lane parks, saying so.
 - Holds cover Dispatch tickets only. Dispatch cannot see a manual
   deploy to `my-dev`; `dispatch status` shows the holds so you can
   look before doing one by hand.
@@ -1934,9 +1965,13 @@ Commands:
   not resumable refused rather than launched fresh
 - `service.new {project, name, argv, env}` → `session`: a service
   record Dispatch owns, killed and removed by it; whether it is
-  listening is Dispatch's probe, not Switchboard's reply
+  listening is Dispatch's probe, not Switchboard's reply. Not built:
+  Dispatch makes its services with `session.new` (kind `service`, an
+  argv launch carrying the port through `env`) and removes them with
+  `session.remove` meanwhile
 - `command.run {project, name, argv, env}` → `session`; the exit code
-  is read back with `session.get`
+  is read back with `session.get`. Not built: a command gate and a
+  service's `before` run as children of the runner meanwhile
 - `space.new {name}` → `space`; `set.new {space, name}` → `set`
   (`space` may be the global workspace's fixed id,
   `00000000-0000-0000-0000-000000000002`, for a set that holds cards
@@ -2169,6 +2204,23 @@ runner rather than a Switchboard command record for now (the port has
 no per-record environment yet); its output goes to the attempt's
 `checks.log`, shown on the ticket page as the `checks` artifact.
 
+The third slice builds Orchard's deploy, `try` and `tried`. A gate-only
+stage with a command gate (`deploy`) runs the command in its context's
+clean tree as a child of the runner, as an agent stage's checks run,
+and the head it ran at is the deployed commit, `{inputs.deploy.commit}`
+to later prompts; a stage in a lane the ticket did not choose is
+skipped and reads `unknown (deploy skipped)`. A failure asks `rerun` or
+`park`, and a deploy lost to a runner restart is that question, since
+it may have run. `needs` are holds on the ticket record, taken on
+entering the range under the writer lock against the other tickets'
+records and released the pass after leaving it; a ticket waiting for
+one asks nothing and costs no slot, and one holding it costs a slot.
+`services` are Switchboard service sessions made with `session.new`
+(an argv `env` launch with the port), each after its `before` ran as a
+child of the runner; the tester starts once each answers, told each
+URL, and they are stopped (killed, port free, removed) when the ticket
+leaves the range, parks or closes.
+
 Acceptance, each as a test against a fake Switchboard on the socket
 and one against the real one:
 
@@ -2239,7 +2291,7 @@ and one against the real one:
 | A parked ticket's checks ignore the kill | Two minutes after the kill the group gets SIGKILL and the ticket parks; the cancellation reason says the checks were still running and names them (`a_check_that_ignores_the_kill_does_not_hold_the_park_past_the_limit`) |
 | The runner restarts while the checks run, then the ticket is parked | The lost check reads as gone; the attempt is cancelled on the first pass and nothing starts again (`parking_after_a_restart_reads_a_lost_check_as_gone`) |
 | A ticket is closed during a code review round | Its command reviewers are killed before the attempt reads `the ticket closed: …` (`closing_during_a_review_round_kills_its_command_reviewers`) |
-| The runner restarts while the checks run | The lost check starts again on the same head; no second agent |
+| The runner restarts while the checks run | The lost check starts again on the same head; no second agent (an agent stage's checks; a gate-only command is a question) |
 | `ready` with the PR's checks pending, then green | A gate-only attempt per context, no agent; no PR is a `pr` decision (`recheck`, `park`); pending waits and reads the provider once a minute; green at the tree's head completes the attempt bound to that head |
 | The PR is at another head, its checks are red, or it has no checks | A `pr` decision naming which; `recheck` reads again at once; the same attempt throughout; `checks = "none"` on the stage passes on the PR at the head alone |
 | The provider cannot be read | The error is recorded on the attempt and retried quietly for an hour, then a `pr` decision; a merged PR passes |
@@ -2324,14 +2376,44 @@ and one against the real one:
 | The same issue taken again after a close, its kept branches in the clones | A kept branch with nothing beyond its base is deleted and the trees are cut; one with commits holds the ticket at the `cut`/`branch` question naming only that repository; `reuse` checks it out at its head, `fresh` renames it to `.closed-<yyyymmdd>` and cuts a new one, `park` parks (`a_retake_deletes_an_unmoved_kept_branch_and_cuts`, `a_retake_asks_about_a_kept_branch_with_commits`, `a_retake_with_one_moved_lane_of_three_deletes_the_others_and_names_only_it`, `fresh_renames_every_moved_branch_to_the_one_name_the_question_gave`); a cut that fails after `reuse` parks and a resume asks again (`a_reuse_whose_cut_fails_is_spent_and_a_resume_asks_again`); a kept branch git cannot read parks (`a_kept_branch_that_cannot_be_read_parks_the_retake`) |
 | Dispatch killed at any point of a close | The ticket reads `closing` and starts nothing; the next pass finishes from the saved flags; nothing counts as done without its read-back (`a_close_cut_off_before_the_project_save_finishes_and_clears_the_set_once_answered` and its siblings) |
 | User is viewing another workspace during the whole path | The window stays on it through every launch and the review start; no terminal window opens |
+| A ticket reaches `deploy` in its backend lane | One gate-only attempt in that lane, no session, the command in the lane's clean tree with `DISPATCH_STAGE=deploy` and its log in `checks.log`; exit 0 binds the head and the tester is told that commit; the command ran once (`a_deploy_runs_once_at_the_lanes_clean_head_and_the_tester_is_told_the_commit`) |
+| A frontend-only ticket reaches `deploy` | No attempt and no command; the tester reads `unknown (deploy skipped)`, and `tried` says the deploy was skipped and what is served (`a_deploy_for_a_lane_not_chosen_is_skipped_and_reads_as_skipped`) |
+| The deploy exits 1 | A `rerun` question with `rerun` and `park`; parked and resumed, the question again and no second run; `rerun` runs attempt 2 with its own log (`a_failed_deploy_asks_rerun_or_park_and_a_resume_does_not_deploy_again_unasked`) |
+| A ticket parked at `tried` is resumed | It takes `my-dev` again and goes back to `deploy`; the deploy's and the tester's attempts are cancelled; a `rerun` question, and no deploy until it is answered; after the deploy, `try` serves the frontend again and asks before the tester runs, and `tried` says what is served (`a_resume_past_the_deploy_asks_to_deploy_again_before_anything_reads_it`) |
+| A frontend-only ticket parked at `tried` is resumed | It goes back to `try`, serves the frontend again and asks before the tester runs again (`a_resume_with_the_deploy_skipped_serves_again_and_asks_before_the_tester`) |
+| The runner restarts while the deploy runs | The attempt fails "it may have run" and asks; nothing runs again; the hold stays (`a_deploy_lost_to_a_runner_restart_is_a_question_not_a_rerun`) |
+| A ticket parks while its deploy runs | `parking` until the command exits, never killed; then `parked` with no hold (`parking_during_a_deploy_waits_for_it_to_exit_then_releases_the_hold`) |
+| A stage in `lane:<x>` for a ticket without that lane chosen | No context and skipped; an `each` stage with nothing chosen still parks (`a_lane_context_skips_unchosen_lanes_but_each_still_parks_with_none`) |
+| A second ticket reaches `deploy` while the first holds `my-dev` | It waits with no attempt, no question and no slot, and `status` says `waiting for my-dev, held by <id> (#n)`; when the first answers `tried`, its service is stopped and removed, the hold released, and the second deploys (`a_second_ticket_waits_for_the_resource_without_a_question_or_a_slot_then_takes_it_when_tried_ends`) |
+| A park or a close while a service runs that survives its first kill and then leaves its port taken | The hold is kept until the session is gone and the port binds again; the session is removed before `parked` or `closed` (`parking_and_closing_release_the_hold_after_the_service_is_gone`) |
+| A `refresh` question at the stage after `tried` | The service still stops and the hold goes, so another ticket takes it (`a_refresh_question_after_tried_does_not_keep_the_hold`) |
+| A stage names a lane in `needs` | The ticket parks: the in-place hold is not built (`a_stage_needing_a_lane_parks_as_not_built`) |
+| The runner restarts while a ticket holds `my-dev` | The hold is read back from the record and the other ticket still waits (`a_hold_survives_a_runner_restart`) |
+| `slots = 1` with a ticket holding `my-dev` at `tried` | Another ticket's tester does not start; `status` counts one running (`a_ticket_holding_a_resource_costs_a_slot_and_status_agrees`) |
+| `try` begins with the frontend chosen | Its `before` runs in the frontend tree; after exit 0 a service session on the first free port, launched as `$SHELL -lc 'exec "$@"' dispatch-service env BROWSER=none PORT=3100 npm start` in that tree; no tester until it answers; the tester is told the URL (`services_start_after_before_on_a_free_port_and_the_tester_is_told_the_url`) |
+| A backend-only ticket at `try` | Nothing is served and the tester reads `not served (no frontend lane)` (`a_lane_not_cut_is_not_served_and_reads_so`) |
+| The first port is taken; every port is taken | The next port is used; with none free, a `service` question (`retry`, `park`) and nothing launched (`a_busy_port_is_skipped_and_no_free_port_is_a_question`) |
+| The `before` exits 1 | A `service` question before any tester; `retry` makes record 2, whose `before` runs under its own key (`a_before_that_fails_is_a_question_before_the_tester_and_retry_runs_it_again`) |
+| Two served lanes fail, one's port still taken when `retry` is answered | The confirmed one starts again; the other stays failed with its session, is stopped on, and is asked about once its port binds; never two records of it alive (`a_retry_leaves_a_failed_service_whose_stop_is_not_confirmed_to_its_stop`) |
+| A park or a close while a `before` runs | It is waited for, never killed; `parking` or `closing` until it exits (`parking_and_closing_wait_for_a_running_before`) |
+| A park whose service's port stays taken | No question before two minutes; then one `stuck` question naming the port and `lsof -i :3100`, pending in the view and kept by parking; `wait` is acted on and asks again after another limit; `released` removes the session, writes what was released, and parks with no hold (`a_park_held_by_a_busy_port_asks_stuck_and_released_parks_it`) |
+| A `stuck` question asked while active, then the ticket parks | The intent to park withdraws it; a new one is asked while parking (`a_park_withdraws_a_stuck_question_asked_while_active_and_asks_afresh`) |
+| A close whose `before` never exits | A `stuck` question answerable while the ticket reads `closing`; `released` kills the `before` and the ticket closes (`a_close_held_by_a_hung_before_asks_stuck_and_can_be_answered_while_closing`) |
+| After `tried` the service's port stays taken | The hold stays and nothing of the next stage starts until `released`; then the other ticket takes it (`a_leaving_stop_past_the_limit_keeps_the_hold_until_answered`) |
+| A `stuck` question is asked, then the port frees on its own, while active or parking | The question is cancelled with the stop; nothing is left pending, and a parking ticket parks (`a_stop_that_ends_on_its_own_after_stuck_withdraws_the_question`) |
+| The runner stops between saving a service `starting` and writing its request | The launch is sent once on the next pass (`a_service_saved_but_never_sent_is_sent_once`) |
+| The service never answers within `ready.within_secs` | Its session is killed and removed, then a `service` question; `retry` starts afresh (`a_probe_that_never_answers_is_a_question_and_the_service_is_stopped`) |
+| `tried` answered, or parked | The service is killed, its port read free, its session removed, the hold released (`services_stop_when_tried_ends_and_on_park`) |
+| The reply to a service's `session.new` is lost | Recovery finds the session; it is on the record and the process list; nothing launches twice (`a_lost_service_reply_is_found_again_not_started_twice`) |
 
 Then, in order: `implement` with its command gate bound to a commit,
 tested with one lane committing after another lane's checks finished;
 `ready` and `merge` from GitHub and the human gate-only stage (built,
 as above; a moved head is not yet voided); the code review stage
-(`docs/review-stage-plan.md`); the queue and slots; the PTA pipeline
-with its in-place hold; the Orchard pipeline with the deploy gate and
-the persisted `my-dev` hold; budget reporting; the `recommend`
+(`docs/review-stage-plan.md`); the queue and slots; the Orchard
+pipeline with the deploy gate and the persisted `my-dev` hold (built,
+as above; a head that moves after `tried` is not voided); the PTA
+pipeline with its in-place hold; budget reporting; the `recommend`
 dial.
 
 ## Design choices

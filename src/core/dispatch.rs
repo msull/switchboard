@@ -855,7 +855,8 @@ impl AppCore {
 
     /// `investigate running`, `parked: <reason>`, `2 waiting on you`, an
     /// agent at a prompt of its own, or why a ticket with nothing open
-    /// is not moving when its project is at a limit.
+    /// is not moving: a resource another ticket holds, or its project at
+    /// a limit.
     #[must_use]
     pub fn ticket_standing(&self, t: &TicketView) -> String {
         let waiting = t.decisions.iter().filter(|d| d.state == "pending").count();
@@ -870,6 +871,11 @@ impl AppCore {
         }
         match t.state.as_str() {
             "active" => {
+                // A resource another ticket holds stops this one before
+                // any limit of its project does.
+                if let Some(what) = t.waiting_for.as_ref().filter(|_| !last_attempt_open(t)) {
+                    return format!("waiting for {what}");
+                }
                 let held = if last_attempt_open(t) {
                     None
                 } else {

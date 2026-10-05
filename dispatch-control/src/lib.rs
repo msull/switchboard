@@ -332,6 +332,13 @@ pub struct TicketView {
     pub root_project: Option<String>,
     /// The session a card shows: the latest attempt's.
     pub current_session: Option<String>,
+    /// The resources the ticket holds.
+    pub holds: Vec<String>,
+    /// What the ticket waits for, and who holds it:
+    /// `my-dev, held by baea8dbe (#56)`.
+    pub waiting_for: Option<String>,
+    /// The lanes served for its stages that are not stopped.
+    pub services: Vec<ServiceView>,
     pub created_ms: u64,
     pub updated_ms: u64,
     /// The files a reader opens next, filled for a single ticket's view
@@ -426,6 +433,18 @@ pub struct PlanRoundView {
     pub feedback: PathBuf,
     /// The response, when it exists.
     pub response: Option<PathBuf>,
+}
+
+/// A lane served for a stage, as Switchboard's service session.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ServiceView {
+    pub lane: String,
+    /// Where it answers, once it has a port.
+    pub url: Option<String>,
+    /// `before`, `starting`, `ready`, `failed: <why>` or `stopped`.
+    pub state: String,
+    pub session: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]

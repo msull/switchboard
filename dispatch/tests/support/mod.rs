@@ -33,6 +33,8 @@ pub struct FakeSwitchboard {
     pub log: Vec<LogLine>,
     /// Removed in the window: gone from the records, still in the log.
     pub removed: Vec<String>,
+    /// Removed with `session.remove`, in order.
+    pub removed_by_port: Vec<String>,
     /// Records saved with their launch pending: the app died in between.
     pub interrupted: Vec<String>,
     /// Every request seen, in order.
@@ -394,6 +396,11 @@ impl FakeSwitchboard {
                 };
                 s.card = "working".into();
                 self.sent.push((session.clone(), text.clone()));
+                (vec![], false)
+            }
+            Body::SessionRemove { session } => {
+                self.sessions.retain(|s| &s.id != session);
+                self.removed_by_port.push(session.clone());
                 (vec![], false)
             }
             Body::SessionNotes { session, text } => {
