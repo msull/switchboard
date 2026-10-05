@@ -435,3 +435,13 @@ or aborted by hand).
   run before any gate or agent in that lane, whose failure is reported
   as the environment's, not the attempt's, and retried on the next pass
   without a question.
+- **A cancelled attempt whose branch moved by one commit offers no
+  `check`.** A one-line formatting commit made by hand on a lane parked
+  the ticket (right: the branch moved by something other than the
+  implementer) and the resume asked `rerun | park`, a full review pass
+  for a change the reviewers had already accepted. When the new head is
+  the gate head plus commits that touch no file the review's open points
+  name, `check` could be offered beside `rerun`. Related: a gate whose
+  lint step reformats a committed file fails as "the tree changed while
+  the checks ran", which reads as an agent problem; naming the formatter
+  and the file would send the fix to the right place.
