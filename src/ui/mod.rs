@@ -85,7 +85,7 @@ pub struct UiState {
     /// headers; they follow the toggle only on the frame it changes, so
     /// individual sections can still be opened and closed by hand.
     pub expand_applied: Option<bool>,
-    /// Show the raw pane as a panel under an agent's conversation.
+    /// Show the raw pane as a panel under an agent's message box.
     pub terminal_open: bool,
     /// Variable names the project's environment defines, for the Run
     /// tab's "not defined" marks: project, when resolved, names.
@@ -682,7 +682,7 @@ fn side_tab_keys(cx: &mut DrawCtx<'_>, ctx: &egui::Context, session: bool) {
 /// Cmd+K opens the quick-switcher, Cmd+B, Cmd+R, and Cmd+N show the
 /// Files, Run, and Notes tabs of the side panel (again to close it
 /// beside a session; Notes only there),
-/// Cmd+T the raw pane under a conversation, and Cmd+. sends Escape to
+/// Cmd+T the raw pane under the message box, and Cmd+. sends Escape to
 /// the session's terminal. On a working set, h, j, k, l (or the
 /// arrows) move the selected card, i or Enter puts the cursor in its
 /// "Send a line" field (Esc leaves it), v starts and stops listening

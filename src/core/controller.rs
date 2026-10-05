@@ -76,7 +76,7 @@ pub enum UiRequest {
     Terminal(RecordId),
     /// What the Escape key does: close a dialog, leave a text field.
     Escape,
-    /// The raw pane under a session's conversation, shown or hidden.
+    /// The raw pane under a session's message box, shown or hidden.
     ToggleTerminal,
     /// On a session's page: the conversation scrolled to the previous
     /// (`back`) or next of the user's messages.
