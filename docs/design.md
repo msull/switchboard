@@ -662,9 +662,9 @@ Items are the ids in `docs/feedback-2026-09.md`.
   The option is re-applied on launch because the server outlives the
   app.
 - **B3 Raw pane panel.** The Terminal toggle in the conversation header
-  (or Cmd+T) opens the pane snapshot as a resizable panel above the
-  message box, with its own Hide button, so closing it never means
-  scrolling back to the top.
+  (or Cmd+T) opens the pane snapshot as a resizable panel under the
+  message box, with no header row; Hide floats over its top-right
+  corner, so closing it never means scrolling back to the top.
 - **C1 Waiting states with a reason.** A session that waits says why
   next to its state, on the card and in the session header: "waiting on
   you: question" for `AskUserQuestion`, "permission for Bash" for a
@@ -1301,7 +1301,7 @@ letting go on none cancels. The stick that made a pick is spent until it comes b
 centre, so one still held over cannot move the page the pick brought
 up. On a session's page Z opens a menu of its
 own mid-window: up Pop out, right Back, down Stop, left Terminal (the
-raw pane under the conversation, as Cmd+T). On that page the stick
+raw pane under the message box, as Cmd+T). On that page the stick
 alone scrolls the conversation, in the main window; a flick left or
 right steps a cursor to the previous or next of the user's messages
 and scrolls it to the top, starting from the end so the first flick

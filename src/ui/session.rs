@@ -1,8 +1,8 @@
 //! The session view: header for one record, and either an
 //! embedded terminal (shells, commands, services) or, for agents, the
 //! conversation read from the transcript with a message box docked at
-//! the bottom. Agents run in Ghostty; the raw screen snapshot is kept
-//! in a "Terminal" fold under the conversation.
+//! the bottom. Agents run in Ghostty; the raw screen snapshot is
+//! shown in a panel under the message box.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -16,7 +16,7 @@ use egui_term::{BackendSettings, PtyEvent, TerminalBackend, TerminalView};
 
 use super::cards::kind_label;
 use super::files::DraggedPath;
-use super::{DrawCtx, GAP, PAD, Renaming, UiState, theme};
+use super::{DrawCtx, GAP, Renaming, UiState, theme};
 use crate::core::{
     AgentKind, AppAction, CardState, PinTarget, RecordId, ResumeHandle, SessionKind, SessionRecord,
     View,
@@ -197,7 +197,7 @@ fn header(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord) {
                     theme::ghost_muted(ui, "Terminal")
                 };
                 if terminal
-                    .on_hover_text("Show the raw pane below the conversation (Cmd+T)")
+                    .on_hover_text("Show the raw pane under the message box (Cmd+T)")
                     .clicked()
                 {
                     cx.state.terminal_open = !cx.state.terminal_open;
@@ -460,11 +460,14 @@ fn name_or_editor(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord) {
     }
 }
 
-/// Chat layout: the message box is a panel docked at the bottom, drawn
-/// first so it claims its space; the conversation fills what is left.
+/// Chat layout: the terminal panel, when open, is drawn first so it sits
+/// lowest; the message box is a panel docked above it, and the
+/// conversation fills what is left.
 fn agent_body(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord) {
+    if cx.state.terminal_open {
+        terminal_panel(cx, ui, record);
+    }
     let p = theme::palette(ui);
-    let fill = p.surface;
     // A file row dragged from the file side lights the panel up and, on
     // release, lands in the draft as its path.
     let hovering = egui::DragAndDrop::has_payload_of_type::<DraggedPath>(ui.ctx());
@@ -505,36 +508,57 @@ fn agent_body(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord) {
             append_path(draft, &dropped.0);
         }
     }
-    // The raw pane is its own panel above the message box, so the control
-    // that hides it never scrolls away with the conversation.
-    if cx.state.terminal_open {
-        egui::Panel::bottom("terminal_panel")
-            .resizable(true)
-            .default_size(240.0)
-            .frame(Frame::new().fill(fill).corner_radius(2).inner_margin(PAD))
-            .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    theme::kicker(ui, "Terminal", p.n600);
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if theme::ghost_muted(ui, "Hide").clicked() {
-                            cx.state.terminal_open = false;
-                        }
-                    });
-                });
-                egui::ScrollArea::both()
-                    .auto_shrink([false, false])
-                    .stick_to_bottom(true)
-                    .show(ui, |ui| match cx.state.snapshots.get(&record.id) {
-                        Some(text) => code_block(ui, text),
-                        None => {
-                            ui.label(RichText::new("No snapshot yet.").weak());
-                        }
-                    });
-            });
-    }
     Frame::new()
         .inner_margin(Margin::symmetric(0, super::GAP_PX / 2))
         .show(ui, |ui| conversation_or_pane(cx, ui, record));
+}
+
+/// The raw pane as the lowest panel, under the message box. Hide
+/// floats over its top-right corner, so the panel spends no height
+/// on a header and closing it never means scrolling back up.
+fn terminal_panel(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord) {
+    let p = theme::palette(ui);
+    egui::Panel::bottom("terminal_panel")
+        .resizable(true)
+        .default_size(240.0)
+        .frame(Frame::new().fill(p.code_fill).corner_radius(2))
+        .show(ui, |ui| {
+            let rect = ui.max_rect();
+            egui::ScrollArea::both()
+                .auto_shrink([false, false])
+                .stick_to_bottom(true)
+                .show(ui, |ui| match cx.state.snapshots.get(&record.id) {
+                    Some(text) => code_block_with_margin(ui, text, Margin::symmetric(8, 0)),
+                    None => {
+                        Frame::new()
+                            .inner_margin(Margin::symmetric(8, 0))
+                            .show(ui, |ui| {
+                                ui.label(RichText::new("No snapshot yet.").weak());
+                            });
+                    }
+                });
+            // Added after the scroll area in the same layer, so it
+            // paints on top and wins the hit test; the right inset
+            // clears the vertical scrollbar.
+            let mut corner = rect.shrink(4.0);
+            corner.max.x -= ui.spacing().scroll.bar_width;
+            ui.scope_builder(
+                egui::UiBuilder::new()
+                    .max_rect(corner)
+                    .layout(egui::Layout::right_to_left(egui::Align::Min)),
+                |ui| {
+                    let hide =
+                        egui::Button::new(RichText::new("Hide").color(p.n700)).fill(p.surface);
+                    if ui
+                        .add(hide)
+                        .on_hover_text("Hide the terminal (Cmd+T)")
+                        .clicked()
+                    {
+                        cx.state.terminal_open = false;
+                    }
+                },
+            );
+        });
 }
 
 /// The conversation when the transcript is readable, otherwise the
@@ -1316,6 +1340,12 @@ fn tool_detail(ui: &mut Ui, detail: &ToolDetail, salt: (usize, usize)) {
 /// Read-only monospace text, selectable: the dark code block of the
 /// design on both themes.
 pub fn code_block(ui: &mut Ui, text: &str) {
+    code_block_with_margin(ui, text, Margin::symmetric(14, 12));
+}
+
+/// A [`code_block`] with its own inner margin, for a block that fills a
+/// panel edge to edge.
+fn code_block_with_margin(ui: &mut Ui, text: &str, margin: Margin) {
     let p = theme::palette(ui);
     // A read-only `TextEdit` paints no background of its own, so the
     // dark fill comes from an explicit frame.
@@ -1327,7 +1357,7 @@ pub fn code_block(ui: &mut Ui, text: &str) {
                 Frame::new()
                     .fill(p.code_fill)
                     .corner_radius(2)
-                    .inner_margin(Margin::symmetric(14, 12)),
+                    .inner_margin(margin),
             )
             .desired_width(f32::INFINITY),
     );

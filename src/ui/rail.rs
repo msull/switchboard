@@ -579,7 +579,7 @@ fn bottom(cx: &mut DrawCtx<'_>, ui: &mut Ui, view: &View, compact: bool) {
     }
     if matches!(view, View::Session(_)) {
         if bottom_item(ui, "Terminal", "⌘T", compact)
-            .on_hover_text("Show the raw pane under the conversation (Cmd+T)")
+            .on_hover_text("Show the raw pane under the message box (Cmd+T)")
             .clicked()
         {
             cx.state.terminal_open = !cx.state.terminal_open;

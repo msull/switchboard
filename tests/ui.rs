@@ -1754,6 +1754,60 @@ fn terminal_panel_toggles_from_the_header() {
     assert!(harness.state().ui_state.terminal_open);
 }
 
+/// Seeds a Claude session with a pane snapshot, shows it and opens the
+/// terminal panel from the header.
+fn open_terminal_panel(harness: &mut Harness<'static, SwitchboardApp>, ids: &Seeded) {
+    let id = seed_claude(harness, ids);
+    harness
+        .state_mut()
+        .ui_state
+        .conversations
+        .insert(id, (None, two_turns()));
+    harness
+        .state_mut()
+        .ui_state
+        .snapshots
+        .insert(id, "$ raw pane text".into());
+    showing(harness, View::Session(id));
+    click(harness, "Terminal");
+}
+
+fn snapshot_rect(harness: &Harness<'static, SwitchboardApp>) -> egui::Rect {
+    harness
+        .query_all_by_value("$ raw pane text")
+        .next()
+        .expect("the snapshot is shown")
+        .rect()
+}
+
+#[test]
+fn terminal_panel_sits_under_the_message_box() {
+    let (mut harness, ids) = harness();
+    open_terminal_panel(&mut harness, &ids);
+    let snapshot = snapshot_rect(&harness);
+    assert!(snapshot.top() >= prompt_field(&mut harness).rect().bottom());
+    assert!(snapshot.top() >= harness.get_by_label("Send →").rect().bottom());
+    // Hide floats over the text rather than taking a row of its own.
+    let hide = harness.get_by_label("Hide").rect();
+    assert!(
+        (hide.top() - snapshot.top()).abs() <= 6.0,
+        "Hide at {hide:?}, snapshot at {snapshot:?}"
+    );
+
+    plain_message_box(&mut harness);
+    harness.run_steps(2);
+    let snapshot = snapshot_rect(&harness);
+    assert!(snapshot.top() >= harness.get_by_label("Message").rect().bottom());
+}
+
+#[test]
+fn open_terminal_panel_has_no_kicker() {
+    let (mut harness, ids) = harness();
+    open_terminal_panel(&mut harness, &ids);
+    assert!(harness.query_by_label("TERMINAL").is_none());
+    assert_eq!(harness.query_all_by_label("Terminal").count(), 1);
+}
+
 #[test]
 fn messages_before_the_answer_are_their_own_blocks_with_the_tools_between() {
     let (mut harness, ids) = harness();
