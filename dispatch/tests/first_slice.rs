@@ -11466,6 +11466,7 @@ fn wait_stepping(
         &data,
         id,
         what,
+        None,
         Some(deadline),
         &mut || env.borrow().now,
         &mut || {
@@ -11525,10 +11526,14 @@ fn wait_times_out_on_an_idle_ticket_and_ends_on_a_parked_one() {
         panic!("{waited:?}");
     };
     assert_eq!(e.kind, dispatch::events::Kind::Parked);
-    // Waiting for anything on a parked ticket waits for its resume.
+    // Waiting for anything on a parked ticket ends at once, as any other
+    // wait does.
     let deadline = env.now + 1_000;
     let waited = wait_stepping(&mut env, &id, dispatch::events::For::Any, deadline);
-    assert_eq!(waited, dispatch::events::Waited::TimedOut);
+    let dispatch::events::Waited::Ended(e) = waited else {
+        panic!("{waited:?}");
+    };
+    assert_eq!(e.kind, dispatch::events::Kind::Parked);
 }
 
 #[test]

@@ -971,30 +971,44 @@ pub enum Waited {
 /// Wait until `ticket` does what `what` names, it parks or closes, or
 /// `deadline_ms` (by `now`) passes. The record is read first, so what
 /// already holds (a pending decision, a parked or closed ticket) returns
-/// at once; then the log is followed from where it was, and each
-/// candidate is confirmed against a fresh read of the record, since an
-/// event can be one whose write failed and whose `void` is not read yet.
+/// at once. Then the log is followed from `since`, or from its tail when
+/// `since` is `None`, and each candidate is confirmed against a fresh read
+/// of the record, since an event can be one whose write failed and whose
+/// `void` is not read yet. An event replayed from before the wait, of a
+/// kind with no record check of its own, is held until the record's
+/// `updated_ms` reaches its write or its `void` drops it.
 /// `pause` runs between looks at the log: a sleep, or a test's step.
 pub fn wait(
     data: &DataDir,
     ticket: &str,
     what: For,
+    since: Option<u64>,
     deadline_ms: Option<u64>,
     now: &mut dyn FnMut() -> u64,
     pause: &mut dyn FnMut(),
 ) -> Result<Waited> {
     let log = log_path(data);
-    // Read before `since`: a write appends before it renames, so every
-    // event after `since` is a change this record does not hold yet,
-    // which is what confirms an event of a kind with no check of its own.
+    // Read before `start`: a write appends before it renames, so every
+    // event after `start` is a change this record does not hold yet,
+    // which is what confirms a live event of a kind with no check of its
+    // own. An event at or before `start` may be in `before` already.
     let before = read_ticket(&data.ticket_file(ticket))?;
-    let since = last_seq(&log)?;
+    let start = last_seq(&log)?;
     let first = read_ticket(&data.ticket_file(ticket))?;
     let names = stage_names(&first);
     if let Some(done) = already(&log, &first, what, &names)? {
         return Ok(done);
     }
-    let mut follow = follow(&log, since);
+    // A cursor past the tail would hide the events still to come.
+    let mut follow = follow(&log, since.map_or(start, |s| s.min(start)));
+    let mut held: Vec<Event> = Vec::new();
+    // The oldest held event `fresh` bears out, so log order holds even
+    // when a write lands between the reads of one batch.
+    let landed = |held: &mut Vec<Event>, fresh: &Ticket| {
+        held.iter()
+            .position(|e| confirmed(e, &before, fresh, what, &names, true))
+            .map(|i| held.remove(i))
+    };
     loop {
         let batch: Vec<Event> = follow
             .next_batch()?
@@ -1002,6 +1016,13 @@ pub fn wait(
             .filter(|e| e.ticket == ticket)
             .collect();
         let gone = withdrawn(&batch);
+        held.retain(|e| !gone.contains(&e.seq));
+        if !held.is_empty() {
+            let fresh = read_ticket(&data.ticket_file(ticket))?;
+            if let Some(e) = landed(&mut held, &fresh) {
+                return Ok(Waited::Matched(e));
+            }
+        }
         for e in batch {
             if e.kind == Kind::Void || gone.contains(&e.seq) {
                 continue;
@@ -1011,8 +1032,15 @@ pub fn wait(
                 continue;
             }
             let fresh = read_ticket(&data.ticket_file(ticket))?;
-            if !confirmed(&e, &before, &fresh, what, &names) {
+            let replayed = e.seq <= start;
+            if !confirmed(&e, &before, &fresh, what, &names, replayed) {
+                if replayed && !checked(e.kind) {
+                    held.push(e);
+                }
                 continue;
+            }
+            if let Some(older) = landed(&mut held, &fresh) {
+                return Ok(Waited::Matched(older));
             }
             return Ok(if what.candidate(e.kind) {
                 Waited::Matched(e)
@@ -1027,9 +1055,20 @@ pub fn wait(
     }
 }
 
+/// Whether `confirmed` checks an event of `kind` against the record
+/// itself, rather than against what changed since the wait began: the
+/// kinds with an arm of their own there. Change the two together.
+fn checked(kind: Kind) -> bool {
+    matches!(
+        kind,
+        Kind::Decision | Kind::Stage | Kind::SentBack | Kind::Pr | Kind::Closed | Kind::Parked
+    )
+}
+
 /// What the record already says before any event is read: a pending
-/// decision, or a ticket parked or closed: the same outcome as a park or
-/// close seen while waiting.
+/// decision, or a ticket parked or closed, which ends every wait but
+/// `--for closed` on a closed one, as a park or close seen while waiting
+/// does.
 fn already(log: &Path, t: &Ticket, what: For, names: &[String]) -> Result<Option<Waited>> {
     let latest = |kind: Kind, decision: Option<&str>| -> Result<Option<Event>> {
         let events = read_since(log, 0)?;
@@ -1065,9 +1104,6 @@ fn already(log: &Path, t: &Ticket, what: For, names: &[String]) -> Result<Option
     };
     Ok(match (what, kind) {
         (For::Closed, Kind::Closed) => Some(Waited::Matched(event)),
-        // A parked ticket's next event is its resume.
-        (For::Any, Kind::Parked) => None,
-        // A closed ticket never writes again, so even `any` ends.
         _ => Some(Waited::Ended(event)),
     })
 }
@@ -1076,8 +1112,18 @@ fn already(log: &Path, t: &Ticket, what: For, names: &[String]) -> Result<Option
 /// names is there, so it is not a write that failed. `before` is the
 /// record as it was before the first event followed. A decision waited
 /// for must still be waiting on the user: one Dispatch or another
-/// terminal answered already is not something to answer.
-fn confirmed(e: &Event, before: &Ticket, fresh: &Ticket, what: For, names: &[String]) -> bool {
+/// terminal answered already is not something to answer. A `replayed`
+/// event may be in `before` already, so one with no check of its own is
+/// borne out once the record's `updated_ms` reaches the write it logs.
+fn confirmed(
+    e: &Event,
+    before: &Ticket,
+    fresh: &Ticket,
+    what: For,
+    names: &[String],
+    replayed: bool,
+) -> bool {
+    // Every kind with an arm of its own here is one `checked` lists.
     match e.kind {
         Kind::Decision => e.decision.as_ref().is_some_and(|id| {
             if what == For::Decision {
@@ -1097,9 +1143,13 @@ fn confirmed(e: &Event, before: &Ticket, fresh: &Ticket, what: For, names: &[Str
         Kind::Parked => matches!(fresh.state, TicketState::Parked { .. }),
         kind => {
             what == For::Any
-                && between(Some(before), fresh, 0, &Vec::new)
-                    .iter()
-                    .any(|x| x.kind == kind)
+                && if replayed {
+                    fresh.updated_ms >= e.at_ms
+                } else {
+                    between(Some(before), fresh, 0, &Vec::new)
+                        .iter()
+                        .any(|x| x.kind == kind)
+                }
         }
     }
 }
@@ -1620,6 +1670,7 @@ mod tests {
                 &data,
                 &t.id,
                 what,
+                None,
                 Some(1_000),
                 &mut || clock.get(),
                 &mut || {
@@ -1672,6 +1723,7 @@ mod tests {
                 &data,
                 &t.id,
                 what,
+                None,
                 Some(1_000),
                 &mut || clock.get(),
                 &mut || {
@@ -1696,9 +1748,9 @@ mod tests {
         }
     }
 
-    /// A ticket already closed, or parked for anything but `any`, ends a
-    /// wait at once, as a park or close seen while waiting does; only
-    /// `--for closed` on a closed ticket is a match.
+    /// A ticket already parked or closed ends every wait at once, as a
+    /// park or close seen while waiting does; only `--for closed` on a
+    /// closed ticket is a match.
     #[test]
     fn a_wait_on_a_parked_or_closed_ticket_returns_at_once() {
         let dir = tempfile::tempdir().unwrap();
@@ -1716,9 +1768,13 @@ mod tests {
             (&closed, For::Stage, false),
             (&closed, For::Closed, true),
             (&parked, For::Closed, false),
+            (&parked, For::Any, false),
+            (&parked, For::Stage, false),
+            (&parked, For::Pr, false),
+            (&parked, For::Decision, false),
         ] {
             crate::store::write_ticket(&data.ticket_file(&t.id), t).unwrap();
-            let waited = wait(&data, &t.id, what, None, &mut || 0, &mut || {
+            let waited = wait(&data, &t.id, what, None, None, &mut || 0, &mut || {
                 panic!("{what:?} waited on a ticket that will not move")
             })
             .unwrap();
@@ -1728,6 +1784,216 @@ mod tests {
                 "{what:?}: {waited:?}"
             );
             assert!(!matches!(waited, Waited::TimedOut));
+        }
+    }
+
+    /// Waits `what` on `id` from `since` with a 1 s deadline; each look
+    /// runs `step` with its count and moves the clock on 250 ms.
+    fn wait_looking(
+        data: &DataDir,
+        id: &str,
+        what: For,
+        since: Option<u64>,
+        step: &mut dyn FnMut(u32),
+    ) -> Waited {
+        let clock = std::cell::Cell::new(0);
+        let mut looks = 0;
+        wait(
+            data,
+            id,
+            what,
+            since,
+            Some(1_000),
+            &mut || clock.get(),
+            &mut || {
+                looks += 1;
+                clock.set(clock.get() + 250);
+                step(looks);
+            },
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn a_pending_decision_is_returned_at_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = DataDir::new(dir.path());
+        let mut t = ticket();
+        t.decisions.push(decision("d1"));
+        crate::store::write_ticket(&data.ticket_file(&t.id), &t).unwrap();
+        let waited = wait(
+            &data,
+            &t.id,
+            For::Decision,
+            None,
+            None,
+            &mut || 0,
+            &mut || panic!("waited on a decision already pending"),
+        )
+        .unwrap();
+        let Waited::Matched(e) = waited else {
+            panic!("{waited:?}");
+        };
+        assert_eq!(e.kind, Kind::Decision);
+        assert_eq!(e.decision.as_deref(), Some("d1"));
+    }
+
+    #[test]
+    fn a_wait_without_a_cursor_matches_the_next_move() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = DataDir::new(dir.path());
+        let t = ticket();
+        let file = data.ticket_file(&t.id);
+        crate::store::write_ticket(&file, &t).unwrap();
+        let log = log_path(&data);
+        let mut moved = t.clone();
+        moved.stage = 1;
+        // No pipeline copy, so the wait names stages by index: log them so.
+        let waited = wait_looking(&data, &t.id, For::Stage, None, &mut |looks| {
+            if looks == 1 {
+                append(&log, &mut between(Some(&t), &moved, 1, &Vec::new)).unwrap();
+                crate::store::write_ticket(&file, &moved).unwrap();
+            }
+        });
+        assert!(
+            matches!(&waited, Waited::Matched(e) if e.kind == Kind::Stage && e.stage == "#1"),
+            "{waited:?}"
+        );
+    }
+
+    /// A move made between taking the tail and waiting is returned from
+    /// a cursor at once; without one, the wait is for the next move.
+    #[test]
+    fn a_cursor_replays_a_move_made_before_the_wait() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = DataDir::new(dir.path());
+        let t = ticket();
+        let file = data.ticket_file(&t.id);
+        crate::store::write_ticket(&file, &t).unwrap();
+        let log = log_path(&data);
+        let seq = last_seq(&log).unwrap();
+        let mut moved = t.clone();
+        moved.stage = 1;
+        append(&log, &mut between(Some(&t), &moved, 1, &Vec::new)).unwrap();
+        crate::store::write_ticket(&file, &moved).unwrap();
+        let waited = wait(
+            &data,
+            &t.id,
+            For::Stage,
+            Some(seq),
+            None,
+            &mut || 0,
+            &mut || panic!("waited on a move already made"),
+        )
+        .unwrap();
+        assert!(
+            matches!(&waited, Waited::Matched(e) if e.kind == Kind::Stage),
+            "{waited:?}"
+        );
+        let waited = wait_looking(&data, &t.id, For::Stage, None, &mut |_| {});
+        assert_eq!(waited, Waited::TimedOut);
+    }
+
+    /// A replayed event of a kind the record does not check by itself is
+    /// returned once the record's `updated_ms` reaches its write, and
+    /// never once its `void` is read, even when a later write lands.
+    #[test]
+    fn a_replayed_event_waits_for_its_write_to_land() {
+        let mut started = ticket();
+        started.attempts.push(running("implement", 1));
+        started.updated_ms = 40;
+        let mut nudged = started.clone();
+        nudged.attempts[0].nudges.push(7);
+        nudged.updated_ms = 50;
+        // A write after the failed one, which would bear the event out
+        // by its time alone if the `void` were not honoured.
+        let mut later = started.clone();
+        later.updated_ms = 60;
+        // Landed, in flight, failed while waiting, failed before.
+        for case in 0..4 {
+            let dir = tempfile::tempdir().unwrap();
+            let data = DataDir::new(dir.path());
+            let file = data.ticket_file(&started.id);
+            let log = log_path(&data);
+            let mut events = between(Some(&started), &nudged, 50, &names);
+            assert_eq!(events.len(), 1);
+            append(&log, &mut events).unwrap();
+            let event = events[0].clone();
+            let cursor = event.seq - 1;
+            let on_disk = if case == 0 { &nudged } else { &started };
+            crate::store::write_ticket(&file, on_disk).unwrap();
+            if case == 3 {
+                append_void(&log, &event, vec![event.seq], "disk full").unwrap();
+                crate::store::write_ticket(&file, &later).unwrap();
+            }
+            let mut looked = 0;
+            let waited = wait_looking(&data, &started.id, For::Any, Some(cursor), &mut |looks| {
+                looked = looks;
+                if looks == 1 && case == 1 {
+                    crate::store::write_ticket(&file, &nudged).unwrap();
+                } else if looks == 1 && case == 2 {
+                    append_void(&log, &event, vec![event.seq], "disk full").unwrap();
+                    crate::store::write_ticket(&file, &later).unwrap();
+                }
+            });
+            match case {
+                0 | 1 => {
+                    assert_eq!(waited, Waited::Matched(event), "case {case}");
+                    assert_eq!(looked, case, "case {case}: looks");
+                }
+                _ => assert_eq!(waited, Waited::TimedOut, "case {case}"),
+            }
+        }
+    }
+
+    /// A cursor taken at the tail just before a resume returns the
+    /// resume; one from before an older event of the ticket returns that.
+    #[test]
+    fn a_cursor_at_the_tail_returns_the_resume_not_an_older_event() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = DataDir::new(dir.path());
+        let file = data.ticket_file("t1");
+        let log = log_path(&data);
+        let mut asked = ticket();
+        asked.state = TicketState::Parked {
+            reason: "by hand".into(),
+        };
+        asked.decisions.push(decision("d1"));
+        let mut answered = asked.clone();
+        answered.decisions[0].state = DecisionState::Answered {
+            answer: "finalize".into(),
+            note: None,
+            by: "dispatch".into(),
+            at_ms: 30,
+            acted: false,
+        };
+        answered.updated_ms = 30;
+        let mut events = between(Some(&asked), &answered, 30, &names);
+        append(&log, &mut events).unwrap();
+        let answer = events[0].clone();
+        assert_eq!(answer.kind, Kind::Answered);
+        crate::store::write_ticket(&file, &answered).unwrap();
+        let tail = last_seq(&log).unwrap();
+        let mut resumed = answered.clone();
+        resumed.state = TicketState::Active;
+        resumed.updated_ms = 50;
+        append(&log, &mut between(Some(&answered), &resumed, 50, &names)).unwrap();
+        crate::store::write_ticket(&file, &resumed).unwrap();
+        for (cursor, kind) in [(tail, Kind::Resumed), (answer.seq - 1, Kind::Answered)] {
+            let waited = wait(
+                &data,
+                "t1",
+                For::Any,
+                Some(cursor),
+                None,
+                &mut || 0,
+                &mut || panic!("waited on a cursor with events after it"),
+            )
+            .unwrap();
+            assert!(
+                matches!(&waited, Waited::Matched(e) if e.kind == kind),
+                "{cursor}: {waited:?}"
+            );
         }
     }
 
