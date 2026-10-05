@@ -86,7 +86,7 @@ the absolute cwd with every `/`, `_` and `.` replaced by `-`:
 $ ls ~/.claude/projects | head
 -Users-sully
 -Users-sully-code_repos-oleev-oleev-app          # older slug form kept '_'
--Users-sully-code-repos-delta
+-Users-sully-code-repos-client-project
 -Users-sully-code-repos-personal-promptbox
 ...
 $ ls -la ~/.claude/projects/-Users-sully-code-repos-personal-switchboard-spikes-01-claude-resume-work-a/
@@ -294,7 +294,7 @@ And on this machine, which has used Claude Code since 2025-09 (per
 ```
 $ head -1 ~/.claude/history.jsonl | ... -> 2025-09-29
 $ find ~/.claude/projects -maxdepth 2 -name '*.jsonl' | xargs stat -f '%Sm %N' -t %Y-%m-%dT%H:%M | sort | head -1
-2026-08-07T14:41 .../-Users-sully-code-repos-delta/0c3fccb9-....jsonl
+2026-08-07T14:41 .../-Users-sully-code-repos-client-project/0c3fccb9-....jsonl
 $ date -u
 Sun Sep  6 06:01:08 UTC 2026
 $ find ~/.claude/projects -maxdepth 2 -name '*.jsonl' | wc -l ; du -sh ~/.claude/projects

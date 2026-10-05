@@ -1881,11 +1881,10 @@ writes = ["plan"]"#,
         );
     }
 
-    /// The back half of the Orchard pipeline as the three tickets parked
-    /// at `deploy` carry it in their copies: a deploy in the backend
-    /// lane, a tester with two served lanes, and a confirmation, all
-    /// holding `my-dev`.
-    const ORCHARD_BACK_HALF: &str = r#"
+    /// The back half of a multi-repository pipeline that deploys: a
+    /// deploy in the backend lane, a tester with two served lanes, and a
+    /// confirmation, all holding `my-dev`.
+    const DEPLOYING_BACK_HALF: &str = r#"
 version = 1
 
 [project]
@@ -1901,20 +1900,20 @@ label = "dispatch"
 [[lanes]]
 name = "backend"
 path = "orchard-backend"
-repo = "git@bitbucket.org:example-co/orchard-backend.git"
+repo = "git@example.invalid:example/backend.git"
 base = "main"
 
 [[lanes]]
 name = "frontend"
 path = "orchard-frontend"
-repo = "git@bitbucket.org:example-co/orchard-frontend.git"
+repo = "git@example.invalid:example/frontend.git"
 base = "dev"
 serve = { argv = ["npm", "start"], env = { BROWSER = "none", PORT = "{port}" }, url = "http://localhost:{port}", ready = { http = "/", within_secs = 120 } }
 
 [[lanes]]
-name = "snp"
-path = "orchard-snp"
-repo = "git@bitbucket.org:example-co/orchard-snp.git"
+name = "admin"
+path = "orchard-admin"
+repo = "git@example.invalid:example/admin.git"
 base = "master"
 serve = { argv = ["npm", "start"], env = { BROWSER = "none", PORT = "{port}" }, url = "http://localhost:{port}", ready = { http = "/", within_secs = 120 } }
 
@@ -1950,10 +1949,10 @@ name = "try"
 operator = "tester"
 context = "joined"
 needs = ["my-dev"]
-services = ["frontend", "snp"]
-before = { frontend = ["npm", "run", "link-env"], snp = ["npm", "run", "link-env"] }
+services = ["frontend", "admin"]
+before = { frontend = ["npm", "run", "link-env"], admin = ["npm", "run", "link-env"] }
 writes = ["notes"]
-prompt = "my-dev is running backend commit {inputs.deploy.commit}. The admin frontend: {services.frontend}. The student portal: {services.snp}. Report to {notes}."
+prompt = "my-dev is running backend commit {inputs.deploy.commit}. The frontend: {services.frontend}. The admin frontend: {services.admin}. Report to {notes}."
 
 [[stages]]
 name = "tried"
@@ -1972,20 +1971,20 @@ ports = [3100, 3199]
 "#;
 
     #[test]
-    fn the_orchard_tickets_deploy_try_and_tried_parse() {
-        let p = Pipeline::parse(ORCHARD_BACK_HALF).unwrap();
+    fn a_deploying_back_half_parses_deploy_try_and_tried() {
+        let p = Pipeline::parse(DEPLOYING_BACK_HALF).unwrap();
         assert_eq!(p.hold_range("my-dev"), Some((2, 4)));
         assert_eq!(p.services_until(3), 4);
         assert_eq!(p.services_until(5), 5, "a stage holding nothing");
         assert_eq!(p.stages[2].kind(), StageKind::GateOnly);
         assert_eq!(p.stages[2].context, Context::Lane("backend".into()));
-        assert_eq!(p.stages[3].services, ["frontend", "snp"]);
+        assert_eq!(p.stages[3].services, ["frontend", "admin"]);
         assert_eq!(p.hold_range("backend"), None, "a lane is not a resource");
     }
 
-    fn orchard_refused(from: &str, to: &str, expected: &str) {
-        let text = ORCHARD_BACK_HALF.replace(from, to);
-        assert_ne!(text, ORCHARD_BACK_HALF, "{from}");
+    fn back_half_refused(from: &str, to: &str, expected: &str) {
+        let text = DEPLOYING_BACK_HALF.replace(from, to);
+        assert_ne!(text, DEPLOYING_BACK_HALF, "{from}");
         let err = Pipeline::parse(&text).unwrap_err().to_string();
         assert!(err.contains(expected), "{from}: {err}");
     }
@@ -1994,13 +1993,13 @@ ports = [3100, 3199]
     fn needs_must_be_contiguous() {
         // `tried` dropped from the run leaves `deploy`..`try`, which is
         // contiguous; a hole in the middle is not.
-        Pipeline::parse(&ORCHARD_BACK_HALF.replace(
+        Pipeline::parse(&DEPLOYING_BACK_HALF.replace(
             "name = \"tried\"\nneeds = [\"my-dev\"]\n",
             "name = \"tried\"\n",
         ))
         .unwrap();
-        orchard_refused(
-            "name = \"try\"\noperator = \"tester\"\ncontext = \"joined\"\nneeds = [\"my-dev\"]\nservices = [\"frontend\", \"snp\"]\nbefore = { frontend = [\"npm\", \"run\", \"link-env\"], snp = [\"npm\", \"run\", \"link-env\"] }\n",
+        back_half_refused(
+            "name = \"try\"\noperator = \"tester\"\ncontext = \"joined\"\nneeds = [\"my-dev\"]\nservices = [\"frontend\", \"admin\"]\nbefore = { frontend = [\"npm\", \"run\", \"link-env\"], admin = [\"npm\", \"run\", \"link-env\"] }\n",
             "name = \"try\"\noperator = \"tester\"\ncontext = \"joined\"\n",
             "breaks the run of stages needing \"my-dev\"",
         );
@@ -2008,7 +2007,7 @@ ports = [3100, 3199]
 
     #[test]
     fn a_review_or_workflow_stands_only_last_in_a_needs_run() {
-        let mut p = Pipeline::parse(ORCHARD_BACK_HALF).unwrap();
+        let mut p = Pipeline::parse(DEPLOYING_BACK_HALF).unwrap();
         p.stages[4].reviewers = vec!["correctness".into()];
         p.validate_contiguous_needs().unwrap();
         p.stages[4].reviewers.clear();
@@ -2023,41 +2022,41 @@ ports = [3100, 3199]
 
     #[test]
     fn services_name_served_lanes_and_need_a_resource_and_ports() {
-        orchard_refused(
-            "services = [\"frontend\", \"snp\"]",
+        back_half_refused(
+            "services = [\"frontend\", \"admin\"]",
             "services = [\"frontend\", \"backend\"]",
             "which has no serve",
         );
-        orchard_refused(
-            "services = [\"frontend\", \"snp\"]",
+        back_half_refused(
+            "services = [\"frontend\", \"admin\"]",
             "services = [\"frontend\", \"frontend\"]",
             "twice",
         );
-        orchard_refused(
-            "before = { frontend = [\"npm\", \"run\", \"link-env\"], snp",
-            "before = { backend = [\"npm\", \"run\", \"link-env\"], snp",
+        back_half_refused(
+            "before = { frontend = [\"npm\", \"run\", \"link-env\"], admin",
+            "before = { backend = [\"npm\", \"run\", \"link-env\"], admin",
             "not in its services",
         );
-        orchard_refused("ports = [3100, 3199]\n", "", "has no ports");
-        orchard_refused("ports = [3100, 3199]", "ports = [3199, 3100]", "is empty");
-        orchard_refused(
-            "url = \"http://localhost:{port}\", ready = { http = \"/\", within_secs = 120 } }\n\n[[lanes]]\nname = \"snp\"",
-            "url = \"http://localhost:3000\", ready = { http = \"/\", within_secs = 120 } }\n\n[[lanes]]\nname = \"snp\"",
+        back_half_refused("ports = [3100, 3199]\n", "", "has no ports");
+        back_half_refused("ports = [3100, 3199]", "ports = [3199, 3100]", "is empty");
+        back_half_refused(
+            "url = \"http://localhost:{port}\", ready = { http = \"/\", within_secs = 120 } }\n\n[[lanes]]\nname = \"admin\"",
+            "url = \"http://localhost:3000\", ready = { http = \"/\", within_secs = 120 } }\n\n[[lanes]]\nname = \"admin\"",
             "serve.url must contain {port}",
         );
-        orchard_refused(
-            "ready = { http = \"/\", within_secs = 120 } }\n\n[[lanes]]\nname = \"snp\"",
-            "ready = { http = \"health\", within_secs = 120 } }\n\n[[lanes]]\nname = \"snp\"",
+        back_half_refused(
+            "ready = { http = \"/\", within_secs = 120 } }\n\n[[lanes]]\nname = \"admin\"",
+            "ready = { http = \"health\", within_secs = 120 } }\n\n[[lanes]]\nname = \"admin\"",
             "must start with /",
         );
-        orchard_refused(
-            "PORT = \"{port}\" }, url = \"http://localhost:{port}\", ready = { http = \"/\", within_secs = 120 } }\n\n[[lanes]]\nname = \"snp\"",
-            "PORT = \"{port}\", WHO = \"{ticket}\" }, url = \"http://localhost:{port}\", ready = { http = \"/\", within_secs = 120 } }\n\n[[lanes]]\nname = \"snp\"",
+        back_half_refused(
+            "PORT = \"{port}\" }, url = \"http://localhost:{port}\", ready = { http = \"/\", within_secs = 120 } }\n\n[[lanes]]\nname = \"admin\"",
+            "PORT = \"{port}\", WHO = \"{ticket}\" }, url = \"http://localhost:{port}\", ready = { http = \"/\", within_secs = 120 } }\n\n[[lanes]]\nname = \"admin\"",
             "the only field a value may name is {port}",
         );
         // Services live until the resource's range ends, so a stage
         // that serves must hold a resource.
-        let text = ORCHARD_BACK_HALF
+        let text = DEPLOYING_BACK_HALF
             .replace(
                 "context = \"lane:backend\"\nneeds = [\"my-dev\"]\n",
                 "context = \"lane:backend\"\n",
@@ -2083,10 +2082,10 @@ ports = [3100, 3199]
             "AWS_KEY",
             "Credentials",
         ] {
-            orchard_refused(
-                "BROWSER = \"none\", PORT = \"{port}\" }, url = \"http://localhost:{port}\", ready = { http = \"/\", within_secs = 120 } }\n\n[[lanes]]\nname = \"snp\"",
+            back_half_refused(
+                "BROWSER = \"none\", PORT = \"{port}\" }, url = \"http://localhost:{port}\", ready = { http = \"/\", within_secs = 120 } }\n\n[[lanes]]\nname = \"admin\"",
                 &format!(
-                    "BROWSER = \"none\", {key} = \"x\", PORT = \"{{port}}\" }}, url = \"http://localhost:{{port}}\", ready = {{ http = \"/\", within_secs = 120 }} }}\n\n[[lanes]]\nname = \"snp\""
+                    "BROWSER = \"none\", {key} = \"x\", PORT = \"{{port}}\" }}, url = \"http://localhost:{{port}}\", ready = {{ http = \"/\", within_secs = 120 }} }}\n\n[[lanes]]\nname = \"admin\""
                 ),
                 &format!("serve.env {key} looks like a secret"),
             );
@@ -2095,7 +2094,7 @@ ports = [3100, 3199]
 
     #[test]
     fn a_gate_only_command_runs_in_its_context() {
-        orchard_refused(
+        back_half_refused(
             "name = \"deploy\"\ncontext = \"lane:backend\"",
             "name = \"deploy\"\ncontext = \"joined\"",
             "needs context = \"lane:backend\"",
@@ -2106,7 +2105,7 @@ ports = [3100, 3199]
     fn contiguity_is_checked_for_resources_not_lanes() {
         // A lane named in `needs` (the in-place hold, not built) parses
         // wherever it sits, gaps and all; it parks at run time.
-        let text = ORCHARD_BACK_HALF
+        let text = DEPLOYING_BACK_HALF
             .replace(
                 "name = \"implement\"\noperator = \"implementer\"\n",
                 "name = \"implement\"\noperator = \"implementer\"\nneeds = [\"backend\"]\n",

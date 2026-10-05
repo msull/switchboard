@@ -8891,7 +8891,7 @@ version = 1
 
 [project]
 name = "Orchard"
-repo = "git@example.com:k3/orchard-workspace.git"
+repo = "git@example.com:example-org/orchard-workspace.git"
 space = "Dispatch · Orchard"
 
 [source]

@@ -1,8 +1,8 @@
 #!/bin/bash
-# Spike 11 item 1 with the real dev server: `npm start` in a Orchard
+# Spike 11 item 1 with the real dev server: `npm start` in a client
 # frontend worktree, launched as Dispatch launches a service.
 S=switchboard-test-spike11
-WT=${1:?usage: npm.sh <a Orchard frontend worktree with node_modules>}
+WT=${1:?usage: npm.sh <a client frontend worktree with node_modules>}
 tmux -L $S new-session -d -s svc -c "$WT" zsh -lc 'exec "$@"' dispatch-service env BROWSER=none PORT=3155 npm start
 PANE=$(tmux -L $S list-panes -a -F '#{pane_pid}')
 PGID=$(ps -o pgid= -p "$PANE" | tr -d ' ')

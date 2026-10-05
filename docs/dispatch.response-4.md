@@ -31,9 +31,9 @@ already makes safe.
 Services are now per lane and conditional. `services` names lanes,
 each started only if the ticket cut it, and a template field for one
 that was not renders as `not served (no <lane> lane)`; the `try`
-prompt lists both the admin frontend and the student portal that way
+prompt lists both frontends that way
 and tells the tester an unserved lane is tested against the existing
-deployment if at all. The portal lane gained its own `serve` entry.
+deployment if at all. The admin lane gained its own `serve` entry.
 
 For a lane that was cut, the order is stated: the `before` command
 runs as a tracked `command.run` operation and must exit zero; Dispatch

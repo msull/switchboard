@@ -46,7 +46,7 @@ Likewise, the existing round-file probe observes metadata stability; it does not
 
 Orchard's investigation says `lanes = ["backend"]` while its comment says it runs at the workspace root before lanes exist. Those are different contexts, and neither the schema nor the control flow explains how this stage starts. Introduce an explicit root/planning context, identify its Switchboard project and cwd, and explain how joined stages receive the selected lane roots and commits.
 
-The `try` stage unconditionally uses `lane:backend`, although lane selection allows frontend-only or SNP-only tickets. Define whether backend is mandatory, how unchanged backend code is supplied, or how the stage behaves without it. Also describe how frontend worktrees receive environment linking and a running server: an existing service in the original checkout does not automatically run the ticket's frontend changes.
+The `try` stage unconditionally uses `lane:backend`, although lane selection allows frontend-only or admin-only tickets. Define whether backend is mandatory, how unchanged backend code is supplied, or how the stage behaves without it. Also describe how frontend worktrees receive environment linking and a running server: an existing service in the original checkout does not automatically run the ticket's frontend changes.
 
 ## 8. The Orchard deploy gate does not establish a tested, correctly targeted deployment
 

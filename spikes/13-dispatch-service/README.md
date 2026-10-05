@@ -19,7 +19,7 @@ Unix (`SO_REUSEADDR` on) and connects the way a probe does.
 ```sh
 ./start.sh   # the forking node server in a pane on port 3155
 ./kill.sh    # kill-session, then the group and the port every 200 ms
-./npm.sh <orchard-frontend worktree>   # the same with the real `npm start`
+./npm.sh <client frontend worktree>   # the same with the real `npm start`
 ```
 
 The forking server:
@@ -33,7 +33,7 @@ node 52062 ... IPv6 ... TCP *:3155 (LISTEN)
 after 200ms: 0 in group, 0 listen lines
 ```
 
-`npm start` in a Orchard frontend worktree (react-app-rewired over
+`npm start` in a client frontend worktree (react-app-rewired over
 react-scripts 5):
 
 ```
@@ -81,8 +81,8 @@ probe of a closed port: nothing/nothing in 0.3 ms
 A connect to a closed loopback port is refused at once, so the
 readiness probe (`Repo::answers_http`: connect with a 200 ms timeout,
 `GET <path> HTTP/1.0`, a status line within 500 ms) costs nothing while
-the server compiles. CRA took 27 s to answer on this machine; Orchard's
-`ready.within_secs = 120` leaves room.
+the server compiles. CRA took 27 s to answer on this machine; the
+client frontend's `ready.within_secs = 120` leaves room.
 
 **Recommendation.** Launch services as above: values travel as argv
 elements, never as shell source, and only the pipeline file's literals
