@@ -344,7 +344,10 @@ built), checks left running on a park (#39, built), `keep` on a fold
 failure (#40, built), the CLI blocking behind a pass (#41), a dirty tree
 nudges the agent (#43, built), the supervising agent's CLI (#44, built),
 the orphaned check (#53, built), the unreviewed conflict rebase (#54,
-built), the stale folded commit message (#55).
+built), the stale folded commit message (#55, built), a refresh that
+launched the next agent into a tree still mid-rebase (#58, built: the
+stage holds on a `recheck | park` question until the rebase is finished
+or aborted by hand).
 
 - **A command reviewer orphaned by a runner restart is never killed.**
   `start_reviewer` (`dispatch/src/git.rs`) puts a command reviewer in its
