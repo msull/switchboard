@@ -10,8 +10,8 @@ Choose an explicit policy: prevent direct deletion of Dispatch-owned records whi
 
 ## 2. Complete the new Orchard service binding
 
-The `try` stage now unconditionally requests `services = ["frontend"]`, runs `before.frontend`, and expands `{services.frontend.url}`. Lane selection still allows backend-only and SNP-only tickets, for which no frontend project/worktree exists. Unlike the backend deploy, there is no stated skip or fallback rule for this service dependency.
+The `try` stage now unconditionally requests `services = ["frontend"]`, runs `before.frontend`, and expands `{services.frontend.url}`. Lane selection still allows backend-only and admin-only tickets, for which no frontend project/worktree exists. Unlike the backend deploy, there is no stated skip or fallback rule for this service dependency.
 
-Define whether frontend is required, supplied from an explicit unchanged checkout, or omitted when absent, and render the tester prompt accordingly. Cover backend-only, frontend-only, and SNP-only tickets so none references an uncreated lane.
+Define whether frontend is required, supplied from an explicit unchanged checkout, or omitted when absent, and render the tester prompt accordingly. Cover backend-only, frontend-only, and admin-only tickets so none references an uncreated lane.
 
 For tickets that do have a frontend, specify where the service URL comes from and how readiness is established. `serve` currently supplies only argv and environment, and `service.new` returns a session ID; neither defines the URL used by the prompt. A successful process launch also does not mean the ticket's server is listening, especially if a manual server already occupies its default port. Add an explicit address/port binding and a readiness check tied to that service, with startup failure becoming a decision before the tester runs. Execute the `before` command as a tracked operation and require it to succeed before starting the service.

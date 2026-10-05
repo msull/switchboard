@@ -716,7 +716,7 @@ mod tests {
   "project": "Orchard",
   "source": {
     "kind": "github",
-    "identity": "k3/orchard#42",
+    "identity": "example-org/orchard#42",
     "number": 42,
     "title": "Asset report column missing",
     "body": "",

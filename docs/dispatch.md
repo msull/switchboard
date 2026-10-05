@@ -1145,7 +1145,7 @@ needs = ["my-dev"]
 services = ["frontend", "admin"]   # each started only if its lane was cut; owned by the ticket until `tried` ends
 before = { frontend = ["npm", "run", "link-env"], admin = ["npm", "run", "link-env"] }
 writes = ["notes"]
-prompt = "my-dev is running backend commit {inputs.deploy.commit} (when that reads as skipped, this ticket has no backend lane and my-dev runs whatever was deployed last). The admin frontend: {services.frontend}. The student portal: {services.admin}. A lane this ticket did not cut is not served; test it, if at all, against the existing deployment. Try ticket #{issue.number} end to end and report to {notes}."
+prompt = "my-dev is running backend commit {inputs.deploy.commit} (when that reads as skipped, this ticket has no backend lane and my-dev runs whatever was deployed last). The frontend: {services.frontend}. The admin frontend: {services.admin}. A lane this ticket did not cut is not served; test it, if at all, against the existing deployment. Try ticket #{issue.number} end to end and report to {notes}."
 
 [[stages]]
 name = "tried"
@@ -1191,7 +1191,7 @@ What this pipeline showed, and what it added to the vocabulary:
 - **Services are Dispatch's.** A stage's `services` name lanes; each
   is started only if the ticket cut that lane, and a template field
   for one that was not renders as `not served (no <lane> lane)`, so a
-  backend-only, frontend-only or portal-only ticket names nothing
+  backend-only, frontend-only or admin-only ticket names nothing
   that does not exist. For each lane that was cut, in order: the
   `before` command runs as a child of the runner, with its log in the
   ticket directory, and must exit zero (it must also be safe to run

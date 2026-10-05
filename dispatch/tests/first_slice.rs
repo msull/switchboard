@@ -4438,27 +4438,27 @@ version = 1
 
 [project]
 name = "Orchard"
-repo = "git@example.com:k3/orchard-workspace.git"
+repo = "git@example.com:example-org/orchard-workspace.git"
 worktrees = "{worktrees}"
 space = "Dispatch · Orchard"
 
 [source]
 kind = "github"
-repo = "k3/orchard-workspace"
+repo = "example-org/orchard-workspace"
 label = "dispatch"
 lane_hints = { "area:backend" = "backend", "area:frontend" = "frontend" }
 
 [[lanes]]
 name = "backend"
 path = "orchard-backend"
-repo = "git@example.com:k3/orchard-backend.git"
+repo = "git@example.com:example-org/orchard-backend.git"
 base = "main"
 setup = ["uv", "sync"]
 
 [[lanes]]
 name = "frontend"
 path = "orchard-frontend"
-repo = "git@example.com:k3/orchard-frontend.git"
+repo = "git@example.com:example-org/orchard-frontend.git"
 base = "dev"
 setup = ["npm", "ci"]
 
@@ -4854,7 +4854,7 @@ fn workspace_env_with(text: &str, labels: &[&str]) -> (Env, String) {
             &std::fs::read_to_string(env.data.pipeline("Orchard")).unwrap(),
             SourceSnapshot {
                 kind: "github".into(),
-                identity: "k3/orchard-workspace#42".into(),
+                identity: "example-org/orchard-workspace#42".into(),
                 number: Some(42),
                 title: "Asset report column missing".into(),
                 body: String::new(),
@@ -4964,9 +4964,9 @@ fn three_lane_workspace() -> String {
         .replace(
             "[operators.investigator]",
             r#"[[lanes]]
-name = "snp"
-path = "orchard-snp"
-repo = "git@example.com:k3/orchard-snp.git"
+name = "admin"
+path = "orchard-admin"
+repo = "git@example.com:example-org/orchard-admin.git"
 base = "main"
 
 [operators.investigator]"#,
@@ -4986,10 +4986,13 @@ fn lanes_is_the_chosen_lanes_and_lanes_all_every_lane_of_the_pipeline() {
     let (mut env, id) = workspace_env_with(&three_lane_workspace(), &["area:frontend"]);
     let now = env.tick();
     env.runner.step_project("Orchard", now).unwrap();
-    assert!(env.data.repo_dir("Orchard@snp").exists(), "the third clone");
+    assert!(
+        env.data.repo_dir("Orchard@admin").exists(),
+        "the third clone"
+    );
     let prompt = last_prompt_of(&env, "investigator");
     assert!(
-        prompt.contains("Lanes [backend, frontend, snp] of [backend, frontend, snp]."),
+        prompt.contains("Lanes [backend, frontend, admin] of [backend, frontend, admin]."),
         "before the choice every lane: {prompt}"
     );
     let t = env.ticket(&id);
@@ -5015,7 +5018,7 @@ fn lanes_is_the_chosen_lanes_and_lanes_all_every_lane_of_the_pipeline() {
     assert_eq!(t.attempts_of("plan").count(), 1, "{t:#?}");
     let prompt = last_prompt_of(&env, "planner");
     assert!(
-        prompt.contains("Plan [frontend] of [backend, frontend, snp] in"),
+        prompt.contains("Plan [frontend] of [backend, frontend, admin] in"),
         "{prompt}"
     );
 }
@@ -5039,7 +5042,7 @@ fn lanes_follows_the_pipeline_order_not_the_answer_order() {
     assert_eq!(pending[0].name, "lanes");
     let now = env.tick();
     env.runner
-        .decide(&id, &pending[0].id, "snp, backend", None, now)
+        .decide(&id, &pending[0].id, "admin, backend", None, now)
         .unwrap();
     for _ in 0..8 {
         let now = env.tick();
@@ -5063,7 +5066,7 @@ fn lanes_follows_the_pipeline_order_not_the_answer_order() {
     assert_eq!(prompts.len(), 2, "{prompts:#?}");
     for prompt in &prompts {
         assert!(
-            prompt.contains("Plan [backend, snp] of [backend, frontend, snp]"),
+            prompt.contains("Plan [backend, admin] of [backend, frontend, admin]"),
             "{prompt}"
         );
     }
@@ -9658,7 +9661,7 @@ fn close_and_retake(env: &mut Env, id: &str, edit: impl FnOnce(&mut FakeRepo)) -
             &std::fs::read_to_string(env.data.pipeline("Orchard")).unwrap(),
             SourceSnapshot {
                 kind: "github".into(),
-                identity: "k3/orchard-workspace#42".into(),
+                identity: "example-org/orchard-workspace#42".into(),
                 number: Some(42),
                 title: "Asset report column missing".into(),
                 body: String::new(),
@@ -13772,27 +13775,27 @@ version = 1
 
 [project]
 name = "Orchard"
-repo = "git@example.com:k3/orchard-workspace.git"
+repo = "git@example.com:example-org/orchard-workspace.git"
 worktrees = "{worktrees}"
 space = "Dispatch · Orchard"
 
 [source]
 kind = "github"
-repo = "k3/orchard-workspace"
+repo = "example-org/orchard-workspace"
 label = "dispatch"
 lane_hints = { "area:backend" = "backend", "area:frontend" = "frontend" }
 
 [[lanes]]
 name = "backend"
 path = "orchard-backend"
-repo = "git@example.com:k3/orchard-backend.git"
+repo = "git@example.com:example-org/orchard-backend.git"
 base = "main"
 setup = ["uv", "sync"]
 
 [[lanes]]
 name = "frontend"
 path = "orchard-frontend"
-repo = "git@example.com:k3/orchard-frontend.git"
+repo = "git@example.com:example-org/orchard-frontend.git"
 base = "dev"
 setup = ["npm", "ci"]
 serve = { argv = ["npm", "start"], env = { BROWSER = "none", PORT = "{port}" }, url = "http://localhost:{port}", ready = { http = "/", within_secs = 120 } }
@@ -13865,7 +13868,7 @@ fn take_orchard(env: &mut Env, number: u64, labels: &[&str]) -> String {
             &std::fs::read_to_string(env.data.pipeline("Orchard")).unwrap(),
             SourceSnapshot {
                 kind: "github".into(),
-                identity: format!("k3/orchard-workspace#{number}"),
+                identity: format!("example-org/orchard-workspace#{number}"),
                 number: Some(number),
                 title: format!("Orchard ticket {number}"),
                 body: String::new(),
