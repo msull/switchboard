@@ -1,8 +1,10 @@
 //! The project rail: the left column that names the app, lists every
 //! project with its most urgent state as a dot, and pins Go to and
 //! Settings at the bottom. Beside a session it lists that project's
-//! entries instead, so the neighbours are one click away. Below about
-//! 120 px it draws only dots and initials.
+//! entries instead, so the neighbours are one click away. The working
+//! sets and that list scroll between the fixed head and the pinned
+//! bottom, and follow a change of selection once. Below about 120 px it
+//! draws only dots and initials.
 
 use egui::{
     Align2, FontId, Response, RichText, Sense, TextStyle, Ui, Vec2, WidgetInfo, WidgetType,
@@ -33,6 +35,19 @@ fn waiting_in(core: &AppCore, project: ProjectId) -> usize {
 
 pub fn show(cx: &mut DrawCtx<'_>, ui: &mut Ui, view: &View) {
     let compact = ui.available_width() < COMPACT_BELOW;
+    // A plain `bool`, so the calls below can still borrow `cx` mutably.
+    let follow = cx.state.rail_followed.as_ref() != Some(view);
+    // Each list keeps its own offset, so the project list's survives a
+    // visit to a session.
+    let salt = match view {
+        View::Session(id) => cx
+            .core
+            .session(*id)
+            .map_or(egui::Id::new(("rail", "session")), |s| {
+                egui::Id::new(("rail", s.project))
+            }),
+        _ => egui::Id::new(("rail", "projects")),
+    };
     ui.spacing_mut().item_spacing = Vec2::new(0.0, 2.0);
     egui::Frame::new()
         .inner_margin(egui::Margin {
@@ -48,10 +63,23 @@ pub fn show(cx: &mut DrawCtx<'_>, ui: &mut Ui, view: &View) {
             ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
                 bottom(cx, ui, view, compact);
                 ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
-                    top(cx, ui, view, compact);
+                    head(cx, ui, view, compact);
+                    // The scroll area bounds the list to the space left
+                    // above the bottom items, so a long one cannot paint
+                    // over them. Its rows inherit the bottom's 4 px
+                    // spacing, as the head's do.
+                    egui::ScrollArea::vertical()
+                        .id_salt(salt)
+                        .auto_shrink(false)
+                        .show(ui, |ui| {
+                            middle(cx, ui, view, compact, follow);
+                            // Keeps the last row off Go to at the end.
+                            ui.add_space(12.0);
+                        });
                 });
             });
         });
+    cx.state.rail_followed = Some(view.clone());
 }
 
 /// The Dispatch page's row: its pending decisions as the count, muted
@@ -84,7 +112,8 @@ fn dispatch_row(cx: &mut DrawCtx<'_>, ui: &mut Ui, view: &View, compact: bool) {
     }
 }
 
-fn top(cx: &mut DrawCtx<'_>, ui: &mut Ui, view: &View, compact: bool) {
+/// The fixed head: the space menu, All sessions and Dispatch.
+fn head(cx: &mut DrawCtx<'_>, ui: &mut Ui, view: &View, compact: bool) {
     space_menu(cx, ui, compact);
     ui.add_space(14.0);
 
@@ -105,10 +134,15 @@ fn top(cx: &mut DrawCtx<'_>, ui: &mut Ui, view: &View, compact: bool) {
         cx.dispatch(AppAction::ShowSwitchboard);
     }
     dispatch_row(cx, ui, view, compact);
-    working_set_rows(cx, ui, view, compact);
+}
+
+/// The scrolling middle: the working sets, then the view's list. With
+/// `follow` the selected row scrolls into sight.
+fn middle(cx: &mut DrawCtx<'_>, ui: &mut Ui, view: &View, compact: bool, follow: bool) {
+    working_set_rows(cx, ui, view, compact, follow);
 
     match view {
-        View::Session(id) => session_neighbours(cx, ui, *id, compact),
+        View::Session(id) => session_neighbours(cx, ui, *id, compact, follow),
         View::Switchboard
         | View::Board(_)
         | View::Document(..)
@@ -125,14 +159,20 @@ fn top(cx: &mut DrawCtx<'_>, ui: &mut Ui, view: &View, compact: bool) {
                 | View::Dispatch
                 | View::Ticket(_) => None,
             };
-            project_rows(cx, ui, active, compact);
+            project_rows(cx, ui, active, compact, follow);
         }
     }
 }
 
 /// The project rows under "Projects", `active` marked, and the add
 /// button; in the global space each workspace's under its name.
-fn project_rows(cx: &mut DrawCtx<'_>, ui: &mut Ui, active: Option<ProjectId>, compact: bool) {
+fn project_rows(
+    cx: &mut DrawCtx<'_>,
+    ui: &mut Ui,
+    active: Option<ProjectId>,
+    compact: bool,
+    follow: bool,
+) {
     let p = theme::palette(ui);
     ui.add_space(12.0);
     let global = cx.core.active_space().is_global();
@@ -182,6 +222,9 @@ fn project_rows(cx: &mut DrawCtx<'_>, ui: &mut Ui, active: Option<ProjectId>, co
                     initial: &initial(name),
                 },
             );
+            if follow && active == Some(*pid) {
+                response.scroll_to_me(None);
+            }
             let hint = if n < 9 {
                 format!("{name} (Cmd+{})", n + 1)
             } else {
@@ -324,7 +367,7 @@ fn space_row(ui: &mut Ui, name: &str, active: bool, waiting: usize) -> Response 
 
 /// The "Working sets" section: one row per set, the empty ones greyed,
 /// and a way to make another.
-fn working_set_rows(cx: &mut DrawCtx<'_>, ui: &mut Ui, view: &View, compact: bool) {
+fn working_set_rows(cx: &mut DrawCtx<'_>, ui: &mut Ui, view: &View, compact: bool, follow: bool) {
     let p = theme::palette(ui);
     ui.add_space(12.0);
     if !compact {
@@ -350,6 +393,9 @@ fn working_set_rows(cx: &mut DrawCtx<'_>, ui: &mut Ui, view: &View, compact: boo
                 initial: &initial(name),
             },
         );
+        if follow && *view == View::WorkingSet(*id) {
+            response.scroll_to_me(None);
+        }
         // A rule set is marked so it is not taken for one arranged by hand.
         if let Some(rule) = rule
             && !compact
@@ -414,7 +460,13 @@ fn working_set_rows(cx: &mut DrawCtx<'_>, ui: &mut Ui, view: &View, compact: boo
 
 /// Beside a session: its project's name as a kicker, a way back to the
 /// board, and every entry of the project with the current one selected.
-fn session_neighbours(cx: &mut DrawCtx<'_>, ui: &mut Ui, id: RecordId, compact: bool) {
+fn session_neighbours(
+    cx: &mut DrawCtx<'_>,
+    ui: &mut Ui,
+    id: RecordId,
+    compact: bool,
+    follow: bool,
+) {
     let p = theme::palette(ui);
     let Some((pid, project_name)) = cx.core.session(id).and_then(|s| {
         cx.core
@@ -458,7 +510,7 @@ fn session_neighbours(cx: &mut DrawCtx<'_>, ui: &mut Ui, id: RecordId, compact: 
         .map(|s| (s.id, s.name.clone()))
         .collect();
     for (sid, name) in sessions {
-        entry_row(cx, ui, sid, &name, id, compact);
+        entry_row(cx, ui, sid, &name, id, compact, follow);
     }
     if !entries.is_empty() {
         ui.add_space(12.0);
@@ -467,7 +519,7 @@ fn session_neighbours(cx: &mut DrawCtx<'_>, ui: &mut Ui, id: RecordId, compact: 
             ui.add_space(4.0);
         }
         for (sid, name) in entries {
-            entry_row(cx, ui, sid, &name, id, compact);
+            entry_row(cx, ui, sid, &name, id, compact, follow);
         }
     }
 }
@@ -480,6 +532,7 @@ fn entry_row(
     name: &str,
     current: RecordId,
     compact: bool,
+    follow: bool,
 ) {
     let state = cx.core.card_state(sid);
     let running = cx.core.is_running(sid);
@@ -495,6 +548,9 @@ fn entry_row(
             initial: &initial(name),
         },
     );
+    if follow && sid == current {
+        response.scroll_to_me(None);
+    }
     if response.on_hover_text(name).clicked() && sid != current {
         cx.dispatch(AppAction::ShowSession(sid));
     }

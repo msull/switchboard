@@ -181,6 +181,9 @@ pub struct UiState {
     /// The selected card the working set grid last scrolled to, so it
     /// follows a change of selection and leaves a manual scroll alone.
     pub followed_card: Option<(SetId, PinTarget)>,
+    /// The view the rail last scrolled to, so the rail follows a change
+    /// of selection and leaves a manual scroll alone.
+    pub rail_followed: Option<View>,
     /// What the core asked the UI to show (the radial menu's View and
     /// Terminal), served by the next frame.
     pub requests: Vec<UiRequest>,
@@ -318,6 +321,7 @@ impl Default for UiState {
             working_set_columns: 24,
             arrange: working_set::Arrange::default(),
             followed_card: None,
+            rail_followed: None,
             requests: Vec::new(),
             pane_dialog: None,
             turn_cursor: None,
