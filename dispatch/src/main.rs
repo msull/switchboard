@@ -1184,7 +1184,7 @@ fn tail(args: &[&str]) -> Result<()> {
 }
 
 fn health(args: &[&str]) -> Result<()> {
-    let f = Flags::parse(args, &["--timeout", "--stale"], &["--json"]);
+    let f = Flags::parse(args, &["--timeout", "--stale"], &["--json", "--verbose"]);
     if !f.rest.is_empty() {
         usage();
     }
@@ -1192,7 +1192,14 @@ fn health(args: &[&str]) -> Result<()> {
     let stale_ms = f.number("--stale").unwrap_or(30) * 1000;
     let data = DataDir::from_env()?;
     let socket = SocketPort::from_env()?.path().to_path_buf();
-    let checked = dispatch::health::check(&data, &socket, timeout, stale_ms, now_ms());
+    let checked = dispatch::health::check(
+        &data,
+        &socket,
+        timeout,
+        stale_ms,
+        now_ms(),
+        f.on("--verbose"),
+    );
     if f.on("--json") {
         say!(
             "{}",

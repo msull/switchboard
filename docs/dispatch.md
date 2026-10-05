@@ -385,7 +385,9 @@ latency of a call to Switchboard, the failures of calls to Switchboard
 and the PR providers in the last hour (time, ticket, the error's
 text), and per ticket the last time the runner got on with it (a call
 for it that succeeded, or a step that finished without an error).
-`dispatch health` reads it, never taking `runner.lock`.
+`dispatch health` reads it, never taking `runner.lock`, and folds the
+failures that repeat for one ticket with one error into one line with a
+count (`--verbose` lists each).
 
 The "never resume automatically" rule holds on both sides. New
 launches happen because the scheduler finds a runnable ticket at the
@@ -2044,8 +2046,10 @@ stop for the owner. No settings file is written: `--settings`
 already carries Switchboard's hooks. `dispatch supervisor <project>
 --fresh [--setup]` (or Fresh on the Dispatch page, through the port's
 intent) sets up, writes the seed, kills the current session and keeps
-it in `past`, rotates the hand-off under `## From the session of
-<date>`, and makes the new one. `--resume` sends `session.resume`;
+it in `past`, rotates the hand-off under a single `## From the
+session of <date>` heading, which replaces the ones earlier rotations
+left on top (a hand-off that is empty, or holds only those headings,
+gets no heading), and makes the new one. `--resume` sends `session.resume`;
 `--kill [--reason]` kills it and keeps it in `past`. Nothing resumes or
 starts a supervisor by itself.
 
