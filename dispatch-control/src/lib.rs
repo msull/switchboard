@@ -266,13 +266,20 @@ pub struct TicketView {
 }
 
 impl TicketView {
-    /// A lane's last bring-up, when it resolved a conflict, in
-    /// `rebased_with_conflicts`'s words with the review of it.
+    /// How a lane's last bring-up reads in `show`: `brought_up`'s words,
+    /// then what the resolution review of its conflict made of it, once
+    /// one began. `None` for a lane never brought up.
     #[must_use]
-    pub fn lane_conflict(&self, l: &LaneView) -> Option<String> {
-        let commits = l.rebase_conflicts?;
-        let pass = self.attempts.iter().find(|a| reviews_resolution(a, l));
-        Some(rebased_with_conflicts(commits, pass))
+    pub fn lane_brought_up(&self, l: &LaneView) -> Option<String> {
+        let by = l.brought_up_by?;
+        let text = brought_up(by, l.brought_up_commits, l.rebase_conflicts);
+        let pass = l
+            .rebase_conflicts
+            .and_then(|_| self.attempts.iter().find(|a| reviews_resolution(a, l)));
+        Some(match pass {
+            Some(a) => format!("{text}, {}", review_outcome(a)),
+            None => text,
+        })
     }
 
     /// What a resolution review read, in the same words: the conflicted
@@ -310,6 +317,7 @@ pub struct PathsView {
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(default)]
+#[allow(clippy::struct_excessive_bools)] // independent facts about the lane
 pub struct LaneView {
     pub name: String,
     pub worktree: PathBuf,
@@ -330,6 +338,11 @@ pub struct LaneView {
     pub rebase_conflicts: Option<u32>,
     /// The `n` of the resolution review of that bring-up, once one began.
     pub resolution: Option<u32>,
+    /// Who brought the lane up last, once it was.
+    pub brought_up_by: Option<BroughtUpBy>,
+    /// That bring-up rebased commits of the branch's own rather than
+    /// moving it.
+    pub brought_up_commits: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -454,15 +467,58 @@ pub fn commit_count(commits: u32) -> String {
     }
 }
 
-/// How a bring-up that had conflicts reads on the page and in `show`:
+/// Who rewrote a lane's branch onto its new base.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BroughtUpBy {
+    /// git alone: the branch moved, or rebased without a conflict.
+    Git,
+    /// A rebaser agent finished the rebase.
+    Rebaser,
+    /// A rebase finished by hand, adopted by a `recheck` or `rerun`
+    /// answer.
+    Hand,
+    /// A rebaser failed or was cancelled with no answer since: the record
+    /// cannot tell whether it or a hand rebase finished the work.
+    Stopped,
+}
+
+/// How a bring-up reads in the event log and in `show`. `commits` is
+/// whether the branch had commits of its own; `conflicts` is how many of
+/// them conflicted (0 when they could not be listed), `None` when no
+/// conflict is on record.
+#[must_use]
+pub fn brought_up(by: BroughtUpBy, commits: bool, conflicts: Option<u32>) -> String {
+    if !commits {
+        return "brought up with no commits of its own".to_owned();
+    }
+    let who = match by {
+        BroughtUpBy::Git => return "rebased cleanly".to_owned(),
+        BroughtUpBy::Rebaser => "rebased by the rebaser",
+        BroughtUpBy::Hand => "rebased by hand (adopted)",
+        BroughtUpBy::Stopped => "rebased after the rebaser stopped",
+    };
+    match conflicts {
+        Some(n) => format!("{who}, conflicts in {}", commit_count(n)),
+        None => who.to_owned(),
+    }
+}
+
+/// How a bring-up that had conflicts reads on the page:
 /// how many commits conflicted, then what its resolution review (the
 /// `resolution` attempt `pass`) made of it, once one began.
 #[must_use]
 pub fn rebased_with_conflicts(commits: u32, pass: Option<&AttemptView>) -> String {
     let text = format!("rebased with conflicts in {}", commit_count(commits));
-    let Some(a) = pass else {
-        return text;
-    };
+    match pass {
+        Some(a) => format!("{text}, {}", review_outcome(a)),
+        None => text,
+    }
+}
+
+/// What a resolution review (the `resolution` attempt `pass`) made of
+/// the conflict it read.
+fn review_outcome(a: &AttemptView) -> String {
     let points = |k: u32| {
         if k == 1 {
             "1 point".to_owned()
@@ -471,7 +527,7 @@ pub fn rebased_with_conflicts(commits: u32, pass: Option<&AttemptView>) -> Strin
         }
     };
     let last = a.rounds.last();
-    let outcome = match a.state.as_str() {
+    match a.state.as_str() {
         "complete" => match last {
             Some(r) if r.state == "accepted" => {
                 format!("accepted with {} open", points(r.open_points))
@@ -483,8 +539,7 @@ pub fn rebased_with_conflicts(commits: u32, pass: Option<&AttemptView>) -> Strin
         },
         "failed" | "cancelled" => "review failed".to_owned(),
         _ => "under review".to_owned(),
-    };
-    format!("{text}, {outcome}")
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -761,5 +816,95 @@ mod tests {
         for (commits, a, want) in cases {
             assert_eq!(rebased_with_conflicts(commits, Some(&a)), want);
         }
+    }
+
+    #[test]
+    fn a_bring_up_reads_by_who_rewrote_it() {
+        use BroughtUpBy::{Git, Hand, Rebaser, Stopped};
+        let cases = [
+            (
+                Rebaser,
+                false,
+                Some(2),
+                "brought up with no commits of its own",
+            ),
+            (Git, true, Some(0), "rebased cleanly"),
+            (
+                Rebaser,
+                true,
+                Some(2),
+                "rebased by the rebaser, conflicts in 2 commits",
+            ),
+            (
+                Hand,
+                true,
+                Some(1),
+                "rebased by hand (adopted), conflicts in 1 commit",
+            ),
+            (
+                Stopped,
+                true,
+                Some(2),
+                "rebased after the rebaser stopped, conflicts in 2 commits",
+            ),
+            (
+                Rebaser,
+                true,
+                Some(0),
+                "rebased by the rebaser, conflicts in commits it could not list",
+            ),
+            (Rebaser, true, None, "rebased by the rebaser"),
+            (Hand, true, None, "rebased by hand (adopted)"),
+            (Stopped, true, None, "rebased after the rebaser stopped"),
+        ];
+        for (by, commits, conflicts, want) in cases {
+            assert_eq!(brought_up(by, commits, conflicts), want);
+        }
+        assert_eq!(serde_json::to_string(&Rebaser).unwrap(), r#""rebaser""#);
+    }
+
+    #[test]
+    fn a_lane_reads_its_bring_up_with_the_review_of_its_conflict() {
+        let conflicted = LaneView {
+            name: "repo".into(),
+            rebase_conflicts: Some(2),
+            resolution: Some(1),
+            brought_up_by: Some(BroughtUpBy::Rebaser),
+            brought_up_commits: true,
+            ..LaneView::default()
+        };
+        let clean = LaneView {
+            name: "web".into(),
+            brought_up_by: Some(BroughtUpBy::Git),
+            brought_up_commits: true,
+            ..LaneView::default()
+        };
+        let view = TicketView {
+            attempts: vec![AttemptView {
+                stage: RESOLUTION.into(),
+                n: 1,
+                context: "repo".into(),
+                state: "complete".into(),
+                rounds: vec![ReviewRoundView {
+                    n: 1,
+                    state: "fixed".into(),
+                    open_points: 1,
+                    head_after: Some("fix00001".into()),
+                    ..ReviewRoundView::default()
+                }],
+                ..AttemptView::default()
+            }],
+            lanes: vec![conflicted.clone(), clean.clone()],
+            ..TicketView::default()
+        };
+        assert_eq!(
+            view.lane_brought_up(&conflicted).as_deref(),
+            Some("rebased by the rebaser, conflicts in 2 commits, reviewed: 1 point fixed")
+        );
+        assert_eq!(
+            view.lane_brought_up(&clean).as_deref(),
+            Some("rebased cleanly")
+        );
+        assert_eq!(view.lane_brought_up(&LaneView::default()), None);
     }
 }

@@ -1257,6 +1257,7 @@ impl Runner {
                     to: onto_sha.to_owned(),
                     commits,
                     stage,
+                    at_ms: now_ms,
                 });
             }
         }
@@ -6253,6 +6254,69 @@ fn rebaser_notes(t: &Ticket, lane: &str, previous: Option<&Refreshed>) -> Option
         .filter_map(|a| Some((a.n, a.artifacts.get("notes").filter(|p| p.is_file())?)))
         .max_by_key(|(n, _)| *n)
         .map(|(_, path)| path.clone())
+}
+
+/// Who rewrote `lane`'s branch for the bring-up `r`, read from the
+/// attempts and answers recorded at or before it, so the event written
+/// with it and a later `show` agree. A clean rebase or a move is git's.
+/// After a conflict, only a rebaser started at or after the conflict
+/// worked on it (any, for a conflict from before its time was kept); a
+/// `recheck` answer to the `refresh` question or a `rerun` answer to the
+/// lane's rebaser's `rerun` question newer than that rebaser adopted a
+/// hand rebase, as does a bring-up with no such rebaser; else that
+/// rebaser's state says, and one that failed or was cancelled cannot
+/// tell its own work from a hand rebase made before a park.
+pub(crate) fn brought_up_by(t: &Ticket, lane: &str, r: &Refreshed) -> wire_dispatch::BroughtUpBy {
+    use wire_dispatch::BroughtUpBy;
+    if !r.commits || (r.conflict.is_none() && r.notes.is_none()) {
+        return BroughtUpBy::Git;
+    }
+    let since = r.conflict.as_ref().map_or(0, |c| c.at_ms);
+    let rebaser = t
+        .attempts
+        .iter()
+        .filter(|a| a.stage == REFRESH && a.context == lane)
+        .filter(|a| (since..=r.at_ms).contains(&a.started_ms))
+        .max_by_key(|a| (a.started_ms, a.n));
+    let adopted = t
+        .decisions
+        .iter()
+        .filter_map(|d| {
+            let DecisionState::Answered { answer, at_ms, .. } = &d.state else {
+                return None;
+            };
+            let counts = match d.name.as_str() {
+                REFRESH => answer == "recheck",
+                "rerun" => {
+                    answer == "rerun"
+                        && d.attempt.as_ref().is_some_and(|(stage, n)| {
+                            stage == REFRESH
+                                && find_attempt(t, REFRESH, *n).is_some_and(|a| a.context == lane)
+                        })
+                }
+                _ => false,
+            };
+            (counts && *at_ms <= r.at_ms).then_some(*at_ms)
+        })
+        .max();
+    match (adopted, rebaser) {
+        (Some(h), Some(a)) if h > a.started_ms => BroughtUpBy::Hand,
+        (_, Some(a)) if a.state == AttemptState::Complete => BroughtUpBy::Rebaser,
+        (_, Some(_)) => BroughtUpBy::Stopped,
+        (_, None) => BroughtUpBy::Hand,
+    }
+}
+
+/// How many commits conflicted in the bring-up `r` as its event says
+/// it: 0 for git's, else the recorded conflict's count (0 when they
+/// could not be listed), `None` when none is on record.
+pub(crate) fn conflict_count(r: &Refreshed, by: wire_dispatch::BroughtUpBy) -> Option<u32> {
+    if by == wire_dispatch::BroughtUpBy::Git {
+        return Some(0);
+    }
+    r.conflict
+        .as_ref()
+        .map(|c| u32::try_from(c.commits.len()).unwrap_or(u32::MAX))
 }
 
 /// The latest resolution review in `lane` that belongs to the bring-up

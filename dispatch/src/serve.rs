@@ -461,6 +461,11 @@ fn lane_view(t: &Ticket, l: &crate::ticket::LaneRecord) -> LaneView {
             .filter(|r| r.conflict.is_some())
             .and_then(|r| crate::scheduler::resolution_of(t, &l.name, r))
             .map(|a| a.n),
+        brought_up_by: l
+            .refreshed
+            .as_ref()
+            .map(|r| crate::scheduler::brought_up_by(t, &l.name, r)),
+        brought_up_commits: l.refreshed.as_ref().is_some_and(|r| r.commits),
     }
 }
 

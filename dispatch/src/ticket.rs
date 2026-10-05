@@ -183,6 +183,10 @@ pub struct RefreshConflict {
     /// review still reads it.
     #[serde(default)]
     pub stage: usize,
+    /// When the rebase first stopped: only a rebaser started at or after
+    /// it worked on this conflict. 0 is a record from before the field.
+    #[serde(default)]
+    pub at_ms: u64,
 }
 
 /// A head pushed to a lane's branch, and when.

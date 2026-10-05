@@ -167,10 +167,12 @@ the lines and report them. Do not restart the runner yourself.
 **Show.** `dispatch show X` prints the header (id, project, source,
 title), `stage <name> (i/n)` and the state; each lane with its branch,
 worktree and the base, head and last pushed head (seven characters),
-and, when its last bring-up resolved a rebase that conflicted, a
-clause such as `, rebased with conflicts in 2 commits, reviewed: 1
-point fixed` (or `under review`, `accepted with 1 point open`, `review
-failed`); the attempts grouped by stage, each with its state and reason, head,
+and, once it was brought up, a clause in the words of its `refreshed`
+event, such as `, rebased cleanly`, `, brought up with no commits of
+its own`, `, rebased by the rebaser, conflicts in 2 commits, reviewed:
+1 point fixed` or `, rebased by hand (adopted), conflicts in 1 commit,
+under review` (the review of a conflict also reads `reviewed`,
+`accepted with 1 point open` or `review failed`); the attempts grouped by stage, each with its state and reason, head,
 the head its checks ran at and a history rewrite, with any PR and the
 code review rounds (`r<n> <state> open <k>`) beneath it; the pending
 decisions with their options and the exact `dispatch decide` line; and
@@ -210,6 +212,19 @@ local zone (the stored `at_ms` under `--json` is UTC milliseconds).
   cursor and keep following.
 - Tickets taken before this build have no events before their next
   transition. `show` and `report` read the record, so they are whole.
+- A `refreshed` line reads `<lane> from <base> to <base>, <how>`, where
+  `<how>` is `brought up with no commits of its own`, `rebased
+  cleanly`, `rebased by the rebaser`, `rebased by hand (adopted)` or
+  `rebased after the rebaser stopped`, the last three followed by
+  `, conflicts in N commits` when a conflict was recorded (`commits it
+  could not list` when they could not be read). Under `--json` it
+  carries `by` (`git`, `rebaser`, `hand` or `stopped`) and `conflicts`.
+  `stopped` means a rebaser failed or was cancelled and nothing was
+  answered since, so the record cannot tell whether the rebaser or a
+  hand rebase finished the work: look at that bring-up. `conflicts` is
+  0 for `git`; for the others it is the conflicting commits, 0 when
+  they could not be listed, and absent when none was recorded. Lines
+  written before this build read `..., rebased`.
 
 **Wait.** `dispatch wait X --for decision` blocks until the ticket asks
 something and prints that `decision` event with the `dispatch decide`

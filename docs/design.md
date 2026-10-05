@@ -1676,6 +1676,14 @@ A refresh holds a lane whose worktree is mid-rebase or off its branch
 with a `refresh` question instead of reading it, and a failed
 rebaser's `rerun` question holds the stage and reads the lane again
 (no record change).
+The `refreshed` event and `show` say who brought a lane up (git, the
+rebaser, or a hand rebase adopted by a `recheck` or `rerun` answer) and
+how many commits conflicted, derived from the ticket's attempts and
+answers and the time the conflict was recorded (record v11), so a
+rebaser from before the conflict is never credited; a bring-up after a
+rebaser that failed or was cancelled, with no answer since, reads
+`stopped`, since the record cannot tell the rebaser's work from a hand
+rebase made before a park.
 A prompt's `{lanes}` is the lanes the ticket chose, in pipeline order
 (every lane before the `lanes` decision), and `{lanes.all}` every lane.
 A retake after close deletes each kept branch with nothing beyond its
@@ -1704,7 +1712,10 @@ tag a point as style. And: a check runs in its own process group, so it
 outlives a runner killed by Ctrl-C or a closed pane; the restarted
 runner reads it as lost, an active ticket starts it again (the new run
 waits on cargo's build lock behind the orphan), and a park cancels
-without killing it.
+without killing it. And: the `refresh` question is asked per stage, not
+per lane, so one `recheck` covers every held lane; a lane whose rebaser
+finished and that is brought up in the pass right after another lane's
+`recheck` reads `rebased by hand (adopted)`.
 
 A supervising agent has commands of its own, all read-only:
 `dispatch health` (the runner's `runner.json`, written after every

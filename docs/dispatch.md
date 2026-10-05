@@ -279,7 +279,10 @@ neither goes through `migrate`.
 `events.jsonl` is the event log the supervising commands read
 (`dispatch events`, `dispatch wait`). Each line is one JSON object,
 `{"v":1,"seq":N,"at_ms":…,"ticket":…,"project":…,"stage":…,"kind":…,"text":…}`,
-with `attempt`, `decision`, `head`, `url` and `voids` when they apply.
+with `attempt`, `decision`, `head`, `url`, `voids`, `by` and
+`conflicts` when they apply. `by` and `conflicts` are only on
+`refreshed`: `conflicts` is 0 for `git`, and is absent for a `rebaser`,
+`hand` or `stopped` bring-up with no conflict recorded.
 There is one writer, `store::write_ticket_logged`, at the one place a
 ticket is written (`Runner::save_ticket`, `decide` and `resume`): it
 reads the record being replaced, diffs it against the new one
