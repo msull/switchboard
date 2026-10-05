@@ -20,3 +20,6 @@ cargo clippy --locked --workspace --all-targets --quiet -- -D warnings
 
 echo "pre-commit: cargo test"
 cargo test --locked --workspace --quiet
+
+echo "pre-commit: cargo test (egui_term)"
+cargo test --locked -p egui_term --lib --quiet

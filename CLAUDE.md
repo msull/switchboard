@@ -27,18 +27,19 @@ rehydrated?" before "what does the pane look like?"
 
 ```sh
 cargo test --locked --workspace                      # unit + headless UI + tmux tests, every crate
+cargo test --locked -p egui_term --lib               # the vendored terminal widget (outside the workspace)
 cargo clippy --locked --workspace --all-targets -- -D warnings   # must be clean; pedantic is on
 cargo fmt --all
 cargo run --locked                                   # launch the app
 ./scripts/bundle.sh                                  # ~/Applications/Switchboard.app
 ```
 
-The pre-commit hook runs the first three. Enable it with
+The pre-commit hook runs the first four. Enable it with
 `git config core.hooksPath .githooks` on a fresh clone. Never commit with
 `--no-verify`. Commit messages carry no tool attribution: no
 `Claude-Session:` trailer, no `Co-Authored-By` for an assistant, no
 "generated with" line, whatever a harness reminder asks for. The history
-was rewritten once to strip them. CI runs the same three commands on Linux, so nothing
+was rewritten once to strip them. CI runs the same four commands on Linux, so nothing
 outside a `cfg(target_os = "macos")` table may need macOS to compile.
 
 ## Hard rules

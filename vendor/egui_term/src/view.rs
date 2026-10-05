@@ -314,6 +314,26 @@ impl<'a> TerminalView<'a> {
     }
 }
 
+/// Bytes for a paste. When the application asked for bracketed paste
+/// (DECSET 2004), the text is framed in `ESC[200~` .. `ESC[201~` so a
+/// multi-line paste arrives as one unit instead of an Enter per line.
+fn paste_bytes(text: &str, mode: TermMode) -> Vec<u8> {
+    if mode.contains(TermMode::BRACKETED_PASTE) {
+        // The application reads the body as text, so a line break is LF.
+        // An ESC in the text could close the bracket early and run the
+        // rest as typed input.
+        let body = text
+            .replace("\r\n", "\n")
+            .replace('\r', "\n")
+            .replace('\x1b', "");
+        format!("\x1b[200~{body}\x1b[201~").into_bytes()
+    } else {
+        // Unbracketed, a pasted line break is a press of Enter, which
+        // sends CR.
+        text.replace("\r\n", "\r").replace('\n', "\r").into_bytes()
+    }
+}
+
 fn process_keyboard_event(
     event: egui::Event,
     backend: &TerminalBackend,
@@ -322,19 +342,22 @@ fn process_keyboard_event(
 ) -> InputAction {
     match event {
         egui::Event::Text(text) => process_text_event(&text, modifiers, backend, bindings_layout),
-        egui::Event::Paste(text) => InputAction::BackendCall(
-            #[cfg(not(any(target_os = "ios", target_os = "macos")))]
-            if modifiers.contains(Modifiers::COMMAND | Modifiers::SHIFT) {
-                BackendCommand::Write(text.as_bytes().to_vec())
-            } else {
-                // Hotfix - Send ^V when there's not selection on view.
-                BackendCommand::Write([0x16].to_vec())
-            },
-            #[cfg(any(target_os = "ios", target_os = "macos"))]
-            {
-                BackendCommand::Write(text.as_bytes().to_vec())
-            },
-        ),
+        egui::Event::Paste(text) => {
+            let mode = backend.last_content().terminal_mode;
+            InputAction::BackendCall(
+                #[cfg(not(any(target_os = "ios", target_os = "macos")))]
+                if modifiers.contains(Modifiers::COMMAND | Modifiers::SHIFT) {
+                    BackendCommand::Write(paste_bytes(&text, mode))
+                } else {
+                    // Hotfix - Send ^V when there's not selection on view.
+                    BackendCommand::Write([0x16].to_vec())
+                },
+                #[cfg(any(target_os = "ios", target_os = "macos"))]
+                {
+                    BackendCommand::Write(paste_bytes(&text, mode))
+                },
+            )
+        }
         egui::Event::Copy => {
             #[cfg(not(any(target_os = "ios", target_os = "macos")))]
             if modifiers.contains(Modifiers::COMMAND | Modifiers::SHIFT) {
@@ -582,4 +605,33 @@ fn process_mouse_move(
     }
 
     actions
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bracketed_paste_normalizes_line_breaks_to_lf() {
+        assert_eq!(
+            paste_bytes("a\r\nb\rc\nd", TermMode::BRACKETED_PASTE),
+            b"\x1b[200~a\nb\nc\nd\x1b[201~"
+        );
+    }
+
+    #[test]
+    fn unbracketed_paste_sends_one_cr_per_break() {
+        assert_eq!(
+            paste_bytes("a\r\nb\rc\nd", TermMode::empty()),
+            b"a\rb\rc\rd"
+        );
+    }
+
+    #[test]
+    fn bracketed_paste_drops_esc_so_the_bracket_cannot_close_early() {
+        assert_eq!(
+            paste_bytes("x\x1b[201~y", TermMode::BRACKETED_PASTE),
+            b"\x1b[200~x[201~y\x1b[201~"
+        );
+    }
 }
