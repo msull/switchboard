@@ -105,6 +105,9 @@ pub struct TicketReport {
     pub range: Option<RangeSize>,
     /// How many tickets a total adds up; 1 for a ticket.
     pub tickets: u32,
+    /// Answered decisions by who answered: `you`, `supervisor`,
+    /// `dispatch`, `resume`.
+    pub answered_by: BTreeMap<String, u32>,
 }
 
 /// The plan review's round files beside `subject`: `<stem>.feedback-<n>.md`.
@@ -168,6 +171,11 @@ pub fn of(
         tickets: 1,
         ..TicketReport::default()
     };
+    for d in &t.decisions {
+        if let DecisionState::Answered { by, .. } = &d.state {
+            *r.answered_by.entry(by.clone()).or_default() += 1;
+        }
+    }
     for name in stages {
         let mine: Vec<_> = t.attempts_of(name).collect();
         let start = mine.iter().map(|a| a.started_ms).min();
@@ -349,6 +357,9 @@ pub fn total(reports: &[TicketReport]) -> TicketReport {
         sum.code_points += r.code_points;
         for (who, n) in &r.code_points_by_reviewer {
             *sum.code_points_by_reviewer.entry(who.clone()).or_default() += n;
+        }
+        for (who, n) in &r.answered_by {
+            *sum.answered_by.entry(who.clone()).or_default() += n;
         }
         sum.code_incomplete |= r.code_incomplete;
         sum.fix_passes += r.fix_passes;
@@ -691,6 +702,40 @@ mod tests {
         let r = of(&t, &stages(), &files(&[]), None, 50);
         assert!(r.code_incomplete);
         assert_eq!(r.code_reviews[0].rounds[0].new, None);
+    }
+
+    #[test]
+    fn answers_are_counted_by_who_gave_them() {
+        let mut t = closed_ticket();
+        let answered = |id: &str, by: &str| crate::ticket::Decision {
+            id: id.into(),
+            stage: "plan".into(),
+            name: "finalize".into(),
+            kind: crate::ticket::DecisionKind::Permission,
+            question: String::new(),
+            options: vec!["finalize".into()],
+            recommendation: None,
+            attempt: None,
+            state: DecisionState::Answered {
+                answer: "finalize".into(),
+                note: None,
+                by: by.into(),
+                at_ms: 1,
+                acted: true,
+            },
+            made_ms: 0,
+            refusals: Vec::new(),
+        };
+        t.decisions = vec![
+            answered("d1", "you"),
+            answered("d2", "supervisor"),
+            answered("d3", "supervisor"),
+        ];
+        let r = of(&t, &[], &|_| None, None, 0);
+        assert_eq!(r.answered_by.get("you"), Some(&1));
+        assert_eq!(r.answered_by.get("supervisor"), Some(&2));
+        let sum = total(&[r.clone(), r]);
+        assert_eq!(sum.answered_by.get("supervisor"), Some(&4));
     }
 
     #[test]

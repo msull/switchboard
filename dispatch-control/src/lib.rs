@@ -100,6 +100,11 @@ pub enum Body {
         #[serde(default)]
         since: u64,
     },
+    /// Start a new supervisor session for the project, replacing the
+    /// current one. The answer is the status at once, the intent saved;
+    /// the runner's next pass does the work, which asks the caller's own
+    /// control socket.
+    SupervisorFresh { project: String },
 }
 
 impl Body {
@@ -117,6 +122,7 @@ impl Body {
             Self::Close { .. } => "close",
             Self::Worktrees { .. } => "worktrees",
             Self::Events { .. } => "events",
+            Self::SupervisorFresh { .. } => "supervisor-fresh",
         }
     }
 }
@@ -235,6 +241,28 @@ pub struct ProjectView {
     /// Free space on the worktrees' volume now, in GB.
     #[serde(default)]
     pub free_gb: Option<u32>,
+    /// The project's supervisor, when its live pipeline has a
+    /// `[supervisor]` table.
+    #[serde(default)]
+    pub supervisor: Option<SupervisorView>,
+}
+
+/// A project's supervisor session as the page shows it.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SupervisorView {
+    /// Switchboard's record id of the session now, if there is one.
+    pub session: Option<String>,
+    /// When the session now was asked for, in Unix ms; 0 without one.
+    pub created_ms: u64,
+    /// The `[supervisor]` table changed since the session was seeded.
+    pub seed_stale: bool,
+    /// How many sessions it replaced.
+    pub replaced: u32,
+    /// A fresh one is asked for and the runner has yet to start it.
+    pub fresh_pending: bool,
+    /// Why the last fresh, resume or kill failed.
+    pub error: Option<String>,
 }
 
 impl ProjectView {
@@ -765,6 +793,7 @@ mod tests {
                     pending: 1,
                     min_free_gb: 0,
                     free_gb: None,
+                    supervisor: None,
                 }],
                 tickets: vec![ticket.clone()],
             }),

@@ -271,6 +271,7 @@ impl Runner {
         });
         t.restart = None;
         t.state = TicketState::Active;
+        t.state_by = None;
         if checked.ranged {
             self.record_entry(t, now_ms);
         }

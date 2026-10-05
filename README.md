@@ -179,6 +179,11 @@ Dev aids, all environment variables:
   `<dir>/lock` is the writer lock, with a line naming its holder, and
   `<dir>/tickets/<id>/closing.lock` is held by whichever `dispatch` is
   finishing that ticket's close; both are lock files, not records.
+  `<dir>/projects/<project>/supervisor/` holds a project's supervisor
+  files: `seed.md`, the prompt its session starts from, `handoff.md`,
+  which the session keeps, and `handoff.<stamp>.md`, each earlier
+  hand-off kept when a fresh session replaced it. The supervisor works
+  in `supervisor-<project>` under the worktrees root.
 - `SWITCHBOARD_SCRIPT=<file>`: run actions at startup, one per line, so
   the app can be put into a known state without clicking. See
   `src/script.rs` for the lines (`add-project`, `new-shell`, `new-claude`,
@@ -226,7 +231,7 @@ src/core/
   events.rs              hook events -> record activity (matched by record id, ordered by time)
   workflow.rs            plan review runs: reviewer and planner rounds as a state machine over records
   control.rs             the control port's commands run quietly under an operation id; read models in the wire's shapes
-  dispatch.rs            Dispatch as the app shows it: the runner's last status as views, decisions answered as calls, a ticket's events and full view read once per change and its timeline, the console session
+  dispatch.rs            Dispatch as the app shows it: the runner's last status as views, decisions answered as calls, a ticket's events and full view read once per change and its timeline, a project's supervisor chip, the console session
   tests.rs               state-transition tests for the core
 src/ports/               traits: store, host, events, agent, opener, transcript, secrets, project_config, round_files, artifacts, changes (a branch's commits and files over its base), controller, control (the operations log), dispatch (Dispatch's port)
 src/adapters/
@@ -271,7 +276,7 @@ src/ui/
   env.rs                 Environment dialog: variables, secrets, .env opt-in, masked preview
   config.rs              project config editor: .switchboard/project.json as text, options listed, parse shown
   workflow.rs            plan review: the Review plan dialog, the run's page (rounds, plan with diff, feedback beside response, controls)
-  dispatch.rs            the Dispatch page: tickets with what waits on you (filtered by project) and the console; Pop out
+  dispatch.rs            the Dispatch page: tickets with what waits on you (filtered by project), each project's supervisor chip (Open, Resume, Trust, Fresh behind a confirmation), and the console; Pop out
   ticket.rs              one ticket's page: header, pending decisions pinned, tabs for timeline, issue, plan with its review rounds, notes, code review, and branch changes read on a thread
   cards.rs               the one card for every entry kind, the card grid, pinned document cards
   session.rs             session view: header, embedded terminal or conversation + message box
@@ -286,18 +291,19 @@ tests/live.rs            ignored: real claude / codex / Ghostty runs
 tests/gate.rs            Milestone 1 gate: real store, tmux, hooks; agents ignored
 scripts/test-times.sh    every test's time, serially, through libtest's `--report-time`; the slowest ten, each binary's total, the 5 s budget
 scripts/ci-test.sh       CI's test step: the workspace, then one retry of the failed tests, warning `flaky:` for each that passes on it
-control/                 switchboard-control: the control port's wire contract (requests, replies, views) and a blocking client; std + serde only
-dispatch-control/        dispatch-control: the wire contract of Dispatch's own port (tickets as views, a ticket's events after a cursor, decide, queue, take, resume, close, worktrees), how a bring-up reads, and a blocking client; std + serde only
+control/                 switchboard-control: the control port's wire contract (requests, replies, views; `session.resume` resumes an agent without a terminal and never launches fresh) and a blocking client; std + serde only
+dispatch-control/        dispatch-control: the wire contract of Dispatch's own port (tickets as views, a ticket's events after a cursor, decide, queue, take, resume, close, worktrees, a project's supervisor and `supervisor-fresh`), how a bring-up reads, and a blocking client; std + serde only
 dispatch/                the `dispatch` binary (docs/dispatch.md; docs/dispatch-agent-guide.md is the command-line guide for agents that take tickets; docs/dispatch-pipeline-improvements.md is the open list of pipeline changes drawn from tickets run so far): a ticket scheduler that drives Switchboard over the control port and never links the app
-  src/main.rs            CLI: take, run, decide, decisions, status, queue, park, resume, close, restart, worktrees; for a supervising agent, events, wait, show, report, tail and health (usage errors, and a command the ticket's state never allows, exit 64)
+  src/main.rs            CLI: take, run, decide, decisions, status, queue, park, resume, close, restart, worktrees, supervisor; for a supervising agent, brief, events (with `--follow --timeout`), wait, show, report, tail and health (usage errors, and a command the ticket's state never allows, exit 64); a supervisor session's command checked against what it may run first
   src/events.rs          the event log `events.jsonl`: what a ticket write changed (`between`, pure), appended and synced before the record's rename, a `void` for a write that failed; a bring-up's `by` and `conflicts` as the scheduler derives them; read, followed, and waited on with each match checked against the record
   src/report.rs          how a ticket went, pure: stage time, plan and code review points counted by id, fix passes, rebases, the PR's size
   src/health.rs          the runner's call counters, written as `runner.json` after every pass, and the `health` check of that file and both sockets
   src/serve.rs           Dispatch's port on <data>/dispatch.sock while `run` is up: the records as views, the commands the CLI has, one handler under one lock
   src/pipeline.rs        the TOML pipeline file, parsed in full and validated; fingerprint of the copy a ticket runs
-  src/ticket.rs          the ticket record: source, lanes (with a conflict seen and not yet brought up, and their last bring-up, `Refreshed`: whether the branch had commits, when, the rebaser's notes, the conflict it resolved and the head it reached), attempts (with their checks' head and exit, the attempt a review carries and its send-back note, the history rewrite a review attempt made), decisions, operation ledger, a close's progress (`CloseProgress`), restarts with the heads recorded at each stage entry; the per-project queue and closing list
+  src/ticket.rs          the ticket record: source, lanes (with a conflict seen and not yet brought up, and their last bring-up, `Refreshed`: whether the branch had commits, when, the rebaser's notes, the conflict it resolved and the head it reached), attempts (with their checks' head and exit, the attempt a review carries and its send-back note, the history rewrite a review attempt made), decisions, operation ledger, a close's progress (`CloseProgress`), restarts with the heads recorded at each stage entry, who took, parked, resumed or closed it and the supervisor's refused answers; the per-project queue and closing list, and the project's supervisor (`Supervision`)
   src/scheduler.rs       the runner: stage executors (agent, gate-only lanes, review workflow), completion evidence, decisions, ledgered sends, parking, closing and restarting as sequences; bringing a lane up to its moved base, recorded with the rebaser's notes; a conflicted bring-up after the last code review gets one resolution review; who brought a lane up and how many commits conflicted; a retake's kept branches deleted or asked about at the cut
   src/review.rs          the code review stage: rounds of several reviewers over a lane's branch, a fresh implementer per round, checks at every accepted head; a rerun carries the last attempt's settled and open points; style and the plan's decisions do not hold a round open; a reviewer's line that every point left is wording is a note, not a point; folds the fix rounds into the commits they amend as it completes, or keeps them when the user answers `keep` to a failed fold; checks each folded message's backticked names against the commit and the tree, and asks `rewrite | accept | park` when one is gone, a rewrite rewording the folded commits with the tree unchanged; the one-pass resolution review (docs/dispatch.md, "The code review stage")
+  src/supervisor.rs      a project's supervisor session from the live `[supervisor]` table: its seed and the hash that says it is stale, its launch flags, who runs a command (`SWITCHBOARD_RECORD_ID`) and what a supervisor may run (`SUPERVISOR_VERBS`); the runner's fresh (workspace setup, seed, the old session killed and kept, the hand-off rotated), kill and resume through a ledgered request on the project's record
   src/restart.rs         `dispatch restart`: a ticket put at its stage or an earlier one under a fresh copy of the live pipeline, applied by the park sequence; branches reset to the heads recorded at stage entry, later work discarded, changed setup run again
   src/recover.rs         unanswered ledger operations resolved by class through find and op.status; nothing launched twice
   src/view.rs            the `Dispatch · <project>` working set, one card per queued ticket, redrawn through set.sync
@@ -310,6 +316,7 @@ dispatch/                the `dispatch` binary (docs/dispatch.md; docs/dispatch-
   src/port.rs            the Port trait over the control socket client; the connection remade after any error, a timeout included; `path()` names the socket for `health`
   src/template.rs        `{a.b}` substitution for prompts
   tests/first_slice.rs   the acceptance table against an in-memory Switchboard (tests/support)
+  tests/supervisor.rs    a project's supervisor made, replaced, killed, resumed and recovered against the in-memory Switchboard; through the CLI with `SWITCHBOARD_RECORD_ID` set, what a supervisor may and may not run
   tests/live.rs          ignored: the first stage against a real Switchboard and a haiku agent
   tests/sandbox.rs       ignored, macOS: a confined gate's refused write fails the attempt and is named in checks.log
 vendor/egui_term/        embedded terminal widget (Harzu/egui_term @ 31bbc7ab, egui 0.36; see SWITCHBOARD-PATCHES.md)

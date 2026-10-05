@@ -6,7 +6,8 @@ use anyhow::Result;
 use switchboard_control::{Body, Found, Made, OpStatus, Reply, Request};
 
 use crate::scheduler::{Ask, NUDGE, Runner, apply_reply};
-use crate::ticket::{DecisionKind, Operation, Ticket, TicketState};
+use crate::supervisor::apply_supervisor_reply;
+use crate::ticket::{DecisionKind, Operation, ProjectState, Ticket, TicketState};
 
 /// Recovery's verdicts on an operation with no reply, as the reader
 /// sees them. Whether an op is settled is its `settled` flag, not these
@@ -55,7 +56,73 @@ impl Runner {
             self.save_ticket(&mut t, now_ms)?;
             self.save_project(&ps)?;
         }
+        for project in self.projects()? {
+            let mut ps = self.load_project(&project)?;
+            if ps.supervisor.op.as_ref().is_some_and(Operation::unresolved) {
+                self.recover_supervisor(&mut ps)?;
+            }
+        }
         Ok(())
+    }
+
+    /// A project's supervisor request whose reply never came, resolved
+    /// as a ticket's creation is: what `find` reports becomes the reply,
+    /// and one lost or cut short is a verdict and the record's `error`.
+    /// The record is saved.
+    pub(crate) fn recover_supervisor(&mut self, ps: &mut ProjectState) -> Result<()> {
+        let Some(op) = ps.supervisor.op.clone() else {
+            return Ok(());
+        };
+        log::info!("{} recovering supervisor {} ({})", ps.name, op.op, op.kind);
+        let verdict = |ps: &mut ProjectState, verdict: &str| {
+            if let Some(o) = ps.supervisor.op.as_mut() {
+                give_verdict(o, verdict);
+            }
+            ps.supervisor.error = Some(format!("{}: {verdict}", op.kind));
+        };
+        if op.class != "creation" {
+            verdict(ps, NOT_REPEATED);
+            self.save_project(ps)?;
+            return Ok(());
+        }
+        let found = match self.call(
+            None,
+            &Request::new(
+                format!("r-{}", uuid::Uuid::new_v4().simple()),
+                Body::Find {
+                    operation: op.op.clone(),
+                },
+            ),
+        )? {
+            Reply::Found { records } => records,
+            other => anyhow::bail!("find answered {other:?}"),
+        };
+        let reply = if found.iter().any(|f| f.removed) {
+            verdict(ps, REMOVED);
+            None
+        } else if found.is_empty() {
+            match self.status_of(&op.op)? {
+                OpStatus::InProgress => return Ok(()),
+                OpStatus::Done { reply } => Some(*reply),
+                OpStatus::Unknown => {
+                    verdict(ps, LOST);
+                    None
+                }
+                OpStatus::Interrupted => {
+                    verdict(ps, INTERRUPTED);
+                    None
+                }
+            }
+        } else {
+            Some(rebuild(&found))
+        };
+        if let Some(reply) = reply {
+            if let Some(o) = ps.supervisor.op.as_mut() {
+                o.reply = Some(reply.clone());
+            }
+            apply_supervisor_reply(ps, &reply);
+        }
+        self.save_project(ps)
     }
 
     /// One unanswered operation, resolved by its class.

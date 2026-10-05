@@ -10,7 +10,7 @@ use egui_extras::{Column, TableBuilder};
 
 use super::{DrawCtx, GAP, theme};
 use crate::core::dispatch::{parked, ticket_source, ticket_stage};
-use crate::core::{AppAction, TicketOnly, TicketSort, View, WaitingAgent};
+use crate::core::{AppAction, SupervisorState, TicketOnly, TicketSort, View, WaitingAgent};
 use crate::ports::dispatch::{DecisionView, ProjectView, TicketView};
 
 /// The console pane's height on the overview.
@@ -75,7 +75,7 @@ pub fn show(cx: &mut DrawCtx<'_>, ui: &mut Ui) {
             waiting_section(cx, ui, seen, &pending, &agents, &tickets);
 
             theme::section(ui, "Tickets");
-            project_limits(ui, projects.iter().filter(|p| shown(&p.name)));
+            project_limits(cx, ui, projects.iter().filter(|p| shown(&p.name)));
             listing_controls(cx, ui);
             ticket_table(cx, ui);
 
@@ -163,8 +163,12 @@ fn project_chips(cx: &mut DrawCtx<'_>, ui: &mut Ui, projects: &[ProjectView]) {
 }
 
 /// One line per project: how many slots and decisions its policy
-/// allows and what holds new starts back.
-fn project_limits<'a>(ui: &mut Ui, projects: impl Iterator<Item = &'a ProjectView>) {
+/// allows and what holds new starts back, and its supervisor's chip.
+fn project_limits<'a>(
+    cx: &mut DrawCtx<'_>,
+    ui: &mut Ui,
+    projects: impl Iterator<Item = &'a ProjectView>,
+) {
     let p = theme::palette(ui);
     for project in projects {
         ui.horizontal_wrapped(|ui| {
@@ -185,7 +189,92 @@ fn project_limits<'a>(ui: &mut Ui, projects: impl Iterator<Item = &'a ProjectVie
                         .color(p.accent_2_text),
                 );
             }
+            supervisor_chip(cx, ui, project);
         });
+    }
+    confirm_supervisor_fresh(cx, ui.ctx());
+}
+
+/// The project's supervisor: what it is doing, and Open, Resume, Trust
+/// and Fresh where they apply. Nothing for a project without one.
+fn supervisor_chip(cx: &mut DrawCtx<'_>, ui: &mut Ui, project: &ProjectView) {
+    let Some(chip) = cx.core.supervisor_chip(project) else {
+        return;
+    };
+    let Some(view) = project.supervisor.as_ref() else {
+        return;
+    };
+    let p = theme::palette(ui);
+    ui.label(theme::meta_text(ui, "·"));
+    let mut words = format!("Supervisor · {}", chip.state.label());
+    if view.seed_stale {
+        words.push_str(" · seed changed");
+    }
+    if view.fresh_pending {
+        words.push_str(" · starting");
+    }
+    ui.label(theme::meta_text(ui, words));
+    if let Some(e) = &view.error {
+        ui.label(
+            RichText::new(e)
+                .text_style(theme::meta())
+                .color(p.accent_2_text),
+        );
+    }
+    if let Some(id) = chip.session {
+        if theme::ghost(ui, "Open supervisor")
+            .on_hover_text("Show the supervisor's session")
+            .clicked()
+        {
+            cx.dispatch(AppAction::ShowSession(id));
+        }
+        if chip.resumable
+            && theme::ghost(ui, "Resume supervisor")
+                .on_hover_text("Resume the supervisor's conversation (a paid run)")
+                .clicked()
+        {
+            cx.dispatch(AppAction::ReturnToSession(id));
+        }
+        if chip.state == SupervisorState::AsksTrust
+            && theme::ghost(ui, "Trust its folder")
+                .on_hover_text("Answer Claude's trust question for the workspace with yes")
+                .clicked()
+        {
+            cx.dispatch(AppAction::TrustFolder(id));
+        }
+    }
+    if !view.fresh_pending
+        && theme::ghost(ui, "Fresh supervisor")
+            .on_hover_text("Start a new supervisor from the seed, replacing this one")
+            .clicked()
+    {
+        cx.state.confirm_supervisor_fresh = Some(project.name.clone());
+    }
+}
+
+/// The confirmation before a new supervisor replaces the current one,
+/// since the current one is killed.
+fn confirm_supervisor_fresh(cx: &mut DrawCtx<'_>, ctx: &egui::Context) {
+    let Some(project) = cx.state.confirm_supervisor_fresh.clone() else {
+        return;
+    };
+    let mut done = false;
+    super::dialogs::dialog(ctx, "Start a new supervisor", |ui| {
+        ui.label(format!(
+            "{project}'s supervisor session is killed and kept in its history, its hand-off \
+             is rotated, and a new one starts from the seed. Starting it is a paid run."
+        ));
+        let (confirmed, cancelled) = super::dialogs::dialog_actions(ui, "Start new", true);
+        if confirmed {
+            cx.dispatch(AppAction::DispatchSupervisorFresh(project.clone()));
+            done = true;
+        }
+        if cancelled {
+            done = true;
+        }
+    });
+    if done || ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
+        cx.state.confirm_supervisor_fresh = None;
     }
 }
 
@@ -454,9 +543,13 @@ pub(super) fn decision_card(
             }
             ui.add(egui::Label::new(&d.question).wrap());
             if d.state != "pending" {
+                let by = d
+                    .answered_by
+                    .as_ref()
+                    .map_or(String::new(), |by| format!(" by {by}"));
                 ui.label(
                     RichText::new(format!(
-                        "{}: {}",
+                        "{}: {}{by}",
                         d.state,
                         d.answer.clone().unwrap_or_default()
                     ))

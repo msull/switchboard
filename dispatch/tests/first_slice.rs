@@ -369,6 +369,7 @@ fn take_issue(
             url: None,
             labels: vec!["dispatch".into()],
             taken_at_ms: now,
+            taken_by: None,
             pull_requests: Vec::new(),
         },
         now,
@@ -3704,6 +3705,7 @@ fn at_implement_with_a_question(env: &mut Env) -> (String, String, String) {
         attempt: None,
         state: DecisionState::Pending,
         made_ms: env.now,
+        refusals: Vec::new(),
     });
     let now = env.tick();
     env.runner.save_ticket(&mut t, now).unwrap();
@@ -4559,6 +4561,7 @@ fn the_worktree_root_is_a_setting_a_tilde_is_the_home_and_a_space_is_refused() {
                 url: None,
                 labels: vec![],
                 taken_at_ms: now,
+                taken_by: None,
                 pull_requests: Vec::new(),
             },
             now,
@@ -4858,6 +4861,7 @@ fn workspace_env_with(text: &str, labels: &[&str]) -> (Env, String) {
                 url: None,
                 labels: labels.iter().map(|l| (*l).to_owned()).collect(),
                 taken_at_ms: now,
+                taken_by: None,
                 pull_requests: Vec::new(),
             },
             now,
@@ -9661,6 +9665,7 @@ fn close_and_retake(env: &mut Env, id: &str, edit: impl FnOnce(&mut FakeRepo)) -
                 url: None,
                 labels: vec!["area:backend".into()],
                 taken_at_ms: now,
+                taken_by: None,
                 pull_requests: Vec::new(),
             },
             now,

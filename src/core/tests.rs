@@ -5842,6 +5842,70 @@ mod control {
         }
     }
 
+    /// The port's resume of a running pane leaves it as it is: the
+    /// quiet port never opens a terminal.
+    #[test]
+    fn a_port_resume_of_a_running_session_does_nothing() {
+        let (mut core, id) = resumable_agent();
+        core.dispatch(AppAction::HostListed(vec![running(id)]), Clock::at(2));
+        let effects = control(&mut core, "op-r", ControlAction::Resume(id), 3);
+        assert!(
+            !effects.iter().any(|e| matches!(e, Effect::Attach { .. })),
+            "{effects:?}"
+        );
+        assert!(
+            !effects
+                .iter()
+                .any(|e| matches!(e, Effect::CheckTranscript { .. } | Effect::Spawn { .. })),
+            "{effects:?}"
+        );
+        assert_eq!(core.take_control_outcome("op-r").unwrap().error, None);
+    }
+
+    #[test]
+    fn a_port_resume_of_a_cold_agent_starts_the_preflight() {
+        let (mut core, id) = resumable_agent();
+        let effects = control(&mut core, "op-r", ControlAction::Resume(id), 3);
+        assert!(
+            effects
+                .iter()
+                .any(|e| matches!(e, Effect::CheckTranscript { id: i, .. } if *i == id)),
+            "{effects:?}"
+        );
+        assert_eq!(core.take_control_outcome("op-r").unwrap().error, None);
+    }
+
+    /// Never a fresh launch: that would run the first prompt again.
+    #[test]
+    fn a_port_resume_of_a_session_that_cannot_resume_is_refused() {
+        for no_handle in [false, true] {
+            let p = project("p");
+            let mut w = Workspace::new(p.clone());
+            let mut r = record(p.id, agent(), 0);
+            if no_handle {
+                r.resume = None;
+            } else {
+                r.resume = Some(claude_handle());
+                r.not_resumable = true;
+            }
+            let id = r.id;
+            w.sessions.push(r);
+            let (mut core, _) = loaded(vec![w], vec![]);
+            let effects = control(&mut core, "op-r", ControlAction::Resume(id), 3);
+            assert!(
+                !effects.iter().any(|e| matches!(
+                    e,
+                    Effect::CheckTranscript { .. }
+                        | Effect::Spawn { .. }
+                        | Effect::PrepareLaunch { .. }
+                )),
+                "{effects:?}"
+            );
+            let error = core.take_control_outcome("op-r").unwrap().error.unwrap();
+            assert!(error.contains("not resumable"), "{error}");
+        }
+    }
+
     /// `session.clone` makes the record at once, so the asker has its
     /// id and its op, and launches it through the copied transcript.
     #[test]
@@ -6328,6 +6392,7 @@ mod dispatch_page {
                 pending: 1,
                 min_free_gb: 0,
                 free_gb: None,
+                supervisor: None,
             }],
             tickets: vec![TicketView {
                 id: "t1".into(),
@@ -6945,6 +7010,47 @@ mod dispatch_page {
             Clock::at(3),
         );
         assert_eq!(core.ticket("t1").unwrap().state, "active");
+    }
+
+    #[test]
+    fn a_fresh_supervisor_is_one_call_to_the_port() {
+        let (mut core, _) = loaded(vec![], vec![]);
+        core.dispatch(AppAction::DispatchStatus(Some(status(None))), Clock::at(1));
+        let e = core.dispatch(
+            AppAction::DispatchSupervisorFresh("Orchard".into()),
+            Clock::at(2),
+        );
+        assert!(
+            e.contains(&Effect::DispatchCall(Body::SupervisorFresh {
+                project: "Orchard".into()
+            })),
+            "{e:?}"
+        );
+    }
+
+    #[test]
+    fn a_supervisor_chip_reads_the_session_in_this_window() {
+        let (mut core, id) = resumable_agent();
+        let mut with = status(None);
+        assert_eq!(core.supervisor_chip(&with.projects[0]), None, "no table");
+        with.projects[0].supervisor = Some(crate::ports::dispatch::SupervisorView {
+            session: Some(id.0.to_string()),
+            ..Default::default()
+        });
+        core.dispatch(AppAction::DispatchStatus(Some(with.clone())), Clock::at(1));
+        let chip = core.supervisor_chip(&with.projects[0]).unwrap();
+        assert_eq!(chip.session, Some(id));
+        assert_eq!(chip.state, crate::core::SupervisorState::Cold);
+        assert!(chip.resumable);
+        core.dispatch(AppAction::HostListed(vec![running(id)]), Clock::at(2));
+        let chip = core.supervisor_chip(&with.projects[0]).unwrap();
+        assert!(!chip.resumable, "a running pane is not resumed");
+        // A session this window does not have reads as none.
+        with.projects[0].supervisor.as_mut().unwrap().session =
+            Some(uuid::Uuid::new_v4().to_string());
+        let chip = core.supervisor_chip(&with.projects[0]).unwrap();
+        assert_eq!(chip.session, None);
+        assert_eq!(chip.state, crate::core::SupervisorState::None);
     }
 
     #[test]

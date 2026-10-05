@@ -173,6 +173,12 @@ pub enum Body {
     // --- commands: non-replayable
     #[serde(rename = "session.send")]
     SessionSend { session: String, text: String },
+    /// Resume an agent's conversation from its resume handle, with no
+    /// terminal opened. A running pane is left alone, and a session that
+    /// cannot be resumed is refused: it never launches fresh. Never
+    /// repeated by recovery, since it starts a paid turn.
+    #[serde(rename = "session.resume")]
+    SessionResume { session: String },
     #[serde(rename = "workflow.continue")]
     WorkflowContinue { run: String },
 
@@ -236,7 +242,9 @@ impl Body {
             | Self::WorkflowPause { .. }
             | Self::WorkflowFinalize { .. }
             | Self::WorkflowRemove { .. } => Class::Idempotent,
-            Self::SessionSend { .. } | Self::WorkflowContinue { .. } => Class::NonReplayable,
+            Self::SessionSend { .. }
+            | Self::SessionResume { .. }
+            | Self::WorkflowContinue { .. } => Class::NonReplayable,
             Self::Projects { .. }
             | Self::Spaces
             | Self::Sets { .. }
@@ -821,6 +829,27 @@ mod tests {
             .class(),
             Class::NonReplayable
         );
+        // A resume starts a paid turn: recovery never repeats it.
+        assert_eq!(
+            Body::SessionResume {
+                session: "s".into()
+            }
+            .class(),
+            Class::NonReplayable
+        );
+    }
+
+    #[test]
+    fn a_resume_line_reads_as_the_doc_writes_it() {
+        let req = Request::parse(r#"{"op":"r","kind":"session.resume","session":"s1"}"#).unwrap();
+        assert_eq!(
+            req.body,
+            Body::SessionResume {
+                session: "s1".into()
+            }
+        );
+        assert_eq!(req.body.kind(), "session.resume");
+        round_trip_request(req.body);
     }
 
     #[test]

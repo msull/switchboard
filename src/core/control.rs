@@ -50,6 +50,9 @@ pub enum ControlAction {
         text: String,
     },
     Kill(RecordId),
+    /// Resume an agent's conversation without opening a terminal; never
+    /// a fresh launch.
+    Resume(RecordId),
     Remove(RecordId),
     SetNotes {
         id: RecordId,
@@ -227,6 +230,10 @@ impl AppCore {
             }
             ControlAction::Kill(id) => {
                 self.session_action(AppAction::KillSession(id), now, out);
+                Vec::new()
+            }
+            ControlAction::Resume(id) => {
+                self.control_resume(id, now, out);
                 Vec::new()
             }
             ControlAction::Remove(id) => {
@@ -642,6 +649,7 @@ fn control_kind(action: &ControlAction) -> String {
         ControlAction::CloneSession { .. } => "session.clone",
         ControlAction::SendInput { .. } => "session.send",
         ControlAction::Kill(_) => "session.kill",
+        ControlAction::Resume(_) => "session.resume",
         ControlAction::Remove(_) => "session.remove",
         ControlAction::SetNotes { .. } => "session.notes",
         ControlAction::SetWaiting { .. } => "session.waiting",
@@ -778,6 +786,7 @@ impl TryFrom<wire::Body> for ControlAction {
                 text,
             },
             wire::Body::SessionKill { session: s } => Self::Kill(session(&s)?),
+            wire::Body::SessionResume { session: s } => Self::Resume(session(&s)?),
             wire::Body::SessionRemove { session: s } => Self::Remove(session(&s)?),
             wire::Body::SessionNotes { session: s, text } => Self::SetNotes {
                 id: session(&s)?,

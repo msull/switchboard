@@ -19,7 +19,10 @@ mod tests;
 pub use action::{AppAction, AppCore, Clock, Effect, Notice, View};
 pub use control::{ControlAction, ControlOutcome};
 pub use controller::{MenuKind, RadialMenu, UiRequest};
-pub use dispatch::{DispatchState, TicketListing, TicketOnly, TicketSort, WaitingAgent};
+pub use dispatch::{
+    DispatchState, SupervisorChip, SupervisorState, TicketListing, TicketOnly, TicketSort,
+    WaitingAgent,
+};
 pub use env::{Resolved, ResolvedVar, SecretScope, Source};
 pub use model::*;
 pub use reconcile::RECORD_ID_ENV;

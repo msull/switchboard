@@ -451,6 +451,25 @@ impl FakeSwitchboard {
                 self.run_mut(run).state = RunState::AwaitingFeedback;
                 (vec![], false)
             }
+            // As the app's port: a running pane is left alone, and only
+            // a session with a transcript is resumed, never launched fresh.
+            Body::SessionResume { session } => {
+                let resumable = self.resumable.contains(session);
+                let Some(s) = self.sessions.iter_mut().find(|s| &s.id == session) else {
+                    return Reply::failed("no such session");
+                };
+                if s.liveness != Liveness::Running {
+                    if !resumable {
+                        return Reply::failed(format!(
+                            "{} is not resumable; `dispatch supervisor --fresh` starts a new one",
+                            s.name
+                        ));
+                    }
+                    s.liveness = Liveness::Running;
+                    s.card = "working".into();
+                }
+                (vec![], false)
+            }
             other => return Reply::failed(format!("{} is not built in the fake", other.kind())),
         };
         let reply = if launched {

@@ -1,0 +1,891 @@
+//! A project's supervisor session against a Switchboard in memory: made,
+//! replaced, killed, resumed and recovered through its own ledger; and,
+//! through the command line with `SWITCHBOARD_RECORD_ID` set as its pane
+//! would set it, what a supervisor may and may not do.
+
+// The in-memory Switchboard is shared with `first_slice`, which uses the
+// parts this file does not.
+#[allow(dead_code)]
+mod support;
+
+use std::path::{Path, PathBuf};
+use std::process::{Command, Output};
+use std::sync::{Arc, Mutex};
+
+use dispatch::events::{For, Kind, Waited};
+use dispatch::git::FakeRepo;
+use dispatch::scheduler::{BY_HAND, BY_SUPERVISOR, Runner};
+use dispatch::store::DataDir;
+use dispatch::supervisor::{Actor, permit};
+use dispatch::ticket::{
+    Decision, DecisionKind, DecisionState, SourceSnapshot, SupervisorRecord, Ticket, TicketState,
+};
+use support::{FakeSwitchboard, SharedPort};
+use switchboard_control::{Body, Liveness};
+
+const ORCHARD: &str = "Orchard";
+const GROVE: &str = "Grove";
+/// The record id of Orchard's supervisor session in the CLI tests.
+const SUPERVISOR: &str = "sup-orchard";
+
+fn pipeline(project: &str, decides: &[&str]) -> String {
+    let decides: Vec<String> = decides.iter().map(|d| format!("{d:?}")).collect();
+    format!(
+        r#"
+version = 1
+
+[project]
+name = "{project}"
+repo = "git@example.com:o/{project}.git"
+space = "Dispatch · {project}"
+
+[source]
+kind = "github"
+repo = "o/{project}"
+label = "dispatch"
+
+[[lanes]]
+name = "repo"
+path = "."
+
+[[stages]]
+name = "inspect"
+gate = {{ kind = "human", decision = "inspect" }}
+
+[supervisor]
+guidance = "Keep {project}'s queue moving."
+read = ["CLAUDE.md"]
+decides = [{}]
+"#,
+        decides.join(", ")
+    )
+}
+
+struct Env {
+    dir: tempfile::TempDir,
+    data: DataDir,
+    sb: Arc<Mutex<FakeSwitchboard>>,
+    repo: Arc<Mutex<FakeRepo>>,
+    runner: Runner,
+    now: u64,
+}
+
+impl Env {
+    fn new() -> Self {
+        dispatch::store::skip_fsync_for_tests();
+        let dir = tempfile::tempdir().unwrap();
+        let data = DataDir::new(dir.path().join("dispatch"));
+        std::fs::create_dir_all(data.root.join("pipelines")).unwrap();
+        data.write_settings(&dispatch::store::Settings {
+            worktrees: Some(dir.path().join("wt")),
+        })
+        .unwrap();
+        std::fs::write(data.pipeline(ORCHARD), pipeline(ORCHARD, &["finalize"])).unwrap();
+        std::fs::write(data.pipeline(GROVE), pipeline(GROVE, &[])).unwrap();
+        let sb = Arc::new(Mutex::new(FakeSwitchboard::new()));
+        let repo = Arc::new(Mutex::new(FakeRepo::default()));
+        let runner = Runner::new(
+            data.clone(),
+            Box::new(SharedPort(Arc::clone(&sb))),
+            Box::new(Arc::clone(&repo)),
+        );
+        Self {
+            dir,
+            data,
+            sb,
+            repo,
+            runner,
+            now: 1_000,
+        }
+    }
+
+    fn tick(&mut self) -> u64 {
+        self.now += 1_000;
+        self.now
+    }
+
+    fn workspace(&self) -> PathBuf {
+        self.dir
+            .path()
+            .join("wt")
+            .join(format!("supervisor-{ORCHARD}"))
+    }
+
+    fn handoff(&self) -> PathBuf {
+        self.data.supervisor_dir(ORCHARD).join("handoff.md")
+    }
+
+    fn fresh(&mut self) -> anyhow::Result<SupervisorRecord> {
+        let now = self.tick();
+        self.runner.supervisor_fresh(ORCHARD, false, "fresh", now)
+    }
+
+    fn take(&mut self, project: &str, number: u64) -> Ticket {
+        let now = self.tick();
+        let text = std::fs::read_to_string(self.data.pipeline(project)).unwrap();
+        self.runner
+            .take(project, &text, source(project, number, now), now)
+            .unwrap()
+    }
+
+    /// A pending decision of `name` on the ticket; its id.
+    fn ask(&mut self, ticket: &str, name: &str) -> String {
+        let now = self.tick();
+        let mut t = self.runner.load_ticket(ticket).unwrap();
+        let id = format!("d{}", t.decisions.len() + 1);
+        t.decisions.push(Decision {
+            id: id.clone(),
+            stage: "inspect".into(),
+            name: name.into(),
+            kind: DecisionKind::Permission,
+            question: "Go on?".into(),
+            options: vec![name.into(), "park".into()],
+            recommendation: None,
+            attempt: None,
+            state: DecisionState::Pending,
+            made_ms: now,
+            refusals: Vec::new(),
+        });
+        self.runner.save_ticket(&mut t, now).unwrap();
+        id
+    }
+
+    fn parked(&mut self, ticket: &str) {
+        let now = self.tick();
+        let mut t = self.runner.load_ticket(ticket).unwrap();
+        t.state = TicketState::Parked {
+            reason: "parked by hand".into(),
+        };
+        self.runner.save_ticket(&mut t, now).unwrap();
+    }
+
+    /// `session` recorded as the project's current supervisor.
+    fn seat(&self, project: &str, session: &str) {
+        let mut ps = self.runner.load_project(project).unwrap();
+        ps.supervisor.current = Some(SupervisorRecord {
+            session: session.into(),
+            seed_hash: "seed".into(),
+            created_ms: 1,
+            model: None,
+        });
+        self.runner.save_project(&ps).unwrap();
+    }
+
+    /// The command line, as the owner (`None`) or as a Switchboard
+    /// session.
+    fn cli(&self, record: Option<&str>, args: &[&str]) -> Output {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_dispatch"));
+        cmd.args(args)
+            .env("DISPATCH_DATA_DIR", &self.data.root)
+            .env("SWITCHBOARD_DATA_DIR", self.dir.path().join("sb"))
+            .env_remove("SWITCHBOARD_RECORD_ID");
+        if let Some(id) = record {
+            cmd.env("SWITCHBOARD_RECORD_ID", id);
+        }
+        cmd.output().unwrap()
+    }
+
+    fn ticket(&self, id: &str) -> Ticket {
+        self.runner.load_ticket(id).unwrap()
+    }
+}
+
+fn source(project: &str, number: u64, now: u64) -> SourceSnapshot {
+    SourceSnapshot {
+        kind: "github".into(),
+        identity: format!("o/{project}#{number}"),
+        number: Some(number),
+        title: format!("Issue {number}"),
+        body: String::new(),
+        url: None,
+        labels: vec!["dispatch".into()],
+        taken_at_ms: now,
+        taken_by: None,
+        pull_requests: Vec::new(),
+    }
+}
+
+fn stdout(out: &Output) -> String {
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+fn stderr(out: &Output) -> String {
+    String::from_utf8_lossy(&out.stderr).into_owned()
+}
+
+/// Exit 1 with `want` in the message.
+fn refused(out: &Output, want: &str) {
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    assert!(
+        stderr(out).contains(want),
+        "{:?} lacks {want:?}",
+        stderr(out)
+    );
+}
+
+fn accepted(out: &Output) {
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+}
+
+// --- making and replacing the session
+
+#[test]
+fn a_fresh_supervisor_is_set_up_seeded_and_recorded_before_it_is_sent() {
+    let mut env = Env::new();
+    let project_file = env.data.project_file(ORCHARD);
+    env.sb().snapshot_on = Some(("session.new".into(), project_file));
+    let current = env.fresh().unwrap();
+    let ps = env.runner.load_project(ORCHARD).unwrap();
+    assert_eq!(ps.supervisor.current.as_ref(), Some(&current));
+    assert_eq!(ps.supervisor.workspace.as_deref(), Some(&*env.workspace()));
+    assert_eq!(ps.supervisor.error, None);
+    assert!(env.workspace().is_dir());
+    // No setup in the table and a repo: the default clone, in the
+    // workspace.
+    let ran = env.repo.lock().unwrap().ran.clone();
+    assert_eq!(
+        ran,
+        [(
+            env.workspace(),
+            vec![
+                "git".to_owned(),
+                "clone".into(),
+                "git@example.com:o/Orchard.git".into(),
+                ".".into()
+            ]
+        )]
+    );
+    // The request was on the record before Switchboard saw it.
+    let snapshot = env.sb().snapshots[0].clone();
+    let before: dispatch::ticket::ProjectState = serde_json::from_str(&snapshot).unwrap();
+    let op = before.supervisor.op.unwrap();
+    assert_eq!(op.kind, "session.new");
+    assert!(op.op.starts_with("sup-Orchard-"), "{}", op.op);
+    assert_eq!(op.reply, None);
+    // The session: a Claude Code agent in the workspace, with the
+    // seed's path as its first prompt and the allow rules as flags.
+    let sb = env.sb();
+    let s = sb.session(&current.session);
+    assert_eq!(s.name, "Supervisor · Orchard");
+    assert_eq!(s.cwd, env.workspace());
+    let seed = env.data.supervisor_dir(ORCHARD).join("seed.md");
+    let text = std::fs::read_to_string(&seed).unwrap();
+    assert!(text.contains("Keep Orchard's queue moving."), "{text}");
+    assert!(text.contains(&env.workspace().join("CLAUDE.md").display().to_string()));
+    let new = sb
+        .calls
+        .iter()
+        .find_map(|c| match &c.body {
+            Body::SessionNew { prompt, launch, .. } => Some((prompt.clone(), launch.clone())),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(
+        new.0,
+        Some(format!("Read {} and do what it says.", seed.display()))
+    );
+    let switchboard_control::Launch::Argv(flags) = new.1 else {
+        panic!("{:?}", new.1);
+    };
+    assert!(
+        flags
+            .iter()
+            .any(|f| f.starts_with("Bash(") && f.ends_with(":*)"))
+    );
+    assert!(!flags.iter().any(|f| f == "--settings"));
+}
+
+#[test]
+fn a_second_fresh_replaces_the_first_and_rotates_the_handoff() {
+    let mut env = Env::new();
+    let first = env.fresh().unwrap();
+    std::fs::write(env.handoff(), "watching #12\n").unwrap();
+    let second = env.fresh().unwrap();
+    assert_ne!(first.session, second.session);
+    let ps = env.runner.load_project(ORCHARD).unwrap();
+    assert_eq!(ps.supervisor.past.len(), 1);
+    assert_eq!(ps.supervisor.past[0].session, first.session);
+    assert_eq!(ps.supervisor.past[0].why, "fresh");
+    assert!(env.sb().killed.contains(&first.session));
+    // The Switchboard project is made once and reused.
+    assert_eq!(env.sb().kinds_called("project.add"), 1);
+    let handoff = std::fs::read_to_string(env.handoff()).unwrap();
+    assert!(handoff.starts_with("## From the session of "), "{handoff}");
+    assert!(handoff.ends_with("watching #12\n"));
+    let kept: Vec<_> = std::fs::read_dir(env.data.supervisor_dir(ORCHARD))
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n.starts_with("handoff.") && n != "handoff.md")
+        .collect();
+    assert_eq!(kept.len(), 1, "{kept:?}");
+    let old = std::fs::read_to_string(env.data.supervisor_dir(ORCHARD).join(&kept[0])).unwrap();
+    assert_eq!(old, "watching #12\n");
+}
+
+#[test]
+fn a_failed_setup_makes_no_session_and_removes_the_workspace_it_made() {
+    let mut env = Env::new();
+    env.repo.lock().unwrap().fail_run = Some("remote not found".into());
+    let e = env.fresh().unwrap_err();
+    let text = format!("{e:#}");
+    assert!(
+        text.contains("git clone git@example.com:o/Orchard.git ."),
+        "{text}"
+    );
+    assert!(text.contains("remote not found"), "{text}");
+    assert!(!env.workspace().exists());
+    assert_eq!(env.sb().kinds_called("session.new"), 0);
+    let ps = env.runner.load_project(ORCHARD).unwrap();
+    assert_eq!(ps.supervisor.current, None);
+    assert!(ps.supervisor.error.unwrap().contains("remote not found"));
+}
+
+#[test]
+fn a_failed_setup_leaves_the_current_supervisor_running() {
+    let mut env = Env::new();
+    let first = env.fresh().unwrap();
+    env.repo.lock().unwrap().fail_run = Some("no network".into());
+    let now = env.tick();
+    env.runner
+        .supervisor_fresh(ORCHARD, true, "fresh", now)
+        .unwrap_err();
+    let ps = env.runner.load_project(ORCHARD).unwrap();
+    assert_eq!(ps.supervisor.current, Some(first.clone()));
+    assert!(!env.sb().killed.contains(&first.session));
+    // A workspace this call did not make is kept.
+    assert!(env.workspace().is_dir());
+}
+
+#[test]
+fn a_lost_session_reply_is_found_again_at_recovery() {
+    let mut env = Env::new();
+    env.sb().drop_reply_for = Some("session.new".into());
+    env.fresh().unwrap_err();
+    let ps = env.runner.load_project(ORCHARD).unwrap();
+    assert_eq!(ps.supervisor.current, None);
+    assert!(ps.supervisor.op.as_ref().unwrap().unresolved());
+    let now = env.tick();
+    env.runner.recover(now).unwrap();
+    let ps = env.runner.load_project(ORCHARD).unwrap();
+    let current = ps.supervisor.current.expect("found by its op");
+    assert_eq!(env.sb().sessions_named("Supervisor · Orchard").len(), 1);
+    assert_eq!(
+        env.sb().sessions_named("Supervisor · Orchard")[0].id,
+        current.session
+    );
+    assert_eq!(ps.supervisor.error, None);
+    assert!(!ps.supervisor.op.unwrap().unresolved());
+}
+
+#[test]
+fn a_kill_keeps_the_reason_and_a_resume_needs_the_workspace() {
+    let mut env = Env::new();
+    let first = env.fresh().unwrap();
+    // A running pane: the resume is Switchboard's to leave alone.
+    assert_eq!(
+        env.runner.supervisor_resume(ORCHARD).unwrap(),
+        first.session
+    );
+    std::fs::remove_dir_all(env.workspace()).unwrap();
+    let e = env.runner.supervisor_resume(ORCHARD).unwrap_err();
+    assert!(format!("{e:#}").contains("--fresh"), "{e:#}");
+    let now = env.tick();
+    env.runner
+        .supervisor_kill(ORCHARD, "the owner is away", now)
+        .unwrap();
+    let ps = env.runner.load_project(ORCHARD).unwrap();
+    assert_eq!(ps.supervisor.current, None);
+    assert_eq!(ps.supervisor.past[0].why, "kill: the owner is away");
+    assert!(env.sb().killed.contains(&first.session));
+    let e = env.runner.supervisor_resume(ORCHARD).unwrap_err();
+    assert!(format!("{e:#}").contains("no supervisor"), "{e:#}");
+}
+
+#[test]
+fn a_resume_reaches_switchboard_for_an_exited_supervisor() {
+    let mut env = Env::new();
+    let first = env.fresh().unwrap();
+    env.sb().session_mut(&first.session).liveness = Liveness::Exited { code: Some(0) };
+    env.runner.supervisor_resume(ORCHARD).unwrap();
+    assert_eq!(env.sb().kinds_called("session.resume"), 1);
+    assert_eq!(env.sb().session(&first.session).liveness, Liveness::Running);
+}
+
+#[test]
+fn an_intent_from_the_port_is_carried_out_by_the_next_pass() {
+    let mut env = Env::new();
+    let mut handler = dispatch::serve::Handler {
+        runner: Runner::new(
+            env.data.clone(),
+            Box::new(SharedPort(Arc::clone(&env.sb))),
+            Box::new(Arc::clone(&env.repo)),
+        ),
+        issues: Box::new(dispatch::github::FakeIssues::default()),
+    };
+    let reply = handler.handle(
+        &dispatch_control::Request::new(
+            "a",
+            dispatch_control::Body::SupervisorFresh {
+                project: ORCHARD.into(),
+            },
+        ),
+        env.now,
+    );
+    let dispatch_control::Reply::Status(status) = reply else {
+        panic!("{reply:?}");
+    };
+    let view = status
+        .projects
+        .iter()
+        .find(|p| p.name == ORCHARD)
+        .and_then(|p| p.supervisor.clone())
+        .unwrap();
+    assert!(view.fresh_pending);
+    assert_eq!(view.session, None);
+    // Nothing is made while the caller waits on the reply.
+    assert_eq!(env.sb().kinds_called("session.new"), 0);
+    let now = env.tick();
+    env.runner.step_all(now).unwrap();
+    let ps = env.runner.load_project(ORCHARD).unwrap();
+    assert!(ps.supervisor.current.is_some());
+    assert_eq!(ps.supervisor.intent, None);
+    // A project without the table is refused at the port.
+    std::fs::write(
+        env.data.pipeline(GROVE),
+        pipeline(GROVE, &[]).split("[supervisor]").next().unwrap(),
+    )
+    .unwrap();
+    let reply = handler.handle(
+        &dispatch_control::Request::new(
+            "b",
+            dispatch_control::Body::SupervisorFresh {
+                project: GROVE.into(),
+            },
+        ),
+        env.now,
+    );
+    assert!(
+        matches!(&reply, dispatch_control::Reply::Failed { reason } if reason.contains("no [supervisor] table")),
+        "{reply:?}"
+    );
+}
+
+#[test]
+fn a_fresh_from_the_command_line_settles_a_pending_intent() {
+    let mut env = Env::new();
+    env.runner.request_supervisor_fresh(ORCHARD).unwrap();
+    let made = env.fresh().unwrap();
+    let ps = env.runner.load_project(ORCHARD).unwrap();
+    assert_eq!(ps.supervisor.intent, None);
+    let now = env.tick();
+    env.runner.step_all(now).unwrap();
+    let ps = env.runner.load_project(ORCHARD).unwrap();
+    assert_eq!(ps.supervisor.current, Some(made));
+    assert_eq!(ps.supervisor.past.len(), 0);
+    assert_eq!(env.sb().kinds_called("session.new"), 1);
+}
+
+#[test]
+fn the_seed_goes_stale_when_the_table_changes() {
+    let mut env = Env::new();
+    env.fresh().unwrap();
+    assert!(!env.runner.supervisor_standing(ORCHARD).unwrap().stale);
+    std::fs::write(
+        env.data.pipeline(ORCHARD),
+        pipeline(ORCHARD, &["finalize", "rerun"]),
+    )
+    .unwrap();
+    assert!(env.runner.supervisor_standing(ORCHARD).unwrap().stale);
+    let status = dispatch::serve::status(&env.runner).unwrap();
+    let view = status
+        .projects
+        .iter()
+        .find(|p| p.name == ORCHARD)
+        .and_then(|p| p.supervisor.clone())
+        .unwrap();
+    assert!(view.seed_stale);
+}
+
+// --- brief
+
+#[test]
+fn brief_shows_the_tickets_what_waits_the_events_and_the_handoff() {
+    let mut env = Env::new();
+    let t = env.take(ORCHARD, 12);
+    let d = env.ask(&t.id, "inspect");
+    let other = env.take(GROVE, 3);
+    std::fs::create_dir_all(env.data.supervisor_dir(ORCHARD)).unwrap();
+    std::fs::write(env.handoff(), "watching #12\n").unwrap();
+    let out = env.cli(None, &["brief", ORCHARD]);
+    accepted(&out);
+    let text = stdout(&out);
+    for want in [
+        "supervisor: none; `dispatch supervisor Orchard --fresh` starts one",
+        &format!("{} #12 Issue 12 · stage inspect · active", t.id),
+        &format!("dispatch decide {} {d} <answer> [--note <text>]", t.id),
+        "taken",
+        "follow from seq ",
+        "watching #12",
+    ] {
+        assert!(text.contains(want), "brief lacks {want:?}:\n{text}");
+    }
+    assert!(
+        !text.contains(&other.id),
+        "another project's ticket:\n{text}"
+    );
+    std::fs::remove_file(env.handoff()).unwrap();
+    assert!(stdout(&env.cli(None, &["brief", ORCHARD])).contains("(no hand-off yet)"));
+}
+
+#[test]
+fn a_supervisors_brief_and_show_print_decide_with_the_full_path() {
+    let mut env = Env::new();
+    env.seat(ORCHARD, SUPERVISOR);
+    let t = env.take(ORCHARD, 12);
+    let d = env.ask(&t.id, "inspect");
+    let line = format!("/dispatch decide {} {d} <answer>", t.id);
+    for args in [["brief", ORCHARD], ["show", &t.id]] {
+        let text = stdout(&env.cli(Some(SUPERVISOR), &args));
+        assert!(text.contains(&line), "{args:?} lacks {line:?}:\n{text}");
+        assert!(!text.contains("    dispatch decide"), "{text}");
+        let owners = stdout(&env.cli(None, &args));
+        assert!(
+            owners.contains(&format!("    dispatch decide {}", t.id)),
+            "{owners}"
+        );
+    }
+}
+
+#[test]
+fn events_with_a_timeout_return_as_soon_as_they_print() {
+    let mut env = Env::new();
+    env.take(ORCHARD, 1);
+    let started = std::time::Instant::now();
+    let out = env.cli(
+        None,
+        &["events", "--since", "0", "--follow", "--timeout", "60"],
+    );
+    accepted(&out);
+    assert!(stdout(&out).contains("taken"), "{out:?}");
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(30),
+        "it waited out the timeout"
+    );
+}
+
+#[test]
+fn events_with_a_timeout_and_nothing_new_exit_two() {
+    let env = Env::new();
+    let out = env.cli(None, &["events", "--follow", "--timeout", "1"]);
+    assert_eq!(out.status.code(), Some(2), "{out:?}");
+    let out = env.cli(None, &["events", "--timeout", "1"]);
+    assert_eq!(out.status.code(), Some(64), "a timeout without --follow");
+}
+
+// --- what a supervisor may do
+
+#[test]
+fn a_supervisor_answers_what_decides_lists_and_nothing_else() {
+    let mut env = Env::new();
+    env.seat(ORCHARD, SUPERVISOR);
+    let t = env.take(ORCHARD, 1);
+    let finalize = env.ask(&t.id, "finalize");
+    accepted(&env.cli(Some(SUPERVISOR), &["decide", &t.id, &finalize, "finalize"]));
+    let d = env.ticket(&t.id).decisions[0].clone();
+    assert!(
+        matches!(&d.state, DecisionState::Answered { by, .. } if by == BY_SUPERVISOR),
+        "{d:?}"
+    );
+    let since = dispatch::events::last_seq(&dispatch::events::log_path(&env.data)).unwrap();
+    let inspect = env.ask(&t.id, "inspect");
+    let since_ask = dispatch::events::last_seq(&dispatch::events::log_path(&env.data)).unwrap();
+    assert!(since_ask > since);
+    let out = env.cli(Some(SUPERVISOR), &["decide", &t.id, &inspect, "inspect"]);
+    refused(
+        &out,
+        "the supervisor may not answer `inspect`; the owner does",
+    );
+    let d = env.ticket(&t.id).decisions[1].clone();
+    assert!(d.pending());
+    assert_eq!(d.refusals.len(), 1);
+    assert_eq!(d.refusals[0].by, BY_SUPERVISOR);
+    assert_eq!(d.refusals[0].answer, "inspect");
+    // The refusal is an event a waiter is handed.
+    let waited = dispatch::events::wait(
+        &env.data,
+        &t.id,
+        For::Any,
+        Some(since_ask),
+        Some(0),
+        &mut || 1,
+        &mut || {},
+    )
+    .unwrap();
+    let Waited::Matched(e) = waited else {
+        panic!("{waited:?}");
+    };
+    assert_eq!(e.kind, Kind::Refused);
+    assert_eq!(e.actor.as_deref(), Some(BY_SUPERVISOR));
+    assert_eq!(
+        e.text,
+        "inspect: the supervisor asked inspect; refused, the owner answers"
+    );
+    // `show` lists it.
+    let shown = stdout(&env.cli(None, &["show", &t.id]));
+    assert!(shown.contains("answered finalize by supervisor"), "{shown}");
+    assert!(shown.contains("the supervisor asked inspect"), "{shown}");
+    // With no id, or an id no supervisor had, it is the owner's.
+    accepted(&env.cli(
+        Some("someone-else"),
+        &["decide", &t.id, &inspect, "inspect"],
+    ));
+    let d = env.ticket(&t.id).decisions[1].clone();
+    assert!(
+        matches!(&d.state, DecisionState::Answered { by, .. } if by == BY_HAND),
+        "{d:?}"
+    );
+    let again = env.ask(&t.id, "inspect");
+    accepted(&env.cli(None, &["decide", &t.id, &again, "inspect"]));
+}
+
+#[test]
+fn a_past_supervisor_is_still_a_supervisor() {
+    let mut env = Env::new();
+    let mut ps = env.runner.load_project(ORCHARD).unwrap();
+    ps.supervisor.past.push(dispatch::ticket::PastSupervisor {
+        session: "old".into(),
+        seed_hash: "x".into(),
+        created_ms: 1,
+        replaced_ms: 2,
+        why: "fresh".into(),
+    });
+    env.runner.save_project(&ps).unwrap();
+    assert_eq!(
+        dispatch::supervisor::actor_of(&env.data, Some("old")).unwrap(),
+        Actor::Supervisor(ORCHARD.into())
+    );
+    assert_eq!(
+        dispatch::supervisor::actor_of(&env.data, Some("new")).unwrap(),
+        Actor::Owner
+    );
+    assert_eq!(
+        dispatch::supervisor::actor_of(&env.data, None).unwrap(),
+        Actor::Owner
+    );
+    let t = env.take(ORCHARD, 1);
+    refused(
+        &env.cli(Some("old"), &["restart", &t.id]),
+        "the supervisor may not run `dispatch restart`; the owner does",
+    );
+}
+
+#[test]
+fn a_supervisor_stays_on_its_own_project() {
+    let mut env = Env::new();
+    env.seat(ORCHARD, SUPERVISOR);
+    let theirs = env.take(GROVE, 1);
+    let d = env.ask(&theirs.id, "inspect");
+    let before = env.ticket(&theirs.id);
+    refused(
+        &env.cli(Some(SUPERVISOR), &["decide", &theirs.id, &d, "inspect"]),
+        "the supervisor of Orchard may not act on Grove's tickets",
+    );
+    refused(
+        &env.cli(Some(SUPERVISOR), &["park", &theirs.id]),
+        "may not act on Grove's tickets",
+    );
+    refused(
+        &env.cli(Some(SUPERVISOR), &["take", GROVE, "7"]),
+        "the supervisor of Orchard may not act on Grove",
+    );
+    refused(
+        &env.cli(Some(SUPERVISOR), &["take", GROVE, "pr", "repo/5"]),
+        "may not act on Grove",
+    );
+    refused(
+        &env.cli(Some(SUPERVISOR), &["queue", GROVE, &theirs.id]),
+        "may not act on Grove",
+    );
+    assert_eq!(env.ticket(&theirs.id), before);
+    assert_eq!(env.runner.tickets().unwrap().len(), 1);
+    // Its own project's queue is its to read and order.
+    let mine = env.take(ORCHARD, 2);
+    let out = env.cli(Some(SUPERVISOR), &["queue", ORCHARD, &mine.id]);
+    accepted(&out);
+    assert!(stdout(&out).contains(&mine.id));
+    let data = &env.data;
+    let me = Actor::Supervisor(ORCHARD.into());
+    permit(&me, &["take", ORCHARD, "7"], data).unwrap();
+    permit(&me, &["take", ORCHARD, "pr", "repo/5"], data).unwrap();
+}
+
+#[test]
+fn a_take_by_a_supervisor_is_stamped_and_logged() {
+    let mut env = Env::new();
+    env.runner.actor = Some(BY_SUPERVISOR.into());
+    let t = env.take(ORCHARD, 4);
+    assert_eq!(t.source.taken_by.as_deref(), Some(BY_SUPERVISOR));
+    let events = dispatch::events::read_since(&dispatch::events::log_path(&env.data), 0).unwrap();
+    let taken = events.iter().find(|e| e.kind == Kind::Taken).unwrap();
+    assert_eq!(taken.actor.as_deref(), Some(BY_SUPERVISOR));
+    assert!(taken.text.ends_with("(by supervisor)"), "{}", taken.text);
+}
+
+#[test]
+fn a_park_by_the_supervisor_says_who_parked() {
+    let mut env = Env::new();
+    env.seat(ORCHARD, SUPERVISOR);
+    let t = env.take(ORCHARD, 1);
+    accepted(&env.cli(
+        Some(SUPERVISOR),
+        &["park", &t.id, "--reason", "waits on #2"],
+    ));
+    let parked = env.ticket(&t.id);
+    assert_eq!(parked.state_by.as_deref(), Some(BY_SUPERVISOR));
+    let events = dispatch::events::read_since(&dispatch::events::log_path(&env.data), 0).unwrap();
+    let parking = events.iter().find(|e| e.kind == Kind::Parking).unwrap();
+    assert_eq!(parking.text, "waits on #2 (by supervisor)");
+    assert_eq!(parking.actor.as_deref(), Some(BY_SUPERVISOR));
+}
+
+#[test]
+fn a_supervisor_resumes_with_reruns_only_when_rerun_is_its_to_answer() {
+    let mut env = Env::new();
+    env.seat(ORCHARD, SUPERVISOR);
+    let t = env.take(ORCHARD, 1);
+    env.parked(&t.id);
+    refused(
+        &env.cli(Some(SUPERVISOR), &["resume", &t.id]),
+        "the supervisor may not resume with reruns; `--no-rerun`, or the owner does",
+    );
+    let still = env.ticket(&t.id);
+    assert!(matches!(still.state, TicketState::Parked { .. }));
+    assert!(still.decisions.is_empty(), "no rerun was answered");
+    let out = env.cli(Some(SUPERVISOR), &["resume", &t.id, "--no-rerun"]);
+    accepted(&out);
+    let resumed = env.ticket(&t.id);
+    assert!(resumed.active());
+    assert_eq!(resumed.state_by.as_deref(), Some(BY_SUPERVISOR));
+    // With `rerun` in `decides` a plain resume is its too.
+    std::fs::write(
+        env.data.pipeline(ORCHARD),
+        pipeline(ORCHARD, &["finalize", "rerun"]),
+    )
+    .unwrap();
+    env.parked(&t.id);
+    accepted(&env.cli(Some(SUPERVISOR), &["resume", &t.id]));
+    assert!(env.ticket(&t.id).active());
+}
+
+#[test]
+fn the_owners_verbs_are_refused_to_a_supervisor() {
+    let mut env = Env::new();
+    env.seat(ORCHARD, SUPERVISOR);
+    let t = env.take(ORCHARD, 1);
+    let ticket_before = env.ticket(&t.id);
+    let project_before = env.runner.load_project(ORCHARD).unwrap();
+    let settings = env.data.root.join("settings.json");
+    let settings_before = std::fs::read_to_string(&settings).unwrap();
+    let elsewhere = env.dir.path().join("elsewhere").display().to_string();
+    for (args, form) in [
+        (vec!["restart", t.id.as_str()], "restart"),
+        (vec!["restart", t.id.as_str(), "inspect"], "restart"),
+        (vec!["run", "--once"], "run"),
+        (vec!["run"], "run"),
+        (vec!["worktrees", elsewhere.as_str()], "worktrees "),
+        (vec!["worktrees", "--migrate"], "worktrees --migrate"),
+        (
+            vec!["supervisor", ORCHARD, "--fresh"],
+            "supervisor Orchard --fresh",
+        ),
+        (
+            vec!["supervisor", ORCHARD, "--resume"],
+            "supervisor Orchard --resume",
+        ),
+        (
+            vec!["supervisor", ORCHARD, "--kill"],
+            "supervisor Orchard --kill",
+        ),
+        (vec!["frob"], "frob"),
+    ] {
+        let out = env.cli(Some(SUPERVISOR), &args);
+        refused(
+            &out,
+            &format!("the supervisor may not run `dispatch {form}"),
+        );
+    }
+    assert_eq!(env.ticket(&t.id), ticket_before);
+    assert_eq!(env.runner.load_project(ORCHARD).unwrap(), project_before);
+    assert_eq!(std::fs::read_to_string(&settings).unwrap(), settings_before);
+    assert!(
+        !env.data.root.join("runner.json").exists(),
+        "nothing stepped"
+    );
+    // The reads are its.
+    for args in [
+        vec!["worktrees"],
+        vec!["supervisor", ORCHARD],
+        vec!["status"],
+        vec!["decisions"],
+        vec!["show", t.id.as_str()],
+        vec!["report", t.id.as_str()],
+    ] {
+        accepted(&env.cli(Some(SUPERVISOR), &args));
+    }
+    // The owner runs them all; the offline ones here.
+    accepted(&env.cli(None, &["worktrees"]));
+    accepted(&env.cli(None, &["queue", GROVE]));
+    accepted(&env.cli(None, &["park", &t.id]));
+    let owner = Actor::Owner;
+    for args in [
+        vec!["restart", "x"],
+        vec!["run", "--once"],
+        vec!["worktrees", "/x", "--migrate"],
+        vec!["supervisor", ORCHARD, "--kill"],
+        vec!["take", GROVE, "7"],
+        vec!["frob"],
+    ] {
+        permit(&owner, &args, &env.data).unwrap();
+    }
+}
+
+#[test]
+fn the_supervisor_command_shows_the_session_and_the_paths() {
+    let mut env = Env::new();
+    let out = env.cli(None, &["supervisor", ORCHARD]);
+    accepted(&out);
+    assert!(stdout(&out).contains("supervisor: none; `dispatch supervisor Orchard --fresh`"));
+    let c = env.fresh().unwrap();
+    let out = stdout(&env.cli(None, &["supervisor", ORCHARD]));
+    for want in [
+        format!("session {}", c.session),
+        "(current)".to_owned(),
+        format!("workspace {}", env.workspace().display()),
+        format!("hand-off {}", env.handoff().display()),
+        "replaced 0 supervisor(s)".to_owned(),
+        "open it from the Dispatch page".to_owned(),
+    ] {
+        assert!(out.contains(&want), "lacks {want:?}:\n{out}");
+    }
+}
+
+#[test]
+fn a_workspace_path_a_shell_would_split_is_refused() {
+    let mut env = Env::new();
+    let spaced: &Path = &env.dir.path().join("with space");
+    env.data
+        .write_settings(&dispatch::store::Settings {
+            worktrees: Some(spaced.to_path_buf()),
+        })
+        .unwrap();
+    let e = env.fresh().unwrap_err();
+    assert!(format!("{e:#}").contains("supervisor workspace"), "{e:#}");
+    assert_eq!(env.sb().kinds_called("session.new"), 0);
+}
+
+impl Env {
+    fn sb(&self) -> std::sync::MutexGuard<'_, FakeSwitchboard> {
+        self.sb.lock().unwrap()
+    }
+}

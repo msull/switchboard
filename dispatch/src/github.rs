@@ -295,6 +295,7 @@ impl Issues for Gh {
             url: Some(issue.url),
             labels: issue.labels.into_iter().map(|l| l.name).collect(),
             taken_at_ms: now_ms,
+            taken_by: None,
             pull_requests: Vec::new(),
         })
     }
@@ -322,6 +323,7 @@ impl Issues for FakeIssues {
             url: Some(format!("https://github.com/{repo}/issues/{number}")),
             labels: vec!["dispatch".into()],
             taken_at_ms: now_ms,
+            taken_by: None,
             pull_requests: Vec::new(),
         })
     }

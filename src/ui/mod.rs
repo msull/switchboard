@@ -153,6 +153,9 @@ pub struct UiState {
     pub confirm_cleanup: Option<WorkflowId>,
     /// The Dispatch ticket whose close awaits confirmation.
     pub confirm_close_ticket: Option<String>,
+    /// The project whose new supervisor session awaits confirmation: it
+    /// kills the current one.
+    pub confirm_supervisor_fresh: Option<String>,
     /// Run logs read from disk, by record and run, with the file time
     /// they were read at.
     pub run_logs: HashMap<(RecordId, u32), (Option<SystemTime>, String)>,
@@ -304,6 +307,7 @@ impl Default for UiState {
             review_views: HashMap::new(),
             confirm_cleanup: None,
             confirm_close_ticket: None,
+            confirm_supervisor_fresh: None,
             run_logs: HashMap::new(),
             run_selected: HashMap::new(),
             run_modes: HashMap::new(),
@@ -703,6 +707,7 @@ fn keyboard(cx: &mut DrawCtx<'_>, ui: &Ui, view: &View) {
         || cx.state.review_dialog.is_some()
         || cx.state.confirm_cleanup.is_some()
         || cx.state.confirm_close_ticket.is_some()
+        || cx.state.confirm_supervisor_fresh.is_some()
         || cx.state.raw_message.is_some()
         || cx.state.message_links.is_some()
         || cx.state.delete_set.is_some()

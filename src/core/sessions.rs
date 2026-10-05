@@ -241,6 +241,29 @@ impl AppCore {
         }
     }
 
+    /// The control port's resume: a running pane is left as it is (the
+    /// port never opens a terminal), an agent with a conversation to
+    /// resume goes through the same preflight as a return, and anything
+    /// else is refused. It never launches fresh, which would start the
+    /// agent's first prompt again.
+    pub(super) fn control_resume(&mut self, id: RecordId, now: Clock, out: &mut Out) {
+        let Some(record) = self.session(id) else {
+            self.error("no such session");
+            return;
+        };
+        if self.is_running(id) {
+            return;
+        }
+        if !record.resumable() {
+            let name = record.name.clone();
+            self.error(format!(
+                "{name} is not resumable; `dispatch supervisor --fresh` starts a new one"
+            ));
+            return;
+        }
+        self.return_to_session(id, now, out);
+    }
+
     /// Kill the pane if there is one, then launch the record fresh.
     /// Agents are not restarted this way (a restart would lose the
     /// conversation); for them it is a plain return.

@@ -99,6 +99,11 @@ pub struct Runner {
     /// `self` while they call; each use is one statement that never
     /// holds the borrow across another call.
     pub health: RefCell<Health>,
+    /// Who the commands run through this runner are for: `supervisor`
+    /// when a project's supervisor session ran them, `None` for the
+    /// owner, the port and the runner itself. Stamped on what they take,
+    /// answer, park, resume and close.
+    pub actor: Option<String>,
 }
 
 /// Where a stop of an attempt's checks stands: a park's, a close's, or
@@ -140,6 +145,7 @@ impl Runner {
             low_disk: None,
             stopping: BTreeMap::new(),
             health: RefCell::new(Health::default()),
+            actor: None,
         }
     }
 
@@ -238,6 +244,30 @@ pub const BY_DISPATCH: &str = "dispatch";
 /// Who answered the `rerun` a resume authorised for an attempt its park
 /// cancelled mid-run.
 pub const BY_RESUME: &str = "resume";
+/// Who answered, parked, resumed, closed or took when the command came
+/// from a project's supervisor session.
+pub const BY_SUPERVISOR: &str = "supervisor";
+
+/// Every decision Dispatch asks of its own accord, by name, beside the
+/// ones a pipeline's gates name. A supervisor's `decides` may list
+/// these; a test holds the list to the ask sites.
+pub const DECISIONS: &[&str] = &[
+    "finalize",
+    "paused",
+    "rerun",
+    "pr",
+    "branch",
+    "lanes",
+    REFRESH,
+    "review-cap",
+    "review-code",
+    "message",
+    RESOLUTION,
+    "lost-send",
+];
+
+/// The decision a `pr-merged` gate asks when it names none.
+pub const DEFAULT_MERGE: &str = "merge";
 
 /// What a decision asks, before it is a record.
 pub struct Ask<'a> {
@@ -362,9 +392,10 @@ impl Runner {
         &mut self,
         project: &str,
         pipeline_text: &str,
-        source: SourceSnapshot,
+        mut source: SourceSnapshot,
         now_ms: u64,
     ) -> Result<Ticket> {
+        source.taken_by.clone_from(&self.actor);
         let pipeline = Pipeline::parse(pipeline_text)?;
         if pipeline.project.name != project {
             bail!(
@@ -425,6 +456,7 @@ impl Runner {
             rework: BTreeMap::new(),
             refreshed_stage: None,
             state: TicketState::Active,
+            state_by: None,
             close: CloseProgress::default(),
             restarts: Vec::new(),
             restart: None,
@@ -442,7 +474,7 @@ impl Runner {
     /// Where a pipeline's tickets' trees go: its own `worktrees`, else
     /// the data directory's setting or default.
     #[must_use]
-    fn worktree_root(&self, p: &Pipeline) -> PathBuf {
+    pub(crate) fn worktree_root(&self, p: &Pipeline) -> PathBuf {
         p.project
             .worktrees
             .clone()
@@ -591,25 +623,8 @@ impl Runner {
             t.id,
             &uuid::Uuid::new_v4().simple().to_string()[..8]
         );
-        let class = match body.class() {
-            wire::Class::Creation => "creation",
-            wire::Class::Idempotent => "idempotent",
-            wire::Class::NonReplayable => "non-replayable",
-            wire::Class::Query => "query",
-        };
-        t.ledger.push(Operation {
-            op: op.clone(),
-            kind: body.kind(),
-            class: class.into(),
-            attempt,
-            intent: intent.into(),
-            sent_ms: now_ms,
-            body: Some(body.clone()),
-            reply: None,
-            error: None,
-            asked: false,
-            settled: false,
-        });
+        t.ledger
+            .push(Operation::new(op.clone(), &body, attempt, intent, now_ms));
         self.save_ticket(t, now_ms)?;
         let result = self.call(Some(&t.id), &Request::new(op.clone(), body));
         let entry = t
@@ -1427,6 +1442,7 @@ impl Runner {
         t.state = TicketState::Closing {
             reason: reason.into(),
         };
+        t.state_by.clone_from(&self.actor);
         // A close supersedes a restart held part way.
         t.restart = None;
         self.save_ticket(t, now_ms)?;
@@ -1791,7 +1807,7 @@ impl Runner {
         now_ms: u64,
     ) -> Result<()> {
         log::warn!("ticket {} parking: {reason}", t.id);
-        Self::parking_intent(t, reason);
+        Self::parking_intent(t, reason, None);
         self.save_ticket(t, now_ms)?;
         self.finish_parking(t, ps, now_ms)
     }
@@ -1799,10 +1815,12 @@ impl Runner {
     /// A park's first write, in memory: `Parking` with every open
     /// decision withdrawn. Shared by a park the runner decides and one
     /// asked for by `dispatch park`, so the two leave the same record.
-    fn parking_intent(t: &mut Ticket, reason: &str) {
+    /// `by` is who asked: `None` for the owner and for Dispatch itself.
+    fn parking_intent(t: &mut Ticket, reason: &str, by: Option<String>) {
         t.state = TicketState::Parking {
             reason: reason.into(),
         };
+        t.state_by = by;
         Self::withdraw_open_decisions(t);
     }
 
@@ -3208,7 +3226,7 @@ impl Runner {
             Some(Gate::External {
                 check, decision, ..
             }) if check == "pr-merged" => {
-                let decision = decision.clone().unwrap_or_else(|| "merge".to_owned());
+                let decision = decision.clone().unwrap_or_else(|| DEFAULT_MERGE.to_owned());
                 self.pr_merged_stage(t, ps, p, stage, &decision, now_ms)
             }
             Some(Gate::Human { decision, confirm }) => {
@@ -4035,18 +4053,8 @@ impl Runner {
         p: &Pipeline,
         now_ms: u64,
     ) -> Result<String> {
-        if let Some(space) = &ps.space {
-            return Ok(space.clone());
-        }
-        if let Reply::Spaces { spaces } = self.ask(Body::Spaces)?
-            // The global space is listed as a view; it holds no projects.
-            && let Some(s) = spaces
-                .iter()
-                .find(|s| !s.view && s.name == p.project.space)
-        {
-            ps.space = Some(s.id.clone());
-            self.save_project(ps)?;
-            return Ok(s.id.clone());
+        if let Some(space) = self.known_space(ps, p)? {
+            return Ok(space);
         }
         let reply = self.send(
             t,
@@ -4061,6 +4069,30 @@ impl Runner {
         ps.space
             .clone()
             .ok_or_else(|| anyhow!("space.new: {reply:?}"))
+    }
+
+    /// The Switchboard workspace the pipeline names, when the record
+    /// has it or Switchboard lists it (saved then); `None` when it has
+    /// yet to be made.
+    pub(crate) fn known_space(
+        &mut self,
+        ps: &mut ProjectState,
+        p: &Pipeline,
+    ) -> Result<Option<String>> {
+        if let Some(space) = &ps.space {
+            return Ok(Some(space.clone()));
+        }
+        if let Reply::Spaces { spaces } = self.ask(Body::Spaces)?
+            // The global space is listed as a view; it holds no projects.
+            && let Some(s) = spaces
+                .iter()
+                .find(|s| !s.view && s.name == p.project.space)
+        {
+            ps.space = Some(s.id.clone());
+            self.save_project(ps)?;
+            return Ok(Some(s.id.clone()));
+        }
+        Ok(None)
     }
 
     /// The ticket's one Switchboard project, `#<n> <title>`, rooted at
@@ -5734,6 +5766,9 @@ impl Runner {
     /// One pass over every project.
     pub fn step_all(&mut self, now_ms: u64) -> Result<()> {
         for project in self.projects()? {
+            if let Err(e) = self.supervisor_intent(&project, now_ms) {
+                log::error!("project {project}: supervisor: {e:#}");
+            }
             if let Err(e) = self.step_project(&project, now_ms) {
                 log::error!("project {project}: {e}");
             }
@@ -5762,6 +5797,7 @@ impl Runner {
                 }
                 bail!("ticket {ticket} has no pending decision {decision}");
             }
+            let by = self.actor.as_deref().unwrap_or(BY_HAND);
             let d = t
                 .decisions
                 .iter_mut()
@@ -5770,10 +5806,25 @@ impl Runner {
             if !d.options.iter().any(|o| o == answer) && d.name != "lanes" {
                 bail!("decision {decision} takes one of: {}", d.options.join(", "));
             }
+            // A supervisor answers only what the live table lets it; a
+            // refusal is saved on the decision, which still waits.
+            if by == BY_SUPERVISOR
+                && !crate::supervisor::decides(&self.data, &t.project).contains(&d.name)
+            {
+                let name = d.name.clone();
+                d.refusals.push(crate::ticket::Refusal {
+                    by: by.to_owned(),
+                    answer: answer.to_owned(),
+                    at_ms: now_ms,
+                });
+                t.updated_ms = now_ms;
+                write_ticket_logged(&self.data, &t, now_ms)?;
+                bail!("the supervisor may not answer `{name}`; the owner does");
+            }
             d.state = DecisionState::Answered {
                 answer: answer.into(),
                 note: note.map(str::to_owned),
-                by: BY_HAND.into(),
+                by: by.into(),
                 at_ms: now_ms,
                 acted: false,
             };
@@ -5813,7 +5864,7 @@ impl Runner {
                 }
             }
             log::warn!("ticket {ticket} parking: {reason}");
-            Self::parking_intent(&mut t, reason);
+            Self::parking_intent(&mut t, reason, self.actor.clone());
             t.updated_ms = now_ms;
             write_ticket_logged(&self.data, &t, now_ms)?;
             Ok(t)
@@ -5904,6 +5955,7 @@ impl Runner {
                 );
             }
             t.state = TicketState::Active;
+            t.state_by.clone_from(&self.actor);
             t.updated_ms = now_ms;
             write_ticket_logged(&self.data, &t, now_ms)?;
             Ok(Resumed {
@@ -6645,6 +6697,7 @@ fn new_decision(t: &Ticket, ask: Ask<'_>, now_ms: u64) -> Decision {
         attempt: ask.attempt,
         state: DecisionState::Pending,
         made_ms: now_ms,
+        refusals: Vec::new(),
     }
 }
 
@@ -7806,6 +7859,38 @@ pub fn apply_reply(t: &mut Ticket, ps: &mut ProjectState, intent: &str, reply: &
 mod tests {
     use super::*;
 
+    /// Every decision name Dispatch asks of its own accord, as a literal
+    /// at its ask site, is one a supervisor's `decides` may list.
+    #[test]
+    fn decisions_holds_every_name_an_ask_site_spells() {
+        for (file, text) in [
+            ("scheduler.rs", include_str!("scheduler.rs")),
+            ("review.rs", include_str!("review.rs")),
+            ("recover.rs", include_str!("recover.rs")),
+        ] {
+            let code = text.split("#[cfg(test)]").next().unwrap();
+            for rest in code.split("name: \"").skip(1) {
+                let Some((name, after)) = rest.split_once('"') else {
+                    continue;
+                };
+                if !after.starts_with(',') {
+                    continue;
+                }
+                assert!(
+                    DECISIONS.contains(&name),
+                    "{file} asks `{name}`; add it to DECISIONS"
+                );
+            }
+        }
+        assert_eq!(
+            DECISIONS
+                .iter()
+                .filter(|d| **d == REFRESH || **d == RESOLUTION)
+                .count(),
+            2
+        );
+    }
+
     #[test]
     fn a_remedys_completion_names_its_role_and_head() {
         let record = |checks: &str| PullRequestRecord {
@@ -7981,6 +8066,7 @@ network = "deny"
                 url: None,
                 labels: vec![],
                 taken_at_ms: 0,
+                taken_by: None,
             },
             pipeline_fingerprint: String::new(),
             pipeline_file: PathBuf::new(),
@@ -7995,6 +8081,7 @@ network = "deny"
             rework: BTreeMap::new(),
             refreshed_stage: None,
             state: TicketState::Active,
+            state_by: None,
             close: crate::ticket::CloseProgress::default(),
             restarts: Vec::new(),
             restart: None,
@@ -8115,6 +8202,7 @@ gate = { kind = "human", decision = "inspect" }
                 url: None,
                 labels: vec![],
                 taken_at_ms: 0,
+                taken_by: None,
             },
             pipeline_fingerprint: String::new(),
             pipeline_file: PathBuf::new(),
@@ -8143,6 +8231,7 @@ gate = { kind = "human", decision = "inspect" }
             state: TicketState::Parked {
                 reason: "parked".into(),
             },
+            state_by: None,
             close: crate::ticket::CloseProgress::default(),
             restarts: Vec::new(),
             restart: None,
@@ -8265,6 +8354,7 @@ gate = { kind = "human", decision = "inspect" }
             attempt: Some((stage.into(), 1)),
             state,
             made_ms: 1,
+            refusals: Vec::new(),
         };
         t.decisions = vec![
             about("finalize", "review", DecisionState::Cancelled),

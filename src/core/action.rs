@@ -502,6 +502,9 @@ pub enum AppAction {
     },
     /// A parked ticket back to active, through the port.
     DispatchResume(String),
+    /// A new supervisor session for the project, replacing the current
+    /// one, through the port.
+    DispatchSupervisorFresh(String),
     /// Close a ticket through the port: its worktrees removed, its
     /// branch and records kept.
     DispatchClose(String),
@@ -1012,6 +1015,7 @@ impl AppCore {
             | AppAction::DispatchReadEvents { .. }
             | AppAction::DispatchReadTicket { .. }
             | AppAction::DispatchResume(_)
+            | AppAction::DispatchSupervisorFresh(_)
             | AppAction::DispatchClose(_)
             | AppAction::DispatchWorktrees { .. }
             | AppAction::DispatchReplied { .. }

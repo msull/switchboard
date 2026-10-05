@@ -1992,6 +1992,67 @@ Known gaps:
 - The Changes tab reads trees on this machine, so it cannot show a
   runner's on another machine.
 
+## Supervisor sessions (2026-10-04)
+
+A project whose live pipeline has a `[supervisor]` table gets one
+long-lived Claude Code session that watches its tickets
+(`dispatch/src/supervisor.rs`; the spec is "Supervisor" in
+`docs/dispatch.md`). Built:
+
+- The table (`guidance`, `read`, `setup` as one argv or several,
+  `model`, `decides`), validated against the decisions Dispatch asks
+  (`scheduler::DECISIONS`, held to the ask sites by a test) and the ones
+  the file's gates ask.
+- `ProjectState.supervisor` (record v13): the workspace, the current
+  session by Switchboard record id with its seed hash, the ones it
+  replaced, an intent from the port, the one request in flight (made
+  and recovered as a ticket's creations are), and the last error.
+- `dispatch supervisor <project> [--fresh [--setup] | --resume |
+  --kill [--reason]]`, `dispatch brief <project>`, and `dispatch
+  events --follow --timeout <secs>` (exit 0 once something printed, 2
+  when nothing came) for a supervisor's watch loop.
+- The actor: `SWITCHBOARD_RECORD_ID` naming a project's current or
+  past supervisor makes a command that supervisor's. It may read
+  anything, `take` and `queue` on its own project, and `decide`,
+  `park`, `resume --no-rerun` and `close` on its own tickets; a plain
+  `resume` needs `rerun` in `decides`. Refused with exit 1: `restart`,
+  `run`, `worktrees <path>` and `--migrate`, `supervisor --fresh`,
+  `--resume` and `--kill`, any verb not on the list
+  (`supervisor::SUPERVISOR_VERBS`, held to `USAGE` by a test), and any
+  other project. A `decide` outside `decides` saves a `Refusal` on the
+  decision and logs a `refused` event. The answer's `by`, a ticket's
+  `state_by`, its source's `taken_by` and an event's `actor` say
+  `supervisor`.
+- The control port's `session.resume` (non-replayable): resumes an
+  agent's conversation with no terminal, leaves a running pane alone,
+  and refuses a session that cannot resume rather than launching it
+  fresh (`ControlAction::Resume`).
+- Dispatch's port: `supervisor-fresh` writes the intent the runner's
+  next pass carries out; `ProjectView.supervisor` is the chip's data.
+- The Dispatch page: a chip after each project's limits, `Supervisor ·
+  working | waiting on you | idle | cold | asks to trust its folder |
+  none`, with `seed changed`, `starting` and the error; Open, Resume
+  (only for a record that can resume, since a return on any other
+  launches it fresh with its first prompt), Trust, and Fresh behind a
+  confirmation (`UiState.confirm_supervisor_fresh`). A decision card
+  and the timeline say who answered.
+
+Known gaps:
+
+- Nothing wakes an idle supervisor: a `session.send` costs money and
+  cannot be replayed, so it follows the log with `events --follow
+  --timeout` in a loop.
+- Setup runs unconfined and under the writer lock, as a lane's setup
+  does.
+- With a non-default `DISPATCH_DATA_DIR`, the supervisor's commands
+  need the variable, which its allow rule does not cover.
+- The actor check is a guard against mistakes, not a boundary: an
+  agent can unset the variable.
+- A refused `resume`, `restart`, `worktrees` or `supervisor` is an
+  exit and a message, not an event, since no decision carries it.
+- The flags pass the allow rules on the command line; whether a second
+  `--settings` would have replaced Switchboard's hooks was not tried.
+
 ## Open questions
 
 - Shared project config runs with a hash-and-approve flow and no
