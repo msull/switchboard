@@ -268,6 +268,8 @@ and the `conflict` and `after` of a lane's `refreshed`, the conflict a
 bring-up resolved and the head it reached; all are absent in older
 records, so a bring-up recorded before the upgrade gets no resolution
 review.
+Version 10 adds a rewrite's `stale` and `message`, empty and absent in
+older records.
 
 ### The event log and the runner's status
 
@@ -1351,6 +1353,58 @@ signal that matters: an agent's `git push` records nothing on the
 ticket. A ref holding only commits of the base or older does not
 count. A pull-request pipeline takes only `keep`.
 
+**Folded messages.** A fold keeps the message of the commit a fix
+folds into, so a review that renamed `old_name` to `new_name` can leave
+a folded commit saying it adds `old_name`. Once a `fold` or `one`
+rewrite has moved the branch, each folded commit that absorbed a fix
+(a group of more than one commit) has its message checked: the names
+it wraps in single backticks (outside fenced blocks; a trailing `()`
+and a `:<line>` location dropped; only spans of `[A-Za-z0-9_-./:]` at
+least three long that are not all digits or a sha) must each occur,
+as a whole word, in the folded commit's diff (added or removed lines,
+file headers), anywhere in the tree at the folded head, or, for a
+path-like name, as a tree path or a path's suffix. A name with `::`,
+or a `.` that is not path-like, also counts when its last segment
+occurs. Prose is never read, and only names the check is sure are
+missing are reported. The check backs up the fixers' `squash!`
+convention and does not replace it: a name that a `squash!` commit's
+body in the same group also names has been addressed and is not
+asked about, and the squash bodies' own names are not checked. A
+published branch, an identity fold and `keep` check nothing. A read
+error is logged and the attempt completes as before: the check is a
+backstop.
+
+A stale message holds the attempt open with the branch at the folded
+head, before the `pr` stage opens anything, and asks `message`:
+`rewrite | accept | park`, naming each stale commit by subject and
+`<head>~k` with the missing names. `accept` completes the stage at the
+folded head with the messages as written. `rewrite` starts the stage's
+`implementer` operator, with `message/input.md` in the attempt
+directory listing each stale commit, its message, the missing names,
+the rounds' `r<n>/response` files and the plan, and asking for each
+new message in `message/<sha8>.txt` (the folded commit's first eight
+characters); a Claude rewriter may write that directory. The agent
+writes files only: it does not commit or amend. Once it stops with
+every file settled, its session is killed and Dispatch replays the
+folded commits one for one with the new messages, through the same
+replay, tree-equality check and compare-and-swap move the fold uses,
+so the tree is unchanged by construction and checked before and
+after; no hook runs and nothing is pushed. The reworded messages are
+checked again, and the attempt completes at the reworded head. A
+rewriter that stops without a file, leaves an empty file or subject
+line, or whose swap is refused asks again with `accept | park` only,
+the branch where it was; a second agent run is never spent unless the
+user chooses it. A tree that is dirty, or a head that moved, while the
+rewriter ran parks with both heads named, and so does an answer given
+after the branch moved. `launched` is saved before the rewriter's
+`session.new`, so a lost reply is found again by recovery and never
+sent twice; `moving` is saved before git writes the reworded commits,
+and a restart reads it as a rewrite's intent is read, against
+`message.from`: the branch still at the folded head swaps again,
+another head with the same clean tree is where it landed, and anything
+else fails the attempt. A `message` dial of `auto` accepts without
+asking, since `rewrite` spends an agent run.
+
 **Records.** One attempt per context per stage run, with `rounds` on
 it: each round's base, head, reviewers (name, kind, session or launch
 intent, completion, result), the aggregated feedback, the open point
@@ -1358,12 +1412,19 @@ count, the implementer's session, response and `head_after`, and its
 state (`reviewing`, `findings`, `fixing`, `fixed`, `converged`,
 `accepted`, `failed`), plus `carried_from` and `rework` (see "A new
 attempt") and `rewrite` (see "Clean commits": the mode, `before`,
-`after`, the commit counts `from` and `to`, and `skipped`). Artifacts
+`after`, the commit counts `from` and `to`, `skipped`, and, from
+"Folded messages", `stale` (each stale commit's index, subject and
+missing names) and `message` (the answer, the folded head `from`,
+`launched`, the rewriter's session and its settling, `moving`, the
+reworded head `to`, and `failed`); once the branch moves to a reworded
+head, `after` is that head). Artifacts
 per round: each reviewer's file (`r<n>/<reviewer>`), `r<n>/feedback`,
-`r<n>/response`, `r<n>/checks`;
+`r<n>/response`, `r<n>/checks`, and for a rewording `message/input`
+and `message/<sha8>`;
 and once the attempt completes, `summary` (`summary.md` in the attempt
 directory): how it ended (converged, or accepted with how many points
-open), how its commits were folded or why they were kept, what it
+open), how its commits were folded or why they were kept, the names a
+folded message carried and what became of it, what it
 carried, the last round's points left to the merge, its
 open points when accepted, and every round's points found but not
 done.
@@ -1915,6 +1976,13 @@ and one against the real one:
 | `keep` with the branch moved since the question | The ticket parks naming both heads; the attempt stays failed (`keep_with_the_branch_moved_since_parks`) |
 | `keep` on a tree dirtied since the question | A fresh rerun decision with `rerun`, `keep` and `park` (`keep_on_a_dirty_tree_is_asked_again`) |
 | A ticket parked over a rewrite failure is resumed | The question offers `rerun`, `keep` and `park` (`a_parked_rewrite_failure_offers_keep_on_resume`) |
+| A fold whose message names a name neither the folded commit nor the tree has | The attempt stays open at the folded head and asks `message` with `rewrite`, `accept` and `park`, naming the commit and the name (`a_folded_message_naming_a_removed_name_asks`) |
+| A fold whose message's names all exist | The attempt completes at the folded head; nothing is asked (`a_folded_message_whose_names_all_exist_completes`) |
+| `rewrite` answered | The implementer operator writes the new message to a file; the folded commits are replayed one for one with it, the tree unchanged, the branch moved, the rewriter killed, nothing pushed, and the stage completes at the reworded head (`rewrite_rewords_the_folded_commit_and_keeps_the_tree`) |
+| `accept` answered | The stage completes at the folded head; the summary says the message was kept as written (`accept_keeps_the_folded_message`) |
+| The rewriter stops without its file | Its session is killed and `message` is asked again with `accept` and `park` only; `accept` completes at the folded head (`a_message_rewrite_that_fails_asks_accept_or_park`) |
+| The reworded message still names a name neither has | The branch stays at the reworded head and `message` is asked again with `accept` and `park`; `accept` completes there, the summary saying the rewording was kept as rewritten (`accept_after_a_rewording_that_still_names_it_keeps_the_rewording`) |
+| A fixer's `squash!` body names the renamed name | Nothing is asked (`a_squash_fix_that_renames_the_name_asks_nothing`) |
 | A stage fails past the policy's `max_reruns` in one context | The ticket parks with the count and the last reason; nothing is asked |
 | Free space on the worktrees' volume is under the policy's `min_free_gb` | Nothing new starts and `status` says why; running attempts are still watched; the hold lifts on its own (`a_full_disk_holds_new_starts_until_space_is_back`) |
 | `take` while a close removes a large tree | returns at once; the next pass drives it (`a_take_during_a_long_tree_removal_returns_at_once_and_runs_next_pass`) |

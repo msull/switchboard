@@ -10,7 +10,7 @@ use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 
-use crate::history::{Commit, Group};
+use crate::history::{self, Commit, Group};
 use crate::ticket::CheckGroup;
 
 /// What a pipeline command may touch. The adapter turns this into the
@@ -236,6 +236,10 @@ pub trait Repo: Send {
     /// lines its diff changes. Read in Dispatch's clone, which outlives
     /// the ticket's trees.
     fn range_size(&self, dir: &Path, base: &str, head: &str) -> Result<RangeSize>;
+    /// The names among `names` that neither the diff of `rev` against its
+    /// parent nor the tree at `head` has, as `history::occurs` and
+    /// `history::is_path` judge them. Read-only.
+    fn absent(&self, dir: &Path, rev: &str, head: &str, names: &[String]) -> Result<Vec<String>>;
 }
 
 /// How big a range of commits is, as a report shows it.
@@ -1139,6 +1143,61 @@ impl Repo for GitCli {
             deletions,
         })
     }
+
+    fn absent(&self, dir: &Path, rev: &str, head: &str, names: &[String]) -> Result<Vec<String>> {
+        if names.is_empty() {
+            return Ok(Vec::new());
+        }
+        let diff = output(git_in(dir).args([
+            "diff",
+            "-U0",
+            "--no-color",
+            "--no-ext-diff",
+            &format!("{rev}^"),
+            rev,
+        ]))?;
+        let listing = output(git_in(dir).args(["ls-tree", "-r", "--name-only", "-z", head]))?;
+        let paths: Vec<&str> = listing.split('\0').filter(|p| !p.is_empty()).collect();
+        let mut missing = Vec::new();
+        for name in names {
+            let path = history::is_path(name, &paths);
+            if history::occurs(&diff, name, path) {
+                continue;
+            }
+            let suffix = format!("/{name}");
+            if path && paths.iter().any(|p| *p == name || p.ends_with(&suffix)) {
+                continue;
+            }
+            if !grep_occurs(dir, head, name, path)? {
+                missing.push(name.clone());
+            }
+        }
+        Ok(missing)
+    }
+}
+
+/// Whether `name` occurs, as `history::occurs` judges it, on a line of
+/// the tree at `head`. `-e` keeps a name like `--flag` from being read
+/// as an option; exit 1 is no line.
+fn grep_occurs(dir: &Path, head: &str, name: &str, path: bool) -> Result<bool> {
+    let mut cmd = git_in(dir);
+    cmd.args(["grep", "-F", "-I", "-h", "--no-color", "-e", name]);
+    if let Some(last) = history::segment(name, path) {
+        cmd.args(["-e", last]);
+    }
+    cmd.args([head, "--"]);
+    let out = cmd.output().with_context(|| format!("run {cmd:?}"))?;
+    match out.status.code() {
+        Some(0) => Ok(String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .any(|l| history::occurs(l, name, path))),
+        Some(1) => Ok(false),
+        _ => bail!(
+            "{cmd:?} exited {}: {}",
+            out.status,
+            String::from_utf8_lossy(&out.stderr).trim()
+        ),
+    }
 }
 
 /// `pick` applied on `onto` as a cherry-pick would, by a three-way
@@ -1480,6 +1539,9 @@ pub struct FakeRepo {
     /// What `range_size` answers by `(dir, base, head)`; any other range
     /// is an error, as git's would be for a clone without the commits.
     pub ranges: std::collections::BTreeMap<(PathBuf, String, String), RangeSize>,
+    /// The names a tree lacks, whatever the rev and head; any other
+    /// name is present.
+    pub absent_names: std::collections::BTreeMap<PathBuf, Vec<String>>,
     /// Gates by method name; only `worktree_remove` honours one, and
     /// only through the shared `Arc<Mutex<FakeRepo>>`.
     pub gates: std::collections::BTreeMap<&'static str, std::sync::Arc<Gate>>,
@@ -1988,6 +2050,14 @@ impl Repo for FakeRepo {
             .copied()
             .with_context(|| format!("no range {base}..{head} in {}", dir.display()))
     }
+    fn absent(&self, dir: &Path, _rev: &str, _head: &str, names: &[String]) -> Result<Vec<String>> {
+        let lacks = self.absent_names.get(dir).cloned().unwrap_or_default();
+        Ok(names
+            .iter()
+            .filter(|n| lacks.contains(n))
+            .cloned()
+            .collect())
+    }
 }
 
 /// A fake repository shared with a test, so a runner can be replaced (a
@@ -2202,6 +2272,9 @@ impl Repo for std::sync::Arc<std::sync::Mutex<FakeRepo>> {
     }
     fn range_size(&self, dir: &Path, base: &str, head: &str) -> Result<RangeSize> {
         self.lock().unwrap().range_size(dir, base, head)
+    }
+    fn absent(&self, dir: &Path, rev: &str, head: &str, names: &[String]) -> Result<Vec<String>> {
+        self.lock().unwrap().absent(dir, rev, head, names)
     }
 }
 
@@ -2977,6 +3050,61 @@ mod tests {
                 .is_empty(),
             "onto its own base nothing conflicts"
         );
+    }
+
+    #[test]
+    fn the_real_git_finds_a_name_absent_only_when_neither_diff_nor_tree_has_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let (wt, _) = cut(dir.path());
+        commit(&wt, "gone.rs", "fn removed_name() {}\n", &["-m", "old"]);
+        sh(&wt, &["rm", "-q", "gone.rs"]);
+        sh(&wt, &["commit", "-q", "-m", "drop"]);
+        std::fs::create_dir_all(wt.join("src")).unwrap();
+        let a = commit(
+            &wt,
+            "src/lib.rs",
+            "fn old_name() {}\nfn kept() {}\n",
+            &["-m", "A"],
+        );
+        let fixup = commit(
+            &wt,
+            "src/lib.rs",
+            "fn new_name() {}\nfn kept() {}\n",
+            &["--fixup", &a],
+        );
+        let cli = GitCli::default();
+        let names = |n: &[&str]| n.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
+        // `A`'s own diff adds `old_name`, so judged on `A` it is present
+        // although the fixup renamed it away.
+        let asked = names(&[
+            "old_name",
+            "kept",
+            "lib.rs",
+            "src/lib.rs",
+            "removed_name",
+            "--nope",
+            "Thing.kept",
+            "gone.rs",
+        ]);
+        assert_eq!(
+            cli.absent(&wt, &format!("{fixup}~1"), &fixup, &asked)
+                .unwrap(),
+            ["removed_name", "--nope", "gone.rs"],
+            "a field is found by its last segment; a removed file in a tree of its kind is a path, absent"
+        );
+        let drop = format!("{fixup}~2");
+        assert_eq!(
+            cli.absent(
+                &wt,
+                &drop,
+                &fixup,
+                &names(&["removed_name", "old_name", "kept"])
+            )
+            .unwrap(),
+            ["old_name"],
+            "renamed away and not in this diff: absent; one the commit removed is in its diff, one in the tree is present"
+        );
+        assert!(cli.absent(&wt, &fixup, &fixup, &[]).unwrap().is_empty());
     }
 
     #[test]

@@ -10467,6 +10467,8 @@ fn fold_completes_with_the_fix_rounds_folded_and_the_checks_run_once() {
             from: 4,
             to: 2,
             skipped: None,
+            stale: Vec::new(),
+            message: None,
             at_ms: 0,
         })
     );
@@ -11184,6 +11186,8 @@ fn a_review_converging_at_round_one_with_fold_rewrites_nothing() {
             from: 2,
             to: 2,
             skipped: None,
+            stale: Vec::new(),
+            message: None,
             at_ms: 0,
         })
     );
@@ -11360,4 +11364,606 @@ fn tail_reads_the_running_agents_screen_and_nothing_once_it_is_done() {
     });
     let t = env.ticket(&id);
     assert!(env.runner.screens(&t, 20).unwrap().is_empty());
+}
+
+// --- a folded message that names what the review removed
+
+/// The implementation commit's message, as the fake reports it from
+/// now on.
+fn seed_message(env: &Env, tree: &std::path::Path, message: &str) {
+    message.clone_into(&mut env.repo.lock().unwrap().commits.get_mut(tree).unwrap()[0].message);
+}
+
+/// A fold at its final checks whose first commit says it adds
+/// `old_name`, which the tree no longer has: the checks pass and the
+/// `message` question is asked.
+fn a_stale_fold(env: &mut Env) -> (String, PathBuf) {
+    let (id, tree) = at_final_checks(env, Some("fold"));
+    seed_message(env, &tree, "A\n\nAdds `old_name`.");
+    env.repo
+        .lock()
+        .unwrap()
+        .absent_names
+        .insert(tree.clone(), vec!["old_name".into()]);
+    let t = env.ticket(&id);
+    env.repo
+        .lock()
+        .unwrap()
+        .check_exits
+        .insert(checks_key(&t, 3), 0);
+    env.steps_until(&id, "the message question", |t, _| {
+        t.pending_decisions().iter().any(|d| d.name == "message")
+    });
+    (id, tree)
+}
+
+/// The texts of the ticket's events in the log, in order.
+fn event_texts(env: &Env, id: &str) -> Vec<String> {
+    dispatch::events::read_since(&dispatch::events::log_path(&env.data), 0)
+        .unwrap()
+        .into_iter()
+        .filter(|e| e.ticket == id)
+        .map(|e| e.text)
+        .collect()
+}
+
+/// The pending `message` question, answered `answer`.
+fn answer_message(env: &mut Env, id: &str, answer: &str) -> Decision {
+    let d = env
+        .pending(id)
+        .into_iter()
+        .find(|d| d.name == "message")
+        .unwrap_or_else(|| panic!("no message question: {:#?}", env.ticket(id)));
+    let now = env.tick();
+    env.runner.decide(id, &d.id, answer, None, now).unwrap();
+    d
+}
+
+/// The folded history the fake reports from now on: the commit the
+/// fixup folded into, with its stale message, and the tip.
+fn folded_history(env: &Env, tree: &std::path::Path) {
+    let c = |sha: &str, message: &str| Commit {
+        sha: sha.to_owned(),
+        parents: 1,
+        message: message.to_owned(),
+    };
+    env.repo.lock().unwrap().commits.insert(
+        tree.to_path_buf(),
+        vec![c("folda001", "A\n\nAdds `old_name`."), c("fold0001", "B")],
+    );
+}
+
+fn message_fix(t: &Ticket) -> dispatch::ticket::MessageFix {
+    review_attempt(t)
+        .rewrite
+        .and_then(|r| r.message)
+        .unwrap_or_else(|| panic!("no message record: {t:#?}"))
+}
+
+/// `rewrite` answered on a stale fold, the folded history seeded and
+/// the rewriter running: its session and its output file.
+fn a_rewriter_running(env: &mut Env) -> (String, PathBuf, String, PathBuf) {
+    let (id, tree) = a_stale_fold(env);
+    folded_history(env, &tree);
+    answer_message(env, &id, "rewrite");
+    env.steps_until(&id, "the rewriter", |t, _| {
+        review_attempt(t)
+            .rewrite
+            .and_then(|r| r.message)
+            .is_some_and(|m| m.session.is_some())
+    });
+    let t = env.ticket(&id);
+    let session = message_fix(&t).session.unwrap();
+    let out = review_attempt(&t).artifacts["message/folda00"].clone();
+    (id, tree, session, out)
+}
+
+/// The issue's first test: the fold lands, and its message names a
+/// name neither the commit nor the tree has, so the attempt stays open
+/// with the branch at the folded head and asks.
+#[test]
+fn a_folded_message_naming_a_removed_name_asks() {
+    let mut env = Env::new();
+    let (id, tree) = a_stale_fold(&mut env);
+    let t = env.ticket(&id);
+    let a = review_attempt(&t);
+    assert!(a.is_open(), "{:?}", a.state);
+    assert_eq!(env.repo.lock().unwrap().heads[&tree], "fold0001");
+    let d = env
+        .pending(&id)
+        .into_iter()
+        .find(|d| d.name == "message")
+        .unwrap();
+    assert_eq!(d.options, ["rewrite", "accept", "park"]);
+    assert!(d.question.contains("`old_name`"), "{}", d.question);
+    assert!(d.question.contains("fold000~1"), "{}", d.question);
+    let r = a.rewrite.unwrap();
+    assert_eq!(r.after.as_deref(), Some("fold0001"));
+    assert_eq!(
+        r.stale,
+        [dispatch::ticket::StaleMessage {
+            index: 0,
+            subject: "A".into(),
+            names: vec!["old_name".into()],
+        }]
+    );
+    assert!(
+        t.attempts_of("inspect").next().is_none(),
+        "nothing advanced"
+    );
+    let events = event_texts(&env, &id);
+    assert!(
+        events
+            .iter()
+            .any(|e| e == "folded message names `old_name`, which the tree does not have"),
+        "{events:#?}"
+    );
+}
+
+#[test]
+fn a_folded_message_whose_names_all_exist_completes() {
+    let mut env = Env::new();
+    let (id, tree) = at_final_checks(&mut env, Some("fold"));
+    seed_message(&env, &tree, "A\n\nAdds `old_name`.");
+    let a = final_checks_pass(&mut env, &id);
+    assert_eq!(a.state, AttemptState::Complete, "{:?}", a.state);
+    assert_eq!(a.head.as_deref(), Some("fold0001"));
+    assert!(a.rewrite.unwrap().stale.is_empty());
+    assert!(
+        env.ticket(&id)
+            .decisions
+            .iter()
+            .all(|d| d.name != "message"),
+        "nothing asked"
+    );
+}
+
+/// The issue's third test: `rewrite` rewords the folded commit one for
+/// one, the tree unchanged, and nothing is pushed.
+#[test]
+fn rewrite_rewords_the_folded_commit_and_keeps_the_tree() {
+    let mut env = Env::new();
+    let (id, tree, session, out) = a_rewriter_running(&mut env);
+    let t = env.ticket(&id);
+    let dir = out.parent().unwrap().to_path_buf();
+    assert!(dir.ends_with("message"), "{}", dir.display());
+    assert!(review_attempt(&t).artifacts["message/input"].is_file());
+    let launch = env
+        .sb()
+        .calls
+        .iter()
+        .rev()
+        .find_map(|r| match &r.body {
+            Body::SessionNew { notes, launch, .. } if notes.contains("message rewriter") => {
+                Some(launch.clone())
+            }
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(
+        launch,
+        switchboard_control::Launch::Argv(vec![
+            "--allowedTools".into(),
+            format!("Edit(//{}/**)", dir.display())
+        ]),
+        "the rewriter may write its files outside the tree"
+    );
+    assert!(
+        t.ledger
+            .iter()
+            .any(|o| o.intent == "message" && o.kind == "session.new")
+    );
+    let prompt = last_prompt_of(&env, "implementer");
+    assert!(prompt.contains("input.md"), "{prompt}");
+    assert!(prompt.contains("Do not commit"), "{prompt}");
+    env.repo
+        .lock()
+        .unwrap()
+        .replay_heads
+        .insert(tree.clone(), "word0001".into());
+    env.finish(&session, &out, "A\n\nAdds `new_name`.\n");
+    env.steps_until(&id, "the attempt completing", |t, _| {
+        !review_attempt(t).is_open()
+    });
+    let t = env.ticket(&id);
+    let a = review_attempt(&t);
+    assert_eq!(a.state, AttemptState::Complete, "{:?}", a.state);
+    assert_eq!(a.head.as_deref(), Some("word0001"));
+    let m = message_fix(&t);
+    assert_eq!(m.to.as_deref(), Some("word0001"));
+    assert_eq!(m.from, "fold0001");
+    assert_eq!(a.rewrite.unwrap().after.as_deref(), Some("word0001"));
+    {
+        let repo = env.repo.lock().unwrap();
+        assert_eq!(repo.replayed.len(), 2);
+        assert_eq!(
+            repo.replayed[1],
+            (
+                tree.clone(),
+                "root0000".to_owned(),
+                vec![
+                    group(&["folda001"], "A\n\nAdds `new_name`."),
+                    group(&["fold0001"], "B"),
+                ]
+            )
+        );
+        assert_eq!(
+            repo.head_sets.last().unwrap(),
+            &(tree.clone(), "word0001".to_owned(), "fold0001".to_owned())
+        );
+        assert!(repo.pushed.is_empty(), "nothing pushed");
+    }
+    assert!(env.sb().killed.contains(&session), "the rewriter killed");
+    let summary = std::fs::read_to_string(&a.artifacts["summary"]).unwrap();
+    assert!(
+        summary.contains("The folded message named `old_name`, which neither the commit nor the tree has; rewritten, fold000 → word000."),
+        "{summary}"
+    );
+    let events = event_texts(&env, &id);
+    assert!(
+        events
+            .iter()
+            .any(|e| e == "message rewritten fold000 → word000"),
+        "{events:#?}"
+    );
+}
+
+/// A rewording that lands and still names the removed name asks again;
+/// `accept` keeps the reworded message the branch now carries, and says
+/// so rather than that the folded one was kept.
+#[test]
+fn accept_after_a_rewording_that_still_names_it_keeps_the_rewording() {
+    let mut env = Env::new();
+    let (id, tree, session, out) = a_rewriter_running(&mut env);
+    env.repo
+        .lock()
+        .unwrap()
+        .replay_heads
+        .insert(tree.clone(), "word0001".into());
+    env.finish(&session, &out, "A\n\nStill adds `old_name`.\n");
+    let d = answer_message(&mut env, &id, "accept");
+    assert_eq!(d.options, ["accept", "park"]);
+    assert!(
+        d.question.contains("still names `old_name`"),
+        "{}",
+        d.question
+    );
+    env.steps_until(&id, "the attempt completing", |t, _| {
+        !review_attempt(t).is_open()
+    });
+    let t = env.ticket(&id);
+    let a = review_attempt(&t);
+    assert_eq!(a.state, AttemptState::Complete, "{:?}", a.state);
+    assert_eq!(a.head.as_deref(), Some("word0001"));
+    assert_eq!(env.repo.lock().unwrap().heads[&tree], "word0001");
+    let summary = std::fs::read_to_string(&a.artifacts["summary"]).unwrap();
+    assert!(
+        summary.contains("rewritten, fold000 → word000, but the rewritten message still names `old_name`; kept as rewritten."),
+        "{summary}"
+    );
+    let events = event_texts(&env, &id);
+    assert!(
+        events.iter().any(|e| e == "message kept as rewritten"),
+        "{events:#?}"
+    );
+}
+
+#[test]
+fn accept_keeps_the_folded_message() {
+    let mut env = Env::new();
+    let (id, tree) = a_stale_fold(&mut env);
+    answer_message(&mut env, &id, "accept");
+    env.steps_until(&id, "the attempt completing", |t, _| {
+        !review_attempt(t).is_open()
+    });
+    let t = env.ticket(&id);
+    let a = review_attempt(&t);
+    assert_eq!(a.state, AttemptState::Complete, "{:?}", a.state);
+    assert_eq!(a.head.as_deref(), Some("fold0001"));
+    assert_eq!(message_fix(&t).answer, "accept");
+    assert_eq!(env.repo.lock().unwrap().heads[&tree], "fold0001");
+    assert_eq!(env.repo.lock().unwrap().replayed.len(), 1);
+    let summary = std::fs::read_to_string(&a.artifacts["summary"]).unwrap();
+    assert!(
+        summary.contains("The folded message named `old_name`, which neither the commit nor the tree has; kept as written."),
+        "{summary}"
+    );
+    assert!(
+        event_texts(&env, &id)
+            .iter()
+            .any(|e| e == "message kept as written")
+    );
+}
+
+#[test]
+fn a_message_rewrite_that_fails_asks_accept_or_park() {
+    let mut env = Env::new();
+    let (id, tree, session, _) = a_rewriter_running(&mut env);
+    let first = env
+        .ticket(&id)
+        .decisions
+        .iter()
+        .find(|d| d.name == "message")
+        .unwrap()
+        .id
+        .clone();
+    let now = env.now;
+    env.sb().stop(&session, now);
+    env.idle_past_grace();
+    env.steps_until(&id, "the question again", |t, _| {
+        t.pending_decisions()
+            .iter()
+            .any(|d| d.name == "message" && d.id != first)
+    });
+    let t = env.ticket(&id);
+    assert!(review_attempt(&t).is_open());
+    let failed = message_fix(&t).failed.unwrap();
+    assert!(failed.contains("without writing"), "{failed}");
+    assert!(env.sb().killed.contains(&session), "the rewriter killed");
+    let d = answer_message(&mut env, &id, "accept");
+    assert_eq!(d.options, ["accept", "park"]);
+    assert!(d.question.contains("without writing"), "{}", d.question);
+    env.steps_until(&id, "the attempt completing", |t, _| {
+        !review_attempt(t).is_open()
+    });
+    let t = env.ticket(&id);
+    let a = review_attempt(&t);
+    assert_eq!(a.state, AttemptState::Complete, "{:?}", a.state);
+    assert_eq!(a.head.as_deref(), Some("fold0001"));
+    let repo = env.repo.lock().unwrap();
+    assert_eq!(repo.heads[&tree], "fold0001");
+    assert_eq!(repo.replayed.len(), 1, "nothing replayed for the messages");
+}
+
+/// A completed rewording written back as a restart would find it had
+/// the runner stopped after `moving` was saved; the fake's head set to
+/// `head`, then the restart.
+fn restarted_mid_rewording(env: &mut Env, id: &str, head: &str, tree: &std::path::Path) {
+    let mut t = env.ticket(id);
+    let a = t
+        .attempts
+        .iter_mut()
+        .rev()
+        .find(|a| a.stage == "review-code")
+        .unwrap();
+    a.state = AttemptState::Running;
+    a.head = None;
+    a.ended_ms = None;
+    let r = a.rewrite.as_mut().unwrap();
+    r.after = Some("fold0001".into());
+    let m = r.message.as_mut().unwrap();
+    m.to = None;
+    m.moving = true;
+    t.stage = 5;
+    env.runner.save_ticket(&mut t, env.now).unwrap();
+    env.repo
+        .lock()
+        .unwrap()
+        .heads
+        .insert(tree.to_path_buf(), head.to_owned());
+    env.restart();
+}
+
+/// The rewording ran to completion; the steps that follow.
+fn reworded(env: &mut Env) -> (String, PathBuf) {
+    let (id, tree, session, out) = a_rewriter_running(env);
+    env.repo
+        .lock()
+        .unwrap()
+        .replay_heads
+        .insert(tree.clone(), "word0001".into());
+    env.finish(&session, &out, "A\n\nAdds `new_name`.\n");
+    env.steps_until(&id, "the attempt completing", |t, _| {
+        !review_attempt(t).is_open()
+    });
+    (id, tree)
+}
+
+#[test]
+fn a_restart_after_the_message_move_completes_at_the_reworded_head() {
+    let mut env = Env::new();
+    let (id, tree) = reworded(&mut env);
+    restarted_mid_rewording(&mut env, &id, "word0001", &tree);
+    env.steps_until(&id, "the stage completing", |t, _| {
+        review_attempt(t).state == AttemptState::Complete
+    });
+    let t = env.ticket(&id);
+    let a = review_attempt(&t);
+    assert_eq!(a.head.as_deref(), Some("word0001"));
+    assert_eq!(message_fix(&t).to.as_deref(), Some("word0001"));
+    let repo = env.repo.lock().unwrap();
+    assert_eq!(repo.replayed.len(), 2, "no third replay");
+}
+
+#[test]
+fn a_restart_before_the_message_move_swaps_again() {
+    let mut env = Env::new();
+    let (id, tree) = reworded(&mut env);
+    restarted_mid_rewording(&mut env, &id, "fold0001", &tree);
+    env.steps_until(&id, "the stage completing", |t, _| {
+        review_attempt(t).state == AttemptState::Complete
+    });
+    let t = env.ticket(&id);
+    assert_eq!(review_attempt(&t).head.as_deref(), Some("word0001"));
+    let repo = env.repo.lock().unwrap();
+    assert_eq!(repo.replayed.len(), 3, "replayed once more");
+    assert_eq!(repo.replayed[2].2, repo.replayed[1].2);
+    assert_eq!(repo.heads[&tree], "word0001");
+}
+
+#[test]
+fn a_rewriter_reply_lost_is_found_again_and_nothing_launches_twice() {
+    let mut env = Env::new();
+    let (id, tree) = a_stale_fold(&mut env);
+    folded_history(&env, &tree);
+    answer_message(&mut env, &id, "rewrite");
+    let before = env.sb().kinds_called("session.new");
+    env.sb().drop_reply_for = Some("session.new".into());
+    env.step();
+    let m = message_fix(&env.ticket(&id));
+    assert!(m.launched && m.session.is_none(), "{m:#?}");
+    env.step();
+    assert_eq!(env.sb().kinds_called("session.new"), before + 1);
+    env.restart();
+    let session = message_fix(&env.ticket(&id)).session;
+    assert!(session.is_some(), "the reply applied by recovery");
+    env.step();
+    env.step();
+    assert_eq!(env.sb().kinds_called("session.new"), before + 1);
+    assert!(env.ticket(&id).processes.contains(&session.unwrap()));
+}
+
+#[test]
+fn a_restart_with_the_message_question_pending_asks_nothing_new() {
+    let mut env = Env::new();
+    let (id, _) = a_stale_fold(&mut env);
+    env.restart();
+    env.step();
+    env.step();
+    let asked: Vec<Decision> = env
+        .ticket(&id)
+        .decisions
+        .into_iter()
+        .filter(|d| d.name == "message")
+        .collect();
+    assert_eq!(asked.len(), 1, "{asked:#?}");
+    assert!(asked[0].pending());
+}
+
+#[test]
+fn a_published_branch_an_identity_fold_and_keep_ask_nothing() {
+    // Published: the history is left alone, and so are its messages.
+    let mut env = Env::new();
+    let (id, tree) = at_final_checks(&mut env, Some("fold"));
+    seed_message(&env, &tree, "A\n\nAdds `old_name`.");
+    {
+        let mut repo = env.repo.lock().unwrap();
+        repo.absent_names
+            .insert(tree.clone(), vec!["old_name".into()]);
+        repo.published
+            .push((tree.clone(), "root0000".into(), "fix00002".into()));
+    }
+    let a = final_checks_pass(&mut env, &id);
+    assert_eq!(a.state, AttemptState::Complete, "{:?}", a.state);
+    assert!(a.rewrite.unwrap().stale.is_empty());
+    // Identity: nothing folds.
+    let mut env = Env::new();
+    let (id, tree) = at_final_checks(&mut env, Some("fold"));
+    {
+        let mut repo = env.repo.lock().unwrap();
+        repo.commits.insert(
+            tree.clone(),
+            vec![Commit {
+                sha: "impl0001".into(),
+                parents: 1,
+                message: "A\n\nAdds `old_name`.".into(),
+            }],
+        );
+        repo.absent_names
+            .insert(tree.clone(), vec!["old_name".into()]);
+    }
+    let a = final_checks_pass(&mut env, &id);
+    assert_eq!(a.state, AttemptState::Complete, "{:?}", a.state);
+    assert!(env.repo.lock().unwrap().replayed.is_empty());
+    // Keep: no rewrite, no check.
+    let mut env = Env::new();
+    let (id, tree) = at_final_checks(&mut env, Some("keep"));
+    seed_message(&env, &tree, "A\n\nAdds `old_name`.");
+    env.repo
+        .lock()
+        .unwrap()
+        .absent_names
+        .insert(tree.clone(), vec!["old_name".into()]);
+    let a = final_checks_pass(&mut env, &id);
+    assert_eq!(a.state, AttemptState::Complete, "{:?}", a.state);
+    assert_eq!(a.rewrite, None);
+    assert!(
+        env.ticket(&id)
+            .decisions
+            .iter()
+            .all(|d| d.name != "message")
+    );
+}
+
+#[test]
+fn a_message_answer_after_the_branch_moved_parks() {
+    let mut env = Env::new();
+    let (id, tree) = a_stale_fold(&mut env);
+    env.repo
+        .lock()
+        .unwrap()
+        .heads
+        .insert(tree.clone(), "other001".into());
+    answer_message(&mut env, &id, "accept");
+    env.steps_until(&id, "the park", |t, _| {
+        matches!(t.state, TicketState::Parked { .. })
+    });
+    let TicketState::Parked { reason, .. } = env.ticket(&id).state else {
+        unreachable!()
+    };
+    assert!(
+        reason.contains("fold0001") && reason.contains("other001"),
+        "{reason}"
+    );
+}
+
+/// The fixer followed its guidance and wrote a `squash!` body about
+/// the rename: the folded message carries both, and nothing is asked.
+#[test]
+fn a_squash_fix_that_renames_the_name_asks_nothing() {
+    let mut env = Env::new();
+    let (id, tree) = at_final_checks(&mut env, Some("fold"));
+    {
+        let mut repo = env.repo.lock().unwrap();
+        let commits = repo.commits.get_mut(&tree).unwrap();
+        commits[0].message = "A\n\nAdds `old_name`.".into();
+        commits[2].message = "squash! A\n\nRenames `old_name` to `new_name`.".into();
+        repo.absent_names
+            .insert(tree.clone(), vec!["old_name".into()]);
+    }
+    let a = final_checks_pass(&mut env, &id);
+    assert_eq!(a.state, AttemptState::Complete, "{:?}", a.state);
+    assert_eq!(a.head.as_deref(), Some("fold0001"));
+    assert!(a.rewrite.unwrap().stale.is_empty());
+    assert!(
+        env.ticket(&id)
+            .decisions
+            .iter()
+            .all(|d| d.name != "message"),
+        "nothing asked"
+    );
+}
+
+#[test]
+fn the_message_dial_at_auto_keeps_the_message_without_asking() {
+    let mut env = Env::new();
+    with_three_rounds(&env);
+    with_commits(&env, "fold");
+    // The pipeline is read as the ticket is taken.
+    let path = env.data.pipeline(PROJECT);
+    let text = std::fs::read_to_string(&path).unwrap();
+    let text = text.replace(
+        "finalize = \"ask\",",
+        "finalize = \"ask\", message = \"auto\",",
+    );
+    assert!(text.contains("message = \"auto\""));
+    std::fs::write(path, text).unwrap();
+    let id = at_review(&mut env);
+    let tree = seed_commits(&env, &id);
+    two_fixes_then_the_final_checks(&mut env, &id);
+    seed_message(&env, &tree, "A\n\nAdds `old_name`.");
+    env.repo
+        .lock()
+        .unwrap()
+        .absent_names
+        .insert(tree.clone(), vec!["old_name".into()]);
+    let a = final_checks_pass(&mut env, &id);
+    assert_eq!(a.state, AttemptState::Complete, "{:?}", a.state);
+    assert_eq!(a.rewrite.unwrap().message.unwrap().answer, "accept");
+    assert!(
+        env.ticket(&id)
+            .decisions
+            .iter()
+            .all(|d| d.name != "message")
+    );
 }

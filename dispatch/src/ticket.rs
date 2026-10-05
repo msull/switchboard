@@ -8,6 +8,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 use switchboard_control::{Body, Reply};
 
+use crate::events::short;
 use crate::history::Commits;
 
 /// Where a ticket came from, as it was when taken.
@@ -355,6 +356,101 @@ pub struct Rewrite {
     /// a clause that reads after "commits kept:".
     #[serde(default)]
     pub skipped: Option<String>,
+    /// The folded commits whose messages name something neither their
+    /// own diff nor the tree at the folded head has; the attempt asks
+    /// about them before it completes.
+    #[serde(default)]
+    pub stale: Vec<StaleMessage>,
+    /// What became of the stale messages once the user answered.
+    #[serde(default)]
+    pub message: Option<MessageFix>,
+    pub at_ms: u64,
+}
+
+impl Rewrite {
+    /// What became of the stale messages, as a clause: `None` while
+    /// nothing is stale or the question is open.
+    #[must_use]
+    pub fn message_outcome(&self) -> Option<String> {
+        if self.stale.is_empty() {
+            return None;
+        }
+        let m = self.message.as_ref()?;
+        // A rewording that landed and then still named something leaves
+        // the branch at `to`: what an accept keeps is the reworded message.
+        Some(match (m.answer.as_str(), &m.to, &m.failed) {
+            (answer, Some(to), failed) => {
+                let moved = format!("rewritten, {} → {}", short(&m.from), short(to));
+                match (failed, answer) {
+                    (None, _) => moved,
+                    (Some(why), "accept") => format!("{moved}, but {why}; kept as rewritten"),
+                    (Some(why), _) => format!("{moved}, but {why}"),
+                }
+            }
+            ("accept", None, Some(why)) => format!("rewrite failed: {why}; kept as written"),
+            ("accept", None, None) => "kept as written".to_owned(),
+            (_, None, Some(why)) => format!("rewrite failed: {why}"),
+            (_, None, None) => "being rewritten".to_owned(),
+        })
+    }
+
+    /// Every name the stale messages lack, deduped in commit order.
+    #[must_use]
+    pub fn stale_names(&self) -> Vec<String> {
+        let mut names: Vec<String> = Vec::new();
+        for n in self.stale.iter().flat_map(|s| &s.names) {
+            if !names.contains(n) {
+                names.push(n.clone());
+            }
+        }
+        names
+    }
+}
+
+/// A folded commit whose message names something that neither its own
+/// diff nor the tree at the folded head has.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StaleMessage {
+    /// Its position in `base..after`, oldest first.
+    pub index: u32,
+    pub subject: String,
+    /// The backticked names it lacks, in message order.
+    pub names: Vec<String>,
+}
+
+/// What became of a rewrite's stale messages once the user answered.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MessageFix {
+    /// `accept` or `rewrite`.
+    pub answer: String,
+    /// The folded head the question was about.
+    pub from: String,
+    /// Saved before the rewriter's `session.new` is sent, so a lost or
+    /// not yet applied reply never sends a second one.
+    #[serde(default)]
+    pub launched: bool,
+    /// The rewriter's session, once its reply is applied.
+    #[serde(default)]
+    pub session: Option<String>,
+    #[serde(default)]
+    pub stop_at_ms: Option<u64>,
+    /// Counted as `Attempt::polls_since_stop` is, for the rewriter and
+    /// its files.
+    #[serde(default)]
+    pub polls_since_stop: u32,
+    /// Each output file's settling, by path.
+    #[serde(default)]
+    pub settle: BTreeMap<String, Settle>,
+    /// Saved before git writes the reworded commits.
+    #[serde(default)]
+    pub moving: bool,
+    /// The head carrying the new messages, once the branch moved there.
+    #[serde(default)]
+    pub to: Option<String>,
+    /// Why `rewrite` ended without a clean result; the question is then
+    /// asked again with `accept | park` only.
+    #[serde(default)]
+    pub failed: Option<String>,
     pub at_ms: u64,
 }
 
@@ -961,6 +1057,47 @@ mod tests {
         assert_eq!(t.current_session().unwrap(), "s-plan-2");
         assert_eq!(t.attempts_of("plan").count(), 2);
         assert_eq!(Ticket::new_id().len(), 8);
+    }
+
+    #[test]
+    fn a_message_outcome_says_which_message_the_branch_keeps() {
+        let fix = |answer: &str, to: Option<&str>, failed: Option<&str>| Rewrite {
+            mode: Commits::Fold,
+            before: "head0001".into(),
+            after: Some("fold0001".into()),
+            from: 2,
+            to: 1,
+            skipped: None,
+            stale: vec![StaleMessage {
+                index: 0,
+                subject: "A".into(),
+                names: vec!["old_name".into()],
+            }],
+            message: Some(MessageFix {
+                answer: answer.into(),
+                from: "fold0001".into(),
+                to: to.map(Into::into),
+                failed: failed.map(Into::into),
+                ..MessageFix::default()
+            }),
+            at_ms: 1,
+        };
+        let outcome = |r: Rewrite| r.message_outcome().unwrap();
+        let still = Some("the rewritten message still names `old_name`");
+        assert_eq!(outcome(fix("rewrite", None, None)), "being rewritten");
+        assert_eq!(
+            outcome(fix("rewrite", Some("word0001"), None)),
+            "rewritten, fold000 → word000"
+        );
+        assert_eq!(
+            outcome(fix("accept", Some("word0001"), still)),
+            "rewritten, fold000 → word000, but the rewritten message still names `old_name`; kept as rewritten"
+        );
+        assert_eq!(
+            outcome(fix("accept", None, Some("no file"))),
+            "rewrite failed: no file; kept as written"
+        );
+        assert_eq!(outcome(fix("accept", None, None)), "kept as written");
     }
 
     #[test]

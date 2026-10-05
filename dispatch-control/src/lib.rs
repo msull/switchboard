@@ -383,6 +383,23 @@ pub struct RewriteView {
     pub to: u32,
     /// Why history was left as it was.
     pub skipped: Option<String>,
+    /// The names folded messages carried that neither their commit nor
+    /// the tree has.
+    pub stale: Vec<String>,
+    /// What became of those messages: "being rewritten" while the
+    /// rewriter runs, "rewritten, a → b", "rewritten, a → b, but …" when
+    /// the reworded message still names something (with "; kept as
+    /// rewritten" once accepted), "kept as written", or why a rewrite
+    /// failed; absent while it is first asked.
+    pub message: Option<String>,
+    /// The head carrying the reworded messages, once the branch moved
+    /// there.
+    pub message_head: Option<String>,
+    /// Whether the last rewrite failed or left a message that still names
+    /// something; `message` says how.
+    pub message_failed: bool,
+    /// The session of the agent rewording them, once it started.
+    pub message_session: Option<String>,
 }
 
 /// One round of a code review: what every reviewer read, what each
@@ -661,6 +678,11 @@ mod tests {
                 from: 4,
                 to: 2,
                 skipped: None,
+                stale: vec!["old_name".into()],
+                message: Some("kept as written".into()),
+                message_head: None,
+                message_failed: false,
+                message_session: None,
             }),
             ..a
         };

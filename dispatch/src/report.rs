@@ -510,6 +510,8 @@ mod tests {
             from: 2,
             to: 1,
             skipped: None,
+            stale: Vec::new(),
+            message: None,
             at_ms: 20_000,
         });
         let mut merge = attempt("merge", 1, AttemptKind::GateOnly, 20_000, 30_000);

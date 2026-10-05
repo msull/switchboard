@@ -4715,6 +4715,108 @@ fn ticket_page_shows_how_a_review_rewrote_its_commits() {
     harness.get_by_label("commits folded 4 → 2: aaaaaaaa → bbbbbbbb");
 }
 
+/// A fold whose message named what the review removed says what became
+/// of it: asked, being rewritten with the rewriter's session a click
+/// away, kept as written, or rewritten.
+#[test]
+fn ticket_page_shows_what_became_of_a_stale_folded_message() {
+    use switchboard::ports::dispatch::{AttemptView, RewriteView};
+    let (mut harness, ids) = harness();
+    let mut status = dispatch_status();
+    let attempt = |n: u32, state: &str, message: RewriteView| AttemptView {
+        stage: "review-code".into(),
+        n,
+        context: "repo".into(),
+        kind: "review".into(),
+        state: state.into(),
+        rewrite: Some(RewriteView {
+            mode: "fold".into(),
+            before: "aaaaaaaa1111".into(),
+            after: Some("bbbbbbbb2222".into()),
+            from: 4,
+            to: 2,
+            stale: vec!["old_name".into()],
+            ..message
+        }),
+        ..AttemptView::default()
+    };
+    status.tickets[0].attempts = vec![
+        attempt(1, "running", RewriteView::default()),
+        attempt(
+            2,
+            "running",
+            RewriteView {
+                message: Some("being rewritten".into()),
+                message_session: Some(ids.server.0.to_string()),
+                ..RewriteView::default()
+            },
+        ),
+        attempt(
+            3,
+            "complete",
+            RewriteView {
+                message: Some("kept as written".into()),
+                ..RewriteView::default()
+            },
+        ),
+        attempt(
+            4,
+            "complete",
+            RewriteView {
+                message: Some("rewritten, bbbbbbb → ccccccc".into()),
+                message_head: Some("cccccccc3333".into()),
+                ..RewriteView::default()
+            },
+        ),
+        attempt(
+            5,
+            "running",
+            RewriteView {
+                message: Some("rewritten, bbbbbbb → ddddddd, but it still names `x`".into()),
+                message_head: Some("dddddddd4444".into()),
+                message_failed: true,
+                ..RewriteView::default()
+            },
+        ),
+        attempt(
+            6,
+            "complete",
+            RewriteView {
+                message: Some(
+                    "rewritten, bbbbbbb → eeeeeee, but it still names `x`; kept as rewritten"
+                        .into(),
+                ),
+                message_head: Some("eeeeeeee5555".into()),
+                message_failed: true,
+                ..RewriteView::default()
+            },
+        ),
+    ];
+    harness
+        .state_mut()
+        .dispatch(AppAction::DispatchStatus(Some(status)));
+    harness
+        .state_mut()
+        .dispatch(AppAction::ShowTicket("t1".into()));
+    harness.state_mut().dispatched.clear();
+    harness.run_steps(2);
+    for outcome in [
+        "message names `old_name` (asked)",
+        "message names `old_name` (being rewritten)",
+        "message names `old_name` (kept as written)",
+        "message rewritten → cccccccc",
+        "message names `old_name` (rewritten, bbbbbbb → ddddddd, but it still names `x`)",
+        "message names `old_name` \
+         (rewritten, bbbbbbb → eeeeeee, but it still names `x`; kept as rewritten)",
+    ] {
+        harness.get_by_label(&format!(
+            "commits folded 4 → 2: aaaaaaaa → bbbbbbbb · {outcome}"
+        ));
+    }
+    click(&mut harness, "Rewriter");
+    assert!(actions(&harness).contains(&AppAction::ShowSession(ids.server)));
+}
+
 /// A review whose fold failed and that the user answered `keep` says
 /// why its commits were left as they were.
 #[test]
@@ -4735,6 +4837,7 @@ fn ticket_page_shows_commits_kept_by_hand() {
             from: 4,
             to: 2,
             skipped: Some("the user kept them after the rewrite failed".into()),
+            ..RewriteView::default()
         }),
         ..AttemptView::default()
     }];

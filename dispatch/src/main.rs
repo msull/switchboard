@@ -661,7 +661,12 @@ fn print_attempts(view: &dispatch_control::TicketView) -> Result<()> {
             .as_ref()
             .map_or(String::new(), |c| format!(" gate-head {}", short(&c.head)));
         let rewrite = a.rewrite.as_ref().map_or(String::new(), |r| {
-            format!(" rewrite {} {}→{}", r.mode, r.from, r.to)
+            let message = if r.stale.is_empty() {
+                String::new()
+            } else {
+                format!(" message {}", r.message.as_deref().unwrap_or("asked"))
+            };
+            format!(" rewrite {} {}→{}{message}", r.mode, r.from, r.to)
         });
         say!(
             "  #{} {} {state} head {}{gate}{rewrite}{}",
