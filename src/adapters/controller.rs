@@ -27,7 +27,7 @@ pub struct SerialController {
 
 impl SerialController {
     /// Starts the port thread. `port` names the device
-    /// (`SWITCHBOARD_CONTROLLER`), else the first `usbmodem` port is
+    /// (`SWITCHBOARD_CONTROLLER`), else the Feather's `usbmodem` port is
     /// used, so the thread also waits for one to be plugged in. `wake`
     /// runs on the thread after each event, for a repaint request.
     #[must_use]
@@ -53,39 +53,32 @@ impl Controller for SerialController {
     }
 }
 
-/// Adafruit's USB vendor id: the Feather, and other `CircuitPython`
-/// boards that may be plugged in beside it.
-const ADAFRUIT: u16 = 0x239a;
-
-/// The port to open: a Feather by its USB product name, else any
-/// Adafruit board, else the first `usbmodem` port. Another board on
-/// the same machine (a Trinkey, say) must not win by sorting first.
+/// The port to open: the Feather, found by its USB product name, and
+/// nothing else. An unrelated board on a `usbmodem` port (a Trinkey,
+/// say) must never be opened as a fallback: opening a CDC port whose
+/// firmware never answers blocks inside the kernel, uninterruptibly,
+/// and a thread stuck there pins the whole process at exit, immune to
+/// force quit. Any other device is opted into with
+/// `SWITCHBOARD_CONTROLLER`.
 fn find_port() -> Option<String> {
     let ports = serialport::available_ports().unwrap_or_default();
-    let mut ranked: Vec<(u8, String)> = ports
+    let mut names: Vec<String> = ports
         .into_iter()
         .filter(|p| p.port_name.contains("usbmodem"))
-        .map(|p| {
-            let rank = match &p.port_type {
-                serialport::SerialPortType::UsbPort(usb) => {
-                    let product = usb.product.as_deref().unwrap_or_default();
-                    if product.contains("Feather") {
-                        0
-                    } else if usb.vid == ADAFRUIT {
-                        1
-                    } else {
-                        2
-                    }
-                }
-                _ => 3,
-            };
-            // macOS lists each device twice; the callout one is for us.
-            (rank, p.port_name.replace("/dev/tty.", "/dev/cu."))
+        .filter(|p| match &p.port_type {
+            serialport::SerialPortType::UsbPort(usb) => usb
+                .product
+                .as_deref()
+                .unwrap_or_default()
+                .contains("Feather"),
+            _ => false,
         })
+        // macOS lists each device twice; the callout one is for us.
+        .map(|p| p.port_name.replace("/dev/tty.", "/dev/cu."))
         .collect();
-    ranked.sort();
-    ranked.dedup();
-    ranked.into_iter().next().map(|(_, name)| name)
+    names.sort();
+    names.dedup();
+    names.into_iter().next()
 }
 
 fn run(

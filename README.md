@@ -202,7 +202,9 @@ Dev aids, all environment variables:
   `move-project`, `move-working-set`, `controller`,
   `open-terminal`, `prompt-box`, `theme`, `sleep`).
 - `SWITCHBOARD_CONTROLLER=<device>`: the nunchuk's serial port (default: the
-  first `/dev/cu.usbmodem*`, waited for if absent).
+  `/dev/cu.usbmodem*` whose USB product name says Feather, waited for if
+  absent; no other board is ever opened, since a port that never answers
+  blocks the process in the kernel at exit).
 - `SWITCHBOARD_TMUX=<path>`: tmux binary to use.
 - `RUST_LOG=switchboard=debug`: verbose logging.
 
