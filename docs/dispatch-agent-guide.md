@@ -330,9 +330,13 @@ minutes by default and ten at most, so a watcher passes its tool the
 longer timeout and keeps `--timeout` under it: `dispatch events
 --project <name> --since <seq> --follow --timeout 540`, noting the last
 seq it printed and starting again from it, one call at a time. While
-driving one ticket, `dispatch wait <ticket> --for any --timeout 540` is
-the better call: it returns on that ticket's next decision, stage
-change, pull request or close.
+driving one ticket, `dispatch wait <ticket> --for any --since <seq>
+--timeout 540` is the better call: it returns on that ticket's next
+decision, stage change, pull request or close after `<seq>`. Arm the
+first watch from the `follow from seq` that `brief` printed. After a
+return, arm the next from the seq at the start of the line it printed;
+after `timed out`, from the same seq again. A decision raised between
+two watches is then returned, and one left pending does not come back.
 
 **Brief.** `dispatch brief <project>` is what a supervisor reads
 first: its own session's line, the project's open tickets with stage
