@@ -13,9 +13,13 @@ use crate::core::{
     AgentKind, ProjectId, RECORD_ID_ENV, RecordId, ResumeHandle, Settings, Views, Workspace,
 };
 use crate::ports::agent::{AgentLaunch, AgentLauncher};
+use crate::ports::changes::{BranchChanges, Changes};
 use crate::ports::control::{OpLine, Operations};
 use crate::ports::controller::{Controller, ControllerEvent};
-use crate::ports::dispatch::{Body as DispatchBody, DispatchPort, Reply as DispatchReply, Status};
+use crate::ports::dispatch::{
+    Body as DispatchBody, DispatchPort, EventView, EventsView, PathsView, Reply as DispatchReply,
+    Status,
+};
 use crate::ports::events::{EventSource, SessionEvent};
 use crate::ports::host::{HostId, HostInfo, HostStatus, ProcessHost, SpawnSpec};
 use crate::ports::opener::Opener;
@@ -38,6 +42,7 @@ pub fn services() -> Services {
         secrets: Box::new(FakeSecrets::default()),
         project_config: Box::new(FakeProjectConfig),
         round_files: Box::new(FakeRoundFiles),
+        changes: Arc::new(FakeChanges::default()),
         artifacts: Box::new(FakeArtifacts),
         controller: Box::new(FakeController),
         operations: Box::new(FakeOperations::default()),
@@ -151,6 +156,18 @@ impl EventSource for FakeEvents {
     fn checkpoint(&mut self) {}
 }
 
+/// A branch's changes as a test sets them, whatever is asked.
+#[derive(Debug, Default, Clone)]
+pub struct FakeChanges {
+    pub changes: Changes,
+}
+
+impl BranchChanges for FakeChanges {
+    fn read(&self, _dir: &Path, _base: &str, _head: &str) -> Result<Changes, String> {
+        Ok(self.changes.clone())
+    }
+}
+
 /// Dispatch as a test sets it: a status to answer with (none means no
 /// runner).
 #[derive(Debug, Default, Clone)]
@@ -158,6 +175,10 @@ pub struct FakeDispatch {
     pub status: Option<Status>,
     /// Answer from the app's port thread, as the real socket does.
     pub blocks: bool,
+    /// The log `events` reads, every ticket's.
+    pub events: Vec<EventView>,
+    /// The paths a single-ticket reply carries.
+    pub paths: PathsView,
 }
 
 impl DispatchPort for FakeDispatch {
@@ -183,8 +204,30 @@ impl DispatchPort for FakeDispatch {
                 .cloned()
                 .map_or_else(
                     || DispatchReply::failed("no such ticket"),
-                    DispatchReply::Ticket,
+                    |mut t| {
+                        t.paths = self.paths.clone();
+                        for l in &mut t.lanes {
+                            l.clone = Some(l.worktree.clone());
+                        }
+                        DispatchReply::Ticket(t)
+                    },
                 ),
+            // The fake's events carry no ticket of their own: each is
+            // every ticket's.
+            DispatchBody::Events { since, .. } => {
+                let events: Vec<EventView> = self
+                    .events
+                    .iter()
+                    .filter(|e| e.seq > *since)
+                    .cloned()
+                    .collect();
+                let last = events.iter().map(|e| e.seq).max().unwrap_or(*since);
+                DispatchReply::Events(EventsView {
+                    events,
+                    last,
+                    withdrawn: Vec::new(),
+                })
+            }
             DispatchBody::Artifact { .. } => DispatchReply::failed("no such file"),
             DispatchBody::Decide {
                 ticket, decision, ..

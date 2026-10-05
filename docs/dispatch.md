@@ -2001,8 +2001,11 @@ they are rather than through the sessions they made. While `dispatch
 run` is up it serves `<data>/dispatch.sock` (wire crate
 `dispatch-control`): `status` answers every project's queue and every
 ticket as a view (stage names resolved, attempts, decisions, lanes,
-artifact paths), `ticket` one in full, `artifact` the text of a file
-under a ticket's directory and nothing outside it, and `decide`,
+artifact paths), `ticket` one in full (with its plan review's round
+files and each lane's clone), `artifact` the text of a file under a
+ticket's directory and nothing outside it, `events` a ticket's lines
+of the event log after a cursor (with the next cursor and the seqs a
+`void` withdrew), and `decide`,
 `queue`, `take`, `resume`, `close` and `worktrees` do exactly what the command
 line does, through the same runner methods under the same writer lock. Switchboard's Dispatch
 page is a client of this port and knows nothing of the records; a

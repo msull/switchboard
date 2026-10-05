@@ -30,6 +30,7 @@ mod session;
 mod switchboard;
 mod switcher;
 pub mod theme;
+pub mod ticket;
 pub mod workflow;
 pub mod working_set;
 pub mod zoom;
@@ -107,6 +108,11 @@ pub struct UiState {
     pub dispatch_note_drafts: std::collections::HashMap<String, String>,
     /// The artifact the ticket page is showing.
     pub dispatch_artifact: Option<PathBuf>,
+    /// The tab each ticket's page shows; the timeline when none.
+    pub dispatch_ticket_tabs: HashMap<String, ticket::TicketTab>,
+    /// Each ticket lane's branch changes, read on a thread, by ticket
+    /// and lane.
+    pub ticket_changes: HashMap<(String, String), ticket::ChangesScan>,
     /// The Dispatch project the page is narrowed to; every one when none.
     pub dispatch_project: Option<String>,
     /// How the ticket table is narrowed and ordered.
@@ -278,6 +284,8 @@ impl Default for UiState {
             dispatch_settings: None,
             dispatch_note_drafts: std::collections::HashMap::new(),
             dispatch_artifact: None,
+            dispatch_ticket_tabs: HashMap::new(),
+            ticket_changes: HashMap::new(),
             dispatch_project: None,
             dispatch_listing: crate::core::TicketListing::default(),
             dispatch_waiting_fold_set: false,
@@ -394,7 +402,7 @@ fn draw_frame(cx: &mut DrawCtx<'_>, ui: &mut Ui) {
     zoom::main_window(cx, ui.ctx());
     let view = cx.core.view();
     working_set::serve_requests(cx, ui.ctx());
-    dispatch::drop_stale_close_dialog(cx);
+    ticket::drop_stale_close_dialog(cx);
     keyboard(cx, ui, &view);
     if let Some(delay) = prompt_box::pump(cx) {
         ui.ctx().request_repaint_after(delay);
@@ -459,7 +467,7 @@ fn draw_frame(cx: &mut DrawCtx<'_>, ui: &mut Ui) {
                     dispatch::elsewhere(cx, ui);
                 }
                 View::Dispatch => dispatch::show(cx, ui),
-                View::Ticket(id) => dispatch::ticket(cx, ui, &id),
+                View::Ticket(id) => ticket::ticket(cx, ui, &id),
             }
         });
 

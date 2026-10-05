@@ -16,11 +16,12 @@ use std::thread::JoinHandle;
 
 use anyhow::{Context, Result, bail};
 use dispatch_control::{
-    AttemptView, Body, DecisionView, LaneView, PathsView, ProjectView, Reply, Request, SOCKET_FILE,
-    Status, TicketView,
+    AttemptView, Body, DecisionView, EventView, EventsView, LaneView, PathsView, PlanRoundView,
+    ProjectView, Reply, Request, SOCKET_FILE, Status, TicketView,
 };
 
 use crate::epoch_ms;
+use crate::events;
 use crate::github::Issues;
 use crate::pipeline::{Pipeline, Source};
 use crate::scheduler::Runner;
@@ -56,11 +57,24 @@ impl Handler {
             Body::Status => Reply::Status(status(&self.runner)?),
             Body::Ticket { id } => {
                 let t = self.runner.load_ticket(id)?;
-                Reply::Ticket(TicketView {
+                let mut view = TicketView {
                     paths: ticket_paths(&t),
                     ..self.view(&t)
-                })
+                };
+                if let Ok(p) = self.runner.pipeline_of(&t) {
+                    for l in &mut view.lanes {
+                        if let Some(lane) = p.lanes.iter().find(|x| x.name == l.name) {
+                            l.clone = Some(self.runner.lane_clone(&p, lane));
+                        }
+                    }
+                }
+                Reply::Ticket(view)
             }
+            Body::Events { ticket, since } => Reply::Events(ticket_events(
+                &events::log_path(&self.runner.data),
+                ticket,
+                *since,
+            )?),
             Body::Artifact { ticket, path } => {
                 let dir = self.runner.data.ticket_dir(ticket);
                 let (dir, file) = (
@@ -388,12 +402,51 @@ pub fn attempt_state(state: &AttemptState) -> (&'static str, Option<String>) {
     }
 }
 
-/// The last plan review round file beside `subject` that exists.
-fn last_round_file(subject: &Path) -> Option<PathBuf> {
+/// `ticket`'s events after `since`, with the seqs its voids in the same
+/// batch withdraw. No writer lock: `read_since` skips a torn tail.
+fn ticket_events(log: &Path, ticket: &str, since: u64) -> Result<EventsView> {
+    let batch = events::read_since(log, since)?;
+    let last = batch.iter().map(|e| e.seq).max().unwrap_or(since);
+    let mine: Vec<&events::Event> = batch.iter().filter(|e| e.ticket == ticket).collect();
+    let withdrawn: Vec<u64> = mine
+        .iter()
+        .filter(|e| e.kind == events::Kind::Void)
+        .flat_map(|e| e.voids.iter().copied())
+        .collect();
+    let events = mine
+        .into_iter()
+        .filter(|e| e.kind != events::Kind::Void && !withdrawn.contains(&e.seq))
+        .map(|e| EventView {
+            seq: e.seq,
+            at_ms: e.at_ms,
+            stage: e.stage.clone(),
+            kind: e.kind.as_str().to_owned(),
+            text: e.text.clone(),
+            attempt: e.attempt.clone(),
+            decision: e.decision.clone(),
+            head: e.head.clone(),
+            url: e.url.clone(),
+        })
+        .collect();
+    Ok(EventsView {
+        events,
+        last,
+        withdrawn,
+    })
+}
+
+/// Every plan review round beside `subject` whose feedback exists, with
+/// its response when that exists too.
+fn plan_rounds(subject: &Path) -> Vec<PlanRoundView> {
     (1..=u32::MAX)
-        .map(|n| crate::report::round_file(subject, n))
-        .take_while(|f| f.exists())
-        .last()
+        .map(|n| (n, crate::report::round_file(subject, n)))
+        .take_while(|(_, f)| f.exists())
+        .map(|(n, feedback)| PlanRoundView {
+            n,
+            feedback,
+            response: Some(crate::report::response_file(subject, n)).filter(|r| r.exists()),
+        })
+        .collect()
 }
 
 /// Where a ticket's documents are, for `show` and the port's
@@ -406,14 +459,14 @@ pub fn ticket_paths(t: &Ticket) -> PathsView {
         .rev()
         .flat_map(|a| a.rounds.iter().rev())
         .find_map(|r| r.feedback.clone());
-    let round_file = last_round.or_else(|| {
-        t.attempts
-            .iter()
-            .rev()
-            .filter(|a| a.kind == AttemptKind::Workflow)
-            .find_map(|a| a.artifacts.values().next())
-            .and_then(|subject| last_round_file(subject))
-    });
+    let subject = t
+        .attempts
+        .iter()
+        .rev()
+        .filter(|a| a.kind == AttemptKind::Workflow)
+        .find_map(|a| a.artifacts.values().next());
+    let plan_rounds = subject.map_or_else(Vec::new, |s| plan_rounds(s));
+    let round_file = last_round.or_else(|| plan_rounds.last().map(|r| r.feedback.clone()));
     let pr = t.attempts.iter().rev().find_map(|a| a.pr.as_ref());
     PathsView {
         plan: t.input("plan").cloned(),
@@ -426,6 +479,7 @@ pub fn ticket_paths(t: &Ticket) -> PathsView {
         notes: t.input("notes").cloned(),
         pr_url: pr.map(|pr| pr.url.clone()),
         pr_head: pr.map(|pr| pr.head.clone()),
+        plan_rounds,
     }
 }
 
@@ -466,6 +520,7 @@ fn lane_view(t: &Ticket, l: &crate::ticket::LaneRecord) -> LaneView {
             .as_ref()
             .map(|r| crate::scheduler::brought_up_by(t, &l.name, r)),
         brought_up_commits: l.refreshed.as_ref().is_some_and(|r| r.commits),
+        clone: None,
     }
 }
 
@@ -608,6 +663,10 @@ fn decision_view(t: &Ticket, d: &Decision) -> DecisionView {
         ),
         DecisionState::Cancelled => ("cancelled", None, None),
     };
+    let (answered_by, answered_ms) = match &d.state {
+        DecisionState::Answered { by, at_ms, .. } => (Some(by.clone()), Some(*at_ms)),
+        _ => (None, None),
+    };
     DecisionView {
         id: d.id.clone(),
         ticket: t.id.clone(),
@@ -621,6 +680,8 @@ fn decision_view(t: &Ticket, d: &Decision) -> DecisionView {
         answer,
         note,
         made_ms: d.made_ms,
+        answered_by,
+        answered_ms,
     }
 }
 
@@ -913,6 +974,176 @@ slots = 1
         assert!(
             matches!(&again, Reply::Failed { reason } if reason.contains("already closed")),
             "{again:?}"
+        );
+    }
+
+    fn take(h: &mut Handler) -> TicketView {
+        let reply = h.handle(
+            &Request::new(
+                "t",
+                Body::Take {
+                    project: "P".into(),
+                    issue: "7".into(),
+                },
+            ),
+            1_000,
+        );
+        let Reply::Taken(t) = reply else {
+            panic!("{reply:?}")
+        };
+        t
+    }
+
+    fn event(seq: u64, ticket: &str, kind: events::Kind, text: &str) -> events::Event {
+        events::Event {
+            v: events::EVENT_VERSION,
+            seq,
+            at_ms: seq * 1_000,
+            ticket: ticket.into(),
+            project: "P".into(),
+            stage: "investigate".into(),
+            kind,
+            text: text.into(),
+            attempt: Some(("investigate".into(), 1)),
+            decision: None,
+            head: None,
+            url: None,
+            voids: Vec::new(),
+            by: None,
+            conflicts: None,
+        }
+    }
+
+    #[test]
+    fn the_port_reads_a_tickets_events_after_a_cursor_without_the_withdrawn() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut h = handler(dir.path());
+        let log = events::log_path(&h.runner.data);
+        let mut batch = [
+            event(0, "t1", events::Kind::AttemptStarted, "started"),
+            event(0, "t2", events::Kind::AttemptStarted, "other ticket"),
+            event(0, "t1", events::Kind::AttemptEnded, "ended"),
+        ];
+        events::append(&log, &mut batch).unwrap();
+        events::append_void(&log, &batch[2], vec![batch[2].seq], "disk full").unwrap();
+        let ask = |h: &mut Handler, since: u64| {
+            let body = Body::Events {
+                ticket: "t1".into(),
+                since,
+            };
+            match h.handle(&Request::new("e", body), 9_000) {
+                Reply::Events(v) => v,
+                other => panic!("{other:?}"),
+            }
+        };
+        let v = ask(&mut h, 0);
+        assert_eq!(
+            v.events
+                .iter()
+                .map(|e| (e.seq, e.kind.as_str(), e.text.as_str()))
+                .collect::<Vec<_>>(),
+            vec![(1, "attempt-started", "started")]
+        );
+        assert_eq!(v.events[0].attempt, Some(("investigate".into(), 1)));
+        assert_eq!((v.last, v.withdrawn), (4, vec![3]));
+        let again = ask(&mut h, v.last);
+        assert!(again.events.is_empty() && again.withdrawn.is_empty());
+        assert_eq!(again.last, 4);
+    }
+
+    #[test]
+    fn a_single_ticket_names_its_plan_rounds_and_its_lanes_clone() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut h = handler(dir.path());
+        let view = take(&mut h);
+        let tdir = h.runner.data.ticket_dir(&view.id);
+        fs::create_dir_all(&tdir).unwrap();
+        let plan = tdir.join("plan.md");
+        for f in [
+            "plan.md",
+            "plan.feedback-1.md",
+            "plan.response-1.md",
+            "plan.feedback-2.md",
+        ] {
+            fs::write(tdir.join(f), "x").unwrap();
+        }
+        let mut t = h.runner.load_ticket(&view.id).unwrap();
+        t.attempts.push(crate::scheduler::new_attempt(
+            "review-plan",
+            1,
+            "root",
+            AttemptKind::Workflow,
+            AttemptState::Complete,
+            [("plan".to_owned(), plan)].into(),
+            1_100,
+        ));
+        t.lanes.push(crate::ticket::LaneRecord {
+            name: "repo".into(),
+            worktree: dir.path().join("wt"),
+            branch: "dispatch/7-seven".into(),
+            project: None,
+            chosen: true,
+            setup_done: true,
+            base_sha: Some("base0000".into()),
+            refreshed: None,
+            pushed: None,
+            conflict: None,
+            removed: true,
+        });
+        t.decisions.push(Decision {
+            id: "d1".into(),
+            stage: "investigate".into(),
+            name: "finalize".into(),
+            kind: crate::ticket::DecisionKind::Permission,
+            question: "Finalize it?".into(),
+            options: vec!["finalize".into()],
+            recommendation: None,
+            attempt: None,
+            state: DecisionState::Answered {
+                answer: "finalize".into(),
+                note: None,
+                by: "user".into(),
+                at_ms: 1_234,
+                acted: false,
+            },
+            made_ms: 1_200,
+        });
+        h.runner.save_ticket(&mut t, 1_500).unwrap();
+        let reply = h.handle(&Request::new("1", Body::Ticket { id: view.id }), 2_000);
+        let Reply::Ticket(t) = reply else {
+            panic!("{reply:?}")
+        };
+        let rounds: Vec<_> = t
+            .paths
+            .plan_rounds
+            .iter()
+            .map(|r| (r.n, r.feedback.clone(), r.response.clone()))
+            .collect();
+        assert_eq!(
+            rounds,
+            vec![
+                (
+                    1,
+                    tdir.join("plan.feedback-1.md"),
+                    Some(tdir.join("plan.response-1.md"))
+                ),
+                (2, tdir.join("plan.feedback-2.md"), None),
+            ]
+        );
+        assert_eq!(t.lanes[0].clone, Some(h.runner.data.repo_dir("P")));
+        assert_eq!(
+            (
+                t.decisions[0].answered_by.as_deref(),
+                t.decisions[0].answered_ms
+            ),
+            (Some("user"), Some(1_234))
+        );
+        let Reply::Status(status) = h.handle(&Request::new("2", Body::Status), 3_000) else {
+            panic!("a status")
+        };
+        assert_eq!(
+            status.tickets[0].lanes[0].clone, None,
+            "a status reads no pipeline paths"
         );
     }
 

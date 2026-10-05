@@ -106,6 +106,7 @@ const REVIEW_LINES: &[&str] = &[
     "show-dispatch",
     "show-ticket",
     "close-ticket",
+    "ticket-tab",
     "pop-out",
     "close-pop-out",
     "files-root",
@@ -253,6 +254,7 @@ fn review_step(app: &mut SwitchboardApp, w: &[&str]) -> Result<(), String> {
         ["show-dispatch"] => app.dispatch(AppAction::ShowDispatch),
         ["show-ticket", id] => app.dispatch(AppAction::ShowTicket((*id).to_owned())),
         ["close-ticket", id] => close_ticket(app, id)?,
+        ["ticket-tab", id, tab] => ticket_tab(app, id, tab)?,
         ["review-continue"] => {
             let id = newest_review(app)?;
             app.dispatch(AppAction::ContinueWorkflow(id));
@@ -304,6 +306,24 @@ fn close_ticket(app: &mut SwitchboardApp, id: &str) -> Result<(), String> {
         return Err(format!("ticket {id} is not offered a close"));
     }
     app.ui_state.confirm_close_ticket = Some(id.to_owned());
+    Ok(())
+}
+
+/// The ticket's page on one of its tabs. Like `close-ticket`, the
+/// status is fetched first, since the script runs before any frame has
+/// asked Dispatch for it.
+fn ticket_tab(app: &mut SwitchboardApp, id: &str, tab: &str) -> Result<(), String> {
+    let tab = crate::ui::ticket::TicketTab::parse(tab)
+        .ok_or("ticket-tab <id> timeline|issue|plan|notes|review|changes")?;
+    if !app.await_dispatch_status(std::time::Duration::from_secs(10)) {
+        return Err("no status from Dispatch".into());
+    }
+    if app.core().settings().dispatch_window.is_some() {
+        app.ui_state.dispatch_window_ticket = Some(id.to_owned());
+    } else {
+        app.dispatch(AppAction::ShowTicket(id.to_owned()));
+    }
+    app.ui_state.dispatch_ticket_tabs.insert(id.to_owned(), tab);
     Ok(())
 }
 

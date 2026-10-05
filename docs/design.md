@@ -1481,7 +1481,8 @@ every two seconds enters the core as `DispatchStatus` (tickets,
 decisions and attempts as views, never Dispatch's records), the Dispatch
 page lists what waits on the user with each option as a button and one
 `DispatchDecide` is one call whose reply is one more action, a ticket
-page reads a stage's artifacts through the port, a session Dispatch
+page reads a stage's artifacts, the ticket's events and the ticket in
+full through the port (see "Dispatch ticket page"), a session Dispatch
 made links to its ticket, the rail's Dispatch row and the Dock badge
 count pending decisions, and the console is a shell session of the
 app's own in a `Dispatch` space and project rooted at Dispatch's data
@@ -1922,6 +1923,74 @@ measurements.
 
 Known gap: the sleep and wake cycle and the Dock badge while hidden
 were not measured; spike 12 lists the steps.
+
+## Dispatch ticket page (2026-10-04)
+
+A ticket's page is a header (title, actions, the meta row with the
+lanes and the latest attempt's pull request as chips), the ticket's
+pending decisions pinned under it on every tab, and a strip of tabs.
+The chosen tab per ticket is `UiState.dispatch_ticket_tabs`, transient;
+a tab click dispatches nothing.
+
+- **Timeline**: `AppCore::ticket_timeline` groups rows newest first,
+  a new group each time the stage changes. The rows are the runner's
+  event log for the ticket, after the record's rows from before its
+  first event less those the log has too, since a ticket in progress
+  when the log began has its earlier history only on the record. The
+  core marks the row each attempt's details (state, checks, PR,
+  rewrite, rounds, session and artifact buttons, the chosen artifact
+  as markdown) go under (`TimelineRow.details`): its end row, or its
+  start row while it runs; attempts no row carries are listed last
+  (`Timeline.earlier`). A decision row
+  shows the decision's full question and answer, not the log's capped
+  line.
+- **Issue**: the title linked out, labels, the body as markdown.
+- **Plan**: the latest plan, then the plan review's rounds folded,
+  each read when opened.
+- **Notes**: every attempt's `notes` artifact, newest first, the
+  newest open and the rest folded.
+- **Review**: each code review attempt's rounds, their findings and
+  responses folded, its summary, and what it did to the commits.
+- **Changes**: per lane, the branch's commits over its base and the
+  files it changes with their line counts, read through the
+  `BranchChanges` port (`git log base..head`, `git diff --numstat
+  base...head`) on a thread when the ticket's `updated_ms` or the
+  lane's range moves. The base and head are the status's lane, current
+  every poll; the full ticket only adds the clone. The tree is the lane's worktree, or Dispatch's clone of the lane
+  (`LaneView.clone`) once the worktree is removed. Open and Reveal are
+  offered while the worktree stands.
+
+Reads. The events read is `Body::Events { ticket, since }`; the runner
+answers with the ticket's events after `since` from `events.jsonl`, the
+highest seq it read as the next cursor, and the seqs this ticket's
+`void` lines in the batch withdraw. The core caches them on
+`DispatchState.events` with the cursor, and the ticket in full
+(`Body::Ticket`, which alone carries `paths`, the plan review's round
+files and each lane's clone) on `DispatchState.details`; both are
+transient and fill on the page's first draw. The page asks only when
+`AppCore::events_read_due` and `ticket_read_due` say so: connected, not in flight, and
+not yet asked at the ticket's `updated_ms` from the status poll, so an
+idle ticket costs nothing. A runner from before the events read
+answers it `Failed`; the page then builds the timeline from the record
+(attempts started and ended, decisions made and answered, restarts)
+without a notice, and asks again when a runner reconnects. The single
+ticket view is kept while the runner is away, so the plan and changes
+still read. An artifact is read the same way (`artifact_read_due`,
+`DispatchState.artifact_reads`): a failed read is said under its name
+("Not written yet." for a missing file, since an agent writes its notes
+after the runner hands out the path) without a notice, and asked again
+once the ticket's `updated_ms` moves or its button is clicked. Times
+read "3 min ago" with the local time on hover
+(`cards::ago_ms`), the ticket table's too.
+
+Known gaps:
+
+- `DispatchReadArtifact` reads a path once, so a plan or notes file
+  rewritten on an active ticket stays stale until the app restarts.
+- `read_since` reads the whole event log on every events read; the
+  log is never rotated.
+- The Changes tab reads trees on this machine, so it cannot show a
+  runner's on another machine.
 
 ## Open questions
 

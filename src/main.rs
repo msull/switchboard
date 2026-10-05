@@ -6,7 +6,9 @@ use switchboard::SwitchboardApp;
 use switchboard::adapters::agents::Agents;
 use switchboard::adapters::control::OperationsLog;
 use switchboard::adapters::controller::SerialController;
+use switchboard::adapters::dispatch::DispatchSocket;
 use switchboard::adapters::ghostty::MacOpener;
+use switchboard::adapters::git::GitChanges;
 use switchboard::adapters::hooks::{HookLog, WakeSocket, write_hook_settings};
 use switchboard::adapters::project_config::FileConfigReader;
 use switchboard::adapters::store::JsonStore;
@@ -167,12 +169,11 @@ fn main() -> eframe::Result {
                 secrets: secret_store(),
                 project_config: Box::new(FileConfigReader::new()),
                 round_files: Box::new(switchboard::adapters::round_files::DiskRoundFiles),
+                changes: std::sync::Arc::new(GitChanges),
                 artifacts: Box::new(switchboard::adapters::artifacts::DiskArtifacts),
                 controller: Box::new(controller),
                 operations: Box::new(operations),
-                dispatch: Some(Box::new(
-                    switchboard::adapters::dispatch::DispatchSocket::detect(),
-                )),
+                dispatch: Some(Box::new(DispatchSocket::detect())),
                 wake,
             };
             let mut app = SwitchboardApp::with_services(services);

@@ -113,11 +113,24 @@ pub struct TicketReport {
 /// there is carried over here.
 #[must_use]
 pub fn round_file(subject: &Path, n: u32) -> PathBuf {
+    beside(subject, "feedback", n)
+}
+
+/// The response to plan review round `n` beside `subject`:
+/// `<stem>.response-<n>.md`, mirrored as `round_file` is.
+#[must_use]
+pub fn response_file(subject: &Path, n: u32) -> PathBuf {
+    beside(subject, "response", n)
+}
+
+/// `<stem>.<suffix>-<n>.md` beside `subject`: one place for the shape
+/// both round names share.
+fn beside(subject: &Path, suffix: &str, n: u32) -> PathBuf {
     let stem = subject
         .file_stem()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_default();
-    subject.with_file_name(format!("{stem}.feedback-{n}.md"))
+    subject.with_file_name(format!("{stem}.{suffix}-{n}.md"))
 }
 
 /// The pull request a report sizes: the last attempt with one, its

@@ -190,7 +190,7 @@ Dev aids, all environment variables:
   `set-hours`, `dismiss-from-set`, `add-to-working-set`,
   `add-file-to-working-set`, `arrange`, `show-message`, `clone-session`,
   `discard-to`, `undo-discard`, `review-plan`, `show-review`,
-  `show-dispatch`, `show-ticket`, `close-ticket`,
+  `show-dispatch`, `show-ticket`, `close-ticket`, `ticket-tab`,
   `review-file`, `review-continue`, `review-finalize`, `show-artifact`,
   `pop-out`, `close-pop-out`, `files-root`, `zoom`, `place-pop-out`,
   `place-card`, `new-workspace`, `workspace`, `workspace-global`,
@@ -226,9 +226,9 @@ src/core/
   events.rs              hook events -> record activity (matched by record id, ordered by time)
   workflow.rs            plan review runs: reviewer and planner rounds as a state machine over records
   control.rs             the control port's commands run quietly under an operation id; read models in the wire's shapes
-  dispatch.rs            Dispatch as the app shows it: the runner's last status as views, decisions answered as calls, the console session
+  dispatch.rs            Dispatch as the app shows it: the runner's last status as views, decisions answered as calls, a ticket's events and full view read once per change and its timeline, the console session
   tests.rs               state-transition tests for the core
-src/ports/               traits: store, host, events, agent, opener, transcript, secrets, project_config, round_files, artifacts, controller, control (the operations log), dispatch (Dispatch's port)
+src/ports/               traits: store, host, events, agent, opener, transcript, secrets, project_config, round_files, artifacts, changes (a branch's commits and files over its base), controller, control (the operations log), dispatch (Dispatch's port)
 src/adapters/
   store.rs               JSON store: atomic writes, .bak, flock
   tmux.rs                tmux process host on the private socket
@@ -238,7 +238,7 @@ src/adapters/
   dock.rs                Dock badge with the waiting-session count (macOS)
   controller.rs          the nunchuk over USB serial: a thread owns the port, reconnects, hands events over a channel
   files.rs               project file index: gitignore-aware scan, lazy children, fuzzy match
-  git.rs                 branches, change counts, per-path status; finds repos one or two dirs down
+  git.rs                 branches, change counts, per-path status; finds repos one or two dirs down; a branch's commits and numstat over its base (`GitChanges`)
   keychain.rs            secrets as generic-password items in the login Keychain (tests use a temp keychain)
   dotenv.rs              .env parser (opt-in per project) and .env.example names
   project_config.rs      reads and validates .switchboard/project.json (capped, no symlinks)
@@ -271,7 +271,8 @@ src/ui/
   env.rs                 Environment dialog: variables, secrets, .env opt-in, masked preview
   config.rs              project config editor: .switchboard/project.json as text, options listed, parse shown
   workflow.rs            plan review: the Review plan dialog, the run's page (rounds, plan with diff, feedback beside response, controls)
-  dispatch.rs            the Dispatch pages: tickets with what waits on you (filtered by project) and the console; one ticket's stages, attempts, decisions and artifacts; Pop out
+  dispatch.rs            the Dispatch page: tickets with what waits on you (filtered by project) and the console; Pop out
+  ticket.rs              one ticket's page: header, pending decisions pinned, tabs for timeline, issue, plan with its review rounds, notes, code review, and branch changes read on a thread
   cards.rs               the one card for every entry kind, the card grid, pinned document cards
   session.rs             session view: header, embedded terminal or conversation + message box
   switchboard.rs         every session across projects, waiting first
@@ -286,7 +287,7 @@ tests/gate.rs            Milestone 1 gate: real store, tmux, hooks; agents ignor
 scripts/test-times.sh    every test's time, serially, through libtest's `--report-time`; the slowest ten, each binary's total, the 5 s budget
 scripts/ci-test.sh       CI's test step: the workspace, then one retry of the failed tests, warning `flaky:` for each that passes on it
 control/                 switchboard-control: the control port's wire contract (requests, replies, views) and a blocking client; std + serde only
-dispatch-control/        dispatch-control: the wire contract of Dispatch's own port (tickets as views, decide, queue, take, resume, close, worktrees), how a bring-up reads, and a blocking client; std + serde only
+dispatch-control/        dispatch-control: the wire contract of Dispatch's own port (tickets as views, a ticket's events after a cursor, decide, queue, take, resume, close, worktrees), how a bring-up reads, and a blocking client; std + serde only
 dispatch/                the `dispatch` binary (docs/dispatch.md; docs/dispatch-agent-guide.md is the command-line guide for agents that take tickets; docs/dispatch-pipeline-improvements.md is the open list of pipeline changes drawn from tickets run so far): a ticket scheduler that drives Switchboard over the control port and never links the app
   src/main.rs            CLI: take, run, decide, decisions, status, queue, park, resume, close, restart, worktrees; for a supervising agent, events, wait, show, report, tail and health (usage errors, and a command the ticket's state never allows, exit 64)
   src/events.rs          the event log `events.jsonl`: what a ticket write changed (`between`, pure), appended and synced before the record's rename, a `void` for a write that failed; a bring-up's `by` and `conflicts` as the scheduler derives them; read, followed, and waited on with each match checked against the record
