@@ -31,12 +31,6 @@ fn viewport_id(id: RecordId) -> ViewportId {
 /// Every session window, after the main window's panels.
 pub fn show_all(cx: &mut DrawCtx<'_>, ctx: &Context) {
     let popouts: Vec<Popout> = cx.core.settings().popouts.clone();
-    // Raise the windows the core asked for, then draw them all.
-    for id in std::mem::take(&mut cx.state.focus_windows) {
-        if popouts.iter().any(|p| p.session == id) {
-            ctx.send_viewport_cmd_to(viewport_id(id), ViewportCommand::Focus);
-        }
-    }
     cx.state
         .popout_opened
         .retain(|id, _| popouts.iter().any(|p| p.session == *id));
@@ -44,6 +38,17 @@ pub fn show_all(cx: &mut DrawCtx<'_>, ctx: &Context) {
         window(cx, ctx, &popout);
     }
     dispatch_window(cx, ctx);
+}
+
+/// Raise the session windows the core asked for. Called from `logic`,
+/// not `ui`, so a raise asked while the main window is hidden still
+/// lands: eframe runs viewport commands without an egui pass.
+pub fn raise(ctx: &Context, popouts: &[Popout], ids: Vec<RecordId>) {
+    for id in ids {
+        if popouts.iter().any(|p| p.session == id) {
+            ctx.send_viewport_cmd_to(viewport_id(id), ViewportCommand::Focus);
+        }
+    }
 }
 
 /// The Dispatch window's viewport.

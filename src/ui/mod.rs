@@ -212,8 +212,8 @@ pub struct UiState {
     /// The terminals drawn this frame; the rest are dropped at the next
     /// frame's start, which detaches their tmux client.
     pub terminals_drawn: HashSet<RecordId>,
-    /// Session windows the core asked to raise; drawn to the front on
-    /// the next frame.
+    /// Session windows the core asked to raise; `logic` brings them to
+    /// the front, even while the main window is hidden.
     pub focus_windows: Vec<RecordId>,
     /// The session whose own window is being drawn right now, so the
     /// page knows it is not in the main window.

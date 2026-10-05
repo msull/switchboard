@@ -63,6 +63,10 @@ The rule since: comments say why.
   `Panel` type, and kittest needs `.focus()` before `type_text`. See
   `CLAUDE.md`. When docs and compiler disagree, read the crate source in
   `~/.cargo/registry`.
+- eframe 0.36 runs `App::logic`, not `App::ui`, while the window is
+  occluded or minimized; anything that must keep ticking belongs in
+  `logic`. The symptom looked like a sleep bug: the control port went
+  silent until the window was uncovered.
 - The crate forbids `unsafe`, and that survived native AppKit calls
   (Dock badge) because `objc2` exposes safe wrappers for the common
   methods. Put such code in a tiny `cfg`-gated adapter.
