@@ -362,7 +362,11 @@ fn ticket_table(cx: &mut DrawCtx<'_>, ui: &mut Ui) {
                         if core.ticket_waits(t) && theme::ghost(ui, "Answer").clicked() {
                             open_ticket(cx, &t.id);
                         }
-                        if parked(t) && theme::secondary(ui, "Resume").clicked() {
+                        if parked(t)
+                            && theme::secondary(ui, "Resume")
+                                .on_hover_text(RESUME_HINT)
+                                .clicked()
+                        {
                             cx.dispatch(AppAction::DispatchResume(t.id.clone()));
                         }
                         if theme::ghost_muted(ui, "Open").clicked() {
@@ -844,12 +848,16 @@ fn ticket_header(cx: &mut DrawCtx<'_>, ui: &mut Ui, t: &TicketView) {
     }
 }
 
+/// What a Resume click spends, on both Resume buttons: it is
+/// `dispatch resume`, which reruns what the park cancelled mid-run.
+const RESUME_HINT: &str = "Back to active; what the park cancelled mid-run runs again (a paid run), and the rest is asked";
+
 /// Resume and Close, in the header's right-to-left row, where the
 /// ticket's state allows them.
 fn ticket_actions(cx: &mut DrawCtx<'_>, ui: &mut Ui, t: &TicketView) {
     if parked(t)
         && theme::secondary(ui, "Resume")
-            .on_hover_text("Back to active; the runner takes it from its current stage")
+            .on_hover_text(RESUME_HINT)
             .clicked()
     {
         cx.dispatch(AppAction::DispatchResume(t.id.clone()));

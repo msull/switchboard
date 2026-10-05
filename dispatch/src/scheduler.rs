@@ -4,7 +4,7 @@
 //! retries on its own: a failure is a decision.
 
 use std::cell::RefCell;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
@@ -12,6 +12,7 @@ use anyhow::{Context as _, Result, anyhow, bail};
 use dispatch_control as wire_dispatch;
 use switchboard_control::{self as wire, Body, Reply, Request, RunState};
 
+use crate::UsageError;
 use crate::bitbucket::{Bitbucket, bitbucket_repo};
 use crate::git::{Adopted, Confine, Network, Push, Repo, branch_name, yyyymmdd};
 use crate::github::{Checks, Gh, PullRequests, github_repo};
@@ -234,6 +235,9 @@ impl Runner {
 pub const BY_HAND: &str = "you";
 /// Who answered a decision Dispatch resolved from a provider.
 pub const BY_DISPATCH: &str = "dispatch";
+/// Who answered the `rerun` a resume authorised for an attempt its park
+/// cancelled mid-run.
+pub const BY_RESUME: &str = "resume";
 
 /// What a decision asks, before it is a record.
 pub struct Ask<'a> {
@@ -862,34 +866,12 @@ impl Runner {
         let Some(shape) = resolution_stage(p) else {
             return Ok(false);
         };
-        let last_review = p
-            .stages
-            .iter()
-            .rposition(|s| s.kind() == StageKind::Review)
-            .unwrap_or_default();
         let mut holds = false;
         for i in 0..t.lanes.len() {
             let lane = t.lanes[i].clone();
-            if !lane.chosen || lane.removed {
-                continue;
-            }
-            let Some(moved) = lane.refreshed.as_ref() else {
+            let Some(moved) = resolution_due(p, &lane) else {
                 continue;
             };
-            // A conflict brought up at or before the last code review is
-            // read there, by round 1's rebase check.
-            if moved
-                .conflict
-                .as_ref()
-                .is_none_or(|c| c.stage <= last_review)
-            {
-                continue;
-            }
-            // A bring-up that pushed has put the resolution on the PR
-            // already.
-            if lane.pushed.as_ref().is_some_and(|p| p.at_ms >= moved.at_ms) {
-                continue;
-            }
             let last = resolution_of(t, &lane.name, moved).cloned();
             let (ctx, cwd) = (lane.name.as_str(), lane.worktree.as_path());
             match last {
@@ -1799,12 +1781,19 @@ impl Runner {
         now_ms: u64,
     ) -> Result<()> {
         log::warn!("ticket {} parking: {reason}", t.id);
+        Self::parking_intent(t, reason);
+        self.save_ticket(t, now_ms)?;
+        self.finish_parking(t, ps, now_ms)
+    }
+
+    /// A park's first write, in memory: `Parking` with every open
+    /// decision withdrawn. Shared by a park the runner decides and one
+    /// asked for by `dispatch park`, so the two leave the same record.
+    fn parking_intent(t: &mut Ticket, reason: &str) {
         t.state = TicketState::Parking {
             reason: reason.into(),
         };
         Self::withdraw_open_decisions(t);
-        self.save_ticket(t, now_ms)?;
-        self.finish_parking(t, ps, now_ms)
     }
 
     /// The rest of the sequence, from the saved intent: any decision
@@ -2160,45 +2149,39 @@ impl Runner {
         ask: Ask<'_>,
         now_ms: u64,
     ) -> Result<()> {
-        let Ask {
-            stage,
-            name,
-            kind,
-            question,
-            options,
-            recommendation,
-            attempt,
-        } = ask;
-        if t.decisions
-            .iter()
-            .any(|d| d.pending() && d.stage == stage && d.name == name && d.attempt == attempt)
-        {
+        if t.decisions.iter().any(|d| {
+            d.pending() && d.stage == ask.stage && d.name == ask.name && d.attempt == ask.attempt
+        }) {
             return Ok(());
         }
-        let id = format!("d{}", t.decisions.len() + 1);
-        t.decisions.push(Decision {
-            id: id.clone(),
-            stage: stage.into(),
-            name: name.into(),
-            kind,
-            question: question.clone(),
-            options: options.iter().map(|o| (*o).to_owned()).collect(),
-            recommendation,
-            attempt,
-            state: DecisionState::Pending,
-            made_ms: now_ms,
-        });
-        log::info!("ticket {} decision {id} ({name}): {question}", t.id);
+        let d = new_decision(t, ask, now_ms);
+        log::info!(
+            "ticket {} decision {} ({}): {}",
+            t.id,
+            d.id,
+            d.name,
+            d.question
+        );
+        // What the session is told, taken before the push moves `d`.
+        let Decision {
+            id,
+            name,
+            question,
+            options,
+            ..
+        } = &d;
+        let notes = format!(
+            "Dispatch ticket {} needs a decision ({id}): {question}\nAnswer with: dispatch decide {} {id} <{}>",
+            t.id,
+            t.id,
+            options.join("|")
+        );
+        let waiting = format!("decision {id}: {name}");
+        t.decisions.push(d);
         self.save_ticket(t, now_ms)?;
         // The ticket's current session shows it, so the badge and the
         // rail count it.
         if let Some(session) = t.current_session().cloned() {
-            let text = format!(
-                "Dispatch ticket {} needs a decision ({id}): {question}\nAnswer with: dispatch decide {} {id} <{}>",
-                t.id,
-                t.id,
-                options.join("|")
-            );
             self.send(
                 t,
                 ps,
@@ -2206,7 +2189,7 @@ impl Runner {
                 "notes",
                 Body::SessionNotes {
                     session: session.clone(),
-                    text,
+                    text: notes,
                 },
                 now_ms,
             )?;
@@ -2218,7 +2201,7 @@ impl Runner {
                 Body::SessionWaiting {
                     session,
                     on: true,
-                    reason: format!("decision {id}: {name}"),
+                    reason: waiting,
                 },
                 now_ms,
             )?;
@@ -5082,33 +5065,8 @@ impl Runner {
         a: &Attempt,
         now_ms: u64,
     ) -> Result<()> {
-        let (what, options): (String, &[&str]) = match &a.state {
-            AttemptState::Failed { reason } => {
-                // A failure at the checks was offered `check` too, and
-                // one at the rewrite `keep`. A ticket written before the
-                // attempt kept that has only the earlier question about
-                // it to say so.
-                let earlier = t
-                    .decisions
-                    .iter()
-                    .rev()
-                    .find(|d| d.name == "rerun" && d.attempt == Some((a.stage.clone(), a.n)));
-                let offered = |o: &str| earlier.is_some_and(|d| d.options.iter().any(|x| x == o));
-                let options: &[&str] = if a.failed_at_checks || offered("check") {
-                    &["rerun", "check", "park"]
-                } else if a.failed_at_rewrite || offered("keep") {
-                    &["rerun", "keep", "park"]
-                } else {
-                    &["rerun", "park"]
-                };
-                (format!("failed: {reason}"), options)
-            }
-            AttemptState::Cancelled { reason } => {
-                (format!("was cancelled: {reason}"), &["rerun", "park"])
-            }
-            AttemptState::Starting | AttemptState::Running | AttemptState::Complete => {
-                return Ok(());
-            }
+        let Some((question, options)) = rerun_ask(t, a) else {
+            return Ok(());
         };
         self.ensure_decision(
             t,
@@ -5117,14 +5075,7 @@ impl Runner {
                 stage: &a.stage,
                 name: "rerun",
                 kind: DecisionKind::Permission,
-                question: format!(
-                    "{} ({}) attempt {} {what}. Run it again?{}{}",
-                    a.stage,
-                    a.context,
-                    a.n,
-                    rerun_carries(t, &a.stage, a.n),
-                    rewrite_choices(a, options)
-                ),
+                question,
                 options,
                 recommendation: None,
                 attempt: Some((a.stage.clone(), a.n)),
@@ -5788,22 +5739,153 @@ impl Runner {
 }
 
 impl Runner {
-    /// A parked ticket back to active; the runner takes it from its
-    /// current stage on its next pass. Nothing else is a resume.
-    pub fn resume(&self, ticket: &str, now_ms: u64) -> Result<Ticket> {
+    /// `dispatch park`: the parking intent written by command, with every
+    /// open decision withdrawn in the same write, as a `park` answer's
+    /// first write does. The runner's next pass cancels the open
+    /// attempts and kills the processes (`finish_parking`), since the
+    /// checks are its children. A closing or closed ticket is a
+    /// `UsageError`; one already parking or parked is refused.
+    pub fn request_park(&self, ticket: &str, reason: Option<&str>, now_ms: u64) -> Result<Ticket> {
+        let reason = reason.unwrap_or("parked by hand");
         let path = self.data.ticket_file(ticket);
         self.data.with_lock(|| {
             let mut t = read_ticket(&path)?;
-            let TicketState::Parked { reason } = &t.state else {
-                bail!("ticket {ticket} is not parked");
-            };
-            log::info!("ticket {ticket} resumed (was parked: {reason})");
-            t.state = TicketState::Active;
+            match &t.state {
+                TicketState::Active => {}
+                TicketState::Closing { .. } => {
+                    return Err(UsageError(format!("ticket {ticket} is closing")).into());
+                }
+                TicketState::Closed { .. } => {
+                    return Err(UsageError(format!("ticket {ticket} is closed")).into());
+                }
+                TicketState::Parking { reason } => {
+                    bail!("ticket {ticket} is already parking: {reason}")
+                }
+                TicketState::Parked { reason } => {
+                    bail!("ticket {ticket} is already parked: {reason}")
+                }
+            }
+            log::warn!("ticket {ticket} parking: {reason}");
+            Self::parking_intent(&mut t, reason);
             t.updated_ms = now_ms;
             write_ticket_logged(&self.data, &t, now_ms)?;
             Ok(t)
         })
     }
+
+    /// A parked ticket back to active, with the attempts its park
+    /// cancelled mid-run authorised to run again (`reruns_on_resume`):
+    /// the resume is the answer to each one's `rerun` question, written
+    /// answered by `resume`. The runner asks about the rest, and takes
+    /// the ticket from its current stage on its next pass.
+    pub fn resume(&self, ticket: &str, now_ms: u64) -> Result<Resumed> {
+        self.resume_with(ticket, true, now_ms)
+    }
+
+    /// A parked ticket back to active with nothing authorised: the
+    /// runner asks about every failed or cancelled attempt.
+    pub fn resume_asking(&self, ticket: &str, now_ms: u64) -> Result<Resumed> {
+        self.resume_with(ticket, false, now_ms)
+    }
+
+    /// Nothing else is a resume: the answers and `Active` are one write.
+    fn resume_with(&self, ticket: &str, rerun: bool, now_ms: u64) -> Result<Resumed> {
+        let path = self.data.ticket_file(ticket);
+        self.data.with_lock(|| {
+            let mut t = read_ticket(&path)?;
+            let TicketState::Parked { reason } = t.state.clone() else {
+                bail!("ticket {ticket} is not parked");
+            };
+            let mut no_reruns = None;
+            let candidates = if rerun {
+                match self.park_reruns(&t, &reason) {
+                    Ok(reruns) => reruns,
+                    Err(e) => {
+                        log::warn!("ticket {ticket}: nothing reruns on the resume: {e:#}");
+                        no_reruns = Some(format!("{e:#}"));
+                        Vec::new()
+                    }
+                }
+            } else {
+                Vec::new()
+            };
+            let mut reruns = Vec::new();
+            for a in candidates {
+                let Some((question, options)) = rerun_ask(&t, &a) else {
+                    continue;
+                };
+                let mut d = new_decision(
+                    &t,
+                    Ask {
+                        stage: &a.stage,
+                        name: "rerun",
+                        kind: DecisionKind::Permission,
+                        question,
+                        options,
+                        recommendation: None,
+                        attempt: Some((a.stage.clone(), a.n)),
+                    },
+                    now_ms,
+                );
+                d.state = DecisionState::Answered {
+                    answer: "rerun".into(),
+                    note: None,
+                    by: BY_RESUME.into(),
+                    at_ms: now_ms,
+                    acted: false,
+                };
+                t.decisions.push(d);
+                reruns.push(a);
+            }
+            if reruns.is_empty() {
+                log::info!("ticket {ticket} resumed (was parked: {reason})");
+            } else {
+                let names: Vec<String> = reruns.iter().map(attempt_label).collect();
+                log::info!(
+                    "ticket {ticket} resumed (was parked: {reason}), rerunning {}",
+                    names.join(", ")
+                );
+            }
+            t.state = TicketState::Active;
+            t.updated_ms = now_ms;
+            write_ticket_logged(&self.data, &t, now_ms)?;
+            Ok(Resumed {
+                ticket: t,
+                reruns,
+                no_reruns,
+            })
+        })
+    }
+
+    /// What the park that left `t` parked cancelled and a resume reruns:
+    /// the attempts the event log ends after that park's `parking` event
+    /// keep an earlier park with the same reason out. An error says why
+    /// nothing can rerun.
+    fn park_reruns(&self, t: &Ticket, reason: &str) -> Result<Vec<Attempt>> {
+        let p = self.pipeline_of(t)?;
+        let ended =
+            crate::events::ended_since_parking(&crate::events::log_path(&self.data), &t.id)?
+                .context("the event log has no parking for it")?;
+        Ok(reruns_on_resume(t, &p, reason, &ended))
+    }
+}
+
+/// What a resume wrote.
+pub struct Resumed {
+    /// The ticket, active again.
+    pub ticket: Ticket,
+    /// The attempts it authorised to run again, as answers to their
+    /// `rerun` questions.
+    pub reruns: Vec<Attempt>,
+    /// Why a resume that reruns found nothing to: the pipeline or the
+    /// park's time could not be read.
+    pub no_reruns: Option<String>,
+}
+
+/// An attempt as a person reads it: `stage (context) attempt n`.
+#[must_use]
+pub fn attempt_label(a: &Attempt) -> String {
+    format!("{} ({}) attempt {}", a.stage, a.context, a.n)
 }
 
 impl Runner {
@@ -6319,6 +6401,115 @@ pub(crate) fn conflict_count(r: &Refreshed, by: wire_dispatch::BroughtUpBy) -> O
         .map(|c| u32::try_from(c.commits.len()).unwrap_or(u32::MAX))
 }
 
+/// The bring-up of `lane` whose conflict resolution is still to be
+/// reviewed: a chosen lane, not removed, whose last bring-up resolved a
+/// conflict after the pipeline's last code review stage and pushed
+/// nothing since. Shared by the resolution loop and the resume, so a
+/// resume authorises a rerun only where the loop would launch one.
+pub(crate) fn resolution_due<'l>(p: &Pipeline, lane: &'l LaneRecord) -> Option<&'l Refreshed> {
+    let last_review = p
+        .stages
+        .iter()
+        .rposition(|s| s.kind() == StageKind::Review)
+        .unwrap_or_default();
+    if !lane.chosen || lane.removed {
+        return None;
+    }
+    let moved = lane.refreshed.as_ref()?;
+    // A conflict brought up at or before the last code review is read
+    // there, by round 1's rebase check.
+    if moved
+        .conflict
+        .as_ref()
+        .is_none_or(|c| c.stage <= last_review)
+    {
+        return None;
+    }
+    // A bring-up that pushed has put the resolution on the PR already.
+    if lane.pushed.as_ref().is_some_and(|p| p.at_ms >= moved.at_ms) {
+        return None;
+    }
+    Some(moved)
+}
+
+/// The attempts a resume authorises to run again, as the answer to their
+/// `rerun` question: each the latest in its context, cancelled by the
+/// park `park` names (a reason that only adds what its checks did past
+/// the limit still counts) and in `ended`, the attempts the log ends
+/// after that park's `parking` event, since an earlier park may have
+/// given the same reason; of an agent, code review or workflow stage;
+/// and with no question about it withdrawn or answered `park` by that
+/// park. An attempt that was waiting on a question when the park came
+/// is asked about again instead, since a rerun would throw away what it
+/// had come to, and so is one an earlier park cancelled. A resolution
+/// review is rerun only where the resolution loop would still launch
+/// one; a rebaser never is, since the next pass reads its lane again and
+/// starts one if it is still needed.
+pub(crate) fn reruns_on_resume(
+    t: &Ticket,
+    p: &Pipeline,
+    park: &str,
+    ended: &BTreeSet<(String, u32)>,
+) -> Vec<Attempt> {
+    let past_the_limit = format!("{park}; ");
+    t.attempts
+        .iter()
+        .filter(|a| {
+            let AttemptState::Cancelled { reason } = &a.state else {
+                return false;
+            };
+            if reason != park && !reason.starts_with(&past_the_limit) {
+                return false;
+            }
+            if !ended.contains(&(a.stage.clone(), a.n)) {
+                return false;
+            }
+            if latest_attempt(t, &a.stage, &a.context).map(|l| l.n) != Some(a.n) {
+                return false;
+            }
+            let key = Some((a.stage.clone(), a.n));
+            let was_asked = t.decisions.iter().any(|d| {
+                d.attempt == key
+                    && match &d.state {
+                        DecisionState::Cancelled => true,
+                        DecisionState::Answered { answer, .. } => answer == "park",
+                        DecisionState::Pending => false,
+                    }
+            });
+            if was_asked || rerun_in_flight(t, a) || may_rerun(t, a) {
+                return false;
+            }
+            if a.stage == RESOLUTION {
+                return resolution_reruns(t, p, a);
+            }
+            p.stages
+                .iter()
+                .find(|s| s.name == a.stage)
+                .is_some_and(|s| {
+                    matches!(
+                        s.kind(),
+                        StageKind::Agent | StageKind::Review | StageKind::Workflow
+                    )
+                })
+        })
+        .cloned()
+        .collect()
+}
+
+/// Whether the resolution loop would launch a rerun of `a`: its lane's
+/// resolution is still due and `a` is that bring-up's latest review.
+fn resolution_reruns(t: &Ticket, p: &Pipeline, a: &Attempt) -> bool {
+    if !t.source.pull_requests.is_empty() || resolution_stage(p).is_none() {
+        return false;
+    }
+    t.lanes
+        .iter()
+        .find(|l| l.name == a.context)
+        .and_then(|lane| resolution_due(p, lane))
+        .and_then(|moved| resolution_of(t, &a.context, moved))
+        .is_some_and(|r| r.n == a.n)
+}
+
 /// The latest resolution review in `lane` that belongs to the bring-up
 /// `moved`: started at or after it.
 pub(crate) fn resolution_of<'t>(
@@ -6381,6 +6572,64 @@ fn resolution_stage(p: &Pipeline) -> Option<Stage> {
     shape.review_prompt = None;
     shape.no_feedback = None;
     Some(shape)
+}
+
+/// The decision `ask` makes on `t`, pending, with the next id on the
+/// ticket: one scheme for the runner's questions and a resume's answers.
+fn new_decision(t: &Ticket, ask: Ask<'_>, now_ms: u64) -> Decision {
+    Decision {
+        id: format!("d{}", t.decisions.len() + 1),
+        stage: ask.stage.into(),
+        name: ask.name.into(),
+        kind: ask.kind,
+        question: ask.question,
+        options: ask.options.iter().map(|o| (*o).to_owned()).collect(),
+        recommendation: ask.recommendation,
+        attempt: ask.attempt,
+        state: DecisionState::Pending,
+        made_ms: now_ms,
+    }
+}
+
+/// The `rerun` question about a failed or cancelled attempt and its
+/// options, as `ask_rerun` asks it and a resume answers it. `None` for
+/// an attempt that is neither.
+fn rerun_ask(t: &Ticket, a: &Attempt) -> Option<(String, &'static [&'static str])> {
+    let (what, options): (String, &'static [&'static str]) = match &a.state {
+        AttemptState::Failed { reason } => {
+            // A failure at the checks was offered `check` too, and one
+            // at the rewrite `keep`. A ticket written before the attempt
+            // kept that has only the earlier question about it to say
+            // so.
+            let earlier = t
+                .decisions
+                .iter()
+                .rev()
+                .find(|d| d.name == "rerun" && d.attempt == Some((a.stage.clone(), a.n)));
+            let offered = |o: &str| earlier.is_some_and(|d| d.options.iter().any(|x| x == o));
+            let options: &'static [&'static str] = if a.failed_at_checks || offered("check") {
+                &["rerun", "check", "park"]
+            } else if a.failed_at_rewrite || offered("keep") {
+                &["rerun", "keep", "park"]
+            } else {
+                &["rerun", "park"]
+            };
+            (format!("failed: {reason}"), options)
+        }
+        AttemptState::Cancelled { reason } => {
+            (format!("was cancelled: {reason}"), &["rerun", "park"])
+        }
+        AttemptState::Starting | AttemptState::Running | AttemptState::Complete => return None,
+    };
+    let question = format!(
+        "{} ({}) attempt {} {what}. Run it again?{}{}",
+        a.stage,
+        a.context,
+        a.n,
+        rerun_carries(t, &a.stage, a.n),
+        rewrite_choices(a, options)
+    );
+    Some((question, options))
 }
 
 /// What a rerun question adds about a code review attempt: the next
@@ -7301,8 +7550,7 @@ pub(crate) fn vars_for(t: &Ticket, p: &Pipeline, lane: Option<&str>) -> Vars {
             );
         }
     }
-    let names: std::collections::BTreeSet<&String> =
-        t.attempts.iter().flat_map(|a| a.artifacts.keys()).collect();
+    let names: BTreeSet<&String> = t.attempts.iter().flat_map(|a| a.artifacts.keys()).collect();
     for name in names {
         if let Some(path) = t.input(name) {
             vars.set(format!("inputs.{name}"), path.display().to_string());
@@ -7711,6 +7959,310 @@ network = "deny"
             web.writable,
             ["/wt", "/wt/web", "/cache/web"].map(PathBuf::from)
         );
+    }
+
+    /// A pipeline with one stage of each kind: `plan` (agent), `review`
+    /// (workflow), `review-code` (code review, the last), `inspect`
+    /// (gate-only).
+    fn kinds_pipeline() -> Pipeline {
+        Pipeline::parse(
+            r#"
+version = 1
+
+[project]
+name = "P"
+repo = "git@example.com:o/p.git"
+space = "Dispatch · P"
+
+[source]
+kind = "github"
+repo = "o/p"
+label = "dispatch"
+
+[[lanes]]
+name = "api"
+path = "."
+
+[operators.planner]
+kind = "claude"
+
+[operators.implementer]
+kind = "claude"
+
+[operators.style]
+kind = "claude"
+
+[operators.reviewer]
+kind = "codex"
+[operators.reviewer.review]
+reviewer = "codex"
+review_first = "Review {plan}; write to {feedback}; else {no_feedback}"
+review_round = "Again {response} {plan} {feedback} {no_feedback}"
+respond = "Feedback at {feedback}; edit {plan}; answer at {response}."
+respond_to_user = "{text} {plan} {response}"
+handoff = "The plan at {plan} is final."
+no_feedback = "No further feedback."
+cap = 4
+
+[[stages]]
+name = "plan"
+operator = "planner"
+context = "each"
+writes = ["plan"]
+prompt = "Plan to {plan}."
+
+[[stages]]
+name = "review"
+review = "reviewer"
+context = "each"
+subject = "plan"
+gate = { kind = "external", check = "review-finalized" }
+
+[[stages]]
+name = "review-code"
+context = "each"
+reviewers = ["style"]
+implementer = "implementer"
+gate = { kind = "command", argv = ["sh", "-c", "cargo test"] }
+
+[[stages]]
+name = "inspect"
+context = "each"
+gate = { kind = "human", decision = "inspect" }
+"#,
+        )
+        .unwrap()
+    }
+
+    fn bare_ticket() -> Ticket {
+        Ticket {
+            version: 0,
+            id: "t1".into(),
+            project: "P".into(),
+            source: SourceSnapshot {
+                kind: "github".into(),
+                identity: "o/p#7".into(),
+                pull_requests: Vec::new(),
+                number: Some(7),
+                title: "x".into(),
+                body: String::new(),
+                url: None,
+                labels: vec![],
+                taken_at_ms: 0,
+            },
+            pipeline_fingerprint: String::new(),
+            pipeline_file: PathBuf::new(),
+            lanes: vec![LaneRecord {
+                name: "api".into(),
+                worktree: "/wt".into(),
+                branch: "dispatch/7-x".into(),
+                project: None,
+                chosen: true,
+                setup_done: false,
+                base_sha: None,
+                refreshed: None,
+                pushed: None,
+                conflict: None,
+                removed: false,
+            }],
+            tree: None,
+            stage: 0,
+            attempts: vec![],
+            decisions: vec![],
+            ledger: vec![],
+            processes: vec![],
+            root_project: None,
+            rework: BTreeMap::new(),
+            refreshed_stage: None,
+            state: TicketState::Parked {
+                reason: "parked".into(),
+            },
+            close: crate::ticket::CloseProgress::default(),
+            created_ms: 0,
+            updated_ms: 0,
+        }
+    }
+
+    fn cancelled(stage: &str, n: u32, kind: AttemptKind, reason: &str, at: u64) -> Attempt {
+        new_attempt(
+            stage,
+            n,
+            "api",
+            kind,
+            AttemptState::Cancelled {
+                reason: reason.into(),
+            },
+            BTreeMap::new(),
+            at,
+        )
+    }
+
+    /// What reruns when the log ends every attempt after the park.
+    fn rerun_of(t: &Ticket, p: &Pipeline) -> Vec<(String, u32)> {
+        let ended = t.attempts.iter().map(|a| (a.stage.clone(), a.n)).collect();
+        reruns_on_resume(t, p, "parked", &ended)
+            .into_iter()
+            .map(|a| (a.stage, a.n))
+            .collect()
+    }
+
+    #[test]
+    fn a_resume_reruns_the_latest_attempts_its_park_cancelled_of_a_stage_that_runs() {
+        let p = kinds_pipeline();
+        let mut t = bare_ticket();
+        t.attempts = vec![
+            cancelled("plan", 1, AttemptKind::Agent, "parked", 1),
+            cancelled("review", 1, AttemptKind::Workflow, "parked", 1),
+            cancelled(
+                "review-code",
+                1,
+                AttemptKind::Review,
+                "parked; its checks (t1/review-code/1) were still running after 120s",
+                1,
+            ),
+        ];
+        assert_eq!(
+            rerun_of(&t, &p),
+            [
+                ("plan".to_owned(), 1),
+                ("review".to_owned(), 1),
+                ("review-code".to_owned(), 1)
+            ]
+        );
+        // Another park's reason, one that only starts the same, a
+        // failure, a gate-only stage and a rebaser are left to ask.
+        let mut other = t.clone();
+        other.attempts = vec![
+            cancelled("plan", 1, AttemptKind::Agent, "parked by hand", 1),
+            cancelled("review", 1, AttemptKind::Workflow, "an earlier park", 1),
+            new_attempt(
+                "review-code",
+                1,
+                "api",
+                AttemptKind::Review,
+                AttemptState::Failed {
+                    reason: "parked".into(),
+                },
+                BTreeMap::new(),
+                1,
+            ),
+            cancelled("inspect", 1, AttemptKind::GateOnly, "parked", 1),
+            cancelled(REFRESH, 1, AttemptKind::Agent, "parked", 1),
+        ];
+        assert!(
+            rerun_of(&other, &p).is_empty(),
+            "{:?}",
+            rerun_of(&other, &p)
+        );
+        // Only the latest in its context: an earlier cancelled attempt
+        // under a later failed one is not rerun.
+        let mut earlier = t.clone();
+        earlier.attempts = vec![
+            cancelled("plan", 1, AttemptKind::Agent, "parked", 1),
+            new_attempt(
+                "plan",
+                2,
+                "api",
+                AttemptKind::Agent,
+                AttemptState::Failed {
+                    reason: "gone".into(),
+                },
+                BTreeMap::new(),
+                2,
+            ),
+        ];
+        assert!(rerun_of(&earlier, &p).is_empty());
+        // The same reason the log ends before this park's `parking`
+        // event: an earlier park's, asked about too.
+        assert!(reruns_on_resume(&t, &p, "parked", &BTreeSet::new()).is_empty());
+    }
+
+    #[test]
+    fn an_attempt_parked_at_its_question_is_asked_about_again() {
+        let p = kinds_pipeline();
+        let mut t = bare_ticket();
+        t.attempts = vec![
+            cancelled("review", 1, AttemptKind::Workflow, "parked", 1),
+            cancelled("plan", 1, AttemptKind::Agent, "parked", 1),
+        ];
+        let about = |name: &str, stage: &str, state: DecisionState| Decision {
+            id: format!("d-{name}"),
+            stage: stage.into(),
+            name: name.into(),
+            kind: DecisionKind::Permission,
+            question: String::new(),
+            options: vec![],
+            recommendation: None,
+            attempt: Some((stage.into(), 1)),
+            state,
+            made_ms: 1,
+        };
+        t.decisions = vec![
+            about("finalize", "review", DecisionState::Cancelled),
+            about(
+                "paused",
+                "plan",
+                DecisionState::Answered {
+                    answer: "park".into(),
+                    note: None,
+                    by: BY_HAND.into(),
+                    at_ms: 1,
+                    acted: true,
+                },
+            ),
+        ];
+        assert!(rerun_of(&t, &p).is_empty(), "{:?}", rerun_of(&t, &p));
+    }
+
+    #[test]
+    fn a_resolution_review_is_rerun_only_where_the_loop_still_launches_one() {
+        let p = kinds_pipeline();
+        let mut t = bare_ticket();
+        let moved = Refreshed {
+            from: "base0".into(),
+            to: "base1".into(),
+            commits: true,
+            notes: None,
+            at_ms: 100,
+            // Past `review-code`, the last code review.
+            conflict: Some(RefreshConflict {
+                before: "head0".into(),
+                from: "base0".into(),
+                to: "base1".into(),
+                commits: vec![],
+                stage: 3,
+                at_ms: 90,
+            }),
+            after: Some("head1".into()),
+        };
+        t.lanes[0].refreshed = Some(moved.clone());
+        t.attempts = vec![cancelled(RESOLUTION, 1, AttemptKind::Review, "parked", 150)];
+        assert_eq!(rerun_of(&t, &p), [(RESOLUTION.to_owned(), 1)]);
+        // The bring-up was pushed since: the resolution is on the PR.
+        let mut pushed = t.clone();
+        pushed.lanes[0].pushed = Some(crate::ticket::PushedHead {
+            head: "head1".into(),
+            at_ms: 100,
+        });
+        assert!(rerun_of(&pushed, &p).is_empty());
+        // A newer bring-up: the review belongs to the one before it.
+        let mut newer = t.clone();
+        newer.lanes[0].refreshed = Some(Refreshed {
+            at_ms: 200,
+            ..moved.clone()
+        });
+        assert!(rerun_of(&newer, &p).is_empty());
+        // A conflict a code review still reads is not the loop's.
+        let mut read = t.clone();
+        read.lanes[0]
+            .refreshed
+            .as_mut()
+            .unwrap()
+            .conflict
+            .as_mut()
+            .unwrap()
+            .stage = 2;
+        assert!(rerun_of(&read, &p).is_empty());
     }
 
     struct NoPort;

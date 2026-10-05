@@ -468,8 +468,12 @@ whichever attempt made it. An agent's pane is killed as soon as its
 attempt's completion evidence is recorded, so nothing of a finished
 stage keeps running, and the record stays for viewing.
 
-Rejecting a decision cancels the ticket's current attempt, and
-cancelling is a sequence, not a flag: write the intent on the record,
+Rejecting a decision cancels the ticket's current attempt, and so does
+`dispatch park <ticket> [--reason <text>]`, which writes the same intent
+by command rather than by an answer (the reason defaults to "parked by
+hand"; a closing or closed ticket is a usage error, exit 64) and leaves
+the rest to the runner's next pass, since the checks are its children.
+Cancelling is a sequence, not a flag: write the intent on the record,
 with every open decision on the ticket cancelled in the same write:
 a pending one, an answer not yet acted on (a `rerun` still waiting for
 a slot), an acted `rerun` whose replacement has not launched, and a
@@ -491,12 +495,26 @@ says why.
 A cancelled decision cannot be answered, and a parked ticket counts
 nothing against `waiting_on_me`. A `parking` record whose decisions
 are still pending has them cancelled on the next pass; a `parked` one
-keeps them until it is resumed or closed. A resumed ticket asks again,
-under a new decision id, about each context's failed or cancelled
-latest attempt, quoting the attempt's own reason and offering what the
-failure first offered (`check` too after failed checks). Asking
-launches nothing, so it does not wait for a slot, and nothing reruns
-without an answer.
+keeps them until it is resumed or closed. The resume is itself the
+answer for each context's latest attempt that the park it ends
+cancelled mid-run: its reason is the park's (or the park's with what
+its checks did past the limit), its end is logged after the park's
+`parking` event (an earlier park with the same reason is asked about,
+as is everything when the log has no such event), its
+stage is an agent, code review or workflow stage, or a resolution
+review the resolution loop would still launch, and no question about
+it was withdrawn or answered `park` by that park. Each is recorded, in
+the resume's own write, as a `rerun` decision answered by `resume`,
+which the runner acts on as it does a hand answer, waiting for a slot.
+A cancelled rebaser is not one: the next pass reads its lane again.
+About every other failed or cancelled latest attempt, including one
+that was waiting on a question when the park came, the resumed ticket
+asks again under a new decision id, quoting the attempt's own reason
+and offering what the failure first offered (`check` too after failed
+checks). Asking launches nothing, so it does not wait for a slot.
+`dispatch resume <ticket> --no-rerun` answers nothing and asks about
+all of them. The `resumed` event names the reruns and comes before
+their decision events.
 
 A ticket that takes an issue again after a close finds the closed
 ticket's branches in Dispatch's clones under its own name, since a close
@@ -2022,8 +2040,14 @@ and one against the real one:
 | Two lanes' `inspect` questions are answered `rerun` with a note and `park` before one pass, with slots free | The send-back is acted on first, then the `park` drops its note with the parking intent before an implementer carries it; the resume asks `rerun` about that lane's sent-back attempt, quoting the note, and launches nothing; answered `rerun`, the new attempt's prompt ends with the note (`a_send_back_acted_before_a_park_in_the_same_pass_launches_nothing`) |
 | A ticket parked over failed checks is resumed | The question offers `rerun`, `check` and `park` again; `check` passes on the same attempt with no agent (`a_resume_after_failed_checks_offers_check_again`) |
 | A ticket parked over failed checks past `max_reruns` is resumed | The park asked nothing, but the resume's question still offers `rerun`, `check` and `park`: the attempt keeps that it failed at the checks (`a_resume_after_failed_checks_past_max_reruns_offers_check_again`) |
-| A ticket parked mid-attempt is resumed | The question quotes the attempt's own cancellation reason (`a_resume_after_a_cancelled_attempt_quotes_its_reason`) |
-| A ticket is parked while its checks run | The checks are killed with their process group; the attempt stays open and the ticket `Parking` until they read back as gone, then cancelled; a resume's checks start only after the old ones were killed (`parking_during_checks_kills_them_before_the_attempt_reads_cancelled`) |
+| A ticket parked at a question about its open attempt is resumed | The question quotes the attempt's own cancellation reason (`a_resume_after_a_cancelled_attempt_quotes_its_reason`) |
+| A ticket is parked while its checks run | The checks are killed with their process group; the attempt stays open and the ticket `Parking` until they read back as gone, then cancelled; the resume reruns the attempt with no question, and its checks start only after the old ones were killed (`parking_during_checks_kills_them_before_the_attempt_reads_cancelled`) |
+| `dispatch park` with an implementer running and a question about something else | The intent is written with the question cancelled; the next pass cancels the attempt with the reason, kills its session and reads `parked`; the log has `parking`, `parked` and `decision-cancelled` (`dispatch_park_stops_a_running_attempt_and_withdraws_an_unrelated_question`) |
+| That ticket is resumed | A `rerun` answered by `resume` is recorded, nothing is pending, the second attempt launches, and `resumed` names `implement (repo)` (`a_resume_reruns_what_the_park_cancelled_without_asking`) |
+| Two lanes, one failed before `dispatch park` and one running when it came, resumed | The running lane relaunches; the failed lane is asked `rerun` (`a_resume_reruns_the_cancelled_lane_and_asks_about_the_failed_one`) |
+| The same ticket resumed with `--no-rerun` | A pending `rerun` quoting the park's reason; nothing launches (`a_resume_with_no_rerun_asks_as_before`) |
+| A park whose checks outlived the limit is resumed | The reason carries the checks' suffix and the attempt still reruns (`a_resume_reruns_an_attempt_whose_checks_outlived_the_park`) |
+| `dispatch park` on a closing or closed ticket | Exit 64 with the reason; one already parking or parked is refused with exit 1 (`park_on_a_closed_ticket_is_a_usage_error`) |
 | A ticket is closed while its checks run | The same: the ticket stays `Closing` and the attempt open until the checks are gone, then `the ticket closed: …` and `Closed` (`closing_during_checks_kills_them_before_the_attempt_reads_cancelled`) |
 | A parked ticket's checks ignore the kill | Two minutes after the kill the group gets SIGKILL and the ticket parks; the cancellation reason says the checks were still running and names them (`a_check_that_ignores_the_kill_does_not_hold_the_park_past_the_limit`) |
 | The runner restarts while the checks run, then the ticket is parked | The lost check reads as gone; the attempt is cancelled on the first pass and nothing starts again (`parking_after_a_restart_reads_a_lost_check_as_gone`) |

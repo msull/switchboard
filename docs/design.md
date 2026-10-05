@@ -1499,14 +1499,17 @@ saved once it settles, Cmd+W closes), with navigation of its own so a
 ticket opened there does not touch the main window's stack, which
 shows only a note pointing at the window while it is open. A ticket's
 page offers Close where the runner says a close would start, and
-Remove trees where a closed ticket's trees were kept. Built: the wire
-crate, the core path and read models, the log and socket adapters,
-`serve` in the app, `tests/control.rs`, and the close: `DispatchClose`
-behind a confirmation dialog that lists the paths the runner reports it
-would remove (`TicketView::removes`), answered by Dispatch with the
-ticket `closing` once the intent is saved, the runner's pass doing the
-rest. Gaps: `service.new` and `command.run` are not
-on the port yet; nothing marks Dispatch-owned records as such in the
+Remove trees where a closed ticket's trees were kept. Resume, on the
+board's row and the ticket's page, is `dispatch resume`: it reruns what
+the park cancelled mid-run, which spends agent runs on one click, and
+says so on its hover text; `--no-rerun` is only on the command line.
+Built: the wire crate, the core path and read models, the log and socket
+adapters, `serve` in the app, `tests/control.rs`, and the close:
+`DispatchClose` behind a confirmation dialog that lists the paths the
+runner reports it would remove (`TicketView::removes`), answered by
+Dispatch with the ticket `closing` once the intent is saved, the
+runner's pass doing the rest. Gaps: `service.new` and `command.run` are
+not on the port yet; nothing marks Dispatch-owned records as such in the
 window.
 
 Claude Code asks whether to trust a folder before it runs any hook, so
@@ -1629,12 +1632,17 @@ count as acted (which is what lets the replacement start); the
 sequence runs from the saved intent on every pass, so a restart at any
 point resumes it whole. A close does the same before it writes an
 open attempt cancelled: its checks stopped under the same limit, then
-its command reviewers killed. A resumed
-ticket asks `rerun` again, under a new id and without waiting for a
-slot, about each failed or cancelled attempt with no rerun question
-in flight, with the attempt's own reason (for a sent-back attempt,
-the note) and the options its failure first had; a pending decision
-holds its stage only in the context it is about. With every slot
+its command reviewers killed. `dispatch park` writes the same intent
+by command, and the runner's next pass finishes it. A resume is the
+`rerun` answer, recorded as answered by `resume`, for each latest
+attempt its park cancelled mid-run (its end logged after the park's
+`parking` event) with no question about it withdrawn (`--no-rerun`
+answers none). A resumed ticket asks `rerun` again, under a new id and
+without waiting for a slot, about each other failed or cancelled
+attempt with no rerun question in flight, with the attempt's own
+reason (for a sent-back attempt, the note) and the options its failure
+first had; a pending decision holds its stage only in the context it
+is about. With every slot
 taken, a `park` answer is still acted on, since parking launches
 nothing; any other answer waits for a slot. An answer's acted mark
 reaches disk only with its action's first write (the parking state,
@@ -1684,6 +1692,9 @@ rebaser from before the conflict is never credited; a bring-up after a
 rebaser that failed or was cancelled, with no answer since, reads
 `stopped`, since the record cannot tell the rebaser's work from a hand
 rebase made before a park.
+`dispatch park` writes the parking intent by command, and a resume
+reruns the attempts that park cancelled mid-run, recorded as `rerun`
+answers by `resume` (no record change).
 A prompt's `{lanes}` is the lanes the ticket chose, in pipeline order
 (every lane before the `lanes` decision), and `{lanes.all}` every lane.
 A retake after close deletes each kept branch with nothing beyond its

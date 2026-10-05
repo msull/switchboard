@@ -4,22 +4,24 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::Result;
-use dispatch::USAGE;
 use dispatch::epoch_ms;
 use dispatch::events::{self, Event, For, Kind, Waited, short};
 use dispatch::git::GitCli;
 use dispatch::github::Gh;
 use dispatch::port::SocketPort;
 use dispatch::report::{self, TicketReport};
-use dispatch::scheduler::{Runner, kept_branches};
+use dispatch::scheduler::{Runner, attempt_label, kept_branches};
 use dispatch::serve::{Handler, Server, take_issue, take_pull_requests};
 use dispatch::serve::{ticket_paths, ticket_view};
-use dispatch::store::DataDir;
-use dispatch::ticket::{DecisionState, TicketState};
+use dispatch::store::{DataDir, read_ticket};
+use dispatch::ticket::{DecisionState, Ticket, TicketState};
+use dispatch::{USAGE, UsageError};
 use std::io::Write as _;
 
-/// `EX_USAGE`: the command line was wrong. `wait` gives 2 and 3 their
-/// own meanings, so a usage error is never mistaken for them.
+/// `EX_USAGE`: the command line was wrong, or the command is one the
+/// ticket's state never allows (`park` on a closing or closed ticket, a
+/// `UsageError`). `wait` gives 2 and 3 their own meanings, so a usage
+/// error is never mistaken for them.
 const EXIT_USAGE: i32 = 64;
 
 /// Exit codes of `wait` past its match.
@@ -71,7 +73,18 @@ fn main() -> Result<()> {
         .init();
     let args: Vec<String> = std::env::args().skip(1).collect();
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
-    match args.as_slice() {
+    let result = command(&args);
+    if let Err(e) = &result
+        && let Some(usage) = e.downcast_ref::<UsageError>()
+    {
+        eprintln!("{usage}");
+        std::process::exit(EXIT_USAGE);
+    }
+    result
+}
+
+fn command(args: &[&str]) -> Result<()> {
+    match args {
         ["take", project, "pr", specs @ ..] => take_prs(project, specs),
         ["take", project, issue] => take(project, issue),
         ["run"] => run(false),
@@ -83,7 +96,10 @@ fn main() -> Result<()> {
         ["decisions"] => decisions(),
         ["status"] => status(),
         ["queue", project, rest @ ..] => queue(project, rest),
-        ["resume", ticket] => resume(ticket),
+        ["park", ticket] => park(ticket, None),
+        ["park", ticket, "--reason", reason] => park(ticket, Some(reason)),
+        ["resume", ticket] => resume(ticket, true),
+        ["resume", ticket, "--no-rerun"] => resume(ticket, false),
         ["close", ticket] => close(ticket, None),
         ["close", ticket, "--reason", reason] => close(ticket, Some(reason)),
         ["worktrees", rest @ ..] => worktrees(rest),
@@ -285,15 +301,45 @@ fn status() -> Result<()> {
     Ok(())
 }
 
-fn resume(ticket: &str) -> Result<()> {
+/// Write the parking intent; the runner, whose children the checks
+/// are, does the stopping on its next pass.
+fn park(ticket: &str, reason: Option<&str>) -> Result<()> {
     let runner = offline_runner()?;
-    let t = runner.resume(ticket, now_ms())?;
+    let t = runner.request_park(ticket, reason, now_ms())?;
+    let reason = match &t.state {
+        TicketState::Parking { reason } => reason.as_str(),
+        _ => "",
+    };
+    say!(
+        "{} {} {} parking: {reason} (the runner finishes it on its next pass)",
+        t.id,
+        t.source.label(),
+        t.source.title
+    );
+    Ok(())
+}
+
+fn resume(ticket: &str, rerun: bool) -> Result<()> {
+    let runner = offline_runner()?;
+    let now = now_ms();
+    let resumed = if rerun {
+        runner.resume(ticket, now)?
+    } else {
+        runner.resume_asking(ticket, now)?
+    };
+    let t = &resumed.ticket;
     say!(
         "{} {} {} active again",
         t.id,
         t.source.label(),
         t.source.title
     );
+    for a in &resumed.reruns {
+        say!("  rerunning {}", attempt_label(a));
+    }
+    if let Some(why) = &resumed.no_reruns {
+        say!("  nothing reruns: {why}");
+    }
     Ok(())
 }
 
@@ -573,11 +619,14 @@ fn wait(args: &[&str]) -> Result<()> {
     match waited {
         Waited::Matched(e) => {
             say!("{}", event_line(&e, json));
-            if !json
-                && e.kind == Kind::Decision
-                && let Some(d) = &e.decision
-            {
-                say!("    dispatch decide {ticket} {d} <answer> [--note <text>]");
+            if !json && e.kind == Kind::Decision {
+                // Read again: a decision answered since its event (by a
+                // resume, by Dispatch, from another terminal) has no
+                // answer left to give.
+                let t = read_ticket(&data.ticket_file(ticket))?;
+                if let Some(hint) = decide_hint(&e, &t) {
+                    say!("{hint}");
+                }
             }
             Ok(())
         }
@@ -594,6 +643,16 @@ fn wait(args: &[&str]) -> Result<()> {
             std::process::exit(EXIT_TIMED_OUT);
         }
     }
+}
+
+/// The `dispatch decide` line after a matched `decision` event, while
+/// that decision still waits on the user.
+fn decide_hint(e: &Event, t: &Ticket) -> Option<String> {
+    let d = e.decision.as_ref()?;
+    t.waiting_on_you()
+        .iter()
+        .any(|w| &w.id == d)
+        .then(|| format!("    dispatch decide {} {d} <answer> [--note <text>]", t.id))
 }
 
 fn show(args: &[&str]) -> Result<()> {
@@ -981,5 +1040,81 @@ impl dispatch::port::Port for NoPort {
         Err(std::io::Error::other(
             "this command does not talk to Switchboard",
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dispatch::ticket::{Decision, DecisionKind};
+
+    fn ticket() -> Ticket {
+        serde_json::from_value(serde_json::json!({
+            "id": "t1",
+            "project": "p",
+            "source": {
+                "kind": "github",
+                "identity": "o/r#7",
+                "number": 7,
+                "title": "a title",
+                "body": "",
+                "url": null,
+                "labels": [],
+                "taken_at_ms": 0
+            },
+            "pipeline_fingerprint": "",
+            "pipeline_file": "",
+            "lanes": [],
+            "stage": 0,
+            "attempts": [],
+            "decisions": [],
+            "ledger": [],
+            "processes": [],
+            "root_project": null,
+            "state": "active",
+            "created_ms": 0,
+            "updated_ms": 0
+        }))
+        .unwrap()
+    }
+
+    fn rerun(state: DecisionState) -> Decision {
+        Decision {
+            id: "d1".into(),
+            stage: "implement".into(),
+            name: "rerun".into(),
+            kind: DecisionKind::Permission,
+            question: "Run it again?".into(),
+            options: vec!["rerun".into(), "park".into()],
+            recommendation: None,
+            attempt: Some(("implement".into(), 1)),
+            state,
+            made_ms: 3,
+        }
+    }
+
+    fn answered(by: &str) -> DecisionState {
+        DecisionState::Answered {
+            answer: "rerun".into(),
+            note: None,
+            by: by.into(),
+            at_ms: 4,
+            acted: false,
+        }
+    }
+
+    #[test]
+    fn the_decide_hint_is_only_for_a_decision_that_still_waits() {
+        let mut t = ticket();
+        t.decisions.push(rerun(DecisionState::Pending));
+        let event = Event::from_decision(&t, &t.decisions[0]);
+        assert_eq!(
+            decide_hint(&event, &t).as_deref(),
+            Some("    dispatch decide t1 d1 <answer> [--note <text>]")
+        );
+        for by in [dispatch::scheduler::BY_RESUME, dispatch::scheduler::BY_HAND] {
+            t.decisions[0].state = answered(by);
+            assert_eq!(decide_hint(&event, &t), None, "answered by {by}");
+        }
     }
 }

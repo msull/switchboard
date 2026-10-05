@@ -23,6 +23,7 @@ use dispatch_control::{BroughtUpBy, brought_up};
 use serde::{Deserialize, Serialize};
 
 use crate::scheduler;
+use crate::scheduler::BY_RESUME;
 use crate::store::{DataDir, read_ticket};
 use crate::ticket::{
     Attempt, AttemptKind, AttemptState, Decision, DecisionState, RoundState, Ticket, TicketState,
@@ -367,6 +368,14 @@ pub fn between(
         whole.push(out.len());
         out.push(Event::new(new, at_ms, kind, "", String::new()));
     }
+    let state = state_event(old, new);
+    // A resume comes before the reruns it answered in the same write:
+    // a waiter on a parked ticket wants the resume, and must never be
+    // handed a `rerun` question that was born answered.
+    if let Some((Kind::Resumed, text)) = &state {
+        whole.push(out.len());
+        out.push(Event::new(new, at_ms, Kind::Resumed, "", text.clone()));
+    }
     for a in &new.attempts {
         let before = old
             .attempts
@@ -421,27 +430,55 @@ pub fn between(
             });
         }
     }
-    if std::mem::discriminant(&new.state) != std::mem::discriminant(&old.state) {
-        let event = match state_kind(&new.state) {
-            Some((kind, reason)) => Some((kind, reason.to_owned())),
-            None if matches!(
-                old.state,
-                TicketState::Parked { .. } | TicketState::Parking { .. }
-            ) =>
-            {
-                Some((Kind::Resumed, "active again".to_owned()))
-            }
-            None => None,
-        };
-        if let Some((kind, text)) = event {
-            whole.push(out.len());
-            out.push(Event::new(new, at_ms, kind, "", text));
-        }
+    if let Some((kind, text)) = state
+        && kind != Kind::Resumed
+    {
+        whole.push(out.len());
+        out.push(Event::new(new, at_ms, kind, "", text));
     }
     if !out.is_empty() {
         name_stages(&mut out, &whole, new, moved.map(|_| old.stage), names);
     }
     out
+}
+
+/// The ticket's own state change from `old` to `new`, as an event's
+/// kind and text. A resume names what it reran: each `rerun` it
+/// answered in the same write, as `stage (context)`.
+fn state_event(old: &Ticket, new: &Ticket) -> Option<(Kind, String)> {
+    if std::mem::discriminant(&new.state) == std::mem::discriminant(&old.state) {
+        return None;
+    }
+    if let Some((kind, reason)) = state_kind(&new.state) {
+        return Some((kind, reason.to_owned()));
+    }
+    if !matches!(
+        old.state,
+        TicketState::Parked { .. } | TicketState::Parking { .. }
+    ) {
+        return None;
+    }
+    let reruns: Vec<String> = new
+        .decisions
+        .iter()
+        .filter(|d| d.name == "rerun" && !old.decisions.iter().any(|x| x.id == d.id))
+        .filter(|d| matches!(&d.state, DecisionState::Answered { by, .. } if by == BY_RESUME))
+        .filter_map(|d| d.attempt.as_ref())
+        .map(|(stage, n)| {
+            let ctx = new
+                .attempts
+                .iter()
+                .find(|a| &a.stage == stage && a.n == *n)
+                .map_or("?", |a| a.context.as_str());
+            format!("{stage} ({ctx})")
+        })
+        .collect();
+    let text = if reruns.is_empty() {
+        "active again".to_owned()
+    } else {
+        format!("active again, rerunning {}", reruns.join(", "))
+    };
+    Some((Kind::Resumed, text))
 }
 
 /// The stage of every whole-ticket event, and a move's text, from the
@@ -877,6 +914,34 @@ pub fn withdrawn(events: &[Event]) -> BTreeSet<u64> {
         .filter(|e| e.kind == Kind::Void)
         .flat_map(|e| e.voids.iter().copied())
         .collect()
+}
+
+/// The attempts of `ticket`, by stage and number, whose end the log at
+/// `path` holds after the ticket's latest `parking` event that no
+/// `void` withdrew; `None` when the log has no such event. The log's
+/// order decides, not the events' times: a pass stamps every write with
+/// the time it began, so a park written while it ran can carry a later
+/// time than the cancellations it caused.
+pub fn ended_since_parking(path: &Path, ticket: &str) -> Result<Option<BTreeSet<(String, u32)>>> {
+    let events = read_since(path, 0)?;
+    let voided = withdrawn(&events);
+    let live = |e: &&Event| e.ticket == ticket && !voided.contains(&e.seq);
+    let Some(parking) = events
+        .iter()
+        .filter(live)
+        .rfind(|e| e.kind == Kind::Parking)
+        .map(|e| e.seq)
+    else {
+        return Ok(None);
+    };
+    Ok(Some(
+        events
+            .iter()
+            .filter(live)
+            .filter(|e| e.seq > parking && e.kind == Kind::AttemptEnded)
+            .filter_map(|e| e.attempt.clone())
+            .collect(),
+    ))
 }
 
 /// A reader of the log from a seq on, which returns what was appended
@@ -2013,6 +2078,83 @@ mod tests {
                 "{cursor}: {waited:?}"
             );
         }
+    }
+
+    /// A parked ticket and the same ticket resumed, the resume
+    /// answering a `rerun` about its cancelled implementer.
+    fn parked_and_resumed_with_a_rerun() -> (Ticket, Ticket) {
+        let mut parked = ticket();
+        parked.state = TicketState::Parked {
+            reason: "by hand".into(),
+        };
+        let mut a = running("implement", 1);
+        a.state = AttemptState::Cancelled {
+            reason: "by hand".into(),
+        };
+        parked.attempts.push(a);
+        let mut resumed = parked.clone();
+        resumed.state = TicketState::Active;
+        resumed.updated_ms = 50;
+        resumed.decisions.push(Decision {
+            name: "rerun".into(),
+            stage: "implement".into(),
+            attempt: Some(("implement".into(), 1)),
+            state: DecisionState::Answered {
+                answer: "rerun".into(),
+                note: None,
+                by: BY_RESUME.into(),
+                at_ms: 50,
+                acted: false,
+            },
+            ..decision("d1")
+        });
+        (parked, resumed)
+    }
+
+    #[test]
+    fn a_resume_names_its_reruns_and_comes_before_them() {
+        let (parked, resumed) = parked_and_resumed_with_a_rerun();
+        let events = between(Some(&parked), &resumed, 5, &names);
+        assert_eq!(
+            events.iter().map(|e| e.kind).collect::<Vec<_>>(),
+            [Kind::Resumed, Kind::Decision, Kind::Answered]
+        );
+        assert_eq!(events[0].text, "active again, rerunning implement (root)");
+        let mut plain = parked.clone();
+        plain.state = TicketState::Active;
+        let events = between(Some(&parked), &plain, 5, &names);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].text, "active again");
+    }
+
+    /// `--for any` from a cursor taken on the parked ticket returns the
+    /// resume, never the `rerun` question the resume wrote already
+    /// answered.
+    #[test]
+    fn a_wait_for_any_across_a_resume_returns_the_resume() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = DataDir::new(dir.path());
+        let (parked, resumed) = parked_and_resumed_with_a_rerun();
+        let file = data.ticket_file(&parked.id);
+        crate::store::write_ticket(&file, &parked).unwrap();
+        let log = log_path(&data);
+        let tail = last_seq(&log).unwrap();
+        append(&log, &mut between(Some(&parked), &resumed, 50, &names)).unwrap();
+        crate::store::write_ticket(&file, &resumed).unwrap();
+        let waited = wait(
+            &data,
+            &parked.id,
+            For::Any,
+            Some(tail),
+            None,
+            &mut || 0,
+            &mut || panic!("waited on a cursor with events after it"),
+        )
+        .unwrap();
+        assert!(
+            matches!(&waited, Waited::Matched(e) if e.kind == Kind::Resumed),
+            "{waited:?}"
+        );
     }
 
     #[test]
