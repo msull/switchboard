@@ -266,6 +266,12 @@ impl SwitchboardApp {
         self.dispatch_inner(action);
     }
 
+    /// Tell the core how wide the working-set view is. Not recorded: it
+    /// is a measurement of the window, not something the user asked for.
+    pub(crate) fn set_view_columns(&mut self, columns: u32) {
+        self.dispatch_inner(AppAction::ViewColumns(columns));
+    }
+
     /// The resume handles of the records an `Events` action names, so a
     /// handle swapped by an event (`/clear`) drops the cached
     /// conversation the way a discard does.

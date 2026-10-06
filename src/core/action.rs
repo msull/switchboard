@@ -199,6 +199,19 @@ pub enum AppAction {
         set: SetId,
         hours: u32,
     },
+    /// Show only the members of a rule set whose pane is running. A
+    /// hand set changes nothing.
+    SetRuleRunningOnly {
+        set: SetId,
+        on: bool,
+    },
+    /// The size of a rule set's cards in percent, clamped to
+    /// [`RULE_SCALE`] and snapped to steps of 10. A hand set changes
+    /// nothing.
+    SetRuleCardScale {
+        set: SetId,
+        scale: u32,
+    },
     /// Take a session off a rule set until it is active again.
     DismissFromSet {
         set: SetId,
@@ -311,6 +324,10 @@ pub enum AppAction {
     /// Move the selection one card that way on the working set shown
     /// (the keyboard's h, j, k, l).
     StepCard(Direction),
+    /// How many grid units the working-set view fits across, so steps
+    /// on a rule set follow the grid as drawn. A measurement, never
+    /// saved.
+    ViewColumns(u32),
     /// Work in this space: the rail shows it, and the screen goes to
     /// its switchboard unless what was showing is in it.
     ShowSpace(SpaceId),
@@ -776,12 +793,23 @@ pub const ENV_SETUP_LOCKED: &str = "environment setup is locked: choose Unlock e
 /// How far back a rule set may look, in hours: an hour to a month.
 pub const RULE_HOURS: std::ops::RangeInclusive<u32> = 1..=720;
 /// The width, in grid units, a rule set is laid out at where no view
-/// says how wide it is (the control port, the controller).
+/// says how wide it is: the control port, and the core before the
+/// first frame reports [`AppAction::ViewColumns`].
 pub const RULE_COLUMNS: u32 = 24;
+/// A rule set's card size in percent: small enough to fit more, never
+/// so small a card's header and footer clip.
+pub const RULE_SCALE: std::ops::RangeInclusive<u32> = 90..=200;
 
 /// `hours` kept within [`RULE_HOURS`].
 fn clamp_hours(hours: u32) -> u32 {
     hours.clamp(*RULE_HOURS.start(), *RULE_HOURS.end())
+}
+
+/// `scale` kept within [`RULE_SCALE`], to the nearest 10: the value a
+/// rule set's scale is stored at, and the one its slider shows.
+#[must_use]
+pub fn clamp_scale(scale: u32) -> u32 {
+    (scale.saturating_add(5) / 10 * 10).clamp(*RULE_SCALE.start(), *RULE_SCALE.end())
 }
 
 /// A session taken off its board, kept whole until its undo window
@@ -881,6 +909,9 @@ pub struct AppCore {
     /// set, a dismissal, a move to another space, a load, the clock on a
     /// `Tick`) shows in the same frame.
     pub(super) rule_members: HashMap<SetId, Vec<RecordId>>,
+    /// How many grid units the working-set view last said it fits
+    /// across; `None` until the first frame. Transient.
+    pub(super) view_columns: Option<u32>,
     /// Until when, on the clock's `mono`, `switchboard-env`'s setup
     /// commands are accepted. Transient: a restart closes it.
     pub(super) env_setup_until: Option<Duration>,
@@ -925,6 +956,8 @@ impl AppCore {
             | AppAction::DeleteWorkingSet(_)
             | AppAction::NewRuleSet { .. }
             | AppAction::SetRuleHours { .. }
+            | AppAction::SetRuleRunningOnly { .. }
+            | AppAction::SetRuleCardScale { .. }
             | AppAction::DismissFromSet { .. }
             | AppAction::KillAndDismiss { .. } => self.working_set_action(action, now, &mut out),
             AppAction::ShowBoard(id) => self.show(View::Board(id), now, &mut out),
@@ -982,6 +1015,7 @@ impl AppCore {
             AppAction::Controller(event) => self.controller_event(event, now, &mut out),
             AppAction::ActivateCard { set, target } => self.activate_card(set, target),
             AppAction::StepCard(direction) => self.step_card(direction),
+            AppAction::ViewColumns(columns) => self.view_columns = Some(columns),
 
             AppAction::StartWorkflow { .. }
             | AppAction::ShowWorkflow(_)
@@ -1217,6 +1251,21 @@ impl AppCore {
                     }
                 });
             }
+            AppAction::SetRuleRunningOnly { set, on } => {
+                self.update_set(out, set, |s| {
+                    if s.rule.is_some() {
+                        s.running_only = on;
+                    }
+                });
+            }
+            AppAction::SetRuleCardScale { set, scale } => {
+                let scale = clamp_scale(scale);
+                self.update_set(out, set, |s| {
+                    if s.rule.is_some() {
+                        s.card_scale = scale;
+                    }
+                });
+            }
             AppAction::DismissFromSet { set, record } => {
                 self.dismiss_from_set(set, record, out);
             }
@@ -1330,6 +1379,8 @@ impl AppCore {
             set.items = source.items;
             set.rule = source.rule;
             set.dismissed = source.dismissed;
+            set.running_only = source.running_only;
+            set.card_scale = source.card_scale;
         }
         if let Some(target) = with {
             self.place_new(&mut set, target, columns);
@@ -1428,6 +1479,7 @@ impl AppCore {
                 *at > since
                     && !set.dismissed.iter().any(|d| d.record == *id && *at <= d.at)
                     && self.target_in(&PinTarget::Session(*id), set.space)
+                    && (!set.running_only || self.is_running(*id))
             })
             .collect();
         members.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
@@ -1443,6 +1495,14 @@ impl AppCore {
         }
     }
 
+    /// How many grid units wide the core lays a rule set out for the
+    /// keys and the controller: the view's width once a frame has said
+    /// it, [`RULE_COLUMNS`] before.
+    #[must_use]
+    pub fn view_columns(&self) -> u32 {
+        self.view_columns.unwrap_or(RULE_COLUMNS)
+    }
+
     /// A rule set's members as of the last action; empty for a hand set.
     #[must_use]
     pub fn rule_members(&self, set: SetId) -> &[RecordId] {
@@ -1450,15 +1510,16 @@ impl AppCore {
     }
 
     /// The cards of `set` as drawn: its pins for a hand set, its members
-    /// laid out in order, one size each, for a rule set. `Cow` lends the
-    /// hand set's own list and hands over a new one for a rule set.
+    /// laid out in order at the set's card scale for a rule set. `Cow`
+    /// lends the hand set's own list and hands over a new one for a rule
+    /// set.
     #[must_use]
     pub fn set_cards<'a>(&'a self, set: &'a WorkingSet, columns: u32) -> Cow<'a, [PinnedItem]> {
         if set.rule.is_none() {
             return Cow::Borrowed(&set.items);
         }
         let members = self.rule_members(set.id);
-        let (w, h) = grid::SESSION_CARD;
+        let (w, h) = grid::rule_card(set.card_scale);
         let rects = grid::flow(members.len(), w, h, columns);
         Cow::Owned(
             members

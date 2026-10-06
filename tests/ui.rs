@@ -3032,6 +3032,79 @@ fn a_rule_sets_hours_are_typed_in_its_header_and_it_cannot_be_arranged() {
 }
 
 #[test]
+fn a_rule_sets_running_only_and_card_size_are_set_in_its_header() {
+    let (mut harness, ids) = harness();
+    let (set, id) = recent_set_of_one(&mut harness, &ids);
+    harness.get_by_label("Running only").click();
+    harness.run_steps(2);
+    assert_eq!(
+        actions(&harness),
+        vec![AppAction::SetRuleRunningOnly { set, on: true }]
+    );
+    assert!(
+        harness
+            .state()
+            .core()
+            .working_set(set)
+            .unwrap()
+            .running_only
+    );
+    assert_eq!(harness.state().core().rule_members(set), &[id]);
+    harness.get_by_label("Card size").focus();
+    harness.run_steps(1);
+    harness.key_press(egui::Key::ArrowRight);
+    harness.run_steps(2);
+    assert_eq!(
+        actions(&harness).last(),
+        Some(&AppAction::SetRuleCardScale { set, scale: 110 })
+    );
+    assert_eq!(
+        harness.state().core().working_set(set).unwrap().card_scale,
+        110
+    );
+}
+
+#[test]
+fn an_off_grid_card_size_is_not_saved_by_showing_its_set() {
+    // A hand-edited `views.json` can hold a scale the slider would snap.
+    let ws = switchboard::core::WorkingSet {
+        rule: Some(switchboard::core::SetRule::Recent { hours: 24 }),
+        card_scale: 95,
+        ..switchboard::core::WorkingSet::named("Recent")
+    };
+    let set = ws.id;
+    let mut initial = switchboard::ports::store::Loaded::default();
+    initial.views.sets.push(ws);
+    let services = Services {
+        store: Box::new(MemoryStore {
+            initial,
+            lock_result: None,
+        }),
+        ..fakes::services()
+    };
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1400.0, 900.0))
+        .build_eframe(move |cc| {
+            switchboard::ui::theme::install(&cc.egui_ctx);
+            let mut app = test_app(services);
+            app.start();
+            app
+        });
+    showing(&mut harness, View::WorkingSet(set));
+    harness.get_by_label("Card size");
+    harness.run_steps(2);
+    assert!(
+        !actions(&harness)
+            .iter()
+            .any(|a| matches!(a, AppAction::SetRuleCardScale { .. }))
+    );
+    assert_eq!(
+        harness.state().core().working_set(set).unwrap().card_scale,
+        95
+    );
+}
+
+#[test]
 fn the_rail_makes_a_recent_sessions_set() {
     let (mut harness, _) = harness();
     harness.set_size(egui::vec2(1200.0, 800.0));

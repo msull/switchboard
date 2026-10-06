@@ -12,8 +12,8 @@ use super::document::{self, Body};
 use super::{DrawCtx, GAP, Renaming, UiState, theme};
 use crate::core::grid::{MIN_HEIGHT, MIN_WIDTH};
 use crate::core::{
-    AppAction, AppCore, CardState, GridRect, MenuKind, PinTarget, PinnedItem, RadialMenu, RecordId,
-    SessionKind, SessionRecord, SetId, SetRule, UiRequest,
+    AppAction, AppCore, CardState, GridRect, MenuKind, PinTarget, PinnedItem, RULE_SCALE,
+    RadialMenu, RecordId, SessionKind, SessionRecord, SetId, SetRule, UiRequest, clamp_scale,
 };
 
 /// Arrange mode: while on, cards are moved and resized instead of
@@ -96,31 +96,30 @@ pub fn cell_rect(origin: egui::Pos2, rect: GridRect) -> egui::Rect {
 pub fn show(cx: &mut DrawCtx<'_>, ui: &mut Ui, set: SetId) {
     let p = theme::palette(ui);
     ui.spacing_mut().item_spacing = egui::vec2(10.0, 6.0);
-    let columns = columns(ui.available_width());
-    let Some((name, rule, mut items)) = cx.core.working_set(set).map(|s| {
-        (
-            s.name.clone(),
-            s.rule,
-            cx.core.set_cards(s, columns).into_owned(),
-        )
-    }) else {
+    // The width `draw_frame` measured from this same `ui`, which the
+    // core's steps use too.
+    let columns = cx.state.working_set_columns;
+    let Some((name, rule, running_only, card_scale, mut items)) =
+        cx.core.working_set(set).map(|s| {
+            (
+                s.name.clone(),
+                s.rule,
+                s.running_only,
+                s.card_scale,
+                cx.core.set_cards(s, columns).into_owned(),
+            )
+        })
+    else {
         ui.label("This working set no longer exists.");
         return;
     };
     header(cx, ui, set, &name, items.is_empty() || rule.is_some());
     if let Some(rule) = rule {
-        rule_line(cx, ui, set, rule);
+        rule_line(cx, ui, set, rule, running_only, card_scale);
     }
     ui.label(theme::meta_text(
         ui,
-        match (items.len(), rule) {
-            (0, Some(SetRule::Recent { hours })) => {
-                format!("No session active in the last {hours} h")
-            }
-            (0, None) => "Nothing here yet.".to_owned(),
-            (1, _) => "1 card".to_owned(),
-            (n, _) => format!("{n} cards"),
-        },
+        count_text(items.len(), rule, running_only),
     ));
     if items.is_empty() {
         if rule.is_none() {
@@ -1196,9 +1195,32 @@ fn header(cx: &mut DrawCtx<'_>, ui: &mut Ui, set: SetId, name: &str, fixed: bool
     });
 }
 
+/// How many cards a set shows, or why it shows none.
+fn count_text(n: usize, rule: Option<SetRule>, running_only: bool) -> String {
+    match (n, rule) {
+        (0, Some(SetRule::Recent { hours })) if running_only => {
+            format!("No running session active in the last {hours} h")
+        }
+        (0, Some(SetRule::Recent { hours })) => {
+            format!("No session active in the last {hours} h")
+        }
+        (0, None) => "Nothing here yet.".to_owned(),
+        (1, _) => "1 card".to_owned(),
+        (n, _) => format!("{n} cards"),
+    }
+}
+
 /// A rule set's rule under its name, the hours a small field that
-/// commits on Enter or when it loses focus; Escape puts it back.
-fn rule_line(cx: &mut DrawCtx<'_>, ui: &mut Ui, set: SetId, rule: SetRule) {
+/// commits on Enter or when it loses focus; Escape puts it back. Then
+/// the running-only toggle and the card size.
+fn rule_line(
+    cx: &mut DrawCtx<'_>,
+    ui: &mut Ui,
+    set: SetId,
+    rule: SetRule,
+    running_only: bool,
+    card_scale: u32,
+) {
     let SetRule::Recent { hours } = rule;
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 4.0;
@@ -1226,6 +1248,38 @@ fn rule_line(cx: &mut DrawCtx<'_>, ui: &mut Ui, set: SetId, rule: SetRule) {
             }
         }
         ui.label(theme::meta_text(ui, "h"));
+        ui.add_space(12.0);
+        let mut on = running_only;
+        if ui
+            .checkbox(&mut on, "Running only")
+            .on_hover_text("Hide sessions whose pane is not running")
+            .changed()
+        {
+            cx.dispatch(AppAction::SetRuleRunningOnly { set, on });
+        }
+        ui.add_space(12.0);
+        // The slider snaps to the core's steps, so a full drag writes
+        // `views.json` a dozen times at most. It also clamps and snaps
+        // its value on every frame, so it starts from the value it would
+        // show: an off-grid scale in a hand-edited `views.json` is then
+        // not saved until the slider is moved.
+        let shown = clamp_scale(card_scale);
+        let mut v = shown;
+        ui.scope(|ui| {
+            // The theme leaves inactive widgets unfilled, and a slider
+            // paints its rail and handle with that fill.
+            ui.visuals_mut().widgets.inactive.bg_fill = theme::palette(ui).text_alpha(0.14);
+            ui.add(
+                egui::Slider::new(&mut v, RULE_SCALE)
+                    .step_by(10.0)
+                    .show_value(false)
+                    .trailing_fill(true)
+                    .text("Card size"),
+            );
+        });
+        if v != shown {
+            cx.dispatch(AppAction::SetRuleCardScale { set, scale: v });
+        }
     });
 }
 

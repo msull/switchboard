@@ -349,6 +349,8 @@ impl AppCore {
                     op: self.quiet_op.clone(),
                     rule: None,
                     dismissed: Vec::new(),
+                    running_only: false,
+                    card_scale: WorkingSet::default_card_scale(),
                 };
                 let id = set.id;
                 self.update_views(out, |v| v.sets.push(set));

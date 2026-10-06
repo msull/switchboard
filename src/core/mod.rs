@@ -17,7 +17,8 @@ mod workflow;
 mod tests;
 
 pub use action::{
-    AppAction, AppCore, Clock, ENV_SETUP_LOCKED, ENV_SETUP_WINDOW, Effect, Notice, View,
+    AppAction, AppCore, Clock, ENV_SETUP_LOCKED, ENV_SETUP_WINDOW, Effect, Notice, RULE_SCALE,
+    View, clamp_scale,
 };
 pub use control::{ControlAction, ControlOutcome, GrantTarget, aws_view};
 pub use controller::{MenuKind, RadialMenu, UiRequest};

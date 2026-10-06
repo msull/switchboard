@@ -4051,6 +4051,8 @@ fn working_set_loads_and_is_pruned_and_the_view_is_restored() {
         op: None,
         rule: None,
         dismissed: Vec::new(),
+        running_only: false,
+        card_scale: crate::core::WorkingSet::default_card_scale(),
     });
     let load = |last_view: SavedView| {
         let mut core = AppCore::new();
@@ -6040,22 +6042,177 @@ fn undo_restores_a_dismissal() {
     assert!(members(&core, set).is_empty());
 }
 
+/// Six shells that printed at distinct times, on a rule set laid out
+/// at 30 columns: newest first, `ids[5]` is card 0.
+fn six_on_a_grid() -> (AppCore, SetId, Vec<RecordId>) {
+    let (mut core, _, ids) = with_records(&[SessionKind::Shell; 6], |_| None);
+    let set = recent_set(&mut core, 24, 1_000);
+    let statuses = ids
+        .iter()
+        .zip(0u64..)
+        .map(|(id, i)| printed(*id, 2_000 + i * 1_000))
+        .collect();
+    core.dispatch(AppAction::HostListed(statuses), Clock::at(8_000));
+    core.dispatch(AppAction::ViewColumns(30), Clock::at(8_000));
+    tick(&mut core, 9_000);
+    let cards: Vec<RecordId> = ids.iter().rev().copied().collect();
+    assert_eq!(members(&core, set), cards);
+    (core, set, cards)
+}
+
+fn step(core: &mut AppCore, direction: Direction) {
+    core.dispatch(AppAction::StepCard(direction), Clock::at(10_000));
+}
+
 #[test]
-fn the_controller_steps_through_a_rule_set_in_order() {
+fn the_controller_steps_a_rule_set_across_its_grid() {
+    let (mut core, set, cards) = six_on_a_grid();
+    let card = |n: usize| Some(PinTarget::Session(cards[n]));
+    assert_eq!(core.active_card(set), card(0));
+    step(&mut core, Direction::Up);
+    assert_eq!(core.active_card(set), card(0));
+    step(&mut core, Direction::Down);
+    assert_eq!(core.active_card(set), card(3));
+    core.dispatch(
+        AppAction::ActivateCard {
+            set,
+            target: PinTarget::Session(cards[2]),
+        },
+        Clock::at(5_000),
+    );
+    // The last card of a row does not wrap to the next.
+    step(&mut core, Direction::Right);
+    assert_eq!(core.active_card(set), card(2));
+}
+
+#[test]
+fn a_larger_card_scale_puts_fewer_cards_on_a_row() {
+    let (mut core, set, cards) = six_on_a_grid();
+    core.dispatch(
+        AppAction::SetRuleCardScale { set, scale: 120 },
+        Clock::at(5_000),
+    );
+    let ws = core.working_set(set).unwrap();
+    let laid = core.set_cards(ws, 30);
+    assert!(laid.iter().all(|i| i.rect.w == 13));
+    assert_eq!((laid[1].rect.y, laid[2].rect.y), (0, 10));
+    step(&mut core, Direction::Down);
+    assert_eq!(core.active_card(set), Some(PinTarget::Session(cards[2])));
+}
+
+#[test]
+fn a_running_only_rule_set_leaves_out_stopped_sessions() {
     let (mut core, _, ids) = with_records(&[SessionKind::Shell, SessionKind::Shell], |_| None);
     let set = recent_set(&mut core, 24, 1_000);
+    let stopped = HostStatus {
+        liveness: Liveness::Exited { code: Some(0) },
+        ..printed(ids[1], 3_000)
+    };
     core.dispatch(
-        AppAction::HostListed(vec![printed(ids[0], 2_000), printed(ids[1], 3_000)]),
+        AppAction::HostListed(vec![printed(ids[0], 2_000), stopped]),
         Clock::at(3_000),
     );
     tick(&mut core, 4_000);
-    assert_eq!(core.active_card(set), Some(PinTarget::Session(ids[1])));
-    core.dispatch(AppAction::StepCard(Direction::Down), Clock::at(5_000));
+    assert_eq!(members(&core, set), vec![ids[1], ids[0]]);
+    let e = core.dispatch(
+        AppAction::SetRuleRunningOnly { set, on: true },
+        Clock::at(5_000),
+    );
+    assert!(e.iter().any(|e| matches!(e, Effect::SaveViews(_))));
+    assert!(core.working_set(set).unwrap().running_only);
+    assert_eq!(members(&core, set), vec![ids[0]]);
+    let ws = core.working_set(set).unwrap();
+    assert_eq!(core.set_card_count(ws), 1);
+    assert_eq!(core.set_cards(ws, 30).len(), 1);
     assert_eq!(core.active_card(set), Some(PinTarget::Session(ids[0])));
-    core.dispatch(AppAction::StepCard(Direction::Right), Clock::at(5_000));
+    for direction in [
+        Direction::Right,
+        Direction::Down,
+        Direction::Left,
+        Direction::Up,
+    ] {
+        step(&mut core, direction);
+        assert_eq!(core.active_card(set), Some(PinTarget::Session(ids[0])));
+    }
+    // Choose the shown card, then ask for the hidden one: the choice
+    // must survive, which shows once the hidden card is back first.
+    for id in [ids[0], ids[1]] {
+        core.dispatch(
+            AppAction::ActivateCard {
+                set,
+                target: PinTarget::Session(id),
+            },
+            Clock::at(5_000),
+        );
+    }
+    let e = core.dispatch(
+        AppAction::SetRuleRunningOnly { set, on: false },
+        Clock::at(6_000),
+    );
+    assert!(e.iter().any(|e| matches!(e, Effect::SaveViews(_))));
+    assert_eq!(members(&core, set), vec![ids[1], ids[0]]);
     assert_eq!(core.active_card(set), Some(PinTarget::Session(ids[0])));
-    core.dispatch(AppAction::StepCard(Direction::Left), Clock::at(5_000));
-    assert_eq!(core.active_card(set), Some(PinTarget::Session(ids[1])));
+    assert!(core.working_set(set).unwrap().dismissed.is_empty());
+}
+
+#[test]
+fn rule_set_scale_and_toggle_are_clamped_and_a_hand_set_ignores_them() {
+    let mut core = AppCore::new();
+    let set = recent_set(&mut core, 24, 1);
+    let scale = |core: &mut AppCore, asked: u32| {
+        core.dispatch(
+            AppAction::SetRuleCardScale { set, scale: asked },
+            Clock::at(2),
+        );
+        core.working_set(set).unwrap().card_scale
+    };
+    assert_eq!(scale(&mut core, 0), 90);
+    assert_eq!(scale(&mut core, 1_000), 200);
+    assert_eq!(scale(&mut core, 115), 120);
+    core.dispatch(
+        AppAction::SetRuleRunningOnly { set, on: true },
+        Clock::at(3),
+    );
+    // A clone carries both.
+    core.dispatch(
+        AppAction::NewWorkingSet {
+            name: None,
+            clone_of: Some(set),
+            with: None,
+            columns: 24,
+        },
+        Clock::at(4),
+    );
+    let copy = core.working_sets().last().unwrap();
+    assert_ne!(copy.id, set);
+    assert!(copy.running_only);
+    assert_eq!(copy.card_scale, 120);
+    let hand = new_set(&mut core, 5);
+    let before = core.working_set(hand).unwrap().clone();
+    core.dispatch(
+        AppAction::SetRuleCardScale {
+            set: hand,
+            scale: 150,
+        },
+        Clock::at(6),
+    );
+    core.dispatch(
+        AppAction::SetRuleRunningOnly {
+            set: hand,
+            on: true,
+        },
+        Clock::at(6),
+    );
+    assert_eq!(core.working_set(hand), Some(&before));
+}
+
+#[test]
+fn view_columns_saves_nothing() {
+    let mut core = AppCore::new();
+    assert_eq!(core.view_columns(), crate::core::action::RULE_COLUMNS);
+    let e = core.dispatch(AppAction::ViewColumns(40), Clock::at(1));
+    assert!(e.is_empty());
+    assert_eq!(core.view_columns(), 40);
 }
 
 // --- the control port: quiet commands under an operation id

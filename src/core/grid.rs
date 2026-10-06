@@ -10,9 +10,26 @@ pub const MIN_WIDTH: u32 = 3;
 /// And to this many units tall.
 pub const MIN_HEIGHT: u32 = 2;
 
-/// The one size of a session's card on a working set, and every card's
-/// size on a rule set.
+/// The one size of a session's card on a working set, and a rule set's
+/// card at 100%, which [`rule_card`] scales.
 pub const SESSION_CARD: (u32, u32) = (10, 8);
+
+/// A rule set's card at `scale_pct` percent of [`SESSION_CARD`]. The
+/// width grows 1.4 times as fast as the height, so a larger card gives
+/// its terminal more columns rather than just more rows. The scale is
+/// clamped again here because a hand-edited `views.json` is read
+/// without going through the action that clamps it.
+#[must_use]
+pub fn rule_card(scale_pct: u32) -> (u32, u32) {
+    let p = scale_pct.clamp(
+        *super::action::RULE_SCALE.start(),
+        *super::action::RULE_SCALE.end(),
+    );
+    let (w, h) = SESSION_CARD;
+    // The width's factor is 1 + 1.4 * (p - 100) / 100, in thousandths
+    // 14p - 400, which stays positive for any `p` above 28.
+    ((w * (14 * p - 400) + 500) / 1000, (h * p + 50) / 100)
+}
 
 /// The size a target's card starts at. Board cards are 7 units
 /// wide; working-set cards show more and get more room.
@@ -184,6 +201,27 @@ mod tests {
             ]
         );
         assert!(flow(0, 10, 8, 24).is_empty());
+    }
+
+    #[test]
+    fn rule_card_grows_from_the_session_card_and_is_wider_than_it() {
+        use crate::core::RULE_SCALE;
+        assert_eq!(rule_card(100), SESSION_CARD);
+        assert_eq!(rule_card(90), (9, 7));
+        assert_eq!(rule_card(120), (13, 10));
+        assert_eq!(rule_card(200), (24, 16));
+        let mut last = (0, 0);
+        for p in RULE_SCALE.step_by(10) {
+            let (w, h) = rule_card(p);
+            // Rounding holds the height still for one step here and there.
+            assert!(w > last.0 && h >= last.1, "{p}% did not grow");
+            last = (w, h);
+            if p >= 120 {
+                assert!(w * 8 > h * 10, "{p}% is not wider than 10:8");
+            }
+        }
+        assert_eq!(rule_card(0), rule_card(*RULE_SCALE.start()));
+        assert_eq!(rule_card(10_000), rule_card(*RULE_SCALE.end()));
     }
 
     #[test]

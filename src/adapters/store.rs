@@ -589,6 +589,8 @@ mod tests {
             op: None,
             rule: None,
             dismissed: Vec::new(),
+            running_only: false,
+            card_scale: WorkingSet::default_card_scale(),
         });
         store.save_views(&views).unwrap();
         assert_eq!(store.load_all().unwrap().views, views);
@@ -638,6 +640,8 @@ mod tests {
             op: None,
             rule: None,
             dismissed: Vec::new(),
+            running_only: false,
+            card_scale: WorkingSet::default_card_scale(),
         }
     }
 
@@ -671,6 +675,37 @@ mod tests {
         let old = store.load_all().unwrap().views;
         assert_eq!(old.sets[0].rule, None);
         assert!(old.sets[0].dismissed.is_empty());
+    }
+
+    #[test]
+    fn a_rule_sets_toggle_and_scale_round_trip_and_a_v6_set_reads_with_defaults() {
+        use crate::core::SetRule;
+        let dir = tempfile::tempdir().unwrap();
+        let store = locked_store(dir.path());
+        let mut views = Views::default();
+        let mut set = set_in(SpaceId::DEFAULT);
+        set.items.clear();
+        set.rule = Some(SetRule::Recent { hours: 24 });
+        set.running_only = true;
+        set.card_scale = 150;
+        views.sets.push(set);
+        store.save_views(&views).unwrap();
+        assert_eq!(store.load_all().unwrap().views, views);
+        std::fs::write(
+            dir.path().join("views.json"),
+            r#"{"schema_version": 6, "sets": [{"name": "R", "rule": {"kind": "recent", "hours": 24}}]}"#,
+        )
+        .unwrap();
+        let old = store.load_all().unwrap().views;
+        assert!(!old.sets[0].running_only);
+        assert_eq!(old.sets[0].card_scale, 100);
+        store.save_views(&old).unwrap();
+        let written: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(dir.path().join("views.json")).unwrap()).unwrap();
+        assert_eq!(
+            written["schema_version"],
+            serde_json::json!(crate::core::VIEWS_SCHEMA_VERSION)
+        );
     }
 
     #[test]

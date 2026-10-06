@@ -376,13 +376,9 @@ impl AppCore {
             return;
         };
         let next = self.working_set(set).and_then(|s| {
-            if s.rule.is_some() {
-                // The core does not know how wide the view lays a rule
-                // set out, so it steps through the members in order.
-                return step_in_list(self.rule_members(set), &from, direction);
-            }
-            let rect = s.items.iter().find(|i| i.target == from)?.rect;
-            grid::neighbour(&s.items, rect, direction).cloned()
+            let cards = self.set_cards(s, self.view_columns());
+            let rect = cards.iter().find(|i| i.target == from)?.rect;
+            grid::neighbour(&cards, rect, direction).cloned()
         });
         if let Some(target) = next {
             self.activate_card(set, target);
@@ -490,18 +486,4 @@ impl AppCore {
     pub(crate) fn controller_connected(&self) -> bool {
         self.controller.connected
     }
-}
-
-/// The member one step from `from` in a rule set's order: Left and Up
-/// go back, Right and Down forward. At either end nothing moves.
-fn step_in_list(members: &[RecordId], from: &PinTarget, direction: Direction) -> Option<PinTarget> {
-    let PinTarget::Session(from) = from else {
-        return None;
-    };
-    let at = members.iter().position(|m| m == from)?;
-    let next = match direction {
-        Direction::Left | Direction::Up => at.checked_sub(1)?,
-        Direction::Right | Direction::Down => at + 1,
-    };
-    members.get(next).map(|id| PinTarget::Session(*id))
 }
