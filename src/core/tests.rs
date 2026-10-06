@@ -4094,7 +4094,7 @@ mod workflow {
         BUILTIN_WORKFLOW, HandoffMode, RunState, Verdict, WorkflowDefinition, WorkflowId,
     };
     use crate::core::round_paths;
-    use crate::core::workflow::SETTLE_PROBES;
+    use crate::core::workflow::{SETTLE_PROBES, STOP_GRACE};
     use crate::ports::round_files::{FileStamp, Probed};
 
     const PLAN: &str = "/tmp/proj/docs/plan.md";
@@ -4446,14 +4446,14 @@ mod workflow {
     }
 
     #[test]
-    fn an_exited_agent_pauses_the_run_and_continue_relaunches_it() {
+    fn an_exited_agent_fails_the_run_and_continue_relaunches_it() {
         let (mut core, run, _, reviewer, _) = started();
         core.dispatch(
             AppAction::HostListed(vec![exited(reviewer, Some(1))]),
             Clock::at(200),
         );
         let effects = core.dispatch(AppAction::Tick, Clock::at(201));
-        assert!(matches!(run_of(&core).state, RunState::Paused(ref why) if why.contains("exited")));
+        assert!(matches!(run_of(&core).state, RunState::Failed(ref why) if why.contains("exited")));
         assert!(
             !effects
                 .iter()
@@ -4490,6 +4490,214 @@ mod workflow {
         let argv = spawn_argv(&effects);
         assert_eq!(argv.len(), 4);
         assert!(argv[3].contains("plan.feedback-1.md"), "{argv:?}");
+    }
+
+    /// A hook event for `id`, at `at_ms` on both clocks.
+    fn hook(core: &mut AppCore, id: RecordId, kind: EventKind, at_ms: u64) {
+        core.dispatch(
+            AppAction::Events(vec![SessionEvent {
+                record_id: Some(id),
+                ..event(kind, at_ms)
+            }]),
+            Clock::at(at_ms),
+        );
+    }
+
+    fn stop(core: &mut AppCore, id: RecordId, at_ms: u64) {
+        hook(core, id, EventKind::Stopped { last_message: None }, at_ms);
+    }
+
+    /// A probe that finds the awaited file missing.
+    fn missing(core: &mut AppCore, run: WorkflowId, at_ms: u64) -> Vec<Effect> {
+        let path = core.workflow(run).unwrap().awaited_file().unwrap().clone();
+        core.dispatch(
+            AppAction::RoundFileProbed {
+                run,
+                path,
+                found: None,
+            },
+            Clock::at(at_ms),
+        )
+    }
+
+    /// Milliseconds after the stop at `stop_ms` when the grace is over.
+    fn past_grace(stop_ms: u64) -> u64 {
+        stop_ms + u64::try_from(STOP_GRACE.as_millis()).unwrap()
+    }
+
+    #[test]
+    fn a_reviewer_that_stops_without_its_file_fails_the_run_after_the_grace() {
+        let (mut core, run, _, reviewer, _) = started();
+        assert_eq!(
+            run_of(&core).rounds[0].feedback_asked,
+            Some(Clock::at(100).wall)
+        );
+        stop(&mut core, reviewer, 5_000);
+        missing(&mut core, run, past_grace(5_000) - 1_000);
+        assert_eq!(run_of(&core).state, RunState::AwaitingFeedback, "in grace");
+        let effects = missing(&mut core, run, past_grace(5_000));
+        assert!(
+            matches!(&run_of(&core).state, RunState::Failed(why)
+                if why.contains("stopped without writing") && why.ends_with("plan.feedback-1.md")),
+            "{:?}",
+            run_of(&core).state
+        );
+        assert!(saves(&effects) > 0);
+        let view = core.run_view(run).unwrap();
+        assert!(matches!(
+            view.state,
+            switchboard_control::RunState::Paused { failed: true, .. }
+        ));
+    }
+
+    #[test]
+    fn a_planner_that_stops_without_its_response_fails_the_run() {
+        let (mut core, run, _, _, planner) = started();
+        settle(&mut core, run, "- item", 400);
+        assert_eq!(run_of(&core).state, RunState::AwaitingResponse);
+        assert_eq!(
+            run_of(&core).rounds[0].response_asked,
+            Some(Clock::at(402).wall)
+        );
+        stop(&mut core, planner, 5_000);
+        missing(&mut core, run, past_grace(5_000));
+        assert!(
+            matches!(&run_of(&core).state, RunState::Failed(why)
+                if why.ends_with("plan.response-1.md")),
+            "{:?}",
+            run_of(&core).state
+        );
+    }
+
+    #[test]
+    fn a_stop_from_before_the_prompt_or_one_still_busy_does_not_fail_the_run() {
+        // The same second as the prompt: the previous turn's stop.
+        let (mut core, run, _, reviewer, _) = started();
+        stop(&mut core, reviewer, 500);
+        missing(&mut core, run, 100_000);
+        assert_eq!(run_of(&core).state, RunState::AwaitingFeedback);
+        // A prompt submitted after the stop: working again.
+        let (mut core, run, _, reviewer, _) = started();
+        stop(&mut core, reviewer, 5_000);
+        hook(&mut core, reviewer, EventKind::PromptSubmitted, 6_000);
+        missing(&mut core, run, 100_000);
+        assert_eq!(run_of(&core).state, RunState::AwaitingFeedback);
+        // A permission prompt after the stop: waiting on the user.
+        let (mut core, run, _, reviewer, _) = started();
+        stop(&mut core, reviewer, 5_000);
+        hook(
+            &mut core,
+            reviewer,
+            EventKind::PermissionRequested {
+                tool: Some("Bash".into()),
+            },
+            6_000,
+        );
+        missing(&mut core, run, 100_000);
+        assert_eq!(run_of(&core).state, RunState::AwaitingFeedback);
+    }
+
+    #[test]
+    fn an_idle_notification_after_the_stop_does_not_hide_it() {
+        let (mut core, run, _, reviewer, _) = started();
+        stop(&mut core, reviewer, 5_000);
+        hook(
+            &mut core,
+            reviewer,
+            EventKind::Notification {
+                kind: "idle_prompt".into(),
+            },
+            20_000,
+        );
+        missing(&mut core, run, past_grace(5_000));
+        assert!(matches!(run_of(&core).state, RunState::Failed(_)));
+    }
+
+    #[test]
+    fn a_file_that_appears_after_the_stop_is_still_honoured() {
+        let (mut core, run, _, reviewer, _) = started();
+        stop(&mut core, reviewer, 5_000);
+        settle(&mut core, run, "- item", 40_000);
+        assert_eq!(run_of(&core).state, RunState::AwaitingResponse);
+    }
+
+    #[test]
+    fn a_round_saved_without_an_asked_time_is_freed_by_pause_and_continue() {
+        let (mut core, run, _, reviewer, _) = started();
+        core.workspaces[0].workflows[0].rounds[0].feedback_asked = None;
+        stop(&mut core, reviewer, 5_000);
+        missing(&mut core, run, 100_000);
+        assert_eq!(
+            run_of(&core).state,
+            RunState::AwaitingFeedback,
+            "never fails"
+        );
+        // Continue while waiting does nothing.
+        let effects = core.dispatch(AppAction::ContinueWorkflow(run), Clock::at(101_000));
+        assert!(sent(&effects).is_empty());
+        core.dispatch(AppAction::PauseWorkflow(run), Clock::at(102_000));
+        let effects = core.dispatch(AppAction::ContinueWorkflow(run), Clock::at(103_000));
+        assert_eq!(run_of(&core).state, RunState::AwaitingFeedback);
+        assert_eq!(sent(&effects).len(), 1, "the idle reviewer is asked again");
+        assert_eq!(
+            run_of(&core).rounds[0].feedback_asked,
+            Some(Clock::at(103_000).wall)
+        );
+        // From here the rule applies.
+        stop(&mut core, reviewer, 110_000);
+        missing(&mut core, run, past_grace(110_000));
+        assert!(matches!(run_of(&core).state, RunState::Failed(_)));
+    }
+
+    #[test]
+    fn continue_from_failed_re_prompts_a_running_agent_that_stopped() {
+        let (mut core, run, _, reviewer, _) = started();
+        stop(&mut core, reviewer, 5_000);
+        missing(&mut core, run, past_grace(5_000));
+        assert!(matches!(run_of(&core).state, RunState::Failed(_)));
+        let effects = core.dispatch(AppAction::ContinueWorkflow(run), Clock::at(60_000));
+        let r = run_of(&core);
+        assert_eq!(r.state, RunState::AwaitingFeedback);
+        assert_eq!(r.rounds[0].feedback_asked, Some(Clock::at(60_000).wall));
+        let sent = sent(&effects);
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0].0, HostId(reviewer.host_name()));
+        assert!(sent[0].1.contains("plan.feedback-1.md"), "{}", sent[0].1);
+        // The old stop is before the new prompt: no second failure.
+        missing(&mut core, run, 200_000);
+        assert_eq!(run_of(&core).state, RunState::AwaitingFeedback);
+        // A user's pause reads as an ordinary pause on the wire.
+        core.dispatch(AppAction::PauseWorkflow(run), Clock::at(201_000));
+        assert!(matches!(
+            core.run_view(run).unwrap().state,
+            switchboard_control::RunState::Paused { failed: false, .. }
+        ));
+    }
+
+    #[test]
+    fn continue_re_prompts_a_user_rounds_planner_with_the_users_feedback() {
+        let (mut core, run, _, _, planner) = started();
+        settle(&mut core, run, "No further feedback.", 400);
+        core.dispatch(
+            AppAction::HostListed(vec![running(planner)]),
+            Clock::at(410),
+        );
+        core.dispatch(
+            AppAction::UserFeedback {
+                run,
+                text: "Split step 3.".into(),
+            },
+            Clock::at(420),
+        );
+        stop(&mut core, planner, 5_000);
+        missing(&mut core, run, past_grace(5_000));
+        assert!(matches!(run_of(&core).state, RunState::Failed(_)));
+        let effects = core.dispatch(AppAction::ContinueWorkflow(run), Clock::at(60_000));
+        let sent = sent(&effects);
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0].0, HostId(planner.host_name()));
+        assert!(sent[0].1.contains("Split step 3."), "{}", sent[0].1);
+        assert!(!sent[0].1.contains("plan.feedback-2.md"), "{}", sent[0].1);
     }
 
     #[test]
@@ -4716,6 +4924,8 @@ mod workflow {
             user_feedback: None,
             responded: false,
             snapshot: false,
+            feedback_asked: None,
+            response_asked: None,
         };
         let text = builtin.render(
             "{plan} {feedback} {response} {round}/{cap} {no_feedback}",

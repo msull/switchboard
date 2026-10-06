@@ -572,6 +572,11 @@ impl AppCore {
                 super::RunState::AtCap => wire::RunState::AtCap,
                 super::RunState::Paused(reason) => wire::RunState::Paused {
                     reason: reason.clone(),
+                    failed: false,
+                },
+                super::RunState::Failed(reason) => wire::RunState::Paused {
+                    reason: reason.clone(),
+                    failed: true,
                 },
                 super::RunState::Finalized => wire::RunState::Finalized,
                 super::RunState::HandedOff => wire::RunState::HandedOff,

@@ -5889,17 +5889,7 @@ impl Runner {
         a: &Attempt,
         now_ms: u64,
     ) -> Result<()> {
-        let key = (a.stage.clone(), a.n);
-        let mut withdrawn = false;
-        for d in t
-            .decisions
-            .iter_mut()
-            .filter(|d| d.pending() && d.name == "finalize" && d.attempt.as_ref() == Some(&key))
-        {
-            d.state = DecisionState::Cancelled;
-            withdrawn = true;
-        }
-        if !withdrawn {
+        if !cancel_pending(t, a, "finalize") {
             return Ok(());
         }
         log::info!(
@@ -6037,7 +6027,23 @@ impl Runner {
             RunState::Converged | RunState::AtCap => {
                 self.review_done(t, ps, p, stage, a, &view, now_ms)
             }
-            RunState::Paused { reason } => self.ensure_decision(
+            // The reviewer or planner stopped or exited without its
+            // round file: the attempt failed like any agent's, and a
+            // rerun starts a fresh review.
+            RunState::Paused {
+                reason,
+                failed: true,
+            } => {
+                // A `paused` question left from a pause the user
+                // continued in the app would send `continue` to a run
+                // Dispatch no longer polls; `rerun` replaces it.
+                cancel_pending(t, a, "paused");
+                self.fail_attempt(t, ps, &a.stage, a.n, &format!("review: {reason}"), now_ms)
+            }
+            RunState::Paused {
+                reason,
+                failed: false,
+            } => self.ensure_decision(
                 t,
                 ps,
                 Ask {
@@ -7222,6 +7228,22 @@ fn resolution_stage(p: &Pipeline) -> Option<Stage> {
     shape.review_prompt = None;
     shape.no_feedback = None;
     Some(shape)
+}
+
+/// Cancel the attempt's pending decisions called `name` in memory; the
+/// caller's next save writes it. True if there was one.
+fn cancel_pending(t: &mut Ticket, a: &Attempt, name: &str) -> bool {
+    let key = (a.stage.clone(), a.n);
+    let mut cancelled = false;
+    for d in t
+        .decisions
+        .iter_mut()
+        .filter(|d| d.pending() && d.name == name && d.attempt.as_ref() == Some(&key))
+    {
+        d.state = DecisionState::Cancelled;
+        cancelled = true;
+    }
+    cancelled
 }
 
 /// The decision `ask` makes on `t`, pending, with the next id on the

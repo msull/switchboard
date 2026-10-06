@@ -3,7 +3,7 @@
 //! waits for a file, prompts an agent, or stops. Nothing here retries.
 
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use crate::core::action::{AppAction, AppCore, Clock, Effect, Out, View};
 use crate::core::model::{
@@ -21,6 +21,12 @@ pub const SETTLE_PROBES: u8 = 3;
 /// most likely at an approval prompt: the run is marked stalled and the
 /// user told once.
 pub const STALL_AFTER: Duration = Duration::from_secs(120);
+/// How long a Claude Code agent must have read idle after its Stop,
+/// with its round file still missing, before the run fails. Claude Code
+/// can end a turn with background work that writes later, so a Stop
+/// alone is not enough. Dispatch's `STOP_IDLE_POLLS` is the same wait
+/// for a stage agent.
+pub const STOP_GRACE: Duration = Duration::from_secs(30);
 
 /// How long a run's awaited file has looked the same.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -72,6 +78,45 @@ fn fresh_round(plan: &Path, n: u32) -> Round {
         user_feedback: None,
         responded: false,
         snapshot: false,
+        feedback_asked: None,
+        response_asked: None,
+    }
+}
+
+impl Round {
+    /// When the agent `state` waits on was last asked for this round's
+    /// file.
+    fn asked(&self, state: &RunState) -> Option<SystemTime> {
+        match state {
+            RunState::AwaitingFeedback => self.feedback_asked,
+            RunState::AwaitingResponse => self.response_asked,
+            _ => None,
+        }
+    }
+
+    /// Record that the agent `state` waits on was asked at `at`.
+    fn set_asked(&mut self, state: &RunState, at: SystemTime) {
+        match state {
+            RunState::AwaitingFeedback => self.feedback_asked = Some(at),
+            RunState::AwaitingResponse => self.response_asked = Some(at),
+            _ => {}
+        }
+    }
+}
+
+/// When the run's awaited agent was asked for the current round's file.
+fn asked_at(run: &WorkflowRun) -> Option<SystemTime> {
+    run.current()?.asked(&run.state)
+}
+
+/// The planner's prompt for `round`: the user's own feedback is sent in
+/// it, the reviewer's is a file to read.
+fn respond_prompt(def: &WorkflowDefinition, round: &Round, plan: &Path, cap: u32) -> String {
+    match &round.user_feedback {
+        Some(text) => def
+            .render(&def.respond_to_user, round, plan, cap)
+            .replace("{text}", text),
+        None => def.render(&def.respond, round, plan, cap),
     }
 }
 
@@ -250,7 +295,10 @@ impl AppCore {
             return;
         };
         let cap = def.cap.unwrap_or(self.settings.workflow_round_cap).max(1);
-        let round = fresh_round(plan, 1);
+        let round = Round {
+            feedback_asked: Some(now.wall),
+            ..fresh_round(plan, 1)
+        };
         let id = WorkflowId::new();
         let run = WorkflowRun {
             id,
@@ -386,7 +434,7 @@ impl AppCore {
             if exited {
                 let name = self.session_name(agent);
                 let file = path.display().to_string();
-                self.pause_workflow(
+                self.fail_workflow(
                     run,
                     &format!("{name} exited before writing {file}"),
                     now,
@@ -446,6 +494,7 @@ impl AppCore {
         }
         let Some(found) = found else {
             self.probes.retain(|p| p.run != id);
+            self.fail_if_stopped(id, path, now, out);
             return;
         };
         let streak = match self.probes.iter_mut().find(|p| p.run == id) {
@@ -471,6 +520,47 @@ impl AppCore {
             self.probes.retain(|p| p.run != id);
             self.settled(id, &found.first_line, now, out);
         }
+    }
+
+    /// The awaited file is missing: fail the run when its agent stopped
+    /// after it was asked and has read idle for [`STOP_GRACE`]. A round
+    /// with no asked time (saved before it was kept) never fails here,
+    /// since a recorded stop may be the previous round's.
+    fn fail_if_stopped(&mut self, id: WorkflowId, path: &Path, now: Clock, out: &mut Out) {
+        let Some(run) = self.workflow(id) else {
+            return;
+        };
+        let (Some(agent), Some(asked)) = (run.awaiting(), asked_at(run)) else {
+            return;
+        };
+        let Some(stop) = self.stopped_since(agent, asked) else {
+            return;
+        };
+        if now
+            .wall
+            .duration_since(stop)
+            .is_ok_and(|idle| idle >= STOP_GRACE)
+        {
+            let name = self.session_name(agent);
+            let file = path.display().to_string();
+            self.fail_workflow(
+                id,
+                &format!("{name} stopped without writing {file}"),
+                now,
+                out,
+            );
+        }
+    }
+
+    /// The agent's last Stop, when it came strictly after `asked` (one
+    /// at or before is the previous turn's) and its card reads idle. A
+    /// queued prompt reads `Working` and a permission prompt or a
+    /// question `WaitingOnYou`, neither of which is done. A Codex card
+    /// never reads idle (it has no hooks), so it never matches.
+    fn stopped_since(&self, agent: RecordId, asked: SystemTime) -> Option<SystemTime> {
+        let session = self.session(agent)?;
+        let stop = session.last_stop_at?;
+        (stop > asked && session.activity == Activity::Idle).then_some(stop)
     }
 
     /// The awaited file stopped changing: record what it says and move
@@ -544,7 +634,10 @@ impl AppCore {
         };
         let def = self.definition_of(&run);
         let n = round_count(&run) + 1;
-        let round = fresh_round(&run.plan, n);
+        let round = Round {
+            feedback_asked: Some(now.wall),
+            ..fresh_round(&run.plan, n)
+        };
         // `{response}` in the reviewer's round prompt is the previous
         // round's, the one it is asked to read; `{feedback}` is the new
         // file to write.
@@ -568,6 +661,11 @@ impl AppCore {
             self.pause_workflow(id, "the planner clone does not exist yet", now, out);
             return;
         };
+        self.edit_run(id, now, out, |r| {
+            if let Some(round) = r.rounds.last_mut() {
+                round.response_asked = Some(now.wall);
+            }
+        });
         self.prompt_agent(planner, prompt, now, out);
     }
 
@@ -589,26 +687,37 @@ impl AppCore {
     // --- user controls
 
     fn pause_workflow(&mut self, id: WorkflowId, reason: &str, now: Clock, out: &mut Out) {
+        self.halt_workflow(id, RunState::Paused(reason.to_owned()), now, out);
+    }
+
+    /// Like a pause, but the awaited agent let the round down rather
+    /// than the user stopping it; Dispatch reruns a failed review.
+    fn fail_workflow(&mut self, id: WorkflowId, reason: &str, now: Clock, out: &mut Out) {
+        self.halt_workflow(id, RunState::Failed(reason.to_owned()), now, out);
+    }
+
+    /// Stop waiting: no more probes, and the run rests in `state`.
+    fn halt_workflow(&mut self, id: WorkflowId, state: RunState, now: Clock, out: &mut Out) {
         if self.workflow(id).is_none() {
             return;
         }
         self.probes.retain(|p| p.run != id);
-        self.edit_run(id, now, out, |r| {
-            r.state = RunState::Paused(reason.to_owned());
-        });
+        self.edit_run(id, now, out, |r| r.state = state);
     }
 
-    /// From `Paused`, take the interrupted step again: wait for the
-    /// same file, and re-prompt the agent only if its pane is gone (a
-    /// running one is either still working or already done, and the
-    /// probe tells which). From `AtCap` or `Converged`, one more round.
+    /// From `Paused` or `Failed`, take the interrupted step again: wait
+    /// for the same file, and re-prompt the agent if its pane is gone
+    /// or it stopped since it was asked (for a round saved without an
+    /// asked time, any recorded stop with its card idle). A running
+    /// agent that has not stopped is still working, and the probe tells
+    /// when it is done. From `AtCap` or `Converged`, one more round.
     fn continue_workflow(&mut self, id: WorkflowId, now: Clock, out: &mut Out) {
         let Some(run) = self.workflow(id).cloned() else {
             return;
         };
         let def = self.definition_of(&run);
         match run.state {
-            RunState::Paused(_) => {
+            RunState::Paused(_) | RunState::Failed(_) => {
                 let Some(round) = run.current().cloned() else {
                     return;
                 };
@@ -621,29 +730,39 @@ impl AppCore {
                     out.push(Effect::CloneAllTranscript { run: id, handle });
                     return;
                 }
-                let (state, agent, template) = match round.verdict {
-                    None => (
-                        RunState::AwaitingFeedback,
-                        run.reviewer,
-                        if round.n == 1 {
-                            def.review_first.clone()
+                let (state, agent, prompt) = match round.verdict {
+                    None => {
+                        let template = if round.n == 1 {
+                            &def.review_first
                         } else {
-                            def.review_round.clone()
-                        },
-                    ),
+                            &def.review_round
+                        };
+                        (
+                            RunState::AwaitingFeedback,
+                            run.reviewer,
+                            def.render(template, &round, &run.plan, run.cap),
+                        )
+                    }
                     Some(Verdict::Changes) if !round.responded => (
                         RunState::AwaitingResponse,
                         run.planner.unwrap_or(run.reviewer),
-                        def.respond.clone(),
+                        respond_prompt(&def, &round, &run.plan, run.cap),
                     ),
                     Some(_) => {
                         self.next_review_round(id, now, out);
                         return;
                     }
                 };
-                self.edit_run(id, now, out, |r| r.state = state);
-                if !self.is_running(agent) {
-                    let prompt = def.render(&template, &round, &run.plan, run.cap);
+                let asked = round.asked(&state).unwrap_or(SystemTime::UNIX_EPOCH);
+                let reprompt =
+                    !self.is_running(agent) || self.stopped_since(agent, asked).is_some();
+                self.edit_run(id, now, out, |r| {
+                    if reprompt && let Some(round) = r.rounds.last_mut() {
+                        round.set_asked(&state, now.wall);
+                    }
+                    r.state = state;
+                });
+                if reprompt {
                     self.prompt_agent(agent, &prompt, now, out);
                 }
             }
@@ -756,9 +875,7 @@ impl AppCore {
             user_feedback: Some(text.to_owned()),
             ..fresh_round(&run.plan, n)
         };
-        let prompt = def
-            .render(&def.respond_to_user, &round, &run.plan, run.cap)
-            .replace("{text}", text);
+        let prompt = respond_prompt(&def, &round, &run.plan, run.cap);
         self.edit_run(id, now, out, |r| {
             r.rounds.push(round);
             r.state = RunState::AwaitingResponse;

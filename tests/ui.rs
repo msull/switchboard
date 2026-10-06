@@ -3862,6 +3862,8 @@ fn seed_review(
             user_feedback: None,
             responded: false,
             snapshot: false,
+            feedback_asked: None,
+            response_asked: None,
         }],
         state: RunState::Converged,
         cap: 4,
@@ -4032,6 +4034,31 @@ fn the_review_page_lists_rounds_and_its_controls_dispatch() {
     // The board lists the review.
     showing(&mut harness, View::Board(ids.beta));
     harness.get_by_label("Review: plan.md");
+}
+
+#[test]
+fn a_failed_review_offers_continue() {
+    let (mut harness, ids) = harness();
+    let source = seed_claude(&mut harness, &ids);
+    let run = seed_review(&mut harness, &ids, source);
+    {
+        let core = harness.state_mut().core_mut_for_seeding();
+        let mut workspaces = core.workspaces().to_vec();
+        let beta = workspaces
+            .iter_mut()
+            .find(|w| w.project.id == ids.beta)
+            .unwrap();
+        let wf = beta.workflows.iter_mut().find(|w| w.id == run).unwrap();
+        wf.state =
+            RunState::Failed("plan review stopped without writing plan.feedback-1.md".into());
+        wf.rounds[0].verdict = None;
+        core.seed(workspaces, vec![]);
+    }
+    showing(&mut harness, View::Workflow(run));
+    harness.get_by_label("failed: plan review stopped without writing plan.feedback-1.md");
+    harness.get_by_label("Finalize");
+    click(&mut harness, "Continue");
+    assert!(actions(&harness).contains(&AppAction::ContinueWorkflow(run)));
 }
 
 #[test]

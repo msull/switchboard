@@ -983,8 +983,8 @@ never saw the review, to enter plan mode and implement.
   plan, feedback, and response as they were at the end of the round.
 - `state` is a small machine: `AwaitingFeedback(n)`,
   `AwaitingResponse(n)`, `Converged`, `AtCap`, `Paused(reason)`,
-  `Finalized`, `HandedOff`. Every transition emits `Effect::Save`, so a
-  restart mid-round rehydrates and keeps waiting.
+  `Failed(reason)`, `Finalized`, `HandedOff`. Every transition emits
+  `Effect::Save`, so a restart mid-round rehydrates and keeps waiting.
 - `WorkflowDefinition` is a record in the data directory, never in the
   project: the reviewer's first prompt, its per-round prompt, the
   planner's first prompt, its per-round prompt, the handoff prompt, the
@@ -1010,8 +1010,16 @@ the run advances when that file exists and has not changed for a settle
 period (three ticks). "No feedback" is a file too: its first line is a
 fixed sentence the definition states, so the verdict is a string
 compare, never a judgement of prose. A missing file after the agent's
-pane exits, or a resume failure, moves the run to `Paused` with the
-reason; nothing retries on its own.
+pane exits, or after a Claude Code agent stopped since it was asked
+(each round keeps `feedback_asked` and `response_asked`) and its card
+has read idle for `STOP_GRACE` (thirty seconds, Dispatch's
+`STOP_IDLE_POLLS` wait), moves the run to `Failed` with the reason; a
+resume failure moves it to `Paused`. Nothing retries on its own. Codex
+has no Stop hook, so a Codex reviewer that sits idle without its file
+still only gets the stall notice below; the planner is always a Claude
+Code clone, so its half is always covered. A round saved before the
+asked times were kept never fails on a stop (the stop may be the
+previous round's).
 
 An approval prompt inside the agent (Codex asking to run `gh`, say) is
 invisible the same way, and a round can sit on it for as long as nobody
@@ -1128,9 +1136,14 @@ show what is actually shared.
   and never stored; `workflow_round_cap` is the setting. A user round
   (`UserFeedback`) sends the text in the prompt and keeps it on the
   round, so Switchboard still writes nothing into the project.
-- `Continue` from `Paused` re-enters the interrupted wait and re-prompts
-  only an agent whose pane is gone; from `AtCap` or `Converged` it opens
-  one more reviewer round and raises the cap to match.
+- `Continue` from `Paused` or `Failed` re-enters the interrupted wait
+  and re-prompts an agent whose pane is gone or that stopped since it
+  was asked (for a round saved without an asked time, any recorded stop
+  with the card idle), setting the asked time anew; a running agent
+  that has not stopped is left to finish. A round with no asked time
+  never fails on a stop, so Pause it first to free it; Continue does
+  nothing while a run waits. From `AtCap` or `Converged` it opens one
+  more reviewer round and raises the cap to match.
 - The planner clone is `clone_all` on the transcript port: the whole
   conversation under a fresh id, the same private write as a clone.
 - The page reads round files itself through the preview cache, live
@@ -1466,7 +1479,11 @@ reports), as interrupted. A `Stop` hook event now records
 `last_stop_at`, and `session.waiting` sets an outside reason on a
 record that makes its card read as waiting on you while the pane runs,
 so the badge and the rail count Dispatch's pending decisions without
-knowing about them. Only the instance holding the store lock listens.
+knowing about them. A run's `paused` state carries `failed: true` when
+its agent let the round down (the core's `Failed`) rather than a
+user's Pause; the flag is omitted when false and read with a default,
+so either side may be older. Dispatch fails the review attempt on it.
+Only the instance holding the store lock listens.
 An agent record whose `launch` is `Argv` adds those flags to the
 composed command line, ahead of the first prompt (with `--` between,
 since Claude Code's multi-value flags would otherwise read the prompt
@@ -1661,9 +1678,14 @@ path, since the reviewer works in the attempt directory.
 The runner is patient. A Stop with the card still `working` holds an
 agent, reviewer or fix attempt; it fails only after about thirty
 seconds idle at its prompt without its artifact, or when the pane
-exits. Only `no such run` fails a review run's query or reads a paused
-run as stopped; any other failed reply or socket error is asked again
-next pass with one warning. A `none` check reading within two minutes
+exits. A plan review run the app reports failed (its reviewer or
+planner exited or stopped without its round file) fails the attempt
+the same way, with the ordinary rerun/park question and `max_reruns`;
+a rerun kills the old run's agents and starts a fresh run, and a
+`paused` question left from a pause continued in the app is cancelled.
+Only `no such run` fails a review run's query or reads a paused run as
+stopped; any other failed reply or socket error is asked again next
+pass with one warning. A `none` check reading within two minutes
 of the head's last move is pending. Answering clears every session a
 decision marked, not only the ticket's newest.
 Review rounds carry forward. A new attempt of a code review stage
