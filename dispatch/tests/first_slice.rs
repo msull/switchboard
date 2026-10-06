@@ -15414,7 +15414,8 @@ fn a_gate_only_stage_writes_an_artifact_the_tester_is_given_by_path_and_environm
         "{prompt}"
     );
     assert_eq!(vars.get("DISPATCH_INPUT_PERSONAS"), Some(&shown));
-    assert_eq!(vars.len(), 1, "{vars:?}");
+    assert_eq!(vars.get("DISPATCH_INPUT_TRY_SETUP_PERSONAS"), Some(&shown));
+    assert_eq!(vars.len(), 2, "{vars:?}");
     assert!(!prompt.contains(TOKEN));
 }
 

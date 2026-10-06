@@ -2214,7 +2214,10 @@ is replaced, failed or cancelled, and when the ticket parks or closes.
 Agent sessions get each input their prompt names as
 `DISPATCH_INPUT_<NAME>`, carried on the Switchboard record
 (`SessionRecord.env`) so a resume keeps it. `{inputs.<stage>.<name>}`
-names one stage's artifact.
+names one stage's artifact and has its own variable,
+`DISPATCH_INPUT_<STAGE>_<NAME>`. Both forms read the reader's own
+lane from a stage that runs per lane, and a root or joined stage that
+names a per-lane file is refused when the pipeline loads.
 
 Known gaps:
 
@@ -2230,6 +2233,15 @@ Known gaps:
   logs, if the agent prints the file. Only the path reaches a
   Switchboard record (`SessionRecord.env`); the contents reach these
   files only through the agent's own output.
+- Dispatch's own reads of `plan` and `notes` are still lane-blind: the
+  human gate's notes line, the refresh and remedy agents' plan, the
+  review workflow's plan, the report, and the port. With an `each`
+  plan over more than one lane, a refresh or remedy agent is handed
+  another lane's plan. `Ticket::input_where` with the reader's lane is
+  the fix.
+- A session launched before `{inputs.<stage>.<name>}` had its own
+  `DISPATCH_INPUT_<STAGE>_<NAME>` keeps its old environment on resume:
+  one `DISPATCH_INPUT_<NAME>`, which may hold the stage-qualified file.
 
 ## Open questions
 

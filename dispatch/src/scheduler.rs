@@ -4467,7 +4467,7 @@ impl Runner {
         }
         let guidance = &p.operators[&operator].guidance;
         let template = stage.prompt.as_deref().unwrap_or_default();
-        let env = input_env(p, &vars, &format!("{guidance}\n{template}"));
+        let env = input_env(&vars, &format!("{guidance}\n{template}"));
         let mut prompt = guidance_prelude(guidance, &vars);
         prompt.push_str(&vars.render(template));
         if let Some(moved) = lane
@@ -7593,33 +7593,26 @@ fn judge_pr(
     (summary, verdict)
 }
 
-/// `DISPATCH_INPUT_<NAME>` for each input `text` names that `vars`
-/// resolves, set to its path. Validation keeps `env_key` one-to-one
-/// over artifact names, so two fields share a key only when they name
-/// the same artifact: a stage-qualified field wins over a bare one, and
-/// of two stage-qualified fields, the stage later in the pipeline wins.
-fn input_env(p: &Pipeline, vars: &Vars, text: &str) -> BTreeMap<String, String> {
-    let mut names: Vec<_> = crate::template::input_names(text).into_iter().collect();
-    // A bare field ranks 0, below every stage. A field naming no stage
-    // of the pipeline ranks 0 too, harmlessly: `vars` never resolves it,
-    // so it sets nothing.
-    let order = |stage: &Option<String>| {
-        stage.as_ref().map_or(0, |s| {
-            p.stages
-                .iter()
-                .position(|x| &x.name == s)
-                .map_or(0, |i| i + 1)
-        })
-    };
-    names.sort_by_key(|(stage, _)| order(stage));
+/// One variable for each input `text` names that `vars` resolves, set
+/// to its path: `{inputs.<name>}` sets `DISPATCH_INPUT_<NAME>` and
+/// `{inputs.<stage>.<name>}` sets `DISPATCH_INPUT_<STAGE>_<NAME>`, since
+/// the two forms can mean different files. Validation keeps the keys
+/// one-to-one, so no two fields share one.
+fn input_env(vars: &Vars, text: &str) -> BTreeMap<String, String> {
     let mut env = BTreeMap::new();
-    for (stage, name) in names {
-        let field = match &stage {
-            Some(s) => format!("inputs.{s}.{name}"),
-            None => format!("inputs.{name}"),
+    for (stage, name) in crate::template::input_names(text) {
+        let (field, key) = match &stage {
+            Some(s) => (
+                format!("inputs.{s}.{name}"),
+                format!("DISPATCH_INPUT_{}_{}", env_key(s), env_key(&name)),
+            ),
+            None => (
+                format!("inputs.{name}"),
+                format!("DISPATCH_INPUT_{}", env_key(&name)),
+            ),
         };
         if let Some(path) = vars.0.get(&field) {
-            env.insert(format!("DISPATCH_INPUT_{}", env_key(&name)), path.clone());
+            env.insert(key, path.clone());
         }
     }
     env
@@ -8066,17 +8059,19 @@ pub(crate) fn vars_for(t: &Ticket, p: &Pipeline, lane: Option<&str>) -> Vars {
     }
     let names: BTreeSet<&String> = t.attempts.iter().flat_map(|a| a.artifacts.keys()).collect();
     for name in names {
-        if let Some(path) = t.input(name) {
+        if let Some((_, path)) = t.input_where(name, |a| visible(p, lane, a)) {
             vars.set(format!("inputs.{name}"), path.display().to_string());
         }
     }
     // What an earlier stage left the tree at (a deploy's commit), or
-    // that it was skipped.
+    // that it was skipped. A per-lane stage with no attempt in this lane
+    // leaves its fields unset rather than hand over another lane's.
     for s in p.stages.iter().take(t.stage) {
         let latest = t
             .attempts
             .iter()
             .filter(|a| a.stage == s.name && a.state == AttemptState::Complete)
+            .filter(|a| visible(p, lane, a))
             .max_by_key(|a| a.n);
         // An artifact of a named stage, unless it was forgotten.
         for (name, path) in latest.iter().flat_map(|a| {
@@ -8114,6 +8109,19 @@ pub(crate) fn vars_for(t: &Ticket, p: &Pipeline, lane: Option<&str>) -> Vars {
         }
     }
     vars
+}
+
+/// Whether a reader in `lane` (none in the root) sees what attempt `a`
+/// wrote: every attempt of a stage that runs in one context, and only
+/// its own lane's of a stage that runs per lane. An attempt of no stage
+/// of the pipeline (a refresh, a resolution) runs where it ran, so it is
+/// seen from the root, the join, and its own lane.
+fn visible(p: &Pipeline, lane: Option<&str>, a: &Attempt) -> bool {
+    let own = Some(a.context.as_str()) == lane;
+    match p.stages.iter().find(|s| s.name == a.stage) {
+        Some(s) => !s.runs_per_lane() || own,
+        None => a.context == "root" || a.context == "joined" || own,
+    }
 }
 
 /// What a human gate after a deploy or with services up adds: the
@@ -9167,5 +9175,196 @@ gate = { kind = "human", decision = "each" }
         );
         t.stage = 0;
         assert_eq!(deployed_and_served(&t, &p), "", "nothing before it");
+    }
+
+    /// Two lanes, `A` and `B`: a root `investigate` and a per-lane
+    /// `implement` both write `notes`, a per-lane gate-only `deploy`
+    /// records a head, and a per-lane `read` names them.
+    fn lanes_pipeline() -> Pipeline {
+        Pipeline::parse(
+            r#"
+version = 1
+
+[project]
+name = "P"
+repo = "git@example.com:o/p.git"
+space = "Dispatch · P"
+
+[source]
+kind = "github"
+repo = "o/p"
+label = "dispatch"
+
+[[lanes]]
+name = "A"
+path = "a"
+
+[[lanes]]
+name = "B"
+path = "b"
+
+[operators.agent]
+kind = "claude"
+
+[[stages]]
+name = "investigate"
+operator = "agent"
+context = "root"
+writes = ["notes"]
+prompt = "Write {notes}."
+
+[[stages]]
+name = "implement"
+operator = "agent"
+context = "each"
+writes = ["notes"]
+prompt = "Write {notes}."
+
+[[stages]]
+name = "deploy"
+context = "each"
+gate = { kind = "command", argv = ["make", "deploy"], in = "lane" }
+
+[[stages]]
+name = "read"
+operator = "agent"
+context = "each"
+prompt = "Read {inputs.notes} and {inputs.implement.notes} at {inputs.deploy.commit}."
+"#,
+        )
+        .unwrap()
+    }
+
+    /// A ticket at the `read` stage holding `attempts`, each a stage,
+    /// a context, and the path it wrote `notes` to.
+    fn notes_ticket(attempts: &[(&str, &str, &str)]) -> Ticket {
+        let mut t = crate::ticket::blank();
+        t.stage = 3;
+        for (i, (stage, ctx, path)) in attempts.iter().enumerate() {
+            t.attempts.push(new_attempt(
+                stage,
+                u32::try_from(i).unwrap() + 1,
+                ctx,
+                AttemptKind::Agent,
+                AttemptState::Complete,
+                BTreeMap::from([("notes".to_owned(), PathBuf::from(path))]),
+                0,
+            ));
+        }
+        t
+    }
+
+    fn field(v: &Vars, key: &str) -> Option<String> {
+        v.0.get(key).cloned()
+    }
+
+    #[test]
+    fn input_vars_for_both_forms_name_their_own_files() {
+        let p = lanes_pipeline();
+        let t = notes_ticket(&[
+            ("implement", "A", "/impl/a.md"),
+            ("investigate", "root", "/inv.md"),
+        ]);
+        let vars = vars_for(&t, &p, Some("A"));
+        let env = input_env(
+            &vars,
+            "{inputs.notes} {inputs.investigate.notes} {inputs.implement.notes}",
+        );
+        assert_eq!(
+            env,
+            BTreeMap::from([
+                ("DISPATCH_INPUT_NOTES".to_owned(), "/inv.md".to_owned()),
+                (
+                    "DISPATCH_INPUT_INVESTIGATE_NOTES".to_owned(),
+                    "/inv.md".to_owned()
+                ),
+                (
+                    "DISPATCH_INPUT_IMPLEMENT_NOTES".to_owned(),
+                    "/impl/a.md".to_owned()
+                ),
+            ])
+        );
+    }
+
+    #[test]
+    fn a_lane_reader_gets_its_own_lanes_file_through_both_forms() {
+        let p = lanes_pipeline();
+        let t = notes_ticket(&[("implement", "A", "/a.md"), ("implement", "B", "/b.md")]);
+        for (lane, path) in [("A", "/a.md"), ("B", "/b.md")] {
+            let vars = vars_for(&t, &p, Some(lane));
+            assert_eq!(
+                field(&vars, "inputs.notes").as_deref(),
+                Some(path),
+                "{lane}"
+            );
+            assert_eq!(
+                field(&vars, "inputs.implement.notes").as_deref(),
+                Some(path),
+                "{lane}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_lane_reader_still_gets_a_one_context_writers_file() {
+        let p = lanes_pipeline();
+        let t = notes_ticket(&[
+            ("investigate", "root", "/inv.md"),
+            ("implement", "B", "/b.md"),
+        ]);
+        let vars = vars_for(&t, &p, Some("A"));
+        assert_eq!(field(&vars, "inputs.notes").as_deref(), Some("/inv.md"));
+        assert_eq!(
+            field(&vars, "inputs.investigate.notes").as_deref(),
+            Some("/inv.md")
+        );
+        assert_eq!(
+            field(&vars, "inputs.implement.notes"),
+            None,
+            "B's is not A's"
+        );
+        let vars = vars_for(&t, &p, Some("B"));
+        assert_eq!(field(&vars, "inputs.notes").as_deref(), Some("/b.md"));
+    }
+
+    #[test]
+    fn a_lanes_refresh_notes_stay_in_that_lane() {
+        let p = lanes_pipeline();
+        let t = notes_ticket(&[
+            ("investigate", "root", "/inv.md"),
+            (REFRESH, "B", "/refresh-b.md"),
+        ]);
+        let vars = vars_for(&t, &p, Some("A"));
+        assert_eq!(field(&vars, "inputs.notes").as_deref(), Some("/inv.md"));
+        let vars = vars_for(&t, &p, Some("B"));
+        assert_eq!(
+            field(&vars, "inputs.notes").as_deref(),
+            Some("/refresh-b.md")
+        );
+    }
+
+    #[test]
+    fn a_per_lane_commit_follows_the_readers_lane() {
+        let p = lanes_pipeline();
+        let mut t = crate::ticket::blank();
+        t.stage = 3;
+        for (n, lane, head) in [(1, "A", "head-a"), (2, "B", "head-b")] {
+            t.attempts.push(Attempt {
+                head: Some(head.into()),
+                ..new_attempt(
+                    "deploy",
+                    n,
+                    lane,
+                    AttemptKind::GateOnly,
+                    AttemptState::Complete,
+                    BTreeMap::new(),
+                    0,
+                )
+            });
+        }
+        for (lane, head) in [("A", "head-a"), ("B", "head-b")] {
+            let vars = vars_for(&t, &p, Some(lane));
+            assert_eq!(field(&vars, "inputs.deploy.commit").as_deref(), Some(head));
+        }
     }
 }

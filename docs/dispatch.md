@@ -424,17 +424,23 @@ interrupted attempt.
   artifact names; each expands in the prompt to a path
   `<ticket>/<stage>/<attempt>/<context>/<name>.md` under Dispatch's
   data directory. `{inputs.<name>}` is the artifact of that name from
-  the most recent completed stage that wrote it, so PTA's `render`
-  reads `{inputs.plan}` written by `draft`, and Switchboard's
-  `implement` reads the `plan` that the review finalized. A new
-  attempt cannot find a stale file already settled, and parallel
+  the most recent completed attempt that wrote it, among this lane's
+  attempts and those of stages that run in one context, so PTA's
+  `render` reads `{inputs.plan}` written by `draft`, and Switchboard's
+  `implement` reads the `plan` that its own lane's review finalized.
+  A new attempt cannot find a stale file already settled, and parallel
   `each` attempts never share a file. Earlier artifacts are read-only
   inputs; a stage that changes one writes its own copy.
   `{inputs.<stage>.<name>}` names the artifact of the latest completed
-  attempt of that stage. An agent session also gets each input its
-  prompt or its operator's guidance names as an environment variable,
-  `DISPATCH_INPUT_<NAME>`, set to the path (never the contents), on
-  every spawn including a resume.
+  attempt of that stage: in this lane, when the stage runs per lane
+  (`each`, or more than one lane), and unset when this lane has none.
+  A root or joined stage that names a file only a per-lane stage
+  writes, through either form, is refused when the pipeline loads. An
+  agent session also gets each input its prompt or its operator's
+  guidance names as an environment variable set to the path (never
+  the contents), on every spawn including a resume:
+  `DISPATCH_INPUT_<NAME>` for `{inputs.<name>}` and
+  `DISPATCH_INPUT_<STAGE>_<NAME>` for `{inputs.<stage>.<name>}`.
 - **A secret artifact lives only through its hold.** A gate-only
   command stage may mark an artifact `secret` (a generated test
   user's credentials, say). Dispatch never reads it: the port refuses
@@ -814,11 +820,14 @@ digit as `_`. Nothing names the environment it deploys to; a pipeline
 that needs one puts it in its own argv
 (`argv = ["sh", "-c", "inv personas --env my-dev > \"$DISPATCH_WRITES_PERSONAS\""]`).
 An agent session gets `DISPATCH_INPUT_<NAME>` for each `{inputs.<name>}`
-or `{inputs.<stage>.<name>}` its prompt or guidance names. Two fields
-naming the same artifact share a variable: the stage-qualified one wins
-over the bare one, and of two stage-qualified ones, the later stage in
-the pipeline. A stage that writes a secret must print nothing secret,
-since its output is the `checks` log anyone can read.
+its prompt or guidance names, and `DISPATCH_INPUT_<STAGE>_<NAME>` for
+each `{inputs.<stage>.<name>}` (`{inputs.try-setup.personas}` is
+`DISPATCH_INPUT_TRY_SETUP_PERSONAS`), since the two forms can mean
+different files. A pipeline whose names would put two inputs on one
+variable (stage `plan` writing `notes` beside an artifact `plan-notes`,
+both `DISPATCH_INPUT_PLAN_NOTES`) is refused when it loads. A stage
+that writes a secret must print nothing secret, since its output is the
+`checks` log anyone can read.
 
 A prompt's templates are these keys, plus a stage's `writes` names
 (`{notes}`, `{plan}`); the review and code review variables are
@@ -834,9 +843,18 @@ as written.
 | `{worktree}`, `{branch}`, `{lane}` | the context's tree, branch and lane (`{branch}` only where a branch is cut: a lane, or the root of a pipeline with a `repo`; `{lane}` only in a lane context) |
 | `{lanes}` | the lanes the ticket chose, comma-separated in pipeline order; every lane before the `lanes` decision, so `investigate` sees them all |
 | `{lanes.all}` | every lane of the pipeline, comma-separated in pipeline order |
-| `{inputs.<artifact>}` | the path of an earlier attempt's artifact |
-| `{inputs.<stage>.<artifact>}` | the path of that artifact from the latest completed attempt of `<stage>` |
-| `{inputs.<stage>.commit}` | the head an earlier stage's gate recorded (a deploy's commit) |
+| `{inputs.<artifact>}` | the path from the newest completed attempt that wrote it, among this lane's and those of stages that run in one context; `$DISPATCH_INPUT_<ARTIFACT>` |
+| `{inputs.<stage>.<artifact>}` | the path from the latest completed attempt of `<stage>`, in this lane when `<stage>` runs per lane; `$DISPATCH_INPUT_<STAGE>_<ARTIFACT>`. A root or joined stage naming a per-lane stage's artifact is refused |
+| `{inputs.<stage>.commit}` | the head that same attempt's gate recorded (a deploy's commit); refused in the same case |
+
+A command-gated stage's `checks` log and a code review's `summary`
+count as artifacts it writes, for both the refusal and the variable
+names. The refusal reads every template rendered with the stage's
+inputs: the prompt, the guidance of its operator, reviewers and
+implementer, a code review's `review_prompt` and `fix_prompt`, a
+workflow reviewer's templates, and, for a `pr-checks` or `pr-merged`
+gate, the guidance of the policy's `rebaser` (and of its `fixer` for
+`pr-checks`).
 
 ### Pipeline: Switchboard
 
