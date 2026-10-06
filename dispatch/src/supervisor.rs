@@ -142,8 +142,12 @@ pub fn seed(
     for name in &sup.decides {
         let _ = writeln!(out, "- `{name}`: {}", decision_words(name));
     }
-    out.push_str(
-        "\nEvery other decision is the owner's: say so and move on. A `merge` question is \
+    let _ = write!(
+        out,
+        "\nEvery other decision is the owner's: say so and move on. Tell the owner they \
+         answer it {OWNER_ROUTES}. A `dispatch` command the owner types in this pane, a `!` \
+         line included, runs as you and is refused the same way, so never suggest it, and \
+         never change your environment to get round the rule. A `merge` question is \
          answered `park` only: Dispatch resolves it when the provider reports the merge. \
          You may not restart a ticket, move the worktrees, run the runner, resume with \
          reruns unless `rerun` is yours, or replace yourself.\n\n",
@@ -365,6 +369,12 @@ pub fn rule(verb: &str) -> Option<Rule> {
         .find(|(v, _)| *v == verb)
         .map(|(_, r)| *r)
 }
+
+/// Where the owner answers a decision the supervisor may not: said by
+/// the refusal and by the seed, so the two never drift.
+pub const OWNER_ROUTES: &str = "with the decision's buttons on the ticket page \
+    in Switchboard, or with `dispatch decide` from any shell but a supervisor's \
+    pane (a Switchboard shell session or another terminal)";
 
 /// The decisions a project's live `[supervisor]` table lets its
 /// supervisor answer; empty without one.
@@ -914,6 +924,9 @@ mod tests {
             "- `finalize`: `finalize` ends a plan review",
             "- `rerun`: `rerun` runs a failed",
             "Every other decision is the owner's: say so and move on.",
+            OWNER_ROUTES,
+            "a `!` line included, runs as you",
+            "never change your environment",
             "`park` only",
             "run `/opt/bin/dispatch brief orchard` first",
             "/data/projects/orchard/supervisor/handoff.md current",
@@ -930,6 +943,8 @@ mod tests {
             assert!(s.contains(want), "the seed lacks {want:?}:\n{s}");
         }
         assert!(!s.contains("{exe}"));
+        // Naming the variable would show the supervisor how to pass as the owner.
+        assert!(!s.contains("SWITCHBOARD_RECORD_ID"));
         assert!(!s.contains("--timeout 100"));
         assert!(!s.contains("--for any --timeout 540"));
     }

@@ -2045,9 +2045,10 @@ long-lived Claude Code session that watches its tickets
   `--resume` and `--kill`, any verb not on the list
   (`supervisor::SUPERVISOR_VERBS`, held to `USAGE` by a test), and any
   other project. A `decide` outside `decides` saves a `Refusal` on the
-  decision and logs a `refused` event. The answer's `by`, a ticket's
-  `state_by`, its source's `taken_by` and an event's `actor` say
-  `supervisor`.
+  decision and logs a `refused` event, and its message names the
+  owner's two routes (`supervisor::OWNER_ROUTES`). The answer's `by`, a
+  ticket's `state_by`, its source's `taken_by` and an event's `actor`
+  say `supervisor`.
 - The control port's `session.resume` (non-replayable): resumes an
   agent's conversation with no terminal, leaves a running pane alone,
   and refuses a session that cannot resume rather than launching it

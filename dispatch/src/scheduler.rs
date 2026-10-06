@@ -6106,7 +6106,11 @@ impl Runner {
                     at_ms: now_ms,
                 });
                 write_ticket_stamped(&self.data, &mut t, now_ms)?;
-                bail!("the supervisor may not answer `{name}`; the owner does");
+                bail!(
+                    "the supervisor may not answer `{name}`; the owner does, {}; a command \
+                     typed in the supervisor's pane is the supervisor's",
+                    crate::supervisor::OWNER_ROUTES
+                );
             }
             d.state = DecisionState::Answered {
                 answer: answer.into(),
