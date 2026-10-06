@@ -256,8 +256,11 @@ pub struct ReviewView {
 const ROUNDS_WIDTH: f32 = 150.0;
 /// What a section label takes: the space above it plus its line.
 const SECTION_HEIGHT: f32 = 48.0;
-/// The note box with its button.
-const NOTE_HEIGHT: f32 = 110.0;
+/// The tallest the feedback box grows before it scrolls, so typing
+/// never pushes its button off the page.
+const NOTE_MAX: f32 = 96.0;
+/// The column beside the feedback box: its button and the hints.
+const NOTE_BUTTON_WIDTH: f32 = 140.0;
 
 pub fn show(cx: &mut DrawCtx<'_>, ui: &mut Ui, id: WorkflowId) {
     let Some(run) = cx.core.workflow(id).cloned() else {
@@ -278,6 +281,17 @@ pub fn show(cx: &mut DrawCtx<'_>, ui: &mut Ui, id: WorkflowId) {
         .iter()
         .find(|r| r.n + 1 == round.n)
         .map(|prev| round_files(&data_dir, &run, prev).0);
+    // The owner's note sits above the columns, so its height is never
+    // what is left over once the panes are split.
+    if !run.state.waiting() && run.planner.is_some() {
+        let draft = &mut cx.state.review_views.entry(run.id).or_default().note;
+        let field = egui::Id::new(("review-note", run.id));
+        if feedback_block(ui, draft, field, "Your own feedback for the planner", "") {
+            let text = draft.trim().to_owned();
+            draft.clear();
+            cx.dispatch(AppAction::UserFeedback { run: run.id, text });
+        }
+    }
     ui.horizontal_top(|ui| {
         ui.allocate_ui_with_layout(
             egui::vec2(ROUNDS_WIDTH, ui.available_height()),
@@ -588,10 +602,9 @@ fn exchange_column(
     feedback: &Path,
     response: &Path,
 ) {
-    let note = !run.state.waiting() && run.planner.is_some();
-    // Two section labels, and the note box when it is shown, come out
-    // of the height before it is split between the two panes.
-    let reserve = 2.0 * SECTION_HEIGHT + if note { NOTE_HEIGHT } else { 0.0 };
+    // The two section labels come out of the height before it is split
+    // between the two panes.
+    let reserve = 2.0 * SECTION_HEIGHT;
     let half = ((ui.available_height() - reserve) * 0.5).max(80.0);
     // While the round waits on an agent, the pane its file will fill
     // shows that agent's terminal instead of a missing file, so the
@@ -661,37 +674,75 @@ fn exchange_column(
                 });
         }
     }
-    if note {
-        note_box(cx, ui, run);
-    }
 }
 
-/// The user's own feedback, sent as one more round for the planner.
-fn note_box(cx: &mut DrawCtx<'_>, ui: &mut Ui, run: &WorkflowRun) {
+/// The owner's feedback: a box that scrolls rather than grows, with
+/// "Send my feedback", `meta` and the shortcut beside it. True when the
+/// owner sends a draft that is not blank, by the button or Cmd+Enter;
+/// the caller sends `draft.trim()` and clears it. Returning a `bool`
+/// rather than dispatching here keeps this `&mut` borrow of the draft
+/// (which lives in `cx.state`) from overlapping the caller's `&mut cx`.
+pub(super) fn feedback_block(
+    ui: &mut Ui,
+    draft: &mut String,
+    field: egui::Id,
+    hint: &str,
+    meta: &str,
+) -> bool {
     let p = theme::palette(ui);
-    let view = cx.state.review_views.entry(run.id).or_default();
-    let response = ui.add(
-        egui::TextEdit::multiline(&mut view.note)
-            .hint_text("Your own feedback for the planner")
-            .desired_rows(2)
-            .desired_width(f32::INFINITY)
-            .background_color(p.surface)
-            .margin(egui::Margin::symmetric(10, 8)),
-    );
-    ui.ctx()
-        .accesskit_node_builder(response.id, |node| node.set_label("Your feedback"));
-    let ready = !view.note.trim().is_empty();
-    let text = view.note.clone();
-    if ui
-        .add_enabled_ui(ready, |ui| theme::secondary(ui, "Send my feedback"))
-        .inner
-        .clicked()
-    {
-        cx.dispatch(AppAction::UserFeedback { run: run.id, text });
-        if let Some(view) = cx.state.review_views.get_mut(&run.id) {
-            view.note.clear();
-        }
-    }
+    let mut send = false;
+    ui.horizontal_top(|ui| {
+        let width = (ui.available_width() - NOTE_BUTTON_WIDTH - GAP).max(120.0);
+        ui.allocate_ui_with_layout(
+            egui::vec2(width, NOTE_MAX),
+            egui::Layout::top_down(egui::Align::Min),
+            |ui| {
+                egui::ScrollArea::vertical()
+                    .id_salt(("feedback-block", field))
+                    .max_height(NOTE_MAX)
+                    .auto_shrink([false, true])
+                    .show(ui, |ui| {
+                        // Plain Enter stays a newline, which suits
+                        // paragraphs; Cmd+Enter is not the field's
+                        // return key, so it inserts nothing and reaches
+                        // the check below.
+                        let response = ui.add(
+                            egui::TextEdit::multiline(draft)
+                                .id(field)
+                                .hint_text(hint)
+                                .desired_rows(2)
+                                .desired_width(f32::INFINITY)
+                                .background_color(p.surface)
+                                .margin(egui::Margin::symmetric(10, 8)),
+                        );
+                        ui.ctx().accesskit_node_builder(response.id, |node| {
+                            node.set_label("Your feedback");
+                        });
+                        let cmd_enter = ui.input(|i| {
+                            i.key_pressed(egui::Key::Enter) && i.modifiers.command_only()
+                        });
+                        if response.has_focus() && cmd_enter {
+                            send = true;
+                        }
+                    });
+            },
+        );
+        ui.vertical(|ui| {
+            let ready = !draft.trim().is_empty();
+            if ui
+                .add_enabled_ui(ready, |ui| theme::secondary(ui, "Send my feedback"))
+                .inner
+                .clicked()
+            {
+                send = true;
+            }
+            if !meta.is_empty() {
+                ui.label(theme::meta_text(ui, meta));
+            }
+            ui.label(theme::meta_text(ui, "⌘↩ sends"));
+        });
+    });
+    send && !draft.trim().is_empty()
 }
 
 /// A file's body through the preview cache; a missing file is a note.

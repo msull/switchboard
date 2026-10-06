@@ -6943,7 +6943,7 @@ mod dispatch_page {
     use super::*;
     use crate::core::dispatch::{
         ArtifactRead, CONSOLE_NAME, CONSOLE_SPACE, RUNNER_NAME, RUNNER_NO_COMMAND, RUNNER_OUTSIDE,
-        RUNNER_STILL_ANSWERS, RUNNER_STOP_OUTSIDE, RunnerStanding, RunnerStop,
+        RUNNER_STILL_ANSWERS, RUNNER_STOP_OUTSIDE, RunnerStanding, RunnerStop, revisable,
     };
     use crate::ports::dispatch::{
         AttemptView, Body, DecisionView, EventView, EventsView, ProjectView, Reply, Status,
@@ -8049,6 +8049,57 @@ mod dispatch_page {
             "an agent asking for itself counts"
         );
         assert_eq!(core.waiting_count(), 2);
+    }
+
+    /// The plan tab's feedback block, and the card's Revise…, apply to a
+    /// pending `finalize` that offers `revise` on a stage reviewing the
+    /// plan, and to nothing else.
+    #[test]
+    fn revisable_is_a_pending_finalize_on_a_plan_review() {
+        let mut t = status(None).tickets.remove(0);
+        t.attempts.push(AttemptView {
+            stage: "review-plan".into(),
+            n: 1,
+            kind: "workflow".into(),
+            artifacts: vec![("plan".into(), "/dispatch/t1/review/1/plan.md".into())],
+            ..AttemptView::default()
+        });
+        t.decisions.push(DecisionView {
+            id: "d7".into(),
+            ticket: "t1".into(),
+            stage: "review-plan".into(),
+            name: "finalize".into(),
+            options: vec!["finalize".into(), "revise".into(), "park".into()],
+            state: "pending".into(),
+            needs_note: vec!["revise".into()],
+            ..DecisionView::default()
+        });
+        assert_eq!(revisable(&t).map(|d| d.id.as_str()), Some("d7"));
+
+        let mut answered = t.clone();
+        answered.decisions[1].state = "answered".into();
+        assert!(revisable(&answered).is_none(), "answered");
+
+        let mut named = t.clone();
+        named.decisions[1].name = "merge".into();
+        assert!(revisable(&named).is_none(), "another decision");
+
+        let mut no_revise = t.clone();
+        no_revise.decisions[1].options.retain(|o| o != "revise");
+        assert!(revisable(&no_revise).is_none(), "revise not offered");
+
+        let mut draft = t.clone();
+        draft.attempts[1].artifacts = vec![("draft".into(), "/dispatch/t1/draft.md".into())];
+        assert!(revisable(&draft).is_none(), "another subject");
+
+        // The newest attempt of the stage decides, not an older one.
+        let mut newer = draft.clone();
+        newer.attempts.insert(1, t.attempts[1].clone());
+        newer.attempts[2].n = 2;
+        assert!(
+            revisable(&newer).is_none(),
+            "the newest attempt reviews a draft"
+        );
     }
 
     #[test]

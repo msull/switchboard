@@ -4129,6 +4129,64 @@ fn the_review_page_lists_rounds_and_its_controls_dispatch() {
     harness.get_by_label("Review: plan.md");
 }
 
+/// The note sits above the columns, so a short window with a long plan
+/// still shows its button; Cmd+Enter sends, but never a blank box.
+#[test]
+fn the_review_note_stays_on_screen_and_cmd_enter_sends_it() {
+    let (mut harness, ids) = harness_sized(
+        fake_services(
+            FakeOpener::default(),
+            FakeSecrets::default(),
+            FakeHost::default(),
+        ),
+        egui::vec2(1000.0, 420.0),
+    );
+    let source = seed_claude(&mut harness, &ids);
+    let run = seed_review(&mut harness, &ids, source);
+    let dir = tempfile::tempdir().unwrap();
+    let plan = dir.path().join("plan.md");
+    let body = "Step.\n\n".repeat(200);
+    std::fs::write(&plan, body).unwrap();
+    {
+        let core = harness.state_mut().core_mut_for_seeding();
+        let mut workspaces = core.workspaces().to_vec();
+        let beta = workspaces
+            .iter_mut()
+            .find(|w| w.project.id == ids.beta)
+            .unwrap();
+        let wf = beta.workflows.iter_mut().find(|w| w.id == run).unwrap();
+        wf.plan = plan;
+        core.seed(workspaces, vec![]);
+    }
+    showing(&mut harness, View::Workflow(run));
+    let button = harness.get_by_label("Send my feedback").rect();
+    assert!(
+        button.min.y >= 0.0 && button.max.y <= 420.0,
+        "the button is on screen: {button:?}"
+    );
+    let sent = |h: &Harness<'static, SwitchboardApp>| {
+        actions(h)
+            .into_iter()
+            .filter(|a| matches!(a, AppAction::UserFeedback { .. }))
+            .collect::<Vec<_>>()
+    };
+    harness.get_by_label("Your feedback").focus();
+    harness.run_steps(2);
+    harness.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Enter);
+    harness.run_steps(2);
+    assert!(sent(&harness).is_empty(), "a blank box sends nothing");
+    type_into(&mut harness, "Your feedback", "Split step 3");
+    harness.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Enter);
+    harness.run_steps(2);
+    assert_eq!(
+        sent(&harness),
+        vec![AppAction::UserFeedback {
+            run,
+            text: "Split step 3".into(),
+        }]
+    );
+}
+
 #[test]
 fn a_failed_review_offers_continue() {
     let (mut harness, ids) = harness();
@@ -5394,6 +5452,149 @@ fn dispatch_page_holds_revise_until_a_note_is_written() {
         answer: "revise".into(),
         note: Some("Step 3 deletes data.".into()),
     }));
+}
+
+/// `ticket_with_documents` with a plan review of `subject` on stage
+/// `review-plan` and its `finalize` pending.
+fn ticket_with_a_pending_finalize(
+    subject: &'static str,
+) -> (
+    FakeDispatch,
+    impl FnOnce(&mut switchboard::ports::dispatch::TicketView),
+) {
+    use switchboard::ports::dispatch::{AttemptView, DecisionView};
+    let (dispatch, documents) = ticket_with_documents();
+    let edit = move |t: &mut switchboard::ports::dispatch::TicketView| {
+        documents(t);
+        t.attempts.push(AttemptView {
+            stage: "review-plan".into(),
+            n: 1,
+            context: "repo".into(),
+            kind: "workflow".into(),
+            state: "complete".into(),
+            artifacts: vec![(
+                subject.into(),
+                format!("/dispatch/tickets/t1/review/1/{subject}.md").into(),
+            )],
+            ..AttemptView::default()
+        });
+        t.decisions = vec![DecisionView {
+            id: "d7".into(),
+            ticket: "t1".into(),
+            stage: "review-plan".into(),
+            name: "finalize".into(),
+            question: "The review of plan converged after 2 round(s).".into(),
+            options: vec!["finalize".into(), "revise".into(), "park".into()],
+            recommendation: Some("finalize".into()),
+            state: "pending".into(),
+            needs_note: vec!["revise".into()],
+            ..DecisionView::default()
+        }];
+    };
+    (dispatch, edit)
+}
+
+fn decides(harness: &Harness<'static, SwitchboardApp>) -> Vec<AppAction> {
+    actions(harness)
+        .into_iter()
+        .filter(|a| matches!(a, AppAction::DispatchDecide { .. }))
+        .collect()
+}
+
+/// While a plan review's `finalize` is pending, the Plan tab pins the
+/// owner's box above the plan; sending it answers `revise` with the
+/// note, and a blank box sends nothing.
+#[test]
+fn the_plan_tab_takes_the_owners_feedback_on_a_pending_finalize() {
+    let (dispatch, edit) = ticket_with_a_pending_finalize("plan");
+    let mut harness = ticket_page_on(dispatch, Changes::default(), edit);
+    click(&mut harness, "Plan");
+    harness.get_by_label("Your feedback");
+    harness.get_by_label("Send my feedback");
+    harness.get_by_label("2 rounds so far");
+    harness.get_by_label("Your feedback").focus();
+    harness.run_steps(2);
+    harness.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Enter);
+    harness.run_steps(2);
+    assert!(decides(&harness).is_empty(), "a blank box sends nothing");
+    type_into(&mut harness, "Your feedback", "Step 3 deletes data.");
+    click(&mut harness, "Send my feedback");
+    assert_eq!(
+        decides(&harness),
+        vec![AppAction::DispatchDecide {
+            ticket: "t1".into(),
+            decision: "d7".into(),
+            answer: "revise".into(),
+            note: Some("Step 3 deletes data.".into()),
+        }]
+    );
+}
+
+/// A workflow stage reviewing another subject has no plan to pin the
+/// box over, so its card keeps its own note box and a bare `revise`.
+#[test]
+fn a_finalize_on_another_subject_keeps_the_cards_note() {
+    let (dispatch, edit) = ticket_with_a_pending_finalize("draft");
+    let mut harness = ticket_page_on(dispatch, Changes::default(), edit);
+    click(&mut harness, "Plan");
+    assert!(harness.query_by_label("Your feedback").is_none());
+    assert!(harness.query_by_label("Revise…").is_none());
+    harness.get_by_label("revise");
+}
+
+/// On the ticket page the card's "Revise…" opens the Plan tab with its
+/// box focused; once the decision is answered both are gone.
+#[test]
+fn revise_on_the_ticket_card_opens_the_plan_tab_and_focuses_the_box() {
+    let (dispatch, edit) = ticket_with_a_pending_finalize("plan");
+    let mut harness = ticket_page_on(dispatch, Changes::default(), edit);
+    harness.get_by_label("Revise…");
+    assert!(harness.query_by_label("Your feedback").is_none());
+    click(&mut harness, "Revise…");
+    assert!(harness.get_by_label("Your feedback").is_focused());
+    let mut status = harness.state().core().dispatch_state().status.clone();
+    status.tickets[0].decisions[0].state = "answered".into();
+    status.tickets[0].decisions[0].answer = Some("finalize".into());
+    harness
+        .state_mut()
+        .dispatch(AppAction::DispatchStatus(Some(status)));
+    harness.run_steps(2);
+    assert!(harness.query_by_label("Revise…").is_none());
+    assert!(harness.query_by_label("Your feedback").is_none());
+}
+
+/// A focus request for a box the page does not draw is dropped, so it
+/// cannot take the focus when the Plan tab opens later.
+#[test]
+fn a_focus_request_for_an_undrawn_box_is_dropped() {
+    let (dispatch, edit) = ticket_with_a_pending_finalize("plan");
+    let mut harness = ticket_page_on(dispatch, Changes::default(), edit);
+    harness.state_mut().ui_state.focus_feedback = Some(egui::Id::new(("finalize-note", "d7")));
+    harness.run_steps(2);
+    assert_eq!(harness.state().ui_state.focus_feedback, None);
+    click(&mut harness, "Plan");
+    assert!(!harness.get_by_label("Your feedback").is_focused());
+}
+
+/// The card shows no box on the ticket page, so its `finalize` never
+/// carries the objection drafted on the Plan tab.
+#[test]
+fn finalize_on_the_ticket_card_does_not_send_the_plan_tabs_draft() {
+    let (dispatch, edit) = ticket_with_a_pending_finalize("plan");
+    let mut harness = ticket_page_on(dispatch, Changes::default(), edit);
+    click(&mut harness, "Plan");
+    type_into(&mut harness, "Your feedback", "Step 3 deletes data.");
+    click(&mut harness, "Timeline");
+    click(&mut harness, "finalize");
+    assert_eq!(
+        decides(&harness),
+        vec![AppAction::DispatchDecide {
+            ticket: "t1".into(),
+            decision: "d7".into(),
+            answer: "finalize".into(),
+            note: None,
+        }]
+    );
 }
 
 /// A `ready` attempt shows the pull request it is bound to and what
