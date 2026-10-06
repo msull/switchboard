@@ -1693,17 +1693,18 @@ ticket's slot as any open attempt does).
   ticket still needs out of the tree.
 - A hold is released only after every writer that could touch the
   resource is confirmed stopped, by the cancellation sequence under
-  "Decisions"; a deploy still running keeps `my-dev`. As built, a hold
-  is released on the pass after the ticket leaves its range (an
-  advance, a send-back, the pipeline's end), once the services it
-  started there read back as gone: each `before` exited, each session
-  killed and read back gone, each port binding again, and each session
-  removed with `session.remove`. A park or a close releases the same
-  way. A stop not confirmed within two minutes (`STOP_LIMIT_MS`) is a
-  `stuck` decision with `wait` and `released`, asked even while the
-  ticket parks or closes; only a `released` answer lets a hold go
-  without the runner's confirmation. A stop that ends on its own
-  after asking withdraws the question in the write that records it.
+  "Decisions"; a deploy still running keeps `my-dev`, including one a
+  runner restart lost. As built, a hold is released on the pass after
+  the ticket leaves its range (an advance, a send-back, the pipeline's
+  end), once the services it started there read back as gone: each
+  `before` exited, each session killed and read back gone, each port
+  binding again, and each session removed with `session.remove`. A park
+  or a close releases the same way. A stop not confirmed within two
+  minutes (`STOP_LIMIT_MS`) is a `stuck` decision with `wait` and
+  `released`, asked even while the ticket parks or closes; only a
+  `released` answer lets a hold go without the runner's confirmation. A
+  stop that ends on its own after asking withdraws the question in the
+  write that records it.
 - A hold taken past the first stage of its range (a ticket parked at
   `try` or `tried`, then resumed) cannot trust what the range's earlier
   stages did: another ticket may have deployed since, and parking
@@ -2300,15 +2301,18 @@ and the head it ran at is the deployed commit, `{inputs.deploy.commit}`
 to later prompts; a stage in a lane the ticket did not choose is
 skipped and reads `unknown (deploy skipped)`. A failure asks `rerun` or
 `park`, and a deploy lost to a runner restart is that question, since
-it may have run. `needs` are holds on the ticket record, taken on
-entering the range under the writer lock against the other tickets'
-records and released the pass after leaving it; a ticket waiting for
-one asks nothing and costs no slot, and one holding it costs a slot.
-`services` are Switchboard service sessions made with `session.new`
-(an argv `env` launch with the port), each after its `before` ran as a
-child of the runner; the tester starts once each answers, told each
-URL, and they are stopped (killed, port free, removed) when the ticket
-leaves the range, parks or closes.
+it may have run. A park, a close or a `rerun` answer waits for a lost
+deploy's process group to empty, without signalling it, and asks
+`stuck` (`wait` or `released`) once it has run past the stop limit.
+`needs` are holds on the ticket record, taken on entering the range
+under the writer lock against the other tickets' records and released
+the pass after leaving it; a ticket waiting for one asks nothing and
+costs no slot, and one holding it costs a slot. `services` are
+Switchboard service sessions made with `session.new` (an argv `env`
+launch with the port), each after its `before` ran as a child of the
+runner; the tester starts once each answers, told each URL, and they
+are stopped (killed, port free, removed) when the ticket leaves the
+range, parks or closes.
 
 Acceptance, each as a test against a fake Switchboard on the socket
 and one against the real one:
@@ -2472,6 +2476,9 @@ and one against the real one:
 | A frontend-only ticket parked at `tried` is resumed | It goes back to `try`, serves the frontend again and asks before the tester runs again (`a_resume_with_the_deploy_skipped_serves_again_and_asks_before_the_tester`) |
 | The runner restarts while the deploy runs | The attempt fails "it may have run" and asks; nothing runs again; the hold stays (`a_deploy_lost_to_a_runner_restart_is_a_question_not_a_rerun`) |
 | A ticket parks while its deploy runs | `parking` until the command exits, never killed; then `parked` with no hold (`parking_during_a_deploy_waits_for_it_to_exit_then_releases_the_hold`) |
+| A ticket parks after a runner restart lost its deploy, whose group still runs | `parking` with `my-dev` held until the group empties, and nothing is ever signalled; a restart while parking keeps waiting (`parking_after_a_restart_waits_for_a_lost_deploy_and_never_signals_it`, `a_restart_while_parking_on_a_deploy_keeps_waiting`) |
+| The lost deploy still runs at the stop limit | One `stuck` question; `wait` gives it another limit, `released` ends the wait, and still nothing is signalled; a group that empties withdraws the question (`a_lost_deploy_still_running_at_the_stop_limit_asks_stuck`, `a_lost_deploy_that_exits_withdraws_its_stuck`) |
+| `rerun`, a park or a close at the "it may have run" question while the lost deploy still runs | No second deploy, no park and no close until the group empties: the trees, the secrets and the hold stay (`a_failed_lost_deploy_still_running_holds_the_park_and_the_rerun`, `a_close_at_the_rerun_question_waits_for_a_lost_deploy_still_running`, `a_close_from_parked_waits_for_a_lost_deploy_still_running`) |
 | A stage in `lane:<x>` for a ticket without that lane chosen | No context and skipped; an `each` stage with nothing chosen still parks (`a_lane_context_skips_unchosen_lanes_but_each_still_parks_with_none`) |
 | A second ticket reaches `deploy` while the first holds `my-dev` | It waits with no attempt, no question and no slot, and `status` says `waiting for my-dev, held by <id> (#n)`; when the first answers `tried`, its service is stopped and removed, the hold released, and the second deploys (`a_second_ticket_waits_for_the_resource_without_a_question_or_a_slot_then_takes_it_when_tried_ends`) |
 | A park or a close while a service runs that survives its first kill and then leaves its port taken | The hold is kept until the session is gone and the port binds again; the session is removed before `parked` or `closed` (`parking_and_closing_release_the_hold_after_the_service_is_gone`) |

@@ -20,6 +20,7 @@ use crate::health::Health;
 use crate::pipeline::{Context, Gate, Lane, OnDirty, Pipeline, Stage, StageKind, Write, env_key};
 use crate::port::Port;
 use crate::review::checks_key;
+use crate::services::{push_stuck, stuck_answer, stuck_pending, withdraw_stuck};
 use crate::store::{
     DataDir, Lock, Settings, expand_home, read_project, read_ticket, shell_unsafe, write_project,
     write_ticket_stamped,
@@ -1908,8 +1909,9 @@ impl Runner {
         // Every marked session stops reading as waiting, and parking is
         // not done until Switchboard has said so for each.
         let unmarked = self.clear_marks(t, ps, now_ms)?;
-        // A deploy is never killed halfway: parking waits for it to exit.
-        if !self.gate_only_commands_exited(t, now_ms)? {
+        // A deploy is never killed halfway: parking waits for it to exit,
+        // one a runner restart lost included.
+        if !self.commands_settled(t, now_ms)? {
             return Ok(());
         }
         let open: Vec<Attempt> = t.attempts.iter().filter(|a| a.is_open()).cloned().collect();
@@ -1949,38 +1951,124 @@ impl Runner {
         Ok(())
     }
 
-    /// Every open gate-only command (a deploy) read: false while one
-    /// still runs. An exit is written as it is read, since the real
-    /// child is gone after that read; one lost to a restart goes on.
-    fn gate_only_commands_exited(&mut self, t: &mut Ticket, now_ms: u64) -> Result<bool> {
-        let running: Vec<Attempt> = t
+    /// Whether every gate-only command (a deploy) whose exit is unknown
+    /// has ended: false while one may still run. An open one's exit is
+    /// written as it is read, since the real child is gone after that
+    /// read. One lost to a runner restart, open or already failed with
+    /// "it may have run", is waited for by its recorded group, never
+    /// signalled.
+    fn commands_settled(&mut self, t: &mut Ticket, now_ms: u64) -> Result<bool> {
+        let unknown: Vec<Attempt> = t
             .attempts
             .iter()
             .filter(|a| {
-                a.is_open()
-                    && a.kind == AttemptKind::GateOnly
-                    && a.gate.as_ref().is_some_and(|g| g.exit.is_none())
+                a.kind == AttemptKind::GateOnly
+                    && a.gate
+                        .as_ref()
+                        .is_some_and(|g| g.exit.is_none() && (a.is_open() || g.group.is_some()))
             })
             .cloned()
             .collect();
-        for a in running {
-            match self.git.poll_check(&gate_key(t, &a)) {
-                None => {
-                    log::info!("ticket {} parking: {} is still running", t.id, a.stage);
-                    return Ok(false);
-                }
-                Some(Ok(code)) => {
-                    if let Some(g) =
-                        find_attempt_mut(t, &a.stage, a.n).and_then(|x| x.gate.as_mut())
-                    {
-                        g.exit = Some(code);
+        let mut settled = true;
+        for a in unknown {
+            if a.is_open() {
+                match self.git.poll_check(&gate_key(t, &a)) {
+                    None => {
+                        log::info!("ticket {}: {} is still running", t.id, a.stage);
+                        settled = false;
+                        continue;
                     }
-                    self.save_ticket(t, now_ms)?;
+                    Some(Ok(code)) => {
+                        if let Some(g) = gate_mut(t, &a) {
+                            g.exit = Some(code);
+                        }
+                        self.save_ticket(t, now_ms)?;
+                        continue;
+                    }
+                    // No child of this runner's under the key: a runner
+                    // restart lost it, so it is looked for by its group.
+                    Some(Err(_)) => {}
                 }
-                Some(Err(_)) => {}
             }
+            settled &= self.lost_command_settled(t, &a, now_ms)?;
         }
-        Ok(true)
+        Ok(settled)
+    }
+
+    /// A gate-only command lost to a runner restart, looked for by its
+    /// recorded group without a signal: true once the group is gone or
+    /// the owner answered `released`. While it runs, the stop limit
+    /// counts from when a runner first found it, across restarts, and
+    /// past it `stuck` is asked. Every write is saved before this
+    /// returns, since a rerun's wait has no later save in its pass.
+    fn lost_command_settled(&mut self, t: &mut Ticket, a: &Attempt, now_ms: u64) -> Result<bool> {
+        let Some(group) = a
+            .gate
+            .as_ref()
+            .filter(|g| g.exit.is_none())
+            .and_then(|g| g.group.clone())
+        else {
+            return Ok(true);
+        };
+        let what = format!("ticket {} {}/{}", t.id, a.stage, a.context);
+        // Read here, not by `act_on_answers`, which leaves a `stuck`
+        // answer to the wait it is about.
+        let key = command_stuck_key(a);
+        if let Some((d, answer)) = stuck_answer(t, &a.stage, &key) {
+            if let DecisionState::Answered { acted, .. } = &mut t.decisions[d].state {
+                *acted = true;
+            }
+            if answer == "released" {
+                log::warn!(
+                    "{what}: the command lost to a runner restart (group {}) released by hand",
+                    group.pgid
+                );
+                clear_lost_group(t, a);
+                self.save_ticket(t, now_ms)?;
+                return Ok(true);
+            }
+            // `wait`: the limit runs again from now.
+            if let Some(g) = gate_mut(t, a) {
+                g.lost_since_ms = Some(now_ms);
+            }
+            self.save_ticket(t, now_ms)?;
+            return Ok(false);
+        }
+        if !self.git.group_running(&gate_key(t, a), &group) {
+            log::info!(
+                "{what}: the command lost to a runner restart has exited (group {})",
+                group.pgid
+            );
+            clear_lost_group(t, a);
+            // A `stuck` asked while it ran has nothing left to be about.
+            withdraw_stuck(t, &a.stage, &key);
+            self.save_ticket(t, now_ms)?;
+            return Ok(true);
+        }
+        let since = a.gate.as_ref().and_then(|g| g.lost_since_ms);
+        let Some(since) = since else {
+            log::info!(
+                "{what}: the command lost to a runner restart is still running (group {}); waiting for it to exit",
+                group.pgid
+            );
+            if let Some(g) = gate_mut(t, a) {
+                g.lost_since_ms = Some(now_ms);
+            }
+            self.save_ticket(t, now_ms)?;
+            return Ok(false);
+        };
+        if now_ms.saturating_sub(since) >= STOP_LIMIT_MS && !stuck_pending(t, &a.stage, &key) {
+            let question = format!(
+                "{} ({}): the command lost to a runner restart is still running (group {}) after {}s. Let it finish, or stop it by hand, then answer released; answer wait to give it longer. The hold on what the stage needs stays until then.",
+                a.stage,
+                a.context,
+                group.pgid,
+                STOP_LIMIT_MS / 1000
+            );
+            push_stuck(t, &a.stage, key, question, now_ms);
+            self.save_ticket(t, now_ms)?;
+        }
+        Ok(false)
     }
 
     /// An attempt Dispatch stops on purpose: its run paused and confirmed
@@ -2058,8 +2146,14 @@ impl Runner {
     /// so the record never says cancelled about checks still running;
     /// then its command reviewers. An attempt whose checks are done is
     /// cancelled now, so a reason past the limit is not lost to a pass
-    /// that waits on another attempt's.
+    /// that waits on another attempt's. A deploy, one a runner restart
+    /// lost included, is waited for first and never killed, so its tree
+    /// is not removed under it.
     fn cancel_open_attempts(&mut self, t: &mut Ticket, reason: &str, now_ms: u64) -> Result<bool> {
+        if !self.commands_settled(t, now_ms)? {
+            log::info!("ticket {} closing: a command is still running", t.id);
+            return Ok(true);
+        }
         let open: Vec<Attempt> = t.attempts.iter().filter(|a| a.is_open()).cloned().collect();
         let mut waiting = false;
         let mut cancelled = false;
@@ -2092,13 +2186,18 @@ impl Runner {
     /// Checks a previous runner left running are found by the gate's
     /// recorded group and killed the same way. Past `STOP_LIMIT_MS` from
     /// the first kill the group gets SIGKILL and the stop goes on without
-    /// reading it back.
+    /// reading it back. A gate-only command (a deploy) is never signalled
+    /// and reads as gone: callers wait for it with `commands_settled`
+    /// first.
     pub(crate) fn stop_gate(
         &mut self,
         t: &mut Ticket,
         a: &Attempt,
         now_ms: u64,
     ) -> Result<GateStop> {
+        if a.kind == AttemptKind::GateOnly {
+            return Ok(GateStop::Gone);
+        }
         let Some(gate) = a.gate.as_ref().filter(|g| g.exit.is_none()) else {
             return Ok(GateStop::Gone);
         };
@@ -2622,9 +2721,11 @@ impl Runner {
 
     /// A rerun's replaced attempt is retired first, so an old and a new
     /// attempt never run together; still alive, the answer stays
-    /// unacted for the next pass (false). Gone, the answer is acted,
-    /// and a `note` for the replacement's prompt goes onto `t.rework`
-    /// in the same write, so the launch `may_rerun` allows carries it.
+    /// unacted for the next pass (false). A gate-only command lost to a
+    /// runner restart counts as alive while its group runs. Gone, the
+    /// answer is acted, and a `note` for the replacement's prompt goes
+    /// onto `t.rework` in the same write, so the launch `may_rerun`
+    /// allows carries it.
     fn retire_replaced(
         &mut self,
         t: &mut Ticket,
@@ -2637,6 +2738,9 @@ impl Runner {
         if let Some(a) = attempt.and_then(|(s, n)| find_attempt(t, s, *n)).cloned() {
             let mine = self.processes_of(&a)?;
             if !self.retire_processes(t, ps, &mine, now_ms)? {
+                return Ok(false);
+            }
+            if a.kind == AttemptKind::GateOnly && !self.lost_command_settled(t, &a, now_ms)? {
                 return Ok(false);
             }
         }
@@ -5134,6 +5238,7 @@ impl Runner {
                 started_ms: now_ms,
                 exit: None,
                 group: self.git.check_group(&key),
+                lost_since_ms: None,
             });
             attempt.artifacts.insert("checks".into(), log);
         }
@@ -7713,6 +7818,27 @@ pub(crate) fn next_n(t: &Ticket, stage: &str) -> u32 {
 /// The key a check is polled under: one per attempt.
 fn gate_key(t: &Ticket, a: &Attempt) -> String {
     format!("{}/{}/{}", t.id, a.stage, a.n)
+}
+
+/// What a lost command's `stuck` question carries as its "attempt": a
+/// pseudo-key, so `held_in` finds no attempt and it holds nothing.
+fn command_stuck_key(a: &Attempt) -> (String, u32) {
+    (format!("command:{}", a.stage), a.n)
+}
+
+/// A lost command's group forgotten, and with it how long it was waited
+/// for: gone, or released by hand. Its exit stays unknown.
+fn clear_lost_group(t: &mut Ticket, a: &Attempt) {
+    if let Some(g) = gate_mut(t, a) {
+        g.group = None;
+        g.lost_since_ms = None;
+    }
+}
+
+/// The gate run on the record behind `a`, to change: `a` is a copy the
+/// runner is polling, and a write to it would be lost.
+fn gate_mut<'t>(t: &'t mut Ticket, a: &Attempt) -> Option<&'t mut GateRun> {
+    find_attempt_mut(t, &a.stage, a.n).and_then(|x| x.gate.as_mut())
 }
 
 /// A fresh attempt record.

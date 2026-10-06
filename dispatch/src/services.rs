@@ -539,6 +539,7 @@ impl Runner {
             started_ms: now_ms,
             exit: None,
             group: self.git.check_group(key),
+            lost_since_ms: None,
         });
         self.save_ticket(t, now_ms)
     }
@@ -749,7 +750,8 @@ impl Runner {
         }
         // Read here, not by `act_on_answers`, which never runs for a
         // parking or closing ticket.
-        if let Some((d, answer)) = stuck_answer(t, i) {
+        let (stage, key) = (t.services[i].stage.clone(), stuck_key(&t.services[i]));
+        if let Some((d, answer)) = stuck_answer(t, &stage, &key) {
             if let DecisionState::Answered { acted, .. } = &mut t.decisions[d].state {
                 *acted = true;
             }
@@ -766,7 +768,7 @@ impl Runner {
             self.remove_service_session(t, ps, i, now_ms)?;
             // A `stuck` asked while it was slow has nothing left to be
             // about, and no later stop would read its answer.
-            let withdrawn = withdraw_stuck(t, i);
+            let withdrawn = withdraw_stuck(t, &stage, &key);
             let rec = &mut t.services[i];
             let ended = rec.state != end;
             if ended {
@@ -784,7 +786,8 @@ impl Runner {
                 self.save_ticket(t, now_ms)?;
             }
             Some(since)
-                if now_ms.saturating_sub(since) >= STOP_LIMIT_MS && !stuck_pending(t, i) =>
+                if now_ms.saturating_sub(since) >= STOP_LIMIT_MS
+                    && !stuck_pending(t, &stage, &key) =>
             {
                 self.ask_stuck(t, i, &alive, now_ms)?;
             }
@@ -915,41 +918,25 @@ impl Runner {
             rec.stage,
             rec.lane
         );
-        withdraw_stuck(t, i);
+        withdraw_stuck(t, &rec.stage, &stuck_key(&rec));
         let rec = &mut t.services[i];
         rec.released = Some(what);
         rec.state = end;
         self.save_ticket(t, now_ms)
     }
 
-    /// The `stuck` question, written straight to the record: asking
-    /// through `ensure_decision` would mark the current session waiting,
-    /// which may be the one being stopped, and which parking and the
-    /// close unmark.
+    /// The service's `stuck` question, with what is still alive kept on
+    /// the record for a `released` to name.
     fn ask_stuck(&mut self, t: &mut Ticket, i: usize, alive: &str, now_ms: u64) -> Result<()> {
         let rec = t.services[i].clone();
-        let id = format!("d{}", t.decisions.len() + 1);
         let question = format!(
             "{} ({}): the service has not stopped after {}s: {alive}. Stop it by hand and answer released, or answer wait to give it longer. The hold on what the stage needs stays until then.",
             rec.stage,
             rec.lane,
             STOP_LIMIT_MS / 1000
         );
-        log::warn!("ticket {} decision {id} ({STUCK}): {question}", t.id);
         t.services[i].stuck_on = Some(alive.to_owned());
-        t.decisions.push(Decision {
-            id,
-            stage: rec.stage.clone(),
-            name: STUCK.to_owned(),
-            kind: DecisionKind::Permission,
-            question,
-            options: vec!["wait".to_owned(), "released".to_owned()],
-            recommendation: None,
-            attempt: Some(stuck_key(&rec)),
-            state: DecisionState::Pending,
-            made_ms: now_ms,
-            refusals: Vec::new(),
-        });
+        push_stuck(t, &rec.stage, stuck_key(&rec), question, now_ms);
         self.save_ticket(t, now_ms)
     }
 }
@@ -1007,39 +994,71 @@ fn stuck_key(rec: &ServiceRecord) -> (String, u32) {
     (format!("service:{}", rec.lane), rec.n)
 }
 
-fn is_stuck_for(d: &Decision, rec: &ServiceRecord) -> bool {
-    d.name == STUCK && d.stage == rec.stage && d.attempt.as_ref() == Some(&stuck_key(rec))
+/// Whether `d` is the `stuck` question about `key` in `stage`: a
+/// service's or a lost command's, each with its own pseudo-key.
+fn is_stuck(d: &Decision, stage: &str, key: &(String, u32)) -> bool {
+    d.name == STUCK && d.stage == stage && d.attempt.as_ref() == Some(key)
 }
 
-/// The unacted answer to the record's `stuck` question, with its index.
-fn stuck_answer(t: &Ticket, i: usize) -> Option<(usize, String)> {
-    let rec = &t.services[i];
+/// The unacted answer to the `stuck` question about `key`, with its
+/// index.
+pub(crate) fn stuck_answer(
+    t: &Ticket,
+    stage: &str,
+    key: &(String, u32),
+) -> Option<(usize, String)> {
     t.decisions.iter().enumerate().find_map(|(d, x)| {
         x.unacted_answer()
-            .filter(|_| is_stuck_for(x, rec))
+            .filter(|_| is_stuck(x, stage, key))
             .map(|a| (d, a.to_owned()))
     })
 }
 
-fn stuck_pending(t: &Ticket, i: usize) -> bool {
-    let rec = &t.services[i];
+pub(crate) fn stuck_pending(t: &Ticket, stage: &str, key: &(String, u32)) -> bool {
     t.decisions
         .iter()
-        .any(|d| d.pending() && is_stuck_for(d, rec))
+        .any(|d| d.pending() && is_stuck(d, stage, key))
 }
 
-/// Each pending `stuck` question about the record withdrawn; true if
-/// there was one.
-fn withdraw_stuck(t: &mut Ticket, i: usize) -> bool {
-    let rec = &t.services[i];
+/// Each pending `stuck` question about `key` withdrawn; true if there
+/// was one.
+pub(crate) fn withdraw_stuck(t: &mut Ticket, stage: &str, key: &(String, u32)) -> bool {
     let mut withdrawn = false;
     for d in &mut t.decisions {
-        if d.pending() && is_stuck_for(d, rec) {
+        if d.pending() && is_stuck(d, stage, key) {
             d.state = DecisionState::Cancelled;
             withdrawn = true;
         }
     }
     withdrawn
+}
+
+/// A `stuck` question about `key`, pushed straight onto the record and
+/// logged: asking through `ensure_decision` would mark the current
+/// session waiting, which may be the one being stopped, and which
+/// parking and the close unmark.
+pub(crate) fn push_stuck(
+    t: &mut Ticket,
+    stage: &str,
+    key: (String, u32),
+    question: String,
+    now_ms: u64,
+) {
+    let id = format!("d{}", t.decisions.len() + 1);
+    log::warn!("ticket {} decision {id} ({STUCK}): {question}", t.id);
+    t.decisions.push(Decision {
+        id,
+        stage: stage.to_owned(),
+        name: STUCK.to_owned(),
+        kind: DecisionKind::Permission,
+        question,
+        options: vec!["wait".to_owned(), "released".to_owned()],
+        recommendation: None,
+        attempt: Some(key),
+        state: DecisionState::Pending,
+        made_ms: now_ms,
+        refusals: Vec::new(),
+    });
 }
 
 /// The ports of a ticket's services not yet stopped.

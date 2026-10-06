@@ -1551,6 +1551,7 @@ impl Runner {
             started_ms: now_ms,
             exit: None,
             group: self.git.check_group(&check_key),
+            lost_since_ms: None,
         });
         attempt
             .artifacts

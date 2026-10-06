@@ -230,6 +230,10 @@ pub trait Repo: Send {
     /// A check a previous runner started and left running, signalled by
     /// its recorded group if it is still ours.
     fn adopt_check(&mut self, key: &str, group: &CheckGroup) -> Adopted;
+    /// Whether a group a previous runner started may still be running a
+    /// command of ours; sends no signal. A gate-only command lost to a
+    /// restart is waited for through this, never stopped.
+    fn group_running(&self, key: &str, group: &CheckGroup) -> bool;
     /// The commits of `base..head` in `dir`, oldest first.
     fn commits(&self, dir: &Path, base: &str, head: &str) -> Result<Vec<Commit>>;
     /// The tree `rev` names in `dir`.
@@ -1134,6 +1138,21 @@ impl Repo for GitCli {
             .output();
         self.killed.insert(key.to_owned(), group.pgid);
         Adopted::Killed
+    }
+
+    fn group_running(&self, _key: &str, group: &CheckGroup) -> bool {
+        if !group_alive(group.pgid) {
+            return false;
+        }
+        // The reverse of `adopt_check`'s rule for a leader whose start
+        // time cannot be read. There a wrong guess signals someone else's
+        // group; here the only action is waiting. A deploy shell's leader
+        // can exit while its children keep applying, and a group id is
+        // not reused while the group has a member, so a live group with
+        // no readable leader is taken as still ours. A wrong guess costs
+        // a wait, which the `stuck` question bounds. Only a leader that
+        // started at another time proves the id reused.
+        leader_started(group.pgid).is_none_or(|s| s == group.leader_started)
     }
 
     fn commits(&self, dir: &Path, base: &str, head: &str) -> Result<Vec<Commit>> {
@@ -2123,6 +2142,9 @@ impl Repo for FakeRepo {
             Adopted::Gone
         }
     }
+    fn group_running(&self, key: &str, _group: &CheckGroup) -> bool {
+        self.orphans.contains(key)
+    }
     fn rev_parse(&self, dir: &Path, _rev: &str) -> Result<String> {
         Ok(self
             .bases
@@ -2442,6 +2464,9 @@ impl Repo for std::sync::Arc<std::sync::Mutex<FakeRepo>> {
     fn adopt_check(&mut self, key: &str, group: &CheckGroup) -> Adopted {
         self.lock().unwrap().adopt_check(key, group)
     }
+    fn group_running(&self, key: &str, group: &CheckGroup) -> bool {
+        self.lock().unwrap().group_running(key, group)
+    }
     fn commits(&self, dir: &Path, base: &str, head: &str) -> Result<Vec<Commit>> {
         self.lock().unwrap().commits(dir, base, head)
     }
@@ -2701,6 +2726,52 @@ mod tests {
         poll_to("the check gone", || previous.check_gone("k").then_some(()));
         let mut cli = GitCli::default();
         assert_eq!(cli.adopt_check("k", &group), Adopted::Gone);
+        assert!(!GitCli::default().group_running("k", &group));
+    }
+
+    #[test]
+    fn a_group_whose_leader_exited_with_a_child_left_reads_running_and_is_not_signalled() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut previous = GitCli::default();
+        previous
+            .start_check(
+                "k",
+                dir.path(),
+                &["sh".into(), "-c".into(), "sleep 30 & echo $! > pid".into()],
+                &[],
+                &dir.path().join("gate.log"),
+            )
+            .unwrap();
+        let group = previous.check_group("k").unwrap();
+        let sleep = written_pid(dir.path());
+        let mut leader = previous.checks.remove("k").unwrap();
+        leader.wait().unwrap();
+        let cli = GitCli::default();
+        assert!(cli.group_running("k", &group));
+        assert!(alive(sleep), "reading the group sends it nothing");
+        let _ = Command::new("kill")
+            .args(["-KILL", &sleep.to_string()])
+            .output();
+        poll_to("the sleeper gone", || (!alive(sleep)).then_some(()));
+        assert!(!cli.group_running("k", &group));
+    }
+
+    #[test]
+    fn a_group_led_by_a_process_started_at_another_time_reads_not_running() {
+        let dir = tempfile::tempdir().unwrap();
+        let group = orphaned_sleep(dir.path());
+        let cli = GitCli::default();
+        assert!(cli.group_running("k", &group));
+        let other = CheckGroup {
+            leader_started: "never".into(),
+            ..group.clone()
+        };
+        assert!(!cli.group_running("k", &other));
+        assert!(alive(group.pgid));
+        let _ = Command::new("kill")
+            .args(["-KILL", &group.pgid.to_string()])
+            .output();
+        poll_to("the sleeper gone", || (!alive(group.pgid)).then_some(()));
     }
 
     #[test]
