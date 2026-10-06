@@ -183,7 +183,9 @@ the head its checks ran at and a history rewrite, with any PR and the
 code review rounds (`r<n> <state> open <k>`) beneath it; the pending
 decisions with their options and the exact `dispatch decide` line; and
 the files to read next: the plan, the latest round's findings, the
-code review summary, the notes, and the PR's url and head. Read those
+code review summary, the notes, and the PR's url and head. When the
+stage that last wrote the plan or the notes runs per lane, each lane's
+file is its own line (`plan (A): ...`, `notes (B): ...`). Read those
 files rather than guessing what they say.
 
 **Events.** Every ticket write that changes something appends one
@@ -282,7 +284,8 @@ tail, `dispatch resume X`, then `dispatch wait X --for any --since
 off, not only its first line.
 
 **Report.** `dispatch report X` gives the time per stage with the time
-its decisions waited on the owner apart, the plan's size, the plan
+its decisions waited on the owner apart, the plan's size (one
+`plan (<lane>)` line per lane when the plan stage runs per lane), the plan
 review's rounds and points, the code review's rounds and points (each
 point once, however many rounds it stayed open, split by reviewer),
 fix passes, rebases (at least: a lane keeps only its last clean

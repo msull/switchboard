@@ -1658,6 +1658,39 @@ impl Pipeline {
     }
 }
 
+/// A pipeline with lanes `A` and `B` and a claude operator `agent`,
+/// then `rest` (its stages and any other operators), for tests.
+#[cfg(test)]
+pub(crate) fn two_lanes(rest: &str) -> Pipeline {
+    Pipeline::parse(&format!(
+        r#"
+version = 1
+
+[project]
+name = "P"
+repo = "git@example.com:o/p.git"
+space = "Dispatch · P"
+
+[source]
+kind = "github"
+repo = "o/p"
+label = "dispatch"
+
+[[lanes]]
+name = "A"
+path = "a"
+
+[[lanes]]
+name = "B"
+path = "b"
+
+[operators.agent]
+kind = "claude"
+{rest}"#
+    ))
+    .unwrap()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

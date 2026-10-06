@@ -791,12 +791,25 @@ fn decide_hint(e: &Event, t: &Ticket) -> Option<String> {
     })
 }
 
+/// `show`'s lines for a document a per-lane stage writes once per lane.
+fn print_lane_files(name: &str, files: &[dispatch_control::LaneFile]) -> Result<()> {
+    for f in files {
+        let lane = f
+            .lane
+            .as_ref()
+            .map_or_else(String::new, |l| format!(" ({l})"));
+        say!("  {name}{lane}: {}", f.path.display());
+    }
+    Ok(())
+}
+
 fn show(args: &[&str]) -> Result<()> {
     let f = Flags::parse(args, &[], &["--json"]);
     let runner = offline_runner()?;
     let t = runner.load_ticket(f.one())?;
-    let mut view = ticket_view(&t, runner.pipeline_of(&t).ok().as_ref());
-    view.paths = ticket_paths(&t);
+    let pipeline = runner.pipeline_of(&t).ok();
+    let mut view = ticket_view(&t, pipeline.as_ref());
+    view.paths = ticket_paths(&t, pipeline.as_ref());
     if f.on("--json") {
         say!("{}", serde_json::to_string_pretty(&view)?);
         return Ok(());
@@ -843,16 +856,16 @@ fn show(args: &[&str]) -> Result<()> {
     print_pending(&view)?;
     let p = &view.paths;
     say!("files:");
+    print_lane_files("plan", &p.plan_files)?;
     for (name, path) in [
-        ("plan", &p.plan),
         ("round", &p.round_file),
         ("review summary", &p.review_summary),
-        ("notes", &p.notes),
     ] {
         if let Some(path) = path {
             say!("  {name}: {}", path.display());
         }
     }
+    print_lane_files("notes", &p.notes_files)?;
     if let Some(url) = &p.pr_url {
         say!("  PR: {url} at {}", p.pr_head.as_deref().map_or("-", short));
     }
@@ -1011,13 +1024,15 @@ fn print_pending(view: &dispatch_control::TicketView) -> Result<()> {
 /// Dispatch's clone of the lane's repository.
 fn report_of(runner: &Runner, t: &dispatch::ticket::Ticket) -> TicketReport {
     let names = events::stage_names(t);
+    let pipeline = runner.pipeline_of(t).ok();
     let range = report::pr_range(t).and_then(|(lane, base, head)| {
-        let p = runner.pipeline_of(t).ok()?;
-        let dir = runner.lane_clone(&p, p.lane(&lane)?);
+        let p = pipeline.as_ref()?;
+        let dir = runner.lane_clone(p, p.lane(&lane)?);
         runner.git.range_size(&dir, &base, &head).ok()
     });
     report::of(
         t,
+        pipeline.as_ref(),
         &names,
         &|p| std::fs::read_to_string(p).ok(),
         range,
@@ -1128,7 +1143,16 @@ fn print_report(r: &TicketReport) -> Result<()> {
             span(s.waiting_ms)
         );
     }
-    if let (Some(lines), Some(bytes)) = (r.plan_lines, r.plan_bytes) {
+    let per_lane: Vec<_> = r
+        .plans
+        .iter()
+        .filter_map(|x| Some((x.lane.as_deref()?, x)))
+        .collect();
+    if !per_lane.is_empty() {
+        for (lane, x) in per_lane {
+            say!("  plan ({lane}): {} lines, {} bytes", x.lines, x.bytes);
+        }
+    } else if let (Some(lines), Some(bytes)) = (r.plan_lines, r.plan_bytes) {
         say!("  plan: {lines} lines, {bytes} bytes");
     } else {
         say!("  plan: none");

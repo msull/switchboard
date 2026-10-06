@@ -1435,6 +1435,24 @@ pub(crate) fn blank() -> Ticket {
     }
 }
 
+/// A chosen lane `name` cut at `/wt/<name>`, for tests.
+#[cfg(test)]
+pub(crate) fn chosen_lane(name: &str) -> LaneRecord {
+    LaneRecord {
+        name: name.into(),
+        worktree: PathBuf::from(format!("/wt/{name}")),
+        branch: "dispatch/1-x".into(),
+        project: None,
+        chosen: true,
+        setup_done: false,
+        base_sha: None,
+        refreshed: None,
+        pushed: None,
+        removed: false,
+        conflict: None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

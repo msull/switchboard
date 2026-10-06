@@ -406,14 +406,15 @@ fn reviews_resolution(a: &AttemptView, l: &LaneView) -> bool {
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PathsView {
-    /// The latest completed plan.
+    /// The latest completed plan; `plan_files` has it per lane.
     pub plan: Option<PathBuf>,
     /// The latest review round's findings: a code review round's
     /// aggregated feedback, else the plan review's latest round file.
     pub round_file: Option<PathBuf>,
     /// The latest code review summary.
     pub review_summary: Option<PathBuf>,
-    /// The latest notes for a human gate.
+    /// The latest notes for a human gate; `notes_files` has them per
+    /// lane.
     pub notes: Option<PathBuf>,
     /// The last pull request an attempt bound to.
     pub pr_url: Option<String>,
@@ -421,6 +422,23 @@ pub struct PathsView {
     pub pr_head: Option<String>,
     /// The plan review's round files, first to last.
     pub plan_rounds: Vec<PlanRoundView>,
+    /// The plan, one file per lane when the stage that last wrote it
+    /// runs per lane, in pipeline lane order; else the one `plan` names.
+    pub plan_files: Vec<LaneFile>,
+    /// The notes, the same way.
+    pub notes_files: Vec<LaneFile>,
+}
+
+/// One lane's copy of a ticket's document, or the ticket's only one.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LaneFile {
+    /// The lane it was written in; none for a stage that runs once.
+    pub lane: Option<String>,
+    /// The stage whose attempt wrote it.
+    pub stage: String,
+    /// Where it is.
+    pub path: PathBuf,
 }
 
 /// One plan review round's files.

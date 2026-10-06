@@ -16,15 +16,15 @@ use std::thread::JoinHandle;
 
 use anyhow::{Context, Result, bail};
 use dispatch_control::{
-    AttemptView, Body, DecisionView, EventView, EventsView, LaneView, PathsView, PlanRoundView,
-    ProjectView, Reply, Request, SOCKET_FILE, Status, TicketView,
+    AttemptView, Body, DecisionView, EventView, EventsView, LaneFile, LaneView, PathsView,
+    PlanRoundView, ProjectView, Reply, Request, SOCKET_FILE, Status, TicketView,
 };
 
 use crate::epoch_ms;
 use crate::events;
 use crate::github::Issues;
 use crate::pipeline::{Pipeline, Source};
-use crate::scheduler::Runner;
+use crate::scheduler::{Runner, lane_files};
 use crate::store::DataDir;
 use crate::ticket::{
     AttemptKind, AttemptState, Decision, DecisionState, PullRequestSource, SourceSnapshot, Ticket,
@@ -57,11 +57,12 @@ impl Handler {
             Body::Status => Reply::Status(status(&self.runner)?),
             Body::Ticket { id } => {
                 let t = self.runner.load_ticket(id)?;
+                let p = self.runner.pipeline_of(&t).ok();
                 let mut view = TicketView {
-                    paths: ticket_paths(&t),
+                    paths: ticket_paths(&t, p.as_ref()),
                     ..self.view(&t)
                 };
-                if let Ok(p) = self.runner.pipeline_of(&t) {
+                if let Some(p) = p {
                     for l in &mut view.lanes {
                         if let Some(lane) = p.lanes.iter().find(|x| x.name == l.name) {
                             l.clone = Some(self.runner.lane_clone(&p, lane));
@@ -498,7 +499,17 @@ fn plan_rounds(subject: &Path) -> Vec<PlanRoundView> {
 /// Where a ticket's documents are, for `show` and the port's
 /// single-ticket reply; the one part of a view that touches files.
 #[must_use]
-pub fn ticket_paths(t: &Ticket) -> PathsView {
+pub fn ticket_paths(t: &Ticket, p: Option<&Pipeline>) -> PathsView {
+    let files = |name: &str| -> Vec<LaneFile> {
+        lane_files(t, p, name)
+            .into_iter()
+            .map(|(lane, stage, path)| LaneFile {
+                lane: lane.map(str::to_owned),
+                stage: stage.to_owned(),
+                path: path.clone(),
+            })
+            .collect()
+    };
     let last_round = t
         .attempts
         .iter()
@@ -526,6 +537,8 @@ pub fn ticket_paths(t: &Ticket) -> PathsView {
         pr_url: pr.map(|pr| pr.url.clone()),
         pr_head: pr.map(|pr| pr.head.clone()),
         plan_rounds,
+        plan_files: files("plan"),
+        notes_files: files("notes"),
     }
 }
 
@@ -1115,6 +1128,56 @@ slots = 1
         let again = ask(&mut h, v.last);
         assert!(again.events.is_empty() && again.withdrawn.is_empty());
         assert_eq!(again.last, 4);
+    }
+
+    #[test]
+    fn the_paths_list_a_per_lane_plan_once_per_lane() {
+        let text = PIPELINE.replace(
+            "[operators.a]",
+            "[[lanes]]\nname = \"docs\"\npath = \"docs\"\n[operators.a]",
+        ) + "[[stages]]\nname = \"outline\"\noperator = \"a\"\ncontext = \"root\"\nwrites = [\"plan\"]\nprompt = \"go {plan}\"\n[[stages]]\nname = \"plan\"\noperator = \"a\"\ncontext = \"each\"\nwrites = [\"plan\"]\nprompt = \"go {plan}\"\n";
+        let p = Pipeline::parse(&text).unwrap();
+        let attempt = |stage: &str, n: u32, ctx: &str, path: &str| {
+            crate::scheduler::new_attempt(
+                stage,
+                n,
+                ctx,
+                AttemptKind::Agent,
+                AttemptState::Complete,
+                std::collections::BTreeMap::from([("plan".to_owned(), PathBuf::from(path))]),
+                0,
+            )
+        };
+        let mut t = crate::ticket::blank();
+        t.attempts.push(attempt("outline", 1, "root", "/plan.md"));
+        let paths = ticket_paths(&t, Some(&p));
+        assert_eq!(
+            paths.plan_files,
+            [LaneFile {
+                lane: None,
+                stage: "outline".into(),
+                path: "/plan.md".into(),
+            }]
+        );
+        assert_eq!(paths.plan, Some(PathBuf::from("/plan.md")));
+        for lane in ["repo", "docs"] {
+            t.lanes.push(crate::ticket::chosen_lane(lane));
+        }
+        t.attempts.push(attempt("plan", 1, "repo", "/repo.md"));
+        t.attempts.push(attempt("plan", 1, "docs", "/docs.md"));
+        let paths = ticket_paths(&t, Some(&p));
+        let file = |lane: &str, path: &str| LaneFile {
+            lane: Some(lane.into()),
+            stage: "plan".into(),
+            path: path.into(),
+        };
+        assert_eq!(
+            paths.plan_files,
+            [file("repo", "/repo.md"), file("docs", "/docs.md")]
+        );
+        // The single field is the newest plan, as older clients read it.
+        assert_eq!(paths.plan, Some(PathBuf::from("/docs.md")));
+        assert!(paths.notes_files.is_empty());
     }
 
     #[test]

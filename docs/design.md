@@ -2230,7 +2230,15 @@ Agent sessions get each input their prompt names as
 names one stage's artifact and has its own variable,
 `DISPATCH_INPUT_<STAGE>_<NAME>`. Both forms read the reader's own
 lane from a stage that runs per lane, and a root or joined stage that
-names a per-lane file is refused when the pipeline loads.
+names a per-lane file is refused when the pipeline loads. Dispatch's
+own reads of `plan` and `notes` follow the same lane rule: the refresh
+and remedy agents' plan, a lane's human gate's notes line, and the
+review workflow's plan (the reviewer's and the fixer's `{plan}`, the
+decisions section, the message rewriter's input). A root or joined
+human gate, `show`, `report` and the port's `PathsView.plan_files` and
+`notes_files` list one file per lane when the newest writer runs per
+lane, and the one file otherwise; a lane's refresh notes stand in for
+that lane only.
 
 Known gaps:
 
@@ -2246,12 +2254,10 @@ Known gaps:
   logs, if the agent prints the file. Only the path reaches a
   Switchboard record (`SessionRecord.env`); the contents reach these
   files only through the agent's own output.
-- Dispatch's own reads of `plan` and `notes` are still lane-blind: the
-  human gate's notes line, the refresh and remedy agents' plan, the
-  review workflow's plan, the report, and the port. With an `each`
-  plan over more than one lane, a refresh or remedy agent is handed
-  another lane's plan. `Ticket::input_where` with the reader's lane is
-  the fix.
+- A joined code review over a per-lane plan gets no `{plan}` and no
+  decisions section: `{plan}` is one path.
+- An agent launched before the lane rule keeps the plan path its
+  prompt was given, which may be another lane's.
 - A session launched before `{inputs.<stage>.<name>}` had its own
   `DISPATCH_INPUT_<STAGE>_<NAME>` keeps its old environment on resume:
   one `DISPATCH_INPUT_<NAME>`, which may hold the stage-qualified file.

@@ -10,10 +10,11 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 
 use crate::git::RangeSize;
+use crate::pipeline::Pipeline;
 use crate::review::{
     LEFT_HEADING, open_points_of, point_text, reviewer_of, section_points, unqualified,
 };
-use crate::scheduler::REFRESH;
+use crate::scheduler::{REFRESH, lane_files};
 use crate::ticket::{AttemptKind, DecisionState, Ticket};
 
 /// One pipeline stage's time: from its first attempt's start to its
@@ -57,6 +58,18 @@ pub struct ReviewReport {
     pub rounds: Vec<RoundReport>,
 }
 
+/// One plan's size, labelled with its lane when the plan stage runs
+/// per lane.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct PlanSize {
+    /// The lane it was written in; none for a plan written once.
+    pub lane: Option<String>,
+    /// Its length in lines.
+    pub lines: u32,
+    /// Its size in bytes.
+    pub bytes: u64,
+}
+
 /// How one ticket went, or (from `total`) several added up, for
 /// `dispatch report`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
@@ -71,10 +84,15 @@ pub struct TicketReport {
     pub state: String,
     /// Each pipeline stage, in order.
     pub stages: Vec<StageTime>,
-    /// The latest plan's length in lines, when there is one.
+    /// The plan's length in lines, summed over its lanes' plans when
+    /// the plan stage runs per lane, when there is one.
     pub plan_lines: Option<u32>,
-    /// The latest plan's size in bytes, when there is one.
+    /// The plan's size in bytes, summed over its lanes' plans when the
+    /// plan stage runs per lane, when there is one.
     pub plan_bytes: Option<u64>,
+    /// Each plan it could read, one per lane when the plan stage runs
+    /// per lane; empty in a total.
+    pub plans: Vec<PlanSize>,
     /// Each plan review attempt, its rounds from the round files.
     pub plan_reviews: Vec<ReviewReport>,
     /// Plan review rounds across every attempt.
@@ -151,13 +169,15 @@ pub fn pr_range(t: &Ticket) -> Option<(String, String, String)> {
     Some((lane.name.clone(), lane.base_sha.clone()?, pr.head.clone()))
 }
 
-/// The report of one ticket. `stages` are its pipeline's stage names in
-/// order; `read` reads a round file or the plan; `range` is git's size
-/// of the PR's range when it could be read; `now_ms` ends a stage still
-/// open.
+/// The report of one ticket. `p` is its pipeline, which says whether
+/// the plan was written once per lane. `stages` are its pipeline's
+/// stage names in order; `read` reads a round file or the plan; `range`
+/// is git's size of the PR's range when it could be read; `now_ms` ends
+/// a stage still open.
 #[must_use]
 pub fn of(
     t: &Ticket,
+    p: Option<&Pipeline>,
     stages: &[String],
     read: &dyn Fn(&Path) -> Option<String>,
     range: Option<RangeSize>,
@@ -201,9 +221,18 @@ pub fn of(
             nudges: u32::try_from(nudges).unwrap_or(u32::MAX),
         });
     }
-    if let Some(text) = t.input("plan").and_then(|p| read(p)) {
-        r.plan_lines = Some(u32::try_from(text.lines().count()).unwrap_or(u32::MAX));
-        r.plan_bytes = Some(text.len() as u64);
+    for (lane, _, path) in lane_files(t, p, "plan") {
+        if let Some(text) = read(path) {
+            r.plans.push(PlanSize {
+                lane: lane.map(str::to_owned),
+                lines: u32::try_from(text.lines().count()).unwrap_or(u32::MAX),
+                bytes: text.len() as u64,
+            });
+        }
+    }
+    if !r.plans.is_empty() {
+        r.plan_lines = Some(r.plans.iter().fold(0, |n, x| n.saturating_add(x.lines)));
+        r.plan_bytes = Some(r.plans.iter().map(|x| x.bytes).sum());
     }
     for a in t
         .attempts
@@ -575,13 +604,55 @@ mod tests {
         t.lanes = vec![rebased, clean];
         t.attempts
             .push(attempt(REFRESH, 1, AttemptKind::Agent, 10_000, 11_000));
-        let r = of(&t, &stages(), &files(&[]), None, 99_000);
+        let r = of(&t, None, &stages(), &files(&[]), None, 99_000);
         assert_eq!(r.rebases, 2);
     }
 
     const PLAN_ROUND_1: &str = "# Feedback\n\n1. Name the lock order.\n   - an indented aside\n";
     const CODE_ROUND_1: &str = "## Open\n\n- r1/style-1 (style): rename tmp\n";
     const CODE_ROUND_2: &str = "## Left to the merge\n\n- r1/style-1 (style): rename tmp\n";
+
+    #[test]
+    fn a_per_lane_plan_is_sized_per_lane_and_summed() {
+        let p = crate::pipeline::two_lanes(
+            r#"
+[[stages]]
+name = "plan"
+operator = "agent"
+context = "each"
+writes = ["plan"]
+prompt = "Write {plan}."
+"#,
+        );
+        let mut t = crate::ticket::blank();
+        for name in ["A", "B"] {
+            t.lanes.push(LaneRecord {
+                name: name.into(),
+                ..lane()
+            });
+            t.attempts.push(new_attempt(
+                "plan",
+                1,
+                name,
+                AttemptKind::Agent,
+                AttemptState::Complete,
+                BTreeMap::from([("plan".to_owned(), PathBuf::from(format!("/{name}.md")))]),
+                0,
+            ));
+        }
+        let read = files(&[("/A.md", "a\nb\n"), ("/B.md", "c\n")]);
+        let r = of(&t, Some(&p), &[], &read, None, 0);
+        let size = |lane: &str, lines, bytes| PlanSize {
+            lane: Some(lane.into()),
+            lines,
+            bytes,
+        };
+        assert_eq!(r.plans, [size("A", 2, 4), size("B", 1, 2)]);
+        assert_eq!((r.plan_lines, r.plan_bytes), (Some(3), Some(6)));
+        // A total keeps the sums and lists no lanes.
+        let sum = total(&[r]);
+        assert_eq!((sum.plan_lines, sum.plans.len()), (Some(3), 0));
+    }
 
     #[test]
     fn a_closed_ticket_counts_plan_and_code_points_once_each() {
@@ -603,8 +674,16 @@ mod tests {
             insertions: 40,
             deletions: 2,
         };
-        let r = of(&t, &stages(), &read, Some(range), 99_000);
+        let r = of(&t, None, &stages(), &read, Some(range), 99_000);
         assert_eq!((r.plan_lines, r.plan_bytes), (Some(3), Some(18)));
+        assert_eq!(
+            r.plans,
+            [PlanSize {
+                lane: None,
+                lines: 3,
+                bytes: 18
+            }]
+        );
         assert_eq!((r.plan_rounds, r.plan_points), (2, 1));
         assert_eq!((r.code_rounds, r.code_points), (2, 1));
         assert_eq!(
@@ -621,7 +700,7 @@ mod tests {
             Some(("backend".into(), "base0000".into(), "fold0001".into()))
         );
 
-        let r = of(&t, &stages(), &read, None, 99_000);
+        let r = of(&t, None, &stages(), &read, None, 99_000);
         assert_eq!(r.commits, Some(1), "the rewrite's count when git has none");
         assert_eq!(r.range, None);
     }
@@ -651,7 +730,7 @@ mod tests {
             ("/r3.md", "No open points.\n"),
             ("/a2r1.md", "## Open\n\n- a1/r1/style-1 (style): rename\n"),
         ]);
-        let r = of(&t, &stages(), &read, None, 50);
+        let r = of(&t, None, &stages(), &read, None, 50);
         assert_eq!(r.code_points, 2);
         assert_eq!(
             r.code_points_by_reviewer,
@@ -683,7 +762,7 @@ mod tests {
                 "## Open\n\n- r1/correctness-1 (correctness): the base's guard is gone\n",
             ),
         ]);
-        let r = of(&t, &stages(), &read, None, 50);
+        let r = of(&t, None, &stages(), &read, None, 50);
         assert_eq!((r.code_rounds, r.code_points, r.fix_passes), (2, 1, 1));
         assert_eq!(
             r.code_points_by_reviewer,
@@ -699,7 +778,7 @@ mod tests {
         let mut a = attempt("review-code", 1, AttemptKind::Review, 0, 10);
         a.rounds = vec![round(1, RoundState::Fixed, 1, "/gone.md", true)];
         t.attempts = vec![a];
-        let r = of(&t, &stages(), &files(&[]), None, 50);
+        let r = of(&t, None, &stages(), &files(&[]), None, 50);
         assert!(r.code_incomplete);
         assert_eq!(r.code_reviews[0].rounds[0].new, None);
     }
@@ -731,7 +810,7 @@ mod tests {
             answered("d2", "supervisor"),
             answered("d3", "supervisor"),
         ];
-        let r = of(&t, &[], &|_| None, None, 0);
+        let r = of(&t, None, &[], &|_| None, None, 0);
         assert_eq!(r.answered_by.get("you"), Some(&1));
         assert_eq!(r.answered_by.get("supervisor"), Some(&2));
         let sum = total(&[r.clone(), r]);
