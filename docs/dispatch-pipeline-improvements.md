@@ -473,3 +473,25 @@ or aborted by hand).
   attempt's check or deploy is mid-run (#85). The `!` prefix in the
   supervisor's session is no help from the remote client, which sends
   it as a message.
+- **Dispatch's own artifact reads are lane-blind.** #98 gave the
+  `{inputs.*}` fields one lane rule, but `t.input("plan")` and
+  `t.input("notes")` still take the newest complete attempt from any
+  context: the refresh agent and the remedy/fixer agent
+  (`dispatch/src/scheduler.rs`, each beside a lane-aware `vars_for`),
+  the human gate's `Notes (<stage>)` line, the reviewers in
+  `review.rs`, `report.rs` and `serve.rs`. With an `each` plan stage
+  over more than one lane, a lane can be handed another lane's plan.
+  Each read is fixed with `Ticket::input_where` and the reader's lane;
+  `report` and `serve` have no lane and need a rule of their own.
+  Listed as a known gap in design.md. Seen in #98's plan.
+- **The README's test-times table is stale.** It records the serial
+  run just after #48 (55.9 s, 791 tests). On 2026-10-05 after #94 the
+  same script gives 102.7 s for 1093 tests: `first_slice` 73 s (318
+  tests), the dispatch lib 16.6 s (the three confined-check tests from
+  #1 take about 2.3 s each). Nothing is over the 5 s budget on a quiet
+  machine, but under another build's load
+  `a_lost_unmark_is_sent_again_until_it_lands` went from 0.95 s to
+  13.4 s. Parallel `cargo test --workspace` is about 61 s, against the
+  README's two-minute local budget. Refresh the table when the suite
+  is next touched, and consider a budget line for the whole serial
+  run.
