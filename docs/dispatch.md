@@ -478,7 +478,8 @@ interrupted attempt.
   `forgotten` event logged with the reason (`<resource> released`,
   `attempt failed`, `attempt cancelled`, `attempt replaced`, `parked`
   or `closed`), when the ticket leaves the
-  range of stages its stage's `needs` resource covers, when a newer
+  run of stages its stage's `needs` resource covers (a later run of
+  the same resource makes it again), when a newer
   attempt of the stage completes or its attempt fails or is cancelled,
   and when the ticket parks or closes. A restart rides on a park, so it
   deletes the secret too, and lets go of the hold the secret was made
@@ -788,7 +789,7 @@ gate = { kind = "command", argv = ["..."], in = "root" | "lane" | "lane:<name>" 
      | { kind = "external", check = "pr-checks", checks = "none" }   # a repository with no CI: a PR at the head is enough
      | { kind = "human", decision = "...", confirm = true }
 on_dirty = { nudge = 1 } | "ask"   # an agent stage with a command gate, or a code review stage's implementer: overrides the policy's
-needs = ["resource name"]     # held from the first stage that names it to the last, contiguous; a review or workflow stage only last
+needs = ["resource name"]     # held over each run of consecutive stages that name it, released at its end and retaken at the next; a workflow stage only last in a run; never a code review stage (refused at take and restart)
 reviewers = ["style", "lint"] # present: a code review stage (see "The code review stage"); operators, run at once each round
 implementer = "implementer"   # the claude operator that addresses a round's findings, fresh each round
 cap = 3                       # review passes before the findings left are a question
@@ -807,7 +808,7 @@ trust_folders = false         # true: Claude Code's folder trust question, which
 max_reruns = 3                # failed attempts a stage may collect in one context before the ticket parks instead of asking again
 on_dirty = { nudge = 1 } | "ask"   # an agent that stops with a dirty tree is nudged in its session up to N times, each after a stop, before the question; "ask" asks at once. Read from the ticket's copy; a copy without the key, including one taken before the key existed, nudges once
 min_free_gb = 10              # free space on the worktrees' volume below which nothing new starts; live, like slots
-refresh = true                # each lane's branch is brought up to its base when a stage begins; a conflict goes to the rebaser
+refresh = true                # each lane's branch is brought up to its base when a stage begins; a stage holding a resource past the first stage of its run, a gate-only stage and one that serves lanes are not refreshed; a conflict goes to the rebaser
 rebaser = "rebaser"           # the operator that rebases a PR that conflicts with its base, cloned from the lane's implementer; absent, a conflict is a question
 max_rebases = 2               # rebases one PR may get before the conflict is a question
 resolution_reviewer = "correctness"  # the one reviewer of a conflict's resolution brought up after the last code review stage; absent, that stage's first reviewer that is not `style`
@@ -1199,6 +1200,15 @@ cap = 4
 kind = "claude"
 guidance = "Implement the lane's part of the finalized plan on branch {branch} in this worktree only. Run the lane's checks before every commit. Never run bb.py promote or any deploy. Guidance is advisory: the deploy this pipeline performs is Dispatch's, not yours."
 
+[operators.lane-implementer]  # `implement` only: it holds my-dev, so it may deploy and serve its own lane
+kind = "claude"
+args = ["--allowedTools", "Bash(aws-vault exec -n orchard-dev -- uv run inv deploy:*)", "--allowedTools", "Bash(npm start:*)"]
+guidance = "Implement the lane's part of the finalized plan on branch {branch} in this worktree only. Run the lane's checks before every commit. Never run bb.py promote. You may deploy and serve your own lane while you implement; what you deploy is never kept, and the deploy stage deploys the branch again. Run any deploy in the foreground and stop any dev server you started before you finish."
+
+[operators.code-reviewer]
+kind = "claude"
+guidance = "Hold the lane's branch to its repository's guides/COLLABORATION_GUIDE.md and the finalized plan."
+
 [operators.tester]
 kind = "claude"
 guidance = "The backend branch is already deployed to my-dev; the commit is in your prompt. Do not deploy. The frontend worktree is linked to my-dev and already being served at the address in your prompt; do not start another. Exercise the change with the tools/e2e probes or curl. Write what worked and what did not, with the commands and their output, to {notes}."
@@ -1230,10 +1240,18 @@ gate = { kind = "external", check = "review-finalized" }
 
 [[stages]]
 name = "implement"
-operator = "implementer"
+operator = "lane-implementer"
 context = "each"
-prompt = "The plan at {inputs.plan} is final. Implement the {lane} part on {branch}."
+needs = ["my-dev"]        # its own run: let go when every lane's attempt completes, so `review-code` never holds the stack
+prompt = "The plan at {inputs.plan} is final. Implement the {lane} part on {branch}. You hold my-dev while you work: as the backend implementer you may deploy your lane to it as often as you like; as a frontend implementer, serve your lane and test it against whatever the backend implementer deployed last, or the previous deployment. Nothing you deploy is kept."
 gate = { kind = "command", in = "lane", per_lane = { backend = ["sh", "-c", "uv run inv lint && uv run inv pytest"], frontend = ["sh", "-c", "CI=true npm test -- --watchAll=false"], admin = ["sh", "-c", "CI=true npm test"] } }
+
+[[stages]]
+name = "review-code"
+context = "each"
+reviewers = ["code-reviewer"]
+implementer = "implementer"   # never deploys: this stage holds nothing
+gate = { kind = "command", like = "implement" }
 
 [[stages]]
 name = "deploy"
@@ -1242,7 +1260,9 @@ needs = ["my-dev"]
 # Dispatch deploys, once, after linking again so the target cannot be
 # whatever a previous checkout left; the deployed commit is recorded
 # on the attempt. It needs AWS, so under confine with the network
-# denied it keeps its own.
+# denied it keeps its own. The wrapper asks for MFA, which no pane can
+# answer: the owner runs it once by hand, and that session covers the
+# implementers' deploys and this one while it lasts.
 gate = { kind = "command", in = "lane:backend", network = "allow", argv = ["sh", "-c", "uv run inv link-env --env-name my-dev && aws-vault exec -n orchard-dev -- uv run inv deploy -f"] }
 
 [[stages]]
@@ -1315,22 +1335,32 @@ What this pipeline showed, and what it added to the vocabulary:
   limit. A `before` failure, no free port, or a probe that never
   answers is a decision before the tester is launched. The tester is
   told each URL and not to start a server of its own. Services live
-  on the ticket record until the last stage holding the resource ends.
-- **One owner of the deploy.** Dispatch runs it as a command gate,
-  records the commit, and the tester is told the commit and told not
-  to deploy. The `tried` decision shows the tester's evidence file and
-  that commit, so what you look at is what was tested.
-- **A resource held across three stages.** `needs` on consecutive
-  stages is one hold from the first to the last. Losing it in the
-  middle would let a second ticket overwrite the stack while you are
-  looking, which is why holds are on the record and not in memory.
+  on the ticket record until the last stage of the run holding the
+  resource ends.
+- **One authoritative deploy.** The implementers may deploy their
+  lane while they work, and nothing they deploy is kept. Dispatch runs
+  the deploy that counts as a command gate, records the commit, and
+  the tester is told the commit and told not to deploy. The `tried`
+  decision shows the tester's evidence file and that commit, so what
+  you look at is what was tested.
+- **A resource held in two runs.** `needs` on consecutive stages is
+  one hold from the first to the last of the run; `implement` is a run
+  of its own, and `deploy` to `tried` is another. Losing it in the
+  middle of a run would let a second ticket overwrite the stack while
+  you are looking, which is why holds are on the record and not in
+  memory. It is not held through `review-code` between them: a review
+  takes hours, and every other ticket would wait through it, so a code
+  review stage may not name a resource at all. That stage is what
+  makes two runs: with nothing between them, `implement` to `tried`
+  would be one.
 - **`lane_hints`.** The issue's `area:` labels and the investigator's
   notes are shown with the lanes decision. It still starts at `ask`.
 - **Guidance is advisory.** Nothing in Dispatch stops an agent from
-  running a deploy; the operator is told not to, and the only deploy
-  in the file is Dispatch's own. If that is not enough the next step
-  is an environment the agent's credentials cannot reach, not more
-  guidance.
+  running a deploy. Only the implement operator is allowed one, while
+  its ticket holds `my-dev`; the others are told not to, and the
+  deploy the tester and `tried` read is Dispatch's own. If that is not
+  enough the next step is an environment the agent's credentials
+  cannot reach, not more guidance.
 - **A count is not an environment.** Raising `my-dev` to 2 would
   need a second stack to exist and each ticket bound to one (a
   `link-env` name per hold, and the frontend linked to match). The
@@ -1717,9 +1747,24 @@ ticket's slot as any open attempt does).
 ## Resources and slots
 
 - A hold is taken by writing it onto the ticket record under the
-  writer lock, checked against every other ticket's holds. It is
-  released when the last stage naming it completes, when the ticket is
-  cancelled or a decision rejects it, and never on a restart.
+  writer lock, checked against every other ticket's holds. A
+  resource may be named in several runs of consecutive stages; it is
+  released when the last stage of a run completes and taken again at
+  the start of the next run, and released when the ticket is cancelled
+  or a decision rejects it, never on a restart. A code review stage
+  may not name one: a `take` or a `dispatch restart` onto a file whose
+  code review stage does is refused, while a ticket already running
+  under such a copy runs on.
+- The hold is taken before the stage's lanes are brought up to their
+  base, so a ticket waiting for it starts nothing: no rebase, no
+  rebaser, no `refresh` question. Only the first stage of a run brings
+  the lanes up; a later stage of the run looks at what was deployed
+  earlier in it. A hold at `implement` costs a slot like any other.
+- A ticket waiting for a resource reads `my-dev, held by <id> (#n)
+  from <stage>`, naming the stage the holder took it at, or the stage
+  a send-back carried it to. Two tickets waiting
+  for a `count = 1` resource, one at `implement` and one at `deploy`,
+  race for it; the back half is not preferred.
 - An in-place lane (no `worktrees`) is an implicit resource named for
   the repository path, held from the first stage in that lane to the
   stage whose `release` names it (the last stage in the lane when none
@@ -1741,17 +1786,18 @@ ticket's slot as any open attempt does).
   `released` answer lets a hold go without the runner's confirmation. A
   stop that ends on its own after asking withdraws the question in the
   write that records it.
-- A hold taken past the first stage of its range (a ticket parked at
-  `try` or `tried`, then resumed) cannot trust what the range's earlier
+- A hold taken past the first stage of its run (a ticket parked at
+  `try` or `tried`, then resumed) cannot trust what the run's earlier
   stages did: another ticket may have deployed since, and parking
   stopped the services the tester ran against. Every completed attempt
-  of a stage earlier in the range is cancelled and the ticket goes back
-  to the earliest, where a `rerun` question asks before anything
+  of a stage earlier in the run containing the retake is cancelled,
+  an earlier run of the same resource is left alone, and the ticket
+  goes back to the earliest, where a `rerun` question asks before anything
   deploys or reads the old commit. Each later agent stage brings its
   services up again before asking the same, and a human gate in the
-  range asks afresh, so `tried` is never asked with nothing served. A
-  review or workflow stage cannot be sent back this way, so a pipeline
-  file may put one only last in a `needs` run. A frontend-only ticket,
+  run asks afresh, so `tried` is never asked with nothing served. A
+  workflow stage cannot be sent back this way, so a pipeline file may
+  put one only last in a `needs` run. A frontend-only ticket,
   with no deploy, goes back to `try`.
 - The in-place lane hold above is not built: a stage whose `needs`
   names a lane parks, saying so.
@@ -1854,6 +1900,13 @@ another, so a hand-finished rebase is brought up, an aborted one
 conflicts again, and one still stopped asks the `refresh` question. A
 stage held on a lane is not marked refreshed, so a park and resume,
 which withdraws the question, reads the lane again.
+
+A stage that holds a resource past the first stage of its `needs` run,
+a gate-only stage and one that serves lanes are not refreshed: they
+look at what was inspected or deployed earlier, and moving the branch
+under them would not. The stage that opens a run is, once its hold is
+taken: a ticket waiting for the hold starts no rebase, no rebaser and
+no `refresh` question.
 
 A lane with no `base_sha` gets its fork point from the base as
 `base_sha` while it is still behind, before anything moves, so the bring-up after a rebaser reads the old base; a lane not
@@ -2374,15 +2427,15 @@ skipped and reads `unknown (deploy skipped)`. A failure asks `rerun` or
 it may have run. A park, a close or a `rerun` answer waits for a lost
 deploy's process group to empty, without signalling it, and asks
 `stuck` (`wait` or `released`) once it has run past the stop limit.
-`needs` are holds on the ticket record, taken on entering the range
-under the writer lock against the other tickets' records and released
-the pass after leaving it; a ticket waiting for one asks nothing and
+`needs` are holds on the ticket record, taken on entering each run of
+stages naming them under the writer lock against the other tickets'
+records and released the pass after leaving that run; a ticket waiting for one asks nothing and
 costs no slot, and one holding it costs a slot. `services` are
 Switchboard service sessions made with `session.new` (an argv `env`
 launch with the port), each after its `before` ran as a child of the
 runner; the tester starts once each answers, told each URL, and they
 are stopped (killed, port free, removed) when the ticket leaves the
-range, parks or closes.
+run, parks or closes.
 
 Acceptance, each as a test against a fake Switchboard on the socket
 and one against the real one:
@@ -2556,7 +2609,14 @@ and one against the real one:
 | The lost deploy still runs at the stop limit | One `stuck` question; `wait` gives it another limit, `released` ends the wait, and still nothing is signalled; a group that empties withdraws the question (`a_lost_deploy_still_running_at_the_stop_limit_asks_stuck`, `a_lost_deploy_that_exits_withdraws_its_stuck`) |
 | `rerun`, a park or a close at the "it may have run" question while the lost deploy still runs | No second deploy, no park and no close until the group empties: the trees, the secrets and the hold stay (`a_failed_lost_deploy_still_running_holds_the_park_and_the_rerun`, `a_close_at_the_rerun_question_waits_for_a_lost_deploy_still_running`, `a_close_from_parked_waits_for_a_lost_deploy_still_running`) |
 | A stage in `lane:<x>` for a ticket without that lane chosen | No context and skipped; an `each` stage with nothing chosen still parks (`a_lane_context_skips_unchosen_lanes_but_each_still_parks_with_none`) |
-| A second ticket reaches `deploy` while the first holds `my-dev` | It waits with no attempt, no question and no slot, and `status` says `waiting for my-dev, held by <id> (#n)`; when the first answers `tried`, its service is stopped and removed, the hold released, and the second deploys (`a_second_ticket_waits_for_the_resource_without_a_question_or_a_slot_then_takes_it_when_tried_ends`) |
+| A second ticket reaches `deploy` while the first holds `my-dev` | It waits with no attempt, no question and no slot, and `status` says `waiting for my-dev, held by <id> (#n) from deploy`; when the first answers `tried`, its service is stopped and removed, the hold released, and the second deploys (`a_second_ticket_waits_for_the_resource_without_a_question_or_a_slot_then_takes_it_when_tried_ends`) |
+| `implement` holds `my-dev` in a run of its own and a second ticket reaches it | The second waits at `implement` with no attempt, no question, no bring-up and no slot, reading `held by <id> (#42) from implement`; the first lets go when both lanes finish, and waits at `deploy` while the second implements, its implement attempts untouched; it deploys once the second finishes (`a_second_ticket_waits_at_implement_and_the_first_waits_again_at_deploy`) |
+| A ticket parks while its implementers run, then resumes | The hold goes with the park; the resume retakes it at `implement` and reruns each lane, nothing earlier cancelled (`parking_at_implement_lets_go_and_a_resume_asks_rerun_there`) |
+| The base moves while a ticket waits at `implement` | Nothing is rebased or asked while it waits; once it holds `my-dev` the lane is brought up before the implementers launch and the prompt says the base moved; a conflict is asked only then; `try` later does not rebase (`implement_brings_its_lanes_up_once_it_holds_the_stack`, `a_conflict_at_implement_is_asked_only_once_the_stack_is_held`) |
+| A human gate holding `my-dev` after `deploy` answered `rerun` | The ticket is back at `implement` still holding `my-dev`, its hold now read as `from implement`, and lets go when it leaves (`a_send_back_into_implement_keeps_the_hold_and_names_implement`) |
+| A ticket's copy holds `my-dev` at a code review stage | The ticket runs on; a `take` or a `dispatch restart` onto that file is refused (`a_review_stage_holding_a_resource_runs_on_in_a_ticket_already_taken`) |
+| A two-run ticket parked at `tried` is resumed | It goes back to `deploy`, not `implement`; `implement` and `look` stand (`a_resume_at_tried_goes_back_to_deploy_not_implement`) |
+| The implement operator names its own `--allowedTools` | They go on the launch ahead of the write rule for its notes (`the_implementers_own_allowed_tools_go_beside_its_write_rule`) |
 | A park or a close while a service runs that survives its first kill and then leaves its port taken | The hold is kept until the session is gone and the port binds again; the session is removed before `parked` or `closed` (`parking_and_closing_release_the_hold_after_the_service_is_gone`) |
 | A `refresh` question at the stage after `tried` | The service still stops and the hold goes, so another ticket takes it (`a_refresh_question_after_tried_does_not_keep_the_hold`) |
 | A stage names a lane in `needs` | The ticket parks: the in-place hold is not built (`a_stage_needing_a_lane_parks_as_not_built`) |
