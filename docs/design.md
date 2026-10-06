@@ -2084,8 +2084,10 @@ Known gaps:
   need the variable, which its allow rule does not cover.
 - The actor check is a guard against mistakes, not a boundary: an
   agent can unset the variable.
-- A refused `resume`, `restart`, `worktrees` or `supervisor` is an
-  exit and a message, not an event, since no decision carries it.
+- A refused `resume`, `restart`, `runner`, `worktrees` or `supervisor`
+  is an exit and a message, not an event, since no ticket carries it;
+  a refused `runner stop`, `start` or `restart` is kept on the
+  project's record.
 - The flags pass the allow rules on the command line; whether a second
   `--settings` would have replaced Switchboard's hooks was not tried.
 
@@ -2187,7 +2189,12 @@ Known gaps:
   with `released`.
 - No restart on a crash while the app is up; the runner stays down
   until Start or the next app launch, like every service.
-- A rebundle with the runner up is left to the Stop button's hover.
+- A rebundle with the runner up is followed by `dispatch runner
+  restart` (the owner's, or a supervisor's whose table's `may` lists
+  `runner`), which asks the app over the control port to kill the pane
+  without turning autostart off and start it again once the old runner
+  lets go, refused while a ticket runs a deploy. A supervisor that runs
+  the bundle script is still stopped by its permission prompt.
 - The runner's children inherit `SWITCHBOARD_RECORD_ID` and `TMUX`.
 - `runner stopping…` ends on the first status `RUNNER_LET_GO` after
   the Stop, answered or not. A kill that fails leaves the pane running,

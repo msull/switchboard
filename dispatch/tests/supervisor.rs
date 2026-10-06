@@ -783,6 +783,95 @@ fn a_supervisor_resumes_with_reruns_only_when_rerun_is_its_to_answer() {
     assert!(env.ticket(&t.id).active());
 }
 
+/// `pipeline(project, &[])` whose first stage is a deploy, and whose
+/// supervisor may use the runner.
+fn deploying_pipeline(project: &str) -> String {
+    pipeline(project, &[])
+        .replace(
+            "[[stages]]\nname = \"inspect\"",
+            "[[stages]]\nname = \"deploy\"\n\
+             gate = { kind = \"command\", argv = [\"true\"], in = \"lane\" }\n\n\
+             [[stages]]\nname = \"inspect\"",
+        )
+        .replace("decides = []", "decides = []\nmay = [\"runner\"]")
+}
+
+#[test]
+fn the_runner_is_refused_to_a_supervisor_without_may_and_the_refusal_kept() {
+    let env = Env::new();
+    env.seat(ORCHARD, SUPERVISOR);
+    for malformed in [&["runner"][..], &["runner", "bogus"]] {
+        let out = env.cli(Some(SUPERVISOR), malformed);
+        assert_eq!(out.status.code(), Some(64), "{out:?}");
+    }
+    let out = env.cli(Some(SUPERVISOR), &["runner", "restart"]);
+    refused(
+        &out,
+        "the supervisor may not run `dispatch runner restart` unless its table's `may` \
+         lists `runner`; the owner does",
+    );
+    let ps = env.runner.load_project(ORCHARD).unwrap();
+    let answers: Vec<&str> = ps
+        .supervisor
+        .refusals
+        .iter()
+        .map(|r| r.answer.as_str())
+        .collect();
+    assert_eq!(answers, ["runner restart"]);
+    assert_eq!(ps.supervisor.refusals[0].by, BY_SUPERVISOR);
+    let shown = env.cli(None, &["supervisor", ORCHARD]);
+    accepted(&shown);
+    assert!(
+        stdout(&shown).contains("refused: runner restart at "),
+        "{}",
+        stdout(&shown)
+    );
+}
+
+#[test]
+fn the_runner_is_a_supervisors_once_its_table_says_may() {
+    let env = Env::new();
+    env.seat(ORCHARD, SUPERVISOR);
+    let text = pipeline(ORCHARD, &["finalize"]).replace(
+        "decides = [\"finalize\"]",
+        "decides = [\"finalize\"]\nmay = [\"runner\"]",
+    );
+    std::fs::write(env.data.pipeline(ORCHARD), text).unwrap();
+    let out = env.cli(Some(SUPERVISOR), &["runner", "restart"]);
+    // Past the rule: it fails on the missing Switchboard socket.
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    assert!(stderr(&out).contains("control socket"), "{}", stderr(&out));
+    assert!(!stderr(&out).contains("may not"), "{}", stderr(&out));
+    let ps = env.runner.load_project(ORCHARD).unwrap();
+    assert_eq!(ps.supervisor.refusals.len(), 0);
+}
+
+#[test]
+fn a_restart_is_refused_while_a_ticket_runs_a_deploy() {
+    let mut env = Env::new();
+    std::fs::write(env.data.pipeline(ORCHARD), deploying_pipeline(ORCHARD)).unwrap();
+    env.seat(ORCHARD, SUPERVISOR);
+    let t = env.take(ORCHARD, 1);
+    let now = env.tick();
+    env.runner.step_all(now).unwrap();
+    let deploy = env.ticket(&t.id);
+    assert!(
+        deploy
+            .attempts
+            .iter()
+            .any(|a| a.stage == "deploy" && a.is_open()),
+        "{:?}",
+        deploy.attempts
+    );
+    for record in [Some(SUPERVISOR), None] {
+        let out = env.cli(record, &["runner", "restart"]);
+        refused(&out, &format!("ticket {} is running `deploy`", t.id));
+    }
+    // A start kills nothing, so a deploy does not hold it back.
+    let out = env.cli(Some(SUPERVISOR), &["runner", "start"]);
+    assert!(stderr(&out).contains("control socket"), "{}", stderr(&out));
+}
+
 #[test]
 fn the_owners_verbs_are_refused_to_a_supervisor() {
     let mut env = Env::new();

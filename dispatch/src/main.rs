@@ -9,16 +9,18 @@ use dispatch::epoch_ms;
 use dispatch::events::{self, Burst, Event, For, Kind, base_name, short};
 use dispatch::git::{GitCli, yyyymmdd};
 use dispatch::github::Gh;
+use dispatch::health;
 use dispatch::port::SocketPort;
 use dispatch::report::{self, TicketReport};
-use dispatch::scheduler::{Runner, attempt_label, kept_branches};
+use dispatch::scheduler::{BY_SUPERVISOR, Runner, attempt_label, kept_branches};
 use dispatch::serve::{Handler, Server, take_issue, take_pull_requests};
 use dispatch::serve::{ticket_paths, ticket_view};
 use dispatch::store::{DataDir, read_ticket};
 use dispatch::supervisor::{self, Actor};
-use dispatch::ticket::{DecisionState, ServiceState, Ticket, TicketState};
+use dispatch::ticket::{DecisionState, REFUSALS_KEPT, Refusal, ServiceState, Ticket, TicketState};
 use dispatch::{USAGE, UsageError};
 use std::io::Write as _;
+use switchboard_control::RunnerVerb;
 
 /// `EX_USAGE`: the command line was wrong, or the command is one the
 /// ticket's state never allows (`park` on a closing or closed ticket, a
@@ -120,12 +122,24 @@ fn command(args: &[&str]) -> Result<()> {
     // project; the owner runs anything.
     let data = DataDir::from_env()?;
     let actor = supervisor::actor(&data)?;
-    supervisor::permit(ACTOR.get_or_init(|| actor), args, &data)?;
+    if let Err(e) = supervisor::permit(ACTOR.get_or_init(|| actor), args, &data) {
+        if let Some(refused) = e.downcast_ref::<supervisor::CapabilityRefused>()
+            && let Err(save) = save_refusal(refused)
+        {
+            // The refusal is the answer; a record that will not take it
+            // is only logged.
+            log::warn!("{}: refusal not saved: {save:#}", refused.project);
+        }
+        return Err(e);
+    }
     match args {
         ["take", project, "pr", specs @ ..] => take_prs(project, specs),
         ["take", project, issue] => take(project, issue),
         ["run"] => run(false),
         ["run", "--once"] => run(true),
+        ["runner", "stop"] => runner_verb(RunnerVerb::Stop),
+        ["runner", "start"] => runner_verb(RunnerVerb::Start),
+        ["runner", "restart"] => runner_verb(RunnerVerb::Restart),
         ["decide", ticket, decision, answer] => decide(ticket, decision, answer, None),
         ["decide", ticket, decision, answer, "--note", note] => {
             decide(ticket, decision, answer, Some(note))
@@ -152,6 +166,39 @@ fn command(args: &[&str]) -> Result<()> {
         ["supervisor", rest @ ..] => supervise(rest),
         _ => usage(),
     }
+}
+
+/// A command refused for want of a capability, kept on the project's
+/// record so the owner sees what the supervisor tried, and logged.
+fn save_refusal(refused: &supervisor::CapabilityRefused) -> Result<()> {
+    log::warn!(
+        "{}: the supervisor was refused `dispatch {}`",
+        refused.project,
+        refused.command()
+    );
+    let mut runner = offline_runner()?;
+    runner.transaction(|r| {
+        let mut ps = r.load_project(&refused.project)?;
+        let kept = &mut ps.supervisor.refusals;
+        kept.push(Refusal {
+            by: BY_SUPERVISOR.to_owned(),
+            answer: refused.command(),
+            at_ms: now_ms(),
+        });
+        let over = kept.len().saturating_sub(REFUSALS_KEPT);
+        kept.drain(..over);
+        r.save_project(&ps)
+    })
+}
+
+/// `dispatch runner stop|start|restart`: asked of the app, then waited
+/// for in `runner.json`.
+fn runner_verb(verb: RunnerVerb) -> Result<()> {
+    let data = DataDir::from_env()?;
+    let socket = SocketPort::from_env()?.path().to_path_buf();
+    let line = dispatch::runner_cmd::run(&data, &socket, verb, Duration::from_secs(60), now_ms)?;
+    say!("{line}");
+    Ok(())
 }
 
 fn take_prs(project: &str, specs: &[&str]) -> Result<()> {
@@ -616,6 +663,22 @@ fn clock(ms: u64) -> String {
     }
     let s = (ms / 1000) % 86_400;
     format!("{:02}:{:02}:{:02}", s / 3600, (s / 60) % 60, s % 60)
+}
+
+/// `YYYY-MM-DD hh:mm` of `ms` since the epoch, in the local zone, as
+/// `clock` reads it; for a moment that may be days back.
+fn local_time(ms: u64) -> String {
+    use chrono::{DateTime, Local, TimeZone as _};
+    let secs = i64::try_from(ms / 1000).unwrap_or(i64::MAX);
+    DateTime::from_timestamp(secs, 0).map_or_else(
+        || format!("{} {}", date_of(ms), clock(ms)),
+        |utc| {
+            Local
+                .from_utc_datetime(&utc.naive_utc())
+                .format("%Y-%m-%d %H:%M")
+                .to_string()
+        },
+    )
 }
 
 /// A duration for a person: `2h05m`, `4m10s`, `12s`.
@@ -1244,11 +1307,13 @@ fn health(args: &[&str]) -> Result<()> {
     if !f.rest.is_empty() {
         usage();
     }
-    let timeout = Duration::from_secs(f.number("--timeout").unwrap_or(2));
-    let stale_ms = f.number("--stale").unwrap_or(30) * 1000;
+    let timeout = f
+        .number("--timeout")
+        .map_or(health::CHECK_TIMEOUT, Duration::from_secs);
+    let stale_ms = f.number("--stale").map_or(health::STALE_MS, |s| s * 1000);
     let data = DataDir::from_env()?;
     let socket = SocketPort::from_env()?.path().to_path_buf();
-    let checked = dispatch::health::check(
+    let checked = health::check(
         &data,
         &socket,
         timeout,
@@ -1437,6 +1502,13 @@ fn supervise(args: &[&str]) -> Result<()> {
     say!("replaced {} supervisor(s)", s.ps.supervisor.past.len());
     if let Some(e) = &s.ps.supervisor.error {
         say!("error: {e}");
+    }
+    for refusal in &s.ps.supervisor.refusals {
+        say!(
+            "refused: {} at {}",
+            refusal.answer,
+            local_time(refusal.at_ms)
+        );
     }
     if s.ps.supervisor.intent.is_some() {
         say!("a fresh one starts on the runner's next pass");

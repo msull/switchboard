@@ -719,12 +719,13 @@ pub struct Decision {
     pub refusals: Vec<Refusal>,
 }
 
-/// A supervisor's answer refused because the decision is the owner's.
+/// A supervisor's answer, or command, refused because it is the owner's.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Refusal {
     /// Who answered: `supervisor`.
     pub by: String,
-    /// The answer it gave, which was not applied.
+    /// The answer or command it gave, which was not applied: a
+    /// decision's answer, or `runner restart` on a project's record.
     pub answer: String,
     /// When, in Unix ms.
     pub at_ms: u64,
@@ -1331,7 +1332,14 @@ pub struct Supervision {
     pub op: Option<Operation>,
     /// Why the last fresh, resume or kill failed, until one succeeds.
     pub error: Option<String>,
+    /// Commands the supervisor was refused because its table does not
+    /// allow them, newest last; only the last `REFUSALS_KEPT`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub refusals: Vec<Refusal>,
 }
+
+/// How many refused commands a project's supervision keeps.
+pub const REFUSALS_KEPT: usize = 20;
 
 impl Supervision {
     /// Whether `session` is this project's supervisor, now or before.

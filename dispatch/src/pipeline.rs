@@ -62,6 +62,12 @@ pub struct Supervisor {
     /// it report a green pull request and stop, so the owner merges.
     #[serde(default)]
     pub merges: bool,
+    /// Capabilities beyond decisions that the supervisor may use; every
+    /// other is the owner's. Today only `runner`: stop, start and
+    /// restart the runner the app runs. Not written when empty, so a
+    /// table without it hashes into the seed as it did before.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub may: Vec<String>,
 }
 
 /// `setup = [...]` (one argv, the shape of a lane's `setup`) or
@@ -1654,6 +1660,13 @@ impl Pipeline {
                 "[supervisor] decides: `{name}` is not a decision Dispatch asks or a gate of this file asks"
             );
         }
+        let known = crate::supervisor::CAPABILITIES;
+        if let Some(x) = sup.may.iter().find(|x| !known.contains(&x.as_str())) {
+            bail!(
+                "[supervisor] may: `{x}` is not a capability Dispatch knows ({})",
+                known.join(", ")
+            );
+        }
         Ok(())
     }
 }
@@ -1850,6 +1863,29 @@ argv = ["make", "deps"]
         );
         // A gate of this file asks it: a human gate's own name.
         supervised("guidance = \"g\"\ndecides = [\"lanes\", \"merge\"]").unwrap();
+    }
+
+    #[test]
+    fn may_names_capabilities_and_is_not_written_when_empty() {
+        let sup = supervised("guidance = \"g\"\nmay = [\"runner\"]")
+            .unwrap()
+            .supervisor
+            .unwrap();
+        assert_eq!(sup.may, ["runner"]);
+        assert!(
+            toml::to_string(&sup)
+                .unwrap()
+                .contains("may = [\"runner\"]")
+        );
+        let e = supervised("guidance = \"g\"\nmay = [\"deploy\"]")
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            e,
+            "[supervisor] may: `deploy` is not a capability Dispatch knows (runner)"
+        );
+        let none = supervised("guidance = \"g\"").unwrap().supervisor.unwrap();
+        assert!(!toml::to_string(&none).unwrap().contains("may"));
     }
 
     #[test]

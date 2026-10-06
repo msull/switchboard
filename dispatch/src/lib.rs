@@ -51,6 +51,7 @@ pub mod recover;
 pub mod report;
 pub mod restart;
 pub mod review;
+pub mod runner_cmd;
 pub mod scheduler;
 pub mod serve;
 pub mod services;
@@ -88,6 +89,7 @@ pub const USAGE: &str = "usage:
   dispatch take <project> pr <lane>/<n>... a ticket from someone's pull requests, one per lane,
                                            on <project>.pr.toml; the lane may be left off with one lane
   dispatch run [--once]                    drive every ticket (once, or until stopped)
+  dispatch runner stop|start|restart       stop or start the runner the app runs; restart waits for the new pid
   dispatch decide <ticket> <decision> <answer> [--note <text>]
   dispatch decisions                       what waits on you
   dispatch status                          every ticket, its stage and state

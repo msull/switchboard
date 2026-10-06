@@ -39,6 +39,7 @@ dispatch resume <ticket> [--no-rerun]             a parked ticket back to active
 dispatch close <ticket> [--reason <text>]         a ticket closed, its trees removed (its branches are kept; close lists them)
 dispatch restart <ticket> [<stage>]               a ticket at its stage, or an earlier one, under the live pipeline; later work discarded
 dispatch health [--timeout <secs>] [--stale <secs>] [--verbose] [--json]   is the runner alive and getting on; run it first
+dispatch runner stop|start|restart                stop or start the runner the app runs; restart waits for the new pid
 dispatch show <ticket> [--json]                   one ticket: stage, lanes, attempts, rounds, decisions, files
 dispatch events [--since <seq>] [--follow [--timeout <secs>]] [--ticket <id>]... [--project <name>] [--json]
 dispatch brief <project>                          the project at a glance: tickets, what waits, recent events, the hand-off
@@ -50,8 +51,14 @@ dispatch tail <ticket> [--lines N]                what the ticket's running agen
 ```
 
 `dispatch run`, `dispatch worktrees` and `dispatch supervisor <project>
---fresh`, `--resume` or `--kill` are the owner's: never run them. The runner is already up; if a command says it cannot reach the
-socket, stop and report that instead of starting one.
+--fresh`, `--resume` or `--kill` are the owner's: never run them.
+`dispatch runner` is the owner's too, unless the project's
+`[supervisor]` table lists `runner` in `may`: then the supervisor may
+`restart` the runner after a merge that touches `dispatch/`, and
+`start` it when `health` says it is down. A `stop` or `restart` is
+refused while a deploy runs; retry it when that stage ends. A
+supervisor without `runner` still stops and reports when a command
+cannot reach the socket, and no supervisor ever runs `dispatch run`.
 
 ## Projects and what they take
 
@@ -380,9 +387,10 @@ session's `SWITCHBOARD_RECORD_ID` names it. It may run the read-only
 commands, `take` and `queue` on its own project, and `decide`, `park`,
 `resume --no-rerun` and `close` on its own project's tickets. A plain
 `resume` (which reruns, a paid run) needs `rerun` in `decides`.
-Everything else is refused with exit 1: `restart`, `run`, `worktrees
-<path>` and `--migrate`, `supervisor --fresh`, `--resume` and `--kill`,
-and any other project's tickets. This is a guard against mistakes, not
+Everything else is refused with exit 1: `restart`, `run`, `runner`
+(unless `may` lists it), `worktrees <path>` and `--migrate`,
+`supervisor --fresh`, `--resume` and `--kill`, and any other project's
+tickets. This is a guard against mistakes, not
 a boundary: an agent can unset the variable.
 
 ## Answering decisions
