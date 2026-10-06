@@ -13,7 +13,7 @@ use super::cards::{ago_ms, at_local, now_ms};
 use super::dialogs::{dialog, dialog_actions};
 use super::dispatch::{decision_card, title_of};
 use super::{DrawCtx, GAP, markdown, theme};
-use crate::core::dispatch::{TimelineRow, close_offered, parked};
+use crate::core::dispatch::{TimelineRow, close_offered, parked, revisable};
 use crate::core::{AppAction, RecordId};
 use crate::ports::changes::Changes;
 use crate::ports::dispatch::{
@@ -97,6 +97,15 @@ pub fn ticket(cx: &mut DrawCtx<'_>, ui: &mut Ui, id: &str) {
         decision_card(cx, ui, d, Some(&t), false);
     }
     let tab = tab_strip(cx, ui, &t.id);
+    if tab == TicketTab::Plan
+        && let Some(d) = revisable(&t)
+    {
+        plan_feedback(cx, ui, d);
+    } else {
+        // A request for a box not drawn this frame has lost its moment;
+        // left set, it would take the focus whenever the tab next opens.
+        cx.state.focus_feedback = None;
+    }
     let now = now_ms();
     // The header stays put so the pending decisions and the tabs are
     // always in view. Its meta row wraps by whole items, so the header
@@ -116,6 +125,61 @@ pub fn ticket(cx: &mut DrawCtx<'_>, ui: &mut Ui, id: &str) {
                 TicketTab::Changes => changes(cx, ui, &t, now),
             }
         });
+}
+
+/// The id of the box that takes the owner's objection to a plan, so the
+/// card's "Revise…" can focus it.
+pub(super) fn finalize_note_id(d: &DecisionView) -> egui::Id {
+    egui::Id::new(("finalize-note", &d.id))
+}
+
+/// The owner's objection to the plan under review, pinned above the
+/// plan while its `finalize` is pending; sending it answers `revise`.
+/// The draft is the card's, one per decision.
+fn plan_feedback(cx: &mut DrawCtx<'_>, ui: &mut Ui, d: &DecisionView) {
+    let meta = cx
+        .core
+        .ticket_details(&d.ticket)
+        .map_or(String::new(), |details| {
+            match details.paths.plan_rounds.len() {
+                1 => "1 round so far".to_owned(),
+                n => format!("{n} rounds so far"),
+            }
+        });
+    let mut send = None;
+    theme::surface(ui)
+        .inner_margin(egui::Margin::symmetric(12, 10))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            theme::section(ui, "Your feedback on the plan");
+            let field = finalize_note_id(d);
+            // Asked until held; see `UiState::focus_feedback`.
+            if cx.state.focus_feedback == Some(field) {
+                if ui.memory(|m| m.has_focus(field)) {
+                    cx.state.focus_feedback = None;
+                } else {
+                    ui.memory_mut(|m| m.request_focus(field));
+                }
+            }
+            let draft = cx
+                .state
+                .dispatch_note_drafts
+                .entry(d.id.clone())
+                .or_default();
+            let hint = "What the planner should change; Dispatch sends it as the next round";
+            if super::workflow::feedback_block(ui, draft, field, hint, &meta) {
+                send = Some(draft.trim().to_owned());
+            }
+        });
+    if let Some(note) = send {
+        cx.state.dispatch_note_drafts.remove(&d.id);
+        cx.dispatch(AppAction::DispatchDecide {
+            ticket: d.ticket.clone(),
+            decision: d.id.clone(),
+            answer: "revise".into(),
+            note: Some(note),
+        });
+    }
 }
 
 /// The ticket's events and its full view, asked once per change of its

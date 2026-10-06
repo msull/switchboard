@@ -1095,9 +1095,12 @@ Choosing marks `HandedOff` and shows the session the draft is in.
 - Review page (`ui/workflow.rs`): rounds down the left with each
   verdict; the plan at that round in the middle with a diff toggle
   against the previous round; feedback and response side by side on the
-  right; a notes box at the bottom that sends the user's own feedback
-  as one more round. Header buttons follow the state: Pause, Continue,
-  Raise cap, Finalize, Clean up, Hand off.
+  right. The note box sends the user's own feedback as one more round.
+  It and its "Send my feedback" button are one block pinned under the
+  header, above the columns, so a short window never pushes the button
+  off the page; the box scrolls rather than grows, and Cmd+Enter in it
+  sends (a blank box sends nothing). Header buttons follow the state:
+  Pause, Continue, Raise cap, Finalize, Clean up, Hand off.
 - Board: runs listed under their project with state; working-set cards
   for the run's sessions carry the badge.
 
@@ -1657,7 +1660,9 @@ the next prompt. The note box under a decision is multi-line, and an
 option the decision lists in `DecisionView.needs_note` (`revise` on
 `finalize`) stays disabled until the note has text: Dispatch refuses
 that answer without one and the decision stays pending, so the page
-gates it rather than send a click that changes nothing. A gate-only stage and a ticket closing past its last
+gates it rather than send a click that changes nothing. That is on the
+Dispatch page; the ticket page takes a plan review's note in the Plan
+tab's block. A gate-only stage and a ticket closing past its last
 stage hold no slot. A PR GitHub reports as conflicting is rebased by
 the policy's `rebaser`, a session the new `session.clone` port command
 makes from the lane's implementer's transcript (the record is made
@@ -2059,7 +2064,16 @@ tab body's scroll.
   line.
 - **Issue**: the title linked out, labels, the body as markdown.
 - **Plan**: the latest plan, then the plan review's rounds folded,
-  each read when opened.
+  each read when opened. While a plan review's `finalize` is pending
+  (`dispatch::revisable`, which skips a workflow stage reviewing
+  another subject), the tab pins the owner's note box and "Send my
+  feedback" above the plan with the round count. Sending answers
+  `revise` with the note, so Dispatch writes the round's feedback file
+  and the tab lists it when it lands; Cmd+Enter sends, and an empty box
+  sends nothing. On this page the pending card shows "Revise…" in
+  place of `revise`, and no note box of its own; "Revise…" switches to
+  the Plan tab and focuses the box, and the card's `finalize` and
+  `park` send no note.
 - **Notes**: every attempt's `notes` artifact, newest first, the
   newest open and the rest folded.
 - **Review**: each code review attempt's rounds, their findings and

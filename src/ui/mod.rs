@@ -108,6 +108,11 @@ pub struct UiState {
     pub dispatch_note_drafts: std::collections::HashMap<String, String>,
     /// The artifact the ticket page is showing.
     pub dispatch_artifact: Option<PathBuf>,
+    /// The feedback box to focus, asked for until it holds the focus:
+    /// the card's "Revise…" asks for the Plan tab's box, and egui takes
+    /// a focus requested in the frame of a click outside the box away
+    /// again.
+    pub focus_feedback: Option<egui::Id>,
     /// The tab each ticket's page shows; the timeline when none.
     pub dispatch_ticket_tabs: HashMap<String, ticket::TicketTab>,
     /// Each ticket lane's branch changes, read on a thread, by ticket
@@ -290,6 +295,7 @@ impl Default for UiState {
             dispatch_settings: None,
             dispatch_note_drafts: std::collections::HashMap::new(),
             dispatch_artifact: None,
+            focus_feedback: None,
             dispatch_ticket_tabs: HashMap::new(),
             ticket_changes: HashMap::new(),
             dispatch_project: None,

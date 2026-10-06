@@ -304,9 +304,9 @@ src/ui/
   zoom.rs                Cmd+= and Cmd+- per window, remembered per display; a pop-out's pass runs at its display's zoom
   env.rs                 Environment dialog: variables, secrets, .env opt-in, masked preview
   config.rs              project config editor: .switchboard/project.json as text, options listed, parse shown
-  workflow.rs            plan review: the Review plan dialog, the run's page (rounds, plan with diff, feedback beside response, controls)
+  workflow.rs            plan review: the Review plan dialog, the run's page (rounds, plan with diff, feedback beside response, controls), the feedback block pinned under the header
   dispatch.rs            the Dispatch page: tickets with what waits on you (filtered by project), each project's supervisor chip (Open, Resume, Trust, Fresh behind a confirmation), and the console; Pop out
-  ticket.rs              one ticket's page: header, pending decisions pinned, tabs for timeline, issue, plan with its review rounds, notes, code review, and branch changes read on a thread
+  ticket.rs              one ticket's page: header, pending decisions pinned, tabs for timeline, issue, plan with its review rounds, notes, code review, and branch changes read on a thread; the owner's feedback on a pending finalize pinned above the plan
   cards.rs               the one card for every entry kind, the card grid, pinned document cards
   session.rs             session view: header, embedded terminal or conversation + message box
   switchboard.rs         every session across projects, waiting first

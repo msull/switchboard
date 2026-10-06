@@ -635,6 +635,25 @@ pub fn parked(t: &TicketView) -> bool {
     t.state == "parked"
 }
 
+/// The pending `finalize` of a plan review that offers `revise`, which
+/// is when the ticket page takes the owner's objection above the plan.
+/// The stage's newest workflow attempt must review the `plan`: a
+/// workflow stage over another subject is asked the same `finalize`,
+/// and its ticket has no plan to pin the box over.
+#[must_use]
+pub fn revisable(t: &TicketView) -> Option<&DecisionView> {
+    t.decisions.iter().find(|d| {
+        d.state == "pending"
+            && d.name == "finalize"
+            && d.options.iter().any(|o| o == "revise")
+            && t.attempts
+                .iter()
+                .filter(|a| a.kind == "workflow" && a.stage == d.stage)
+                .max_by_key(|a| a.n)
+                .is_some_and(|a| a.artifacts.iter().any(|(name, _)| name == "plan"))
+    })
+}
+
 impl AppCore {
     /// Send `body` to the runner, or say it is not running.
     fn dispatch_call(&mut self, out: &mut Out, body: Body) {

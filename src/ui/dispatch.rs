@@ -8,8 +8,9 @@ use std::path::PathBuf;
 use egui::{RichText, Ui};
 use egui_extras::{Column, TableBuilder};
 
+use super::ticket::{TicketTab, finalize_note_id};
 use super::{DrawCtx, GAP, theme};
-use crate::core::dispatch::{parked, ticket_source, ticket_stage};
+use crate::core::dispatch::{parked, revisable, ticket_source, ticket_stage};
 use crate::core::{
     AppAction, RunnerStanding, SupervisorState, TicketOnly, TicketSort, View, WaitingAgent,
 };
@@ -562,30 +563,30 @@ pub(super) fn decision_card(
                 multiple_choice(cx, ui, d);
                 return;
             }
-            let note = {
-                let draft = cx
-                    .state
-                    .dispatch_note_drafts
-                    .entry(d.id.clone())
-                    .or_default();
-                // An objection can run to paragraphs: two rows to start.
-                let hint = if d.needs_note.is_empty() {
-                    "Note (optional)".to_owned()
-                } else {
-                    format!("Note (needed for {})", d.needs_note.join(", "))
-                };
-                ui.add(
-                    egui::TextEdit::multiline(draft)
-                        .hint_text(hint)
-                        .desired_rows(2)
-                        .desired_width(f32::INFINITY),
-                )
-                .on_hover_text("Sent with the answer; a rerun sends it to the agent");
-                let text = draft.trim().to_owned();
-                (!text.is_empty()).then_some(text)
+            // On the ticket page, a plan review's objection is written in
+            // the block pinned above the plan, so this card shows no box
+            // and its other answers send no note the owner cannot see.
+            let plan_block =
+                !with_ticket && ticket.and_then(revisable).is_some_and(|r| r.id == d.id);
+            let note = if plan_block {
+                None
+            } else {
+                card_note(cx, ui, d)
             };
             ui.horizontal_wrapped(|ui| {
                 for option in &d.options {
+                    if plan_block && option == "revise" {
+                        if theme::secondary(ui, "Revise…")
+                            .on_hover_text("Write the objection above the plan")
+                            .clicked()
+                        {
+                            cx.state
+                                .dispatch_ticket_tabs
+                                .insert(d.ticket.clone(), TicketTab::Plan);
+                            cx.state.focus_feedback = Some(finalize_note_id(d));
+                        }
+                        continue;
+                    }
                     let recommended = d.recommendation.as_deref() == Some(option);
                     // Dispatch refuses these without a note, so the card
                     // never sends one bare.
@@ -618,6 +619,30 @@ pub(super) fn decision_card(
                 }
             });
         });
+}
+
+/// The card's own note box; the trimmed note when it has text.
+fn card_note(cx: &mut DrawCtx<'_>, ui: &mut Ui, d: &DecisionView) -> Option<String> {
+    let draft = cx
+        .state
+        .dispatch_note_drafts
+        .entry(d.id.clone())
+        .or_default();
+    // An objection can run to paragraphs: two rows to start.
+    let hint = if d.needs_note.is_empty() {
+        "Note (optional)".to_owned()
+    } else {
+        format!("Note (needed for {})", d.needs_note.join(", "))
+    };
+    ui.add(
+        egui::TextEdit::multiline(draft)
+            .hint_text(hint)
+            .desired_rows(2)
+            .desired_width(f32::INFINITY),
+    )
+    .on_hover_text("Sent with the answer; a rerun sends it to the agent");
+    let text = draft.trim().to_owned();
+    (!text.is_empty()).then_some(text)
 }
 
 /// An agent at a prompt of its own: the ticket, the attempt, why, and
