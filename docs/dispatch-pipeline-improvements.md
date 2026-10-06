@@ -347,7 +347,10 @@ the orphaned check (#53, built), the unreviewed conflict rebase (#54,
 built), the stale folded commit message (#55, built), a refresh that
 launched the next agent into a tree still mid-rebase (#58, built: the
 stage holds on a `recheck | park` question until the rebase is finished
-or aborted by hand).
+or aborted by hand), `wait` bunching and `--for move` (#100), the
+orphaned command reviewer and the leaderless check (#101), Dispatch's
+own lane-blind reads (#102), the runner restart from away from the Mac
+(#103).
 
 - **A look at the work before the PR opens.** #71 produced screenshots
   of the new ticket page, but only after the PR was open, and the two
