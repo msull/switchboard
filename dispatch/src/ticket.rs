@@ -604,10 +604,17 @@ pub struct GateRun {
     pub started_ms: u64,
     pub exit: Option<i32>,
     /// The check's process group as started, so a runner that restarts
-    /// while it runs can stop it. Cleared when a later runner finds the
-    /// group gone; never read once `exit` is set.
+    /// while it runs can stop it, or wait for it when it is a gate-only
+    /// command. Cleared when a later runner finds the group gone or the
+    /// owner answers `released`; never read once `exit` is set.
     #[serde(default)]
     pub group: Option<CheckGroup>,
+    /// When a runner first found this gate-only command lost to a
+    /// restart with its group still running. Saved so the stop limit
+    /// counts across further restarts before `stuck` is asked; cleared
+    /// with `group`.
+    #[serde(default)]
+    pub lost_since_ms: Option<u64>,
 }
 
 /// A check's process group as started, so a later runner can tell

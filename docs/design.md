@@ -1573,9 +1573,11 @@ ticket's values in its environment and its output in the attempt's
 `checks.log`, and the exit is bound to that head only if the tree is
 still clean at it after; a dirty tree, a nonzero exit or a changed
 head is a failed attempt and a rerun decision, and a runner restart
-starts the lost check again on the same head. (The design has the
-gate run as a Switchboard command record; a child of the runner is
-what is built, so the port needs no per-record environment yet.)
+starts the lost check again on the same head, except a gate-only
+command, which is asked about and waited for, never started again or
+signalled. (The design has the gate run as a Switchboard command
+record; a child of the runner is what is built, so the port needs no
+per-record environment yet.)
 A gate-only `pr-checks` stage (`ready`) opens one attempt per
 context that launches nothing: it finds the lane's PR by branch
 through `gh` (the provider is read from the remote; another host
@@ -2179,6 +2181,10 @@ Known gaps:
   that run waits on cargo's build lock behind the orphan. Killing the
   check's group on Stop, or a graceful stop, needs a signal handler or
   a port call in Dispatch.
+- A Stop during a deploy leaves the deploy running. The next runner
+  waits for its group rather than killing it: a park, a close or a
+  `rerun` holds until the group empties or the owner answers `stuck`
+  with `released`.
 - No restart on a crash while the app is up; the runner stays down
   until Start or the next app launch, like every service.
 - A rebundle with the runner up is left to the Stop button's hover.

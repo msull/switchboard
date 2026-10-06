@@ -23,7 +23,7 @@ use crate::ticket::{ProjectState, Ticket};
 /// carried a version reads as 0 and is brought up by `migrate`. A
 /// record above it was written by a newer `dispatch` and is refused
 /// both ways, so this build never drops fields it does not know.
-pub const RECORD_VERSION: u32 = 15;
+pub const RECORD_VERSION: u32 = 16;
 
 /// A lock file held while this lives: the writer lock, the runner's
 /// claim, or a ticket's close.
@@ -529,6 +529,11 @@ pub fn migrate(mut value: Value) -> Value {
         // would drop them on its next write must refuse the record, or a
         // secret artifact would be read, or its deletion forgotten and
         // its name offered to a later prompt again.
+        //
+        // 15 to 16: a gate run gains `lost_since_ms`, absent from its
+        // serde default. Nothing is transformed; a build that would drop
+        // it on its next write must refuse the record, or a restart would
+        // lose how long the wait on a lost command has run.
         if version == 1 {
             settle_from_verdicts(&mut value);
         }
@@ -1218,6 +1223,34 @@ mod tests {
         assert_eq!(t.version, RECORD_VERSION);
         assert!(t.attempts[0].secret.is_empty());
         assert!(t.attempts[0].forgotten.is_empty());
+    }
+
+    #[test]
+    fn a_version_fifteen_gate_migrates_to_sixteen_with_no_lost_wait() {
+        let gate = r#"{"head": "head0001", "argv": ["sh", "-c", "deploy"], "log": "/d.log", "started_ms": 1000, "exit": null, "group": {"pgid": 4000, "leader_started": "Sun Oct  4 10:00:00 2026"}}"#;
+        let attempt = format!(
+            r#"{{"stage": "deploy", "n": 1, "context": "root", "kind": "gate-only", "state": "running", "project": null, "session": null, "run": null, "artifacts": {{}}, "settle": {{}}, "stop_at_ms": null, "head": null, "gate": {gate}, "started_ms": 1000, "ended_ms": null}}"#
+        );
+        let text = TICKET_V0
+            .replacen('{', "{\n  \"version\": 15,", 1)
+            .replacen(
+                r#""attempts": [],"#,
+                &format!(r#""attempts": [{attempt}],"#),
+                1,
+            );
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.json");
+        fs::write(&path, text).unwrap();
+        let mut t = read_ticket(&path).unwrap();
+        assert_eq!(t.version, RECORD_VERSION);
+        let gate = t.attempts[0].gate.as_mut().unwrap();
+        assert_eq!(gate.lost_since_ms, None);
+        assert_eq!(gate.group.as_ref().unwrap().pgid, 4000);
+        gate.lost_since_ms = Some(5000);
+        write_ticket(&path, &t).unwrap();
+        let written: Value = read_json(&path).unwrap();
+        assert_eq!(written["attempts"][0]["gate"]["lost_since_ms"], 5000);
+        assert_eq!(read_ticket(&path).unwrap(), t);
     }
 
     #[test]

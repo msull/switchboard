@@ -14403,6 +14403,359 @@ fn parking_during_a_deploy_waits_for_it_to_exit_then_releases_the_hold() {
     assert!(matches!(a.state, AttemptState::Cancelled { .. }));
 }
 
+/// Nothing was ever sent to the deploy's group: no kill, no adoption,
+/// no escalation, no orphan event.
+fn never_signalled(env: &Env, id: &str) {
+    let key = deploy_key(id, 1);
+    let repo = env.repo.lock().unwrap();
+    assert!(
+        !repo.killed_checks.contains(&key),
+        "{:?}",
+        repo.killed_checks
+    );
+    assert!(!repo.adopted.contains(&key), "{:?}", repo.adopted);
+    assert!(
+        !repo.escalated_checks.contains(&key),
+        "{:?}",
+        repo.escalated_checks
+    );
+    drop(repo);
+    assert_eq!(orphan_events(env, id), 0);
+}
+
+/// The deploy's group a previous runner left has emptied.
+fn lost_deploy_exits(env: &Env, id: &str) {
+    env.repo.lock().unwrap().orphans.remove(&deploy_key(id, 1));
+}
+
+fn deploy_attempt(t: &Ticket) -> Attempt {
+    t.attempts_of("deploy").next().unwrap().clone()
+}
+
+fn stuck_questions(env: &Env, id: &str) -> Vec<Decision> {
+    env.pending(id)
+        .into_iter()
+        .filter(|d| d.name == "stuck")
+        .collect()
+}
+
+/// Parking waits, holding `my-dev`, while the lost deploy's group runs.
+fn parking_waits_on_the_lost_deploy(env: &Env, id: &str) {
+    let t = env.ticket(id);
+    assert!(is_parking(&t), "{t:#?}");
+    assert_eq!(holds(&t), ["my-dev"], "held while the lost deploy runs");
+    never_signalled(env, id);
+}
+
+/// The lost deploy gone, the park ends: nothing held, the attempt
+/// cancelled with its group forgotten.
+fn parked_after_the_lost_deploy(env: &Env, id: &str) {
+    let t = env.ticket(id);
+    assert!(is_parked(&t), "{t:#?}");
+    assert!(t.holds.is_empty());
+    let a = deploy_attempt(&t);
+    assert!(matches!(a.state, AttemptState::Cancelled { .. }), "{a:#?}");
+    let gate = a.gate.unwrap();
+    assert_eq!(gate.group, None);
+    assert_eq!(gate.lost_since_ms, None);
+    assert_eq!(gate.exit, None, "its exit stays unknown");
+}
+
+#[test]
+fn parking_after_a_restart_waits_for_a_lost_deploy_and_never_signals_it() {
+    let (mut env, id) = back_half_env(BOTH);
+    deploying(&mut env, &id);
+    orphan_and_restart(&mut env, &deploy_key(&id, 1));
+    park_by_hand(&mut env, &id);
+    env.step();
+    parking_waits_on_the_lost_deploy(&env, &id);
+    let since = deploy_attempt(&env.ticket(&id)).gate.unwrap().lost_since_ms;
+    assert!(since.is_some(), "the wait is on the record");
+    env.step();
+    parking_waits_on_the_lost_deploy(&env, &id);
+    lost_deploy_exits(&env, &id);
+    env.step();
+    parked_after_the_lost_deploy(&env, &id);
+    never_signalled(&env, &id);
+}
+
+#[test]
+fn a_restart_while_parking_on_a_deploy_keeps_waiting() {
+    let (mut env, id) = back_half_env(BOTH);
+    deploying(&mut env, &id);
+    break_copy(&env, &id);
+    env.step();
+    env.step();
+    assert!(is_parking(&env.ticket(&id)));
+    orphan_and_restart(&mut env, &deploy_key(&id, 1));
+    env.step();
+    env.step();
+    parking_waits_on_the_lost_deploy(&env, &id);
+    lost_deploy_exits(&env, &id);
+    env.step();
+    parked_after_the_lost_deploy(&env, &id);
+    never_signalled(&env, &id);
+}
+
+#[test]
+fn a_lost_deploy_still_running_at_the_stop_limit_asks_stuck() {
+    let (mut env, id) = back_half_env(BOTH);
+    deploying(&mut env, &id);
+    orphan_and_restart(&mut env, &deploy_key(&id, 1));
+    park_by_hand(&mut env, &id);
+    env.step();
+    assert!(
+        stuck_questions(&env, &id).is_empty(),
+        "not before the limit"
+    );
+    env.wait(STOP_LIMIT_MS);
+    env.step();
+    env.step();
+    let stuck = stuck_questions(&env, &id);
+    assert_eq!(stuck.len(), 1, "{stuck:#?}");
+    assert!(stuck[0].question.contains("lost to a runner restart"));
+    parking_waits_on_the_lost_deploy(&env, &id);
+    answer(&mut env, &id, &stuck[0], "wait");
+    env.step();
+    env.step();
+    assert!(
+        stuck_questions(&env, &id).is_empty(),
+        "wait gives it longer"
+    );
+    parking_waits_on_the_lost_deploy(&env, &id);
+    env.wait(STOP_LIMIT_MS);
+    env.step();
+    let stuck = stuck_questions(&env, &id);
+    assert_eq!(stuck.len(), 1, "asked again after another limit");
+    answer(&mut env, &id, &stuck[0], "released");
+    env.step();
+    parked_after_the_lost_deploy(&env, &id);
+    never_signalled(&env, &id);
+}
+
+#[test]
+fn a_lost_deploy_that_exits_withdraws_its_stuck() {
+    let (mut env, id) = back_half_env(BOTH);
+    deploying(&mut env, &id);
+    orphan_and_restart(&mut env, &deploy_key(&id, 1));
+    park_by_hand(&mut env, &id);
+    env.step();
+    env.wait(STOP_LIMIT_MS);
+    env.step();
+    assert_eq!(stuck_questions(&env, &id).len(), 1);
+    lost_deploy_exits(&env, &id);
+    env.step();
+    parked_after_the_lost_deploy(&env, &id);
+    let t = env.ticket(&id);
+    let stuck = t.decisions.iter().find(|d| d.name == "stuck").unwrap();
+    assert_eq!(stuck.state, DecisionState::Cancelled);
+    never_signalled(&env, &id);
+}
+
+/// The deploy lost to a restart while its group keeps running, failed
+/// with "it may have run" and the `rerun` question pending.
+fn at_lost_deploy_rerun(env: &mut Env, id: &str) -> Decision {
+    deploying(env, id);
+    orphan_and_restart(env, &deploy_key(id, 1));
+    env.steps_until(id, "the rerun question", |t, _| {
+        t.pending_decisions().iter().any(|d| d.name == "rerun")
+    });
+    pending_named(env, id, "rerun").unwrap()
+}
+
+#[test]
+fn a_failed_lost_deploy_still_running_holds_the_park_and_the_rerun() {
+    let (mut env, id) = back_half_env(BOTH);
+    let rerun = at_lost_deploy_rerun(&mut env, &id);
+    answer(&mut env, &id, &rerun, "rerun");
+    for _ in 0..3 {
+        env.step();
+    }
+    let t = env.ticket(&id);
+    assert_eq!(started(&env, &deploy_key(&id, 2)), 0, "{t:#?}");
+    assert_eq!(t.attempts_of("deploy").count(), 1);
+    let d = t.decisions.iter().find(|d| d.id == rerun.id).unwrap();
+    assert!(d.unacted_answer().is_some(), "{d:#?}");
+    never_signalled(&env, &id);
+    lost_deploy_exits(&env, &id);
+    for _ in 0..3 {
+        env.step();
+    }
+    assert_eq!(started(&env, &deploy_key(&id, 2)), 1);
+    never_signalled(&env, &id);
+
+    // Still running at the stop limit, the rerun asks `stuck` once, and
+    // `released` lets the second deploy start with the group untouched.
+    let (mut env, id) = back_half_env(BOTH);
+    let rerun = at_lost_deploy_rerun(&mut env, &id);
+    answer(&mut env, &id, &rerun, "rerun");
+    env.step();
+    env.wait(STOP_LIMIT_MS);
+    env.step();
+    env.step();
+    let stuck = stuck_questions(&env, &id);
+    assert_eq!(stuck.len(), 1, "{stuck:#?}");
+    assert_eq!(started(&env, &deploy_key(&id, 2)), 0);
+    answer(&mut env, &id, &stuck[0], "released");
+    for _ in 0..3 {
+        env.step();
+    }
+    assert!(
+        env.repo
+            .lock()
+            .unwrap()
+            .orphans
+            .contains(&deploy_key(&id, 1))
+    );
+    assert_eq!(started(&env, &deploy_key(&id, 2)), 1);
+    let t = env.ticket(&id);
+    let acted = |d: &Decision| matches!(d.state, DecisionState::Answered { acted: true, .. });
+    assert!(acted(
+        t.decisions.iter().find(|d| d.id == stuck[0].id).unwrap()
+    ));
+    assert!(acted(
+        t.decisions.iter().find(|d| d.id == rerun.id).unwrap()
+    ));
+    assert_eq!(deploy_attempt(&t).gate.unwrap().group, None);
+    never_signalled(&env, &id);
+
+    // A park from the failed state waits the same way.
+    let (mut env, id) = back_half_env(BOTH);
+    at_lost_deploy_rerun(&mut env, &id);
+    park_by_hand(&mut env, &id);
+    env.step();
+    env.step();
+    parking_waits_on_the_lost_deploy(&env, &id);
+    lost_deploy_exits(&env, &id);
+    env.step();
+    let t = env.ticket(&id);
+    assert!(is_parked(&t), "{t:#?}");
+    assert!(t.holds.is_empty());
+    assert_eq!(deploy_attempt(&t).gate.unwrap().group, None);
+}
+
+/// A close waits while the lost deploy's group runs: the trees, the
+/// hold and the record's progress all stay, and nothing is signalled.
+fn closing_waits_on_the_lost_deploy(env: &Env, id: &str) {
+    let t = env.ticket(id);
+    assert!(matches!(t.state, TicketState::Closing { .. }), "{t:#?}");
+    assert!(!t.close.tree_removed, "{:#?}", t.close);
+    assert!(env.repo.lock().unwrap().removed.is_empty());
+    assert_eq!(holds(&t), ["my-dev"], "held while the lost deploy runs");
+    never_signalled(env, id);
+}
+
+fn closed_after_the_lost_deploy(env: &mut Env, id: &str) {
+    lost_deploy_exits(env, id);
+    env.steps_until(id, "closed", |t, _| {
+        matches!(t.state, TicketState::Closed { .. })
+    });
+    let t = env.ticket(id);
+    assert!(t.close.tree_removed);
+    assert!(!env.repo.lock().unwrap().removed.is_empty());
+    assert!(t.holds.is_empty());
+    never_signalled(env, id);
+}
+
+/// The back half with a gate-only `creds` stage before `deploy`, in
+/// `my-dev`'s range, whose secret the deploy may still be using.
+fn creds_env() -> (Env, String) {
+    let mut env = Env::new();
+    let text = BACK_HALF
+        .replace("{worktrees}", &env.worktrees.display().to_string())
+        .replace(
+            "[[stages]]\nname = \"deploy\"\n",
+            "[[stages]]\nname = \"creds\"\ncontext = \"lane:backend\"\nneeds = [\"my-dev\"]\nwrites = [{ name = \"creds\", secret = true }]\ngate = { kind = \"command\", in = \"lane:backend\", argv = [\"sh\", \"-c\", \"inv creds\"] }\n\n[[stages]]\nname = \"deploy\"\n",
+        );
+    std::fs::write(env.data.pipeline("Orchard"), text).unwrap();
+    let id = take_orchard(&mut env, 42, BOTH);
+    (env, id)
+}
+
+/// `creds` writes its secret and exits 0: the path it wrote.
+fn creds_written(env: &mut Env, id: &str) -> PathBuf {
+    let key = format!("{id}/creds/1");
+    for _ in 0..8 {
+        if started(env, &key) > 0 {
+            break;
+        }
+        env.step();
+    }
+    let path = {
+        let repo = env.repo.lock().unwrap();
+        let check = repo.checks.iter().find(|c| c.key == key).unwrap();
+        check
+            .env
+            .iter()
+            .find(|(k, _)| k == "DISPATCH_WRITES_CREDS")
+            .map(|(_, v)| PathBuf::from(v))
+            .unwrap()
+    };
+    std::fs::write(&path, TOKEN).unwrap();
+    exits(env, &key, 0);
+    path
+}
+
+fn creds_attempt(t: &Ticket) -> Attempt {
+    t.attempts_of("creds").last().unwrap().clone()
+}
+
+#[test]
+fn a_close_at_the_rerun_question_waits_for_a_lost_deploy_still_running() {
+    let (mut env, id) = creds_env();
+    let creds = creds_written(&mut env, &id);
+    at_lost_deploy_rerun(&mut env, &id);
+    let now = env.tick();
+    env.runner.close_by_hand(&id, None, now).unwrap();
+    for _ in 0..2 {
+        closing_waits_on_the_lost_deploy(&env, &id);
+        assert!(creds.exists(), "the secret stays while the deploy runs");
+        assert!(creds_attempt(&env.ticket(&id)).forgotten.is_empty());
+        env.step();
+    }
+    closed_after_the_lost_deploy(&mut env, &id);
+    assert!(!creds.exists());
+    assert_eq!(
+        creds_attempt(&env.ticket(&id)).forgotten["creds"].why,
+        "closed"
+    );
+}
+
+#[test]
+fn a_close_from_parked_waits_for_a_lost_deploy_still_running() {
+    let (mut env, id) = back_half_env(BOTH);
+    at_lost_deploy_rerun(&mut env, &id);
+    // A record an older build parked while the group still ran: its
+    // question withdrawn, its hold let go.
+    let mut t = env.ticket(&id);
+    t.state = TicketState::Parked {
+        reason: "parked by hand".into(),
+    };
+    for d in &mut t.decisions {
+        d.state = DecisionState::Cancelled;
+    }
+    t.holds.clear();
+    let now = env.tick();
+    env.runner.save_ticket(&mut t, now).unwrap();
+    let a = deploy_attempt(&env.ticket(&id));
+    assert!(a.gate.as_ref().unwrap().group.is_some() && !a.is_open());
+    let now = env.tick();
+    env.runner.close_by_hand(&id, None, now).unwrap();
+    for _ in 0..2 {
+        let t = env.ticket(&id);
+        assert!(matches!(t.state, TicketState::Closing { .. }), "{t:#?}");
+        assert!(!t.close.tree_removed);
+        assert!(env.repo.lock().unwrap().removed.is_empty());
+        never_signalled(&env, &id);
+        env.step();
+    }
+    lost_deploy_exits(&env, &id);
+    env.steps_until(&id, "closed", |t, _| {
+        matches!(t.state, TicketState::Closed { .. })
+    });
+    assert!(!env.repo.lock().unwrap().removed.is_empty());
+}
+
 #[test]
 fn a_second_ticket_waits_for_the_resource_without_a_question_or_a_slot_then_takes_it_when_tried_ends()
  {
