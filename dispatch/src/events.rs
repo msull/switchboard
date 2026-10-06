@@ -768,8 +768,8 @@ fn nudge_events(
     }
 }
 
-/// One `check-orphan-killed` event per check group a previous runner
-/// left running that was signalled since `before`.
+/// One `check-orphan-killed` event per check or command reviewer group
+/// a previous runner left running that was signalled since `before`.
 fn orphan_events(
     out: &mut Vec<Event>,
     t: &Ticket,
@@ -779,8 +779,12 @@ fn orphan_events(
 ) {
     let seen = before.map_or(0, |b| b.orphans_killed.len());
     for o in a.orphans_killed.iter().skip(seen) {
+        let what = match &o.reviewer {
+            Some(name) => format!("reviewer {name}"),
+            None => "checks".to_owned(),
+        };
         let text = format!(
-            "checks at {} left running by a previous runner (group {}) stopped",
+            "{what} at {} left running by a previous runner (group {}) stopped",
             short(&o.head),
             o.pgid
         );
@@ -1815,6 +1819,7 @@ mod tests {
                 leader_started: "fake-1".into(),
                 head: "abcdef0123".into(),
                 at_ms: 7,
+                reviewer: None,
             });
         let events = between(Some(&started), &stopped, 5, &names);
         assert_eq!(kinds(Some(&started), &stopped), [Kind::CheckOrphanKilled]);
@@ -1824,6 +1829,28 @@ mod tests {
         );
         assert_eq!(Kind::CheckOrphanKilled.as_str(), "check-orphan-killed");
         assert!(between(Some(&stopped), &stopped, 5, &names).is_empty());
+    }
+
+    #[test]
+    fn an_orphaned_command_reviewer_stopped_names_the_reviewer() {
+        let mut started = ticket();
+        started.attempts.push(running("implement", 1));
+        let mut stopped = started.clone();
+        stopped.attempts[0]
+            .orphans_killed
+            .push(crate::ticket::OrphanKill {
+                pgid: 4001,
+                leader_started: "fake-2".into(),
+                head: "abcdef0123".into(),
+                at_ms: 7,
+                reviewer: Some("lint".into()),
+            });
+        let events = between(Some(&started), &stopped, 5, &names);
+        assert_eq!(kinds(Some(&started), &stopped), [Kind::CheckOrphanKilled]);
+        assert_eq!(
+            events[0].text,
+            "reviewer lint at abcdef0 left running by a previous runner (group 4001) stopped"
+        );
     }
 
     #[test]

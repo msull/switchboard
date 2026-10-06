@@ -23,7 +23,7 @@ use crate::ticket::{ProjectState, Ticket};
 /// carried a version reads as 0 and is brought up by `migrate`. A
 /// record above it was written by a newer `dispatch` and is refused
 /// both ways, so this build never drops fields it does not know.
-pub const RECORD_VERSION: u32 = 17;
+pub const RECORD_VERSION: u32 = 18;
 
 /// A lock file held while this lives: the writer lock, the runner's
 /// claim, or a ticket's close.
@@ -539,6 +539,12 @@ pub fn migrate(mut value: Value) -> Value {
         // its serde default. Nothing is transformed; a build that would
         // drop it on its next write must refuse the record, or a refused
         // runner command would be forgotten.
+        //
+        // 17 to 18: a reviewer run gains `group` and an orphan kill gains
+        // `reviewer`, both absent from their serde defaults. Nothing is
+        // transformed; a build that would drop the reviewer's group on its
+        // next write must refuse the record, or a restart would leave the
+        // reviewer's process group running again.
         if version == 1 {
             settle_from_verdicts(&mut value);
         }
@@ -1083,6 +1089,46 @@ mod tests {
     }
 
     #[test]
+    fn a_version_seventeen_record_migrates_with_no_reviewer_group() {
+        let reviewer = r#"{"name": "lint", "kind": "command", "dir": "/r1/lint", "feedback": "/r1/lint/feedback.md", "session": null, "launched": true, "result": null}"#;
+        let round = format!(
+            r#"{{"n": 1, "base": "base0000", "head": "head0001", "reviewers": [{reviewer}], "round_state": "reviewing", "feedback": null, "implementer": null, "response": null, "started_ms": 1000, "ended_ms": null}}"#
+        );
+        let orphan =
+            r#"{"pgid": 4000, "leader_started": "fake-1", "head": "head0001", "at_ms": 1500}"#;
+        let attempt = format!(
+            r#"{{"stage": "review", "n": 1, "context": "backend", "kind": "agent", "state": "running", "project": null, "session": null, "run": null, "artifacts": {{}}, "settle": {{}}, "stop_at_ms": null, "head": null, "gate": null, "rounds": [{round}], "orphans_killed": [{orphan}], "started_ms": 1000, "ended_ms": null}}"#
+        );
+        let text = TICKET_V0
+            .replacen('{', "{\n  \"version\": 17,", 1)
+            .replacen(
+                r#""attempts": [],"#,
+                &format!(r#""attempts": [{attempt}],"#),
+                1,
+            );
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.json");
+        fs::write(&path, text).unwrap();
+        let mut t = read_ticket(&path).unwrap();
+        assert_eq!(t.version, RECORD_VERSION);
+        assert_eq!(t.attempts[0].rounds[0].reviewers[0].group, None);
+        assert_eq!(t.attempts[0].orphans_killed[0].reviewer, None);
+        t.attempts[0].rounds[0].reviewers[0].group = Some(crate::ticket::CheckGroup {
+            pgid: 4001,
+            leader_started: "Sun Oct  4 10:00:00 2026".into(),
+        });
+        t.attempts[0].orphans_killed[0].reviewer = Some("lint".into());
+        write_ticket(&path, &t).unwrap();
+        let written: Value = read_json(&path).unwrap();
+        assert_eq!(written["version"], RECORD_VERSION);
+        assert_eq!(
+            written["attempts"][0]["rounds"][0]["reviewers"][0]["group"]["pgid"],
+            4001
+        );
+        assert_eq!(read_ticket(&path).unwrap(), t);
+    }
+
+    #[test]
     fn a_version_eight_record_migrates_to_nine_with_no_conflict() {
         let text = TICKET_V0.replacen('{', "{\n  \"version\": 8,", 1).replacen(
             r#""base_sha": "base0000""#,
@@ -1443,6 +1489,7 @@ mod tests {
                 polls_since_stop: 0,
                 settle: None,
                 result: None,
+                group: None,
             }],
             state: RoundState::Reviewing,
             feedback: None,

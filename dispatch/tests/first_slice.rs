@@ -4183,6 +4183,61 @@ fn parking_after_a_restart_waits_on_an_orphaned_check() {
 }
 
 #[test]
+fn a_leaderless_orphan_with_a_fresh_kill_is_killed_again() {
+    let mut env = Env::new();
+    let (id, key) = at_running_checks(&mut env);
+    orphan_and_restart(&mut env, &key);
+    env.step();
+    let at_ms = first_implement(&env, &id).orphans_killed[0].at_ms;
+    // The leader died of the TERM; a member that ignored it runs on.
+    env.repo.lock().unwrap().leaderless.insert(key.clone());
+    env.restart();
+    env.step();
+    {
+        let repo = env.repo.lock().unwrap();
+        assert_eq!(repo.adopted, vec![key.clone(), key.clone()]);
+        assert_eq!(repo.vouched, vec![key.clone()]);
+        assert!(repo.escalated_checks.is_empty());
+    }
+    assert_eq!(first_implement(&env, &id).orphans_killed.len(), 1);
+    assert_eq!(orphan_events(&env, &id), 1);
+    assert_eq!(started_under(&env, &key), 0);
+    // SIGKILL at the first kill's time plus the limit, not a fresh limit.
+    env.now = at_ms + STOP_LIMIT_MS;
+    env.step();
+    assert_eq!(env.repo.lock().unwrap().escalated_checks, vec![key.clone()]);
+    assert_eq!(started_under(&env, &key), 1);
+    env.step();
+    assert_eq!(started_under(&env, &key), 1, "started once");
+}
+
+#[test]
+fn a_leaderless_orphan_past_the_limit_is_left_alone() {
+    let mut env = Env::new();
+    let (id, key) = at_running_checks(&mut env);
+    orphan_and_restart(&mut env, &key);
+    env.step();
+    env.wait(STOP_LIMIT_MS);
+    env.repo.lock().unwrap().leaderless.insert(key.clone());
+    env.restart();
+    env.step();
+    {
+        let repo = env.repo.lock().unwrap();
+        assert_eq!(repo.adopted, vec![key.clone()]);
+        assert!(repo.vouched.is_empty());
+        assert!(repo.orphans.contains(&key), "its members run on");
+        assert!(repo.left_alone.contains(&key));
+        assert!(repo.escalated_checks.is_empty());
+    }
+    assert_eq!(started_under(&env, &key), 1);
+    let a = first_implement(&env, &id);
+    assert_eq!(a.orphans_killed.len(), 1);
+    assert_eq!(orphan_events(&env, &id), 1);
+    env.step();
+    assert_eq!(started_under(&env, &key), 1, "started once");
+}
+
+#[test]
 fn a_review_rounds_orphaned_checks_are_stopped_before_they_start_again() {
     let (mut env, id, _) = findings_asked_and_fixed();
     let t = env.ticket(&id);
@@ -6800,6 +6855,66 @@ fn a_failed_reviewer_fails_the_round_after_its_siblings_are_killed() {
     );
 }
 
+/// A command sibling that outlives the round's TERM is waited for, not
+/// polled: its kill took it from the runner, and a poll would fail it
+/// as lost to a restart that never happened, as the retired agent
+/// sibling would be failed as exited.
+#[test]
+fn a_failed_rounds_stubborn_command_sibling_is_not_read_as_lost() {
+    let mut env = Env::new();
+    env.with_review_stage("ask");
+    let path = env.data.pipeline(PROJECT);
+    let text = std::fs::read_to_string(&path)
+        .unwrap()
+        .replace(
+            "[operators.rebaser]\n",
+            "[operators.test]\nkind = \"command\"\nargv = [\"sh\", \"-c\", \"test\"]\n\n[operators.rebaser]\n",
+        )
+        .replace(
+            "reviewers = [\"style\", \"lint\"]",
+            "reviewers = [\"style\", \"lint\", \"test\"]",
+        );
+    std::fs::write(&path, text).unwrap();
+    let id = at_review(&mut env);
+    let test_key = lint_key(&env.ticket(&id), 1).replace("/lint", "/test");
+    env.repo
+        .lock()
+        .unwrap()
+        .stubborn_checks
+        .push(test_key.clone());
+    lint_exits(&mut env, &id, 1, 2, "");
+    for _ in 0..3 {
+        env.step();
+    }
+    assert_eq!(
+        env.repo
+            .lock()
+            .unwrap()
+            .killed_checks
+            .iter()
+            .filter(|k| **k == test_key)
+            .count(),
+        1
+    );
+    let t = env.ticket(&id);
+    assert!(review_attempt(&t).is_open(), "waits on the sibling");
+    assert_eq!(reviewer(&t, 1, "test").result, None);
+    env.repo
+        .lock()
+        .unwrap()
+        .checks
+        .retain(|c| c.key != test_key);
+    env.steps_until(&id, "the rerun question", |t, _| {
+        t.pending_decisions().iter().any(|d| d.name == "rerun")
+    });
+    let a = review_attempt(&env.ticket(&id));
+    assert!(
+        matches!(&a.state, AttemptState::Failed { reason } if reason.contains("lint: exited 2") && !reason.contains("lost") && !reason.contains("style")),
+        "{:?}",
+        a.state
+    );
+}
+
 /// A Claude reviewer whose Stop leaves its card `working` is held, its
 /// sibling with it, and a later write and Stop finish the round.
 #[test]
@@ -7146,6 +7261,111 @@ fn a_lost_command_reviewer_is_failed_not_started_again() {
     assert!(
         !env.repo.lock().unwrap().checks.iter().any(|c| c.key == key),
         "not started again"
+    );
+}
+
+#[test]
+fn an_orphaned_command_reviewer_is_stopped_before_the_rounds_reviewers_start_again() {
+    let mut env = Env::new();
+    let id = at_review(&mut env);
+    let t = env.ticket(&id);
+    let key = lint_key(&t, 1);
+    let group = reviewer(&t, 1, "lint").group.expect("the reviewer's group");
+    let head = review_attempt(&t).rounds[0].head.clone();
+    orphan_and_restart(&mut env, &key);
+    for _ in 0..3 {
+        env.step();
+    }
+    assert_eq!(env.repo.lock().unwrap().adopted, vec![key.clone()]);
+    let t = env.ticket(&id);
+    assert_eq!(reviewer(&t, 1, "lint").result, None);
+    assert!(!t.pending_decisions().iter().any(|d| d.name == "rerun"));
+    let a = review_attempt(&t);
+    assert!(a.is_open());
+    assert_eq!(a.orphans_killed.len(), 1);
+    let o = &a.orphans_killed[0];
+    assert_eq!(
+        (o.reviewer.as_deref(), o.pgid, &o.leader_started, &o.head),
+        (Some("lint"), group.pgid, &group.leader_started, &head)
+    );
+    assert_eq!(orphan_events(&env, &id), 1);
+    env.repo.lock().unwrap().orphans.remove(&key);
+    env.steps_until(&id, "the rerun question", |t, _| {
+        t.pending_decisions().iter().any(|d| d.name == "rerun")
+    });
+    let a = review_attempt(&env.ticket(&id));
+    assert!(
+        matches!(&a.state, AttemptState::Failed { reason } if reason.contains("lint: lost") && !reason.contains("still running")),
+        "{:?}",
+        a.state
+    );
+    let d = env
+        .pending(&id)
+        .into_iter()
+        .find(|d| d.name == "rerun")
+        .unwrap();
+    answer(&mut env, &id, &d, "rerun");
+    env.steps_until(&id, "the new attempt's reviewers", |t, _| {
+        review_attempt(t).n == a.n + 1
+            && review_attempt(t).rounds.first().is_some_and(|r| {
+                r.reviewers
+                    .iter()
+                    .all(|x| x.session.is_some() || x.launched)
+            })
+    });
+    let t = env.ticket(&id);
+    assert_eq!(started_under(&env, &lint_key(&t, 1)), 1);
+    assert_eq!(started_under(&env, &key), 0, "the lost one never again");
+}
+
+#[test]
+fn an_orphaned_command_reviewer_that_ignores_term_is_killed_past_the_limit() {
+    let mut env = Env::new();
+    let id = at_review(&mut env);
+    let key = lint_key(&env.ticket(&id), 1);
+    orphan_and_restart(&mut env, &key);
+    env.step();
+    env.step();
+    assert!(env.repo.lock().unwrap().escalated_checks.is_empty());
+    env.wait(STOP_LIMIT_MS);
+    env.steps_until(&id, "the rerun question", |t, _| {
+        t.pending_decisions().iter().any(|d| d.name == "rerun")
+    });
+    assert_eq!(env.repo.lock().unwrap().escalated_checks, vec![key.clone()]);
+    let a = review_attempt(&env.ticket(&id));
+    assert!(
+        matches!(&a.state, AttemptState::Failed { reason } if reason.contains("lint: lost") && reason.contains("its reviewer lint") && reason.contains("still running after")),
+        "{:?}",
+        a.state
+    );
+}
+
+#[test]
+fn parking_after_a_restart_waits_on_an_orphaned_command_reviewer() {
+    let mut env = Env::new();
+    let id = at_review(&mut env);
+    let key = lint_key(&env.ticket(&id), 1);
+    orphan_and_restart(&mut env, &key);
+    park_by_hand(&mut env, &id);
+    env.step();
+    env.step();
+    let t = env.ticket(&id);
+    assert!(review_attempt(&t).is_open(), "not cancelled while it runs");
+    assert!(matches!(t.state, TicketState::Parking { .. }));
+    assert_eq!(env.repo.lock().unwrap().adopted, vec![key.clone()]);
+    env.repo.lock().unwrap().orphans.remove(&key);
+    env.step();
+    let t = env.ticket(&id);
+    assert!(
+        matches!(&review_attempt(&t).state, AttemptState::Cancelled { reason } if !reason.contains("still running")),
+        "{:?}",
+        review_attempt(&t).state
+    );
+    assert_eq!(review_attempt(&t).orphans_killed.len(), 1);
+    assert!(
+        matches!(t.state, TicketState::Parked { .. }),
+        "{:?}",
+        t.state
     );
 }
 

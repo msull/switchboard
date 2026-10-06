@@ -204,9 +204,11 @@ in the ledger with no reply against Switchboard's `find {op}`:
 
 A live session is observed, never resumed, never sent to. A session that
 is gone is judged by the attempt's completion evidence (below), never by
-the mere presence of a file. A check a previous runner left running is
-stopped by its recorded process group before the gate runs again or its
-attempt is cancelled (see "Runner children"). Resource holds are read
+the mere presence of a file. A check or command reviewer a previous
+runner left running is stopped by its recorded process group before the
+gate runs again, before a lost reviewer fails its round (so a rerun
+never starts beside it), or before its attempt is cancelled (see
+"Runner children"). Resource holds are read
 back from the records; nothing is released on restart. Switchboard's own
 restart is covered by the same reads: every record the port made is an
 ordinary Switchboard record that its reconcile treats like any other,
@@ -325,6 +327,14 @@ older records. Version 13 adds a project's `supervisor`, a decision's
 empty or absent in older records.
 Version 14 adds a ticket's `holds` and `services`, empty in older
 records.
+Version 15 adds an attempt's `secret` and `forgotten`, empty in older
+records. Version 16 adds a gate run's `lost_since_ms`, absent in older
+records. Version 17 adds a project's `supervision.refusals`, empty in
+older records. Version 18 adds a reviewer run's `group`, a command
+reviewer's process group as started, and an orphan kill's `reviewer`,
+the command reviewer it stopped (absent for the checks); both are absent
+in older records, so a command reviewer started before the upgrade and
+lost to a restart is failed with nothing killed.
 
 A project's record (`projects/<project>.json`) holds, besides its
 space, set and queue, its supervisor (see "Supervisor"): `supervisor`
@@ -1625,26 +1635,35 @@ result fails the reviewer, never starts a second copy and never kills
 an unrelated process. Children run in their own process group and are
 killed with it when the ticket parks or a rerun retires the attempt.
 A check's group is recorded on its `GateRun` as the leader's pid and
-its start time (`ps -o lstart=` under `LC_ALL=C`, `TZ=UTC`). A runner
-that finds a running gate whose check it never started, on the next
-pass that polls it or on a park or a close, looks at the recorded
-group: no member left clears the record; a live leader with another
-start time took a reused pid and is left alone. A gone leader, or one
-whose start time `ps` could not read, proves nothing (the id may have
-gone to a new group whose leader exited), so its group is left alone
-too and a leaderless orphan is missed. A live leader with the recorded
-start time is ours, and the group gets TERM, then SIGKILL past the
-stop limit, counted from that group's first TERM across restarts for
-as long as the leader lives. A leader that dies of the TERM (the usual
-`sh -c`) reads as gone on the next restart, so a member that ignored
-the TERM is left running and never gets SIGKILL. The kill is recorded
-on the attempt's `orphans_killed` and logged as `check-orphan-killed`;
-only then do the checks start again or the attempt read cancelled. Two
-gaps are left: a leaderless orphan, whether its leader exited before
-the restart or died of our TERM, is left running beside the new
-checks; and a crash between the spawn and the save that records the
-group, one `fsync` long, leaves a group no record names. Command reviewers record no group and are not
-adopted.
+its start time (`ps -o lstart=` under `LC_ALL=C`, `TZ=UTC`), and a
+command reviewer's on its `ReviewerRun` the same way. A runner that
+finds a running gate whose check it never started, on the next pass
+that polls it or on a park or a close, looks at the recorded group; a
+command reviewer is adopted the same way, on the poll that finds it
+lost and on a park, a close or a failed round. No member left clears
+the record; a live leader with another start time took a reused pid
+and is left alone. A live leader with the recorded start time is ours,
+and the group gets TERM, then SIGKILL past the stop limit, counted from
+that group's first TERM across restarts. A gone leader, or one whose
+start time `ps` could not read, proves nothing by itself (the id may
+have gone to a new group whose leader exited), so its group is left
+alone unless an `orphans_killed` entry for the same group is younger
+than the stop limit: a pgid cannot be reused while a member lives, so
+that entry vouches for it, and the group is killed again, with SIGKILL
+at that entry's time plus the limit. A leader that dies of the TERM
+(the usual `sh -c`) therefore no longer frees a member that ignored
+it. The kill is recorded on the attempt's `orphans_killed` (with the
+reviewer's name for a command reviewer) and logged as
+`check-orphan-killed`; only then do the checks start again, the lost
+reviewer fail its round, or the attempt read cancelled. A lost
+reviewer's `Failed` waits for its group, so the `rerun` that would
+start it again in the same tree, beside the old one and its build
+locks, is not offered while it runs. Two gaps are left: a leaderless
+group with no fresh entry (its leader exited before any restart, or
+the entry is past the limit) is left running; and a crash between the
+spawn and the save that records the group, one `fsync` long, leaves a
+group no record names, which for a command reviewer is failed "lost"
+with nothing killed.
 
 **Validation** refuses: an unknown or repeated reviewer, a command
 reviewer with no `argv`, a missing implementer or one that is not
