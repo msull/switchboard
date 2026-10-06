@@ -3090,8 +3090,10 @@ mod tests {
         }
         cli.worktree_remove(&repo, &gone).unwrap();
         let list = sh(&repo, &["worktree", "list", "--porcelain"]);
-        assert!(!list.contains("t2"), "{list}");
-        assert!(list.contains("t4"), "{list}");
+        // Match with the parent: the temp directory's random name can
+        // hold "t2" on its own.
+        assert!(!list.contains("wt/t2"), "{list}");
+        assert!(list.contains("wt/t4"), "{list}");
         // An untracked file: git refuses, and the tree stays.
         let kept = dir.path().join("wt").join("t3");
         cli.worktree_add(&repo, &kept, "dispatch/3-x", "origin/main")
