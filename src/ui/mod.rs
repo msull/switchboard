@@ -388,6 +388,10 @@ pub fn draw(app: &mut SwitchboardApp, ui: &mut Ui) {
     let sent: Vec<(RecordId, String)> =
         std::mem::take(&mut *state.prompt_boxes.outbox.lock().expect("outbox mutex"));
     app.ui_state = state;
+    let columns = app.ui_state.working_set_columns;
+    if columns != app.core().view_columns() {
+        app.set_view_columns(columns);
+    }
     for action in actions {
         app.dispatch(action);
     }

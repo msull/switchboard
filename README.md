@@ -82,12 +82,13 @@ windows of their own and where each window sits, where the main
 window sits, the zoom of each display, the workflow round cap and the
 user's workflow definitions, and the environment sets: each set's
 variables, which of them are secret, and its AWS method),
-`views.json` (schema v6: the workspaces, and the working sets: each
+`views.json` (schema v7: the workspaces, and the working sets: each
 one's name, workspace, which sessions and files are on it, and where
 each card sits on its grid, with a `.bak`; a set made in the global
 workspace, "Everywhere", is in no real workspace and may hold cards
 from all of them; a rule set stores its rule, such as "active in the
-last 24 hours", and the sessions dismissed from it instead of cards),
+last 24 hours", the sessions dismissed from it, whether it shows
+only running sessions, and its card size instead of cards),
 the
 `tmux.conf`, `claude-hooks.json` (passed to Claude Code
 with `--settings`), `events.log` (the hook event log), `wake.sock`, and
@@ -216,7 +217,7 @@ Dev aids, all environment variables:
   `send`, `interrupt`, `return`, `kill`, `remove`, `approve`, `revoke`, `side`,
   `switchboard`, `working-set`, `new-working-set`, `clone-working-set`,
   `rename-working-set`, `delete-working-set`, `new-recent-set`,
-  `set-hours`, `dismiss-from-set`, `add-to-working-set`,
+  `set-hours`, `running-only`, `card-scale`, `dismiss-from-set`, `add-to-working-set`,
   `add-file-to-working-set`, `arrange`, `show-message`, `clone-session`,
   `discard-to`, `undo-discard`, `review-plan`, `show-review`,
   `show-dispatch`, `dispatch-runner-start`, `dispatch-runner-stop`,
@@ -252,7 +253,7 @@ src/core/
   action.rs              AppAction, Effect, Clock, AppCore::dispatch, read model for the UI
   reconcile.rs           StoreLoaded / HostListed: card states, autostart services, spawn specs
   sessions.rs            launch, idempotent return, resume preflight, Codex serialization
-  grid.rs                Working Set placement: default card sizes, first free spot, overlap, minimum size, the card a step away, a rule set's flowed layout
+  grid.rs                Working Set placement: default card sizes, first free spot, overlap, minimum size, the card a step away, a rule set's card size at its scale and flowed layout
   controller.rs          the hand controller's meaning: the selected card per working set, Z's radial menu, the session C holds open
   definitions.rs         .switchboard/project.json entries -> records; hash-keyed approval
   env.rs                 environment resolution for a new session: global variables, opted-in .env files, the project's own; secrets by account name

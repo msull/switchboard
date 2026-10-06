@@ -591,8 +591,11 @@ pub struct WindowFrame {
 /// space's fixed id to `WorkingSet.space`; a v4 file reads unchanged.
 /// The bump keeps an older build, which would move a global set into a
 /// real space and prune its cards, from rewriting such a file. v6 added
-/// rules and dismissals; a v5 file reads as hand sets.
-pub const VIEWS_SCHEMA_VERSION: u32 = 6;
+/// rules and dismissals; a v5 file reads as hand sets. v7 added a rule
+/// set's running-only toggle and card scale; a v6 file reads with the
+/// toggle off and the scale at 100. The bump keeps an older build from
+/// dropping them on its next save.
+pub const VIEWS_SCHEMA_VERSION: u32 = 7;
 
 /// Switchboard's own id for a space. Never reused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -730,6 +733,13 @@ pub struct WorkingSet {
     /// Sessions taken off a rule set by hand. Meaningless without a rule.
     #[serde(default)]
     pub dismissed: Vec<Dismissal>,
+    /// Leave out members whose pane is not running. Meaningless without a rule.
+    #[serde(default)]
+    pub running_only: bool,
+    /// The size of a rule set's cards in percent; 100 is `grid::SESSION_CARD`.
+    /// The core keeps it in `RULE_SCALE`. Meaningless without a rule.
+    #[serde(default = "WorkingSet::default_card_scale")]
+    pub card_scale: u32,
 }
 
 impl Default for WorkingSet {
@@ -742,11 +752,19 @@ impl Default for WorkingSet {
             op: None,
             rule: None,
             dismissed: Vec::new(),
+            running_only: false,
+            card_scale: Self::default_card_scale(),
         }
     }
 }
 
 impl WorkingSet {
+    /// A rule set's card size before the user changes it, in percent.
+    #[must_use]
+    pub fn default_card_scale() -> u32 {
+        100
+    }
+
     /// An empty set called `name`.
     #[must_use]
     pub fn named(name: impl Into<String>) -> Self {
@@ -758,6 +776,8 @@ impl WorkingSet {
             op: None,
             rule: None,
             dismissed: Vec::new(),
+            running_only: false,
+            card_scale: Self::default_card_scale(),
         }
     }
 }

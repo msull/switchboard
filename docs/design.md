@@ -1891,8 +1891,23 @@ is the record (`WorkingSet.rule`, `SetRule::Recent { hours }`, on disk
 (`AppCore::rule_members`) worked out again after every action, so nothing
 is written per card and a tick never saves. Everything that draws or
 walks a set reads `AppCore::set_cards`: a hand set's pins, or a rule
-set's members laid out. views.json is v6, so an older build leaves a
+set's members laid out. views.json is v7, so an older build leaves a
 file with rules alone; a v5 file reads as hand sets.
+
+Two settings sit beside the rule. `WorkingSet.running_only` leaves out
+members whose pane is not running (`AppCore::is_running`). It is applied
+where membership is worked out (`members_at`), so every reader agrees:
+the cards, the keys and the controller, the rail's count, and the
+control port's `items`. Before the first `HostListed` no pane is known
+to be running, so such a set is empty for up to a second at startup; a
+pane that dies leaves it within a second. `WorkingSet.card_scale` is
+the cards' size in percent, 90 to 200 in steps of 10 (`RULE_SCALE`),
+default 100; `grid::rule_card` turns it into units, with the width
+growing 1.4 times as fast as the height (90 is 9 by 7, 100 is 10 by 8,
+200 is 24 by 16), and clamps again for a hand-edited file. Both were
+added in views v7; a v6 file reads with the toggle off and the scale
+at 100. Clone and Move to carry them. The header shows them as a
+"Running only" checkbox and a "Card size" slider after the hours.
 
 Activity (`AppCore::last_active`) is the latest of `last_seen` (the
 launch, and every hook event), `last_event_at`, `last_stop_at`, and the
@@ -1923,7 +1938,8 @@ it may hold through `target_in`, so a rule set made while Everywhere is
 active covers every workspace with no code of its own. Clone and Move
 to carry the rule and the dismissals. The control port's `set` replies
 carry `rule`, with `items` the members laid out at 24 columns. Script
-lines: `new-recent-set`, `set-hours`, `dismiss-from-set`; the last two
+lines: `new-recent-set`, `set-hours`, `running-only <set> on|off`,
+`card-scale <set> <percent>`, `dismiss-from-set`; all but the first
 take a multi-word set name (every word but the last). Hours from any
 sender are clamped to 1 to 720. The rail lists rule sets before hand
 sets, each in record order (`AppCore::working_sets_in_rail_order`); the
@@ -1932,9 +1948,14 @@ control port's `set` replies keep record order.
 Known edges: a pane that redraws forever (`top`, a clock in a prompt)
 cannot stay dismissed past its next redraw; Kill and dismiss is the way
 out. Rule sets are rule-only (no hand pins beside the rule's cards).
-The controller steps through a rule set's list in order (Left and Up
-back, Right and Down forward) rather than across the grid, since the
-core does not know the view's columns.
+The keys and the controller step across a rule set's grid as drawn:
+each frame the view reports its width (`AppAction::ViewColumns`, a
+transient measurement that saves nothing), and the core lays the set
+out at it before `grid::neighbour` picks the next card. Right from the
+last card of a row does not wrap; Down from above the empty end of a
+short last row goes to the nearest card below by centre line, as on a
+hand set. Only the control port, which has no view, lays a set out at
+24 columns (`RULE_COLUMNS`), as the core does before the first frame.
 
 ## Cleanup pass (2026-10-03)
 

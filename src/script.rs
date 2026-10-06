@@ -118,9 +118,16 @@ const REVIEW_LINES: &[&str] = &[
 ];
 
 /// The rule-set lines `rule_set_step` handles.
-const RULE_SET_LINES: &[&str] = &["new-recent-set", "set-hours", "dismiss-from-set"];
+const RULE_SET_LINES: &[&str] = &[
+    "new-recent-set",
+    "set-hours",
+    "running-only",
+    "card-scale",
+    "dismiss-from-set",
+];
 
-/// Rule sets: make one, change its hours, dismiss a session from it.
+/// Rule sets: make one, change its hours, its running-only toggle or
+/// its card size, dismiss a session from it.
 fn rule_set_step(app: &mut SwitchboardApp, w: &[&str]) -> Result<(), String> {
     match w {
         // A rule set of the sessions active in the last `hours`, in the
@@ -139,6 +146,20 @@ fn rule_set_step(app: &mut SwitchboardApp, w: &[&str]) -> Result<(), String> {
             let set = working_set(app, &name.join(" "))?;
             let hours: u32 = hours.parse().map_err(|_| "bad hours")?;
             app.dispatch(AppAction::SetRuleHours { set, hours });
+        }
+        ["running-only", name @ .., on_off] if !name.is_empty() => {
+            let set = working_set(app, &name.join(" "))?;
+            let on = match *on_off {
+                "on" => true,
+                "off" => false,
+                _ => return Err("bad on|off".into()),
+            };
+            app.dispatch(AppAction::SetRuleRunningOnly { set, on });
+        }
+        ["card-scale", name @ .., percent] if !name.is_empty() => {
+            let set = working_set(app, &name.join(" "))?;
+            let scale: u32 = percent.parse().map_err(|_| "bad percent")?;
+            app.dispatch(AppAction::SetRuleCardScale { set, scale });
         }
         ["dismiss-from-set", name @ .., record] if !name.is_empty() => {
             let set = working_set(app, &name.join(" "))?;
