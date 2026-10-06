@@ -2141,16 +2141,18 @@ it work in the session and it takes no initiative of its own; at start it
 runs `brief`, compares it with the hand-off, arms a background watch per
 ticket in flight and then waits; watches are background calls, never a
 foreground loop; the hand-off is written with the Edit tool, never a shell
-script), the `read` paths made absolute, what
-each listed decision's answers do and that every other is the owner's,
-that `merge` is answered `park` only, the full path of the `dispatch`
-executable (its allow rule matches that path), "run `dispatch brief
-<project>` first", the hand-off to keep current, and the commands it
-works with. The session's first prompt is "Read `<seed.md>` and do
-what it says". The seed is stale when a hash of the table, the
-project's name and the commands' text no longer matches the one the
-session was seeded with; the rendered seed's paths are left out, since
-they differ between builds.
+script), the `read` paths made absolute, what each listed decision's
+answers do and that every other is the owner's, where the owner answers
+those (the ticket page's buttons, or `dispatch decide` from any shell
+but the supervisor's pane), that a command typed in its pane, a `!` line
+included, is its own, that `merge` is answered `park` only, the full
+path of the `dispatch` executable (its allow rule matches that path),
+"run `dispatch brief <project>` first", the hand-off to keep current,
+and the commands it works with. The session's first prompt is "Read
+`<seed.md>` and do what it says". The seed is stale when a hash of the
+table, the project's name and the commands' text no longer matches the
+one the session was seeded with; the rendered seed's paths are left out,
+since they differ between builds.
 
 **The session** is made through the control port as a ticket's are,
 each creation on the project's record before it is sent: the space,
@@ -2183,8 +2185,14 @@ with a path or `--migrate`, `supervisor --fresh`, `--resume` and
 `--kill`, any verb not on the list, and any other project are refused
 with exit 1. A `decide` on a name outside `decides` saves a refusal on
 the decision and logs a `refused` event; the decision still waits on
-the owner. What a supervisor does is stamped `supervisor`: the
-answer's `by`, `state_by`, `taken_by`, and the events' `actor`.
+the owner. The refusal names the owner's two routes: the decision's
+buttons on the ticket page, or `dispatch decide` from any shell but a
+supervisor's pane, a Switchboard shell session included. A command typed
+in the supervisor's pane, the owner's own `!` line included, inherits
+`SWITCHBOARD_RECORD_ID` and is the supervisor's. No flag or variable
+makes it count as the owner. What a supervisor does is stamped
+`supervisor`: the answer's `by`, `state_by`, `taken_by`, and the events'
+`actor`.
 
 The rule guards against a supervisor's mistakes, not against a hostile
 agent, which can unset the variable. Gaps: nothing wakes an idle

@@ -606,6 +606,11 @@ fn a_supervisor_answers_what_decides_lists_and_nothing_else() {
         &out,
         "the supervisor may not answer `inspect`; the owner does",
     );
+    refused(&out, dispatch::supervisor::OWNER_ROUTES);
+    refused(
+        &out,
+        "a command typed in the supervisor's pane is the supervisor's",
+    );
     let d = env.ticket(&t.id).decisions[1].clone();
     assert!(d.pending());
     assert_eq!(d.refusals.len(), 1);
