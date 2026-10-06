@@ -6,7 +6,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::Result;
 use dispatch::epoch_ms;
-use dispatch::events::{self, Event, For, Kind, Waited, base_name, short};
+use dispatch::events::{self, Burst, Event, For, Kind, base_name, short};
 use dispatch::git::{GitCli, yyyymmdd};
 use dispatch::github::Gh;
 use dispatch::port::SocketPort;
@@ -721,7 +721,7 @@ fn wait(args: &[&str]) -> Result<()> {
     let what = match f.value("--for") {
         None => For::Any,
         Some(word) => For::parse(word).unwrap_or_else(|| {
-            eprintln!("--for takes decision, stage, pr, closed or any");
+            eprintln!("--for takes decision, stage, pr, closed, move or any");
             usage()
         }),
     };
@@ -729,7 +729,7 @@ fn wait(args: &[&str]) -> Result<()> {
     let json = f.on("--json");
     let data = DataDir::from_env()?;
     let since = f.number("--since");
-    let waited = events::wait(
+    let burst = events::wait_burst(
         &data,
         ticket,
         what,
@@ -740,25 +740,34 @@ fn wait(args: &[&str]) -> Result<()> {
             std::thread::sleep(Duration::from_millis(events::FOLLOW_POLL_MS));
         },
     )?;
-    match waited {
-        Waited::Matched(e) => {
-            say!("{}", event_line(&e, json));
+    match burst {
+        Burst::Lines(lines) => {
+            for e in &lines {
+                say!("{}", event_line(e, json));
+            }
+            // Only the last line can be a decision: one ends the burst.
+            let Some(e) = lines.last() else {
+                return Ok(());
+            };
             if !json && e.kind == Kind::Decision {
                 // Read again: a decision answered since its event (by a
                 // resume, by Dispatch, from another terminal) has no
                 // answer left to give.
                 let t = read_ticket(&data.ticket_file(ticket))?;
-                if let Some(hint) = decide_hint(&e, &t) {
+                if let Some(hint) = decide_hint(e, &t) {
                     say!("{hint}");
                 }
             }
             Ok(())
         }
-        Waited::Ended(e) => {
-            say!("{}", event_line(&e, json));
+        Burst::Ended { lines, end } => {
+            for e in &lines {
+                say!("{}", event_line(e, json));
+            }
+            say!("{}", event_line(&end, json));
             std::process::exit(EXIT_ENDED);
         }
-        Waited::TimedOut => {
+        Burst::TimedOut => {
             if json {
                 say!(r#"{{"timed_out":true}}"#);
             } else {

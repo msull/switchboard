@@ -2034,7 +2034,7 @@ long-lived Claude Code session that watches its tickets
   --kill [--reason]]`, `dispatch brief <project>`, and `dispatch
   events --follow --timeout <secs>` (exit 0 once something printed, 2
   when nothing came) for a supervisor's watch loop, beside `dispatch
-  wait <ticket> --for any --since <seq> --timeout 540` as its watch on
+  wait <ticket> --for move --since <seq> --timeout 540` as its watch on
   one ticket.
 - The actor: `SWITCHBOARD_RECORD_ID` naming a project's current or
   past supervisor makes a command that supervisor's. It may read
@@ -2064,6 +2064,12 @@ long-lived Claude Code session that watches its tickets
   and the timeline say who answered.
 - A rotation keeps one `## From the session of <date>` heading over the
   session's own text, replacing the ones earlier rotations left on top.
+- `wait --for move` returns on what a supervisor acts on, and `--for
+  any` / `--for move` return a burst: every match within two seconds
+  of the last (ten at most), by the clock and by the lines' own times
+  so a replay from an old cursor comes a burst at a time, ended at once
+  by a decision and after the lines before it by a park or close,
+  followed from the seq of the last event line.
 
 Known gaps:
 
