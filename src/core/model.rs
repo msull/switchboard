@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 /// Bump when the on-disk shape changes incompatibly.
-pub const SCHEMA_VERSION: u32 = 10;
+pub const SCHEMA_VERSION: u32 = 11;
 
 /// How the UI picks its colours: follow the system, or force one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -384,6 +384,14 @@ pub struct Round {
     /// directory at the end of the round.
     #[serde(default)]
     pub snapshot: bool,
+    /// When the reviewer was last asked for this round's feedback.
+    /// `None` on a round saved before the time was kept.
+    #[serde(default)]
+    pub feedback_asked: Option<SystemTime>,
+    /// When the planner was last asked for this round's response.
+    /// `None` on a round saved before the time was kept.
+    #[serde(default)]
+    pub response_asked: Option<SystemTime>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -407,8 +415,13 @@ pub enum RunState {
     Converged,
     /// The cap was reached with feedback still coming.
     AtCap,
-    /// Stopped by the user or by a failure; the reason is shown.
+    /// Stopped by the user, or because the planner clone failed or is
+    /// missing; the reason is shown. An agent that let the round down
+    /// is `Failed`.
     Paused(String),
+    /// The awaited agent let the round down: it exited or stopped
+    /// without writing its file. The reason is shown.
+    Failed(String),
     /// The user has reviewed the plan.
     Finalized,
     /// The plan went back to the source session.
@@ -425,6 +438,7 @@ impl RunState {
             Self::Converged => "converged".into(),
             Self::AtCap => "at cap".into(),
             Self::Paused(why) => format!("paused: {why}"),
+            Self::Failed(why) => format!("failed: {why}"),
             Self::Finalized => "finalized".into(),
             Self::HandedOff => "handed off".into(),
         }

@@ -2056,7 +2056,10 @@ A failed reply to a query is judged by its words. Only `no such
 session` or `no such run` means the record is gone, and only that fails
 an attempt or reads a paused run as stopped; any other failed reply
 (the app too busy to answer in time) or a socket error says nothing
-about the record and is asked again on the next pass.
+about the record and is asked again on the next pass. A run reported
+`paused` with `failed: true` (its agent stopped or exited without its
+round file) fails the review attempt and asks `rerun`/`park`; a plain
+`paused` asks `paused` (continue/park).
 
 An operation whose status is `in progress` is waited for, not judged:
 Dispatch restarting while Switchboard is still cloning a planner finds

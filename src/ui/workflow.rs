@@ -342,7 +342,7 @@ fn header(cx: &mut DrawCtx<'_>, ui: &mut Ui, run: &WorkflowRun) {
                     RichText::new(run.state.label())
                         .text_style(theme::meta())
                         .color(match run.state {
-                            RunState::Paused(_) => p.accent_2_text,
+                            RunState::Paused(_) | RunState::Failed(_) => p.accent_2_text,
                             _ => p.n700,
                         }),
                 );
@@ -406,7 +406,7 @@ fn controls(cx: &mut DrawCtx<'_>, ui: &mut Ui, run: &WorkflowRun) {
                 cx.dispatch(AppAction::PauseWorkflow(run.id));
             }
         }
-        RunState::Paused(_) => {
+        RunState::Paused(_) | RunState::Failed(_) => {
             if theme::primary(ui, "Continue").clicked() {
                 cx.dispatch(AppAction::ContinueWorkflow(run.id));
             }

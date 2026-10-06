@@ -451,6 +451,7 @@ impl FakeSwitchboard {
             Body::WorkflowPause { run } => {
                 self.run_mut(run).state = RunState::Paused {
                     reason: "paused by you".into(),
+                    failed: false,
                 };
                 (vec![], false)
             }

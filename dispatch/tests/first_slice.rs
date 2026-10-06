@@ -3185,6 +3185,124 @@ fn at_review_run(env: &mut Env) -> String {
     id
 }
 
+/// The app reports the latest review run failed: its agent stopped
+/// without writing its round file.
+fn review_run_fails(env: &mut Env) {
+    env.sb().runs.last_mut().unwrap().state = RunState::Paused {
+        reason: "plan review stopped without writing plan.feedback-1.md".into(),
+        failed: true,
+    };
+}
+
+#[test]
+fn a_failed_review_run_fails_the_attempt_and_a_rerun_starts_a_new_run() {
+    let mut env = Env::new();
+    let id = at_review_run(&mut env);
+    review_run_fails(&mut env);
+    env.steps_until(&id, "the review failing", |t, _| {
+        t.attempts_of("review")
+            .last()
+            .is_some_and(|a| matches!(a.state, AttemptState::Failed { .. }))
+    });
+    let t = env.ticket(&id);
+    let AttemptState::Failed { reason } = &t.attempts_of("review").last().unwrap().state else {
+        panic!()
+    };
+    assert!(
+        reason.starts_with("review: ") && reason.contains("stopped without"),
+        "{reason}"
+    );
+    let pending = env.pending(&id);
+    assert_eq!((pending.len(), pending[0].name.as_str()), (1, "rerun"));
+    let now = env.tick();
+    env.runner
+        .decide(&id, &pending[0].id, "rerun", None, now)
+        .unwrap();
+    env.steps_until(&id, "a second review run", |t, _| {
+        t.attempts_of("review")
+            .last()
+            .is_some_and(|a| a.n == 2 && a.run.is_some())
+    });
+    assert_eq!(env.sb().runs.len(), 2, "a fresh run");
+}
+
+#[test]
+fn a_review_failing_past_max_reruns_parks_the_ticket() {
+    let mut env = Env::new();
+    let id = at_review_run(&mut env);
+    let t = env.ticket(&id);
+    with_max_reruns(&env, &t, 1);
+    review_run_fails(&mut env);
+    env.steps_until(&id, "the first failure", |t, _| {
+        t.attempts_of("review")
+            .last()
+            .is_some_and(|a| matches!(a.state, AttemptState::Failed { .. }))
+    });
+    let pending = env.pending(&id);
+    let now = env.tick();
+    env.runner
+        .decide(&id, &pending[0].id, "rerun", None, now)
+        .unwrap();
+    env.steps_until(&id, "a second review run", |t, _| {
+        t.attempts_of("review")
+            .last()
+            .is_some_and(|a| a.n == 2 && a.run.is_some())
+    });
+    review_run_fails(&mut env);
+    env.steps_until(&id, "the ticket parking", |t, _| !t.active());
+    let t = env.ticket(&id);
+    let (TicketState::Parked { reason } | TicketState::Parking { reason }) = &t.state else {
+        panic!("{t:#?}");
+    };
+    assert!(reason.contains("max_reruns"), "{reason}");
+}
+
+#[test]
+fn a_review_paused_by_hand_still_asks_to_continue() {
+    let mut env = Env::new();
+    let id = at_review_run(&mut env);
+    env.sb().runs[0].state = RunState::Paused {
+        reason: "paused by you".into(),
+        failed: false,
+    };
+    env.step();
+    let pending = env.pending(&id);
+    assert_eq!(pending.len(), 1, "{pending:#?}");
+    assert_eq!(pending[0].name, "paused");
+    assert_eq!(pending[0].options, vec!["continue", "park"]);
+    assert!(
+        env.ticket(&id)
+            .attempts_of("review")
+            .last()
+            .unwrap()
+            .is_open()
+    );
+}
+
+#[test]
+fn a_review_continued_in_the_app_then_failing_asks_only_to_rerun() {
+    let mut env = Env::new();
+    let id = at_review_run(&mut env);
+    env.sb().runs[0].state = RunState::Paused {
+        reason: "paused by you".into(),
+        failed: false,
+    };
+    env.step();
+    assert_eq!(env.pending(&id)[0].name, "paused");
+    // Continued in the app, not answered here.
+    env.sb().runs[0].state = RunState::AwaitingFeedback;
+    env.step();
+    review_run_fails(&mut env);
+    env.steps_until(&id, "the review failing", |t, _| {
+        t.attempts_of("review")
+            .last()
+            .is_some_and(|a| matches!(a.state, AttemptState::Failed { .. }))
+    });
+    let pending = env.pending(&id);
+    assert_eq!(pending.len(), 1, "{pending:#?}");
+    assert_eq!(pending[0].name, "rerun");
+}
+
 fn at_finalize(env: &mut Env) -> String {
     let id = at_review_run(env);
     env.sb().runs[0].state = RunState::Converged;

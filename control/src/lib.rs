@@ -495,7 +495,14 @@ pub enum RunState {
     AwaitingResponse,
     Converged,
     AtCap,
-    Paused { reason: String },
+    Paused {
+        reason: String,
+        /// The awaited agent let the round down, rather than a user's
+        /// Pause. A field rather than a variant so an older reader,
+        /// which has no catch-all, still reads the reply.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        failed: bool,
+    },
     Finalized,
     HandedOff,
 }
@@ -679,6 +686,7 @@ mod tests {
             definition: "Dispatch: reviewer@abc".into(),
             state: RunState::Paused {
                 reason: "by you".into(),
+                failed: false,
             },
             round: 2,
             cap: 4,
@@ -1003,5 +1011,28 @@ mod tests {
         for reply in &replies {
             round_trip_reply(reply);
         }
+    }
+
+    #[test]
+    fn a_paused_run_reads_without_the_failed_flag_and_writes_it_only_when_set() {
+        let paused: RunState = serde_json::from_str(r#"{"state":"paused","reason":"x"}"#).unwrap();
+        assert_eq!(
+            paused,
+            RunState::Paused {
+                reason: "x".into(),
+                failed: false
+            }
+        );
+        assert_eq!(
+            serde_json::to_string(&paused).unwrap(),
+            r#"{"state":"paused","reason":"x"}"#
+        );
+        let failed = RunState::Paused {
+            reason: "x".into(),
+            failed: true,
+        };
+        let text = serde_json::to_string(&failed).unwrap();
+        assert_eq!(text, r#"{"state":"paused","reason":"x","failed":true}"#);
+        assert_eq!(serde_json::from_str::<RunState>(&text).unwrap(), failed);
     }
 }
