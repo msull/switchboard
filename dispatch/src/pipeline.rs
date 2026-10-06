@@ -554,6 +554,20 @@ pub enum StageKind {
     Review,
 }
 
+/// Every artifact a stage leaves for the stages after it: what it
+/// writes, the `checks` log of a command gate, a code review's
+/// `summary`, and a workflow's finalized copy of its subject.
+fn produced(stage: &Stage) -> impl Iterator<Item = &str> {
+    let checks = matches!(stage.gate, Some(Gate::Command { .. })).then_some("checks");
+    let summary = (stage.kind() == StageKind::Review).then_some("summary");
+    let subject = stage.subject.as_deref().filter(|_| stage.review.is_some());
+    stage
+        .write_names()
+        .chain(checks)
+        .chain(summary)
+        .chain(subject)
+}
+
 /// Review passes a code review stage makes when the file says nothing.
 pub const DEFAULT_REVIEW_CAP: u32 = 3;
 
@@ -572,6 +586,17 @@ impl Stage {
             StageKind::Workflow
         } else {
             StageKind::GateOnly
+        }
+    }
+
+    /// The stage runs in more than one lane context, so it writes one file
+    /// per lane under each name.
+    #[must_use]
+    pub fn runs_per_lane(&self) -> bool {
+        match &self.context {
+            Context::Each => true,
+            Context::Lanes(l) => l.len() > 1,
+            Context::Root | Context::Joined | Context::Lane(_) => false,
         }
     }
 
@@ -1037,15 +1062,11 @@ impl Pipeline {
             if stage.write_names().any(|w| w == "checks") {
                 bail!("stage {name:?} writes \"checks\", which is its command's own log");
             }
-            // A reader takes a stage's newest artifact whatever lane wrote
-            // it, so one written per lane would hand every lane the last
-            // lane's file.
-            let one_context = match &stage.context {
-                Context::Each => false,
-                Context::Lanes(lanes) => lanes.len() <= 1,
-                Context::Root | Context::Joined | Context::Lane(_) => true,
-            };
-            if !one_context {
+            // A gate-only writer's file (a deploy's outputs) is read by
+            // root stages and by Dispatch's own reads, which see no lane,
+            // so one written per lane would hand them whichever lane
+            // finished last.
+            if stage.runs_per_lane() {
                 bail!("stage {name:?}: a gate-only stage writes only in one context, not per lane");
             }
         }
@@ -1415,12 +1436,13 @@ impl Pipeline {
         let mut stage_names = std::collections::BTreeSet::new();
         let mut written: Vec<&str> = Vec::new();
         let mut secrets: Vec<&str> = Vec::new();
-        let mut keys: BTreeMap<String, &str> = BTreeMap::new();
-        for stage in &self.stages {
+        let mut keys = BTreeMap::new();
+        for (i, stage) in self.stages.iter().enumerate() {
             if !stage_names.insert(&stage.name) {
                 bail!("stage {:?} is listed twice", stage.name);
             }
             self.validate_stage(stage, &written)?;
+            self.validate_inputs(stage, &self.stages[..i])?;
             if let Some(subject) = &stage.subject
                 && secrets.contains(&subject.as_str())
             {
@@ -1429,18 +1451,7 @@ impl Pipeline {
                     stage.name
                 );
             }
-            // One variable name per artifact name, so no two artifacts
-            // share a `DISPATCH_WRITES_*` or `DISPATCH_INPUT_*` key.
-            for name in stage.write_names() {
-                if let Some(other) = keys.insert(env_key(name), name)
-                    && other != name
-                {
-                    bail!(
-                        "stage {:?} writes {name:?}, which has the same variable name as {other:?}",
-                        stage.name
-                    );
-                }
-            }
+            Self::validate_keys(stage, &mut keys)?;
             written.extend(stage.write_names());
             secrets.extend(stage.secret_writes());
             if stage.review.is_some()
@@ -1461,6 +1472,135 @@ impl Pipeline {
             self.validate_supervisor(sup)?;
         }
         Ok(())
+    }
+
+    /// One variable name per artifact name, so no two artifacts share a
+    /// `DISPATCH_WRITES_*` or `DISPATCH_INPUT_*` key; and one per
+    /// stage-qualified input, whose `DISPATCH_INPUT_<STAGE>_<NAME>` must
+    /// not land on another. `keys` holds what the stages before claimed.
+    fn validate_keys<'a>(
+        stage: &'a Stage,
+        keys: &mut BTreeMap<String, (Option<&'a str>, &'a str)>,
+    ) -> Result<()> {
+        let shown = |(s, n): (Option<&str>, &str)| match s {
+            Some(s) => format!("{s}'s {n:?}"),
+            None => format!("{n:?}"),
+        };
+        let bare = stage.write_names().map(|n| (env_key(n), (None, n)));
+        let qualified = produced(stage).map(|n| {
+            (
+                format!("{}_{}", env_key(&stage.name), env_key(n)),
+                (Some(stage.name.as_str()), n),
+            )
+        });
+        for (key, this) in bare.chain(qualified) {
+            if let Some(other) = keys.insert(key.clone(), this)
+                && other != this
+            {
+                bail!(
+                    "stage {:?} leaves {:?}, whose DISPATCH_INPUT_{key} is the same variable name as {}",
+                    stage.name,
+                    this.1,
+                    shown(other)
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// A root or joined stage never names a file a stage before it
+    /// writes once per lane: whichever lane it took would be a guess.
+    /// Every template rendered with the stage's inputs is read.
+    fn validate_inputs(&self, stage: &Stage, before: &[Stage]) -> Result<()> {
+        if !matches!(stage.context, Context::Root | Context::Joined) {
+            return Ok(());
+        }
+        let text = self.templates_of(stage);
+        let name = &stage.name;
+        let ctx = if stage.context == Context::Root {
+            "root"
+        } else {
+            "joined"
+        };
+        let advice = "name it from a stage in that lane's context, which reads its own lane's file";
+        let per_lane = |s: &str| before.iter().any(|x| x.name == s && x.runs_per_lane());
+        for s in crate::template::commit_stages(&text) {
+            if per_lane(&s) {
+                bail!(
+                    "stage {name:?} ({ctx}) names {{inputs.{s}.commit}}, but {s} records a commit once per lane; {advice}"
+                );
+            }
+        }
+        for (s, x) in crate::template::input_names(&text) {
+            match s {
+                Some(s) if per_lane(&s) => bail!(
+                    "stage {name:?} ({ctx}) names {{inputs.{s}.{x}}}, but {s} writes {x} once per lane; {advice}"
+                ),
+                Some(_) => {}
+                None => {
+                    let producers: Vec<&Stage> = before
+                        .iter()
+                        .filter(|b| produced(b).any(|p| p == x))
+                        .collect();
+                    if !producers.is_empty() && producers.iter().all(|b| b.runs_per_lane()) {
+                        let names: Vec<&str> = producers.iter().map(|b| b.name.as_str()).collect();
+                        bail!(
+                            "stage {name:?} ({ctx}) names {{inputs.{x}}}, but {} writes {x} once per lane; {advice}",
+                            names.join(", ")
+                        );
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Every template rendered with a stage's inputs, in one string: its
+    /// prompt and its operator's guidance, a code review's prompts and
+    /// its reviewers' and implementer's guidance, a workflow reviewer's
+    /// templates, and the guidance of the policy's `rebaser` (a PR gate
+    /// can rebase) and `fixer` (a `pr-checks` gate can fix red checks).
+    fn templates_of(&self, stage: &Stage) -> String {
+        let (rebaser, fixer) = match &stage.gate {
+            Some(Gate::External { check, .. }) if check == "pr-checks" => {
+                (self.policy.rebaser.as_ref(), self.policy.fixer.as_ref())
+            }
+            Some(Gate::External { check, .. }) if check == "pr-merged" => {
+                (self.policy.rebaser.as_ref(), None)
+            }
+            _ => (None, None),
+        };
+        let guidance = stage
+            .operator
+            .iter()
+            .chain(&stage.reviewers)
+            .chain(&stage.implementer)
+            .chain(rebaser)
+            .chain(fixer)
+            .filter_map(|o| self.operators.get(o))
+            .map(|o| o.guidance.as_str());
+        let workflow = stage
+            .review
+            .as_ref()
+            .and_then(|o| self.operators.get(o))
+            .and_then(|o| o.review.as_ref())
+            .into_iter()
+            .flat_map(|r| {
+                [
+                    r.review_first.as_str(),
+                    &r.review_round,
+                    &r.respond,
+                    &r.respond_to_user,
+                    &r.handoff,
+                ]
+            });
+        guidance
+            .chain(stage.prompt.as_deref())
+            .chain(stage.review_prompt.as_deref())
+            .chain(stage.fix_prompt.as_deref())
+            .chain(workflow)
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     /// The decisions a gate of this file asks: a human gate's, an
@@ -2419,5 +2559,187 @@ ports = [3100, 3199]
             );
         let p = Pipeline::parse(&text).unwrap();
         assert_eq!(p.hold_range("backend"), None);
+    }
+
+    /// The Switchboard pipeline with `extra` appended, parsed.
+    fn with(extra: &str) -> Result<Pipeline> {
+        Pipeline::parse(&format!("{SWITCHBOARD}\n{extra}"))
+    }
+
+    fn refused(extra: &str, expected: &[&str]) {
+        let err = with(extra).unwrap_err().to_string();
+        for e in expected {
+            assert!(err.contains(e), "{extra}: {err}");
+        }
+    }
+
+    /// A joined agent stage `test` whose prompt is `prompt`.
+    fn joined(prompt: &str) -> String {
+        format!(
+            "[[stages]]\nname = \"test\"\noperator = \"implementer\"\ncontext = \"joined\"\nprompt = \"{prompt}\"\n"
+        )
+    }
+
+    #[test]
+    fn a_joined_stage_naming_a_per_lane_file_is_refused() {
+        refused(
+            &joined("Read {inputs.implement.notes}."),
+            &[
+                "stage \"test\" (joined) names {inputs.implement.notes}",
+                "implement writes notes once per lane",
+            ],
+        );
+        // Lane `repo`'s agents read their own lane's file.
+        let lane = joined("Read {inputs.implement.notes}.").replace("joined", "lane:repo");
+        with(&lane).unwrap();
+        // `investigate` writes notes once, in the root, so the bare form
+        // has a file to take.
+        with(&joined("Read {inputs.notes}.")).unwrap();
+    }
+
+    #[test]
+    fn a_joined_stage_naming_a_bare_name_only_lanes_write_is_refused() {
+        refused(
+            &joined("Read {inputs.plan}."),
+            &[
+                "names {inputs.plan}",
+                "plan, review writes plan once per lane",
+            ],
+        );
+        let root_writer = "[[stages]]\nname = \"summarise\"\noperator = \"planner\"\ncontext = \"root\"\nwrites = [\"plan\"]\nprompt = \"Write {plan}.\"\n";
+        with(&format!("{root_writer}\n{}", joined("Read {inputs.plan}."))).unwrap();
+        // A command gate's log and a code review's summary count as
+        // written.
+        refused(
+            &joined("Read {inputs.checks}."),
+            &["names {inputs.checks}", "implement writes checks"],
+        );
+        refused(
+            &format!("{CODE_REVIEW}\n{}", joined("Read {inputs.summary}.")),
+            &["names {inputs.summary}", "review-code writes summary"],
+        );
+        // A workflow writes no summary, so plan review leaves none to take.
+        with(&joined("Read {inputs.summary}.")).unwrap();
+    }
+
+    /// A code review stage in each lane.
+    const CODE_REVIEW: &str = "[[stages]]\nname = \"review-code\"\ncontext = \"each\"\nreviewers = [\"planner\"]\nimplementer = \"implementer\"\ngate = { kind = \"command\", like = \"implement\" }\n";
+
+    #[test]
+    fn a_joined_review_s_templates_are_read_like_a_prompt() {
+        let joined_review = CODE_REVIEW
+            .replace("review-code", "review-all")
+            .replace("\"each\"", "\"joined\"");
+        refused(
+            &format!("{joined_review}review_prompt = \"Against {{inputs.implement.notes}}.\"\n"),
+            &["stage \"review-all\" (joined) names {inputs.implement.notes}"],
+        );
+        refused(
+            &format!("{joined_review}fix_prompt = \"Per {{inputs.plan}}.\"\n"),
+            &["names {inputs.plan}"],
+        );
+        let guided = "[operators.critic]\nkind = \"claude\"\nguidance = \"Start from {inputs.implement.notes}.\"\n";
+        refused(
+            &format!("{guided}\n{}", joined_review.replace("planner", "critic")),
+            &["names {inputs.implement.notes}"],
+        );
+        let workflow = "[[stages]]\nname = \"review-notes\"\nreview = \"reviewer\"\ncontext = \"joined\"\nsubject = \"notes\"\ngate = { kind = \"external\", check = \"review-finalized\" }\n";
+        with(workflow).unwrap();
+        let handoff = format!("{SWITCHBOARD}\n{workflow}").replace(
+            "handoff = \"The plan at {plan} is final.\"",
+            "handoff = \"Final; see {inputs.implement.notes}.\"",
+        );
+        let err = Pipeline::parse(&handoff).unwrap_err().to_string();
+        assert!(err.contains("names {inputs.implement.notes}"), "{err}");
+    }
+
+    #[test]
+    fn guidance_is_read_like_the_prompt() {
+        let guided = "[operators.tester]\nkind = \"claude\"\nguidance = \"Start from {inputs.implement.notes}.\"\n";
+        let stage = joined("Test it.").replace("implementer", "tester");
+        refused(
+            &format!("{guided}\n{stage}"),
+            &["names {inputs.implement.notes}"],
+        );
+        // An unknown operator is its own error, not a panic here.
+        refused(
+            &joined("Test it.").replace("implementer", "nobody"),
+            &["unknown operator \"nobody\""],
+        );
+    }
+
+    #[test]
+    fn a_pr_gate_reads_the_rebaser_s_and_fixer_s_guidance() {
+        let guided = "[operators.mender]\nkind = \"claude\"\nguidance = \"Start from {inputs.implement.notes}.\"\n";
+        let pr = |check: &str| {
+            format!(
+                "{guided}\n{}gate = {{ kind = \"external\", check = \"{check}\" }}\n",
+                joined("Open a PR.")
+            )
+        };
+        let policy = |role: &str, check: &str| {
+            format!("{SWITCHBOARD}\n{}", pr(check))
+                .replace("[policy]\n", &format!("[policy]\n{role} = \"mender\"\n"))
+        };
+        for (role, check) in [
+            ("rebaser", "pr-checks"),
+            ("rebaser", "pr-merged"),
+            ("fixer", "pr-checks"),
+        ] {
+            let err = Pipeline::parse(&policy(role, check))
+                .unwrap_err()
+                .to_string();
+            assert!(
+                err.contains("names {inputs.implement.notes}"),
+                "{role} {check}: {err}"
+            );
+        }
+        // A `pr-merged` gate never fixes checks.
+        Pipeline::parse(&policy("fixer", "pr-merged")).unwrap();
+    }
+
+    #[test]
+    fn a_joined_stage_naming_a_per_lane_commit_is_refused() {
+        let deploy = "[[stages]]\nname = \"deploy\"\ncontext = \"each\"\ngate = { kind = \"command\", argv = [\"make\", \"deploy\"], in = \"lane\" }\n";
+        let reader = joined("Check {inputs.deploy.commit}.");
+        refused(
+            &format!("{deploy}\n{reader}"),
+            &[
+                "names {inputs.deploy.commit}",
+                "deploy records a commit once per lane",
+            ],
+        );
+        let one = deploy
+            .replace("\"each\"", "\"lane:repo\"")
+            .replace("in = \"lane\"", "in = \"lane:repo\"");
+        with(&format!("{one}\n{reader}")).unwrap();
+    }
+
+    #[test]
+    fn a_stage_qualified_variable_may_not_land_on_another() {
+        // Stage `implement` has a command gate, so
+        // `{inputs.implement.checks}` is DISPATCH_INPUT_IMPLEMENT_CHECKS.
+        let writer = "[[stages]]\nname = \"after\"\noperator = \"planner\"\ncontext = \"root\"\nwrites = [\"implement-checks\"]\nprompt = \"Write {implement-checks}.\"\n";
+        refused(
+            writer,
+            &[
+                "DISPATCH_INPUT_IMPLEMENT_CHECKS",
+                "the same variable name as implement's \"checks\"",
+            ],
+        );
+        refused(
+            &writer.replace("implement-checks", "plan-plan"),
+            &["DISPATCH_INPUT_PLAN_PLAN", "the same variable name"],
+        );
+    }
+
+    #[test]
+    fn a_gate_only_stage_writes_in_one_context() {
+        let deploy = "[[stages]]\nname = \"deploy\"\ncontext = \"each\"\nwrites = [\"url\"]\ngate = { kind = \"command\", argv = [\"make\", \"deploy\"], in = \"lane\" }\n";
+        refused(deploy, &["a gate-only stage writes only in one context"]);
+        let one = deploy
+            .replace("\"each\"", "\"lane:repo\"")
+            .replace("in = \"lane\"", "in = \"lane:repo\"");
+        with(&one).unwrap();
     }
 }

@@ -57,28 +57,42 @@ fn is_field(s: &str) -> bool {
 /// is a commit and not a file.
 #[must_use]
 pub fn input_names(text: &str) -> BTreeSet<(Option<String>, String)> {
-    let mut out = BTreeSet::new();
+    input_fields(text)
+        .filter_map(|field| match field.split_once('.') {
+            None => Some((None, field.to_owned())),
+            Some((stage, name)) if !name.contains('.') && name != "commit" => {
+                Some((Some(stage.to_owned()), name.to_owned()))
+            }
+            Some(_) => None,
+        })
+        .collect()
+}
+
+/// The stage of each `{inputs.S.commit}` `text` names.
+#[must_use]
+pub fn commit_stages(text: &str) -> BTreeSet<String> {
+    input_fields(text)
+        .filter_map(|field| field.strip_suffix(".commit"))
+        .filter(|stage| !stage.is_empty() && !stage.contains('.'))
+        .map(str::to_owned)
+        .collect()
+}
+
+/// What follows `inputs.` in each well-formed `{inputs.…}` field.
+fn input_fields(text: &str) -> impl Iterator<Item = &str> {
     let mut rest = text;
-    while let Some(start) = rest.find("{inputs.") {
-        let after = &rest[start + "{inputs.".len()..];
-        let Some(end) = after.find('}') else {
-            break;
-        };
-        let field = &after[..end];
-        if is_field(field) {
-            match field.split_once('.') {
-                None => {
-                    out.insert((None, field.to_owned()));
-                }
-                Some((stage, name)) if !name.contains('.') && name != "commit" => {
-                    out.insert((Some(stage.to_owned()), name.to_owned()));
-                }
-                Some(_) => {}
+    std::iter::from_fn(move || {
+        loop {
+            let start = rest.find("{inputs.")?;
+            let after = &rest[start + "{inputs.".len()..];
+            let end = after.find('}')?;
+            let field = &after[..end];
+            rest = &after[end..];
+            if is_field(field) {
+                return Some(field);
             }
         }
-        rest = &after[end..];
-    }
-    out
+    })
 }
 
 #[cfg(test)]
@@ -110,6 +124,16 @@ mod tests {
                 (None, "personas".to_owned()),
                 (Some("try-setup".to_owned()), "personas".to_owned()),
             ])
+        );
+    }
+
+    #[test]
+    fn commit_stages_finds_only_commits() {
+        assert_eq!(
+            commit_stages(
+                "Use {inputs.personas} and {inputs.try-setup.personas}; at {inputs.deploy.commit}; {inputs.} {issue.title} {inputs.bad name}",
+            ),
+            BTreeSet::from(["deploy".to_owned()])
         );
     }
 }

@@ -1205,10 +1205,23 @@ impl Ticket {
     /// whose notes these are when a later stage wrote none.
     #[must_use]
     pub fn input_with_stage(&self, name: &str) -> Option<(&str, &PathBuf)> {
+        self.input_where(name, |_| true)
+    }
+
+    /// The most recent completed attempt that wrote `name` among those
+    /// `keep` accepts, with its stage: a lane's reader keeps only the
+    /// attempts it can see.
+    #[must_use]
+    pub fn input_where(
+        &self,
+        name: &str,
+        keep: impl Fn(&Attempt) -> bool,
+    ) -> Option<(&str, &PathBuf)> {
         self.attempts
             .iter()
             .rev()
             .filter(|a| a.state == AttemptState::Complete && !a.forgotten.contains_key(name))
+            .filter(|a| keep(a))
             .find_map(|a| a.artifacts.get(name).map(|p| (a.stage.as_str(), p)))
     }
 

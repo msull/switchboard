@@ -525,13 +525,14 @@ A stage that gives a tester something secret (a test user's
 credentials from a gate-only `try-setup` that writes
 `{ name = "personas", secret = true }`) reaches the tester's prompt as
 `{inputs.personas}`, a path, and as `$DISPATCH_INPUT_PERSONAS` in its
-session. The file lives only while the ticket holds the stage's
-resource; it is deleted when the hold is released, the ticket parks or
-closes. Say so in the tester's stage prompt, and say that the tester
-holds no cloud credentials and should not look for any, and that it
-uses the file (passes its path to a probe or a seeding script) without
-printing its contents: whatever an agent prints stays in its
-transcript and in Switchboard's scrollback.
+session; named as `{inputs.try-setup.personas}`, it arrives as
+`$DISPATCH_INPUT_TRY_SETUP_PERSONAS`. The file lives only while the
+ticket holds the stage's resource; it is deleted when the hold is
+released, the ticket parks or closes. Say so in the tester's stage
+prompt, and say that the tester holds no cloud credentials and should
+not look for any, and that it uses the file (passes its path to a
+probe or a seeding script) without printing its contents: whatever an
+agent prints stays in its transcript and in Switchboard's scrollback.
 
 Before saving, read the file back: a pipeline that does not parse is
 refused at the next `take` with the parser's reason, and `status`
