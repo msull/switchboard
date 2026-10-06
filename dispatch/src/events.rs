@@ -1135,10 +1135,14 @@ pub enum For {
     Closed,
     /// The next event of any kind.
     Any,
+    /// What a supervisor acts on: what `Stage` and `Pr` match (a stage
+    /// move, a send-back, a restart, a pull request bound), plus a
+    /// decision asked and a `pr-checks` line.
+    Move,
 }
 
 impl For {
-    /// `decision`, `stage`, `pr`, `closed` or `any`.
+    /// `decision`, `stage`, `pr`, `closed`, `move` or `any`.
     #[must_use]
     pub fn parse(word: &str) -> Option<Self> {
         Some(match word {
@@ -1147,6 +1151,7 @@ impl For {
             "pr" => Self::Pr,
             "closed" => Self::Closed,
             "any" => Self::Any,
+            "move" => Self::Move,
             _ => return None,
         })
     }
@@ -1158,7 +1163,21 @@ impl For {
             Self::Pr => kind == Kind::Pr,
             Self::Closed => kind == Kind::Closed,
             Self::Any => kind != Kind::Void,
+            Self::Move => matches!(
+                kind,
+                Kind::Stage
+                    | Kind::SentBack
+                    | Kind::Restarted
+                    | Kind::Decision
+                    | Kind::Pr
+                    | Kind::PrChecks
+            ),
         }
+    }
+
+    /// Whether `wait_burst` keeps following after a match.
+    fn bunches(self) -> bool {
+        matches!(self, Self::Any | Self::Move)
     }
 }
 
@@ -1279,6 +1298,198 @@ pub fn wait(
     }
 }
 
+/// How long a burst stays open after its last line.
+pub const SETTLE_MS: u64 = 2_000;
+
+/// How long a burst stays open after its first line, however busy the
+/// ticket.
+pub const SETTLE_CAP_MS: u64 = 10_000;
+
+/// How a `wait_burst` ended.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Burst {
+    /// What was waited for happened: the matching lines in log order,
+    /// never empty, the last one the cursor to follow from.
+    Lines(Vec<Event>),
+    /// The ticket parked or closed: the matching lines logged before
+    /// the end, in log order, and the park or close itself, which is
+    /// always printed, even when it has no line of its own.
+    Ended {
+        /// The matching lines before the end.
+        lines: Vec<Event>,
+        /// The park or close, boxed to keep the other variants small.
+        end: Box<Event>,
+    },
+    /// The deadline passed before any line.
+    TimedOut,
+}
+
+/// Wait as `wait` does, then, for `--for any` and `--for move`, keep
+/// following for `SETTLE_MS` after each match (`SETTLE_CAP_MS` after the
+/// first at most, and never past `deadline_ms`) and return every match in
+/// log order. The window holds by the clock and by the lines' own
+/// `at_ms` (`settles`), so a burst replayed from an old cursor stops
+/// where a live one would have. A decision ends the burst at once; a
+/// park or close ends it with the lines logged before it. With a cursor,
+/// a ticket already parked or closed first gives the matching lines
+/// logged after the cursor, ending at a decision among them or else at
+/// the park or close. Every other filter returns its first match.
+///
+/// Each follow-up is a fresh `wait` from the last line's seq, the same
+/// hand-off a supervisor makes between two watches, so every hold rule
+/// stays inside `wait`.
+pub fn wait_burst(
+    data: &DataDir,
+    ticket: &str,
+    what: For,
+    since: Option<u64>,
+    deadline_ms: Option<u64>,
+    now: &mut dyn FnMut() -> u64,
+    pause: &mut dyn FnMut(),
+) -> Result<Burst> {
+    let log = log_path(data);
+    let mut cursor = since;
+    loop {
+        let first = match wait(data, ticket, what, cursor, deadline_ms, now, pause)? {
+            Waited::TimedOut => return Ok(Burst::TimedOut),
+            Waited::Matched(e) if !what.bunches() => return Ok(Burst::Lines(vec![e])),
+            // `--for any` matches a park or close line; it still ends
+            // the burst, and anything before it was not borne out.
+            Waited::Matched(e) if ends(&e) => {
+                return Ok(Burst::Ended {
+                    lines: Vec::new(),
+                    end: Box::new(e),
+                });
+            }
+            Waited::Matched(e) => e,
+            Waited::Ended(end) => {
+                return Ok(match cursor {
+                    // `already` answered without reading the lines
+                    // between the cursor and the end: the call after a
+                    // burst that stopped at a decision just before a park.
+                    Some(from) if what.bunches() => {
+                        let before = ended_lines(data, &log, ticket, what, from, &end)?;
+                        end_rule(Vec::new(), before, end)
+                    }
+                    _ => Burst::Ended {
+                        lines: Vec::new(),
+                        end: Box::new(end),
+                    },
+                });
+            }
+        };
+        let opened = now();
+        let mut lines = vec![first];
+        let ended = loop {
+            let last = &lines[lines.len() - 1];
+            if last.kind == Kind::Decision {
+                break None;
+            }
+            let from = last.seq;
+            let mut until = (now() + SETTLE_MS).min(opened + SETTLE_CAP_MS);
+            if let Some(d) = deadline_ms {
+                until = until.min(d);
+            }
+            match wait(data, ticket, what, Some(from), Some(until), now, pause)? {
+                Waited::Matched(e) if !settles(&lines, &e) => break None,
+                Waited::Matched(e) if ends(&e) => break Some((Vec::new(), e)),
+                Waited::Matched(e) => lines.push(e),
+                Waited::Ended(end) => {
+                    let before = ended_lines(data, &log, ticket, what, from, &end)?;
+                    break Some((before, end));
+                }
+                Waited::TimedOut => break None,
+            }
+        };
+        // A `void` can land inside the window after its line was taken.
+        let seen = lines.last().map_or(0, |e| e.seq);
+        let gone = withdrawn(&read_since(&log, lines[0].seq.saturating_sub(1))?);
+        lines.retain(|e| !gone.contains(&e.seq));
+        match ended {
+            Some((before, end)) => return Ok(end_rule(lines, before, end)),
+            None if lines.is_empty() => cursor = Some(seen),
+            None => return Ok(Burst::Lines(lines)),
+        }
+    }
+}
+
+/// Whether `e` is a park or close.
+fn ends(e: &Event) -> bool {
+    matches!(e.kind, Kind::Parked | Kind::Closed)
+}
+
+/// Whether `e` falls inside the window `lines` opened, by the lines'
+/// own times: within `SETTLE_MS` of the last and `SETTLE_CAP_MS` of the
+/// first. The clock closes a live burst, but lines replayed from an old
+/// cursor all arrive before it moves. Any line opens an empty window.
+fn settles(lines: &[Event], e: &Event) -> bool {
+    let (Some(first), Some(last)) = (lines.first(), lines.last()) else {
+        return true;
+    };
+    e.at_ms <= last.at_ms.saturating_add(SETTLE_MS)
+        && e.at_ms <= first.at_ms.saturating_add(SETTLE_CAP_MS)
+}
+
+/// A burst a park or close ended: `lines`, then `before`, the lines
+/// logged before the end, then the end. A decision among `before` still
+/// ends the burst at once, and so does a line, or an end line, past the
+/// window (`settles`); the burst stops there and the next watch, from
+/// the last line's seq, returns the rest and the end.
+fn end_rule(mut lines: Vec<Event>, before: Vec<Event>, end: Event) -> Burst {
+    for e in before {
+        if !settles(&lines, &e) {
+            return Burst::Lines(lines);
+        }
+        let decision = e.kind == Kind::Decision;
+        lines.push(e);
+        if decision {
+            return Burst::Lines(lines);
+        }
+    }
+    if end.seq != 0 && !settles(&lines, &end) {
+        return Burst::Lines(lines);
+    }
+    Burst::Ended {
+        lines,
+        end: Box::new(end),
+    }
+}
+
+/// The lines of `ticket` after `from` and before `end` (every one after
+/// `from` when `end` has no line of its own) that `what` matches, that
+/// no `void` withdrew, and that the record bears out as replayed lines.
+/// Nothing can be held here: the record that reads parked or closed was
+/// written after every line before the end line.
+fn ended_lines(
+    data: &DataDir,
+    log: &Path,
+    ticket: &str,
+    what: For,
+    from: u64,
+    end: &Event,
+) -> Result<Vec<Event>> {
+    let events = read_since(log, from)?;
+    let gone = withdrawn(&events);
+    let fresh = read_ticket(&data.ticket_file(ticket))?;
+    let names = stage_names(&fresh);
+    let mut lines = Vec::new();
+    for e in events {
+        if e.ticket != ticket
+            || e.kind == Kind::Void
+            || gone.contains(&e.seq)
+            || (end.seq != 0 && e.seq >= end.seq)
+            || ends(&e)
+            || !what.candidate(e.kind)
+        {
+            continue;
+        }
+        if confirmed(&e, &fresh, &fresh, what, &names, true) && !superseded(log, &e)? {
+            lines.push(e);
+        }
+    }
+    Ok(lines)
+}
+
 /// Whether a later line of `e`'s ticket, not withdrawn, logs the same
 /// transition. A write that agrees with a phantom (one whose rename and
 /// `void` both failed) makes the transition the record lacks, so it logs
@@ -1321,7 +1532,8 @@ fn in_flight(e: &Event, fresh: &Ticket) -> bool {
 /// What the record already says before any event is read: a pending
 /// decision, or a ticket parked or closed, which ends every wait but
 /// `--for closed` on a closed one, as a park or close seen while waiting
-/// does.
+/// does. `wait_burst` puts the matching lines between a cursor and the
+/// end before it, for `--for any` and `--for move`.
 fn already(log: &Path, t: &Ticket, what: For, names: &[String]) -> Result<Option<Waited>> {
     let latest = |kind: Kind, decision: Option<&str>| -> Result<Option<Event>> {
         let events = read_since(log, 0)?;
@@ -1399,7 +1611,7 @@ fn confirmed(
         Kind::Closed => matches!(fresh.state, TicketState::Closed { .. }),
         Kind::Parked => matches!(fresh.state, TicketState::Parked { .. }),
         kind => {
-            what == For::Any
+            what.candidate(kind)
                 && if replayed {
                     fresh.updated_ms >= e.at_ms
                 } else {
@@ -1946,7 +2158,7 @@ mod tests {
         let t = ticket();
         crate::store::write_ticket(&data.ticket_file(&t.id), &t).unwrap();
         let log = log_path(&data);
-        for what in [For::Decision, For::Any] {
+        for what in [For::Decision, For::Any, For::Move] {
             let mut phantom = t.clone();
             phantom.decisions.push(decision(&format!("d-{what:?}")));
             // Read by `now` and moved by `pause`: a `Cell` lets both
@@ -1979,7 +2191,14 @@ mod tests {
         let all = read_since(&log, 0).unwrap();
         assert_eq!(
             all.iter().map(|e| e.kind).collect::<Vec<_>>(),
-            [Kind::Decision, Kind::Void, Kind::Decision, Kind::Void]
+            [
+                Kind::Decision,
+                Kind::Void,
+                Kind::Decision,
+                Kind::Void,
+                Kind::Decision,
+                Kind::Void
+            ]
         );
     }
 
@@ -1993,7 +2212,7 @@ mod tests {
         let t = ticket();
         crate::store::write_ticket(&data.ticket_file(&t.id), &t).unwrap();
         let log = log_path(&data);
-        for what in [For::Decision, For::Any] {
+        for what in [For::Decision, For::Any, For::Move] {
             let mut asked = t.clone();
             asked.decisions.push(decision(&format!("d-{what:?}")));
             let mut answered = asked.clone();
@@ -2217,36 +2436,38 @@ mod tests {
     /// the ticket's next event.
     #[test]
     fn a_watch_past_a_pending_decision_waits_for_the_next_event() {
-        let dir = tempfile::tempdir().unwrap();
-        let data = DataDir::new(dir.path());
-        let t = ticket();
-        let file = data.ticket_file(&t.id);
-        crate::store::write_ticket(&file, &t).unwrap();
-        let log = log_path(&data);
-        let mut asked = t.clone();
-        asked.decisions.push(decision("d1"));
-        append(&log, &mut between(Some(&t), &asked, 1, &Vec::new)).unwrap();
-        crate::store::write_ticket(&file, &asked).unwrap();
-        let d = read_since(&log, 0)
-            .unwrap()
-            .into_iter()
-            .find(|e| e.kind == Kind::Decision)
-            .unwrap()
-            .seq;
-        let waited = wait_looking(&data, &t.id, For::Any, Some(d), &mut |_| {});
-        assert_eq!(waited, Waited::TimedOut);
-        let mut moved = asked.clone();
-        moved.stage = 1;
-        let waited = wait_looking(&data, &t.id, For::Any, Some(d), &mut |looks| {
-            if looks == 1 {
-                append(&log, &mut between(Some(&asked), &moved, 2, &Vec::new)).unwrap();
-                crate::store::write_ticket(&file, &moved).unwrap();
-            }
-        });
-        assert!(
-            matches!(&waited, Waited::Matched(e) if e.kind == Kind::Stage && e.stage == "#1"),
-            "{waited:?}"
-        );
+        for what in [For::Any, For::Move] {
+            let dir = tempfile::tempdir().unwrap();
+            let data = DataDir::new(dir.path());
+            let t = ticket();
+            let file = data.ticket_file(&t.id);
+            crate::store::write_ticket(&file, &t).unwrap();
+            let log = log_path(&data);
+            let mut asked = t.clone();
+            asked.decisions.push(decision("d1"));
+            append(&log, &mut between(Some(&t), &asked, 1, &Vec::new)).unwrap();
+            crate::store::write_ticket(&file, &asked).unwrap();
+            let d = read_since(&log, 0)
+                .unwrap()
+                .into_iter()
+                .find(|e| e.kind == Kind::Decision)
+                .unwrap()
+                .seq;
+            let waited = wait_looking(&data, &t.id, what, Some(d), &mut |_| {});
+            assert_eq!(waited, Waited::TimedOut, "{what:?}");
+            let mut moved = asked.clone();
+            moved.stage = 1;
+            let waited = wait_looking(&data, &t.id, what, Some(d), &mut |looks| {
+                if looks == 1 {
+                    append(&log, &mut between(Some(&asked), &moved, 2, &Vec::new)).unwrap();
+                    crate::store::write_ticket(&file, &moved).unwrap();
+                }
+            });
+            assert!(
+                matches!(&waited, Waited::Matched(e) if e.kind == Kind::Stage && e.stage == "#1"),
+                "{what:?}: {waited:?}"
+            );
+        }
     }
 
     /// A line is appended before its record is renamed in, so a wait can
@@ -3077,5 +3298,436 @@ mod tests {
         let old = r#"{"v":1,"seq":3,"at_ms":5,"ticket":"t1","project":"p","stage":"","kind":"refreshed","text":"backend from base000 to main000, rebased","head":"main0000"}"#;
         let back: Event = serde_json::from_str(old).unwrap();
         assert_eq!((back.by, back.conflicts), (None, None));
+    }
+
+    /// Bursts `what` on `id` from `since` with a 30 s deadline; each look
+    /// runs `step` with its count and moves the clock on 250 ms, one
+    /// count and one clock across every follow-up `wait`.
+    fn burst_looking(
+        data: &DataDir,
+        id: &str,
+        what: For,
+        since: Option<u64>,
+        step: &mut dyn FnMut(u32, u64),
+    ) -> Burst {
+        let clock = std::cell::Cell::new(0);
+        let mut looks = 0;
+        wait_burst(
+            data,
+            id,
+            what,
+            since,
+            Some(30_000),
+            &mut || clock.get(),
+            &mut || {
+                looks += 1;
+                clock.set(clock.get() + 250);
+                step(looks, clock.get());
+            },
+        )
+        .unwrap()
+    }
+
+    fn kinds_of(lines: &[Event]) -> Vec<Kind> {
+        lines.iter().map(|e| e.kind).collect()
+    }
+
+    fn pr_record(n: u64) -> PullRequestRecord {
+        PullRequestRecord {
+            provider: "github".into(),
+            repo: "o/r".into(),
+            number: n,
+            url: format!("https://example.com/pr/{n}"),
+            head: "head0001".into(),
+            checks: "pending".into(),
+            checked_ms: 0,
+            error_since_ms: None,
+        }
+    }
+
+    /// A stage change logs several lines within a second or two; one
+    /// watch returns them all, and a line past the settle is the next
+    /// watch's. Look 14 is 2.5 s past the last line: the clock closes the
+    /// window before it, and the line's own time would leave its nudge
+    /// out if it did not.
+    #[test]
+    fn a_burst_within_the_settle_is_one_return_and_a_line_after_it_is_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = DataDir::new(dir.path());
+        let mut t = ticket();
+        t.attempts.push(running("plan", 1));
+        crate::store::write_ticket_stamped(&data, &mut t, 10).unwrap();
+        let mut reached = 0;
+        let burst = burst_looking(&data, "t1", For::Any, None, &mut |looks, at| {
+            reached = looks;
+            match looks {
+                1 => t.attempts[0].state = AttemptState::Complete,
+                2 => t.stage = 1,
+                3 => t.attempts.push(running("implement", 1)),
+                4 | 14 => t.attempts[1].nudges.push(at),
+                _ => return,
+            }
+            crate::store::write_ticket_stamped(&data, &mut t, at).unwrap();
+        });
+        let Burst::Lines(lines) = burst else {
+            panic!("{burst:?}");
+        };
+        assert_eq!(
+            kinds_of(&lines),
+            [
+                Kind::AttemptEnded,
+                Kind::Stage,
+                Kind::AttemptStarted,
+                Kind::Nudged
+            ]
+        );
+        assert!(reached < 14, "{reached}");
+        assert!(lines.windows(2).all(|w| w[0].seq < w[1].seq));
+        let last = lines.last().unwrap().seq;
+        t.attempts[1].nudges.push(5_000);
+        crate::store::write_ticket_stamped(&data, &mut t, 5_000).unwrap();
+        let burst = burst_looking(&data, "t1", For::Any, Some(last), &mut |_, _| {});
+        let Burst::Lines(lines) = burst else {
+            panic!("{burst:?}");
+        };
+        assert_eq!(kinds_of(&lines), [Kind::Nudged]);
+        assert!(lines[0].seq > last);
+    }
+
+    /// A ticket that keeps logging does not hold the watch open: the
+    /// burst closes `SETTLE_CAP_MS` after its first line.
+    #[test]
+    fn a_burst_closes_at_the_cap_on_a_ticket_that_keeps_logging() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = DataDir::new(dir.path());
+        let mut t = ticket();
+        t.attempts.push(running("plan", 1));
+        crate::store::write_ticket_stamped(&data, &mut t, 10).unwrap();
+        let burst = burst_looking(&data, "t1", For::Any, None, &mut |_, at| {
+            if at % 1_000 == 0 && at <= 15_000 {
+                t.attempts[0].nudges.push(at);
+                crate::store::write_ticket_stamped(&data, &mut t, at).unwrap();
+            }
+        });
+        let Burst::Lines(lines) = burst else {
+            panic!("{burst:?}");
+        };
+        assert_eq!(lines[0].at_ms, 1_000);
+        assert_eq!(lines.len(), 11, "{lines:?}");
+        assert!(
+            lines
+                .iter()
+                .all(|e| e.kind == Kind::Nudged && e.at_ms <= 1_000 + SETTLE_CAP_MS)
+        );
+    }
+
+    /// Lines replayed from an old cursor all arrive at once, so their own
+    /// times close the window: a line more than `SETTLE_MS` after the
+    /// last one, or `SETTLE_CAP_MS` after the first, is the next watch's.
+    #[test]
+    fn a_replayed_burst_closes_by_its_lines_times() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = DataDir::new(dir.path());
+        let mut t = ticket();
+        t.attempts.push(running("plan", 1));
+        crate::store::write_ticket_stamped(&data, &mut t, 10).unwrap();
+        let since = last_seq(&log_path(&data)).unwrap();
+        let mut at = 1_000;
+        for gap in [
+            1_000, 3_000, 1_500, 1_500, 1_500, 1_500, 1_500, 1_500, 1_500,
+        ] {
+            at += gap;
+            t.attempts[0].nudges.push(at);
+            crate::store::write_ticket_stamped(&data, &mut t, at).unwrap();
+        }
+        let mut cursor = since;
+        let mut times = Vec::new();
+        for _ in 0..3 {
+            let burst = burst_looking(&data, "t1", For::Any, Some(cursor), &mut |_, _| {});
+            let Burst::Lines(lines) = burst else {
+                panic!("{burst:?}");
+            };
+            cursor = lines.last().unwrap().seq;
+            times.push(lines.iter().map(|e| e.at_ms).collect::<Vec<_>>());
+        }
+        assert_eq!(
+            times,
+            [
+                vec![2_000],
+                vec![5_000, 6_500, 8_000, 9_500, 11_000, 12_500, 14_000],
+                vec![15_500],
+            ]
+        );
+    }
+
+    /// `--for move` passes over an attempt's start and returns on a
+    /// stage line; the table holds the kinds it returns on and the ones
+    /// it does not.
+    #[test]
+    fn a_move_watch_returns_on_a_stage_line_and_not_on_an_attempt_start() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = DataDir::new(dir.path());
+        let mut t = ticket();
+        crate::store::write_ticket_stamped(&data, &mut t, 10).unwrap();
+        let burst = burst_looking(&data, "t1", For::Move, None, &mut |looks, at| {
+            if looks == 1 {
+                t.attempts.push(running("plan", 1));
+                crate::store::write_ticket_stamped(&data, &mut t, at).unwrap();
+            }
+        });
+        assert_eq!(burst, Burst::TimedOut);
+        let burst = burst_looking(&data, "t1", For::Move, None, &mut |looks, at| {
+            if looks == 1 {
+                t.stage = 1;
+                crate::store::write_ticket_stamped(&data, &mut t, at).unwrap();
+            }
+        });
+        let Burst::Lines(lines) = burst else {
+            panic!("{burst:?}");
+        };
+        assert_eq!(kinds_of(&lines), [Kind::Stage]);
+
+        // Replayed lines the record bears out, one kind at a time.
+        let dir = tempfile::tempdir().unwrap();
+        let data = DataDir::new(dir.path());
+        let mut t = ticket();
+        t.attempts.push(running("plan", 1));
+        t.attempts[0].pr = Some(pr_record(3));
+        t.decisions.push(decision("d1"));
+        t.restarts.push(crate::ticket::Restart {
+            at_ms: 50,
+            from: "#0".into(),
+            to: "#0".into(),
+            before: "/t/pipeline.toml".into(),
+            after: "/t/pipeline.2.toml".into(),
+            discarded: vec![],
+            reset: vec![],
+            setup_again: vec![],
+        });
+        t.updated_ms = 100;
+        crate::store::write_ticket(&data.ticket_file(&t.id), &t).unwrap();
+        let log = log_path(&data);
+        for (kind, returned) in [
+            (Kind::SentBack, true),
+            (Kind::Restarted, true),
+            (Kind::Pr, true),
+            (Kind::PrChecks, true),
+            (Kind::Decision, true),
+            (Kind::Round, false),
+            (Kind::Rewrite, false),
+            (Kind::Nudged, false),
+            (Kind::Answered, false),
+        ] {
+            let since = last_seq(&log).unwrap();
+            let mut e = Event::new(&t, 50, kind, "#0", "x".into());
+            e.decision = Some("d1".into());
+            e.url = Some("https://example.com/pr/3".into());
+            e.attempt = Some(("plan".into(), 1));
+            append(&log, std::slice::from_mut(&mut e)).unwrap();
+            let burst = burst_looking(&data, "t1", For::Move, Some(since), &mut |_, _| {});
+            if returned {
+                assert_eq!(burst, Burst::Lines(vec![e]), "{kind:?}");
+            } else {
+                assert_eq!(burst, Burst::TimedOut, "{kind:?}");
+            }
+        }
+    }
+
+    /// A decision ends a burst at once: nothing after it is looked for.
+    #[test]
+    fn a_decision_ends_a_burst_at_once() {
+        for (what, want) in [
+            (For::Any, vec![Kind::AttemptEnded, Kind::Decision]),
+            (For::Move, vec![Kind::Decision]),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let data = DataDir::new(dir.path());
+            let mut t = ticket();
+            t.attempts.push(running("plan", 1));
+            crate::store::write_ticket_stamped(&data, &mut t, 10).unwrap();
+            let burst = burst_looking(&data, "t1", what, None, &mut |looks, at| {
+                match looks {
+                    1 => t.attempts[0].state = AttemptState::Complete,
+                    2 => t.decisions.push(decision("d1")),
+                    _ => panic!("{what:?} looked on after the decision"),
+                }
+                crate::store::write_ticket_stamped(&data, &mut t, at).unwrap();
+            });
+            let Burst::Lines(lines) = burst else {
+                panic!("{what:?}: {burst:?}");
+            };
+            assert_eq!(kinds_of(&lines), want, "{what:?}");
+        }
+    }
+
+    /// A line taken into a burst whose `void` lands inside the window is
+    /// left out of what the burst returns.
+    #[test]
+    fn a_line_withdrawn_inside_the_window_is_left_out_of_the_burst() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = DataDir::new(dir.path());
+        let log = log_path(&data);
+        let mut t = ticket();
+        t.attempts.push(running("plan", 1));
+        crate::store::write_ticket_stamped(&data, &mut t, 10).unwrap();
+        let burst = burst_looking(&data, "t1", For::Any, None, &mut |looks, at| match looks {
+            1 | 3 => {
+                t.attempts[0].nudges.push(at);
+                crate::store::write_ticket_stamped(&data, &mut t, at).unwrap();
+            }
+            2 => {
+                let first = read_since(&log, 0)
+                    .unwrap()
+                    .into_iter()
+                    .rfind(|e| e.kind == Kind::Nudged)
+                    .unwrap();
+                let seqs = vec![first.seq];
+                append_void(&log, &first, seqs, "disk full").unwrap();
+            }
+            _ => {}
+        });
+        let Burst::Lines(lines) = burst else {
+            panic!("{burst:?}");
+        };
+        assert_eq!(kinds_of(&lines), [Kind::Nudged]);
+        assert_eq!(lines[0].at_ms, 750);
+    }
+
+    /// The ticket a park reaches inside the window: the follow-up `wait`
+    /// reads the parked record first, and the lines logged before the
+    /// park are still returned, then the park.
+    #[test]
+    fn a_park_inside_the_window_keeps_the_lines_logged_before_it() {
+        let parked = |t: &mut Ticket| {
+            t.state = TicketState::Parked {
+                reason: "by hand".into(),
+            };
+        };
+        for what in [For::Any, For::Move] {
+            // The park logged.
+            let dir = tempfile::tempdir().unwrap();
+            let data = DataDir::new(dir.path());
+            let mut t = ticket();
+            t.attempts.push(running("plan", 1));
+            crate::store::write_ticket_stamped(&data, &mut t, 10).unwrap();
+            let burst = burst_looking(&data, "t1", what, None, &mut |looks, at| {
+                if looks == 1 {
+                    t.stage = 1;
+                    crate::store::write_ticket_stamped(&data, &mut t, at).unwrap();
+                    t.attempts[0].pr = Some(pr_record(3));
+                    crate::store::write_ticket_stamped(&data, &mut t, at + 1).unwrap();
+                    parked(&mut t);
+                    crate::store::write_ticket_stamped(&data, &mut t, at + 2).unwrap();
+                }
+            });
+            let Burst::Ended { lines, end } = burst else {
+                panic!("{what:?}: {burst:?}");
+            };
+            assert_eq!(kinds_of(&lines), [Kind::Stage, Kind::Pr], "{what:?}");
+            assert_eq!(end.kind, Kind::Parked, "{what:?}");
+            assert!(end.seq > lines[1].seq, "{what:?}");
+
+            // No park line: the end is made from the record.
+            let dir = tempfile::tempdir().unwrap();
+            let data = DataDir::new(dir.path());
+            let mut t = ticket();
+            t.attempts.push(running("plan", 1));
+            crate::store::write_ticket_stamped(&data, &mut t, 10).unwrap();
+            let burst = burst_looking(&data, "t1", what, None, &mut |looks, at| {
+                if looks == 1 {
+                    t.stage = 1;
+                    crate::store::write_ticket_stamped(&data, &mut t, at).unwrap();
+                    t.attempts[0].pr = Some(pr_record(3));
+                    crate::store::write_ticket_stamped(&data, &mut t, at + 1).unwrap();
+                    parked(&mut t);
+                    t.updated_ms = at + 2;
+                    crate::store::write_ticket(&data.ticket_file(&t.id), &t).unwrap();
+                }
+            });
+            let Burst::Ended { lines, end } = burst else {
+                panic!("{what:?}: {burst:?}");
+            };
+            assert_eq!(kinds_of(&lines), [Kind::Stage, Kind::Pr], "{what:?}");
+            assert_eq!((end.kind, end.seq), (Kind::Parked, 0), "{what:?}");
+
+            // A decision among the lines before the park still ends the
+            // burst at once; the next watch returns the rest and the park.
+            let dir = tempfile::tempdir().unwrap();
+            let data = DataDir::new(dir.path());
+            let mut t = ticket();
+            t.attempts.push(running("plan", 1));
+            crate::store::write_ticket_stamped(&data, &mut t, 10).unwrap();
+            let burst = burst_looking(&data, "t1", what, None, &mut |looks, at| {
+                if looks == 1 {
+                    t.stage = 1;
+                    crate::store::write_ticket_stamped(&data, &mut t, at).unwrap();
+                    t.decisions.push(decision("d1"));
+                    crate::store::write_ticket_stamped(&data, &mut t, at + 1).unwrap();
+                    t.attempts[0].pr = Some(pr_record(3));
+                    crate::store::write_ticket_stamped(&data, &mut t, at + 2).unwrap();
+                    parked(&mut t);
+                    t.decisions[0].state = DecisionState::Cancelled;
+                    crate::store::write_ticket_stamped(&data, &mut t, at + 3).unwrap();
+                }
+            });
+            let Burst::Lines(lines) = burst else {
+                panic!("{what:?}: {burst:?}");
+            };
+            assert_eq!(kinds_of(&lines), [Kind::Stage, Kind::Decision], "{what:?}");
+            // Parked, so the decision no longer waits: no `decide` line.
+            let fresh = read_ticket(&data.ticket_file("t1")).unwrap();
+            assert!(fresh.waiting_on_you().is_empty());
+            let from = lines[1].seq;
+            let burst = burst_looking(&data, "t1", what, Some(from), &mut |_, _| {
+                panic!("{what:?} followed a parked ticket")
+            });
+            let Burst::Ended { lines, end } = burst else {
+                panic!("{what:?}: {burst:?}");
+            };
+            let want: &[Kind] = if what == For::Any {
+                &[Kind::Pr, Kind::DecisionCancelled]
+            } else {
+                &[Kind::Pr]
+            };
+            assert_eq!(kinds_of(&lines), want, "{what:?}");
+            assert_eq!(end.kind, Kind::Parked, "{what:?}");
+        }
+    }
+
+    /// A watch re-armed from an older cursor on a ticket already parked
+    /// returns the lines between the cursor and the park, then the park;
+    /// the other filters, and a watch with no cursor, end at once.
+    #[test]
+    fn a_rearm_on_a_parked_ticket_from_an_older_cursor_returns_the_lines_then_the_park() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = DataDir::new(dir.path());
+        let log = log_path(&data);
+        let mut t = ticket();
+        t.attempts.push(running("plan", 1));
+        crate::store::write_ticket_stamped(&data, &mut t, 10).unwrap();
+        let cursor = last_seq(&log).unwrap();
+        t.stage = 1;
+        crate::store::write_ticket_stamped(&data, &mut t, 20).unwrap();
+        t.attempts[0].pr = Some(pr_record(3));
+        crate::store::write_ticket_stamped(&data, &mut t, 30).unwrap();
+        t.state = TicketState::Parked {
+            reason: "by hand".into(),
+        };
+        crate::store::write_ticket_stamped(&data, &mut t, 40).unwrap();
+        for (what, since, want) in [
+            (For::Any, Some(cursor), vec![Kind::Stage, Kind::Pr]),
+            (For::Move, Some(cursor), vec![Kind::Stage, Kind::Pr]),
+            (For::Stage, Some(cursor), vec![]),
+            (For::Any, None, vec![]),
+        ] {
+            let burst = burst_looking(&data, "t1", what, since, &mut |_, _| {
+                panic!("{what:?} followed a parked ticket")
+            });
+            let Burst::Ended { lines, end } = burst else {
+                panic!("{what:?}: {burst:?}");
+            };
+            assert_eq!(kinds_of(&lines), want, "{what:?} from {since:?}");
+            assert_eq!(end.kind, Kind::Parked, "{what:?} from {since:?}");
+        }
     }
 }

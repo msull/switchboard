@@ -43,7 +43,7 @@ dispatch show <ticket> [--json]                   one ticket: stage, lanes, atte
 dispatch events [--since <seq>] [--follow [--timeout <secs>]] [--ticket <id>]... [--project <name>] [--json]
 dispatch brief <project>                          the project at a glance: tickets, what waits, recent events, the hand-off
 dispatch supervisor <project>                     the project's supervisor session: its id, age, seed, workspace
-dispatch wait <ticket> [--for decision|stage|pr|closed|any] [--since <seq>] [--timeout <secs>] [--json]
+dispatch wait <ticket> [--for decision|stage|pr|closed|move|any] [--since <seq>] [--timeout <secs>] [--json]
 dispatch report <ticket> [--json]                 how a ticket went: stage time, review points, fix passes, size
 dispatch report --project <name> [--since YYYY-MM-DD] [--json]
 dispatch tail <ticket> [--lines N]                what the ticket's running agents show
@@ -243,17 +243,33 @@ something and prints that `decision` event with the `dispatch decide`
 line to answer it. The record is read first. If a decision already
 waits, `--for decision` returns it at once, printed, with exit 0, and a
 decision answered before the wait reads it is passed over. A ticket
-already parked or closed ends every wait at once with exit 3 and the
-reason, except `--for closed` on a closed ticket, which exits 0.
-`--for stage` waits for a stage move or a restart, `--for pr` for a
-PR bound to an attempt, `--for closed` for the close, and `--for any`
-(the default) for the next event of any kind. A stage move or a PR
-needs a before state, so without a cursor `--for stage` and `--for pr`
-wait for the next one. With `--since <seq>`, the first matching event
-after the cursor returns at once, whoever caused it. Every match is
+already parked or closed ends every wait with exit 3 and the reason,
+except `--for closed` on a closed ticket, which exits 0; see below for
+`any` and `move` with `--since`. `--for stage` waits for a stage move or a restart,
+`--for pr` for a PR bound to an attempt, `--for closed` for the close,
+and `--for any` (the default) for the next event of any kind. `--for
+move` waits for what a supervisor acts on: a stage move, a send-back
+or a restart, a decision, a `pr` or `pr-checks` line; a park or close
+ends it with exit 3. A stage move or a PR needs a before state, so
+without a cursor `--for stage` and `--for pr` wait for the next one.
+With `--since <seq>`, the first matching event after the cursor ends
+the wait, whoever caused it: at once for `decision`, `stage`, `pr` and
+`closed`, after the burst settles for `any` and `move`. Every match is
 checked against the record first, so a withdrawn event is never
 returned. An event logged just before its record lands is held until
-the record catches up, so a `--for any` watch does not miss it.
+the record catches up, so an `any` or `move` watch does not miss it.
+
+`--for any` and `--for move` return a burst: every match logged
+within two seconds of the one before (ten after the first at most),
+in log order, measured by the lines' own times, so a watch from an old
+cursor returns the history a burst at a time. A decision ends the
+burst at once with exit 0; a park or close ends it after the lines
+logged before it, with exit 3. On a ticket already parked or closed,
+a watch with `--since` prints the matching lines after the cursor
+before the park or close. Follow from the seq of the last event line
+printed: the next watch returns whatever the burst left, the park
+included. With `--json` each event is one object on its own line, so
+these two filters can print several, and the last carries the cursor.
 
 To wait on your own action, take the log's tail just before you act,
 act, then wait with `--since`. The tail is the `seq` of the last line
@@ -262,7 +278,8 @@ A listing filtered with `--ticket` or `--project` gives an older seq,
 and a wait from it can return an event from before your action, under
 `--for any` most of all. The same recipe blocks on a resume: take the
 tail, `dispatch resume X`, then `dispatch wait X --for any --since
-<tail>`.
+<tail>`. Under `--for any` the wait returns the burst your action set
+off, not only its first line.
 
 **Report.** `dispatch report X` gives the time per stage with the time
 its decisions waited on the owner apart, the plan's size, the plan
@@ -331,11 +348,12 @@ minutes by default and ten at most, so a watcher passes its tool the
 longer timeout and keeps `--timeout` under it: `dispatch events
 --project <name> --since <seq> --follow --timeout 540`, noting the last
 seq it printed and starting again from it, one call at a time. While
-driving one ticket, `dispatch wait <ticket> --for any --since <seq>
+driving one ticket, `dispatch wait <ticket> --for move --since <seq>
 --timeout 540` is the better call: it returns on that ticket's next
-decision, stage change, pull request or close after `<seq>`. Arm the
+stage change, decision, pull request line, park or close after
+`<seq>`, with every such line that follows within two seconds. Arm the
 first watch from the `follow from seq` that `brief` printed. After a
-return, arm the next from the seq at the start of the line it printed;
+return, arm the next from the seq of the last event line it printed;
 after `timed out`, from the same seq again. A decision raised between
 two watches is then returned, and one left pending does not come back.
 
@@ -424,7 +442,7 @@ the reason is "parked by hand". With no runner up the ticket stays
 
 To know it has parked, `dispatch wait <ticket> --for stage` exits 3 at
 the park, or watch `dispatch events --ticket <id> --follow` for
-`parked`. Not `--for any`: it returns on the first cancelled attempt's
+`parked`. Not `--for any`: it can return on the first cancelled attempt's
 `attempt-ended`, before the ticket reads parked.
 
 A closing or closed ticket cannot be parked (exit 64), and one already

@@ -107,7 +107,7 @@ Supervising (see docs/dispatch-agent-guide.md):
   dispatch events [--since <seq>] [--follow [--timeout <secs>]] [--ticket <id>]... [--project <name>] [--json]
                                            what happened, from the event log; with --timeout, exit 0
                                            once something printed, 2 when nothing came
-  dispatch wait <ticket> [--for decision|stage|pr|closed|any] [--since <seq>] [--timeout <secs>] [--json]
+  dispatch wait <ticket> [--for decision|stage|pr|closed|move|any] [--since <seq>] [--timeout <secs>] [--json]
                                            block until it happens: exit 0 matched,
                                            2 timed out, 3 the ticket parked or closed
   dispatch show <ticket> [--json]          one ticket: stage, lanes, attempts, decisions, files

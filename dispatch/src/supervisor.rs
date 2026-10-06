@@ -28,15 +28,17 @@ use crate::ticket::{Operation, PastSupervisor, ProjectState, SupervisorIntent, S
 pub const GUIDE_ESSENTIALS: &str = "\
 - `{exe} brief <project>`: the project at a glance: tickets, what waits, \
 the last events with the seq to follow from, open worktrees, the hand-off.
-- `{exe} wait <ticket> --for any --since <seq> --timeout 540`: your watch \
+- `{exe} wait <ticket> --for move --since <seq> --timeout 540`: your watch \
 on one ticket, always as a background call: it returns on the ticket's \
-next decision, stage change, pull request or close after `<seq>` (exit 0), \
-or after 540 seconds with nothing (exit 2; arm it again). `<seq>` is the \
-`follow from seq` that `brief` printed the first time, the seq at the \
-start of the line the watch printed after a return, and the same seq \
-again after `timed out`, so nothing between two watches is lost, and a \
-decision left pending does not come back. Give the call a 600000 ms \
-tool timeout. Never in the foreground, never in a shell loop.
+next stage change, decision, pull request line, park or close after \
+`<seq>`, with every such line that follows within two seconds (exit 0; \
+exit 3 for a park or close), or after 540 seconds with nothing (exit 2; \
+arm it again). `<seq>` is the `follow from seq` that `brief` printed the \
+first time, the seq of the last event line the watch printed after a \
+return, and the same seq again after `timed out`, so nothing between \
+two watches is lost, and a decision left pending does not come back. \
+Give the call a 600000 ms tool timeout. Never in the foreground, never \
+in a shell loop.
 - `{exe} events --project <project> --since <seq> --follow --timeout 540`: \
 the same for the whole project, for the Monitor tool or a background \
 call: it exits 0 as soon as it prints events (note the last seq and start \
@@ -113,12 +115,12 @@ pub fn seed(
          hand-off; then stop and wait for the owner. Do not fill the wait with reading or \
          polling.\n\n\
          Watching never blocks this session. A watch is a background call: run \
-         `{exe_text} wait <ticket> --for any --since <seq> --timeout 540` with your Bash tool's \
+         `{exe_text} wait <ticket> --for move --since <seq> --timeout 540` with your Bash tool's \
          run-in-background option (or the Monitor tool over `events --follow`), so its \
          result arrives as a notification while you stay free to talk. Never run `wait` or \
          `events --follow` in the foreground, and never wrap either in a shell loop. When \
          a watch returns, read what it says, act only on tickets the owner handed you, and \
-         arm it again from the seq at the start of the line it printed (from the same seq \
+         arm it again from the seq of the last event line it printed (from the same seq \
          after a timeout) if that ticket is still in flight.\n\n\
          Keep {handoff} current as you work: what you watch, what you answered and why, \
          what is left. The next supervisor starts from it. Write it with your Edit or Write \
@@ -931,8 +933,8 @@ mod tests {
             "run `/opt/bin/dispatch brief orchard` first",
             "/data/projects/orchard/supervisor/handoff.md current",
             "`/opt/bin/dispatch events --project <project>",
-            "`/opt/bin/dispatch wait <ticket> --for any --since <seq> --timeout 540`",
-            "from the seq at the start of the line it printed",
+            "`/opt/bin/dispatch wait <ticket> --for move --since <seq> --timeout 540`",
+            "from the seq of the last event line it printed",
             "same seq after a timeout",
             "from the `follow from seq` that brief printed, never from a seq in the hand-off",
             "You never merge a pull request.",
@@ -947,6 +949,7 @@ mod tests {
         assert!(!s.contains("SWITCHBOARD_RECORD_ID"));
         assert!(!s.contains("--timeout 100"));
         assert!(!s.contains("--for any --timeout 540"));
+        assert!(!s.contains("--for any --since"));
     }
 
     #[test]

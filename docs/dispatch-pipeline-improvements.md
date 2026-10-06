@@ -347,10 +347,10 @@ the orphaned check (#53, built), the unreviewed conflict rebase (#54,
 built), the stale folded commit message (#55, built), a refresh that
 launched the next agent into a tree still mid-rebase (#58, built: the
 stage holds on a `recheck | park` question until the rebase is finished
-or aborted by hand), `wait` bunching and `--for move` (#100), the
-orphaned command reviewer and the leaderless check (#101), Dispatch's
-own lane-blind reads (#102), the runner restart from away from the Mac
-(#103).
+or aborted by hand), `wait` bunching and `--for move` (#100, built:
+both shapes), the orphaned command reviewer and the leaderless check
+(#101), Dispatch's own lane-blind reads (#102), the runner restart from
+away from the Mac (#103).
 
 - **A look at the work before the PR opens.** #71 produced screenshots
   of the new ticket page, but only after the PR was open, and the two
@@ -448,17 +448,6 @@ own lane-blind reads (#102), the runner restart from away from the Mac
   lint step reformats a committed file fails as "the tree changed while
   the checks ran", which reads as an agent problem; naming the formatter
   and the file would send the fix to the right place.
-- **`wait --for any` returns on every line, one at a time.** A stage
-  change logs several lines within a second or two (`attempt-ended`,
-  `stage`, `attempt-started`, `round`), and each one ends the
-  supervisor's watch, so it is re-armed once per line: on #95 the step
-  from lanes to plan took four re-arms, and the step from implement to
-  review-code took three. Two shapes, not yet chosen: a `--for move`
-  that returns only on a stage change, a decision, a pull request or a
-  close; or `wait` gathering lines for about two seconds after the
-  first one and printing them all, with the last seq to follow from.
-  The second keeps `--for any` meaning every line and needs no new
-  filter. Seen supervising #95.
 - **The runner cannot be restarted from away from the Mac.** After a
   merge that touches `dispatch/`, the runner must be restarted from
   the new bundle, and the only way is the overview's Stop/Start. The
