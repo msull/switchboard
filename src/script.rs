@@ -101,6 +101,7 @@ const REVIEW_LINES: &[&str] = &[
     "show-review",
     "review-file",
     "review-continue",
+    "review-object",
     "review-finalize",
     "show-artifact",
     "show-dispatch",
@@ -284,6 +285,7 @@ fn review_step(app: &mut SwitchboardApp, w: &[&str]) -> Result<(), String> {
             let id = newest_review(app)?;
             app.dispatch(AppAction::ContinueWorkflow(id));
         }
+        ["review-object", text @ ..] => review_object(app, &text.join(" "))?,
         ["review-finalize"] => {
             let id = newest_review(app)?;
             app.dispatch(AppAction::FinalizeWorkflow(id));
@@ -349,6 +351,21 @@ fn ticket_tab(app: &mut SwitchboardApp, id: &str, tab: &str) -> Result<(), Strin
         app.dispatch(AppAction::ShowTicket(id.to_owned()));
     }
     app.ui_state.dispatch_ticket_tabs.insert(id.to_owned(), tab);
+    Ok(())
+}
+
+/// The owner's objection to the newest review, as its next round.
+fn review_object(app: &mut SwitchboardApp, text: &str) -> Result<(), String> {
+    let id = newest_review(app)?;
+    let rounds = app.core().workflow(id).ok_or("no review")?.rounds.len();
+    // `ObjectWorkflow` names its round and the core refuses any but the
+    // next, as it would a stale request from Dispatch; the script names
+    // the next one rather than deciding it.
+    app.dispatch(AppAction::ObjectWorkflow {
+        run: id,
+        round: u32::try_from(rounds + 1).map_err(|e| e.to_string())?,
+        text: text.to_owned(),
+    });
     Ok(())
 }
 

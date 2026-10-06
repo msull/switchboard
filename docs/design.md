@@ -1163,6 +1163,23 @@ show what is actually shared.
   never fails on a stop, so Pause it first to free it; Continue does
   nothing while a run waits. From `AtCap` or `Converged` it opens one
   more reviewer round and raises the cap to match.
+- The owner's objection arrives over the control port as
+  `workflow.object {run, round, text}` (`ObjectWorkflow`), sent by
+  Dispatch's `revise` answer to `finalize`. It is refused unless the run
+  is `Converged` or `AtCap`, has a planner, the text is not blank, and
+  `round` is the run's round count plus one, so the feedback file the
+  sender wrote beside the plan and the round opened here carry the same
+  number. The round keeps the text in `user_feedback` with `objection`
+  set (schema v13), and the planner gets the `respond_to_user` prompt,
+  as for a notes-box round. Once its response settles the reviewer is
+  prompted for the next round whatever the cap, which is raised to
+  match; a notes-box round still ends the review at `Converged`. The
+  rounds list reads it as "owner's objection".
+- The ticket page's Plan tab titles a round Dispatch lists with
+  `PlanRoundView.by` as "owner", or "owner, via the supervisor" when
+  `by` is `supervisor`, so a reader tells the owner's round from the
+  reviewer's and sees when the supervisor typed it on the owner's
+  behalf.
 - The planner clone is `clone_all` on the transcript port: the whole
   conversation under a fresh id, the same private write as a clone.
 - The page reads round files itself through the preview cache, live
@@ -1636,7 +1653,11 @@ second provider for both PR gates, read through `curl` with the
 account token from the environment or `<data>/env`); `proceed` passes,
 `rerun` with a note (typed under the decision on the page) sends
 that lane back to the nearest earlier agent stage with the note in
-the next prompt. A gate-only stage and a ticket closing past its last
+the next prompt. The note box under a decision is multi-line, and an
+option the decision lists in `DecisionView.needs_note` (`revise` on
+`finalize`) stays disabled until the note has text: Dispatch refuses
+that answer without one and the decision stays pending, so the page
+gates it rather than send a click that changes nothing. A gate-only stage and a ticket closing past its last
 stage hold no slot. A PR GitHub reports as conflicting is rebased by
 the policy's `rebaser`, a session the new `session.clone` port command
 makes from the lane's implementer's transcript (the record is made
@@ -1654,7 +1675,8 @@ refused by `runner.lock`. Every request keeps its body in the ledger,
 so a lost reply to an idempotent one (`workflow.finalize`,
 `session.kill`, `set.sync`) is sent again as the same operation; a
 lost reply to a non-replayable one (`session.send`,
-`workflow.continue`) is a `lost-send` question asked once, since its
+`workflow.continue`, `workflow.object`, and an objection the port
+answered "the app did not answer in time") is a `lost-send` question asked once, since its
 ledger entry is marked asked and recovery skips it from then on. An
 attempt with no launch on the books fails rather than waits. Parking
 and a rerun follow the design's cancellation sequence: the intent is

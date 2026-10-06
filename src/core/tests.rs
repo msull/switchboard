@@ -4099,7 +4099,7 @@ mod workflow {
         BUILTIN_WORKFLOW, HandoffMode, RunState, Verdict, WorkflowDefinition, WorkflowId,
     };
     use crate::core::round_paths;
-    use crate::core::workflow::{SETTLE_PROBES, STOP_GRACE};
+    use crate::core::workflow::{SETTLE_PROBES, STOP_GRACE, round_status};
     use crate::ports::round_files::{FileStamp, Probed};
 
     const PLAN: &str = "/tmp/proj/docs/plan.md";
@@ -4919,6 +4919,106 @@ mod workflow {
     }
 
     #[test]
+    fn an_objection_opens_a_round_for_the_planner_and_the_reviewer_re_reads() {
+        let (mut core, run, _, reviewer, planner) = started();
+        settle(&mut core, run, "No further feedback.", 400);
+        // A cap below the next round: the objection's review runs anyway.
+        core.dispatch(AppAction::RaiseWorkflowCap { run, cap: 1 }, Clock::at(405));
+        assert_eq!(run_of(&core).state, RunState::Converged);
+        core.dispatch(
+            AppAction::HostListed(vec![running(reviewer), running(planner)]),
+            Clock::at(410),
+        );
+        let effects = core.dispatch(
+            AppAction::ObjectWorkflow {
+                run,
+                round: 2,
+                text: "  Step 3 deletes data.  ".into(),
+            },
+            Clock::at(420),
+        );
+        let r = run_of(&core);
+        assert_eq!(r.state, RunState::AwaitingResponse);
+        assert_eq!(r.rounds.len(), 2);
+        assert!(r.rounds[1].objection);
+        assert_eq!(
+            r.rounds[1].user_feedback.as_deref(),
+            Some("Step 3 deletes data.")
+        );
+        assert_eq!(round_status(r, &r.rounds[1]), "answering");
+        let sent_now = sent(&effects);
+        assert_eq!(sent_now.len(), 1);
+        assert_eq!(sent_now[0].0, HostId(planner.host_name()));
+        assert!(sent_now[0].1.contains("Step 3 deletes data."));
+        assert!(sent_now[0].1.contains("plan.response-2.md"));
+        let effects = settle(&mut core, run, "ok", 500);
+        let r = run_of(&core);
+        assert_eq!(r.state, RunState::AwaitingFeedback);
+        assert_eq!(r.rounds.len(), 3);
+        assert!(r.cap >= 3, "{}", r.cap);
+        assert_eq!(round_status(r, &r.rounds[1]), "owner's objection");
+        let sent_now = sent(&effects);
+        assert_eq!(sent_now.len(), 1);
+        assert_eq!(sent_now[0].0, HostId(reviewer.host_name()));
+        assert!(sent_now[0].1.contains("plan.response-2.md"));
+        assert!(sent_now[0].1.contains("plan.feedback-3.md"));
+        // From there the loop converges as it always does.
+        settle(&mut core, run, "No further feedback.", 600);
+        assert_eq!(run_of(&core).state, RunState::Converged);
+    }
+
+    #[test]
+    fn an_objection_is_refused_unless_the_review_finished_and_names_the_next_round() {
+        let (mut core, run, _, _, planner) = started();
+        settle(&mut core, run, "No further feedback.", 400);
+        core.dispatch(
+            AppAction::HostListed(vec![running(planner)]),
+            Clock::at(410),
+        );
+        // Each refusal posts one error and prompts nobody.
+        let refused = |core: &mut AppCore, round: u32, text: &str, at: u64| {
+            let errors = |c: &AppCore| c.notices().iter().filter(|n| n.is_error).count();
+            let before = errors(core);
+            let effects = core.dispatch(
+                AppAction::ObjectWorkflow {
+                    run,
+                    round,
+                    text: text.into(),
+                },
+                Clock::at(at),
+            );
+            assert!(sent(&effects).is_empty(), "{round} {text}");
+            assert_eq!(errors(core), before + 1, "{round} {text}");
+            assert_eq!(run_of(core).rounds.len(), 1);
+            core.notices()
+                .iter()
+                .rev()
+                .find(|n| n.is_error)
+                .unwrap()
+                .text
+                .clone()
+        };
+        for (round, text) in [(3, "late"), (1, "early"), (2, "   ")] {
+            refused(&mut core, round, text, 420);
+            assert_eq!(run_of(&core).state, RunState::Converged);
+        }
+        core.dispatch(AppAction::FinalizeWorkflow(run), Clock::at(430));
+        let text = refused(&mut core, 2, "too late", 440);
+        assert!(text.contains("converged or reached its cap"), "{text}");
+        assert_eq!(run_of(&core).state, RunState::Finalized);
+        core.dispatch(
+            AppAction::HandOffWorkflow {
+                run,
+                mode: HandoffMode::AsIs,
+            },
+            Clock::at(450),
+        );
+        assert_eq!(run_of(&core).state, RunState::HandedOff);
+        refused(&mut core, 2, "too late", 460);
+        assert_eq!(run_of(&core).state, RunState::HandedOff);
+    }
+
+    #[test]
     fn a_loaded_run_keeps_waiting_and_removal_leaves_its_sessions() {
         let (core, run, _, reviewer, planner) = started();
         let workspace = core.workspaces()[0].clone();
@@ -4961,6 +5061,7 @@ mod workflow {
             snapshot: false,
             feedback_asked: None,
             response_asked: None,
+            objection: false,
         };
         let text = builtin.render(
             "{plan} {feedback} {response} {round}/{cap} {no_feedback}",

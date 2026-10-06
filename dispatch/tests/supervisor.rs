@@ -523,7 +523,10 @@ fn brief_shows_the_tickets_what_waits_the_events_and_the_handoff() {
     for want in [
         "supervisor: none; `dispatch supervisor Orchard --fresh` starts one",
         &format!("{} #12 Issue 12 · stage inspect · active", t.id),
-        &format!("dispatch decide {} {d} <answer> [--note <text>]", t.id),
+        &format!(
+            "dispatch decide {} {d} <answer> [--note <text> | --file <path>]",
+            t.id
+        ),
         "taken",
         "follow from seq ",
         "watching #12",

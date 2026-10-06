@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 /// Bump when the on-disk shape changes incompatibly.
-pub const SCHEMA_VERSION: u32 = 12;
+pub const SCHEMA_VERSION: u32 = 13;
 
 /// How the UI picks its colours: follow the system, or force one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -421,6 +421,12 @@ pub struct Round {
     /// `None` on a round saved before the time was kept.
     #[serde(default)]
     pub response_asked: Option<SystemTime>,
+    /// This round's text (in `user_feedback`) is the owner's objection,
+    /// sent from outside the app over `workflow.object`. Once the
+    /// planner answers it the reviewer reads the response, where a round
+    /// from the notes box ends the review.
+    #[serde(default)]
+    pub objection: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

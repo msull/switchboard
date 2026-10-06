@@ -222,7 +222,7 @@ Dev aids, all environment variables:
   `discard-to`, `undo-discard`, `review-plan`, `show-review`,
   `show-dispatch`, `dispatch-runner-start`, `dispatch-runner-stop`,
   `show-ticket`, `close-ticket`, `ticket-tab`,
-  `review-file`, `review-continue`, `review-finalize`, `show-artifact`,
+  `review-file`, `review-continue`, `review-object`, `review-finalize`, `show-artifact`,
   `pop-out`, `close-pop-out`, `files-root`, `zoom`, `place-pop-out`,
   `place-card`, `new-workspace`, `workspace`, `workspace-global`,
   `move-project`, `move-working-set`, `controller`,

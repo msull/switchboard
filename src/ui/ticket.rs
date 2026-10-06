@@ -368,8 +368,18 @@ fn plan(cx: &mut DrawCtx<'_>, ui: &mut Ui, t: &TicketView) {
     theme::section(ui, "Plan review");
     for round in &d.paths.plan_rounds {
         let id = ui.make_persistent_id(("plan-round", &t.id, round.n));
-        fold(ui, id, &format!("Round {}", round.n), false, |ui| {
-            ui.label(theme::meta_text(ui, "Feedback"));
+        let title = match round.by.as_deref() {
+            None => format!("Round {}", round.n),
+            Some("supervisor") => format!("Round {} · owner, via the supervisor", round.n),
+            Some(_) => format!("Round {} · owner", round.n),
+        };
+        fold(ui, id, &title, false, |ui| {
+            let what = if round.by.is_some() {
+                "The owner's objection"
+            } else {
+                "Feedback"
+            };
+            ui.label(theme::meta_text(ui, what));
             artifact_text(cx, ui, t, &round.feedback);
             match &round.response {
                 Some(response) => {

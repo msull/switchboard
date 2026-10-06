@@ -12,7 +12,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use egui::accesskit::Role;
 use egui_kittest::Harness;
-use egui_kittest::kittest::Queryable;
+use egui_kittest::kittest::{NodeT, Queryable};
 use switchboard::SwitchboardApp;
 use switchboard::adapters::fakes::{
     self, FakeChanges, FakeDispatch, FakeHost, FakeOpener, FakeSecrets, FakeTranscripts,
@@ -3956,6 +3956,7 @@ fn seed_review(
             snapshot: false,
             feedback_asked: None,
             response_asked: None,
+            objection: false,
         }],
         state: RunState::Converged,
         cap: 4,
@@ -4974,11 +4975,20 @@ fn ticket_with_documents() -> (
     let dispatch = FakeDispatch {
         paths: PathsView {
             plan: Some("/dispatch/tickets/t1/plan/1/plan.md".into()),
-            plan_rounds: vec![PlanRoundView {
-                n: 1,
-                feedback: "/dispatch/tickets/t1/plan/1/plan.feedback-1.md".into(),
-                response: None,
-            }],
+            plan_rounds: vec![
+                PlanRoundView {
+                    n: 1,
+                    feedback: "/dispatch/tickets/t1/plan/1/plan.feedback-1.md".into(),
+                    response: None,
+                    by: None,
+                },
+                PlanRoundView {
+                    n: 2,
+                    feedback: "/dispatch/tickets/t1/plan/1/plan.feedback-2.md".into(),
+                    response: None,
+                    by: Some("you".into()),
+                },
+            ],
             ..PathsView::default()
         },
         ..FakeDispatch::default()
@@ -5049,6 +5059,15 @@ fn the_plan_tab_lists_its_review_rounds() {
     click(&mut harness, "Plan");
     harness.get_by_label("Round 1");
     harness.get_by_label("/dispatch/tickets/t1/plan/1/plan.md");
+}
+
+/// A round the owner opened with an objection says so in its title.
+#[test]
+fn the_plan_tab_marks_the_owners_round() {
+    let (dispatch, edit) = ticket_with_documents();
+    let mut harness = ticket_page_on(dispatch, Changes::default(), edit);
+    click(&mut harness, "Plan");
+    harness.get_by_label("Round 2 · owner");
 }
 
 /// A decision pending on the ticket stays above the tabs, whichever is
@@ -5305,10 +5324,9 @@ fn dispatch_page_sends_a_note_with_an_answer() {
     harness.run_steps(2);
     click(&mut harness, "Dispatch");
     harness.get_by_label("inspect (repo): branch dispatch/104 at abc12345 over origin/main.");
-    // Decisions come before the worktrees section, so the first text
-    // field on the page is this card's note.
+    // The note is the page's one multi-line field.
     let field = harness
-        .query_all_by_role(Role::TextInput)
+        .query_all_by_role(Role::MultilineTextInput)
         .next()
         .expect("the note field");
     field.focus();
@@ -5320,6 +5338,61 @@ fn dispatch_page_sends_a_note_with_an_answer() {
         decision: "d9".into(),
         answer: "rerun".into(),
         note: Some("use a set, not a vec".into()),
+    }));
+}
+
+/// An answer that needs a note is disabled until one is typed, so the
+/// card never sends what Dispatch would refuse; the others stay live.
+#[test]
+fn dispatch_page_holds_revise_until_a_note_is_written() {
+    use switchboard::ports::dispatch::DecisionView;
+    let (mut harness, _) = harness();
+    let mut status = dispatch_status();
+    status.tickets[0].decisions = vec![DecisionView {
+        id: "d7".into(),
+        ticket: "t1".into(),
+        stage: "review-plan".into(),
+        name: "finalize".into(),
+        question: "The review of plan converged after 1 round(s).".into(),
+        options: vec!["finalize".into(), "revise".into(), "park".into()],
+        recommendation: Some("finalize".into()),
+        state: "pending".into(),
+        needs_note: vec!["revise".into()],
+        ..DecisionView::default()
+    }];
+    harness
+        .state_mut()
+        .dispatch(AppAction::DispatchStatus(Some(status)));
+    harness.state_mut().dispatched.clear();
+    harness.run_steps(2);
+    click(&mut harness, "Dispatch");
+    harness.get_by_label("The review of plan converged after 1 round(s).");
+    let disabled =
+        |h: &Harness<'_, _>, label: &str| h.get_by_label(label).accesskit_node().is_disabled();
+    assert!(!disabled(&harness, "finalize"));
+    assert!(disabled(&harness, "revise"));
+    click(&mut harness, "revise");
+    assert!(
+        !actions(&harness)
+            .iter()
+            .any(|a| matches!(a, AppAction::DispatchDecide { .. })),
+        "a bare revise is never sent"
+    );
+    let field = harness
+        .query_all_by_role(Role::MultilineTextInput)
+        .next()
+        .expect("the note field");
+    field.focus();
+    field.type_text("Step 3 deletes data.");
+    harness.run_steps(2);
+    assert!(!disabled(&harness, "finalize"));
+    assert!(!disabled(&harness, "revise"));
+    click(&mut harness, "revise");
+    assert!(actions(&harness).contains(&AppAction::DispatchDecide {
+        ticket: "t1".into(),
+        decision: "d7".into(),
+        answer: "revise".into(),
+        note: Some("Step 3 deletes data.".into()),
     }));
 }
 

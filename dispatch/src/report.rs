@@ -137,6 +137,45 @@ pub fn round_file(subject: &Path, n: u32) -> PathBuf {
     beside(subject, "feedback", n)
 }
 
+/// The plan review round numbers whose feedback file is beside
+/// `subject`, ascending. Listed rather than counted up from 1: a round
+/// sent from the app's notes box writes no file, and every round after
+/// it still has one.
+#[must_use]
+pub fn plan_round_numbers(subject: &Path) -> Vec<u32> {
+    let dir = subject.parent().unwrap_or_else(|| Path::new("/"));
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let names: Vec<String> = entries
+        .filter_map(|e| e.ok()?.file_name().into_string().ok())
+        .collect();
+    round_numbers(subject, names.iter().map(String::as_str))
+}
+
+/// The `n`s of the names `<stem>.feedback-<n>.md` among `names`, the
+/// file names in `subject`'s directory, ascending.
+#[must_use]
+pub fn round_numbers<'a>(subject: &Path, names: impl IntoIterator<Item = &'a str>) -> Vec<u32> {
+    let stem = subject
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let prefix = format!("{stem}.feedback-");
+    let mut ns: Vec<u32> = names
+        .into_iter()
+        .filter_map(|name| {
+            name.strip_prefix(&prefix)?
+                .strip_suffix(".md")?
+                .parse()
+                .ok()
+        })
+        .collect();
+    ns.sort_unstable();
+    ns.dedup();
+    ns
+}
+
 /// The response to plan review round `n` beside `subject`:
 /// `<stem>.response-<n>.md`, mirrored as `round_file` is.
 #[must_use]
@@ -171,7 +210,9 @@ pub fn pr_range(t: &Ticket) -> Option<(String, String, String)> {
 
 /// The report of one ticket. `p` is its pipeline, which says whether
 /// the plan was written once per lane. `stages` are its pipeline's
-/// stage names in order; `read` reads a round file or the plan; `range`
+/// stage names in order; `read` reads a round file or the plan;
+/// `rounds` lists the plan review round numbers beside a reviewed copy
+/// (`plan_round_numbers`); `range`
 /// is git's size of the PR's range when it could be read; `now_ms` ends
 /// a stage still open.
 #[must_use]
@@ -180,6 +221,7 @@ pub fn of(
     p: Option<&Pipeline>,
     stages: &[String],
     read: &dyn Fn(&Path) -> Option<String>,
+    rounds: &dyn Fn(&Path) -> Vec<u32>,
     range: Option<RangeSize>,
     now_ms: u64,
 ) -> TicketReport {
@@ -234,38 +276,7 @@ pub fn of(
         r.plan_lines = Some(r.plans.iter().fold(0, |n, x| n.saturating_add(x.lines)));
         r.plan_bytes = Some(r.plans.iter().map(|x| x.bytes).sum());
     }
-    for a in t
-        .attempts
-        .iter()
-        .filter(|a| a.kind == AttemptKind::Workflow)
-    {
-        let Some(subject) = a.artifacts.values().next() else {
-            continue;
-        };
-        let mut rounds = Vec::new();
-        for n in 1.. {
-            let Some(text) = read(&round_file(subject, n)) else {
-                break;
-            };
-            let points = text
-                .lines()
-                .filter(|l| !l.starts_with(char::is_whitespace) && point_text(l).is_some())
-                .count();
-            let points = u32::try_from(points).unwrap_or(u32::MAX);
-            rounds.push(RoundReport {
-                n,
-                new: Some(points),
-                open: points,
-            });
-            r.plan_points += points;
-        }
-        r.plan_rounds += u32::try_from(rounds.len()).unwrap_or(u32::MAX);
-        r.plan_reviews.push(ReviewReport {
-            stage: a.stage.clone(),
-            attempt: a.n,
-            rounds,
-        });
-    }
+    plan_review(t, read, rounds, &mut r);
     code_review(t, read, &mut r);
     r.rebases = rebases(t);
     r.pr_url = t
@@ -283,6 +294,57 @@ pub fn of(
         })
     });
     r
+}
+
+/// The plan review rounds of every workflow attempt, from the feedback
+/// files beside its reviewed copy. The owner's objection is a round,
+/// but its lines are not the reviewer's points.
+fn plan_review(
+    t: &Ticket,
+    read: &dyn Fn(&Path) -> Option<String>,
+    rounds: &dyn Fn(&Path) -> Vec<u32>,
+    r: &mut TicketReport,
+) {
+    for a in t
+        .attempts
+        .iter()
+        .filter(|a| a.kind == AttemptKind::Workflow)
+    {
+        let Some(subject) = a.artifacts.values().next() else {
+            continue;
+        };
+        let mut found = Vec::new();
+        for n in rounds(subject) {
+            let Some(text) = read(&round_file(subject, n)) else {
+                continue;
+            };
+            if a.revisions.iter().any(|x| x.round == n) {
+                found.push(RoundReport {
+                    n,
+                    new: None,
+                    open: 0,
+                });
+                continue;
+            }
+            let points = text
+                .lines()
+                .filter(|l| !l.starts_with(char::is_whitespace) && point_text(l).is_some())
+                .count();
+            let points = u32::try_from(points).unwrap_or(u32::MAX);
+            found.push(RoundReport {
+                n,
+                new: Some(points),
+                open: points,
+            });
+            r.plan_points += points;
+        }
+        r.plan_rounds += u32::try_from(found.len()).unwrap_or(u32::MAX);
+        r.plan_reviews.push(ReviewReport {
+            stage: a.stage.clone(),
+            attempt: a.n,
+            rounds: found,
+        });
+    }
 }
 
 /// Rebaser runs, plus each lane's last bring-up when no rebaser of that
@@ -462,6 +524,25 @@ mod tests {
         move |p: &Path| map.get(p).cloned()
     }
 
+    /// The round numbers `plan_round_numbers` would list among the
+    /// paths of `map`.
+    fn listed_in(map: &[(&str, &str)]) -> impl Fn(&Path) -> Vec<u32> {
+        let paths: Vec<PathBuf> = map.iter().map(|(p, _)| PathBuf::from(p)).collect();
+        move |subject: &Path| {
+            round_numbers(
+                subject,
+                paths
+                    .iter()
+                    .filter(|p| p.parent() == subject.parent())
+                    .filter_map(|p| p.file_name()?.to_str()),
+            )
+        }
+    }
+
+    fn none(_: &Path) -> Vec<u32> {
+        Vec::new()
+    }
+
     fn attempt(stage: &str, n: u32, kind: AttemptKind, started: u64, ended: u64) -> Attempt {
         Attempt {
             ended_ms: Some(ended),
@@ -605,7 +686,7 @@ mod tests {
         t.lanes = vec![rebased, clean];
         t.attempts
             .push(attempt(REFRESH, 1, AttemptKind::Agent, 10_000, 11_000));
-        let r = of(&t, None, &stages(), &files(&[]), None, 99_000);
+        let r = of(&t, None, &stages(), &files(&[]), &none, None, 99_000);
         assert_eq!(r.rebases, 2);
     }
 
@@ -642,7 +723,7 @@ prompt = "Write {plan}."
             ));
         }
         let read = files(&[("/A.md", "a\nb\n"), ("/B.md", "c\n")]);
-        let r = of(&t, Some(&p), &[], &read, None, 0);
+        let r = of(&t, Some(&p), &[], &read, &none, None, 0);
         let size = |lane: &str, lines, bytes| PlanSize {
             lane: Some(lane.into()),
             lines,
@@ -658,7 +739,7 @@ prompt = "Write {plan}."
     #[test]
     fn a_closed_ticket_counts_plan_and_code_points_once_each() {
         let t = closed_ticket();
-        let read = files(&[
+        let docs = [
             // The plan a later stage reads is the reviewed copy.
             ("/t/review-plan/plan.md", "# plan\nsteps\nmore\n"),
             ("/t/review-plan/plan.feedback-1.md", PLAN_ROUND_1),
@@ -668,14 +749,15 @@ prompt = "Write {plan}."
             ),
             ("/t/rc/r1.md", CODE_ROUND_1),
             ("/t/rc/r2.md", CODE_ROUND_2),
-        ]);
+        ];
+        let (read, listed) = (files(&docs), listed_in(&docs));
         let range = RangeSize {
             commits: 1,
             files: 3,
             insertions: 40,
             deletions: 2,
         };
-        let r = of(&t, None, &stages(), &read, Some(range), 99_000);
+        let r = of(&t, None, &stages(), &read, &listed, Some(range), 99_000);
         assert_eq!((r.plan_lines, r.plan_bytes), (Some(3), Some(18)));
         assert_eq!(
             r.plans,
@@ -701,9 +783,67 @@ prompt = "Write {plan}."
             Some(("backend".into(), "base0000".into(), "fold0001".into()))
         );
 
-        let r = of(&t, None, &stages(), &read, None, 99_000);
+        let r = of(&t, None, &stages(), &read, &listed, None, 99_000);
         assert_eq!(r.commits, Some(1), "the rewrite's count when git has none");
         assert_eq!(r.range, None);
+    }
+
+    /// A round from the app's notes box has no file and is skipped,
+    /// and the owner's objection is a round with no reviewer points.
+    #[test]
+    fn plan_rounds_are_listed_past_a_gap_and_the_owners_round_has_no_points() {
+        let mut t = closed_ticket();
+        let review = t
+            .attempts
+            .iter_mut()
+            .find(|a| a.kind == AttemptKind::Workflow)
+            .unwrap();
+        review.revisions.push(crate::ticket::Revision {
+            round: 3,
+            by: "you".into(),
+            at_ms: 1,
+        });
+        let docs = [
+            ("/t/review-plan/plan.md", "# plan\n"),
+            ("/t/review-plan/plan.feedback-1.md", PLAN_ROUND_1),
+            (
+                "/t/review-plan/plan.feedback-3.md",
+                "# The owner's objection\n\n1. Step 3 deletes data.\n2. And more.\n",
+            ),
+            ("/t/review-plan/plan.feedback-4.md", PLAN_ROUND_1),
+            ("/t/review-plan/plan.feedback-x.md", PLAN_ROUND_1),
+            ("/t/other.feedback-2.md", PLAN_ROUND_1),
+        ];
+        let r = of(
+            &t,
+            None,
+            &stages(),
+            &files(&docs),
+            &listed_in(&docs),
+            None,
+            99_000,
+        );
+        let rounds = &r.plan_reviews[0].rounds;
+        assert_eq!(rounds.iter().map(|x| x.n).collect::<Vec<_>>(), [1, 3, 4]);
+        assert_eq!((rounds[1].new, rounds[1].open), (None, 0));
+        assert_eq!((r.plan_rounds, r.plan_points), (3, 2));
+    }
+
+    #[test]
+    fn plan_round_numbers_are_read_off_the_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let subject = dir.path().join("plan.md");
+        for name in [
+            "plan.feedback-4.md",
+            "plan.feedback-1.md",
+            "plan.feedback-3.md",
+            "plan.response-2.md",
+            "notes.feedback-2.md",
+        ] {
+            std::fs::write(dir.path().join(name), "x").unwrap();
+        }
+        assert_eq!(plan_round_numbers(&subject), [1, 3, 4]);
+        assert!(plan_round_numbers(&dir.path().join("gone/plan.md")).is_empty());
     }
 
     /// A point carried open through a later round, and into a rerun
@@ -731,7 +871,7 @@ prompt = "Write {plan}."
             ("/r3.md", "No open points.\n"),
             ("/a2r1.md", "## Open\n\n- a1/r1/style-1 (style): rename\n"),
         ]);
-        let r = of(&t, None, &stages(), &read, None, 50);
+        let r = of(&t, None, &stages(), &read, &none, None, 50);
         assert_eq!(r.code_points, 2);
         assert_eq!(
             r.code_points_by_reviewer,
@@ -763,7 +903,7 @@ prompt = "Write {plan}."
                 "## Open\n\n- r1/correctness-1 (correctness): the base's guard is gone\n",
             ),
         ]);
-        let r = of(&t, None, &stages(), &read, None, 50);
+        let r = of(&t, None, &stages(), &read, &none, None, 50);
         assert_eq!((r.code_rounds, r.code_points, r.fix_passes), (2, 1, 1));
         assert_eq!(
             r.code_points_by_reviewer,
@@ -779,7 +919,7 @@ prompt = "Write {plan}."
         let mut a = attempt("review-code", 1, AttemptKind::Review, 0, 10);
         a.rounds = vec![round(1, RoundState::Fixed, 1, "/gone.md", true)];
         t.attempts = vec![a];
-        let r = of(&t, None, &stages(), &files(&[]), None, 50);
+        let r = of(&t, None, &stages(), &files(&[]), &none, None, 50);
         assert!(r.code_incomplete);
         assert_eq!(r.code_reviews[0].rounds[0].new, None);
     }
@@ -811,7 +951,7 @@ prompt = "Write {plan}."
             answered("d2", "supervisor"),
             answered("d3", "supervisor"),
         ];
-        let r = of(&t, None, &[], &|_| None, None, 0);
+        let r = of(&t, None, &[], &|_| None, &none, None, 0);
         assert_eq!(r.answered_by.get("you"), Some(&1));
         assert_eq!(r.answered_by.get("supervisor"), Some(&2));
         let sum = total(&[r.clone(), r]);

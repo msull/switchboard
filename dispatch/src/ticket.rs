@@ -3,7 +3,7 @@
 //! queue). Plain data; the scheduler changes it, the store writes it.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use switchboard_control::{Body, Class, Reply};
@@ -341,8 +341,24 @@ pub struct Attempt {
     /// stays in `artifacts`, so the name is still listed.
     #[serde(default)]
     pub forgotten: BTreeMap<String, Forgotten>,
+    /// A plan review's rounds the owner opened with a `revise` answer to
+    /// `finalize`, first to last. Pushed before `workflow.object` is
+    /// sent and popped when Switchboard refuses it.
+    #[serde(default)]
+    pub revisions: Vec<Revision>,
     pub started_ms: u64,
     pub ended_ms: Option<u64>,
+}
+
+/// One owner's objection to a finished plan review, sent as round
+/// `round` of its run.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Revision {
+    pub round: u32,
+    /// Who answered `revise`, as the decision's `by` says it: `you` or
+    /// `supervisor`.
+    pub by: String,
+    pub at_ms: u64,
 }
 
 /// A secret artifact's file deleted.
@@ -1186,6 +1202,19 @@ impl ServiceRecord {
 }
 
 impl Ticket {
+    /// The name of the secret artifact at `file`, already canonical,
+    /// when it is one of any attempt's: what Dispatch never reads.
+    #[must_use]
+    pub fn secret_at(&self, file: &Path) -> Option<&str> {
+        self.attempts.iter().find_map(|a| {
+            a.secret.iter().find_map(|name| {
+                let path = a.artifacts.get(name)?;
+                let path = path.canonicalize().unwrap_or_else(|_| path.clone());
+                (path == file).then_some(name.as_str())
+            })
+        })
+    }
+
     /// The indexes of the ledger's operations recovery still has to
     /// resolve.
     #[must_use]

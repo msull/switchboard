@@ -23,7 +23,7 @@ use crate::ticket::{ProjectState, Ticket};
 /// carried a version reads as 0 and is brought up by `migrate`. A
 /// record above it was written by a newer `dispatch` and is refused
 /// both ways, so this build never drops fields it does not know.
-pub const RECORD_VERSION: u32 = 18;
+pub const RECORD_VERSION: u32 = 19;
 
 /// A lock file held while this lives: the writer lock, the runner's
 /// claim, or a ticket's close.
@@ -545,6 +545,11 @@ pub fn migrate(mut value: Value) -> Value {
         // transformed; a build that would drop the reviewer's group on its
         // next write must refuse the record, or a restart would leave the
         // reviewer's process group running again.
+        //
+        // 18 to 19: an attempt gains `revisions`, empty from its serde
+        // default. Nothing is transformed; a build that would drop them
+        // on its next write must refuse the record, or an owner's round
+        // would read as the reviewer's and its points be counted.
         if version == 1 {
             settle_from_verdicts(&mut value);
         }
@@ -1125,6 +1130,34 @@ mod tests {
             written["attempts"][0]["rounds"][0]["reviewers"][0]["group"]["pgid"],
             4001
         );
+        assert_eq!(read_ticket(&path).unwrap(), t);
+    }
+
+    #[test]
+    fn a_version_eighteen_record_migrates_with_no_revisions() {
+        let attempt = r#"{"stage": "review", "n": 1, "context": "root", "kind": "workflow", "state": "complete", "project": null, "session": null, "run": "run-1", "artifacts": {}, "settle": {}, "stop_at_ms": null, "head": null, "started_ms": 1000, "ended_ms": null}"#;
+        let text = TICKET_V0
+            .replacen('{', "{\n  \"version\": 18,", 1)
+            .replacen(
+                r#""attempts": [],"#,
+                &format!(r#""attempts": [{attempt}],"#),
+                1,
+            );
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.json");
+        fs::write(&path, text).unwrap();
+        let mut t = read_ticket(&path).unwrap();
+        assert_eq!(t.version, RECORD_VERSION);
+        assert!(t.attempts[0].revisions.is_empty());
+        t.attempts[0].revisions.push(crate::ticket::Revision {
+            round: 2,
+            by: "you".into(),
+            at_ms: 2_000,
+        });
+        write_ticket(&path, &t).unwrap();
+        let written: Value = read_json(&path).unwrap();
+        assert_eq!(written["version"], RECORD_VERSION);
+        assert_eq!(written["attempts"][0]["revisions"][0]["round"], 2);
         assert_eq!(read_ticket(&path).unwrap(), t);
     }
 

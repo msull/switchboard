@@ -341,15 +341,16 @@ pub fn migrate(value: serde_json::Value) -> Result<Workspace, String> {
         .and_then(serde_json::Value::as_u64)
         .ok_or_else(|| "missing schema_version".to_string())?;
     match version {
-        // v2 to v12 added optional fields and variants only (v8: the
+        // v2 to v13 added optional fields and variants only (v8: the
         // project's space; v9: the control port's operation id, the
         // outside waiting reason, the pending-launch mark and the last
         // stop time; v10: a session's launcher environment; v11: when a
         // round's agents were asked, and a failed run; v12: a project's
         // and a session's environment sets, and a session's launch-token
-        // hash), so an older document reads with their defaults; it is
-        // written back at the current version.
-        1..=12 => serde_json::from_value(value)
+        // hash; v13: whether a round is the owner's objection), so an
+        // older document reads with their defaults; it is written back
+        // at the current version.
+        1..=13 => serde_json::from_value(value)
             .map(|mut w: Workspace| {
                 w.schema_version = SCHEMA_VERSION;
                 w
@@ -1073,6 +1074,7 @@ mod tests {
                 snapshot: false,
                 feedback_asked: None,
                 response_asked: None,
+                objection: false,
             }],
             state: crate::core::RunState::AwaitingFeedback,
             cap: 4,
@@ -1091,6 +1093,46 @@ mod tests {
         assert_eq!(loaded.schema_version, SCHEMA_VERSION);
         let round = &loaded.workflows[0].rounds[0];
         assert_eq!((round.feedback_asked, round.response_asked), (None, None));
+    }
+
+    #[test]
+    fn v12_rounds_read_as_no_objection() {
+        let mut w = workspace("v12");
+        w.schema_version = 12;
+        let (feedback, response) = crate::core::round_paths(Path::new("/tmp/proj/plan.md"), 1);
+        w.workflows.push(crate::core::WorkflowRun {
+            id: crate::core::WorkflowId::new(),
+            project: w.project.id,
+            definition: crate::core::BUILTIN_WORKFLOW.into(),
+            source: w.sessions[0].id,
+            plan: PathBuf::from("/tmp/proj/plan.md"),
+            planner: None,
+            reviewer: w.sessions[0].id,
+            rounds: vec![crate::core::Round {
+                n: 1,
+                feedback,
+                response,
+                verdict: Some(crate::core::Verdict::Changes),
+                user_feedback: Some("mine".into()),
+                responded: true,
+                snapshot: false,
+                feedback_asked: None,
+                response_asked: None,
+                objection: false,
+            }],
+            state: crate::core::RunState::Converged,
+            cap: 4,
+            cleaned: false,
+            created: w.project.created,
+            updated: w.project.created,
+            op: None,
+        });
+        let mut value = serde_json::to_value(&w).unwrap();
+        let round = value["workflows"][0]["rounds"][0].as_object_mut().unwrap();
+        assert!(round.remove("objection").is_some());
+        let loaded = migrate(value).unwrap();
+        assert_eq!(loaded.schema_version, SCHEMA_VERSION);
+        assert!(!loaded.workflows[0].rounds[0].objection);
     }
 
     #[test]

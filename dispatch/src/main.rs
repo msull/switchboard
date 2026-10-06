@@ -1,6 +1,6 @@
 //! `dispatch`: take a ticket, run the scheduler, answer decisions, look.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant, SystemTime};
 
@@ -146,6 +146,10 @@ fn command(args: &[&str]) -> Result<()> {
         ["decide", ticket, decision, answer] => decide(ticket, decision, answer, None),
         ["decide", ticket, decision, answer, "--note", note] => {
             decide(ticket, decision, answer, Some(note))
+        }
+        ["decide", ticket, decision, answer, "--file", path] => {
+            let note = offline_runner()?.note_from_file(ticket, Path::new(path))?;
+            decide(ticket, decision, answer, Some(&note))
         }
         ["decisions"] => decisions(),
         ["status"] => status(),
@@ -850,7 +854,7 @@ fn decide_hint(e: &Event, t: &Ticket) -> Option<String> {
     let d = e.decision.as_ref()?;
     t.waiting_on_you().iter().any(|w| &w.id == d).then(|| {
         format!(
-            "    {} {} {d} <answer> [--note <text>]",
+            "    {} {} {d} <answer> [--note <text> | --file <path>]",
             decide_command(),
             t.id
         )
@@ -930,6 +934,10 @@ fn show(args: &[&str]) -> Result<()> {
         if let Some(path) = path {
             say!("  {name}: {}", path.display());
         }
+    }
+    for r in &p.plan_rounds {
+        let owner = if r.by.is_some() { " (owner)" } else { "" };
+        say!("  plan round {}{owner}: {}", r.n, r.feedback.display());
     }
     print_lane_files("notes", &p.notes_files)?;
     if let Some(url) = &p.pr_url {
@@ -1026,9 +1034,13 @@ fn print_answered(t: &Ticket) -> Result<()> {
         say!("answered:");
     }
     for d in answered {
-        if let DecisionState::Answered { answer, by, .. } = &d.state {
+        if let DecisionState::Answered {
+            answer, by, note, ..
+        } = &d.state
+        {
+            let note = note.as_ref().map_or(String::new(), |n| format!(" — {n}"));
             say!(
-                "  {} [{}] {}: answered {answer} by {by}",
+                "  {} [{}] {}: answered {answer} by {by}{note}",
                 d.id,
                 d.stage,
                 d.name
@@ -1070,7 +1082,7 @@ fn print_pending(view: &dispatch_control::TicketView) -> Result<()> {
     }
     for d in pending {
         say!(
-            "  {} [{}] {}\n    options: {}{}\n    {} {} {} <answer> [--note <text>]",
+            "  {} [{}] {}\n    options: {}{}\n    {} {} {} <answer> [--note <text> | --file <path>]",
             d.id,
             d.stage,
             d.question,
@@ -1101,6 +1113,7 @@ fn report_of(runner: &Runner, t: &dispatch::ticket::Ticket) -> TicketReport {
         pipeline.as_ref(),
         &names,
         &|p| std::fs::read_to_string(p).ok(),
+        &report::plan_round_numbers,
         range,
         now_ms(),
     )
@@ -1383,7 +1396,7 @@ fn brief(args: &[&str]) -> Result<()> {
         for d in t.waiting_on_you() {
             any = true;
             say!(
-                "  {} {} [{}] {}: {}\n    options: {}\n    {} {} {} <answer> [--note <text>]",
+                "  {} {} [{}] {}: {}\n    options: {}\n    {} {} {} <answer> [--note <text> | --file <path>]",
                 t.id,
                 d.id,
                 d.stage,
@@ -1604,7 +1617,7 @@ mod tests {
         let event = Event::from_decision(&t, &t.decisions[0]);
         assert_eq!(
             decide_hint(&event, &t).as_deref(),
-            Some("    dispatch decide t1 d1 <answer> [--note <text>]")
+            Some("    dispatch decide t1 d1 <answer> [--note <text> | --file <path>]")
         );
         for by in [dispatch::scheduler::BY_RESUME, dispatch::scheduler::BY_HAND] {
             t.decisions[0].state = answered(by);

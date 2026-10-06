@@ -27,8 +27,8 @@ use crate::pipeline::{Pipeline, Source};
 use crate::scheduler::{Runner, lane_files};
 use crate::store::DataDir;
 use crate::ticket::{
-    AttemptKind, AttemptState, Decision, DecisionState, PullRequestSource, SourceSnapshot, Ticket,
-    TicketState,
+    Attempt, AttemptKind, AttemptState, Decision, DecisionState, PullRequestSource, SourceSnapshot,
+    Ticket, TicketState,
 };
 
 /// A Unix socket path may be at most 104 bytes on macOS (108 on Linux);
@@ -86,7 +86,7 @@ impl Handler {
                     bail!("{} is not a file of ticket {ticket}", path.display());
                 }
                 let t = self.runner.load_ticket(ticket)?;
-                if let Some(name) = secret_named(&t, &file) {
+                if let Some(name) = t.secret_at(&file) {
                     bail!("{name} is secret; Dispatch never reads it");
                 }
                 let text = fs::read_to_string(&file)
@@ -141,18 +141,6 @@ impl Handler {
     fn view(&self, t: &Ticket) -> TicketView {
         ticket_view(t, self.runner.pipeline_of(t).ok().as_ref())
     }
-}
-
-/// The name of the secret artifact at `file`, already canonical, when
-/// it is one of any attempt of `t`.
-fn secret_named<'t>(t: &'t Ticket, file: &Path) -> Option<&'t str> {
-    t.attempts.iter().find_map(|a| {
-        a.secret.iter().find_map(|name| {
-            let path = a.artifacts.get(name)?;
-            let path = path.canonicalize().unwrap_or_else(|_| path.clone());
-            (path == file).then_some(name.as_str())
-        })
-    })
 }
 
 /// Make a ticket from the project's source, as `dispatch take` does.
@@ -482,16 +470,25 @@ fn ticket_events(log: &Path, ticket: &str, since: u64) -> Result<EventsView> {
     })
 }
 
-/// Every plan review round beside `subject` whose feedback exists, with
-/// its response when that exists too.
-fn plan_rounds(subject: &Path) -> Vec<PlanRoundView> {
-    (1..=u32::MAX)
-        .map(|n| (n, crate::report::round_file(subject, n)))
-        .take_while(|(_, f)| f.exists())
-        .map(|(n, feedback)| PlanRoundView {
+/// Every plan review round beside the workflow attempt's reviewed copy
+/// whose feedback exists, with its response when that exists too, and
+/// who opened it when it was the owner's objection. A round with no
+/// file (one from the app's notes box) is skipped and keeps its number.
+fn plan_rounds(a: &Attempt) -> Vec<PlanRoundView> {
+    let Some(subject) = a.artifacts.values().next() else {
+        return Vec::new();
+    };
+    crate::report::plan_round_numbers(subject)
+        .into_iter()
+        .map(|n| PlanRoundView {
             n,
-            feedback,
+            feedback: crate::report::round_file(subject, n),
             response: Some(crate::report::response_file(subject, n)).filter(|r| r.exists()),
+            by: a
+                .revisions
+                .iter()
+                .find(|x| x.round == n)
+                .map(|x| x.by.clone()),
         })
         .collect()
 }
@@ -516,13 +513,13 @@ pub fn ticket_paths(t: &Ticket, p: Option<&Pipeline>) -> PathsView {
         .rev()
         .flat_map(|a| a.rounds.iter().rev())
         .find_map(|r| r.feedback.clone());
-    let subject = t
+    let review = t
         .attempts
         .iter()
         .rev()
         .filter(|a| a.kind == AttemptKind::Workflow)
-        .find_map(|a| a.artifacts.values().next());
-    let plan_rounds = subject.map_or_else(Vec::new, |s| plan_rounds(s));
+        .find(|a| !a.artifacts.is_empty());
+    let plan_rounds = review.map_or_else(Vec::new, plan_rounds);
     let round_file = last_round.or_else(|| plan_rounds.last().map(|r| r.feedback.clone()));
     let pr = t.attempts.iter().rev().find_map(|a| a.pr.as_ref());
     PathsView {
@@ -760,6 +757,12 @@ fn decision_view(t: &Ticket, d: &Decision) -> DecisionView {
         made_ms: d.made_ms,
         answered_by,
         answered_ms,
+        needs_note: d
+            .options
+            .iter()
+            .filter(|o| crate::needs_note(&d.name, o))
+            .cloned()
+            .collect(),
     }
 }
 
@@ -1275,6 +1278,72 @@ slots = 1
             status.tickets[0].lanes[0].clone, None,
             "a status reads no pipeline paths"
         );
+    }
+
+    /// A round with no file (from the app's notes box) is skipped and
+    /// keeps its number; the owner's round names who sent it.
+    #[test]
+    fn plan_rounds_skip_a_missing_round_and_name_the_owners() {
+        let dir = tempfile::tempdir().unwrap();
+        let plan = dir.path().join("plan.md");
+        for f in [
+            "plan.md",
+            "plan.feedback-1.md",
+            "plan.feedback-3.md",
+            "plan.response-3.md",
+            "plan.feedback-4.md",
+        ] {
+            fs::write(dir.path().join(f), "x").unwrap();
+        }
+        let mut a = crate::scheduler::new_attempt(
+            "review-plan",
+            1,
+            "root",
+            AttemptKind::Workflow,
+            AttemptState::Complete,
+            [("plan".to_owned(), plan)].into(),
+            1_100,
+        );
+        a.revisions.push(crate::ticket::Revision {
+            round: 3,
+            by: "supervisor".into(),
+            at_ms: 1_200,
+        });
+        let rounds = plan_rounds(&a);
+        let seen: Vec<_> = rounds
+            .iter()
+            .map(|r| (r.n, r.response.is_some(), r.by.as_deref()))
+            .collect();
+        assert_eq!(
+            seen,
+            [
+                (1, false, None),
+                (3, true, Some("supervisor")),
+                (4, false, None)
+            ]
+        );
+    }
+
+    #[test]
+    fn only_revise_on_finalize_needs_a_note() {
+        let decision = |name: &str, options: &[&str]| Decision {
+            id: "d1".into(),
+            stage: "review-plan".into(),
+            name: name.into(),
+            kind: crate::ticket::DecisionKind::Permission,
+            question: "?".into(),
+            options: options.iter().map(|o| (*o).to_owned()).collect(),
+            recommendation: None,
+            attempt: None,
+            state: DecisionState::Pending,
+            made_ms: 0,
+            refusals: Vec::new(),
+        };
+        let t = crate::ticket::blank();
+        let view = decision_view(&t, &decision("finalize", &["finalize", "revise", "park"]));
+        assert_eq!(view.needs_note, ["revise"]);
+        let view = decision_view(&t, &decision("inspect", &["proceed", "rerun", "park"]));
+        assert!(view.needs_note.is_empty());
     }
 
     #[test]
