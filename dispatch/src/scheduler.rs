@@ -8448,6 +8448,25 @@ pub(crate) fn lane_plan<'a>(
     lane_input(t, p, lane, "plan").map(|(_, plan)| plan)
 }
 
+/// The plans a reader in `lane` sees: its lane's own, or for a reader
+/// with none, every lane's (labelled) when the newest plan writer runs
+/// per lane, else the newest one.
+pub(crate) fn lane_plans<'a>(
+    t: &'a Ticket,
+    p: &Pipeline,
+    lane: Option<&str>,
+) -> Vec<(Option<&'a str>, &'a PathBuf)> {
+    if lane.is_some() {
+        return lane_plan(t, p, lane)
+            .map(|plan| vec![(None, plan)])
+            .unwrap_or_default();
+    }
+    lane_files(t, Some(p), "plan")
+        .into_iter()
+        .map(|(l, _, plan)| (l, plan))
+        .collect()
+}
+
 /// `name` for a reader with no lane: one file per lane, labelled with
 /// it, when its newest writer runs per lane, else the newest one. Each
 /// lane's file is the newest in its own context from any stage that runs
@@ -9712,6 +9731,45 @@ prompt = "Write {notes}."
                 " (the plan is at /plan.md)"
             );
         }
+    }
+
+    #[test]
+    fn a_joined_reader_gets_every_lanes_plan() {
+        let p = plan_pipeline();
+        let plans = |t: &Ticket, lane: Option<&str>| -> Vec<(Option<String>, String)> {
+            lane_plans(t, &p, lane)
+                .into_iter()
+                .map(|(l, path)| (l.map(str::to_owned), path.display().to_string()))
+                .collect()
+        };
+        let lane = |l: &str, path: &str| (Some(l.to_owned()), path.to_owned());
+        let t = lanes_ticket(
+            "plan",
+            &[("plan", "A", "/plan-a.md"), ("plan", "B", "/plan-b.md")],
+            &["A", "B"],
+        );
+        assert_eq!(
+            plans(&t, None),
+            [lane("A", "/plan-a.md"), lane("B", "/plan-b.md")]
+        );
+        assert_eq!(plans(&t, Some("A")), [(None, "/plan-a.md".to_owned())]);
+        let t = lanes_ticket("plan", &[("outline", "root", "/plan.md")], &["A", "B"]);
+        assert_eq!(plans(&t, None), [(None, "/plan.md".to_owned())]);
+        // Lane plans written after a root one stand in for it, as they
+        // do on `show` and a root gate.
+        let t = lanes_ticket(
+            "plan",
+            &[
+                ("outline", "root", "/plan.md"),
+                ("plan", "A", "/plan-a.md"),
+                ("plan", "B", "/plan-b.md"),
+            ],
+            &["A", "B"],
+        );
+        assert_eq!(
+            plans(&t, None),
+            [lane("A", "/plan-a.md"), lane("B", "/plan-b.md")]
+        );
     }
 
     #[test]

@@ -8,7 +8,7 @@
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result};
 use switchboard_control::{self as wire, Body, Reply};
@@ -19,9 +19,9 @@ use crate::pipeline::{Gate, OperatorKind, Pipeline, Stage};
 use crate::scheduler::{
     Ask, DirtyStep, GateStop, NO_SUCH_SESSION, Owner, RESOLUTION, Runner, SocketDown, asks_again,
     busy, checks_env, confine_for, dirty_step, env_for, find_attempt, find_attempt_mut,
-    gate_network, guidance_prelude, held_in, idle_polls, lane_gate_argv, lane_plan, latest_attempt,
-    may_rerun, new_attempt, next_n, primary_tree, record_of, rework_key, sent_back, session_kind,
-    settle_file, stopped_after_nudges, vars_for,
+    gate_network, guidance_prelude, held_in, idle_polls, lane_gate_argv, lane_plans,
+    latest_attempt, may_rerun, new_attempt, next_n, primary_tree, record_of, rework_key, sent_back,
+    session_kind, settle_file, stopped_after_nudges, vars_for,
 };
 use crate::template::Vars;
 use crate::ticket::{
@@ -70,8 +70,15 @@ const REVIEW_RESOLUTION_UNKNOWN: &str = "Branch {branch} in {worktree} was revie
 /// Where a resolution reviewer writes, worded as `REVIEW_PROMPT` says it.
 const REVIEW_RESOLUTION_WRITE: &str = "Write your findings to {feedback} as a Markdown list, one point per line starting with \"- \", each naming the file and saying why it matters. If you find nothing, write exactly this line alone: {no_feedback}. Change nothing in {worktree}.";
 
-/// The addition when the plan has a decisions section.
-const REVIEW_DECIDED: &str = "The plan at {plan} settled these decisions:\n\n{decisions}\n\nA point that contests one of them is out of scope for this review: write it as \"- decided: <the decision>: why\" and it is listed as found but not done.";
+/// The addition when a plan has a decisions section; `{which}` is
+/// "The plan", or "The <lane> plan" when there are several.
+const REVIEW_DECIDED: &str = "{which} at {plan} settled these decisions:\n\n{decisions}";
+
+/// What follows the decisions, once, when any plan has some.
+const REVIEW_DECIDED_SCOPE: &str = "A point that contests one of them is out of scope for this review: write it as \"- decided: <the decision>: why\" and it is listed as found but not done.";
+
+/// The addition when a plan has no decisions section.
+const REVIEW_UNDECIDED: &str = "{which} at {plan} lists no decisions.";
 
 /// The addition every agent reviewer gets.
 const REVIEW_STYLE: &str = "Start a point that is only about wording, naming, comments or layout with \"style: \". Style points do not hold the review open after its early rounds.";
@@ -518,8 +525,9 @@ impl Runner {
                     .clone()
                     .unwrap_or_else(|| NO_FINDINGS.to_owned()),
             );
-        if let Some(plan) = lane_plan(t, p, lane) {
-            vars.set("plan", plan.display().to_string());
+        let plans = lane_plans(t, p, lane);
+        if let Some(plan) = plan_value(&plans) {
+            vars.set("plan", plan);
         }
         let previous = a.rounds.iter().rev().find(|x| x.n < round.n);
         let carried = previous.is_some_and(|x| x.open_points > 0);
@@ -555,19 +563,9 @@ impl Runner {
             prompt.push_str("\n\n");
             prompt.push_str(&rebased_text(moved));
         }
-        if let Some(plan) = lane_plan(t, p, lane)
-            && let Ok(text) = std::fs::read_to_string(plan)
-        {
+        if let Some(decided) = decided_text(&plans, &vars) {
             prompt.push_str("\n\n");
-            match decisions_section(&text) {
-                Some(decisions) => {
-                    vars.set("decisions", decisions);
-                    prompt.push_str(&vars.render(REVIEW_DECIDED));
-                }
-                None => {
-                    let _ = write!(prompt, "The plan at {} lists no decisions.", plan.display());
-                }
-            }
+            prompt.push_str(&decided);
         }
         prompt.push_str("\n\n");
         prompt.push_str(REVIEW_STYLE);
@@ -1316,8 +1314,9 @@ impl Runner {
                     .unwrap_or_default(),
             )
             .set("response", response.display().to_string());
-        if let Some(plan) = lane_plan(t, p, lane) {
-            vars.set("plan", plan.display().to_string());
+        let plans = lane_plans(t, p, lane);
+        if let Some(plan) = plan_value(&plans) {
+            vars.set("plan", plan);
         }
         let mut prompt = guidance_prelude(&op.guidance, &vars);
         prompt.push_str(&vars.render(stage.fix_prompt.as_deref().unwrap_or(FIX_PROMPT)));
@@ -2533,9 +2532,7 @@ impl Runner {
                 responses.join("\n")
             );
         }
-        if let Some(plan) = lane_plan(t, p, lane) {
-            let _ = write!(input, "\nThe plan: {}\n", plan.display());
-        }
+        input.push_str(&plan_lines(&lane_plans(t, p, lane)));
         let path = dir.join("input.md");
         std::fs::write(&path, input).with_context(|| format!("write {}", path.display()))?;
         let artifacts = &mut record_of(t, &key.0, key.1).artifacts;
@@ -3727,6 +3724,86 @@ fn rebased_text(moved: &Refreshed) -> String {
     text
 }
 
+/// `{plan}` for the plans a reader sees: the one path, or each lane's
+/// path followed by its lane, on one line so it reads inside a sentence.
+fn plan_value(plans: &[(Option<&str>, &PathBuf)]) -> Option<String> {
+    match plans {
+        [] => None,
+        [(_, plan)] => Some(plan.display().to_string()),
+        _ => Some(
+            plans
+                .iter()
+                .map(|(lane, plan)| match lane {
+                    Some(lane) => format!("{} ({lane})", plan.display()),
+                    None => plan.display().to_string(),
+                })
+                .collect::<Vec<_>>()
+                .join(", "),
+        ),
+    }
+}
+
+/// How a decisions block names its plan: plainly when it is the only
+/// one, by its lane when there are several.
+fn which_plan(label: Option<&str>, several: bool) -> String {
+    match label {
+        Some(lane) if several => format!("The {lane} plan"),
+        _ => "The plan".to_owned(),
+    }
+}
+
+/// The reviewer's decisions addition: one block per readable plan, in
+/// lane order, then the scope rule once if any plan settled something.
+/// Nothing when no plan can be read.
+fn decided_text(plans: &[(Option<&str>, &PathBuf)], vars: &Vars) -> Option<String> {
+    let several = plans.len() > 1;
+    let mut blocks = Vec::new();
+    let mut decided = false;
+    for (lane, plan) in plans {
+        let Ok(text) = std::fs::read_to_string(plan) else {
+            continue;
+        };
+        let mut vars = vars.clone();
+        vars.set("which", which_plan(*lane, several))
+            .set("plan", plan.display().to_string());
+        match decisions_section(&text) {
+            Some(decisions) => {
+                vars.set("decisions", decisions);
+                blocks.push(vars.render(REVIEW_DECIDED));
+                decided = true;
+            }
+            None => blocks.push(vars.render(REVIEW_UNDECIDED)),
+        }
+    }
+    if blocks.is_empty() {
+        return None;
+    }
+    if decided {
+        blocks.push(REVIEW_DECIDED_SCOPE.to_owned());
+    }
+    Some(blocks.join("\n\n"))
+}
+
+/// The rewriter input's plan lines: the one plan, or each lane's.
+/// Several plans come only from per-lane writers, so each carries its
+/// lane; an unlabelled one is listed by path alone, as `plan_value` does.
+fn plan_lines(plans: &[(Option<&str>, &PathBuf)]) -> String {
+    match plans {
+        [] => String::new(),
+        [(_, plan)] => format!("\nThe plan: {}\n", plan.display()),
+        _ => {
+            let mut lines = "\nThe plans, one per lane:\n\n".to_owned();
+            for (lane, plan) in plans {
+                let _ = match lane {
+                    Some(lane) => writeln!(lines, "- {lane}: {}", plan.display()),
+                    None => writeln!(lines, "- {}", plan.display()),
+                };
+            }
+            lines
+        }
+    }
+}
+
 /// The plan's decisions section: a heading of any level whose title,
 /// after an optional number such as `2.`, starts with the word
 /// "Decisions", through to the next heading of the same or a higher
@@ -4330,6 +4407,139 @@ gate = { kind = "command", argv = ["true"] }
         assert!(prompt.contains("Keep A."), "{prompt}");
         assert!(!prompt.contains("plan-B.md"), "{prompt}");
         assert!(!prompt.contains("Keep B."), "{prompt}");
+    }
+
+    #[test]
+    fn a_joined_reviewer_and_fixer_are_given_every_lanes_plan() {
+        let p = crate::pipeline::two_lanes(
+            r#"
+[operators.style]
+kind = "claude"
+
+[[stages]]
+name = "plan"
+operator = "agent"
+context = "each"
+writes = ["plan"]
+prompt = "Write {plan}."
+
+[[stages]]
+name = "review-code"
+context = "joined"
+reviewers = ["style"]
+implementer = "agent"
+gate = { kind = "command", argv = ["true"] }
+review_prompt = "Against {plan}."
+fix_prompt = "Per {plan}."
+"#,
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let mut t = crate::ticket::blank();
+        for lane in ["A", "B"] {
+            let plan = dir.path().join(format!("plan-{lane}.md"));
+            let text = if lane == "A" {
+                "## Decisions\n\n- Keep A.\n"
+            } else {
+                "## Steps\n\n- Do B.\n"
+            };
+            std::fs::write(&plan, text).unwrap();
+            t.attempts.push(new_attempt(
+                "plan",
+                1,
+                lane,
+                AttemptKind::Agent,
+                AttemptState::Complete,
+                BTreeMap::from([("plan".to_owned(), plan)]),
+                0,
+            ));
+            t.lanes.push(crate::ticket::chosen_lane(lane));
+        }
+        let a = new_attempt(
+            "review-code",
+            1,
+            "joined",
+            AttemptKind::Workflow,
+            AttemptState::Running,
+            BTreeMap::new(),
+            0,
+        );
+        let mut round = round_said(dir.path(), "");
+        round.n = 1;
+        let (plan_a, plan_b) = (dir.path().join("plan-A.md"), dir.path().join("plan-B.md"));
+        let listed = format!("{} (A), {} (B)", plan_a.display(), plan_b.display());
+        let prompt = Runner::reviewer_prompt(
+            &t,
+            &p,
+            &p.stages[1],
+            &a,
+            &round,
+            &round.reviewers[0],
+            dir.path(),
+            None,
+        );
+        assert!(
+            prompt.starts_with(&format!("Against {listed}.")),
+            "{prompt}"
+        );
+        let settled = format!("The A plan at {} settled", plan_a.display());
+        let undecided = format!("The B plan at {} lists no decisions.", plan_b.display());
+        let at = |needle: &str| {
+            prompt
+                .find(needle)
+                .unwrap_or_else(|| panic!("{needle}: {prompt}"))
+        };
+        assert!(at(&settled) < at("Keep A."), "{prompt}");
+        assert!(at("Keep A.") < at(&undecided), "{prompt}");
+        assert_eq!(prompt.matches("- decided: ").count(), 1, "{prompt}");
+        let fix = Runner::fix_prompt(
+            &mut t,
+            &p,
+            &p.stages[1],
+            &a,
+            &round,
+            dir.path(),
+            None,
+            &dir.path().join("response.md"),
+            &p.operators["agent"],
+        );
+        assert!(fix.starts_with(&format!("Per {listed}.")), "{fix}");
+    }
+
+    #[test]
+    fn one_plan_reads_as_a_single_plan() {
+        let dir = tempfile::tempdir().unwrap();
+        let plan = dir.path().join("plan.md");
+        std::fs::write(&plan, "## Decisions\n\n- Keep X.\n").unwrap();
+        let one = [(None, &plan)];
+        let path = plan.display().to_string();
+        assert_eq!(plan_value(&one).as_deref(), Some(path.as_str()));
+        assert_eq!(
+            decided_text(&one, &Vars::default()),
+            Some(format!(
+                "The plan at {path} settled these decisions:\n\n- Keep X.\n\nA point that contests one of them is out of scope for this review: write it as \"- decided: <the decision>: why\" and it is listed as found but not done."
+            ))
+        );
+        // A lane's reader gets its plan unlabelled, but a label alone
+        // does not rename it either.
+        assert_eq!(
+            decided_text(&[(Some("A"), &plan)], &Vars::default()),
+            decided_text(&one, &Vars::default())
+        );
+        std::fs::write(&plan, "## Steps\n").unwrap();
+        assert_eq!(
+            decided_text(&one, &Vars::default()),
+            Some(format!("The plan at {path} lists no decisions."))
+        );
+        let missing = dir.path().join("missing.md");
+        assert_eq!(decided_text(&[(None, &missing)], &Vars::default()), None);
+        assert_eq!(plan_lines(&one), format!("\nThe plan: {path}\n"));
+        assert_eq!(plan_lines(&[]), "");
+        assert_eq!(plan_value(&[]), None);
+        let (a, b) = (PathBuf::from("/a.md"), PathBuf::from("/b.md"));
+        assert_eq!(
+            plan_lines(&[(Some("A"), &a), (Some("B"), &b)]),
+            "\nThe plans, one per lane:\n\n- A: /a.md\n- B: /b.md\n"
+        );
     }
 
     #[test]

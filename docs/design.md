@@ -2275,7 +2275,11 @@ names a per-lane file is refused when the pipeline loads. Dispatch's
 own reads of `plan` and `notes` follow the same lane rule: the refresh
 and remedy agents' plan, a lane's human gate's notes line, and the
 review workflow's plan (the reviewer's and the fixer's `{plan}`, the
-decisions section, the message rewriter's input). A root or joined
+decisions section, the message rewriter's input). A joined or root
+code review lists every lane's plan in all three when the newest plan
+writer runs per lane: `{plan}` is each lane's path with its lane in
+parentheses, the decisions come one block per lane, and the rewriter's
+input has one line per lane. A root or joined
 human gate, `show`, `report` and the port's `PathsView.plan_files` and
 `notes_files` list one file per lane when the newest writer runs per
 lane, and the one file otherwise; a lane's refresh notes stand in for
@@ -2295,10 +2299,11 @@ Known gaps:
   logs, if the agent prints the file. Only the path reaches a
   Switchboard record (`SessionRecord.env`); the contents reach these
   files only through the agent's own output.
-- A joined code review over a per-lane plan gets no `{plan}` and no
-  decisions section: `{plan}` is one path.
-- An agent launched before the lane rule keeps the plan path its
-  prompt was given, which may be another lane's.
+- A root pull-request remedy over per-lane plans gets no plan clause
+  (`plan_clause` is one path).
+- An agent launched before the lane rule, or before a joined review
+  listed every lane's plan, keeps the plan its prompt was given, which
+  may be another lane's or none.
 - A session launched before `{inputs.<stage>.<name>}` had its own
   `DISPATCH_INPUT_<STAGE>_<NAME>` keeps its old environment on resume:
   one `DISPATCH_INPUT_<NAME>`, which may hold the stage-qualified file.

@@ -17248,3 +17248,169 @@ fn a_park_asked_while_the_secrets_command_runs_deletes_it_once_cancelled() {
         ["personas deleted: attempt cancelled"]
     );
 }
+
+// --- a joined code review over per-lane plans: the reviewer and the
+// fixer are given every lane's plan.
+
+/// `WORKSPACE`'s lanes, planned and implemented per lane, then one
+/// code review of them all.
+const JOINED_REVIEW: &str = r#"
+version = 1
+
+[project]
+name = "Orchard"
+repo = "git@example.com:example-org/orchard-workspace.git"
+worktrees = "{worktrees}"
+space = "Dispatch · Orchard"
+
+[source]
+kind = "github"
+repo = "example-org/orchard-workspace"
+label = "dispatch"
+lane_hints = { "area:backend" = "backend", "area:frontend" = "frontend" }
+
+[[lanes]]
+name = "backend"
+path = "orchard-backend"
+repo = "git@example.com:example-org/orchard-backend.git"
+base = "main"
+setup = ["uv", "sync"]
+
+[[lanes]]
+name = "frontend"
+path = "orchard-frontend"
+repo = "git@example.com:example-org/orchard-frontend.git"
+base = "dev"
+setup = ["npm", "ci"]
+
+[operators.planner]
+kind = "claude"
+
+[operators.implementer]
+kind = "claude"
+
+[operators.style]
+kind = "claude"
+
+[[stages]]
+name = "lanes"
+gate = { kind = "human", decision = "lanes" }
+
+[[stages]]
+name = "plan"
+operator = "planner"
+context = "each"
+writes = ["plan"]
+prompt = "Plan in {worktree} ({lane}) on {branch} to {plan}."
+
+[[stages]]
+name = "implement"
+operator = "implementer"
+context = "each"
+writes = ["notes"]
+prompt = "Implement the {lane} part on {branch}; notes to {notes}."
+gate = { kind = "command", argv = ["sh", "-c", "check"] }
+
+[[stages]]
+name = "review-code"
+context = "joined"
+reviewers = ["style"]
+implementer = "implementer"
+gate = { kind = "command", like = "implement" }
+review_prompt = "Against {plan}."
+fix_prompt = "Per {plan}."
+
+[policy]
+slots = 2
+waiting_on_me = 3
+decisions = { lanes = "auto", review-code = "auto" }
+trust_folders = true
+"#;
+
+#[test]
+fn a_joined_review_over_lane_plans_names_every_plan() {
+    let mut env = Env::new();
+    let text = JOINED_REVIEW.replace("{worktrees}", &env.worktrees.display().to_string());
+    std::fs::write(env.data.pipeline("Orchard"), text).unwrap();
+    let id = take_orchard(&mut env, 42, BOTH);
+    env.steps_until(&id, "the planners", |t, _| {
+        t.attempts_of("plan")
+            .filter(|a| a.session.is_some() && a.is_open())
+            .count()
+            == 2
+    });
+    let t = env.ticket(&id);
+    let planners: Vec<Attempt> = t.attempts_of("plan").cloned().collect();
+    for a in planners {
+        env.finish(
+            a.session.as_deref().unwrap(),
+            &a.artifacts["plan"],
+            &format!("# Plan\n\n## Decisions\n- Keep {}.\n", a.context),
+        );
+    }
+    implementing(&mut env, &id);
+    let t = env.ticket(&id);
+    let open: Vec<Attempt> = t
+        .attempts_of("implement")
+        .filter(|a| a.is_open())
+        .cloned()
+        .collect();
+    for a in open {
+        env.finish(
+            a.session.as_deref().unwrap(),
+            &a.artifacts["notes"],
+            "# notes\ndone",
+        );
+    }
+    env.steps_until(&id, "each lane's checks", |t, _| {
+        t.attempts_of("implement")
+            .filter(|a| a.gate.is_some())
+            .count()
+            == 2
+    });
+    let t = env.ticket(&id);
+    for a in t.attempts_of("implement") {
+        env.repo
+            .lock()
+            .unwrap()
+            .check_exits
+            .insert(format!("{id}/implement/{}", a.n), 0);
+    }
+    env.steps_until(&id, "the joined review round", |t, _| {
+        t.attempts_of("review-code").last().is_some_and(|a| {
+            a.context == "joined"
+                && a.rounds
+                    .first()
+                    .is_some_and(|r| r.reviewers.iter().all(|x| x.session.is_some()))
+        })
+    });
+    let t = env.ticket(&id);
+    let plan = |lane: &str| {
+        t.attempts_of("plan")
+            .find(|a| a.context == lane)
+            .unwrap()
+            .artifacts["plan"]
+            .display()
+            .to_string()
+    };
+    let listed = format!(
+        "{} (backend), {} (frontend)",
+        plan("backend"),
+        plan("frontend")
+    );
+    let prompt = last_prompt_of(&env, "style");
+    assert!(prompt.contains(&format!("Against {listed}.")), "{prompt}");
+    let (backend, frontend) = (
+        prompt.find("Keep backend.").expect(&prompt),
+        prompt.find("Keep frontend.").expect(&prompt),
+    );
+    assert!(backend < frontend, "{prompt}");
+    style_says(&mut env, &id, 1, "- src/a.rs: unused import\n");
+    env.steps_until(&id, "the fixer", |t, _| {
+        t.attempts_of("review-code")
+            .last()
+            .is_some_and(|a| a.rounds[0].implementer.is_some())
+    });
+    let fix = last_prompt_of(&env, "implementer");
+    assert!(fix.contains(&format!("Per {listed}.")), "{fix}");
+}
