@@ -13098,19 +13098,203 @@ fn a_restart_is_refused_for_a_stage_after_the_current_one() {
     assert_eq!(env.ticket(&id), before, "nothing written");
 }
 
-/// A restart that discards work needs the heads recorded as the ticket
-/// entered the stage; a ticket taken before they were recorded has none.
+/// A live file that renames the current stage: the stage in its place is
+/// live-only and the stage after it is later than the current one, so
+/// the refusal names the current stage as missing, not as passed.
 #[test]
-fn a_ranged_restart_is_refused_without_an_entry() {
+fn a_restart_at_a_renamed_current_stage_says_the_live_file_lacks_it() {
     let mut env = Env::new();
-    let id = at_inspect(&mut env);
+    let (id, _) = at_implement(&mut env);
+    let before = env.ticket(&id);
+    live_edit(
+        &env,
+        "[[stages]]\nname = \"implement\"",
+        "[[stages]]\nname = \"build\"",
+    );
+    let e = restart_refused(&mut env, &id, Some("build"));
+    assert!(
+        e.contains("the live pipeline has no stage implement"),
+        "{e}"
+    );
+    assert!(!e.contains("comes after"), "{e}");
+    assert_eq!(env.ticket(&id), before, "nothing written");
+}
+
+/// Two commits the fake reports beyond `dir`'s base.
+fn seed_moved(env: &Env, dir: &std::path::Path) {
+    let c = |sha: &str| Commit {
+        sha: sha.into(),
+        parents: 1,
+        message: "work".into(),
+    };
+    env.repo
+        .lock()
+        .unwrap()
+        .commits
+        .insert(dir.to_path_buf(), vec![c("work0001"), c("work0002")]);
+}
+
+/// A ticket taken before entries were recorded: `at_finalize` with
+/// `entered` cleared.
+fn at_finalize_without_entries(env: &mut Env) -> String {
+    let id = at_finalize(env);
     let mut t = env.ticket(&id);
-    assert!(t.entered.iter().any(|e| e.stage == "implement"));
     t.entered.clear();
     dispatch::store::write_ticket(&env.data.ticket_file(&id), &t).unwrap();
-    let e = restart_refused(&mut env, &id, Some("implement"));
-    assert!(e.contains("no head is recorded for implement"), "{e}");
-    assert!(env.ticket(&id).active());
+    id
+}
+
+/// No head is recorded for `plan`, but no branch has moved from its
+/// base: the restart goes ahead without a reset, records the heads as
+/// it enters `plan`, and the rerun runs the edited plan prompt.
+#[test]
+fn a_ranged_restart_without_heads_proceeds_when_no_branch_moved() {
+    let mut env = Env::new();
+    let id = at_finalize_without_entries(&mut env);
+    let chosen: Vec<bool> = env.ticket(&id).lanes.iter().map(|l| l.chosen).collect();
+    live_edit(
+        &env,
+        "Using {inputs.notes}, plan",
+        "Using {inputs.notes}, carefully plan",
+    );
+    let planners = env.sb().sessions_named("planner").len();
+    let t = restart_at(&mut env, &id, Some("plan"));
+    assert!(t.active(), "{:?}", t.state);
+    assert_eq!(dispatch::events::stage_names(&t)[t.stage], "plan");
+    assert!(t.pipeline_file.ends_with("pipeline.2.toml"));
+    for a in t.attempts_of("plan") {
+        assert!(
+            matches!(&a.state, AttemptState::Cancelled { reason } if reason == "discarded by restart at plan"),
+            "{a:#?}"
+        );
+    }
+    assert!(
+        t.attempts_of("review")
+            .all(|a| a.state != AttemptState::Complete)
+    );
+    assert!(
+        t.decisions
+            .iter()
+            .filter(|d| d.name == "finalize")
+            .all(|d| d.state == DecisionState::Cancelled)
+    );
+    assert!(
+        t.decisions
+            .iter()
+            .all(|d| d.name != "lanes" || matches!(d.state, DecisionState::Answered { .. })),
+        "lanes is not asked again"
+    );
+    assert_eq!(t.lanes.iter().map(|l| l.chosen).collect::<Vec<_>>(), chosen);
+    assert!(t.restarts[0].reset.is_empty());
+    assert!(env.repo.lock().unwrap().resets.is_empty());
+    let tree = t.tree.clone().unwrap();
+    let entry = t.entered.last().unwrap();
+    assert_eq!(entry.stage, "plan");
+    assert_eq!(entry.heads["root"], env.repo.lock().unwrap().heads[&tree]);
+    env.step();
+    let d = rerun_about(&env, &id, "plan", 1);
+    answer(&mut env, &id, &d, "rerun");
+    env.steps_until(&id, "a second planner", |t, _| {
+        t.attempts_of("plan").any(Attempt::is_open)
+    });
+    assert_eq!(env.sb().sessions_named("planner").len(), planners + 1);
+    assert!(
+        last_prompt_of(&env, "planner").contains("carefully plan"),
+        "{}",
+        last_prompt_of(&env, "planner")
+    );
+}
+
+/// No head is recorded for `plan`, and an agent after it may have
+/// moved the tree: uncommitted changes and commits beyond the base are
+/// each refused by name, and nothing is written.
+#[test]
+fn a_ranged_restart_without_heads_is_refused_when_the_tree_moved() {
+    let mut env = Env::new();
+    let id = at_finalize_without_entries(&mut env);
+    let before = env.ticket(&id);
+    let tree = before.tree.clone().unwrap();
+    env.repo
+        .lock()
+        .unwrap()
+        .changes
+        .insert(tree.clone(), vec![PathBuf::from("src/lib.rs")]);
+    let e = restart_refused(&mut env, &id, Some("plan"));
+    assert!(e.contains("root has uncommitted changes in"), "{e}");
+    assert!(e.contains("src/lib.rs"), "{e}");
+    assert!(!e.contains("has moved"), "{e}");
+    assert_eq!(env.ticket(&id), before, "nothing written");
+    env.repo.lock().unwrap().changes.clear();
+    seed_moved(&env, &tree);
+    let e = restart_refused(&mut env, &id, Some("plan"));
+    assert!(e.contains("no head is recorded for plan"), "{e}");
+    assert!(e.contains("root has moved from its base"), "{e}");
+    assert_eq!(env.ticket(&id), before, "nothing written");
+}
+
+/// Without entries, a lane with a repository of its own that moved
+/// from its base is named in the refusal; the tree, still at its base,
+/// is not.
+#[test]
+fn a_ranged_restart_is_refused_when_a_lane_repo_moved_without_heads() {
+    let mut env = Env::new();
+    let text = two_lane_pipeline(&env.worktrees);
+    let id = two_lanes(&mut env, &text);
+    let lanes = two_lanes_checking(&mut env, &id);
+    {
+        let mut repo = env.repo.lock().unwrap();
+        for (_, _, key) in &lanes {
+            repo.check_exits.insert(key.clone(), 0);
+        }
+    }
+    env.steps_until(&id, "inspect", |t, _| {
+        t.pending_decisions().iter().any(|d| d.name == "inspect")
+    });
+    let mut t = env.ticket(&id);
+    t.entered.clear();
+    dispatch::store::write_ticket(&env.data.ticket_file(&id), &t).unwrap();
+    let docs = t.lanes[1].worktree.clone();
+    seed_moved(&env, &docs);
+    let before = env.ticket(&id);
+    let e = restart_refused(&mut env, &id, Some("plan"));
+    assert!(e.contains("docs has moved from its base"), "{e}");
+    assert!(!e.contains("root has moved"), "{e}");
+    assert_eq!(env.ticket(&id), before, "nothing written");
+}
+
+/// `implement` failed at its checks, and the live file adds `design`
+/// before it: a failed agent may have committed, so the tree is read,
+/// and the restart goes ahead only once it has nothing beyond its base.
+#[test]
+fn a_live_only_restart_after_a_failed_agent_reads_whether_the_tree_moved() {
+    let mut env = Env::new();
+    let id = implement_checks_127(&mut env);
+    let mut t = env.ticket(&id);
+    t.entered.clear();
+    dispatch::store::write_ticket(&env.data.ticket_file(&id), &t).unwrap();
+    live_edit(
+        &env,
+        "[[stages]]\nname = \"implement\"",
+        "[[stages]]\nname = \"design\"\noperator = \"planner\"\ncontext = \"each\"\nwrites = [\"design\"]\nprompt = \"Design to {design}.\"\n\n[[stages]]\nname = \"implement\"",
+    );
+    let tree = t.tree.clone().unwrap();
+    seed_moved(&env, &tree);
+    let before = env.ticket(&id);
+    let e = restart_refused(&mut env, &id, Some("design"));
+    assert!(e.contains("no head is recorded for design"), "{e}");
+    assert!(e.contains("root has moved from its base"), "{e}");
+    assert_eq!(env.ticket(&id), before, "nothing written");
+    env.repo.lock().unwrap().commits.clear();
+    let t = restart_at(&mut env, &id, Some("design"));
+    assert!(t.active(), "{:?}", t.state);
+    assert_eq!(dispatch::events::stage_names(&t)[t.stage], "design");
+    let r = &t.restarts[0];
+    assert_eq!((r.from.as_str(), r.to.as_str()), ("implement", "design"));
+    assert!(r.reset.is_empty(), "{r:#?}");
+    assert!(
+        r.discarded.is_empty(),
+        "the failed attempt was never complete"
+    );
 }
 
 /// `at_inspect` with the implementer's commit at `work0001`: the tree
@@ -13753,6 +13937,50 @@ fn a_restart_is_refused_ranged_on_a_pull_request_ticket() {
     assert!(t.pipeline_file.ends_with("pipeline.2.toml"));
 }
 
+/// A pull-request ticket cannot take a ranged restart, so the refusal
+/// for a stage added before its current one does not point at one.
+#[test]
+fn a_restart_at_the_current_stage_of_a_pull_request_ticket_does_not_point_at_a_ranged_restart() {
+    let mut env = Env::new();
+    let worktrees = env.data.root.join("wt");
+    std::fs::write(env.data.pr_pipeline(PROJECT), pr_pipeline(&worktrees)).unwrap();
+    open_pr(
+        &env,
+        "msull/switchboard",
+        9,
+        "feature/escape",
+        "Escape leaves the field",
+    );
+    open_pr(
+        &env,
+        "msull/docs",
+        3,
+        "feature/escape-docs",
+        "Document escape",
+    );
+    seed_pr_bases(&env);
+    let now = env.tick();
+    let t =
+        dispatch::serve::take_pull_requests(&mut env.runner, PROJECT, &["repo/9", "docs/3"], now)
+            .unwrap();
+    let id = t.id.clone();
+    for _ in 0..2 {
+        env.inspect(&id, "proceed", None);
+    }
+    env.steps_until(&id, "the merge stage", |t, _| t.stage == 1);
+    let text = pr_pipeline(&worktrees).replacen(
+        "[[stages]]\nname = \"merge\"",
+        "[[stages]]\nname = \"triage\"\ncontext = \"each\"\ngate = { kind = \"human\", decision = \"triage\" }\n\n[[stages]]\nname = \"merge\"",
+        1,
+    );
+    std::fs::write(env.data.pr_pipeline(PROJECT), text).unwrap();
+    let before = env.ticket(&id);
+    let e = restart_refused(&mut env, &id, None);
+    assert!(e.contains("adds triage before merge"), "{e}");
+    assert!(!e.contains("restart it at"), "{e}");
+    assert_eq!(env.ticket(&id), before, "nothing written");
+}
+
 /// An `each` code review with one lane finished and one failed at its
 /// checks: the finished lane is asked `rerun | park` (its fold and
 /// summary are done; checks that pass would rewrite it again), the
@@ -14223,6 +14451,85 @@ fn a_deploy_for_a_lane_not_chosen_is_skipped_and_reads_as_skipped() {
         question.contains("Served: frontend http://localhost:3100"),
         "{question}"
     );
+}
+
+/// The Orchard live file with an agent stage `deploy-check` added
+/// before `deploy`.
+fn live_deploy_check(env: &Env) {
+    let path = env.data.pipeline("Orchard");
+    let text = std::fs::read_to_string(&path).unwrap();
+    let from = "[[stages]]\nname = \"deploy\"";
+    assert!(text.contains(from));
+    let to = "[[stages]]\nname = \"deploy-check\"\noperator = \"tester\"\ncontext = \"lane:backend\"\nwrites = [\"notes\"]\nprompt = \"Check the deploy; notes to {notes}.\"\n\n[[stages]]\nname = \"deploy\"";
+    std::fs::write(path, text.replacen(from, to, 1)).unwrap();
+}
+
+/// A ticket parked at a failed `deploy`, taken before entries were
+/// recorded, whose lanes moved during the stages before it.
+fn parked_at_deploy_with_moved_lanes() -> (Env, String) {
+    let (mut env, id) = back_half_env(BOTH);
+    deploying(&mut env, &id);
+    exits(&env, &deploy_key(&id, 1), 1);
+    env.steps_until(&id, "the rerun question", |t, _| {
+        t.pending_decisions().iter().any(|d| d.name == "rerun")
+    });
+    answer_named(&mut env, &id, "rerun", "park");
+    env.step();
+    let mut t = env.ticket(&id);
+    assert!(is_parked(&t), "{t:#?}");
+    t.entered.clear();
+    dispatch::store::write_ticket(&env.data.ticket_file(&id), &t).unwrap();
+    for lane in ["backend", "frontend"] {
+        let dir = lane_tree(&env, &id, lane);
+        env.repo
+            .lock()
+            .unwrap()
+            .heads
+            .insert(dir.clone(), "work0001".into());
+        seed_moved(&env, &dir);
+    }
+    live_deploy_check(&env);
+    (env, id)
+}
+
+/// The live file adds an agent stage before the failed `deploy`: the
+/// ticket is put at it with nothing discarded and no branch reset, since
+/// the lanes moved before the target and only a gate-only attempt
+/// follows it.
+#[test]
+fn a_restart_can_target_a_stage_only_the_live_file_has() {
+    let (mut env, id) = parked_at_deploy_with_moved_lanes();
+    let t = restart_at(&mut env, &id, Some("deploy-check"));
+    assert!(t.active(), "{:?}", t.state);
+    assert_eq!(dispatch::events::stage_names(&t)[t.stage], "deploy-check");
+    let r = &t.restarts[0];
+    assert_eq!((r.from.as_str(), r.to.as_str()), ("deploy", "deploy-check"));
+    assert!(r.discarded.is_empty() && r.reset.is_empty(), "{r:#?}");
+    {
+        let repo = env.repo.lock().unwrap();
+        for lane in ["backend", "frontend"] {
+            assert_eq!(repo.heads[&lane_tree(&env, &id, lane)], "work0001");
+        }
+        assert!(repo.resets.is_empty());
+    }
+    env.steps_until(&id, "the deploy-check tester", |t, _| {
+        t.attempts_of("deploy-check").any(Attempt::is_open)
+    });
+    let sb = env.sb();
+    let tester = sb.sessions_named("tester");
+    assert_eq!(tester.last().unwrap().cwd, lane_tree(&env, &id, "backend"));
+}
+
+/// A restart at the current stage names the stage the live file adds
+/// before it, and the restart that would run it.
+#[test]
+fn a_restart_at_the_current_stage_names_the_stage_the_live_file_adds() {
+    let (mut env, id) = parked_at_deploy_with_moved_lanes();
+    let before = env.ticket(&id);
+    let e = restart_refused(&mut env, &id, None);
+    assert!(e.contains("adds deploy-check before deploy"), "{e}");
+    assert!(e.contains("restart it at deploy-check to run it"), "{e}");
+    assert_eq!(env.ticket(&id), before, "nothing written");
 }
 
 #[test]

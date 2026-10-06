@@ -253,12 +253,19 @@ an earlier one named, under a fresh copy of the project's live file
 before anything is written, and refused for a closing or closed ticket
 (that is a retake), for one still parking, for a live file that is
 missing, does not parse, names another project, lacks the stage, adds a
-stage before it that the ticket never ran, drops one of the ticket's
-lanes, or changes a lane's `path`, `repo`, `base` or `remote` or the
-project's `repo`, `base`, `remote` or `worktrees`, and for a stage after
-the current one. Then the intent is saved on the ticket together with
-`parking`, and the park sequence runs: open attempts cancelled, every
-process read back as gone. Only then, on that call or a later pass, does
+stage before it that the ticket never ran (the refusal says to restart
+at that stage, for a ticket that can take a ranged restart), drops one
+of the ticket's lanes, or changes a lane's `path`, `repo`, `base` or
+`remote` or the project's `repo`, `base`, `remote` or `worktrees`, and
+for a stage after the current one. A stage only the live file has may
+be the target when every live stage before it was run and the first
+live stage after it that the ticket has is its current stage or an
+earlier one: the ticket is put there, and the work from that following
+stage on is discarded, as for an earlier stage. When the live file
+lacks the current stage itself (renamed, say), the refusal says so
+rather than calling the target later. Then the intent is saved on the
+ticket together with `parking`, and the park sequence runs: open
+attempts cancelled, every process read back as gone. Only then, on that call or a later pass, does
 the restart apply; until it does, `dispatch restart` says the runner
 finishes it. Stages are mapped by name into the new copy, which is
 written beside the old ones as `pipeline.<n>.toml`; the first copy is
@@ -270,11 +277,21 @@ each branch (the ticket's tree, and each lane with a repository of its
 own) is reset with `git reset --keep` to the head it had as the ticket
 last advanced into that stage, with the lane's base, bring-up record
 and conflict put back as they were then. A ticket records those heads
-on every advance (`entered`); one taken before that has none, and a
-ranged restart of it is refused, as it is for a project that works in
-place and for a ticket from pull requests. Each branch is checked (on
-its branch, not mid-rebase, clean) before any moves, and each reset is
-saved as it lands; a refused one parks the ticket with git's reason and
+on every advance (`entered`). A reset is only needed when something
+after the target can have moved a branch: an agent, workflow or review
+attempt in the discarded range, in any state (a failed or cancelled
+agent may have committed), or a rebaser after the entry. Without a
+recorded head, a branch is left where it is when nothing after the
+target can have moved it, or when it has no commits beyond its base and
+a clean tree; otherwise the restart is refused, and the refusal names
+the branch and says whether it moved, has uncommitted changes, is
+mid-rebase, is off its branch, or could not be read. This rests on an
+assumption: a gate-only stage's command is taken not to commit, so its
+attempt does not count, and a commit such a command does make is kept
+and recorded in the new entry. A ranged restart is refused for a
+project that works in place and for a ticket from pull requests. Each
+branch is checked (on its branch, not mid-rebase, clean) before any
+moves, and each reset is saved as it lands; a refused one parks the ticket with git's reason and
 the intent kept, `resume` refuses while a restart is held, and
 `dispatch restart` again carries it on. A restart at the current stage
 discards that stage's completed attempts too, gate-only ones included,
@@ -2460,7 +2477,13 @@ and one against the real one:
 | A restart while the stage's checks ignore TERM | The ticket stays `parking` with the intent until they are gone, then the restart applies (`a_restart_waits_for_running_checks_then_applies`) |
 | `dispatch restart` on a ticket still parking without a restart | Refused with "still parking"; nothing written (`a_restart_is_refused_while_still_parking`) |
 | Git refuses a ranged restart's reset | The ticket parks with git's reason and the intent kept; `resume` is refused while it is held; `dispatch restart` again finishes it (`a_reset_refused_by_git_keeps_the_intent_and_resume_refuses`) |
-| A ranged restart of a ticket taken before version 12 | Refused: no head is recorded for the stage; the ticket stays active (`a_ranged_restart_is_refused_without_an_entry`) |
+| A ranged restart without entries, after an agent, with no branch moved | Goes ahead with no reset; the new entry records the current heads, and the rerun runs the edited prompt (`a_ranged_restart_without_heads_proceeds_when_no_branch_moved`) |
+| The same, with the tree dirty or ahead of its base | Refused, naming `root` and its changed paths, or `root` as moved; nothing written (`a_ranged_restart_without_heads_is_refused_when_the_tree_moved`) |
+| The same, with a lane's own repository ahead of its base | Refused, naming that lane and not the tree; nothing written (`a_ranged_restart_is_refused_when_a_lane_repo_moved_without_heads`) |
+| A restart at a stage only the live file adds, before a failed gate-only stage | The ticket is put at it, nothing discarded, no branch reset; its agent runs in its lane (`a_restart_can_target_a_stage_only_the_live_file_has`) |
+| A restart at the current stage when the live file adds a stage before it | Refused, naming the added stage and saying to restart at it (`a_restart_at_the_current_stage_names_the_stage_the_live_file_adds`) |
+| The same on a ticket from pull requests | Refused without pointing at a ranged restart (`a_restart_at_the_current_stage_of_a_pull_request_ticket_does_not_point_at_a_ranged_restart`) |
+| A restart at a live-only stage after a failed agent, without entries | The tree is read: refused while it is ahead of its base, then goes ahead with nothing discarded (`a_live_only_restart_after_a_failed_agent_reads_whether_the_tree_moved`) |
 | A ranged restart of a ticket from pull requests | Refused: someone else's branches are never reset; only its current stage restarts (`a_restart_is_refused_ranged_on_a_pull_request_ticket`) |
 | A restart, `check` fails under the new copy, then a rerun fails, with `max_reruns = 1` | Two failures under the new copy: the ticket parks; failures under the old copy are not counted (`a_checked_attempt_failing_under_the_new_copy_counts_toward_max_reruns`, `failures_under_the_old_copy_do_not_count_toward_max_reruns`) |
 | `status` and `queue` list a pull-request ticket | Its source reads `pr <lane>/<n>` (lanes joined by `+`), never `#<n>`, so it cannot be mistaken for the issue of that number; piping either command into `head` ends quietly |

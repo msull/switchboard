@@ -1794,12 +1794,18 @@ on active tickets still run under a step's lock.
 `dispatch restart <ticket> [<stage>]` (`src/restart.rs`) gives a
 ticket a fixed pipeline: it puts the ticket at its stage, or an earlier
 one, under a fresh copy of the live file (`pipeline.<n>.toml`, the
-first copy never rewritten), with stages mapped by name. The intent
+first copy never rewritten), with stages mapped by name. The target
+may be a stage only the live file has, when every live stage before it
+was run; the work from the stage after it on is discarded. The intent
 rides on the park sequence, so nothing moves until every process is
 read back as gone. A ranged restart cancels the later completed work as
 discarded and resets each branch with `git reset --keep` to the head
 recorded as the ticket last advanced into that stage (`entered`, record
-version 12), restoring the lane's base and bring-up record; each reset
+version 12), restoring the lane's base and bring-up record. Without a
+recorded head, a branch stays where it is when nothing after the target
+(an agent, workflow or review attempt in the range, or a rebaser after
+the entry) can have moved it, or when it is at its base with a clean
+tree; a gate-only command is assumed not to commit. Each reset
 is saved as it lands, and a refusal holds the restart parked with its
 intent, which `resume` will not drop. A lane whose `setup` changed runs
 it again, before a `check` answer's checks too, failing the checks
@@ -1808,8 +1814,8 @@ question is answered, and attempts whose checks may be run again under
 the new copy are offered `check`. Gaps: no port body or Switchboard
 button yet (the CLI only); a ranged restart asks `rerun` again at each
 later agent stage it reaches, since those attempts are discarded too;
-and a ticket taken before version 12 has no entries, so it can only be
-restarted at its current stage.
+and a ticket without entries can be restarted earlier only where no
+branch moved after the target.
 
 ## Global workspace status (2026-10-01)
 
