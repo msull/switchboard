@@ -19,8 +19,8 @@ use crate::pipeline::{Gate, OperatorKind, Pipeline, Stage};
 use crate::scheduler::{
     Ask, DirtyStep, GateStop, NO_SUCH_SESSION, RESOLUTION, Runner, SocketDown, asks_again, busy,
     checks_env, confine_for, dirty_step, env_for, find_attempt, find_attempt_mut, gate_network,
-    guidance_prelude, held_in, idle_polls, lane_gate_argv, latest_attempt, may_rerun, new_attempt,
-    next_n, primary_tree, record_of, rework_key, sent_back, session_kind, settle_file,
+    guidance_prelude, held_in, idle_polls, lane_gate_argv, lane_plan, latest_attempt, may_rerun,
+    new_attempt, next_n, primary_tree, record_of, rework_key, sent_back, session_kind, settle_file,
     stopped_after_nudges, vars_for,
 };
 use crate::template::Vars;
@@ -515,7 +515,7 @@ impl Runner {
                     .clone()
                     .unwrap_or_else(|| NO_FINDINGS.to_owned()),
             );
-        if let Some(plan) = t.input("plan") {
+        if let Some(plan) = lane_plan(t, p, lane) {
             vars.set("plan", plan.display().to_string());
         }
         let previous = a.rounds.iter().rev().find(|x| x.n < round.n);
@@ -552,7 +552,7 @@ impl Runner {
             prompt.push_str("\n\n");
             prompt.push_str(&rebased_text(moved));
         }
-        if let Some(plan) = t.input("plan")
+        if let Some(plan) = lane_plan(t, p, lane)
             && let Ok(text) = std::fs::read_to_string(plan)
         {
             prompt.push_str("\n\n");
@@ -1269,7 +1269,7 @@ impl Runner {
                     .unwrap_or_default(),
             )
             .set("response", response.display().to_string());
-        if let Some(plan) = t.input("plan") {
+        if let Some(plan) = lane_plan(t, p, lane) {
             vars.set("plan", plan.display().to_string());
         }
         let mut prompt = guidance_prelude(&op.guidance, &vars);
@@ -2486,7 +2486,7 @@ impl Runner {
                 responses.join("\n")
             );
         }
-        if let Some(plan) = t.input("plan") {
+        if let Some(plan) = lane_plan(t, p, lane) {
             let _ = write!(input, "\nThe plan: {}\n", plan.display());
         }
         let path = dir.join("input.md");
@@ -4209,6 +4209,70 @@ mod tests {
             started_ms: 0,
             ended_ms: None,
         }
+    }
+
+    #[test]
+    fn a_lanes_reviewer_is_given_its_own_lanes_plan_and_decisions() {
+        let p = crate::pipeline::two_lanes(
+            r#"
+[operators.style]
+kind = "claude"
+
+[[stages]]
+name = "plan"
+operator = "agent"
+context = "each"
+writes = ["plan"]
+prompt = "Write {plan}."
+
+[[stages]]
+name = "review-code"
+context = "each"
+reviewers = ["style"]
+implementer = "agent"
+gate = { kind = "command", argv = ["true"] }
+"#,
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let mut t = crate::ticket::blank();
+        for lane in ["A", "B"] {
+            let plan = dir.path().join(format!("plan-{lane}.md"));
+            std::fs::write(&plan, format!("## Decisions\n\n- Keep {lane}.\n")).unwrap();
+            t.attempts.push(new_attempt(
+                "plan",
+                1,
+                lane,
+                AttemptKind::Agent,
+                AttemptState::Complete,
+                BTreeMap::from([("plan".to_owned(), plan)]),
+                0,
+            ));
+        }
+        let a = new_attempt(
+            "review-code",
+            1,
+            "A",
+            AttemptKind::Workflow,
+            AttemptState::Running,
+            BTreeMap::new(),
+            0,
+        );
+        let mut round = round_said(dir.path(), "");
+        round.n = 1;
+        let prompt = Runner::reviewer_prompt(
+            &t,
+            &p,
+            &p.stages[1],
+            &a,
+            &round,
+            &round.reviewers[0],
+            dir.path(),
+            Some("A"),
+        );
+        assert!(prompt.contains("plan-A.md"), "{prompt}");
+        assert!(prompt.contains("Keep A."), "{prompt}");
+        assert!(!prompt.contains("plan-B.md"), "{prompt}");
+        assert!(!prompt.contains("Keep B."), "{prompt}");
     }
 
     #[test]

@@ -7519,7 +7519,8 @@ fn a_style_only_round_three_converges_and_leaves_the_point_to_the_merge() {
     let after = summary.find("## Found but not done").unwrap();
     assert!(left < point && point < after, "{summary}");
     // `show` points at the summary and at the last round's findings.
-    let paths = dispatch::serve::ticket_paths(&env.ticket(&id));
+    let t = env.ticket(&id);
+    let paths = dispatch::serve::ticket_paths(&t, env.runner.pipeline_of(&t).ok().as_ref());
     assert_eq!(paths.review_summary.as_ref(), Some(&a.artifacts["summary"]));
     assert_eq!(paths.round_file, a.rounds[2].feedback);
 }
@@ -11909,9 +11910,10 @@ fn show_points_at_the_plan_the_notes_and_the_pr() {
             .is_some_and(|a| a.pr.is_some())
     });
     let t = env.ticket(&id);
-    let mut view = dispatch::serve::ticket_view(&t, env.runner.pipeline_of(&t).ok().as_ref());
+    let pipeline = env.runner.pipeline_of(&t).ok();
+    let mut view = dispatch::serve::ticket_view(&t, pipeline.as_ref());
     assert_eq!(view.paths, dispatch_control::PathsView::default());
-    view.paths = dispatch::serve::ticket_paths(&t);
+    view.paths = dispatch::serve::ticket_paths(&t, pipeline.as_ref());
     assert_eq!(
         view.paths.pr_url.as_deref(),
         Some("https://github.com/msull/switchboard/pull/7")
@@ -13415,6 +13417,84 @@ fn two_lanes(env: &mut Env, pipeline_text: &str) -> String {
         t.attempts_of("implement").filter(|a| a.is_open()).count() == 2
     });
     id
+}
+
+/// Two lanes plan, and the `repo` lane's branch is behind its base with
+/// a rebase that conflicts: the rebaser is given the `repo` lane's plan,
+/// though the `docs` lane's plan finished later.
+#[test]
+fn a_lanes_rebaser_is_given_its_own_lanes_plan() {
+    let mut env = Env::new();
+    let text = two_lane_pipeline(&env.worktrees)
+        .replace(
+            "[operators.implementer]\n",
+            "[operators.rebaser]\nkind = \"claude\"\n\n[operators.implementer]\n",
+        )
+        .replace("[policy]\n", "[policy]\nrebaser = \"rebaser\"\n");
+    std::fs::write(env.data.pipeline(PROJECT), text).unwrap();
+    let id = env.take(21).id;
+    env.steps_until(&id, "the lanes question", |t, _| {
+        t.pending_decisions().iter().any(|d| d.name == "lanes")
+    });
+    let d = env
+        .pending(&id)
+        .into_iter()
+        .find(|d| d.name == "lanes")
+        .unwrap();
+    answer(&mut env, &id, &d, "repo,docs");
+    env.steps_until(&id, "both planners", |t, _| {
+        t.attempts_of("plan").filter(|a| a.is_open()).count() == 2
+    });
+    let t = env.ticket(&id);
+    let tree = t
+        .lanes
+        .iter()
+        .find(|l| l.name == "repo")
+        .unwrap()
+        .worktree
+        .clone();
+    {
+        let mut repo = env.repo.lock().unwrap();
+        repo.bases
+            .insert(env.runner.data.repo_dir(PROJECT), "main0002".into());
+        repo.behind.insert(tree.clone(), 2);
+        repo.rebase_conflicts.push(tree);
+    }
+    let plan_of = |lane: &str| {
+        t.attempts_of("plan")
+            .find(|a| a.context == lane)
+            .unwrap()
+            .clone()
+    };
+    let (repo_plan, docs_plan) = (plan_of("repo"), plan_of("docs"));
+    let place = |a: &Attempt| t.attempts.iter().position(|x| x == a).unwrap();
+    assert!(
+        place(&docs_plan) > place(&repo_plan),
+        "docs's plan is the newest, so a lane-blind read hands it to repo"
+    );
+    for a in [&repo_plan, &docs_plan] {
+        env.finish(a.session.as_ref().unwrap(), &a.artifacts["plan"], "# plan");
+    }
+    env.steps_until(&id, "the rebaser", |t, _| {
+        t.attempts_of(dispatch::scheduler::REFRESH)
+            .any(|a| a.session.is_some())
+    });
+    let prompt = env
+        .sb()
+        .calls
+        .iter()
+        .rev()
+        .find_map(|r| match &r.body {
+            Body::SessionClone { prompt, name, .. } if name == "rebaser" => Some(prompt.clone()),
+            _ => None,
+        })
+        .unwrap();
+    let path = |a: &Attempt| a.artifacts["plan"].display().to_string();
+    assert!(
+        prompt.contains(&format!("(the plan is at {})", path(&repo_plan))),
+        "{prompt}"
+    );
+    assert!(!prompt.contains(&path(&docs_plan)), "{prompt}");
 }
 
 /// Both implementers stop and their checks start; each lane's attempt
@@ -15804,8 +15884,9 @@ fn a_secret_artifact_is_private_and_never_read_into_a_view_a_report_or_the_log()
         & 0o777;
     assert_eq!(dir_mode, 0o700);
     let t = env.ticket(&id);
-    let mut view = dispatch::serve::ticket_view(&t, env.runner.pipeline_of(&t).ok().as_ref());
-    view.paths = dispatch::serve::ticket_paths(&t);
+    let pipeline = env.runner.pipeline_of(&t).ok();
+    let mut view = dispatch::serve::ticket_view(&t, pipeline.as_ref());
+    view.paths = dispatch::serve::ticket_paths(&t, pipeline.as_ref());
     let attempt = view
         .attempts
         .iter()
@@ -15816,6 +15897,7 @@ fn a_secret_artifact_is_private_and_never_read_into_a_view_a_report_or_the_log()
     assert!(!shown.contains(TOKEN));
     let report = dispatch::report::of(
         &t,
+        pipeline.as_ref(),
         &dispatch::events::stage_names(&t),
         &|p| std::fs::read_to_string(p).ok(),
         None,

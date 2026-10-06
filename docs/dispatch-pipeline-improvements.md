@@ -349,8 +349,8 @@ launched the next agent into a tree still mid-rebase (#58, built: the
 stage holds on a `recheck | park` question until the rebase is finished
 or aborted by hand), `wait` bunching and `--for move` (#100, built:
 both shapes), the orphaned command reviewer and the leaderless check
-(#101), Dispatch's own lane-blind reads (#102), the runner restart from
-away from the Mac (#103).
+(#101), Dispatch's own lane-blind reads (#102, built), the runner
+restart from away from the Mac (#103).
 
 - **A look at the work before the PR opens.** #71 produced screenshots
   of the new ticket page, but only after the PR was open, and the two
@@ -475,7 +475,10 @@ away from the Mac (#103).
   over more than one lane, a lane can be handed another lane's plan.
   Each read is fixed with `Ticket::input_where` and the reader's lane;
   `report` and `serve` have no lane and need a rule of their own.
-  Listed as a known gap in design.md. Seen in #98's plan.
+  Listed as a known gap in design.md. Seen in #98's plan. Issue #102,
+  built: each read takes the reader's lane, and a reader with no lane
+  (a root or joined gate, `show`, `report`, the port) lists one file
+  per lane when the newest writer runs per lane.
 - **The README's test-times table is stale.** It records the serial
   run just after #48 (55.9 s, 791 tests). On 2026-10-05 after #94 the
   same script gives 102.7 s for 1093 tests: `first_slice` 73 s (318

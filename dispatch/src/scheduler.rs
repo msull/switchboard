@@ -1399,10 +1399,7 @@ impl Runner {
             .get(operator)
             .map_or("", |o| o.guidance.as_str());
         let mut prompt = guidance_prelude(guidance, &vars);
-        let plan = t
-            .input("plan")
-            .map(|plan| format!(" (the plan is at {})", plan.display()))
-            .unwrap_or_default();
+        let plan = plan_clause(t, p, Some(&name));
         let checks = p
             .stages
             .iter()
@@ -3418,7 +3415,7 @@ impl Runner {
                     return Ok(());
                 }
                 let all: Vec<&str> = p.lanes.iter().map(|l| l.name.as_str()).collect();
-                let notes = t.input("notes").map(|n| n.display().to_string());
+                let notes = lane_input(t, p, None, "notes").map(|(_, n)| n.display().to_string());
                 let question = format!(
                     "Which lanes does #{} need? Lanes: {}.{}",
                     t.source.number.unwrap_or(0),
@@ -3978,9 +3975,7 @@ impl Runner {
             }
         }
         let _ = write!(q, "\n\nTree: {}", cwd.display());
-        if let Some((stage, notes)) = t.input_with_stage("notes") {
-            let _ = write!(q, "\nNotes ({stage}): {}", notes.display());
-        }
+        q.push_str(&notes_line(t, p, lane));
         q.push_str(&deployed_and_served(t, p));
         Ok(q)
     }
@@ -4795,10 +4790,7 @@ impl Runner {
         let mut vars = vars_for(t, p, lane);
         vars.set("notes", notes.display().to_string());
         let mut prompt = guidance_prelude(&p.operators[&operator].guidance, &vars);
-        let plan = t
-            .input("plan")
-            .map(|plan| format!(" (the plan is at {})", plan.display()))
-            .unwrap_or_default();
+        let plan = plan_clause(t, p, lane);
         let branch = lane_record.map_or("", |l| l.branch.as_str());
         let _ = write!(
             prompt,
@@ -8189,7 +8181,7 @@ pub(crate) fn vars_for(t: &Ticket, p: &Pipeline, lane: Option<&str>) -> Vars {
     }
     let names: BTreeSet<&String> = t.attempts.iter().flat_map(|a| a.artifacts.keys()).collect();
     for name in names {
-        if let Some((_, path)) = t.input_where(name, |a| visible(p, lane, a)) {
+        if let Some((_, path)) = lane_input(t, p, lane, name) {
             vars.set(format!("inputs.{name}"), path.display().to_string());
         }
     }
@@ -8252,6 +8244,94 @@ fn visible(p: &Pipeline, lane: Option<&str>, a: &Attempt) -> bool {
         Some(s) => !s.runs_per_lane() || own,
         None => a.context == "root" || a.context == "joined" || own,
     }
+}
+
+/// The newest completed `name` a reader in `lane` sees, with its stage:
+/// the rule `vars_for` and Dispatch's own prompts share.
+pub(crate) fn lane_input<'a>(
+    t: &'a Ticket,
+    p: &Pipeline,
+    lane: Option<&str>,
+    name: &str,
+) -> Option<(&'a str, &'a PathBuf)> {
+    t.input_where(name, |a| visible(p, lane, a))
+}
+
+/// The newest completed plan a reader in `lane` sees.
+pub(crate) fn lane_plan<'a>(
+    t: &'a Ticket,
+    p: &Pipeline,
+    lane: Option<&str>,
+) -> Option<&'a PathBuf> {
+    lane_input(t, p, lane, "plan").map(|(_, plan)| plan)
+}
+
+/// `name` for a reader with no lane: one file per lane, labelled with
+/// it, when its newest writer runs per lane, else the newest one. Each
+/// lane's file is the newest in its own context from any stage that runs
+/// per lane, so a fixer's notes in one lane leave the others' earlier
+/// notes listed. Lanes with none are left out. A lane's refresh notes
+/// never stand in for the whole ticket's, as under `visible`.
+pub(crate) fn lane_files<'a>(
+    t: &'a Ticket,
+    p: Option<&Pipeline>,
+    name: &str,
+) -> Vec<(Option<&'a str>, &'a str, &'a PathBuf)> {
+    let Some(p) = p else {
+        return t
+            .input_with_stage(name)
+            .map(|(stage, path)| vec![(None, stage, path)])
+            .unwrap_or_default();
+    };
+    let stage_of = |a: &Attempt| p.stages.iter().find(|s| s.name == a.stage);
+    let Some((stage, path)) = t.input_where(name, |a| {
+        stage_of(a).is_some() || a.context == "root" || a.context == "joined"
+    }) else {
+        return Vec::new();
+    };
+    if !p
+        .stages
+        .iter()
+        .find(|s| s.name == stage)
+        .is_some_and(Stage::runs_per_lane)
+    {
+        return vec![(None, stage, path)];
+    }
+    p.lanes
+        .iter()
+        .filter_map(|l| t.lanes.iter().find(|x| x.name == l.name))
+        .filter_map(|l| {
+            t.input_where(name, |a| {
+                a.context == l.name && stage_of(a).is_none_or(Stage::runs_per_lane)
+            })
+            .map(|(s, path)| (Some(l.name.as_str()), s, path))
+        })
+        .collect()
+}
+
+/// The plan clause of a refresh rebaser's or a fixer's prompt: the plan
+/// a reader in `lane` sees, or nothing.
+pub(crate) fn plan_clause(t: &Ticket, p: &Pipeline, lane: Option<&str>) -> String {
+    lane_plan(t, p, lane)
+        .map(|plan| format!(" (the plan is at {})", plan.display()))
+        .unwrap_or_default()
+}
+
+/// A human gate's notes lines: in a lane, the notes it sees; with none,
+/// every lane's notes when their newest writer runs per lane.
+pub(crate) fn notes_line(t: &Ticket, p: &Pipeline, lane: Option<&str>) -> String {
+    if lane.is_some() {
+        return lane_input(t, p, lane, "notes")
+            .map(|(stage, notes)| format!("\nNotes ({stage}): {}", notes.display()))
+            .unwrap_or_default();
+    }
+    lane_files(t, Some(p), "notes")
+        .into_iter()
+        .map(|(l, stage, notes)| match l {
+            Some(l) => format!("\nNotes ({stage}, {l}): {}", notes.display()),
+            None => format!("\nNotes ({stage}): {}", notes.display()),
+        })
+        .collect()
 }
 
 /// What a human gate after a deploy or with services up adds: the
@@ -9311,31 +9391,8 @@ gate = { kind = "human", decision = "each" }
     /// `implement` both write `notes`, a per-lane gate-only `deploy`
     /// records a head, and a per-lane `read` names them.
     fn lanes_pipeline() -> Pipeline {
-        Pipeline::parse(
+        crate::pipeline::two_lanes(
             r#"
-version = 1
-
-[project]
-name = "P"
-repo = "git@example.com:o/p.git"
-space = "Dispatch · P"
-
-[source]
-kind = "github"
-repo = "o/p"
-label = "dispatch"
-
-[[lanes]]
-name = "A"
-path = "a"
-
-[[lanes]]
-name = "B"
-path = "b"
-
-[operators.agent]
-kind = "claude"
-
 [[stages]]
 name = "investigate"
 operator = "agent"
@@ -9362,7 +9419,6 @@ context = "each"
 prompt = "Read {inputs.notes} and {inputs.implement.notes} at {inputs.deploy.commit}."
 "#,
         )
-        .unwrap()
     }
 
     /// A ticket at the `read` stage holding `attempts`, each a stage,
@@ -9382,6 +9438,206 @@ prompt = "Read {inputs.notes} and {inputs.implement.notes} at {inputs.deploy.com
             ));
         }
         t
+    }
+
+    /// `lanes_pipeline()` with a root `outline` and a per-lane `plan`,
+    /// both writing `plan`, ahead of its stages.
+    fn plan_pipeline() -> Pipeline {
+        crate::pipeline::two_lanes(
+            r#"
+[[stages]]
+name = "outline"
+operator = "agent"
+context = "root"
+writes = ["plan"]
+prompt = "Write {plan}."
+
+[[stages]]
+name = "plan"
+operator = "agent"
+context = "each"
+writes = ["plan"]
+prompt = "Write {plan}."
+
+[[stages]]
+name = "investigate"
+operator = "agent"
+context = "root"
+writes = ["notes"]
+prompt = "Write {notes}."
+
+[[stages]]
+name = "implement"
+operator = "agent"
+context = "each"
+writes = ["notes"]
+prompt = "Write {notes}."
+"#,
+        )
+    }
+
+    /// A ticket holding `attempts` (a stage, a context, the path it
+    /// wrote `name` to, oldest first) and lane records cut in `lanes`'s
+    /// order.
+    fn lanes_ticket(name: &str, attempts: &[(&str, &str, &str)], lanes: &[&str]) -> Ticket {
+        let mut t = crate::ticket::blank();
+        for (i, (stage, ctx, path)) in attempts.iter().enumerate() {
+            t.attempts.push(new_attempt(
+                stage,
+                u32::try_from(i).unwrap() + 1,
+                ctx,
+                AttemptKind::Agent,
+                AttemptState::Complete,
+                BTreeMap::from([(name.to_owned(), PathBuf::from(path))]),
+                0,
+            ));
+        }
+        for lane in lanes {
+            t.lanes.push(crate::ticket::chosen_lane(lane));
+        }
+        t
+    }
+
+    fn listed(files: &[(Option<&str>, &str, &PathBuf)]) -> Vec<(Option<String>, String, String)> {
+        files
+            .iter()
+            .map(|(l, s, p)| {
+                (
+                    l.map(str::to_owned),
+                    (*s).to_owned(),
+                    p.display().to_string(),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_lanes_plan_clause_names_its_own_lanes_plan() {
+        let p = plan_pipeline();
+        let t = lanes_ticket(
+            "plan",
+            &[("plan", "A", "/plan-a.md"), ("plan", "B", "/plan-b.md")],
+            &["A", "B"],
+        );
+        let a = plan_clause(&t, &p, Some("A"));
+        assert!(a.contains("/plan-a.md") && !a.contains("/plan-b.md"), "{a}");
+        // A joined reader sees neither lane's.
+        assert_eq!(plan_clause(&t, &p, None), "");
+        let t = lanes_ticket("plan", &[("outline", "root", "/plan.md")], &["A", "B"]);
+        for lane in ["A", "B"] {
+            assert_eq!(
+                plan_clause(&t, &p, Some(lane)),
+                " (the plan is at /plan.md)"
+            );
+        }
+    }
+
+    #[test]
+    fn a_lanes_gate_names_its_own_lanes_notes() {
+        let p = plan_pipeline();
+        let t = lanes_ticket(
+            "notes",
+            &[("implement", "A", "/a.md"), ("implement", "B", "/b.md")],
+            &["A", "B"],
+        );
+        assert_eq!(notes_line(&t, &p, Some("A")), "\nNotes (implement): /a.md");
+    }
+
+    #[test]
+    fn a_root_gate_lists_every_lanes_notes_after_a_per_lane_writer() {
+        let p = plan_pipeline();
+        let t = lanes_ticket(
+            "notes",
+            &[
+                ("investigate", "root", "/inv.md"),
+                ("implement", "A", "/a.md"),
+                ("implement", "B", "/b.md"),
+            ],
+            &["A", "B"],
+        );
+        assert_eq!(
+            notes_line(&t, &p, None),
+            "\nNotes (implement, A): /a.md\nNotes (implement, B): /b.md"
+        );
+        let t = lanes_ticket("notes", &[("investigate", "root", "/inv.md")], &["A", "B"]);
+        assert_eq!(notes_line(&t, &p, None), "\nNotes (investigate): /inv.md");
+    }
+
+    #[test]
+    fn a_lanes_refresh_notes_stand_in_for_that_lane_only() {
+        let p = plan_pipeline();
+        let t = lanes_ticket(
+            "notes",
+            &[
+                ("implement", "A", "/a.md"),
+                ("implement", "B", "/b.md"),
+                (REFRESH, "A", "/refresh-a.md"),
+            ],
+            &["A", "B"],
+        );
+        assert_eq!(
+            listed(&lane_files(&t, Some(&p), "notes")),
+            [
+                (Some("A".into()), REFRESH.into(), "/refresh-a.md".into()),
+                (Some("B".into()), "implement".into(), "/b.md".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn lane_files_leave_out_a_forgotten_plan_and_keep_pipeline_order() {
+        let p = plan_pipeline();
+        let mut t = lanes_ticket(
+            "plan",
+            &[("plan", "A", "/plan-a.md"), ("plan", "B", "/plan-b.md")],
+            &["B", "A"],
+        );
+        assert_eq!(
+            listed(&lane_files(&t, Some(&p), "plan")),
+            [
+                (Some("A".into()), "plan".into(), "/plan-a.md".into()),
+                (Some("B".into()), "plan".into(), "/plan-b.md".into()),
+            ]
+        );
+        t.attempts[0].forgotten.insert(
+            "plan".into(),
+            crate::ticket::Forgotten {
+                at_ms: 1,
+                why: "closed".into(),
+            },
+        );
+        assert_eq!(
+            listed(&lane_files(&t, Some(&p), "plan")),
+            [(Some("B".into()), "plan".into(), "/plan-b.md".into())]
+        );
+        // With no pipeline, the newest one, as before.
+        assert_eq!(
+            listed(&lane_files(&t, None, "plan")),
+            [(None, "plan".into(), "/plan-b.md".into())]
+        );
+    }
+
+    #[test]
+    fn lane_files_keep_a_lanes_older_notes_when_another_lane_has_newer() {
+        // A fixer's remedy in lane A records notes under a per-lane stage
+        // lane B never ran.
+        let p = plan_pipeline();
+        let t = lanes_ticket(
+            "notes",
+            &[
+                ("implement", "A", "/impl-a.md"),
+                ("implement", "B", "/impl-b.md"),
+                ("plan", "A", "/fix-a.md"),
+            ],
+            &["A", "B"],
+        );
+        assert_eq!(
+            listed(&lane_files(&t, Some(&p), "notes")),
+            [
+                (Some("A".into()), "plan".into(), "/fix-a.md".into()),
+                (Some("B".into()), "implement".into(), "/impl-b.md".into()),
+            ]
+        );
     }
 
     fn field(v: &Vars, key: &str) -> Option<String> {
