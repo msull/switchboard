@@ -1735,6 +1735,9 @@ it; when the ticket has a plan, its decisions section (a heading whose
 title, after an optional number, starts with "Decisions") as settled,
 with how to write a `decided:` point, or that the plan lists none (an
 unreadable plan file adds nothing); and how to tag a `style:` point.
+For a joined or root review over per-lane plans, `{plan}` is each
+lane's plan path followed by its lane in parentheses, in pipeline
+order, and the decisions text comes one block per lane.
 A command reviewer gets no prompt: its points are untagged and hold the
 round open.
 
