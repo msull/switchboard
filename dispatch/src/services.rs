@@ -1,7 +1,8 @@
 //! A stage's resources and services. A ticket takes a hold on each
-//! `[[resources]]` entry its stage `needs` on entering the range of
-//! stages that need it, and drops it the pass after it leaves, once the
-//! services started inside the range are confirmed stopped. A stage's
+//! `[[resources]]` entry its stage `needs` on entering a run of
+//! consecutive stages that need it, and drops it the pass after it
+//! leaves the run, once the services started inside it are confirmed
+//! stopped; a later run takes it again. A stage's
 //! `services` are the lanes it serves: the lane's `before` as a child of
 //! the runner, a free port, a Switchboard service session launched with
 //! the port in its environment, and the readiness probe. Both live on
@@ -130,10 +131,29 @@ impl Runner {
             return Ok(true);
         }
         let needs: &[String] = p.stages.get(t.stage).map_or(&[], |s| s.needs.as_slice());
-        let (kept, dropped): (Vec<Hold>, Vec<Hold>) =
+        let (mut kept, dropped): (Vec<Hold>, Vec<Hold>) =
             t.holds.drain(..).partition(|h| needs.contains(&h.resource));
+        // A hold kept across a send-back into another run of its
+        // resource is now held for that run: the waiting text names the
+        // stage it is held from.
+        let mut rewritten = false;
+        for h in &mut kept {
+            let taken_in = p
+                .stages
+                .iter()
+                .position(|s| s.name == h.stage)
+                .and_then(|i| p.hold_run_at(&h.resource, i));
+            // `kept` is empty unless `needs` came from the current stage.
+            if taken_in != p.hold_run_at(&h.resource, t.stage) {
+                h.stage.clone_from(&p.stages[t.stage].name);
+                rewritten = true;
+            }
+        }
         t.holds = kept;
         if dropped.is_empty() {
+            if rewritten {
+                self.save_ticket(t, now_ms)?;
+            }
             return Ok(false);
         }
         let by_hand: Vec<String> = leaving
@@ -158,12 +178,12 @@ impl Runner {
 
     /// Every secret artifact whose reason to exist has ended deleted,
     /// and the deletion recorded: its attempt failed, was cancelled or
-    /// was replaced, the ticket left the range its stage's hold covers,
+    /// was replaced, the ticket left the run its stage's hold covers,
     /// or the ticket is parking or closing. An attempt still starting
     /// or running is never swept, since its command may yet write the
     /// file. The file goes first and the record after, so a crash in
     /// between is recorded on the next pass. Without the ticket's
-    /// pipeline the hold's range is not judged. True when anything was
+    /// pipeline the hold's run is not judged. True when anything was
     /// recorded.
     pub(crate) fn forget_secrets(
         &mut self,
@@ -941,18 +961,19 @@ impl Runner {
     }
 }
 
-/// A hold taken past the first stage of its range (a resume, after
-/// parking let it go) cannot trust what the range's earlier stages did:
+/// A hold taken past the first stage of its run (a resume, after
+/// parking let it go) cannot trust what the run's earlier stages did:
 /// another ticket may have deployed since, and parking stopped the
-/// services the tester ran against. Every stage earlier in the range
-/// has its completed attempts cancelled, so a command or agent stage is
-/// a `rerun` question rather than a result (an agent stage asks once its
+/// services the tester ran against. Every stage earlier in the run has
+/// its completed attempts cancelled, so a command or agent stage is a
+/// `rerun` question rather than a result (an agent stage asks once its
 /// services are up again) and a human gate asks afresh, and the
-/// earliest is the stage the ticket goes back to. Validation keeps
-/// review and workflow stages out of this span. `None` when nothing in
-/// the range ran.
+/// earliest is the stage the ticket goes back to. An earlier run of the
+/// same resource is not touched: it was let go at its end by design.
+/// Validation keeps review and workflow stages out of this span. `None`
+/// when nothing in the run ran.
 fn undo_range(t: &mut Ticket, p: &Pipeline, resource: &str, now_ms: u64) -> Option<usize> {
-    let (first, _) = p.hold_range(resource)?;
+    let (first, _) = p.hold_run_at(resource, t.stage)?;
     let mut back = None;
     for i in first..t.stage {
         let name = &p.stages[i].name;
@@ -1070,19 +1091,22 @@ fn live_ports(t: &Ticket) -> impl Iterator<Item = u16> + '_ {
 }
 
 /// The other tickets of `t`'s project that hold `resource`, as
-/// `<id> (<source>)`.
+/// `<id> (<source>) from <stage>`, the stage each holds it from.
 fn holders_of(all: &[Ticket], t: &Ticket, resource: &str) -> Vec<String> {
     all.iter()
         .filter(|o| o.id != t.id && o.project == t.project)
         .filter(|o| !matches!(o.state, TicketState::Closed { .. }))
-        .filter(|o| o.holds.iter().any(|h| h.resource == resource))
-        .map(|o| format!("{} ({})", o.id, o.source.label()))
+        .filter_map(|o| {
+            let h = o.holds.iter().find(|h| h.resource == resource)?;
+            Some(format!("{} ({}) from {}", o.id, o.source.label(), h.stage))
+        })
         .collect()
 }
 
 /// What an active ticket waits for: a resource its current stage needs
 /// that as many other tickets hold as its `count` allows, and who holds
-/// it, as `my-dev, held by baea8dbe (#56)`.
+/// it from which stage, as `my-dev, held by baea8dbe (#56) from
+/// implement`.
 #[must_use]
 pub fn waiting_for(t: &Ticket, p: &Pipeline, all: &[Ticket]) -> Option<String> {
     if !t.active() {

@@ -549,6 +549,21 @@ nothing needs restarting. What a change reaches depends on the key:
 - A lane's `setup` runs once per worktree, before the lane's first
   agent, and again after a restart that changed it: before the next
   agent or the checks a `check` answer starts.
+- A `take` or `dispatch restart` refused with "is a code review stage
+  and may not hold" means the live file names a resource in `needs` on
+  a code review stage. Remove that stage's `needs` (when the owner
+  delegated the file). Tickets already running under an older copy are
+  left alone and run on.
+
+When an implement stage holds a deployable stack (`needs` on
+`implement`), its agents may deploy their lane to it while they work.
+Those deploys are throwaway: the pipeline's own deploy stage deploys
+the branch again, and its commit is what `tried` shows. A deploy
+wrapper that asks for MFA cannot be answered in an agent's pane, so the
+owner keeps its session alive by running it once by hand. A
+`dispatch runner stop` or `restart` refused while a deploy runs covers
+only Dispatch's own deploy stage: an implementer's deploy runs in its
+Switchboard session, which a runner restart does not touch.
 
 A stage that gives a tester something secret (a test user's
 credentials from a gate-only `try-setup` that writes

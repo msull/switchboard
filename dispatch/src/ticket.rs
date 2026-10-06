@@ -1083,12 +1083,13 @@ pub struct LaneAtEntry {
     pub conflict: Option<RefreshConflict>,
 }
 
-/// A resource this ticket holds, from the first stage of its `needs`
-/// range to the last.
+/// A resource this ticket holds over a run of consecutive stages that
+/// name it in `needs`, from the run's first stage to its last.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Hold {
     pub resource: String,
-    /// The stage it was taken at.
+    /// The stage it was taken at, or the stage of another run a
+    /// send-back carried it to.
     pub stage: String,
     pub taken_ms: u64,
 }

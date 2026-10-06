@@ -138,6 +138,9 @@ impl Runner {
             .with_context(|| format!("the live pipeline {} cannot be read", path.display()))?;
         let new = Pipeline::parse(&text)
             .with_context(|| format!("the live pipeline {} does not parse", path.display()))?;
+        if let Err(e) = new.validate_for_take() {
+            bail!("the live pipeline {}: {e}", path.display());
+        }
         if new.project.name != t.project {
             bail!(
                 "the live pipeline {} names project {}, not {}",

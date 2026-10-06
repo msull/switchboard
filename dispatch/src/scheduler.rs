@@ -452,6 +452,7 @@ impl Runner {
     ) -> Result<Ticket> {
         source.taken_by.clone_from(&self.actor);
         let pipeline = Pipeline::parse(pipeline_text)?;
+        pipeline.validate_for_take()?;
         if pipeline.project.name != project {
             bail!(
                 "the pipeline file names project {:?}, not {project:?}",
@@ -795,20 +796,14 @@ impl Runner {
         }
         // Services the ticket has left behind are stopped and the holds
         // its stage no longer needs dropped before anything else, so
-        // neither a refresh question nor the pipeline's end keeps a
-        // resource held.
+        // neither a wait for a hold, a refresh question nor the
+        // pipeline's end keeps a resource held.
         if self.release_left(t, ps, p, now_ms)? || !t.active() {
             return Ok(());
         }
         let Some(stage) = p.stages.get(t.stage).cloned() else {
             return self.begin_close(t, ps, "every stage is done", now_ms);
         };
-        if self.refresh_lanes(t, ps, p, &stage, now_ms)? || !t.active() {
-            return Ok(());
-        }
-        if self.resolution_passes(t, ps, p, now_ms)? || !t.active() {
-            return Ok(());
-        }
         // A stage for lanes the ticket did not choose has nothing to run
         // in: it advances with no attempt, no hold and no question.
         if Self::skipped(t, &stage) {
@@ -819,7 +814,18 @@ impl Runner {
             );
             return self.advance(t, now_ms);
         }
+        // The hold comes before the lanes are brought up, so a ticket
+        // waiting for a resource starts nothing (no rebase, no rebaser,
+        // no refresh question) and its branch is brought up to its base
+        // when its work actually starts. Holding the resource while a
+        // rebaser runs costs no more than the stage's own work would.
         if self.take_holds(t, ps, p, &stage, now_ms)? || !t.active() {
+            return Ok(());
+        }
+        if self.refresh_lanes(t, ps, p, &stage, now_ms)? || !t.active() {
+            return Ok(());
+        }
+        if self.resolution_passes(t, ps, p, now_ms)? || !t.active() {
             return Ok(());
         }
         // Agent, workflow and review stages are held per context
@@ -924,10 +930,15 @@ impl Runner {
         {
             return Ok(true);
         }
-        // A stage that holds a resource or serves lanes looks at what was
-        // inspected and deployed; moving the branch under it would not.
+        // A stage past the first stage of its `needs` run, or one that
+        // serves lanes, looks at what was inspected and deployed earlier
+        // in the run; moving the branch under it would not. The stage
+        // that opens a run (an implementer that may deploy its lane) is
+        // brought up like any stage that launches something, once its
+        // hold is taken.
         if (stage.kind() == StageKind::GateOnly && !reads_pr(stage))
-            || !stage.needs.is_empty()
+            || p.needs_range(t.stage)
+                .is_some_and(|(first, _)| first < t.stage)
             || !stage.services.is_empty()
         {
             t.refreshed_stage = Some(t.stage);

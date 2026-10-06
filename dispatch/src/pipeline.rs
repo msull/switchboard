@@ -1190,78 +1190,96 @@ impl Pipeline {
         self.resources.iter().find(|r| r.name == name)
     }
 
-    /// The first and last index of the stages whose `needs` name the
-    /// `[[resources]]` entry `resource`: the range a ticket holds it
-    /// for. `None` for a lane name or a resource no stage needs.
+    /// The maximal runs of consecutive stages whose `needs` name the
+    /// `[[resources]]` entry `resource`, as first and last index: a
+    /// ticket holds it over each run, lets go at its end and takes it
+    /// again at the start of the next. Empty for a lane name or a
+    /// resource no stage needs.
     #[must_use]
-    pub fn hold_range(&self, resource: &str) -> Option<(usize, usize)> {
-        self.resource(resource)?;
-        let mut indexes = self
-            .stages
-            .iter()
-            .enumerate()
-            .filter(|(_, s)| s.needs.iter().any(|n| n == resource))
-            .map(|(i, _)| i);
-        let first = indexes.next()?;
-        Some((first, indexes.next_back().unwrap_or(first)))
+    pub fn hold_runs(&self, resource: &str) -> Vec<(usize, usize)> {
+        if self.resource(resource).is_none() {
+            return Vec::new();
+        }
+        let mut runs: Vec<(usize, usize)> = Vec::new();
+        for (i, s) in self.stages.iter().enumerate() {
+            if !s.needs.iter().any(|n| n == resource) {
+                continue;
+            }
+            match runs.last_mut() {
+                Some((_, last)) if *last + 1 == i => *last = i,
+                _ => runs.push((i, i)),
+            }
+        }
+        runs
     }
 
-    /// The union of the hold ranges of the resources `stage` needs;
-    /// `None` when it needs none.
+    /// The run of [`Self::hold_runs`] for `resource` that contains
+    /// `stage`; `None` when `stage` does not name it.
+    #[must_use]
+    pub fn hold_run_at(&self, resource: &str, stage: usize) -> Option<(usize, usize)> {
+        self.hold_runs(resource)
+            .into_iter()
+            .find(|(first, last)| (*first..=*last).contains(&stage))
+    }
+
+    /// The union, over the resources `stage` needs, of each one's run
+    /// containing it; `None` when it needs none.
     #[must_use]
     pub fn needs_range(&self, stage: usize) -> Option<(usize, usize)> {
         let s = self.stages.get(stage)?;
         s.needs
             .iter()
-            .filter_map(|n| self.hold_range(n))
+            .filter_map(|n| self.hold_run_at(n, stage))
             .reduce(|(a, b), (c, d)| (a.min(c), b.max(d)))
     }
 
     /// The last stage a service started at `stage` lives through: the
-    /// end of the `needs` ranges that contain it, `stage` itself when it
-    /// holds none.
+    /// end of the `needs` runs that contain it, `stage` itself when it
+    /// holds none. A later run of the same resource is never reached.
     #[must_use]
     pub fn services_until(&self, stage: usize) -> usize {
-        self.stages.get(stage).map_or(stage, |s| {
-            s.needs
-                .iter()
-                .filter_map(|n| self.hold_range(n))
-                .map(|(_, last)| last)
-                .max()
-                .unwrap_or(stage)
-        })
+        self.needs_range(stage).map_or(stage, |(_, last)| last)
     }
 
-    /// Each `[[resources]]` name in `needs` is named by one run of
-    /// stages with no gap, so "held until the last stage needing it
-    /// ends" is a fact the file states. A hold retaken partway through
-    /// the run cancels what the earlier stages completed and goes back
-    /// to them, which a review's rounds or a workflow's run cannot be
-    /// sent back through, so neither may stand before the run's last
-    /// stage.
-    fn validate_contiguous_needs(&self) -> Result<()> {
+    /// A resource may be held in several runs of stages, released at
+    /// the end of each and taken again at the start of the next. A hold
+    /// retaken partway through a run cancels what the run's earlier
+    /// stages completed and goes back to them, which a review's rounds
+    /// or a workflow's run cannot be sent back through, so neither may
+    /// stand before a run's last stage.
+    fn validate_needs_runs(&self) -> Result<()> {
         for r in &self.resources {
-            let Some((first, last)) = self.hold_range(&r.name) else {
-                continue;
-            };
-            if let Some(gap) = self.stages[first..=last]
-                .iter()
-                .find(|s| !s.needs.contains(&r.name))
-            {
-                bail!(
-                    "stage {:?} breaks the run of stages needing {:?}; needs must name a resource on stages next to each other",
-                    gap.name,
-                    r.name
-                );
+            for (first, last) in self.hold_runs(&r.name) {
+                if let Some(s) = self.stages[first..last]
+                    .iter()
+                    .find(|s| matches!(s.kind(), StageKind::Review | StageKind::Workflow))
+                {
+                    bail!(
+                        "stage {:?} is a review or workflow stage in a run of stages needing {:?}; only the run's last stage may be one",
+                        s.name,
+                        r.name
+                    );
+                }
             }
-            if let Some(s) = self.stages[first..last]
-                .iter()
-                .find(|s| matches!(s.kind(), StageKind::Review | StageKind::Workflow))
-            {
+        }
+        Ok(())
+    }
+
+    /// The checks that apply to a file being adopted (a take, or a
+    /// restart onto the live file) but not to a ticket's copy already
+    /// running, which is parsed every pass and would park on a new
+    /// rule: no code review stage holds a `[[resources]]` entry, since
+    /// its rounds take hours and every other ticket would wait through
+    /// them.
+    pub fn validate_for_take(&self) -> Result<()> {
+        for s in &self.stages {
+            if s.kind() != StageKind::Review {
+                continue;
+            }
+            if let Some(r) = s.needs.iter().find(|n| self.resource(n).is_some()) {
                 bail!(
-                    "stage {:?} is a review or workflow stage in the run of stages needing {:?}; only the run's last stage may be one",
-                    s.name,
-                    r.name
+                    "stage {:?} is a code review stage and may not hold {r:?}: its rounds would hold it for every other ticket",
+                    s.name
                 );
             }
         }
@@ -1468,7 +1486,7 @@ impl Pipeline {
                 written.push(subject.as_str());
             }
         }
-        self.validate_contiguous_needs()?;
+        self.validate_needs_runs()?;
         for (name, dial) in &self.policy.decisions {
             if !matches!(dial.as_str(), "ask" | "recommend" | "auto") {
                 bail!("decision {name:?}: the dial is ask, recommend or auto, not {dial:?}");
@@ -2371,13 +2389,61 @@ ports = [3100, 3199]
     #[test]
     fn a_deploying_back_half_parses_deploy_try_and_tried() {
         let p = Pipeline::parse(DEPLOYING_BACK_HALF).unwrap();
-        assert_eq!(p.hold_range("my-dev"), Some((2, 4)));
+        assert_eq!(p.hold_runs("my-dev"), [(2, 4)]);
         assert_eq!(p.services_until(3), 4);
         assert_eq!(p.services_until(5), 5, "a stage holding nothing");
         assert_eq!(p.stages[2].kind(), StageKind::GateOnly);
         assert_eq!(p.stages[2].context, Context::Lane("backend".into()));
         assert_eq!(p.stages[3].services, ["frontend", "admin"]);
-        assert_eq!(p.hold_range("backend"), None, "a lane is not a resource");
+        assert!(
+            p.hold_runs("backend").is_empty(),
+            "a lane is not a resource"
+        );
+    }
+
+    /// `text` with `implement` holding `my-dev` too.
+    fn with_implement_needing(text: &str) -> String {
+        text.replace(
+            "prompt = \"Implement the {lane} part on {branch}.\"\n",
+            "needs = [\"my-dev\"]\nprompt = \"Implement the {lane} part on {branch}.\"\n",
+        )
+    }
+
+    #[test]
+    fn needs_may_name_a_resource_in_two_runs() {
+        let text = with_implement_needing(DEPLOYING_BACK_HALF);
+        assert_ne!(text, DEPLOYING_BACK_HALF);
+        let p = Pipeline::parse(&text).unwrap();
+        p.validate_for_take().unwrap();
+        assert_eq!(p.hold_runs("my-dev"), [(0, 0), (2, 4)]);
+        assert_eq!(p.hold_run_at("my-dev", 0), Some((0, 0)));
+        assert_eq!(p.hold_run_at("my-dev", 1), None);
+        assert_eq!(p.hold_run_at("my-dev", 3), Some((2, 4)));
+        assert_eq!(p.needs_range(0), Some((0, 0)));
+        assert_eq!(p.needs_range(1), None);
+        assert_eq!(p.needs_range(3), Some((2, 4)));
+        assert_eq!(p.services_until(0), 0);
+        assert_eq!(p.services_until(3), 4);
+    }
+
+    #[test]
+    fn the_orchard_example_holds_my_dev_in_two_runs_around_its_code_review() {
+        let doc = include_str!("../../docs/dispatch.md");
+        let start = doc
+            .find("```toml\nversion = 1\n\n[project]\nname = \"Orchard\"")
+            .unwrap();
+        let body = &doc[start + "```toml\n".len()..];
+        let p = Pipeline::parse(&body[..body.find("```").unwrap()]).unwrap();
+        p.validate_for_take().unwrap();
+        let at = |name: &str| p.stages.iter().position(|s| s.name == name).unwrap();
+        assert_eq!(
+            p.hold_runs("my-dev"),
+            [
+                (at("implement"), at("implement")),
+                (at("deploy"), at("tried"))
+            ]
+        );
+        assert_eq!(p.stages[at("review-code")].kind(), StageKind::Review);
     }
 
     fn back_half_refused(from: &str, to: &str, expected: &str) {
@@ -2426,6 +2492,13 @@ ports = [3100, 3199]
         assert_eq!(setup.secret_writes().collect::<Vec<_>>(), ["personas"]);
         assert_eq!(p.needs_range(3), Some((2, 5)));
         assert_eq!(p.needs_range(6), None);
+        let two = Pipeline::parse(&with_implement_needing(&secret_half())).unwrap();
+        assert_eq!(
+            two.needs_range(0),
+            Some((0, 0)),
+            "the first run ends at implement"
+        );
+        assert_eq!(two.needs_range(3), Some((2, 5)));
         assert_eq!(
             serde_json::to_value(&setup.writes).unwrap(),
             serde_json::json!([{ "name": "personas", "secret": true }, "seed"])
@@ -2502,32 +2575,63 @@ ports = [3100, 3199]
     }
 
     #[test]
-    fn needs_must_be_contiguous() {
-        // `tried` dropped from the run leaves `deploy`..`try`, which is
-        // contiguous; a hole in the middle is not.
-        Pipeline::parse(&DEPLOYING_BACK_HALF.replace(
-            "name = \"tried\"\nneeds = [\"my-dev\"]\n",
-            "name = \"tried\"\n",
-        ))
-        .unwrap();
-        back_half_refused(
+    fn a_gap_in_needs_is_two_runs() {
+        // `try` without its hold or its services: a stage holding
+        // nothing between two that do.
+        let text = DEPLOYING_BACK_HALF.replace(
             "name = \"try\"\noperator = \"tester\"\ncontext = \"joined\"\nneeds = [\"my-dev\"]\nservices = [\"frontend\", \"admin\"]\nbefore = { frontend = [\"npm\", \"run\", \"link-env\"], admin = [\"npm\", \"run\", \"link-env\"] }\n",
             "name = \"try\"\noperator = \"tester\"\ncontext = \"joined\"\n",
-            "breaks the run of stages needing \"my-dev\"",
         );
+        let text = text.replace(
+            "my-dev is running backend commit {inputs.deploy.commit}. The frontend: {services.frontend}. The admin frontend: {services.admin}. Report to {notes}.",
+            "my-dev is running backend commit {inputs.deploy.commit}. Report to {notes}.",
+        );
+        let p = Pipeline::parse(&text).unwrap();
+        assert_eq!(p.hold_runs("my-dev"), [(2, 2), (4, 4)]);
+        assert_eq!(p.hold_run_at("my-dev", 3), None);
+        assert_eq!(p.services_until(2), 2);
     }
 
     #[test]
-    fn a_review_or_workflow_stands_only_last_in_a_needs_run() {
+    fn a_workflow_stands_only_last_in_a_needs_run_and_a_code_review_holds_nothing() {
         let mut p = Pipeline::parse(DEPLOYING_BACK_HALF).unwrap();
-        p.stages[4].reviewers = vec!["correctness".into()];
-        p.validate_contiguous_needs().unwrap();
-        p.stages[4].reviewers.clear();
+        p.stages[4].operator = None;
+        p.stages[4].review = Some("tester".into());
+        p.stages[4].subject = Some("notes".into());
+        assert_eq!(p.stages[4].kind(), StageKind::Workflow);
+        p.validate_needs_runs().unwrap();
+        let mut p = Pipeline::parse(DEPLOYING_BACK_HALF).unwrap();
         p.stages[3].operator = None;
         p.stages[3].review = Some("tester".into());
-        let err = p.validate_contiguous_needs().unwrap_err().to_string();
+        let err = p.validate_needs_runs().unwrap_err().to_string();
         assert!(
             err.contains("stage \"try\" is a review or workflow stage"),
+            "{err}"
+        );
+
+        // An implement stage and a code review stage `inspect` hold
+        // `my-dev` as one run, and `deploy` does not.
+        let mut p = Pipeline::parse(DEPLOYING_BACK_HALF).unwrap();
+        p.stages[0].needs = vec!["my-dev".into()];
+        p.stages[1].needs = vec!["my-dev".into()];
+        p.stages[1].reviewers = vec!["correctness".into()];
+        p.stages[2].needs.clear();
+        assert_eq!(p.stages[1].kind(), StageKind::Review);
+        p.validate_needs_runs().unwrap();
+        let err = p.validate_for_take().unwrap_err().to_string();
+        assert!(
+            err.contains("stage \"inspect\" is a code review stage and may not hold \"my-dev\""),
+            "{err}"
+        );
+
+        // A code review stage last in a run: a copy may hold it, a
+        // take may not.
+        let mut p = Pipeline::parse(DEPLOYING_BACK_HALF).unwrap();
+        p.stages[4].reviewers = vec!["correctness".into()];
+        p.validate_needs_runs().unwrap();
+        let err = p.validate_for_take().unwrap_err().to_string();
+        assert!(
+            err.contains("stage \"tried\" is a code review stage and may not hold"),
             "{err}"
         );
     }
@@ -2627,7 +2731,7 @@ ports = [3100, 3199]
                 "name = \"tried\"\nneeds = [\"my-dev\", \"backend\"]\n",
             );
         let p = Pipeline::parse(&text).unwrap();
-        assert_eq!(p.hold_range("backend"), None);
+        assert!(p.hold_runs("backend").is_empty());
     }
 
     /// The Switchboard pipeline with `extra` appended, parsed.

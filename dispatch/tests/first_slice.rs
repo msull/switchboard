@@ -14532,8 +14532,18 @@ fn take_orchard(env: &mut Env, number: u64, labels: &[&str]) -> String {
 
 const STAGES: [&str; 5] = ["lanes", "deploy", "try", "tried", "after"];
 
-fn stage_name(t: &Ticket) -> &'static str {
-    STAGES.get(t.stage).copied().unwrap_or("done")
+/// The name of the ticket's stage in its own pipeline copy, so the
+/// helpers serve every back-half fixture; `STAGES` for a copy that
+/// `break_copy` made unreadable.
+fn stage_name(t: &Ticket) -> String {
+    let mut names = dispatch::events::stage_names(t);
+    if names.is_empty() {
+        names = STAGES.map(str::to_owned).to_vec();
+    }
+    names
+        .get(t.stage)
+        .cloned()
+        .unwrap_or_else(|| "done".to_owned())
 }
 
 fn at_stage(env: &mut Env, id: &str, stage: &str) {
@@ -15498,7 +15508,7 @@ fn a_second_ticket_waits_for_the_resource_without_a_question_or_a_slot_then_take
     let view = status.tickets.iter().find(|v| v.id == b).unwrap();
     assert_eq!(
         view.waiting_for.as_deref(),
-        Some(format!("my-dev, held by {a} (#42)").as_str())
+        Some(format!("my-dev, held by {a} (#42) from deploy").as_str())
     );
     let orchard = status
         .projects
@@ -15520,6 +15530,489 @@ fn a_second_ticket_waits_for_the_resource_without_a_question_or_a_slot_then_take
     assert!(env.sb().removed_by_port.contains(&session));
     assert!(!ta.processes.contains(&session));
     deploying(&mut env, &b);
+}
+
+// --- two runs: the implementer holds `my-dev` too, lets go for the
+// look, and the deploy takes it again.
+
+/// `BACK_HALF` with an `implement` stage holding `my-dev` after `lanes`
+/// and a `look` that holds nothing, standing in for a code review: two
+/// runs of `my-dev`, `implement` and `deploy`..`tried`.
+const IMPLEMENT_STAGE: &str = "[[stages]]\nname = \"implement\"\noperator = \"implementer\"\ncontext = \"each\"\nneeds = [\"my-dev\"]\nwrites = [\"notes\"]\nprompt = \"Implement the {lane} part on {branch}; notes to {notes}.\"\n\n[[stages]]\nname = \"look\"\ngate = { kind = \"human\", decision = \"look\" }\n\n[[stages]]\nname = \"deploy\"\n";
+
+fn two_runs_text(env: &Env) -> String {
+    let text = BACK_HALF
+        .replace("{worktrees}", &env.worktrees.display().to_string())
+        .replace("[[stages]]\nname = \"deploy\"\n", IMPLEMENT_STAGE);
+    assert!(text.contains("name = \"implement\""));
+    text
+}
+
+fn two_runs_env() -> (Env, String) {
+    let mut env = Env::new();
+    let text = two_runs_text(&env);
+    std::fs::write(env.data.pipeline("Orchard"), text).unwrap();
+    let id = take_orchard(&mut env, 42, BOTH);
+    (env, id)
+}
+
+/// Each lane's implementer launched, or still complete from before a
+/// send-back of the other: the ticket holds `my-dev`.
+fn implementing(env: &mut Env, id: &str) {
+    env.steps_until(id, "the implementers", |t, _| {
+        let latest = |lane: &str| {
+            t.attempts_of("implement")
+                .filter(|a| a.context == lane)
+                .last()
+        };
+        t.attempts_of("implement").any(Attempt::is_open)
+            && ["backend", "frontend"].iter().all(|l| {
+                latest(l).is_some_and(|a| a.is_open() || a.state == AttemptState::Complete)
+            })
+    });
+}
+
+/// Every open `implement` attempt finishes, one per lane, and the
+/// ticket stands at `look` with its question asked, past the pass that
+/// let `my-dev` go.
+fn implemented(env: &mut Env, id: &str) {
+    implementing(env, id);
+    let t = env.ticket(id);
+    let open: Vec<Attempt> = t
+        .attempts_of("implement")
+        .filter(|a| a.is_open())
+        .cloned()
+        .collect();
+    for a in open {
+        env.finish(
+            a.session.as_deref().unwrap(),
+            &a.artifacts["notes"],
+            "# notes\ndone",
+        );
+    }
+    env.steps_until(id, "the look question", |t, _| {
+        t.pending_decisions().iter().any(|d| d.name == "look")
+    });
+}
+
+fn implement_states(t: &Ticket) -> Vec<AttemptState> {
+    t.attempts_of("implement")
+        .map(|a| a.state.clone())
+        .collect()
+}
+
+fn waiting_text(env: &Env, id: &str) -> Option<String> {
+    let status = dispatch::serve::status(&env.runner).unwrap();
+    status
+        .tickets
+        .iter()
+        .find(|v| v.id == id)
+        .unwrap()
+        .waiting_for
+        .clone()
+}
+
+#[test]
+fn a_second_ticket_waits_at_implement_and_the_first_waits_again_at_deploy() {
+    let (mut env, a) = two_runs_env();
+    implementing(&mut env, &a);
+    let b = take_orchard(&mut env, 43, BOTH);
+    for _ in 0..4 {
+        env.step();
+    }
+    let ta = env.ticket(&a);
+    assert_eq!(holds(&ta), ["my-dev"]);
+    assert_eq!(ta.holds[0].stage, "implement");
+    let tb = env.ticket(&b);
+    assert_eq!(stage_name(&tb), "implement");
+    assert!(tb.holds.is_empty());
+    assert!(tb.attempts_of("implement").next().is_none(), "{tb:#?}");
+    assert!(tb.attempts_of(REFRESH).next().is_none());
+    assert_ne!(
+        tb.refreshed_stage,
+        Some(tb.stage),
+        "nothing brought up while waiting"
+    );
+    assert!(tb.pending_decisions().is_empty(), "waiting asks nothing");
+    assert_eq!(
+        waiting_text(&env, &b).as_deref(),
+        Some(format!("my-dev, held by {a} (#42) from implement").as_str())
+    );
+    let status = dispatch::serve::status(&env.runner).unwrap();
+    let orchard = status
+        .projects
+        .iter()
+        .find(|p| p.name == "Orchard")
+        .unwrap();
+    assert_eq!(orchard.running, 1, "the waiting ticket costs no slot");
+
+    implemented(&mut env, &a);
+    assert!(
+        env.ticket(&a).holds.is_empty(),
+        "let go at the end of the run"
+    );
+    implementing(&mut env, &b);
+    assert_eq!(env.ticket(&b).holds[0].stage, "implement");
+
+    answer_named(&mut env, &a, "look", "proceed");
+    at_stage(&mut env, &a, "deploy");
+    for _ in 0..3 {
+        env.step();
+    }
+    let ta = env.ticket(&a);
+    assert!(ta.holds.is_empty());
+    assert_eq!(started(&env, &deploy_key(&a, 1)), 0, "waits for the hold");
+    assert_eq!(stage_name(&ta), "deploy", "not sent back to implement");
+    assert!(
+        implement_states(&ta)
+            .iter()
+            .all(|s| *s == AttemptState::Complete),
+        "{ta:#?}"
+    );
+    assert_eq!(
+        waiting_text(&env, &a).as_deref(),
+        Some(format!("my-dev, held by {b} (#43) from implement").as_str())
+    );
+
+    implemented(&mut env, &b);
+    deploying(&mut env, &a);
+    let ta = env.ticket(&a);
+    assert_eq!(holds(&ta), ["my-dev"]);
+    assert_eq!(ta.holds[0].stage, "deploy");
+    assert!(
+        implement_states(&ta)
+            .iter()
+            .all(|s| *s == AttemptState::Complete),
+        "{ta:#?}"
+    );
+}
+
+/// The implement-only operator's own allow rules (its deploy and its
+/// dev server) go on the command line ahead of the rule that lets it
+/// write its notes, each behind its own `--allowedTools`.
+#[test]
+fn the_implementers_own_allowed_tools_go_beside_its_write_rule() {
+    let mut env = Env::new();
+    let text = two_runs_text(&env)
+        .replace(
+            "name = \"implement\"\noperator = \"implementer\"",
+            "name = \"implement\"\noperator = \"deployer\"",
+        )
+        .replace(
+            "[operators.implementer]\n",
+            "[operators.deployer]\nkind = \"claude\"\nargs = [\"--allowedTools\", \"Bash(inv deploy:*)\", \"--allowedTools\", \"Bash(npm start:*)\"]\n\n[operators.implementer]\n",
+        );
+    std::fs::write(env.data.pipeline("Orchard"), text).unwrap();
+    let id = take_orchard(&mut env, 42, BOTH);
+    implementing(&mut env, &id);
+    let t = env.ticket(&id);
+    let notes = t.attempts_of("implement").next().unwrap().artifacts["notes"].clone();
+    let dir = notes.parent().unwrap().display().to_string();
+    let argvs: Vec<Vec<String>> = env
+        .sb()
+        .calls
+        .iter()
+        .filter_map(|r| match &r.body {
+            Body::SessionNew {
+                name,
+                launch: switchboard_control::Launch::Argv(a),
+                ..
+            } if name == "deployer" => Some(a.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(argvs.len(), 2, "one per lane");
+    let backend = argvs
+        .iter()
+        .find(|a| a.iter().any(|x| x.contains(&dir)))
+        .unwrap();
+    assert_eq!(
+        backend,
+        &[
+            "--allowedTools".to_owned(),
+            "Bash(inv deploy:*)".into(),
+            "--allowedTools".into(),
+            "Bash(npm start:*)".into(),
+            "--allowedTools".into(),
+            format!("Edit(//{dir}/**)"),
+        ]
+    );
+}
+
+#[test]
+fn parking_at_implement_lets_go_and_a_resume_asks_rerun_there() {
+    let (mut env, id) = two_runs_env();
+    implementing(&mut env, &id);
+    let now = env.tick();
+    env.runner.request_park(&id, Some("for now"), now).unwrap();
+    env.steps_until(&id, "parked", |t, _| is_parked(t));
+    let t = env.ticket(&id);
+    assert!(t.holds.is_empty());
+    assert!(
+        implement_states(&t)
+            .iter()
+            .all(|s| matches!(s, AttemptState::Cancelled { .. })),
+        "{t:#?}"
+    );
+    let now = env.tick();
+    let resumed = env.runner.resume(&id, now).unwrap();
+    let reruns: Vec<&str> = resumed.reruns.iter().map(|a| a.stage.as_str()).collect();
+    assert_eq!(reruns, ["implement", "implement"], "one per lane");
+    env.steps_until(&id, "the second implementers", |t, _| {
+        t.attempts_of("implement").filter(|a| a.is_open()).count() == 2
+    });
+    let t = env.ticket(&id);
+    assert_eq!(stage_name(&t), "implement");
+    assert_eq!(holds(&t), ["my-dev"]);
+    assert_eq!(t.holds[0].stage, "implement");
+    assert!(
+        t.attempts_of("lanes")
+            .all(|a| a.state == AttemptState::Complete)
+    );
+}
+
+/// `ticket`'s backend lane is one commit behind a base that moved to
+/// `base`, with commits of its own; with `conflict` its rebase stops.
+fn backend_base_moves(env: &Env, ticket: &str, base: &str, conflict: bool) -> PathBuf {
+    let tree = lane_tree(env, ticket, "backend");
+    let mut repo = env.repo.lock().unwrap();
+    repo.heads.insert(tree.clone(), "impl0001".into());
+    repo.bases
+        .insert(env.data.lane_repo_dir("Orchard", "backend"), base.into());
+    repo.behind.insert(tree.clone(), 1);
+    if conflict {
+        repo.rebase_conflicts.push(tree.clone());
+    }
+    tree
+}
+
+fn rebases_of(env: &Env, tree: &PathBuf) -> usize {
+    env.repo
+        .lock()
+        .unwrap()
+        .rebased
+        .iter()
+        .filter(|(d, _)| d == tree)
+        .count()
+}
+
+/// A ticket waiting at `implement` for `my-dev` while its backend's
+/// base moves: the first ticket and the second, and the backend tree.
+fn waiting_while_the_base_moves(conflict: bool) -> (Env, String, String, PathBuf) {
+    let (mut env, a) = two_runs_env();
+    implementing(&mut env, &a);
+    let b = take_orchard(&mut env, 43, BOTH);
+    env.steps_until(&b, "the second ticket at implement", |t, _| {
+        stage_name(t) == "implement"
+    });
+    let tree = backend_base_moves(&env, &b, "main0002", conflict);
+    let base_before = env
+        .ticket(&b)
+        .lanes
+        .iter()
+        .find(|l| l.name == "backend")
+        .unwrap()
+        .base_sha
+        .clone();
+    for _ in 0..4 {
+        env.step();
+    }
+    let tb = env.ticket(&b);
+    assert_eq!(rebases_of(&env, &tree), 0, "nothing moves while it waits");
+    assert_ne!(tb.refreshed_stage, Some(tb.stage));
+    assert!(tb.attempts_of(REFRESH).next().is_none());
+    assert!(tb.pending_decisions().is_empty(), "{tb:#?}");
+    assert_eq!(
+        tb.lanes
+            .iter()
+            .find(|l| l.name == "backend")
+            .unwrap()
+            .base_sha,
+        base_before
+    );
+    (env, a, b, tree)
+}
+
+#[test]
+fn implement_brings_its_lanes_up_once_it_holds_the_stack() {
+    let (mut env, a, b, tree) = waiting_while_the_base_moves(false);
+    implemented(&mut env, &a);
+    implementing(&mut env, &b);
+    let tb = env.ticket(&b);
+    assert_eq!(holds(&tb), ["my-dev"]);
+    assert_eq!(rebases_of(&env, &tree), 1);
+    assert_eq!(tb.refreshed_stage, Some(tb.stage));
+    assert_eq!(stage_name(&tb), "implement");
+    let backend = tb.lanes.iter().find(|l| l.name == "backend").unwrap();
+    assert_eq!(backend.base_sha.as_deref(), Some("main0002"));
+    let prompt = env
+        .sb()
+        .calls
+        .iter()
+        .rev()
+        .find_map(|r| match &r.body {
+            Body::SessionNew { prompt, .. }
+                if prompt
+                    .as_deref()
+                    .is_some_and(|p| p.contains("Implement the backend part")) =>
+            {
+                prompt.clone()
+            }
+            _ => None,
+        })
+        .unwrap();
+    assert!(prompt.contains("the base moved from"), "{prompt}");
+
+    // Past the first stage of its run, `try` reads what was deployed and
+    // is not moved under it.
+    implemented(&mut env, &b);
+    answer_named(&mut env, &b, "look", "proceed");
+    backend_base_moves(&env, &b, "main0003", false);
+    deployed(&mut env, &b);
+    for _ in 0..3 {
+        env.step();
+    }
+    assert_eq!(stage_name(&env.ticket(&b)), "try");
+    assert_eq!(rebases_of(&env, &tree), 1, "try does not rebase");
+}
+
+/// The fixture names no rebaser, so a conflicting rebase is a `refresh`
+/// question; a rebaser would start at the same point.
+#[test]
+fn a_conflict_at_implement_is_asked_only_once_the_stack_is_held() {
+    let (mut env, a, b, _) = waiting_while_the_base_moves(true);
+    implemented(&mut env, &a);
+    env.steps_until(&b, "the refresh question", |t, _| {
+        t.pending_decisions().iter().any(|d| d.name == REFRESH)
+    });
+    let tb = env.ticket(&b);
+    assert_eq!(holds(&tb), ["my-dev"]);
+    assert!(tb.attempts_of("implement").next().is_none());
+}
+
+#[test]
+fn a_send_back_into_implement_keeps_the_hold_and_names_implement() {
+    let mut env = Env::new();
+    let text = two_runs_text(&env).replace(
+        "[[stages]]\nname = \"try\"\n",
+        "[[stages]]\nname = \"checked\"\ncontext = \"lane:backend\"\nneeds = [\"my-dev\"]\ngate = { kind = \"human\", decision = \"checked\" }\n\n[[stages]]\nname = \"try\"\n",
+    );
+    std::fs::write(env.data.pipeline("Orchard"), text).unwrap();
+    let a = take_orchard(&mut env, 42, BOTH);
+    implemented(&mut env, &a);
+    answer_named(&mut env, &a, "look", "proceed");
+    deploying(&mut env, &a);
+    exits(&env, &deploy_key(&a, 1), 0);
+    env.steps_until(&a, "the checked question", |t, _| {
+        t.pending_decisions().iter().any(|d| d.name == "checked")
+    });
+    assert_eq!(env.ticket(&a).holds[0].stage, "deploy");
+    let b = take_orchard(&mut env, 43, BOTH);
+    env.steps_until(&b, "the second ticket at implement", |t, _| {
+        stage_name(t) == "implement"
+    });
+    assert_eq!(
+        waiting_text(&env, &b).as_deref(),
+        Some(format!("my-dev, held by {a} (#42) from deploy").as_str())
+    );
+    answer_named(&mut env, &a, "checked", "rerun");
+    env.step();
+    let ta = env.ticket(&a);
+    assert_eq!(stage_name(&ta), "implement");
+    assert_eq!(holds(&ta), ["my-dev"], "kept, not dropped");
+    assert_eq!(ta.holds[0].stage, "implement");
+    assert!(env.ticket(&b).holds.is_empty());
+    assert_eq!(
+        waiting_text(&env, &b).as_deref(),
+        Some(format!("my-dev, held by {a} (#42) from implement").as_str())
+    );
+    // The backend reruns; the frontend's result stands, and `look`
+    // passed before, so leaving `implement` lets go for `deploy`.
+    implementing(&mut env, &a);
+    let open = env
+        .ticket(&a)
+        .attempts_of("implement")
+        .find(|x| x.is_open())
+        .cloned()
+        .unwrap();
+    assert_eq!(open.context, "backend");
+    env.finish(
+        open.session.as_deref().unwrap(),
+        &open.artifacts["notes"],
+        "# notes\nagain",
+    );
+    env.steps_until(&b, "the second ticket's hold", |t, _| !t.holds.is_empty());
+    assert!(env.ticket(&a).holds.is_empty());
+    implementing(&mut env, &b);
+}
+
+#[test]
+fn a_review_stage_holding_a_resource_runs_on_in_a_ticket_already_taken() {
+    let (mut env, id) = two_runs_env();
+    implementing(&mut env, &id);
+    let copy = env.ticket(&id).pipeline_file;
+    let old = std::fs::read_to_string(&copy).unwrap();
+    let held_review = old.replace(
+        "[[stages]]\nname = \"look\"\ngate = { kind = \"human\", decision = \"look\" }\n",
+        "[[stages]]\nname = \"look\"\ncontext = \"each\"\nneeds = [\"my-dev\"]\nreviewers = [\"tester\"]\nimplementer = \"implementer\"\ngate = { kind = \"command\", argv = [\"sh\", \"-c\", \"check\"] }\n\n[[stages]]\nname = \"between\"\ngate = { kind = \"human\", decision = \"between\" }\n",
+    );
+    assert_ne!(held_review, old);
+    std::fs::write(&copy, &held_review).unwrap();
+    for _ in 0..3 {
+        env.step();
+    }
+    let t = env.ticket(&id);
+    assert!(t.active(), "{:?}", t.state);
+    assert_eq!(stage_name(&t), "implement");
+
+    let now = env.tick();
+    let source = env.ticket(&id).source;
+    let e = env
+        .runner
+        .take("Orchard", &held_review, source, now)
+        .unwrap_err();
+    assert!(
+        format!("{e:#}").contains("\"look\" is a code review stage and may not hold \"my-dev\""),
+        "{e:#}"
+    );
+    std::fs::write(env.data.pipeline("Orchard"), &held_review).unwrap();
+    let before = env.ticket(&id);
+    let e = restart_refused(&mut env, &id, None);
+    assert!(e.contains("is a code review stage and may not hold"), "{e}");
+    assert_eq!(env.ticket(&id), before, "nothing written");
+}
+
+#[test]
+fn a_resume_at_tried_goes_back_to_deploy_not_implement() {
+    let (mut env, id) = two_runs_env();
+    implemented(&mut env, &id);
+    answer_named(&mut env, &id, "look", "proceed");
+    at_tried(&mut env, &id);
+    tried(&mut env, &id, "park");
+    env.step();
+    assert!(is_parked(&env.ticket(&id)));
+    let now = env.tick();
+    env.runner.resume(&id, now).unwrap();
+    env.steps_until(&id, "the deploy question", |t, _| {
+        t.pending_decisions()
+            .iter()
+            .any(|d| d.name == "rerun" && d.stage == "deploy")
+    });
+    let t = env.ticket(&id);
+    assert_eq!(stage_name(&t), "deploy");
+    assert_eq!(holds(&t), ["my-dev"]);
+    // Retaken where the ticket stood, then rewound within the run.
+    assert_eq!(t.holds[0].stage, "tried");
+    assert!(
+        implement_states(&t)
+            .iter()
+            .all(|s| *s == AttemptState::Complete),
+        "{t:#?}"
+    );
+    assert!(
+        t.attempts_of("look")
+            .all(|a| a.state == AttemptState::Complete)
+    );
 }
 
 #[test]
