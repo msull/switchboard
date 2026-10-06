@@ -1,6 +1,7 @@
 //! State-transition tests for the core. Every test dispatches actions at
 //! an explicit `Clock` and asserts on state and returned effects.
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
 
@@ -79,6 +80,7 @@ fn record(project: ProjectId, kind: SessionKind, order: u32) -> SessionRecord {
         waiting_on: None,
         pending_launch: false,
         last_stop_at: None,
+        env: Vec::new(),
     }
 }
 
@@ -5839,7 +5841,68 @@ mod control {
             launch: Launch::Shell,
             prompt: prompt.map(str::to_owned),
             notes: "Dispatch ticket 1, stage investigate".into(),
+            env: BTreeMap::new(),
         }
+    }
+
+    /// A launcher's variables land on the record, where every spawn
+    /// reads them; a clone of that session is a new attempt and starts
+    /// with none.
+    #[test]
+    fn a_port_sessions_env_lands_on_its_record_and_a_clone_starts_with_none() {
+        let (mut core, pid, _) = with_records(&[], |_| None);
+        let env = BTreeMap::from([(
+            "DISPATCH_INPUT_PERSONAS".to_owned(),
+            "/d/personas.md".to_owned(),
+        )]);
+        let mut op = new_session_op(pid, Some("Try it"));
+        if let ControlAction::NewSession { env: e, .. } = &mut op {
+            *e = env;
+        }
+        control(&mut core, "op-1", op, 10);
+        let made = core
+            .workspace(pid)
+            .unwrap()
+            .sessions
+            .iter()
+            .find(|s| s.name == "investigator")
+            .map(|s| s.id)
+            .unwrap();
+        assert_eq!(
+            core.session(made).unwrap().env,
+            [(
+                "DISPATCH_INPUT_PERSONAS".to_owned(),
+                "/d/personas.md".to_owned()
+            )]
+        );
+        // A source with variables of its own.
+        let p = project("p");
+        let mut w = Workspace::new(p.clone());
+        let mut r = record(p.id, agent(), 0);
+        r.resume = Some(claude_handle());
+        r.env = vec![("DISPATCH_INPUT_PLAN".into(), "/d/plan.md".into())];
+        let source = r.id;
+        w.sessions.push(r);
+        let (mut core, _) = loaded(vec![w], vec![]);
+        control(
+            &mut core,
+            "op-3",
+            ControlAction::CloneSession {
+                source,
+                name: "rebaser".into(),
+                prompt: "Rebase.".into(),
+                notes: String::new(),
+            },
+            12,
+        );
+        let clone = core
+            .workspace(p.id)
+            .unwrap()
+            .sessions
+            .iter()
+            .find(|s| s.name == "rebaser")
+            .expect("the clone's record");
+        assert!(clone.env.is_empty(), "{:?}", clone.env);
     }
 
     /// The port's resume of a running pane leaves it as it is: the
@@ -7981,5 +8044,21 @@ mod dispatch_page {
         );
         assert!(core.artifact_read(&path).is_none());
         assert!(!core.artifact_read_due(&t(10), &path), "read");
+    }
+
+    #[test]
+    fn a_secret_artifact_is_never_due_for_a_read() {
+        let core = connected();
+        let path = std::path::PathBuf::from("/dispatch/t1/try-setup/1/root/personas.md");
+        let mut t = status(None).tickets.remove(0);
+        t.attempts.push(AttemptView {
+            stage: "try-setup".into(),
+            n: 1,
+            artifacts: vec![("personas".into(), path.clone())],
+            ..AttemptView::default()
+        });
+        assert!(core.artifact_read_due(&t, &path));
+        t.attempts.last_mut().unwrap().secret = vec!["personas".into()];
+        assert!(!core.artifact_read_due(&t, &path));
     }
 }

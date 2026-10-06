@@ -408,9 +408,10 @@ pub struct Stage {
     pub review: Option<String>,
     #[serde(default)]
     pub context: Context,
-    /// Artifact names; each expands as `{name}` in the prompt.
+    /// The artifacts the stage writes; each name expands as `{name}` in
+    /// the prompt. The file spells one as a name or as `{ name, secret }`.
     #[serde(default)]
-    pub writes: Vec<String>,
+    pub writes: Vec<Write>,
     /// The artifact a workflow stage reviews.
     #[serde(default)]
     pub subject: Option<String>,
@@ -462,6 +463,87 @@ pub struct Stage {
     pub on_dirty: Option<OnDirty>,
 }
 
+/// One artifact a stage writes. A secret one is written by a gate-only
+/// command, never read by Dispatch, and deleted when the stage's hold is
+/// released.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "WriteFile", into = "WriteFile")]
+pub struct Write {
+    /// The artifact's name: `{name}` in the prompt, `<name>.md` on disk.
+    pub name: String,
+    /// Written by a gate-only command only, never read by Dispatch, and
+    /// deleted when the hold its stage needs is released.
+    pub secret: bool,
+}
+
+impl Write {
+    /// A plain, readable artifact.
+    #[must_use]
+    pub fn named(name: &str) -> Self {
+        Self {
+            name: name.to_owned(),
+            secret: false,
+        }
+    }
+}
+
+/// `Write` as the file spells it: a name, or a table. A plain artifact
+/// writes back as a name, so older copies of a pipeline read the same.
+#[derive(Serialize, Deserialize)]
+#[serde(untagged)]
+enum WriteFile {
+    Name(String),
+    Table {
+        name: String,
+        #[serde(default)]
+        secret: bool,
+    },
+}
+
+impl From<WriteFile> for Write {
+    fn from(file: WriteFile) -> Self {
+        match file {
+            WriteFile::Name(name) => Self {
+                name,
+                secret: false,
+            },
+            WriteFile::Table { name, secret } => Self { name, secret },
+        }
+    }
+}
+
+impl From<Write> for WriteFile {
+    fn from(w: Write) -> Self {
+        if w.secret {
+            Self::Table {
+                name: w.name,
+                secret: true,
+            }
+        } else {
+            Self::Name(w.name)
+        }
+    }
+}
+
+/// The environment variable name for an artifact name: upper-cased,
+/// with anything not a letter or digit as `_`.
+#[must_use]
+pub fn env_key(name: &str) -> String {
+    name.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_uppercase()
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+/// Artifact names Dispatch reads itself, which therefore cannot be
+/// secret.
+const READ_BY_NAME: [&str; 4] = ["plan", "notes", "summary", "checks"];
+
 /// What a stage is, from which fields it names.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StageKind {
@@ -497,6 +579,19 @@ impl Stage {
     #[must_use]
     pub fn is_command_stage(&self) -> bool {
         self.kind() == StageKind::GateOnly && matches!(self.gate, Some(Gate::Command { .. }))
+    }
+
+    /// The names of the artifacts the stage writes.
+    pub fn write_names(&self) -> impl Iterator<Item = &str> {
+        self.writes.iter().map(|w| w.name.as_str())
+    }
+
+    /// The names of the stage's secret artifacts.
+    pub fn secret_writes(&self) -> impl Iterator<Item = &str> {
+        self.writes
+            .iter()
+            .filter(|w| w.secret)
+            .map(|w| w.name.as_str())
     }
 
     /// The review passes a code review stage may make.
@@ -864,12 +959,7 @@ impl Pipeline {
             }
             Context::Root | Context::Each | Context::Joined => {}
         }
-        let mut seen = std::collections::BTreeSet::new();
-        for name in &stage.writes {
-            if !seen.insert(name) {
-                bail!("stage {:?} writes {name:?} twice", stage.name);
-            }
-        }
+        self.validate_writes(stage)?;
         for need in &stage.needs {
             if !self.resources.iter().any(|r| &r.name == need)
                 && !self.lanes.iter().any(|l| &l.name == need)
@@ -910,6 +1000,71 @@ impl Pipeline {
         }
         Self::validate_gate_context(stage)?;
         self.validate_services(stage)
+    }
+
+    /// What a stage may write: a gate-only stage writes only through a
+    /// command it runs itself, in one context, never its own `checks`;
+    /// no stage writes `commit`, which `inputs.<stage>.commit` already
+    /// means; and a secret is written by a gate-only command, under a
+    /// name Dispatch never reads, in a stage that holds a resource whose
+    /// release deletes it.
+    fn validate_writes(&self, stage: &Stage) -> Result<()> {
+        let name = &stage.name;
+        let mut seen = std::collections::BTreeSet::new();
+        for w in stage.write_names() {
+            if !seen.insert(w) {
+                bail!("stage {name:?} writes {w:?} twice");
+            }
+        }
+        if stage.write_names().any(|w| w == "commit") {
+            bail!("stage {name:?} writes \"commit\", which inputs.{name}.commit already names");
+        }
+        if stage.kind() == StageKind::GateOnly && !stage.writes.is_empty() {
+            let runs = matches!(
+                &stage.gate,
+                Some(Gate::Command {
+                    argv,
+                    per_lane,
+                    like: None,
+                    ..
+                }) if argv.is_some() || per_lane.is_some()
+            );
+            if !runs {
+                bail!(
+                    "stage {name:?}: a gate-only stage writes only with a command gate of its own (argv or per_lane, not like)"
+                );
+            }
+            if stage.write_names().any(|w| w == "checks") {
+                bail!("stage {name:?} writes \"checks\", which is its command's own log");
+            }
+            // A reader takes a stage's newest artifact whatever lane wrote
+            // it, so one written per lane would hand every lane the last
+            // lane's file.
+            let one_context = match &stage.context {
+                Context::Each => false,
+                Context::Lanes(lanes) => lanes.len() <= 1,
+                Context::Root | Context::Joined | Context::Lane(_) => true,
+            };
+            if !one_context {
+                bail!("stage {name:?}: a gate-only stage writes only in one context, not per lane");
+            }
+        }
+        for secret in stage.secret_writes() {
+            if stage.kind() != StageKind::GateOnly {
+                bail!(
+                    "stage {name:?}: secret {secret:?}: secret artifacts are written by a gate-only command"
+                );
+            }
+            if READ_BY_NAME.contains(&secret) {
+                bail!("stage {name:?}: {secret:?} is read by Dispatch, so it cannot be secret");
+            }
+            if !stage.needs.iter().any(|n| self.resource(n).is_some()) {
+                bail!(
+                    "stage {name:?}: secret {secret:?} needs a [[resources]] entry in needs, whose release deletes it"
+                );
+            }
+        }
+        Ok(())
     }
 
     /// A gate-only command runs in its context's tree, so a gate that
@@ -1022,6 +1177,17 @@ impl Pipeline {
             .map(|(i, _)| i);
         let first = indexes.next()?;
         Some((first, indexes.next_back().unwrap_or(first)))
+    }
+
+    /// The union of the hold ranges of the resources `stage` needs;
+    /// `None` when it needs none.
+    #[must_use]
+    pub fn needs_range(&self, stage: usize) -> Option<(usize, usize)> {
+        let s = self.stages.get(stage)?;
+        s.needs
+            .iter()
+            .filter_map(|n| self.hold_range(n))
+            .reduce(|(a, b), (c, d)| (a.min(c), b.max(d)))
     }
 
     /// The last stage a service started at `stage` lives through: the
@@ -1248,12 +1414,35 @@ impl Pipeline {
         }
         let mut stage_names = std::collections::BTreeSet::new();
         let mut written: Vec<&str> = Vec::new();
+        let mut secrets: Vec<&str> = Vec::new();
+        let mut keys: BTreeMap<String, &str> = BTreeMap::new();
         for stage in &self.stages {
             if !stage_names.insert(&stage.name) {
                 bail!("stage {:?} is listed twice", stage.name);
             }
             self.validate_stage(stage, &written)?;
-            written.extend(stage.writes.iter().map(String::as_str));
+            if let Some(subject) = &stage.subject
+                && secrets.contains(&subject.as_str())
+            {
+                bail!(
+                    "stage {:?} reviews {subject:?}, which is secret and never read",
+                    stage.name
+                );
+            }
+            // One variable name per artifact name, so no two artifacts
+            // share a `DISPATCH_WRITES_*` or `DISPATCH_INPUT_*` key.
+            for name in stage.write_names() {
+                if let Some(other) = keys.insert(env_key(name), name)
+                    && other != name
+                {
+                    bail!(
+                        "stage {:?} writes {name:?}, which has the same variable name as {other:?}",
+                        stage.name
+                    );
+                }
+            }
+            written.extend(stage.write_names());
+            secrets.extend(stage.secret_writes());
             if stage.review.is_some()
                 && let Some(subject) = &stage.subject
             {
@@ -1987,6 +2176,120 @@ ports = [3100, 3199]
         assert_ne!(text, DEPLOYING_BACK_HALF, "{from}");
         let err = Pipeline::parse(&text).unwrap_err().to_string();
         assert!(err.contains(expected), "{from}: {err}");
+    }
+
+    /// The back half with a gate-only `try-setup` before `try` that
+    /// writes a secret and a plain artifact.
+    fn secret_half() -> String {
+        DEPLOYING_BACK_HALF.replace(
+            "[[stages]]\nname = \"try\"\n",
+            "[[stages]]\nname = \"try-setup\"\ncontext = \"lane:backend\"\nneeds = [\"my-dev\"]\nwrites = [{ name = \"personas\", secret = true }, \"seed\"]\ngate = { kind = \"command\", in = \"lane:backend\", argv = [\"make\", \"personas\"] }\n\n[[stages]]\nname = \"try\"\n",
+        )
+    }
+
+    fn secret_half_refused(from: &str, to: &str, expected: &str) {
+        let base = secret_half();
+        let text = base.replace(from, to);
+        assert_ne!(text, base, "{from}");
+        let err = Pipeline::parse(&text).unwrap_err().to_string();
+        assert!(err.contains(expected), "{from}: {err}");
+    }
+
+    #[test]
+    fn writes_take_a_name_or_a_table_and_a_plain_one_writes_back_as_a_name() {
+        #[derive(Serialize, Deserialize)]
+        struct Writes {
+            writes: Vec<Write>,
+        }
+        let p = Pipeline::parse(&secret_half()).unwrap();
+        let setup = &p.stages[3];
+        assert_eq!(setup.name, "try-setup");
+        assert_eq!(
+            setup.writes,
+            [
+                Write {
+                    name: "personas".into(),
+                    secret: true
+                },
+                Write::named("seed")
+            ]
+        );
+        assert_eq!(setup.secret_writes().collect::<Vec<_>>(), ["personas"]);
+        assert_eq!(p.needs_range(3), Some((2, 5)));
+        assert_eq!(p.needs_range(6), None);
+        assert_eq!(
+            serde_json::to_value(&setup.writes).unwrap(),
+            serde_json::json!([{ "name": "personas", "secret": true }, "seed"])
+        );
+        let back = toml::to_string(&Writes {
+            writes: setup.writes.clone(),
+        })
+        .unwrap();
+        assert!(back.contains("\"seed\""), "{back}");
+        assert_eq!(
+            toml::from_str::<Writes>(&back).unwrap().writes,
+            setup.writes
+        );
+        assert_eq!(env_key("try-setup.personas"), "TRY_SETUP_PERSONAS");
+    }
+
+    #[test]
+    fn writes_and_secrets_are_refused_where_nothing_could_write_or_forget_them() {
+        let gate =
+            "gate = { kind = \"command\", in = \"lane:backend\", argv = [\"make\", \"personas\"] }";
+        secret_half_refused(
+            gate,
+            "gate = { kind = \"human\", decision = \"setup\" }",
+            "writes only with a command gate",
+        );
+        secret_half_refused(
+            gate,
+            "gate = { kind = \"command\", in = \"lane:backend\", like = \"deploy\" }",
+            "writes only with a command gate",
+        );
+        secret_half_refused("\"seed\"]", "\"checks\"]", "its command's own log");
+        secret_half_refused(
+            "context = \"lane:backend\"\nneeds = [\"my-dev\"]\nwrites = [{",
+            "context = \"each\"\nneeds = [\"my-dev\"]\nwrites = [{",
+            "writes only in one context",
+        );
+        secret_half_refused("\"seed\"]", "\"commit\"]", "inputs.try-setup.commit");
+        secret_half_refused("\"seed\"]", "\"Personas\"]", "the same variable name");
+        secret_half_refused(
+            "writes = [\"notes\"]",
+            "writes = [{ name = \"token\", secret = true }]",
+            "written by a gate-only command",
+        );
+        secret_half_refused(
+            "{ name = \"personas\", secret = true }",
+            "{ name = \"summary\", secret = true }",
+            "read by Dispatch",
+        );
+        secret_half_refused(
+            "needs = [\"my-dev\"]\nwrites = [{",
+            "needs = [\"backend\"]\nwrites = [{",
+            "needs a [[resources]] entry",
+        );
+    }
+
+    #[test]
+    fn a_secret_is_never_a_reviews_subject() {
+        let mut p = Pipeline::parse(&secret_half()).unwrap();
+        p.operators.insert(
+            "reviewer".into(),
+            toml::from_str(
+                "kind = \"codex\"\n[review]\nreviewer = \"codex\"\nreview_first = \"r\"\nreview_round = \"r\"\nrespond = \"r\"\nrespond_to_user = \"r\"\nhandoff = \"h\"\nno_feedback = \"n\"\n",
+            )
+            .unwrap(),
+        );
+        let mut review: Stage = toml::from_str(
+            "name = \"check-personas\"\nreview = \"reviewer\"\nsubject = \"personas\"\n",
+        )
+        .unwrap();
+        review.context = Context::Root;
+        p.stages.push(review);
+        let err = p.validate().unwrap_err().to_string();
+        assert!(err.contains("which is secret and never read"), "{err}");
     }
 
     #[test]

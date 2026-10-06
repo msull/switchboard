@@ -96,6 +96,7 @@ fn record(project: ProjectId, name: &str, kind: SessionKind, order: u32) -> Sess
         waiting_on: None,
         pending_launch: false,
         last_stop_at: None,
+        env: Vec::new(),
     }
 }
 
@@ -5210,6 +5211,63 @@ fn ticket_page_shows_the_attempts_pull_request() {
     harness.run_steps(2);
     harness.get_by_label("PR #20");
     harness.get_by_label("pending at fa62f3f7");
+}
+
+/// A secret artifact is listed by name with no button, so nothing on
+/// the page can ask the runner to read it; once deleted it says so.
+#[test]
+fn a_secret_artifact_is_a_label_and_a_click_on_it_reads_nothing() {
+    use switchboard::ports::dispatch::AttemptView;
+    let (mut harness, _ids) = harness();
+    let mut status = dispatch_status();
+    status.tickets[0].attempts = vec![AttemptView {
+        stage: "try-setup".into(),
+        n: 1,
+        context: "root".into(),
+        kind: "gate-only".into(),
+        state: "complete".into(),
+        artifacts: vec![
+            (
+                "personas".into(),
+                "/dispatch/t1/try-setup/1/root/personas.md".into(),
+            ),
+            (
+                "seed".into(),
+                "/dispatch/t1/try-setup/1/root/seed.md".into(),
+            ),
+        ],
+        secret: vec!["personas".into()],
+        ..AttemptView::default()
+    }];
+    harness
+        .state_mut()
+        .dispatch(AppAction::DispatchStatus(Some(status.clone())));
+    harness
+        .state_mut()
+        .dispatch(AppAction::ShowTicket("t1".into()));
+    harness.run_steps(2);
+    harness.get_by_role_and_label(Role::Button, "seed");
+    assert!(
+        harness
+            .query_by_role_and_label(Role::Button, "personas")
+            .is_none()
+    );
+    harness.state_mut().dispatched.clear();
+    harness.get_by_label("personas").click();
+    harness.run_steps(2);
+    assert!(
+        !actions(&harness)
+            .iter()
+            .any(|a| matches!(a, AppAction::DispatchReadArtifact { .. })),
+        "{:?}",
+        actions(&harness)
+    );
+    status.tickets[0].attempts[0].forgotten = vec!["personas".into()];
+    harness
+        .state_mut()
+        .dispatch(AppAction::DispatchStatus(Some(status)));
+    harness.run_steps(2);
+    harness.get_by_label("personas (deleted)");
 }
 
 /// An attempt and a review round that were nudged after a dirty stop

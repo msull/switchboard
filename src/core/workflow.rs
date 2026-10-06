@@ -340,6 +340,7 @@ impl AppCore {
             waiting_on: None,
             pending_launch: false,
             last_stop_at: None,
+            env: Vec::new(),
             ..source
         });
         self.edit_run(id, now, out, |r| {

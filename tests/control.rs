@@ -124,6 +124,7 @@ fn session_new(project: &str, prompt: Option<&str>) -> Body {
         launch: Launch::Shell,
         prompt: prompt.map(str::to_owned),
         notes: "Dispatch ticket 1".into(),
+        env: std::collections::BTreeMap::new(),
     }
 }
 

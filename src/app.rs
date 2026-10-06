@@ -729,13 +729,15 @@ impl SwitchboardApp {
         }
     }
 
-    /// The project's environment under the launcher's own variables, so
-    /// an agent-specific value still wins.
+    /// The project's environment, then the variables an outside
+    /// launcher put on the record, then the launcher's own, so a later
+    /// value wins. The record's come back on every spawn, so a resumed
+    /// session keeps them.
     fn spawn_env(&self, id: RecordId, own: Vec<(String, String)>) -> Vec<(String, String)> {
-        let Some(pid) = self.core.session(id).map(|s| s.project) else {
+        let Some(record) = self.core.session(id) else {
             return own;
         };
-        let resolved = resolve_project_env(&self.core, &self.services, pid);
+        let resolved = resolve_project_env(&self.core, &self.services, record.project);
         let missing = resolved.missing();
         if !missing.is_empty() {
             log::warn!("secrets without a stored value: {}", missing.join(", "));
@@ -746,6 +748,7 @@ impl SwitchboardApp {
             env.iter().map(|(k, _)| k.as_str()).collect::<Vec<_>>(),
             id.host_name()
         );
+        env.extend(record.env.iter().cloned());
         env.extend(own);
         env
     }
@@ -1602,7 +1605,63 @@ fn find_across_breaks(text: &str, value: &str, from: usize) -> Option<(usize, us
 
 #[cfg(test)]
 mod tests {
-    use super::redact;
+    use std::collections::BTreeMap;
+    use std::path::PathBuf;
+    use std::time::SystemTime;
+
+    use super::{SwitchboardApp, redact};
+    use crate::adapters::fakes;
+    use crate::core::model::{Project, ProjectEnv, ProjectId, SessionKind, SpaceId, Workspace};
+    use crate::core::{AppAction, ControlAction, Launch};
+
+    /// Every spawn, a resume as much as the first, carries the
+    /// variables on the record, under the launcher's own.
+    #[test]
+    fn a_spawn_carries_the_records_variables_under_the_launchers_own() {
+        let mut app = SwitchboardApp::with_services(fakes::services());
+        let project = Project {
+            id: ProjectId::new(),
+            name: "p".into(),
+            root: PathBuf::from("/work/p"),
+            tags: Vec::new(),
+            notes: String::new(),
+            pinned: Vec::new(),
+            env: ProjectEnv::default(),
+            shown: Vec::new(),
+            created: SystemTime::UNIX_EPOCH,
+            last_active: SystemTime::UNIX_EPOCH,
+            space: SpaceId::DEFAULT,
+            op: None,
+        };
+        let pid = project.id;
+        app.core_mut_for_seeding()
+            .seed(vec![Workspace::new(project)], Vec::new());
+        app.dispatch(AppAction::Control {
+            op: "op-1".into(),
+            action: ControlAction::NewSession {
+                project: pid,
+                name: "tester".into(),
+                kind: SessionKind::Shell,
+                cwd: "/work/p".into(),
+                launch: Launch::Shell,
+                prompt: None,
+                notes: String::new(),
+                env: BTreeMap::from([
+                    ("DISPATCH_INPUT_PERSONAS".into(), "/d/personas.md".into()),
+                    ("SHARED".into(), "record".into()),
+                ]),
+            },
+        });
+        let id = app.core.workspace(pid).unwrap().sessions[0].id;
+        let env = app.spawn_env(id, vec![("SHARED".into(), "launcher".into())]);
+        let at = |key: &str, value: &str| {
+            env.iter()
+                .position(|(k, v)| k == key && v == value)
+                .unwrap_or_else(|| panic!("{key}={value} in {env:?}"))
+        };
+        at("DISPATCH_INPUT_PERSONAS", "/d/personas.md");
+        assert!(at("SHARED", "record") < at("SHARED", "launcher"), "{env:?}");
+    }
 
     #[test]
     fn a_value_inside_another_is_replaced_whole_in_both() {

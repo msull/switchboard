@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 /// Bump when the on-disk shape changes incompatibly.
-pub const SCHEMA_VERSION: u32 = 9;
+pub const SCHEMA_VERSION: u32 = 10;
 
 /// How the UI picks its colours: follow the system, or force one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -1052,6 +1052,10 @@ pub struct SessionRecord {
     /// `last_event_at` moves on every event; this one only on a stop.
     #[serde(default)]
     pub last_stop_at: Option<SystemTime>,
+    /// Variables an outside launcher asked for, set on every spawn under
+    /// the launcher's own; paths and names, never secret values.
+    #[serde(default)]
+    pub env: Vec<(String, String)>,
 }
 
 /// How many runs a record keeps; the logs of older ones are deleted

@@ -17,7 +17,7 @@ use crate::bitbucket::{Bitbucket, bitbucket_repo};
 use crate::git::{Adopted, Confine, Network, Push, Repo, branch_name, yyyymmdd};
 use crate::github::{Checks, Gh, PullRequests, github_repo};
 use crate::health::Health;
-use crate::pipeline::{Context, Gate, Lane, OnDirty, Pipeline, Stage, StageKind};
+use crate::pipeline::{Context, Gate, Lane, OnDirty, Pipeline, Stage, StageKind, Write, env_key};
 use crate::port::Port;
 use crate::review::checks_key;
 use crate::store::{
@@ -1365,7 +1365,7 @@ impl Runner {
         shape.operator.clone_from(&p.policy.rebaser);
         shape.review = None;
         shape.gate = None;
-        shape.writes = vec!["notes".to_owned()];
+        shape.writes = vec![Write::named("notes")];
         shape.prompt = None;
         shape
     }
@@ -1439,6 +1439,7 @@ impl Runner {
             clone_of,
             pr: None,
             rework: None,
+            env: BTreeMap::new(),
         };
         self.launch_agent(t, ps, p, REFRESH, &name, &cwd, n, spec, now_ms)
     }
@@ -1573,6 +1574,8 @@ impl Runner {
             log::info!("ticket {} closing: a service is still stopping", t.id);
             return Ok(());
         }
+        let p = self.pipeline_of(t).ok();
+        self.forget_secrets(t, p.as_ref(), now_ms)?;
         if !t.holds.is_empty() {
             t.holds.clear();
             self.save_ticket(t, now_ms)?;
@@ -1921,9 +1924,20 @@ impl Runner {
             }
         }
         if settled && unmarked {
+            // Nothing runs any more, so a secret the ticket holds is
+            // deleted with the park, a restart riding on it or not: the
+            // stack it was for is stopped.
+            let p = self.pipeline_of(t).ok();
+            let lost = p.as_ref().map(|p| secret_holds(t, p)).unwrap_or_default();
+            self.forget_secrets(t, p.as_ref(), now_ms)?;
             // Everything is read back as gone: a restart that rode on the
-            // park applies now, instead of the park ending.
+            // park applies now, instead of the park ending. It keeps the
+            // ticket's holds, except one a deleted secret was made under:
+            // retaking that sends the ticket back through its range, so
+            // the stage that writes the secret runs again before anything
+            // reads it.
             if t.restart.is_some() {
+                t.holds.retain(|h| !lost.contains(&h.resource));
                 return self.apply_restart(t, now_ms);
             }
             log::warn!("ticket {} parked: {reason}", t.id);
@@ -3458,15 +3472,22 @@ impl Runner {
         ctx: &str,
         now_ms: u64,
     ) -> Result<()> {
-        let a = new_attempt(
+        let n = next_n(t, &stage.name);
+        let artifacts = if stage.writes.is_empty() {
+            BTreeMap::new()
+        } else {
+            artifact_paths(stage, &self.attempt_dir(t, &stage.name, n, ctx)?)
+        };
+        let mut a = new_attempt(
             &stage.name,
-            next_n(t, &stage.name),
+            n,
             ctx,
             AttemptKind::GateOnly,
             AttemptState::Running,
-            BTreeMap::new(),
+            artifacts,
             now_ms,
         );
+        a.secret = stage.secret_writes().map(str::to_owned).collect();
         log::info!("ticket {} {}/{ctx} attempt {}", t.id, stage.name, a.n);
         t.attempts.push(a);
         self.save_ticket(t, now_ms)
@@ -4439,17 +4460,16 @@ impl Runner {
             );
         }
         let dir = self.attempt_dir(t, &stage.name, n, ctx)?;
-        let artifacts: BTreeMap<String, PathBuf> = stage
-            .writes
-            .iter()
-            .map(|w| (w.clone(), dir.join(format!("{w}.md"))))
-            .collect();
+        let artifacts = artifact_paths(stage, &dir);
         let mut vars = vars_for(t, p, lane);
         for (name, path) in &artifacts {
             vars.set(name.clone(), path.display().to_string());
         }
-        let mut prompt = guidance_prelude(&p.operators[&operator].guidance, &vars);
-        prompt.push_str(&vars.render(stage.prompt.as_deref().unwrap_or_default()));
+        let guidance = &p.operators[&operator].guidance;
+        let template = stage.prompt.as_deref().unwrap_or_default();
+        let env = input_env(p, &vars, &format!("{guidance}\n{template}"));
+        let mut prompt = guidance_prelude(guidance, &vars);
+        prompt.push_str(&vars.render(template));
         if let Some(moved) = lane
             .and_then(|l| t.lanes.iter().find(|x| x.name == l))
             .and_then(|l| l.refreshed.as_ref())
@@ -4475,6 +4495,7 @@ impl Runner {
             clone_of: None,
             pr: None,
             rework,
+            env,
         };
         self.launch_agent(t, ps, p, &stage.name, ctx, cwd, n, spec, now_ms)
     }
@@ -4576,6 +4597,7 @@ impl Runner {
                 launch,
                 prompt: Some(spec.prompt),
                 notes,
+                env: spec.env,
             }
         };
         let reply = self.send(t, ps, Some((stage.to_owned(), n)), "session", body, now_ms)?;
@@ -4736,6 +4758,7 @@ impl Runner {
             clone_of,
             pr: Some(record),
             rework: None,
+            env: BTreeMap::new(),
         };
         let (stage_name, ctx) = (a.stage.clone(), a.context.clone());
         self.launch_agent(t, ps, p, &stage_name, &ctx, cwd, n, spec, now_ms)
@@ -5072,7 +5095,7 @@ impl Runner {
         let dir = self.attempt_dir(t, &a.stage, a.n, &a.context)?;
         let log = dir.join("checks.log");
         let lane_record = lane.and_then(|l| t.lanes.iter().find(|x| x.name == l));
-        let env = checks_env(
+        let mut env = checks_env(
             t,
             lane_record.map(|l| l.name.as_str()),
             lane_record.map(|l| l.branch.as_str()),
@@ -5080,6 +5103,12 @@ impl Runner {
             cwd,
             &head,
         );
+        if a.kind == AttemptKind::GateOnly
+            && let Err(e) = prepare_writes(a, &dir, &mut env)
+        {
+            let reason = format!("the command's artifacts could not be prepared: {e:#}");
+            return self.fail_attempt(t, ps, &a.stage, a.n, &reason, now_ms);
+        }
         let key = gate_key(t, a);
         let started = match confine_for(t, p, lane, &[&dir], gate_network(p, stage)) {
             Some(confine) => self
@@ -5181,6 +5210,11 @@ impl Runner {
         }
         if code != 0 {
             let reason = checks_reason(code, &gate.log);
+            return self.fail_gate(t, ps, a, &reason, now_ms);
+        }
+        if a.kind == AttemptKind::GateOnly
+            && let Some(reason) = seal_writes(a)
+        {
             return self.fail_gate(t, ps, a, &reason, now_ms);
         }
         if let Some(attempt) = find_attempt_mut(t, &a.stage, a.n) {
@@ -7108,6 +7142,9 @@ struct AgentSpec {
     /// The sent-back note in the prompt, by its `rework` key, taken off
     /// in the same write as the attempt.
     rework: Option<String>,
+    /// `DISPATCH_INPUT_*` variables for a fresh session: the path of
+    /// each input its prompt names.
+    env: BTreeMap<String, String>,
 }
 
 /// One context's poll of a PR-reading stage.
@@ -7556,6 +7593,108 @@ fn judge_pr(
     (summary, verdict)
 }
 
+/// `DISPATCH_INPUT_<NAME>` for each input `text` names that `vars`
+/// resolves, set to its path. Validation keeps `env_key` one-to-one
+/// over artifact names, so two fields share a key only when they name
+/// the same artifact: a stage-qualified field wins over a bare one, and
+/// of two stage-qualified fields, the stage later in the pipeline wins.
+fn input_env(p: &Pipeline, vars: &Vars, text: &str) -> BTreeMap<String, String> {
+    let mut names: Vec<_> = crate::template::input_names(text).into_iter().collect();
+    // A bare field ranks 0, below every stage. A field naming no stage
+    // of the pipeline ranks 0 too, harmlessly: `vars` never resolves it,
+    // so it sets nothing.
+    let order = |stage: &Option<String>| {
+        stage.as_ref().map_or(0, |s| {
+            p.stages
+                .iter()
+                .position(|x| &x.name == s)
+                .map_or(0, |i| i + 1)
+        })
+    };
+    names.sort_by_key(|(stage, _)| order(stage));
+    let mut env = BTreeMap::new();
+    for (stage, name) in names {
+        let field = match &stage {
+            Some(s) => format!("inputs.{s}.{name}"),
+            None => format!("inputs.{name}"),
+        };
+        if let Some(path) = vars.0.get(&field) {
+            env.insert(format!("DISPATCH_INPUT_{}", env_key(&name)), path.clone());
+        }
+    }
+    env
+}
+
+/// The resources a live secret was made under: what each stage with a
+/// completed attempt still holding a secret file needs.
+fn secret_holds(t: &Ticket, p: &Pipeline) -> Vec<String> {
+    t.attempts
+        .iter()
+        .filter(|a| {
+            a.state == AttemptState::Complete
+                && a.secret.iter().any(|n| !a.forgotten.contains_key(n))
+        })
+        .filter_map(|a| p.stages.iter().find(|s| s.name == a.stage))
+        .flat_map(|s| s.needs.iter().filter(|n| p.resource(n).is_some()).cloned())
+        .collect()
+}
+
+/// Where each artifact a stage writes goes in its attempt directory.
+fn artifact_paths(stage: &Stage, dir: &Path) -> BTreeMap<String, PathBuf> {
+    stage
+        .write_names()
+        .map(|w| (w.to_owned(), dir.join(format!("{w}.md"))))
+        .collect()
+}
+
+/// A gate-only command's artifacts made ready before it starts: each
+/// path in its environment as `DISPATCH_WRITES_<NAME>`, any file left
+/// from an earlier run removed so that one existing afterwards is this
+/// run's, and the attempt directory closed to other users when one of
+/// them is secret (the child writes the file under its own umask).
+fn prepare_writes(a: &Attempt, dir: &Path, env: &mut Vec<(String, String)>) -> Result<()> {
+    for (name, path) in a.artifacts.iter().filter(|(n, _)| *n != "checks") {
+        env.push((
+            format!("DISPATCH_WRITES_{}", env_key(name)),
+            path.display().to_string(),
+        ));
+        match std::fs::remove_file(path) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                return Err(e).with_context(|| format!("removing {name}"));
+            }
+            _ => {}
+        }
+    }
+    if !a.secret.is_empty() {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
+            .context("closing the attempt directory")?;
+    }
+    Ok(())
+}
+
+/// After a gate-only command exited 0: every artifact it was to write
+/// is there, and each secret one is readable by this user alone. The
+/// reason to fail it otherwise.
+fn seal_writes(a: &Attempt) -> Option<String> {
+    if let Some(name) = missing_artifacts(a).into_iter().find(|n| n != "checks") {
+        return Some(format!(
+            "exited 0 without writing {name} ({})",
+            a.artifacts[&name].display()
+        ));
+    }
+    for name in &a.secret {
+        use std::os::unix::fs::PermissionsExt;
+        let Some(path) = a.artifacts.get(name) else {
+            continue;
+        };
+        if let Err(e) = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)) {
+            return Some(format!("could not make {name} private: {e}"));
+        }
+    }
+    None
+}
+
 /// The artifacts an attempt was to write that are not files yet.
 fn missing_artifacts(attempt: &Attempt) -> Vec<String> {
     attempt
@@ -7609,6 +7748,8 @@ pub(crate) fn new_attempt(
         rewrite: None,
         nudges: Vec::new(),
         orphans_killed: Vec::new(),
+        secret: BTreeSet::new(),
+        forgotten: BTreeMap::new(),
         settle: BTreeMap::new(),
         stop_at_ms: None,
         polls_since_stop: 0,
@@ -7932,12 +8073,23 @@ pub(crate) fn vars_for(t: &Ticket, p: &Pipeline, lane: Option<&str>) -> Vars {
     // What an earlier stage left the tree at (a deploy's commit), or
     // that it was skipped.
     for s in p.stages.iter().take(t.stage) {
-        let head = t
+        let latest = t
             .attempts
             .iter()
             .filter(|a| a.stage == s.name && a.state == AttemptState::Complete)
-            .max_by_key(|a| a.n)
-            .and_then(|a| a.head.clone());
+            .max_by_key(|a| a.n);
+        // An artifact of a named stage, unless it was forgotten.
+        for (name, path) in latest.iter().flat_map(|a| {
+            a.artifacts
+                .iter()
+                .filter(|(name, _)| !a.forgotten.contains_key(*name))
+        }) {
+            vars.set(
+                format!("inputs.{}.{name}", s.name),
+                path.display().to_string(),
+            );
+        }
+        let head = latest.and_then(|a| a.head.clone());
         let key = format!("inputs.{}.commit", s.name);
         if let Some(head) = head {
             vars.set(key, head);

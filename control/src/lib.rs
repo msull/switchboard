@@ -11,6 +11,7 @@
 
 pub mod client;
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
@@ -94,6 +95,11 @@ pub enum Body {
         prompt: Option<String>,
         #[serde(default)]
         notes: String,
+        /// Variables set on every spawn of the session, resumes
+        /// included: paths and names, never secret values. Not written
+        /// when empty, so an older app reads the same request.
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        env: BTreeMap<String, String>,
     },
     /// A new Claude Code session whose conversation is a copy of
     /// `source`'s whole transcript, in the source's project and cwd,
@@ -667,6 +673,7 @@ mod tests {
                 launch: Launch::Shell,
                 prompt: Some("go".into()),
                 notes: "ticket".into(),
+                env: BTreeMap::from([("DISPATCH_INPUT_PLAN".into(), "/plan.md".into())]),
             },
             Body::SessionClone {
                 source: "s1".into(),
@@ -685,6 +692,7 @@ mod tests {
                 },
                 prompt: None,
                 notes: String::new(),
+                env: BTreeMap::new(),
             },
             Body::SpaceNew { name: "D".into() },
             Body::SetNew {

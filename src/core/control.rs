@@ -5,6 +5,7 @@
 //! `TryFrom<wire::Body>` at the end of this file translates it to
 //! `ControlAction`, and the read models answer in its shapes.
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::SystemTime;
 
@@ -36,6 +37,8 @@ pub enum ControlAction {
         /// An agent's first prompt, on its command line.
         prompt: Option<String>,
         notes: String,
+        /// Variables for every spawn of the session (`SessionRecord::env`).
+        env: BTreeMap<String, String>,
     },
     /// A Claude Code session cloned from `source`'s whole transcript,
     /// launched with `prompt`.
@@ -196,6 +199,7 @@ impl AppCore {
                 launch,
                 prompt,
                 notes,
+                env,
             } => {
                 if let Some(text) = self.host_unavailable("start", &name) {
                     self.error(text);
@@ -204,7 +208,10 @@ impl AppCore {
                 let Some(id) = self.add_record(project, name, kind, cwd, launch, now, out) else {
                     return Vec::new();
                 };
-                self.edit_session(id, out, |s| s.notes = notes);
+                self.edit_session(id, out, |s| {
+                    s.notes = notes;
+                    s.env = env.into_iter().collect();
+                });
                 if let Some(prompt) = prompt.filter(|_| matches!(kind, SessionKind::Agent(_))) {
                     self.first_prompts.push((id, prompt));
                 }
@@ -761,6 +768,7 @@ impl TryFrom<wire::Body> for ControlAction {
                 launch: l,
                 prompt,
                 notes,
+                env,
             } => Self::NewSession {
                 project: project(&p)?,
                 name,
@@ -769,6 +777,7 @@ impl TryFrom<wire::Body> for ControlAction {
                 launch: launch(l),
                 prompt,
                 notes,
+                env,
             },
             wire::Body::SessionClone {
                 source: s,

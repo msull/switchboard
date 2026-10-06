@@ -199,7 +199,8 @@ agent's session after it stopped with a dirty tree),
 by this one before they ran again or the attempt was cancelled),
 `parking`,
 `parked`, `resumed`, `closing`, `closed`, `refused` (a supervisor's
-answer to a decision that is not its to answer), and `void`. A take,
+answer to a decision that is not its to answer), `forgotten` (a secret
+artifact's file deleted, with its name and why), and `void`. A take,
 park, resume, close or answer a supervisor session made carries
 `"actor":"supervisor"` and its text ends `(by supervisor)` or reads
 `by supervisor`. The human line is
@@ -519,6 +520,18 @@ nothing needs restarting. What a change reaches depends on the key:
 - A lane's `setup` runs once per worktree, before the lane's first
   agent, and again after a restart that changed it: before the next
   agent or the checks a `check` answer starts.
+
+A stage that gives a tester something secret (a test user's
+credentials from a gate-only `try-setup` that writes
+`{ name = "personas", secret = true }`) reaches the tester's prompt as
+`{inputs.personas}`, a path, and as `$DISPATCH_INPUT_PERSONAS` in its
+session. The file lives only while the ticket holds the stage's
+resource; it is deleted when the hold is released, the ticket parks or
+closes. Say so in the tester's stage prompt, and say that the tester
+holds no cloud credentials and should not look for any, and that it
+uses the file (passes its path to a probe or a seeding script) without
+printing its contents: whatever an agent prints stays in its
+transcript and in Switchboard's scrollback.
 
 Before saving, read the file back: a pipeline that does not parse is
 refused at the next `take` with the parser's reason, and `status`

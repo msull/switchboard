@@ -430,6 +430,31 @@ interrupted attempt.
   attempt cannot find a stale file already settled, and parallel
   `each` attempts never share a file. Earlier artifacts are read-only
   inputs; a stage that changes one writes its own copy.
+  `{inputs.<stage>.<name>}` names the artifact of the latest completed
+  attempt of that stage. An agent session also gets each input its
+  prompt or its operator's guidance names as an environment variable,
+  `DISPATCH_INPUT_<NAME>`, set to the path (never the contents), on
+  every spawn including a resume.
+- **A secret artifact lives only through its hold.** A gate-only
+  command stage may mark an artifact `secret` (a generated test
+  user's credentials, say). Dispatch never reads it: the port refuses
+  to serve it, `show`, the report and the event log list its name
+  only, and Switchboard's ticket page draws it as a label with no
+  button. The attempt directory is made 0700 before the command runs
+  and the file 0600 after it exits 0. The file is deleted, and a
+  `forgotten` event logged with the reason (`<resource> released`,
+  `attempt failed`, `attempt cancelled`, `attempt replaced`, `parked`
+  or `closed`), when the ticket leaves the
+  range of stages its stage's `needs` resource covers, when a newer
+  attempt of the stage completes or its attempt fails or is cancelled,
+  and when the ticket parks or closes. A restart rides on a park, so it
+  deletes the secret too, and lets go of the hold the secret was made
+  under: the restarted ticket retakes it, which asks to run the range's
+  earlier stages again (the one that writes the secret among them)
+  before anything reads it. An attempt whose command still runs is
+  never swept. Once deleted, `{inputs.<name>}` no longer
+  renders it. A stage writing a secret must print nothing secret:
+  everything it prints goes to its readable `checks` log.
 - **A review is a copy.** A *workflow* stage copies the reviewed
   artifact into its own attempt directory and starts the run on the
   copy, so the workflow's round files (derived from the plan path) are
@@ -720,6 +745,7 @@ name = "..."
 operator = "..."              # present: an agent stage; absent with a review operator: a workflow stage; absent: gate-only
 context = "root" | "each" | "joined" | ["front"]
 writes = ["notes"]            # artifact names; each expands as {notes}, {plan}, ...
+writes = ["seed", { name = "personas", secret = true }]   # a gate-only command stage: the command writes each to $DISPATCH_WRITES_<NAME>; a secret one needs a [[resources]] entry in needs
 prompt = "..."                # templates: {issue.number} {issue.title} {task.text} {lane} {lanes} {lanes.all} {branch} {worktree} {project.root} {inputs.<artifact>}; the full list is the table below
 gate = { kind = "command", argv = ["..."], in = "root" | "lane" | "lane:<name>" }
      | { kind = "command", per_lane = { <lane> = ["..."] }, in = "lane" }
@@ -763,6 +789,37 @@ artifact it writes settled" is the default, described under "Stage
 semantics". A workflow stage names the artifact it reviews with
 `subject`.
 
+`writes` takes a name or a table `{ name, secret = true }`. A gate-only
+stage may write only with a command gate of its own (`argv` or
+`per_lane`; not `like`, whose result is reused without running): the
+command must leave each file at the path it is given, or its exit 0
+fails the attempt and asks `rerun`. Validation refuses: `checks` in a
+gate-only stage's `writes` (it is the command's own log); `writes` on a
+gate-only stage that runs per lane (`each`, or `lanes` naming more than
+one), since a reader takes the stage's newest artifact whichever lane
+wrote it; `commit` as a
+name anywhere (`{inputs.<stage>.commit}` already means the head); two
+names in the pipeline that make the same variable name (`a-b` and
+`a_b` are both `A_B`); and `secret = true` on any stage but a gate-only
+one, on `plan`, `notes`, `summary` or `checks` (which Dispatch reads
+itself), on a stage whose `needs` names no `[[resources]]` entry, or on
+an artifact a later review stage names as its `subject`.
+
+A command gate runs with `DISPATCH_TICKET`, `DISPATCH_LANE` and
+`DISPATCH_BRANCH` (in a lane context), `DISPATCH_STAGE`,
+`DISPATCH_CONTEXT`, `DISPATCH_TREE` and `DISPATCH_HEAD`. A gate-only
+command stage's command also gets `DISPATCH_WRITES_<NAME>` for each
+artifact it writes: the name upper-cased with anything not a letter or
+digit as `_`. Nothing names the environment it deploys to; a pipeline
+that needs one puts it in its own argv
+(`argv = ["sh", "-c", "inv personas --env my-dev > \"$DISPATCH_WRITES_PERSONAS\""]`).
+An agent session gets `DISPATCH_INPUT_<NAME>` for each `{inputs.<name>}`
+or `{inputs.<stage>.<name>}` its prompt or guidance names. Two fields
+naming the same artifact share a variable: the stage-qualified one wins
+over the bare one, and of two stage-qualified ones, the later stage in
+the pipeline. A stage that writes a secret must print nothing secret,
+since its output is the `checks` log anyone can read.
+
 A prompt's templates are these keys, plus a stage's `writes` names
 (`{notes}`, `{plan}`); the review and code review variables are
 described where they are used. A key that is not set reaches the agent
@@ -778,6 +835,8 @@ as written.
 | `{lanes}` | the lanes the ticket chose, comma-separated in pipeline order; every lane before the `lanes` decision, so `investigate` sees them all |
 | `{lanes.all}` | every lane of the pipeline, comma-separated in pipeline order |
 | `{inputs.<artifact>}` | the path of an earlier attempt's artifact |
+| `{inputs.<stage>.<artifact>}` | the path of that artifact from the latest completed attempt of `<stage>` |
+| `{inputs.<stage>.commit}` | the head an earlier stage's gate recorded (a deploy's commit) |
 
 ### Pipeline: Switchboard
 

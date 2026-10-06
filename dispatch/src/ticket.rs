@@ -2,7 +2,7 @@
 //! and the per-project state (the workspace and set in Switchboard, the
 //! queue). Plain data; the scheduler changes it, the store writes it.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
@@ -332,8 +332,27 @@ pub struct Attempt {
     /// attempt was cancelled.
     #[serde(default)]
     pub orphans_killed: Vec<OrphanKill>,
+    /// The artifact names that are secret, from the ticket's copy of the
+    /// stage when the attempt was made; never changed afterwards, so a
+    /// reader knows what never to read without the pipeline.
+    #[serde(default)]
+    pub secret: BTreeSet<String>,
+    /// Each secret artifact whose file was deleted, and why. The path
+    /// stays in `artifacts`, so the name is still listed.
+    #[serde(default)]
+    pub forgotten: BTreeMap<String, Forgotten>,
     pub started_ms: u64,
     pub ended_ms: Option<u64>,
+}
+
+/// A secret artifact's file deleted.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Forgotten {
+    /// When the file was deleted, in ms.
+    pub at_ms: u64,
+    /// Why: `"<resource> released"`, `"attempt failed"`, `"attempt
+    /// cancelled"`, `"attempt replaced"`, `"parked"` or `"closed"`.
+    pub why: String,
 }
 
 /// `Rewrite::skipped` when the branch is already on the remote.
@@ -1189,7 +1208,7 @@ impl Ticket {
         self.attempts
             .iter()
             .rev()
-            .filter(|a| a.state == AttemptState::Complete)
+            .filter(|a| a.state == AttemptState::Complete && !a.forgotten.contains_key(name))
             .find_map(|a| a.artifacts.get(name).map(|p| (a.stage.as_str(), p)))
     }
 
