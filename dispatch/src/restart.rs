@@ -2,8 +2,15 @@
 //! fresh copy of the project's live pipeline. The restart rides on a
 //! park, so everything running is read back as gone before anything
 //! moves; then the branches go back to the heads recorded as the ticket
-//! entered the stage, the later work is discarded, and the stage asks
-//! before any agent of it runs again.
+//! entered the stage, or stay where they are when nothing after the
+//! target can have moved them or they are at their base; the later work
+//! is discarded, and the stage asks before any agent of it runs again.
+//! The target may be a stage only the live file has, when every live
+//! stage before it was run.
+//!
+//! A gate-only stage's command is taken not to commit, so its attempt
+//! never makes a reset needed. A commit such a command does make is kept
+//! on the branch and recorded in the entry the restart writes.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -13,8 +20,8 @@ use anyhow::{Context as _, Result, bail};
 use crate::pipeline::{Gate, Lane, Pipeline};
 use crate::scheduler::{REFRESH, RESOLUTION, Runner, rework_key, tree_branch};
 use crate::ticket::{
-    AttemptKind, AttemptState, DecisionState, HeadReset, LaneAtEntry, Restart, RestartIntent,
-    StageEntry, Ticket, TicketState,
+    Attempt, AttemptKind, AttemptState, DecisionState, HeadReset, LaneAtEntry, Restart,
+    RestartIntent, StageEntry, Ticket, TicketState,
 };
 
 /// The start of the reason a restart cancels a completed attempt with.
@@ -30,17 +37,30 @@ struct Checked {
     from: String,
     /// The stage it is put at, by name.
     to: String,
-    /// `to`'s index in the ticket's copy.
+    /// The first stage of the ticket's copy whose work is discarded:
+    /// `to` itself, or the stage after a live-only `to`.
     target_old: usize,
     /// `to`'s index in the live file.
     target_new: usize,
-    /// `to` is earlier than the current stage: later work is discarded
-    /// and the branches reset.
+    /// `to` is earlier than the current stage, or only the live file has
+    /// it: the work from `target_old` on is discarded, and the branches
+    /// are reset where needed.
     ranged: bool,
+    /// The stages whose work is discarded, by name: from `target_old` on
+    /// in the ticket's copy for a ranged restart, the current stage alone
+    /// for a plain one.
+    range: Vec<String>,
+    /// The newest entry recorded for `target_old` on a ranged restart:
+    /// the heads the branches go back to and the lane state put back.
+    entry: Option<StageEntry>,
+    /// The branches of a ranged restart and the head each goes back to;
+    /// empty for a plain one.
+    targets: Vec<Target>,
 }
 
 /// A branch a ranged restart moves: its key in `StageEntry::heads`, its
-/// tree, the branch checked out there, and the head it goes back to.
+/// tree, the branch checked out there, and the head it goes back to,
+/// which is its current head when no reset is needed.
 struct Target {
     key: String,
     dir: PathBuf,
@@ -130,28 +150,7 @@ impl Runner {
             bail!("ticket {} is past its last stage", t.id);
         };
         let to = stage.map_or_else(|| from.clone(), str::to_owned);
-        let Some(target_old) = old.stages.iter().position(|s| s.name == to) else {
-            bail!("{to} is not a stage of ticket {}'s pipeline", t.id);
-        };
-        let Some(target_new) = new.stages.iter().position(|s| s.name == to) else {
-            bail!("the live pipeline has no stage {to}");
-        };
-        if target_old > t.stage {
-            bail!("{to} comes after the current stage {from}; a restart only goes back");
-        }
-        let ran: Vec<&str> = old.stages[..target_old]
-            .iter()
-            .map(|s| s.name.as_str())
-            .collect();
-        if let Some(added) = new.stages[..target_new]
-            .iter()
-            .find(|s| !ran.contains(&s.name.as_str()))
-        {
-            bail!(
-                "the live pipeline adds {} before {to}, which this ticket never ran",
-                added.name
-            );
-        }
+        let (target_old, target_new, live_only) = locate(t, old, &new, &from, &to)?;
         for lane in &t.lanes {
             let Some(live) = new.lane(&lane.name) else {
                 bail!(
@@ -172,7 +171,10 @@ impl Runner {
         {
             bail!("the live pipeline changes the project's repo, base, remote or worktrees");
         }
-        let ranged = target_old < t.stage;
+        let ranged = target_old < t.stage || live_only;
+        let mut targets = Vec::new();
+        let mut range = vec![from.clone()];
+        let mut entry = None;
         if ranged {
             if !old.cuts_worktrees() {
                 bail!("the project works in place, so there is no branch to reset to {to}");
@@ -183,15 +185,14 @@ impl Runner {
                     t.id
                 );
             }
-            let missing = format!(
-                "no head is recorded for {to} on this ticket; restart at the current stage, or close and retake"
-            );
-            let Some(entry) = latest_entry(t, &to) else {
-                bail!("{missing}");
-            };
-            if targets(t, old, entry).is_none() {
-                bail!("{missing}");
-            }
+            range = old.stages[target_old..]
+                .iter()
+                .map(|s| s.name.clone())
+                .collect();
+            entry = latest_entry(t, &old.stages[target_old].name).cloned();
+            targets = self
+                .reset_targets(t, old, &to, &range, entry.as_ref())
+                .map_err(anyhow::Error::msg)?;
         }
         Ok(Checked {
             text,
@@ -201,6 +202,9 @@ impl Runner {
             target_old,
             target_new,
             ranged,
+            range,
+            entry,
+            targets,
         })
     }
 
@@ -220,18 +224,12 @@ impl Runner {
             }
         };
         let to = target_name(t, &old, intent.stage.as_deref());
-        let checked = match self.check_restart(t, &old, intent.stage.as_deref()) {
+        let mut checked = match self.check_restart(t, &old, intent.stage.as_deref()) {
             Ok(c) => c,
             Err(e) => return self.hold_restart(t, Some(&to), &format!("{e:#}"), now_ms),
         };
-        let entry = if checked.ranged {
-            latest_entry(t, &checked.to).cloned()
-        } else {
-            None
-        };
-        if let Some(entry) = &entry
-            && let Some(why) = self.reset_heads(t, &old, entry, now_ms)?
-        {
+        let targets = std::mem::take(&mut checked.targets);
+        if let Some(why) = self.reset_heads(t, targets, now_ms)? {
             return self.hold_restart(t, Some(&to), &why, now_ms);
         }
         let before = t.pipeline_file.clone();
@@ -245,9 +243,9 @@ impl Runner {
             .as_ref()
             .map(|i| i.reset.clone())
             .unwrap_or_default();
-        let discarded = discard(t, &old, &checked, entry.as_ref());
+        let discarded = discard(t, &old, &checked);
         let setup_again = setup_changed(t, &old, &checked.new);
-        if let Some(entry) = &entry {
+        if let Some(entry) = &checked.entry {
             for lane in &mut t.lanes {
                 if let Some(at) = entry.lanes.get(&lane.name) {
                     lane.base_sha.clone_from(&at.base_sha);
@@ -303,7 +301,7 @@ impl Runner {
         self.save_ticket(t, now_ms)
     }
 
-    /// Each branch whose head differs from the entry's moved back to
+    /// Each branch whose head differs from its target's moved back to
     /// it, with `git reset --keep`: every one checked (on its branch, not
     /// mid-rebase, clean) before any moves, then each reset saved on the
     /// intent as it lands, so a restart cut short never moves a branch
@@ -311,13 +309,9 @@ impl Runner {
     fn reset_heads(
         &mut self,
         t: &mut Ticket,
-        old: &Pipeline,
-        entry: &StageEntry,
+        targets: Vec<Target>,
         now_ms: u64,
     ) -> Result<Option<String>> {
-        let Some(targets) = targets(t, old, entry) else {
-            return Ok(Some(format!("no head is recorded for {}", entry.stage)));
-        };
         let done: Vec<String> = t
             .restart
             .as_ref()
@@ -383,12 +377,184 @@ impl Runner {
         Ok(None)
     }
 
+    /// The branches a ranged restart to `to` moves, and the head each
+    /// goes back to: the ticket's tree, and each lane with a repository
+    /// of its own (a lane that is a path in the tree shares the tree's
+    /// branch). `range` is the stages whose work is discarded and
+    /// `entry` the heads recorded as the ticket entered the first of
+    /// them. A reset is only needed when something after the target can
+    /// have moved a branch, so for each branch:
+    ///
+    /// 1. the entry's head for it, when the entry has one;
+    /// 2. else its current head, when no attempt can have moved it: no
+    ///    agent, workflow or review attempt in the range in any state (a
+    ///    failed or cancelled agent may have committed), and no rebaser
+    ///    after the entry (any rebaser, without one);
+    /// 3. else its current head, when it is on its branch, not
+    ///    mid-rebase, has no commits beyond its base and a clean tree;
+    /// 4. else the restart is refused.
+    ///
+    /// A gate-only attempt is assumed not to commit: its stage runs no
+    /// agent, but its command gate runs the user's command in the lane
+    /// tree, and nothing stops that command from committing. A commit it
+    /// does make is kept and recorded in the entry the restart writes.
+    /// `Err` is the refusal.
+    fn reset_targets(
+        &self,
+        t: &Ticket,
+        old: &Pipeline,
+        to: &str,
+        range: &[String],
+        entry: Option<&StageEntry>,
+    ) -> Result<Vec<Target>, String> {
+        // Each branch with the base its own commits are counted from.
+        let mut branches: Vec<(Target, String)> = Vec::new();
+        if let Some(tree) = &t.tree {
+            let recorded = t
+                .lanes
+                .iter()
+                .filter(|l| !l.removed && old.lane(&l.name).is_some_and(|p| p.repo.is_none()))
+                .find_map(|l| l.base_sha.clone());
+            let base =
+                recorded.unwrap_or_else(|| format!("{}/{}", old.project.remote, old.project.base));
+            branches.push((
+                Target {
+                    key: "root".to_owned(),
+                    dir: tree.clone(),
+                    branch: tree_branch(t, None),
+                    to: String::new(),
+                },
+                base,
+            ));
+        }
+        for lane in t.lanes.iter().filter(|l| !l.removed) {
+            if let Some(p) = old.lane(&lane.name).filter(|l| l.repo.is_some()) {
+                let base = lane
+                    .base_sha
+                    .clone()
+                    .unwrap_or_else(|| format!("{}/{}", old.lane_remote(p), old.lane_base(p)));
+                branches.push((
+                    Target {
+                        key: lane.name.clone(),
+                        dir: lane.worktree.clone(),
+                        branch: lane.branch.clone(),
+                        to: String::new(),
+                    },
+                    base,
+                ));
+            }
+        }
+        let may_have_moved = t.attempts.iter().any(|a| {
+            let in_range = range.contains(&a.stage) && a.kind != AttemptKind::GateOnly;
+            let rebaser = entry.map_or(a.stage == REFRESH || a.stage == RESOLUTION, |e| {
+                after_entry(a, e)
+            });
+            in_range || rebaser
+        });
+        let nested: Vec<PathBuf> = branches
+            .iter()
+            .filter(|(x, _)| x.key != "root")
+            .map(|(x, _)| x.dir.clone())
+            .collect();
+        let mut out = Vec::new();
+        for (mut target, base) in branches {
+            if let Some(head) = entry.and_then(|e| e.heads.get(&target.key)) {
+                target.to.clone_from(head);
+                out.push(target);
+                continue;
+            }
+            let unrecorded = format!(
+                "no head is recorded for {to} on this ticket and {}",
+                target.key
+            );
+            let current = match self.git.branch_head(&target.dir, &target.branch) {
+                Ok(Some(head)) => head,
+                Ok(None) => {
+                    return Err(format!(
+                        "{unrecorded} is not on its branch {}; check it out, or restart at the current stage",
+                        target.branch
+                    ));
+                }
+                Err(e) => {
+                    return Err(format!(
+                        "{unrecorded}'s head cannot be read ({e:#}); restart at the current stage"
+                    ));
+                }
+            };
+            if may_have_moved {
+                self.at_base(&target, &base, &nested, &unrecorded)?;
+            }
+            target.to = current;
+            out.push(target);
+        }
+        Ok(out)
+    }
+
+    /// Whether a branch with no recorded head may stay where it is
+    /// although something after the target can have moved it: not
+    /// mid-rebase, no commits beyond `base`, and a clean tree. `nested`
+    /// is the lanes with repositories of their own; `unrecorded` starts
+    /// each refusal. `Err` is the refusal, naming which check failed.
+    fn at_base(
+        &self,
+        target: &Target,
+        base: &str,
+        nested: &[PathBuf],
+        unrecorded: &str,
+    ) -> Result<(), String> {
+        match self.git.rebase_in_progress(&target.dir) {
+            Ok(false) => {}
+            Ok(true) => {
+                return Err(format!(
+                    "{unrecorded} is mid-rebase; finish or abort the rebase, or restart at the current stage"
+                ));
+            }
+            Err(e) => {
+                return Err(format!(
+                    "{unrecorded} cannot be read for a rebase in progress ({e:#}); restart at the current stage"
+                ));
+            }
+        }
+        match self.git.commits(&target.dir, base, "HEAD") {
+            Ok(c) if c.is_empty() => {}
+            Ok(_) => {
+                return Err(format!(
+                    "{unrecorded} has moved from its base; restart at the current stage, or close and retake"
+                ));
+            }
+            Err(e) => {
+                return Err(format!(
+                    "{unrecorded}'s commits beyond its base cannot be read ({e:#}); restart at the current stage"
+                ));
+            }
+        }
+        // A clean nested lane is untracked content in the ticket's
+        // tree, so the tree is read with those lanes left out.
+        let (tree, lanes) = if target.key == "root" {
+            (Some(target.dir.as_path()), nested.to_vec())
+        } else {
+            (None, vec![target.dir.clone()])
+        };
+        let changed =
+            crate::git::uncommitted(&*self.git, tree, &lanes).map_err(|e| format!("{e:#}"))?;
+        if !changed.is_empty() {
+            let named: Vec<String> = changed.iter().map(|c| c.display().to_string()).collect();
+            return Err(format!(
+                "{unrecorded} has uncommitted changes in {}; clean the tree, or restart at the current stage",
+                named.join(", ")
+            ));
+        }
+        Ok(())
+    }
+
     /// What each branch stands at as the ticket enters its current
     /// stage, pushed onto `entered`; the caller saves. Heads are read
     /// from the trees, which is local and cheap; one that cannot be read
-    /// is left out with a log line, which refuses a later ranged restart
-    /// to this stage and fails nothing now. A project that works in
-    /// place has no branches to record.
+    /// is left out with a log line and fails nothing now. A later ranged
+    /// restart to this stage then keeps that branch where it is if
+    /// nothing after the stage can have moved it or it is at its base,
+    /// and is refused for it otherwise. A project that works in place
+    /// has no branches to record.
     pub(crate) fn record_entry(&self, t: &mut Ticket, now_ms: u64) {
         let Some(tree) = t.tree.clone() else {
             return;
@@ -429,6 +595,72 @@ impl Runner {
     }
 }
 
+/// Where `to` stands in each copy: its index in the ticket's copy (the
+/// stage after it when only the live file has it), its index in the
+/// live file, and whether only the live file has it. Refused when it
+/// comes after the current stage `from` (or, for a live-only `to`, when
+/// the live file lacks `from` and the stage after `to` is later than
+/// it), or a stage before it in the live file was never run.
+fn locate(
+    t: &Ticket,
+    old: &Pipeline,
+    new: &Pipeline,
+    from: &str,
+    to: &str,
+) -> Result<(usize, usize, bool)> {
+    let in_old = old.stages.iter().position(|s| s.name == to);
+    let Some(target_new) = new.stages.iter().position(|s| s.name == to) else {
+        if in_old.is_none() {
+            bail!("{to} is not a stage of ticket {}'s pipeline", t.id);
+        }
+        bail!("the live pipeline has no stage {to}");
+    };
+    // When the live file renamed or dropped the current stage, the
+    // follower of a live-only `to` can land after it without `to` being
+    // later; say what is actually missing.
+    let after = || {
+        if new.stages.iter().any(|s| s.name == from) {
+            format!("{to} comes after the current stage {from}; a restart only goes back")
+        } else {
+            format!("the live pipeline has no stage {from}, the ticket's current stage")
+        }
+    };
+    // A stage only the live file has stands where the first live
+    // stage after it that the ticket ran stands.
+    let live_only = in_old.is_none();
+    let target_old = match in_old {
+        Some(i) => i,
+        None => new.stages[target_new + 1..]
+            .iter()
+            .find_map(|s| old.stages.iter().position(|o| o.name == s.name))
+            .ok_or_else(|| anyhow::anyhow!(after()))?,
+    };
+    if target_old > t.stage {
+        bail!("{}", after());
+    }
+    let ran: Vec<&str> = old.stages[..target_old]
+        .iter()
+        .map(|s| s.name.as_str())
+        .collect();
+    if let Some(added) = new.stages[..target_new]
+        .iter()
+        .find(|s| !ran.contains(&s.name.as_str()))
+    {
+        // A restart at the added stage is ranged, so it is pointed
+        // at only for a ticket that can take one.
+        let advice = if can_range(t, old) {
+            format!("; restart it at {} to run it", added.name)
+        } else {
+            String::new()
+        };
+        bail!(
+            "the live pipeline adds {} before {to}, which this ticket never ran{advice}",
+            added.name
+        );
+    }
+    Ok((target_old, target_new, live_only))
+}
+
 /// What a restart compares a lane by: where it lives and what it
 /// branches from.
 fn lane_shape(l: &Lane) -> (&PathBuf, &Option<String>, &Option<String>, &Option<String>) {
@@ -453,45 +685,17 @@ fn latest_entry<'t>(t: &'t Ticket, stage: &str) -> Option<&'t StageEntry> {
     t.entered.iter().rev().find(|e| e.stage == stage)
 }
 
-/// The branches a ranged restart moves, with their entry heads: the
-/// ticket's tree, and each lane with a repository of its own. A lane
-/// that is a path in the tree shares the tree's branch. `None` when the
-/// entry lacks one of them.
-fn targets(t: &Ticket, p: &Pipeline, entry: &StageEntry) -> Option<Vec<Target>> {
-    let mut out = Vec::new();
-    if let Some(tree) = &t.tree {
-        out.push(Target {
-            key: "root".to_owned(),
-            dir: tree.clone(),
-            branch: tree_branch(t, None),
-            to: entry.heads.get("root")?.clone(),
-        });
-    }
-    for lane in t.lanes.iter().filter(|l| !l.removed) {
-        if p.lane(&lane.name).is_some_and(|l| l.repo.is_some()) {
-            out.push(Target {
-                key: lane.name.clone(),
-                dir: lane.worktree.clone(),
-                branch: lane.branch.clone(),
-                to: entry.heads.get(&lane.name)?.clone(),
-            });
-        }
-    }
-    Some(out)
+/// Whether a ticket can take a ranged restart: its project cuts
+/// worktrees, so there are branches to reset, and the branches are its
+/// own, not a pull request's.
+fn can_range(t: &Ticket, old: &Pipeline) -> bool {
+    old.cuts_worktrees() && !t.source.is_pull_request()
 }
 
-/// The stages whose work the restart discards, by name: from the target
-/// on in the ticket's copy for a ranged restart, the current stage alone
-/// for a plain one.
-fn range(old: &Pipeline, c: &Checked) -> Vec<String> {
-    if c.ranged {
-        old.stages[c.target_old..]
-            .iter()
-            .map(|s| s.name.clone())
-            .collect()
-    } else {
-        vec![c.from.clone()]
-    }
+/// A rebaser or a resolution review started after the entry: it worked
+/// on a branch a reset to the entry moves away from.
+fn after_entry(a: &Attempt, e: &StageEntry) -> bool {
+    (a.stage == REFRESH || a.stage == RESOLUTION) && a.started_ms >= e.at_ms
 }
 
 /// The completed attempts in the range cancelled, so nothing reads them
@@ -499,22 +703,13 @@ fn range(old: &Pipeline, c: &Checked) -> Vec<String> {
 /// again when it is in the range; and on a plain restart the attempts
 /// whose checks may be run again under the new copy flagged so their
 /// question offers `check`. Returns the attempts discarded.
-fn discard(
-    t: &mut Ticket,
-    old: &Pipeline,
-    c: &Checked,
-    entry: Option<&StageEntry>,
-) -> Vec<(String, u32)> {
-    let range = range(old, c);
+fn discard(t: &mut Ticket, old: &Pipeline, c: &Checked) -> Vec<(String, u32)> {
+    let range = &c.range;
     let reason = format!("{DISCARDED_BY}{}", c.to);
     let mut discarded = Vec::new();
     for a in &mut t.attempts {
-        // A rebaser or a resolution review after the entry worked on a
-        // branch the reset moved away from.
-        let after_entry = entry.is_some_and(|e| {
-            (a.stage == REFRESH || a.stage == RESOLUTION) && a.started_ms >= e.at_ms
-        });
-        if a.state == AttemptState::Complete && (range.contains(&a.stage) || after_entry) {
+        let rebased = c.entry.as_ref().is_some_and(|e| after_entry(a, e));
+        if a.state == AttemptState::Complete && (range.contains(&a.stage) || rebased) {
             a.state = AttemptState::Cancelled {
                 reason: reason.clone(),
             };
