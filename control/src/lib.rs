@@ -21,6 +21,27 @@ pub use client::Client;
 /// The socket's file name inside Switchboard's data directory.
 pub const SOCKET_FILE: &str = "control.sock";
 
+/// Injected into every pane so hooks and shells can report the record
+/// they belong to without relying on cwd.
+pub const RECORD_ID_ENV: &str = "SWITCHBOARD_RECORD_ID";
+
+/// Injected into every pane beside the record id: a random token, new at
+/// every spawn, whose hash is the record's `token_hash`. A record id is
+/// no proof of identity; holding this is what lets `env.resolve` answer.
+pub const RECORD_TOKEN_ENV: &str = "SWITCHBOARD_RECORD_TOKEN";
+
+/// An environment set's name as Switchboard accepts it:
+/// `[a-z0-9][a-z0-9-]*`, so it cannot hold a `/` and alias another set's
+/// Keychain account.
+#[must_use]
+pub fn valid_set_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    chars
+        .next()
+        .is_some_and(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+        && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+}
+
 /// `SessionView::card` for an agent at work. The app's card label reads
 /// this, so a client matching on it cannot drift from the app.
 pub const CARD_WORKING: &str = "working";
@@ -100,6 +121,10 @@ pub enum Body {
         /// when empty, so an older app reads the same request.
         #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
         env: BTreeMap<String, String>,
+        /// Environment sets granted to the session, which
+        /// `switchboard-env exec` resolves for its children. Names only.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        env_sets: Vec<String>,
     },
     /// A new Claude Code session whose conversation is a copy of
     /// `source`'s whole transcript, in the source's project and cwd,
@@ -112,6 +137,10 @@ pub enum Body {
         prompt: String,
         #[serde(default)]
         notes: String,
+        /// The clone's own environment sets; never the source's, since
+        /// a clone may be a different operator.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        env_sets: Vec<String>,
     },
     #[serde(rename = "space.new")]
     SpaceNew { name: String },
@@ -181,6 +210,41 @@ pub enum Body {
     /// still brings the runner back.
     #[serde(rename = "dispatch.runner")]
     DispatchRunner { action: RunnerVerb },
+    /// Create the environment set when it is missing, replace each named
+    /// variable, and replace `aws` when given. A secret's value never
+    /// travels here: it goes through `env.secret.store`. Accepted only
+    /// while the owner has unlocked environment setup in the app.
+    #[serde(rename = "env.set.upsert")]
+    EnvSetUpsert {
+        name: String,
+        #[serde(default)]
+        vars: Vec<EnvVarView>,
+        #[serde(default)]
+        aws: Option<AwsMethod>,
+    },
+    /// Store one secret of a set in the Keychain, adding the variable to
+    /// the set when it is missing. Only `Persisted` is logged as its
+    /// reply; the value never reaches a record or a log.
+    #[serde(rename = "env.secret.store")]
+    EnvSecretStore {
+        set: String,
+        name: String,
+        value: String,
+    },
+    /// Grant a set to exactly one of a project, a session or the
+    /// Dispatch runner, or take the grant back with `remove`.
+    #[serde(rename = "env.grant")]
+    EnvGrant {
+        #[serde(default)]
+        project: Option<String>,
+        #[serde(default)]
+        session: Option<String>,
+        #[serde(default)]
+        runner: bool,
+        set: String,
+        #[serde(default)]
+        remove: bool,
+    },
 
     // --- commands: non-replayable
     #[serde(rename = "session.send")]
@@ -228,6 +292,15 @@ pub enum Body {
         #[serde(default)]
         lines: Option<u32>,
     },
+    /// The variables of the session's granted sets, for
+    /// `switchboard-env`. Answered only to the holder of the session's
+    /// launch token (`SWITCHBOARD_RECORD_TOKEN`); never logged.
+    #[serde(rename = "env.resolve")]
+    EnvResolve { session: String, token: String },
+    /// Every environment set: names, variable names, which are secret,
+    /// and the AWS method. Plain values are included; secret ones never.
+    #[serde(rename = "env.sets")]
+    EnvSets,
 }
 
 impl Body {
@@ -256,7 +329,10 @@ impl Body {
             | Self::WorkflowRemove { .. }
             | Self::DispatchRunner {
                 action: RunnerVerb::Stop | RunnerVerb::Start,
-            } => Class::Idempotent,
+            }
+            | Self::EnvSetUpsert { .. }
+            | Self::EnvSecretStore { .. }
+            | Self::EnvGrant { .. } => Class::Idempotent,
             // A repeat would stop a second runner.
             Self::DispatchRunner {
                 action: RunnerVerb::Restart,
@@ -274,7 +350,9 @@ impl Body {
             | Self::Workflows { .. }
             | Self::Find { .. }
             | Self::OpStatus { .. }
-            | Self::SessionScreen { .. } => Class::Query,
+            | Self::SessionScreen { .. }
+            | Self::EnvResolve { .. }
+            | Self::EnvSets => Class::Query,
         }
     }
 
@@ -312,6 +390,41 @@ impl RunnerVerb {
             Self::Restart => "restart",
         }
     }
+}
+
+/// How `switchboard-env exec` gets AWS credentials for an environment
+/// set.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "method", rename_all = "lowercase")]
+pub enum AwsMethod {
+    /// `aws-vault exec <profile> -- <command>`.
+    Vault { profile: String },
+    /// `AWS_PROFILE=<profile>`, after a check that its SSO session is
+    /// still valid.
+    Sso { profile: String },
+    /// The set's own `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`
+    /// secrets (and `AWS_SESSION_TOKEN` when it has one).
+    Static,
+}
+
+/// One variable of an environment set. A secret's `value` is always
+/// empty on the wire except in an `env` reply.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EnvVarView {
+    pub name: String,
+    #[serde(default)]
+    pub value: String,
+    #[serde(default)]
+    pub secret: bool,
+}
+
+/// One environment set as `env.sets` reports it: no secret values.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EnvSetView {
+    pub name: String,
+    pub vars: Vec<EnvVarView>,
+    #[serde(default)]
+    pub aws: Option<AwsMethod>,
 }
 
 /// What a session runs as.
@@ -599,6 +712,20 @@ pub enum Reply {
     Screen {
         text: String,
     },
+    /// What `env.resolve` resolved: the pairs to put in the child's
+    /// environment, the AWS method, and each secret with no stored value
+    /// as `<set>/VAR`.
+    Env {
+        pairs: Vec<(String, String)>,
+        #[serde(default)]
+        aws: Option<AwsMethod>,
+        #[serde(default)]
+        missing: Vec<String>,
+    },
+    /// Every environment set, as `env.sets` asked for them.
+    EnvSets {
+        sets: Vec<EnvSetView>,
+    },
 }
 
 impl Reply {
@@ -716,12 +843,14 @@ mod tests {
                 prompt: Some("go".into()),
                 notes: "ticket".into(),
                 env: BTreeMap::from([("DISPATCH_INPUT_PLAN".into(), "/plan.md".into())]),
+                env_sets: vec!["aws-dev".into()],
             },
             Body::SessionClone {
                 source: "s1".into(),
                 name: "rebaser".into(),
                 prompt: "rebase".into(),
                 notes: "ticket".into(),
+                env_sets: vec!["aws-dev".into()],
             },
             Body::SessionNew {
                 project: "p".into(),
@@ -735,6 +864,7 @@ mod tests {
                 prompt: None,
                 notes: String::new(),
                 env: BTreeMap::new(),
+                env_sets: Vec::new(),
             },
             Body::SpaceNew { name: "D".into() },
             Body::SetNew {
@@ -840,6 +970,34 @@ mod tests {
                 session: "s".into(),
                 lines: Some(20),
             },
+            Body::EnvResolve {
+                session: "s".into(),
+                token: "t".into(),
+            },
+            Body::EnvSets,
+            Body::EnvSetUpsert {
+                name: "aws-dev".into(),
+                vars: vec![EnvVarView {
+                    name: "REGION".into(),
+                    value: "us-east-1".into(),
+                    secret: false,
+                }],
+                aws: Some(AwsMethod::Vault {
+                    profile: "dev".into(),
+                }),
+            },
+            Body::EnvSecretStore {
+                set: "aws-dev".into(),
+                name: "TOKEN".into(),
+                value: "v".into(),
+            },
+            Body::EnvGrant {
+                project: None,
+                session: None,
+                runner: true,
+                set: "aws-dev".into(),
+                remove: false,
+            },
         ];
         for body in bodies {
             assert!(!body.kind().is_empty(), "{body:?}");
@@ -887,6 +1045,33 @@ mod tests {
             .class(),
             Class::NonReplayable
         );
+    }
+
+    #[test]
+    fn env_lines_read_as_the_doc_writes_them_and_resolve_is_a_query() {
+        let req =
+            Request::parse(r#"{"op":"q","kind":"env.resolve","session":"s","token":"t"}"#).unwrap();
+        assert_eq!(req.body.class(), Class::Query);
+        let req = Request::parse(r#"{"op":"g","kind":"env.grant","runner":true,"set":"aws-dev"}"#)
+            .unwrap();
+        assert_eq!(req.body.class(), Class::Idempotent);
+        let aws: AwsMethod = serde_json::from_str(r#"{"method":"vault","profile":"dev"}"#).unwrap();
+        assert_eq!(
+            aws,
+            AwsMethod::Vault {
+                profile: "dev".into()
+            }
+        );
+        assert_eq!(
+            serde_json::to_string(&AwsMethod::Static).unwrap(),
+            r#"{"method":"static"}"#
+        );
+        // An older Dispatch's line, without sets, still reads.
+        let req = Request::parse(
+            r#"{"op":"c","kind":"session.clone","source":"s","name":"n","prompt":"p"}"#,
+        )
+        .unwrap();
+        assert!(matches!(req.body, Body::SessionClone { env_sets, .. } if env_sets.is_empty()));
     }
 
     #[test]
@@ -1006,6 +1191,20 @@ mod tests {
             Reply::Workflows { runs: vec![run()] },
             Reply::Screen {
                 text: "$ ls\nsrc".into(),
+            },
+            Reply::Env {
+                pairs: vec![("A".into(), "b".into())],
+                aws: Some(AwsMethod::Sso {
+                    profile: "p".into(),
+                }),
+                missing: vec!["aws-dev/TOKEN".into()],
+            },
+            Reply::EnvSets {
+                sets: vec![EnvSetView {
+                    name: "aws-dev".into(),
+                    vars: vec![EnvVarView::default()],
+                    aws: Some(AwsMethod::Static),
+                }],
             },
         ];
         for reply in &replies {

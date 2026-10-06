@@ -21,7 +21,8 @@ use switchboard::ports::control::OpLine;
 use switchboard::ports::host::{HostId, HostStatus, Liveness as HostLiveness};
 use switchboard::ports::store::Loaded;
 use switchboard_control::{
-    Body, Client, Launch, Liveness, OpStatus, RecordKind, Reply, Request, SessionKind,
+    AwsMethod, Body, Client, EnvVarView, Launch, Liveness, OpStatus, RecordKind, Reply, Request,
+    SessionKind,
 };
 
 struct Port {
@@ -125,6 +126,7 @@ fn session_new(project: &str, prompt: Option<&str>) -> Body {
         prompt: prompt.map(str::to_owned),
         notes: "Dispatch ticket 1".into(),
         env: std::collections::BTreeMap::new(),
+        env_sets: Vec::new(),
     }
 }
 
@@ -796,4 +798,408 @@ fn served_while_the_window_is_hidden() {
         |app| eframe::App::logic(app, &ctx, &mut frame),
     );
     assert!(matches!(reply, Reply::Projects { .. }), "{reply:?}");
+}
+
+// --- environment sets: `env.*` over the real socket, and the binary
+
+/// A port with a real operations log in its own temp dir, so a test can
+/// read the file every reply line went to.
+struct EnvPort {
+    port: Port,
+    host: FakeHost,
+    secrets: FakeSecrets,
+    log_dir: tempfile::TempDir,
+}
+
+fn env_port() -> EnvPort {
+    let host = FakeHost::default();
+    let secrets = FakeSecrets::default();
+    let log_dir = tempfile::tempdir().expect("log dir");
+    let operations = switchboard::adapters::control::OperationsLog::open(log_dir.path())
+        .expect("operations log");
+    let services = Services {
+        secrets: Box::new(secrets.clone()),
+        host: Box::new(host.clone()),
+        operations: Box::new(operations),
+        ..fakes::services()
+    };
+    let mut app = SwitchboardApp::with_services(services);
+    app.start();
+    let dir = tempfile::Builder::new()
+        .prefix("sbe")
+        .tempdir_in("/tmp")
+        .expect("temp dir");
+    let path = app.listen_at(dir.path(), || {}).expect("listen");
+    EnvPort {
+        port: Port {
+            app,
+            path,
+            opener: FakeOpener::default(),
+            operations: FakeOperations::default(),
+            _dir: dir,
+        },
+        host,
+        secrets,
+        log_dir,
+    }
+}
+
+const SECRET: &str = "s3cr3t-v4lue-0042";
+
+/// A shell session launched through the port with the `dev` set granted
+/// to it; returns its id and the token its pane was given.
+fn granted_session(env: &mut EnvPort) -> (String, String) {
+    let port = &mut env.port;
+    let space = made_id(
+        &call(
+            port,
+            Request::new("sp", Body::SpaceNew { name: "D".into() }),
+        ),
+        RecordKind::Space,
+    );
+    let project = made_id(
+        &call(
+            port,
+            Request::new(
+                "pj",
+                Body::ProjectAdd {
+                    space,
+                    name: "#1".into(),
+                    root: PathBuf::from("/tmp"),
+                },
+            ),
+        ),
+        RecordKind::Project,
+    );
+    port.app.dispatch(AppAction::SetEnvSetup { open: true });
+    for (op, body) in [
+        (
+            "up",
+            Body::EnvSetUpsert {
+                name: "dev".into(),
+                vars: vec![EnvVarView {
+                    name: "REGION".into(),
+                    value: "us-east-1".into(),
+                    secret: false,
+                }],
+                aws: None,
+            },
+        ),
+        (
+            "sec",
+            Body::EnvSecretStore {
+                set: "dev".into(),
+                name: "API_KEY".into(),
+                value: SECRET.into(),
+            },
+        ),
+    ] {
+        let reply = call(port, Request::new(op, body));
+        assert!(matches!(reply, Reply::Persisted { .. }), "{op}: {reply:?}");
+    }
+    let reply = call(
+        port,
+        Request::new(
+            "se",
+            Body::SessionNew {
+                project,
+                name: "shell".into(),
+                session_kind: SessionKind::Shell,
+                cwd: PathBuf::from("/tmp"),
+                launch: Launch::Shell,
+                prompt: None,
+                notes: String::new(),
+                env: std::collections::BTreeMap::new(),
+                env_sets: vec!["dev".into()],
+            },
+        ),
+    );
+    let session = made_id(&reply, RecordKind::Session);
+    let token = env
+        .host
+        .state()
+        .spawned
+        .last()
+        .and_then(|s| {
+            s.env
+                .iter()
+                .find(|(k, _)| k == "SWITCHBOARD_RECORD_TOKEN")
+                .map(|(_, v)| v.clone())
+        })
+        .expect("the pane's token");
+    (session, token)
+}
+
+fn resolve(port: &mut Port, op: &str, session: &str, token: &str) -> Reply {
+    call(
+        port,
+        Request::new(
+            op,
+            Body::EnvResolve {
+                session: session.into(),
+                token: token.into(),
+            },
+        ),
+    )
+}
+
+/// Only the holder of the pane's token resolves its sets; nothing the
+/// app keeps or logs holds a value or the token.
+#[test]
+fn env_resolve_answers_only_the_token_holder_and_nothing_keeps_a_value() {
+    let mut env = env_port();
+    let (session, token) = granted_session(&mut env);
+    assert_eq!(
+        env.secrets
+            .state()
+            .get("set/dev/API_KEY")
+            .map(String::as_str),
+        Some(SECRET)
+    );
+    let reply = resolve(&mut env.port, "r1", &session, &token);
+    let Reply::Env {
+        pairs,
+        aws,
+        missing,
+    } = reply
+    else {
+        panic!("{reply:?}");
+    };
+    assert_eq!(
+        pairs,
+        vec![
+            ("REGION".to_owned(), "us-east-1".to_owned()),
+            ("API_KEY".to_owned(), SECRET.to_owned())
+        ]
+    );
+    assert_eq!((aws, missing), (None, Vec::new()));
+    for (op, bad) in [("r2", ""), ("r3", "not-the-token")] {
+        assert_eq!(
+            resolve(&mut env.port, op, &session, bad),
+            Reply::failed("token does not match"),
+            "{op}"
+        );
+    }
+
+    // The sets as listed carry no secret value.
+    let listed = call(&mut env.port, Request::new("ls", Body::EnvSets));
+    let text = format!("{listed:?}");
+    assert!(text.contains("API_KEY") && !text.contains(SECRET), "{text}");
+    let view = call(
+        &mut env.port,
+        Request::new(
+            "s",
+            Body::Session {
+                session: session.clone(),
+            },
+        ),
+    );
+    assert!(!format!("{view:?}").contains(SECRET));
+
+    // The operations log: no value, no token, no resolve line, and the
+    // secret store's reply is a bare `persisted`.
+    let log = std::fs::read_to_string(env.log_dir.path().join("operations.log")).unwrap();
+    assert!(!log.contains(SECRET), "{log}");
+    assert!(!log.contains(&token), "{log}");
+    assert!(!log.contains("env.resolve"), "{log}");
+    let stored = log
+        .lines()
+        .find(|l| l.contains("\"op\":\"sec\"") && l.contains("replied"))
+        .expect("the secret store's reply line");
+    assert!(stored.contains("persisted"), "{stored}");
+
+    // Nothing the store would write holds the value or the token.
+    let kept = format!(
+        "{:?}{:?}",
+        env.port.app.core().workspaces(),
+        env.port.app.core().settings()
+    );
+    assert!(!kept.contains(SECRET) && !kept.contains(&token));
+}
+
+#[test]
+fn a_setup_command_is_refused_while_locked_and_persisted_once_unlocked() {
+    let mut env = env_port();
+    let body = || Body::EnvSetUpsert {
+        name: "dev".into(),
+        vars: Vec::new(),
+        aws: None,
+    };
+    let reply = call(&mut env.port, Request::new("u1", body()));
+    assert_eq!(reply, Reply::failed(switchboard::core::ENV_SETUP_LOCKED));
+    env.port.app.dispatch(AppAction::SetEnvSetup { open: true });
+    let reply = call(&mut env.port, Request::new("u2", body()));
+    assert!(matches!(reply, Reply::Persisted { .. }), "{reply:?}");
+}
+
+#[test]
+fn session_screen_redacts_a_set_secret_too() {
+    let mut env = env_port();
+    let (session, _) = granted_session(&mut env);
+    let record = switchboard::core::RecordId(uuid::Uuid::parse_str(&session).unwrap());
+    let pane = HostId(record.host_name());
+    env.host.state().statuses.push(HostStatus {
+        id: pane.clone(),
+        liveness: HostLiveness::Running {
+            pid: 7,
+            command: "zsh".into(),
+        },
+        cwd: None,
+        last_activity: None,
+        title: None,
+    });
+    env.host
+        .state()
+        .snapshots
+        .insert(pane, format!("$ env\nAPI_KEY={SECRET}\nREGION=us-east-1\n"));
+    env.port.app.poll_now();
+    let reply = call(
+        &mut env.port,
+        Request::new(
+            "q",
+            Body::SessionScreen {
+                session,
+                lines: None,
+            },
+        ),
+    );
+    assert_eq!(
+        reply,
+        Reply::Screen {
+            text: "$ env\nAPI_KEY=<API_KEY>\nREGION=us-east-1".into()
+        }
+    );
+}
+
+/// Run `switchboard-env` against the port, serving the app until it
+/// exits. `vars` are set on the binary's own environment.
+fn run_env(port: &mut Port, args: &[&str], vars: &[(&str, &str)]) -> std::process::Output {
+    let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_switchboard-env"));
+    cmd.args(args)
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .env("SWITCHBOARD_DATA_DIR", port.path.parent().unwrap())
+        .stdin(std::process::Stdio::null());
+    for (k, v) in vars {
+        cmd.env(k, v);
+    }
+    let child = std::thread::spawn(move || cmd.output().expect("run switchboard-env"));
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while !child.is_finished() {
+        assert!(std::time::Instant::now() < deadline, "switchboard-env hung");
+        port.app.serve_pending();
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    child.join().expect("binary thread")
+}
+
+fn text(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(bytes).into_owned()
+}
+
+/// A directory holding one executable shell script named `name`.
+fn fake_bin(name: &str, script: &str) -> tempfile::TempDir {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join(name);
+    std::fs::write(&path, format!("#!/bin/sh\n{script}\n")).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    dir
+}
+
+fn set_aws(port: &mut Port, op: &str, aws: AwsMethod) {
+    let reply = call(
+        port,
+        Request::new(
+            op,
+            Body::EnvSetUpsert {
+                name: "dev".into(),
+                vars: Vec::new(),
+                aws: Some(aws),
+            },
+        ),
+    );
+    assert!(matches!(reply, Reply::Persisted { .. }), "{reply:?}");
+}
+
+#[test]
+fn the_binary_runs_a_child_with_the_pairs_and_without_the_token() {
+    let mut env = env_port();
+    let (session, token) = granted_session(&mut env);
+    let ids = [
+        ("SWITCHBOARD_RECORD_ID", session.as_str()),
+        ("SWITCHBOARD_RECORD_TOKEN", token.as_str()),
+    ];
+    let out = run_env(&mut env.port, &["exec", "--", "env"], &ids);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    let printed = text(&out.stdout);
+    assert!(printed.contains(&format!("API_KEY={SECRET}")), "{printed}");
+    assert!(printed.contains("REGION=us-east-1"), "{printed}");
+    assert!(!printed.contains("SWITCHBOARD_RECORD_TOKEN"), "{printed}");
+
+    // vault: the command runs under aws-vault.
+    set_aws(
+        &mut env.port,
+        "v",
+        AwsMethod::Vault {
+            profile: "dev-admin".into(),
+        },
+    );
+    let bin = fake_bin("aws-vault", r#"echo "argv: $*""#);
+    let path = format!("{}:/usr/bin:/bin", bin.path().display());
+    let mut vars = ids.to_vec();
+    vars.push(("PATH", &path));
+    let out = run_env(&mut env.port, &["exec", "--", "echo", "hi"], &vars);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert_eq!(text(&out.stdout).trim(), "argv: exec dev-admin -- echo hi");
+
+    // sso: an expired session stops with the login line.
+    set_aws(
+        &mut env.port,
+        "s",
+        AwsMethod::Sso {
+            profile: "dev-sso".into(),
+        },
+    );
+    let bin = fake_bin("aws", "exit 255");
+    let path = format!("{}:/usr/bin:/bin", bin.path().display());
+    let mut vars = ids.to_vec();
+    vars.push(("PATH", &path));
+    let out = run_env(&mut env.port, &["exec", "--", "true"], &vars);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        text(&out.stderr).contains("aws sso login --profile dev-sso"),
+        "{}",
+        text(&out.stderr)
+    );
+}
+
+#[test]
+fn the_binary_refuses_without_credentials_and_while_setup_is_locked() {
+    let mut env = env_port();
+    let out = run_env(&mut env.port, &["exec", "--", "true"], &[]);
+    assert_eq!(out.status.code(), Some(64), "{}", text(&out.stderr));
+    let out = run_env(
+        &mut env.port,
+        &["exec", "--", "true"],
+        &[("SWITCHBOARD_RECORD_ID", "x")],
+    );
+    assert_eq!(out.status.code(), Some(64));
+    let out = run_env(&mut env.port, &["exec"], &[]);
+    assert_eq!(out.status.code(), Some(64));
+    let out = run_env(&mut env.port, &["grant", "--runner", "dev"], &[]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        text(&out.stderr).contains(switchboard::core::ENV_SETUP_LOCKED),
+        "{}",
+        text(&out.stderr)
+    );
+}
+
+/// The binary links only std and the wire crate, so it never grows the
+/// app's start-up or its dependencies.
+#[test]
+fn the_binary_never_uses_the_app_crate() {
+    let source = include_str!("../src/bin/switchboard-env.rs");
+    assert!(!source.contains(concat!("switchboard", "::")));
 }

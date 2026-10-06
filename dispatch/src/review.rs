@@ -15,7 +15,7 @@ use switchboard_control::{self as wire, Body, Reply};
 
 use crate::events::{names_list, short};
 use crate::history::{self, Commits};
-use crate::pipeline::{Gate, OperatorKind, Pipeline, Stage};
+use crate::pipeline::{Gate, OperatorKind, Pipeline, Stage, env_sets};
 use crate::scheduler::{
     Ask, DirtyStep, GateStop, NO_SUCH_SESSION, Owner, RESOLUTION, Runner, SocketDown, asks_again,
     busy, checks_env, confine_for, dirty_step, env_for, find_attempt, find_attempt_mut,
@@ -450,19 +450,17 @@ impl Runner {
             return self.save_ticket(t, now_ms);
         }
         let project = a.project.clone().unwrap_or_default();
-        let prompt = self.prompt_of(t, p, stage, &a, &round, &r, cwd, lane);
-        let mut args = op.args.clone();
-        let session_cwd = if op.kind.reviews_in_tree() {
-            args.extend(op.kind.write_flags(&r.dir));
-            cwd.to_path_buf()
-        } else {
-            r.dir.clone()
-        };
-        let launch = if args.is_empty() {
-            wire::Launch::Shell
-        } else {
-            wire::Launch::Argv(args)
-        };
+        let mut prompt = self.prompt_of(t, p, stage, &a, &round, &r, cwd, lane);
+        // A reviewer is granted its operator's sets only: the stage's
+        // are for its implementer and its checks.
+        let sets = env_sets(Some(&op), None);
+        if let Err(reason) = self.with_env_sentence(&mut prompt, &sets) {
+            reviewer_mut(t, key, round_n, name).result = Some(ReviewerResult::Failed {
+                reason: format!("could not start: {reason}"),
+            });
+            return self.save_ticket(t, now_ms);
+        }
+        let (launch, session_cwd) = reviewer_launch(&op, &r.dir, cwd);
         let notes = format!(
             "Dispatch ticket {} · #{} {} · stage {} attempt {} · round {round_n} reviewer {name}",
             t.id,
@@ -485,6 +483,7 @@ impl Runner {
                 prompt: Some(prompt),
                 notes,
                 env: BTreeMap::new(),
+                env_sets: sets,
             },
             now_ms,
         )?;
@@ -1231,7 +1230,15 @@ impl Runner {
             .and_then(|f| f.parent())
             .map_or_else(|| cwd.to_path_buf(), Path::to_path_buf);
         let response = rdir.join("response.md");
-        let prompt = Self::fix_prompt(t, p, stage, &a, round, cwd, lane, &response, &op);
+        let mut prompt = Self::fix_prompt(t, p, stage, &a, round, cwd, lane, &response, &op);
+        let sets = env_sets(Some(&op), Some(stage));
+        if let Err(reason) = self.with_env_sentence(&mut prompt, &sets) {
+            let reason = format!(
+                "round {}: the implementer could not start: {reason}",
+                round.n
+            );
+            return self.fail_round(t, ps, key, round.n, &reason, now_ms);
+        }
         let mut args = op.args.clone();
         args.extend(op.kind.write_flags(&rdir));
         let launch = if args.is_empty() {
@@ -1273,6 +1280,7 @@ impl Runner {
                 prompt: Some(prompt),
                 notes,
                 env: BTreeMap::new(),
+                env_sets: sets,
             },
             now_ms,
         )?;
@@ -1561,7 +1569,7 @@ impl Runner {
         }
         let round_dir = round.reviewers.first().and_then(|r| r.dir.parent());
         let log = round_dir.map_or_else(|| cwd.join("checks.log"), |d| d.join("checks.log"));
-        let env = checks_env(
+        let mut env = checks_env(
             t,
             lane,
             lane.and_then(|l| t.lanes.iter().find(|x| x.name == l))
@@ -1570,13 +1578,19 @@ impl Runner {
             cwd,
             &head,
         );
+        let outer = match self.gate_env(stage, &mut env) {
+            Ok(outer) => outer,
+            Err(reason) => return self.fail_checks(t, ps, &key.0, key.1, &reason, now_ms),
+        };
         let check_key = checks_key(t, &key, round.n);
         let extra: Vec<&Path> = round_dir.into_iter().collect();
         let started = match confine_for(t, p, lane, &extra, gate_network(p, stage)) {
             Some(confine) => self
                 .git
-                .start_check_confined(&check_key, cwd, &argv, &env, &log, &confine),
-            None => self.git.start_check(&check_key, cwd, &argv, &env, &log),
+                .start_check_confined(&check_key, cwd, &argv, &env, &log, &confine, &outer),
+            None => self
+                .git
+                .start_check(&check_key, cwd, &argv, &env, &log, &outer),
         };
         if let Err(e) = started {
             let reason = format!("the checks could not start: {e:#}");
@@ -2435,6 +2449,11 @@ impl Runner {
             .set("input", input.display().to_string());
         let mut prompt = guidance_prelude(&op.guidance, &vars);
         prompt.push_str(&vars.render(MESSAGE_PROMPT));
+        let sets = env_sets(Some(&op), Some(stage));
+        if let Err(reason) = self.with_env_sentence(&mut prompt, &sets) {
+            let reason = format!("the rewriter could not start: {reason}");
+            return self.message_failed(t, ps, p, key, &reason, now_ms);
+        }
         let notes = format!(
             "Dispatch ticket {} · #{} {} · stage {} attempt {} · message rewriter",
             t.id,
@@ -2457,6 +2476,7 @@ impl Runner {
                 prompt: Some(prompt),
                 notes,
                 env: BTreeMap::new(),
+                env_sets: sets,
             },
             now_ms,
         )?;
@@ -4202,6 +4222,29 @@ pub(crate) fn apply_review_reply(t: &mut Ticket, intent: &str, made: &[wire::Mad
         m.session = Some(id.clone());
         t.processes.push(id);
     }
+}
+
+/// An agent reviewer's launch and cwd: in the tree with an allow rule
+/// for its round directory `dir`, or in `dir` for a kind that writes
+/// only in its cwd.
+fn reviewer_launch(
+    op: &crate::pipeline::Operator,
+    dir: &Path,
+    tree: &Path,
+) -> (wire::Launch, std::path::PathBuf) {
+    let mut args = op.args.clone();
+    let cwd = if op.kind.reviews_in_tree() {
+        args.extend(op.kind.write_flags(dir));
+        tree.to_path_buf()
+    } else {
+        dir.to_path_buf()
+    };
+    let launch = if args.is_empty() {
+        wire::Launch::Shell
+    } else {
+        wire::Launch::Argv(args)
+    };
+    (launch, cwd)
 }
 
 #[cfg(test)]

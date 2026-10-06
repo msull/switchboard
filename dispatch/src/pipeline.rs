@@ -10,6 +10,7 @@ use std::path::PathBuf;
 use anyhow::{Context as _, Result, bail};
 use serde::{Deserialize, Deserializer, Serialize};
 use sha2::{Digest, Sha256};
+use switchboard_control::valid_set_name;
 
 use crate::history::Commits;
 
@@ -301,6 +302,30 @@ pub struct Operator {
     pub argv: Vec<String>,
     #[serde(rename = "in", default = "default_run_in")]
     pub run_in: String,
+    /// Switchboard environment sets granted to this operator's sessions,
+    /// which `switchboard-env exec` resolves for the commands they run.
+    /// Names only; Claude Code operators only.
+    #[serde(default)]
+    pub env: Vec<String>,
+}
+
+/// `operator`'s environment sets, then `stage`'s, each once in the order
+/// first listed: what a session of that operator in that stage is
+/// granted.
+#[must_use]
+pub fn env_sets(operator: Option<&Operator>, stage: Option<&Stage>) -> Vec<String> {
+    let mut sets: Vec<String> = Vec::new();
+    let names = operator
+        .map(|o| o.env.as_slice())
+        .unwrap_or_default()
+        .iter()
+        .chain(stage.map(|s| s.env.as_slice()).unwrap_or_default());
+    for name in names {
+        if !sets.contains(name) {
+            sets.push(name.clone());
+        }
+    }
+    sets
 }
 
 fn default_run_in() -> String {
@@ -467,6 +492,12 @@ pub struct Stage {
     /// when it stops with a dirty tree; absent, the policy's.
     #[serde(default)]
     pub on_dirty: Option<OnDirty>,
+    /// Switchboard environment sets for this stage: added to its agents'
+    /// own after their operator's, and on a command gate the reason the
+    /// gate runs under `switchboard-env exec --` with the runner's
+    /// grants. Names only.
+    #[serde(default)]
+    pub env: Vec<String>,
 }
 
 /// One artifact a stage writes. A secret one is written by a gate-only
@@ -1030,7 +1061,70 @@ impl Pipeline {
             );
         }
         Self::validate_gate_context(stage)?;
+        self.validate_stage_env(stage)?;
         self.validate_services(stage)
+    }
+
+    /// A stage's `env` names well formed, on a stage something of
+    /// Switchboard's carries them to: a Claude Code agent, a code
+    /// review's implementer and checks, or a command gate. Every
+    /// operator a launch may hand the stage's sets to must be Claude
+    /// Code: the stage's own agent or implementer, and the policy's
+    /// rebaser and fixer, which work a PR in the stage that raised it.
+    fn validate_stage_env(&self, stage: &Stage) -> Result<()> {
+        if stage.env.is_empty() {
+            return Ok(());
+        }
+        let name = &stage.name;
+        for set in &stage.env {
+            if !valid_set_name(set) {
+                bail!("stage {name:?}: env set {set:?} is not [a-z0-9][a-z0-9-]*");
+            }
+        }
+        let mut carriers: Vec<&str> = Vec::new();
+        match stage.kind() {
+            StageKind::Agent => carriers.extend(stage.operator.as_deref()),
+            StageKind::Review => carriers.extend(stage.implementer.as_deref()),
+            StageKind::GateOnly => {
+                if !matches!(stage.gate, Some(Gate::Command { .. })) {
+                    bail!("stage {name:?}: env needs an agent or a command gate");
+                }
+            }
+            StageKind::Workflow => {
+                bail!("stage {name:?}: a workflow stage's sessions take no env");
+            }
+        }
+        carriers.extend(self.policy.rebaser.as_deref());
+        carriers.extend(self.policy.fixer.as_deref());
+        for op in carriers {
+            if self
+                .operators
+                .get(op)
+                .is_some_and(|o| o.kind != OperatorKind::Claude)
+            {
+                bail!(
+                    "stage {name:?}: env needs a claude operator, and {op:?} is not one (codex's sandbox may not reach Switchboard)"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// Each operator's `env` names well formed, on Claude Code only.
+    fn validate_operator_env(&self) -> Result<()> {
+        for (name, op) in &self.operators {
+            for set in &op.env {
+                if !valid_set_name(set) {
+                    bail!("operator {name:?}: env set {set:?} is not [a-z0-9][a-z0-9-]*");
+                }
+            }
+            if !op.env.is_empty() && op.kind != OperatorKind::Claude {
+                bail!(
+                    "operator {name:?}: env is for claude operators only (codex's sandbox may not reach Switchboard)"
+                );
+            }
+        }
+        Ok(())
     }
 
     /// What a stage may write: a gate-only stage writes only through a
@@ -1418,6 +1512,7 @@ impl Pipeline {
         if self.lanes.is_empty() {
             bail!("a pipeline needs at least one lane");
         }
+        self.validate_operator_env()?;
         for (key, name) in [
             ("rebaser", &self.policy.rebaser),
             ("fixer", &self.policy.fixer),
@@ -2914,5 +3009,121 @@ ports = [3100, 3199]
             .replace("\"each\"", "\"lane:repo\"")
             .replace("in = \"lane\"", "in = \"lane:repo\"");
         with(&one).unwrap();
+    }
+
+    #[test]
+    fn env_on_a_claude_operator_and_its_stage_is_kept_and_combined_in_order() {
+        let text = SWITCHBOARD
+            .replace(
+                "[operators.implementer]\nkind = \"claude\"\n",
+                "[operators.implementer]\nkind = \"claude\"\nenv = [\"aws-dev\", \"npm\"]\n",
+            )
+            .replace(
+                "prompt = \"Implement {inputs.plan}",
+                "env = [\"npm\", \"deploy-2\"]\nprompt = \"Implement {inputs.plan}",
+            );
+        let p = Pipeline::parse(&text).unwrap();
+        let stage = p.stages.iter().find(|s| s.name == "implement").unwrap();
+        assert_eq!(stage.env, vec!["npm", "deploy-2"]);
+        assert_eq!(
+            env_sets(p.operators.get("implementer"), Some(stage)),
+            vec!["aws-dev", "npm", "deploy-2"]
+        );
+    }
+
+    #[test]
+    fn env_absent_changes_nothing() {
+        let p = Pipeline::parse(SWITCHBOARD).unwrap();
+        assert!(p.operators.values().all(|o| o.env.is_empty()));
+        assert!(p.stages.iter().all(|s| s.env.is_empty()));
+        let stage = p.stages.iter().find(|s| s.name == "implement").unwrap();
+        assert!(env_sets(p.operators.get("implementer"), Some(stage)).is_empty());
+    }
+
+    #[test]
+    fn a_malformed_env_set_name_is_refused() {
+        for bad in ["AWS", "-dev", "aws/dev", "aws_dev", ""] {
+            let op = SWITCHBOARD.replace(
+                "[operators.planner]\nkind = \"claude\"\n",
+                &format!("[operators.planner]\nkind = \"claude\"\nenv = [\"{bad}\"]\n"),
+            );
+            let err = Pipeline::parse(&op).unwrap_err().to_string();
+            assert!(err.contains("is not [a-z0-9][a-z0-9-]*"), "{bad}: {err}");
+            let stage = SWITCHBOARD.replace(
+                "name = \"ready\"\n",
+                &format!("name = \"ready\"\nenv = [\"{bad}\"]\n"),
+            );
+            let err = Pipeline::parse(&stage).unwrap_err().to_string();
+            assert!(err.contains("is not [a-z0-9][a-z0-9-]*"), "{bad}: {err}");
+        }
+    }
+
+    #[test]
+    fn env_on_a_codex_operator_or_its_stage_is_refused() {
+        let op = SWITCHBOARD.replace(
+            "[operators.reviewer]\nkind = \"codex\"\n",
+            "[operators.reviewer]\nkind = \"codex\"\nenv = [\"aws-dev\"]\n",
+        );
+        let err = Pipeline::parse(&op).unwrap_err().to_string();
+        assert!(err.contains("env is for claude operators only"), "{err}");
+        let stage = SWITCHBOARD
+            .replace(
+                "[operators.implementer]\nkind = \"claude\"\n",
+                "[operators.implementer]\nkind = \"codex\"\n",
+            )
+            .replace(
+                "prompt = \"Implement {inputs.plan}",
+                "env = [\"aws-dev\"]\nprompt = \"Implement {inputs.plan}",
+            );
+        let err = Pipeline::parse(&stage).unwrap_err().to_string();
+        assert!(err.contains("env needs a claude operator"), "{err}");
+    }
+
+    #[test]
+    fn env_on_a_stage_whose_pr_fixer_or_rebaser_is_codex_is_refused() {
+        let with_env = SWITCHBOARD.replace(
+            "prompt = \"Implement {inputs.plan}",
+            "env = [\"aws-dev\"]\nprompt = \"Implement {inputs.plan}",
+        );
+        Pipeline::parse(&with_env).unwrap();
+        for role in ["fixer", "rebaser"] {
+            let text =
+                with_env.replace("[policy]\n", &format!("[policy]\n{role} = \"reviewer\"\n"));
+            let err = Pipeline::parse(&text).unwrap_err().to_string();
+            assert!(
+                err.contains("env needs a claude operator, and \"reviewer\""),
+                "{role}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn env_on_a_gate_only_command_stage_is_accepted_and_on_a_workflow_stage_refused() {
+        let gate_only = SWITCHBOARD.replace(
+            "[[stages]]\nname = \"ready\"\n",
+            "[[stages]]\nname = \"deploy\"\ncontext = \"each\"\nenv = [\"aws-dev\"]\ngate = { kind = \"command\", argv = [\"make\", \"deploy\"], in = \"lane\" }\n\n[[stages]]\nname = \"ready\"\n",
+        );
+        let p = Pipeline::parse(&gate_only).unwrap();
+        let stage = p.stages.iter().find(|s| s.name == "deploy").unwrap();
+        assert_eq!(stage.kind(), StageKind::GateOnly);
+        assert_eq!(stage.env, vec!["aws-dev"]);
+        let human = SWITCHBOARD.replace(
+            "name = \"lanes\"\n",
+            "name = \"lanes\"\nenv = [\"aws-dev\"]\n",
+        );
+        let err = Pipeline::parse(&human).unwrap_err().to_string();
+        assert!(
+            err.contains("env needs an agent or a command gate"),
+            "{err}"
+        );
+        let workflow = SWITCHBOARD.replace(
+            "review = \"reviewer\"\n",
+            "review = \"reviewer\"\nenv = [\"aws-dev\"]\n",
+        );
+        let err = Pipeline::parse(&workflow).unwrap_err().to_string();
+        assert!(
+            err.contains("a workflow stage's sessions take no env"),
+            "{err}"
+        );
     }
 }

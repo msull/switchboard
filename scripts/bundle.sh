@@ -47,6 +47,7 @@ FINAL="$APP"
 APP="$STAGE"
 cp "$BIN/switchboard" "$APP/Contents/MacOS/switchboard"
 cp "$BIN/switchboard-hook" "$APP/Contents/MacOS/switchboard-hook"
+cp "$BIN/switchboard-env" "$APP/Contents/MacOS/switchboard-env"
 cp "$BIN/dispatch" "$APP/Contents/MacOS/dispatch"
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>

@@ -80,7 +80,8 @@ Prompt Box switch and its trigger word, model, captions, and the screen
 its caption bar and preview panel appear on, the sessions open in
 windows of their own and where each window sits, where the main
 window sits, the zoom of each display, the workflow round cap and the
-user's workflow definitions),
+user's workflow definitions, and the environment sets: each set's
+variables, which of them are secret, and its AWS method),
 `views.json` (schema v6: the workspaces, and the working sets: each
 one's name, workspace, which sessions and files are on it, and where
 each card sits on its grid, with a `.bak`; a set made in the global
@@ -96,7 +97,9 @@ rasterized by Quick Look), and `workflows/<run>/round-<n>/` (copies of
 the plan, feedback, and response at the end of each review round). Sessions run
 on a private tmux server (`tmux -L switchboard`), never on your default
 one. Nothing is written into a project directory except what the Config
-editor saves on your click.
+editor saves on your click. Secret values live in the login Keychain,
+never in these files, under the accounts `global/<VAR>`,
+`project/<id>/<VAR>` and `set/<name>/<VAR>` (an environment set's).
 
 ### Defining commands and services
 
@@ -151,8 +154,10 @@ as you type; Save is the only time Switchboard writes into
 ./scripts/icon.sh            # regenerates the icon from assets/Switchboard.svg
 ```
 
-The bundle carries both binaries (`switchboard` and `switchboard-hook`,
-which the app locates next to its own executable). Raising a Ghostty
+The bundle carries the binaries side by side in `Contents/MacOS`:
+`switchboard`, `switchboard-hook` (which the app locates next to its own
+executable), `switchboard-env` (which Dispatch locates next to its own)
+and `dispatch`. Raising a Ghostty
 window needs Accessibility, and macOS ties that grant to the code
 signature, and the Keychain ties its per-item "always allow" to the
 signer's Team ID. The script signs with `CODESIGN_IDENTITY`, else the
@@ -167,7 +172,15 @@ renders the SVG with AppKit into `assets/Switchboard.icns` for Finder and
 Dev aids, all environment variables:
 
 - `SWITCHBOARD_DATA_DIR=<dir>`: use another data directory (keep the path
-  short; the wake socket path has a 104-byte limit).
+  short; the wake socket path has a 104-byte limit). The app sets it in
+  every pane it spawns, so `switchboard-env` in a shell asks the
+  instance that launched it.
+- `SWITCHBOARD_RECORD_TOKEN`: set by the app in every pane, beside
+  `SWITCHBOARD_RECORD_ID`, and new at every spawn. `switchboard-env
+  exec` sends it with `env.resolve`; the record keeps only its SHA-256.
+  To try `switchboard-env` by hand, run it in a shell the app launched,
+  after `env-setup unlock` (or the settings menu's Unlock environment
+  setup) for the setup commands.
 - `SWITCHBOARD_TMUX_SOCKET=<name>`: use another tmux socket name.
 - `DISPATCH_DATA_DIR=<dir>`: where the Dispatch page looks for
   `dispatch.sock` and where its console opens (the `dispatch` binary
@@ -199,6 +212,7 @@ Dev aids, all environment variables:
   `src/script.rs` for the lines (`add-project`, `new-shell`, `new-claude`,
   `new-codex`, `new-service`, `show-board`, `show-session`, `show-document`,
   `files`, `side-position`, `terminal`, `select-file`, `set-env`, `set-secret`, `dotenv`, `environment`, `config`,
+  `env-setup unlock|lock`,
   `send`, `interrupt`, `return`, `kill`, `remove`, `approve`, `revoke`, `side`,
   `switchboard`, `working-set`, `new-working-set`, `clone-working-set`,
   `rename-working-set`, `delete-working-set`, `new-recent-set`,
@@ -231,6 +245,7 @@ cargo test --test gate -- --ignored --nocapture     # the Milestone 1 gate items
 ```
 src/main.rs              launcher: wires real adapters, opens the window
 src/bin/switchboard-hook.rs  helper Claude Code hooks call (std only)
+src/bin/switchboard-env.rs   runs one child with a session's environment sets, resolved over the control port with its launch token; the sets' setup commands (std and the wire crate only)
 src/lib.rs               module tree and the layering rules
 src/core/
   model.rs               durable data model (Project, SessionRecord, ResumeHandle, CardState)

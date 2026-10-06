@@ -106,4 +106,16 @@ mod tests {
         store.delete("global/TOKEN").unwrap();
         assert_eq!(store.get("global/TOKEN").unwrap(), None);
     }
+
+    #[test]
+    fn a_set_secret_round_trips_under_its_own_account() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = KeychainStore::create_at(&dir.path().join("test.keychain-db")).unwrap();
+        let account = crate::core::SecretScope::Set("aws-dev".into()).account("TOKEN");
+        store.set(&account, "s3cret").unwrap();
+        assert_eq!(store.get(&account).unwrap().as_deref(), Some("s3cret"));
+        assert_eq!(store.get("global/TOKEN").unwrap(), None);
+        store.delete(&account).unwrap();
+        assert_eq!(store.get(&account).unwrap(), None);
+    }
 }

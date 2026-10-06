@@ -552,7 +552,7 @@ fn step(app: &mut SwitchboardApp, w: &[&str]) -> Result<(), String> {
             app.ui_state.files.entry(id).or_default().selected = Some(root.join(rel));
         }
         [
-            "set-env" | "set-secret" | "dotenv" | "environment" | "config",
+            "set-env" | "set-secret" | "dotenv" | "environment" | "config" | "env-setup",
             ..,
         ] => {
             env_step(app, w)?;
@@ -654,6 +654,11 @@ fn env_step(app: &mut SwitchboardApp, w: &[&str]) -> Result<(), String> {
             let (id, _) = project(app, p)?;
             app.ui_state.config_dialog =
                 crate::ui::config::ConfigDraft::read(app.core(), app.services(), id);
+        }
+        ["env-setup", verb @ ("unlock" | "lock")] => {
+            app.dispatch(AppAction::SetEnvSetup {
+                open: *verb == "unlock",
+            });
         }
         _ => return Err(format!("unknown environment line: {}", w.join(" "))),
     }

@@ -40,6 +40,7 @@ fn project(name: &str) -> Project {
         last_active: t,
         space: SpaceId::DEFAULT,
         op: None,
+        env_sets: Vec::new(),
     }
 }
 
@@ -81,6 +82,8 @@ fn record(project: ProjectId, kind: SessionKind, order: u32) -> SessionRecord {
         pending_launch: false,
         last_stop_at: None,
         env: Vec::new(),
+        env_sets: Vec::new(),
+        token_hash: None,
     }
 }
 
@@ -4227,6 +4230,36 @@ mod workflow {
         (core, run, source, reviewer, planner)
     }
 
+    /// A planner is no Dispatch stage: it is granted nothing, whatever
+    /// its source holds, and gets its own token at its own launch.
+    #[test]
+    fn the_planner_clone_has_no_sets_and_no_token() {
+        let (mut core, source) = resumable_agent();
+        core.edit_session(source, &mut crate::core::action::Out::default(), |s| {
+            s.env_sets = vec!["dev".into()];
+            s.token_hash = Some("h".into());
+        });
+        core.dispatch(
+            AppAction::StartWorkflow {
+                source,
+                plan: PLAN.into(),
+                definition: BUILTIN_WORKFLOW.into(),
+            },
+            Clock::at(100),
+        );
+        let run = run_of(&core).id;
+        core.dispatch(
+            AppAction::WorkflowCloned {
+                run,
+                result: Ok(claude_handle()),
+            },
+            Clock::at(130),
+        );
+        let planner = core.session(run_of(&core).planner.unwrap()).unwrap();
+        assert!(planner.env_sets.is_empty());
+        assert_eq!(planner.token_hash, None);
+    }
+
     #[test]
     fn start_needs_a_clonable_planner_and_an_absolute_plan() {
         let (mut core, _, ids) = with_records(&[codex()], |_| None);
@@ -6052,6 +6085,7 @@ mod control {
             prompt: prompt.map(str::to_owned),
             notes: "Dispatch ticket 1, stage investigate".into(),
             env: BTreeMap::new(),
+            env_sets: Vec::new(),
         }
     }
 
@@ -6102,6 +6136,7 @@ mod control {
                 name: "rebaser".into(),
                 prompt: "Rebase.".into(),
                 notes: String::new(),
+                env_sets: Vec::new(),
             },
             12,
         );
@@ -6193,6 +6228,7 @@ mod control {
                 name: "rebaser".into(),
                 prompt: "Rebase onto main.".into(),
                 notes: "Dispatch ticket 1, rebase".into(),
+                env_sets: Vec::new(),
             },
             10,
         );
@@ -6245,6 +6281,7 @@ mod control {
                 name: "rebaser".into(),
                 prompt: "again".into(),
                 notes: String::new(),
+                env_sets: Vec::new(),
             },
             12,
         );
@@ -8425,5 +8462,505 @@ mod dispatch_page {
         assert!(core.artifact_read_due(&t, &path));
         t.attempts.last_mut().unwrap().secret = vec!["personas".into()];
         assert!(!core.artifact_read_due(&t, &path));
+    }
+}
+
+// --- environment sets: resolution, the setup window, grants and tokens
+
+mod env_sets {
+    use super::*;
+    use crate::core::env::{SecretScope, resolve_sets};
+    use crate::core::{
+        AwsMethod, ControlAction, ENV_SETUP_LOCKED, ENV_SETUP_WINDOW, EnvSet, EnvVar, GrantTarget,
+    };
+
+    fn var(name: &str, value: &str, secret: bool) -> EnvVar {
+        EnvVar {
+            name: name.into(),
+            value: value.into(),
+            secret,
+        }
+    }
+
+    fn set(name: &str, vars: Vec<EnvVar>, aws: Option<AwsMethod>) -> EnvSet {
+        EnvSet {
+            name: name.into(),
+            vars,
+            aws,
+        }
+    }
+
+    fn control(core: &mut AppCore, op: &str, action: ControlAction, at: u64) -> Vec<Effect> {
+        core.dispatch(
+            AppAction::Control {
+                op: op.into(),
+                action,
+            },
+            Clock::at(at),
+        )
+    }
+
+    fn upsert(name: &str, vars: Vec<EnvVar>, aws: Option<AwsMethod>) -> ControlAction {
+        ControlAction::EnvSetUpsert {
+            name: name.into(),
+            vars,
+            aws,
+        }
+    }
+
+    fn grant(target: GrantTarget, set: &str, remove: bool) -> ControlAction {
+        ControlAction::EnvGrant {
+            target,
+            set: set.into(),
+            remove,
+        }
+    }
+
+    /// The error a control command ended with, if any.
+    fn refusal(core: &mut AppCore, op: &str) -> Option<String> {
+        core.take_control_outcome(op).and_then(|o| o.error)
+    }
+
+    /// A core with one shell record and the given sets, the Dispatch
+    /// runner being that record when `runner` is set.
+    fn with_sets(sets: Vec<EnvSet>, runner: bool) -> (AppCore, ProjectId, RecordId) {
+        let p = project("p");
+        let pid = p.id;
+        let mut w = Workspace::new(p);
+        let r = record(pid, SessionKind::Service, 0);
+        let id = r.id;
+        w.sessions.push(r);
+        let mut core = AppCore::new();
+        core.dispatch(
+            AppAction::StoreLoaded(Ok(Loaded {
+                workspaces: vec![w],
+                settings: Settings {
+                    env_sets: sets,
+                    dispatch_runner: runner.then_some(id),
+                    ..Settings::default()
+                },
+                ..Loaded::default()
+            })),
+            Clock::at(0),
+        );
+        core.dispatch(AppAction::HostListed(vec![]), Clock::at(1));
+        (core, pid, id)
+    }
+
+    #[test]
+    fn a_sessions_set_wins_over_its_projects_and_missing_secrets_are_named() {
+        let sets = vec![
+            set("base", vec![var("REGION", "us-east-1", false)], None),
+            set(
+                "dev",
+                vec![var("REGION", "eu-west-1", false), var("TOKEN", "", true)],
+                None,
+            ),
+            set("ci", vec![var("KEY", "", true)], None),
+        ];
+        let lookup = |account: &str| (account == "set/dev/TOKEN").then(|| "t0k".to_owned());
+        let r = resolve_sets(
+            &sets,
+            &["base".into(), "ci".into()],
+            &["dev".into(), "base".into()],
+            &lookup,
+        )
+        .unwrap();
+        assert_eq!(
+            r.pairs,
+            vec![
+                ("REGION".to_owned(), "eu-west-1".to_owned()),
+                ("TOKEN".to_owned(), "t0k".to_owned())
+            ]
+        );
+        assert_eq!(r.missing, vec!["ci/KEY".to_owned()]);
+        assert_eq!(r.aws, None);
+    }
+
+    #[test]
+    fn a_later_sets_value_clears_an_earlier_sets_missing_secret() {
+        let sets = vec![
+            set("a", vec![var("TOKEN", "", true)], None),
+            set("b", vec![var("TOKEN", "x", false)], None),
+        ];
+        let none = |_: &str| None;
+        let r = resolve_sets(&sets, &["a".into()], &["b".into()], &none).unwrap();
+        assert_eq!(r.pairs, vec![("TOKEN".to_owned(), "x".to_owned())]);
+        assert!(r.missing.is_empty(), "{:?}", r.missing);
+    }
+
+    #[test]
+    fn an_unknown_set_and_two_aws_methods_are_errors_naming_them() {
+        let vault = |p: &str| Some(AwsMethod::Vault { profile: p.into() });
+        let sets = vec![
+            set("a", vec![], vault("one")),
+            set("b", vec![], vault("two")),
+        ];
+        let none = |_: &str| None;
+        let err = resolve_sets(&sets, &[], &["gone".into()], &none).unwrap_err();
+        assert!(err.contains("gone"), "{err}");
+        let err = resolve_sets(&sets, &["a".into()], &["b".into()], &none).unwrap_err();
+        assert!(err.contains('a') && err.contains('b'), "{err}");
+        let one = resolve_sets(&sets, &["a".into()], &["a".into()], &none).unwrap();
+        assert_eq!(one.aws, vault("one"));
+    }
+
+    #[test]
+    fn a_set_secret_lives_under_its_own_account() {
+        assert_eq!(
+            SecretScope::Set("aws-dev".into()).account("TOKEN"),
+            "set/aws-dev/TOKEN"
+        );
+        assert!(crate::core::env::valid_set_name("aws-dev2"));
+        assert!(!crate::core::env::valid_set_name("a/b"));
+        assert!(!crate::core::env::valid_set_name("-x"));
+        assert!(!crate::core::env::valid_set_name("Dev"));
+        assert!(crate::core::env::valid_var_name("_AWS_REGION2"));
+        assert!(!crate::core::env::valid_var_name("2X"));
+        assert!(!crate::core::env::valid_var_name("lower"));
+    }
+
+    /// Every write is refused until the owner opens the window, accepted
+    /// inside it, and refused once it has passed; the window is never
+    /// saved, and a `Tick` past it closes it.
+    #[test]
+    fn the_setup_commands_are_accepted_only_inside_the_window() {
+        let (mut core, pid, id) = with_sets(vec![set("dev", vec![], None)], false);
+        let writes = || {
+            vec![
+                upsert("dev", vec![var("A", "1", false)], None),
+                ControlAction::EnvSecretStore {
+                    set: "dev".into(),
+                    name: "TOKEN".into(),
+                    value: "v".into(),
+                },
+                grant(GrantTarget::Session(id), "dev", false),
+            ]
+        };
+        for (n, action) in writes().into_iter().enumerate() {
+            let op = format!("locked-{n}");
+            let e = control(&mut core, &op, action, 10);
+            assert_eq!(refusal(&mut core, &op).as_deref(), Some(ENV_SETUP_LOCKED));
+            assert!(e.is_empty(), "{e:?}");
+        }
+        let e = core.dispatch(AppAction::SetEnvSetup { open: true }, Clock::at(1_000));
+        assert!(e.is_empty(), "the window is never saved: {e:?}");
+        assert!(core.env_setup_until().is_some());
+        for (n, action) in writes().into_iter().enumerate() {
+            let op = format!("open-{n}");
+            control(&mut core, &op, action, 2_000);
+            assert_eq!(refusal(&mut core, &op), None);
+        }
+        assert_eq!(core.session(id).unwrap().env_sets, vec!["dev".to_owned()]);
+        let past = 1_000 + u64::try_from(ENV_SETUP_WINDOW.as_millis()).unwrap();
+        control(
+            &mut core,
+            "late",
+            grant(GrantTarget::Project(pid), "dev", false),
+            past,
+        );
+        assert_eq!(
+            refusal(&mut core, "late").as_deref(),
+            Some(ENV_SETUP_LOCKED)
+        );
+        let e = core.dispatch(AppAction::Tick, Clock::at(past));
+        assert!(core.env_setup_until().is_none());
+        assert!(!e.iter().any(|e| matches!(e, Effect::SaveSettings(_))));
+        // Closing by hand works too.
+        core.dispatch(AppAction::SetEnvSetup { open: true }, Clock::at(past));
+        core.dispatch(AppAction::SetEnvSetup { open: false }, Clock::at(past));
+        assert!(core.env_setup_until().is_none());
+    }
+
+    fn unlocked(sets: Vec<EnvSet>, runner: bool) -> (AppCore, ProjectId, RecordId) {
+        let (mut core, pid, id) = with_sets(sets, runner);
+        core.dispatch(AppAction::SetEnvSetup { open: true }, Clock::at(5));
+        (core, pid, id)
+    }
+
+    fn saved_sets(effects: &[Effect]) -> Option<Vec<EnvSet>> {
+        effects.iter().find_map(|e| match e {
+            Effect::SaveSettings(s) => Some(s.env_sets.clone()),
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn upsert_creates_a_set_merges_variables_and_never_stores_a_secret_value() {
+        let (mut core, _, _) = unlocked(vec![], false);
+        control(
+            &mut core,
+            "u1",
+            upsert(
+                "dev",
+                vec![var("A", "1", false), var("B", "2", false)],
+                Some(AwsMethod::Sso {
+                    profile: "p".into(),
+                }),
+            ),
+            10,
+        );
+        assert_eq!(refusal(&mut core, "u1"), None);
+        // A second upsert replaces one variable and keeps the method.
+        let e = control(
+            &mut core,
+            "u2",
+            upsert("dev", vec![var("A", "9", false)], None),
+            11,
+        );
+        let sets = saved_sets(&e).expect("settings saved");
+        assert_eq!(
+            sets,
+            vec![set(
+                "dev",
+                vec![var("A", "9", false), var("B", "2", false)],
+                Some(AwsMethod::Sso {
+                    profile: "p".into()
+                })
+            )]
+        );
+        // A secret's value never travels in an upsert.
+        let e = control(
+            &mut core,
+            "u3",
+            upsert("dev", vec![var("C", "leak", true)], None),
+            12,
+        );
+        assert!(
+            refusal(&mut core, "u3")
+                .unwrap()
+                .contains("env.secret.store")
+        );
+        assert!(saved_sets(&e).is_none());
+        // Turning a plain variable secret blanks what settings held.
+        let e = control(
+            &mut core,
+            "u4",
+            upsert("dev", vec![var("B", "", true)], None),
+            13,
+        );
+        let sets = saved_sets(&e).unwrap();
+        assert_eq!(sets[0].vars[1], var("B", "", true));
+        assert!(!format!("{sets:?}").contains("\"2\""));
+        // Bad names change nothing.
+        for (op, action) in [
+            ("bad-set", upsert("a/b", vec![], None)),
+            (
+                "bad-var",
+                upsert("dev", vec![var("lower", "x", false)], None),
+            ),
+        ] {
+            let e = control(&mut core, op, action, 14);
+            assert!(refusal(&mut core, op).is_some(), "{op}");
+            assert!(saved_sets(&e).is_none(), "{op}");
+        }
+    }
+
+    #[test]
+    fn a_secret_store_adds_the_variable_and_stores_the_value_under_the_set() {
+        let (mut core, _, _) =
+            unlocked(vec![set("dev", vec![var("T", "old", false)], None)], false);
+        let e = control(
+            &mut core,
+            "s1",
+            ControlAction::EnvSecretStore {
+                set: "dev".into(),
+                name: "T".into(),
+                value: "s3cret".into(),
+            },
+            10,
+        );
+        assert_eq!(refusal(&mut core, "s1"), None);
+        assert!(e.contains(&Effect::StoreSecret {
+            account: "set/dev/T".into(),
+            value: "s3cret".into(),
+        }));
+        let sets = saved_sets(&e).expect("the variable is marked secret");
+        assert_eq!(sets[0].vars, vec![var("T", "", true)]);
+        assert!(!format!("{:?}", core.settings()).contains("s3cret"));
+        control(
+            &mut core,
+            "s2",
+            ControlAction::EnvSecretStore {
+                set: "nope".into(),
+                name: "T".into(),
+                value: "x".into(),
+            },
+            11,
+        );
+        assert!(refusal(&mut core, "s2").unwrap().contains("nope"));
+    }
+
+    #[test]
+    fn grants_and_revokes_edit_the_target_and_refuse_what_cannot_be_granted() {
+        let (mut core, pid, id) = unlocked(vec![set("dev", vec![], None)], true);
+        let e = control(
+            &mut core,
+            "g1",
+            grant(GrantTarget::Project(pid), "dev", false),
+            10,
+        );
+        assert_eq!(refusal(&mut core, "g1"), None);
+        assert_eq!(saves(&e), 1);
+        assert_eq!(core.workspace(pid).unwrap().project.env_sets, ["dev"]);
+        control(
+            &mut core,
+            "g2",
+            grant(GrantTarget::Runner, "dev", false),
+            11,
+        );
+        control(
+            &mut core,
+            "g3",
+            grant(GrantTarget::Runner, "dev", false),
+            12,
+        );
+        assert_eq!(core.session(id).unwrap().env_sets, ["dev"], "no repeats");
+        let e = control(&mut core, "r1", grant(GrantTarget::Runner, "dev", true), 13);
+        assert_eq!(saves(&e), 1);
+        assert!(core.session(id).unwrap().env_sets.is_empty());
+        control(
+            &mut core,
+            "r2",
+            grant(GrantTarget::Project(pid), "dev", true),
+            14,
+        );
+        assert!(core.workspace(pid).unwrap().project.env_sets.is_empty());
+        for (op, action) in [
+            ("unknown", grant(GrantTarget::Session(id), "gone", false)),
+            ("bad", grant(GrantTarget::Session(id), "A/B", false)),
+            (
+                "nobody",
+                grant(GrantTarget::Session(RecordId::new()), "dev", false),
+            ),
+        ] {
+            let e = control(&mut core, op, action, 15);
+            assert!(refusal(&mut core, op).is_some(), "{op}");
+            assert_eq!(saves(&e), 0, "{op}");
+        }
+        let (mut core, _, _) = unlocked(vec![set("dev", vec![], None)], false);
+        control(
+            &mut core,
+            "nr",
+            grant(GrantTarget::Runner, "dev", false),
+            10,
+        );
+        assert!(refusal(&mut core, "nr").unwrap().contains("runner"));
+    }
+
+    #[test]
+    fn a_launch_token_hash_lands_on_the_record_and_is_saved() {
+        let (mut core, _, id) = with_sets(vec![], false);
+        let e = core.dispatch(
+            AppAction::RecordTokenIssued {
+                id,
+                hash: "abc".into(),
+            },
+            Clock::at(10),
+        );
+        assert_eq!(saves(&e), 1);
+        assert_eq!(core.session(id).unwrap().token_hash.as_deref(), Some("abc"));
+        assert_eq!(
+            crate::core::token_hash("t"),
+            "e3b98a4da31a127d4bde6e43033f66ba274cab0eb7eb1c70ec41402bf6273dd8"
+        );
+    }
+
+    #[test]
+    fn a_port_session_keeps_its_sets_and_a_port_clone_takes_only_the_asked_ones() {
+        let p = project("p");
+        let pid = p.id;
+        let mut w = Workspace::new(p);
+        let mut r = record(pid, agent(), 0);
+        r.resume = Some(claude_handle());
+        r.env_sets = vec!["impl".into()];
+        r.token_hash = Some("h".into());
+        let source = r.id;
+        w.sessions.push(r);
+        let (mut core, _) = loaded(vec![w], vec![]);
+        control(
+            &mut core,
+            "n1",
+            ControlAction::NewSession {
+                project: pid,
+                name: "tester".into(),
+                kind: agent(),
+                cwd: "/tmp/proj".into(),
+                launch: Launch::Shell,
+                prompt: None,
+                notes: String::new(),
+                env: BTreeMap::new(),
+                env_sets: vec!["aws-dev".into()],
+            },
+            10,
+        );
+        let by_name = |core: &AppCore, n: &str| {
+            core.workspace(pid)
+                .unwrap()
+                .sessions
+                .iter()
+                .find(|s| s.name == n)
+                .cloned()
+                .unwrap()
+        };
+        assert_eq!(by_name(&core, "tester").env_sets, ["aws-dev"]);
+        for (op, name, sets) in [
+            ("c1", "fixer", vec!["ci".to_owned()]),
+            ("c2", "rebaser", vec![]),
+        ] {
+            control(
+                &mut core,
+                op,
+                ControlAction::CloneSession {
+                    source,
+                    name: name.into(),
+                    prompt: "go".into(),
+                    notes: String::new(),
+                    env_sets: sets.clone(),
+                },
+                11,
+            );
+            let clone = by_name(&core, name);
+            assert_eq!(clone.env_sets, sets, "{name}");
+            assert_eq!(clone.token_hash, None, "{name}");
+        }
+    }
+
+    /// The user's own clone continues the same conversation under the
+    /// same launch, so it keeps the source's grants, as it keeps `env`.
+    #[test]
+    fn the_users_clone_keeps_the_sources_sets_but_not_its_token() {
+        let (mut core, id) = resumable_agent();
+        let pid = core.session(id).unwrap().project;
+        core.edit_session(id, &mut crate::core::action::Out::default(), |s| {
+            s.env_sets = vec!["dev".into()];
+            s.token_hash = Some("h".into());
+        });
+        core.dispatch(
+            AppAction::CloneSession {
+                id,
+                before: usize::MAX,
+                prompt: String::new(),
+            },
+            Clock::at(1),
+        );
+        core.dispatch(
+            AppAction::TranscriptCloned {
+                source: id,
+                prompt: String::new(),
+                result: Ok(claude_handle()),
+            },
+            Clock::at(2),
+        );
+        let clone = core
+            .workspace(pid)
+            .unwrap()
+            .sessions
+            .iter()
+            .find(|s| s.id != id)
+            .cloned()
+            .unwrap();
+        assert_eq!(clone.env_sets, ["dev"]);
+        assert_eq!(clone.token_hash, None);
     }
 }

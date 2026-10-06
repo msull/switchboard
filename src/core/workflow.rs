@@ -389,6 +389,9 @@ impl AppCore {
             pending_launch: false,
             last_stop_at: None,
             env: Vec::new(),
+            // A planner is no Dispatch stage and is granted nothing.
+            env_sets: Vec::new(),
+            token_hash: None,
             ..source
         });
         self.edit_run(id, now, out, |r| {

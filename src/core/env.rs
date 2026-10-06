@@ -2,27 +2,120 @@
 //! project's `.env` files (only when the project opted in), then the
 //! project's own variables. Secret values are looked up by account name;
 //! the records never hold them.
+//!
+//! Environment sets are resolved separately, by `resolve_sets`, only for
+//! `switchboard-env`: their values never go into a pane's environment.
 
 use std::collections::HashSet;
 
-use crate::core::model::{EnvVar, ProjectEnv, ProjectId};
+pub use switchboard_control::valid_set_name;
+
+use crate::core::model::{AwsMethod, EnvSet, EnvVar, ProjectEnv, ProjectId};
 
 /// Where a secret lives; decides its Keychain account name.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SecretScope {
     Global,
     Project(ProjectId),
+    /// An environment set, by name.
+    Set(String),
 }
 
 impl SecretScope {
-    /// `global/NAME` or `project/<id>/NAME`.
+    /// `global/NAME`, `project/<id>/NAME` or `set/<name>/NAME`.
     #[must_use]
-    pub fn account(self, name: &str) -> String {
+    pub fn account(&self, name: &str) -> String {
         match self {
             Self::Global => format!("global/{name}"),
             Self::Project(id) => format!("project/{}/{name}", id.0),
+            Self::Set(set) => format!("set/{set}/{name}"),
         }
     }
+}
+
+/// A variable name is `[A-Z_][A-Z0-9_]*`.
+#[must_use]
+pub fn valid_var_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    chars
+        .next()
+        .is_some_and(|c| c.is_ascii_uppercase() || c == '_')
+        && chars.all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+}
+
+/// SHA-256 of a launch token, in hex: what a record keeps of it.
+#[must_use]
+pub fn token_hash(token: &str) -> String {
+    use sha2::{Digest, Sha256};
+    use std::fmt::Write;
+    Sha256::digest(token.as_bytes())
+        .iter()
+        .fold(String::new(), |mut hex, b| {
+            let _ = write!(hex, "{b:02x}");
+            hex
+        })
+}
+
+/// What a session's granted sets resolve to.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SetsResolved {
+    /// Name/value pairs for the child; missing secrets are left out.
+    pub pairs: Vec<(String, String)>,
+    /// Each secret with no stored value, as `<set>/VAR`.
+    pub missing: Vec<String>,
+    /// The AWS method of the one granted set that gives one.
+    pub aws: Option<AwsMethod>,
+}
+
+/// Resolve the project's grants, then the session's, each in listed
+/// order with repeats dropped; a later variable replaces an earlier one
+/// of the same name. An unknown set is an error naming it, and so are
+/// two sets that both give an AWS method: picking one could deploy to
+/// the wrong account.
+pub fn resolve_sets(
+    sets: &[EnvSet],
+    project: &[String],
+    session: &[String],
+    lookup: &dyn Fn(&str) -> Option<String>,
+) -> Result<SetsResolved, String> {
+    let mut names: Vec<&str> = Vec::new();
+    for name in project.iter().chain(session) {
+        if !names.contains(&name.as_str()) {
+            names.push(name);
+        }
+    }
+    let mut out = SetsResolved::default();
+    let mut aws_from: Option<&str> = None;
+    for name in names {
+        let set = sets
+            .iter()
+            .find(|s| s.name == name)
+            .ok_or_else(|| format!("no environment set named {name}"))?;
+        if let Some(method) = &set.aws {
+            if let Some(first) = aws_from {
+                return Err(format!(
+                    "environment sets {first} and {name} both give AWS credentials"
+                ));
+            }
+            aws_from = Some(name);
+            out.aws = Some(method.clone());
+        }
+        let scope = SecretScope::Set(set.name.clone());
+        for var in &set.vars {
+            out.pairs.retain(|(n, _)| *n != var.name);
+            out.missing
+                .retain(|m| m.rsplit_once('/').is_none_or(|(_, v)| v != var.name));
+            if var.secret {
+                match lookup(&scope.account(&var.name)) {
+                    Some(value) => out.pairs.push((var.name.clone(), value)),
+                    None => out.missing.push(format!("{name}/{}", var.name)),
+                }
+            } else {
+                out.pairs.push((var.name.clone(), var.value.clone()));
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// Which layer supplied a value.
@@ -100,7 +193,7 @@ pub fn resolve(
         vars.push(var);
     };
     for var in global {
-        put(layer_var(var, SecretScope::Global, Source::Global, lookup));
+        put(layer_var(var, &SecretScope::Global, Source::Global, lookup));
     }
     for (file, pairs) in dotenv {
         for (name, value) in pairs {
@@ -115,7 +208,7 @@ pub fn resolve(
     for var in &project.vars {
         put(layer_var(
             var,
-            SecretScope::Project(project_id),
+            &SecretScope::Project(project_id),
             Source::Project,
             lookup,
         ));
@@ -134,7 +227,7 @@ pub fn resolve(
 
 fn layer_var(
     var: &EnvVar,
-    scope: SecretScope,
+    scope: &SecretScope,
     source: Source,
     lookup: &dyn Fn(&str) -> Option<String>,
 ) -> ResolvedVar {

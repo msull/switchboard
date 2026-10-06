@@ -259,6 +259,7 @@ impl FakeSwitchboard {
                 name,
                 prompt: _,
                 notes,
+                env_sets: _,
             } => {
                 let Some(src) = self.sessions.iter().find(|s| &s.id == source).cloned() else {
                     return Reply::failed("no such session");

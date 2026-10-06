@@ -341,14 +341,15 @@ pub fn migrate(value: serde_json::Value) -> Result<Workspace, String> {
         .and_then(serde_json::Value::as_u64)
         .ok_or_else(|| "missing schema_version".to_string())?;
     match version {
-        // v2 to v11 added optional fields and variants only (v8: the
+        // v2 to v12 added optional fields and variants only (v8: the
         // project's space; v9: the control port's operation id, the
         // outside waiting reason, the pending-launch mark and the last
         // stop time; v10: a session's launcher environment; v11: when a
-        // round's agents were asked, and a failed run), so an older
-        // document reads with their defaults; it is written back at the
-        // current version.
-        1..=11 => serde_json::from_value(value)
+        // round's agents were asked, and a failed run; v12: a project's
+        // and a session's environment sets, and a session's launch-token
+        // hash), so an older document reads with their defaults; it is
+        // written back at the current version.
+        1..=12 => serde_json::from_value(value)
             .map(|mut w: Workspace| {
                 w.schema_version = SCHEMA_VERSION;
                 w
@@ -497,6 +498,8 @@ mod tests {
             pending_launch: false,
             last_stop_at: None,
             env: Vec::new(),
+            env_sets: Vec::new(),
+            token_hash: None,
         };
         let mut agent = session(
             "claude",
@@ -524,6 +527,7 @@ mod tests {
                 last_active: now,
                 space: SpaceId::DEFAULT,
                 op: None,
+                env_sets: Vec::new(),
             },
             sessions: vec![agent, shell],
             workflows: Vec::new(),
@@ -1052,5 +1056,33 @@ mod tests {
         assert_eq!(loaded.schema_version, SCHEMA_VERSION);
         let round = &loaded.workflows[0].rounds[0];
         assert_eq!((round.feedback_asked, round.response_asked), (None, None));
+    }
+
+    #[test]
+    fn v11_records_read_with_no_environment_sets_and_no_token() {
+        let mut w = workspace("v11");
+        w.schema_version = 11;
+        let mut value = serde_json::to_value(&w).unwrap();
+        assert!(
+            value["project"]
+                .as_object_mut()
+                .unwrap()
+                .remove("env_sets")
+                .is_some()
+        );
+        for s in value["sessions"].as_array_mut().unwrap() {
+            let s = s.as_object_mut().unwrap();
+            assert!(s.remove("env_sets").is_some());
+            assert!(s.remove("token_hash").is_some());
+        }
+        let loaded = migrate(value).unwrap();
+        assert_eq!(loaded.schema_version, SCHEMA_VERSION);
+        assert!(loaded.project.env_sets.is_empty());
+        assert!(
+            loaded
+                .sessions
+                .iter()
+                .all(|s| s.env_sets.is_empty() && s.token_hash.is_none())
+        );
     }
 }

@@ -12,9 +12,11 @@ use std::time::SystemTime;
 use switchboard_control as wire;
 
 use super::action::{AppAction, Out, RULE_COLUMNS};
+use super::env::{SecretScope, valid_set_name, valid_var_name};
 use super::{
-    AppCore, Clock, Effect, GridRect, Launch, PinTarget, PinnedItem, ProjectId, RecordId,
-    SessionKind, SetId, SetRule, Space, SpaceId, WorkflowDefinition, WorkflowId, WorkingSet, grid,
+    AppCore, AwsMethod, Clock, ENV_SETUP_LOCKED, Effect, EnvSet, EnvVar, GridRect, Launch,
+    PinTarget, PinnedItem, ProjectId, RecordId, SessionKind, SetId, SetRule, Space, SpaceId,
+    WorkflowDefinition, WorkflowId, WorkingSet, grid,
 };
 use crate::ports::host::Liveness;
 
@@ -39,6 +41,8 @@ pub enum ControlAction {
         notes: String,
         /// Variables for every spawn of the session (`SessionRecord::env`).
         env: BTreeMap<String, String>,
+        /// Environment sets granted to the session.
+        env_sets: Vec<String>,
     },
     /// A Claude Code session cloned from `source`'s whole transcript,
     /// launched with `prompt`.
@@ -47,6 +51,8 @@ pub enum ControlAction {
         name: String,
         prompt: String,
         notes: String,
+        /// The clone's own environment sets, never the source's.
+        env_sets: Vec<String>,
     },
     SendInput {
         id: RecordId,
@@ -108,6 +114,35 @@ pub enum ControlAction {
     RemoveWorkflow(WorkflowId),
     /// Stop, start or restart the Dispatch runner the app runs.
     DispatchRunner(wire::RunnerVerb),
+    /// Create the environment set when missing, replace each named
+    /// variable, and replace `aws` when given.
+    EnvSetUpsert {
+        name: String,
+        vars: Vec<EnvVar>,
+        aws: Option<AwsMethod>,
+    },
+    /// Store a set's secret value, adding the variable when missing.
+    EnvSecretStore {
+        set: String,
+        name: String,
+        value: String,
+    },
+    /// Grant a set to a target, or take it back.
+    EnvGrant {
+        target: GrantTarget,
+        set: String,
+        remove: bool,
+    },
+}
+
+/// Who an `env.grant` names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GrantTarget {
+    Project(ProjectId),
+    Session(RecordId),
+    /// The Dispatch runner's record (`Settings::dispatch_runner`), whose
+    /// grants serve every gate that runs with `env`.
+    Runner,
 }
 
 /// What one control command did: the records it made and the error it
@@ -202,6 +237,7 @@ impl AppCore {
                 prompt,
                 notes,
                 env,
+                env_sets,
             } => {
                 if let Some(text) = self.host_unavailable("start", &name) {
                     self.error(text);
@@ -213,6 +249,7 @@ impl AppCore {
                 self.edit_session(id, out, |s| {
                     s.notes = notes;
                     s.env = env.into_iter().collect();
+                    s.env_sets = env_sets;
                 });
                 if let Some(prompt) = prompt.filter(|_| matches!(kind, SessionKind::Agent(_))) {
                     self.first_prompts.push((id, prompt));
@@ -225,12 +262,13 @@ impl AppCore {
                 name,
                 prompt,
                 notes,
+                env_sets,
             } => {
                 if let Some(text) = self.host_unavailable("start", &name) {
                     self.error(text);
                     return Vec::new();
                 }
-                self.clone_into(source, name, prompt, notes, now, out)
+                self.clone_into(source, name, prompt, notes, env_sets, now, out)
                     .map_or_else(Vec::new, |id| vec![made(K::Session, id.0)])
             }
             ControlAction::SendInput { id, text } => {
@@ -373,7 +411,130 @@ impl AppCore {
                 self.control_runner(verb, now, out);
                 Vec::new()
             }
+            ControlAction::EnvSetUpsert { name, vars, aws } => {
+                if self.env_setup_open(now) {
+                    self.env_set_upsert(&name, vars, aws, out);
+                }
+                Vec::new()
+            }
+            ControlAction::EnvSecretStore { set, name, value } => {
+                if self.env_setup_open(now) {
+                    self.env_secret_store(&set, name, value, out);
+                }
+                Vec::new()
+            }
+            ControlAction::EnvGrant {
+                target,
+                set,
+                remove,
+            } => {
+                if self.env_setup_open(now) {
+                    self.env_grant(target, &set, remove, out);
+                }
+                Vec::new()
+            }
         }
+    }
+
+    /// Whether `switchboard-env`'s setup commands are accepted now; a
+    /// refusal is the command's error. Every later refusal is an error
+    /// too, so nothing is half-applied.
+    fn env_setup_open(&mut self, now: Clock) -> bool {
+        let open = self.env_setup_until.is_some_and(|t| now.mono < t);
+        if !open {
+            self.error(ENV_SETUP_LOCKED);
+        }
+        open
+    }
+
+    fn env_set_upsert(
+        &mut self,
+        name: &str,
+        vars: Vec<EnvVar>,
+        aws: Option<AwsMethod>,
+        out: &mut Out,
+    ) {
+        if !valid_set_name(name) {
+            return self.error(format!("{name:?} is not a set name ([a-z0-9][a-z0-9-]*)"));
+        }
+        if let Some(bad) = vars.iter().find(|v| !valid_var_name(&v.name)) {
+            return self.error(format!(
+                "{:?} is not a variable name ([A-Z_][A-Z0-9_]*)",
+                bad.name
+            ));
+        }
+        if vars.iter().any(|v| v.secret && !v.value.is_empty()) {
+            return self.error("a secret's value goes through `env.secret.store`");
+        }
+        self.update_settings(out, |s| {
+            let set = set_entry(&mut s.env_sets, name);
+            for var in vars {
+                put_var(set, var);
+            }
+            if aws.is_some() {
+                set.aws = aws;
+            }
+        });
+    }
+
+    fn env_secret_store(&mut self, set: &str, name: String, value: String, out: &mut Out) {
+        if !self.settings.env_sets.iter().any(|s| s.name == set) {
+            return self.error(format!("no environment set named {set}"));
+        }
+        if !valid_var_name(&name) {
+            return self.error(format!(
+                "{name:?} is not a variable name ([A-Z_][A-Z0-9_]*)"
+            ));
+        }
+        if value.is_empty() {
+            return self.error("a secret needs a value");
+        }
+        let account = SecretScope::Set(set.to_owned()).account(&name);
+        self.update_settings(out, |s| {
+            put_var(
+                set_entry(&mut s.env_sets, set),
+                EnvVar {
+                    name,
+                    value: String::new(),
+                    secret: true,
+                },
+            );
+        });
+        out.push(Effect::StoreSecret { account, value });
+    }
+
+    fn env_grant(&mut self, target: GrantTarget, set: &str, remove: bool, out: &mut Out) {
+        if !valid_set_name(set) {
+            return self.error(format!("{set:?} is not a set name ([a-z0-9][a-z0-9-]*)"));
+        }
+        // A revoke may name a set that is gone; a grant may not.
+        if !remove && !self.settings.env_sets.iter().any(|s| s.name == set) {
+            return self.error(format!("no environment set named {set}"));
+        }
+        let edit = |sets: &mut Vec<String>| {
+            if remove {
+                sets.retain(|s| s != set);
+            } else if !sets.iter().any(|s| s == set) {
+                sets.push(set.to_owned());
+            }
+        };
+        let session = match target {
+            GrantTarget::Project(id) => {
+                if self.workspace(id).is_none() {
+                    return self.error("no such project");
+                }
+                return self.edit_project(id, out, |p| edit(&mut p.env_sets));
+            }
+            GrantTarget::Session(id) => id,
+            GrantTarget::Runner => match self.settings.dispatch_runner {
+                Some(id) => id,
+                None => return self.error("there is no Dispatch runner to grant to"),
+            },
+        };
+        if self.session(session).is_none() {
+            return self.error("no such session");
+        }
+        self.edit_session(session, out, |s| edit(&mut s.env_sets));
     }
 
     /// The runner's buttons, asked for over the port. A stop with
@@ -652,6 +813,30 @@ impl AppCore {
     }
 }
 
+/// The set called `name`, made empty when there is none.
+fn set_entry<'a>(sets: &'a mut Vec<EnvSet>, name: &str) -> &'a mut EnvSet {
+    let pos = sets.iter().position(|s| s.name == name).unwrap_or_else(|| {
+        sets.push(EnvSet {
+            name: name.to_owned(),
+            ..EnvSet::default()
+        });
+        sets.len() - 1
+    });
+    &mut sets[pos]
+}
+
+/// Replace or add one variable. A secret keeps no value here, so turning
+/// a plain variable secret blanks what `settings.json` held for it.
+fn put_var(set: &mut EnvSet, mut var: EnvVar) {
+    if var.secret {
+        var.value.clear();
+    }
+    match set.vars.iter_mut().find(|v| v.name == var.name) {
+        Some(existing) => *existing = var,
+        None => set.vars.push(var),
+    }
+}
+
 fn found_record(kind: wire::RecordKind, id: uuid::Uuid) -> wire::Found {
     wire::Found {
         kind,
@@ -721,6 +906,9 @@ fn control_kind(action: &ControlAction) -> String {
         ControlAction::DispatchRunner(verb) => {
             return format!("dispatch.runner.{}", verb.word());
         }
+        ControlAction::EnvSetUpsert { .. } => "env.set.upsert",
+        ControlAction::EnvSecretStore { .. } => "env.secret.store",
+        ControlAction::EnvGrant { .. } => "env.grant",
     }
     .to_owned()
 }
@@ -767,6 +955,28 @@ fn pin(pin: wire::Pin) -> Result<PinnedItem, String> {
             h: pin.rect.h,
         },
     })
+}
+
+fn aws_method(method: wire::AwsMethod) -> AwsMethod {
+    match method {
+        wire::AwsMethod::Vault { profile } => AwsMethod::Vault { profile },
+        wire::AwsMethod::Sso { profile } => AwsMethod::Sso { profile },
+        wire::AwsMethod::Static => AwsMethod::Static,
+    }
+}
+
+/// The core's AWS method as the wire carries it.
+#[must_use]
+pub fn aws_view(method: &AwsMethod) -> wire::AwsMethod {
+    match method {
+        AwsMethod::Vault { profile } => wire::AwsMethod::Vault {
+            profile: profile.clone(),
+        },
+        AwsMethod::Sso { profile } => wire::AwsMethod::Sso {
+            profile: profile.clone(),
+        },
+        AwsMethod::Static => wire::AwsMethod::Static,
+    }
 }
 
 fn definition(d: wire::Definition) -> WorkflowDefinition {
@@ -817,6 +1027,7 @@ impl TryFrom<wire::Body> for ControlAction {
                 prompt,
                 notes,
                 env,
+                env_sets,
             } => Self::NewSession {
                 project: project(&p)?,
                 name,
@@ -826,17 +1037,20 @@ impl TryFrom<wire::Body> for ControlAction {
                 prompt,
                 notes,
                 env,
+                env_sets,
             },
             wire::Body::SessionClone {
                 source: s,
                 name,
                 prompt,
                 notes,
+                env_sets,
             } => Self::CloneSession {
                 source: session(&s)?,
                 name,
                 prompt,
                 notes,
+                env_sets,
             },
             wire::Body::SessionSend { session: s, text } => Self::SendInput {
                 id: session(&s)?,
@@ -903,6 +1117,42 @@ impl TryFrom<wire::Body> for ControlAction {
             wire::Body::WorkflowFinalize { run: r } => Self::FinalizeWorkflow(run(&r)?),
             wire::Body::WorkflowRemove { run: r } => Self::RemoveWorkflow(run(&r)?),
             wire::Body::DispatchRunner { action } => Self::DispatchRunner(action),
+            wire::Body::EnvSetUpsert { name, vars, aws } => Self::EnvSetUpsert {
+                name,
+                vars: vars
+                    .into_iter()
+                    .map(|v| EnvVar {
+                        name: v.name,
+                        value: v.value,
+                        secret: v.secret,
+                    })
+                    .collect(),
+                aws: aws.map(aws_method),
+            },
+            wire::Body::EnvSecretStore { set, name, value } => {
+                Self::EnvSecretStore { set, name, value }
+            }
+            wire::Body::EnvGrant {
+                project: p,
+                session: s,
+                runner,
+                set,
+                remove,
+            } => Self::EnvGrant {
+                target: match (p, s, runner) {
+                    (Some(p), None, false) => GrantTarget::Project(project(&p)?),
+                    (None, Some(s), false) => GrantTarget::Session(session(&s)?),
+                    (None, None, true) => GrantTarget::Runner,
+                    _ => {
+                        return Err(
+                            "a grant names exactly one of a project, a session or the runner"
+                                .into(),
+                        );
+                    }
+                },
+                set,
+                remove,
+            },
             other => return Err(format!("{} is a query, not a command", other.kind())),
         })
     }

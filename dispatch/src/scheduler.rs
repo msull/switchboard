@@ -17,7 +17,9 @@ use crate::bitbucket::{Bitbucket, bitbucket_repo};
 use crate::git::{Adopted, Confine, Network, Push, Repo, branch_name, yyyymmdd};
 use crate::github::{Checks, Gh, PullRequests, github_repo};
 use crate::health::Health;
-use crate::pipeline::{Context, Gate, Lane, OnDirty, Pipeline, Stage, StageKind, Write, env_key};
+use crate::pipeline::{
+    Context, Gate, Lane, OnDirty, Pipeline, Stage, StageKind, Write, env_key, env_sets,
+};
 use crate::port::Port;
 use crate::review::{checks_key, find_reviewer_mut, reviewer_key};
 use crate::services::{push_stuck, stuck_answer, stuck_pending, withdraw_stuck};
@@ -108,6 +110,69 @@ pub struct Runner {
     /// The resource each ticket was last logged waiting for, by ticket
     /// id, so a wait is one line, not one a second.
     pub(crate) held_back: BTreeMap<String, String>,
+    /// `switchboard-env` beside this executable, when it is there: what
+    /// an agent with environment sets is told to run its commands
+    /// through, and what wraps a command gate with `env`.
+    pub env_bin: Option<PathBuf>,
+    /// The Switchboard record this runner's pane belongs to and that
+    /// launch's token, read at start; `None` for a runner started by
+    /// hand, which can run no command gate with `env`.
+    pub credentials: Option<RunnerCredentials>,
+}
+
+/// The runner's own Switchboard record and launch token, from
+/// `SWITCHBOARD_RECORD_ID` and `SWITCHBOARD_RECORD_TOKEN`. The token
+/// goes only into a gate run under `switchboard-env exec`, which
+/// resolves the runner's grants with it.
+#[derive(Clone)]
+pub struct RunnerCredentials {
+    pub record: String,
+    pub token: String,
+}
+
+impl std::fmt::Debug for RunnerCredentials {
+    // The token is as private as the pane's environment: never printed.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RunnerCredentials")
+            .field("record", &self.record)
+            .finish_non_exhaustive()
+    }
+}
+
+impl RunnerCredentials {
+    /// The record id and token of the pane this process runs in, when it
+    /// has both.
+    #[must_use]
+    pub fn from_env() -> Option<Self> {
+        let record = std::env::var(wire::RECORD_ID_ENV).ok()?;
+        let token = std::env::var(wire::RECORD_TOKEN_ENV).ok()?;
+        (!record.is_empty() && !token.is_empty()).then_some(Self { record, token })
+    }
+}
+
+/// `switchboard-env` beside the running executable (the app bundle's
+/// `Contents/MacOS`), when that file exists.
+#[must_use]
+pub fn env_bin_beside_exe() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let bin = exe.parent()?.join("switchboard-env");
+    bin.is_file().then_some(bin)
+}
+
+/// The prompt sentence an agent with environment sets gets: how to run
+/// a command with their credentials, with the path quoted for a shell
+/// when it holds a space.
+#[must_use]
+pub fn env_sentence(bin: &Path) -> String {
+    let path = bin.display().to_string();
+    let path = if path.contains(char::is_whitespace) {
+        format!("'{}'", path.replace('\'', "'\\''"))
+    } else {
+        path
+    };
+    format!(
+        "Commands that need credentials run through `{path} exec -- <command>`; never look for credential files or profiles."
+    )
 }
 
 /// Where a stop of an attempt's checks or command reviewers stands: a
@@ -202,6 +267,8 @@ impl Runner {
             health: RefCell::new(Health::default()),
             actor: None,
             held_back: BTreeMap::new(),
+            env_bin: None,
+            credentials: None,
         }
     }
 
@@ -1500,6 +1567,7 @@ impl Runner {
             pr: None,
             rework: None,
             env: BTreeMap::new(),
+            env_sets: env_sets(p.operators.get(operator), None),
         };
         self.launch_agent(t, ps, p, REFRESH, &name, &cwd, n, spec, now_ms)
     }
@@ -4747,6 +4815,7 @@ impl Runner {
             prompt.push_str(note);
             key
         });
+        let env_sets = env_sets(p.operators.get(&operator), Some(stage));
         let spec = AgentSpec {
             operator,
             prompt,
@@ -4755,6 +4824,7 @@ impl Runner {
             pr: None,
             rework,
             env,
+            env_sets,
         };
         self.launch_agent(t, ps, p, &stage.name, ctx, cwd, n, spec, now_ms)
     }
@@ -4820,6 +4890,11 @@ impl Runner {
         // Not saved here: `send` writes the attempt and its request in
         // one go, so no record ever shows the one without the other.
         t.attempts.push(attempt);
+        // Failed before the note is taken off, so a rerun still has it.
+        let mut prompt = spec.prompt;
+        if let Err(reason) = self.with_env_sentence(&mut prompt, &spec.env_sets) {
+            return self.fail_attempt(t, ps, stage, n, &reason, now_ms);
+        }
         if let Some(key) = &spec.rework {
             t.rework.remove(key);
         }
@@ -4833,8 +4908,9 @@ impl Runner {
             Body::SessionClone {
                 source,
                 name: spec.operator,
-                prompt: spec.prompt,
+                prompt,
                 notes,
+                env_sets: spec.env_sets,
             }
         } else {
             // The artifacts live outside the agent's cwd, in Dispatch's
@@ -4854,9 +4930,10 @@ impl Runner {
                 session_kind: session_kind(operator.kind),
                 cwd: cwd.to_path_buf(),
                 launch,
-                prompt: Some(spec.prompt),
+                prompt: Some(prompt),
                 notes,
                 env: spec.env,
+                env_sets: spec.env_sets,
             }
         };
         let reply = self.send(t, ps, Some((stage.to_owned(), n)), "session", body, now_ms)?;
@@ -4871,6 +4948,56 @@ impl Runner {
             )?;
         }
         Ok(())
+    }
+
+    /// `prompt` with the sentence on running commands through
+    /// `switchboard-env` when the session is granted `sets`; `Err` when
+    /// it is and there is no `switchboard-env` to name.
+    pub(crate) fn with_env_sentence(
+        &self,
+        prompt: &mut String,
+        sets: &[String],
+    ) -> std::result::Result<(), String> {
+        if sets.is_empty() {
+            return Ok(());
+        }
+        let Some(bin) = &self.env_bin else {
+            return Err("switchboard-env not found beside dispatch".into());
+        };
+        prompt.push_str("\n\n");
+        prompt.push_str(&env_sentence(bin));
+        Ok(())
+    }
+
+    /// What a command gate of `stage` runs under: nothing for a stage
+    /// without `env`; otherwise `switchboard-env exec --` in front of its
+    /// argv, and the runner's record id and token in its environment, so
+    /// it resolves the runner's grants without relying on what it
+    /// inherits. `Err` is why the gate cannot run.
+    pub(crate) fn gate_env(
+        &self,
+        stage: &Stage,
+        env: &mut Vec<(String, String)>,
+    ) -> std::result::Result<Vec<String>, String> {
+        if stage.env.is_empty() {
+            return Ok(Vec::new());
+        }
+        let Some(creds) = &self.credentials else {
+            return Err(format!(
+                "stage {} needs credentials (env), but this runner has no Switchboard record: start it from the Dispatch overview",
+                stage.name
+            ));
+        };
+        let Some(bin) = &self.env_bin else {
+            return Err("switchboard-env not found beside dispatch".into());
+        };
+        env.push((wire::RECORD_ID_ENV.to_owned(), creds.record.clone()));
+        env.push((wire::RECORD_TOKEN_ENV.to_owned(), creds.token.clone()));
+        Ok(vec![
+            bin.display().to_string(),
+            "exec".to_owned(),
+            "--".to_owned(),
+        ])
     }
 
     /// A PR the provider says cannot go in as it stands (it conflicts
@@ -5007,6 +5134,10 @@ impl Runner {
                 .map(|s| format!(" from {s}"))
                 .unwrap_or_default()
         );
+        let env_sets = env_sets(
+            p.operators.get(&operator),
+            p.stages.iter().find(|s| s.name == a.stage),
+        );
         let spec = AgentSpec {
             operator,
             prompt,
@@ -5015,6 +5146,7 @@ impl Runner {
             pr: Some(record),
             rework: None,
             env: BTreeMap::new(),
+            env_sets,
         };
         let (stage_name, ctx) = (a.stage.clone(), a.context.clone());
         self.launch_agent(t, ps, p, &stage_name, &ctx, cwd, n, spec, now_ms)
@@ -5365,12 +5497,16 @@ impl Runner {
             let reason = format!("the command's artifacts could not be prepared: {e:#}");
             return self.fail_attempt(t, ps, &a.stage, a.n, &reason, now_ms);
         }
+        let outer = match self.gate_env(stage, &mut env) {
+            Ok(outer) => outer,
+            Err(reason) => return self.fail_gate(t, ps, a, &reason, now_ms),
+        };
         let key = gate_key(t, a);
         let started = match confine_for(t, p, lane, &[&dir], gate_network(p, stage)) {
             Some(confine) => self
                 .git
-                .start_check_confined(&key, cwd, &argv, &env, &log, &confine),
-            None => self.git.start_check(&key, cwd, &argv, &env, &log),
+                .start_check_confined(&key, cwd, &argv, &env, &log, &confine, &outer),
+            None => self.git.start_check(&key, cwd, &argv, &env, &log, &outer),
         };
         if let Err(e) = started {
             let reason = format!("the checks could not start: {e:#}");
@@ -7428,6 +7564,9 @@ struct AgentSpec {
     /// `DISPATCH_INPUT_*` variables for a fresh session: the path of
     /// each input its prompt names.
     env: BTreeMap<String, String>,
+    /// The Switchboard environment sets the session is granted: its
+    /// operator's, then its stage's.
+    env_sets: Vec<String>,
 }
 
 /// One context's poll of a PR-reading stage.

@@ -63,6 +63,21 @@ pub fn settings_menu(
                 cx.state.env_dialog = Some(super::env::EnvDraft::global(cx.core, cx.services));
                 ui.close();
             }
+            // `switchboard-env`'s setup commands are accepted only while
+            // this is open, so an agent cannot grant itself credentials.
+            let unlocked = cx.core.env_setup_until().is_some();
+            let label = if unlocked {
+                "Lock environment setup"
+            } else {
+                "Unlock environment setup (5 min)"
+            };
+            if theme::ghost(ui, label)
+                .on_hover_text("Lets switchboard-env create sets, store their secrets and grant them")
+                .clicked()
+            {
+                cx.dispatch(AppAction::SetEnvSetup { open: !unlocked });
+                ui.close();
+            }
             ui.add_space(6.0);
             let mut side_left = settings.side_left;
             if ui

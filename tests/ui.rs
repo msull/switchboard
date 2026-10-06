@@ -63,6 +63,7 @@ fn project(name: &str, last_active: SystemTime) -> Project {
         last_active,
         space: SpaceId::DEFAULT,
         op: None,
+        env_sets: Vec::new(),
     }
 }
 
@@ -97,6 +98,8 @@ fn record(project: ProjectId, name: &str, kind: SessionKind, order: u32) -> Sess
         pending_launch: false,
         last_stop_at: None,
         env: Vec::new(),
+        env_sets: Vec::new(),
+        token_hash: None,
     }
 }
 
@@ -3806,6 +3809,22 @@ fn the_settings_menu_moves_the_side_panel_to_the_left() {
         .rect()
         .left();
     assert!(files.left() < page_x, "and left of the board's content");
+}
+
+/// `switchboard-env`'s setup commands are accepted only while the owner
+/// has unlocked them here; the button says which way it goes.
+#[test]
+fn the_settings_menu_unlocks_and_locks_environment_setup() {
+    let (mut harness, ids) = harness();
+    showing(&mut harness, View::Board(ids.alpha));
+    click(&mut harness, "Settings");
+    click(&mut harness, "Unlock environment setup (5 min)");
+    assert!(actions(&harness).contains(&AppAction::SetEnvSetup { open: true }));
+    assert!(harness.state().core().env_setup_until().is_some());
+    click(&mut harness, "Settings");
+    click(&mut harness, "Lock environment setup");
+    assert!(actions(&harness).contains(&AppAction::SetEnvSetup { open: false }));
+    assert!(harness.state().core().env_setup_until().is_none());
 }
 
 #[test]

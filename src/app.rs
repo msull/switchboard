@@ -15,7 +15,8 @@ use crate::adapters::hooks::WakeSocket;
 use crate::adapters::scrollback::scrollback_dir;
 use crate::core::{
     Activity, AgentKind, AppAction, AppCore, Clock, ControlAction, ControlOutcome, DISPATCH_POLL,
-    Effect, ProjectId, RecordId, Resolved, ResumeHandle, SessionKind, SpaceId, View, WorkflowId,
+    Effect, ProjectId, RECORD_TOKEN_ENV, RecordId, Resolved, ResumeHandle, SessionKind,
+    SessionRecord, SetsResolved, SpaceId, View, WorkflowId, aws_view, resolve_sets, token_hash,
 };
 use crate::ports::agent::AgentLauncher;
 use crate::ports::artifacts::ArtifactFinder;
@@ -23,7 +24,7 @@ use crate::ports::control::{OpLine, Operations};
 use crate::ports::controller::Controller;
 use crate::ports::dispatch::{Body, DispatchPort, Reply, Status};
 use crate::ports::events::EventSource;
-use crate::ports::host::{HostId, ProcessHost};
+use crate::ports::host::{HostId, ProcessHost, SpawnSpec};
 use crate::ports::opener::Opener;
 use crate::ports::project_config::ProjectConfigReader;
 use crate::ports::round_files::RoundFiles;
@@ -461,15 +462,7 @@ impl SwitchboardApp {
                 });
                 None
             }
-            Effect::Spawn { id, mut spec } => {
-                spec.scrollback = Some(self.log_path(id, &spec.id));
-                spec.env = self.spawn_env(id, spec.env);
-                let result = s.host.spawn(&spec).map_err(|e| e.to_string());
-                if let Err(e) = &result {
-                    log::error!("spawn {} failed: {e}", spec.id.0);
-                }
-                Some(AppAction::Spawned { id, result })
-            }
+            Effect::Spawn { id, spec } => Some(self.spawn(id, spec)),
             Effect::Attach {
                 id,
                 host,
@@ -729,20 +722,60 @@ impl SwitchboardApp {
         }
     }
 
+    /// Start a record's pane with its environment and a fresh launch
+    /// token, whose hash is on disk before the pane exists: a surviving
+    /// pane still resolves after a restart, and a dead pane's token
+    /// stops working at the next spawn.
+    fn spawn(&mut self, id: RecordId, mut spec: SpawnSpec) -> AppAction {
+        spec.scrollback = Some(self.log_path(id, &spec.id));
+        spec.env = self.spawn_env(id, spec.env);
+        // Two v4 uuids: 244 random bits without another crate.
+        let token = format!(
+            "{}{}",
+            uuid::Uuid::new_v4().simple(),
+            uuid::Uuid::new_v4().simple()
+        );
+        self.dispatch_inner(AppAction::RecordTokenIssued {
+            id,
+            hash: token_hash(&token),
+        });
+        // Only the fresh token: never one a launcher or a respawn carried.
+        spec.env.retain(|(k, _)| k != RECORD_TOKEN_ENV);
+        spec.env.push((RECORD_TOKEN_ENV.to_owned(), token));
+        let result = self.services.host.spawn(&spec).map_err(|e| e.to_string());
+        if let Err(e) = &result {
+            log::error!("spawn {} failed: {e}", spec.id.0);
+        }
+        AppAction::Spawned { id, result }
+    }
+
     /// The project's environment, then the variables an outside
     /// launcher put on the record, then the launcher's own, so a later
     /// value wins. The record's come back on every spawn, so a resumed
     /// session keeps them.
     fn spawn_env(&self, id: RecordId, own: Vec<(String, String)>) -> Vec<(String, String)> {
+        let data_dir = (
+            "SWITCHBOARD_DATA_DIR".to_owned(),
+            self.services
+                .store
+                .data_dir()
+                .to_string_lossy()
+                .into_owned(),
+        );
         let Some(record) = self.core.session(id) else {
-            return own;
+            let mut env = vec![data_dir];
+            env.extend(own);
+            return env;
         };
         let resolved = resolve_project_env(&self.core, &self.services, record.project);
         let missing = resolved.missing();
         if !missing.is_empty() {
             log::warn!("secrets without a stored value: {}", missing.join(", "));
         }
-        let mut env = resolved.pairs();
+        // Every kind gets the data dir, so `switchboard-env` in a shell
+        // asks the app that launched it; an agent's own says the same.
+        let mut env = vec![data_dir];
+        env.extend(resolved.pairs());
         log::debug!(
             "injecting {:?} into {}",
             env.iter().map(|(k, _)| k.as_str()).collect::<Vec<_>>(),
@@ -1288,8 +1321,64 @@ impl SwitchboardApp {
                 Ok(id) => self.screen(RecordId(id), *lines),
                 Err(reason) => wire::Reply::failed(reason),
             },
+            wire::Body::EnvResolve { session, token } => match parse_uuid("session", session) {
+                Ok(id) => self.env_resolve(RecordId(id), token),
+                Err(reason) => wire::Reply::failed(reason),
+            },
+            wire::Body::EnvSets => wire::Reply::EnvSets {
+                sets: core.env_set_views(),
+            },
             _ => wire::Reply::failed("not a query"),
         }
+    }
+
+    /// The variables of a session's granted sets, for `switchboard-env`,
+    /// answered only to the holder of the session's launch token. Never
+    /// logged: queries reach no operations line, and the log lines here
+    /// carry names only.
+    fn env_resolve(&self, id: RecordId, token: &str) -> wire::Reply {
+        let Some(record) = self.core.session(id) else {
+            return wire::Reply::failed("no such session");
+        };
+        let Some(hash) = &record.token_hash else {
+            return wire::Reply::failed("this session was launched before tokens; restart it");
+        };
+        if token.is_empty() || token_hash(token) != *hash {
+            return wire::Reply::failed("token does not match");
+        }
+        match self.resolve_record_sets(record) {
+            Ok(resolved) => {
+                log::info!(
+                    "env.resolve for {}: {} variables",
+                    id.host_name(),
+                    resolved.pairs.len()
+                );
+                wire::Reply::Env {
+                    pairs: resolved.pairs,
+                    aws: resolved.aws.as_ref().map(aws_view),
+                    missing: resolved.missing,
+                }
+            }
+            Err(reason) => wire::Reply::failed(reason),
+        }
+    }
+
+    /// What the record's and its project's grants resolve to now: values
+    /// are never cached, so a grant or a secret changed since launch is
+    /// what the next `exec` gets.
+    fn resolve_record_sets(&self, record: &SessionRecord) -> Result<SetsResolved, String> {
+        let project = self
+            .core
+            .workspace(record.project)
+            .map(|w| w.project.env_sets.as_slice())
+            .unwrap_or_default();
+        let lookup = |account: &str| self.services.secrets.get(account).ok().flatten();
+        resolve_sets(
+            &self.core.settings().env_sets,
+            project,
+            &record.env_sets,
+            &lookup,
+        )
     }
 
     /// The last lines of a running session's pane for `session.screen`,
@@ -1311,7 +1400,7 @@ impl SwitchboardApp {
             Ok(text) => text,
             Err(e) => return wire::Reply::failed(format!("snapshot: {e}")),
         };
-        let secrets: Vec<(String, String)> = self
+        let mut secrets: Vec<(String, String)> = self
             .core
             .session(id)
             .map(|s| resolve_project_env(&self.core, &self.services, s.project))
@@ -1324,6 +1413,16 @@ impl SwitchboardApp {
                     .collect()
             })
             .unwrap_or_default();
+        // A child of `switchboard-env exec` may print a set's secret too.
+        if let Some(Ok(resolved)) = self.core.session(id).map(|s| self.resolve_record_sets(s)) {
+            let secret_names = self.set_secret_names();
+            secrets.extend(
+                resolved
+                    .pairs
+                    .into_iter()
+                    .filter(|(name, value)| !value.is_empty() && secret_names.contains(name)),
+            );
+        }
         let redacted = redact(&text, &secrets);
         if redacted != text {
             log::debug!("session.screen for {}: secrets redacted", id.host_name());
@@ -1332,6 +1431,16 @@ impl SwitchboardApp {
         wire::Reply::Screen {
             text: kept[kept.len().saturating_sub(n)..].join("\n"),
         }
+    }
+
+    /// The names of every set variable marked secret.
+    fn set_secret_names(&self) -> Vec<String> {
+        self.core
+            .settings()
+            .env_sets
+            .iter()
+            .flat_map(|s| s.vars.iter().filter(|v| v.secret).map(|v| v.name.clone()))
+            .collect()
     }
 
     /// Every record `op` made: the ones still present with their state,
@@ -1613,6 +1722,8 @@ mod tests {
     use crate::adapters::fakes;
     use crate::core::model::{Project, ProjectEnv, ProjectId, SessionKind, SpaceId, Workspace};
     use crate::core::{AppAction, ControlAction, Launch};
+    use crate::core::{RECORD_TOKEN_ENV, token_hash};
+    use crate::ports::host::SpawnSpec;
 
     /// Every spawn, a resume as much as the first, carries the
     /// variables on the record, under the launcher's own.
@@ -1632,6 +1743,7 @@ mod tests {
             last_active: SystemTime::UNIX_EPOCH,
             space: SpaceId::DEFAULT,
             op: None,
+            env_sets: Vec::new(),
         };
         let pid = project.id;
         app.core_mut_for_seeding()
@@ -1650,6 +1762,7 @@ mod tests {
                     ("DISPATCH_INPUT_PERSONAS".into(), "/d/personas.md".into()),
                     ("SHARED".into(), "record".into()),
                 ]),
+                env_sets: Vec::new(),
             },
         });
         let id = app.core.workspace(pid).unwrap().sessions[0].id;
@@ -1661,6 +1774,76 @@ mod tests {
         };
         at("DISPATCH_INPUT_PERSONAS", "/d/personas.md");
         assert!(at("SHARED", "record") < at("SHARED", "launcher"), "{env:?}");
+    }
+
+    /// Each spawn carries a fresh token whose hash is what the record
+    /// keeps, and the data dir whatever the kind; a second spawn replaces
+    /// both, so the first pane's token stops resolving.
+    #[test]
+    fn a_spawn_carries_a_fresh_token_whose_hash_is_on_the_record() {
+        let host = fakes::FakeHost::default();
+        let mut services = fakes::services();
+        services.host = Box::new(host.clone());
+        let mut app = SwitchboardApp::with_services(services);
+        let project = Project {
+            id: ProjectId::new(),
+            name: "p".into(),
+            root: PathBuf::from("/work/p"),
+            tags: Vec::new(),
+            notes: String::new(),
+            pinned: Vec::new(),
+            env: ProjectEnv::default(),
+            env_sets: Vec::new(),
+            shown: Vec::new(),
+            created: SystemTime::UNIX_EPOCH,
+            last_active: SystemTime::UNIX_EPOCH,
+            space: SpaceId::DEFAULT,
+            op: None,
+        };
+        let pid = project.id;
+        app.core_mut_for_seeding()
+            .seed(vec![Workspace::new(project)], Vec::new());
+        app.dispatch(AppAction::Control {
+            op: "op-1".into(),
+            action: ControlAction::NewSession {
+                project: pid,
+                name: "shell".into(),
+                kind: SessionKind::Shell,
+                cwd: "/work/p".into(),
+                launch: Launch::Shell,
+                prompt: None,
+                notes: String::new(),
+                env: BTreeMap::new(),
+                env_sets: Vec::new(),
+            },
+        });
+        let id = app.core.workspace(pid).unwrap().sessions[0].id;
+        let token_of = |spec: &SpawnSpec| {
+            spec.env
+                .iter()
+                .find(|(k, _)| k == RECORD_TOKEN_ENV)
+                .map(|(_, v)| v.clone())
+                .expect("a token")
+        };
+        let first = host.state().spawned.last().cloned().expect("a spawn");
+        let token = token_of(&first);
+        assert_eq!(token.len(), 64);
+        assert!(
+            first
+                .env
+                .iter()
+                .any(|(k, v)| k == "SWITCHBOARD_DATA_DIR" && !v.is_empty()),
+            "{:?}",
+            first.env
+        );
+        let hash = app.core.session(id).unwrap().token_hash.clone();
+        assert_eq!(hash, Some(token_hash(&token)));
+        let action = app.spawn(id, first.clone());
+        assert!(matches!(action, AppAction::Spawned { result: Ok(()), .. }));
+        let second = token_of(host.state().spawned.last().unwrap());
+        assert_ne!(second, token);
+        let hash = app.core.session(id).unwrap().token_hash.clone();
+        assert_eq!(hash, Some(token_hash(&second)));
     }
 
     #[test]
