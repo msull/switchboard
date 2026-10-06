@@ -20,6 +20,12 @@ path = "src/main.rs"
 name = "switchboard-hook"
 path = "src/bin/switchboard-hook.rs"
 
+# Runs one child with the credentials of a session's environment sets,
+# resolved over the control port; std and the wire crate only.
+[[bin]]
+name = "switchboard-env"
+path = "src/bin/switchboard-env.rs"
+
 [dependencies]
 anyhow = "1"
 chrono = "0.4"

@@ -757,6 +757,7 @@ guidance = "..."
 budget_usd = 0.0              # per ticket across the operator's attempts; 0 means the project default
 argv = ["cmd", "args"]        # kind = "command" only: local tooling a code review stage runs as a reviewer
 in = "lane"                   # or "root"; where the command runs
+env = ["aws-dev"]             # kind = "claude" only: Switchboard environment sets granted to this operator's sessions (see below)
 
 [operators.<name>.review]     # present on a reviewer: a complete Switchboard definition;
                               # Dispatch renders {worktree}, {branch}, {project.root} and
@@ -798,6 +799,7 @@ fix_prompt = "..."
 no_feedback = "No findings."
 style_rounds = 2              # from this round, a round with only style points converges (live)
 commits = "keep"              # "fold": fix rounds fold into the commits they amend; "one": one commit; at completion, tree unchanged
+env = ["aws-dev"]             # Switchboard environment sets: added to the stage's agents' after their operator's; on a command gate, the gate runs under switchboard-env (see below)
 
 [policy]
 slots = 1                     # tickets with a running attempt or a held resource; read live from <project>.toml on every pass, not from a ticket's copy
@@ -856,6 +858,37 @@ variable (stage `plan` writing `notes` beside an artifact `plan-notes`,
 both `DISPATCH_INPUT_PLAN_NOTES`) is refused when it loads. A stage
 that writes a secret must print nothing secret, since its output is the
 `checks` log anyone can read.
+
+`env` names Switchboard environment sets: named groups of variables
+and secrets the owner keeps in Switchboard, never in the pipeline
+file. A name matches `[a-z0-9][a-z0-9-]*`. A session's sets are its
+operator's `env`, then its stage's, each once, in that order; a code
+review's reviewers get their operator's only, and its implementer and
+message rewriter get the stage's too. Dispatch sends the names with the
+launch (on a clone as well, as the cloning operator's own) and appends
+one sentence to the prompt: commands that need credentials run through
+`<path>/switchboard-env exec -- <command>`, the `switchboard-env` beside
+the `dispatch` executable (in the app bundle, `Contents/MacOS`). With
+none there, the attempt fails with "switchboard-env not found beside
+dispatch". Validation refuses `env` on an operator that is not
+`claude` (Codex's sandbox may not reach Switchboard's socket), on an
+agent stage whose operator is not `claude`, on a workflow stage, and on
+a gate-only stage without a command gate. A set that does not exist is
+not caught here: `switchboard-env exec` refuses it when it runs.
+
+On a command gate (a gate-only stage's, an agent stage's, or a code
+review stage's checks), `env` wraps the argv as
+`<path>/switchboard-env exec -- <argv>`, outside any confinement, and
+gives the gate the runner's `SWITCHBOARD_RECORD_TOKEN`. The gate then
+gets the variables of the sets granted to the runner's own record, the
+`Dispatch runner` service, which the owner grants with
+`switchboard-env grant --runner <set>`. The stage's `env` names decide
+only that the gate is wrapped; the runner's grants decide what it gets.
+A runner started by hand rather than from the Dispatch overview has no
+record, and fails such a gate with "stage <s> needs credentials (env),
+but this runner has no Switchboard record: start it from the Dispatch
+overview". No other child of the runner (a gate without `env`, a setup
+command, a command reviewer, a service's `before`) sees the token.
 
 A prompt's templates are these keys, plus a stage's `writes` names
 (`{notes}`, `{plan}`); the review and code review variables are

@@ -544,9 +544,11 @@ impl Runner {
         let started = match confine_for(t, p, Some(&lane.name), &[&dir], None) {
             Some(confine) => {
                 self.git
-                    .start_check_confined(key, &lane.worktree, argv, &env, &log, &confine)
+                    .start_check_confined(key, &lane.worktree, argv, &env, &log, &confine, &[])
             }
-            None => self.git.start_check(key, &lane.worktree, argv, &env, &log),
+            None => self
+                .git
+                .start_check(key, &lane.worktree, argv, &env, &log, &[]),
         };
         if let Err(e) = started {
             return self.fail_service(t, i, &format!("before could not start: {e:#}"), now_ms);
@@ -644,6 +646,7 @@ impl Runner {
                 rec.stage
             ),
             env: std::collections::BTreeMap::new(),
+            env_sets: Vec::new(),
         };
         let reply = self.send(t, ps, None, &rec.intent(), body, now_ms)?;
         if let Reply::Failed { reason } = reply {

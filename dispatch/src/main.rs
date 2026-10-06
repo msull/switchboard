@@ -82,10 +82,13 @@ fn offline_runner() -> Result<Runner> {
     )))
 }
 
-/// The runner stamped with who runs this command: a supervisor session
-/// or the owner.
+/// The runner stamped with who runs this command (a supervisor session
+/// or the owner), where `switchboard-env` is, and the Switchboard record
+/// and launch token of the pane it runs in.
 fn with_actor(mut runner: Runner) -> Runner {
     runner.actor = actor().by();
+    runner.env_bin = dispatch::scheduler::env_bin_beside_exe();
+    runner.credentials = dispatch::scheduler::RunnerCredentials::from_env();
     runner
 }
 

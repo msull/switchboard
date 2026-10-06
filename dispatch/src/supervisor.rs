@@ -730,6 +730,7 @@ impl Runner {
                     prompt: Some(first_prompt(&seed_path)),
                     notes: format!("Dispatch supervisor of {project}"),
                     env: BTreeMap::new(),
+                    env_sets: Vec::new(),
                 },
                 now_ms,
             )?;

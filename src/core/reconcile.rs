@@ -15,9 +15,7 @@ use crate::ports::store::{Loaded, StoreError};
 /// shown idle: it is waiting at its prompt, or for the user.
 const QUIET_AFTER: std::time::Duration = std::time::Duration::from_secs(20);
 
-/// Injected into every pane so hooks and shells can report the record
-/// they belong to without relying on cwd.
-pub const RECORD_ID_ENV: &str = "SWITCHBOARD_RECORD_ID";
+pub use switchboard_control::{RECORD_ID_ENV, RECORD_TOKEN_ENV};
 
 impl AppCore {
     pub(super) fn store_loaded(&mut self, result: Result<Loaded, StoreError>, out: &mut Out) {

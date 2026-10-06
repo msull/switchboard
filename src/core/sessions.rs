@@ -85,6 +85,8 @@ impl AppCore {
             pending_launch: false,
             last_stop_at: None,
             env: Vec::new(),
+            env_sets: Vec::new(),
+            token_hash: None,
         });
         out.touch(project);
         Some(id)
@@ -554,6 +556,11 @@ impl AppCore {
             discard: None,
             runs: Vec::new(),
             outputs: Vec::new(),
+            // The copy gets its own token at its own launch.
+            token_hash: None,
+            // `env_sets` comes from the source on purpose: the owner asked
+            // for this copy of the same conversation, which keeps the
+            // source's `env` the same way.
             ..record
         });
         out.touch(record.project);
@@ -565,12 +572,14 @@ impl AppCore {
     /// gets its id at once and recovery can find it by its operation,
     /// and it launches once the transcript copy exists. In the source's
     /// project and cwd, with the source's launch flags.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn clone_into(
         &mut self,
         source: RecordId,
         name: String,
         prompt: String,
         notes: String,
+        env_sets: Vec<String>,
         now: Clock,
         out: &mut Out,
     ) -> Option<RecordId> {
@@ -606,8 +615,12 @@ impl AppCore {
             waiting_on: None,
             pending_launch: true,
             last_stop_at: None,
-            // A clone is a new Dispatch attempt and is sent its own.
+            // A clone is a new Dispatch attempt and is sent its own, and
+            // may be a different operator, so it is granted only the sets
+            // the asker names.
             env: Vec::new(),
+            env_sets,
+            token_hash: None,
             ..record
         });
         out.touch(record.project);

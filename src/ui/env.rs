@@ -37,7 +37,7 @@ impl EnvDraft {
     #[must_use]
     pub fn global(core: &AppCore, services: &Services) -> Self {
         let scope = SecretScope::Global;
-        let rows = rows(&core.settings().env, scope, services);
+        let rows = rows(&core.settings().env, &scope, services);
         let lookup = |account: &str| services.secrets.get(account).ok().flatten();
         let preview = crate::core::env::resolve(
             &core.settings().env,
@@ -65,9 +65,9 @@ impl EnvDraft {
         let project = &core.workspace(pid)?.project;
         let scope = SecretScope::Project(pid);
         Some(Self {
+            rows: rows(&project.env.vars, &scope, services),
             scope,
             title: format!("Environment: {}", project.name),
-            rows: rows(&project.env.vars, scope, services),
             removed: Vec::new(),
             load_dotenv: project.env.load_dotenv,
             dotenv_files: project.env.files().join(", "),
@@ -93,7 +93,7 @@ impl EnvDraft {
     }
 }
 
-fn rows(vars: &[EnvVar], scope: SecretScope, services: &Services) -> Vec<RowDraft> {
+fn rows(vars: &[EnvVar], scope: &SecretScope, services: &Services) -> Vec<RowDraft> {
     vars.iter()
         .map(|v| RowDraft {
             name: v.name.clone(),
@@ -325,9 +325,13 @@ fn preview(ui: &mut Ui, draft: &mut EnvDraft) {
 
 fn commit(cx: &mut DrawCtx<'_>, draft: &EnvDraft) {
     let vars = draft.vars();
-    match draft.scope {
+    match &draft.scope {
         SecretScope::Global => cx.dispatch(AppAction::SetGlobalEnv(vars)),
+        // The editor never builds a set's draft: sets are written only
+        // through `switchboard-env` while setup is unlocked.
+        SecretScope::Set(_) => return,
         SecretScope::Project(pid) => {
+            let pid = *pid;
             let files: Vec<String> = draft
                 .dotenv_files
                 .split(',')
@@ -352,20 +356,20 @@ fn commit(cx: &mut DrawCtx<'_>, draft: &EnvDraft) {
         }
         if row.secret && !row.value.is_empty() {
             cx.dispatch(AppAction::StoreSecret {
-                scope: draft.scope,
+                scope: draft.scope.clone(),
                 name,
                 value: row.value.clone(),
             });
         } else if !row.secret && row.stored {
             cx.dispatch(AppAction::DeleteSecret {
-                scope: draft.scope,
+                scope: draft.scope.clone(),
                 name,
             });
         }
     }
     for name in &draft.removed {
         cx.dispatch(AppAction::DeleteSecret {
-            scope: draft.scope,
+            scope: draft.scope.clone(),
             name: name.clone(),
         });
     }

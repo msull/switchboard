@@ -92,6 +92,8 @@ pub struct FakeHostState {
     pub fail_write: Option<String>,
     /// What `snapshot` returns per pane; unknown panes read as empty.
     pub snapshots: HashMap<HostId, String>,
+    /// Every spec `spawn` was given, oldest first.
+    pub spawned: Vec<SpawnSpec>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -113,7 +115,8 @@ impl ProcessHost for FakeHost {
     fn list(&self) -> std::io::Result<Vec<HostStatus>> {
         Ok(self.state().statuses.clone())
     }
-    fn spawn(&self, _spec: &SpawnSpec) -> std::io::Result<()> {
+    fn spawn(&self, spec: &SpawnSpec) -> std::io::Result<()> {
+        self.state().spawned.push(spec.clone());
         Ok(())
     }
     fn status(&self, id: &HostId) -> std::io::Result<HostStatus> {

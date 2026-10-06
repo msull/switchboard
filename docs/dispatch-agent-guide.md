@@ -554,6 +554,22 @@ nothing needs restarting. What a change reaches depends on the key:
   a code review stage. Remove that stage's `needs` (when the owner
   delegated the file). Tickets already running under an older copy are
   left alone and run on.
+- `env = ["<set>"]` on an operator or a stage grants Switchboard
+  environment sets: named variables and secrets the owner keeps in
+  Switchboard, never in the pipeline file or the repository. A
+  session gets its operator's sets, then its stage's, and its prompt
+  ends with the one sentence on running commands through
+  `switchboard-env exec -- <command>`. Only `claude` operators take
+  `env`, and only agent stages with a `claude` operator, code review
+  stages and command-gate stages. On a command gate, `env` makes the
+  gate run under `switchboard-env exec --` with the runner's own
+  grants, which the owner makes with `switchboard-env grant --runner
+  <set>`; the gate fails with "this runner has no Switchboard record"
+  when the runner was not started from the Dispatch overview. Add or
+  change `env` only as the owner says: which sets exist and what is
+  granted to whom is theirs to decide, and you neither create sets nor
+  grant them. Like the rest of a stage, `env` reaches tickets taken or
+  restarted after the edit.
 
 When an implement stage holds a deployable stack (`needs` on
 `implement`), its agents may deploy their lane to it while they work.
@@ -573,10 +589,14 @@ session; named as `{inputs.try-setup.personas}`, it arrives as
 `$DISPATCH_INPUT_TRY_SETUP_PERSONAS`. The file lives only while the
 ticket holds the stage's resource; it is deleted when the hold is
 released, the ticket parks or closes. Say so in the tester's stage
-prompt, and say that the tester holds no cloud credentials and should
-not look for any, and that it uses the file (passes its path to a
-probe or a seeding script) without printing its contents: whatever an
-agent prints stays in its transcript and in Switchboard's scrollback.
+prompt, and say that the tester should not look for cloud credentials:
+it has none unless its operator or stage names sets in `env`, and then
+it reaches them only by running a command through `switchboard-env
+exec`, as its prompt says, never by reading credential files or
+profiles. Say also that it uses the file (passes its path to a probe or
+a seeding script) without printing its contents, and that it prints no
+variable `switchboard-env` gives a command: whatever an agent prints
+stays in its transcript and in Switchboard's scrollback.
 
 Before saving, read the file back: a pipeline that does not parse is
 refused at the next `take` with the parser's reason, and `status`

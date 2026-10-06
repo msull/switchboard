@@ -210,6 +210,11 @@ left to the implementation:
   environment values are never persisted by Switchboard; process output
   may still expose a secret in the private scrollback (see "Trust
   boundary").
+- Named environment sets (built 2026-10-06; see "Environment sets"
+  below) hold credentials that never enter a pane: a session, its
+  project or the Dispatch runner is granted sets, and
+  `switchboard-env exec -- <command>` puts their variables in that one
+  child's environment, resolved over `env.resolve`.
 
 ### Trust boundary
 
@@ -230,7 +235,18 @@ never run anything on its own.
   without that approval. The file is capped at 64 KiB and refused when
   it is a symlink; the README documents its schema.
 - **Secrets** come from the Keychain and from `.env` files the user
-  already owns; Switchboard never writes them elsewhere. Scrollback can
+  already owns; Switchboard writes them nowhere else. They leave the app
+  only as tmux `-e` flags or as the `env.resolve` reply on the
+  owner-only `control.sock` to `switchboard-env`, which puts them in its
+  child's environment and nowhere else. `env.resolve` answers only the
+  holder of a record's launch token (`SWITCHBOARD_RECORD_TOKEN`, new at
+  every spawn, its SHA-256 on the record), so a session resolves only
+  its own grants; the token is as private as the pane's environment.
+  The writes (`env.set.upsert`, `env.secret.store`, `env.grant`) are
+  accepted only inside a five-minute setup window the owner opens from
+  the app's settings menu, so an agent cannot grant itself a set. What a
+  child prints reaches the agent's tool result and the provider's
+  transcript: the owner accepts that by granting a set. Scrollback can
   contain secrets that a process printed; it is stored privately, capped,
   rotatable, and deletable, and the UI says so. Agent transcripts stay
   where the provider keeps them; Switchboard reads them and never edits
@@ -584,9 +600,12 @@ per project.
 - **Secrets.** A variable marked secret keeps only its name in the
   record; the value is a Keychain item under service
   `com.sadburger.switchboard`, account `global/NAME` or
-  `project/<id>/NAME`. The adapter is tested against a throwaway keychain
-  file, never the login keychain. Values reach tmux through `-e` flags,
-  never a shell command line, and are never logged (names only).
+  `project/<id>/NAME`, or `set/<name>/NAME` for an environment set. The
+  adapter is tested against a throwaway keychain file, never the login
+  keychain. Values reach tmux through `-e` flags, never a shell command
+  line, and are never logged (names only). A set's values reach only
+  the `env.resolve` reply to `switchboard-env` and its child's
+  environment.
 - **Dialog.** Settings > Environment… edits the global layer; the board's
   Environment button edits the project: name/value rows with a Secret
   toggle (secret values are typed into a password field and stored on
@@ -2199,6 +2218,12 @@ row's state is `AppCore::runner_standing`, and the refusal is
 Start and Stop on the same record stay plain service actions and leave
 `autostart` alone.
 
+The runner's pane carries its record id and launch token, and its
+children inherit the id. A command gate of a stage with `env` runs
+under `switchboard-env exec --` with the token, so it resolves the
+runner's grants (`switchboard-env grant --runner <set>`); every other
+child of the runner has the token removed.
+
 The row reads `runner up · pid N · K ticket(s)` with Stop, `runner
 starting…` while the pane runs but has not answered, `runner
 stopping…` or `starting after the old runner stops…` during a Stop,
@@ -2307,6 +2332,70 @@ Known gaps:
 - A session launched before `{inputs.<stage>.<name>}` had its own
   `DISPATCH_INPUT_<STAGE>_<NAME>` keeps its old environment on resume:
   one `DISPATCH_INPUT_<NAME>`, which may hold the stage-qualified file.
+
+## Environment sets (2026-10-06)
+
+Credentials for one child, from named sets, without a pane's
+environment holding them. `Settings.env_sets` holds each set's
+variables (secrets by name only, values under `set/<name>/<VAR>`) and
+its AWS method (`vault`, `sso` or `static`). `Project.env_sets` and
+`SessionRecord.env_sets` are the grants; a session resolves its
+project's sets, then its own, later variables winning, and two sets that
+both give an AWS method are an error naming both. Schema v12.
+
+- **Resolution** is pull-only. `switchboard-env exec -- <command>`
+  sends `env.resolve { session, token }`; the app checks the token
+  against `SessionRecord.token_hash`, resolves with
+  `core::env::resolve_sets` and the Keychain at that moment (values are
+  never cached), and answers the pairs. The binary removes the token and
+  any `AWS_VAULT` from the child, and when a set gives an AWS method
+  every ambient AWS key, token and profile variable too (the CLI prefers
+  ambient keys to `AWS_PROFILE`); then it adds the pairs, and for
+  `vault` runs the command under `aws-vault exec <profile> --`, for
+  `sso` checks `aws sts get-caller-identity --profile <p>` first and
+  sets `AWS_PROFILE`, and for `static` refuses unless the sets supply
+  `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`. `env.resolve` is a query, so it never reaches the
+  operations log; `session.screen` redacts a set's secrets too.
+- **Tokens.** The app makes a token (two v4 uuids) at every
+  `Effect::Spawn`, dispatches `RecordTokenIssued` so the hash is saved
+  before the pane exists, and sets `SWITCHBOARD_RECORD_TOKEN`. A pane
+  that outlives the app still resolves; a relaunch replaces the hash.
+  The port's clone takes the sets Dispatch names, the planner clone gets
+  none, and the user's own clone keeps the source's (it continues the
+  same conversation, as it keeps `env`); all three start with no hash.
+- **Setup** is `switchboard-env set create|var|secret|aws`, `grant` and
+  `revoke`, accepted only within `ENV_SETUP_WINDOW` of the settings
+  menu's Unlock environment setup (transient, closed by `Tick` and by a
+  restart). A secret's value comes from the terminal or a pipe, never
+  argv, and never travels in an upsert.
+- **Dispatch.** `env` on an operator and a stage; an agent launch
+  carries the union on `session.new` / `session.clone` and one prompt
+  sentence naming the absolute `switchboard-env` beside `dispatch`.
+  Validation refuses `env` on a non-claude operator, and on a stage
+  whose agent, implementer, or the policy's rebaser or fixer is one.
+- **Spike 14.** A pane's `-e` variables reach a grandchild. Check (e),
+  whether Claude Code with Dispatch's launch flags runs
+  `<abs>/switchboard-env exec -- true` without a permission prompt, and
+  check (d), the `aws-vault exec` form against a cached session, were
+  not run; the spike README has the commands. Until (e) is run, no
+  allow rule is passed, and the fallback (`OperatorKind::env_flags`,
+  `SessionClone.args`) is unbuilt.
+
+Known gaps:
+
+- No GUI editor for sets and grants; `switchboard-env` is the editor.
+- The global and project layers still travel as tmux `-e` flags.
+- An expired SSO session is reported, not refreshed.
+- Codex operators are refused `env`: their sandbox may not reach
+  `control.sock`.
+- `env.resolve` writes no audit line.
+- A pane launched before tokens cannot resolve until it is relaunched.
+- A runner started outside Switchboard fails every `env` gate.
+- The runner's grants serve every `env` gate it runs; a stage's `env`
+  names on a gate are not consulted.
+- An older app drops `env_sets` from `session.new` silently.
+- An aws-vault prompt cannot be answered from an agent's Bash tool.
+- Scrollback holds whatever a child prints.
 
 ## Open questions
 

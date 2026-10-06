@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 /// Bump when the on-disk shape changes incompatibly.
-pub const SCHEMA_VERSION: u32 = 11;
+pub const SCHEMA_VERSION: u32 = 12;
 
 /// How the UI picks its colours: follow the system, or force one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -42,6 +42,31 @@ pub struct EnvVar {
     pub name: String,
     pub value: String,
     pub secret: bool,
+}
+
+/// A named group of variables that `switchboard-env exec` puts in one
+/// child's environment, for a session, project or runner it was granted
+/// to. Secrets keep only their names here, as in [`EnvVar`]; their
+/// values live under `set/<name>/<VAR>`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct EnvSet {
+    pub name: String,
+    pub vars: Vec<EnvVar>,
+    /// How the child gets AWS credentials, when the set gives any.
+    pub aws: Option<AwsMethod>,
+}
+
+/// How `switchboard-env exec` gets AWS credentials for a set.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "method", rename_all = "lowercase")]
+pub enum AwsMethod {
+    /// `aws-vault exec <profile> -- <command>`.
+    Vault { profile: String },
+    /// `AWS_PROFILE=<profile>`, once its SSO session is checked.
+    Sso { profile: String },
+    /// The set's `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` secrets.
+    Static,
 }
 
 /// A project's environment: its own variables and whether its `.env`
@@ -136,6 +161,9 @@ pub struct Settings {
     pub dispatch_runner: Option<RecordId>,
     /// The Dispatch page in a window of its own, while it has one.
     pub dispatch_window: Option<PageWindow>,
+    /// Named environment sets, granted to projects, sessions and the
+    /// Dispatch runner and resolved only by `switchboard-env`.
+    pub env_sets: Vec<EnvSet>,
 }
 
 /// A page (not a session) in a window of its own.
@@ -170,6 +198,7 @@ impl Default for Settings {
             dispatch_console: None,
             dispatch_runner: None,
             dispatch_window: None,
+            env_sets: Vec::new(),
         }
     }
 }
@@ -875,6 +904,11 @@ pub struct Project {
     pub pinned: Vec<PathBuf>,
     #[serde(default)]
     pub env: ProjectEnv,
+    /// Environment sets every session of the project may resolve, by
+    /// name. Beside `env`, not in it, because the env editor replaces
+    /// the whole `ProjectEnv` on Save.
+    #[serde(default)]
+    pub env_sets: Vec<String>,
     /// Folders the file side shows despite the root's `.gitignore`, as
     /// `.switchboard/project.json` last declared them (`show`).
     #[serde(default)]
@@ -1070,6 +1104,14 @@ pub struct SessionRecord {
     /// the launcher's own; paths and names, never secret values.
     #[serde(default)]
     pub env: Vec<(String, String)>,
+    /// Environment sets granted to this session, after its project's.
+    #[serde(default)]
+    pub env_sets: Vec<String>,
+    /// SHA-256, in hex, of the token its latest spawn put in
+    /// `SWITCHBOARD_RECORD_TOKEN`: what `env.resolve` checks. Replaced
+    /// at every spawn, so a dead pane's token stops working.
+    #[serde(default)]
+    pub token_hash: Option<String>,
 }
 
 /// How many runs a record keeps; the logs of older ones are deleted

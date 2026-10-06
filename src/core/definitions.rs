@@ -254,6 +254,8 @@ fn upsert(
         pending_launch: false,
         last_stop_at: None,
         env: Vec::new(),
+        env_sets: Vec::new(),
+        token_hash: None,
     });
     id
 }

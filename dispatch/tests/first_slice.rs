@@ -17414,3 +17414,249 @@ fn a_joined_review_over_lane_plans_names_every_plan() {
     let fix = last_prompt_of(&env, "implementer");
     assert!(fix.contains(&format!("Per {listed}.")), "{fix}");
 }
+
+/// The implementer granted `aws-dev` and `npm`, and the implement stage
+/// `npm` and `deploy`, with `switchboard-env` at a known path; the
+/// path returned.
+fn with_env_sets(env: &mut Env) -> PathBuf {
+    let path = env.data.pipeline(PROJECT);
+    let text = std::fs::read_to_string(&path)
+        .unwrap()
+        .replace(
+            "[operators.implementer]\nkind = \"claude\"\n",
+            "[operators.implementer]\nkind = \"claude\"\nenv = [\"aws-dev\", \"npm\"]\n",
+        )
+        .replace(
+            "prompt = \"Implement {inputs.plan}",
+            "env = [\"npm\", \"deploy\"]\nprompt = \"Implement {inputs.plan}",
+        );
+    std::fs::write(path, text).unwrap();
+    let bin = env.worktrees.join("bin").join("switchboard-env");
+    env.runner.env_bin = Some(bin.clone());
+    bin
+}
+
+/// The implement stage's `SessionNew`, as Dispatch sent it.
+fn implement_launch(env: &Env) -> Body {
+    env.sb()
+        .calls
+        .iter()
+        .find_map(|r| match &r.body {
+            b @ Body::SessionNew { name, .. } if name == "implementer" => Some(b.clone()),
+            _ => None,
+        })
+        .expect("the implementer was launched")
+}
+
+#[test]
+fn an_agent_with_env_gets_its_operators_sets_then_its_stages_and_the_sentence() {
+    let mut env = Env::new();
+    let bin = with_env_sets(&mut env);
+    at_implement(&mut env);
+    let Body::SessionNew {
+        env_sets,
+        prompt,
+        launch,
+        ..
+    } = implement_launch(&env)
+    else {
+        unreachable!()
+    };
+    assert_eq!(env_sets, vec!["aws-dev", "npm", "deploy"]);
+    let prompt = prompt.unwrap();
+    let sentence = format!(
+        "Commands that need credentials run through `{} exec -- <command>`; never look for credential files or profiles.",
+        bin.display()
+    );
+    assert!(prompt.ends_with(&sentence), "{prompt}");
+    let switchboard_control::Launch::Argv(argv) = launch else {
+        panic!("the implementer launches with its write flags: {launch:?}");
+    };
+    assert!(
+        !argv.iter().any(|a| a.contains("Bash(switchboard-env")),
+        "no allow rule: {argv:?}"
+    );
+    // Stages without env launch as before.
+    let investigate = env
+        .sb()
+        .calls
+        .iter()
+        .find_map(|r| match &r.body {
+            Body::SessionNew {
+                name,
+                env_sets,
+                prompt,
+                ..
+            } if name == "investigator" => Some((env_sets.clone(), prompt.clone().unwrap())),
+            _ => None,
+        })
+        .unwrap();
+    assert!(investigate.0.is_empty());
+    assert!(
+        !investigate.1.contains("switchboard-env"),
+        "{}",
+        investigate.1
+    );
+}
+
+#[test]
+fn the_env_sentence_quotes_a_path_with_a_space() {
+    let bin = PathBuf::from("/Applications/My Apps/Switchboard.app/Contents/MacOS/switchboard-env");
+    assert_eq!(
+        dispatch::scheduler::env_sentence(&bin),
+        "Commands that need credentials run through `'/Applications/My Apps/Switchboard.app/Contents/MacOS/switchboard-env' exec -- <command>`; never look for credential files or profiles."
+    );
+}
+
+#[test]
+fn an_agent_with_env_and_no_switchboard_env_fails_its_attempt_unlaunched() {
+    let mut env = Env::new();
+    with_env_sets(&mut env);
+    env.runner.env_bin = None;
+    let id = at_finalize(&mut env);
+    let decision = env.pending(&id)[0].id.clone();
+    let now = env.tick();
+    env.runner
+        .decide(&id, &decision, "finalize", None, now)
+        .unwrap();
+    env.steps_until(&id, "the implement attempt failing", |t, _| {
+        t.attempts_of("implement")
+            .next()
+            .is_some_and(|a| matches!(a.state, AttemptState::Failed { .. }))
+    });
+    let t = env.ticket(&id);
+    let a = t.attempts_of("implement").next().unwrap();
+    assert_eq!(
+        a.state,
+        AttemptState::Failed {
+            reason: "switchboard-env not found beside dispatch".into()
+        }
+    );
+    assert!(
+        !env.sb().calls.iter().any(|r| matches!(
+            &r.body,
+            Body::SessionNew { name, .. } if name == "implementer"
+        )),
+        "nothing launched"
+    );
+}
+
+#[test]
+fn a_clone_carries_its_own_operators_sets() {
+    let mut env = Env::new();
+    let path = env.data.pipeline(PROJECT);
+    let text = std::fs::read_to_string(&path).unwrap().replace(
+        "[operators.rebaser]\nkind = \"claude\"\n",
+        "[operators.rebaser]\nkind = \"claude\"\nenv = [\"git-push\"]\n",
+    );
+    std::fs::write(path, text).unwrap();
+    env.runner.env_bin = Some(PathBuf::from("/opt/sb/switchboard-env"));
+    let id = at_ready(&mut env);
+    env.at_merge(&id);
+    env.pr_is_with(&id, "base0000", "open", Checks::Passed, Some("conflicting"));
+    env.wait(PR_POLL_MS);
+    env.steps_until(&id, "the rebaser", |t, _| {
+        t.attempts_of("merge")
+            .any(|a| a.kind == AttemptKind::Agent && a.session.is_some())
+    });
+    let (sets, prompt) = env
+        .sb()
+        .calls
+        .iter()
+        .find_map(|r| match &r.body {
+            Body::SessionClone {
+                name,
+                env_sets,
+                prompt,
+                ..
+            } if name == "rebaser" => Some((env_sets.clone(), prompt.clone())),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(sets, vec!["git-push"]);
+    assert!(
+        prompt.contains("`/opt/sb/switchboard-env exec -- <command>`"),
+        "{prompt}"
+    );
+}
+
+#[test]
+fn a_command_gate_with_env_runs_under_switchboard_env_with_the_runners_token() {
+    let mut env = Env::new();
+    let bin = with_env_sets(&mut env);
+    env.runner.credentials = Some(dispatch::scheduler::RunnerCredentials {
+        record: "runner-record".into(),
+        token: "runner-token".into(),
+    });
+    let (id, implementer) = at_implement(&mut env);
+    implementer_stops(&mut env, &id, &implementer);
+    let check = implement_check(&mut env, &id);
+    assert_eq!(
+        check.outer,
+        vec![bin.display().to_string(), "exec".into(), "--".into()]
+    );
+    assert_eq!(check.argv, vec!["sh", "-c", "cargo test"]);
+    assert!(
+        check.env.contains(&(
+            "SWITCHBOARD_RECORD_TOKEN".to_owned(),
+            "runner-token".to_owned()
+        )) && check.env.contains(&(
+            "SWITCHBOARD_RECORD_ID".to_owned(),
+            "runner-record".to_owned()
+        )),
+        "{:?}",
+        check.env
+    );
+}
+
+#[test]
+fn a_command_gate_with_env_on_a_runner_without_a_record_fails_with_one_line() {
+    let mut env = Env::new();
+    with_env_sets(&mut env);
+    let (id, implementer) = at_implement(&mut env);
+    implementer_stops(&mut env, &id, &implementer);
+    env.steps_until(&id, "the checks failing", |t, _| {
+        t.attempts_of("implement")
+            .last()
+            .is_some_and(|a| matches!(a.state, AttemptState::Failed { .. }))
+    });
+    let t = env.ticket(&id);
+    let a = t.attempts_of("implement").last().unwrap();
+    assert_eq!(
+        a.state,
+        AttemptState::Failed {
+            reason: "stage implement needs credentials (env), but this runner has no Switchboard record: start it from the Dispatch overview".into()
+        }
+    );
+    assert!(env.repo.lock().unwrap().checks.is_empty(), "nothing ran");
+}
+
+#[test]
+fn a_command_gate_without_env_gets_no_wrapper_and_no_token() {
+    let mut env = Env::new();
+    env.runner.env_bin = Some(PathBuf::from("/opt/sb/switchboard-env"));
+    env.runner.credentials = Some(dispatch::scheduler::RunnerCredentials {
+        record: "runner-record".into(),
+        token: "runner-token".into(),
+    });
+    let (id, implementer) = at_implement(&mut env);
+    implementer_stops(&mut env, &id, &implementer);
+    let check = implement_check(&mut env, &id);
+    assert!(check.outer.is_empty(), "{:?}", check.outer);
+    assert!(
+        !check
+            .env
+            .iter()
+            .any(|(k, _)| k == "SWITCHBOARD_RECORD_TOKEN"),
+        "{:?}",
+        check.env
+    );
+    let Body::SessionNew {
+        env_sets, prompt, ..
+    } = implement_launch(&env)
+    else {
+        unreachable!()
+    };
+    assert!(env_sets.is_empty());
+    assert!(!prompt.unwrap().contains("switchboard-env"));
+}

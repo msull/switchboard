@@ -226,6 +226,18 @@ pub enum AppAction {
         scope: SecretScope,
         name: String,
     },
+    /// Open or close the window in which `switchboard-env`'s setup
+    /// commands (`env.set.upsert`, `env.secret.store`, `env.grant`) are
+    /// accepted. It lasts `ENV_SETUP_WINDOW` and is never saved.
+    SetEnvSetup {
+        open: bool,
+    },
+    /// The app put a fresh launch token in the record's next spawn;
+    /// `hash` is its SHA-256 in hex, what `env.resolve` checks.
+    RecordTokenIssued {
+        id: RecordId,
+        hash: String,
+    },
     // --- sessions
     NewSession {
         project: ProjectId,
@@ -755,6 +767,12 @@ const NOTICE_TTL: Duration = Duration::from_secs(4);
 /// change, so a click meant for one can land on another; the record is
 /// held here, untouched on disk, until the window closes.
 pub(crate) const UNDO_WINDOW: Duration = Duration::from_secs(10);
+/// How long environment setup stays unlocked once the owner opens it.
+/// `ENV_SETUP_LOCKED` and the settings menu's Unlock label both say this
+/// length in words; change them with it.
+pub const ENV_SETUP_WINDOW: Duration = Duration::from_mins(5);
+/// Why `switchboard-env`'s setup commands are refused outside the window.
+pub const ENV_SETUP_LOCKED: &str = "environment setup is locked: choose Unlock environment setup in Switchboard's settings menu, then run this again within five minutes";
 /// How far back a rule set may look, in hours: an hour to a month.
 pub const RULE_HOURS: std::ops::RangeInclusive<u32> = 1..=720;
 /// The width, in grid units, a rule set is laid out at where no view
@@ -863,6 +881,9 @@ pub struct AppCore {
     /// set, a dismissal, a move to another space, a load, the clock on a
     /// `Tick`) shows in the same frame.
     pub(super) rule_members: HashMap<SetId, Vec<RecordId>>,
+    /// Until when, on the clock's `mono`, `switchboard-env`'s setup
+    /// commands are accepted. Transient: a restart closes it.
+    pub(super) env_setup_until: Option<Duration>,
 }
 
 impl AppCore {
@@ -952,6 +973,12 @@ impl AppCore {
             AppAction::PromptSeen { id, seen } => self.prompt_seen(id, seen),
             AppAction::TrustFolder(id) => self.trust_folder(id, &mut out),
             AppAction::Tick => self.tick(now, &mut out),
+            AppAction::SetEnvSetup { open } => {
+                self.env_setup_until = open.then_some(now.mono + ENV_SETUP_WINDOW);
+            }
+            AppAction::RecordTokenIssued { id, hash } => {
+                self.edit_session(id, &mut out, |s| s.token_hash = Some(hash));
+            }
             AppAction::Controller(event) => self.controller_event(event, now, &mut out),
             AppAction::ActivateCard { set, target } => self.activate_card(set, target),
             AppAction::StepCard(direction) => self.step_card(direction),
@@ -1608,6 +1635,9 @@ impl AppCore {
     /// workflows probe.
     fn tick(&mut self, now: Clock, out: &mut Out) {
         self.expire_notices(now);
+        if self.env_setup_until.is_some_and(|t| t <= now.mono) {
+            self.env_setup_until = None;
+        }
         self.controller_tick(now, out);
         let expired: Vec<(RecordId, ProjectId)> = self
             .trash
@@ -1787,6 +1817,7 @@ impl AppCore {
             notes: String::new(),
             pinned: Vec::new(),
             env: ProjectEnv::default(),
+            env_sets: Vec::new(),
             shown: Vec::new(),
             created: now.wall,
             last_active: now.wall,
@@ -2143,6 +2174,38 @@ impl AppCore {
     #[must_use]
     pub fn settings(&self) -> &Settings {
         &self.settings
+    }
+    /// Until when environment setup is unlocked, while it is; `Tick`
+    /// clears it once it has passed.
+    #[must_use]
+    pub fn env_setup_until(&self) -> Option<Duration> {
+        self.env_setup_until
+    }
+    /// Every environment set for `env.sets`: plain values included,
+    /// secret ones never.
+    #[must_use]
+    pub fn env_set_views(&self) -> Vec<switchboard_control::EnvSetView> {
+        self.settings
+            .env_sets
+            .iter()
+            .map(|set| switchboard_control::EnvSetView {
+                name: set.name.clone(),
+                vars: set
+                    .vars
+                    .iter()
+                    .map(|v| switchboard_control::EnvVarView {
+                        name: v.name.clone(),
+                        value: if v.secret {
+                            String::new()
+                        } else {
+                            v.value.clone()
+                        },
+                        secret: v.secret,
+                    })
+                    .collect(),
+                aws: set.aws.as_ref().map(crate::core::control::aws_view),
+            })
+            .collect()
     }
     /// Every working set, in the user's order.
     #[must_use]

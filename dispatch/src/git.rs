@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Context, Result, bail};
+use switchboard_control::RECORD_TOKEN_ENV;
 
 use crate::history::{self, Commit, Group};
 use crate::ticket::CheckGroup;
@@ -161,7 +162,9 @@ pub trait Repo: Send {
     /// Start a check (a command gate) in `dir` as a child of the runner,
     /// in its own process group so a kill reaches its descendants, its
     /// output appended to `log`, under `key` for polling. Nothing from a
-    /// template reaches the command line; values go in `env`.
+    /// template reaches the command line; values go in `env`. A
+    /// non-empty `outer` (`switchboard-env exec --`) is put in front of
+    /// the command as it is spawned.
     fn start_check(
         &mut self,
         key: &str,
@@ -169,10 +172,14 @@ pub trait Repo: Send {
         argv: &[String],
         env: &[(String, String)],
         log: &Path,
+        outer: &[String],
     ) -> Result<()>;
     /// `start_check` under `confine`: the log starts with a header line
     /// saying what the check runs under, and a failed check's log ends
-    /// with any writes the sandbox refused.
+    /// with any writes the sandbox refused. `outer` goes outside the
+    /// confinement, so it can reach Switchboard's socket while the
+    /// command itself stays confined.
+    #[allow(clippy::too_many_arguments)]
     fn start_check_confined(
         &mut self,
         key: &str,
@@ -181,6 +188,7 @@ pub trait Repo: Send {
         env: &[(String, String)],
         log: &Path,
         confine: &Confine,
+        outer: &[String],
     ) -> Result<()>;
     /// `None` while the check runs, `Some(Ok(code))` once it exited, and
     /// `Some(Err)` for a check this runner never started, or one it can
@@ -378,7 +386,9 @@ impl GitCli {
     }
 
     /// A check's spawn, confined or not: its output appended to `log`,
-    /// the header first when it is confined.
+    /// the header first when it is confined, and `outer` in front of
+    /// whatever confines it.
+    #[allow(clippy::too_many_arguments)]
     fn spawn_check(
         &mut self,
         key: &str,
@@ -387,6 +397,7 @@ impl GitCli {
         env: &[(String, String)],
         log: &Path,
         confine: Option<&Confine>,
+        outer: &[String],
     ) -> Result<()> {
         if argv.is_empty() {
             bail!("a check with no command");
@@ -397,6 +408,7 @@ impl GitCli {
             .open(log)
             .with_context(|| format!("open {}", log.display()))?;
         let argv = with_header(argv, confine, &mut out)?;
+        let argv: Vec<String> = outer.iter().cloned().chain(argv).collect();
         let err = out.try_clone()?;
         self.spawn(key, dir, &argv, env, out, err)
     }
@@ -439,22 +451,32 @@ impl GitCli {
         let (program, rest) = argv
             .split_first()
             .expect("spawn_check and spawn_reviewer refuse an empty argv");
-        let mut cmd = Command::new(program);
+        let mut cmd = child_command(program, env);
         cmd.args(rest)
             .current_dir(dir)
             .stdin(std::process::Stdio::null())
             .stdout(out)
             .stderr(err)
             .process_group(0);
-        for (k, v) in env {
-            cmd.env(k, v);
-        }
         let child = cmd
             .spawn()
             .with_context(|| format!("start {program} in {}", dir.display()))?;
         self.checks.insert(key.to_owned(), child);
         Ok(())
     }
+}
+
+/// A child's `Command` for `program` with `env` set, without the
+/// runner's launch token unless `env` gives it back: the runner's own
+/// environment is inherited, and the token in it would let any command
+/// resolve the runner's environment sets.
+fn child_command(program: impl AsRef<std::ffi::OsStr>, env: &[(String, String)]) -> Command {
+    let mut cmd = Command::new(program);
+    cmd.env_remove(RECORD_TOKEN_ENV);
+    for (k, v) in env {
+        cmd.env(k, v);
+    }
+    cmd
 }
 
 /// `argv` as it is spawned under `confine`, its header line written to
@@ -941,11 +963,8 @@ impl Repo for GitCli {
         let Some((program, rest)) = argv.split_first() else {
             return Ok(());
         };
-        let mut cmd = Command::new(program);
+        let mut cmd = child_command(program, env);
         cmd.args(rest).current_dir(dir);
-        for (k, v) in env {
-            cmd.env(k, v);
-        }
         output(&mut cmd)?;
         Ok(())
     }
@@ -961,11 +980,8 @@ impl Repo for GitCli {
             return Ok(crate::confine::header(confine));
         };
         let (wrapped, header) = crate::confine::wrap(argv, confine)?;
-        let mut cmd = Command::new(&wrapped[0]);
+        let mut cmd = child_command(&wrapped[0], env);
         cmd.args(&wrapped[1..]).current_dir(dir);
-        for (k, v) in env {
-            cmd.env(k, v);
-        }
         let out = cmd
             .output()
             .with_context(|| format!("{header}: run {program}"))?;
@@ -989,8 +1005,9 @@ impl Repo for GitCli {
         argv: &[String],
         env: &[(String, String)],
         log: &Path,
+        outer: &[String],
     ) -> Result<()> {
-        self.spawn_check(key, dir, argv, env, log, None)
+        self.spawn_check(key, dir, argv, env, log, None, outer)
     }
 
     fn start_check_confined(
@@ -1001,8 +1018,9 @@ impl Repo for GitCli {
         env: &[(String, String)],
         log: &Path,
         confine: &Confine,
+        outer: &[String],
     ) -> Result<()> {
-        self.spawn_check(key, dir, argv, env, log, Some(confine))
+        self.spawn_check(key, dir, argv, env, log, Some(confine), outer)
     }
 
     fn start_reviewer(
@@ -1511,6 +1529,9 @@ pub struct StartedCheck {
     pub log: PathBuf,
     /// What it was confined to, `None` when started unconfined.
     pub confine: Option<Confine>,
+    /// What it was wrapped in outside any confinement
+    /// (`switchboard-env exec --`); empty for none and for reviewers.
+    pub outer: Vec<String>,
 }
 
 /// A point a fake call stops at until the test lets it go, so a test
@@ -1721,6 +1742,7 @@ pub struct FakeRepo {
 }
 
 impl FakeRepo {
+    #[allow(clippy::too_many_arguments)]
     fn record_check(
         &mut self,
         key: &str,
@@ -1729,6 +1751,7 @@ impl FakeRepo {
         env: &[(String, String)],
         log: &Path,
         confine: Option<Confine>,
+        outer: &[String],
     ) -> Result<()> {
         std::fs::write(log, "checks ran\n")?;
         self.take_pgid(key);
@@ -1739,6 +1762,7 @@ impl FakeRepo {
             env: env.to_vec(),
             log: log.to_path_buf(),
             confine,
+            outer: outer.to_vec(),
         });
         Ok(())
     }
@@ -1766,6 +1790,7 @@ impl FakeRepo {
             env: env.to_vec(),
             log: stdout.to_path_buf(),
             confine,
+            outer: Vec::new(),
         };
         self.checks.push(started.clone());
         self.reviewers.push((started, stderr.to_path_buf()));
@@ -2090,8 +2115,9 @@ impl Repo for FakeRepo {
         argv: &[String],
         env: &[(String, String)],
         log: &Path,
+        outer: &[String],
     ) -> Result<()> {
-        self.record_check(key, dir, argv, env, log, None)
+        self.record_check(key, dir, argv, env, log, None, outer)
     }
     fn start_check_confined(
         &mut self,
@@ -2101,8 +2127,9 @@ impl Repo for FakeRepo {
         env: &[(String, String)],
         log: &Path,
         confine: &Confine,
+        outer: &[String],
     ) -> Result<()> {
-        self.record_check(key, dir, argv, env, log, Some(confine.clone()))
+        self.record_check(key, dir, argv, env, log, Some(confine.clone()), outer)
     }
     fn start_reviewer_confined(
         &mut self,
@@ -2439,10 +2466,11 @@ impl Repo for std::sync::Arc<std::sync::Mutex<FakeRepo>> {
         env: &[(String, String)],
         log: &Path,
         confine: &Confine,
+        outer: &[String],
     ) -> Result<()> {
         self.lock()
             .unwrap()
-            .start_check_confined(key, dir, argv, env, log, confine)
+            .start_check_confined(key, dir, argv, env, log, confine, outer)
     }
     fn start_reviewer_confined(
         &mut self,
@@ -2465,8 +2493,11 @@ impl Repo for std::sync::Arc<std::sync::Mutex<FakeRepo>> {
         argv: &[String],
         env: &[(String, String)],
         log: &Path,
+        outer: &[String],
     ) -> Result<()> {
-        self.lock().unwrap().start_check(key, dir, argv, env, log)
+        self.lock()
+            .unwrap()
+            .start_check(key, dir, argv, env, log, outer)
     }
     fn poll_check(&mut self, key: &str) -> Option<Result<i32>> {
         self.lock().unwrap().poll_check(key)
@@ -2575,6 +2606,60 @@ pub fn branch_name(number: u64, title: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_child_never_inherits_the_record_token_unless_its_env_gives_it() {
+        // Read from the `Command`, not the process environment, which
+        // other tests share.
+        let bare = child_command("sh", &[]);
+        assert!(
+            bare.get_envs()
+                .any(|(k, v)| k == RECORD_TOKEN_ENV && v.is_none()),
+            "removed from a child without it in env"
+        );
+        let given = child_command("sh", &[(RECORD_TOKEN_ENV.into(), "t0k".into())]);
+        assert!(
+            given
+                .get_envs()
+                .any(|(k, v)| k == RECORD_TOKEN_ENV && v == Some("t0k".as_ref()))
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let echo: Vec<String> = vec![
+            "sh".into(),
+            "-c".into(),
+            "echo ${SWITCHBOARD_RECORD_TOKEN-unset}".into(),
+        ];
+        let mut cli = GitCli::default();
+        let bare_log = dir.path().join("bare.log");
+        cli.start_check("bare", dir.path(), &echo, &[], &bare_log, &[])
+            .unwrap();
+        let given_log = dir.path().join("given.log");
+        let outer: Vec<String> = vec![
+            "sh".into(),
+            "-c".into(),
+            "echo outer; exec \"$@\"".into(),
+            "outer".into(),
+        ];
+        cli.start_check(
+            "given",
+            dir.path(),
+            &echo,
+            &[(RECORD_TOKEN_ENV.into(), "t0k".into())],
+            &given_log,
+            &outer,
+        )
+        .unwrap();
+        assert_eq!(
+            poll_to("the bare exit", || cli.poll_check("bare")).unwrap(),
+            0
+        );
+        assert_eq!(
+            poll_to("the given exit", || cli.poll_check("given")).unwrap(),
+            0
+        );
+        assert_eq!(std::fs::read_to_string(&bare_log).unwrap(), "unset\n");
+        assert_eq!(std::fs::read_to_string(&given_log).unwrap(), "outer\nt0k\n");
+    }
     #[test]
     fn a_check_runs_as_a_child_with_its_output_in_the_log_and_is_lost_to_a_new_runner() {
         let dir = tempfile::tempdir().unwrap();
@@ -2590,6 +2675,7 @@ mod tests {
             ],
             &[("DISPATCH_LANE".into(), "backend".into())],
             &log,
+            &[],
         )
         .unwrap();
         let code = poll_to("the check's exit", || cli.poll_check("k")).unwrap();
@@ -2654,6 +2740,7 @@ mod tests {
             ],
             &[],
             &dir.path().join("gate.log"),
+            &[],
         )
         .unwrap();
         let sleep = written_pid(dir.path());
@@ -2678,6 +2765,7 @@ mod tests {
                 &["sleep".into(), "30".into()],
                 &[],
                 &dir.join("gate.log"),
+                &[],
             )
             .unwrap();
         let group = previous.check_group("k").unwrap();
@@ -2726,6 +2814,7 @@ mod tests {
                 &["sh".into(), "-c".into(), "sleep 30 & echo $! > pid".into()],
                 &[],
                 &dir.path().join("gate.log"),
+                &[],
             )
             .unwrap();
         let group = previous.check_group("k").unwrap();
@@ -2754,6 +2843,7 @@ mod tests {
                 &["sh".into(), "-c".into(), "sleep 30 & echo $! > pid".into()],
                 &[],
                 &dir.path().join("gate.log"),
+                &[],
             )
             .unwrap();
         let group = previous.check_group("k").unwrap();
@@ -2778,6 +2868,7 @@ mod tests {
                 &["sleep".into(), "30".into()],
                 &[],
                 &dir.path().join("gate.log"),
+                &[],
             )
             .unwrap();
         let group = previous.check_group("k").unwrap();
@@ -2799,6 +2890,7 @@ mod tests {
                 &["sh".into(), "-c".into(), "sleep 30 & echo $! > pid".into()],
                 &[],
                 &dir.path().join("gate.log"),
+                &[],
             )
             .unwrap();
         let group = previous.check_group("k").unwrap();
@@ -2847,6 +2939,7 @@ mod tests {
             ],
             &[],
             &dir.path().join("gate.log"),
+            &[],
         )
         .unwrap();
         let inner = written_pid(dir.path());
@@ -3694,6 +3787,7 @@ mod tests {
             &[("PROBE".into(), std::process::id().to_string())],
             &log,
             &confined_to(dir.path()),
+            &[],
         )
         .unwrap();
         let code = poll_to("the check's exit", || cli.poll_check("k")).unwrap();
@@ -3719,10 +3813,25 @@ mod tests {
         let argv: Vec<String> = vec!["sh".into(), "-c".into(), "kill -KILL $$".into()];
         let log = dir.path().join("checks.log");
         let mut cli = GitCli::default();
-        cli.start_check_confined("c", dir.path(), &argv, &[], &log, &confined_to(dir.path()))
-            .unwrap();
-        cli.start_check("u", dir.path(), &argv, &[], &dir.path().join("bare.log"))
-            .unwrap();
+        cli.start_check_confined(
+            "c",
+            dir.path(),
+            &argv,
+            &[],
+            &log,
+            &confined_to(dir.path()),
+            &[],
+        )
+        .unwrap();
+        cli.start_check(
+            "u",
+            dir.path(),
+            &argv,
+            &[],
+            &dir.path().join("bare.log"),
+            &[],
+        )
+        .unwrap();
         let confined = poll_to("the confined exit", || cli.poll_check("c")).unwrap();
         let bare = poll_to("the bare exit", || cli.poll_check("u")).unwrap();
         assert_eq!((confined, bare), (-1, -1));
@@ -3746,6 +3855,7 @@ mod tests {
             &[],
             &log,
             &confined_to(dir.path()),
+            &[],
         )
         .unwrap();
         let code = poll_to("the check's exit", || cli.poll_check("c")).unwrap();
