@@ -568,9 +568,16 @@ pub(super) fn decision_card(
                     .dispatch_note_drafts
                     .entry(d.id.clone())
                     .or_default();
+                // An objection can run to paragraphs: two rows to start.
+                let hint = if d.needs_note.is_empty() {
+                    "Note (optional)".to_owned()
+                } else {
+                    format!("Note (needed for {})", d.needs_note.join(", "))
+                };
                 ui.add(
-                    egui::TextEdit::singleline(draft)
-                        .hint_text("Note (optional)")
+                    egui::TextEdit::multiline(draft)
+                        .hint_text(hint)
+                        .desired_rows(2)
                         .desired_width(f32::INFINITY),
                 )
                 .on_hover_text("Sent with the answer; a rerun sends it to the agent");
@@ -580,17 +587,25 @@ pub(super) fn decision_card(
             ui.horizontal_wrapped(|ui| {
                 for option in &d.options {
                     let recommended = d.recommendation.as_deref() == Some(option);
-                    let clicked = if recommended {
-                        theme::primary(ui, option)
-                    } else {
-                        theme::secondary(ui, option)
-                    }
-                    .on_hover_text(if recommended {
-                        "Dispatch suggests this"
-                    } else {
-                        "Answer with this"
-                    })
-                    .clicked();
+                    // Dispatch refuses these without a note, so the card
+                    // never sends one bare.
+                    let enabled = note.is_some() || !d.needs_note.contains(option);
+                    let clicked = ui
+                        .add_enabled_ui(enabled, |ui| {
+                            if recommended {
+                                theme::primary(ui, option)
+                            } else {
+                                theme::secondary(ui, option)
+                            }
+                        })
+                        .inner
+                        .on_hover_text(if recommended {
+                            "Dispatch suggests this"
+                        } else {
+                            "Answer with this"
+                        })
+                        .on_disabled_hover_text(format!("Write the note first: {option} needs one"))
+                        .clicked();
                     if clicked {
                         cx.state.dispatch_note_drafts.remove(&d.id);
                         cx.dispatch(AppAction::DispatchDecide {

@@ -428,6 +428,14 @@ pub enum AppAction {
         run: WorkflowId,
         text: String,
     },
+    /// The owner's objection to a converged or capped review, from the
+    /// control port: round `round` (the next one) carries `text` to the
+    /// planner, and the reviewer re-reads after it answers.
+    ObjectWorkflow {
+        run: WorkflowId,
+        round: u32,
+        text: String,
+    },
     /// Forget the run; its sessions stay.
     RemoveWorkflow(WorkflowId),
     SetWorkflowRoundCap(u32),
@@ -1026,6 +1034,7 @@ impl AppCore {
             | AppAction::CleanUpWorkflow(_)
             | AppAction::HandOffWorkflow { .. }
             | AppAction::UserFeedback { .. }
+            | AppAction::ObjectWorkflow { .. }
             | AppAction::RemoveWorkflow(_)
             | AppAction::SetWorkflowRoundCap(_)
             | AppAction::SetWorkflowDefinitions(_)

@@ -3354,6 +3354,328 @@ fn an_authorised_finalize_survives_a_lost_request() {
     );
 }
 
+/// `revise` at `finalize`, answered with `note`: the decision's id.
+fn revise(env: &mut Env, id: &str, note: &str) -> String {
+    let d = env.pending(id)[0].clone();
+    assert_eq!(d.name, "finalize");
+    assert_eq!(d.options, ["finalize", "revise", "park"]);
+    let now = env.tick();
+    env.runner
+        .decide(id, &d.id, "revise", Some(note), now)
+        .unwrap();
+    d.id
+}
+
+/// The texts of the ticket's events of `kind`.
+fn texts_of_kind(env: &Env, id: &str, kind: dispatch::events::Kind) -> Vec<String> {
+    dispatch::events::read_since(&dispatch::events::log_path(&env.data), 0)
+        .unwrap()
+        .into_iter()
+        .filter(|e| e.ticket == id && e.kind == kind)
+        .map(|e| e.text)
+        .collect()
+}
+
+/// The owner's `revise` writes the next round's feedback beside the
+/// reviewed copy and sends it as `workflow.object`; `finalize` is asked
+/// again, naming the new round count, once the run converges again.
+#[test]
+fn revise_writes_the_owners_round_and_sends_it_as_an_objection() {
+    let mut env = Env::new();
+    let id = at_finalize(&mut env);
+    let session = env.ticket(&id).current_session().cloned().unwrap();
+    revise(&mut env, &id, "Step 3 deletes data; keep a backup.");
+    env.step();
+    let copy = artifact_of(&env.ticket(&id), "review", "plan");
+    let file = dispatch::report::round_file(&copy, 2);
+    let text = std::fs::read_to_string(&file).unwrap();
+    assert!(
+        text.starts_with(&format!("{}\n\n", dispatch::OWNER_ROUND_HEADING)),
+        "{text}"
+    );
+    assert!(
+        text.contains("Step 3 deletes data; keep a backup."),
+        "{text}"
+    );
+    let run = env.sb().runs[0].id.clone();
+    assert_eq!(
+        env.sb().objections,
+        [(run, 2, "Step 3 deletes data; keep a backup.".to_owned())]
+    );
+    let t = env.ticket(&id);
+    let review = t.attempts_of("review").last().unwrap();
+    assert_eq!(review.revisions.len(), 1);
+    assert_eq!(
+        (review.revisions[0].round, review.revisions[0].by.as_str()),
+        (2, "you")
+    );
+    assert!(events_of(&env.data, &id).contains(&"revised".to_owned()));
+    assert_eq!(
+        texts_of_kind(&env, &id, dispatch::events::Kind::Revised),
+        ["r2: the owner's objection, by you"]
+    );
+    assert!(
+        texts_of_kind(&env, &id, dispatch::events::Kind::Answered)
+            .iter()
+            .any(|e| e.contains("revise — Step 3 deletes data")),
+        "the answer carries the note"
+    );
+    assert!(env.pending(&id).is_empty());
+    assert!(!env.sb().session(&session).waiting, "unmarked");
+    {
+        let mut sb = env.sb();
+        sb.runs[0].state = RunState::Converged;
+        sb.runs[0].round = 3;
+    }
+    env.step();
+    let again = env.pending(&id);
+    assert_eq!(again.len(), 1);
+    assert_eq!(again[0].name, "finalize");
+    assert!(
+        again[0].question.contains("converged after 3 round(s)"),
+        "{}",
+        again[0].question
+    );
+}
+
+/// `revise` takes a note: none, or only spaces, is a usage error, and
+/// the decision still waits.
+#[test]
+fn revise_without_a_note_is_refused_and_the_decision_waits() {
+    let mut env = Env::new();
+    let id = at_finalize(&mut env);
+    let d = env.pending(&id)[0].id.clone();
+    for note in [None, Some("  ")] {
+        let now = env.tick();
+        let e = env.runner.decide(&id, &d, "revise", note, now).unwrap_err();
+        assert_eq!(
+            e.downcast_ref::<dispatch::UsageError>()
+                .map(ToString::to_string)
+                .as_deref(),
+            Some("revise takes --note <text> or --file <path>")
+        );
+        assert_eq!(env.pending(&id)[0].id, d);
+    }
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_dispatch"))
+        .args(["decide", &id, &d, "revise"])
+        .env("DISPATCH_DATA_DIR", &env.data.root)
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(64), "{out:?}");
+    assert_eq!(env.pending(&id)[0].id, d);
+    assert!(env.sb().objections.is_empty());
+}
+
+/// `--file` reads the note from a file, but never from one of the
+/// ticket's secret artifacts.
+#[test]
+fn revise_reads_its_note_from_a_file_but_never_a_secret_one() {
+    let mut env = Env::new();
+    let id = at_finalize(&mut env);
+    let d = env.pending(&id)[0].id.clone();
+    let dir = tempfile::tempdir().unwrap();
+    // A secret artifact of an earlier attempt, as the record names it.
+    let secret = dir.path().join("personas.md");
+    std::fs::write(&secret, "hunter2").unwrap();
+    let mut t = env.ticket(&id);
+    let a = t.attempts.iter_mut().find(|a| a.stage == "plan").unwrap();
+    a.secret.insert("personas".into());
+    a.artifacts.insert("personas".into(), secret.clone());
+    let now = env.tick();
+    env.runner.save_ticket(&mut t, now).unwrap();
+    let decide = |path: &std::path::Path| {
+        std::process::Command::new(env!("CARGO_BIN_EXE_dispatch"))
+            .args(["decide", &id, &d, "revise", "--file"])
+            .arg(path)
+            .env("DISPATCH_DATA_DIR", &env.data.root)
+            .output()
+            .unwrap()
+    };
+    let out = decide(&secret);
+    assert_eq!(out.status.code(), Some(64), "{out:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&out.stderr).trim(),
+        "personas is secret; Dispatch never reads it"
+    );
+    assert_eq!(env.pending(&id)[0].id, d);
+    let note = dir.path().join("objection.md");
+    std::fs::write(&note, "Split step 3.\n\nIt does two things.\n").unwrap();
+    let out = decide(&note);
+    assert!(out.status.success(), "{out:?}");
+    assert!(env.pending(&id).is_empty());
+    env.step();
+    assert_eq!(
+        env.sb().objections[0].2,
+        "Split step 3.\n\nIt does two things.\n"
+    );
+}
+
+/// A supervisor whose `decides` lists `finalize` may answer `revise`:
+/// the objection is sent, and its event names the supervisor as actor.
+#[test]
+fn a_supervisor_that_decides_finalize_may_revise() {
+    let mut env = Env::new();
+    let id = at_finalize(&mut env);
+    let path = env.data.pipeline(PROJECT);
+    let mut text = std::fs::read_to_string(&path).unwrap();
+    text.push_str("\n[supervisor]\nguidance = \"Keep it moving.\"\ndecides = [\"finalize\"]\n");
+    std::fs::write(path, text).unwrap();
+    env.runner.actor = Some(dispatch::scheduler::BY_SUPERVISOR.into());
+    revise(&mut env, &id, "The owner says: step 3 deletes data.");
+    env.runner.actor = None;
+    env.step();
+    assert_eq!(env.sb().objections.len(), 1);
+    let events = dispatch::events::read_since(&dispatch::events::log_path(&env.data), 0).unwrap();
+    let revised = events
+        .iter()
+        .find(|e| e.ticket == id && e.kind == dispatch::events::Kind::Revised)
+        .expect("a revised event");
+    assert_eq!(revised.text, "r2: the owner's objection, by supervisor");
+    assert_eq!(
+        revised.actor.as_deref(),
+        Some(dispatch::scheduler::BY_SUPERVISOR)
+    );
+}
+
+/// Switchboard refusing the objection undoes it: the file and the
+/// revision go, nothing reads as revised, and `finalize` is asked again.
+#[test]
+fn a_refused_objection_is_undone_and_finalize_is_asked_again() {
+    let mut env = Env::new();
+    let id = at_finalize(&mut env);
+    let first = revise(&mut env, &id, "Split step 3.");
+    env.sb().fail_next = Some("workflow.object".into());
+    env.step();
+    let copy = artifact_of(&env.ticket(&id), "review", "plan");
+    assert!(!dispatch::report::round_file(&copy, 2).exists());
+    let t = env.ticket(&id);
+    assert!(t.attempts_of("review").last().unwrap().revisions.is_empty());
+    assert!(!events_of(&env.data, &id).contains(&"revised".to_owned()));
+    assert!(env.sb().objections.is_empty());
+    let d = t.decisions.iter().find(|d| d.id == first).unwrap();
+    assert!(matches!(
+        d.state,
+        DecisionState::Answered { acted: true, .. }
+    ));
+    env.step();
+    let again = env.pending(&id);
+    assert_eq!(again.len(), 1);
+    assert_eq!(again[0].name, "finalize");
+    assert_ne!(again[0].id, first);
+}
+
+/// A lost reply may have opened the round: the file and the revision
+/// stay, and the send is asked about once rather than repeated.
+#[test]
+fn a_lost_objection_keeps_its_round_and_asks_about_the_send() {
+    let mut env = Env::new();
+    let id = at_finalize(&mut env);
+    revise(&mut env, &id, "Split step 3.");
+    env.sb().drop_reply_for = Some("workflow.object".into());
+    env.step();
+    let copy = artifact_of(&env.ticket(&id), "review", "plan");
+    assert!(dispatch::report::round_file(&copy, 2).exists());
+    let t = env.ticket(&id);
+    assert_eq!(t.attempts_of("review").last().unwrap().revisions.len(), 1);
+    assert!(events_of(&env.data, &id).contains(&"revised".to_owned()));
+    env.restart();
+    env.step();
+    let t = env.ticket(&id);
+    assert!(
+        t.pending_decisions().iter().any(|d| d.name == "lost-send"),
+        "{:#?}",
+        t.decisions
+    );
+    assert_eq!(env.sb().kinds_called("workflow.object"), 1);
+}
+
+/// The port's `NO_ANSWER` is no refusal: the app still has the
+/// objection and may open the round, so it is kept like a lost reply
+/// and the send is asked about.
+#[test]
+fn an_objection_the_app_was_slow_to_answer_keeps_its_round() {
+    let mut env = Env::new();
+    let id = at_finalize(&mut env);
+    revise(&mut env, &id, "Split step 3.");
+    env.sb().no_answer_for = Some("workflow.object".into());
+    env.step();
+    assert_eq!(env.sb().objections.len(), 1, "the app opened the round");
+    let copy = artifact_of(&env.ticket(&id), "review", "plan");
+    assert!(dispatch::report::round_file(&copy, 2).exists());
+    let t = env.ticket(&id);
+    assert_eq!(t.attempts_of("review").last().unwrap().revisions.len(), 1);
+    let op = t
+        .ledger
+        .iter()
+        .find(|o| o.kind == "workflow.object")
+        .unwrap();
+    assert!(op.reply.is_none() && op.error.is_some(), "{op:?}");
+    assert_eq!(
+        texts_of_kind(&env, &id, dispatch::events::Kind::Revised),
+        ["r2: the owner's objection, by you"]
+    );
+    env.step();
+    let t = env.ticket(&id);
+    assert!(
+        t.pending_decisions().iter().any(|d| d.name == "lost-send"),
+        "{:#?}",
+        t.decisions
+    );
+    assert_eq!(env.sb().kinds_called("workflow.object"), 1);
+}
+
+/// An objection lost before it reached Switchboard leaves the run
+/// converged, so `finalize` is asked again; a second `revise` of the
+/// same round replaces the first one's revision rather than adding one.
+#[test]
+fn a_second_objection_to_an_unopened_round_replaces_the_first() {
+    let mut env = Env::new();
+    let id = at_finalize(&mut env);
+    let path = env.data.pipeline(PROJECT);
+    let mut text = std::fs::read_to_string(&path).unwrap();
+    text.push_str("\n[supervisor]\nguidance = \"Keep it moving.\"\ndecides = [\"finalize\"]\n");
+    std::fs::write(path, text).unwrap();
+    env.runner.actor = Some(dispatch::scheduler::BY_SUPERVISOR.into());
+    revise(&mut env, &id, "The supervisor's objection.");
+    env.runner.actor = None;
+    env.fail_once(
+        "workflow.object",
+        "the socket closed before the request went out",
+    );
+    env.step();
+    assert!(env.sb().objections.is_empty(), "the request was lost");
+    env.step();
+    let finalize = env
+        .pending(&id)
+        .into_iter()
+        .find(|d| d.name == "finalize")
+        .expect("finalize asked again");
+    let now = env.tick();
+    env.runner
+        .decide(&id, &finalize.id, "revise", Some("The owner's own."), now)
+        .unwrap();
+    env.step();
+    assert_eq!(env.sb().objections.len(), 1);
+    let t = env.ticket(&id);
+    let revisions = &t.attempts_of("review").last().unwrap().revisions;
+    assert_eq!(
+        revisions
+            .iter()
+            .map(|r| (r.round, r.by.as_str()))
+            .collect::<Vec<_>>(),
+        [(2, "you")]
+    );
+    let copy = artifact_of(&t, "review", "plan");
+    let file = std::fs::read_to_string(dispatch::report::round_file(&copy, 2)).unwrap();
+    assert!(file.contains("The owner's own."), "{file}");
+    assert_eq!(
+        texts_of_kind(&env, &id, dispatch::events::Kind::Revised)
+            .last()
+            .map(String::as_str),
+        Some("r2: the owner's objection, by you")
+    );
+}
+
 #[test]
 fn parking_pauses_the_run_and_kills_every_process_before_reading_as_parked() {
     let mut env = Env::new();
@@ -17038,6 +17360,7 @@ fn a_secret_artifact_is_private_and_never_read_into_a_view_a_report_or_the_log()
         pipeline.as_ref(),
         &dispatch::events::stage_names(&t),
         &|p| std::fs::read_to_string(p).ok(),
+        &dispatch::report::plan_round_numbers,
         None,
         env.now,
     );

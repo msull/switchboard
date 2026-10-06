@@ -48,6 +48,12 @@ pub const CARD_WORKING: &str = "working";
 /// `SessionView::card` for an agent alive at its prompt, nothing pending.
 pub const CARD_IDLE: &str = "idle";
 
+/// `Reply::Failed`'s reason when the app took the request but did not
+/// answer before the port gave up waiting. The request may still be
+/// applied on a later frame, so a client reads this as a lost reply,
+/// not a refusal.
+pub const NO_ANSWER: &str = "the app did not answer in time";
+
 /// One request line. `body` is flattened beside `op`, so a line reads
 /// `{"op":"...","kind":"session.new",...}`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -257,6 +263,16 @@ pub enum Body {
     SessionResume { session: String },
     #[serde(rename = "workflow.continue")]
     WorkflowContinue { run: String },
+    /// The owner's objection to a converged or capped plan review: opens
+    /// round `round` (the run's round count plus one) with `text` as its
+    /// feedback, prompts the planner, then the reviewer re-reads. Starts
+    /// a paid planner turn, so it is never repeated by recovery.
+    #[serde(rename = "workflow.object")]
+    WorkflowObject {
+        run: String,
+        round: u32,
+        text: String,
+    },
 
     // --- queries
     #[serde(rename = "projects")]
@@ -339,7 +355,8 @@ impl Body {
             }
             | Self::SessionSend { .. }
             | Self::SessionResume { .. }
-            | Self::WorkflowContinue { .. } => Class::NonReplayable,
+            | Self::WorkflowContinue { .. }
+            | Self::WorkflowObject { .. } => Class::NonReplayable,
             Self::Projects { .. }
             | Self::Spaces
             | Self::Sets { .. }
@@ -736,6 +753,13 @@ impl Reply {
         }
     }
 
+    /// Whether this is the port's `NO_ANSWER` failure rather than an
+    /// answer from the app.
+    #[must_use]
+    pub fn is_no_answer(&self) -> bool {
+        matches!(self, Self::Failed { reason } if reason == NO_ANSWER)
+    }
+
     /// Parse one line as it arrives on the socket.
     pub fn parse(line: &str) -> Result<Self, String> {
         parse_line(line)
@@ -946,6 +970,11 @@ mod tests {
                 text: "hi".into(),
             },
             Body::WorkflowContinue { run: "r".into() },
+            Body::WorkflowObject {
+                run: "r".into(),
+                round: 2,
+                text: "no".into(),
+            },
             Body::Projects { space: None },
             Body::Spaces,
             Body::Sets { space: "sp".into() },
@@ -1045,6 +1074,20 @@ mod tests {
             .class(),
             Class::NonReplayable
         );
+        // An objection starts a paid planner turn, as a resume does.
+        let req = Request::parse(
+            r#"{"op":"q","kind":"workflow.object","run":"r","round":3,"text":"no"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            req.body,
+            Body::WorkflowObject {
+                run: "r".into(),
+                round: 3,
+                text: "no".into()
+            }
+        );
+        assert_eq!(req.body.class(), Class::NonReplayable);
     }
 
     #[test]

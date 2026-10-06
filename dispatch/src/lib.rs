@@ -83,6 +83,19 @@ impl std::fmt::Display for UsageError {
 
 impl std::error::Error for UsageError {}
 
+/// The first line of the feedback file Dispatch writes for the owner's
+/// objection to a finished plan review: for the agents and for anyone
+/// reading the file. Who wrote a round is read off the attempt's
+/// `revisions`, never off this line.
+pub const OWNER_ROUND_HEADING: &str = "# The owner's objection";
+
+/// Whether `answer` to decision `name` is refused without a note: the
+/// note is what the answer sends on.
+#[must_use]
+pub fn needs_note(name: &str, answer: &str) -> bool {
+    matches!((name, answer), ("finalize", "revise"))
+}
+
 /// The command line's usage, printed on a usage error (exit 64).
 pub const USAGE: &str = "usage:
   dispatch take <project> <issue-number>   make a ticket from an issue and queue it
@@ -90,7 +103,7 @@ pub const USAGE: &str = "usage:
                                            on <project>.pr.toml; the lane may be left off with one lane
   dispatch run [--once]                    drive every ticket (once, or until stopped)
   dispatch runner stop|start|restart       stop or start the runner the app runs; restart waits for the new pid
-  dispatch decide <ticket> <decision> <answer> [--note <text>]
+  dispatch decide <ticket> <decision> <answer> [--note <text> | --file <path>]
   dispatch decisions                       what waits on you
   dispatch status                          every ticket, its stage and state
   dispatch queue <project> [<ticket>...]   show, or reorder, a project's queue

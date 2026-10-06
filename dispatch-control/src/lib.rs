@@ -451,6 +451,12 @@ pub struct PlanRoundView {
     pub feedback: PathBuf,
     /// The response, when it exists.
     pub response: Option<PathBuf>,
+    /// Who opened the round with an objection to the finished review
+    /// (`you` or `supervisor`, Dispatch's `BY_HAND` and
+    /// `BY_SUPERVISOR`); none for the reviewer's own round. The ticket
+    /// page matches `supervisor` to title the round "owner, via the
+    /// supervisor" and reads any other value as the owner.
+    pub by: Option<String>,
 }
 
 /// A lane served for a stage, as Switchboard's service session.
@@ -765,6 +771,9 @@ pub struct DecisionView {
     pub answered_by: Option<String>,
     /// When it was answered.
     pub answered_ms: Option<u64>,
+    /// The options that are refused without a note; a client asks for
+    /// the note before it sends one of these.
+    pub needs_note: Vec<String>,
 }
 
 /// One socket line as a request or reply.

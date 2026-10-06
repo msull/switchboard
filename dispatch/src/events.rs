@@ -108,6 +108,9 @@ pub enum Kind {
     /// A secret artifact's file was deleted; the text names it and why,
     /// never what it held.
     Forgotten,
+    /// The owner's objection to a finished plan review was sent as its
+    /// next round.
+    Revised,
 }
 
 impl Kind {
@@ -140,6 +143,7 @@ impl Kind {
             Self::Restarted => "restarted",
             Self::Refused => "refused",
             Self::Forgotten => "forgotten",
+            Self::Revised => "revised",
         }
     }
 }
@@ -406,6 +410,7 @@ pub fn between(
             .find(|x| x.stage == a.stage && x.n == a.n);
         attempt_events(&mut out, new, a, before, at_ms);
     }
+    revision_events(&mut out, old, new, at_ms);
     for d in &new.decisions {
         let before = old.decisions.iter().find(|x| x.id == d.id);
         decision_events(&mut out, new, d, before, at_ms);
@@ -765,6 +770,43 @@ fn nudge_events(
             let text = format!("r{} nudge {}: the tree is not clean", round.n, k + 1);
             out.push(Event::of_attempt(t, at_ms, Kind::Nudged, a, text));
         }
+    }
+}
+
+/// One `revised` event per owner's objection whose send settled since
+/// `old` without a refusal: answered, or with its reply lost (the round
+/// may have started). The revision is on the attempt from the write
+/// before the send, so a refused objection, whose revision is popped,
+/// is never logged as one.
+fn revision_events(out: &mut Vec<Event>, old: &Ticket, new: &Ticket, at_ms: u64) {
+    let settled = |o: &crate::ticket::Operation| o.reply.is_some() || o.error.is_some();
+    for op in new
+        .ledger
+        .iter()
+        .filter(|o| o.intent == scheduler::REVISE && settled(o))
+    {
+        if old.ledger.iter().any(|o| o.op == op.op && settled(o))
+            || matches!(op.reply, Some(switchboard_control::Reply::Failed { .. }))
+        {
+            continue;
+        }
+        let Some(switchboard_control::Body::WorkflowObject { round, .. }) = &op.body else {
+            continue;
+        };
+        let Some((stage, n)) = &op.attempt else {
+            continue;
+        };
+        let Some(a) = new.attempts.iter().find(|a| &a.stage == stage && a.n == *n) else {
+            continue;
+        };
+        let Some(r) = a.revisions.iter().find(|r| r.round == *round) else {
+            continue;
+        };
+        let text = format!("r{}: the owner's objection, by {}", r.round, r.by);
+        out.push(Event {
+            actor: (r.by == scheduler::BY_SUPERVISOR).then(|| r.by.clone()),
+            ..Event::of_attempt(new, at_ms, Kind::Revised, a, text)
+        });
     }
 }
 
@@ -1783,6 +1825,65 @@ mod tests {
         assert_eq!(events[0].text, "nudge 1: the tree is not clean");
         assert_eq!(Kind::Nudged.as_str(), "nudged");
         assert!(between(Some(&nudged), &nudged, 5, &names).is_empty());
+    }
+
+    /// An objection is logged once its send settles without a refusal,
+    /// not when the revision is written ahead of it.
+    #[test]
+    fn an_owners_round_is_one_revised_event_once_its_send_settles() {
+        use switchboard_control::{Body, Reply};
+        let mut done = ticket();
+        let mut a = running("review", 1);
+        a.state = AttemptState::Complete;
+        done.attempts.push(a);
+        let object = |t: &Ticket, op: &str, round: u32, by: &str| {
+            let mut t = t.clone();
+            t.attempts[0].revisions.push(crate::ticket::Revision {
+                round,
+                by: by.into(),
+                at_ms: 7,
+            });
+            t.ledger.push(crate::ticket::Operation::new(
+                op.into(),
+                &Body::WorkflowObject {
+                    run: "run-1".into(),
+                    round,
+                    text: "no".into(),
+                },
+                Some(("review".into(), 1)),
+                scheduler::REVISE,
+                7,
+            ));
+            t
+        };
+        let settle = |t: &Ticket, reply: Option<Reply>, error: Option<&str>| {
+            let mut t = t.clone();
+            let op = t.ledger.last_mut().unwrap();
+            op.reply = reply;
+            op.error = error.map(str::to_owned);
+            t
+        };
+        let sent = object(&done, "op-1", 2, scheduler::BY_HAND);
+        assert!(between(Some(&done), &sent, 5, &names).is_empty());
+        let answered = settle(&sent, Some(Reply::Persisted { made: vec![] }), None);
+        let events = between(Some(&sent), &answered, 5, &names);
+        assert_eq!(kinds(Some(&sent), &answered), [Kind::Revised]);
+        assert_eq!(events[0].text, "r2: the owner's objection, by you");
+        assert_eq!(events[0].actor, None);
+        assert_eq!(Kind::Revised.as_str(), "revised");
+        assert!(between(Some(&answered), &answered, 5, &names).is_empty());
+        // Refused: the revision is popped in the same write.
+        let sent = object(&answered, "op-2", 3, scheduler::BY_SUPERVISOR);
+        let mut refused = settle(&sent, Some(Reply::failed("no")), None);
+        refused.attempts[0].revisions.pop();
+        assert!(between(Some(&sent), &refused, 5, &names).is_empty());
+        // Lost: the round may have started, and is logged.
+        let sent = object(&refused, "op-3", 3, scheduler::BY_SUPERVISOR);
+        let lost = settle(&sent, None, Some("the socket closed"));
+        let events = between(Some(&sent), &lost, 5, &names);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].text, "r3: the owner's objection, by supervisor");
+        assert_eq!(events[0].actor.as_deref(), Some(scheduler::BY_SUPERVISOR));
     }
 
     #[test]

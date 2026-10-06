@@ -31,7 +31,7 @@ dispatch take <project> <issue-number>           ticket from a GitHub issue
 dispatch take <project> pr [<remote>:]<lane>/<n>  ticket from someone else's pull request(s)
 dispatch status                                   every ticket: id, project, title, stage, state
 dispatch decisions                                what waits on the owner, with the exact answer command
-dispatch decide <ticket> <decision> <answer> [--note <text>]
+dispatch decide <ticket> <decision> <answer> [--note <text> | --file <path>]
 dispatch queue <project>                          the project's queue in order
 dispatch queue <project> <ticket>...              reorder it
 dispatch park <ticket> [--reason <text>]          a ticket's work stopped, its questions withdrawn
@@ -209,7 +209,9 @@ by this one before they ran again or the attempt was cancelled),
 `parking`,
 `parked`, `resumed`, `closing`, `closed`, `refused` (a supervisor's
 answer to a decision that is not its to answer), `forgotten` (a secret
-artifact's file deleted, with its name and why), and `void`. A take,
+artifact's file deleted, with its name and why), `revised` (the owner's
+objection to a finished plan review sent as its next round, by whom),
+and `void`. A take,
 park, resume, close or answer a supervisor session made carries
 `"actor":"supervisor"` and its text ends `(by supervisor)` or reads
 `by supervisor`. The human line is
@@ -329,7 +331,8 @@ kind of failure:
   report it, then `recheck` once told it is done.
 - `paused`, `review-code`, `review-cap`, `finalize`, `message`: only
   with the owner's say for that project. `message`'s `rewrite` spends an
-  agent run.
+  agent run. `finalize`'s `revise` spends a planner turn and a reviewer
+  turn, and its note is what the owner told you, not your own review.
 
 **Exit codes.** Every command exits 0 when it did what it says and 1
 with a reason when it was refused or failed. `wait` exits 2 when its
@@ -402,7 +405,7 @@ report them instead. The kinds you will see:
 | Decision | Options | What it means |
 |---|---|---|
 | `lanes` | lane names, comma-separated (`api,web`), or `park` | which repositories the ticket touches; multi-lane projects ask after the investigator's notes, single-lane ones pick their one lane |
-| `finalize` | `finalize`, `park` | the plan's review has converged; approve the plan for implementation |
+| `finalize` | `finalize`, `revise`, `park` | the plan's review has converged or hit its cap; approve the plan for implementation, or `revise --note "<objection>"` (or `--file <path>`) to send the owner's objection to the planner as the next round, after which the reviewer re-reads and `finalize` is asked again. `revise` without a note exits 64. `--file` refuses the ticket's secret artifacts; what the file holds is saved on the decision and sent to the planner, so it must hold nothing secret |
 | `paused` | `continue`, `park` | the plan review stopped before converging (a reviewer objected past its cap) |
 | `review-code` | `fix`, `accept`, `park` | code reviewers found points; start an implementer on them, take the branch as is, or stop |
 | `review-cap` | `accept`, `more`, `park` | the review rounds hit their cap with points still open; `more` is one more fix and review pass |
@@ -422,6 +425,7 @@ the decision still waits on the owner.
 dispatch decide 3e0dcacd d2 proceed
 dispatch decide 3e0dcacd d2 rerun --note "The grid still overflows at 50 rows; see the issue's second screenshot."
 dispatch decide 314cb7a1 d1 accept
+dispatch decide 3e0dcacd d4 revise --note "The owner says step 3 deletes data without a backup."
 ```
 
 An answer takes effect on the runner's next pass, within a second or
@@ -436,7 +440,9 @@ Two things never to do: park a ticket at `merge`, by answering its
 `merge` decision or by `dispatch park` (either abandons a PR that is
 about to land), and answer `finalize`, `review-code` or `review-cap`
 for a project you have not been told to approve plans or code on.
-Those spend money and change branches.
+Those spend money and change branches. `revise` on `finalize` spends a
+planner turn and a reviewer turn; send it only with an objection the
+owner gave you, in the note.
 
 ## Parking
 

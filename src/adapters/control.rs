@@ -10,7 +10,7 @@ use std::sync::{Arc, mpsc};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-use switchboard_control::{Reply, Request, SOCKET_FILE};
+use switchboard_control::{NO_ANSWER, Reply, Request, SOCKET_FILE};
 
 use crate::ports::control::{OpLine, Operations};
 
@@ -219,7 +219,7 @@ fn serve_connection(stream: UnixStream, tx: &mpsc::Sender<Incoming>, wake: &dyn 
                 wake();
                 match reply_rx.recv_timeout(ANSWER_TIMEOUT) {
                     Ok(reply) => reply,
-                    Err(_) => Reply::failed("the app did not answer in time"),
+                    Err(_) => Reply::failed(NO_ANSWER),
                 }
             }
         };

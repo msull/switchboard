@@ -50,11 +50,16 @@ pub struct FakeSwitchboard {
     pub resumable: Vec<String>,
     /// Sessions made by `session.clone`: source, clone.
     pub cloned: Vec<(String, String)>,
+    /// Objections taken with `workflow.object`: run, round, text.
+    pub objections: Vec<(String, u32, String)>,
     // --- knobs
     /// The next launch of this kind fails outright (no records).
     pub fail_next: Option<String>,
     /// Act and log the reply, then fail the socket: the reply was lost.
     pub drop_reply_for: Option<String>,
+    /// Act and log the reply, then answer the port's `NO_ANSWER`: the
+    /// app was too slow for the port's wait.
+    pub no_answer_for: Option<String>,
     /// The next session query is answered with this failure instead of
     /// the session (the app too busy to answer, say).
     pub fail_session_query: Option<String>,
@@ -460,6 +465,26 @@ impl FakeSwitchboard {
                 self.run_mut(run).state = RunState::AwaitingFeedback;
                 (vec![], false)
             }
+            // As the app's core: only a finished run, and only its next
+            // round.
+            Body::WorkflowObject { run, round, text } => {
+                let r = self.run_mut(run);
+                if !matches!(r.state, RunState::Converged | RunState::AtCap) {
+                    return Reply::failed(
+                        "the review must have converged or reached its cap before an objection",
+                    );
+                }
+                if *round != r.round + 1 {
+                    return Reply::failed(format!(
+                        "the objection names round {round}, but the next round is {}",
+                        r.round + 1
+                    ));
+                }
+                r.round = *round;
+                r.state = RunState::AwaitingResponse;
+                self.objections.push((run.clone(), *round, text.clone()));
+                (vec![], false)
+            }
             // As the app's port: a running pane is left alone, and only
             // a session with a transcript is resumed, never launched fresh.
             Body::SessionResume { session } => {
@@ -708,6 +733,10 @@ impl Port for SharedPort {
                 io::ErrorKind::ConnectionReset,
                 "the control socket closed before replying",
             ));
+        }
+        if sb.no_answer_for.as_deref() == Some(kind.as_str()) {
+            sb.no_answer_for = None;
+            return Ok(Reply::failed(switchboard_control::NO_ANSWER));
         }
         Ok(reply)
     }

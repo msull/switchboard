@@ -80,6 +80,7 @@ fn fresh_round(plan: &Path, n: u32) -> Round {
         snapshot: false,
         feedback_asked: None,
         response_asked: None,
+        objection: false,
     }
 }
 
@@ -127,6 +128,7 @@ pub fn round_status(run: &WorkflowRun, round: &Round) -> &'static str {
     let at_work = run.current().map(|r| r.n) == Some(round.n) && run.awaiting().is_some();
     match (round.user_feedback.is_some(), round.verdict, &run.state) {
         (_, _, RunState::AwaitingResponse) if at_work => "answering",
+        (true, _, _) if round.objection => "owner's objection",
         (true, _, _) => "your feedback",
         (false, Some(Verdict::Nothing), _) => "nothing further",
         (false, Some(Verdict::Changes), _) if round.responded => "answered",
@@ -161,6 +163,9 @@ impl AppCore {
             AppAction::CleanUpWorkflow(id) => self.clean_up(id, out),
             AppAction::HandOffWorkflow { run, mode } => self.hand_off(run, mode, now, out),
             AppAction::UserFeedback { run, text } => self.user_feedback(run, &text, now, out),
+            AppAction::ObjectWorkflow { run, round, text } => {
+                self.object_workflow(run, round, &text, now, out);
+            }
             AppAction::RemoveWorkflow(id) => self.remove_workflow(id, out),
             AppAction::SetWorkflowRoundCap(cap) => {
                 self.update_settings(out, |s| s.workflow_round_cap = cap.max(1));
@@ -605,7 +610,11 @@ impl AppCore {
                     }
                 });
                 Self::snapshot(&run, &round, out);
-                if round.user_feedback.is_some() {
+                if round.objection {
+                    // The owner objected to a finished review: the
+                    // reviewer reads the answer, whatever the cap.
+                    self.next_review_round(id, now, out);
+                } else if round.user_feedback.is_some() {
                     self.edit_run(id, now, out, |r| r.state = RunState::Converged);
                 } else if round.n >= run.cap {
                     self.edit_run(id, now, out, |r| r.state = RunState::AtCap);
@@ -876,6 +885,51 @@ impl AppCore {
         let round = Round {
             verdict: Some(Verdict::Changes),
             user_feedback: Some(text.to_owned()),
+            ..fresh_round(&run.plan, n)
+        };
+        let prompt = respond_prompt(&def, &round, &run.plan, run.cap);
+        self.edit_run(id, now, out, |r| {
+            r.rounds.push(round);
+            r.state = RunState::AwaitingResponse;
+        });
+        self.prompt_planner(id, &prompt, now, out);
+    }
+
+    /// The owner's objection to a converged or capped review, sent over
+    /// the control port: round `n` carries `text` to the planner, and
+    /// the reviewer re-reads once it answers. `n` must be the next
+    /// round, so the feedback file the sender wrote and the round
+    /// opened here have the same number.
+    fn object_workflow(&mut self, id: WorkflowId, n: u32, text: &str, now: Clock, out: &mut Out) {
+        let Some(run) = self.workflow(id).cloned() else {
+            self.error("no such review");
+            return;
+        };
+        if !matches!(run.state, RunState::Converged | RunState::AtCap) {
+            self.error("the review must have converged or reached its cap before an objection");
+            return;
+        }
+        if run.planner.is_none() {
+            self.error("the review has no planner to answer an objection");
+            return;
+        }
+        let text = text.trim();
+        if text.is_empty() {
+            self.error("an objection needs text");
+            return;
+        }
+        let next = round_count(&run) + 1;
+        if n != next {
+            self.error(format!(
+                "the objection names round {n}, but the next round is {next}"
+            ));
+            return;
+        }
+        let def = self.definition_of(&run);
+        let round = Round {
+            verdict: Some(Verdict::Changes),
+            user_feedback: Some(text.to_owned()),
+            objection: true,
             ..fresh_round(&run.plan, n)
         };
         let prompt = respond_prompt(&def, &round, &run.plan, run.cap);

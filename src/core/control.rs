@@ -110,6 +110,12 @@ pub enum ControlAction {
     },
     PauseWorkflow(WorkflowId),
     ContinueWorkflow(WorkflowId),
+    /// The owner's objection: round `round` of the run carries `text`.
+    ObjectWorkflow {
+        run: WorkflowId,
+        round: u32,
+        text: String,
+    },
     FinalizeWorkflow(WorkflowId),
     RemoveWorkflow(WorkflowId),
     /// Stop, start or restart the Dispatch runner the app runs.
@@ -399,6 +405,10 @@ impl AppCore {
             }
             ControlAction::ContinueWorkflow(id) => {
                 self.workflow_action(AppAction::ContinueWorkflow(id), now, out);
+                Vec::new()
+            }
+            ControlAction::ObjectWorkflow { run, round, text } => {
+                self.workflow_action(AppAction::ObjectWorkflow { run, round, text }, now, out);
                 Vec::new()
             }
             ControlAction::FinalizeWorkflow(id) => {
@@ -903,6 +913,7 @@ fn control_kind(action: &ControlAction) -> String {
         ControlAction::StartWorkflow { .. } => "workflow.start",
         ControlAction::PauseWorkflow(_) => "workflow.pause",
         ControlAction::ContinueWorkflow(_) => "workflow.continue",
+        ControlAction::ObjectWorkflow { .. } => "workflow.object",
         ControlAction::FinalizeWorkflow(_) => "workflow.finalize",
         ControlAction::RemoveWorkflow(_) => "workflow.remove",
         ControlAction::DispatchRunner(verb) => {
@@ -1116,6 +1127,15 @@ impl TryFrom<wire::Body> for ControlAction {
             },
             wire::Body::WorkflowPause { run: r } => Self::PauseWorkflow(run(&r)?),
             wire::Body::WorkflowContinue { run: r } => Self::ContinueWorkflow(run(&r)?),
+            wire::Body::WorkflowObject {
+                run: r,
+                round,
+                text,
+            } => Self::ObjectWorkflow {
+                run: run(&r)?,
+                round,
+                text,
+            },
             wire::Body::WorkflowFinalize { run: r } => Self::FinalizeWorkflow(run(&r)?),
             wire::Body::WorkflowRemove { run: r } => Self::RemoveWorkflow(run(&r)?),
             wire::Body::DispatchRunner { action } => Self::DispatchRunner(action),

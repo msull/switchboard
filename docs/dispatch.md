@@ -352,6 +352,9 @@ reviewer's process group as started, and an orphan kill's `reviewer`,
 the command reviewer it stopped (absent for the checks); both are absent
 in older records, so a command reviewer started before the upgrade and
 lost to a restart is failed with nothing killed.
+Version 19 adds an attempt's `revisions`, the plan review rounds the
+owner opened with a `revise` answer to `finalize`, each
+`{round, by, at_ms}`; empty in older records.
 
 A project's record (`projects/<project>.json`) holds, besides its
 space, set and queue, its supervisor (see "Supervisor"): `supervisor`
@@ -581,7 +584,7 @@ options go into that session's notes with `SetSessionNotes`. The
 answer is given with:
 
 ```
-dispatch decide <ticket> <decision> <answer> [--note ...]
+dispatch decide <ticket> <decision> <answer> [--note ... | --file <path>]
 ```
 
 and read back by the scheduler. `dispatch decisions` lists what is
@@ -2129,7 +2132,7 @@ differently:
   from the state itself: repeating one is harmless, so a lost reply
   is answered by sending it again.
 - *Non-replayable* (`session.send`, `session.resume`,
-  `workflow.continue`, and `dispatch.runner` with `restart`, which a
+  `workflow.continue`, `workflow.object`, and `dispatch.runner` with `restart`, which a
   repeat would stop a second time; its `stop` and `start` are
   idempotent): a repeat
   can spend money twice. A lost reply to one is not repeated; it is a
@@ -2198,6 +2201,9 @@ Commands:
   `workflow.start {source, plan, definition}` → `run` with its
   reviewer session, and the planner clone once made;
   `workflow.pause {run}`; `workflow.continue {run}`;
+  `workflow.object {run, round, text}` (the owner's objection to a
+  converged or capped run, as round `round`, which must be the run's
+  next; refused otherwise);
   `workflow.finalize {run}`; `workflow.remove {run}`
 - `dispatch.runner {action: stop|start|restart}`: the Dispatch page's
   runner buttons. `stop` turns autostart off and kills the app's runner
@@ -2551,6 +2557,7 @@ and one against the real one:
 | A human gate (`inspect`) after `implement` | One gate-only attempt and one decision per lane, naming the branch and head, what it adds over its base, the tree and the notes; `proceed` completes it bound to the head; `park` stops |
 | `rerun` with a note at `inspect` | That lane's `implement` result and the gate's attempt are cancelled, the ticket stands at `implement` again, a fresh implementer gets the note at the end of its prompt, other lanes are untouched, and `inspect` asks again on a new attempt when it is done |
 | `merge` with the PR open | A confirmation decision with only `park`, the session marked waiting; `merged` by hand is refused; the PR is read once a minute |
+| `revise --note` at `finalize` | `<stem>.feedback-<n>.md` is written beside the reviewed copy, headed `# The owner's objection`, and `workflow.object` sent for round n; a `revised` event once it is accepted; `finalize` is asked again naming the new round count; no note is exit 64 with the decision still pending; a refusal removes the file and the revision and asks again; a lost reply, or the app too slow to answer, is a `lost-send` question; a second `revise` of an unopened round replaces the first's revision (`revise_writes_the_owners_round_and_sends_it_as_an_objection`, `a_refused_objection_is_undone_and_finalize_is_asked_again`, `a_lost_objection_keeps_its_round_and_asks_about_the_send`, `an_objection_the_app_was_slow_to_answer_keeps_its_round`, `a_second_objection_to_an_unopened_round_replaces_the_first`) |
 | The user's own feedback round after the review converged | The pending `finalize` decision is cancelled and the session unmarked while the planner answers; when the run converges again a new decision names the new round count |
 | The PR conflicts with its base at `merge` | The policy's rebaser starts in the lane, cloned from the implementer's session, with the PR, the base and the notes path in its prompt; the merge decision stays; when it stops the gate reads the PR again and, merged, the ticket closes; the rebaser's attempt still records `conflicting`, which its completion line names as the rebaser's (`a_conflicting_pr_is_rebased_by_a_clone_of_the_implementer`; the log text in `a_remedys_completion_names_its_role_and_head`) |
 | The rebaser leaves the PR at the same head, or `max_rebases` is spent | A `pr` decision saying which; no further rebaser runs |
@@ -2702,10 +2709,23 @@ dial.
 5. **A reviewer operator is a full workflow definition**, installed
    into Switchboard under a `Dispatch: ` prefix on load. The planner
    is always Claude Code, because the workflow clones its transcript.
-6. **Reviewer objections are not intercepted.** The workflow already
+6. **The owner's objection is `revise` on `finalize`.** The workflow
    loops planner and reviewer; the human's interception point is the
-   `finalize` decision, which shows the rounds. A structured objection
-   channel would be a new workflow mechanism and is not designed here.
+   `finalize` decision, which shows the rounds. Answering it `revise`
+   with a note (or `--file`) makes Dispatch write the note as the next
+   round's feedback file beside the reviewed copy, headed `# The
+   owner's objection`, record the round on the attempt's `revisions`,
+   and send `workflow.object {run, round, text}`. The planner answers
+   it, the reviewer re-reads the response, and `finalize` is asked
+   again when the run converges or caps. A refusal removes the file and
+   the revision, and the next pass asks `finalize` afresh; a lost reply,
+   or the port's "the app did not answer in time" (the app still has
+   the request), keeps both and is a `lost-send` question. A second
+   `revise` of a round no send opened replaces its file and revision,
+   so the round names who answered last. Plan rounds are listed
+   from the directory, so a round from the app's notes box, which
+   writes no file, leaves a gap rather than hiding the rounds after
+   it.
 7. **Confirmation gates have no dial.** Merge, publish and tried are
    verified where a provider can say so and otherwise answered by you.
 8. **One workspace per project, not per ticket.** Reason: working sets

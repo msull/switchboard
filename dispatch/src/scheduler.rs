@@ -70,6 +70,8 @@ pub const NUDGE_TEXT: &str = "The stage is not done: the tree is not clean. Comm
 /// The ledger intent of a nudge. Recorded on the attempt before it is
 /// sent, so recovery neither repeats it nor asks about it.
 pub(crate) const NUDGE: &str = "nudge";
+/// The ledger intent of `workflow.object`, the owner's objection.
+pub(crate) const REVISE: &str = "revise";
 
 /// Everything the runner acts through.
 pub struct Runner {
@@ -370,6 +372,9 @@ pub const BY_RESUME: &str = "resume";
 /// Who answered, parked, resumed, closed or took when the command came
 /// from a project's supervisor session.
 pub const BY_SUPERVISOR: &str = "supervisor";
+
+/// The largest note `dispatch decide --file` reads, in bytes.
+pub const NOTE_FILE_MAX: u64 = 64 * 1024;
 
 /// Every decision Dispatch asks of its own accord, by name, beside the
 /// ones a pipeline's gates name. A supervisor's `decides` may list
@@ -2873,6 +2878,10 @@ impl Runner {
                         };
                         self.send(t, ps, attempt.clone(), &answer, body, now_ms)?;
                     }
+                    self.unmark(t, ps, now_ms)?;
+                }
+                ("finalize", "revise") => {
+                    self.revise(t, ps, p, i, attempt.as_ref(), now_ms)?;
                     self.unmark(t, ps, now_ms)?;
                 }
                 ("rerun", "check") => {
@@ -6049,6 +6058,101 @@ impl Runner {
         self.unmark(t, ps, now_ms)
     }
 
+    /// A `revise` answer to `finalize`: the owner's note becomes the
+    /// next round's feedback file beside the reviewed copy, and
+    /// `workflow.object` opens that round, for the planner to answer and
+    /// the reviewer to re-read. A run no longer finished is left alone;
+    /// the next poll asks `finalize` again if it finishes. A refusal
+    /// pops the revision (in `apply_reply`) and the file goes with it,
+    /// so the next poll asks afresh. A lost reply keeps both: the round
+    /// may have started, and recovery asks about the send. The port's
+    /// `NO_ANSWER` is a lost reply too, since the app still has the
+    /// request. A revision of a round whose earlier send never opened it
+    /// is replaced, so each round has one, naming who answered last.
+    fn revise(
+        &mut self,
+        t: &mut Ticket,
+        ps: &mut ProjectState,
+        p: &Pipeline,
+        decision: usize,
+        attempt: Option<&(String, u32)>,
+        now_ms: u64,
+    ) -> Result<()> {
+        let DecisionState::Answered { note, by, .. } = &t.decisions[decision].state else {
+            return Ok(());
+        };
+        let (text, by) = (note.clone().unwrap_or_default(), by.clone());
+        let Some((stage, number)) = attempt.cloned() else {
+            return Ok(());
+        };
+        let Some(review) = find_attempt(t, &stage, number) else {
+            return Ok(());
+        };
+        let subject = p
+            .stages
+            .iter()
+            .find(|s| s.name == stage)
+            .and_then(|s| s.subject.as_ref())
+            .and_then(|name| review.artifacts.get(name))
+            .cloned();
+        let (Some(run), Some(subject)) = (review.run.clone(), subject) else {
+            log::warn!(
+                "ticket {} {stage}/{number}: revise has no review run or reviewed copy",
+                t.id
+            );
+            return Ok(());
+        };
+        let view = match self.ask(Body::Workflow { run: run.clone() })? {
+            Reply::Workflow { run } => run,
+            other => {
+                log::warn!(
+                    "ticket {} {stage}/{number}: revise: the run could not be read ({other:?})",
+                    t.id
+                );
+                return Ok(());
+            }
+        };
+        if !matches!(view.state, RunState::Converged | RunState::AtCap) {
+            log::warn!(
+                "ticket {} {stage}/{number}: revise: the review is no longer finished",
+                t.id
+            );
+            return Ok(());
+        }
+        let round = view.round + 1;
+        let file = crate::report::round_file(&subject, round);
+        let body = format!("{}\n\n{}\n", crate::OWNER_ROUND_HEADING, text.trim_end());
+        crate::store::atomic_write(&file, body.as_bytes())?;
+        if let Some(review) = find_attempt_mut(t, &stage, number) {
+            review.revisions.retain(|r| r.round != round);
+            review.revisions.push(crate::ticket::Revision {
+                round,
+                by,
+                at_ms: now_ms,
+            });
+        }
+        let reply = self.send(
+            t,
+            ps,
+            Some((stage.clone(), number)),
+            REVISE,
+            Body::WorkflowObject { run, round, text },
+            now_ms,
+        )?;
+        if let Reply::Failed { reason } = &reply
+            && !reply.is_no_answer()
+        {
+            log::warn!(
+                "ticket {} {stage}/{number}: Switchboard refused round {round}: {reason}",
+                t.id
+            );
+            if let Err(e) = std::fs::remove_file(&file) {
+                log::warn!("{}: {e}", file.display());
+            }
+        }
+        Ok(())
+    }
+
     /// The reviewer has nothing further, or the rounds ran out: the
     /// finalize decision, or finalized outright when the dial says so.
     #[allow(clippy::too_many_arguments)]
@@ -6094,9 +6198,10 @@ impl Runner {
                 name: "finalize",
                 kind: DecisionKind::Permission,
                 question: format!(
-                    "The review of {subject} {how}. The reviewed copy is {copy}. Finalize it?"
+                    "The review of {subject} {how}. The reviewed copy is {copy}. \
+                     Finalize it, or revise with --note?"
                 ),
-                options: &["finalize", "park"],
+                options: &["finalize", "revise", "park"],
                 recommendation: Some("finalize".into()),
                 attempt: Some((a.stage.clone(), a.n)),
             },
@@ -6493,6 +6598,13 @@ impl Runner {
             if !d.options.iter().any(|o| o == answer) && d.name != "lanes" {
                 bail!("decision {decision} takes one of: {}", d.options.join(", "));
             }
+            // Refused before anything is written, so the decision still
+            // waits.
+            if crate::needs_note(&d.name, answer) && note.is_none_or(|n| n.trim().is_empty()) {
+                return Err(
+                    UsageError(format!("{answer} takes --note <text> or --file <path>")).into(),
+                );
+            }
             // A supervisor answers only what the live table lets it; a
             // refusal is saved on the decision, which still waits.
             if by == BY_SUPERVISOR
@@ -6526,6 +6638,31 @@ impl Runner {
 }
 
 impl Runner {
+    /// The note of `dispatch decide --file <path>`: the file's text,
+    /// unless it is one of the ticket's secret artifacts, which Dispatch
+    /// never reads, or longer than `NOTE_FILE_MAX`. Both are a
+    /// `UsageError`.
+    pub fn note_from_file(&self, ticket: &str, path: &Path) -> Result<String> {
+        let t = read_ticket(&self.data.ticket_file(ticket))?;
+        let file = path
+            .canonicalize()
+            .with_context(|| format!("read {}", path.display()))?;
+        if let Some(name) = t.secret_at(&file) {
+            return Err(UsageError(format!("{name} is secret; Dispatch never reads it")).into());
+        }
+        let len = std::fs::metadata(&file)
+            .with_context(|| format!("read {}", file.display()))?
+            .len();
+        if len > NOTE_FILE_MAX {
+            return Err(UsageError(format!(
+                "{} is {len} bytes; a note file holds at most {NOTE_FILE_MAX}",
+                path.display()
+            ))
+            .into());
+        }
+        std::fs::read_to_string(&file).with_context(|| format!("read {}", file.display()))
+    }
+
     /// `dispatch park`: the parking intent written by command, with every
     /// open decision withdrawn in the same write, as a `park` answer's
     /// first write does. The runner's next pass cancels the open
@@ -8186,6 +8323,7 @@ pub(crate) fn new_attempt(
         orphans_killed: Vec::new(),
         secret: BTreeSet::new(),
         forgotten: BTreeMap::new(),
+        revisions: Vec::new(),
         settle: BTreeMap::new(),
         stop_at_ms: None,
         polls_since_stop: 0,
@@ -8884,6 +9022,30 @@ pub fn apply_reply(t: &mut Ticket, ps: &mut ProjectState, intent: &str, reply: &
                 for m in made.iter().filter(|m| m.kind == wire::RecordKind::Session) {
                     t.processes.push(m.id.clone());
                 }
+            }
+        }
+        // A refused objection opened no round: the revision pushed
+        // before the send goes, in the same write as the failure. The
+        // port's `NO_ANSWER` is no refusal: the app may still open the
+        // round, so the reply is written down as lost, for recovery to
+        // ask about.
+        REVISE => {
+            if !matches!(reply, Reply::Failed { .. }) {
+                return;
+            }
+            let Some(op) = t.ledger.iter_mut().rev().find(|o| o.intent == intent) else {
+                return;
+            };
+            if reply.is_no_answer() {
+                op.reply = None;
+                op.error = Some(wire::NO_ANSWER.to_owned());
+                return;
+            }
+            let Some((stage, n)) = op.attempt.clone() else {
+                return;
+            };
+            if let Some(attempt) = find_attempt_mut(t, &stage, n) {
+                attempt.revisions.pop();
             }
         }
         other => {
