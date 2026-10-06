@@ -1956,7 +1956,10 @@ A ticket's page is a header (title, actions, the meta row with the
 lanes and the latest attempt's pull request as chips), the ticket's
 pending decisions pinned under it on every tab, and a strip of tabs.
 The chosen tab per ticket is `UiState.dispatch_ticket_tabs`, transient;
-a tab click dispatches nothing.
+a tab click dispatches nothing. The meta row wraps by whole items: a
+chip or the PR link that does not fit moves to the next row rather than
+breaking inside, and the header and pinned decisions sit outside the
+tab body's scroll.
 
 - **Timeline**: `AppCore::ticket_timeline` groups rows newest first,
   a new group each time the stage changes. The rows are the runner's

@@ -98,6 +98,10 @@ pub fn ticket(cx: &mut DrawCtx<'_>, ui: &mut Ui, id: &str) {
     }
     let tab = tab_strip(cx, ui, &t.id);
     let now = now_ms();
+    // The header stays put so the pending decisions and the tabs are
+    // always in view. Its meta row wraps by whole items, so the header
+    // alone stays short; several long pending decisions under it can
+    // still push the tabs down on a short window.
     egui::ScrollArea::vertical()
         .id_salt(("ticket-tab", tab))
         .auto_shrink([false, false])
@@ -712,12 +716,17 @@ fn ticket_header(cx: &mut DrawCtx<'_>, ui: &mut Ui, t: &TicketView) {
         if let Some(pr) = t.attempts.iter().rev().find_map(|a| a.pr.as_ref())
             && pr.number > 0
         {
-            ui.hyperlink_to(
-                RichText::new(format!("PR #{} · {}", pr.number, pr.checks))
-                    .text_style(theme::meta())
-                    .color(p.accent_text),
-                &pr.url,
-            );
+            // On one line, so it moves to the next row whole rather
+            // than breaking between its words.
+            ui.scope(|ui| {
+                ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
+                ui.hyperlink_to(
+                    RichText::new(format!("PR #{} · {}", pr.number, pr.checks))
+                        .text_style(theme::meta())
+                        .color(p.accent_text),
+                    &pr.url,
+                );
+            });
         }
     });
     holds_and_services(ui, t);
@@ -755,16 +764,36 @@ fn holds_and_services(ui: &mut Ui, t: &TicketView) {
     });
 }
 
-/// A small framed label on the meta row.
+/// A small framed label on one line, for a lane on the meta row or an
+/// issue's label from the tracker on the Issue tab. It is measured and
+/// its size asked of the layout before it is drawn, because a Frame
+/// takes whatever is left of a wrapping row and never moves to the next
+/// one itself, so a chip at a full row's end would break letter by
+/// letter. A chip wider than a whole row, such as an unusually long
+/// tracker label, is clipped rather than broken.
 fn chip(ui: &mut Ui, text: &str, color: egui::Color32) -> egui::Response {
-    egui::Frame::new()
+    let frame = egui::Frame::new()
         .stroke(egui::Stroke::new(1.0, theme::palette(ui).n600))
         .corner_radius(4)
-        .inner_margin(egui::Margin::symmetric(5, 1))
-        .show(ui, |ui| {
-            ui.label(RichText::new(text).text_style(theme::meta()).color(color))
-        })
-        .inner
+        .inner_margin(egui::Margin::symmetric(5, 1));
+    let rich = RichText::new(text).text_style(theme::meta()).color(color);
+    let galley = egui::WidgetText::from(rich.clone()).into_galley(
+        ui,
+        Some(egui::TextWrapMode::Extend),
+        f32::INFINITY,
+        theme::meta(),
+    );
+    // The total margin counts the stroke as well as the inner margin;
+    // the frame takes both out of the space it is given.
+    let size = galley.size() + frame.total_margin().sum();
+    ui.allocate_ui(size, |ui| {
+        frame
+            .show(ui, |ui| {
+                ui.add(egui::Label::new(rich).wrap_mode(egui::TextWrapMode::Extend))
+            })
+            .inner
+    })
+    .inner
 }
 
 /// Resume and Close, in the header's right-to-left row, where the

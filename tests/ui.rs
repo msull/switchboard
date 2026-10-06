@@ -185,12 +185,18 @@ fn harness_build(
 
 /// A seeded harness on these services.
 fn harness_on(services: Services) -> (Harness<'static, SwitchboardApp>, Seeded) {
-    let mut harness = Harness::builder()
-        .with_size(egui::vec2(1200.0, 900.0))
-        .build_eframe(move |cc| {
-            switchboard::ui::theme::install(&cc.egui_ctx);
-            test_app(services)
-        });
+    harness_sized(services, egui::vec2(1200.0, 900.0))
+}
+
+/// `harness_on` with a window of `size`.
+fn harness_sized(
+    services: Services,
+    size: egui::Vec2,
+) -> (Harness<'static, SwitchboardApp>, Seeded) {
+    let mut harness = Harness::builder().with_size(size).build_eframe(move |cc| {
+        switchboard::ui::theme::install(&cc.egui_ctx);
+        test_app(services)
+    });
     let ids = seed(harness.state_mut());
     harness.run_steps(2);
     (harness, ids)
@@ -4499,13 +4505,32 @@ fn ticket_page(
     ticket_page_on(FakeDispatch::default(), Changes::default(), edit)
 }
 
-/// `ticket_page` against a runner that answers with the same status,
-/// with `dispatch`'s events and paths, and a branch with `changes`. The
-/// page's first reads and their replies are cleared before a test
-/// looks; it asks again only when the ticket's `updated_ms` changes.
+/// `ticket_page_built` in the default 1200×900 window.
 fn ticket_page_on(
+    dispatch: FakeDispatch,
+    changes: Changes,
+    edit: impl FnOnce(&mut switchboard::ports::dispatch::TicketView),
+) -> Harness<'static, SwitchboardApp> {
+    ticket_page_built(dispatch, changes, egui::vec2(1200.0, 900.0), edit)
+}
+
+/// `ticket_page` in a window of `size`.
+fn ticket_page_sized(
+    size: egui::Vec2,
+    edit: impl FnOnce(&mut switchboard::ports::dispatch::TicketView),
+) -> Harness<'static, SwitchboardApp> {
+    ticket_page_built(FakeDispatch::default(), Changes::default(), size, edit)
+}
+
+/// `ticket_page` against a runner that answers with the same status,
+/// with `dispatch`'s events and paths, and a branch with `changes`, in a
+/// window of `size`. The page's first reads and their replies are
+/// cleared before a test looks; it asks again only when the ticket's
+/// `updated_ms` changes.
+fn ticket_page_built(
     mut dispatch: FakeDispatch,
     changes: Changes,
+    size: egui::Vec2,
     edit: impl FnOnce(&mut switchboard::ports::dispatch::TicketView),
 ) -> Harness<'static, SwitchboardApp> {
     let mut status = dispatch_status();
@@ -4522,7 +4547,7 @@ fn ticket_page_on(
             FakeHost::default(),
         )
     };
-    let (mut harness, _) = harness_on(services);
+    let (mut harness, _) = harness_sized(services, size);
     harness
         .state_mut()
         .dispatch(AppAction::DispatchStatus(Some(status)));
@@ -5542,6 +5567,72 @@ fn ticket_page_shows_commits_kept_by_hand() {
         .dispatch(AppAction::ShowTicket("t1".into()));
     harness.run_steps(2);
     harness.get_by_label("commits kept: the user kept them after the rewrite failed");
+}
+
+/// A lane chip that does not fit at the end of a full meta row moves
+/// whole to the next row instead of breaking letter by letter, so the
+/// header stays short and the tabs stay in the window.
+#[test]
+fn ticket_page_lane_chip_wraps_whole_on_a_full_meta_row() {
+    use switchboard::ports::dispatch::LaneView;
+    let width = 520.0;
+    let height = 900.0;
+    let harness = ticket_page_sized(egui::vec2(width, height), |t| {
+        t.stages = [
+            "intake",
+            "triage",
+            "plan",
+            "review",
+            "finalize",
+            "implement",
+            "check",
+            "audit",
+            "rework",
+            "verify",
+            "publish",
+            "merge",
+            "close",
+        ]
+        .map(String::from)
+        .to_vec();
+        t.stage = 6;
+        t.tree = Some("/Users/someone/.dispatch/worktrees/0123456789abcdef".into());
+        t.lanes = vec![
+            LaneView {
+                name: "backend".into(),
+                worktree: "/wt/t1/backend".into(),
+                chosen: true,
+                ..LaneView::default()
+            },
+            LaneView {
+                name: "documentation".into(),
+                worktree: "/wt/t1/documentation".into(),
+                chosen: false,
+                ..LaneView::default()
+            },
+        ];
+    });
+    let line = harness.get_by_label("intake").rect();
+    let text = "documentation (not chosen)";
+    let chip = harness.get_by_label(text).rect();
+    let font = switchboard::ui::theme::meta().resolve(&harness.ctx.global_style());
+    let one_line = harness.ctx.fonts_mut(|f| {
+        f.layout_no_wrap(text.into(), font, egui::Color32::WHITE)
+            .size()
+    });
+    assert!(
+        chip.width() >= one_line.x - 0.5 && chip.height() <= one_line.y + 0.5,
+        "the chip's label is on one line: {chip:?} against {one_line:?}"
+    );
+    assert!(chip.top() > line.bottom(), "it moved to a later row");
+    assert!(chip.right() <= width, "it is inside the window: {chip:?}");
+    for tab in ["Timeline", "Issue", "Plan", "Notes", "Review", "Changes"] {
+        let rect = harness.get_by_label(tab).rect();
+        assert!(
+            rect.bottom() <= height,
+            "the {tab} tab is in the window: {rect:?}"
+        );
+    }
 }
 
 #[test]
