@@ -175,6 +175,12 @@ pub enum Body {
     WorkflowFinalize { run: String },
     #[serde(rename = "workflow.remove")]
     WorkflowRemove { run: String },
+    /// Stop, start or restart the Dispatch runner the app runs, as the
+    /// overview's buttons do. A restart keeps the runner's autostart on
+    /// throughout, so an app that dies between the kill and the start
+    /// still brings the runner back.
+    #[serde(rename = "dispatch.runner")]
+    DispatchRunner { action: RunnerVerb },
 
     // --- commands: non-replayable
     #[serde(rename = "session.send")]
@@ -247,8 +253,15 @@ impl Body {
             | Self::DefinitionInstall { .. }
             | Self::WorkflowPause { .. }
             | Self::WorkflowFinalize { .. }
-            | Self::WorkflowRemove { .. } => Class::Idempotent,
-            Self::SessionSend { .. }
+            | Self::WorkflowRemove { .. }
+            | Self::DispatchRunner {
+                action: RunnerVerb::Stop | RunnerVerb::Start,
+            } => Class::Idempotent,
+            // A repeat would stop a second runner.
+            Self::DispatchRunner {
+                action: RunnerVerb::Restart,
+            }
+            | Self::SessionSend { .. }
             | Self::SessionResume { .. }
             | Self::WorkflowContinue { .. } => Class::NonReplayable,
             Self::Projects { .. }
@@ -277,6 +290,27 @@ impl Body {
             .ok()
             .and_then(|v| v.get("kind")?.as_str().map(str::to_owned))
             .unwrap_or_default()
+    }
+}
+
+/// What `dispatch.runner` asks of the Dispatch runner.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum RunnerVerb {
+    Stop,
+    Start,
+    Restart,
+}
+
+impl RunnerVerb {
+    /// The word on the command line and in the request's `action`.
+    #[must_use]
+    pub fn word(self) -> &'static str {
+        match self {
+            Self::Stop => "stop",
+            Self::Start => "start",
+            Self::Restart => "restart",
+        }
     }
 }
 
@@ -844,6 +878,28 @@ mod tests {
             }
             .class(),
             Class::NonReplayable
+        );
+    }
+
+    #[test]
+    fn a_runner_line_round_trips_for_each_verb_and_only_a_restart_is_non_replayable() {
+        for (verb, class) in [
+            (RunnerVerb::Stop, Class::Idempotent),
+            (RunnerVerb::Start, Class::Idempotent),
+            (RunnerVerb::Restart, Class::NonReplayable),
+        ] {
+            let body = Body::DispatchRunner { action: verb };
+            assert_eq!(body.kind(), "dispatch.runner");
+            assert_eq!(body.class(), class);
+            round_trip_request(body);
+        }
+        let req =
+            Request::parse(r#"{"op":"r","kind":"dispatch.runner","action":"restart"}"#).unwrap();
+        assert_eq!(
+            req.body,
+            Body::DispatchRunner {
+                action: RunnerVerb::Restart
+            }
         );
     }
 

@@ -106,6 +106,8 @@ pub enum ControlAction {
     ContinueWorkflow(WorkflowId),
     FinalizeWorkflow(WorkflowId),
     RemoveWorkflow(WorkflowId),
+    /// Stop, start or restart the Dispatch runner the app runs.
+    DispatchRunner(wire::RunnerVerb),
 }
 
 /// What one control command did: the records it made and the error it
@@ -367,6 +369,44 @@ impl AppCore {
                 self.workflow_action(AppAction::RemoveWorkflow(id), now, out);
                 Vec::new()
             }
+            ControlAction::DispatchRunner(verb) => {
+                self.control_runner(verb, now, out);
+                Vec::new()
+            }
+        }
+    }
+
+    /// The runner's buttons, asked for over the port. A stop with
+    /// nothing to stop succeeds, since that is already the state asked
+    /// for; a restart kills without turning autostart off, so the record
+    /// says the runner comes back however the app ends.
+    fn control_runner(&mut self, verb: wire::RunnerVerb, now: Clock, out: &mut Out) {
+        use super::dispatch::{RUNNER_STOP_OUTSIDE, RunnerStanding};
+        use wire::RunnerVerb;
+        let standing = self.runner_standing();
+        match (verb, standing) {
+            (RunnerVerb::Stop, RunnerStanding::Outside) => self.error(RUNNER_STOP_OUTSIDE),
+            (
+                RunnerVerb::Stop,
+                RunnerStanding::Up { .. } | RunnerStanding::Starting | RunnerStanding::StartQueued,
+            ) => self.runner_stop(now, out),
+            (RunnerVerb::Stop, RunnerStanding::Stopping) => {}
+            (RunnerVerb::Stop, RunnerStanding::Stopped | RunnerStanding::Gone) => {
+                if let Some(id) = self
+                    .runner()
+                    .filter(|id| self.session(*id).is_some_and(|s| s.autostart))
+                {
+                    self.edit_session(id, out, |s| s.autostart = false);
+                }
+            }
+            (
+                RunnerVerb::Restart,
+                RunnerStanding::Up { .. } | RunnerStanding::Starting | RunnerStanding::StartQueued,
+            ) => {
+                self.runner_kill(now, out);
+                self.runner_start(now, out);
+            }
+            (RunnerVerb::Start | RunnerVerb::Restart, _) => self.runner_start(now, out),
         }
     }
 
@@ -673,6 +713,9 @@ fn control_kind(action: &ControlAction) -> String {
         ControlAction::ContinueWorkflow(_) => "workflow.continue",
         ControlAction::FinalizeWorkflow(_) => "workflow.finalize",
         ControlAction::RemoveWorkflow(_) => "workflow.remove",
+        ControlAction::DispatchRunner(verb) => {
+            return format!("dispatch.runner.{}", verb.word());
+        }
     }
     .to_owned()
 }
@@ -854,6 +897,7 @@ impl TryFrom<wire::Body> for ControlAction {
             wire::Body::WorkflowContinue { run: r } => Self::ContinueWorkflow(run(&r)?),
             wire::Body::WorkflowFinalize { run: r } => Self::FinalizeWorkflow(run(&r)?),
             wire::Body::WorkflowRemove { run: r } => Self::RemoveWorkflow(run(&r)?),
+            wire::Body::DispatchRunner { action } => Self::DispatchRunner(action),
             other => return Err(format!("{} is a query, not a command", other.kind())),
         })
     }

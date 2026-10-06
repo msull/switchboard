@@ -144,6 +144,7 @@ pub fn seed(
     for name in &sup.decides {
         let _ = writeln!(out, "- `{name}`: {}", decision_words(name));
     }
+    let runner = sup.may.iter().any(|m| m == "runner");
     let _ = write!(
         out,
         "\nEvery other decision is the owner's: say so and move on. Tell the owner they \
@@ -151,8 +152,13 @@ pub fn seed(
          line included, runs as you and is refused the same way, so never suggest it, and \
          never change your environment to get round the rule. A `merge` question is \
          answered `park` only: Dispatch resolves it when the provider reports the merge. \
-         You may not restart a ticket, move the worktrees, run the runner, resume with \
+         You may not restart a ticket, move the worktrees, {run_the_runner}, resume with \
          reruns unless `rerun` is yours, or replace yourself.\n\n",
+        run_the_runner = if runner {
+            "start a runner with `dispatch run`"
+        } else {
+            "run the runner"
+        },
     );
     out.push_str(if sup.merges {
         "## Pull requests\n\nThe pull request itself is yours to merge: once Dispatch logs \
@@ -167,6 +173,17 @@ pub fn seed(
          `pr-checks passed`, read the pull request's body and commit message, say to the \
          owner that it is green and whether the body is clean, and stop: the owner merges.\n\n"
     });
+    if runner {
+        let _ = write!(
+            out,
+            "## The runner\n\nAfter you merge a change that touches `dispatch/`, pull main, \
+             rebundle as the guidance says, run `{exe_text} runner restart`, then \
+             `{exe_text} health`, and tell the owner the new pid. A restart refused because a \
+             deploy is running is retried when that stage ends, never forced. If `runner \
+             start` or `restart` fails, report it to the owner; never run `dispatch run` \
+             yourself.\n\n",
+        );
+    }
     out.push_str("## Commands\n\n");
     out.push_str(&GUIDE_ESSENTIALS.replace("{exe}", &exe_text));
     out
@@ -337,6 +354,8 @@ pub enum Rule {
     Worktrees,
     /// `supervisor`: the plain read only.
     Supervisor,
+    /// `runner`: only when the table's `may` lists `runner`.
+    Runner,
 }
 
 /// Every verb and what a supervisor may do with it. A verb not here is
@@ -350,6 +369,7 @@ pub const SUPERVISOR_VERBS: &[(&str, Rule)] = &[
     ("resume", Rule::Resume),
     ("restart", Rule::Refused),
     ("run", Rule::Refused),
+    ("runner", Rule::Runner),
     ("worktrees", Rule::Worktrees),
     ("supervisor", Rule::Supervisor),
     ("decisions", Rule::Allowed),
@@ -388,6 +408,56 @@ pub fn decides(data: &DataDir, project: &str) -> Vec<String> {
         .map(|s| s.decides)
         .unwrap_or_default()
 }
+
+/// The capabilities a project's live `[supervisor]` table gives its
+/// supervisor beyond decisions; empty without one.
+#[must_use]
+pub fn may(data: &DataDir, project: &str) -> Vec<String> {
+    live_pipeline(data, project)
+        .ok()
+        .and_then(|p| p.supervisor)
+        .map(|s| s.may)
+        .unwrap_or_default()
+}
+
+/// Every capability a `[supervisor]` table's `may` can name.
+pub const CAPABILITIES: &[&str] = &["runner"];
+
+/// A command refused because the supervisor's table does not give it
+/// the capability. Unlike the other refusals it is saved on the
+/// project's record, so the owner sees it was tried.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CapabilityRefused {
+    /// The supervisor's project.
+    pub project: String,
+    /// The capability the command needs, which is also its verb after
+    /// `dispatch`: `runner`.
+    pub capability: String,
+    /// What the command asks of it: `restart`.
+    pub action: String,
+}
+
+impl CapabilityRefused {
+    /// The command as typed after `dispatch`: `runner restart`.
+    #[must_use]
+    pub fn command(&self) -> String {
+        format!("{} {}", self.capability, self.action)
+    }
+}
+
+impl std::fmt::Display for CapabilityRefused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "the supervisor may not run `dispatch {}` unless its table's `may` lists `{}`; \
+             the owner does",
+            self.command(),
+            self.capability
+        )
+    }
+}
+
+impl std::error::Error for CapabilityRefused {}
 
 /// The project's live pipeline, read and parsed.
 pub fn live_pipeline(data: &DataDir, project: &str) -> Result<Pipeline> {
@@ -441,6 +511,21 @@ pub fn permit(actor: &Actor, args: &[&str], data: &DataDir) -> Result<()> {
                 bail!("the supervisor may not resume with reruns; `--no-rerun`, or the owner does")
             }
         }
+        Some(Rule::Runner) => match args {
+            [capability, action @ ("stop" | "start" | "restart")]
+                if !may(data, own).iter().any(|m| m == capability) =>
+            {
+                Err(CapabilityRefused {
+                    project: own.clone(),
+                    capability: (*capability).to_owned(),
+                    action: (*action).to_owned(),
+                }
+                .into())
+            }
+            // Anything else is allowed or a usage error, which the
+            // command reports without a refusal to save.
+            _ => Ok(()),
+        },
         Some(Rule::Worktrees) if args.len() == 1 => Ok(()),
         Some(Rule::Supervisor) if args.len() == 2 => Ok(()),
         Some(Rule::Worktrees | Rule::Supervisor) => Err(refused(&args.join(" "))),
@@ -907,7 +992,77 @@ mod tests {
             model: Some("haiku".into()),
             decides: vec!["finalize".into(), "rerun".into()],
             merges: false,
+            may: Vec::new(),
         }
+    }
+
+    fn seed_of(sup: &Supervisor) -> String {
+        seed(
+            "orchard",
+            sup,
+            Path::new("/opt/bin/dispatch"),
+            Path::new("/data/projects/orchard/supervisor/handoff.md"),
+            Path::new("/trees/supervisor-orchard"),
+        )
+    }
+
+    #[test]
+    fn a_supervisor_that_may_use_the_runner_is_told_to_restart_it_after_a_merge() {
+        let mut sup = table();
+        let before = seed_of(&sup);
+        assert!(before.contains("run the runner"));
+        assert!(!before.contains("## The runner"));
+        // A table that never had the key reads the same as one with it empty.
+        let parsed: Supervisor = toml::from_str(&toml::to_string(&sup).unwrap()).unwrap();
+        assert_eq!(seed_of(&parsed), before);
+        assert_eq!(seed_hash("orchard", &parsed), seed_hash("orchard", &sup));
+        sup.may = vec!["runner".into()];
+        let s = seed_of(&sup);
+        assert!(s.contains("`/opt/bin/dispatch runner restart`"), "{s}");
+        assert!(s.contains("start a runner with `dispatch run`"), "{s}");
+        assert!(!s.contains("run the runner"), "{s}");
+        assert!(s.find("## The runner") < s.find("## Commands"));
+        assert_ne!(seed_hash("orchard", &sup), seed_hash("orchard", &table()));
+    }
+
+    #[test]
+    fn the_runner_is_refused_to_a_supervisor_unless_its_table_says_may() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = DataDir::new(dir.path());
+        let write = |may: &str| {
+            let text = format!(
+                "version = 1\n\n[project]\nname = \"orchard\"\nroot = \"/r\"\n\
+                 space = \"Dispatch\"\n\n[source]\nkind = \"github\"\nrepo = \"o/r\"\n\
+                 label = \"dispatch\"\n\n[[lanes]]\nname = \"repo\"\npath = \".\"\n\n\
+                 [[stages]]\nname = \"inspect\"\n\
+                 gate = {{ kind = \"human\", decision = \"inspect\" }}\n\n\
+                 [supervisor]\nguidance = \"g\"\n{may}\n"
+            );
+            std::fs::create_dir_all(dir.path().join("pipelines")).unwrap();
+            std::fs::write(data.pipeline("orchard"), text).unwrap();
+        };
+        let sup = Actor::Supervisor("orchard".into());
+        let args = ["runner", "restart"];
+        write("");
+        let e = permit(&sup, &args, &data).unwrap_err();
+        let refused = e
+            .downcast_ref::<CapabilityRefused>()
+            .expect("a capability refusal");
+        assert_eq!(refused.command(), "runner restart");
+        assert_eq!(
+            e.to_string(),
+            "the supervisor may not run `dispatch runner restart` unless its table's `may` \
+             lists `runner`; the owner does"
+        );
+        // A malformed command is left to the usage error, never saved.
+        permit(&sup, &["runner"], &data).unwrap();
+        permit(&sup, &["runner", "bogus"], &data).unwrap();
+        permit(&Actor::Owner, &args, &data).unwrap();
+        write("may = [\"runner\"]");
+        assert_eq!(may(&data, "orchard"), ["runner"]);
+        permit(&sup, &args, &data).unwrap();
+        // `dispatch run` stays the owner's whatever the table says.
+        assert!(permit(&sup, &["run"], &data).is_err());
     }
 
     #[test]

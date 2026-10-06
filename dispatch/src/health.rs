@@ -19,6 +19,11 @@ pub const RUNNER_FILE: &str = "runner.json";
 
 /// How long a failure stays listed.
 pub const FAILURE_KEEP_MS: u64 = 3_600_000;
+/// How long `check` waits for each socket unless told otherwise.
+pub const CHECK_TIMEOUT: Duration = Duration::from_secs(2);
+/// How long an open attempt may go unstepped before `check` calls it
+/// stale, unless told otherwise.
+pub const STALE_MS: u64 = 30_000;
 
 /// One call that failed: when, for which ticket, and the error's text
 /// (never a request body).
@@ -215,7 +220,8 @@ pub struct Checked {
 
 /// Whether process `pid` is alive, by `ps`: std has no signal call, and
 /// the crate allows no `unsafe`.
-fn alive(pid: u32) -> bool {
+#[must_use]
+pub fn alive(pid: u32) -> bool {
     std::process::Command::new("ps")
         .args(["-p", &pid.to_string()])
         .stdout(std::process::Stdio::null())

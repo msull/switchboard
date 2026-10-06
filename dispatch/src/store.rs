@@ -23,7 +23,7 @@ use crate::ticket::{ProjectState, Ticket};
 /// carried a version reads as 0 and is brought up by `migrate`. A
 /// record above it was written by a newer `dispatch` and is refused
 /// both ways, so this build never drops fields it does not know.
-pub const RECORD_VERSION: u32 = 16;
+pub const RECORD_VERSION: u32 = 17;
 
 /// A lock file held while this lives: the writer lock, the runner's
 /// claim, or a ticket's close.
@@ -534,6 +534,11 @@ pub fn migrate(mut value: Value) -> Value {
         // serde default. Nothing is transformed; a build that would drop
         // it on its next write must refuse the record, or a restart would
         // lose how long the wait on a lost command has run.
+        //
+        // 16 to 17: a project's supervision gains `refusals`, empty from
+        // its serde default. Nothing is transformed; a build that would
+        // drop it on its next write must refuse the record, or a refused
+        // runner command would be forgotten.
         if version == 1 {
             settle_from_verdicts(&mut value);
         }

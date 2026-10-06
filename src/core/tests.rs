@@ -6438,7 +6438,7 @@ mod dispatch_page {
     use super::*;
     use crate::core::dispatch::{
         ArtifactRead, CONSOLE_NAME, CONSOLE_SPACE, RUNNER_NAME, RUNNER_NO_COMMAND, RUNNER_OUTSIDE,
-        RUNNER_STILL_ANSWERS, RunnerStanding, RunnerStop,
+        RUNNER_STILL_ANSWERS, RUNNER_STOP_OUTSIDE, RunnerStanding, RunnerStop,
     };
     use crate::ports::dispatch::{
         AttemptView, Body, DecisionView, EventView, EventsView, ProjectView, Reply, Status,
@@ -7049,6 +7049,161 @@ mod dispatch_page {
         let e = core.dispatch(AppAction::DispatchStatus(None), Clock::at(5000));
         assert_eq!(spawns(&e, id), 0);
         assert!(!core.session(id).unwrap().autostart);
+    }
+
+    fn control_runner(
+        core: &mut AppCore,
+        verb: switchboard_control::RunnerVerb,
+        at: u64,
+    ) -> (Vec<Effect>, Option<String>) {
+        let op = format!("op-{at}");
+        let e = core.dispatch(
+            AppAction::Control {
+                op: op.clone(),
+                action: crate::core::ControlAction::DispatchRunner(verb),
+            },
+            Clock::at(at),
+        );
+        let outcome = core.take_control_outcome(&op).expect("an outcome");
+        (e, outcome.error)
+    }
+
+    fn kills(effects: &[Effect]) -> usize {
+        effects
+            .iter()
+            .filter(|e| matches!(e, Effect::Kill(_)))
+            .count()
+    }
+
+    /// The runner's record as every save in `effects` holds it.
+    fn saved_autostart(effects: &[Effect], id: RecordId) -> Vec<bool> {
+        effects
+            .iter()
+            .filter_map(|e| match e {
+                Effect::Save(ws) => ws.sessions.iter().find(|s| s.id == id),
+                _ => None,
+            })
+            .map(|s| s.autostart)
+            .collect()
+    }
+
+    #[test]
+    fn a_control_restart_kills_once_and_starts_after_the_old_runner_lets_go() {
+        use switchboard_control::RunnerVerb;
+        let (mut core, _) = loaded(vec![], vec![]);
+        configured(&mut core, "/opt/sb/dispatch");
+        let id = runner_up(&mut core);
+        core.dispatch(AppAction::DispatchStatus(Some(status(None))), Clock::at(5));
+        let (e, error) = control_runner(&mut core, RunnerVerb::Restart, 1000);
+        assert_eq!(error, None);
+        assert_eq!(kills(&e), 1);
+        assert_eq!(spawns(&e, id), 0, "the old runner may still hold the lock");
+        assert_eq!(core.runner_standing(), RunnerStanding::StartQueued);
+        let saved = saved_autostart(&e, id);
+        assert!(!saved.is_empty() && saved.iter().all(|a| *a), "{saved:?}");
+        assert!(core.session(id).unwrap().autostart);
+        assert!(core.notice().is_none());
+        let e = core.dispatch(AppAction::DispatchStatus(None), Clock::at(4100));
+        assert_eq!(spawns(&e, id), 1);
+        assert!(saved_autostart(&e, id).iter().all(|a| *a));
+    }
+
+    #[test]
+    fn a_control_stop_or_start_does_what_the_buttons_do() {
+        use switchboard_control::RunnerVerb;
+        let pair = |verb: RunnerVerb, button: AppAction| {
+            let (mut by_port, _) = loaded(vec![], vec![]);
+            configured(&mut by_port, "/opt/sb/dispatch");
+            let (mut by_button, _) = loaded(vec![], vec![]);
+            configured(&mut by_button, "/opt/sb/dispatch");
+            runner_up(&mut by_port);
+            runner_up(&mut by_button);
+            let (port, error) = control_runner(&mut by_port, verb, 1000);
+            assert_eq!(error, None);
+            let button = by_button.dispatch(button, Clock::at(1000));
+            // Each core made its own runner, so the effects are compared
+            // by kind and by what the runner's saved record says.
+            let kinds = |e: &[Effect]| -> Vec<String> {
+                e.iter()
+                    .map(|e| {
+                        let text = format!("{e:?}");
+                        text.split(['(', ' ']).next().unwrap_or_default().to_owned()
+                    })
+                    .collect()
+            };
+            assert_eq!(kinds(&port), kinds(&button), "{verb:?}");
+            assert_eq!(
+                saved_autostart(&port, by_port.runner().unwrap()),
+                saved_autostart(&button, by_button.runner().unwrap()),
+                "{verb:?}"
+            );
+            assert_eq!(
+                by_port.runner_standing(),
+                by_button.runner_standing(),
+                "{verb:?}"
+            );
+        };
+        pair(RunnerVerb::Stop, AppAction::DispatchRunnerStop);
+        pair(RunnerVerb::Start, AppAction::DispatchRunnerStart);
+    }
+
+    #[test]
+    fn a_control_stop_with_nothing_to_stop_succeeds_and_kills_nothing() {
+        use switchboard_control::RunnerVerb;
+        let (mut core, _) = loaded(vec![], vec![]);
+        configured(&mut core, "/opt/sb/dispatch");
+        let (e, error) = control_runner(&mut core, RunnerVerb::Stop, 2);
+        assert_eq!((kills(&e), error), (0, None), "no runner record");
+
+        let id = runner_up(&mut core);
+        let (e, error) = control_runner(&mut core, RunnerVerb::Stop, 1000);
+        assert_eq!((kills(&e), error), (1, None));
+        assert_eq!(core.runner_standing(), RunnerStanding::Stopping);
+        let (e, error) = control_runner(&mut core, RunnerVerb::Stop, 1100);
+        assert_eq!(
+            (kills(&e), error),
+            (0, None),
+            "a second stop while stopping"
+        );
+
+        // Stopped, with the record still saying it comes back.
+        core.dispatch(AppAction::DispatchStatus(None), Clock::at(5000));
+        assert_eq!(core.runner_standing(), RunnerStanding::Stopped);
+        core.edit_session(id, &mut super::super::action::Out::default(), |s| {
+            s.autostart = true;
+        });
+        let (e, error) = control_runner(&mut core, RunnerVerb::Stop, 6000);
+        assert_eq!((kills(&e), error), (0, None));
+        assert_eq!(saved_autostart(&e, id), vec![false]);
+        assert!(!core.session(id).unwrap().autostart);
+    }
+
+    #[test]
+    fn a_control_stop_or_restart_of_a_runner_outside_the_app_is_an_error() {
+        use switchboard_control::RunnerVerb;
+        let (mut core, _) = loaded(vec![], vec![]);
+        configured(&mut core, "/opt/sb/dispatch");
+        core.dispatch(AppAction::DispatchStatus(Some(status(None))), Clock::at(2));
+        let (e, error) = control_runner(&mut core, RunnerVerb::Stop, 3);
+        assert_eq!(error.as_deref(), Some(RUNNER_STOP_OUTSIDE));
+        assert_eq!(kills(&e), 0);
+        let (e, error) = control_runner(&mut core, RunnerVerb::Restart, 4);
+        assert_eq!(error.as_deref(), Some(RUNNER_OUTSIDE));
+        assert_eq!(kills(&e), 0);
+        assert!(!e.iter().any(|e| matches!(e, Effect::Spawn { .. })));
+        assert!(core.notice().is_none());
+    }
+
+    #[test]
+    fn a_control_restart_with_nothing_running_starts_at_once() {
+        use switchboard_control::RunnerVerb;
+        let (mut core, _) = loaded(vec![], vec![]);
+        configured(&mut core, "/opt/sb/dispatch");
+        let (e, error) = control_runner(&mut core, RunnerVerb::Restart, 2);
+        assert_eq!(error, None);
+        let id = core.runner().expect("a runner was made");
+        assert_eq!(spawns(&e, id), 1);
+        assert_eq!(kills(&e), 0);
     }
 
     #[test]

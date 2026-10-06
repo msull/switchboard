@@ -401,6 +401,10 @@ pub(crate) const RUNNER_NO_COMMAND: &str =
     "no `dispatch` beside this app: build it with `cargo build -p dispatch`, or run the bundle";
 /// Why Start is refused while a runner the app did not start answers.
 pub(crate) const RUNNER_OUTSIDE: &str = "a runner outside the app is already up; stop it first";
+/// Why a Stop over the control port is refused: the app cannot stop a
+/// runner it did not start.
+pub(crate) const RUNNER_STOP_OUTSIDE: &str =
+    "a runner outside the app is up; stop it where it runs";
 /// Why a Start queued behind a Stop is dropped while a runner still
 /// answers: the port cannot tell the killed runner, slow to exit, from
 /// one the app did not start.
@@ -1510,7 +1514,7 @@ impl AppCore {
     /// Start: the runner made if need be, marked to come back on the
     /// next app start, and launched unless its pane runs, an old one
     /// is still letting go, or a runner the app did not start answers.
-    fn runner_start(&mut self, now: Clock, out: &mut Out) {
+    pub(super) fn runner_start(&mut self, now: Clock, out: &mut Out) {
         if let Some(why) = self.runner_refusal() {
             self.error(why);
             return;
@@ -1535,11 +1539,21 @@ impl AppCore {
     /// Stop: no relaunch on the next app start, the open run closed as
     /// killed, and the pane killed and forgotten so the page sees it
     /// gone at once. A pane killed is tracked until it lets go.
-    fn runner_stop(&mut self, now: Clock, out: &mut Out) {
+    pub(super) fn runner_stop(&mut self, now: Clock, out: &mut Out) {
         let Some(id) = self.runner() else {
             return;
         };
         self.edit_session(id, out, |s| s.autostart = false);
+        self.runner_kill(now, out);
+    }
+
+    /// The kill half of Stop, with the record's autostart left as it
+    /// is: a restart kills this way, so an app that dies before the new
+    /// runner starts still brings it back on its next start.
+    pub(super) fn runner_kill(&mut self, now: Clock, out: &mut Out) {
+        let Some(id) = self.runner() else {
+            return;
+        };
         if self
             .session(id)
             .and_then(|s| s.last_run())
