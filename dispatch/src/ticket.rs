@@ -578,6 +578,12 @@ pub struct ReviewerRun {
     #[serde(default)]
     pub settle: Option<Settle>,
     pub result: Option<ReviewerResult>,
+    /// A command reviewer's process group as started, so a runner that
+    /// restarts while it runs can stop it before the round fails.
+    /// Cleared when a later runner finds the group gone; never read
+    /// once `result` is set.
+    #[serde(default)]
+    pub group: Option<CheckGroup>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -617,8 +623,9 @@ pub struct GateRun {
     pub lost_since_ms: Option<u64>,
 }
 
-/// A check's process group as started, so a later runner can tell
-/// whether what it finds under the id is the same group.
+/// A check's or command reviewer's process group as started, so a
+/// later runner can tell whether what it finds under the id is the
+/// same group.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CheckGroup {
     /// The group id, which is the leader's pid.
@@ -644,6 +651,10 @@ pub struct OrphanKill {
     /// across restarts while the leader lives, before the group gets
     /// SIGKILL.
     pub at_ms: u64,
+    /// The command reviewer the group ran, by name; `None` is the
+    /// checks. A reviewer's `head` is its round's.
+    #[serde(default)]
+    pub reviewer: Option<String>,
 }
 
 /// A pull request as a gate last read it: which one, where, the head

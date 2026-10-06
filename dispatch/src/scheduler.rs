@@ -19,7 +19,7 @@ use crate::github::{Checks, Gh, PullRequests, github_repo};
 use crate::health::Health;
 use crate::pipeline::{Context, Gate, Lane, OnDirty, Pipeline, Stage, StageKind, Write, env_key};
 use crate::port::Port;
-use crate::review::checks_key;
+use crate::review::{checks_key, find_reviewer_mut, reviewer_key};
 use crate::services::{push_stuck, stuck_answer, stuck_pending, withdraw_stuck};
 use crate::store::{
     DataDir, Lock, Settings, expand_home, read_project, read_ticket, shell_unsafe, write_project,
@@ -110,8 +110,9 @@ pub struct Runner {
     pub(crate) held_back: BTreeMap<String, String>,
 }
 
-/// Where a stop of an attempt's checks stands: a park's, a close's, or
-/// one before lost checks start again.
+/// Where a stop of an attempt's checks or command reviewers stands: a
+/// park's, a close's, a failed round's, or one before lost checks start
+/// again or a lost reviewer fails.
 pub(crate) enum GateStop {
     /// Nothing of the checks is left, or none were running.
     Gone,
@@ -120,6 +121,56 @@ pub(crate) enum GateStop {
     /// Still running at the limit, so stepped up to SIGKILL: the clause
     /// the cancellation reason carries.
     OverLimit(String),
+}
+
+impl GateStop {
+    /// Two stops of one pass as one: waiting if either waits, otherwise
+    /// every over-limit clause.
+    pub(crate) fn and(self, other: GateStop) -> GateStop {
+        match (self, other) {
+            (GateStop::Waiting, _) | (_, GateStop::Waiting) => GateStop::Waiting,
+            (GateStop::OverLimit(a), GateStop::OverLimit(b)) => {
+                GateStop::OverLimit(format!("{a}; {b}"))
+            }
+            (GateStop::OverLimit(s), GateStop::Gone) | (GateStop::Gone, GateStop::OverLimit(s)) => {
+                GateStop::OverLimit(s)
+            }
+            (GateStop::Gone, GateStop::Gone) => GateStop::Gone,
+        }
+    }
+}
+
+/// Whose process group a stop is after.
+#[derive(Clone, Copy)]
+pub(crate) enum Owner<'a> {
+    /// The attempt's checks, or its review round's.
+    Checks,
+    /// A command reviewer of the attempt.
+    Reviewer {
+        /// The reviewer's round: a command reviewer has the same name
+        /// in every round, so this tells its record apart.
+        round: u32,
+        /// The reviewer's name in the stage's `reviewers`.
+        name: &'a str,
+    },
+}
+
+impl<'a> Owner<'a> {
+    /// What logs call it.
+    fn what(self, key: &str) -> String {
+        match self {
+            Owner::Checks => format!("checks {key}"),
+            Owner::Reviewer { name, .. } => format!("reviewer {name} {key}"),
+        }
+    }
+
+    /// The `OrphanKill::reviewer` it records: `None` is the checks.
+    fn reviewer(self) -> Option<&'a str> {
+        match self {
+            Owner::Checks => None,
+            Owner::Reviewer { name, .. } => Some(name),
+        }
+    }
 }
 
 /// The contexts a stage runs in: `(name, cwd, lane)`.
@@ -2115,10 +2166,14 @@ impl Runner {
         if !self.retire_processes(t, ps, &mine, now_ms)? {
             return Ok(false);
         }
-        // Before the command reviewers: this is the call that sends the
-        // checks' TERM and starts the clock, and a repeated kill of the
-        // same key below sends nothing.
-        let reason = match self.stop_gate(t, a, now_ms)? {
+        // Before `kill_review_commands`: these are the calls that send
+        // the TERMs and start the clocks, and a repeated kill of the same
+        // key below sends nothing. Both in one pass, so an orphaned
+        // reviewer gets its TERM and its clock while the checks are
+        // still being waited on.
+        let gate = self.stop_gate(t, a, now_ms)?;
+        let reviewers = self.stop_review_commands(t, a, now_ms)?;
+        let reason = match gate.and(reviewers) {
             GateStop::Gone => reason.to_owned(),
             GateStop::Waiting => return Ok(false),
             GateStop::OverLimit(s) => format!("{reason}; {s}"),
@@ -2155,7 +2210,9 @@ impl Runner {
         let mut waiting = false;
         let mut cancelled = false;
         for a in &open {
-            let cancelled_reason = match self.stop_gate(t, a, now_ms)? {
+            let gate = self.stop_gate(t, a, now_ms)?;
+            let reviewers = self.stop_review_commands(t, a, now_ms)?;
+            let cancelled_reason = match gate.and(reviewers) {
                 GateStop::Gone => format!("the ticket closed: {reason}"),
                 GateStop::Waiting => {
                     waiting = true;
@@ -2202,47 +2259,123 @@ impl Runner {
             Some(round) => checks_key(t, &(a.stage.clone(), a.n), round.n),
             None => gate_key(t, a),
         };
-        let started = if let Some(&started) = self.stopping.get(&key) {
+        let (group, head) = (gate.group.clone(), gate.head.clone());
+        self.stop_child(t, a, &key, group.as_ref(), &head, Owner::Checks, now_ms)
+    }
+
+    /// Every command reviewer of the attempt that may still run stopped
+    /// as `stop_gate` stops checks, by its recorded group when a
+    /// previous runner left it running. Each gets its TERM and its clock
+    /// in the same pass; waiting while any one still runs.
+    pub(crate) fn stop_review_commands(
+        &mut self,
+        t: &mut Ticket,
+        a: &Attempt,
+        now_ms: u64,
+    ) -> Result<GateStop> {
+        let key = (a.stage.clone(), a.n);
+        let mut waiting = false;
+        let mut over = Vec::new();
+        for round in &a.rounds {
+            for r in &round.reviewers {
+                if r.kind != "command" || !r.launched || r.result.is_some() {
+                    continue;
+                }
+                let check_key = reviewer_key(t, &key, round.n, &r.name);
+                let owner = Owner::Reviewer {
+                    round: round.n,
+                    name: &r.name,
+                };
+                match self.stop_child(
+                    t,
+                    a,
+                    &check_key,
+                    r.group.as_ref(),
+                    &round.head,
+                    owner,
+                    now_ms,
+                )? {
+                    GateStop::Gone => {}
+                    GateStop::Waiting => waiting = true,
+                    GateStop::OverLimit(s) => over.push(s),
+                }
+            }
+        }
+        Ok(if waiting {
+            GateStop::Waiting
+        } else if over.is_empty() {
+            GateStop::Gone
+        } else {
+            GateStop::OverLimit(over.join("; "))
+        })
+    }
+
+    /// One check or command reviewer stopped by `key` and read back:
+    /// killed if this runner started it, adopted by its recorded group
+    /// if a previous runner did, and given SIGKILL past `STOP_LIMIT_MS`
+    /// from the first kill.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn stop_child(
+        &mut self,
+        t: &mut Ticket,
+        a: &Attempt,
+        key: &str,
+        group: Option<&CheckGroup>,
+        head: &str,
+        owner: Owner<'_>,
+        now_ms: u64,
+    ) -> Result<GateStop> {
+        let started = if let Some(&started) = self.stopping.get(key) {
             started
         } else {
-            let adopted = match &gate.group {
-                Some(group) => self.adopt_orphan(t, a, &key, group, &gate.head, now_ms)?,
+            let adopted = match group {
+                Some(group) => self.adopt_orphan(t, a, key, group, head, owner, now_ms)?,
                 None => None,
             };
             let started = adopted.unwrap_or_else(|| {
-                self.git.kill_check(&key);
+                self.git.kill_check(key);
                 now_ms
             });
-            self.stopping.insert(key.clone(), started);
+            self.stopping.insert(key.to_owned(), started);
             started
         };
-        if self.git.check_gone(&key) {
-            self.stopping.remove(&key);
+        if self.git.check_gone(key) {
+            self.stopping.remove(key);
             return Ok(GateStop::Gone);
         }
         if now_ms.saturating_sub(started) >= STOP_LIMIT_MS {
-            self.git.escalate_check(&key);
-            self.stopping.remove(&key);
+            self.git.escalate_check(key);
+            self.stopping.remove(key);
             log::warn!(
-                "ticket {}: checks {key} still running {}s after the kill; sent SIGKILL",
+                "ticket {}: {} still running {}s after the kill; sent SIGKILL",
                 t.id,
+                owner.what(key),
                 STOP_LIMIT_MS / 1000
             );
-            return Ok(GateStop::OverLimit(format!(
-                "its checks ({key}) were still running after {}s",
-                STOP_LIMIT_MS / 1000
-            )));
+            let clause = match owner {
+                Owner::Checks => format!(
+                    "its checks ({key}) were still running after {}s",
+                    STOP_LIMIT_MS / 1000
+                ),
+                Owner::Reviewer { name, .. } => format!(
+                    "its reviewer {name} ({key}) was still running after {}s",
+                    STOP_LIMIT_MS / 1000
+                ),
+            };
+            return Ok(GateStop::OverLimit(clause));
         }
         Ok(GateStop::Waiting)
     }
 
-    /// The gate's recorded group looked up after a restart: cleared from
-    /// the record if nothing of ours is left under it, or killed and
-    /// recorded as an orphan if it still runs. The time of the group's
-    /// first kill when it was killed, so the limit counts from it across
-    /// restarts while the leader lives; a leader that died of the TERM
-    /// reads as gone and its members are left. A group under a reused id
-    /// gets its own entry and the full limit.
+    /// A check's or command reviewer's recorded group looked up after a
+    /// restart: cleared from the record if nothing of ours is left under
+    /// it, or killed and recorded as an orphan if it still runs. The time
+    /// of the group's first kill when it was killed, so the limit counts
+    /// from it across restarts. A leaderless group is killed again only
+    /// while that first kill is younger than the limit, which vouches for
+    /// it; otherwise it reads as gone and its members are left. A group
+    /// under a reused id gets its own entry and the full limit.
+    #[allow(clippy::too_many_arguments)]
     fn adopt_orphan(
         &mut self,
         t: &mut Ticket,
@@ -2250,39 +2383,55 @@ impl Runner {
         key: &str,
         group: &CheckGroup,
         head: &str,
+        owner: Owner<'_>,
         now_ms: u64,
     ) -> Result<Option<u64>> {
-        match self.git.adopt_check(key, group) {
+        let first = find_attempt(t, &a.stage, a.n).and_then(|attempt| {
+            attempt
+                .orphans_killed
+                .iter()
+                .find(|o| o.pgid == group.pgid && o.leader_started == group.leader_started)
+                .map(|o| o.at_ms)
+        });
+        let vouched = first.is_some_and(|at| now_ms.saturating_sub(at) < STOP_LIMIT_MS);
+        match self.git.adopt_check(key, group, vouched) {
             Adopted::Known => Ok(None),
             Adopted::Gone => {
-                if let Some(attempt) = find_attempt_mut(t, &a.stage, a.n)
-                    && let Some(run) = &mut attempt.gate
-                {
-                    run.group = None;
+                match owner {
+                    Owner::Checks => {
+                        if let Some(attempt) = find_attempt_mut(t, &a.stage, a.n)
+                            && let Some(run) = &mut attempt.gate
+                        {
+                            run.group = None;
+                        }
+                    }
+                    Owner::Reviewer { round, name } => {
+                        let key = (a.stage.clone(), a.n);
+                        if let Some(r) = find_reviewer_mut(t, &key, round, name) {
+                            r.group = None;
+                        }
+                    }
                 }
                 self.save_ticket(t, now_ms)?;
                 Ok(None)
             }
             Adopted::Killed => {
                 log::info!(
-                    "ticket {}: checks {key} left running by a previous runner (group {}); waiting for them to stop",
+                    "ticket {}: {} left running by a previous runner (group {}); waiting for it to stop",
                     t.id,
+                    owner.what(key),
                     group.pgid
                 );
                 let Some(attempt) = find_attempt_mut(t, &a.stage, a.n) else {
                     return Ok(Some(now_ms));
                 };
-                let first = attempt
-                    .orphans_killed
-                    .iter()
-                    .find(|o| o.pgid == group.pgid && o.leader_started == group.leader_started)
-                    .map(|o| o.at_ms);
                 if first.is_none() {
                     attempt.orphans_killed.push(OrphanKill {
                         pgid: group.pgid,
                         leader_started: group.leader_started.clone(),
                         head: head.to_owned(),
                         at_ms: now_ms,
+                        reviewer: owner.reviewer().map(str::to_owned),
                     });
                 }
                 self.save_ticket(t, now_ms)?;

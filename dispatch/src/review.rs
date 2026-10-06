@@ -17,11 +17,11 @@ use crate::events::{names_list, short};
 use crate::history::{self, Commits};
 use crate::pipeline::{Gate, OperatorKind, Pipeline, Stage};
 use crate::scheduler::{
-    Ask, DirtyStep, GateStop, NO_SUCH_SESSION, RESOLUTION, Runner, SocketDown, asks_again, busy,
-    checks_env, confine_for, dirty_step, env_for, find_attempt, find_attempt_mut, gate_network,
-    guidance_prelude, held_in, idle_polls, lane_gate_argv, lane_plan, latest_attempt, may_rerun,
-    new_attempt, next_n, primary_tree, record_of, rework_key, sent_back, session_kind, settle_file,
-    stopped_after_nudges, vars_for,
+    Ask, DirtyStep, GateStop, NO_SUCH_SESSION, Owner, RESOLUTION, Runner, SocketDown, asks_again,
+    busy, checks_env, confine_for, dirty_step, env_for, find_attempt, find_attempt_mut,
+    gate_network, guidance_prelude, held_in, idle_polls, lane_gate_argv, lane_plan, latest_attempt,
+    may_rerun, new_attempt, next_n, primary_tree, record_of, rework_key, sent_back, session_kind,
+    settle_file, stopped_after_nudges, vars_for,
 };
 use crate::template::Vars;
 use crate::ticket::{
@@ -321,6 +321,7 @@ impl Runner {
                 polls_since_stop: 0,
                 settle: None,
                 result: None,
+                group: None,
             });
         }
         log::info!(
@@ -432,6 +433,8 @@ impl Runner {
                         .start_reviewer(&check_key, &dir, &op.argv, &env, &r.feedback, &stderr)
                 }
             };
+            // Recorded so a restarted runner can stop it before a rerun.
+            reviewer_mut(t, key, round_n, name).group = self.git.check_group(&check_key);
             if let Err(e) = started {
                 reviewer_mut(t, key, round_n, name).result = Some(ReviewerResult::Failed {
                     reason: format!("could not start: {e:#}"),
@@ -725,12 +728,19 @@ impl Runner {
         now_ms: u64,
     ) -> Result<()> {
         let key = (a.stage.clone(), a.n);
+        // Once a reviewer failed, its siblings are the round stop's: it
+        // retires their sessions and kills their commands, so a poll
+        // would fail them for that, as exited or lost to a restart.
+        let failing = round
+            .reviewers
+            .iter()
+            .any(|r| matches!(r.result, Some(ReviewerResult::Failed { .. })));
         for r in &round.reviewers {
-            if r.result.is_some() {
+            if failing || r.result.is_some() {
                 continue;
             }
             if r.kind == "command" {
-                self.poll_command_reviewer(t, &key, round.n, r);
+                self.poll_command_reviewer(t, a, &key, round, r, now_ms)?;
             } else {
                 self.poll_agent_reviewer(t, ps, &key, round.n, r, now_ms)?;
             }
@@ -866,10 +876,20 @@ impl Runner {
                 .filter(|r| r.result.is_none())
                 .filter_map(|r| r.session.clone())
                 .collect();
-            if !self.retire_processes(t, ps, &others, now_ms)? {
+            let retired = self.retire_processes(t, ps, &others, now_ms)?;
+            // In the same pass as the sessions, so an orphaned sibling
+            // gets its TERM and its clock while they are retired.
+            let a = record_of(t, &key.0, key.1).clone();
+            let gate = self.stop_gate(t, &a, now_ms)?;
+            let reviewers = self.stop_review_commands(t, &a, now_ms)?;
+            let over = match gate.and(reviewers) {
+                GateStop::Waiting => return Ok(false),
+                GateStop::Gone => None,
+                GateStop::OverLimit(s) => Some(s),
+            };
+            if !retired {
                 return Ok(false);
             }
-            let a = record_of(t, &key.0, key.1).clone();
             self.kill_review_commands(t, &a);
             set_round_state(
                 t,
@@ -880,7 +900,10 @@ impl Runner {
                 },
                 now_ms,
             );
-            let reason = format!("round {}: reviewer {}", round.n, failed.join("; reviewer "));
+            let mut reason = format!("round {}: reviewer {}", round.n, failed.join("; reviewer "));
+            if let Some(s) = over {
+                reason = format!("{reason}; {s}");
+            }
             self.fail_attempt(t, ps, &key.0, key.1, &reason, now_ms)?;
             return Ok(false);
         }
@@ -1010,23 +1033,46 @@ impl Runner {
     }
 
     /// A command reviewer's child: still running, exited, or lost with
-    /// a runner that restarted (failed, never started again).
+    /// a runner that restarted (its recorded group stopped first, then
+    /// failed, never started again). Until the group is gone the result
+    /// stays unset, so no rerun starts beside it in the same tree.
     fn poll_command_reviewer(
         &mut self,
         t: &mut Ticket,
+        a: &Attempt,
         key: &(String, u32),
-        round_n: u32,
+        round: &ReviewRound,
         r: &ReviewerRun,
-    ) {
+        now_ms: u64,
+    ) -> Result<()> {
+        let round_n = round.n;
         if !r.launched {
-            return;
+            return Ok(());
         }
         let check_key = reviewer_key(t, key, round_n, &r.name);
         let result = match self.git.poll_check(&check_key) {
-            None => return,
-            Some(Err(e)) => ReviewerResult::Failed {
-                reason: format!("lost: {e:#}"),
-            },
+            None => return Ok(()),
+            Some(Err(err)) => {
+                let stopped = match &r.group {
+                    Some(group) => {
+                        let owner = Owner::Reviewer {
+                            round: round_n,
+                            name: &r.name,
+                        };
+                        self.stop_child(t, a, &check_key, Some(group), &round.head, owner, now_ms)?
+                    }
+                    None => GateStop::Gone,
+                };
+                match stopped {
+                    GateStop::Waiting => return Ok(()),
+                    GateStop::Gone => ReviewerResult::Failed {
+                        reason: format!("lost: {err:#}"),
+                    },
+                    GateStop::OverLimit(clause) => ReviewerResult::Failed {
+                        reason: format!("lost: {err:#}; {clause}"),
+                    },
+                }
+            }
             Some(Ok(0)) => ReviewerResult::Clean,
             Some(Ok(1)) => {
                 let out = std::fs::read_to_string(&r.feedback).unwrap_or_default();
@@ -1053,6 +1099,7 @@ impl Runner {
             r.name
         );
         reviewer_mut(t, key, round_n, &r.name).result = Some(result);
+        Ok(())
     }
 
     /// An agent reviewer: Claude Code is done on its Stop with the
@@ -3969,15 +4016,24 @@ fn reviewer_mut<'a>(
     round_n: u32,
     name: &str,
 ) -> &'a mut ReviewerRun {
-    record_of(t, &key.0, key.1)
+    find_reviewer_mut(t, key, round_n, name).expect("the reviewer exists")
+}
+
+/// `reviewer_mut` for a caller holding a copy of the attempt, whose
+/// record may be gone by the time it writes.
+pub(crate) fn find_reviewer_mut<'a>(
+    t: &'a mut Ticket,
+    key: &(String, u32),
+    round_n: u32,
+    name: &str,
+) -> Option<&'a mut ReviewerRun> {
+    find_attempt_mut(t, &key.0, key.1)?
         .rounds
         .iter_mut()
-        .find(|r| r.n == round_n)
-        .expect("the round exists")
+        .find(|r| r.n == round_n)?
         .reviewers
         .iter_mut()
         .find(|r| r.name == name)
-        .expect("the reviewer exists")
 }
 
 fn set_round_state(
@@ -4020,7 +4076,7 @@ fn stage_no_feedback(t: &Ticket, key: &(String, u32)) -> String {
 }
 
 /// The key a command reviewer's child is polled under.
-fn reviewer_key(t: &Ticket, key: &(String, u32), round_n: u32, name: &str) -> String {
+pub(crate) fn reviewer_key(t: &Ticket, key: &(String, u32), round_n: u32, name: &str) -> String {
     format!("{}/{}/{}/r{round_n}/{name}", t.id, key.0, key.1)
 }
 
@@ -4192,6 +4248,7 @@ mod tests {
                 polls_since_stop: 0,
                 settle: None,
                 result: Some(ReviewerResult::Findings),
+                group: None,
             }],
             state: RoundState::Reviewing,
             feedback: None,

@@ -1725,11 +1725,12 @@ parked; the Stop hook's `background_tasks`
 not on the wire. And: the ticket page does not show that an attempt was
 carried or how many points a round left to the merge (each would need a
 field on the `dispatch-control` views), and a command reviewer cannot
-tag a point as style. And: a check runs in its own process group, so it
-outlives a runner killed by Ctrl-C or a closed pane; the restarted
-runner reads it as lost, an active ticket starts it again (the new run
-waits on cargo's build lock behind the orphan), and a park cancels
-without killing it. And: the `refresh` question is asked per stage, not
+tag a point as style. And: a check or command reviewer runs in its own
+process group, so it outlives a runner killed by Ctrl-C or a closed
+pane; the restarted runner stops it by its recorded group before
+anything of it runs again, but a leaderless group with no fresh kill of
+its own, and the one-`fsync` window before the group is saved, are
+left running. And: the `refresh` question is asked per stage, not
 per lane, so one `recheck` covers every held lane; a lane whose rebaser
 finished and that is brought up in the pass right after another lane's
 `recheck` reads `rebased by hand (adopted)`.
@@ -2183,12 +2184,14 @@ while it runs and the tail of the last run's log when it does not.
 
 Known gaps:
 
-- Stop is `kill-session` mid-pass. A check runs in its own process
-  group, so a Stop during a check leaves that check running orphaned;
-  the next runner reads the attempt as lost and starts it again, and
-  that run waits on cargo's build lock behind the orphan. Killing the
-  check's group on Stop, or a graceful stop, needs a signal handler or
-  a port call in Dispatch.
+- Stop is `kill-session` mid-pass. A check or command reviewer runs in
+  its own process group, so a Stop leaves it running orphaned; the next
+  runner stops it by its recorded group before the checks start again,
+  the lost reviewer fails its round, or the attempt is cancelled. Left
+  running: a leaderless group with no `orphans_killed` entry younger
+  than the stop limit, and a group whose spawn the Stop cut off before
+  the save that records it. Stopping the groups on Stop, or a graceful
+  stop, needs a signal handler or a port call in Dispatch.
 - A Stop during a deploy leaves the deploy running. The next runner
   waits for its group rather than killing it: a park, a close or a
   `rerun` holds until the group empties or the owner answers `stuck`

@@ -349,7 +349,7 @@ launched the next agent into a tree still mid-rebase (#58, built: the
 stage holds on a `recheck | park` question until the rebase is finished
 or aborted by hand), `wait` bunching and `--for move` (#100, built:
 both shapes), the orphaned command reviewer and the leaderless check
-(#101), Dispatch's own lane-blind reads (#102, built), the runner
+(#101, built), Dispatch's own lane-blind reads (#102, built), the runner
 restart from away from the Mac (#103, built: `dispatch runner stop |
 start | restart` over the control port, the supervisor's when its
 table's `may` lists `runner`, refused while a deploy runs).

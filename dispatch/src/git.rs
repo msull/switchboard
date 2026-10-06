@@ -227,9 +227,16 @@ pub trait Repo: Send {
     fn escalate_check(&mut self, key: &str);
     /// The process group of a check or reviewer this runner started.
     fn check_group(&self, key: &str) -> Option<CheckGroup>;
-    /// A check a previous runner started and left running, signalled by
-    /// its recorded group if it is still ours.
-    fn adopt_check(&mut self, key: &str, group: &CheckGroup) -> Adopted;
+    /// A check or command reviewer a previous runner started and left
+    /// running, signalled by its recorded group if it is still ours.
+    /// `vouched` says the caller holds a kill of this group by an
+    /// earlier runner of this ticket younger than the stop limit, which
+    /// lets a leaderless group be killed again: a pgid cannot be reused
+    /// while any member lives, and that kill proved the group ours. The
+    /// one hole is the group emptying, its id going to a new leader
+    /// that exits and leaves members, all within the limit. A leader
+    /// whose start time `ps` cannot read counts as gone here.
+    fn adopt_check(&mut self, key: &str, group: &CheckGroup, vouched: bool) -> Adopted;
     /// Whether a group a previous runner started may still be running a
     /// command of ours; sends no signal. A gate-only command lost to a
     /// restart is waited for through this, never stopped.
@@ -304,8 +311,9 @@ pub enum Adopted {
     /// This runner already holds the key: nothing to adopt.
     Known,
     /// Nothing of ours is left under the id, or nothing there can be
-    /// shown to be ours (its leader is gone, started at another time, or
-    /// could not be read); the record's group can go.
+    /// shown to be ours (its leader started at another time, or is gone
+    /// or could not be read and the caller did not vouch for the
+    /// group); the record's group can go.
     Gone,
     /// Ours and still running: TERM sent to the group, which
     /// `check_gone` and `escalate_check` now follow under `key`.
@@ -1068,9 +1076,12 @@ impl Repo for GitCli {
         self.sweep_killed();
         // Probed just before the signal: a group id with a live member
         // cannot have been handed to anyone else. A group this runner
-        // did not start is only here once `adopt_check` found its leader
-        // alive with the recorded start time, so the members still under
-        // the id are ours.
+        // did not start is here either because `adopt_check` found its
+        // leader alive with the recorded start time, or because it was
+        // leaderless and a fresh `orphans_killed` entry vouched for it;
+        // in both cases `group_alive`, probed just before the SIGKILL,
+        // shows a member still holds the id, so it has not been handed
+        // on since.
         if let Some(pgid) = self.killed.remove(key)
             && group_alive(pgid)
         {
@@ -1105,7 +1116,7 @@ impl Repo for GitCli {
         })
     }
 
-    fn adopt_check(&mut self, key: &str, group: &CheckGroup) -> Adopted {
+    fn adopt_check(&mut self, key: &str, group: &CheckGroup, vouched: bool) -> Adopted {
         self.sweep_killed();
         if self.checks.contains_key(key) || self.killed.contains_key(key) {
             return Adopted::Known;
@@ -1113,17 +1124,21 @@ impl Repo for GitCli {
         if !group_alive(group.pgid) {
             return Adopted::Gone;
         }
-        // Only a live leader with the recorded start time proves the
-        // group ours. A leader that started at another time took the pid
-        // after our group emptied. A gone leader proves nothing: our group
-        // may have emptied, its id gone to a new group whose leader then
-        // exited. An unread start time is no proof either, so a leaderless
-        // orphan, or one `ps` could not read, is missed rather than risk
-        // signalling someone else's group.
+        // A live leader with the recorded start time proves the group
+        // ours. A leader with another start time proves the pid reused,
+        // vouched or not. A gone or unreadable leader proves nothing by
+        // itself, so the group is left alone unless the caller vouches
+        // for it with a kill of its own younger than the stop limit,
+        // which a pgid cannot outlive while a member lives.
         let started = leader_started(group.pgid);
-        if started.as_deref() != Some(group.leader_started.as_str()) {
+        if started.is_none() && vouched {
+            log::info!(
+                "{key}: group {}: leader gone, vouched for by this ticket's kill within the stop limit; killed again",
+                group.pgid
+            );
+        } else if started.as_deref() != Some(group.leader_started.as_str()) {
             log::warn!(
-                "checks {key}: group {} is led by {}, not a process started {}; left alone",
+                "{key}: group {} is led by {}, not a process started {}; left alone",
                 group.pgid,
                 started.map_or_else(
                     || "no process whose start time could be read".to_owned(),
@@ -1589,7 +1604,9 @@ pub struct FakeRepo {
     /// Checks and reviewers killed by key, one entry per call.
     pub killed_checks: Vec<String>,
     /// Checks whose kill is recorded but which keep running, as a check
-    /// that ignores TERM would; only `escalate_check` removes them.
+    /// that ignores TERM would; only `escalate_check` removes them. Once
+    /// killed, `poll_check` reads them as lost, as `GitCli` does a key
+    /// its kill took out of its children.
     pub stubborn_checks: Vec<String>,
     /// Checks `escalate_check` was called on, by key.
     pub escalated_checks: Vec<String>,
@@ -1599,6 +1616,15 @@ pub struct FakeRepo {
     pub orphans: std::collections::BTreeSet<String>,
     /// Keys `adopt_check` answered `Killed` for, one entry per answer.
     pub adopted: Vec<String>,
+    /// Orphan keys whose leader is gone: `adopt_check` kills them only
+    /// when vouched for, and otherwise leaves them in `left_alone`.
+    pub leaderless: std::collections::BTreeSet<String>,
+    /// Keys `adopt_check` answered `Killed` for under a vouch, one entry
+    /// per answer.
+    pub vouched: Vec<String>,
+    /// Leaderless orphans `adopt_check` left alone: their members run
+    /// on, and `check_gone` reads them as no longer this runner's.
+    pub left_alone: std::collections::BTreeSet<String>,
     /// The group id the next check or reviewer gets; 0 reads as 4000. A
     /// test that wants a pid reused sets it back.
     pub next_pgid: u32,
@@ -2094,7 +2120,9 @@ impl Repo for FakeRepo {
         if let Some(code) = self.check_exits.get(key) {
             return Some(Ok(*code));
         }
-        if self.checks.iter().any(|c| c.key == key) {
+        let killed = self.stubborn_checks.iter().any(|k| k == key)
+            && self.killed_checks.iter().any(|k| k == key);
+        if !killed && self.checks.iter().any(|c| c.key == key) {
             None
         } else {
             Some(Err(anyhow::anyhow!("no such check in this runner")))
@@ -2118,7 +2146,7 @@ impl Repo for FakeRepo {
         self.killed_checks.push(key.to_owned());
     }
     fn check_gone(&mut self, key: &str) -> bool {
-        !self.orphans.contains(key)
+        (!self.orphans.contains(key) || self.left_alone.contains(key))
             && (!self.checks.iter().any(|c| c.key == key) || self.check_exits.contains_key(key))
     }
     fn escalate_check(&mut self, key: &str) {
@@ -2132,14 +2160,21 @@ impl Repo for FakeRepo {
         }
         self.groups.get(key).cloned()
     }
-    fn adopt_check(&mut self, key: &str, _group: &CheckGroup) -> Adopted {
+    fn adopt_check(&mut self, key: &str, _group: &CheckGroup, vouched: bool) -> Adopted {
         if self.checks.iter().any(|c| c.key == key) {
             Adopted::Known
-        } else if self.orphans.contains(key) {
-            self.adopted.push(key.to_owned());
-            Adopted::Killed
-        } else {
+        } else if !self.orphans.contains(key) {
             Adopted::Gone
+        } else if self.leaderless.contains(key) && !vouched {
+            self.left_alone.insert(key.to_owned());
+            Adopted::Gone
+        } else {
+            self.left_alone.remove(key);
+            self.adopted.push(key.to_owned());
+            if vouched {
+                self.vouched.push(key.to_owned());
+            }
+            Adopted::Killed
         }
     }
     fn group_running(&self, key: &str, _group: &CheckGroup) -> bool {
@@ -2461,8 +2496,8 @@ impl Repo for std::sync::Arc<std::sync::Mutex<FakeRepo>> {
     fn check_group(&self, key: &str) -> Option<CheckGroup> {
         self.lock().unwrap().check_group(key)
     }
-    fn adopt_check(&mut self, key: &str, group: &CheckGroup) -> Adopted {
-        self.lock().unwrap().adopt_check(key, group)
+    fn adopt_check(&mut self, key: &str, group: &CheckGroup, vouched: bool) -> Adopted {
+        self.lock().unwrap().adopt_check(key, group, vouched)
     }
     fn group_running(&self, key: &str, group: &CheckGroup) -> bool {
         self.lock().unwrap().group_running(key, group)
@@ -2657,7 +2692,7 @@ mod tests {
         let group = orphaned_sleep(dir.path());
         assert_eq!(ps_field("pgid", group.pgid), group.pgid);
         let mut cli = GitCli::default();
-        assert_eq!(cli.adopt_check("k", &group), Adopted::Killed);
+        assert_eq!(cli.adopt_check("k", &group, false), Adopted::Killed);
         poll_to("the orphan gone", || cli.check_gone("k").then_some(()));
         assert!(!alive(group.pgid));
     }
@@ -2671,7 +2706,7 @@ mod tests {
             ..group.clone()
         };
         let mut cli = GitCli::default();
-        assert_eq!(cli.adopt_check("k", &other), Adopted::Gone);
+        assert_eq!(cli.adopt_check("k", &other, false), Adopted::Gone);
         assert!(group_alive(group.pgid));
         assert!(cli.killed.is_empty());
         let _ = Command::new("kill")
@@ -2699,13 +2734,37 @@ mod tests {
         leader.wait().unwrap();
         assert!(group_alive(group.pgid), "the sleep is left in the group");
         let mut cli = GitCli::default();
-        assert_eq!(cli.adopt_check("k", &group), Adopted::Gone);
+        assert_eq!(cli.adopt_check("k", &group, false), Adopted::Gone);
         assert!(alive(sleep));
         assert!(cli.killed.is_empty());
         let _ = Command::new("kill")
             .args(["-KILL", &sleep.to_string()])
             .output();
         poll_to("the sleeper gone", || (!alive(sleep)).then_some(()));
+    }
+
+    #[test]
+    fn a_vouched_leaderless_group_is_killed_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut previous = GitCli::default();
+        previous
+            .start_check(
+                "k",
+                dir.path(),
+                &["sh".into(), "-c".into(), "sleep 30 & echo $! > pid".into()],
+                &[],
+                &dir.path().join("gate.log"),
+            )
+            .unwrap();
+        let group = previous.check_group("k").unwrap();
+        let sleep = written_pid(dir.path());
+        let mut leader = previous.checks.remove("k").unwrap();
+        leader.wait().unwrap();
+        assert!(group_alive(group.pgid), "the sleep is left in the group");
+        let mut cli = GitCli::default();
+        assert_eq!(cli.adopt_check("k", &group, true), Adopted::Killed);
+        poll_to("the sleeper gone", || (!alive(sleep)).then_some(()));
+        poll_to("the group gone", || cli.check_gone("k").then_some(()));
     }
 
     #[test]
@@ -2725,7 +2784,7 @@ mod tests {
         previous.kill_check("k");
         poll_to("the check gone", || previous.check_gone("k").then_some(()));
         let mut cli = GitCli::default();
-        assert_eq!(cli.adopt_check("k", &group), Adopted::Gone);
+        assert_eq!(cli.adopt_check("k", &group, false), Adopted::Gone);
         assert!(!GitCli::default().group_running("k", &group));
     }
 

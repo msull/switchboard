@@ -495,6 +495,7 @@ mod tests {
                     polls_since_stop: 0,
                     settle: None,
                     result: Some(ReviewerResult::Findings),
+                    group: None,
                 })
                 .collect(),
             state,
