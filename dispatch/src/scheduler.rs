@@ -18,7 +18,8 @@ use crate::git::{Adopted, Confine, Network, Push, Repo, branch_name, yyyymmdd};
 use crate::github::{Checks, Gh, PullRequests, github_repo};
 use crate::health::Health;
 use crate::pipeline::{
-    Context, Gate, Lane, OnDirty, Pipeline, Stage, StageKind, Write, env_key, env_sets,
+    Context, Gate, Lane, OnDirty, Pipeline, Stage, StageKind, Write, base_context, env_key,
+    env_sets,
 };
 use crate::port::Port;
 use crate::review::{checks_key, find_reviewer_mut, reviewer_key};
@@ -112,6 +113,10 @@ pub struct Runner {
     /// The resource each ticket was last logged waiting for, by ticket
     /// id, so a wait is one line, not one a second.
     pub(crate) held_back: BTreeMap<String, String>,
+    /// The ticket each ticket was last logged waiting on for the
+    /// project's base tree, by ticket id. Apart from `held_back`, which
+    /// `take_holds` rewrites every pass.
+    pub(crate) base_waits: BTreeMap<String, String>,
     /// `switchboard-env` beside this executable, when it is there: what
     /// an agent with environment sets is told to run its commands
     /// through, and what wraps a command gate with `env`.
@@ -261,6 +266,17 @@ impl<'a> Owner<'a> {
 /// The contexts a stage runs in: `(name, cwd, lane)`.
 pub(crate) type Contexts = Vec<(String, PathBuf, Option<String>)>;
 
+/// What the project's base tree is ready for, right before a deploy of
+/// a lane's base starts in it.
+pub(crate) enum BaseRefresh {
+    /// At the base, set up: start the command.
+    Ready,
+    /// Another ticket's deploy runs in it: start nothing yet.
+    Wait,
+    /// It could not be brought to the base; the attempt fails with this.
+    Fail(String),
+}
+
 /// What one ticket's step changed in the project's counts: a slot
 /// taken, and questions asked without one.
 struct Stepped {
@@ -287,6 +303,7 @@ impl Runner {
             health: RefCell::new(Health::default()),
             actor: None,
             held_back: BTreeMap::new(),
+            base_waits: BTreeMap::new(),
             env_bin: None,
             credentials: None,
         }
@@ -630,6 +647,51 @@ impl Runner {
             .unwrap_or_else(|| self.data.worktrees_dir())
     }
 
+    /// The project's base tree: where its record says, else beside the
+    /// tickets' trees as `base-<project>`. The recorded path wins, so a
+    /// deploy running there keeps its cwd when the root moves and every
+    /// pipeline of the project shares one tree.
+    pub(crate) fn base_tree(&self, ps: &ProjectState, p: &Pipeline) -> PathBuf {
+        ps.base_tree
+            .clone()
+            .unwrap_or_else(|| base_tree_under(&self.worktree_root(p), &p.project.name))
+    }
+
+    /// The other ticket of `project` whose deploy of a lane's base is
+    /// running in the project's base tree, if any. An attempt counts
+    /// only when its stage, in that ticket's own pipeline, falls back
+    /// to the lane its context names, so a lane that is merely called
+    /// `<lane>@base` in another pipeline is not taken for one.
+    fn base_deploy_running(&self, project: &str, except: Option<&str>) -> Result<Option<String>> {
+        for o in self.tickets()? {
+            if o.project != project || except == Some(o.id.as_str()) {
+                continue;
+            }
+            if !o.attempts.iter().any(|a| a.is_open() && a.gate.is_some()) {
+                continue;
+            }
+            // A pipeline that cannot be read cannot rule its deploys
+            // out, and moving the tree under one would break it.
+            let Ok(op) = self.pipeline_of(&o) else {
+                return Ok(Some(o.id));
+            };
+            let base = o.attempts.iter().any(|a| {
+                a.is_open()
+                    && a.gate.is_some()
+                    && op
+                        .stages
+                        .iter()
+                        .filter(|s| s.name == a.stage)
+                        .filter_map(Stage::fallback_lane)
+                        .any(|l| a.context == base_context(l))
+            });
+            if base {
+                return Ok(Some(o.id));
+            }
+        }
+        Ok(None)
+    }
+
     /// Set where tickets' trees go (`path`; `None` leaves it), and with
     /// `migrate` move every ticket's tree that is not under the root
     /// there: git moves the ticket's tree, each lane clone is re-pointed
@@ -696,9 +758,90 @@ impl Runner {
                 }
                 r.save_project(&ps)?;
             }
+            for project in r.projects()? {
+                r.migrate_base_tree(&project, &root, &mut view)?;
+            }
             Ok(())
         })?;
         Ok(view)
+    }
+
+    /// A project's base tree moved under `root` as a ticket's tree is,
+    /// listed in `view` under the project's name. Left where it is while
+    /// a deploy runs in it, or when the project's pipeline names its own
+    /// `worktrees`.
+    fn migrate_base_tree(
+        &mut self,
+        project: &str,
+        root: &Path,
+        view: &mut wire_dispatch::WorktreesView,
+    ) -> Result<()> {
+        let mut ps = self.load_project(project)?;
+        let Some(from) = ps.base_tree.clone() else {
+            return Ok(());
+        };
+        let to = base_tree_under(root, project);
+        if from == to {
+            return Ok(());
+        }
+        let skip = |view: &mut wire_dispatch::WorktreesView, why: String| {
+            view.skipped.push((project.to_owned(), why));
+        };
+        let p = match crate::supervisor::live_pipeline(&self.data, project) {
+            Ok(p) => p,
+            Err(e) => {
+                skip(view, format!("base tree: pipeline: {e:#}"));
+                return Ok(());
+            }
+        };
+        if p.project.worktrees.is_some() {
+            skip(
+                view,
+                "base tree: the pipeline names its own worktrees".into(),
+            );
+            return Ok(());
+        }
+        if self.base_deploy_running(project, None)?.is_some() {
+            skip(view, "base tree: a deploy is running in it".into());
+            return Ok(());
+        }
+        let clone = self.data.repo_dir(project);
+        let lanes: Vec<&Lane> = p.lanes.iter().filter(|l| l.repo.is_some()).collect();
+        if from.exists() {
+            if let Err(e) = self.git.worktree_move(&clone, &from, &to) {
+                skip(view, format!("base tree: {e:#}"));
+                return Ok(());
+            }
+            // The tree is at `to` from here on, so the record follows it
+            // even when a lane clone is not re-pointed; a record left at
+            // `from` would have the next deploy build a second tree.
+            for lane in &lanes {
+                let dir = to.join(&lane.path);
+                if dir.is_dir() {
+                    let lane_clone = self.data.lane_repo_dir(project, &lane.name);
+                    if let Err(e) = self.git.worktree_repair(&lane_clone, &dir) {
+                        skip(view, format!("base tree: lane {}: {e:#}", lane.name));
+                    }
+                }
+            }
+        } else {
+            // Deleted by hand: the clones' entries for it name nothing.
+            let mut gone = vec![(clone, from.clone())];
+            for lane in &lanes {
+                let lane_clone = self.data.lane_repo_dir(project, &lane.name);
+                gone.push((lane_clone, from.join(&lane.path)));
+            }
+            for (repo, dir) in gone {
+                if let Err(e) = self.git.worktree_remove(&repo, &dir) {
+                    skip(view, format!("base tree: {e:#}"));
+                }
+            }
+        }
+        ps.base_tree = Some(to.clone());
+        self.save_project(&ps)?;
+        log::info!("project {project}: base tree moved to {}", to.display());
+        view.moved.push(project.to_owned());
+        Ok(())
     }
 
     fn move_tree(
@@ -3956,7 +4099,31 @@ impl Runner {
                     if a.gate.is_some() {
                         self.poll_gate(t, ps, p, &a, stage, &cwd, lane.as_deref(), now_ms)?;
                     } else {
-                        self.start_gate(t, ps, p, &a, stage, &cwd, lane.as_deref(), now_ms)?;
+                        // The base tree moves only right before a start,
+                        // never while a gate in it is polled.
+                        let base = stage.fallback_lane().filter(|l| ctx == base_context(l));
+                        let refresh = match base {
+                            Some(l) => self.refresh_base_tree(t, ps, p, l)?,
+                            None => BaseRefresh::Ready,
+                        };
+                        match refresh {
+                            BaseRefresh::Ready => {
+                                self.start_gate(
+                                    t,
+                                    ps,
+                                    p,
+                                    &a,
+                                    stage,
+                                    &cwd,
+                                    lane.as_deref(),
+                                    now_ms,
+                                )?;
+                            }
+                            BaseRefresh::Wait => {}
+                            BaseRefresh::Fail(reason) => {
+                                self.fail_gate(t, ps, &a, &reason, now_ms)?;
+                            }
+                        }
                     }
                 }
                 Some(a) => {
@@ -4847,7 +5014,8 @@ impl Runner {
             .filter(|l| l.chosen && !merged_in(t, p, &l.name))
             .map(|l| (Some(l.name.clone()), l.worktree.clone()))
             .collect();
-        for (_, cwd, lane) in Self::contexts(t, p, &stage) {
+        let base = self.base_tree(ps, p);
+        for (_, cwd, lane) in Self::contexts(t, p, &stage, &base) {
             if lane.is_none() && !trees.iter().any(|(_, tree)| *tree == cwd) {
                 trees.push((None, cwd));
             }
@@ -4886,7 +5054,7 @@ impl Runner {
             a.ended_ms = Some(now_ms);
         }
         for s in &p.stages[k..at] {
-            for (ctx, _, _) in Self::contexts(t, p, s) {
+            for (ctx, _, _) in Self::contexts(t, p, s, &base) {
                 if merged_in(t, p, &ctx) {
                     continue;
                 }
@@ -4955,7 +5123,7 @@ impl Runner {
             return Ok(());
         };
         let watch = p.stages[t.stage].clone();
-        let reason = match self.merged_unread(t, p, &watch)? {
+        let reason = match self.merged_unread(t, ps, p, &watch)? {
             Ok(true) => {
                 for a in t
                     .attempts
@@ -4990,6 +5158,7 @@ impl Runner {
     fn merged_unread(
         &mut self,
         t: &Ticket,
+        ps: &ProjectState,
         p: &Pipeline,
         stage: &Stage,
     ) -> Result<Result<bool, String>> {
@@ -4997,7 +5166,7 @@ impl Runner {
             Some(Gate::External { provider, .. }) => provider.as_deref(),
             _ => None,
         };
-        for (ctx, cwd, lane) in Self::contexts(t, p, stage) {
+        for (ctx, cwd, lane) in Self::contexts(t, p, stage, &self.base_tree(ps, p)) {
             if merged_in(t, p, &ctx) {
                 continue;
             }
@@ -5126,7 +5295,7 @@ impl Runner {
         stage: &Stage,
         now_ms: u64,
     ) -> Result<Option<Contexts>> {
-        let contexts = Self::contexts(t, p, stage);
+        let contexts = Self::contexts(t, p, stage, &self.base_tree(ps, p));
         if contexts.is_empty() {
             self.park(
                 t,
@@ -5143,10 +5312,20 @@ impl Runner {
     /// stage needs lanes the ticket has not cut. A named lane runs only
     /// when it is chosen; every lane's tree is cut, so one not chosen
     /// would otherwise run a stage the ticket's work never touched.
-    pub(crate) fn contexts(t: &Ticket, p: &Pipeline, stage: &Stage) -> Contexts {
+    /// Unless the stage falls back to that lane's base: then it runs as
+    /// `<lane>@base` in the lane's place in `base`, the project's base
+    /// tree.
+    pub(crate) fn contexts(t: &Ticket, p: &Pipeline, stage: &Stage, base: &Path) -> Contexts {
         let Some(tree) = primary_tree(t, p) else {
             return Vec::new();
         };
+        if let Some(name) = stage.fallback_lane()
+            && !t.lanes.iter().any(|l| l.name == name && l.chosen)
+            && let Some(lane) = p.lane(name)
+        {
+            let cwd = base.join(&lane.path);
+            return vec![(base_context(name), cwd, Some(name.to_owned()))];
+        }
         match &stage.context {
             Context::Root => vec![("root".to_owned(), tree, None)],
             Context::Joined => vec![("joined".to_owned(), tree, None)],
@@ -5174,15 +5353,150 @@ impl Runner {
     /// Whether a stage runs nowhere: it names one lane or a list of
     /// lanes, and the ticket chose none of them (or did not cut them).
     /// `contexts` is empty for it too, but a skipped stage advances
-    /// where an `each` stage with no lane parks.
+    /// where an `each` stage with no lane parks. A named lane's stage
+    /// with `without_lane` never skips: it runs the lane's base.
     #[must_use]
     pub(crate) fn skipped(t: &Ticket, stage: &Stage) -> bool {
+        if stage.fallback_lane().is_some() {
+            return false;
+        }
         let chosen = |name: &String| t.lanes.iter().any(|l| &l.name == name && l.chosen);
         match &stage.context {
             Context::Lane(lane) => !chosen(lane),
             Context::Lanes(lanes) => !lanes.iter().any(chosen),
             _ => false,
         }
+    }
+
+    /// The project's base tree brought to `lane`'s base and set up, right
+    /// before a deploy of that base starts in it: the project's clone and
+    /// the lane's (when it has a repository) detached at what their
+    /// remotes have now, and the lane's `setup` run, every time, since
+    /// the base moves between uses. Waits while another ticket's deploy
+    /// runs there; fails when the tree has changes, which are never
+    /// reset.
+    pub(crate) fn refresh_base_tree(
+        &mut self,
+        t: &Ticket,
+        ps: &mut ProjectState,
+        p: &Pipeline,
+        name: &str,
+    ) -> Result<BaseRefresh> {
+        let Some(lane) = p.lane(name).cloned() else {
+            return Ok(BaseRefresh::Fail(format!(
+                "lane {name} is not in the pipeline"
+            )));
+        };
+        // A resource of `count` above one, or a second pipeline of the
+        // project, could otherwise move the tree under a running deploy.
+        if let Some(other) = self.base_deploy_running(&t.project, Some(&t.id))? {
+            if self.base_waits.get(&t.id) != Some(&other) {
+                log::info!(
+                    "ticket {} lane {name}: the base tree is in use by ticket {other}; waiting",
+                    t.id
+                );
+                self.base_waits.insert(t.id.clone(), other);
+            }
+            return Ok(BaseRefresh::Wait);
+        }
+        self.base_waits.remove(&t.id);
+        let tree = self.base_tree(ps, p);
+        let cwd = tree.join(&lane.path);
+        if let Some(why) = self.base_tree_changes(p, &tree)? {
+            return Ok(BaseRefresh::Fail(why));
+        }
+        let clone = self.data.repo_dir(&p.project.name);
+        let onto = format!("{}/{}", p.project.remote, p.project.base);
+        if let Err(e) = self.detach_at(&clone, &p.project.remote, &onto, &tree) {
+            return Ok(BaseRefresh::Fail(format!(
+                "the base tree at {} could not be brought to {onto}: {e:#}",
+                tree.display()
+            )));
+        }
+        if ps.base_tree.is_none() {
+            ps.base_tree = Some(tree.clone());
+            self.save_project(ps)?;
+        }
+        if lane.repo.is_some() {
+            let (lane_clone, remote, onto) = self.lane_base_ref(p, &lane);
+            if let Err(e) = self.detach_at(&lane_clone, &remote, &onto, &cwd) {
+                return Ok(BaseRefresh::Fail(format!(
+                    "lane {name}: the base tree at {} could not be brought to {onto}: {e:#}",
+                    cwd.display()
+                )));
+            }
+        } else if !cwd.is_dir() {
+            return Ok(BaseRefresh::Fail(format!(
+                "lane {name}: {} is not in the base tree",
+                cwd.display()
+            )));
+        }
+        if !lane.setup.is_empty() {
+            let env = env_for(t, Some(name), Some(p.lane_base(&lane)));
+            let ran = match confine_for(t, p, Some(name), &[&tree], None) {
+                Some(confine) => self.git.run_confined(&cwd, &lane.setup, &env, &confine),
+                None => self
+                    .git
+                    .run(&cwd, &lane.setup, &env)
+                    .map(|()| "unconfined".to_owned()),
+            };
+            match ran {
+                Ok(header) => {
+                    log::info!("ticket {} lane {name}: base setup done; {header}", t.id);
+                }
+                Err(e) => {
+                    return Ok(BaseRefresh::Fail(format!(
+                        "lane {name}: base setup failed: {e:#}"
+                    )));
+                }
+            }
+        }
+        Ok(BaseRefresh::Ready)
+    }
+
+    /// What has changed in the base tree, said as a failure's reason;
+    /// `None` when it is clean or not made yet. The lanes nested in it
+    /// are read on their own terms, as a close's preflight does.
+    fn base_tree_changes(&self, p: &Pipeline, tree: &Path) -> Result<Option<String>> {
+        if !tree.exists() {
+            return Ok(None);
+        }
+        let nested: Vec<PathBuf> = p
+            .lanes
+            .iter()
+            .filter(|l| l.repo.is_some())
+            .map(|l| tree.join(&l.path))
+            .collect();
+        // `checkout --detach` would carry changes that do not conflict
+        // along, so the tree would not be the base.
+        let mut changed = crate::git::tree_changes(&*self.git, tree, &nested)?;
+        for dir in nested.iter().filter(|d| d.is_dir()) {
+            if !self.git.is_clean(dir)? {
+                changed.push(dir.clone());
+            }
+        }
+        if changed.is_empty() {
+            return Ok(None);
+        }
+        let shown: Vec<String> = changed
+            .iter()
+            .take(3)
+            .map(|c| c.display().to_string())
+            .collect();
+        let more = if changed.len() > 3 { ", …" } else { "" };
+        Ok(Some(format!(
+            "the base tree at {} has changes: {}{more}",
+            tree.display(),
+            shown.join(", ")
+        )))
+    }
+
+    /// `dir` made or moved to a detached worktree of `clone` at what
+    /// `remote` has for `rev` now.
+    fn detach_at(&mut self, clone: &Path, remote: &str, rev: &str, dir: &Path) -> Result<()> {
+        self.git.fetch(clone, remote)?;
+        let sha = self.git.rev_parse(clone, rev)?;
+        self.git.worktree_detached(clone, dir, &sha)
     }
 
     /// The Switchboard workspace the pipeline names, found or made once.
@@ -6077,15 +6391,22 @@ impl Runner {
         let head = self.git.head(cwd)?;
         let dir = self.attempt_dir(t, &a.stage, a.n, &a.context)?;
         let log = dir.join("checks.log");
+        // A deploy of a lane's base is for that lane at its base branch,
+        // not for the ticket's unchosen lane on the ticket's branch.
+        let base_lane = stage
+            .fallback_lane()
+            .filter(|l| a.context == base_context(l))
+            .and_then(|l| p.lane(l));
+        let base_tree = base_lane.map(|_| self.base_tree(ps, p));
         let lane_record = lane.and_then(|l| t.lanes.iter().find(|x| x.name == l));
-        let mut env = checks_env(
-            t,
-            lane_record.map(|l| l.name.as_str()),
-            lane_record.map(|l| l.branch.as_str()),
-            a,
-            cwd,
-            &head,
-        );
+        let (env_lane, env_branch) = match base_lane {
+            Some(l) => (Some(l.name.as_str()), Some(p.lane_base(l))),
+            None => (
+                lane_record.map(|l| l.name.as_str()),
+                lane_record.map(|l| l.branch.as_str()),
+            ),
+        };
+        let mut env = checks_env(t, env_lane, env_branch, a, cwd, &head);
         if a.kind == AttemptKind::GateOnly
             && let Err(e) = prepare_writes(a, &dir, &mut env)
         {
@@ -6097,7 +6418,9 @@ impl Runner {
             Err(reason) => return self.fail_gate(t, ps, a, &reason, now_ms),
         };
         let key = gate_key(t, a);
-        let started = match confine_for(t, p, lane, &[&dir], gate_network(p, stage)) {
+        let mut extra: Vec<&Path> = vec![&dir];
+        extra.extend(base_tree.as_deref());
+        let started = match confine_for(t, p, lane, &extra, gate_network(p, stage)) {
             Some(confine) => self
                 .git
                 .start_check_confined(&key, cwd, &argv, &env, &log, &confine, &outer),
@@ -6455,7 +6778,7 @@ impl Runner {
             && (stage.kind() != StageKind::GateOnly
                 || matches!(stage.gate, Some(Gate::Command { .. })))
         {
-            for (ctx, _, _) in Self::contexts(t, p, stage) {
+            for (ctx, _, _) in Self::contexts(t, p, stage, &self.base_tree(ps, p)) {
                 let Some(a) = latest_attempt(t, &stage.name, &ctx).cloned() else {
                     continue;
                 };
@@ -6959,6 +7282,13 @@ impl Runner {
             }
             Ok(tickets)
         })?;
+        // A ticket that parks or closes while it waits for the base tree
+        // never ends that wait in `refresh_base_tree`.
+        for t in &tickets {
+            if !matches!(t.state, TicketState::Active) {
+                self.base_waits.remove(&t.id);
+            }
+        }
         tickets.retain(|t| !matches!(t.state, TicketState::Closed { .. }));
         let mut running = 0u32;
         let mut pending = 0u32;
@@ -9181,6 +9511,12 @@ pub(crate) fn session_kind(kind: crate::pipeline::OperatorKind) -> wire::Session
     }
 }
 
+/// Where a project's base tree goes under `root`, the directory of the
+/// tickets' trees, before one is recorded.
+fn base_tree_under(root: &Path, project: &str) -> PathBuf {
+    root.join(format!("base-{project}"))
+}
+
 /// The ticket's own tree: the tree it was cut into, else its first
 /// lane's worktree, or the project's root for a project that works in
 /// place. None before the cut.
@@ -10629,11 +10965,72 @@ gate = { kind = "human", decision = "each" }
         }
     }
 
+    /// A runner over a fresh data directory, with nothing behind it.
+    fn bare_runner() -> (tempfile::TempDir, Runner) {
+        let dir = tempfile::tempdir().unwrap();
+        let r = Runner::new(
+            DataDir::new(dir.path()),
+            Box::new(NoPort),
+            Box::new(crate::git::FakeRepo::default()),
+        );
+        (dir, r)
+    }
+
+    fn contexts_of(t: &Ticket, p: &Pipeline, stage: usize) -> Contexts {
+        let (_dir, r) = bare_runner();
+        let base = r.base_tree(&ProjectState::default(), p);
+        Runner::contexts(t, p, &p.stages[stage], &base)
+    }
+
     fn names(t: &Ticket, p: &Pipeline, stage: usize) -> Vec<String> {
-        Runner::contexts(t, p, &p.stages[stage])
+        contexts_of(t, p, stage)
             .into_iter()
             .map(|(name, _, _)| name)
             .collect()
+    }
+
+    /// `PIPELINE` with its trees under `/w` and `deploy` falling back
+    /// to the backend's base.
+    fn fallback_pipeline() -> Pipeline {
+        let text = PIPELINE
+            .replace("[source]", "worktrees = \"/w\"\n\n[source]")
+            .replace(
+                "argv = [\"true\"] }",
+                "argv = [\"true\"] }\nwithout_lane = \"base\"",
+            );
+        Pipeline::parse(&text).unwrap()
+    }
+
+    #[test]
+    fn an_unchosen_lane_with_a_fallback_runs_in_the_base_tree() {
+        let p = fallback_pipeline();
+        let t = ticket(&["frontend"]);
+        assert!(!Runner::skipped(&t, &p.stages[0]));
+        assert_eq!(
+            contexts_of(&t, &p, 0),
+            [(
+                "backend@base".to_owned(),
+                PathBuf::from("/w/base-Orchard/orchard-backend"),
+                Some("backend".to_owned())
+            )]
+        );
+        // Chosen, the lane runs in its own tree as before.
+        let t = ticket(&["backend"]);
+        assert_eq!(names(&t, &p, 0), ["backend"]);
+    }
+
+    #[test]
+    fn a_recorded_base_tree_wins_over_the_derived_one() {
+        let p = fallback_pipeline();
+        let t = ticket(&["frontend"]);
+        let (_dir, r) = bare_runner();
+        let ps = ProjectState {
+            name: "Orchard".into(),
+            base_tree: Some("/elsewhere".into()),
+            ..ProjectState::default()
+        };
+        let got = Runner::contexts(&t, &p, &p.stages[0], &r.base_tree(&ps, &p));
+        assert_eq!(got[0].1, PathBuf::from("/elsewhere/orchard-backend"));
     }
 
     #[test]

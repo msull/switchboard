@@ -607,6 +607,13 @@ owner keeps its session alive by running it once by hand. A
 only Dispatch's own deploy stage: an implementer's deploy runs in its
 Switchboard session, which a runner restart does not touch.
 
+A `lane:<name>` deploy with `without_lane = "base"` still runs for a
+ticket that did not choose the lane: it deploys the lane's base branch
+from the project's shared base tree, holds the stage's resource as any
+deploy does, and its commit is what the tester and `tried` read. A
+deploy whose stack already holds the commit must still exit 0, so make
+the deploy task idempotent rather than wrapping it in the gate.
+
 A stage that gives a tester something secret (a test user's
 credentials from a gate-only `try-setup` that writes
 `{ name = "personas", secret = true }`) reaches the tester's prompt as

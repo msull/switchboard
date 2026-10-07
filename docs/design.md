@@ -1798,6 +1798,15 @@ the ticket at the cut; `close` lists the branches it keeps.
 A fold or squash that cannot rewrite the branch asks `rerun | keep |
 park`, and `keep` completes the review at the reviewed head with the
 history as it is, once the head, the checks and a clean tree say it may.
+A `lane:<name>` deploy with `without_lane = "base"` deploys the lane's
+base for a ticket that did not choose the lane, instead of skipping:
+it holds the stage's resource, runs as `<name>@base` in the project's
+shared base tree (a detached worktree of the project's clone with the
+lane's clone detached inside, moved to the bases and set up right
+before each start, waiting while another ticket's base deploy runs
+there), and its commit is what the tester and `tried` read. The tree's
+path is recorded on the project (record v21) and `worktrees --migrate`
+moves it when nothing runs in it.
 `dispatch/tests/first_slice.rs` is the acceptance table, plus a test
 per point above; `dispatch/tests/live.rs` runs the first stage against
 a real Switchboard and a haiku agent. Known gap: Claude Code treats a

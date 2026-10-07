@@ -16130,6 +16130,412 @@ fn a_deploy_for_a_lane_not_chosen_is_skipped_and_reads_as_skipped() {
     );
 }
 
+/// The back half with `deploy` falling back to the backend's base,
+/// after `edit`; a frontend-only Orchard ticket taken under it.
+fn base_env(edit: impl FnOnce(&str) -> String) -> (Env, String) {
+    let mut env = Env::new();
+    let gate = "argv = [\"sh\", \"-c\", \"inv deploy\"] }";
+    let text = BACK_HALF
+        .replace("{worktrees}", &env.worktrees.display().to_string())
+        .replace(gate, &format!("{gate}\nwithout_lane = \"base\""));
+    std::fs::write(env.data.pipeline("Orchard"), edit(&text)).unwrap();
+    {
+        let mut repo = env.repo.lock().unwrap();
+        repo.bases
+            .insert(env.data.repo_dir("Orchard"), "proj0001".into());
+        repo.bases.insert(
+            env.data.lane_repo_dir("Orchard", "backend"),
+            "back0001".into(),
+        );
+    }
+    let id = take_orchard(&mut env, 42, &["area:frontend"]);
+    (env, id)
+}
+
+/// `my-dev` taken by two tickets at once.
+fn two_devs(text: &str) -> String {
+    text.replace("name = \"my-dev\"\n", "name = \"my-dev\"\ncount = 2\n")
+}
+
+fn base_tree(env: &Env) -> PathBuf {
+    env.worktrees.join("base-Orchard")
+}
+
+fn base_backend(env: &Env) -> PathBuf {
+    base_tree(env).join("orchard-backend")
+}
+
+/// How often the backend's setup ran in the base tree.
+fn base_setups(env: &Env) -> usize {
+    let dir = base_backend(env);
+    let repo = env.repo.lock().unwrap();
+    let plain = repo
+        .ran
+        .iter()
+        .filter(|(d, argv)| *d == dir && argv == &["uv", "sync"])
+        .count();
+    let confined = repo
+        .ran_confined
+        .iter()
+        .filter(|(d, argv, _)| *d == dir && argv == &["uv", "sync"])
+        .count();
+    plain + confined
+}
+
+#[test]
+fn a_frontend_only_deploy_deploys_the_backend_base_and_the_tester_reads_its_commit() {
+    let (mut env, id) = base_env(|t| {
+        t.replace(
+            "trust_folders = true",
+            "trust_folders = true\nconfine = true",
+        )
+    });
+    deploying(&mut env, &id);
+    let base = base_tree(&env);
+    let backend = base_backend(&env);
+    let t = env.ticket(&id);
+    assert_eq!(holds(&t), ["my-dev"]);
+    let deploys: Vec<&Attempt> = t.attempts_of("deploy").collect();
+    assert_eq!(deploys.len(), 1, "{t:#?}");
+    assert_eq!(deploys[0].context, "backend@base");
+    {
+        let repo = env.repo.lock().unwrap();
+        assert_eq!(
+            repo.detached_trees,
+            [
+                (
+                    env.data.repo_dir("Orchard"),
+                    base.clone(),
+                    "proj0001".to_owned()
+                ),
+                (
+                    env.data.lane_repo_dir("Orchard", "backend"),
+                    backend.clone(),
+                    "back0001".to_owned()
+                ),
+            ]
+        );
+        let setup: Vec<_> = repo
+            .ran_confined
+            .iter()
+            .filter(|(d, argv, _)| *d == backend && argv == &["uv", "sync"])
+            .collect();
+        assert_eq!(setup.len(), 1, "set up once, confined");
+        assert!(setup[0].2.writable.contains(&base));
+        let check = repo
+            .checks
+            .iter()
+            .find(|c| c.key == deploy_key(&id, 1))
+            .unwrap();
+        assert_eq!(check.dir, backend);
+        assert!(check.log.ends_with("deploy/1/backend@base/checks.log"));
+        for (k, v) in [
+            ("DISPATCH_LANE", "backend"),
+            ("DISPATCH_BRANCH", "main"),
+            ("DISPATCH_HEAD", "back0001"),
+            ("DISPATCH_CONTEXT", "backend@base"),
+        ] {
+            assert!(
+                check.env.contains(&(k.to_owned(), v.to_owned())),
+                "{k}: {:?}",
+                check.env
+            );
+        }
+        assert!(check.confine.as_ref().unwrap().writable.contains(&base));
+    }
+    assert_eq!(
+        env.runner.load_project("Orchard").unwrap().base_tree,
+        Some(base.clone())
+    );
+    exits(&env, &deploy_key(&id, 1), 0);
+    at_stage(&mut env, &id, "try");
+    let t = env.ticket(&id);
+    let deploy = t.attempts_of("deploy").next().unwrap();
+    assert_eq!(deploy.state, AttemptState::Complete);
+    assert_eq!(deploy.head.as_deref(), Some("back0001"));
+    assert!(
+        t.lanes.iter().all(|l| !l.worktree.starts_with(&base)),
+        "no lane of the ticket is the base tree"
+    );
+    served(&mut env, &id);
+    let prompt = last_prompt_of(&env, "tester");
+    assert!(prompt.contains("my-dev runs backend back0001"), "{prompt}");
+    tester_done(&mut env, &id);
+    env.steps_until(&id, "the tried question", |t, _| {
+        t.pending_decisions().iter().any(|d| d.name == "tried")
+    });
+    let question = pending_named(&env, &id, "tried").unwrap().question;
+    assert!(
+        question.contains("Deployed: deploy at back0001 (backend@base)"),
+        "{question}"
+    );
+}
+
+#[test]
+fn a_second_base_deploy_reuses_the_tree_at_the_moved_base() {
+    let (mut env, a) = base_env(two_devs);
+    deployed(&mut env, &a);
+    env.repo.lock().unwrap().bases.insert(
+        env.data.lane_repo_dir("Orchard", "backend"),
+        "back0002".into(),
+    );
+    let b = take_orchard(&mut env, 43, &["area:frontend"]);
+    deploying(&mut env, &b);
+    let backend = base_backend(&env);
+    {
+        let repo = env.repo.lock().unwrap();
+        let check = repo
+            .checks
+            .iter()
+            .find(|c| c.key == deploy_key(&b, 1))
+            .unwrap();
+        assert_eq!(check.dir, backend);
+        assert!(
+            check
+                .env
+                .contains(&("DISPATCH_HEAD".to_owned(), "back0002".to_owned()))
+        );
+        assert_eq!(
+            repo.detached_trees.last().unwrap(),
+            &(
+                env.data.lane_repo_dir("Orchard", "backend"),
+                backend.clone(),
+                "back0002".to_owned()
+            )
+        );
+        assert_eq!(repo.detached_trees.len(), 4, "both trees moved again");
+    }
+    assert_eq!(base_setups(&env), 2, "set up again at the new base");
+    exits(&env, &deploy_key(&b, 1), 0);
+    at_stage(&mut env, &b, "try");
+    let t = env.ticket(&b);
+    assert_eq!(
+        t.attempts_of("deploy").next().unwrap().head.as_deref(),
+        Some("back0002")
+    );
+}
+
+#[test]
+fn a_base_tree_with_changes_fails_the_deploy_with_a_rerun_question() {
+    for stray in [false, true] {
+        let (mut env, a) = base_env(two_devs);
+        deployed(&mut env, &a);
+        let (path, named) = if stray {
+            let base = base_tree(&env);
+            env.repo
+                .lock()
+                .unwrap()
+                .changes
+                .insert(base.clone(), vec![PathBuf::from("stray.txt")]);
+            (base.clone(), base.join("stray.txt"))
+        } else {
+            let backend = base_backend(&env);
+            env.repo.lock().unwrap().dirty.push(backend.clone());
+            (base_tree(&env), backend)
+        };
+        let moves = env.repo.lock().unwrap().detached_trees.len();
+        let b = take_orchard(&mut env, 43, &["area:frontend"]);
+        env.steps_until(&b, "the rerun question", |t, _| {
+            t.pending_decisions()
+                .iter()
+                .any(|d| d.name == "rerun" && d.stage == "deploy")
+        });
+        let t = env.ticket(&b);
+        let deploy = t.attempts_of("deploy").next().unwrap();
+        let AttemptState::Failed { reason } = &deploy.state else {
+            panic!("{t:#?}");
+        };
+        assert!(
+            reason.contains(&format!("the base tree at {} has changes", path.display())),
+            "{reason}"
+        );
+        assert!(reason.contains(&named.display().to_string()), "{reason}");
+        assert_eq!(started(&env, &deploy_key(&b, 1)), 0, "no check started");
+        assert_eq!(
+            env.repo.lock().unwrap().detached_trees.len(),
+            moves,
+            "nothing moved"
+        );
+    }
+}
+
+#[test]
+fn a_base_deploy_waits_while_another_tickets_runs_in_the_tree() {
+    let (mut env, a) = base_env(two_devs);
+    deploying(&mut env, &a);
+    let moves = env.repo.lock().unwrap().detached_trees.len();
+    let b = take_orchard(&mut env, 43, &["area:frontend"]);
+    for _ in 0..8 {
+        env.step();
+    }
+    let t = env.ticket(&b);
+    assert_eq!(stage_name(&t), "deploy", "{t:#?}");
+    assert_eq!(holds(&t), ["my-dev"]);
+    let deploy = t.attempts_of("deploy").next().unwrap();
+    assert!(deploy.is_open() && deploy.gate.is_none(), "{deploy:#?}");
+    assert!(t.pending_decisions().is_empty(), "no failure asked about");
+    assert_eq!(started(&env, &deploy_key(&b, 1)), 0);
+    assert_eq!(env.repo.lock().unwrap().detached_trees.len(), moves);
+    exits(&env, &deploy_key(&a, 1), 0);
+    deploying(&mut env, &b);
+    assert_eq!(env.repo.lock().unwrap().detached_trees.len(), moves + 2);
+}
+
+#[test]
+fn a_running_base_deploy_keeps_its_tree_when_the_worktree_root_moves() {
+    let (mut env, id) = base_env(|t| {
+        let line = t
+            .lines()
+            .find(|l| l.starts_with("worktrees = "))
+            .unwrap()
+            .to_owned();
+        t.replace(&format!("{line}\n"), "")
+    });
+    deploying(&mut env, &id);
+    let old = base_tree(&env);
+    let new_root = env.worktrees.parent().unwrap().join("wt2");
+    let now = env.tick();
+    let view = env
+        .runner
+        .set_worktrees(Some(new_root.clone()), true, now)
+        .unwrap();
+    assert!(
+        view.skipped
+            .iter()
+            .any(|(who, why)| who == "Orchard" && why.contains("a deploy is running")),
+        "{view:?}"
+    );
+    assert!(!view.moved.contains(&"Orchard".to_owned()));
+    assert_eq!(
+        env.runner.load_project("Orchard").unwrap().base_tree,
+        Some(old.clone())
+    );
+    exits(&env, &deploy_key(&id, 1), 0);
+    at_stage(&mut env, &id, "try");
+    let t = env.ticket(&id);
+    assert_eq!(
+        t.attempts_of("deploy").next().unwrap().head.as_deref(),
+        Some("back0001"),
+        "the exit bound in the tree it ran in"
+    );
+    let now = env.tick();
+    let view = env.runner.set_worktrees(None, true, now).unwrap();
+    assert!(view.moved.contains(&"Orchard".to_owned()), "{view:?}");
+    let new = new_root.join("base-Orchard");
+    assert_eq!(
+        env.runner.load_project("Orchard").unwrap().base_tree,
+        Some(new.clone())
+    );
+    let repo = env.repo.lock().unwrap();
+    assert!(
+        repo.moved
+            .contains(&(env.data.repo_dir("Orchard"), old.clone(), new.clone())),
+        "{:?}",
+        repo.moved
+    );
+    assert!(repo.repaired.contains(&(
+        env.data.lane_repo_dir("Orchard", "backend"),
+        new.join("orchard-backend")
+    )));
+}
+
+/// `base_env` with the pipeline's own `worktrees` line dropped, so the
+/// data directory's root places its trees, after a deploy of the base
+/// that finished.
+fn base_deployed_under_the_root() -> (Env, String) {
+    let (mut env, id) = base_env(|t| {
+        let line = t
+            .lines()
+            .find(|l| l.starts_with("worktrees = "))
+            .unwrap()
+            .to_owned();
+        t.replace(&format!("{line}\n"), "")
+    });
+    deploying(&mut env, &id);
+    exits(&env, &deploy_key(&id, 1), 0);
+    at_stage(&mut env, &id, "try");
+    (env, id)
+}
+
+#[test]
+fn a_moved_base_tree_is_recorded_where_it_went_when_a_lane_is_not_repointed() {
+    let (mut env, _id) = base_deployed_under_the_root();
+    let new_root = env.worktrees.parent().unwrap().join("wt2");
+    let new = new_root.join("base-Orchard");
+    env.repo.lock().unwrap().fail_repair = Some(new.join("orchard-backend"));
+    let now = env.tick();
+    let view = env
+        .runner
+        .set_worktrees(Some(new_root.clone()), true, now)
+        .unwrap();
+    assert!(view.moved.contains(&"Orchard".to_owned()), "{view:?}");
+    assert!(
+        view.skipped
+            .iter()
+            .any(|(who, why)| who == "Orchard" && why.contains("lane backend")),
+        "{view:?}"
+    );
+    assert_eq!(
+        env.runner.load_project("Orchard").unwrap().base_tree,
+        Some(new.clone()),
+        "the record follows the tree git moved"
+    );
+    assert!(new.is_dir());
+}
+
+#[test]
+fn a_base_tree_deleted_by_hand_has_its_clone_entries_removed_when_migrated() {
+    let (mut env, _id) = base_deployed_under_the_root();
+    let old = base_tree(&env);
+    std::fs::remove_dir_all(&old).unwrap();
+    let new_root = env.worktrees.parent().unwrap().join("wt2");
+    let now = env.tick();
+    let view = env
+        .runner
+        .set_worktrees(Some(new_root.clone()), true, now)
+        .unwrap();
+    assert!(view.moved.contains(&"Orchard".to_owned()), "{view:?}");
+    assert_eq!(
+        env.runner.load_project("Orchard").unwrap().base_tree,
+        Some(new_root.join("base-Orchard"))
+    );
+    let repo = env.repo.lock().unwrap();
+    assert!(
+        repo.removed
+            .contains(&(env.data.repo_dir("Orchard"), old.clone())),
+        "{:?}",
+        repo.removed
+    );
+    assert!(
+        repo.removed.contains(&(
+            env.data.lane_repo_dir("Orchard", "backend"),
+            old.join("orchard-backend")
+        )),
+        "{:?}",
+        repo.removed
+    );
+}
+
+#[test]
+fn a_resume_past_a_base_deploy_asks_to_deploy_again() {
+    let (mut env, id) = base_env(str::to_owned);
+    at_tried(&mut env, &id);
+    tried(&mut env, &id, "park");
+    env.step();
+    assert!(is_parked(&env.ticket(&id)));
+    let now = env.tick();
+    env.runner.resume(&id, now).unwrap();
+    env.steps_until(&id, "the deploy question", |t, _| {
+        t.pending_decisions()
+            .iter()
+            .any(|d| d.name == "rerun" && d.stage == "deploy")
+    });
+    let t = env.ticket(&id);
+    assert_eq!(stage_name(&t), "deploy");
+    assert_eq!(holds(&t), ["my-dev"]);
+    assert_eq!(started(&env, &deploy_key(&id, 2)), 0, "not again unasked");
+}
+
 /// The Orchard live file with an agent stage `deploy-check` added
 /// before `deploy`.
 fn live_deploy_check(env: &Env) {
