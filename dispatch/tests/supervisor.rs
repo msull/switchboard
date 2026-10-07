@@ -790,6 +790,83 @@ fn a_supervisor_resumes_with_reruns_only_when_rerun_is_its_to_answer() {
     assert!(env.ticket(&t.id).active());
 }
 
+/// `pipeline(project, decides)` with a tester and a `tried`
+/// confirmation that both hold one stack, in place of `inspect`.
+fn tried_pipeline(project: &str, decides: &[&str]) -> String {
+    pipeline(project, decides).replace(
+        "[[stages]]\nname = \"inspect\"\ngate = { kind = \"human\", decision = \"inspect\" }",
+        "[[resources]]\nname = \"stack\"\n\n\
+         [operators.tester]\nkind = \"claude\"\n\n\
+         [[stages]]\nname = \"try\"\noperator = \"tester\"\ncontext = \"joined\"\n\
+         needs = [\"stack\"]\nwrites = [\"notes\"]\nprompt = \"Report to {notes}.\"\n\n\
+         [[stages]]\nname = \"tried\"\nneeds = [\"stack\"]\n\
+         gate = { kind = \"human\", decision = \"tried\", confirm = true }",
+    )
+}
+
+#[test]
+fn a_supervisor_answers_rerun_on_tried_only_when_decides_names_tried() {
+    let mut env = Env::new();
+    env.seat(ORCHARD, SUPERVISOR);
+    let text = tried_pipeline(ORCHARD, &["tried"]);
+    assert!(text.contains("name = \"tried\""), "{text}");
+    std::fs::write(env.data.pipeline(ORCHARD), text).unwrap();
+    let t = env.take(ORCHARD, 1);
+    let ask = |env: &mut Env| {
+        let now = env.tick();
+        let mut t = env.runner.load_ticket(&t.id).unwrap();
+        let id = format!("d{}", t.decisions.len() + 1);
+        t.decisions.push(Decision {
+            id: id.clone(),
+            stage: "tried".into(),
+            name: "tried".into(),
+            kind: DecisionKind::Confirmation,
+            question: "tried (joined): Tree: /t".into(),
+            options: vec!["done".into(), "rerun".into(), "park".into()],
+            recommendation: None,
+            attempt: None,
+            state: DecisionState::Pending,
+            made_ms: now,
+            refusals: Vec::new(),
+        });
+        env.runner.save_ticket(&mut t, now).unwrap();
+        id
+    };
+    let d = ask(&mut env);
+    accepted(&env.cli(
+        Some(SUPERVISOR),
+        &[
+            "decide",
+            &t.id,
+            &d,
+            "rerun",
+            "--note",
+            "nothing could be tested",
+        ],
+    ));
+    let answered = env.ticket(&t.id).decisions[0].clone();
+    assert!(
+        matches!(&answered.state, DecisionState::Answered { answer, by, .. }
+            if answer == "rerun" && by == BY_SUPERVISOR),
+        "{answered:?}"
+    );
+    // Naming `rerun` in `decides` does not reach a gate's `rerun`.
+    std::fs::write(
+        env.data.pipeline(ORCHARD),
+        tried_pipeline(ORCHARD, &["rerun"]),
+    )
+    .unwrap();
+    let d = ask(&mut env);
+    refused(
+        &env.cli(Some(SUPERVISOR), &["decide", &t.id, &d, "rerun"]),
+        "the supervisor may not answer `tried`; the owner does",
+    );
+    let refused_one = env.ticket(&t.id).decisions[1].clone();
+    assert!(refused_one.pending());
+    assert_eq!(refused_one.refusals.len(), 1);
+    assert_eq!(refused_one.refusals[0].answer, "rerun");
+}
+
 /// `pipeline(project, &[])` whose first stage is a deploy, and whose
 /// supervisor may use the runner.
 fn deploying_pipeline(project: &str) -> String {

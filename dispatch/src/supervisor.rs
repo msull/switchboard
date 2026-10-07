@@ -18,9 +18,14 @@ use anyhow::{Context as _, Result, bail};
 use switchboard_control::{self as wire, Body, Reply, Request};
 
 use crate::pipeline::{OperatorKind, Pipeline, Supervisor};
-use crate::scheduler::{BY_SUPERVISOR, Runner, SocketDown, ask_bin_beside_exe, shell_path};
+use crate::scheduler::{
+    BY_SUPERVISOR, DECISIONS, Runner, SocketDown, ask_bin_beside_exe, shell_path,
+};
+use crate::services::SERVICE;
 use crate::store::{DataDir, atomic_write, read_project, read_ticket, shell_unsafe};
-use crate::ticket::{Operation, PastSupervisor, ProjectState, SupervisorIntent, SupervisorRecord};
+use crate::ticket::{
+    Operation, PastSupervisor, ProjectState, STUCK, SupervisorIntent, SupervisorRecord,
+};
 
 /// The commands a supervisor works with, for its seed. `{exe}` is the
 /// full path of the `dispatch` it must type, since its allow rule
@@ -61,9 +66,10 @@ fn first_prompt(seed: &Path) -> String {
     format!("Read {} and do what it says.", seed.display())
 }
 
-/// What one decision's answers do, in the seed's words.
-fn decision_words(name: &str) -> &'static str {
-    match name {
+/// What one decision's answers do, in the seed's words; `None` for a
+/// decision with no words of its own, a gate's among them.
+fn decision_words(name: &str) -> Option<&'static str> {
+    Some(match name {
         "finalize" => "`finalize` ends a plan review with the plan as it stands",
         "paused" => "`continue` lets a paused review run another round",
         "rerun" => {
@@ -80,9 +86,25 @@ fn decision_words(name: &str) -> &'static str {
             "`recheck` sends the ticket back through the `pr-checks` stage before it to bring \
              the branch up and read the checks again; `park` stops it; you never merge"
         }
-        _ => "answer from the options the question lists",
-    }
+        _ => return None,
+    })
 }
+
+/// Whether `name` is a gate's decision with no words of its own: not
+/// one Dispatch asks of its own accord, whose answers are not a gate's.
+fn gate_without_words(name: &str) -> bool {
+    decision_words(name).is_none() && !DECISIONS.contains(&name) && name != SERVICE && name != STUCK
+}
+
+/// What the seed says of a gate's decision `decision_words` has no
+/// words for.
+const GATE_WORDS: &str = "A gate's decision lists its answers in its question; give only one \
+it lists. A human gate's: `proceed` or `done` passes it. `rerun`, when listed, with a note \
+saying why, sends the ticket back to the agent stage before the gate, to run again with the note in its prompt; on a confirmation whose stack is still held, that \
+stage's services are stopped and started again first and nothing is deployed again. Choose it \
+when the work could not be judged, for example when the notes' first line, shown in the \
+question, says nothing could be tested. `park` stops the ticket. A merge gate's lists \
+`recheck`, which sends the ticket back through the `pr-checks` stage before it, and `park`.";
 
 /// The seed: everything the session needs to start, written to
 /// `seed.md`. Pure: the caller gives the paths, and `ask` when
@@ -151,7 +173,11 @@ pub fn seed(
         out.push_str("None.\n");
     }
     for name in &sup.decides {
-        let _ = writeln!(out, "- `{name}`: {}", decision_words(name));
+        let words = decision_words(name).unwrap_or("answer from the options the question lists");
+        let _ = writeln!(out, "- `{name}`: {words}");
+    }
+    if sup.decides.iter().any(|n| gate_without_words(n)) {
+        let _ = write!(out, "\n{GATE_WORDS}\n");
     }
     let runner = sup.may.iter().any(|m| m == "runner");
     let restart = sup.may.iter().any(|m| m == "restart");
@@ -1293,6 +1319,36 @@ mod tests {
                 "Bash(/opt/bin/switchboard-ask:*)",
             ]
         );
+    }
+
+    #[test]
+    fn the_seed_tells_a_gates_answers_only_when_it_decides_a_gate() {
+        let with = |decides: &[&str]| {
+            let mut sup = table();
+            sup.decides = decides.iter().map(|d| (*d).to_owned()).collect();
+            seed_of(&sup)
+        };
+        let gate = with(&["tried"]);
+        assert!(gate.contains(GATE_WORDS), "{gate}");
+        assert!(gate.contains("- `tried`: answer from the options the question lists"));
+        assert!(gate.find(GATE_WORDS) > gate.find("- `tried`"));
+        // A merge gate may name its own decision; the paragraph names
+        // its answers too, so it promises no human gate's answer there.
+        let merged = with(&["merged"]);
+        assert!(merged.contains(GATE_WORDS), "{merged}");
+        assert!(GATE_WORDS.contains("give only one it lists"));
+        assert!(GATE_WORDS.contains("A merge gate's lists `recheck`"));
+        for known in [
+            &["finalize"][..],
+            &["merge"],
+            &["review-code"],
+            &["lost-send"],
+            &[SERVICE],
+            &[STUCK],
+        ] {
+            let s = with(known);
+            assert!(!s.contains(GATE_WORDS), "{s}");
+        }
     }
 
     #[test]

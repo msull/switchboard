@@ -304,6 +304,23 @@ impl Runner {
                 continue;
             };
             let i = self.service_record(t, p, &stage.name, lane, now_ms)?;
+            // Marked by a send-back: stopped before it counts, since a
+            // record being stopped still reads `Ready` until the stop is
+            // confirmed, and an agent must not start against it. Once
+            // `Stopped`, the next pass makes a fresh record.
+            if t.services[i].stopping_ms.is_some()
+                && matches!(
+                    t.services[i].state,
+                    ServiceState::Before | ServiceState::Starting | ServiceState::Ready
+                )
+            {
+                ready = false;
+                self.stop_service(t, ps, i, now_ms)?;
+                if !t.active() {
+                    return Ok(false);
+                }
+                continue;
+            }
             match t.services[i].state.clone() {
                 ServiceState::Before => {
                     self.service_before(t, ps, p, stage, &record, &serve, i, now_ms)?;

@@ -586,6 +586,17 @@ nothing needs restarting. What a change reaches depends on the key:
   grant them. Like the rest of a stage, `env` reaches tickets taken or
   restarted after the edit.
 
+A `tried` confirmation (or any `confirm = true` gate in the same hold
+run as the agent stage before it) shows the first line of text of each
+notes file, so a tester that could not test anything says so on its
+notes' first line (`Result: nothing could be tested`). The owner can
+then answer `rerun` with a note: the tester runs again on the same
+deploy, its services stopped and started with a fresh `before`, while
+the stack stays held. For a supervisor to answer it, `decides` names
+the gate's decision (`tried`), not `rerun`. A running supervisor picks
+up the seed's paragraph on a gate's answers only when it is started
+fresh.
+
 When an implement stage holds a deployable stack (`needs` on
 `implement`), its agents may deploy their lane to it while they work.
 Those deploys are throwaway: the pipeline's own deploy stage deploys
