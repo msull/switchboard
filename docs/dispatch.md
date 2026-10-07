@@ -79,7 +79,9 @@ a test that talks to a local database still runs. A denied write fails
 the command with `EPERM`, and the check's log (`checks.log` for a gate,
 the `stderr` file for a reviewer) starts with a header naming what the
 command could write and ends with the kernel's `deny(1) file-write-…
-<path>` lines for it. A denied setup parks the ticket with the same
+<path>` lines for it, when they have reached the unified log by the
+time the command exits (the script asks twice, a second apart; the
+kernel writes them on its own time). A denied setup parks the ticket with the same
 header and lines in the reason. A project that works in place (`root`)
 is protected less: its tree is the user's own checkout, and that is
 writable. On macOS the mechanism is `sandbox-exec`; on any other
