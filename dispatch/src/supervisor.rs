@@ -145,6 +145,7 @@ pub fn seed(
         let _ = writeln!(out, "- `{name}`: {}", decision_words(name));
     }
     let runner = sup.may.iter().any(|m| m == "runner");
+    let restart = sup.may.iter().any(|m| m == "restart");
     let _ = write!(
         out,
         "\nEvery other decision is the owner's: say so and move on. Tell the owner they \
@@ -152,8 +153,9 @@ pub fn seed(
          line included, runs as you and is refused the same way, so never suggest it, and \
          never change your environment to get round the rule. A `merge` question is \
          answered `park` only: Dispatch resolves it when the provider reports the merge. \
-         You may not restart a ticket, move the worktrees, {run_the_runner}, resume with \
+         You may not {restart_a_ticket}move the worktrees, {run_the_runner}, resume with \
          reruns unless `rerun` is yours, or replace yourself.\n\n",
+        restart_a_ticket = if restart { "" } else { "restart a ticket, " },
         run_the_runner = if runner {
             "start a runner with `dispatch run`"
         } else {
@@ -173,6 +175,15 @@ pub fn seed(
          `pr-checks passed`, read the pull request's body and commit message, say to the \
          owner that it is green and whether the body is clean, and stop: the owner merges.\n\n"
     });
+    capability_sections(&mut out, runner, restart, &exe_text);
+    out.push_str("## Commands\n\n");
+    out.push_str(&GUIDE_ESSENTIALS.replace("{exe}", &exe_text));
+    out
+}
+
+/// The seed's sections for what the table's `may` gives, each drawn only
+/// when it is given.
+fn capability_sections(out: &mut String, runner: bool, restart: bool, exe_text: &str) {
     if runner {
         let _ = write!(
             out,
@@ -184,9 +195,17 @@ pub fn seed(
              yourself.\n\n",
         );
     }
-    out.push_str("## Commands\n\n");
-    out.push_str(&GUIDE_ESSENTIALS.replace("{exe}", &exe_text));
-    out
+    if restart {
+        let _ = write!(
+            out,
+            "## Restarts\n\nYou may restart one of this project's tickets with \
+             `{exe_text} restart <ticket> [<stage>]`, and only when the owner named that ticket \
+             for a restart, or when the ticket was handed to you to take to done and its pull \
+             request at `merge` cannot merge because it conflicts. A restart of a ticket that \
+             is running a deploy is refused; retry it when that stage ends, never ask the owner \
+             to force it. In your report, say what you restarted, at which stage, and why.\n\n",
+        );
+    }
 }
 
 /// The hash of what the owner controls about the seed: the table as
@@ -356,6 +375,9 @@ pub enum Rule {
     Supervisor,
     /// `runner`: only when the table's `may` lists `runner`.
     Runner,
+    /// `restart`: own tickets, only when the table's `may` lists
+    /// `restart`.
+    Restart,
 }
 
 /// Every verb and what a supervisor may do with it. A verb not here is
@@ -367,7 +389,7 @@ pub const SUPERVISOR_VERBS: &[(&str, Rule)] = &[
     ("park", Rule::OwnTicket),
     ("close", Rule::OwnTicket),
     ("resume", Rule::Resume),
-    ("restart", Rule::Refused),
+    ("restart", Rule::Restart),
     ("run", Rule::Refused),
     ("runner", Rule::Runner),
     ("worktrees", Rule::Worktrees),
@@ -421,7 +443,7 @@ pub fn may(data: &DataDir, project: &str) -> Vec<String> {
 }
 
 /// Every capability a `[supervisor]` table's `may` can name.
-pub const CAPABILITIES: &[&str] = &["runner"];
+pub const CAPABILITIES: &[&str] = &["runner", "restart"];
 
 /// A command refused because the supervisor's table does not give it
 /// the capability. Unlike the other refusals it is saved on the
@@ -431,14 +453,15 @@ pub struct CapabilityRefused {
     /// The supervisor's project.
     pub project: String,
     /// The capability the command needs, which is also its verb after
-    /// `dispatch`: `runner`.
+    /// `dispatch`: `runner` or `restart`.
     pub capability: String,
-    /// What the command asks of it: `restart`.
+    /// What the command asks of it: `restart`, or `<ticket> [<stage>]`.
     pub action: String,
 }
 
 impl CapabilityRefused {
-    /// The command as typed after `dispatch`: `runner restart`.
+    /// The command as typed after `dispatch`: `runner restart` or
+    /// `restart 314cb7a1 ready`.
     #[must_use]
     pub fn command(&self) -> String {
         format!("{} {}", self.capability, self.action)
@@ -524,6 +547,23 @@ pub fn permit(actor: &Actor, args: &[&str], data: &DataDir) -> Result<()> {
             }
             // Anything else is allowed or a usage error, which the
             // command reports without a refusal to save.
+            _ => Ok(()),
+        },
+        Some(Rule::Restart) => match args {
+            [capability, ticket, stage @ ..] if stage.len() <= 1 => {
+                own_ticket(ticket)?;
+                if may(data, own).iter().any(|m| m == capability) {
+                    Ok(())
+                } else {
+                    Err(CapabilityRefused {
+                        project: own.clone(),
+                        capability: (*capability).to_owned(),
+                        action: args[1..].join(" "),
+                    }
+                    .into())
+                }
+            }
+            // A malformed restart is the usage error's, never saved.
             _ => Ok(()),
         },
         Some(Rule::Worktrees) if args.len() == 1 => Ok(()),
@@ -1023,6 +1063,25 @@ mod tests {
         assert!(s.contains("start a runner with `dispatch run`"), "{s}");
         assert!(!s.contains("run the runner"), "{s}");
         assert!(s.find("## The runner") < s.find("## Commands"));
+        assert_ne!(seed_hash("orchard", &sup), seed_hash("orchard", &table()));
+    }
+
+    #[test]
+    fn a_supervisor_that_may_restart_is_told_when() {
+        let mut sup = table();
+        let before = seed_of(&sup);
+        assert!(before.contains("You may not restart a ticket"), "{before}");
+        assert!(!before.contains("## Restarts"));
+        sup.may = vec!["restart".into()];
+        let s = seed_of(&sup);
+        assert!(
+            s.contains("`/opt/bin/dispatch restart <ticket> [<stage>]`"),
+            "{s}"
+        );
+        assert!(s.contains("say what you restarted"), "{s}");
+        assert!(!s.contains("You may not restart a ticket"), "{s}");
+        assert!(s.contains("You may not move the worktrees"), "{s}");
+        assert!(s.find("## Restarts") < s.find("## Commands"));
         assert_ne!(seed_hash("orchard", &sup), seed_hash("orchard", &table()));
     }
 

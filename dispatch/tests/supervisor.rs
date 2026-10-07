@@ -684,7 +684,11 @@ fn a_past_supervisor_is_still_a_supervisor() {
     let t = env.take(ORCHARD, 1);
     refused(
         &env.cli(Some("old"), &["restart", &t.id]),
-        "the supervisor may not run `dispatch restart`; the owner does",
+        &format!(
+            "the supervisor may not run `dispatch restart {}` unless its table's `may` lists \
+             `restart`",
+            t.id
+        ),
     );
 }
 
@@ -875,6 +879,126 @@ fn a_restart_is_refused_while_a_ticket_runs_a_deploy() {
     assert!(stderr(&out).contains("control socket"), "{}", stderr(&out));
 }
 
+/// The refusals saved on `project`'s record, as typed after `dispatch`.
+fn refusals(env: &Env, project: &str) -> Vec<String> {
+    let ps = env.runner.load_project(project).unwrap();
+    for r in &ps.supervisor.refusals {
+        assert_eq!(r.by, BY_SUPERVISOR);
+    }
+    ps.supervisor
+        .refusals
+        .iter()
+        .map(|r| r.answer.clone())
+        .collect()
+}
+
+#[test]
+fn a_restart_is_refused_to_a_supervisor_without_may_and_the_refusal_kept() {
+    for may in ["", "may = [\"runner\"]"] {
+        let mut env = Env::new();
+        let text = pipeline(ORCHARD, &["finalize"]).replace(
+            "decides = [\"finalize\"]",
+            &format!("decides = [\"finalize\"]\n{may}"),
+        );
+        std::fs::write(env.data.pipeline(ORCHARD), text).unwrap();
+        env.seat(ORCHARD, SUPERVISOR);
+        let t = env.take(ORCHARD, 1);
+        let before = env.ticket(&t.id);
+        let out = env.cli(Some(SUPERVISOR), &["restart"]);
+        assert_eq!(out.status.code(), Some(64), "{out:?}");
+        assert_eq!(refusals(&env, ORCHARD), Vec::<String>::new());
+        let out = env.cli(Some(SUPERVISOR), &["restart", &t.id, "inspect"]);
+        refused(
+            &out,
+            &format!(
+                "the supervisor may not run `dispatch restart {} inspect` unless its table's \
+                 `may` lists `restart`; the owner does",
+                t.id
+            ),
+        );
+        assert_eq!(env.ticket(&t.id), before);
+        assert_eq!(
+            refusals(&env, ORCHARD),
+            [format!("restart {} inspect", t.id)]
+        );
+        let shown = env.cli(None, &["supervisor", ORCHARD]);
+        accepted(&shown);
+        assert!(
+            stdout(&shown).contains(&format!("refused: restart {} inspect at ", t.id)),
+            "{}",
+            stdout(&shown)
+        );
+    }
+}
+
+#[test]
+fn a_restart_is_a_supervisors_once_its_table_says_may() {
+    let mut env = Env::new();
+    let text = pipeline(ORCHARD, &["finalize"]).replace(
+        "decides = [\"finalize\"]",
+        "decides = [\"finalize\"]\nmay = [\"runner\", \"restart\"]",
+    );
+    std::fs::write(env.data.pipeline(ORCHARD), text).unwrap();
+    env.seat(ORCHARD, SUPERVISOR);
+    let a = env.take(ORCHARD, 1);
+    let b = env.take(ORCHARD, 2);
+    let theirs = env.take(GROVE, 3);
+    let by_owner = env.cli(None, &["restart", &a.id, "inspect"]);
+    let by_supervisor = env.cli(Some(SUPERVISOR), &["restart", &b.id, "inspect"]);
+    accepted(&by_owner);
+    accepted(&by_supervisor);
+    // Nothing runs on a ticket only taken, so each restart parks and
+    // applies in the one command; the park's stamp is on its event.
+    let events = dispatch::events::read_since(&dispatch::events::log_path(&env.data), 0).unwrap();
+    for (t, actor) in [(&a, None), (&b, Some(BY_SUPERVISOR))] {
+        let t = env.ticket(&t.id);
+        assert!(t.active(), "{:?}", t.state);
+        assert_eq!(t.restarts.len(), 1);
+        let parking = events
+            .iter()
+            .find(|e| e.ticket == t.id && e.kind == Kind::Parking)
+            .expect("a parking event");
+        assert_eq!(parking.actor.as_deref(), actor);
+    }
+    refused(
+        &env.cli(Some(SUPERVISOR), &["restart", &theirs.id]),
+        "the supervisor of Orchard may not act on Grove's tickets",
+    );
+    assert_eq!(refusals(&env, ORCHARD), Vec::<String>::new());
+}
+
+#[test]
+fn a_supervisors_restart_is_refused_while_its_ticket_runs_a_deploy() {
+    let mut env = Env::new();
+    let text = deploying_pipeline(ORCHARD)
+        .replace("may = [\"runner\"]", "may = [\"runner\", \"restart\"]");
+    std::fs::write(env.data.pipeline(ORCHARD), text).unwrap();
+    env.seat(ORCHARD, SUPERVISOR);
+    let t = env.take(ORCHARD, 1);
+    let now = env.tick();
+    env.runner.step_all(now).unwrap();
+    let deploy = env.ticket(&t.id);
+    assert!(
+        deploy
+            .attempts
+            .iter()
+            .any(|a| a.stage == "deploy" && a.is_open()),
+        "{:?}",
+        deploy.attempts
+    );
+    let out = env.cli(Some(SUPERVISOR), &["restart", &t.id, "inspect"]);
+    refused(
+        &out,
+        &format!(
+            "ticket {} is running `deploy`; restart it when that stage ends",
+            t.id
+        ),
+    );
+    assert!(!stderr(&out).contains("may not"), "{out:?}");
+    assert_eq!(env.ticket(&t.id), deploy);
+    assert_eq!(refusals(&env, ORCHARD), Vec::<String>::new());
+}
+
 #[test]
 fn the_owners_verbs_are_refused_to_a_supervisor() {
     let mut env = Env::new();
@@ -886,8 +1010,6 @@ fn the_owners_verbs_are_refused_to_a_supervisor() {
     let settings_before = std::fs::read_to_string(&settings).unwrap();
     let elsewhere = env.dir.path().join("elsewhere").display().to_string();
     for (args, form) in [
-        (vec!["restart", t.id.as_str()], "restart"),
-        (vec!["restart", t.id.as_str(), "inspect"], "restart"),
         (vec!["run", "--once"], "run"),
         (vec!["run"], "run"),
         (vec!["worktrees", elsewhere.as_str()], "worktrees "),

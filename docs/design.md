@@ -2150,8 +2150,9 @@ long-lived Claude Code session that watches its tickets
   past supervisor makes a command that supervisor's. It may read
   anything, `take` and `queue` on its own project, and `decide`,
   `park`, `resume --no-rerun` and `close` on its own tickets; a plain
-  `resume` needs `rerun` in `decides`. Refused with exit 1: `restart`,
-  `run`, `worktrees <path>` and `--migrate`, `supervisor --fresh`,
+  `resume` needs `rerun` in `decides`. Refused with exit 1: `restart`
+  (unless `may` lists it, and even with it while the ticket runs a
+  deploy), `run`, `worktrees <path>` and `--migrate`, `supervisor --fresh`,
   `--resume` and `--kill`, any verb not on the list
   (`supervisor::SUPERVISOR_VERBS`, held to `USAGE` by a test), and any
   other project. A `decide` outside `decides` saves a `Refusal` on the
@@ -2194,8 +2195,14 @@ Known gaps:
   agent can unset the variable.
 - A refused `resume`, `restart`, `runner`, `worktrees` or `supervisor`
   is an exit and a message, not an event, since no ticket carries it;
-  a refused `runner stop`, `start` or `restart` is kept on the
-  project's record.
+  a refused `runner stop`, `start` or `restart`, and a refused
+  `restart <ticket>`, are kept on the project's record.
+- Project refusals are not in `dispatch-control`'s `SupervisorView`,
+  so the app does not show them; only `dispatch supervisor <project>`
+  does.
+- `Restart` has no `by`: the park a supervisor's restart makes is
+  stamped `supervisor`, but once the restart applies only the
+  supervisor's report says who restarted the ticket.
 - The flags pass the allow rules on the command line; whether a second
   `--settings` would have replaced Switchboard's hooks was not tried.
 

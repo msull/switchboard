@@ -13583,6 +13583,41 @@ fn a_restart_waits_for_running_checks_then_applies() {
     assert_eq!(t.restart, None);
 }
 
+/// A supervisor's restart parks as the supervisor: the `Parking` state
+/// and its event say who, until the restart applies.
+#[test]
+fn a_supervisors_restart_parks_as_the_supervisor() {
+    let mut env = Env::new();
+    let (id, key) = implement_checking(&mut env);
+    env.repo.lock().unwrap().stubborn_checks.push(key);
+    env.runner.actor = Some(dispatch::scheduler::BY_SUPERVISOR.into());
+    let t = restart_at(&mut env, &id, None);
+    env.runner.actor = None;
+    assert!(
+        matches!(t.state, TicketState::Parking { .. }),
+        "{:?}",
+        t.state
+    );
+    assert_eq!(
+        t.state_by.as_deref(),
+        Some(dispatch::scheduler::BY_SUPERVISOR)
+    );
+    let events = dispatch::events::read_since(&dispatch::events::log_path(&env.data), 0).unwrap();
+    let parking = events
+        .iter()
+        .find(|e| e.ticket == id && e.kind == dispatch::events::Kind::Parking)
+        .expect("a parking event");
+    assert_eq!(
+        parking.actor.as_deref(),
+        Some(dispatch::scheduler::BY_SUPERVISOR)
+    );
+    env.wait(STOP_LIMIT_MS);
+    env.steps_until(&id, "the restart applied", |t, _| t.active());
+    let t = env.ticket(&id);
+    assert_eq!(t.restarts.len(), 1);
+    assert_eq!(t.state_by, None);
+}
+
 /// A runner that restarts while a restart waits on its checks carries
 /// it on from the record.
 #[test]

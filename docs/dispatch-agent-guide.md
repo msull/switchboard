@@ -59,6 +59,13 @@ dispatch tail <ticket> [--lines N]                what the ticket's running agen
 refused while a deploy runs; retry it when that stage ends. A
 supervisor without `runner` still stops and reports when a command
 cannot reach the socket, and no supervisor ever runs `dispatch run`.
+`dispatch restart` is the owner's too, unless `may` lists `restart`:
+then the supervisor may restart its own project's tickets, but only a
+ticket the owner named for a restart, or a ticket handed to it to take
+to done whose pull request at `merge` cannot merge because it
+conflicts. A restart of a ticket running a deploy is refused; retry it
+when that stage ends. Its report says what it restarted, at which
+stage, and why.
 
 ## Projects and what they take
 
@@ -390,8 +397,8 @@ session's `SWITCHBOARD_RECORD_ID` names it. It may run the read-only
 commands, `take` and `queue` on its own project, and `decide`, `park`,
 `resume --no-rerun` and `close` on its own project's tickets. A plain
 `resume` (which reruns, a paid run) needs `rerun` in `decides`.
-Everything else is refused with exit 1: `restart`, `run`, `runner`
-(unless `may` lists it), `worktrees <path>` and `--migrate`,
+Everything else is refused with exit 1: `run`, `restart` and `runner`
+(each unless `may` lists it), `worktrees <path>` and `--migrate`,
 `supervisor --fresh`, `--resume` and `--kill`, and any other project's
 tickets. This is a guard against mistakes, not
 a boundary: an agent can unset the variable.
