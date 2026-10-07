@@ -1646,10 +1646,16 @@ missing checks past the young-head window is one `pr` decision with
 cannot be read is retried quietly for an hour first. The PR is
 recorded on the attempt and shown on the ticket page as a link with
 the last reading. A `pr-merged` stage (`merge`) makes the
-confirmation decision the design describes (only `park` can be
-answered by hand; the session is marked waiting), reads the same PR
+confirmation decision the design describes (`recheck` and `park` can
+be answered by hand; the session is marked waiting), reads the same PR
 once a minute, and on merged completes the attempt and answers the
-decision as Dispatch. A human gate-only
+decision as Dispatch. A base that moved into a conflict under it (a
+local `git merge-tree` probe, or the provider's `conflicting`, which
+Bitbucket's `diffstat` gives) sends the ticket back through the
+`pr-checks` stage before it to be rebased, pushed and checked again,
+as does `recheck`; a tree that is not clean, a stage between that is
+not gate-only, or a trip back that left the head where it is asks
+instead. A human gate-only
 stage (`inspect`) asks once per lane with the branch, its head, what
 it adds over its base, the tree and the notes (Bitbucket Cloud is a
 second provider for both PR gates, read through `curl` with the
@@ -1811,7 +1817,10 @@ its own, and the one-`fsync` window before the group is saved, are
 left running. And: the `refresh` question is asked per stage, not
 per lane, so one `recheck` covers every held lane; a lane whose rebaser
 finished and that is brought up in the pass right after another lane's
-`recheck` reads `rebased by hand (adopted)`.
+`recheck` reads `rebased by hand (adopted)`. And: a base that moves
+cleanly under a ticket waiting at `merge` is not brought up unless the
+owner answers `recheck`, so a provider that requires branches to be up
+to date waits on that answer.
 
 A supervising agent has commands of its own, all read-only:
 `dispatch health` (the runner's `runner.json`, written after every

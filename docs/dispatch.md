@@ -699,8 +699,10 @@ Merge is a confirmation decision as well as an external fact: when a
 ticket reaches `merge`, a pending decision is made, the current
 session is marked waiting, and it counts against `waiting_on_me`.
 `pr-merged` resolves it without your answer when the provider reports
-the merge; answering it by hand is refused until the provider agrees
-(the decision's only option is `park`).
+the merge; answering it `merged` by hand is refused until the provider
+agrees (its options are `recheck`, which sends the ticket back through
+the `pr-checks` stage before it to bring the branch up and read the
+checks again, and `park`).
 
 A human gate on a gate-only stage other than `lanes` (an `inspect`
 stage after `implement`, before anything is pushed or a PR opened) is
@@ -1892,9 +1894,15 @@ head it was at, what its checks said, when) and shown on the ticket
 page.
 
 A PR the provider reports as conflicting with its base (GitHub's
-`mergeable`; Bitbucket does not say) is rebased rather than asked
-about when the policy names a `rebaser`: an agent attempt of the same
-stage in the lane, made by `session.clone` from the lane's last
+`mergeable`; on Bitbucket, any path of the pull request's `diffstat`
+marked `merge conflict`, `local deleted` or `remote deleted`, read
+once per reading of an open PR, a `diffstat` that cannot be read
+leaving it unknown) is rebased rather than asked about when the
+policy names a `rebaser`. At `merge` it goes back through the
+`pr-checks` stage before it instead (below), so the checks are read
+again after whatever rebases it; the rebaser runs at `merge` itself
+only in a pipeline with no such stage. The rebaser is an agent
+attempt of the same stage in the lane, made by `session.clone` from the lane's last
 finished agent so it knows the change, told the PR, the base, the plan
 and where its notes go, and asked to rebase, resolve, run the checks
 and push with `--force-with-lease`. The gate's own attempt stays open
@@ -1929,7 +1937,9 @@ the branch again when it stops, and after `max_rebases` such attempts,
 or without a rebaser, asks a `refresh` question with `recheck`. The
 rebaser's attempts, and the `rerun` questions about them, carry the
 pseudo-stage `refresh`, so no stage mistakes them for its own; the
-`refresh` question carries the real stage and is named `refresh`.
+`refresh` question carries the real stage, is named `refresh`, and
+names the files the rebase conflicts in (`Repo::conflicting_files`,
+`git merge-tree --name-only`) when they can be read.
 Either holds the stage. A worktree with a rebase stopped part way
 (`Repo::rebase_in_progress`, either backend), or whose `HEAD` is not
 the lane's branch (`Repo::branch_head`), is not read at all, since
@@ -2030,6 +2040,48 @@ it started at or after, so a later one gets its own.
 Pull-request tickets are someone else's branch and are never
 refreshed; `lanes`, a human look and the merge watch launch nothing
 and are not refreshed either.
+
+The merge watch does notice a base that moves under it into a
+conflict. On each reading of an open PR (once a minute) where the
+`pr-checks` stage before it would refresh, it fetches the lane's base
+and, when the base moved off the lane's `base_sha`, asks
+`Repo::conflicting_files` whether a merge of the tree's head with it
+conflicts, touching no tree or ref. A fetch or probe that fails is
+logged and reads as no conflict, but like a provider that has not
+decided (no `mergeable`) it leaves a pending merge decision as it was
+asked, so a flaky fetch does not ask it again under a new id; a
+provider reporting the PR `conflicting` is heard all the same. A
+conflict found that way, or the provider reporting the PR
+`conflicting`, sends the ticket back to that `pr-checks` stage
+(`ready`) with the stage not yet refreshed: the merge attempts still
+open and the last completed attempt of every stage from `ready` to the
+watch are cancelled `sent back from merge: <why>`, the pending merge
+decisions with them, and every context goes back at once. A lane whose
+PR already merged (its merge attempt completed) is left out: its
+passes stand, and the refresh neither rebases nor pushes it. `ready`'s
+stage-start refresh then rebases, runs the rebaser on a conflict and
+pushes with the lease; `ready` reads the checks, and the ticket
+returns to `merge` with a new decision. A human gate between them asks
+again about the new head. A base that moved cleanly is left alone,
+since every trip costs a push and a CI run (and on some providers the
+approvals); `recheck` on the merge decision sends it back regardless,
+once it has read each PR the watch waits on again: one merged by hand
+since the last reading is left to the next pass to close, and one that
+cannot be read is named on the decision instead.
+
+Nothing is sent back, and the merge decision names the conflict and
+why instead, ending "Fix it there, then answer recheck", when the tree
+of any chosen lane that has not merged, or of a `root` or `joined`
+watch, is not clean (the refresh would leave it, and a rebaser would
+be started into it), when the provider reports a conflict but the base
+could not be fetched or probed (the refresh would fail the same
+fetch), when a stage between `ready` and the watch is not gate-only
+(it would run again, and spend), or when the last trip back left the
+branch at the head it is at now (the previous merge attempt was sent
+back and the tree's head is that attempt's PR head, so another trip
+would change nothing). A `refresh` question is never asked at `merge`,
+so the watch keeps polling and a PR merged by hand still closes the
+ticket.
 
 Red checks on the PR at the tree's head are handled the same way by
 the policy's `fixer`: cloned from the lane's last finished agent, told
@@ -2339,7 +2391,8 @@ script), the `read` paths made absolute, what each listed decision's
 answers do and that every other is the owner's, where the owner answers
 those (the ticket page's buttons, or `dispatch decide` from any shell
 but the supervisor's pane), that a command typed in its pane, a `!` line
-included, is its own, that `merge` is answered `park` only, the full
+included, is its own, that `merge` is answered `recheck` or `park` and
+never merged by it, the full
 path of the `dispatch` executable (its allow rule matches that path),
 "run `dispatch brief <project>` first", the hand-off to keep current,
 and the commands it works with. The session's first prompt is "Read
@@ -2587,11 +2640,21 @@ and one against the real one:
 | `ready` with every slot taken by another ticket's agent | The PR is still read and the ticket still closes; a gate-only attempt holds no slot and the other agent keeps its own |
 | A human gate (`inspect`) after `implement` | One gate-only attempt and one decision per lane, naming the branch and head, what it adds over its base, the tree and the notes; `proceed` completes it bound to the head; `park` stops |
 | `rerun` with a note at `inspect` | That lane's `implement` result and the gate's attempt are cancelled, the ticket stands at `implement` again, a fresh implementer gets the note at the end of its prompt, other lanes are untouched, and `inspect` asks again on a new attempt when it is done |
-| `merge` with the PR open | A confirmation decision with only `park`, the session marked waiting; `merged` by hand is refused; the PR is read once a minute |
+| `merge` with the PR open | A confirmation decision with `recheck` and `park`, the session marked waiting; `merged` by hand is refused; the PR is read once a minute (`merge_waits_for_the_provider_and_refuses_a_hand_answer`) |
 | `revise --note` at `finalize` | `<stem>.feedback-<n>.md` is written beside the reviewed copy, headed `# The owner's objection`, and `workflow.object` sent for round n; a `revised` event once it is accepted; `finalize` is asked again naming the new round count; no note is exit 64 with the decision still pending; a refusal removes the file and the revision and asks again; a lost reply, or the app too slow to answer, is a `lost-send` question; a second `revise` of an unopened round replaces the first's revision (`revise_writes_the_owners_round_and_sends_it_as_an_objection`, `a_refused_objection_is_undone_and_finalize_is_asked_again`, `a_lost_objection_keeps_its_round_and_asks_about_the_send`, `an_objection_the_app_was_slow_to_answer_keeps_its_round`, `a_second_objection_to_an_unopened_round_replaces_the_first`) |
 | The user's own feedback round after the review converged | The pending `finalize` decision is cancelled and the session unmarked while the planner answers; when the run converges again a new decision names the new round count |
-| The PR conflicts with its base at `merge` | The policy's rebaser starts in the lane, cloned from the implementer's session, with the PR, the base and the notes path in its prompt; the merge decision stays; when it stops the gate reads the PR again and, merged, the ticket closes; the rebaser's attempt still records `conflicting`, which its completion line names as the rebaser's (`a_conflicting_pr_is_rebased_by_a_clone_of_the_implementer`; the log text in `a_remedys_completion_names_its_role_and_head`) |
-| The rebaser leaves the PR at the same head, or `max_rebases` is spent | A `pr` decision saying which; no further rebaser runs |
+| The provider reports the PR conflicting at `merge` | The ticket goes back to `ready`, where the policy's rebaser starts in the lane, cloned from the implementer's session, with the PR, the base and the notes path in its prompt; when it stops `ready` reads the checks at its head, the ticket stands at `merge` again and, merged, closes; the rebaser's attempt still records `conflicting`, which its completion line names as the rebaser's (`a_conflicting_pr_is_rebased_by_a_clone_of_the_implementer`; the log text in `a_remedys_completion_names_its_role_and_head`) |
+| The rebaser leaves the PR at the same head, or `max_rebases` is spent | A `pr` decision saying which at `ready`; no further rebaser runs, and the ticket does not return to `merge` (`a_rebase_that_changes_nothing_or_past_the_cap_is_a_question`) |
+| The base moves under a ticket at `merge` and a merge with it conflicts | The ticket goes back to `ready`, which rebases and pushes once with the lease, reads the checks pending then green, and the ticket stands at `merge` with a new decision; `sent-back`, `refreshed`, `pushed`, `pr`, `pr-checks`, `stage` in order; a restart after the trip back's save still pushes once; a provider's short head leases on the full head `ready` read (`a_conflicting_base_move_at_merge_is_refreshed_through_ready`, `a_restart_after_the_send_back_refreshes_once`, `the_lease_after_a_trip_back_uses_the_full_head`) |
+| The base moves cleanly under a ticket at `merge` | Nothing is rebased or pushed and the same decision waits (`a_clean_base_move_at_merge_leaves_the_branch_alone`) |
+| The trip back meets a conflict with no rebaser | `ready` asks its `refresh` question naming the file (`a_base_move_at_merge_the_rebaser_cannot_resolve_asks_refresh_naming_the_file`) |
+| A conflict at `merge` with a tree that is not clean | No trip back and no rebaser; the merge decision names the tree, the file or the provider's word; `recheck` while it is still not clean says so again; once clean, `recheck` sends it back; in two lanes, the dirty one holds both (`a_dirty_tree_at_merge_asks_instead_of_looping`, `a_dirty_tree_with_a_conflicting_pr_at_merge_starts_no_rebaser`, `a_dirty_second_lane_holds_the_send_back_of_a_clean_one`); a `root` merge with only the provider's word checks the lane trees too (`a_dirty_tree_under_a_root_merge_asks_instead_of_looping`) |
+| A lane's PR merged by hand, then the other lane's base moves into a conflict | Only the other lane goes back; the merged lane keeps its passes and is neither rebased nor pushed, its dirty tree holding nothing (`a_merged_lane_stays_merged_when_the_other_lane_is_sent_back`) |
+| The probe's fetch fails while the merge decision names a conflict | The same decision stays pending (`a_failed_probe_keeps_the_pending_merge_decision`) |
+| The provider says conflicting at `merge` but the trip back moves nothing | The second reading asks, naming the head the trip left; no second trip (`a_trip_back_that_leaves_the_head_asks_once`); a trip on which a rebaser moved the head is followed by another when the conflict returns (`a_second_base_move_after_a_rebaser_push_sends_back_again`) |
+| The PR is merged by hand while a conflict is reported | The watch polls through its question and the ticket closes with the decision answered by Dispatch (`a_pr_merged_while_the_conflict_is_reported_closes_the_ticket`) |
+| A stage between `ready` and `merge` | A human gate's pass is cancelled by the trip back and asked again about the rebased head; an agent stage there holds the trip and the merge decision names it (`a_gate_between_ready_and_merge_judges_the_new_head`, `an_agent_stage_between_ready_and_merge_holds_the_trip_back`) |
+| `recheck` on the merge decision | The ticket goes back through `ready`, which reads the checks again, and stands at `merge` again (`merge_recheck_sends_the_ticket_back_through_ready`); answered after a merge by hand the watch has not read yet, the PR is read and the ticket closes with no trip back (`a_recheck_after_a_hand_merge_closes_without_a_trip_back`) |
 | The base moved while a plan sat; implementation begins | The branch is brought up to the base, `base_sha` is the new base, the implementer is told the range; nothing but git ran (`a_plan_that_sat_is_implemented_on_a_branch_brought_up_to_its_base`) |
 | The base moved after the PR was opened; `ready` begins | The branch is rebased and pushed once with a lease on the head last seen; `ready` reads the PR at the tree's head (`a_refresh_at_ready_pushes_the_rebased_branch_once_with_the_lease`, `a_refresh_at_ready_pushes_after_the_rebaser_resolves_it`) |
 | The same, the remote moved meanwhile | The lease refuses the push; `ready` asks its `pr` question about the head (`a_refused_lease_at_ready_asks_the_pr_question`) |

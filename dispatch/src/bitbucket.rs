@@ -279,6 +279,70 @@ fn parse_statuses(json: &[u8]) -> Result<Checks> {
     Ok(Checks::Passed)
 }
 
+#[derive(Deserialize)]
+struct DiffstatPage {
+    #[serde(default)]
+    next: Option<String>,
+    #[serde(default)]
+    values: Vec<DiffstatRow>,
+}
+
+#[derive(Deserialize)]
+struct DiffstatRow {
+    #[serde(default)]
+    status: String,
+}
+
+/// Whether a pull request's `diffstat` marks any path as a conflict,
+/// read through `get` from `url` and following `next`: `None` for a page
+/// that cannot be parsed. A page that cannot be fetched is an error.
+fn diffstat_conflicts(
+    url: String,
+    mut get: impl FnMut(&str) -> Result<Vec<u8>>,
+) -> Result<Option<bool>> {
+    let mut url = Some(url);
+    let mut pages = 0;
+    while let Some(next) = url.take() {
+        let Ok(page) = serde_json::from_slice::<DiffstatPage>(&get(&next)?) else {
+            return Ok(None);
+        };
+        let conflict = page.values.iter().any(|r| {
+            matches!(
+                r.status.as_str(),
+                "merge conflict" | "local deleted" | "remote deleted"
+            )
+        });
+        if conflict {
+            return Ok(Some(true));
+        }
+        pages += 1;
+        url = page.next.filter(|_| pages < DIFFSTAT_PAGES);
+    }
+    Ok(Some(false))
+}
+
+/// An open pull request with what its `diffstat` says about merging
+/// it. A `diffstat` that could not be fetched or read leaves it unknown
+/// rather than failing the reading of the PR.
+fn with_diffstat(mut pr: PullRequest, conflicts: Result<Option<bool>>) -> PullRequest {
+    pr.mergeable = match conflicts {
+        Ok(Some(true)) => Some("conflicting".to_owned()),
+        Ok(Some(false)) => Some("clean".to_owned()),
+        Ok(None) => {
+            log::warn!("PR #{}: its diffstat could not be parsed", pr.number);
+            None
+        }
+        Err(e) => {
+            log::warn!("PR #{}: its diffstat could not be read: {e:#}", pr.number);
+            None
+        }
+    };
+    pr
+}
+
+/// The most `diffstat` pages followed for one pull request.
+const DIFFSTAT_PAGES: usize = 20;
+
 fn encode(s: &str) -> String {
     let mut out = String::new();
     for b in s.bytes() {
@@ -294,18 +358,36 @@ fn encode(s: &str) -> String {
     out
 }
 
+impl Bitbucket {
+    /// An open pull request with its `mergeable` read from its
+    /// `diffstat`; any other as it is.
+    fn with_mergeable(&self, repo: &str, pr: PullRequest) -> PullRequest {
+        if pr.state != "open" {
+            return pr;
+        }
+        let url = format!(
+            "{API_ROOT}/repositories/{repo}/pullrequests/{}/diffstat?pagelen=500&fields=next,values.status",
+            pr.number
+        );
+        let conflicts = diffstat_conflicts(url, |url| self.get(url));
+        with_diffstat(pr, conflicts)
+    }
+}
+
 impl PullRequests for Bitbucket {
     fn find(&self, repo: &str, branch: &str) -> Result<Option<PullRequest>> {
         let q = encode(&format!("source.branch.name=\"{branch}\""));
         let url = format!(
             "{API_ROOT}/repositories/{repo}/pullrequests?q={q}&state=OPEN&state=MERGED&state=DECLINED&state=SUPERSEDED&pagelen=50"
         );
-        parse_prs(&self.get(&url)?)
+        let pr = parse_prs(&self.get(&url)?)?;
+        Ok(pr.map(|pr| self.with_mergeable(repo, pr)))
     }
 
     fn by_number(&self, repo: &str, number: u64) -> Result<PullRequest> {
         let url = format!("{API_ROOT}/repositories/{repo}/pullrequests/{number}");
-        parse_pr(&self.get(&url)?)
+        let pr = parse_pr(&self.get(&url)?)?;
+        Ok(self.with_mergeable(repo, pr))
     }
 
     fn checks(&self, repo: &str, number: u64) -> Result<Checks> {
@@ -364,6 +446,58 @@ mod tests {
         );
         let passed = br#"{"values":[{"name":"build","state":"SUCCESSFUL"}]}"#;
         assert_eq!(parse_statuses(passed).unwrap(), Checks::Passed);
+    }
+
+    /// `diffstat_conflicts` over `pages`, served in order whatever URL
+    /// is asked for, with the URLs asked for.
+    fn conflicts_over(pages: &[&[u8]]) -> (Result<Option<bool>>, Vec<String>) {
+        let mut asked = Vec::new();
+        let mut served = pages.iter();
+        let read = diffstat_conflicts("first".into(), |url| {
+            asked.push(url.to_owned());
+            served
+                .next()
+                .map(|p| p.to_vec())
+                .ok_or_else(|| anyhow::anyhow!("no page"))
+        });
+        (read, asked)
+    }
+
+    #[test]
+    fn a_diffstat_reads_conflicting_on_any_conflicted_path_and_clean_otherwise() {
+        for status in ["merge conflict", "local deleted", "remote deleted"] {
+            let json = format!(r#"{{"values":[{{"status":"modified"}},{{"status":"{status}"}}]}}"#);
+            let (read, _) = conflicts_over(&[json.as_bytes()]);
+            assert_eq!(read.unwrap(), Some(true), "{status}");
+        }
+        let (read, asked) = conflicts_over(&[
+            br#"{"values":[{"status":"modified"},{"status":"added"}],"next":"page2"}"#,
+            br#"{"values":[{"status":"merge conflict"}],"next":"page3"}"#,
+        ]);
+        assert_eq!(read.unwrap(), Some(true), "found on the second page");
+        assert_eq!(asked, ["first", "page2"], "and read no further");
+        let (read, _) = conflicts_over(&[br#"{"values":[]}"#]);
+        assert_eq!(read.unwrap(), Some(false));
+        let (read, _) = conflicts_over(&[b"<html>"]);
+        assert_eq!(read.unwrap(), None);
+        let (read, _) = conflicts_over(&[br#"{"values":[],"next":"page2"}"#]);
+        assert!(read.is_err(), "a page that cannot be fetched");
+    }
+
+    #[test]
+    fn a_pull_request_is_unknown_to_merge_until_its_diffstat_is_read() {
+        let json = br#"{"id":7,"state":"OPEN","source":{"commit":{"hash":"fa62f3f78577"}}}"#;
+        let pr = parse_pr(json).unwrap();
+        assert_eq!(pr.mergeable, None);
+        let clean = with_diffstat(pr.clone(), Ok(Some(false)));
+        assert_eq!(clean.mergeable.as_deref(), Some("clean"));
+        let conflicting = with_diffstat(pr.clone(), Ok(Some(true)));
+        assert_eq!(conflicting.mergeable.as_deref(), Some("conflicting"));
+        // A failed diffstat leaves the PR readable, its merge unknown.
+        let failed = with_diffstat(pr.clone(), Err(anyhow::anyhow!("bitbucket: 409")));
+        assert_eq!((failed.number, failed.mergeable), (7, None));
+        let garbled = with_diffstat(pr, Ok(None));
+        assert_eq!(garbled.mergeable, None);
     }
 
     #[test]

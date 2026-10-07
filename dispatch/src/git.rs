@@ -103,6 +103,10 @@ pub trait Repo: Send {
         head: &str,
         onto: &str,
     ) -> Result<Vec<String>>;
+    /// The files a merge of `head` and `onto` conflicts in, read the way
+    /// a provider decides whether a pull request can merge, without
+    /// touching the tree or any ref; empty when it merges cleanly.
+    fn conflicting_files(&self, dir: &Path, head: &str, onto: &str) -> Result<Vec<String>>;
     /// `git push --force-with-lease` of `branch` to `remote` from `dir`,
     /// replacing the remote branch only while it is at `expected`.
     fn push_with_lease(
@@ -793,6 +797,43 @@ impl Repo for GitCli {
             tip = commit_tree(dir, &tree, &tip, "dispatch: conflict probe", &env)?;
         }
         Ok(conflicting)
+    }
+
+    fn conflicting_files(&self, dir: &Path, head: &str, onto: &str) -> Result<Vec<String>> {
+        let mut cmd = git_in(dir);
+        cmd.args([
+            "merge-tree",
+            "--write-tree",
+            "--name-only",
+            "--no-messages",
+            onto,
+            head,
+        ]);
+        let out = cmd.output().with_context(|| format!("run {cmd:?}"))?;
+        match out.status.code() {
+            Some(0) => Ok(Vec::new()),
+            // The tree id, then one conflicted path per line up to the
+            // blank line that would open the messages.
+            Some(1) => {
+                let stdout = String::from_utf8_lossy(&out.stdout);
+                let mut files: Vec<String> = Vec::new();
+                for line in stdout.lines().skip(1) {
+                    let line = line.trim();
+                    if line.is_empty() {
+                        break;
+                    }
+                    if !files.iter().any(|f| f == line) {
+                        files.push(line.to_owned());
+                    }
+                }
+                Ok(files)
+            }
+            _ => bail!(
+                "{cmd:?} exited {}: {}",
+                out.status,
+                String::from_utf8_lossy(&out.stderr).trim()
+            ),
+        }
     }
 
     fn push_with_lease(
@@ -1615,6 +1656,8 @@ pub struct FakeRepo {
     /// The next `run` or `run_confined` fails with this, once.
     pub fail_run: Option<String>,
     pub fail_worktree: Option<String>,
+    /// Every `fetch` fails with this while it is set.
+    pub fail_fetch: Option<String>,
     /// Worktrees moved: repo, from, to.
     pub moved: Vec<(PathBuf, PathBuf, PathBuf)>,
     /// The `origin` of a tree, for a project the pipeline names by `root`.
@@ -1673,6 +1716,8 @@ pub struct FakeRepo {
     pub rebase_conflicts: Vec<PathBuf>,
     /// What `conflicting_commits` lists for a tree; absent, nothing.
     pub conflicting: std::collections::BTreeMap<PathBuf, Vec<String>>,
+    /// What `conflicting_files` lists for a tree; absent, nothing.
+    pub conflicting_files: std::collections::BTreeMap<PathBuf, Vec<String>>,
     /// Rebases done: dir, onto.
     pub rebased: Vec<(PathBuf, String)>,
     /// The head a successful rebase leaves in a tree; a tree not listed
@@ -1837,6 +1882,9 @@ impl Repo for FakeRepo {
         Ok(())
     }
     fn fetch(&mut self, dir: &Path, remote: &str) -> Result<()> {
+        if let Some(e) = &self.fail_fetch {
+            bail!("{e}");
+        }
         self.fetched.push((dir.to_path_buf(), remote.to_owned()));
         Ok(())
     }
@@ -2020,6 +2068,9 @@ impl Repo for FakeRepo {
         _onto: &str,
     ) -> Result<Vec<String>> {
         Ok(self.conflicting.get(dir).cloned().unwrap_or_default())
+    }
+    fn conflicting_files(&self, dir: &Path, _head: &str, _onto: &str) -> Result<Vec<String>> {
+        Ok(self.conflicting_files.get(dir).cloned().unwrap_or_default())
     }
     fn push_with_lease(
         &mut self,
@@ -2405,6 +2456,9 @@ impl Repo for std::sync::Arc<std::sync::Mutex<FakeRepo>> {
         self.lock()
             .unwrap()
             .conflicting_commits(dir, base, head, onto)
+    }
+    fn conflicting_files(&self, dir: &Path, head: &str, onto: &str) -> Result<Vec<String>> {
+        self.lock().unwrap().conflicting_files(dir, head, onto)
     }
     fn push_with_lease(
         &mut self,
@@ -3523,6 +3577,41 @@ mod tests {
                 .is_empty(),
             "onto its own base nothing conflicts"
         );
+    }
+
+    /// A base that moved under the branch: the file both changed is
+    /// named, a change elsewhere is not, and nothing in the tree or its
+    /// refs moves.
+    #[test]
+    fn the_real_git_names_the_files_a_merge_with_the_base_conflicts_in() {
+        let dir = tempfile::tempdir().unwrap();
+        let (wt, base) = cut(dir.path());
+        commit(&wt, "a", "1\n", &["-m", "A"]);
+        let b = commit(&wt, "shared", "branch\n", &["-m", "B"]);
+        sh(&wt, &["checkout", "-q", "--detach", &base]);
+        let onto = commit(&wt, "shared", "base\n", &["-m", "moved"]);
+        let elsewhere = commit(&wt, "other", "base\n", &["-m", "elsewhere"]);
+        sh(&wt, &["checkout", "-q", "--detach", &base]);
+        let disjoint = commit(&wt, "other", "base\n", &["-m", "disjoint"]);
+        sh(&wt, &["checkout", "-q", "dispatch/1-x"]);
+        let cli = GitCli::default();
+        let refs = sh(&wt, &["for-each-ref"]);
+        assert_eq!(
+            cli.conflicting_files(&wt, &b, &onto).unwrap(),
+            vec!["shared".to_owned()]
+        );
+        assert_eq!(
+            cli.conflicting_files(&wt, &b, &elsewhere).unwrap(),
+            vec!["shared".to_owned()]
+        );
+        assert!(
+            cli.conflicting_files(&wt, &b, &disjoint)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(cli.head(&wt).unwrap(), b);
+        assert!(cli.is_clean(&wt).unwrap());
+        assert_eq!(sh(&wt, &["for-each-ref"]), refs, "no ref was written");
     }
 
     /// A branch and a moved base that conflict on `shared`: the
