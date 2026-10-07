@@ -89,6 +89,14 @@ impl Runner {
                 }
                 _ => {}
             }
+            // A supervisor never restarts a ticket mid-deploy: the restart
+            // would run it again over a half-applied deploy. The owner may.
+            if r.actor.is_some()
+                && let Some((_, running)) =
+                    crate::runner_cmd::mid_apply(std::slice::from_ref(&t), |t| r.pipeline_of(t))?
+            {
+                bail!("ticket {ticket} is running `{running}`; restart it when that stage ends");
+            }
             let old = r.pipeline_of(&t)?;
             let checked = r.check_restart(&t, &old, stage)?;
             let carried = match &t.restart {
@@ -116,7 +124,13 @@ impl Runner {
             });
             let mut ps = r.load_project(&t.project)?;
             let before = ps.clone();
-            let parked = r.park(&mut t, &mut ps, &format!("restarting at {}", checked.to), now_ms);
+            let parked = r.park_by(
+                &mut t,
+                &mut ps,
+                &format!("restarting at {}", checked.to),
+                r.actor.clone(),
+                now_ms,
+            );
             if ps != before {
                 r.save_project(&ps)?;
             }

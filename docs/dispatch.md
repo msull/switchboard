@@ -2259,7 +2259,7 @@ setup = ["git", "clone", "git@example.com:o/r.git", "."]
 model = "sonnet"
 decides = ["finalize", "rerun", "pr"]
 merges = true      # it merges a green, clean pull request itself; false (default): it reports and the owner merges
-may = ["runner"]   # capabilities beyond decisions; absent, they are the owner's
+may = ["runner", "restart"]   # capabilities beyond decisions; absent, they are the owner's
 ```
 
 `decides` takes decision names: those Dispatch asks of its own accord
@@ -2269,16 +2269,24 @@ those a gate of the same file asks (a human gate's `decision`, an
 external gate's, and `merge` for a `pr-merged` gate that names none).
 An answer such as `recheck` is refused with the decisions that take it.
 
-`may` lists capabilities beyond decisions; today only `runner`, which
-lets the supervisor run `dispatch runner stop|start|restart` and adds a
-seed section: after a merge that touches `dispatch/`, rebundle, restart
-the runner, check `health` and report the new pid. The owner always has
-every capability. Without it, `dispatch runner` is refused, and the
-refusal is saved on the project's record (`supervision.refusals`, the
-last 20) and shown by `dispatch supervisor <project>`. `dispatch run`
-stays the owner's whatever `may` says. Either way a `stop` or `restart`
-is refused while a ticket has an open attempt of a gate-only command
-stage (a deploy), since the kill would cut its command short.
+`may` lists capabilities beyond decisions; today `runner` and
+`restart`. `runner` lets the supervisor run `dispatch runner
+stop|start|restart` and adds a seed section: after a merge that touches
+`dispatch/`, rebundle, restart the runner, check `health` and report the
+new pid. `restart` lets it run `dispatch restart <ticket> [<stage>]` on
+its own project's tickets only, and adds a `## Restarts` seed section:
+it restarts a ticket the owner named, or one handed to it whose pull
+request at `merge` conflicts, and says in its report what it restarted
+and why. The owner always has every capability. Without one, the
+command is refused, and the refusal is saved on the project's record
+(`supervision.refusals`, the last 20) and shown by `dispatch supervisor
+<project>`. `dispatch run` stays the owner's whatever `may` says. Either
+way a `stop` or `restart` of the runner is refused while a ticket has an
+open attempt of a gate-only command stage (a deploy), since the kill
+would cut its command short; a supervisor's `restart <ticket>` is
+refused likewise while that ticket has an open attempt of a deploy
+stage, since the restart would run it again over a half-applied deploy.
+The owner's restart is not refused.
 `dispatch runner` asks the app over the control port and waits up to a
 minute for `runner.json` to show the change: the old pid gone for
 `stop`, a pass written after the request by a live pid for `start` (a
@@ -2344,8 +2352,8 @@ project's current or past supervisor, the command is that
 supervisor's: it may read anything, `take` and `queue` on its own
 project, and `decide`, `park`, `resume --no-rerun` and `close` on its
 own project's tickets; a plain `resume`, which reruns what the park
-cancelled, needs `rerun` in `decides`. `restart`, `run`, `runner` (unless `may`
-lists it), `worktrees` with a path or `--migrate`, `supervisor --fresh`, `--resume` and
+cancelled, needs `rerun` in `decides`. `run`, `restart` and `runner` (each
+unless `may` lists it), `worktrees` with a path or `--migrate`, `supervisor --fresh`, `--resume` and
 `--kill`, any verb not on the list, and any other project are refused
 with exit 1. A `decide` on a name outside `decides` saves a refusal on
 the decision and logs a `refused` event; the decision still waits on
@@ -2367,8 +2375,9 @@ non-default `DISPATCH_DATA_DIR` the supervisor's commands need the
 variable set, which its allow rule does not cover; and a refused
 `resume`, `restart`, `runner`, `worktrees` or `supervisor` is an exit
 and a message, not an event, since no ticket carries it (a refused
-`runner stop`, `start` or `restart` is kept on the project's record; a
-malformed `runner` is a usage error and is not).
+`runner stop`, `start` or `restart`, and a refused `restart <ticket>`,
+are kept on the project's record; a malformed `runner` or `restart` is
+a usage error and is not).
 
 ## Surfacing
 

@@ -64,8 +64,10 @@ pub struct Supervisor {
     #[serde(default)]
     pub merges: bool,
     /// Capabilities beyond decisions that the supervisor may use; every
-    /// other is the owner's. Today only `runner`: stop, start and
-    /// restart the runner the app runs. Not written when empty, so a
+    /// other is the owner's. `runner`: stop, start and restart the
+    /// runner the app runs; `restart`: `dispatch restart <ticket>
+    /// [<stage>]` on the supervisor's own project's tickets, never while
+    /// one runs a deploy. Not written when empty, so a
     /// table without it hashes into the seed as it did before.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub may: Vec<String>,
@@ -1980,22 +1982,22 @@ argv = ["make", "deps"]
 
     #[test]
     fn may_names_capabilities_and_is_not_written_when_empty() {
-        let sup = supervised("guidance = \"g\"\nmay = [\"runner\"]")
+        let sup = supervised("guidance = \"g\"\nmay = [\"runner\", \"restart\"]")
             .unwrap()
             .supervisor
             .unwrap();
-        assert_eq!(sup.may, ["runner"]);
+        assert_eq!(sup.may, ["runner", "restart"]);
         assert!(
             toml::to_string(&sup)
                 .unwrap()
-                .contains("may = [\"runner\"]")
+                .contains("may = [\"runner\", \"restart\"]")
         );
         let e = supervised("guidance = \"g\"\nmay = [\"deploy\"]")
             .unwrap_err()
             .to_string();
         assert_eq!(
             e,
-            "[supervisor] may: `deploy` is not a capability Dispatch knows (runner)"
+            "[supervisor] may: `deploy` is not a capability Dispatch knows (runner, restart)"
         );
         let none = supervised("guidance = \"g\"").unwrap().supervisor.unwrap();
         assert!(!toml::to_string(&none).unwrap().contains("may"));

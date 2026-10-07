@@ -1988,8 +1988,21 @@ impl Runner {
         reason: &str,
         now_ms: u64,
     ) -> Result<()> {
+        self.park_by(t, ps, reason, None, now_ms)
+    }
+
+    /// `park`, with who asked for it: `None` for the owner and for
+    /// Dispatch itself, as `parking_intent` takes it.
+    pub(crate) fn park_by(
+        &mut self,
+        t: &mut Ticket,
+        ps: &mut ProjectState,
+        reason: &str,
+        by: Option<String>,
+        now_ms: u64,
+    ) -> Result<()> {
         log::warn!("ticket {} parking: {reason}", t.id);
-        Self::parking_intent(t, reason, None);
+        Self::parking_intent(t, reason, by);
         self.save_ticket(t, now_ms)?;
         self.finish_parking(t, ps, now_ms)
     }
