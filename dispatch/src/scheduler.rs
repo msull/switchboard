@@ -1009,17 +1009,10 @@ impl Runner {
         if stage.kind() != StageKind::GateOnly {
             self.refresh_tree(t, p, now_ms)?;
         }
-        // A stage past the first stage of its `needs` run, or one that
-        // serves lanes, looks at what was inspected and deployed earlier
-        // in the run; moving the branch under it would not. The stage
-        // that opens a run (an implementer that may deploy its lane) is
-        // brought up like any stage that launches something, once its
-        // hold is taken.
-        if (stage.kind() == StageKind::GateOnly && !reads_pr(stage))
-            || p.needs_range(t.stage)
-                .is_some_and(|(first, _)| first < t.stage)
-            || !stage.services.is_empty()
-        {
+        // The stage that opens a `needs` run (an implementer that may
+        // deploy its lane) is brought up like any stage that launches
+        // something, once its hold is taken.
+        if !refresh_runs_at(p, t.stage) {
             t.refreshed_stage = Some(t.stage);
             drop_stale_conflicts(t);
             self.save_ticket(t, now_ms)?;
@@ -1027,7 +1020,10 @@ impl Runner {
         }
         let mut waits = false;
         for i in 0..t.lanes.len() {
-            if t.lanes[i].chosen && self.refresh_lane(t, ps, p, stage, i, now_ms)? {
+            // A lane whose pull request merged is done: its branch may
+            // be gone, and a rebase onto a base holding it conflicts.
+            let done = merged_in(t, p, &t.lanes[i].name);
+            if t.lanes[i].chosen && !done && self.refresh_lane(t, ps, p, stage, i, now_ms)? {
                 waits = true;
             }
         }
@@ -1438,16 +1434,40 @@ impl Runner {
                 } else {
                     format!("max_rebases ({}) is spent", p.policy.max_rebases)
                 };
+                let files =
+                    self.files_in_conflict(t, &lane.name, &worktree, &head_before, &onto_sha);
                 let question = format!(
-                    "{} ({}): the branch is behind {onto} and a rebase onto it conflicts; {why}. Rebase it by hand in {}, then answer recheck",
+                    "{} ({}): the branch is behind {onto} and a rebase onto it conflicts{}; {why}. Rebase it by hand in {}, then answer recheck",
                     stage.name,
                     lane.name,
+                    in_files(&files),
                     worktree.display()
                 );
                 self.ask_refresh(t, ps, stage, question, now_ms)?;
             }
         }
         Ok(true)
+    }
+
+    /// The files a merge of `head` with `onto` conflicts in, for a
+    /// question to name; none when they cannot be read.
+    fn files_in_conflict(
+        &self,
+        t: &Ticket,
+        lane: &str,
+        worktree: &Path,
+        head: &str,
+        onto: &str,
+    ) -> Vec<String> {
+        self.git
+            .conflicting_files(worktree, head, onto)
+            .unwrap_or_else(|e| {
+                log::info!(
+                    "ticket {} lane {lane}: the conflicting files could not be read: {e:#}",
+                    t.id
+                );
+                Vec::new()
+            })
     }
 
     /// Lane `i`'s worktree is in a state only its owner can put right
@@ -3030,6 +3050,9 @@ impl Runner {
                 ("rerun", "keep") => self.keep_history(t, ps, p, attempt.as_ref(), now_ms)?,
                 ("pr", "recheck") => recheck_pr(t, attempt.as_ref()),
                 (REFRESH, "recheck") => t.refreshed_stage = None,
+                (_, "recheck") if watches_merge(p, attempt.as_ref()) => {
+                    self.merge_recheck(t, ps, p, &name, attempt.as_ref(), now_ms)?;
+                }
                 ("review-code" | "review-cap" | RESOLUTION, "fix" | "accept" | "more") => {
                     self.review_answer(t, ps, &name, &answer, attempt.as_ref(), now_ms)?;
                 }
@@ -4467,6 +4490,7 @@ impl Runner {
         let Some(contexts) = self.contexts_or_park(t, ps, p, stage, now_ms)? else {
             return Ok(());
         };
+        let at = t.stage;
         let mut all_complete = true;
         for (ctx, cwd, lane) in contexts {
             if self.poll_rebaser(t, ps, p, stage, &ctx, &cwd, lane.as_deref(), now_ms)? {
@@ -4484,7 +4508,8 @@ impl Runner {
                 lane: lane.as_deref(),
             };
             self.poll_pr_merged(t, ps, p, &poll, decision, now_ms)?;
-            if !t.active() {
+            // A send-back moves every context at once.
+            if !t.active() || t.stage != at {
                 return Ok(());
             }
         }
@@ -4506,10 +4531,7 @@ impl Runner {
         now_ms: u64,
     ) -> Result<()> {
         let PrPoll {
-            stage,
-            attempt: a,
-            cwd,
-            lane,
+            stage, attempt: a, ..
         } = *poll;
         let provider = match &stage.gate {
             Some(Gate::External { provider, .. }) => provider.as_deref(),
@@ -4539,39 +4561,390 @@ impl Runner {
                 match pr.state.as_str() {
                     "merged" => return self.merged(t, ps, a, decision, &pr, now_ms),
                     "closed" => format!("PR #{} is closed without being merged", pr.number),
-                    _ if pr.mergeable.as_deref() == Some("conflicting") => {
-                        let a = record_of(t, &a.stage, a.n).clone();
-                        let remedy = Remedy::Rebase;
-                        return self.remedy(t, ps, p, &a, cwd, lane, &pr, &remedy, now_ms);
-                    }
-                    _ => {
-                        let question = format!(
-                            "{} ({}): PR #{} {} is open at {}; merge it there. Dispatch resolves this when the provider reports the merge.",
-                            a.stage,
-                            a.context,
-                            pr.number,
-                            pr.url,
-                            pr.head.chars().take(8).collect::<String>()
-                        );
-                        return self.ensure_decision(
-                            t,
-                            ps,
-                            Ask {
-                                stage: &a.stage,
-                                name: decision,
-                                kind: DecisionKind::Confirmation,
-                                question,
-                                options: &["park"],
-                                recommendation: None,
-                                attempt: Some((a.stage.clone(), a.n)),
-                            },
-                            now_ms,
-                        );
-                    }
+                    _ => return self.merge_open(t, ps, p, poll, decision, &pr, &head, now_ms),
                 }
             }
         };
         self.ask_pr(t, ps, a, &question, now_ms)
+    }
+
+    /// An open PR at the merge watch. A base that moved into a conflict,
+    /// by the local probe or the provider's word, sends the ticket back
+    /// through the `pr-checks` stage before it, whose stage-start refresh
+    /// brings the branch up and pushes it and whose reading of the checks
+    /// follows. Otherwise the merge decision waits, naming a conflict it
+    /// could not send back and why. A pipeline with no `pr-checks` stage
+    /// before the watch gets the rebaser here instead.
+    #[allow(clippy::too_many_arguments)]
+    fn merge_open(
+        &mut self,
+        t: &mut Ticket,
+        ps: &mut ProjectState,
+        p: &Pipeline,
+        poll: &PrPoll<'_>,
+        decision: &str,
+        pr: &crate::github::PullRequest,
+        head: &str,
+        now_ms: u64,
+    ) -> Result<()> {
+        let PrPoll {
+            attempt: a,
+            cwd,
+            lane,
+            ..
+        } = *poll;
+        let flagged = pr.mergeable.as_deref() == Some("conflicting");
+        let a = record_of(t, &a.stage, a.n).clone();
+        let Some(k) = checks_before(p, t.stage) else {
+            if flagged {
+                return self.remedy(t, ps, p, &a, cwd, lane, pr, &Remedy::Rebase, now_ms);
+            }
+            return self.ask_merge(t, ps, &a, decision, merge_question(&a, None), now_ms);
+        };
+        let (files, probed) = match lane.map(|lane| self.probe_base(t, p, k, lane, cwd, head)) {
+            None => (Vec::new(), true),
+            Some(Ok(files)) => (files, true),
+            Some(Err(err)) => {
+                log::info!(
+                    "ticket {} lane {}: the base could not be probed for a conflict: {err:#}",
+                    t.id,
+                    a.context
+                );
+                (Vec::new(), false)
+            }
+        };
+        // A reading that cannot tell (a probe that failed, a provider
+        // that has not decided) leaves the question as it was asked, so
+        // a flaky fetch does not ask it again under a new id. The
+        // provider's `conflicting` is sure whatever the probe did.
+        let unsure = !flagged && (!probed || (files.is_empty() && pr.mergeable.is_none()));
+        if unsure && pending_for(t, &a, decision) {
+            return Ok(());
+        }
+        let why = if !files.is_empty() {
+            format!("the base moved and conflicts{}", in_files(&files))
+        } else if flagged {
+            "the provider reports it conflicting".to_owned()
+        } else {
+            return self.ask_merge(t, ps, &a, decision, merge_question(&a, None), now_ms);
+        };
+        // The refresh at `k` fetches the same base, so a trip back while
+        // the probe fails would only fail there.
+        let refusal = if !probed {
+            "the lane's base could not be fetched or probed (see the log)".to_owned()
+        } else if let Some(left) = trip_left_head(t, &a, head) {
+            format!(
+                "the last trip back through {} left the branch at {}",
+                p.stages[k].name,
+                short_head(&left)
+            )
+        } else {
+            match self.back_to_checks(t, ps, p, k, &why, now_ms)? {
+                Ok(()) => return Ok(()),
+                Err(reason) => reason,
+            }
+        };
+        let conflict = format!(
+            "{why}, and it was not sent back through {}: {refusal}. Fix it there, then answer recheck.",
+            p.stages[k].name
+        );
+        let question = merge_question(&a, Some(&conflict));
+        self.ask_merge(t, ps, &a, decision, question, now_ms)
+    }
+
+    /// The files a merge of the lane's tree at `head` with its base as the
+    /// remote has it now conflicts in, read only where the refresh at
+    /// stage `k` would bring the lane up and only once the base has moved
+    /// off where the lane was last brought up.
+    fn probe_base(
+        &mut self,
+        t: &Ticket,
+        p: &Pipeline,
+        k: usize,
+        lane: &str,
+        cwd: &Path,
+        head: &str,
+    ) -> Result<Vec<String>> {
+        if !p.policy.refresh
+            || !p.cuts_worktrees()
+            || !t.source.pull_requests.is_empty()
+            || !refresh_runs_at(p, k)
+        {
+            return Ok(Vec::new());
+        }
+        let (Some(spec), Some(record)) = (
+            p.lane(lane).cloned(),
+            t.lanes.iter().find(|l| l.name == lane),
+        ) else {
+            return Ok(Vec::new());
+        };
+        let (clone, remote, onto) = self.lane_base_ref(p, &spec);
+        self.git.fetch(&clone, &remote)?;
+        let onto_sha = self.git.rev_parse(&clone, &onto)?;
+        if record.base_sha.as_deref() == Some(onto_sha.as_str()) {
+            return Ok(Vec::new());
+        }
+        self.git.conflicting_files(cwd, head, &onto_sha)
+    }
+
+    /// The merge decision for the attempt, asked again when the pending
+    /// one says something else (a conflict found or gone), since a
+    /// pending decision is never rewritten.
+    fn ask_merge(
+        &mut self,
+        t: &mut Ticket,
+        ps: &mut ProjectState,
+        a: &Attempt,
+        decision: &str,
+        question: String,
+        now_ms: u64,
+    ) -> Result<()> {
+        let key = Some((a.stage.clone(), a.n));
+        let mut stale = false;
+        for d in t.decisions.iter_mut().filter(|d| {
+            d.pending()
+                && d.stage == a.stage
+                && d.name == decision
+                && d.attempt == key
+                && d.question != question
+        }) {
+            d.state = DecisionState::Cancelled;
+            stale = true;
+        }
+        if stale {
+            self.save_ticket(t, now_ms)?;
+        }
+        self.ensure_decision(
+            t,
+            ps,
+            Ask {
+                stage: &a.stage,
+                name: decision,
+                kind: DecisionKind::Confirmation,
+                question,
+                options: &["recheck", "park"],
+                recommendation: None,
+                attempt: key,
+            },
+            now_ms,
+        )
+    }
+
+    /// Every context of the ticket whose PR has not merged sent back from
+    /// the merge watch it stands at to the `pr-checks` stage `k`, not yet
+    /// refreshed there, so that stage brings the branches up and reads
+    /// the checks again. The completed attempts of those contexts at the
+    /// stages from `k` to the watch are cancelled, so a gate between
+    /// judges the new head. Refused, with the reason, while a tree the
+    /// refresh would bring up, or a lane-less context's own tree, is not
+    /// clean (the refresh would leave it and a rebaser would be started
+    /// into it), while a
+    /// stage between is not gate-only (it would run again, and spend),
+    /// or while a rebaser is at work at the watch.
+    fn back_to_checks(
+        &mut self,
+        t: &mut Ticket,
+        ps: &mut ProjectState,
+        p: &Pipeline,
+        k: usize,
+        why: &str,
+        now_ms: u64,
+    ) -> Result<Result<(), String>> {
+        let at = t.stage;
+        let Some(stage) = p.stages.get(at).cloned() else {
+            return Ok(Err("the ticket is past its last stage".to_owned()));
+        };
+        if let Some(between) = p
+            .stages
+            .get(k + 1..at)
+            .unwrap_or_default()
+            .iter()
+            .find(|s| s.kind() != StageKind::GateOnly)
+        {
+            return Ok(Err(format!(
+                "{} lies between and would run again",
+                between.name
+            )));
+        }
+        // The refresh at `k` brings up every chosen lane that has not
+        // merged, and a context without a lane works in its own tree.
+        let mut trees: Vec<(Option<String>, PathBuf)> = t
+            .lanes
+            .iter()
+            .filter(|l| l.chosen && !merged_in(t, p, &l.name))
+            .map(|l| (Some(l.name.clone()), l.worktree.clone()))
+            .collect();
+        for (_, cwd, lane) in Self::contexts(t, p, &stage) {
+            if lane.is_none() && !trees.iter().any(|(_, tree)| *tree == cwd) {
+                trees.push((None, cwd));
+            }
+        }
+        let mut dirty = Vec::new();
+        for (lane, tree) in &trees {
+            if !self.git.is_clean(tree)? {
+                dirty.push(match lane {
+                    Some(lane) => {
+                        format!("the tree of lane {lane} at {} is not clean", tree.display())
+                    }
+                    None => format!("the tree at {} is not clean", tree.display()),
+                });
+            }
+        }
+        if !dirty.is_empty() {
+            return Ok(Err(dirty.join("; ")));
+        }
+        if let Some(busy) = t
+            .attempts
+            .iter()
+            .find(|a| a.stage == stage.name && a.is_open() && a.kind != AttemptKind::GateOnly)
+        {
+            return Ok(Err(format!("a rebaser is at work in {}", busy.context)));
+        }
+        let reason = format!("{SENT_BACK_FROM}{}: {why}", stage.name);
+        let cancelled = AttemptState::Cancelled {
+            reason: reason.clone(),
+        };
+        for a in t
+            .attempts
+            .iter_mut()
+            .filter(|a| a.stage == stage.name && a.is_open())
+        {
+            a.state = cancelled.clone();
+            a.ended_ms = Some(now_ms);
+        }
+        for s in &p.stages[k..at] {
+            for (ctx, _, _) in Self::contexts(t, p, s) {
+                if merged_in(t, p, &ctx) {
+                    continue;
+                }
+                if let Some(done) = t
+                    .attempts
+                    .iter_mut()
+                    .filter(|a| {
+                        a.stage == s.name && a.context == ctx && a.kind == AttemptKind::GateOnly
+                    })
+                    .max_by_key(|a| a.n)
+                    .filter(|a| a.state == AttemptState::Complete)
+                {
+                    done.state = cancelled.clone();
+                    done.ended_ms = Some(now_ms);
+                }
+            }
+        }
+        for d in t
+            .decisions
+            .iter_mut()
+            .filter(|d| d.pending() && d.stage == stage.name)
+        {
+            d.state = DecisionState::Cancelled;
+        }
+        t.stage = k;
+        t.refreshed_stage = None;
+        log::info!(
+            "ticket {} {}: sent back to {}: {why}",
+            t.id,
+            stage.name,
+            p.stages[k].name
+        );
+        self.save_ticket(t, now_ms)?;
+        self.unmark(t, ps, now_ms)?;
+        Ok(Ok(()))
+    }
+
+    /// A `recheck` answered on the merge decision: the owner says the
+    /// branch is put right, so the ticket goes back through the
+    /// `pr-checks` stage before the watch whatever the last trip back
+    /// left, unless a tree is not clean or a pull request cannot be
+    /// read, in which case the decision is asked again saying so. A pull
+    /// request merged since the last reading is read again on the next
+    /// pass instead, so a merged branch is not rebased and pushed; so is
+    /// a watch with no such stage.
+    fn merge_recheck(
+        &mut self,
+        t: &mut Ticket,
+        ps: &mut ProjectState,
+        p: &Pipeline,
+        decision: &str,
+        attempt: Option<&(String, u32)>,
+        now_ms: u64,
+    ) -> Result<()> {
+        let Some((stage, number)) = attempt else {
+            return Ok(());
+        };
+        let back = p
+            .stages
+            .iter()
+            .position(|s| &s.name == stage)
+            .filter(|&at| at == t.stage)
+            .and_then(|at| checks_before(p, at));
+        let Some(back) = back else {
+            recheck_pr(t, attempt);
+            return Ok(());
+        };
+        let watch = p.stages[t.stage].clone();
+        let reason = match self.merged_unread(t, p, &watch)? {
+            Ok(true) => {
+                for a in t
+                    .attempts
+                    .iter_mut()
+                    .filter(|a| &a.stage == stage && a.is_open())
+                {
+                    if let Some(pr) = &mut a.pr {
+                        pr.checked_ms = 0;
+                    }
+                }
+                return Ok(());
+            }
+            Ok(false) => match self.back_to_checks(t, ps, p, back, "recheck answered", now_ms)? {
+                Ok(()) => return Ok(()),
+                Err(reason) => reason,
+            },
+            Err(reason) => reason,
+        };
+        let Some(a) = find_attempt(t, stage, *number).cloned() else {
+            return Ok(());
+        };
+        let held = format!(
+            "recheck was answered, but it was not sent back through {}: {reason}. Fix it there, then answer recheck.",
+            p.stages[back].name
+        );
+        self.ask_merge(t, ps, &a, decision, merge_question(&a, Some(&held)), now_ms)
+    }
+
+    /// Whether a pull request the merge watch `stage` still waits on
+    /// has merged since it was last read, each read again now. A
+    /// target or a reading that fails is the reason it cannot be told.
+    fn merged_unread(
+        &mut self,
+        t: &Ticket,
+        p: &Pipeline,
+        stage: &Stage,
+    ) -> Result<Result<bool, String>> {
+        let provider = match &stage.gate {
+            Some(Gate::External { provider, .. }) => provider.as_deref(),
+            _ => None,
+        };
+        for (ctx, cwd, lane) in Self::contexts(t, p, stage) {
+            if merged_in(t, p, &ctx) {
+                continue;
+            }
+            let origin = self.git.remote_url(&cwd)?;
+            let target = match pr_target(t, p, stage, lane.as_deref(), provider, origin) {
+                Ok(target) => target,
+                Err(why) => return Ok(Err(why)),
+            };
+            match self.find_pr(&target) {
+                Ok(Some(pr)) if pr.state == "merged" => return Ok(Ok(true)),
+                Ok(_) => {}
+                Err(e) => {
+                    return Ok(Err(format!(
+                        "the pull request for {} could not be read: {e:#}",
+                        target.branch
+                    )));
+                }
+            }
+        }
+        Ok(Ok(false))
     }
 
     /// The provider reports the merge: the attempt completes at the
@@ -7352,6 +7725,96 @@ fn recheck_pr(t: &mut Ticket, attempt: Option<&(String, u32)>) {
     }
 }
 
+/// Whether the stage is a `pr-merged` watch.
+fn is_merge_watch(stage: &Stage) -> bool {
+    matches!(&stage.gate, Some(Gate::External { check, .. }) if check == "pr-merged")
+}
+
+/// Whether the decision's attempt is of a `pr-merged` watch, whatever
+/// the pipeline names its decision.
+fn watches_merge(p: &Pipeline, attempt: Option<&(String, u32)>) -> bool {
+    attempt.is_some_and(|(stage, _)| {
+        p.stages
+            .iter()
+            .any(|s| &s.name == stage && is_merge_watch(s))
+    })
+}
+
+/// Whether context `ctx`'s pull request merged: its last attempt at a
+/// `pr-merged` watch completed. Nothing is left there to bring up,
+/// push or check again.
+fn merged_in(t: &Ticket, p: &Pipeline, ctx: &str) -> bool {
+    p.stages.iter().filter(|s| is_merge_watch(s)).any(|s| {
+        t.attempts
+            .iter()
+            .filter(|a| a.stage == s.name && a.context == ctx && a.kind == AttemptKind::GateOnly)
+            .max_by_key(|a| a.n)
+            .is_some_and(|a| a.state == AttemptState::Complete)
+    })
+}
+
+/// Whether the merge decision for attempt `a` is pending.
+fn pending_for(t: &Ticket, a: &Attempt, decision: &str) -> bool {
+    let key = Some((a.stage.clone(), a.n));
+    t.decisions
+        .iter()
+        .any(|d| d.pending() && d.stage == a.stage && d.name == decision && d.attempt == key)
+}
+
+/// The merge decision's question: the PR open at its head, and
+/// `conflict`, a conflict that was not sent back, when there is one.
+fn merge_question(a: &Attempt, conflict: Option<&str>) -> String {
+    let (number, url, head) =
+        a.pr.as_ref()
+            .map(|pr| (pr.number, pr.url.as_str(), pr.head.as_str()))
+            .unwrap_or_default();
+    let mut q = format!(
+        "{} ({}): PR #{number} {url} is open at {}",
+        a.stage,
+        a.context,
+        short_head(head)
+    );
+    match conflict {
+        Some(conflict) => {
+            let _ = write!(q, ", but {conflict}");
+        }
+        None => q.push_str("; merge it there."),
+    }
+    q.push_str(" Dispatch resolves this when the provider reports the merge.");
+    q
+}
+
+/// A head as a question shows it.
+fn short_head(head: &str) -> String {
+    head.chars().take(8).collect()
+}
+
+/// The head the last trip back from the merge watch left the branch at,
+/// when the tree is still there: the context's attempt before `a` was
+/// sent back from this stage and nothing has moved the branch since,
+/// whatever moved it (a refresh, a rebaser, a hand rebase). A second
+/// trip would change nothing.
+fn trip_left_head(t: &Ticket, a: &Attempt, head: &str) -> Option<String> {
+    let before = t
+        .attempts
+        .iter()
+        .filter(|x| {
+            x.stage == a.stage
+                && x.context == a.context
+                && x.kind == AttemptKind::GateOnly
+                && x.n < a.n
+        })
+        .max_by_key(|x| x.n)?;
+    let AttemptState::Cancelled { reason } = &before.state else {
+        return None;
+    };
+    if !reason.starts_with(&format!("{SENT_BACK_FROM}{}: ", a.stage)) {
+        return None;
+    }
+    let left = before.pr.as_ref()?.head.clone();
+    same_commit(&left, head).then_some(left)
+}
+
 /// How a sent-back attempt's cancellation reason starts; the gate's
 /// name and the note follow, as `send_back` writes them.
 const SENT_BACK_FROM: &str = "sent back from ";
@@ -8183,6 +8646,35 @@ fn reads_pr(stage: &Stage) -> bool {
     matches!(&stage.gate, Some(Gate::External { check, .. }) if check == "pr-checks")
 }
 
+/// ` in a.rs, b.rs` for the files a conflict is in, or nothing when
+/// they are not known.
+fn in_files(files: &[String]) -> String {
+    if files.is_empty() {
+        String::new()
+    } else {
+        format!(" in {}", files.join(", "))
+    }
+}
+
+/// Whether the stage-start refresh brings lanes up at stage `k`. A
+/// gate-only stage that reads no pull request launches nothing; a
+/// stage past the first stage of its `needs` run, or one that serves
+/// lanes, looks at what was inspected and deployed earlier in the run,
+/// and moving the branch under it would not.
+fn refresh_runs_at(p: &Pipeline, k: usize) -> bool {
+    let Some(stage) = p.stages.get(k) else {
+        return false;
+    };
+    (stage.kind() != StageKind::GateOnly || reads_pr(stage))
+        && p.needs_range(k).is_none_or(|(first, _)| first >= k)
+        && stage.services.is_empty()
+}
+
+/// The nearest stage before `stage` that reads a pull request's checks.
+fn checks_before(p: &Pipeline, stage: usize) -> Option<usize> {
+    p.stages.iter().take(stage).rposition(reads_pr)
+}
+
 /// The pipeline's first stage that reads a pull request (the
 /// `pr-checks` or `pr-merged` watch), with the provider it names.
 fn pr_stage(p: &Pipeline) -> Option<(&Stage, Option<&str>)> {
@@ -8238,10 +8730,20 @@ fn pr_head_seen(t: &Ticket, lane: &LaneRecord) -> Option<String> {
         .rev()
         .filter(|a| a.context == lane.name && a.stage != REFRESH)
         .find_map(|a| {
-            let head = a
-                .head
-                .clone()
-                .or_else(|| a.pr.as_ref().map(|p| p.head.clone()));
+            let head = a.head.clone().or_else(|| {
+                let reported = a.pr.as_ref()?.head.clone();
+                // A provider may report a short head (Bitbucket does);
+                // a lease needs the full one, which an attempt's own
+                // reading of the tree has when it is the same commit.
+                let full = t
+                    .attempts
+                    .iter()
+                    .filter(|x| x.context == lane.name && x.stage != REFRESH)
+                    .filter_map(|x| x.head.as_ref())
+                    .find(|h| h.len() > reported.len() && same_commit(h, &reported))
+                    .cloned();
+                Some(full.unwrap_or(reported))
+            });
             head.map(|h| (h, a.ended_ms.unwrap_or(a.started_ms)))
         });
     match (recorded, &lane.pushed) {

@@ -76,7 +76,10 @@ fn decision_words(name: &str) -> &'static str {
         }
         "lanes" => "the lanes the ticket works in, joined by commas",
         "refresh" => "`recheck` brings the lanes up to their bases again",
-        "merge" => "answer `park` only: you never merge",
+        "merge" => {
+            "`recheck` sends the ticket back through the `pr-checks` stage before it to bring \
+             the branch up and read the checks again; `park` stops it; you never merge"
+        }
         _ => "answer from the options the question lists",
     }
 }
@@ -152,7 +155,8 @@ pub fn seed(
          answer it {OWNER_ROUTES}. A `dispatch` command the owner types in this pane, a `!` \
          line included, runs as you and is refused the same way, so never suggest it, and \
          never change your environment to get round the rule. A `merge` question is \
-         answered `park` only: Dispatch resolves it when the provider reports the merge. \
+         answered `recheck` or `park`, never merged by you: Dispatch resolves it when the \
+         provider reports the merge. \
          You may not {restart_a_ticket}move the worktrees, {run_the_runner}, resume with \
          reruns unless `rerun` is yours, or replace yourself.\n\n",
         restart_a_ticket = if restart { "" } else { "restart a ticket, " },
@@ -1144,7 +1148,7 @@ mod tests {
             OWNER_ROUTES,
             "a `!` line included, runs as you",
             "never change your environment",
-            "`park` only",
+            "answered `recheck` or `park`",
             "run `/opt/bin/dispatch brief orchard` first",
             "/data/projects/orchard/supervisor/handoff.md current",
             "`/opt/bin/dispatch events --project <project>",
@@ -1180,7 +1184,7 @@ mod tests {
         );
         assert!(s.contains("`gh pr merge <n> --merge`"), "{s}");
         assert!(!s.contains("You never merge a pull request."));
-        assert!(s.contains("answered `park` only"));
+        assert!(s.contains("answered `recheck` or `park`"));
         let flags = launch_flags(&sup, Path::new("/opt/bin/dispatch"), Path::new("/d/s"));
         for rule in MERGE_RULES {
             assert!(flags.contains(&(*rule).to_owned()), "missing {rule}");

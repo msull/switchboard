@@ -1224,10 +1224,11 @@ fn a_note_at_inspect_sends_the_lane_back_to_implement() {
     );
 }
 
-/// A PR that conflicts with its base at `merge` gets the policy's
-/// rebaser: a session cloned from the lane's implementer, told the PR,
-/// the base and where the notes go; when it stops, the gate reads the
-/// PR again and the merge goes on.
+/// A PR the provider reports conflicting at `merge` goes back through
+/// `ready`, where the policy's rebaser starts: a session cloned from the
+/// lane's implementer, told the PR, the base and where the notes go.
+/// When it stops, `ready` reads the checks at the head it pushed, and
+/// the ticket stands at `merge` again.
 #[test]
 fn a_conflicting_pr_is_rebased_by_a_clone_of_the_implementer() {
     let mut env = Env::new();
@@ -1237,12 +1238,22 @@ fn a_conflicting_pr_is_rebased_by_a_clone_of_the_implementer() {
     env.pr_is_with(&id, "base0000", "open", Checks::Passed, Some("conflicting"));
     env.wait(PR_POLL_MS);
     env.steps_until(&id, "the rebaser", |t, _| {
-        t.attempts_of("merge")
+        t.attempts_of("ready")
             .any(|a| a.kind == AttemptKind::Agent && a.session.is_some())
     });
     let t = env.ticket(&id);
+    let left = t.attempts_of("merge").last().unwrap();
+    assert!(
+        matches!(&left.state, AttemptState::Cancelled { reason }
+            if reason == "sent back from merge: the provider reports it conflicting"),
+        "{left:?}"
+    );
+    assert!(
+        t.pending_decisions().iter().all(|d| d.name != "merge"),
+        "the merge decision went with the trip back"
+    );
     let rebase = t
-        .attempts_of("merge")
+        .attempts_of("ready")
         .find(|a| a.kind == AttemptKind::Agent)
         .unwrap()
         .clone();
@@ -1281,10 +1292,6 @@ fn a_conflicting_pr_is_rebased_by_a_clone_of_the_implementer() {
     assert!(prompt.contains("--force-with-lease"), "{prompt}");
     let notes = rebase.artifacts["notes"].clone();
     assert!(prompt.contains(&notes.display().to_string()), "{prompt}");
-    assert!(
-        t.pending_decisions().iter().any(|d| d.name == "merge"),
-        "the merge decision stays while the rebaser works"
-    );
     // The rebaser pushed a new head and stopped.
     env.repo
         .lock()
@@ -1293,41 +1300,34 @@ fn a_conflicting_pr_is_rebased_by_a_clone_of_the_implementer() {
         .insert(t.lanes[0].worktree.clone(), "rebased1".into());
     env.pr_is_with(&id, "rebased1", "open", Checks::Passed, Some("clean"));
     env.finish(&rebaser, &notes, "# rebased\nkept both changelog entries");
-    env.steps_until(&id, "the rebase completing", |t, _| {
-        t.attempts_of("merge")
-            .find(|a| a.kind == AttemptKind::Agent)
-            .is_some_and(|a| a.state == AttemptState::Complete)
+    env.wait(PR_POLL_MS);
+    env.steps_until(&id, "the merge decision again", |t, _| {
+        t.pending_decisions().iter().any(|d| d.name == "merge")
     });
     assert!(env.sb().killed.contains(&rebaser), "the rebaser is done");
-    // The completed rebase still records `conflicting`, which is what
-    // makes its completion line name the rebaser rather than the merge.
-    assert_eq!(
-        env.ticket(&id)
-            .attempts_of("merge")
-            .find(|a| a.kind == AttemptKind::Agent)
-            .and_then(|a| a.pr.as_ref().map(|p| p.checks.clone()))
-            .as_deref(),
-        Some("conflicting")
-    );
-    env.wait(PR_POLL_MS);
-    env.step();
     let t = env.ticket(&id);
-    let gate = t
-        .attempts_of("merge")
-        .find(|a| a.kind == AttemptKind::GateOnly)
+    let ready = t
+        .attempts_of("ready")
+        .filter(|a| a.kind == AttemptKind::GateOnly)
+        .last()
         .unwrap();
-    assert!(gate.is_open(), "the same gate attempt watches on");
+    assert_eq!(ready.state, AttemptState::Complete);
+    assert_eq!(
+        ready.head.as_deref(),
+        Some("rebased1"),
+        "checks read after it"
+    );
+    let gate = t.attempts_of("merge").last().unwrap();
+    assert!(gate.is_open());
     assert_eq!(gate.pr.as_ref().map(|p| p.head.as_str()), Some("rebased1"));
     env.pr_is_with(&id, "rebased1", "merged", Checks::Passed, None);
     env.wait(PR_POLL_MS);
     env.steps_until(&id, "the ticket closing", |t, _| !t.active());
     let t = env.ticket(&id);
     assert!(matches!(&t.state, TicketState::Closed { .. }));
-    // The gate's own attempt is not a remedy: it records `merged`, so its
-    // completion is the stage's.
     assert_eq!(
         t.attempts_of("merge")
-            .find(|a| a.kind == AttemptKind::GateOnly)
+            .last()
             .and_then(|a| a.pr.as_ref().map(|p| p.checks.as_str())),
         Some("merged")
     );
@@ -1357,7 +1357,7 @@ fn a_rebaser_that_could_not_start_is_rerun_on_request() {
     env.step();
     assert_eq!(
         env.ticket(&id)
-            .attempts_of("merge")
+            .attempts_of("ready")
             .filter(|a| a.kind == AttemptKind::Agent)
             .count(),
         1,
@@ -1368,7 +1368,7 @@ fn a_rebaser_that_could_not_start_is_rerun_on_request() {
     env.runner.decide(&id, &d.id, "rerun", None, now).unwrap();
     env.wait(PR_POLL_MS);
     env.steps_until(&id, "the rebaser", |t, _| {
-        t.attempts_of("merge")
+        t.attempts_of("ready")
             .any(|a| a.kind == AttemptKind::Agent && a.session.is_some())
     });
     assert_eq!(env.sb().cloned.len(), 1);
@@ -1384,12 +1384,12 @@ fn a_rebase_that_changes_nothing_or_past_the_cap_is_a_question() {
     env.pr_is_with(&id, "base0000", "open", Checks::Passed, Some("conflicting"));
     env.wait(PR_POLL_MS);
     env.steps_until(&id, "the rebaser", |t, _| {
-        t.attempts_of("merge")
+        t.attempts_of("ready")
             .any(|a| a.kind == AttemptKind::Agent && a.session.is_some())
     });
     let t = env.ticket(&id);
-    let rebaser = session_of(&t, "merge");
-    let notes = artifact_of(&t, "merge", "notes");
+    let rebaser = session_of(&t, "ready");
+    let notes = artifact_of(&t, "ready", "notes");
     env.finish(&rebaser, &notes, "# could not");
     env.wait(PR_POLL_MS);
     env.steps_until(&id, "the question", |t, _| {
@@ -1407,7 +1407,7 @@ fn a_rebase_that_changes_nothing_or_past_the_cap_is_a_question() {
     );
     assert_eq!(
         env.ticket(&id)
-            .attempts_of("merge")
+            .attempts_of("ready")
             .filter(|a| a.kind == AttemptKind::Agent)
             .count(),
         1
@@ -1557,8 +1557,8 @@ fn red_checks_past_the_fix_cap_are_a_question() {
     assert!(env2.sb().cloned.is_empty(), "no fixer");
 }
 
-/// `merge` is a confirmation the provider resolves: the decision has no
-/// answer but park, `merged` by hand is refused, and the PR reading as
+/// `merge` is a confirmation the provider resolves: the decision is
+/// answered `recheck` or `park` only, `merged` by hand is refused, and the PR reading as
 /// merged completes the stage with the decision answered by Dispatch.
 #[test]
 fn merge_waits_for_the_provider_and_refuses_a_hand_answer() {
@@ -1574,7 +1574,7 @@ fn merge_waits_for_the_provider_and_refuses_a_hand_answer() {
         .into_iter()
         .find(|d| d.name == "merge")
         .unwrap();
-    assert_eq!(d.options, vec!["park"]);
+    assert_eq!(d.options, vec!["recheck", "park"]);
     assert!(
         d.question
             .contains("PR #7 https://github.com/msull/switchboard/pull/7 is open"),
@@ -1587,7 +1587,7 @@ fn merge_waits_for_the_provider_and_refuses_a_hand_answer() {
         .decide(&id, &d.id, "merged", None, now)
         .unwrap_err()
         .to_string();
-    assert!(err.contains("takes one of: park"), "{err}");
+    assert!(err.contains("takes one of: recheck, park"), "{err}");
     let session = env.ticket(&id).current_session().cloned().unwrap();
     assert!(
         env.sb().session(&session).waiting,
@@ -11338,6 +11338,603 @@ fn at_merge_decision(env: &mut Env) -> String {
     id
 }
 
+// --- a base that moves into a conflict while the ticket waits at merge
+
+/// The ticket at its merge decision, then its lane's base moves to
+/// `main0002` with the tree one behind; a merge with it conflicts in
+/// `files`, and a rebase leaves `rebased1`.
+fn base_moves_at_merge(env: &mut Env, files: &[&str]) -> (String, PathBuf) {
+    let id = at_merge_decision(env);
+    let tree = env.ticket(&id).lanes[0].worktree.clone();
+    base_moves(env, &tree, files);
+    (id, tree)
+}
+
+/// The base of the project's clone moves to `main0002`, with `tree` one
+/// behind it; a merge with it conflicts in `files`, and a rebase leaves
+/// `rebased1`.
+fn base_moves(env: &Env, tree: &std::path::Path, files: &[&str]) {
+    let clone = env.data.repo_dir(PROJECT);
+    let mut repo = env.repo.lock().unwrap();
+    repo.bases.insert(clone, "main0002".into());
+    repo.behind.insert(tree.to_path_buf(), 1);
+    repo.rebase_heads
+        .insert(tree.to_path_buf(), "rebased1".into());
+    if !files.is_empty() {
+        repo.conflicting_files.insert(
+            tree.to_path_buf(),
+            files.iter().map(|f| (*f).to_owned()).collect(),
+        );
+    }
+}
+
+/// Whether the ticket stands at the stage named `stage`.
+fn stands_at(t: &Ticket, stage: &str) -> bool {
+    dispatch::events::stage_names(t)
+        .get(t.stage)
+        .is_some_and(|s| s == stage)
+}
+
+fn count_of(kinds: &[String], kind: &str) -> usize {
+    kinds.iter().filter(|k| *k == kind).count()
+}
+
+/// Polls past the PR's poll interval, `n` times.
+fn polls(env: &mut Env, n: usize) {
+    for _ in 0..n {
+        env.wait(PR_POLL_MS);
+        env.step();
+    }
+}
+
+/// The base moved under a ticket at `merge` and a merge with it
+/// conflicts: the ticket goes back to `ready`, whose refresh rebases the
+/// branch and pushes it once with the lease, whose reading of the checks
+/// waits and then passes, and the ticket stands at `merge` again with a
+/// new decision.
+#[test]
+fn a_conflicting_base_move_at_merge_is_refreshed_through_ready() {
+    let mut env = Env::new();
+    let (id, tree) = base_moves_at_merge(&mut env, &["src/a.rs"]);
+    let first = pending_named(&env, &id, "merge").unwrap();
+    env.wait(PR_POLL_MS);
+    env.steps_until(&id, "the trip back", |t, _| stands_at(t, "ready"));
+    let t = env.ticket(&id);
+    assert_eq!(t.refreshed_stage, None);
+    let left = t.attempts_of("merge").last().unwrap();
+    assert!(
+        matches!(&left.state, AttemptState::Cancelled { reason }
+            if reason == "sent back from merge: the base moved and conflicts in src/a.rs"),
+        "{left:?}"
+    );
+    assert!(
+        t.attempts_of("ready")
+            .all(|a| a.state != AttemptState::Complete),
+        "ready reads the checks again"
+    );
+    assert_eq!(
+        t.decisions.iter().find(|d| d.id == first.id).unwrap().state,
+        DecisionState::Cancelled
+    );
+    // The provider sees the push.
+    env.pr_is(&id, "rebased1", "open", Checks::Pending);
+    env.steps_until(&id, "the checks pending", |t, _| {
+        t.attempts_of("ready")
+            .last()
+            .and_then(|a| a.pr.as_ref())
+            .is_some_and(|p| p.checks == "pending")
+    });
+    let branch = env.ticket(&id).lanes[0].branch.clone();
+    assert_eq!(
+        env.repo.lock().unwrap().pushed,
+        vec![(tree, "origin".into(), branch, "base0000".into())]
+    );
+    env.pr_is(&id, "rebased1", "open", Checks::Passed);
+    env.wait(PR_POLL_MS);
+    env.steps_until(&id, "the merge decision again", |t, _| {
+        t.pending_decisions().iter().any(|d| d.name == "merge")
+    });
+    let t = env.ticket(&id);
+    assert_eq!(t.lanes[0].base_sha.as_deref(), Some("main0002"));
+    let d = pending_named(&env, &id, "merge").unwrap();
+    assert_ne!(d.id, first.id);
+    assert_eq!(d.options, vec!["recheck", "park"]);
+    assert!(
+        d.question.contains("is open at rebased1; merge it there"),
+        "{}",
+        d.question
+    );
+    polls(&mut env, 3);
+    assert_eq!(env.repo.lock().unwrap().pushed.len(), 1, "pushed once");
+    assert!(stands_at(&env.ticket(&id), "merge"), "no second trip");
+    let kinds = events_of(&env.data, &id);
+    assert_in_order(
+        &kinds,
+        &[
+            "sent-back",
+            "refreshed",
+            "pushed",
+            "pr",
+            "pr-checks",
+            "stage",
+        ],
+    );
+    assert_eq!(count_of(&kinds, "sent-back"), 1, "{kinds:?}");
+}
+
+/// A base that moved without a conflict is left alone at `merge`: no
+/// trip back, no push, and the same merge decision.
+#[test]
+fn a_clean_base_move_at_merge_leaves_the_branch_alone() {
+    let mut env = Env::new();
+    let (id, _) = base_moves_at_merge(&mut env, &[]);
+    let first = pending_named(&env, &id, "merge").unwrap();
+    polls(&mut env, 3);
+    let t = env.ticket(&id);
+    assert!(stands_at(&t, "merge"));
+    assert_eq!(t.lanes[0].base_sha.as_deref(), Some("base0000"));
+    assert!(env.repo.lock().unwrap().pushed.is_empty());
+    assert!(env.repo.lock().unwrap().rebased.is_empty());
+    assert_eq!(pending_named(&env, &id, "merge").unwrap().id, first.id);
+    assert_eq!(count_of(&events_of(&env.data, &id), "sent-back"), 0);
+}
+
+/// The trip back meets a rebase that conflicts and a policy with no
+/// rebaser: `ready` asks its `refresh` question, naming the file.
+#[test]
+fn a_base_move_at_merge_the_rebaser_cannot_resolve_asks_refresh_naming_the_file() {
+    let mut env = Env::new();
+    let path = env.data.pipeline(PROJECT);
+    let text = std::fs::read_to_string(&path)
+        .unwrap()
+        .replace("rebaser = \"rebaser\"\n", "");
+    std::fs::write(&path, text).unwrap();
+    let (id, tree) = base_moves_at_merge(&mut env, &["src/a.rs"]);
+    env.repo.lock().unwrap().rebase_conflicts.push(tree);
+    env.wait(PR_POLL_MS);
+    env.steps_until(&id, "the refresh question", |t, _| {
+        t.pending_decisions().iter().any(|d| d.name == REFRESH)
+    });
+    let t = env.ticket(&id);
+    assert!(stands_at(&t, "ready"));
+    let d = pending_named(&env, &id, REFRESH).unwrap();
+    assert!(
+        d.question
+            .contains("a rebase onto it conflicts in src/a.rs; the policy names no rebaser"),
+        "{}",
+        d.question
+    );
+    assert!(env.sb().cloned.is_empty(), "no rebaser");
+    assert!(env.repo.lock().unwrap().pushed.is_empty());
+}
+
+/// A tree with work in it is not sent back, which would only meet a
+/// refresh that leaves it alone: the merge decision names the tree and
+/// the file, a `recheck` while it is still not clean says so again, and
+/// once it is clean `recheck` sends the ticket back and it is brought
+/// up.
+#[test]
+fn a_dirty_tree_at_merge_asks_instead_of_looping() {
+    let mut env = Env::new();
+    let (id, tree) = base_moves_at_merge(&mut env, &["src/a.rs"]);
+    env.repo.lock().unwrap().dirty.push(tree.clone());
+    env.wait(PR_POLL_MS);
+    env.steps_until(&id, "the conflict named", |t, _| {
+        t.pending_decisions()
+            .iter()
+            .any(|d| d.name == "merge" && d.question.contains("not clean"))
+    });
+    let d = pending_named(&env, &id, "merge").unwrap();
+    assert!(
+        d.question.contains(&format!(
+            "the base moved and conflicts in src/a.rs, and it was not sent back through ready: the tree of lane repo at {} is not clean. Fix it there, then answer recheck.",
+            tree.display()
+        )),
+        "{}",
+        d.question
+    );
+    assert_eq!(d.options, vec!["recheck", "park"]);
+    polls(&mut env, 3);
+    assert!(stands_at(&env.ticket(&id), "merge"));
+    assert_eq!(pending_named(&env, &id, "merge").unwrap().id, d.id);
+    answer(&mut env, &id, &d, "recheck");
+    env.step();
+    let t = env.ticket(&id);
+    assert!(stands_at(&t, "merge"), "still not clean");
+    let again = pending_named(&env, &id, "merge").unwrap();
+    assert!(
+        again.question.contains("recheck was answered") && again.question.contains("is not clean"),
+        "{}",
+        again.question
+    );
+    assert_eq!(count_of(&events_of(&env.data, &id), "sent-back"), 0);
+    assert!(env.sb().cloned.is_empty(), "no rebaser");
+    assert!(env.repo.lock().unwrap().pushed.is_empty());
+    env.repo.lock().unwrap().dirty.clear();
+    answer(&mut env, &id, &again, "recheck");
+    env.steps_until(&id, "the branch brought up", |t, _| {
+        t.lanes[0].base_sha.as_deref() == Some("main0002")
+    });
+    assert!(stands_at(&env.ticket(&id), "ready"));
+    assert_eq!(env.repo.lock().unwrap().pushed.len(), 1);
+}
+
+/// The same with the provider also reporting the PR conflicting: no
+/// trip back, so no rebaser is started into the tree at `ready`.
+#[test]
+fn a_dirty_tree_with_a_conflicting_pr_at_merge_starts_no_rebaser() {
+    let mut env = Env::new();
+    let (id, tree) = base_moves_at_merge(&mut env, &["src/a.rs"]);
+    env.repo.lock().unwrap().dirty.push(tree);
+    env.pr_is_with(&id, "base0000", "open", Checks::Passed, Some("conflicting"));
+    env.wait(PR_POLL_MS);
+    env.steps_until(&id, "the conflict named", |t, _| {
+        t.pending_decisions()
+            .iter()
+            .any(|d| d.name == "merge" && d.question.contains("not clean"))
+    });
+    polls(&mut env, 3);
+    assert!(stands_at(&env.ticket(&id), "merge"));
+    assert!(env.sb().cloned.is_empty(), "no rebaser");
+    assert_eq!(count_of(&events_of(&env.data, &id), "sent-back"), 0);
+    // Without the probe, the provider's word is named.
+    env.repo.lock().unwrap().conflicting_files.clear();
+    polls(&mut env, 1);
+    let d = pending_named(&env, &id, "merge").unwrap();
+    assert!(
+        d.question.contains("the provider reports it conflicting"),
+        "{}",
+        d.question
+    );
+}
+
+/// The provider says conflicting at `merge` but cannot say at `ready`
+/// (GitHub computes it lazily), and the base never moved: the trip back
+/// changes nothing, so the second reading asks, naming the head the
+/// trip left, and no second trip follows.
+#[test]
+fn a_trip_back_that_leaves_the_head_asks_once() {
+    let mut env = Env::new();
+    let id = at_merge_decision(&mut env);
+    env.pr_is_with(&id, "base0000", "open", Checks::Passed, Some("conflicting"));
+    env.wait(PR_POLL_MS);
+    env.steps_until(&id, "the trip back", |t, _| stands_at(t, "ready"));
+    env.pr_is_with(&id, "base0000", "open", Checks::Passed, None);
+    env.steps_until(&id, "merge again", |t, _| stands_at(t, "merge"));
+    env.pr_is_with(&id, "base0000", "open", Checks::Passed, Some("conflicting"));
+    env.steps_until(&id, "the merge decision naming the head", |t, _| {
+        t.pending_decisions().iter().any(|d| {
+            d.name == "merge"
+                && d.question
+                    .contains("the last trip back through ready left the branch at base0000")
+        })
+    });
+    polls(&mut env, 3);
+    assert!(stands_at(&env.ticket(&id), "merge"));
+    assert_eq!(count_of(&events_of(&env.data, &id), "sent-back"), 1);
+    assert!(env.sb().cloned.is_empty(), "no rebaser");
+}
+
+/// A trip back on which `ready`'s rebaser moved the head (no refresh
+/// recorded on the lane): a second conflicting reading at `merge` sends
+/// the ticket back again rather than asking.
+#[test]
+fn a_second_base_move_after_a_rebaser_push_sends_back_again() {
+    let mut env = Env::new();
+    let id = at_merge_decision(&mut env);
+    let tree = env.ticket(&id).lanes[0].worktree.clone();
+    env.pr_is_with(&id, "base0000", "open", Checks::Passed, Some("conflicting"));
+    env.wait(PR_POLL_MS);
+    env.steps_until(&id, "the rebaser", |t, _| {
+        t.attempts_of("ready")
+            .any(|a| a.kind == AttemptKind::Agent && a.session.is_some())
+    });
+    let t = env.ticket(&id);
+    let rebaser = session_of(&t, "ready");
+    let notes = artifact_of(&t, "ready", "notes");
+    env.repo
+        .lock()
+        .unwrap()
+        .heads
+        .insert(tree, "rebased1".into());
+    env.pr_is_with(&id, "rebased1", "open", Checks::Passed, Some("clean"));
+    env.finish(&rebaser, &notes, "# rebased");
+    env.wait(PR_POLL_MS);
+    env.steps_until(&id, "merge again", |t, _| {
+        stands_at(t, "merge") && t.pending_decisions().iter().any(|d| d.name == "merge")
+    });
+    assert!(env.ticket(&id).lanes[0].refreshed.is_none());
+    env.pr_is_with(&id, "rebased1", "open", Checks::Passed, Some("conflicting"));
+    env.wait(PR_POLL_MS);
+    env.steps_until(&id, "the second trip back", |t, _| stands_at(t, "ready"));
+    assert_eq!(count_of(&events_of(&env.data, &id), "sent-back"), 2);
+}
+
+/// A PR merged by hand while the conflict is reported still closes the
+/// ticket: the watch polls through its own question.
+#[test]
+fn a_pr_merged_while_the_conflict_is_reported_closes_the_ticket() {
+    let mut env = Env::new();
+    let (id, tree) = base_moves_at_merge(&mut env, &["src/a.rs"]);
+    env.repo.lock().unwrap().dirty.push(tree);
+    env.wait(PR_POLL_MS);
+    env.steps_until(&id, "the conflict named", |t, _| {
+        t.pending_decisions()
+            .iter()
+            .any(|d| d.name == "merge" && d.question.contains("not clean"))
+    });
+    env.pr_is(&id, "base0000", "merged", Checks::Passed);
+    env.wait(PR_POLL_MS);
+    env.steps_until(&id, "the ticket closing", |t, _| !t.active());
+    let t = env.ticket(&id);
+    assert!(
+        matches!(&t.state, TicketState::Closed { .. }),
+        "{:?}",
+        t.state
+    );
+    let merge: Vec<_> = t.decisions.iter().filter(|d| d.name == "merge").collect();
+    assert!(
+        merge.iter().any(|d| matches!(&d.state,
+            DecisionState::Answered { answer, by, .. } if answer == "merged" && by == "dispatch")),
+        "{merge:?}"
+    );
+    assert!(merge.iter().all(|d| !d.pending()));
+}
+
+/// A fetch that fails while the merge decision names a conflict leaves
+/// that decision pending, rather than asking the plain question under a
+/// new id and the conflict again once the fetch works.
+#[test]
+fn a_failed_probe_keeps_the_pending_merge_decision() {
+    let mut env = Env::new();
+    let (id, tree) = base_moves_at_merge(&mut env, &["src/a.rs"]);
+    env.repo.lock().unwrap().dirty.push(tree);
+    env.wait(PR_POLL_MS);
+    env.steps_until(&id, "the conflict named", |t, _| {
+        t.pending_decisions()
+            .iter()
+            .any(|d| d.name == "merge" && d.question.contains("not clean"))
+    });
+    let d = pending_named(&env, &id, "merge").unwrap();
+    env.repo.lock().unwrap().fail_fetch = Some("fatal: unable to access".into());
+    polls(&mut env, 2);
+    env.repo.lock().unwrap().fail_fetch = None;
+    polls(&mut env, 1);
+    assert_eq!(pending_named(&env, &id, "merge").unwrap().id, d.id);
+    let t = env.ticket(&id);
+    assert_eq!(t.decisions.iter().filter(|d| d.name == "merge").count(), 2);
+}
+
+/// The provider reports the PR conflicting while the base cannot be
+/// fetched: the reading is sure, so the pending question is asked again
+/// naming the conflict, but the ticket is not sent back to a refresh that
+/// would fail the same fetch.
+#[test]
+fn a_conflict_the_provider_reports_is_named_while_the_fetch_fails() {
+    let mut env = Env::new();
+    let (id, _) = base_moves_at_merge(&mut env, &[]);
+    let first = pending_named(&env, &id, "merge").unwrap();
+    env.repo.lock().unwrap().fail_fetch = Some("fatal: unable to access".into());
+    env.pr_is_with(&id, "base0000", "open", Checks::Passed, Some("conflicting"));
+    env.wait(PR_POLL_MS);
+    env.steps_until(&id, "the conflict named", |t, _| {
+        t.pending_decisions().iter().any(|d| {
+            d.name == "merge"
+                && d.question.contains("the provider reports it conflicting")
+                && d.question.contains("could not be fetched or probed")
+        })
+    });
+    polls(&mut env, 2);
+    assert_ne!(pending_named(&env, &id, "merge").unwrap().id, first.id);
+    assert!(stands_at(&env.ticket(&id), "merge"));
+    assert_eq!(count_of(&events_of(&env.data, &id), "sent-back"), 0);
+}
+
+/// The owner merges by hand and answers `recheck` before the watch reads
+/// the merge: the PR is read again rather than the branch sent back, so
+/// the merged branch is neither rebased nor pushed and the ticket closes.
+#[test]
+fn a_recheck_after_a_hand_merge_closes_without_a_trip_back() {
+    let mut env = Env::new();
+    let (id, _) = base_moves_at_merge(&mut env, &[]);
+    env.pr_is(&id, "base0000", "merged", Checks::Passed);
+    answer_named(&mut env, &id, "merge", "recheck");
+    env.steps_until(&id, "the ticket closing", |t, _| !t.active());
+    assert_eq!(count_of(&events_of(&env.data, &id), "sent-back"), 0);
+    assert!(env.repo.lock().unwrap().rebased.is_empty());
+    assert!(env.repo.lock().unwrap().pushed.is_empty());
+}
+
+/// A `merge` stage in the `root` context reads no lane of its own, so
+/// only the provider's `conflicting` sends it back: the lane trees the
+/// refresh at `ready` would bring up are checked all the same, and a
+/// dirty one asks instead of starting a rebaser into it.
+#[test]
+fn a_dirty_tree_under_a_root_merge_asks_instead_of_looping() {
+    let mut env = Env::new();
+    let path = env.data.pipeline(PROJECT);
+    let text = std::fs::read_to_string(&path).unwrap().replace(
+        "name = \"merge\"\ncontext = \"each\"",
+        "name = \"merge\"\ncontext = \"root\"",
+    );
+    std::fs::write(&path, text).unwrap();
+    let id = at_merge_decision(&mut env);
+    let tree = env.ticket(&id).lanes[0].worktree.clone();
+    env.repo.lock().unwrap().dirty.push(tree.clone());
+    env.pr_is_with(&id, "base0000", "open", Checks::Passed, Some("conflicting"));
+    env.wait(PR_POLL_MS);
+    let named = format!("the tree of lane repo at {} is not clean", tree.display());
+    env.steps_until(&id, "the dirty tree named", |t, _| {
+        t.pending_decisions()
+            .iter()
+            .any(|d| d.name == "merge" && d.question.contains(&named))
+    });
+    polls(&mut env, 2);
+    assert!(stands_at(&env.ticket(&id), "merge"));
+    assert_eq!(count_of(&events_of(&env.data, &id), "sent-back"), 0);
+    assert!(env.sb().cloned.is_empty(), "no rebaser");
+}
+
+/// The test pipeline with `stage` (TOML) between `ready` and `merge`.
+fn with_stage_before_merge(env: &Env, stage: &str) {
+    let path = env.data.pipeline(PROJECT);
+    let text = std::fs::read_to_string(&path).unwrap().replace(
+        "[[stages]]\nname = \"merge\"\n",
+        &format!("{stage}\n[[stages]]\nname = \"merge\"\n"),
+    );
+    std::fs::write(&path, text).unwrap();
+}
+
+/// A human gate between `ready` and `merge` passed at the old head: the
+/// trip back cancels its pass, so it asks again and its answer binds the
+/// rebased head.
+#[test]
+fn a_gate_between_ready_and_merge_judges_the_new_head() {
+    let mut env = Env::new();
+    with_stage_before_merge(
+        &env,
+        "[[stages]]\nname = \"look\"\ncontext = \"each\"\ngate = { kind = \"human\", decision = \"look\" }\n",
+    );
+    let id = at_ready(&mut env);
+    env.pr_is(&id, "base0000", "open", Checks::Passed);
+    env.recheck(&id);
+    env.steps_until(&id, "the look", |t, _| {
+        t.pending_decisions().iter().any(|d| d.name == "look")
+    });
+    answer_named(&mut env, &id, "look", "proceed");
+    env.steps_until(&id, "the merge decision", |t, _| {
+        t.pending_decisions().iter().any(|d| d.name == "merge")
+    });
+    let tree = env.ticket(&id).lanes[0].worktree.clone();
+    base_moves(&env, &tree, &["src/a.rs"]);
+    env.wait(PR_POLL_MS);
+    env.steps_until(&id, "the trip back", |t, _| stands_at(t, "ready"));
+    let t = env.ticket(&id);
+    let look = t.attempts_of("look").last().unwrap();
+    assert!(
+        matches!(&look.state, AttemptState::Cancelled { reason } if reason.starts_with("sent back from merge: ")),
+        "{look:?}"
+    );
+    env.pr_is(&id, "rebased1", "open", Checks::Passed);
+    env.steps_until(&id, "the look again", |t, _| {
+        t.pending_decisions().iter().any(|d| d.name == "look")
+    });
+    answer_named(&mut env, &id, "look", "proceed");
+    env.steps_until(&id, "the merge decision again", |t, _| {
+        t.pending_decisions().iter().any(|d| d.name == "merge")
+    });
+    let t = env.ticket(&id);
+    let look = t.attempts_of("look").last().unwrap();
+    assert_eq!(look.state, AttemptState::Complete);
+    assert_eq!(look.head.as_deref(), Some("rebased1"));
+}
+
+/// An agent stage between `ready` and `merge` would run again on a trip
+/// back, which costs a run nobody approved: the merge decision names it
+/// instead.
+#[test]
+fn an_agent_stage_between_ready_and_merge_holds_the_trip_back() {
+    let mut env = Env::new();
+    with_stage_before_merge(
+        &env,
+        "[[stages]]\nname = \"polish\"\noperator = \"implementer\"\ncontext = \"each\"\nwrites = [\"notes\"]\nprompt = \"Polish {{branch}}.\"\n",
+    );
+    let id = at_ready(&mut env);
+    env.pr_is(&id, "base0000", "open", Checks::Passed);
+    env.recheck(&id);
+    env.steps_until(&id, "the polisher", |t, _| {
+        t.attempts_of("polish").any(|a| a.session.is_some())
+    });
+    let t = env.ticket(&id);
+    let polisher = session_of(&t, "polish");
+    let notes = artifact_of(&t, "polish", "notes");
+    env.finish(&polisher, &notes, "# polished");
+    env.steps_until(&id, "the merge decision", |t, _| {
+        t.pending_decisions().iter().any(|d| d.name == "merge")
+    });
+    let tree = env.ticket(&id).lanes[0].worktree.clone();
+    base_moves(&env, &tree, &["src/a.rs"]);
+    env.wait(PR_POLL_MS);
+    env.steps_until(&id, "the conflict named", |t, _| {
+        t.pending_decisions().iter().any(|d| {
+            d.name == "merge"
+                && d.question
+                    .contains("polish lies between and would run again")
+        })
+    });
+    polls(&mut env, 2);
+    assert!(stands_at(&env.ticket(&id), "merge"));
+    assert_eq!(count_of(&events_of(&env.data, &id), "sent-back"), 0);
+}
+
+/// `recheck` answered on the merge decision with no conflict: the ticket
+/// goes back through `ready`, which reads the checks again, and stands
+/// at `merge` again.
+#[test]
+fn merge_recheck_sends_the_ticket_back_through_ready() {
+    let mut env = Env::new();
+    let id = at_merge_decision(&mut env);
+    answer_named(&mut env, &id, "merge", "recheck");
+    env.steps_until(&id, "the trip back", |t, _| stands_at(t, "ready"));
+    env.steps_until(&id, "the merge decision again", |t, _| {
+        t.pending_decisions().iter().any(|d| d.name == "merge")
+    });
+    let t = env.ticket(&id);
+    let ready: Vec<_> = t
+        .attempts_of("ready")
+        .filter(|a| a.kind == AttemptKind::GateOnly)
+        .collect();
+    assert_eq!(ready.len(), 2, "{ready:?}");
+    assert!(matches!(&ready[0].state, AttemptState::Cancelled { reason }
+            if reason == "sent back from merge: recheck answered"));
+    assert_eq!(ready[1].state, AttemptState::Complete);
+    assert_eq!(count_of(&events_of(&env.data, &id), "sent-back"), 1);
+    assert!(env.repo.lock().unwrap().pushed.is_empty());
+}
+
+/// Dispatch restarts right after the trip back was saved: the new
+/// runner refreshes at `ready` and pushes once.
+#[test]
+fn a_restart_after_the_send_back_refreshes_once() {
+    let mut env = Env::new();
+    let (id, _) = base_moves_at_merge(&mut env, &["src/a.rs"]);
+    env.wait(PR_POLL_MS);
+    env.steps_until(&id, "the trip back", |t, _| stands_at(t, "ready"));
+    env.restart();
+    env.pr_is(&id, "rebased1", "open", Checks::Passed);
+    env.steps_until(&id, "the merge decision again", |t, _| {
+        t.pending_decisions().iter().any(|d| d.name == "merge")
+    });
+    polls(&mut env, 2);
+    assert_eq!(env.repo.lock().unwrap().pushed.len(), 1);
+    assert_eq!(count_of(&events_of(&env.data, &id), "sent-back"), 1);
+}
+
+/// A provider that reports a short head (Bitbucket does): the push
+/// after the trip back is leased on the full head `ready` read, not the
+/// short one the merge watch recorded.
+#[test]
+fn the_lease_after_a_trip_back_uses_the_full_head() {
+    let mut env = Env::new();
+    let id = at_ready(&mut env);
+    env.pr_is(&id, "base000", "open", Checks::Passed);
+    env.recheck(&id);
+    env.steps_until(&id, "the merge decision", |t, _| {
+        t.pending_decisions().iter().any(|d| d.name == "merge")
+    });
+    let tree = env.ticket(&id).lanes[0].worktree.clone();
+    base_moves(&env, &tree, &["src/a.rs"]);
+    env.wait(PR_POLL_MS);
+    env.steps_until(&id, "the trip back", |t, _| stands_at(t, "ready"));
+    env.pr_is(&id, "rebased", "open", Checks::Passed);
+    env.steps_until(&id, "the merge decision again", |t, _| {
+        t.pending_decisions().iter().any(|d| d.name == "merge")
+    });
+    let pushed = env.repo.lock().unwrap().pushed.clone();
+    assert_eq!(pushed.len(), 1);
+    assert_eq!(pushed[0].3, "base0000");
+}
+
 /// A ticket closed past its last stage with its tree kept because it
 /// was dirty, and the tree since cleaned: a hand close retries it.
 fn closed_with_a_kept_tree(env: &mut Env) -> (String, PathBuf) {
@@ -14539,6 +15136,228 @@ fn two_lanes_checking(env: &mut Env, id: &str) -> Vec<(String, u32, String)> {
         .attempts_of("implement")
         .map(|a| (a.context.clone(), a.n, format!("{id}/implement/{}", a.n)))
         .collect()
+}
+
+/// Both lanes' pull requests as the provider reports them: open, green,
+/// at `base0000`, with `docs` reported as `docs_mergeable`.
+fn two_lane_prs(env: &Env, id: &str, docs_mergeable: Option<&str>) {
+    let t = env.ticket(id);
+    let mut prs = env.prs.lock().unwrap();
+    prs.prs.clear();
+    prs.checks.clear();
+    for (n, lane, repo) in [(7, "repo", "msull/switchboard"), (8, "docs", "msull/docs")] {
+        let branch = t
+            .lanes
+            .iter()
+            .find(|l| l.name == lane)
+            .unwrap()
+            .branch
+            .clone();
+        prs.prs.push((
+            repo.into(),
+            branch,
+            PullRequest {
+                number: n,
+                url: format!("https://github.com/{repo}/pull/{n}"),
+                head: "base0000".into(),
+                state: "open".into(),
+                mergeable: if lane == "docs" {
+                    docs_mergeable.map(str::to_owned)
+                } else {
+                    None
+                },
+                branch: String::new(),
+                base: String::new(),
+                title: String::new(),
+            },
+        ));
+        prs.checks.push((repo.into(), n, Checks::Passed));
+    }
+}
+
+/// A two-lane ticket with `ready` and `merge` stages and a rebaser,
+/// standing at both lanes' merge decisions.
+fn two_lanes_at_merge(env: &mut Env) -> String {
+    let text = two_lane_pipeline(&env.worktrees)
+        .replace(
+            "[operators.implementer]\n",
+            "[operators.rebaser]\nkind = \"claude\"\n\n[operators.implementer]\n",
+        )
+        .replace(
+            "[policy]\n",
+            "[[stages]]\nname = \"ready\"\ncontext = \"each\"\ngate = { kind = \"external\", check = \"pr-checks\" }\n\n[[stages]]\nname = \"merge\"\ncontext = \"each\"\ngate = { kind = \"external\", check = \"pr-merged\", decision = \"merge\" }\n\n[policy]\nrebaser = \"rebaser\"\n",
+        );
+    let id = two_lanes(env, &text);
+    let lanes = two_lanes_checking(env, &id);
+    for (_, _, key) in &lanes {
+        env.repo.lock().unwrap().check_exits.insert(key.clone(), 0);
+    }
+    two_lane_prs(env, &id, None);
+    env.steps_until(&id, "both looks", |t, _| {
+        t.pending_decisions()
+            .iter()
+            .filter(|d| d.name == "inspect")
+            .count()
+            == 2
+    });
+    for d in env.pending(&id) {
+        answer(env, &id, &d, "proceed");
+    }
+    env.steps_until(&id, "both merge decisions", |t, _| {
+        t.pending_decisions()
+            .iter()
+            .filter(|d| d.name == "merge")
+            .count()
+            == 2
+    });
+    id
+}
+
+/// Two lanes at `merge`. The `repo` lane's tree is clean and its base
+/// moved into a conflict; the `docs` lane's tree is not clean and its PR
+/// reads conflicting. A trip back moves every lane, so neither goes
+/// back while `docs` is not clean, and both merge decisions name it;
+/// once it is clean, both go back to `ready` together.
+#[test]
+fn a_dirty_second_lane_holds_the_send_back_of_a_clean_one() {
+    let mut env = Env::new();
+    let id = two_lanes_at_merge(&mut env);
+    let t = env.ticket(&id);
+    let tree = |lane: &str| {
+        t.lanes
+            .iter()
+            .find(|l| l.name == lane)
+            .unwrap()
+            .worktree
+            .clone()
+    };
+    let (repo_tree, docs_tree) = (tree("repo"), tree("docs"));
+    base_moves(&env, &repo_tree, &["src/a.rs"]);
+    env.repo.lock().unwrap().dirty.push(docs_tree.clone());
+    two_lane_prs(&env, &id, Some("conflicting"));
+    let names_docs = |t: &Ticket| {
+        let merge: Vec<_> = t
+            .pending_decisions()
+            .into_iter()
+            .filter(|d| d.name == "merge")
+            .collect();
+        merge.len() == 2
+            && merge.iter().all(|d| {
+                d.question.contains(&format!(
+                    "the tree of lane docs at {} is not clean",
+                    docs_tree.display()
+                ))
+            })
+    };
+    env.wait(PR_POLL_MS);
+    env.steps_until(&id, "both decisions naming docs", |t, _| names_docs(t));
+    let repo_decision = env
+        .pending(&id)
+        .into_iter()
+        .find(|d| d.name == "merge" && d.question.starts_with("merge (repo)"))
+        .unwrap();
+    assert!(
+        repo_decision
+            .question
+            .contains("the base moved and conflicts in src/a.rs"),
+        "{}",
+        repo_decision.question
+    );
+    answer(&mut env, &id, &repo_decision, "recheck");
+    env.step();
+    polls(&mut env, 2);
+    let t = env.ticket(&id);
+    assert!(stands_at(&t, "merge"));
+    assert_eq!(count_of(&events_of(&env.data, &id), "sent-back"), 0);
+    assert!(env.sb().cloned.is_empty(), "no rebaser in either lane");
+    assert!(env.repo.lock().unwrap().pushed.is_empty());
+    env.repo.lock().unwrap().dirty.clear();
+    polls(&mut env, 1);
+    env.steps_until(&id, "the trip back", |t, _| stands_at(t, "ready"));
+    let t = env.ticket(&id);
+    for lane in ["repo", "docs"] {
+        let a = t
+            .attempts_of("merge")
+            .filter(|a| a.context == lane)
+            .last()
+            .unwrap();
+        assert!(
+            matches!(&a.state, AttemptState::Cancelled { reason } if reason.starts_with("sent back from merge: ")),
+            "{lane}: {a:?}"
+        );
+    }
+    assert_eq!(count_of(&events_of(&env.data, &id), "sent-back"), 1);
+}
+
+/// Two lanes at `merge`, the `docs` lane's PR merged by hand, then the
+/// `repo` lane's base moved into a conflict: only `repo` goes back
+/// through `ready`. `docs` keeps its passes, its tree (left dirty) does
+/// not hold the trip, and its branch, behind a base that now holds it,
+/// is neither rebased nor pushed.
+#[test]
+fn a_merged_lane_stays_merged_when_the_other_lane_is_sent_back() {
+    let mut env = Env::new();
+    let id = two_lanes_at_merge(&mut env);
+    let t = env.ticket(&id);
+    let tree = |lane: &str| {
+        t.lanes
+            .iter()
+            .find(|l| l.name == lane)
+            .unwrap()
+            .worktree
+            .clone()
+    };
+    let (repo_tree, docs_tree) = (tree("repo"), tree("docs"));
+    let last = |t: &Ticket, stage: &str, lane: &str| {
+        t.attempts_of(stage)
+            .filter(|a| a.context == lane && a.kind == AttemptKind::GateOnly)
+            .last()
+            .unwrap()
+            .state
+            .clone()
+    };
+    env.prs
+        .lock()
+        .unwrap()
+        .prs
+        .iter_mut()
+        .find(|(_, _, pr)| pr.number == 8)
+        .unwrap()
+        .2
+        .state = "merged".into();
+    env.wait(PR_POLL_MS);
+    env.steps_until(&id, "docs merged", |t, _| {
+        last(t, "merge", "docs") == AttemptState::Complete
+    });
+    {
+        let mut repo = env.repo.lock().unwrap();
+        repo.bases
+            .insert(env.data.lane_repo_dir(PROJECT, "docs"), "docs0002".into());
+        repo.behind.insert(docs_tree.clone(), 1);
+        repo.rebase_conflicts.push(docs_tree.clone());
+        repo.dirty.push(docs_tree);
+    }
+    base_moves(&env, &repo_tree, &["src/a.rs"]);
+    env.wait(PR_POLL_MS);
+    env.steps_until(&id, "the trip back", |t, _| stands_at(t, "ready"));
+    let t = env.ticket(&id);
+    assert_eq!(last(&t, "merge", "docs"), AttemptState::Complete);
+    assert_eq!(last(&t, "ready", "docs"), AttemptState::Complete);
+    env.steps_until(&id, "repo brought up", |t, _| {
+        t.lanes
+            .iter()
+            .any(|l| l.name == "repo" && l.base_sha.as_deref() == Some("main0002"))
+    });
+    let repo = env.repo.lock().unwrap();
+    assert!(
+        repo.rebased.iter().all(|(dir, _)| *dir == repo_tree),
+        "{:?}",
+        repo.rebased
+    );
+    assert!(repo.pushed.iter().all(|(dir, ..)| *dir == repo_tree));
+    drop(repo);
+    assert!(env.sb().cloned.is_empty(), "no rebaser for docs");
+    assert!(env.pending(&id).iter().all(|d| d.name != "refresh"));
 }
 
 /// One lane passed its checks and one failed at them: a plain restart
@@ -18315,7 +19134,7 @@ fn a_clone_carries_its_own_operators_sets() {
     env.pr_is_with(&id, "base0000", "open", Checks::Passed, Some("conflicting"));
     env.wait(PR_POLL_MS);
     env.steps_until(&id, "the rebaser", |t, _| {
-        t.attempts_of("merge")
+        t.attempts_of("ready")
             .any(|a| a.kind == AttemptKind::Agent && a.session.is_some())
     });
     let (sets, prompt) = env

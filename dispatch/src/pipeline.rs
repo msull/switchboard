@@ -109,7 +109,7 @@ impl SupervisorSetup {
 /// Answers that are easily mistaken for decisions in `decides`, with
 /// the decisions that take them.
 const ANSWERS: &[(&str, &str)] = &[
-    ("recheck", "`pr` and `refresh`"),
+    ("recheck", "`pr`, `refresh` and `merge`"),
     ("continue", "`paused`"),
     ("keep", "`rerun`"),
     ("check", "`rerun`"),
@@ -1974,7 +1974,7 @@ argv = ["make", "deps"]
         let e = err("guidance = \"g\"\ndecides = [\"recheck\"]");
         assert_eq!(
             e,
-            "[supervisor] decides: `recheck` is an answer to `pr` and `refresh`; name the decision"
+            "[supervisor] decides: `recheck` is an answer to `pr`, `refresh` and `merge`; name the decision"
         );
         // A gate of this file asks it: a human gate's own name.
         supervised("guidance = \"g\"\ndecides = [\"lanes\", \"merge\"]").unwrap();
