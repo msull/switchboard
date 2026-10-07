@@ -1358,6 +1358,12 @@ pub struct ProjectState {
     pub shown: Vec<(String, String)>,
     /// The project's supervisor session and its workspace.
     pub supervisor: Supervision,
+    /// The tree a deploy of a lane the ticket did not choose runs in:
+    /// a detached worktree of the project's clone at its base, shared
+    /// by every ticket and pipeline of the project. Recorded the first
+    /// time it is made; from then on this path wins over the derived
+    /// one, so a running deploy keeps its cwd when the root moves.
+    pub base_tree: Option<PathBuf>,
 }
 
 /// A project's supervisor: where it works, the session now, the ones it

@@ -62,6 +62,8 @@ checks and command reviewers) run in a sandbox that allows writes only
 to:
 
 - every tree of the ticket, and the primary tree;
+- for a deploy of a lane's base and its setup, the project's base
+  tree;
 - the attempt or round directory the command reports into;
 - the lane's `writable` paths, where its tools keep their caches
   (`~/.cargo`, `~/.cache/uv`, `~/.npm`); a root-context command gets
@@ -360,6 +362,7 @@ owner opened with a `revise` answer to `finalize`, each
 Version 20 adds a ticket's `tree_refreshed`, the tree's last bring-up
 to the project's base, and a stage entry's `tree_refreshed`, the
 ticket's as the stage was entered; both are absent in older records.
+Version 21 adds a project's `base_tree`, absent in older records.
 
 A project's record (`projects/<project>.json`) holds, besides its
 space, set and queue, its supervisor (see "Supervisor"): `supervisor`
@@ -374,6 +377,17 @@ ledger is, and recovered at start the same way. A ticket's `state_by`
 says who made its last park, resume or close and its source's
 `taken_by` who took it: `supervisor`, or absent for the owner and for
 Dispatch itself.
+
+The project's `base_tree` is where a deploy of a lane's base runs,
+recorded the first time the tree is made (`base-<project>` under the
+worktree root). The recorded path wins from then on, so a deploy
+running there keeps its cwd when the root moves. Nothing rebuilds it at
+start: the next base deploy adds a missing tree again at that path,
+first dropping a stale entry with `git worktree remove`, never
+`prune`. `dispatch worktrees --migrate` moves it under the new root as
+it moves a ticket's tree, and leaves it, saying so under the project's
+name, while a base deploy runs in it or when the project's pipeline
+names its own `worktrees`.
 
 ### The event log and the runner's status
 
@@ -530,9 +544,29 @@ interrupted attempt.
 - A *gate-only* stage (`lanes`, `deploy`, `ready`, `merge`) has no
   session; its attempt is the gate's own result, and its prompt
   fields (`{inputs.deploy.commit}`) are what the gate recorded. A
-  skipped stage records nothing, and a template naming its field
-  renders as `unknown (deploy skipped)`; the Orchard `try` prompt says
-  so in words.
+  `lane:<name>` stage whose lane the ticket did not choose is skipped,
+  unless it has `without_lane = "base"` (below). A skipped stage
+  records nothing, and a template naming its field renders as
+  `unknown (deploy skipped)`.
+- **A deploy of a lane's base.** `without_lane = "base"` on a
+  gate-only command stage in `lane:<name>` (its gate `in` that lane)
+  makes a ticket that did not choose the lane deploy the lane's base
+  branch instead of skipping: the stage takes its `needs` as any deploy
+  does, and its attempt runs as `<name>@base` in the project's base
+  tree, a detached worktree of the project's clone at `<remote>/<base>`
+  with the lane's own clone detached at its base at the lane's `path`
+  inside, laid out as a ticket's tree is. Right before each start the
+  tree is fetched and moved to what the remotes have now and the lane's
+  `setup` runs there, every time, since the base moves between uses.
+  The command gets `DISPATCH_LANE=<name>` and `DISPATCH_BRANCH=<the
+  lane's base>`, and its head is the deployed commit, so
+  `{inputs.deploy.commit}` and `tried` name it. The tree is shared by
+  every ticket and pipeline of the project: a start waits, asking
+  nothing, while another ticket's base deploy runs there, and a tree
+  with changes fails the attempt with a `rerun` question naming them,
+  since Dispatch never resets it. Validation refuses the key on any
+  other stage, in a project that works in place (`root`), and where a
+  lane is named `<name>@base`.
 - **Command gates run once, on a clean tree.** After the agent stops,
   Dispatch requires the context's tree clean, records its head commit,
   and asks Switchboard to run the gate as a command record named for
@@ -1298,7 +1332,8 @@ gate = { kind = "command", like = "implement" }
 
 [[stages]]
 name = "deploy"
-context = "lane:backend"      # skipped when the ticket has no backend lane: the frontend is then tried against what my-dev already has
+context = "lane:backend"
+without_lane = "base"         # when the ticket did not choose the backend lane, deploy the backend's base
 needs = ["my-dev"]
 # Dispatch deploys, once, after linking again so the target cannot be
 # whatever a previous checkout left; the deployed commit is recorded
@@ -1316,7 +1351,7 @@ needs = ["my-dev"]
 services = ["frontend", "admin"]   # each started only if its lane was cut; owned by the ticket until `tried` ends
 before = { frontend = ["npm", "run", "link-env"], admin = ["npm", "run", "link-env"] }
 writes = ["notes"]
-prompt = "my-dev is running backend commit {inputs.deploy.commit} (when that reads as skipped, this ticket has no backend lane and my-dev runs whatever was deployed last). The frontend: {services.frontend}. The admin frontend: {services.admin}. A lane this ticket did not cut is not served; test it, if at all, against the existing deployment. Try ticket #{issue.number} end to end and report to {notes}."
+prompt = "my-dev is running backend commit {inputs.deploy.commit}. The frontend: {services.frontend}. The admin frontend: {services.admin}. A lane this ticket did not cut is not served; test it, if at all, against the existing deployment. Try ticket #{issue.number} end to end and report to {notes}."
 
 [[stages]]
 name = "tried"
@@ -1356,9 +1391,10 @@ What this pipeline showed, and what it added to the vocabulary:
   lanes; implementation happens per lane. That distinction did not
   exist until a multi-repo project needed it.
 - **`lane:backend` as a context**, and a stage that is skipped when
-  its lane was not cut. A frontend-only ticket is tried against
-  whatever backend `my-dev` already runs, and the `tried` decision
-  says so.
+  the ticket did not choose its lane, unless it falls back to the
+  lane's base. Orchard's deploy does: a frontend-only ticket is tried
+  against the backend's `main` as the remote has it, deployed from the
+  project's base tree, and the `tried` decision names that commit.
 - **Services are Dispatch's.** A stage's `services` name lanes; each
   is started only if the ticket cut that lane, and a template field
   for one that was not renders as `not served (no <lane> lane)`, so a
@@ -1843,8 +1879,9 @@ ticket's slot as any open attempt does).
   services up again before asking the same, and a human gate in the
   run asks afresh, so `tried` is never asked with nothing served. A
   workflow stage cannot be sent back this way, so a pipeline file may
-  put one only last in a `needs` run. A frontend-only ticket,
-  with no deploy, goes back to `try`.
+  put one only last in a `needs` run. A frontend-only ticket goes back
+  to `deploy` when the deploy falls back to the backend's base, and to
+  `try` when the stage has no `without_lane`.
 - The in-place lane hold above is not built: a stage whose `needs`
   names a lane parks, saying so.
 - Holds cover Dispatch tickets only. Dispatch cannot see a manual
@@ -2550,7 +2587,9 @@ stage with a command gate (`deploy`) runs the command in its context's
 clean tree as a child of the runner, as an agent stage's checks run,
 and the head it ran at is the deployed commit, `{inputs.deploy.commit}`
 to later prompts; a stage in a lane the ticket did not choose is
-skipped and reads `unknown (deploy skipped)`. A failure asks `rerun` or
+skipped and reads `unknown (deploy skipped)`, unless its
+`without_lane = "base"` deploys the lane's base from the project's
+base tree. A failure asks `rerun` or
 `park`, and a deploy lost to a runner restart is that question, since
 it may have run. A park, a close or a `rerun` answer waits for a lost
 deploy's process group to empty, without signalling it, and asks
@@ -2741,6 +2780,14 @@ and one against the real one:
 | A frontend-only ticket reaches `deploy` | No attempt and no command; the tester reads `unknown (deploy skipped)`, and `tried` says the deploy was skipped and what is served (`a_deploy_for_a_lane_not_chosen_is_skipped_and_reads_as_skipped`) |
 | The deploy exits 1 | A `rerun` question with `rerun` and `park`; parked and resumed, the question again and no second run; `rerun` runs attempt 2 with its own log (`a_failed_deploy_asks_rerun_or_park_and_a_resume_does_not_deploy_again_unasked`) |
 | A ticket parked at `tried` is resumed | It takes `my-dev` again and goes back to `deploy`; the deploy's and the tester's attempts are cancelled; a `rerun` question, and no deploy until it is answered; after the deploy, `try` serves the frontend again and asks before the tester runs, and `tried` says what is served (`a_resume_past_the_deploy_asks_to_deploy_again_before_anything_reads_it`) |
+| A frontend-only ticket reaches a deploy with `without_lane = "base"` | It holds `my-dev`; the project clone and the backend clone are detached at their bases in `base-Orchard` under the worktree root, recorded as the project's `base_tree`; `uv sync` runs there, confined; one check `backend@base` runs there with `DISPATCH_LANE=backend` and `DISPATCH_BRANCH=main`; exit 0 binds the base commit, which the tester and `tried` read; no lane of the ticket points into the base tree (`a_frontend_only_deploy_deploys_the_backend_base_and_the_tester_reads_its_commit`) |
+| A second frontend-only ticket deploys after the backend's base moved | The same tree, moved to the new base, set up again (`a_second_base_deploy_reuses_the_tree_at_the_moved_base`) |
+| The base tree has changes: in the lane's tree, or a stray file in the project's | No check; the attempt fails naming the path, with a `rerun` question; nothing is moved (`a_base_tree_with_changes_fails_the_deploy_with_a_rerun_question`) |
+| A second ticket's base deploy while the first's runs (`count = 2`) | It starts nothing, asks nothing and moves nothing until the first exits (`a_base_deploy_waits_while_another_tickets_runs_in_the_tree`) |
+| `worktrees --migrate` while a base deploy runs | The base tree stays, listed as skipped under the project; the exit binds there; a later migrate with nothing running moves it and the record follows (`a_running_base_deploy_keeps_its_tree_when_the_worktree_root_moves`) |
+| `worktrees --migrate` moves the base tree but a lane clone cannot be re-pointed | The record follows the tree to its new place; the lane's failure is listed as skipped under the project (`a_moved_base_tree_is_recorded_where_it_went_when_a_lane_is_not_repointed`) |
+| `worktrees --migrate` with the base tree deleted by hand | The project clone's and each lane clone's entries for the old place are removed and the record moves to the new root (`a_base_tree_deleted_by_hand_has_its_clone_entries_removed_when_migrated`) |
+| A frontend-only ticket parked at `tried` after a base deploy is resumed | It goes back to `deploy` with a `rerun` question (`a_resume_past_a_base_deploy_asks_to_deploy_again`) |
 | A frontend-only ticket parked at `tried` is resumed | It goes back to `try`, serves the frontend again and asks before the tester runs again (`a_resume_with_the_deploy_skipped_serves_again_and_asks_before_the_tester`) |
 | The runner restarts while the deploy runs | The attempt fails "it may have run" and asks; nothing runs again; the hold stays (`a_deploy_lost_to_a_runner_restart_is_a_question_not_a_rerun`) |
 | A ticket parks while its deploy runs | `parking` until the command exits, never killed; then `parked` with no hold (`parking_during_a_deploy_waits_for_it_to_exit_then_releases_the_hold`) |

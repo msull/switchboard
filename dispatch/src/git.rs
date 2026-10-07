@@ -141,6 +141,12 @@ pub trait Repo: Send {
     /// right now, such as one on a volume that is not mounted. The
     /// branch stays.
     fn worktree_remove(&mut self, repo: &Path, dir: &Path) -> Result<()>;
+    /// A worktree of `repo` at `dir` with `HEAD` detached at `commit`:
+    /// `git worktree add --detach` when `dir` is not one of `repo`'s
+    /// trees (an entry whose directory is gone is removed first), else
+    /// `git checkout --detach` in it, which git refuses when a local
+    /// change would be overwritten. Never creates a branch.
+    fn worktree_detached(&mut self, repo: &Path, dir: &Path, commit: &str) -> Result<()>;
     /// What `git status` reports in `dir`, every untracked file listed
     /// on its own, as paths relative to `dir`. A nested repository is
     /// reported once at its own path. Read-only.
@@ -655,26 +661,7 @@ impl Repo for GitCli {
     }
 
     fn is_worktree_of(&self, repo: &Path, dir: &Path, branch: &str) -> Result<bool> {
-        // `rev-parse` answers relative to the directory git was given.
-        let show = |where_: &Path, what: &str| -> Result<Option<PathBuf>> {
-            let out = git_in(where_)
-                .args(["rev-parse", what])
-                .output()
-                .with_context(|| format!("git in {}", where_.display()))?;
-            if !out.status.success() {
-                return Ok(None);
-            }
-            let text = String::from_utf8_lossy(&out.stdout).trim().to_owned();
-            Ok(where_.join(text).canonicalize().ok())
-        };
-        let (Some(common), Some(repo_common), Some(top)) = (
-            show(dir, "--git-common-dir")?,
-            show(repo, "--git-common-dir")?,
-            show(dir, "--show-toplevel")?,
-        ) else {
-            return Ok(false);
-        };
-        if common != repo_common || top != dir.canonicalize()? {
+        if !tree_of(repo, dir)? {
             return Ok(false);
         }
         let head = output(git_in(dir).args(["rev-parse", "--abbrev-ref", "HEAD"]))?;
@@ -982,6 +969,28 @@ impl Repo for GitCli {
             return Ok(());
         }
         bail!("{} not removed: {stderr}", dir.display())
+    }
+
+    fn worktree_detached(&mut self, repo: &Path, dir: &Path, commit: &str) -> Result<()> {
+        if dir.is_dir() && tree_of(repo, dir)? {
+            output(git_in(dir).args(["checkout", "--quiet", "--detach", commit]))?;
+            return Ok(());
+        }
+        if !dir.exists() {
+            // An entry left by a tree deleted by hand would make `add`
+            // refuse the path; `remove` drops only that entry.
+            self.worktree_remove(repo, dir)?;
+        }
+        if let Some(parent) = dir.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        output(
+            git_in(repo)
+                .args(["worktree", "add", "--quiet", "--detach"])
+                .arg(dir)
+                .arg(commit),
+        )?;
+        Ok(())
     }
 
     fn changes(&self, dir: &Path) -> Result<Vec<PathBuf>> {
@@ -1491,6 +1500,31 @@ fn parse_log(text: &str) -> Vec<Commit> {
         .collect()
 }
 
+/// Whether `dir` is the top of a worktree of `repo`: the same common
+/// git directory, and `dir` itself rather than a directory inside one.
+fn tree_of(repo: &Path, dir: &Path) -> Result<bool> {
+    // `rev-parse` answers relative to the directory git was given.
+    let show = |where_: &Path, what: &str| -> Result<Option<PathBuf>> {
+        let out = git_in(where_)
+            .args(["rev-parse", what])
+            .output()
+            .with_context(|| format!("git in {}", where_.display()))?;
+        if !out.status.success() {
+            return Ok(None);
+        }
+        let text = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+        Ok(where_.join(text).canonicalize().ok())
+    };
+    let (Some(common), Some(repo_common), Some(top)) = (
+        show(dir, "--git-common-dir")?,
+        show(repo, "--git-common-dir")?,
+        show(dir, "--show-toplevel")?,
+    ) else {
+        return Ok(false);
+    };
+    Ok(common == repo_common && top == dir.canonicalize()?)
+}
+
 /// `dir` with its deepest existing ancestor's symlinks resolved, and
 /// the missing rest appended as written.
 fn resolved(dir: &Path) -> PathBuf {
@@ -1658,6 +1692,8 @@ pub struct FakeRepo {
     pub fail_worktree: Option<String>,
     /// Every `fetch` fails with this while it is set.
     pub fail_fetch: Option<String>,
+    /// Detached worktrees made or moved: repo, dir, commit.
+    pub detached_trees: Vec<(PathBuf, PathBuf, String)>,
     /// Worktrees moved: repo, from, to.
     pub moved: Vec<(PathBuf, PathBuf, PathBuf)>,
     /// The `origin` of a tree, for a project the pipeline names by `root`.
@@ -1735,6 +1771,8 @@ pub struct FakeRepo {
     pub removed: Vec<(PathBuf, PathBuf)>,
     /// The next removal of this directory fails, once.
     pub fail_remove: Option<PathBuf>,
+    /// The next repair of this directory fails, once.
+    pub fail_repair: Option<PathBuf>,
     /// Trees whose merge base with anything cannot be read.
     pub no_merge_base: Vec<PathBuf>,
     /// What `commits` returns for a tree, whatever the range.
@@ -2110,6 +2148,10 @@ impl Repo for FakeRepo {
         Ok(())
     }
     fn worktree_repair(&mut self, repo: &Path, dir: &Path) -> Result<()> {
+        if self.fail_repair.as_deref() == Some(dir) {
+            self.fail_repair = None;
+            bail!("{} not repaired: the fake was told to fail", dir.display());
+        }
         self.repaired.push((repo.to_path_buf(), dir.to_path_buf()));
         Ok(())
     }
@@ -2127,6 +2169,22 @@ impl Repo for FakeRepo {
         }
         self.worktrees.retain(|(_, d, _, _)| d != dir);
         self.heads.remove(dir);
+        Ok(())
+    }
+    fn worktree_detached(&mut self, repo: &Path, dir: &Path, commit: &str) -> Result<()> {
+        if self.dirty.iter().any(|d| d == dir) {
+            bail!(
+                "error: your local changes in {} would be overwritten by checkout",
+                dir.display()
+            );
+        }
+        std::fs::create_dir_all(dir)?;
+        if !self.detached.iter().any(|d| d == dir) {
+            self.detached.push(dir.to_path_buf());
+        }
+        self.heads.insert(dir.to_path_buf(), commit.to_owned());
+        self.detached_trees
+            .push((repo.to_path_buf(), dir.to_path_buf(), commit.to_owned()));
         Ok(())
     }
     fn changes(&self, dir: &Path) -> Result<Vec<PathBuf>> {
@@ -2495,6 +2553,9 @@ impl Repo for std::sync::Arc<std::sync::Mutex<FakeRepo>> {
             gate.pass();
         }
         self.lock().unwrap().worktree_remove(repo, dir)
+    }
+    fn worktree_detached(&mut self, repo: &Path, dir: &Path, commit: &str) -> Result<()> {
+        self.lock().unwrap().worktree_detached(repo, dir, commit)
     }
     fn changes(&self, dir: &Path) -> Result<Vec<PathBuf>> {
         self.lock().unwrap().changes(dir)
@@ -3215,6 +3276,57 @@ mod tests {
             .unwrap()
             .status;
         assert!(!status.success());
+    }
+
+    #[test]
+    fn the_real_git_makes_and_moves_a_detached_tree_and_no_branch() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = origin_and_clone(dir.path(), "p");
+        let first = commit(&repo, "f", "1\n", &["-m", "one"]);
+        let second = commit(&repo, "f", "2\n", &["-m", "two"]);
+        let branches = sh(&repo, &["branch", "--list"]);
+        let mut cli = GitCli::default();
+        let wt = dir.path().join("wt").join("base-P");
+        cli.worktree_detached(&repo, &wt, &first).unwrap();
+        assert_eq!(cli.head(&wt).unwrap(), first);
+        assert_eq!(cli.branch_head(&wt, "main").unwrap(), None, "detached");
+        cli.worktree_detached(&repo, &wt, &second).unwrap();
+        assert_eq!(cli.head(&wt).unwrap(), second);
+        assert_eq!(sh(&repo, &["branch", "--list"]), branches, "no branch made");
+        // A change the move would overwrite is refused, and kept.
+        std::fs::write(wt.join("f"), "mine\n").unwrap();
+        cli.worktree_detached(&repo, &wt, &first).unwrap_err();
+        assert_eq!(cli.head(&wt).unwrap(), second);
+        assert_eq!(std::fs::read_to_string(wt.join("f")).unwrap(), "mine\n");
+        // Deleted by hand: its entry is dropped and the tree made again.
+        std::fs::remove_dir_all(&wt).unwrap();
+        cli.worktree_detached(&repo, &wt, &first).unwrap();
+        assert_eq!(cli.head(&wt).unwrap(), first);
+    }
+
+    #[test]
+    fn the_fake_records_a_detached_tree_with_no_branch_head() {
+        let dir = tempfile::tempdir().unwrap();
+        let wt = dir.path().join("base-P");
+        let mut fake = FakeRepo::default();
+        fake.worktree_detached(Path::new("/clone"), &wt, "abc")
+            .unwrap();
+        fake.worktree_detached(Path::new("/clone"), &wt, "def")
+            .unwrap();
+        assert!(wt.is_dir());
+        assert_eq!(fake.branch_head(&wt, "main").unwrap(), None);
+        assert_eq!(fake.head(&wt).unwrap(), "def");
+        assert_eq!(fake.detached, std::slice::from_ref(&wt), "listed once");
+        assert_eq!(
+            fake.detached_trees,
+            [
+                (PathBuf::from("/clone"), wt.clone(), "abc".to_owned()),
+                (PathBuf::from("/clone"), wt.clone(), "def".to_owned()),
+            ]
+        );
+        fake.dirty.push(wt.clone());
+        fake.worktree_detached(Path::new("/clone"), &wt, "abc")
+            .unwrap_err();
     }
 
     #[test]

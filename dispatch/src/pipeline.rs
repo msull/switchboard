@@ -358,7 +358,8 @@ pub enum Context {
     Each,
     /// Once in the root with every lane named.
     Joined,
-    /// One named lane; skipped when the ticket did not cut it.
+    /// One named lane; skipped when the ticket did not choose it,
+    /// unless the stage has `without_lane = "base"`.
     Lane(String),
     /// These lanes only.
     Lanes(Vec<String>),
@@ -500,6 +501,27 @@ pub struct Stage {
     /// grants. Names only.
     #[serde(default)]
     pub env: Vec<String>,
+    /// What a `lane:<name>` gate-only command does when the ticket did
+    /// not choose that lane; absent, the stage is skipped.
+    #[serde(default)]
+    pub without_lane: Option<WithoutLane>,
+}
+
+/// What a lane's deploy runs when the ticket did not choose the lane.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum WithoutLane {
+    /// Deploy the lane's base branch from the project's shared detached
+    /// tree, so the stage holds its resource and a tester reads a commit.
+    Base,
+}
+
+/// The context a deploy of `lane`'s base runs as. Validation refuses a
+/// lane by this name in a pipeline that falls back to `lane`, so no
+/// lookup of a ticket's lanes finds it.
+#[must_use]
+pub fn base_context(lane: &str) -> String {
+    format!("{lane}@base")
 }
 
 /// One artifact a stage writes. A secret one is written by a gate-only
@@ -643,6 +665,16 @@ impl Stage {
     #[must_use]
     pub fn is_command_stage(&self) -> bool {
         self.kind() == StageKind::GateOnly && matches!(self.gate, Some(Gate::Command { .. }))
+    }
+
+    /// The lane whose base this stage runs when the ticket did not
+    /// choose it: a `lane:<name>` stage with `without_lane`.
+    #[must_use]
+    pub fn fallback_lane(&self) -> Option<&str> {
+        match (&self.context, self.without_lane) {
+            (Context::Lane(l), Some(WithoutLane::Base)) => Some(l),
+            _ => None,
+        }
     }
 
     /// The names of the artifacts the stage writes.
@@ -1063,6 +1095,7 @@ impl Pipeline {
             );
         }
         Self::validate_gate_context(stage)?;
+        self.validate_without_lane(stage)?;
         self.validate_stage_env(stage)?;
         self.validate_services(stage)
     }
@@ -1202,6 +1235,39 @@ impl Pipeline {
                 "stage {:?}: a gate-only command in lane:{lane} needs context = \"lane:{lane}\"",
                 stage.name
             );
+        }
+        Ok(())
+    }
+
+    /// `without_lane` runs a lane's gate-only command in the project's
+    /// base tree, which only a pipeline of worktrees has. Anything that
+    /// commits there would commit on nobody's branch, and the fallback's
+    /// context name must not be a lane's.
+    fn validate_without_lane(&self, stage: &Stage) -> Result<()> {
+        if stage.without_lane.is_none() {
+            return Ok(());
+        }
+        let name = &stage.name;
+        let Context::Lane(lane) = &stage.context else {
+            bail!("stage {name:?}: without_lane needs context = \"lane:<name>\"");
+        };
+        if !stage.is_command_stage() {
+            bail!("stage {name:?}: without_lane needs a gate-only command stage");
+        }
+        if let Some(Gate::Command { run_in, .. }) = &stage.gate
+            && run_in != "lane"
+            && run_in.strip_prefix("lane:") != Some(lane.as_str())
+        {
+            bail!("stage {name:?}: without_lane needs a gate in lane or lane:{lane}");
+        }
+        if !self.cuts_worktrees() {
+            bail!(
+                "stage {name:?}: without_lane needs [project] repo, so there is a clone to cut the base tree from"
+            );
+        }
+        let base = base_context(lane);
+        if self.lane(&base).is_some() {
+            bail!("stage {name:?}: without_lane runs as {base:?}, which is also a lane's name");
         }
         Ok(())
     }
@@ -2812,6 +2878,87 @@ ports = [3100, 3199]
             "name = \"deploy\"\ncontext = \"joined\"",
             "needs context = \"lane:backend\"",
         );
+    }
+
+    /// Two lanes, `A` and `B`, with `project` as the `[project]`'s
+    /// place line, `lanes` after them, and `stages`, parsed.
+    fn fallback(project: &str, lanes: &str, stages: &str) -> Result<Pipeline> {
+        Pipeline::parse(&format!(
+            r#"
+version = 1
+
+[project]
+name = "P"
+{project}
+space = "Dispatch · P"
+
+[source]
+kind = "manual"
+
+[[lanes]]
+name = "A"
+path = "a"
+
+[[lanes]]
+name = "B"
+path = "b"
+{lanes}
+[operators.agent]
+kind = "claude"
+{stages}"#
+        ))
+    }
+
+    const CLONED: &str = "repo = \"git@example.com:o/p.git\"";
+
+    const DEPLOY_A: &str = r#"
+[[stages]]
+name = "deploy"
+context = "lane:A"
+gate = { kind = "command", in = "lane:A", argv = ["true"] }
+without_lane = "base"
+"#;
+
+    #[test]
+    fn without_lane_base_parses_on_a_lanes_deploy() {
+        let p = fallback(CLONED, "", DEPLOY_A).unwrap();
+        assert_eq!(p.stages[0].without_lane, Some(WithoutLane::Base));
+        assert_eq!(p.stages[0].fallback_lane(), Some("A"));
+        let plain = fallback(
+            CLONED,
+            "",
+            &DEPLOY_A.replace("without_lane = \"base\"\n", ""),
+        )
+        .unwrap();
+        assert_eq!(plain.stages[0].fallback_lane(), None);
+    }
+
+    #[test]
+    fn without_lane_is_refused_where_no_base_tree_can_run_it() {
+        let refused = |project: &str, lanes: &str, stages: &str, expected: &str| {
+            let err = fallback(project, lanes, stages).unwrap_err().to_string();
+            assert!(err.contains("stage \"deploy\""), "{err}");
+            assert!(err.contains(expected), "{err}");
+        };
+        for context in ["\"root\"", "\"each\"", "\"joined\"", "[\"A\", \"B\"]"] {
+            let stages = DEPLOY_A
+                .replace("context = \"lane:A\"", &format!("context = {context}"))
+                .replace("in = \"lane:A\"", "in = \"lane\"");
+            refused(CLONED, "", &stages, "without_lane needs context");
+        }
+        let agent = DEPLOY_A.replace(
+            "gate = { kind = \"command\", in = \"lane:A\", argv = [\"true\"] }",
+            "operator = \"agent\"\nprompt = \"Go.\"",
+        );
+        refused(CLONED, "", &agent, "gate-only command stage");
+        let other = DEPLOY_A.replace("in = \"lane:A\"", "in = \"root\"");
+        refused(CLONED, "", &other, "a gate in lane or lane:A");
+        refused("root = \"/src/p\"", "", DEPLOY_A, "needs [project] repo");
+        let named = "\n[[lanes]]\nname = \"A@base\"\npath = \"c\"\n";
+        refused(CLONED, named, DEPLOY_A, "\"A@base\", which is also a lane");
+        // The same lane name without the key is nobody's business.
+        let plain = DEPLOY_A.replace("without_lane = \"base\"\n", "");
+        fallback(CLONED, named, &plain).unwrap();
     }
 
     #[test]
