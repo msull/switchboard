@@ -263,12 +263,21 @@ impl Runner {
         let discarded = discard(t, &old, &checked);
         let setup_again = setup_changed(t, &old, &checked.new);
         if let Some(entry) = &checked.entry {
+            // The tree's head goes back only when the entry read it, and
+            // its bring-up, with the base of each repo-less lane it moved,
+            // must keep describing the head it has.
+            let tree_reset = entry.heads.contains_key("root");
             for lane in &mut t.lanes {
                 if let Some(at) = entry.lanes.get(&lane.name) {
-                    lane.base_sha.clone_from(&at.base_sha);
+                    if tree_reset || old.lane(&lane.name).is_some_and(|p| p.repo.is_some()) {
+                        lane.base_sha.clone_from(&at.base_sha);
+                    }
                     lane.refreshed.clone_from(&at.refreshed);
                     lane.conflict.clone_from(&at.conflict);
                 }
+            }
+            if tree_reset {
+                t.tree_refreshed.clone_from(&entry.tree_refreshed);
             }
         }
         remap(t, &old, &checked);
@@ -608,6 +617,7 @@ impl Runner {
             at_ms: now_ms,
             heads,
             lanes,
+            tree_refreshed: t.tree_refreshed.clone(),
         });
     }
 }

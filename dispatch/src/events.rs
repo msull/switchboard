@@ -458,6 +458,7 @@ pub fn between(
             });
         }
     }
+    tree_event(&mut out, &mut whole, old, new, at_ms);
     if let Some((kind, text)) = state
         && kind != Kind::Resumed
     {
@@ -468,6 +469,46 @@ pub fn between(
         name_stages(&mut out, &whole, new, moved.map(|_| old.stage), names);
     }
     out
+}
+
+/// The tree's bring-up, as a lane's is logged, under the name `root`.
+/// A restart can put back an older bring-up; that is not a new one.
+fn tree_event(
+    out: &mut Vec<Event>,
+    whole: &mut Vec<usize>,
+    old: &Ticket,
+    new: &Ticket,
+    at_ms: u64,
+) {
+    if let Some(r) = &new.tree_refreshed
+        && old.tree_refreshed.as_ref() != Some(r)
+        && old
+            .tree_refreshed
+            .as_ref()
+            .is_none_or(|o| r.at_ms > o.at_ms)
+    {
+        // No rebaser or question is ever about the tree: its bring-up
+        // is a clean rebase or nothing.
+        let (by, conflicts) = (BroughtUpBy::Git, Some(0));
+        whole.push(out.len());
+        out.push(Event {
+            head: Some(r.to.clone()),
+            by: Some(by),
+            conflicts,
+            ..Event::new(
+                new,
+                at_ms,
+                Kind::Refreshed,
+                "",
+                format!(
+                    "root from {} to {}, {}",
+                    short(&r.from),
+                    short(&r.to),
+                    brought_up(by, r.commits, conflicts)
+                ),
+            )
+        });
+    }
 }
 
 /// The `taken` event of a ticket written for the first time.
@@ -1721,6 +1762,7 @@ mod tests {
             root_project: None,
             rework: BTreeMap::new(),
             refreshed_stage: None,
+            tree_refreshed: None,
             state: TicketState::Active,
             state_by: None,
             close: CloseProgress::default(),
@@ -3266,6 +3308,41 @@ mod tests {
             says(&refreshed(&done, noted)),
             ("rebased by the rebaser", Some(Rebaser), None)
         );
+    }
+
+    #[test]
+    fn a_refreshed_event_names_root_for_the_tree_and_a_restored_bring_up_is_not_one() {
+        let t = ticket();
+        let mut up = t.clone();
+        up.tree_refreshed = Some(brought_up_at_100(false, None));
+        let events: Vec<Event> = between(Some(&t), &up, 5, &names)
+            .into_iter()
+            .filter(|e| e.kind == Kind::Refreshed)
+            .collect();
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events[0].text,
+            "root from base000 to main000, brought up with no commits of its own"
+        );
+        assert_eq!(
+            (events[0].by, events[0].conflicts, events[0].head.as_deref()),
+            (Some(BroughtUpBy::Git), Some(0), Some("main0000"))
+        );
+
+        let quiet = |old: &Ticket, new: &Ticket| {
+            !between(Some(old), new, 5, &names)
+                .iter()
+                .any(|e| e.kind == Kind::Refreshed)
+        };
+        assert!(quiet(&up, &t));
+        let mut later = up.clone();
+        later.tree_refreshed = Some(crate::ticket::Refreshed {
+            to: "main0002".into(),
+            at_ms: 200,
+            ..brought_up_at_100(false, None)
+        });
+        assert!(quiet(&later, &up));
+        assert!(!quiet(&up, &later));
     }
 
     #[test]

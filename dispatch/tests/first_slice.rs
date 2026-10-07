@@ -8820,6 +8820,39 @@ fn a_plan_that_sat_is_implemented_on_a_branch_brought_up_to_its_base() {
     );
 }
 
+/// The repo lane lives on the tree's branch, so its own refresh moves
+/// the tree; the tree is not brought up a second time beside it.
+#[test]
+fn a_tree_with_a_chosen_lane_on_its_branch_is_brought_up_only_by_the_lane() {
+    let mut env = Env::new();
+    let id = at_finalize(&mut env);
+    let t = env.ticket(&id);
+    let tree = t.lanes[0].worktree.clone();
+    let clone = env.runner.data.repo_dir(PROJECT);
+    {
+        let mut repo = env.repo.lock().unwrap();
+        repo.bases.insert(clone, "main0002".into());
+        repo.behind.insert(tree.clone(), 3);
+    }
+    let decision = env.pending(&id)[0].id.clone();
+    let now = env.tick();
+    env.runner
+        .decide(&id, &decision, "finalize", None, now)
+        .unwrap();
+    env.steps_until(&id, "the implementer", |t, _| {
+        t.attempts_of("implement")
+            .last()
+            .is_some_and(Attempt::is_open)
+    });
+    let t = env.ticket(&id);
+    assert_eq!(
+        env.repo.lock().unwrap().rebased,
+        vec![(tree, "origin/main".to_owned())]
+    );
+    assert!(t.lanes[0].refreshed.is_some());
+    assert_eq!(t.tree_refreshed, None);
+}
+
 /// The branch has commits and the mechanical rebase stops: the
 /// policy's rebaser is continued from the lane's last finished agent,
 /// told the base and the checks, and the stage waits for it; when it
@@ -14376,6 +14409,122 @@ fn a_lanes_rebaser_is_given_its_own_lanes_plan() {
     assert!(!prompt.contains(&path(&docs_plan)), "{prompt}");
 }
 
+/// The tree is brought up by a stage before the lanes are chosen: the
+/// lane at `.`, cut on the tree's branch but not yet chosen, moves its
+/// base with it, so choosing it later brings up nothing a second time.
+#[test]
+fn a_tree_brought_up_before_the_lanes_question_moves_the_unchosen_lanes_base() {
+    let mut env = Env::new();
+    let text = two_lane_pipeline(&env.worktrees)
+        .replace(
+            "[operators.planner]\n",
+            "[operators.investigator]\nkind = \"claude\"\n\n[operators.planner]\n",
+        )
+        .replace(
+            "[[stages]]\nname = \"lanes\"",
+            "[[stages]]\nname = \"investigate\"\noperator = \"investigator\"\ncontext = \"root\"\nwrites = [\"notes\"]\nprompt = \"Look into it; notes to {{notes}}.\"\n\n[[stages]]\nname = \"survey\"\noperator = \"investigator\"\ncontext = \"root\"\nwrites = [\"notes\"]\nprompt = \"Survey it; notes to {{notes}}.\"\n\n[[stages]]\nname = \"lanes\"",
+        );
+    std::fs::write(env.data.pipeline(PROJECT), text).unwrap();
+    let id = env.take(21).id;
+    env.steps_until(&id, "the investigator", |t, _| {
+        t.attempts_of("investigate").any(|a| a.session.is_some())
+    });
+    let t = env.ticket(&id);
+    let tree = t.tree.clone().unwrap();
+    let cut_base = t.lanes[0].base_sha.clone();
+    {
+        let mut repo = env.repo.lock().unwrap();
+        repo.bases
+            .insert(env.runner.data.repo_dir(PROJECT), "main0002".into());
+        repo.behind.insert(tree.clone(), 2);
+        repo.rebase_heads.insert(tree.clone(), "main0002".into());
+    }
+    finish_all(&mut env, &id, "investigate", "notes");
+    env.steps_until(&id, "the survey", |t, _| {
+        t.attempts_of("survey").any(|a| a.session.is_some())
+    });
+    let t = env.ticket(&id);
+    assert!(t.tree_refreshed.is_some(), "{t:#?}");
+    let repo_lane = &t.lanes[0];
+    assert_eq!(repo_lane.name, "repo");
+    assert!(!repo_lane.chosen);
+    assert_ne!(repo_lane.base_sha, cut_base);
+    assert_eq!(repo_lane.base_sha.as_deref(), Some("main0002"));
+
+    finish_all(&mut env, &id, "survey", "notes");
+    env.steps_until(&id, "the lanes question", |t, _| {
+        t.pending_decisions().iter().any(|d| d.name == "lanes")
+    });
+    let d = env
+        .pending(&id)
+        .into_iter()
+        .find(|d| d.name == "lanes")
+        .unwrap();
+    answer(&mut env, &id, &d, "repo,docs");
+    env.steps_until(&id, "both planners", |t, _| {
+        t.attempts_of("plan").filter(|a| a.is_open()).count() == 2
+    });
+    let t = env.ticket(&id);
+    assert_eq!(t.lanes[0].refreshed, None, "{t:#?}");
+    let events = refreshed_events(&env, &id);
+    assert_eq!(events.len(), 1, "{events:?}");
+    assert!(events[0].1.starts_with("root from"), "{}", events[0].1);
+}
+
+/// The survey's entry could not read the tree's head, so a restart from
+/// the lanes question to the survey leaves the tree at its brought-up
+/// head, and the unchosen lane at `.` keeps the base the bring-up moved
+/// it to rather than its base at the survey's entry.
+#[test]
+fn a_restart_without_the_trees_entry_head_keeps_the_repo_less_lanes_base() {
+    let mut env = Env::new();
+    let text = two_lane_pipeline(&env.worktrees)
+        .replace(
+            "[operators.planner]\n",
+            "[operators.investigator]\nkind = \"claude\"\n\n[operators.planner]\n",
+        )
+        .replace(
+            "[[stages]]\nname = \"lanes\"",
+            "[[stages]]\nname = \"investigate\"\noperator = \"investigator\"\ncontext = \"root\"\nwrites = [\"notes\"]\nprompt = \"Look into it; notes to {{notes}}.\"\n\n[[stages]]\nname = \"survey\"\noperator = \"investigator\"\ncontext = \"root\"\nwrites = [\"notes\"]\nprompt = \"Survey it; notes to {{notes}}.\"\n\n[[stages]]\nname = \"lanes\"",
+        );
+    std::fs::write(env.data.pipeline(PROJECT), text).unwrap();
+    let id = env.take(21).id;
+    env.steps_until(&id, "the investigator", |t, _| {
+        t.attempts_of("investigate").any(|a| a.session.is_some())
+    });
+    let tree = env.ticket(&id).tree.clone().unwrap();
+    {
+        let mut repo = env.repo.lock().unwrap();
+        repo.bases
+            .insert(env.runner.data.repo_dir(PROJECT), "main0002".into());
+        repo.behind.insert(tree.clone(), 2);
+        repo.rebase_heads.insert(tree.clone(), "main0002".into());
+    }
+    finish_all(&mut env, &id, "investigate", "notes");
+    env.steps_until(&id, "the survey", |t, _| {
+        t.attempts_of("survey").any(|a| a.session.is_some())
+    });
+    finish_all(&mut env, &id, "survey", "notes");
+    env.steps_until(&id, "the lanes question", |t, _| {
+        t.pending_decisions().iter().any(|d| d.name == "lanes")
+    });
+    let mut t = env.ticket(&id);
+    let up = t.tree_refreshed.clone().expect("the bring-up is recorded");
+    assert_eq!(t.lanes[0].base_sha.as_deref(), Some("main0002"), "{t:#?}");
+    for e in t.entered.iter_mut().filter(|e| e.stage == "survey") {
+        e.heads.remove("root");
+    }
+    dispatch::store::write_ticket(&env.data.ticket_file(&id), &t).unwrap();
+    let t = restart_at(&mut env, &id, Some("survey"));
+    assert!(
+        t.restarts[0].reset.iter().all(|h| h.key != "root"),
+        "{t:#?}"
+    );
+    assert_eq!(t.tree_refreshed, Some(up));
+    assert_eq!(t.lanes[0].name, "repo");
+    assert_eq!(t.lanes[0].base_sha.as_deref(), Some("main0002"), "{t:#?}");
+}
+
 /// Both implementers stop and their checks start; each lane's attempt
 /// number and checks key.
 fn two_lanes_checking(env: &mut Env, id: &str) -> Vec<(String, u32, String)> {
@@ -16448,6 +16597,258 @@ fn a_refresh_question_after_tried_does_not_keep_the_hold() {
     );
     assert!(ta.holds.is_empty());
     assert_eq!(ta.services[0].state, ServiceState::Stopped);
+}
+
+/// The tree, the clone it is a worktree of, and its branch.
+fn orchard_tree(env: &Env, id: &str) -> (PathBuf, PathBuf, String) {
+    let tree = env.ticket(id).tree.unwrap();
+    let clone = env.data.repo_dir("Orchard");
+    let branch = env
+        .repo
+        .lock()
+        .unwrap()
+        .worktrees
+        .iter()
+        .find(|(_, d, ..)| *d == tree)
+        .map(|(_, _, b, _)| b.clone())
+        .unwrap();
+    (tree, clone, branch)
+}
+
+/// The project's base moves two commits past the ticket's tree.
+fn move_orchard_base(env: &Env, id: &str) -> PathBuf {
+    let (tree, clone, _) = orchard_tree(env, id);
+    let mut repo = env.repo.lock().unwrap();
+    repo.bases.insert(clone, "main0002".into());
+    repo.behind.insert(tree.clone(), 2);
+    repo.rebase_heads.insert(tree.clone(), "main0002".into());
+    tree
+}
+
+/// Every rebase the fake git ran, as (directory, onto).
+fn env_rebased(env: &Env) -> Vec<(PathBuf, String)> {
+    env.repo.lock().unwrap().rebased.clone()
+}
+
+/// The `refreshed` events of `id` in the log, as (stage, text).
+fn refreshed_events(env: &Env, id: &str) -> Vec<(String, String)> {
+    dispatch::events::read_since(&dispatch::events::log_path(&env.data), 0)
+        .unwrap()
+        .into_iter()
+        .filter(|e| e.ticket == id && e.kind == dispatch::events::Kind::Refreshed)
+        .map(|e| (e.stage, e.text))
+        .collect()
+}
+
+/// The joined tester is past the lane skip rule (it follows the deploy
+/// in a `needs` run and serves a lane), but the tree is not a lane: it
+/// is brought up to the moved base before the services and the tester
+/// start, the lanes stay where they were deployed, and the bring-up is
+/// a `refreshed` event naming `root`.
+#[test]
+fn a_joined_tester_runs_on_a_tree_brought_up_to_the_moved_base() {
+    let (mut env, id) = back_half_env(BOTH);
+    deploying(&mut env, &id);
+    let tree = move_orchard_base(&env, &id);
+    exits(&env, &deploy_key(&id, 1), 0);
+    at_stage(&mut env, &id, "try");
+    for _ in 0..12 {
+        if !env_rebased(&env).is_empty() {
+            break;
+        }
+        env.step();
+    }
+    assert_eq!(
+        env_rebased(&env),
+        vec![(tree.clone(), "origin/main".to_owned())]
+    );
+    assert!(env.ticket(&id).attempts_of("try").next().is_none());
+    served(&mut env, &id);
+    let t = env.ticket(&id);
+    let up = t.tree_refreshed.clone().expect("the bring-up is recorded");
+    assert_eq!(
+        (
+            up.from.as_str(),
+            up.to.as_str(),
+            up.commits,
+            up.after.as_deref()
+        ),
+        ("base0000", "main0002", false, Some("main0002"))
+    );
+    assert_eq!(
+        env_rebased(&env),
+        vec![(tree, "origin/main".to_owned())],
+        "the lanes are not rebased"
+    );
+    let events = refreshed_events(&env, &id);
+    assert_eq!(events.len(), 1, "{events:?}");
+    assert_eq!(events[0].0, "try");
+    assert!(
+        events[0].1.starts_with("root from base000 to main000"),
+        "{}",
+        events[0].1
+    );
+}
+
+/// An uncommitted file in the tree leaves it where it is and the stage
+/// runs; a change inside a nested lane, as the tree or the lane's own
+/// worktree reports it, is the lane's, not the tree's.
+#[test]
+fn a_tree_with_an_uncommitted_file_is_not_moved() {
+    let (mut env, id) = back_half_env(BOTH);
+    deploying(&mut env, &id);
+    let tree = move_orchard_base(&env, &id);
+    env.repo
+        .lock()
+        .unwrap()
+        .changes
+        .insert(tree.clone(), vec!["tools/new.sh".into()]);
+    exits(&env, &deploy_key(&id, 1), 0);
+    at_stage(&mut env, &id, "try");
+    served(&mut env, &id);
+    assert!(env_rebased(&env).is_empty());
+    assert_eq!(env.ticket(&id).tree_refreshed, None);
+
+    let (mut env, id) = back_half_env(BOTH);
+    deploying(&mut env, &id);
+    let tree = move_orchard_base(&env, &id);
+    {
+        let backend = lane_tree(&env, &id, "backend");
+        let mut repo = env.repo.lock().unwrap();
+        repo.changes
+            .insert(tree.clone(), vec!["orchard-backend/x.py".into()]);
+        repo.changes.insert(backend, vec!["x.py".into()]);
+    }
+    exits(&env, &deploy_key(&id, 1), 0);
+    at_stage(&mut env, &id, "try");
+    served(&mut env, &id);
+    assert_eq!(env_rebased(&env), vec![(tree, "origin/main".to_owned())]);
+    assert!(env.ticket(&id).tree_refreshed.is_some());
+}
+
+/// A tree with commits of its own whose rebase conflicts is left where
+/// it was: no rebaser, no question, and the tester still runs. Without
+/// the conflict the same tree is rebased and recorded as having
+/// commits.
+#[test]
+fn a_tree_with_commits_of_its_own_that_conflicts_is_left_and_the_stage_runs() {
+    for conflicts in [true, false] {
+        let (mut env, id) = back_half_env(BOTH);
+        deploying(&mut env, &id);
+        let tree = move_orchard_base(&env, &id);
+        {
+            let (_, clone, branch) = orchard_tree(&env, &id);
+            let mut repo = env.repo.lock().unwrap();
+            repo.branches.get_mut(&(clone, branch)).unwrap().1 = 1;
+            if conflicts {
+                repo.rebase_conflicts.push(tree.clone());
+            }
+        }
+        exits(&env, &deploy_key(&id, 1), 0);
+        at_stage(&mut env, &id, "try");
+        served(&mut env, &id);
+        let t = env.ticket(&id);
+        assert_eq!(env_rebased(&env), vec![(tree, "origin/main".to_owned())]);
+        assert!(t.pending_decisions().is_empty(), "{t:#?}");
+        assert!(t.attempts_of(dispatch::scheduler::REFRESH).next().is_none());
+        if conflicts {
+            assert_eq!(t.tree_refreshed, None);
+        } else {
+            assert!(t.tree_refreshed.unwrap().commits);
+        }
+    }
+}
+
+/// A restart to the tester puts the tree back at the head it entered
+/// with and the record back to the bring-up it had then; on re-entry
+/// the tree is brought up again and logged again.
+#[test]
+fn a_restart_to_the_tester_resets_the_tree_and_brings_it_up_again() {
+    let (mut env, id) = back_half_env(BOTH);
+    deploying(&mut env, &id);
+    let tree = move_orchard_base(&env, &id);
+    let before = env.repo.lock().unwrap().heads[&tree].clone();
+    exits(&env, &deploy_key(&id, 1), 0);
+    at_stage(&mut env, &id, "try");
+    served(&mut env, &id);
+    tester_done(&mut env, &id);
+    let t = restart_at(&mut env, &id, Some("try"));
+    let reset: Vec<(&str, &str, &str)> = t.restarts[0]
+        .reset
+        .iter()
+        .map(|h| (h.key.as_str(), h.from.as_str(), h.to.as_str()))
+        .collect();
+    assert_eq!(reset, vec![("root", "main0002", before.as_str())]);
+    assert_eq!(t.tree_refreshed, None, "as it was at the tester's entry");
+    assert_eq!(refreshed_events(&env, &id).len(), 1);
+
+    env.repo.lock().unwrap().behind.insert(tree.clone(), 2);
+    for _ in 0..40 {
+        let t = env.ticket(&id);
+        if t.attempts_of("try")
+            .any(|a| a.n == 2 && a.session.is_some())
+        {
+            break;
+        }
+        if let Some(d) = t
+            .pending_decisions()
+            .into_iter()
+            .find(|d| d.name == "rerun")
+            .cloned()
+        {
+            answer(&mut env, &id, &d, "rerun");
+        }
+        let n = t.services.iter().map(|s| s.n).max().unwrap_or(0);
+        exits(&env, &before_key(&id, n), 0);
+        if let Some(port) = t.services.iter().find(|s| s.n == n).and_then(|s| s.port) {
+            env.repo.lock().unwrap().answering.insert(port);
+        }
+        env.step();
+    }
+    let t = env.ticket(&id);
+    assert!(
+        t.attempts_of("try")
+            .any(|a| a.n == 2 && a.session.is_some()),
+        "{t:#?}"
+    );
+    let repo = env.repo.lock().unwrap();
+    assert_eq!(
+        repo.rebased,
+        vec![
+            (tree.clone(), "origin/main".to_owned()),
+            (tree.clone(), "origin/main".to_owned())
+        ]
+    );
+    assert_eq!(repo.heads[&tree], "main0002");
+    drop(repo);
+    assert!(t.tree_refreshed.is_some());
+    assert_eq!(refreshed_events(&env, &id).len(), 2);
+}
+
+/// The tester's entry could not read the tree's head, so a restart to
+/// the tester leaves the tree where it is: its bring-up stays on the
+/// record, since that still describes the head it has.
+#[test]
+fn a_restart_without_the_trees_entry_head_keeps_its_bring_up() {
+    let (mut env, id) = back_half_env(BOTH);
+    deploying(&mut env, &id);
+    move_orchard_base(&env, &id);
+    exits(&env, &deploy_key(&id, 1), 0);
+    at_stage(&mut env, &id, "try");
+    served(&mut env, &id);
+    tester_done(&mut env, &id);
+    let mut t = env.ticket(&id);
+    let up = t.tree_refreshed.clone().expect("the bring-up is recorded");
+    for e in t.entered.iter_mut().filter(|e| e.stage == "try") {
+        e.heads.remove("root");
+    }
+    dispatch::store::write_ticket(&env.data.ticket_file(&id), &t).unwrap();
+    let t = restart_at(&mut env, &id, Some("try"));
+    assert!(
+        t.restarts[0].reset.iter().all(|h| h.key != "root"),
+        "{t:#?}"
+    );
+    assert_eq!(t.tree_refreshed, Some(up));
 }
 
 #[test]

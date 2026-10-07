@@ -583,6 +583,7 @@ impl Runner {
             root_project: None,
             rework: BTreeMap::new(),
             refreshed_stage: None,
+            tree_refreshed: None,
             state: TicketState::Active,
             state_by: None,
             close: CloseProgress::default(),
@@ -1002,6 +1003,12 @@ impl Runner {
         {
             return Ok(true);
         }
+        // The tree is brought up before the lane skip rule: that rule keeps
+        // deployed lane code still, and the services serve the lanes'
+        // worktrees, not the tree.
+        if stage.kind() != StageKind::GateOnly {
+            self.refresh_tree(t, p, now_ms)?;
+        }
         // A stage past the first stage of its `needs` run, or one that
         // serves lanes, looks at what was inspected and deployed earlier
         // in the run; moving the branch under it would not. The stage
@@ -1184,6 +1191,126 @@ impl Runner {
             });
         }
         Ok(())
+    }
+
+    /// The ticket's tree brought up to the project's base, when none of
+    /// its chosen lanes lives on the tree's branch (such a lane's own
+    /// refresh moves the tree, and keeps its `base_sha` with it). It
+    /// never holds the stage: a tree with changes is left alone, and a
+    /// rebase that conflicts is aborted and left with a warning, since
+    /// the rebaser and its question are about lanes. A git error is
+    /// logged rather than returned, so a tree that cannot be fetched
+    /// does not stop a stage whose lanes are fine; only the record's
+    /// write is returned. A bring-up moves the `base_sha` of every
+    /// repo-less lane with the tree, chosen or not, so a lane chosen
+    /// later counts from where the tree now sits.
+    fn refresh_tree(&mut self, t: &mut Ticket, p: &Pipeline, now_ms: u64) -> Result<()> {
+        let Some(tree) = t.tree.clone() else {
+            return Ok(());
+        };
+        if t.close.tree_removed
+            || t.lanes.iter().any(|l| {
+                l.chosen && !l.removed && p.lane(&l.name).is_some_and(|x| x.repo.is_none())
+            })
+        {
+            return Ok(());
+        }
+        let up = match self.bring_up_tree(t, p, &tree, now_ms) {
+            Ok(Some(up)) => up,
+            Ok(None) => return Ok(()),
+            Err(e) => {
+                log::warn!("ticket {} root: the tree was not brought up: {e:#}", t.id);
+                return Ok(());
+            }
+        };
+        for l in &mut t.lanes {
+            if !l.removed && p.lane(&l.name).is_some_and(|x| x.repo.is_none()) {
+                l.base_sha = Some(up.to.clone());
+            }
+        }
+        t.tree_refreshed = Some(up);
+        self.save_ticket(t, now_ms)
+    }
+
+    /// `refresh_tree`'s git work on `tree`: the bring-up it made, if any.
+    fn bring_up_tree(
+        &mut self,
+        t: &Ticket,
+        p: &Pipeline,
+        tree: &Path,
+        now_ms: u64,
+    ) -> Result<Option<Refreshed>> {
+        let clone = self.data.repo_dir(&p.project.name);
+        let remote = p.project.remote.clone();
+        let onto = format!("{remote}/{}", p.project.base);
+        let branch = tree_branch(t, None);
+        if self.git.rebase_in_progress(tree)? {
+            log::info!(
+                "ticket {} root: the tree is mid-rebase{}; left alone",
+                t.id,
+                self.at_head(tree)
+            );
+            return Ok(None);
+        }
+        self.git.fetch(&clone, &remote)?;
+        let onto_sha = self.git.rev_parse(&clone, &onto)?;
+        // A detached `HEAD` is not the branch: a rebase there would move
+        // the detached commit and record a bring-up of a branch it never
+        // touched.
+        if self.git.branch_head(tree, &branch)?.is_none() {
+            log::info!(
+                "ticket {} root: the tree is not on {branch}; left alone",
+                t.id
+            );
+            return Ok(None);
+        }
+        let behind = self.git.behind(tree, &onto)?;
+        if behind == 0 {
+            return Ok(None);
+        }
+        // Lanes nested in the tree are untracked content to it, so the
+        // plain `is_clean` would always find changes.
+        let lanes: Vec<PathBuf> = t
+            .lanes
+            .iter()
+            .filter(|l| !l.removed)
+            .map(|l| l.worktree.clone())
+            .collect();
+        let changes = crate::git::tree_changes(&*self.git, tree, &lanes)?;
+        if !changes.is_empty() {
+            let paths: Vec<String> = changes.iter().map(|c| c.display().to_string()).collect();
+            log::info!(
+                "ticket {} root: {behind} behind {onto} but the tree has changes in {}; left alone",
+                t.id,
+                paths.join(", ")
+            );
+            return Ok(None);
+        }
+        // Read before anything moves.
+        let from = self.git.merge_base(tree, "HEAD", &onto).unwrap_or_default();
+        let commits = self.git.branch_ahead(&clone, &branch, &onto)? > 0;
+        if !self.git.rebase_onto(tree, &onto)? {
+            log::warn!(
+                "ticket {} root: a rebase onto {onto} conflicts; the tree is left{}",
+                t.id,
+                self.at_head(tree)
+            );
+            return Ok(None);
+        }
+        let after = self.git.head(tree)?;
+        log::info!(
+            "ticket {} root: brought up {from} -> {onto_sha} ({behind} behind)",
+            t.id
+        );
+        Ok(Some(Refreshed {
+            from,
+            to: onto_sha,
+            commits,
+            notes: None,
+            at_ms: now_ms,
+            conflict: None,
+            after: Some(after),
+        }))
     }
 
     /// One lane's branch against its base; true when the stage must
@@ -9307,6 +9434,7 @@ network = "deny"
             root_project: None,
             rework: BTreeMap::new(),
             refreshed_stage: None,
+            tree_refreshed: None,
             state: TicketState::Active,
             state_by: None,
             close: crate::ticket::CloseProgress::default(),
@@ -9457,6 +9585,7 @@ gate = { kind = "human", decision = "inspect" }
             root_project: None,
             rework: BTreeMap::new(),
             refreshed_stage: None,
+            tree_refreshed: None,
             state: TicketState::Parked {
                 reason: "parked".into(),
             },
@@ -9843,6 +9972,7 @@ gate = { kind = "human", decision = "each" }
             root_project: None,
             rework: BTreeMap::new(),
             refreshed_stage: None,
+            tree_refreshed: None,
             state: TicketState::Active,
             state_by: None,
             close: CloseProgress::default(),

@@ -1494,13 +1494,7 @@ fn parse_status_z(bytes: &[u8]) -> Vec<PathBuf> {
 /// removal only drops git's record of it.
 pub fn uncommitted(git: &dyn Repo, tree: Option<&Path>, lanes: &[PathBuf]) -> Result<Vec<PathBuf>> {
     let mut found = Vec::new();
-    let mut nested: Vec<PathBuf> = Vec::new();
     for lane in lanes {
-        if let Some(tree) = tree
-            && let Ok(rel) = lane.strip_prefix(tree)
-        {
-            nested.push(rel.to_path_buf());
-        }
         if !lane.exists() {
             continue;
         }
@@ -1509,14 +1503,25 @@ pub fn uncommitted(git: &dyn Repo, tree: Option<&Path>, lanes: &[PathBuf]) -> Re
     if let Some(tree) = tree
         && tree.exists()
     {
-        found.extend(
-            git.changes(tree)?
-                .into_iter()
-                .filter(|c| !nested.iter().any(|lane| c.starts_with(lane)))
-                .map(|c| tree.join(c)),
-        );
+        found.extend(tree_changes(git, tree, lanes)?);
     }
     Ok(found)
+}
+
+/// Every change in `tree` that is not one of the worktrees in `lanes`
+/// or inside one, as absolute paths. What is inside a nested lane is
+/// that lane's repository's business, not the tree's.
+pub fn tree_changes(git: &dyn Repo, tree: &Path, lanes: &[PathBuf]) -> Result<Vec<PathBuf>> {
+    let nested: Vec<&Path> = lanes
+        .iter()
+        .filter_map(|lane| lane.strip_prefix(tree).ok())
+        .collect();
+    Ok(git
+        .changes(tree)?
+        .into_iter()
+        .filter(|c| !nested.iter().any(|lane| c.starts_with(lane)))
+        .map(|c| tree.join(c))
+        .collect())
 }
 
 /// A check the fake was asked to start.

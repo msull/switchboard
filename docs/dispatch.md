@@ -355,6 +355,9 @@ lost to a restart is failed with nothing killed.
 Version 19 adds an attempt's `revisions`, the plan review rounds the
 owner opened with a `revise` answer to `finalize`, each
 `{round, by, at_ms}`; empty in older records.
+Version 20 adds a ticket's `tree_refreshed`, the tree's last bring-up
+to the project's base, and a stage entry's `tree_refreshed`, the
+ticket's as the stage was entered; both are absent in older records.
 
 A project's record (`projects/<project>.json`) holds, besides its
 space, set and queue, its supervisor (see "Supervisor"): `supervisor`
@@ -813,7 +816,7 @@ trust_folders = false         # true: Claude Code's folder trust question, which
 max_reruns = 3                # failed attempts a stage may collect in one context before the ticket parks instead of asking again
 on_dirty = { nudge = 1 } | "ask"   # an agent that stops with a dirty tree is nudged in its session up to N times, each after a stop, before the question; "ask" asks at once. Read from the ticket's copy; a copy without the key, including one taken before the key existed, nudges once
 min_free_gb = 10              # free space on the worktrees' volume below which nothing new starts; live, like slots
-refresh = true                # each lane's branch is brought up to its base when a stage begins; a stage holding a resource past the first stage of its run, a gate-only stage and one that serves lanes are not refreshed; a conflict goes to the rebaser
+refresh = true                # each lane's branch is brought up to its base when a stage begins; a stage holding a resource past the first stage of its run, a gate-only stage and one that serves lanes are not refreshed; a conflict goes to the rebaser; and the ticket's tree at every stage but a gate-only one
 rebaser = "rebaser"           # the operator that rebases a PR that conflicts with its base, cloned from the lane's implementer; absent, a conflict is a question
 max_rebases = 2               # rebases one PR may get before the conflict is a question
 resolution_reviewer = "correctness"  # the one reviewer of a conflict's resolution brought up after the last code review stage; absent, that stage's first reviewer that is not `style`
@@ -1946,6 +1949,25 @@ look at what was inspected or deployed earlier, and moving the branch
 under them would not. The stage that opens a run is, once its hold is
 taken: a ticket waiting for the hold starts no rebase, no rebaser and
 no `refresh` question.
+
+The ticket's own tree is brought up to the project's base at every
+stage but a gate-only one, including those the lane rule above skips:
+that rule keeps deployed lane code still, and services serve the
+lanes' worktrees, not the tree. A ticket with a chosen lane on the
+tree's branch (a lane with no `repo`) leaves the tree to that lane's
+own refresh, and a bring-up moves the recorded base of every lane
+with no `repo` along with the tree, so one chosen later starts from
+where the tree sits. A tree with uncommitted changes outside its nested
+lanes is left alone with a log line; changes inside a nested lane's own
+worktree are that lane's. A tree with no commits of its own moves;
+one with commits is rebased, and when that rebase conflicts git aborts
+it, the tree stays where it was, a warning is logged, and the stage
+runs: no rebaser and no question, since both are about lanes. A
+bring-up is recorded as the ticket's `tree_refreshed` and logged as a
+`refreshed` event naming `root`. A ranged restart puts the tree back at
+its head at the stage's entry and `tree_refreshed` and the repo-less
+lanes' `base_sha` back to what they were then (all only when that head
+was read), and the stage brings the tree up again on re-entry.
 
 A lane with no `base_sha` gets its fork point from the base as
 `base_sha` while it is still behind, before anything moves, so the bring-up after a rebaser reads the old base; a lane not

@@ -254,7 +254,9 @@ local zone (the stored `at_ms` under `--json` is UTC milliseconds).
   hand rebase finished the work: look at that bring-up. `conflicts` is
   0 for `git`; for the others it is the conflicting commits, 0 when
   they could not be listed, and absent when none was recorded. Lines
-  written before this build read `..., rebased`.
+  written before this build read `..., rebased`. A `refreshed` line
+  can name `root` for the ticket's tree, which is never rebased by the
+  rebaser.
 
 **Wait.** `dispatch wait X --for decision` blocks until the ticket asks
 something and prints that `decision` event with the `dispatch decide`
