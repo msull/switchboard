@@ -2531,6 +2531,24 @@ Known gaps:
 - Lane agents are not told about `switchboard-ask`; their prompts come
   from the pipeline.
 
+## Multi-line sends paste (2026-10-07)
+
+A message with a blank line, sent from the message box or Prompt Box,
+reached Claude Code cut short: `write_line` typed the text with
+`send-keys`, so each LF arrived as typed input and a blank line
+submitted the part before it. `write_line` now sends text that holds a
+line break as one paste, `load-buffer -` then `paste-buffer -p -r -d`
+(spike 15): tmux brackets it in `ESC[200~` .. `ESC[201~` only for a
+pane that asked for bracketed paste, so a shell or service never sees
+the markers; `-r` keeps LF, and `-d` leaves no copy in the server's
+buffer list. The text goes over stdin, never a command line. Line
+breaks go as LF and ESC is removed first, the same rule as the embedded
+terminal's paste. Single-line text is still typed. Enter follows as a
+separate write after the paste returns, so it lands after the closing
+marker and submits once. Dispatch's `session.send` and the handoff
+prompts go through the same call. Claude Code records such a message
+inside `<pasted_content>` tags, as it does any paste.
+
 ## Open questions
 
 - Shared project config runs with a hash-and-approve flow and no

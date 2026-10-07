@@ -356,7 +356,7 @@ dispatch/                the `dispatch` binary (docs/dispatch.md; docs/dispatch-
   tests/sandbox.rs       ignored, macOS: a confined gate's refused write fails the attempt and is named in checks.log
 vendor/egui_term/        embedded terminal widget (Harzu/egui_term @ 31bbc7ab, egui 0.36; see SWITCHBOARD-PATCHES.md)
 firmware/nunchuk/        CircuitPython for the Feather that reports the nunchuk's buttons and stick
-spikes/                  Spike 0 evidence, and later spikes such as 13-dispatch-service (a Dispatch service as a Switchboard service session; which bind sees a dev server's port)
+spikes/                  Spike 0 evidence, and later spikes such as 13-dispatch-service (a Dispatch service as a Switchboard service session; which bind sees a dev server's port) and 15-paste-buffer (a multi-line send as one tmux paste, bracketed only for a pane that asked)
 ```
 
 The flow for any feature: the UI dispatches an `AppAction`; the core

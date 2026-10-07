@@ -5,8 +5,9 @@
 //! mapping and the measured quirks come from spike 02.
 
 use std::io;
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::time::{Duration, SystemTime};
 
 use crate::ports::host::{HostId, HostInfo, HostStatus, Liveness, ProcessHost, SpawnSpec};
@@ -172,6 +173,63 @@ impl TmuxHost {
         }
     }
 
+    /// `run` with `input` on the command's stdin, for text that must not
+    /// go on a command line: there is no argument limit on stdin, and a
+    /// message never shows in a process listing.
+    fn run_with_stdin(&self, args: &[&str], input: &[u8]) -> io::Result<String> {
+        let mut child = self
+            .command()
+            .args(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()?;
+        // Dropping the handle closes the pipe, which is the end of input
+        // tmux waits for. A failed write still waits for the child, so it
+        // is reaped, and tmux's own complaint wins over the broken pipe it
+        // caused.
+        let written = child
+            .stdin
+            .take()
+            .map_or(Ok(()), |mut stdin| stdin.write_all(input));
+        let out = child.wait_with_output()?;
+        if !out.status.success() {
+            return Err(io::Error::other(
+                String::from_utf8_lossy(&out.stderr).trim_end().to_owned(),
+            ));
+        }
+        written?;
+        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    }
+
+    /// Text with a line break goes as one paste, so a TUI reads its line
+    /// breaks as part of the message rather than as Enter. `-p` brackets
+    /// it only when the pane enabled bracketed paste, so a plain process
+    /// never sees the markers; `-r` keeps LF, which tmux would otherwise
+    /// turn into CR (an Enter per line); `-d` drops the buffer so the
+    /// message does not linger in the server's buffer list.
+    fn paste(&self, id: &HostId, text: &str) -> io::Result<()> {
+        let buffer = format!("sb-send-{}", id.0);
+        self.run_with_stdin(
+            &["load-buffer", "-b", &buffer, "-"],
+            paste_body(text).as_bytes(),
+        )?;
+        let pasted = self.run(&[
+            "paste-buffer",
+            "-p",
+            "-r",
+            "-d",
+            "-b",
+            &buffer,
+            "-t",
+            &pane_target(id),
+        ]);
+        if pasted.is_err() {
+            let _ = self.run(&["delete-buffer", "-b", &buffer]);
+        }
+        pasted.map(drop)
+    }
+
     fn pipe_to(&self, id: &HostId, path: &Path) -> io::Result<()> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
@@ -328,7 +386,14 @@ impl ProcessHost for TmuxHost {
     }
 
     fn write_line(&self, id: &HostId, text: &str) -> io::Result<()> {
-        self.write(id, text.as_bytes())?;
+        // Enter must follow the paste's closing marker, or a TUI reads it
+        // as part of the paste; the thread below starts only once the text
+        // has gone out, which orders it after.
+        if text.contains(['\n', '\r']) {
+            self.paste(id, text)?;
+        } else {
+            self.write(id, text.as_bytes())?;
+        }
         // The handle is a socket name and two paths, so the thread gets
         // its own copy and the UI thread never waits on the pause.
         let host = self.clone();
@@ -395,6 +460,16 @@ fn augmented_path() -> std::ffi::OsString {
         }
     }
     std::env::join_paths(dirs).unwrap_or_else(|_| std::env::var_os("PATH").unwrap_or_default())
+}
+
+/// The body of a paste: line breaks as LF and ESC removed. tmux passes
+/// CR through unchanged, where a TUI may read it as Enter, and an ESC in
+/// the text could start a sequence that closes the bracket early (tmux
+/// 3.7 shows it as a literal `^[`, which is no better in a prompt).
+fn paste_body(text: &str) -> String {
+    text.replace("\r\n", "\n")
+        .replace('\r', "\n")
+        .replace('\x1b', "")
 }
 
 /// `=name`: exact session match, so `foo` never resolves to `foobar`.
@@ -775,7 +850,7 @@ mod tests {
     }
 
     /// A message of many paragraphs arrives whole: `cat` in the pane
-    /// writes what it was typed to a file.
+    /// writes what it was sent to a file.
     #[test]
     fn long_input_is_typed_in_full() {
         let Some(s) = server() else { return };
@@ -820,6 +895,135 @@ mod tests {
                 s.host.snapshot(&id, Some(20)).unwrap_or_default()
             );
         }
+        s.host.kill(&id).unwrap();
+    }
+
+    #[test]
+    fn paste_body_normalises_breaks_and_drops_escape() {
+        assert_eq!(
+            paste_body("a\r\nb\rc\n\nd\x1b[201~e\tf é"),
+            "a\nb\nc\n\nd[201~e\tf é"
+        );
+        assert_eq!(paste_body("plain"), "plain");
+    }
+
+    /// A pane running `cat -u` in raw mode, writing every byte it gets
+    /// to a file, after enabling bracketed paste when `bracketed`. Waits
+    /// until `cat` runs, so a send does not race the terminal setup.
+    fn raw_cat(s: &Server, name: &str, dir: &Path, bracketed: bool) -> (HostId, PathBuf) {
+        let out = dir.join(format!("{name}.bytes"));
+        let id = HostId(name.into());
+        let enable = if bracketed {
+            "printf '\\033[?2004h'; "
+        } else {
+            ""
+        };
+        s.host
+            .spawn(&SpawnSpec {
+                command: Some(vec![
+                    "/bin/sh".into(),
+                    "-c".into(),
+                    format!("{enable}stty raw -echo; exec cat -u > {}", out.display()),
+                ]),
+                ..shell_spec(name, dir, None)
+            })
+            .unwrap();
+        let target = pane_target(&id);
+        let shown = |format: &str| {
+            s.host
+                .run(&["display-message", "-p", "-t", &target, format])
+                .unwrap_or_default()
+                .trim()
+                .to_owned()
+        };
+        poll_on(Some(s), "cat in the pane", &mut || {
+            shown("#{pane_current_command}") == "cat"
+        });
+        // Some supported tmux versions (the Linux runner's) predate this
+        // format and print nothing for it; the bytes each test expects
+        // still show which mode the pane was in.
+        let flag = shown("#{bracket_paste_flag}");
+        if !flag.is_empty() {
+            assert_eq!(flag, if bracketed { "1" } else { "0" });
+        }
+        (id, out)
+    }
+
+    /// Waits until the file holds exactly `expected`, and panics with
+    /// what it held instead.
+    fn expect_bytes(s: &Server, out: &Path, expected: &[u8]) {
+        let mut last = Vec::new();
+        let arrived = try_poll_on(Some(s), &mut || {
+            last = std::fs::read(out).unwrap_or_default();
+            last == expected
+        });
+        if let Err(seen) = arrived {
+            panic!(
+                "expected {:?}, the pane got {:?}{seen}",
+                String::from_utf8_lossy(expected),
+                String::from_utf8_lossy(&last)
+            );
+        }
+    }
+
+    fn three_paragraphs() -> String {
+        [
+            "First paragraph, one line.",
+            "Second paragraph\nwith a second line.",
+            "Third paragraph.",
+        ]
+        .join("\n\n")
+    }
+
+    /// A message with blank lines reaches a pane that asked for bracketed
+    /// paste as one paste, then one Enter after the closing marker: one
+    /// submission. No buffer is left behind on the server.
+    #[test]
+    fn multi_paragraph_input_is_one_bracketed_paste() {
+        let Some(s) = server() else { return };
+        let dir = tempfile::tempdir().unwrap();
+        let (id, out) = raw_cat(&s, "bracketed", dir.path(), true);
+        let text = three_paragraphs();
+        s.host.write_line(&id, &text).unwrap();
+        expect_bytes(&s, &out, format!("\x1b[200~{text}\x1b[201~\r").as_bytes());
+        assert_eq!(s.host.run(&["list-buffers"]).unwrap(), "");
+        s.host.kill(&id).unwrap();
+    }
+
+    /// A process that never enabled bracketed paste gets the text bare,
+    /// with its line breaks as LF.
+    #[test]
+    fn multi_line_input_without_bracketed_paste_has_no_markers() {
+        let Some(s) = server() else { return };
+        let dir = tempfile::tempdir().unwrap();
+        let (id, out) = raw_cat(&s, "plain", dir.path(), false);
+        let text = three_paragraphs();
+        s.host.write_line(&id, &text).unwrap();
+        expect_bytes(&s, &out, format!("{text}\r").as_bytes());
+        s.host.kill(&id).unwrap();
+    }
+
+    /// A closing marker inside the text cannot end the paste early, and
+    /// CR arrives as LF.
+    #[test]
+    fn escape_and_carriage_returns_in_a_paste_are_normalised() {
+        let Some(s) = server() else { return };
+        let dir = tempfile::tempdir().unwrap();
+        let (id, out) = raw_cat(&s, "escapes", dir.path(), true);
+        s.host.write_line(&id, "a\r\nb\x1b[201~c\rd").unwrap();
+        expect_bytes(&s, &out, b"\x1b[200~a\nb[201~c\nd\x1b[201~\r");
+        s.host.kill(&id).unwrap();
+    }
+
+    /// One line is still typed, so it gets no paste markers even in a
+    /// pane that asked for them.
+    #[test]
+    fn single_line_input_is_typed() {
+        let Some(s) = server() else { return };
+        let dir = tempfile::tempdir().unwrap();
+        let (id, out) = raw_cat(&s, "single", dir.path(), true);
+        s.host.write_line(&id, "just one line").unwrap();
+        expect_bytes(&s, &out, b"just one line\r");
         s.host.kill(&id).unwrap();
     }
 
