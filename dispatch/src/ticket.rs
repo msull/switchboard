@@ -952,6 +952,10 @@ pub struct Ticket {
     /// it. None until cut, and for a project that works in place.
     #[serde(default)]
     pub tree: Option<PathBuf>,
+    /// The tree's last bring-up to the project's base, for a ticket none
+    /// of whose chosen lanes lives on the tree's branch.
+    #[serde(default)]
+    pub tree_refreshed: Option<Refreshed>,
     /// Index of the current stage in the newest pipeline copy.
     pub stage: usize,
     pub attempts: Vec<Attempt>,
@@ -1082,6 +1086,9 @@ pub struct StageEntry {
     /// Each lane's own fields at entry, by lane name.
     #[serde(default)]
     pub lanes: BTreeMap<String, LaneAtEntry>,
+    /// The ticket's `tree_refreshed` then.
+    #[serde(default)]
+    pub tree_refreshed: Option<Refreshed>,
 }
 
 /// The lane fields that describe its head at a stage entry, restored
@@ -1471,6 +1478,7 @@ pub(crate) fn blank() -> Ticket {
         root_project: None,
         rework: BTreeMap::new(),
         refreshed_stage: None,
+        tree_refreshed: None,
         state: TicketState::Active,
         state_by: None,
         close: CloseProgress::default(),

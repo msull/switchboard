@@ -1766,6 +1766,11 @@ rebaser from before the conflict is never credited; a bring-up after a
 rebaser that failed or was cancelled, with no answer since, reads
 `stopped`, since the record cannot tell the rebaser's work from a hand
 rebase made before a park.
+A ticket's tree with no chosen lane on its branch is brought up to the
+project's base at every stage but a gate-only one, the joined tester
+among them, recorded as the ticket's `tree_refreshed` with a copy at
+each stage entry that a ranged restart restores (record v20), and
+logged as a `refreshed` event naming `root`.
 `dispatch park` writes the parking intent by command, and a resume
 reruns the attempts that park cancelled mid-run, recorded as `rerun`
 answers by `resume` (no record change).
@@ -1786,6 +1791,11 @@ answered in the pane once (a plain directory under a trusted parent
 inherits the trust; a fresh repository does not). Nothing in
 Switchboard or Dispatch writes Claude's trust file. One more: `close`
 (and `retake`, which closes by it) leaves pending decisions pending.
+And: a ticket's tree with commits of its own whose rebase onto the
+moved base conflicts is left stale with only a log line, and a ticket
+with a chosen lane on the tree's branch has its tree brought up only by
+that lane, so it is stale at a stage the lane skip rule skips, the
+joined tester among them.
 And: a `working` card left stale by a subagent's last hook, with the
 main agent never taking another turn, holds the attempt until it is
 parked; the Stop hook's `background_tasks`

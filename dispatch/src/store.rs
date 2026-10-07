@@ -23,7 +23,7 @@ use crate::ticket::{ProjectState, Ticket};
 /// carried a version reads as 0 and is brought up by `migrate`. A
 /// record above it was written by a newer `dispatch` and is refused
 /// both ways, so this build never drops fields it does not know.
-pub const RECORD_VERSION: u32 = 19;
+pub const RECORD_VERSION: u32 = 20;
 
 /// A lock file held while this lives: the writer lock, the runner's
 /// claim, or a ticket's close.
@@ -550,6 +550,12 @@ pub fn migrate(mut value: Value) -> Value {
         // default. Nothing is transformed; a build that would drop them
         // on its next write must refuse the record, or an owner's round
         // would read as the reviewer's and its points be counted.
+        //
+        // 19 to 20: a ticket and a stage entry gain `tree_refreshed`,
+        // absent from its serde default. Nothing is transformed. A build
+        // that would drop it on its next write must refuse the record, or
+        // the tree's bring-up would be logged again as a new event, and a
+        // restart would leave it describing a head the tree no longer has.
         if version == 1 {
             settle_from_verdicts(&mut value);
         }
@@ -1162,6 +1168,39 @@ mod tests {
     }
 
     #[test]
+    fn a_version_nineteen_record_migrates_with_no_tree_refreshed() {
+        let entry =
+            r#"{"stage": "plan", "at_ms": 1000, "heads": {"root": "base0000"}, "lanes": {}}"#;
+        let text = TICKET_V0
+            .replacen('{', "{\n  \"version\": 19,", 1)
+            .replacen('{', &format!("{{\n  \"entered\": [{entry}],"), 1);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.json");
+        fs::write(&path, text).unwrap();
+        let mut t = read_ticket(&path).unwrap();
+        assert_eq!(t.version, RECORD_VERSION);
+        assert_eq!(t.tree_refreshed, None);
+        assert_eq!(t.entered[0].tree_refreshed, None);
+        let up = crate::ticket::Refreshed {
+            from: "base0000".into(),
+            to: "main0002".into(),
+            commits: false,
+            notes: None,
+            at_ms: 2_000,
+            conflict: None,
+            after: Some("main0002".into()),
+        };
+        t.tree_refreshed = Some(up.clone());
+        t.entered[0].tree_refreshed = Some(up);
+        write_ticket(&path, &t).unwrap();
+        let written: Value = read_json(&path).unwrap();
+        assert_eq!(written["version"], RECORD_VERSION);
+        assert_eq!(written["tree_refreshed"]["to"], "main0002");
+        assert_eq!(written["entered"][0]["tree_refreshed"]["from"], "base0000");
+        assert_eq!(read_ticket(&path).unwrap(), t);
+    }
+
+    #[test]
     fn a_version_eight_record_migrates_to_nine_with_no_conflict() {
         let text = TICKET_V0.replacen('{', "{\n  \"version\": 8,", 1).replacen(
             r#""base_sha": "base0000""#,
@@ -1281,6 +1320,7 @@ mod tests {
             at_ms: 4000,
             heads: std::collections::BTreeMap::from([("root".into(), "head0001".into())]),
             lanes: std::collections::BTreeMap::new(),
+            tree_refreshed: None,
         });
         write_ticket(&path, &t).unwrap();
         let written: Value = read_json(&path).unwrap();

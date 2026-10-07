@@ -252,6 +252,7 @@ gate = { kind = "command", argv = ["true"], in = "lane" }
             root_project: None,
             rework: BTreeMap::new(),
             refreshed_stage: None,
+            tree_refreshed: None,
             state: TicketState::Active,
             state_by: None,
             close: CloseProgress::default(),
