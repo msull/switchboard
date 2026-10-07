@@ -72,6 +72,13 @@ pub enum ControlAction {
         id: RecordId,
         reason: Option<String>,
     },
+    /// The session's own question to the owner, or `None` to clear it.
+    /// Taken only with the token its latest spawn was given.
+    Ask {
+        id: RecordId,
+        token: String,
+        message: Option<String>,
+    },
     /// Answer Claude's folder trust question in the pane with yes.
     TrustFolder(RecordId),
     /// The project's directory moved.
@@ -302,6 +309,10 @@ impl AppCore {
                     self.error("no such session");
                 }
                 self.edit_session(id, out, |s| s.waiting_on = reason);
+                Vec::new()
+            }
+            ControlAction::Ask { id, token, message } => {
+                self.session_ask(id, &token, message, now, out);
                 Vec::new()
             }
             ControlAction::TrustFolder(id) => {
@@ -662,7 +673,7 @@ impl AppCore {
             last_stop_at_ms: s.last_stop_at.and_then(epoch_ms),
             quiet_secs,
             waiting: card == super::CardState::WaitingOnYou,
-            waiting_reason: s.waiting_on.clone().or_else(|| s.activity_reason.clone()),
+            waiting_reason: self.waiting_reason(id),
             trust_question: self.at_trust_prompt(id),
             resume_id: s.resume.as_ref().map(super::ResumeHandle::provider_id),
             op: s.op.clone(),
@@ -883,6 +894,61 @@ fn rect_view(r: GridRect) -> wire::Rect {
     }
 }
 
+impl AppCore {
+    /// Mark or clear a session's own question, for the holder of its
+    /// launch token only, as `env.resolve` checks it. Never touches
+    /// `waiting_on`, which is Dispatch's.
+    fn session_ask(
+        &mut self,
+        id: RecordId,
+        token: &str,
+        message: Option<String>,
+        now: Clock,
+        out: &mut Out,
+    ) {
+        let Some(record) = self.session(id) else {
+            self.error("no such session");
+            return;
+        };
+        let Some(hash) = &record.token_hash else {
+            self.error("this session was launched before tokens; restart it");
+            return;
+        };
+        if token.is_empty() || super::token_hash(token) != *hash {
+            self.error("token does not match");
+            return;
+        }
+        let asking = match message {
+            None => None,
+            Some(text) => {
+                let Some(message) = ask_message(&text) else {
+                    self.error("an ask needs a message");
+                    return;
+                };
+                Some(super::Ask {
+                    message,
+                    at: now.wall,
+                })
+            }
+        };
+        self.edit_session(id, out, |s| s.asking = asking);
+    }
+}
+
+/// An ask's message as the record keeps it: the first line, trimmed,
+/// cut at `ASK_MAX_CHARS` characters with "…" after. `None` when nothing
+/// is left, so a blank ask is refused rather than read as a clear.
+pub(crate) fn ask_message(text: &str) -> Option<String> {
+    let line = text.lines().next().unwrap_or("").trim();
+    if line.is_empty() {
+        return None;
+    }
+    match line.char_indices().nth(super::ASK_MAX_CHARS) {
+        Some((cut, _)) => Some(format!("{}…", line[..cut].trim_end())),
+        None => Some(line.to_owned()),
+    }
+}
+
 fn epoch_ms(t: SystemTime) -> Option<u64> {
     t.duration_since(SystemTime::UNIX_EPOCH)
         .ok()
@@ -902,6 +968,7 @@ fn control_kind(action: &ControlAction) -> String {
         ControlAction::Remove(_) => "session.remove",
         ControlAction::SetNotes { .. } => "session.notes",
         ControlAction::SetWaiting { .. } => "session.waiting",
+        ControlAction::Ask { .. } => "session.ask",
         ControlAction::TrustFolder(_) => "session.trust",
         ControlAction::MoveSession { .. } => "session.move",
         ControlAction::RenameProject { .. } => "project.rename",
@@ -1083,6 +1150,15 @@ impl TryFrom<wire::Body> for ControlAction {
             } => Self::SetWaiting {
                 id: session(&s)?,
                 reason: on.then_some(reason),
+            },
+            wire::Body::SessionAsk {
+                session: s,
+                token,
+                message,
+            } => Self::Ask {
+                id: session(&s)?,
+                token,
+                message,
             },
             wire::Body::SessionTrust { session: s } => Self::TrustFolder(session(&s)?),
             wire::Body::SessionMove {

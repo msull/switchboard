@@ -99,6 +99,13 @@ impl AppCore {
                 s.activity = activity;
                 s.activity_reason = reason;
             }
+            // The owner's next prompt answers the session's question; a
+            // prompt older than the ask started the turn that asked it.
+            if event.kind == EventKind::PromptSubmitted
+                && s.asking.as_ref().is_some_and(|a| a.at < event.at)
+            {
+                s.asking = None;
+            }
             if event.kind == EventKind::SessionStart
                 && let Some(path) = event.transcript_path
                 && let Some(handle) = &mut s.resume

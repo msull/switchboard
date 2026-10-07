@@ -87,6 +87,7 @@ impl AppCore {
             env: Vec::new(),
             env_sets: Vec::new(),
             token_hash: None,
+            asking: None,
         });
         out.touch(project);
         Some(id)
@@ -319,13 +320,23 @@ impl AppCore {
 
     /// Why a session waiting on the user waits: Claude's folder trust
     /// question when the pane shows it, otherwise the reason its last
-    /// event gave, if any.
+    /// event gave, otherwise what the session asked, otherwise what
+    /// Dispatch marked it waiting on, if any. The event's reason comes
+    /// before the ask because every activity change replaces it, so it
+    /// is what blocks the pane now; Dispatch's mark is last because it
+    /// is not the session's own. The cards and the port's
+    /// `SessionView.waiting_reason` both read this.
     #[must_use]
     pub fn waiting_reason(&self, id: RecordId) -> Option<String> {
         if self.at_trust_prompt(id) {
             Some(TRUST_PROMPT_REASON.to_owned())
         } else {
-            self.session(id).and_then(|s| s.activity_reason.clone())
+            self.session(id).and_then(|s| {
+                s.activity_reason
+                    .clone()
+                    .or_else(|| s.asking.as_ref().map(|a| a.message.clone()))
+                    .or_else(|| s.waiting_on.clone())
+            })
         }
     }
 
@@ -558,6 +569,7 @@ impl AppCore {
             outputs: Vec::new(),
             // The copy gets its own token at its own launch.
             token_hash: None,
+            asking: None,
             // `env_sets` comes from the source on purpose: the owner asked
             // for this copy of the same conversation, which keeps the
             // source's `env` the same way.
@@ -621,6 +633,7 @@ impl AppCore {
             env: Vec::new(),
             env_sets,
             token_hash: None,
+            asking: None,
             ..record
         });
         out.touch(record.project);
@@ -753,6 +766,8 @@ impl AppCore {
                     s.last_seen = now.wall;
                     s.activity = Activity::Unknown;
                     s.activity_reason = None;
+                    // A new process has asked nothing yet.
+                    s.asking = None;
                     s.last_exit = None;
                     s.pending_launch = false;
                 });

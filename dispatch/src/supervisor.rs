@@ -18,7 +18,7 @@ use anyhow::{Context as _, Result, bail};
 use switchboard_control::{self as wire, Body, Reply, Request};
 
 use crate::pipeline::{OperatorKind, Pipeline, Supervisor};
-use crate::scheduler::{BY_SUPERVISOR, Runner, SocketDown};
+use crate::scheduler::{BY_SUPERVISOR, Runner, SocketDown, ask_bin_beside_exe, shell_path};
 use crate::store::{DataDir, atomic_write, read_project, read_ticket, shell_unsafe};
 use crate::ticket::{Operation, PastSupervisor, ProjectState, SupervisorIntent, SupervisorRecord};
 
@@ -85,7 +85,8 @@ fn decision_words(name: &str) -> &'static str {
 }
 
 /// The seed: everything the session needs to start, written to
-/// `seed.md`. Pure: the caller gives the paths.
+/// `seed.md`. Pure: the caller gives the paths, and `ask` when
+/// `switchboard-ask` is there to name.
 #[must_use]
 pub fn seed(
     project: &str,
@@ -93,6 +94,7 @@ pub fn seed(
     exe: &Path,
     handoff: &Path,
     workspace: &Path,
+    ask: Option<&Path>,
 ) -> String {
     let exe_text = exe.display().to_string();
     let mut out = String::new();
@@ -133,6 +135,10 @@ pub fn seed(
         workspace = workspace.display(),
         handoff = handoff.display(),
     );
+    if let Some(ask) = ask {
+        out.push_str(&ASK_GUIDE.replace("{ask}", &shell_path(ask)));
+        out.push_str("\n\n");
+    }
     if !sup.read.is_empty() {
         out.push_str("## Read first\n\n");
         for path in &sup.read {
@@ -213,21 +219,24 @@ fn capability_sections(out: &mut String, runner: bool, restart: bool, exe_text: 
 }
 
 /// The hash of what the owner controls about the seed: the table as
-/// TOML, the project's name, and `GUIDE_ESSENTIALS`. Never the rendered
-/// seed, which holds paths that differ between builds and machines.
+/// TOML, the project's name, `GUIDE_ESSENTIALS` and `ASK_GUIDE`. Never
+/// the rendered seed, which holds paths that differ between builds and
+/// machines.
 #[must_use]
 pub fn seed_hash(project: &str, sup: &Supervisor) -> String {
     let table = toml::to_string(sup).unwrap_or_default();
-    Pipeline::fingerprint(&format!("{table}\n{project}\n{GUIDE_ESSENTIALS}"))
+    Pipeline::fingerprint(&format!(
+        "{table}\n{project}\n{GUIDE_ESSENTIALS}\n{ASK_GUIDE}"
+    ))
 }
 
 /// The session's flags: a model when set, an allow rule for the
-/// `dispatch` executable, a read rule and a write rule for the
-/// supervisor directory, and with `merges` the `gh pr` and `git pull`
-/// rules. No settings file: `--settings` already carries Switchboard's
-/// hooks.
+/// `dispatch` executable and, when given, for `switchboard-ask`, a read
+/// rule and a write rule for the supervisor directory, and with
+/// `merges` the `gh pr` and `git pull` rules. No settings file:
+/// `--settings` already carries Switchboard's hooks.
 #[must_use]
-pub fn launch_flags(sup: &Supervisor, exe: &Path, dir: &Path) -> Vec<String> {
+pub fn launch_flags(sup: &Supervisor, exe: &Path, dir: &Path, ask: Option<&Path>) -> Vec<String> {
     let mut flags = Vec::new();
     if let Some(model) = &sup.model {
         flags.extend(["--model".to_owned(), model.clone()]);
@@ -235,6 +244,14 @@ pub fn launch_flags(sup: &Supervisor, exe: &Path, dir: &Path) -> Vec<String> {
     flags.extend([
         "--allowedTools".to_owned(),
         format!("Bash({}:*)", exe.display()),
+    ]);
+    if let Some(ask) = ask {
+        flags.extend([
+            "--allowedTools".to_owned(),
+            format!("Bash({}:*)", ask.display()),
+        ]);
+    }
+    flags.extend([
         "--allowedTools".to_owned(),
         format!("Read(//{}/**)", dir.display()),
     ]);
@@ -272,6 +289,12 @@ fn model_of(body: Option<&Body>) -> Option<String> {
         .position(|a| a == "--model")
         .and_then(|i| argv.get(i + 1).cloned())
 }
+
+/// The seed's line on `switchboard-ask`, with `{ask}` for its path.
+/// Kept out of `GUIDE_ESSENTIALS`, which names `dispatch` verbs only.
+pub const ASK_GUIDE: &str = "When you end a turn with something the owner must answer or \
+     decide, run `{ask} \"<one line>\"` before you stop; it shows on the owner's board until \
+     they reply.";
 
 /// The heading a rotation puts over the old hand-off.
 const ROTATED_HEADING: &str = "## From the session of ";
@@ -747,15 +770,16 @@ impl Runner {
         let exe = std::env::current_exe().context("the dispatch executable's path")?;
         let seed_path = dir.join("seed.md");
         let handoff = dir.join("handoff.md");
+        let ask = ask_bin_beside_exe();
         atomic_write(
             &seed_path,
-            seed(project, &sup, &exe, &handoff, &workspace).as_bytes(),
+            seed(project, &sup, &exe, &handoff, &workspace, ask.as_deref()).as_bytes(),
         )?;
         if ps.supervisor.current.is_some() {
             self.retire(&mut ps, why, now_ms)?;
         }
         let hash = seed_hash(project, &sup);
-        let flags = launch_flags(&sup, &exe, &dir);
+        let flags = launch_flags(&sup, &exe, &dir, ask.as_deref());
         let name = format!("Supervisor · {project}");
         let space = self.supervisor_space(&mut ps, &p, now_ms)?;
         let mut session = None;
@@ -1048,6 +1072,7 @@ mod tests {
             Path::new("/opt/bin/dispatch"),
             Path::new("/data/projects/orchard/supervisor/handoff.md"),
             Path::new("/trees/supervisor-orchard"),
+            None,
         )
     }
 
@@ -1137,6 +1162,7 @@ mod tests {
             Path::new("/opt/bin/dispatch"),
             Path::new("/data/projects/orchard/supervisor/handoff.md"),
             Path::new("/trees/supervisor-orchard"),
+            None,
         );
         for want in [
             "Keep the queue moving.",
@@ -1181,11 +1207,17 @@ mod tests {
             Path::new("/opt/bin/dispatch"),
             Path::new("/data/projects/orchard/supervisor/handoff.md"),
             Path::new("/trees/supervisor-orchard"),
+            None,
         );
         assert!(s.contains("`gh pr merge <n> --merge`"), "{s}");
         assert!(!s.contains("You never merge a pull request."));
         assert!(s.contains("answered `recheck` or `park`"));
-        let flags = launch_flags(&sup, Path::new("/opt/bin/dispatch"), Path::new("/d/s"));
+        let flags = launch_flags(
+            &sup,
+            Path::new("/opt/bin/dispatch"),
+            Path::new("/d/s"),
+            None,
+        );
         for rule in MERGE_RULES {
             assert!(flags.contains(&(*rule).to_owned()), "missing {rule}");
         }
@@ -1224,7 +1256,12 @@ mod tests {
 
     #[test]
     fn the_launch_flags_allow_dispatch_and_the_supervisor_directory_only() {
-        let flags = launch_flags(&table(), Path::new("/opt/bin/dispatch"), Path::new("/d/s"));
+        let flags = launch_flags(
+            &table(),
+            Path::new("/opt/bin/dispatch"),
+            Path::new("/d/s"),
+            None,
+        );
         assert_eq!(
             flags,
             [
@@ -1239,6 +1276,43 @@ mod tests {
             ]
         );
         assert!(!flags.iter().any(|f| f.contains("--settings")));
+        assert!(!flags.iter().any(|f| f.contains("switchboard-ask")));
+        // With `switchboard-ask` beside it, its rule follows Dispatch's.
+        let flags = launch_flags(
+            &table(),
+            Path::new("/opt/bin/dispatch"),
+            Path::new("/d/s"),
+            Some(Path::new("/opt/bin/switchboard-ask")),
+        );
+        assert_eq!(
+            flags[2..6],
+            [
+                "--allowedTools",
+                "Bash(/opt/bin/dispatch:*)",
+                "--allowedTools",
+                "Bash(/opt/bin/switchboard-ask:*)",
+            ]
+        );
+    }
+
+    #[test]
+    fn the_seed_names_switchboard_ask_only_when_it_is_there() {
+        let without = seed_of(&table());
+        assert!(!without.contains("switchboard-ask"), "{without}");
+        let with = seed(
+            "orchard",
+            &table(),
+            Path::new("/opt/bin/dispatch"),
+            Path::new("/data/projects/orchard/supervisor/handoff.md"),
+            Path::new("/trees/supervisor-orchard"),
+            Some(Path::new("/opt/bin/switchboard-ask")),
+        );
+        assert!(
+            with.contains("run `/opt/bin/switchboard-ask \"<one line>\"` before you stop"),
+            "{with}"
+        );
+        // The line sits in "How you work", before the decisions.
+        assert!(with.find("switchboard-ask") < with.find("## Decisions you answer"));
     }
 
     #[test]
@@ -1258,6 +1332,7 @@ mod tests {
             Path::new("/a/dispatch"),
             Path::new("/a/h.md"),
             Path::new("/a/w"),
+            None,
         );
         let b = seed(
             "orchard",
@@ -1265,18 +1340,23 @@ mod tests {
             Path::new("/b/dispatch"),
             Path::new("/b/h.md"),
             Path::new("/b/w"),
+            None,
         );
         assert_ne!(a, b);
         assert_eq!(seed_hash("orchard", &table()), base);
     }
 
     #[test]
-    fn the_hash_covers_the_guide_essentials() {
+    fn the_hash_covers_the_guide_essentials_and_the_ask_guide() {
         let table = toml::to_string(&table()).unwrap();
-        let with = Pipeline::fingerprint(&format!("{table}\norchard\n{GUIDE_ESSENTIALS}"));
-        let without = Pipeline::fingerprint(&format!("{table}\norchard\n"));
+        let with = Pipeline::fingerprint(&format!(
+            "{table}\norchard\n{GUIDE_ESSENTIALS}\n{ASK_GUIDE}"
+        ));
         assert_eq!(with, seed_hash("orchard", &super::tests::table()));
-        assert_ne!(with, without);
+        let no_essentials = Pipeline::fingerprint(&format!("{table}\norchard\n\n{ASK_GUIDE}"));
+        let no_ask = Pipeline::fingerprint(&format!("{table}\norchard\n{GUIDE_ESSENTIALS}"));
+        assert_ne!(with, no_essentials);
+        assert_ne!(with, no_ask);
     }
 
     #[test]

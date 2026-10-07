@@ -157,8 +157,8 @@ as you type; Save is the only time Switchboard writes into
 
 The bundle carries the binaries side by side in `Contents/MacOS`:
 `switchboard`, `switchboard-hook` (which the app locates next to its own
-executable), `switchboard-env` (which Dispatch locates next to its own)
-and `dispatch`. Raising a Ghostty
+executable), `switchboard-env` and `switchboard-ask` (which Dispatch
+locates next to its own) and `dispatch`. Raising a Ghostty
 window needs Accessibility, and macOS ties that grant to the code
 signature, and the Keychain ties its per-item "always allow" to the
 signer's Team ID. The script signs with `CODESIGN_IDENTITY`, else the
@@ -181,7 +181,10 @@ Dev aids, all environment variables:
   exec` sends it with `env.resolve`; the record keeps only its SHA-256.
   To try `switchboard-env` by hand, run it in a shell the app launched,
   after `env-setup unlock` (or the settings menu's Unlock environment
-  setup) for the setup commands.
+  setup) for the setup commands. `switchboard-ask` sends it too, with
+  `session.ask`; `switchboard-ask "a question"` in a shell the app
+  launched marks that shell's card as waiting on you, and
+  `switchboard-ask --clear` takes the mark off.
 - `SWITCHBOARD_TMUX_SOCKET=<name>`: use another tmux socket name.
 - `DISPATCH_DATA_DIR=<dir>`: where the Dispatch page looks for
   `dispatch.sock` and where its console opens (the `dispatch` binary
@@ -247,6 +250,7 @@ cargo test --test gate -- --ignored --nocapture     # the Milestone 1 gate items
 src/main.rs              launcher: wires real adapters, opens the window
 src/bin/switchboard-hook.rs  helper Claude Code hooks call (std only)
 src/bin/switchboard-env.rs   runs one child with a session's environment sets, resolved over the control port with its launch token; the sets' setup commands (std and the wire crate only)
+src/bin/switchboard-ask.rs   marks the session it runs in as asking the owner a one-line question, or clears it, over the control port with its launch token (std and the wire crate only)
 src/lib.rs               module tree and the layering rules
 src/core/
   model.rs               durable data model (Project, SessionRecord, ResumeHandle, CardState)

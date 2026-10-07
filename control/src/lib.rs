@@ -13,6 +13,7 @@ pub mod client;
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
@@ -27,8 +28,47 @@ pub const RECORD_ID_ENV: &str = "SWITCHBOARD_RECORD_ID";
 
 /// Injected into every pane beside the record id: a random token, new at
 /// every spawn, whose hash is the record's `token_hash`. A record id is
-/// no proof of identity; holding this is what lets `env.resolve` answer.
+/// no proof of identity; holding this is what lets `env.resolve` answer,
+/// and what lets `session.ask` mark the holder's own record, and only
+/// that one.
 pub const RECORD_TOKEN_ENV: &str = "SWITCHBOARD_RECORD_TOKEN";
+
+/// Switchboard's data directory as a command run in a pane finds it:
+/// `SWITCHBOARD_DATA_DIR`, else the app's Application Support dir.
+#[must_use]
+pub fn data_dir() -> PathBuf {
+    if let Some(dir) = std::env::var_os("SWITCHBOARD_DATA_DIR") {
+        return PathBuf::from(dir);
+    }
+    let home = std::env::var_os("HOME").map_or_else(|| PathBuf::from("/"), PathBuf::from);
+    home.join("Library/Application Support/Switchboard")
+}
+
+/// The record id and launch token this pane was given.
+///
+/// # Errors
+/// Either is unset or empty: the caller is not inside a Switchboard
+/// session.
+pub fn credentials() -> Result<(String, String), String> {
+    let get = |name: &str| std::env::var(name).ok().filter(|v| !v.is_empty());
+    match (get(RECORD_ID_ENV), get(RECORD_TOKEN_ENV)) {
+        (Some(id), Some(token)) => Ok((id, token)),
+        _ => Err(format!(
+            "{RECORD_ID_ENV} and {RECORD_TOKEN_ENV} are not set: run this inside a Switchboard session"
+        )),
+    }
+}
+
+/// A command's operation id, named for the `program` that sent it so
+/// `operations.log` and `op.status` say who asked: unique enough without
+/// a crate for it.
+#[must_use]
+pub fn op_id(program: &str) -> String {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
+    format!("{program}-{}-{nanos}", std::process::id())
+}
 
 /// An environment set's name as Switchboard accepts it:
 /// `[a-z0-9][a-z0-9-]*`, so it cannot hold a `/` and alias another set's
@@ -186,6 +226,16 @@ pub enum Body {
         #[serde(default)]
         reason: String,
     },
+    /// The session's own question to the owner, shown on its card until
+    /// the owner replies or dismisses it; `message: null` clears it.
+    /// Taken only with the session's own launch token.
+    #[serde(rename = "session.ask")]
+    SessionAsk {
+        session: String,
+        token: String,
+        #[serde(default)]
+        message: Option<String>,
+    },
     /// Answer Claude Code's folder trust question with yes; nothing is
     /// sent unless the pane was last seen showing it.
     #[serde(rename = "session.trust")]
@@ -334,6 +384,7 @@ impl Body {
             | Self::SessionRemove { .. }
             | Self::SessionNotes { .. }
             | Self::SessionWaiting { .. }
+            | Self::SessionAsk { .. }
             | Self::SessionTrust { .. }
             | Self::SessionMove { .. }
             | Self::ProjectRename { .. }
@@ -932,6 +983,16 @@ mod tests {
                 on: true,
                 reason: "finalize?".into(),
             },
+            Body::SessionAsk {
+                session: "s".into(),
+                token: "t".into(),
+                message: Some("merge now?".into()),
+            },
+            Body::SessionAsk {
+                session: "s".into(),
+                token: "t".into(),
+                message: None,
+            },
             Body::SessionTrust {
                 session: "s".into(),
             },
@@ -1088,6 +1149,24 @@ mod tests {
             }
         );
         assert_eq!(req.body.class(), Class::NonReplayable);
+    }
+
+    #[test]
+    fn an_ask_line_reads_with_or_without_a_message_and_is_idempotent() {
+        let req = Request::parse(
+            r#"{"op":"a","kind":"session.ask","session":"s","token":"t","message":"merge?"}"#,
+        )
+        .unwrap();
+        assert_eq!(req.body.class(), Class::Idempotent);
+        assert_eq!(req.body.kind(), "session.ask");
+        let req =
+            Request::parse(r#"{"op":"a","kind":"session.ask","session":"s","token":"t"}"#).unwrap();
+        assert!(matches!(req.body, Body::SessionAsk { message: None, .. }));
+    }
+
+    #[test]
+    fn op_ids_carry_the_program_name() {
+        assert!(op_id("switchboard-ask").starts_with("switchboard-ask-"));
     }
 
     #[test]

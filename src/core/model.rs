@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 /// Bump when the on-disk shape changes incompatibly.
-pub const SCHEMA_VERSION: u32 = 13;
+pub const SCHEMA_VERSION: u32 = 14;
 
 /// How the UI picks its colours: follow the system, or force one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -1117,6 +1117,12 @@ pub struct SessionRecord {
     /// the card reads as waiting, so the badge and the rail count it.
     #[serde(default)]
     pub waiting_on: Option<String>,
+    /// What the session itself asked the owner with `switchboard-ask`,
+    /// and when. Separate from `waiting_on`, which is Dispatch's, so
+    /// neither clears the other. Cleared by the owner's next prompt, a
+    /// dismiss, the session's `--clear`, or a new spawn.
+    #[serde(default)]
+    pub asking: Option<Ask>,
     /// A launch effect was emitted for this record and has not reported
     /// back. Saved before the launch runs, so a record found with it
     /// set after a restart was interrupted between the two.
@@ -1139,6 +1145,19 @@ pub struct SessionRecord {
     #[serde(default)]
     pub token_hash: Option<String>,
 }
+
+/// A session's own question to the owner.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Ask {
+    /// One line, trimmed and capped at `ASK_MAX_CHARS`.
+    pub message: String,
+    /// When the app took it. A prompt submitted before this does not
+    /// answer it.
+    pub at: SystemTime,
+}
+
+/// The longest message an ask keeps, in characters, before the "…".
+pub const ASK_MAX_CHARS: usize = 200;
 
 /// How many runs a record keeps; the logs of older ones are deleted
 /// with them.

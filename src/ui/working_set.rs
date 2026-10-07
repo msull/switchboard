@@ -422,7 +422,7 @@ fn set_card_text(cx: &DrawCtx<'_>, record: &SessionRecord) -> SetCardText {
     }
     .filter(|a| !a.trim().is_empty());
     let reason = (state == CardState::WaitingOnYou)
-        .then(|| record.activity_reason.clone())
+        .then(|| cx.core.waiting_reason(record.id))
         .flatten();
     let mut parts = vec![kind_label(record.kind).to_owned()];
     parts.extend(conversation.and_then(|c| c.model.clone()));

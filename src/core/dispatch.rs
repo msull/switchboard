@@ -74,6 +74,8 @@ pub struct SupervisorChip {
     pub state: SupervisorState,
     /// An agent with a conversation to resume and no pane running.
     pub resumable: bool,
+    /// Why it waits on you, while it does: what the session asked, say.
+    pub reason: Option<String>,
 }
 
 /// A column the ticket table can be ordered by.
@@ -852,6 +854,7 @@ impl AppCore {
                 session: None,
                 state: SupervisorState::None,
                 resumable: false,
+                reason: None,
             });
         };
         let state = if self.at_trust_prompt(id) {
@@ -871,10 +874,14 @@ impl AppCore {
         // of what it replaced, at a cost.
         let resumable =
             !self.is_running(id) && self.session(id).is_some_and(SessionRecord::resumable);
+        let reason = (state == SupervisorState::WaitingOnYou)
+            .then(|| self.waiting_reason(id))
+            .flatten();
         Some(SupervisorChip {
             session: Some(id),
             state,
             resumable,
+            reason,
         })
     }
 

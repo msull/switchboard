@@ -256,6 +256,7 @@ fn upsert(
         env: Vec::new(),
         env_sets: Vec::new(),
         token_hash: None,
+        asking: None,
     });
     id
 }

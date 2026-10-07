@@ -152,26 +152,44 @@ impl RunnerCredentials {
     }
 }
 
-/// `switchboard-env` beside the running executable (the app bundle's
+/// The executable `name` beside the running one (the app bundle's
 /// `Contents/MacOS`), when that file exists.
 #[must_use]
-pub fn env_bin_beside_exe() -> Option<PathBuf> {
+pub fn bin_beside_exe(name: &str) -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
-    let bin = exe.parent()?.join("switchboard-env");
+    let bin = exe.parent()?.join(name);
     bin.is_file().then_some(bin)
 }
 
-/// The prompt sentence an agent with environment sets gets: how to run
-/// a command with their credentials, with the path quoted for a shell
+/// `switchboard-env` beside the running executable, when it exists.
+#[must_use]
+pub fn env_bin_beside_exe() -> Option<PathBuf> {
+    bin_beside_exe("switchboard-env")
+}
+
+/// `switchboard-ask` beside the running executable, when it exists.
+#[must_use]
+pub fn ask_bin_beside_exe() -> Option<PathBuf> {
+    bin_beside_exe("switchboard-ask")
+}
+
+/// A path as a prompt tells an agent to type it: quoted for a shell
 /// when it holds a space.
 #[must_use]
-pub fn env_sentence(bin: &Path) -> String {
+pub fn shell_path(bin: &Path) -> String {
     let path = bin.display().to_string();
-    let path = if path.contains(char::is_whitespace) {
+    if path.contains(char::is_whitespace) {
         format!("'{}'", path.replace('\'', "'\\''"))
     } else {
         path
-    };
+    }
+}
+
+/// The prompt sentence an agent with environment sets gets: how to run
+/// a command with their credentials.
+#[must_use]
+pub fn env_sentence(bin: &Path) -> String {
+    let path = shell_path(bin);
     format!(
         "Commands that need credentials run through `{path} exec -- <command>`; never look for credential files or profiles."
     )

@@ -362,6 +362,7 @@ fn record(project: ProjectId, name: &str, kind: SessionKind, cwd: &Path) -> Sess
         env: Vec::new(),
         env_sets: Vec::new(),
         token_hash: None,
+        asking: None,
     }
 }
 
