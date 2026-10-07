@@ -1666,8 +1666,13 @@ it adds over its base, the tree and the notes (Bitbucket Cloud is a
 second provider for both PR gates, read through `curl` with the
 account token from the environment or `<data>/env`); `proceed` passes,
 `rerun` with a note (typed under the decision on the page) sends
-that lane back to the nearest earlier agent stage with the note in
-the next prompt. The note box under a decision is multi-line, and an
+that lane back to the nearest earlier agent stage with the note and
+the previous attempt's notes path in the next prompt, restarting that
+stage's services with a fresh `before`. The question shows each
+notes file's first line. A `confirm` gate (`tried`) inside its agent
+stage's hold run offers `rerun` beside `done` and `park`, so a try
+that could not test runs again on the same deploy while the stack
+stays held. The note box under a decision is multi-line, and an
 option the decision lists in `DecisionView.needs_note` (`revise` on
 `finalize`) stays disabled until the note has text: Dispatch refuses
 that answer without one and the decision stays pending, so the page

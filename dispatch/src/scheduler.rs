@@ -4234,7 +4234,8 @@ impl Runner {
     /// the user needs to judge the work in the question. `proceed`
     /// completes it, `rerun` with a note sends the context back to the
     /// nearest earlier agent stage, `park` stops. A `confirm` gate is
-    /// "you did this": its answer is `done`.
+    /// "you did this": its answer is `done`, and one inside its agent
+    /// stage's hold run also takes `rerun` (see [`confirm_rerun`]).
     #[allow(clippy::too_many_arguments)]
     fn human_gate(
         &mut self,
@@ -4265,7 +4266,14 @@ impl Runner {
             all_complete = false;
             let question = self.human_question(t, p, stage, &attempt, &cwd, lane.as_deref())?;
             let (kind, options): (DecisionKind, &[&str]) = if confirm {
-                (DecisionKind::Confirmation, &["done", "park"])
+                (
+                    DecisionKind::Confirmation,
+                    if confirm_rerun(p, t.stage) {
+                        &["done", "rerun", "park"]
+                    } else {
+                        &["done", "park"]
+                    },
+                )
             } else {
                 (DecisionKind::Permission, &["proceed", "rerun", "park"])
             };
@@ -4393,7 +4401,12 @@ impl Runner {
             }
         }
         let _ = write!(q, "\n\nTree: {}", cwd.display());
-        q.push_str(&notes_line(t, p, lane));
+        for (line, notes) in notes_files(t, p, lane) {
+            q.push_str(&line);
+            if let Some(first) = notes_first_line(t, notes) {
+                let _ = write!(q, "\n  {first}");
+            }
+        }
         q.push_str(&deployed_and_served(t, p));
         Ok(q)
     }
@@ -4469,18 +4482,60 @@ impl Runner {
             reason: reason.clone(),
         };
         record.ended_ms = Some(now_ms);
-        if let Some(done) = t
-            .attempts
-            .iter_mut()
-            .filter(|a| {
-                a.stage == target && a.context == gate.context && a.state == AttemptState::Complete
-            })
-            .max_by_key(|a| a.n)
-        {
-            done.state = AttemptState::Cancelled { reason };
-            done.ended_ms = Some(now_ms);
+        // A gate in another context than the stage it returns to (a
+        // root confirmation after a joined tester) sends back every
+        // context that stage completed, or nothing would run again.
+        let contexts: Vec<String> = if t.attempts_of(&target).any(|a| a.context == gate.context) {
+            vec![gate.context.clone()]
+        } else {
+            t.attempts_of(&target)
+                .filter(|a| a.state == AttemptState::Complete)
+                .map(|a| a.context.clone())
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect()
+        };
+        for ctx in contexts {
+            let mut note = note.clone();
+            let last = t
+                .attempts
+                .iter()
+                .filter(|a| {
+                    a.stage == target && a.context == ctx && a.state == AttemptState::Complete
+                })
+                .max_by_key(|a| a.n)
+                .map(|a| (a.n, a.artifacts.get("notes").cloned()));
+            if let Some((n, notes)) = last {
+                // The next agent may want what the last one found.
+                if let Some(path) = notes.filter(|path| readable_notes(t, path).is_some()) {
+                    let _ = write!(
+                        note,
+                        " (the previous attempt's notes are at {})",
+                        path.display()
+                    );
+                }
+                let done = record_of(t, &target, n);
+                done.state = AttemptState::Cancelled {
+                    reason: reason.clone(),
+                };
+                done.ended_ms = Some(now_ms);
+            }
+            t.rework.insert(rework_key(&target, &ctx), note);
         }
-        t.rework.insert(rework_key(&target, &gate.context), note);
+        // The stage runs its agent again, so its services start afresh
+        // with a new `before`; `ensure_services` stops each marked one
+        // first. A hold that spans the gate keeps them in range, so
+        // nothing else would stop them.
+        for svc in &mut t.services {
+            if svc.stage == target
+                && matches!(
+                    svc.state,
+                    ServiceState::Before | ServiceState::Starting | ServiceState::Ready
+                )
+            {
+                svc.stopping_ms = Some(now_ms);
+            }
+        }
         t.stage = back_to;
         log::info!(
             "ticket {} {}/{} sent back to {target}",
@@ -9455,21 +9510,89 @@ pub(crate) fn plan_clause(t: &Ticket, p: &Pipeline, lane: Option<&str>) -> Strin
         .unwrap_or_default()
 }
 
-/// A human gate's notes lines: in a lane, the notes it sees; with none,
-/// every lane's notes when their newest writer runs per lane.
-pub(crate) fn notes_line(t: &Ticket, p: &Pipeline, lane: Option<&str>) -> String {
+/// A human gate's notes lines, each with the file it names: in a lane,
+/// the notes it sees; with none, every lane's notes when their newest
+/// writer runs per lane.
+fn notes_files<'a>(t: &'a Ticket, p: &Pipeline, lane: Option<&str>) -> Vec<(String, &'a PathBuf)> {
     if lane.is_some() {
         return lane_input(t, p, lane, "notes")
-            .map(|(stage, notes)| format!("\nNotes ({stage}): {}", notes.display()))
+            .map(|(stage, notes)| vec![(format!("\nNotes ({stage}): {}", notes.display()), notes)])
             .unwrap_or_default();
     }
     lane_files(t, Some(p), "notes")
         .into_iter()
         .map(|(l, stage, notes)| match l {
-            Some(l) => format!("\nNotes ({stage}, {l}): {}", notes.display()),
-            None => format!("\nNotes ({stage}): {}", notes.display()),
+            Some(l) => (
+                format!("\nNotes ({stage}, {l}): {}", notes.display()),
+                notes,
+            ),
+            None => (format!("\nNotes ({stage}): {}", notes.display()), notes),
         })
         .collect()
+}
+
+/// The first line of a notes file a human gate shows, read from at
+/// most `NOTES_PEEK` bytes; `None` for a secret artifact, which
+/// Dispatch never reads, or a file that cannot be read.
+fn notes_first_line(t: &Ticket, notes: &Path) -> Option<String> {
+    use std::io::Read as _;
+    let file = readable_notes(t, notes)?;
+    let mut bytes = Vec::new();
+    std::fs::File::open(&file)
+        .ok()?
+        .take(NOTES_PEEK)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    first_line(&bytes)
+}
+
+/// The file a notes path names, resolved, when Dispatch may read or
+/// point an agent at it: `None` for a secret artifact or a path that
+/// does not resolve.
+fn readable_notes(t: &Ticket, notes: &Path) -> Option<PathBuf> {
+    let file = notes.canonicalize().ok()?;
+    t.secret_at(&file).is_none().then_some(file)
+}
+
+/// How much of a notes file is read for its first line.
+const NOTES_PEEK: u64 = 4096;
+
+/// The first line of `bytes` with text on it, as a terminal may show
+/// it: every control character (an escape, a carriage return, a tab)
+/// made a space so nothing in the file drives the terminal, trimmed,
+/// and at most 200 characters. A multi-byte character cut by the read
+/// costs one replacement character, never the line.
+fn first_line(bytes: &[u8]) -> Option<String> {
+    let text = String::from_utf8_lossy(bytes);
+    let line = text.split('\n').find(|l| !l.trim().is_empty())?;
+    let clean: String = line
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
+    let short: String = clean.trim().chars().take(200).collect();
+    let short = short.trim_end().to_owned();
+    (!short.is_empty()).then_some(short)
+}
+
+/// Whether a `confirm` gate at `stage` offers `rerun`: the agent stage
+/// a send-back returns to stands in the same hold run as the gate for
+/// some resource the gate needs. Going back then takes nothing again
+/// and releases nothing; the stack the agent worked on is still held.
+fn confirm_rerun(p: &Pipeline, stage: usize) -> bool {
+    let Some(back_to) = p
+        .stages
+        .iter()
+        .take(stage)
+        .rposition(|s| s.kind() == StageKind::Agent)
+    else {
+        return false;
+    };
+    p.stages.get(stage).is_some_and(|s| {
+        s.needs.iter().any(|r| {
+            let run = p.hold_run_at(r, stage);
+            run.is_some() && run == p.hold_run_at(r, back_to)
+        })
+    })
 }
 
 /// What a human gate after a deploy or with services up adds: the
@@ -10663,6 +10786,13 @@ prompt = "Write {notes}."
         t
     }
 
+    fn notes_line(t: &Ticket, p: &Pipeline, lane: Option<&str>) -> String {
+        notes_files(t, p, lane)
+            .into_iter()
+            .map(|(line, _)| line)
+            .collect()
+    }
+
     fn listed(files: &[(Option<&str>, &str, &PathBuf)]) -> Vec<(Option<String>, String, String)> {
         files
             .iter()
@@ -10745,6 +10875,81 @@ prompt = "Write {notes}."
             &["A", "B"],
         );
         assert_eq!(notes_line(&t, &p, Some("A")), "\nNotes (implement): /a.md");
+    }
+
+    #[test]
+    fn a_notes_first_line_skips_blanks_and_strips_control_characters() {
+        assert_eq!(
+            first_line(b"\n  \n\tResult: passed\nmore").as_deref(),
+            Some("Result: passed")
+        );
+        assert_eq!(first_line(b""), None);
+        assert_eq!(first_line(b" \n\t\r\n  "), None);
+        assert_eq!(
+            first_line(b"\x1b[31mResult:\rfail").as_deref(),
+            Some("[31mResult: fail")
+        );
+        // A read cut inside a later line's `é` still gives the first.
+        let mut cut = b"Result: nothing could be tested\n".to_vec();
+        while cut.len() < 4095 {
+            cut.push(b'x');
+        }
+        cut.extend_from_slice(&"é".as_bytes()[..1]);
+        assert_eq!(cut.len(), 4096);
+        assert_eq!(
+            first_line(&cut).as_deref(),
+            Some("Result: nothing could be tested")
+        );
+        let long = "é".repeat(300);
+        assert_eq!(first_line(long.as_bytes()), Some("é".repeat(200)));
+    }
+
+    /// A pipeline with an agent stage, a confirm gate, and what stands
+    /// between them, each stage given `needs` as written.
+    fn confirm_pipeline(stages: &str) -> Pipeline {
+        crate::pipeline::two_lanes(&format!(
+            "[[resources]]\nname = \"stack\"\n\n[[resources]]\nname = \"other\"\n\n{stages}"
+        ))
+    }
+
+    #[test]
+    fn a_confirm_gate_offers_rerun_only_inside_its_agent_stages_hold_run() {
+        let agent = |name: &str, needs: &str| {
+            format!(
+                "[[stages]]\nname = \"{name}\"\noperator = \"agent\"\ncontext = \"root\"\nneeds = [{needs}]\nwrites = [\"notes\"]\nprompt = \"Write {{notes}}.\"\n\n"
+            )
+        };
+        let gate = |name: &str, needs: &str, confirm: bool| {
+            format!(
+                "[[stages]]\nname = \"{name}\"\nneeds = [{needs}]\ngate = {{ kind = \"human\", decision = \"{name}\", confirm = {confirm} }}\n\n"
+            )
+        };
+        // `try` and `tried` in one run of the stack.
+        let p = confirm_pipeline(&format!(
+            "{}{}",
+            agent("try", "\"stack\""),
+            gate("tried", "\"stack\"", true)
+        ));
+        assert!(confirm_rerun(&p, 1));
+        // A `published`-shaped gate needs nothing.
+        let p = confirm_pipeline(&format!(
+            "{}{}",
+            agent("render", "\"stack\""),
+            gate("published", "", true)
+        ));
+        assert!(!confirm_rerun(&p, 1));
+        // A gate with no agent stage before it.
+        let p = confirm_pipeline(&gate("tried", "\"stack\"", true));
+        assert!(!confirm_rerun(&p, 0));
+        // The agent stage is in an earlier run of the stack: a stage
+        // between holds only something else.
+        let p = confirm_pipeline(&format!(
+            "{}{}{}",
+            agent("try", "\"stack\""),
+            gate("look", "\"other\"", false),
+            gate("tried", "\"stack\"", true)
+        ));
+        assert!(!confirm_rerun(&p, 2));
     }
 
     #[test]

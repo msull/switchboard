@@ -708,21 +708,33 @@ checks again, and `park`).
 
 A human gate on a gate-only stage other than `lanes` (an `inspect`
 stage after `implement`, before anything is pushed or a PR opened) is
-one permission decision per context: the question names the branch
-and its head, what it adds over its base (the commits and the files
-changed), the tree to open and the latest notes. `proceed` completes
-the attempt bound to the head. `rerun` with a note sends that context
-back: the gate's attempt and the nearest earlier agent stage's result
-for that context are cancelled, the ticket stands at that stage
-again, and the note goes at the end of the next attempt's prompt as
-what the user said; other contexts keep their results. A `rerun`
-answer to an agent stage's `rerun` question carries its own note the
-same way, and without one, the note that sent the attempt back. A
-gate with `confirm = true` is "you did this": its answers are `done`
-and `park`, and it is never answered automatically.
-What follows a merge on your side (a rebundle, a mirror backup) is
-outside Dispatch's definition of done and is named in the decision's
-text as a reminder, not verified.
+one permission decision per context: the question names the branch and
+its head, what it adds over its base (the commits and the files
+changed), the tree to open and the latest notes, each notes file with
+its first line of text under it (control characters made spaces, at
+most 200 characters; a secret artifact is never read). `proceed`
+completes the attempt bound to the head. `rerun` with a note sends
+that context back: the gate's attempt and the nearest earlier agent
+stage's result for that context are cancelled, the ticket stands at
+that stage again, and the note goes at the end of the next attempt's
+prompt as what the user said, with the path of the cancelled attempt's
+notes when it wrote any; other contexts keep their results. A gate
+whose context that stage never ran in (a root gate after a `joined`
+tester) sends back every context the stage completed. The services of
+the stage it returns to are stopped and started again, with a fresh
+`before` on a new port, before its agent launches. A `rerun` answer to
+an agent stage's `rerun` question carries its own note the same way,
+and without one, the note that sent the attempt back. A gate with
+`confirm = true` is "you did this": its answers are `done` and `park`,
+and it is never answered automatically. When the nearest earlier agent
+stage stands in the same hold run as the gate, for a resource the gate
+`needs` (`try` and `tried` on one stack), it also offers `rerun`,
+which sends the ticket back as a permission gate's does: the stack is
+still held, so nothing is deployed again and the hold is never let go.
+A `published`-style gate after a `release` needs nothing and has no
+`rerun`. What follows a merge on your side (a rebundle, a mirror
+backup) is outside Dispatch's definition of done and is named in the
+decision's text as a reminder, not verified.
 
 ## The pipeline file
 
@@ -1321,7 +1333,7 @@ prompt = "my-dev is running backend commit {inputs.deploy.commit} (when that rea
 [[stages]]
 name = "tried"
 needs = ["my-dev"]        # still held: what you are looking at must stay deployed
-gate = { kind = "human", decision = "tried", confirm = true }   # the tester's evidence and the deployed commit are shown
+gate = { kind = "human", decision = "tried", confirm = true }   # the tester's evidence (its notes' first line) and the deployed commit are shown; `rerun` tests again on the same deploy
 
 [[stages]]
 name = "ready"
@@ -1362,14 +1374,14 @@ What this pipeline showed, and what it added to the vocabulary:
 - **Services are Dispatch's.** A stage's `services` name lanes; each
   is started only if the ticket cut that lane, and a template field
   for one that was not renders as `not served (no <lane> lane)`, so a
-  backend-only, frontend-only or admin-only ticket names nothing
-  that does not exist. For each lane that was cut, in order: the
-  `before` command runs as a child of the runner, with its log in the
-  ticket directory, and must exit zero (it must also be safe to run
-  again: one lost to a runner restart is started again, and a retry
-  runs it anew); Dispatch allocates a port from the policy's `ports`
-  range, testing that it binds before choosing it, so a server you
-  started by hand on the default port is simply not chosen; the
+  backend-only, frontend-only or admin-only ticket names nothing that
+  does not exist. For each lane that was cut, in order: the `before`
+  command runs as a child of the runner, with its log in the ticket
+  directory, and must exit zero (it must also be safe to run again:
+  one lost to a runner restart is started again, and a retry or a
+  send-back runs it anew); Dispatch allocates a port from the policy's
+  `ports` range, testing that it binds before choosing it, so a server
+  you started by hand on the default port is simply not chosen; the
   service is a Switchboard service session made with `session.new`,
   launched through the login shell as `env <serve.env> <serve.argv>`
   with `{port}` filled in, so `serve.env` must hold no secrets (the
@@ -1377,8 +1389,8 @@ What this pipeline showed, and what it added to the vocabulary:
   readiness is the `ready` probe answering on that URL within its
   limit. A `before` failure, no free port, or a probe that never
   answers is a decision before the tester is launched. The tester is
-  told each URL and not to start a server of its own. Services live
-  on the ticket record until the last stage of the run holding the
+  told each URL and not to start a server of its own. Services live on
+  the ticket record until the last stage of the run holding the
   resource ends.
 - **One authoritative deploy.** The implementers may deploy their
   lane while they work, and nothing they deploy is kept. Dispatch runs
@@ -2775,6 +2787,10 @@ and one against the real one:
 | The runner stops between saving a service `starting` and writing its request | The launch is sent once on the next pass (`a_service_saved_but_never_sent_is_sent_once`) |
 | The service never answers within `ready.within_secs` | Its session is killed and removed, then a `service` question; `retry` starts afresh (`a_probe_that_never_answers_is_a_question_and_the_service_is_stopped`) |
 | `tried` answered, or parked | The service is killed, its port read free, its session removed, the hold released (`services_stop_when_tried_ends_and_on_park`) |
+| `tried` answered `rerun` with a note | `tried` offered `done`, `rerun` and `park` and showed the notes' first line; the service is stopped and removed, record 2 runs `before` again and launches, the tester runs again only once it answers, with the note and attempt 1's notes path in its prompt; attempt 1's notes stay; nothing is deployed again; `my-dev` is held throughout; `tried` asks again (`a_tried_rerun_runs_the_tester_again_with_services_restarted_and_keeps_the_hold`) |
+| The runner restarts while a `tried` rerun stops the service | One more service launch and one more tester, never two (`a_tried_rerun_cut_off_by_a_runner_restart_launches_once`) |
+| A second ticket waits for `my-dev` while the first's `tried` is answered `rerun` | It waits through the rerun and takes `my-dev` only once `tried` is answered `done` (`a_ticket_queued_for_the_stack_waits_through_a_tried_rerun`) |
+| A `tried` rerun whose service's port stays taken | One `stuck` question after the stop limit; no tester and no second record until it is answered (`a_tried_rerun_restart_past_the_stop_limit_asks_stuck`) |
 | The reply to a service's `session.new` is lost | Recovery finds the session; it is on the record and the process list; nothing launches twice (`a_lost_service_reply_is_found_again_not_started_twice`) |
 
 Then, in order: `implement` with its command gate bound to a commit,

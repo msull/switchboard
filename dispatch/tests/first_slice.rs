@@ -1184,8 +1184,12 @@ fn a_note_at_inspect_sends_the_lane_back_to_implement() {
         AttemptState::Cancelled { .. }
     ));
     let prompt = last_prompt_of(&env, "implementer");
+    let previous = &t.attempts_of("implement").next().unwrap().artifacts["notes"];
     assert!(
-        prompt.ends_with("sent it back: use a set, not a vec"),
+        prompt.ends_with(&format!(
+            "sent it back: use a set, not a vec (the previous attempt's notes are at {})",
+            previous.display()
+        )),
         "{prompt}"
     );
     assert!(t.rework.is_empty(), "the note was taken");
@@ -16857,6 +16861,27 @@ fn a_second_ticket_waits_for_the_resource_without_a_question_or_a_slot_then_take
     deploying(&mut env, &b);
 }
 
+#[test]
+fn a_ticket_queued_for_the_stack_waits_through_a_tried_rerun() {
+    let (mut env, a) = back_half_env(BOTH);
+    let b = take_orchard(&mut env, 43, BOTH);
+    at_tried(&mut env, &a);
+    tried_rerun(&mut env, &a, "again");
+    for _ in 0..3 {
+        env.step();
+        assert!(env.ticket(&b).holds.is_empty(), "held through the rerun");
+    }
+    restarting(&mut env, &a, 2);
+    answering_again(&mut env, &a, 2);
+    assert!(env.ticket(&b).holds.is_empty());
+    tester_done(&mut env, &a);
+    assert!(env.ticket(&b).holds.is_empty(), "held through tried");
+    tried(&mut env, &a, "done");
+    env.steps_until(&b, "the second ticket's hold", |t, _| !t.holds.is_empty());
+    assert!(env.ticket(&a).holds.is_empty());
+    deploying(&mut env, &b);
+}
+
 // --- two runs: the implementer holds `my-dev` too, lets go for the
 // look, and the deploy takes it again.
 
@@ -18314,6 +18339,194 @@ fn services_stop_when_tried_ends_and_on_park() {
     assert_eq!(t.services[0].state, ServiceState::Stopped);
     assert_eq!(env.sb().removed_by_port, [session]);
     assert!(t.holds.is_empty());
+}
+
+/// `tried` answered `rerun` with a note.
+fn tried_rerun(env: &mut Env, id: &str, note: &str) {
+    env.steps_until(id, "the tried question", |t, _| {
+        t.pending_decisions().iter().any(|d| d.name == "tried")
+    });
+    let d = pending_named(env, id, "tried").unwrap();
+    let now = env.tick();
+    env.runner
+        .decide(id, &d.id, "rerun", Some(note), now)
+        .unwrap();
+}
+
+/// After a `tried` rerun: the frontend's record `n` made, its `before`
+/// run, and its service launched but not yet answering.
+fn restarting(env: &mut Env, id: &str, n: u32) {
+    env.repo.lock().unwrap().answering.clear();
+    env.steps_until(id, "the record made again", |t, _| {
+        t.services.iter().any(|s| s.n == n)
+    });
+    for _ in 0..6 {
+        if started(env, &before_key(id, n)) > 0 {
+            break;
+        }
+        env.step();
+    }
+    exits(env, &before_key(id, n), 0);
+    env.steps_until(id, "the service launched again", |t, _| {
+        t.services.iter().any(|s| s.n == n && s.session.is_some())
+    });
+}
+
+/// The service record `n` answers on its port and the second tester
+/// launches.
+fn answering_again(env: &mut Env, id: &str, n: u32) {
+    let port = env
+        .ticket(id)
+        .services
+        .iter()
+        .find(|s| s.n == n)
+        .and_then(|s| s.port)
+        .unwrap();
+    env.repo.lock().unwrap().answering.insert(port);
+    env.steps_until(id, "the second tester", |t, _| {
+        t.attempts_of("try").count() == 2
+    });
+}
+
+#[test]
+fn a_tried_rerun_runs_the_tester_again_with_services_restarted_and_keeps_the_hold() {
+    let (mut env, id) = back_half_env(BOTH);
+    deployed(&mut env, &id);
+    served(&mut env, &id);
+    let t = env.ticket(&id);
+    let tester = session_of(&t, "try");
+    let notes = artifact_of(&t, "try", "notes");
+    env.finish(
+        &tester,
+        &notes,
+        "\nResult: nothing could be tested\n\nThe page 500s.",
+    );
+    at_stage(&mut env, &id, "tried");
+    env.steps_until(&id, "the tried question", |t, _| {
+        t.pending_decisions().iter().any(|d| d.name == "tried")
+    });
+    let asked = pending_named(&env, &id, "tried").unwrap();
+    assert_eq!(asked.options, ["done", "rerun", "park"]);
+    assert!(
+        asked.question.contains(&format!(
+            "Notes (try): {}\n  Result: nothing could be tested",
+            notes.display()
+        )),
+        "{}",
+        asked.question
+    );
+    let first = env.ticket(&id).services[0].clone();
+    let session = first.session.clone().unwrap();
+    tried_rerun(&mut env, &id, "the page 500s; the env link was stale");
+    env.step();
+    let t = env.ticket(&id);
+    assert_eq!(stage_name(&t), "try", "{:#?}", t.decisions);
+    assert_eq!(holds(&t), ["my-dev"]);
+    restarting(&mut env, &id, 2);
+    let t = env.ticket(&id);
+    assert_eq!(holds(&t), ["my-dev"], "held through the restart");
+    assert!(env.sb().killed.contains(&session));
+    assert!(env.sb().removed_by_port.contains(&session));
+    assert_eq!(t.services[0].state, ServiceState::Stopped);
+    assert_eq!(started(&env, &before_key(&id, 2)), 1, "before ran again");
+    assert_eq!(service_launches(&env).len(), 2);
+    assert_eq!(
+        launches_of(&env, "tester"),
+        1,
+        "not before the service answers"
+    );
+    answering_again(&mut env, &id, 2);
+    let t = env.ticket(&id);
+    assert_eq!(holds(&t), ["my-dev"]);
+    assert!(
+        t.services
+            .iter()
+            .any(|s| s.n == 2 && s.state == ServiceState::Ready)
+    );
+    assert_eq!(launches_of(&env, "tester"), 2);
+    let prompt = last_prompt_of(&env, "tester");
+    assert!(
+        prompt.contains("the page 500s; the env link was stale"),
+        "{prompt}"
+    );
+    assert!(
+        prompt.contains(&format!(
+            "(the previous attempt's notes are at {})",
+            notes.display()
+        )),
+        "{prompt}"
+    );
+    assert!(notes.exists(), "attempt 1's notes stay");
+    // Nothing is deployed again.
+    let deploys: Vec<&Attempt> = t.attempts_of("deploy").collect();
+    assert_eq!(deploys.len(), 1);
+    assert_eq!(deploys[0].state, AttemptState::Complete);
+    assert!(deploys[0].head.is_some());
+    assert_eq!(started(&env, &deploy_key(&id, 2)), 0);
+    tester_done(&mut env, &id);
+    env.steps_until(&id, "a second tried question", |t, _| {
+        t.pending_decisions().iter().any(|d| d.name == "tried")
+    });
+    assert_ne!(pending_named(&env, &id, "tried").unwrap().id, asked.id);
+    let events = dispatch::events::read_since(&dispatch::events::log_path(&env.data), 0).unwrap();
+    assert!(
+        events.iter().any(|e| e.ticket == id
+            && e.kind == dispatch::events::Kind::AttemptStarted
+            && e.stage == "try"
+            && e.text.contains("#2")),
+        "{events:#?}"
+    );
+}
+
+#[test]
+fn a_tried_rerun_cut_off_by_a_runner_restart_launches_once() {
+    let (mut env, id) = back_half_env(BOTH);
+    at_tried(&mut env, &id);
+    tried_rerun(&mut env, &id, "again");
+    env.step();
+    let t = env.ticket(&id);
+    assert!(
+        t.services[0].stopping_ms.is_some(),
+        "marked for the restart: {t:#?}"
+    );
+    env.restart();
+    restarting(&mut env, &id, 2);
+    answering_again(&mut env, &id, 2);
+    for _ in 0..3 {
+        env.step();
+    }
+    assert_eq!(service_launches(&env).len(), 2, "one launch per record");
+    assert_eq!(started(&env, &before_key(&id, 2)), 1);
+    assert_eq!(launches_of(&env, "tester"), 2);
+    assert_eq!(holds(&env.ticket(&id)), ["my-dev"]);
+}
+
+#[test]
+fn a_tried_rerun_restart_past_the_stop_limit_asks_stuck() {
+    use dispatch::services::STOP_LIMIT_MS;
+    let (mut env, id) = back_half_env(BOTH);
+    at_tried(&mut env, &id);
+    env.repo.lock().unwrap().busy_ports.insert(3100);
+    tried_rerun(&mut env, &id, "again");
+    env.step();
+    env.step();
+    assert!(stuck_pending(&env, &id).is_empty(), "not before the limit");
+    env.wait(STOP_LIMIT_MS);
+    env.step();
+    let stuck = stuck_pending(&env, &id);
+    assert_eq!(stuck.len(), 1, "{:#?}", env.ticket(&id));
+    assert!(
+        stuck[0].question.contains("port 3100"),
+        "{}",
+        stuck[0].question
+    );
+    for _ in 0..3 {
+        env.step();
+    }
+    let t = env.ticket(&id);
+    assert_eq!(launches_of(&env, "tester"), 1, "no tester against it");
+    assert_eq!(t.services.len(), 1, "no second record beside it");
+    assert_eq!(holds(&t), ["my-dev"]);
 }
 
 #[test]

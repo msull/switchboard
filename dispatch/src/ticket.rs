@@ -1155,7 +1155,8 @@ pub struct ServiceRecord {
     #[serde(default)]
     pub ready_ms: Option<u64>,
     /// When a stop first found the record still to stop; the stop limit
-    /// counts from here, and a `wait` answer resets it.
+    /// counts from here, and a `wait` answer resets it. Also set by a
+    /// send-back, which restarts the service.
     #[serde(default)]
     pub stopping_ms: Option<u64>,
     /// What the stop found still alive when it asked `stuck`; a
