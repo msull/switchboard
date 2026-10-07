@@ -20,7 +20,7 @@ use switchboard::adapters::fakes::{
 };
 use switchboard::app::Services;
 use switchboard::core::{
-    Activity, AgentKind, AppAction, Approval, BUILTIN_WORKFLOW, CardLayout, Definition,
+    Activity, AgentKind, AppAction, Approval, Ask, BUILTIN_WORKFLOW, CardLayout, Definition,
     HandoffMode, Launch, Notice, PinTarget, Project, ProjectEnv, ProjectId, RecordId, ResumeHandle,
     Round, RunState, SessionKind, SessionRecord, SideTab, SpaceId, ThemeMode, Verdict, View,
     VoiceSettings, WorkflowId, WorkflowRun, Workspace, round_paths,
@@ -100,6 +100,7 @@ fn record(project: ProjectId, name: &str, kind: SessionKind, order: u32) -> Sess
         env: Vec::new(),
         env_sets: Vec::new(),
         token_hash: None,
+        asking: None,
     }
 }
 
@@ -1624,6 +1625,44 @@ fn seed_claude(harness: &mut Harness<'static, SwitchboardApp>, ids: &Seeded) -> 
     id
 }
 
+/// Mark `id` as asking the owner `message`, as `switchboard-ask` would,
+/// keeping every pane's status as it was.
+fn seed_ask(harness: &mut Harness<'static, SwitchboardApp>, id: RecordId, message: &str) {
+    let core = harness.state_mut().core_mut_for_seeding();
+    let mut workspaces = core.workspaces().to_vec();
+    let host: Vec<HostStatus> = workspaces
+        .iter()
+        .flat_map(|w| &w.sessions)
+        .filter_map(|s| core.host_status(s.id).cloned())
+        .collect();
+    workspaces
+        .iter_mut()
+        .flat_map(|w| &mut w.sessions)
+        .find(|s| s.id == id)
+        .unwrap()
+        .asking = Some(Ask {
+        message: message.into(),
+        at: SystemTime::now(),
+    });
+    core.seed(workspaces, host);
+    harness.run_steps(2);
+}
+
+/// A board card whose session asked the owner shows the question and
+/// offers to dismiss it.
+#[test]
+fn a_board_card_shows_a_sessions_question_and_dismisses_it() {
+    let (mut harness, ids) = harness();
+    let id = seed_claude(&mut harness, &ids);
+    seed_ask(&mut harness, id, "merge now or run the checks first?");
+    showing(&mut harness, View::Board(ids.beta));
+    harness.get_by_label("merge now or run the checks first?");
+    harness.state_mut().dispatched.clear();
+    click(&mut harness, "Dismiss question");
+    assert_eq!(actions(&harness), [AppAction::DismissAsk(id)]);
+    assert_eq!(harness.state().core().session(id).unwrap().asking, None);
+}
+
 fn two_turns() -> Conversation {
     let tool = TranscriptActivity {
         kind: ActivityKind::Tool,
@@ -2989,6 +3028,24 @@ fn a_rule_set_card_is_dismissed_from_its_corner() {
     );
     assert!(harness.state().core().rule_members(set).is_empty());
     harness.get_by_label("No session active in the last 24 h");
+}
+
+/// A running set card whose session asked shows the question and its
+/// own dismiss, not the rule set's.
+#[test]
+fn a_working_set_card_shows_a_sessions_question_and_dismisses_it() {
+    let (mut harness, ids) = harness();
+    let (_, id) = recent_set_of_one(&mut harness, &ids);
+    seed_ask(&mut harness, id, "merge now?");
+    harness.get_by_label("merge now?");
+    assert!(harness.query_by_label("Dismiss").is_none());
+    harness.state_mut().dispatched.clear();
+    click(&mut harness, "Dismiss question");
+    assert!(
+        actions(&harness).contains(&AppAction::DismissAsk(id)),
+        "{:?}",
+        actions(&harness)
+    );
 }
 
 #[test]
@@ -4819,6 +4876,33 @@ fn the_supervisor_chip_opens_resumes_and_freshens_after_a_confirmation() {
     assert!(harness.state().ui_state.confirm_supervisor_fresh.is_none());
 }
 
+/// A supervisor that asked the owner reads as waiting, with its
+/// question beside the chip.
+#[test]
+fn the_supervisor_chip_shows_what_the_supervisor_asked() {
+    let (mut harness, id) = supervised_page(|r| {
+        r.asking = Some(Ask {
+            message: "merge #12 now?".into(),
+            at: SystemTime::now(),
+        });
+    });
+    harness
+        .state_mut()
+        .dispatch(AppAction::HostListed(vec![HostStatus {
+            id: HostId(id.host_name()),
+            liveness: Liveness::Running {
+                pid: 9,
+                command: "claude".into(),
+            },
+            cwd: None,
+            last_activity: None,
+            title: None,
+        }]));
+    harness.run_steps(2);
+    harness.get_by_label("Supervisor · waiting on you");
+    harness.get_by_label("merge #12 now?");
+}
+
 /// Resume on a record that cannot resume would launch it fresh, with
 /// its first prompt again; only Fresh is offered.
 #[test]
@@ -5354,6 +5438,52 @@ fn dispatch_page_shows_a_tickets_agent_waiting_for_itself() {
     harness.run_steps(2);
     click(&mut harness, "Open session");
     assert!(actions(&harness).contains(&AppAction::ShowSession(session)));
+}
+
+/// A lane agent that asked the owner is listed with its question, and
+/// the question can be dismissed from its card.
+#[test]
+fn dispatch_page_shows_a_lane_agents_question_and_dismisses_it() {
+    use switchboard::ports::dispatch::AttemptView;
+    let (mut harness, ids) = harness();
+    let session = ids.agent;
+    harness
+        .state_mut()
+        .dispatch(AppAction::HostListed(vec![HostStatus {
+            id: HostId(session.host_name()),
+            liveness: Liveness::Running {
+                pid: 7,
+                command: "codex".into(),
+            },
+            cwd: None,
+            last_activity: None,
+            title: None,
+        }]));
+    let mut status = dispatch_status();
+    status.tickets[1].attempts = vec![AttemptView {
+        stage: "implement".into(),
+        n: 1,
+        context: "repo".into(),
+        kind: "agent".into(),
+        state: "running".into(),
+        session: Some(session.0.to_string()),
+        ..AttemptView::default()
+    }];
+    harness
+        .state_mut()
+        .dispatch(AppAction::DispatchStatus(Some(status)));
+    seed_ask(
+        &mut harness,
+        session,
+        "which schema should the migration use?",
+    );
+    harness.state_mut().dispatched.clear();
+    click(&mut harness, "Dispatch");
+    harness.get_by_label("implement (repo) agent");
+    harness.get_by_label("which schema should the migration use?");
+    click(&mut harness, "Dismiss question");
+    assert!(actions(&harness).contains(&AppAction::DismissAsk(session)));
+    assert!(harness.query_by_label("implement (repo) agent").is_none());
 }
 
 /// The worktree root is shown, and a typed path goes to the port with

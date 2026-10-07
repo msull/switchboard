@@ -9,7 +9,7 @@ use egui::{RichText, Sense, Ui, vec2};
 
 use super::{DrawCtx, theme};
 use crate::core::{
-    AppAction, Approval, CardState, PinTarget, ProjectId, SessionKind, SessionRecord,
+    AppAction, Approval, CardState, PinTarget, ProjectId, RecordId, SessionKind, SessionRecord,
 };
 use crate::ports::transcript::Conversation;
 
@@ -342,8 +342,26 @@ pub(super) fn actions(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord,
                 super::runs::actions(cx, ui, record, running);
             }
         }
+        dismiss_ask(cx, ui, record.id);
     });
 }
+
+/// "Dismiss question" for a session that asked the owner something.
+/// The question shows only while the pane runs, so its dismiss does too.
+pub(super) fn dismiss_ask(cx: &mut DrawCtx<'_>, ui: &mut Ui, id: RecordId) {
+    let asking = cx.core.is_running(id) && cx.core.session(id).is_some_and(|s| s.asking.is_some());
+    if asking
+        && theme::ghost_muted(ui, DISMISS_ASK)
+            .on_hover_text("Clear the session's question; the session is not told")
+            .clicked()
+    {
+        cx.dispatch(AppAction::DismissAsk(id));
+    }
+}
+
+/// The label of the button that clears a session's own question; not
+/// "Dismiss", which takes a card off a rule set.
+pub(super) const DISMISS_ASK: &str = "Dismiss question";
 
 /// A live defined entry would come back on the next read, so Remove is
 /// for the user's own records and orphans only.

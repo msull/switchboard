@@ -272,6 +272,9 @@ pub enum AppAction {
         paths: Vec<PathBuf>,
     },
     SetSessionNotes(RecordId, String),
+    /// The owner clears a session's own question without answering it;
+    /// the session is not told.
+    DismissAsk(RecordId),
     SetAutostart(RecordId, bool),
     MoveCard {
         id: RecordId,
@@ -1061,6 +1064,7 @@ impl AppCore {
             | AppAction::ArtifactsFound { .. }
             | AppAction::RenameSession(..)
             | AppAction::SetSessionNotes(..)
+            | AppAction::DismissAsk(_)
             | AppAction::SetAutostart(..)
             | AppAction::MoveCard { .. }
             | AppAction::ReturnToSession(_)
@@ -1137,6 +1141,9 @@ impl AppCore {
             }
             AppAction::SetSessionNotes(id, notes) => {
                 self.edit_session(id, out, |s| s.notes = notes);
+            }
+            AppAction::DismissAsk(id) => {
+                self.edit_session(id, out, |s| s.asking = None);
             }
             AppAction::SetAutostart(id, on) => {
                 self.edit_session(id, out, |s| s.autostart = on);
@@ -1625,6 +1632,15 @@ impl AppCore {
     pub(crate) fn seed_waiting_on(&mut self, id: RecordId, reason: Option<String>) {
         if let Some(s) = self.session_mut(id) {
             s.waiting_on = reason;
+        }
+    }
+
+    /// Set a record's own ask directly. Tests only; a session sets it
+    /// through `session.ask` with its token.
+    #[cfg(test)]
+    pub(crate) fn seed_asking(&mut self, id: RecordId, ask: Option<super::Ask>) {
+        if let Some(s) = self.session_mut(id) {
+            s.asking = ask;
         }
     }
 
@@ -2501,6 +2517,7 @@ impl AppCore {
             return false;
         };
         let only_dispatch = record.waiting_on.is_some()
+            && record.asking.is_none()
             && record.activity != Activity::WaitingOnYou
             && !self.prompted.contains(&id);
         !(only_dispatch && self.dispatch.seen)
@@ -2690,6 +2707,8 @@ impl AppCore {
                 Activity::WaitingOnYou => CardState::WaitingOnYou,
                 // An outside process (Dispatch) says a decision waits here.
                 _ if record.waiting_on.is_some() => CardState::WaitingOnYou,
+                // The session asked the owner with `switchboard-ask`.
+                _ if record.asking.is_some() => CardState::WaitingOnYou,
                 // Claude's own trust question, before any hook can say so.
                 _ if self.prompted.contains(&id) => CardState::WaitingOnYou,
                 // A review's agent gone quiet mid-round is most likely

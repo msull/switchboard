@@ -341,16 +341,16 @@ pub fn migrate(value: serde_json::Value) -> Result<Workspace, String> {
         .and_then(serde_json::Value::as_u64)
         .ok_or_else(|| "missing schema_version".to_string())?;
     match version {
-        // v2 to v13 added optional fields and variants only (v8: the
+        // v2 to v14 added optional fields and variants only (v8: the
         // project's space; v9: the control port's operation id, the
         // outside waiting reason, the pending-launch mark and the last
         // stop time; v10: a session's launcher environment; v11: when a
         // round's agents were asked, and a failed run; v12: a project's
         // and a session's environment sets, and a session's launch-token
-        // hash; v13: whether a round is the owner's objection), so an
-        // older document reads with their defaults; it is written back
-        // at the current version.
-        1..=13 => serde_json::from_value(value)
+        // hash; v13: whether a round is the owner's objection; v14: a
+        // session's own ask), so an older document reads with their
+        // defaults; it is written back at the current version.
+        1..=14 => serde_json::from_value(value)
             .map(|mut w: Workspace| {
                 w.schema_version = SCHEMA_VERSION;
                 w
@@ -501,6 +501,7 @@ mod tests {
             env: Vec::new(),
             env_sets: Vec::new(),
             token_hash: None,
+            asking: None,
         };
         let mut agent = session(
             "claude",
@@ -1161,5 +1162,18 @@ mod tests {
                 .iter()
                 .all(|s| s.env_sets.is_empty() && s.token_hash.is_none())
         );
+    }
+
+    #[test]
+    fn v13_records_read_with_no_ask() {
+        let mut w = workspace("v13");
+        w.schema_version = 13;
+        let mut value = serde_json::to_value(&w).unwrap();
+        for s in value["sessions"].as_array_mut().unwrap() {
+            assert!(s.as_object_mut().unwrap().remove("asking").is_some());
+        }
+        let loaded = migrate(value).unwrap();
+        assert_eq!(loaded.schema_version, SCHEMA_VERSION);
+        assert!(loaded.sessions.iter().all(|s| s.asking.is_none()));
     }
 }

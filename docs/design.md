@@ -242,6 +242,8 @@ never run anything on its own.
   holder of a record's launch token (`SWITCHBOARD_RECORD_TOKEN`, new at
   every spawn, its SHA-256 on the record), so a session resolves only
   its own grants; the token is as private as the pane's environment.
+  The same token gates `session.ask`, which marks only its holder's own
+  record as asking the owner something.
   The writes (`env.set.upsert`, `env.secret.store`, `env.grant`) are
   accepted only inside a five-minute setup window the owner opens from
   the app's settings menu, so an agent cannot grant itself a set. What a
@@ -1518,11 +1520,14 @@ reports), as interrupted. A `Stop` hook event now records
 `last_stop_at`, and `session.waiting` sets an outside reason on a
 record that makes its card read as waiting on you while the pane runs,
 so the badge and the rail count Dispatch's pending decisions without
-knowing about them. A run's `paused` state carries `failed: true` when
-its agent let the round down (the core's `Failed`) rather than a
-user's Pause; the flag is omitted when false and read with a default,
-so either side may be older. Dispatch fails the review attempt on it.
-Only the instance holding the store lock listens.
+knowing about them. `session.ask`, sent by `switchboard-ask` with the
+pane's launch token, sets the session's own question beside it in a
+field Dispatch's `session.waiting` never touches. A run's `paused`
+state carries `failed: true` when its agent let the round down (the
+core's `Failed`) rather than a user's Pause; the flag is omitted when
+false and read with a default, so either side may be older. Dispatch
+fails the review attempt on it. Only the instance holding the store
+lock listens.
 An agent record whose `launch` is `Argv` adds those flags to the
 composed command line, ahead of the first prompt (with `--` between,
 since Claude Code's multi-value flags would otherwise read the prompt
@@ -2479,6 +2484,52 @@ Known gaps:
 - An older app drops `env_sets` from `session.new` silently.
 - An aws-vault prompt cannot be answered from an agent's Bash tool.
 - Scrollback holds whatever a child prints.
+
+## Asking the owner (2026-10-07)
+
+A session can say it waits on the owner without a hook to say so: an
+agent that ends its turn on a question, or a supervisor with a call to
+make. `switchboard-ask "<one line>"` sends `session.ask { session,
+token, message }`; `switchboard-ask --clear` sends it with no message.
+Schema v14.
+
+- **The record.** `SessionRecord.asking: Option<Ask>` (the message, cut
+  to its first line and `ASK_MAX_CHARS`, and when the app took it),
+  separate from `waiting_on`, which Dispatch sets and clears after every
+  answer, so neither clears the other. The token is checked in the core
+  against `token_hash`, as `env.resolve` checks it; a blank message is
+  refused rather than read as a clear.
+- **Showing it.** While the pane runs, an ask makes the card read as
+  waiting on you and counts toward the Dock badge, the rail and the hand
+  controller even after a Dispatch status has arrived (it is not
+  Dispatch's decision). The message is the waiting reason on the board
+  card, the working-set card (which now reads `waiting_reason` like the
+  board), a lane agent's card on the Dispatch page, the port's
+  `SessionView.waiting_reason`, and beside the supervisor chip.
+- **Clearing it.** The record's next `UserPromptSubmit` event later than
+  the ask (a prompt from the turn that asked does not count), the
+  cards' "Dismiss question" (`DismissAsk`, the session is not told), the
+  session's own `--clear`, or any new spawn of the record.
+- **The supervisor.** Its seed gains one line telling it to run
+  `<abs>/switchboard-ask` before it stops on something the owner must
+  answer, and its launch flags an allow rule
+  `Bash(<abs>/switchboard-ask:*)`, both only when the binary sits
+  beside `dispatch`. The line is in `seed_hash`, so a running supervisor
+  reads "seed changed" until a Fresh.
+
+Known gaps:
+
+- Spike 14 check (f), whether the supervisor's allow rule runs
+  `switchboard-ask` without a permission prompt, has not been run; the
+  spike README has the command. A prompt would be answered once per
+  supervisor. When `<abs>` holds a space the seed names the binary
+  single-quoted while the rule names it bare, so if Claude Code matches
+  the rule against the command as typed, that path may prompt even
+  after (f) passes; (f) runs an unspaced path only.
+- A supervisor started before this asks nothing until a Fresh picks up
+  the new seed.
+- Lane agents are not told about `switchboard-ask`; their prompts come
+  from the pipeline.
 
 ## Open questions
 

@@ -26,6 +26,12 @@ path = "src/bin/switchboard-hook.rs"
 name = "switchboard-env"
 path = "src/bin/switchboard-env.rs"
 
+# A session's own question to the owner, marked on its record over the
+# control port; std and the wire crate only.
+[[bin]]
+name = "switchboard-ask"
+path = "src/bin/switchboard-ask.rs"
+
 [dependencies]
 anyhow = "1"
 chrono = "0.4"

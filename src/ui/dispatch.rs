@@ -214,7 +214,18 @@ fn supervisor_chip(cx: &mut DrawCtx<'_>, ui: &mut Ui, project: &ProjectView) {
     if view.fresh_pending {
         words.push_str(" · starting");
     }
-    ui.label(theme::meta_text(ui, words));
+    let label = ui.label(theme::meta_text(ui, words));
+    if let Some(reason) = &chip.reason {
+        label.on_hover_text(reason);
+        ui.add(
+            egui::Label::new(
+                RichText::new(reason)
+                    .text_style(theme::meta())
+                    .color(p.accent_2_text),
+            )
+            .truncate(),
+        );
+    }
     if let Some(e) = &view.error {
         ui.label(
             RichText::new(e)
@@ -683,6 +694,7 @@ fn agent_card(cx: &mut DrawCtx<'_>, ui: &mut Ui, a: &WaitingAgent, ticket: Optio
                 {
                     cx.dispatch(AppAction::ShowSession(a.session));
                 }
+                super::cards::dismiss_ask(cx, ui, a.session);
             });
         });
 }

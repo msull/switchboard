@@ -84,6 +84,7 @@ fn record(project: ProjectId, kind: SessionKind, order: u32) -> SessionRecord {
         env: Vec::new(),
         env_sets: Vec::new(),
         token_hash: None,
+        asking: None,
     }
 }
 
@@ -8051,6 +8052,61 @@ mod dispatch_page {
         assert_eq!(core.waiting_count(), 2);
     }
 
+    #[test]
+    fn a_session_that_asks_waits_on_the_owner_until_their_next_prompt() {
+        use crate::core::{ControlAction, token_hash};
+        let p = project("p");
+        let mut w = Workspace::new(p.clone());
+        let mut r = record(p.id, agent(), 0);
+        r.token_hash = Some(token_hash("t"));
+        // Dispatch's mark alone does not count once its status is seen,
+        // so the ask is what makes the session count below.
+        r.waiting_on = Some("finalize?".into());
+        let id = r.id;
+        w.sessions.push(r);
+        let (mut core, _) = loaded(vec![w], vec![]);
+        core.dispatch(AppAction::HostListed(vec![running(id)]), Clock::at(1));
+        core.dispatch(AppAction::DispatchStatus(Some(status(None))), Clock::at(2));
+        assert!(!core.counts_as_waiting(id));
+        let before = core.waiting_count();
+        let e = core.dispatch(
+            AppAction::Control {
+                op: "a".into(),
+                action: ControlAction::Ask {
+                    id,
+                    token: "t".into(),
+                    message: Some("merge now or run the checks first?".into()),
+                },
+            },
+            Clock::at(5_000),
+        );
+        assert_eq!(saves(&e), 1);
+        assert_eq!(core.take_control_outcome("a").unwrap().error, None);
+        assert_eq!(core.card_state(id), CardState::WaitingOnYou);
+        assert_eq!(
+            core.waiting_reason(id).as_deref(),
+            Some("merge now or run the checks first?")
+        );
+        assert!(
+            core.counts_as_waiting(id),
+            "an ask is the owner's, not Dispatch's"
+        );
+        assert_eq!(core.waiting_count(), before + 1);
+        let prompt = |at| {
+            AppAction::Events(vec![SessionEvent {
+                record_id: Some(id),
+                ..event(EventKind::PromptSubmitted, at)
+            }])
+        };
+        core.dispatch(prompt(5_000), Clock::at(5_100));
+        assert!(
+            core.session(id).unwrap().asking.is_some(),
+            "the prompt that started the asking turn does not answer it"
+        );
+        core.dispatch(prompt(9_000), Clock::at(9_100));
+        assert_eq!(core.session(id).unwrap().asking, None);
+    }
+
     /// The plan tab's feedback block, and the card's Revise…, apply to a
     /// pending `finalize` that offers `revise` on a stage reviewing the
     /// plan, and to nothing else.
@@ -9271,5 +9327,200 @@ mod env_sets {
             .unwrap();
         assert_eq!(clone.env_sets, ["dev"]);
         assert_eq!(clone.token_hash, None);
+    }
+}
+
+mod asking {
+    use super::*;
+    use crate::core::control::ask_message;
+    use crate::core::{ASK_MAX_CHARS, Ask, ControlAction, token_hash};
+
+    fn control(core: &mut AppCore, op: &str, action: ControlAction, at: u64) -> Vec<Effect> {
+        core.dispatch(
+            AppAction::Control {
+                op: op.into(),
+                action,
+            },
+            Clock::at(at),
+        )
+    }
+
+    fn ask(id: RecordId, token: &str, message: Option<&str>) -> ControlAction {
+        ControlAction::Ask {
+            id,
+            token: token.into(),
+            message: message.map(str::to_owned),
+        }
+    }
+
+    /// A running agent whose latest spawn was given the token "t".
+    fn with_token() -> (AppCore, RecordId) {
+        let p = project("p");
+        let mut w = Workspace::new(p.clone());
+        let mut r = record(p.id, agent(), 0);
+        r.token_hash = Some(token_hash("t"));
+        let id = r.id;
+        w.sessions.push(r);
+        let (mut core, _) = loaded(vec![w], vec![]);
+        core.dispatch(AppAction::HostListed(vec![running(id)]), Clock::at(1));
+        (core, id)
+    }
+
+    fn an_ask() -> Ask {
+        Ask {
+            message: "merge?".into(),
+            at: Clock::at(1).wall,
+        }
+    }
+
+    #[test]
+    fn dispatch_waiting_off_leaves_a_sessions_own_ask() {
+        let (mut core, id) = with_token();
+        control(&mut core, "a", ask(id, "t", Some("merge?")), 2);
+        control(
+            &mut core,
+            "w",
+            ControlAction::SetWaiting {
+                id,
+                reason: Some("finalize?".into()),
+            },
+            3,
+        );
+        control(
+            &mut core,
+            "off",
+            ControlAction::SetWaiting { id, reason: None },
+            4,
+        );
+        let s = core.session(id).unwrap();
+        assert_eq!(
+            s.asking.as_ref().map(|a| a.message.as_str()),
+            Some("merge?")
+        );
+        control(
+            &mut core,
+            "w2",
+            ControlAction::SetWaiting {
+                id,
+                reason: Some("finalize?".into()),
+            },
+            5,
+        );
+        control(&mut core, "clear", ask(id, "t", None), 6);
+        let s = core.session(id).unwrap();
+        assert_eq!(s.asking, None);
+        assert_eq!(s.waiting_on.as_deref(), Some("finalize?"));
+    }
+
+    #[test]
+    fn an_ask_with_a_wrong_or_missing_token_is_refused() {
+        let (mut core, id) = with_token();
+        let before = core.session(id).unwrap().clone();
+        let cases = [
+            ("wrong", ask(id, "nope", Some("x")), "token does not match"),
+            ("empty", ask(id, "", Some("x")), "token does not match"),
+            ("blank", ask(id, "t", Some(" \n")), "an ask needs a message"),
+            (
+                "unknown",
+                ask(RecordId::new(), "t", Some("x")),
+                "no such session",
+            ),
+        ];
+        for (op, action, why) in cases {
+            let e = control(&mut core, op, action, 2);
+            assert_eq!(saves(&e), 0, "{op}");
+            assert_eq!(
+                core.take_control_outcome(op).unwrap().error.as_deref(),
+                Some(why),
+                "{op}"
+            );
+        }
+        assert_eq!(core.session(id).unwrap(), &before);
+        // A record from before tokens cannot be asked for at all.
+        let p = project("old");
+        let mut w = Workspace::new(p.clone());
+        let r = record(p.id, agent(), 0);
+        let old = r.id;
+        w.sessions.push(r);
+        let (mut core, _) = loaded(vec![w], vec![]);
+        let e = control(&mut core, "old", ask(old, "t", Some("x")), 2);
+        assert_eq!(saves(&e), 0);
+        assert_eq!(
+            core.take_control_outcome("old").unwrap().error.as_deref(),
+            Some("this session was launched before tokens; restart it")
+        );
+        assert_eq!(core.session(old).unwrap().asking, None);
+    }
+
+    #[test]
+    fn an_ask_clears_on_dismiss_and_on_a_new_spawn() {
+        let (mut core, id) = with_token();
+        core.seed_asking(id, Some(an_ask()));
+        let e = core.dispatch(AppAction::DismissAsk(id), Clock::at(2));
+        assert_eq!(saves(&e), 1);
+        assert_eq!(core.session(id).unwrap().asking, None);
+        assert_ne!(core.card_state(id), CardState::WaitingOnYou);
+
+        let (mut core, pid, _) = with_records(&[], |_| None);
+        let (id, _) = new_session(&mut core, pid, agent(), Launch::Argv(vec![]));
+        core.seed_asking(id, Some(an_ask()));
+        launch_agent(&mut core, id, Some(claude_handle()));
+        assert_eq!(
+            core.session(id).unwrap().asking,
+            None,
+            "a new process has asked nothing"
+        );
+    }
+
+    #[test]
+    fn a_clone_starts_with_no_ask() {
+        let (mut core, id) = resumable_agent();
+        core.seed_asking(id, Some(an_ask()));
+        core.dispatch(
+            AppAction::CloneSession {
+                id,
+                before: 1,
+                prompt: "p".into(),
+            },
+            Clock::at(1),
+        );
+        core.dispatch(
+            AppAction::TranscriptCloned {
+                source: id,
+                prompt: "p".into(),
+                result: Ok(ResumeHandle::ClaudeCode {
+                    session_id: Uuid::new_v4(),
+                    transcript: Some(PathBuf::from("/tmp/forked.jsonl")),
+                }),
+            },
+            Clock::at(2),
+        );
+        let project = core.session(id).unwrap().project;
+        let clone = core
+            .workspace(project)
+            .unwrap()
+            .sessions
+            .iter()
+            .find(|s| s.id != id)
+            .unwrap();
+        assert_eq!(clone.asking, None);
+    }
+
+    #[test]
+    fn ask_message_keeps_one_capped_line() {
+        assert_eq!(
+            ask_message("  merge now?  \nmore detail").as_deref(),
+            Some("merge now?")
+        );
+        let long = "é".repeat(ASK_MAX_CHARS + 10);
+        let kept = ask_message(&long).unwrap();
+        assert_eq!(kept.chars().count(), ASK_MAX_CHARS + 1);
+        assert!(kept.ends_with('…'));
+        assert_eq!(
+            ask_message(&"a".repeat(ASK_MAX_CHARS)).unwrap().len(),
+            ASK_MAX_CHARS
+        );
+        assert_eq!(ask_message("   "), None);
+        assert_eq!(ask_message(""), None);
     }
 }

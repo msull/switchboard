@@ -76,3 +76,30 @@ fallback in the plan comes back (`OperatorKind::env_flags` with one
 `--allowedTools Bash(<abs>/switchboard-env exec:*)` rule, an additive
 `SessionClone.args`, and a trust-text line); design.md's "Environment
 sets" status section lists this as open until then.
+
+## (f) The supervisor's `switchboard-ask` rule: not run
+
+Whether Claude Code with the supervisor's allow rule for
+`switchboard-ask` runs it without a permission prompt. The owner runs it
+once, in a throwaway directory under `$HOME/code_repos` on a test
+socket, with `<abs>` the directory holding the built binary:
+
+```sh
+S=switchboard-test-spike14-$$
+D=$HOME/code_repos/spike14 && mkdir -p $D && cd $D
+tmux -L $S new-session -d -s f -c $D \
+  -e SWITCHBOARD_RECORD_ID=x -e SWITCHBOARD_RECORD_TOKEN=y \
+  "claude --model haiku --allowedTools 'Bash(<abs>/switchboard-ask:*)' \
+   'Run <abs>/switchboard-ask \"merge now or run the checks first? #1\" and say what it printed.'"
+sleep 30; tmux -L $S capture-pane -p -t f | tail -20
+tmux -L $S kill-server
+```
+
+With no app listening the binary prints "Switchboard is not running"
+and exits 1, which is enough: the question is only whether the Bash
+call is asked about. If the pane shows a permission question, the owner
+answers it once per supervisor; nothing else depends on it. Under a
+`<abs>` with a space the seed tells the supervisor to type the path
+single-quoted while the rule stays bare; repeat the run from such a
+directory, prompt quoted the same way, to see whether that form still
+matches.

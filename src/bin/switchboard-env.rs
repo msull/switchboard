@@ -17,13 +17,11 @@
 
 use std::io::{BufRead, IsTerminal, Write};
 use std::os::unix::process::CommandExt;
-use std::path::PathBuf;
 use std::process::{Command, ExitCode, Stdio};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use switchboard_control::{
-    AwsMethod, Body, Client, EnvVarView, RECORD_ID_ENV, RECORD_TOKEN_ENV, Reply, Request,
-    SOCKET_FILE,
+    AwsMethod, Body, Client, EnvVarView, RECORD_TOKEN_ENV, Reply, Request, SOCKET_FILE,
+    credentials, data_dir, op_id,
 };
 
 /// What a child must not inherit when a set gives AWS credentials: the
@@ -162,14 +160,6 @@ fn run(args: &[String]) -> Result<(), Stop> {
     }
 }
 
-fn data_dir() -> PathBuf {
-    if let Some(dir) = std::env::var_os("SWITCHBOARD_DATA_DIR") {
-        return PathBuf::from(dir);
-    }
-    let home = std::env::var_os("HOME").map_or_else(|| PathBuf::from("/"), PathBuf::from);
-    home.join("Library/Application Support/Switchboard")
-}
-
 /// One request, one reply. A missing or refusing socket means the app is
 /// not running, which is the one thing worth saying about it.
 fn call(body: Body) -> Result<Reply, Stop> {
@@ -177,27 +167,8 @@ fn call(body: Body) -> Result<Reply, Stop> {
     let mut client =
         Client::connect(&path).map_err(|_| Stop::Failed("Switchboard is not running".into()))?;
     client
-        .call(&Request::new(op_id(), body))
+        .call(&Request::new(op_id("switchboard-env"), body))
         .map_err(|e| Stop::Failed(format!("control port: {e}")))
-}
-
-/// A command's operation id: unique enough without a crate for it.
-fn op_id() -> String {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| d.as_nanos());
-    format!("switchboard-env-{}-{nanos}", std::process::id())
-}
-
-/// The record id and launch token this pane was given.
-fn credentials() -> Result<(String, String), Stop> {
-    let get = |name: &str| std::env::var(name).ok().filter(|v| !v.is_empty());
-    match (get(RECORD_ID_ENV), get(RECORD_TOKEN_ENV)) {
-        (Some(id), Some(token)) => Ok((id, token)),
-        _ => Err(Stop::Usage(format!(
-            "{RECORD_ID_ENV} and {RECORD_TOKEN_ENV} are not set: run this inside a Switchboard session"
-        ))),
-    }
 }
 
 /// The fields of an `env` reply.
@@ -209,7 +180,7 @@ struct Resolved {
 
 /// What the session's sets resolve to now, or the reason they do not.
 fn resolve() -> Result<Resolved, Stop> {
-    let (session, token) = credentials()?;
+    let (session, token) = credentials().map_err(Stop::Usage)?;
     match call(Body::EnvResolve { session, token })? {
         Reply::Env {
             pairs,
