@@ -14,6 +14,7 @@
 //! cargo test --locked --test gate -- --ignored claude_sessions_map_to_their_cards --nocapture
 //! cargo test --locked --test gate -- --ignored hook_events_while_down_apply_in_order --nocapture
 //! cargo test --locked --test gate -- --ignored codex_launches_bind_distinct_ids --nocapture
+//! cargo test --locked --test gate -- --ignored multi_paragraph_send_submits_once --nocapture
 //! ```
 //!
 //! Interactive `claude` shows a trust dialog for a directory it has not
@@ -1195,6 +1196,110 @@ fn hook_events_while_down_apply_in_order() {
         gate.events_offset(),
         fs::metadata(gate.events_log()).unwrap().len()
     );
+
+    app.dispatch(AppAction::KillSession(id));
+    wait_until(&mut app, "pane gone", Duration::from_secs(5), QUICK, |_| {
+        gate.list().is_empty()
+    });
+}
+
+// ---- not a gate item: a multi-paragraph send ----
+
+/// The text of the first user message in a Claude transcript.
+fn first_user_message(transcript: &Path) -> String {
+    let body = fs::read_to_string(transcript).unwrap();
+    for line in body.lines() {
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        if v["type"] != "user" {
+            continue;
+        }
+        let content = &v["message"]["content"];
+        if let Some(text) = content.as_str() {
+            return text.to_owned();
+        }
+        if let Some(parts) = content.as_array() {
+            return parts
+                .iter()
+                .filter_map(|p| p["text"].as_str())
+                .collect::<Vec<_>>()
+                .join("");
+        }
+    }
+    panic!("no user message in {}", transcript.display());
+}
+
+/// Proves: a three-paragraph prompt sent through `ProcessHost::write_line`
+/// reaches interactive Claude Code as one message, submitted once: one
+/// `PromptSubmitted`, and the transcript's first user message holds all
+/// three paragraphs with their blank lines (inside the `<pasted_content>`
+/// tags Claude Code puts around any paste).
+#[test]
+#[ignore = "runs one real claude session; a fraction of a cent"]
+fn multi_paragraph_send_submits_once() {
+    let Some(gate) = Gate::new() else { return };
+    cheap_claude_settings(&gate.data_dir);
+    let root = TrustedRoot::new();
+    let mut reader = HookLog::new(&gate.data_dir);
+    let mut app = gate.started();
+    let project = add_project(&mut app, &root.0);
+    let id = new_session(
+        &mut app,
+        project,
+        "gate",
+        SessionKind::Agent(AgentKind::ClaudeCode),
+        &root.0,
+    );
+    let mut seen = Vec::new();
+    wait_until(
+        &mut app,
+        "SessionStart",
+        Duration::from_secs(60),
+        SLOW,
+        |_| {
+            seen.extend(reader.poll());
+            has_event(&seen, id, |k| *k == EventKind::SessionStart)
+        },
+    );
+    // The prompt box draws a moment after the hook fires.
+    std::thread::sleep(Duration::from_secs(2));
+    let prompt = [
+        "This message has three paragraphs.",
+        "The word is marmalade.",
+        "Reply with the word in the second paragraph, then stop.",
+    ]
+    .join("\n\n");
+    gate.host
+        .write_line(&HostId(id.host_name()), &prompt)
+        .unwrap();
+    wait_until(&mut app, "Stop", Duration::from_secs(90), SLOW, |_| {
+        seen.extend(reader.poll());
+        has_event(&seen, id, |k| matches!(k, EventKind::Stopped { .. }))
+    });
+    println!("pane:\n{}", gate.snapshot(id));
+    let submits = |seen: &[SessionEvent]| {
+        seen.iter()
+            .filter(|e| e.record_id == Some(id) && e.kind == EventKind::PromptSubmitted)
+            .count()
+    };
+    assert_eq!(submits(&seen), 1, "the prompt was submitted once");
+    // A second submit would land its own hook event a moment later.
+    hold(&mut app, "a second submit", Duration::from_secs(1), |_| {
+        seen.extend(reader.poll());
+        submits(&seen) > 1
+    });
+
+    let resume = app.core().session(id).unwrap().resume.clone();
+    let transcript = Agents::detect(&gate.data_dir)
+        .transcript_path(&resume.expect("a Claude handle"))
+        .expect("a transcript path");
+    let sent = first_user_message(&transcript);
+    println!("first user message: {sent:?}");
+    // Claude Code records a bracketed paste inside `<pasted_content>`
+    // tags, as it does when the owner pastes; what matters is that the
+    // whole text is in the one message.
+    assert!(sent.contains(&prompt), "{sent:?}");
 
     app.dispatch(AppAction::KillSession(id));
     wait_until(&mut app, "pane gone", Duration::from_secs(5), QUICK, |_| {

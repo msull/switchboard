@@ -57,10 +57,13 @@ pub trait ProcessHost: Send + Sync {
     fn snapshot(&self, id: &HostId, lines: Option<usize>) -> std::io::Result<String>;
     /// Raw bytes to the process (keystrokes).
     fn write(&self, id: &HostId, bytes: &[u8]) -> std::io::Result<()>;
-    /// `text` then Enter, as a user typing it. Enter must follow as a
-    /// separate write after a pause (a newline in the same chunk reads as
-    /// a pasted line break to a TUI), and that pause must not stall the
-    /// caller: the host reports only whether the text went out.
+    /// `text` then Enter. Text on one line goes as typed keys. Text with
+    /// a line break goes as one paste, bracketed when the process asked
+    /// for bracketed paste, so a blank line inside it does not submit the
+    /// part before. Enter must follow as a separate write after a pause
+    /// (a newline in the same chunk reads as a pasted line break to a
+    /// TUI), and that pause must not stall the caller: the host reports
+    /// only whether the text went out.
     fn write_line(&self, id: &HostId, text: &str) -> std::io::Result<()>;
     fn kill(&self, id: &HostId) -> std::io::Result<()>;
     /// The argv an external terminal runs to attach to this session.
