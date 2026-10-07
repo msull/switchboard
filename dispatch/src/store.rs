@@ -23,7 +23,7 @@ use crate::ticket::{ProjectState, Ticket};
 /// carried a version reads as 0 and is brought up by `migrate`. A
 /// record above it was written by a newer `dispatch` and is refused
 /// both ways, so this build never drops fields it does not know.
-pub const RECORD_VERSION: u32 = 21;
+pub const RECORD_VERSION: u32 = 22;
 
 /// A lock file held while this lives: the writer lock, the runner's
 /// claim, or a ticket's close.
@@ -562,6 +562,13 @@ pub fn migrate(mut value: Value) -> Value {
         // its next write must refuse the record, or the next deploy of a
         // lane's base after the worktree root moved would build a second
         // tree and leave the first registered in the clones.
+        //
+        // 21 to 22: a pull request record gains `merge_commit` and an
+        // attempt `waits`, both absent from their serde defaults. Nothing
+        // is transformed. A build that would drop them on its next write
+        // must refuse the record, or a lane's wait would be logged again,
+        // a released merge question asked again, and a merged lane's
+        // commit lost.
         if version == 1 {
             settle_from_verdicts(&mut value);
         }
@@ -1185,6 +1192,44 @@ mod tests {
     }
 
     #[test]
+    fn a_version_twenty_one_record_migrates_with_no_merge_commit_or_wait() {
+        let pr = r#"{"provider": "github", "repo": "o/p", "number": 7, "url": "u", "head": "abc", "checks": "merged", "checked_ms": 1000}"#;
+        let attempt = format!(
+            r#"{{"stage": "merge", "n": 1, "context": "docs", "kind": "gate-only", "state": "running", "project": null, "session": null, "run": null, "artifacts": {{}}, "settle": {{}}, "stop_at_ms": null, "head": null, "pr": {pr}, "started_ms": 1000, "ended_ms": null}}"#
+        );
+        let text = TICKET_V0
+            .replacen('{', "{\n  \"version\": 21,", 1)
+            .replacen(
+                r#""attempts": [],"#,
+                &format!(r#""attempts": [{attempt}],"#),
+                1,
+            );
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.json");
+        fs::write(&path, text).unwrap();
+        let mut t = read_ticket(&path).unwrap();
+        assert_eq!(t.version, RECORD_VERSION);
+        assert_eq!(t.attempts[0].waits, None);
+        assert_eq!(t.attempts[0].pr.as_ref().unwrap().merge_commit, None);
+        t.attempts[0].pr.as_mut().unwrap().merge_commit = Some("feed1234".into());
+        t.attempts[0].waits = Some(crate::ticket::MergeWait {
+            lane: "repo".into(),
+            until: crate::ticket::WaitUntil::Deploy,
+            step: None,
+            commit: Some("feed1234".into()),
+            run: Some("pending".into()),
+            since_ms: 2_000,
+            released: None,
+        });
+        write_ticket(&path, &t).unwrap();
+        let written: Value = read_json(&path).unwrap();
+        assert_eq!(written["version"], RECORD_VERSION);
+        assert_eq!(written["attempts"][0]["waits"]["until"], "deploy");
+        assert_eq!(written["attempts"][0]["pr"]["merge_commit"], "feed1234");
+        assert_eq!(read_ticket(&path).unwrap(), t);
+    }
+
+    #[test]
     fn a_version_nineteen_record_migrates_with_no_tree_refreshed() {
         let entry =
             r#"{"stage": "plan", "at_ms": 1000, "heads": {"root": "base0000"}, "lanes": {}}"#;
@@ -1563,6 +1608,7 @@ mod tests {
             checks: "pending".into(),
             checked_ms: 5,
             error_since_ms: None,
+            merge_commit: None,
         });
         a.rounds.push(ReviewRound {
             n: 1,

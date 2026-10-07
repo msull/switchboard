@@ -346,8 +346,76 @@ pub struct Attempt {
     /// sent and popped when Switchboard refuses it.
     #[serde(default)]
     pub revisions: Vec<Revision>,
+    /// A merge watch's hold behind another lane's merge (`merge_after`),
+    /// and once released, how its question was asked.
+    #[serde(default)]
+    pub waits: Option<MergeWait>,
     pub started_ms: u64,
     pub ended_ms: Option<u64>,
+}
+
+/// A lane's merge question held until another lane merges and, when
+/// the pipeline says so, that merge's base pipeline passes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MergeWait {
+    /// The lane waited on.
+    pub lane: String,
+    pub until: WaitUntil,
+    /// The step named, for `Deploy`; `None` is the whole run.
+    #[serde(default)]
+    pub step: Option<String>,
+    /// The lane's merge commit, once merged.
+    #[serde(default)]
+    pub commit: Option<String>,
+    /// The base run as a checks word: `pending`, `none`, `error: <why>`.
+    #[serde(default)]
+    pub run: Option<String>,
+    /// When this wait, for this lane and `until`, began.
+    pub since_ms: u64,
+    /// Set once the hold ends: how the merge question was asked. From
+    /// then on this attempt never holds again, and the base run is not
+    /// read again for it.
+    #[serde(default)]
+    pub released: Option<Released>,
+}
+
+/// What a merge wait waits for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum WaitUntil {
+    /// The lane's pull request to merge.
+    Merge,
+    /// The base pipeline on its merge commit.
+    Deploy,
+}
+
+/// How a held merge question was asked once the hold ended.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Released {
+    /// The clause the question was asked with.
+    pub clause: String,
+    /// Asked "merge it there"; false for a "but" clause.
+    pub plain: bool,
+}
+
+impl MergeWait {
+    /// Whether the hold is still on.
+    #[must_use]
+    pub fn holds(&self) -> bool {
+        self.released.is_none()
+    }
+
+    /// What a held wait waits for, as the `waits` event says it.
+    #[must_use]
+    pub fn describe(&self) -> String {
+        match (self.until, &self.step) {
+            (WaitUntil::Merge, _) => format!("{}'s merge", self.lane),
+            (WaitUntil::Deploy, None) => format!("{}'s base pipeline", self.lane),
+            (WaitUntil::Deploy, Some(step)) => {
+                format!("{}'s base pipeline past {step:?}", self.lane)
+            }
+        }
+    }
 }
 
 /// One owner's objection to a finished plan review, sent as round
@@ -691,6 +759,10 @@ pub struct PullRequestRecord {
     /// When lookups started failing, until one succeeds.
     #[serde(default)]
     pub error_since_ms: Option<u64>,
+    /// The commit the pull request merged as, from the reading that saw
+    /// it merged.
+    #[serde(default)]
+    pub merge_commit: Option<String>,
 }
 
 impl Attempt {

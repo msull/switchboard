@@ -240,6 +240,7 @@ impl Env {
                 branch: String::new(),
                 base: String::new(),
                 title: String::new(),
+                merge_commit: None,
             },
         ));
         prs.checks.push(("msull/switchboard".into(), 7, checks));
@@ -1944,6 +1945,7 @@ fn a_bitbucket_remote_is_read_through_bitbucket_and_a_short_head_matches() {
                 branch: String::new(),
                 base: String::new(),
                 title: String::new(),
+                merge_commit: None,
             },
         ));
         bb.checks
@@ -2804,6 +2806,7 @@ fn open_pr(env: &Env, repo: &str, number: u64, branch: &str, title: &str) {
             branch: branch.to_owned(),
             base: "main".to_owned(),
             title: title.to_owned(),
+            merge_commit: None,
         },
     ));
 }
@@ -2941,6 +2944,7 @@ fn a_pull_request_on_a_named_mirror_is_fetched_from_that_remote() {
             branch: "feature/escape-docs".into(),
             base: "dev".into(),
             title: "Document escape".into(),
+            merge_commit: None,
         },
     ));
     let now = env.tick();
@@ -14911,6 +14915,13 @@ fn finish_all(env: &mut Env, id: &str, stage: &str, artifact: &str) {
 /// A two-lane ticket with both lanes chosen, both plans done and both
 /// implementers running.
 fn two_lanes(env: &mut Env, pipeline_text: &str) -> String {
+    lanes_chosen(env, pipeline_text, "repo,docs")
+}
+
+/// A ticket of `pipeline_text` with `chosen` answered to `lanes`, its
+/// implementers started.
+fn lanes_chosen(env: &mut Env, pipeline_text: &str, chosen: &str) -> String {
+    let count = chosen.split(',').count();
     std::fs::write(env.data.pipeline(PROJECT), pipeline_text).unwrap();
     let id = env.take(21).id;
     env.steps_until(&id, "the lanes question", |t, _| {
@@ -14921,13 +14932,13 @@ fn two_lanes(env: &mut Env, pipeline_text: &str) -> String {
         .into_iter()
         .find(|d| d.name == "lanes")
         .unwrap();
-    answer(env, &id, &d, "repo,docs");
-    env.steps_until(&id, "both planners", |t, _| {
-        t.attempts_of("plan").filter(|a| a.is_open()).count() == 2
+    answer(env, &id, &d, chosen);
+    env.steps_until(&id, "every planner", |t, _| {
+        t.attempts_of("plan").filter(|a| a.is_open()).count() == count
     });
     finish_all(env, &id, "plan", "plan");
-    env.steps_until(&id, "both implementers", |t, _| {
-        t.attempts_of("implement").filter(|a| a.is_open()).count() == 2
+    env.steps_until(&id, "every implementer", |t, _| {
+        t.attempts_of("implement").filter(|a| a.is_open()).count() == count
     });
     id
 }
@@ -15130,11 +15141,11 @@ fn a_restart_without_the_trees_entry_head_keeps_the_repo_less_lanes_base() {
 /// number and checks key.
 fn two_lanes_checking(env: &mut Env, id: &str) -> Vec<(String, u32, String)> {
     finish_all(env, id, "implement", "notes");
-    env.steps_until(id, "both checks", |t, _| {
+    env.steps_until(id, "every lane's checks", |t, _| {
         t.attempts_of("implement")
             .filter(|a| a.gate.is_some())
             .count()
-            == 2
+            == t.lanes.iter().filter(|l| l.chosen).count()
     });
     env.ticket(id)
         .attempts_of("implement")
@@ -15173,6 +15184,7 @@ fn two_lane_prs(env: &Env, id: &str, docs_mergeable: Option<&str>) {
                 branch: String::new(),
                 base: String::new(),
                 title: String::new(),
+                merge_commit: None,
             },
         ));
         prs.checks.push((repo.into(), n, Checks::Passed));
@@ -15182,31 +15194,7 @@ fn two_lane_prs(env: &Env, id: &str, docs_mergeable: Option<&str>) {
 /// A two-lane ticket with `ready` and `merge` stages and a rebaser,
 /// standing at both lanes' merge decisions.
 fn two_lanes_at_merge(env: &mut Env) -> String {
-    let text = two_lane_pipeline(&env.worktrees)
-        .replace(
-            "[operators.implementer]\n",
-            "[operators.rebaser]\nkind = \"claude\"\n\n[operators.implementer]\n",
-        )
-        .replace(
-            "[policy]\n",
-            "[[stages]]\nname = \"ready\"\ncontext = \"each\"\ngate = { kind = \"external\", check = \"pr-checks\" }\n\n[[stages]]\nname = \"merge\"\ncontext = \"each\"\ngate = { kind = \"external\", check = \"pr-merged\", decision = \"merge\" }\n\n[policy]\nrebaser = \"rebaser\"\n",
-        );
-    let id = two_lanes(env, &text);
-    let lanes = two_lanes_checking(env, &id);
-    for (_, _, key) in &lanes {
-        env.repo.lock().unwrap().check_exits.insert(key.clone(), 0);
-    }
-    two_lane_prs(env, &id, None);
-    env.steps_until(&id, "both looks", |t, _| {
-        t.pending_decisions()
-            .iter()
-            .filter(|d| d.name == "inspect")
-            .count()
-            == 2
-    });
-    for d in env.pending(&id) {
-        answer(env, &id, &d, "proceed");
-    }
+    let id = two_lanes_to_merge(env, "", true);
     env.steps_until(&id, "both merge decisions", |t, _| {
         t.pending_decisions()
             .iter()
@@ -15214,6 +15202,53 @@ fn two_lanes_at_merge(env: &mut Env) -> String {
             .count()
             == 2
     });
+    id
+}
+
+/// A two-lane ticket with a merge watch and a rebaser, `docs_keys`
+/// added to the `docs` lane and a `ready` stage before the watch when
+/// `ready`, its `inspect` answered so it moves on to the watch.
+fn two_lanes_to_merge(env: &mut Env, docs_keys: &str, ready: bool) -> String {
+    lanes_to_merge(env, docs_keys, ready, "repo,docs")
+}
+
+/// The same, with `chosen` answered to `lanes`.
+fn lanes_to_merge(env: &mut Env, docs_keys: &str, ready: bool, chosen: &str) -> String {
+    let count = chosen.split(',').count();
+    let ready_stage = if ready {
+        "[[stages]]\nname = \"ready\"\ncontext = \"each\"\ngate = { kind = \"external\", check = \"pr-checks\" }\n\n"
+    } else {
+        ""
+    };
+    let text = two_lane_pipeline(&env.worktrees)
+        .replace(
+            "setup = [\"mdbook\", \"build\"]\n",
+            &format!("setup = [\"mdbook\", \"build\"]\n{docs_keys}"),
+        )
+        .replace(
+            "[operators.implementer]\n",
+            "[operators.rebaser]\nkind = \"claude\"\n\n[operators.implementer]\n",
+        )
+        .replace(
+            "[policy]\n",
+            &format!("{ready_stage}[[stages]]\nname = \"merge\"\ncontext = \"each\"\ngate = {{ kind = \"external\", check = \"pr-merged\", decision = \"merge\" }}\n\n[policy]\nrebaser = \"rebaser\"\n"),
+        );
+    let id = lanes_chosen(env, &text, chosen);
+    let lanes = two_lanes_checking(env, &id);
+    for (_, _, key) in &lanes {
+        env.repo.lock().unwrap().check_exits.insert(key.clone(), 0);
+    }
+    two_lane_prs(env, &id, None);
+    env.steps_until(&id, "every look", |t, _| {
+        t.pending_decisions()
+            .iter()
+            .filter(|d| d.name == "inspect")
+            .count()
+            == count
+    });
+    for d in env.pending(&id) {
+        answer(env, &id, &d, "proceed");
+    }
     id
 }
 
@@ -19856,4 +19891,584 @@ fn a_command_gate_without_env_gets_no_wrapper_and_no_token() {
     };
     assert!(env_sets.is_empty());
     assert!(!prompt.unwrap().contains("switchboard-env"));
+}
+
+/// The `docs` lane's merge waits on the `repo` lane's (`merge_after`),
+/// with `deploy` as its `merge_after_deploy` when given; the ticket
+/// stands with `repo`'s merge question asked and `docs` held.
+fn ordered_at_merge(env: &mut Env, deploy: Option<&str>) -> String {
+    let keys = match deploy {
+        Some(d) => format!("merge_after = [\"repo\"]\nmerge_after_deploy = {d}\n"),
+        None => "merge_after = [\"repo\"]\n".to_owned(),
+    };
+    let id = two_lanes_to_merge(env, &keys, true);
+    env.steps_until(&id, "repo asked and docs held", |t, _| {
+        merge_q(t, "repo").is_some() && held(t, "docs").is_some()
+    });
+    id
+}
+
+/// The pending merge question of `lane`.
+fn merge_q(t: &Ticket, lane: &str) -> Option<Decision> {
+    t.pending_decisions()
+        .into_iter()
+        .find(|d| d.name == "merge" && d.question.starts_with(&format!("merge ({lane})")))
+        .cloned()
+}
+
+/// The latest merge attempt of `lane`.
+fn merge_attempt(t: &Ticket, lane: &str) -> Attempt {
+    t.attempts_of("merge")
+        .filter(|a| a.context == lane)
+        .last()
+        .unwrap()
+        .clone()
+}
+
+/// The hold on `lane`'s merge, while it holds.
+fn held(t: &Ticket, lane: &str) -> Option<dispatch::ticket::MergeWait> {
+    t.attempts_of("merge")
+        .filter(|a| a.context == lane)
+        .last()
+        .and_then(|a| a.waits.clone())
+        .filter(dispatch::ticket::MergeWait::holds)
+}
+
+/// The provider reports `lane`'s pull request as `state`, merged as
+/// `commit`.
+fn lane_pr_is(env: &Env, lane: &str, state: &str, commit: Option<&str>) {
+    let n = if lane == "repo" { 7 } else { 8 };
+    let mut prs = env.prs.lock().unwrap();
+    let pr = prs
+        .prs
+        .iter_mut()
+        .map(|(_, _, pr)| pr)
+        .find(|pr| pr.number == n)
+        .unwrap();
+    pr.state = state.into();
+    pr.merge_commit = commit.map(str::to_owned);
+}
+
+/// The base run on `repo`'s merge commit (or a step of it, as
+/// `<commit>#<step>`) reads `checks`.
+fn base_run_is(env: &Env, key: &str, checks: Checks) {
+    let mut prs = env.prs.lock().unwrap();
+    prs.runs.retain(|(_, k, _)| k != key);
+    prs.runs
+        .push(("msull/switchboard".into(), key.into(), checks));
+}
+
+const MERGED_AS: &str = "feed1234abcd";
+
+/// `repo` merges as `MERGED_AS`, and the passes go on until it is
+/// recorded merged.
+fn repo_merges(env: &mut Env, id: &str) {
+    lane_pr_is(env, "repo", "merged", Some(MERGED_AS));
+    env.wait(PR_POLL_MS);
+    env.steps_until(id, "repo merged", |t, _| {
+        merge_attempt(t, "repo").state == AttemptState::Complete
+    });
+}
+
+#[test]
+fn a_lane_merges_after_the_lane_it_names() {
+    let mut env = Env::new();
+    let id = ordered_at_merge(&mut env, None);
+    let t = env.ticket(&id);
+    assert_eq!(t.pending_decisions().len(), 1, "only repo is asked");
+    assert!(merge_q(&t, "docs").is_none());
+    let wait = held(&t, "docs").unwrap();
+    assert_eq!(
+        (wait.lane.as_str(), wait.until),
+        ("repo", dispatch::ticket::WaitUntil::Merge)
+    );
+    assert_eq!(count_of(&events_of(&env.data, &id), "waits"), 1);
+    repo_merges(&mut env, &id);
+    polls(&mut env, 1);
+    let q = merge_q(&env.ticket(&id), "docs").expect("docs asks once repo merged");
+    assert!(
+        q.question
+            .contains("is open at base0000; repo merged as feed1234; merge it there."),
+        "{}",
+        q.question
+    );
+    assert_eq!(count_of(&events_of(&env.data, &id), "waits"), 1);
+}
+
+#[test]
+fn a_lane_waits_for_the_base_pipeline_of_the_merge() {
+    for (run, plain) in [
+        (Checks::Passed, true),
+        (Checks::Failed(vec!["Deploy to dev".into()]), false),
+    ] {
+        let mut env = Env::new();
+        let id = ordered_at_merge(&mut env, Some("true"));
+        base_run_is(&env, MERGED_AS, Checks::Pending);
+        repo_merges(&mut env, &id);
+        polls(&mut env, 2);
+        let t = env.ticket(&id);
+        assert!(
+            merge_q(&t, "docs").is_none(),
+            "held while the run is pending"
+        );
+        let wait = held(&t, "docs").unwrap();
+        assert_eq!(wait.until, dispatch::ticket::WaitUntil::Deploy);
+        assert_eq!(wait.commit.as_deref(), Some(MERGED_AS));
+        assert_eq!(wait.run.as_deref(), Some("pending"));
+        let texts = texts_of_kind(&env, &id, dispatch::events::Kind::Waits);
+        assert_eq!(
+            texts,
+            [
+                "merge (docs) waits for repo's merge",
+                "merge (docs) waits for repo's base pipeline"
+            ]
+        );
+        base_run_is(&env, MERGED_AS, run);
+        polls(&mut env, 1);
+        let q = merge_q(&env.ticket(&id), "docs").unwrap().question;
+        if plain {
+            assert!(
+                q.contains(
+                    "; repo merged as feed1234 and repo's base pipeline passed; merge it there."
+                ),
+                "{q}"
+            );
+        } else {
+            assert!(
+                q.contains(", but repo's base pipeline failed at Deploy to dev; merge only once the base has the change."),
+                "{q}"
+            );
+        }
+    }
+}
+
+/// Pull requests taken from Bitbucket mirrors are read there although
+/// the pipeline's repositories are on GitHub, so validation lets
+/// `merge_after_deploy` stand; the wait then ends with a "but" once the
+/// dependency merged, and its base pipeline is never read.
+#[test]
+fn a_dependency_on_bitbucket_ends_the_deploy_wait_unread() {
+    let mut env = Env::new();
+    let worktrees = env.data.root.join("wt");
+    let text = pr_pipeline(&worktrees)
+        .replace(
+            "space = ",
+            "remotes = { bb = \"git@bitbucket.org:msull/switchboard.git\" }\nspace = ",
+        )
+        .replace(
+            "repo = \"git@github.com:msull/docs.git\"\n",
+            "repo = \"git@github.com:msull/docs.git\"\nremotes = { bb = \"git@bitbucket.org:msull/docs.git\" }\nmerge_after = [\"repo\"]\nmerge_after_deploy = true\n",
+        );
+    std::fs::write(env.data.pr_pipeline(PROJECT), text).unwrap();
+    for (repo, n, branch) in [
+        ("msull/switchboard", 7, "feature/escape"),
+        ("msull/docs", 3, "feature/escape-docs"),
+    ] {
+        env.bitbucket.lock().unwrap().prs.push((
+            repo.into(),
+            branch.into(),
+            PullRequest {
+                number: n,
+                url: format!("https://bitbucket.org/{repo}/pull-requests/{n}"),
+                head: format!("bb{n:05}"),
+                state: "open".into(),
+                mergeable: None,
+                branch: branch.into(),
+                base: "dev".into(),
+                title: "Document escape".into(),
+                merge_commit: None,
+            },
+        ));
+    }
+    let now = env.tick();
+    let id = dispatch::serve::take_pull_requests(
+        &mut env.runner,
+        PROJECT,
+        &["bb:repo/7", "bb:docs/3"],
+        now,
+    )
+    .unwrap()
+    .id;
+    env.steps_until(&id, "both sign-off questions", |t, _| {
+        t.pending_decisions()
+            .iter()
+            .filter(|d| d.name == "inspect")
+            .count()
+            == 2
+    });
+    for d in env.pending(&id) {
+        answer(&mut env, &id, &d, "proceed");
+    }
+    env.steps_until(&id, "repo asked and docs held", |t, _| {
+        merge_q(t, "repo").is_some() && held(t, "docs").is_some()
+    });
+    {
+        let mut bb = env.bitbucket.lock().unwrap();
+        let pr = &mut bb
+            .prs
+            .iter_mut()
+            .find(|(_, _, pr)| pr.number == 7)
+            .unwrap()
+            .2;
+        pr.state = "merged".into();
+        pr.merge_commit = Some(MERGED_AS.into());
+    }
+    env.wait(PR_POLL_MS);
+    env.steps_until(&id, "docs asked", |t, _| merge_q(t, "docs").is_some());
+    let q = merge_q(&env.ticket(&id), "docs").unwrap().question;
+    assert!(
+        q.contains(", but repo's base pipeline is on Bitbucket, where Dispatch does not read it; check it there;"),
+        "{q}"
+    );
+    assert_eq!(env.bitbucket.lock().unwrap().run_reads, 0);
+    assert_eq!(env.prs.lock().unwrap().run_reads, 0);
+}
+
+#[test]
+fn a_released_merge_question_stays_asked() {
+    let mut env = Env::new();
+    let id = ordered_at_merge(&mut env, Some("true"));
+    base_run_is(&env, MERGED_AS, Checks::Passed);
+    repo_merges(&mut env, &id);
+    polls(&mut env, 1);
+    let first = merge_q(&env.ticket(&id), "docs").unwrap();
+    let reads = env.prs.lock().unwrap().run_reads;
+    base_run_is(&env, MERGED_AS, Checks::Pending);
+    polls(&mut env, 2);
+    env.prs.lock().unwrap().fail = Some("provider down".into());
+    polls(&mut env, 1);
+    env.prs.lock().unwrap().fail = None;
+    polls(&mut env, 2);
+    let t = env.ticket(&id);
+    assert_eq!(merge_q(&t, "docs").unwrap().id, first.id);
+    // The hold on the merge alone; the run passed on its first read.
+    assert_eq!(count_of(&events_of(&env.data, &id), "waits"), 1);
+    assert_eq!(
+        env.prs.lock().unwrap().run_reads,
+        reads,
+        "nothing read again"
+    );
+}
+
+#[test]
+fn a_named_step_releases_the_merge() {
+    let mut env = Env::new();
+    let id = ordered_at_merge(&mut env, Some("\"Deploy to dev\""));
+    let step = format!("{MERGED_AS}#Deploy to dev");
+    base_run_is(&env, &step, Checks::Pending);
+    // The run as a whole is not what is waited on.
+    base_run_is(&env, MERGED_AS, Checks::Passed);
+    repo_merges(&mut env, &id);
+    polls(&mut env, 2);
+    let t = env.ticket(&id);
+    assert!(merge_q(&t, "docs").is_none());
+    assert_eq!(
+        held(&t, "docs").unwrap().step.as_deref(),
+        Some("Deploy to dev")
+    );
+    assert_eq!(
+        texts_of_kind(&env, &id, dispatch::events::Kind::Waits)
+            .last()
+            .unwrap(),
+        "merge (docs) waits for repo's base pipeline past \"Deploy to dev\""
+    );
+    base_run_is(&env, &step, Checks::Passed);
+    polls(&mut env, 1);
+    let q = merge_q(&env.ticket(&id), "docs").unwrap().question;
+    assert!(
+        q.contains("repo's base pipeline step \"Deploy to dev\" passed; merge it there."),
+        "{q}"
+    );
+}
+
+#[test]
+fn a_base_run_that_never_appears_or_never_ends_asks() {
+    // Nothing reported past the young-commit grace.
+    let mut env = Env::new();
+    let id = ordered_at_merge(&mut env, Some("true"));
+    repo_merges(&mut env, &id);
+    polls(&mut env, 1);
+    assert_eq!(
+        held(&env.ticket(&id), "docs").unwrap().run.as_deref(),
+        Some("none")
+    );
+    env.wait(PR_YOUNG_HEAD_MS);
+    polls(&mut env, 1);
+    let q = merge_q(&env.ticket(&id), "docs").unwrap().question;
+    assert!(
+        q.contains(", but repo's base pipeline reported nothing on feed1234;"),
+        "{q}"
+    );
+
+    // Pending past the cap.
+    let mut env = Env::new();
+    let id = ordered_at_merge(&mut env, Some("true"));
+    base_run_is(&env, MERGED_AS, Checks::Pending);
+    repo_merges(&mut env, &id);
+    polls(&mut env, 1);
+    assert!(held(&env.ticket(&id), "docs").is_some());
+    env.wait(dispatch::scheduler::BASE_RUN_WAIT_MS);
+    polls(&mut env, 1);
+    let q = merge_q(&env.ticket(&id), "docs").unwrap().question;
+    assert!(
+        q.contains(", but repo's base pipeline has not finished after 60 minutes;"),
+        "{q}"
+    );
+
+    // No merge commit reported.
+    let mut env = Env::new();
+    let id = ordered_at_merge(&mut env, Some("true"));
+    lane_pr_is(&env, "repo", "merged", None);
+    env.wait(PR_POLL_MS);
+    env.steps_until(&id, "repo merged", |t, _| {
+        merge_attempt(t, "repo").state == AttemptState::Complete
+    });
+    polls(&mut env, 1);
+    let q = merge_q(&env.ticket(&id), "docs").unwrap().question;
+    assert!(
+        q.contains(
+            ", but repo's merge commit was not reported, so its base pipeline was not read;"
+        ),
+        "{q}"
+    );
+}
+
+#[test]
+fn a_dependency_closed_without_merging_releases_the_wait() {
+    let mut env = Env::new();
+    let id = ordered_at_merge(&mut env, Some("true"));
+    lane_pr_is(&env, "repo", "closed", None);
+    env.wait(PR_POLL_MS);
+    env.steps_until(&id, "the pr question", |t, _| {
+        t.pending_decisions().iter().any(|d| d.name == "pr")
+    });
+    polls(&mut env, 1);
+    let q = merge_q(&env.ticket(&id), "docs").unwrap().question;
+    assert!(
+        q.contains(", but repo's PR #7 was closed without merging;"),
+        "{q}"
+    );
+}
+
+#[test]
+fn a_merge_order_is_ignored_for_a_lane_not_chosen() {
+    let mut env = Env::new();
+    let id = lanes_to_merge(&mut env, "merge_after = [\"repo\"]\n", true, "docs");
+    env.steps_until(&id, "docs's merge question", |t, _| {
+        merge_q(t, "docs").is_some()
+    });
+    let t = env.ticket(&id);
+    let q = merge_q(&t, "docs").unwrap().question;
+    assert!(q.contains("is open at base0000; merge it there."), "{q}");
+    assert_eq!(merge_attempt(&t, "docs").waits, None);
+    assert_eq!(count_of(&events_of(&env.data, &id), "waits"), 0);
+}
+
+#[test]
+fn a_waiting_lane_merged_by_hand_closes() {
+    let mut env = Env::new();
+    let id = ordered_at_merge(&mut env, Some("true"));
+    lane_pr_is(&env, "docs", "merged", Some("0123abcd4567"));
+    env.wait(PR_POLL_MS);
+    env.steps_until(&id, "docs merged", |t, _| {
+        merge_attempt(t, "docs").state == AttemptState::Complete
+    });
+    let t = env.ticket(&id);
+    assert!(
+        t.decisions
+            .iter()
+            .all(|d| !d.question.starts_with("merge (docs)")),
+        "nothing was asked of docs, so nothing is answered"
+    );
+    assert!(merge_q(&t, "repo").is_some(), "repo's question stands");
+    // The wait it kept never released, and the ended attempt shows none.
+    assert!(merge_attempt(&t, "docs").waits.is_some_and(|w| w.holds()));
+    let view = dispatch::serve::ticket_view(&t, None);
+    let docs = view.attempts.iter().rfind(|a| a.context == "docs").unwrap();
+    assert_eq!((&docs.waits, docs.waits_since_ms), (&None, None));
+}
+
+#[test]
+fn a_restart_while_waiting_holds_again() {
+    let mut env = Env::new();
+    let id = ordered_at_merge(&mut env, Some("true"));
+    let since = held(&env.ticket(&id), "docs").unwrap().since_ms;
+    env.restart();
+    polls(&mut env, 2);
+    let t = env.ticket(&id);
+    assert_eq!(held(&t, "docs").unwrap().since_ms, since);
+    assert!(merge_q(&t, "docs").is_none());
+    assert_eq!(count_of(&events_of(&env.data, &id), "waits"), 1);
+}
+
+/// `docs`'s pull request as the provider reports its merging.
+fn docs_mergeable(env: &Env, mergeable: Option<&str>) {
+    let mut prs = env.prs.lock().unwrap();
+    let pr = prs
+        .prs
+        .iter_mut()
+        .map(|(_, _, pr)| pr)
+        .find(|pr| pr.number == 8)
+        .unwrap();
+    pr.mergeable = mergeable.map(str::to_owned);
+}
+
+#[test]
+fn a_conflict_while_waiting_still_goes_back() {
+    let mut env = Env::new();
+    let id = ordered_at_merge(&mut env, Some("true"));
+    docs_mergeable(&env, Some("conflicting"));
+    env.wait(PR_POLL_MS);
+    env.steps_until(&id, "the trip back", |t, _| stands_at(t, "ready"));
+    let t = env.ticket(&id);
+    for lane in ["repo", "docs"] {
+        assert!(
+            matches!(&merge_attempt(&t, lane).state, AttemptState::Cancelled { reason } if reason.starts_with("sent back from merge: ")),
+            "{lane}"
+        );
+    }
+    docs_mergeable(&env, None);
+    env.steps_until(&id, "back at merge, docs held again", |t, _| {
+        stands_at(t, "merge") && merge_q(t, "repo").is_some() && held(t, "docs").is_some()
+    });
+    let t = env.ticket(&id);
+    let wait = held(&t, "docs").unwrap();
+    assert_eq!(wait.until, dispatch::ticket::WaitUntil::Merge);
+    assert!(merge_q(&t, "docs").is_none());
+    assert!(
+        t.decisions
+            .iter()
+            .all(|d| !d.question.contains("merge watch")),
+        "a cancelled watch never releases the wait"
+    );
+}
+
+/// `docs` asked with a "but" because `repo`'s base pipeline ran past
+/// the cap, with `ready` before the watch when `ready`.
+fn asked_past_the_cap(env: &mut Env, ready: bool) -> String {
+    let id = two_lanes_to_merge(
+        env,
+        "merge_after = [\"repo\"]\nmerge_after_deploy = true\n",
+        ready,
+    );
+    env.steps_until(&id, "repo asked and docs held", |t, _| {
+        merge_q(t, "repo").is_some() && held(t, "docs").is_some()
+    });
+    base_run_is(env, MERGED_AS, Checks::Pending);
+    repo_merges(env, &id);
+    env.wait(dispatch::scheduler::BASE_RUN_WAIT_MS);
+    polls(env, 1);
+    let q = merge_q(&env.ticket(&id), "docs").unwrap().question;
+    assert!(q.contains("has not finished after 60 minutes"), "{q}");
+    id
+}
+
+#[test]
+fn a_late_pipeline_after_recheck_gives_the_plain_question() {
+    // A trip back through `ready`: the new attempt reads the run again.
+    let mut env = Env::new();
+    let id = asked_past_the_cap(&mut env, true);
+    base_run_is(&env, MERGED_AS, Checks::Passed);
+    let d = merge_q(&env.ticket(&id), "docs").unwrap();
+    answer(&mut env, &id, &d, "recheck");
+    env.steps_until(&id, "docs asked again", |t, _| {
+        stands_at(t, "merge") && merge_q(t, "docs").is_some_and(|q| q.id != d.id)
+    });
+    let t = env.ticket(&id);
+    let q = merge_q(&t, "docs").unwrap().question;
+    assert!(
+        q.contains("repo's base pipeline passed; merge it there."),
+        "{q}"
+    );
+    assert!(merge_attempt(&t, "docs").n > 1, "a new attempt");
+
+    // A trip back refused: the same attempt reads the run again.
+    let mut env = Env::new();
+    let id = asked_past_the_cap(&mut env, true);
+    base_run_is(&env, MERGED_AS, Checks::Passed);
+    let docs_tree = env
+        .ticket(&id)
+        .lanes
+        .iter()
+        .find(|l| l.name == "docs")
+        .unwrap()
+        .worktree
+        .clone();
+    env.repo.lock().unwrap().dirty.push(docs_tree);
+    let reads = env.prs.lock().unwrap().run_reads;
+    let d = merge_q(&env.ticket(&id), "docs").unwrap();
+    answer(&mut env, &id, &d, "recheck");
+    env.steps_until(&id, "docs asked again", |t, _| {
+        merge_q(t, "docs").is_some_and(|q| q.id != d.id)
+    });
+    let t = env.ticket(&id);
+    let q = merge_q(&t, "docs").unwrap().question;
+    assert!(q.contains("it was not sent back through ready"), "{q}");
+    assert!(q.contains("repo's base pipeline passed"), "{q}");
+    assert!(env.prs.lock().unwrap().run_reads > reads);
+    let released = merge_attempt(&t, "docs").waits.unwrap().released.unwrap();
+    assert!(released.plain);
+
+    // No `pr-checks` stage before the watch: nothing goes back, and the
+    // next pass asks the same attempt plainly.
+    let mut env = Env::new();
+    let id = asked_past_the_cap(&mut env, false);
+    base_run_is(&env, MERGED_AS, Checks::Passed);
+    let n = merge_attempt(&env.ticket(&id), "docs").n;
+    let d = merge_q(&env.ticket(&id), "docs").unwrap();
+    answer(&mut env, &id, &d, "recheck");
+    env.steps_until(&id, "docs asked plainly", |t, _| {
+        merge_q(t, "docs").is_some_and(|q| q.question.contains("merge it there."))
+    });
+    assert_eq!(merge_attempt(&env.ticket(&id), "docs").n, n);
+}
+
+#[test]
+fn a_plain_release_carries_across_a_send_back() {
+    let mut env = Env::new();
+    let id = ordered_at_merge(&mut env, Some("true"));
+    base_run_is(&env, MERGED_AS, Checks::Passed);
+    repo_merges(&mut env, &id);
+    polls(&mut env, 1);
+    let first = merge_q(&env.ticket(&id), "docs").unwrap();
+    assert!(first.question.contains("merge it there."));
+    let reads = env.prs.lock().unwrap().run_reads;
+    docs_mergeable(&env, Some("conflicting"));
+    env.wait(PR_POLL_MS);
+    env.steps_until(&id, "the trip back", |t, _| stands_at(t, "ready"));
+    docs_mergeable(&env, None);
+    env.steps_until(&id, "docs asked again", |t, _| {
+        stands_at(t, "merge") && merge_q(t, "docs").is_some_and(|q| q.id != first.id)
+    });
+    let q = merge_q(&env.ticket(&id), "docs").unwrap().question;
+    assert!(
+        q.contains("repo merged as feed1234 and repo's base pipeline passed; merge it there."),
+        "{q}"
+    );
+    assert_eq!(
+        env.prs.lock().unwrap().run_reads,
+        reads,
+        "nothing read again"
+    );
+}
+
+#[test]
+fn a_merge_commit_missing_from_the_list_is_read_by_number() {
+    let mut env = Env::new();
+    let id = ordered_at_merge(&mut env, Some("true"));
+    env.prs.lock().unwrap().list_omits_merge_commit = true;
+    base_run_is(&env, MERGED_AS, Checks::Passed);
+    repo_merges(&mut env, &id);
+    let t = env.ticket(&id);
+    assert_eq!(
+        merge_attempt(&t, "repo")
+            .pr
+            .unwrap()
+            .merge_commit
+            .as_deref(),
+        Some(MERGED_AS)
+    );
+    polls(&mut env, 1);
+    let q = merge_q(&env.ticket(&id), "docs").unwrap().question;
+    assert!(q.contains("repo merged as feed1234"), "{q}");
 }

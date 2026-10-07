@@ -1660,12 +1660,21 @@ Bitbucket's `diffstat` gives) sends the ticket back through the
 `pr-checks` stage before it to be rebased, pushed and checked again,
 as does `recheck`; a tree that is not clean, a stage between that is
 not gate-only, or a trip back that left the head where it is asks
-instead. A human gate-only
-stage (`inspect`) asks once per lane with the branch, its head, what
-it adds over its base, the tree and the notes (Bitbucket Cloud is a
-second provider for both PR gates, read through `curl` with the
-account token from the environment or `<data>/env`); `proceed` passes,
-`rerun` with a note (typed under the decision on the page) sends
+instead. A lane may name lanes whose pull requests merge first
+(`merge_after`, with `merge_after_deploy` for the base pipeline on that
+merge's commit, or one step of it): its merge question is held, and
+the hold is shown on the ticket page and logged as a `waits` event,
+until they merged and their run finished, then asked plainly, or with a
+"but" naming a failed, late or unread run, a missing merge commit, or a
+closed pull request. The base pipeline wait is refused for Bitbucket
+until spike 16's reads are run there. The order is static per pipeline
+rather than per ticket, and the supervisor's seed is told to merge in
+it; one that merges outside `gh` merges by hand in the same order. A
+human gate-only stage (`inspect`) asks once per lane with the branch,
+its head, what it adds over its base, the tree and the notes (Bitbucket
+Cloud is a second provider for both PR gates, read through `curl` with
+the account token from the environment or `<data>/env`); `proceed`
+passes, `rerun` with a note (typed under the decision on the page) sends
 that lane back to the nearest earlier agent stage with the note and
 the previous attempt's notes path in the next prompt, restarting that
 stage's services with a fresh `before`. The question shows each

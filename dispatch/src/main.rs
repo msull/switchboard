@@ -10,6 +10,7 @@ use dispatch::events::{self, Burst, Event, For, Kind, base_name, short};
 use dispatch::git::{GitCli, yyyymmdd};
 use dispatch::github::Gh;
 use dispatch::health;
+use dispatch::pipeline::{DeployWait, Lane};
 use dispatch::port::SocketPort;
 use dispatch::report::{self, TicketReport};
 use dispatch::scheduler::{BY_SUPERVISOR, Runner, attempt_label, kept_branches};
@@ -893,6 +894,9 @@ fn show(args: &[&str]) -> Result<()> {
         view.title
     );
     say!("stage {current} ({}/{})", view.stage + 1, view.stages.len());
+    if !view.stages.is_empty() {
+        say!("stages: {}", stages_line(&view));
+    }
     say!("state {}", t.state.label());
     for r in &view.restarts {
         say!(
@@ -921,6 +925,18 @@ fn show(args: &[&str]) -> Result<()> {
             brought_up_clause(&view, l)
         );
     }
+    if let Some(order) = merge_order_line(&view, pipeline.as_ref()) {
+        say!("merge order: {order}");
+    }
+    for a in view.attempts.iter().filter(|a| a.ended_ms.is_none()) {
+        if let (Some(waits), Some(since)) = (&a.waits, a.waits_since_ms) {
+            say!(
+                "  {} waits for {waits} since {}",
+                a.context,
+                local_time(since)
+            );
+        }
+    }
     print_attempts(&view)?;
     print_answered(&t)?;
     print_pending(&view)?;
@@ -944,6 +960,67 @@ fn show(args: &[&str]) -> Result<()> {
         say!("  PR: {url} at {}", p.pr_head.as_deref().map_or("-", short));
     }
     Ok(())
+}
+
+/// The stages in order, an external gate's check after its name:
+/// `plan, implement, ready (pr-checks), merge (pr-merged)`.
+fn stages_line(view: &dispatch_control::TicketView) -> String {
+    view.stages
+        .iter()
+        .enumerate()
+        .map(
+            |(i, name)| match view.stage_checks.get(i).cloned().flatten() {
+                Some(check) => format!("{name} ({check})"),
+                None => name.clone(),
+            },
+        )
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// The chosen lanes in the order their merges are held to, when any of
+/// them waits on another: `backend, then frontend (after backend's base
+/// pipeline)`.
+fn merge_order_line(
+    view: &dispatch_control::TicketView,
+    p: Option<&dispatch::pipeline::Pipeline>,
+) -> Option<String> {
+    let p = p?;
+    let chosen: Vec<&str> = view
+        .lanes
+        .iter()
+        .filter(|l| l.chosen)
+        .map(|l| l.name.as_str())
+        .collect();
+    let deps = |name: &str| {
+        p.lane(name)
+            .map_or_else(Vec::new, |l| l.merge_after_among(&chosen))
+    };
+    if chosen.iter().all(|name| deps(name).is_empty()) {
+        return None;
+    }
+    let parts: Vec<String> = p
+        .merge_order(&chosen)
+        .into_iter()
+        .map(|name| {
+            let of = deps(name)
+                .iter()
+                .map(|d| format!("{d}'s"))
+                .collect::<Vec<_>>()
+                .join(" and ");
+            if of.is_empty() {
+                return name.to_owned();
+            }
+            match p.lane(name).map(Lane::deploy_wait) {
+                Some(DeployWait::Run) => format!("{name} (after {of} base pipeline)"),
+                Some(DeployWait::Step(step)) => {
+                    format!("{name} (after {of} base pipeline step {step:?})")
+                }
+                Some(DeployWait::Merge) | None => name.to_owned(),
+            }
+        })
+        .collect();
+    Some(parts.join(", then "))
 }
 
 /// `YYYY-MM-DD` of `ms` since the epoch, in UTC.

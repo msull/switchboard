@@ -308,6 +308,9 @@ pub struct TicketView {
     pub reason: Option<String>,
     /// The pipeline's stages in order.
     pub stages: Vec<String>,
+    /// Beside `stages`, each stage's external gate check (`pr-checks`,
+    /// `pr-merged`, `review-finalized`), or `None`.
+    pub stage_checks: Vec<Option<String>>,
     /// Index into `stages` of the current one; past the end when done.
     pub stage: usize,
     pub tree: Option<PathBuf>,
@@ -502,6 +505,14 @@ pub struct LaneView {
     /// Dispatch's clone holding the lane's branch; filled in a single
     /// ticket's view only.
     pub clone: Option<PathBuf>,
+    /// The lanes whose pull requests merge before this one's, from the
+    /// ticket's pipeline.
+    pub merge_after: Vec<String>,
+    /// The merge also waits for the whole base pipeline on their merge
+    /// commit.
+    pub merge_after_run: bool,
+    /// The merge also waits for this step of that pipeline to pass.
+    pub merge_after_step: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -539,6 +550,12 @@ pub struct AttemptView {
     pub secret: Vec<String>,
     /// The secret artifacts whose files were deleted.
     pub forgotten: Vec<String>,
+    /// While the open attempt's merge question is held behind another
+    /// lane's merge, what it waits for: `backend's merge`. `None` once
+    /// released, never held, or the attempt ended.
+    pub waits: Option<String>,
+    /// When that wait began, in ms.
+    pub waits_since_ms: Option<u64>,
     pub started_ms: u64,
     pub ended_ms: Option<u64>,
 }
@@ -735,6 +752,8 @@ pub struct PullRequestView {
     /// What its checks said then: `pending`, `passed`, `failed: <names>`,
     /// `none`, `merged`, `closed`, or `error: <why>`.
     pub checks: String,
+    /// The commit it merged as, once merged and where the provider says.
+    pub merge_commit: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]

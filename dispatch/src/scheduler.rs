@@ -18,8 +18,8 @@ use crate::git::{Adopted, Confine, Network, Push, Repo, branch_name, yyyymmdd};
 use crate::github::{Checks, Gh, PullRequests, github_repo};
 use crate::health::Health;
 use crate::pipeline::{
-    Context, Gate, Lane, OnDirty, Pipeline, Stage, StageKind, Write, base_context, env_key,
-    env_sets,
+    Context, DeployWait, Gate, Lane, OnDirty, Pipeline, Stage, StageKind, Write, base_context,
+    env_key, env_sets,
 };
 use crate::port::Port;
 use crate::review::{checks_key, find_reviewer_mut, reviewer_key};
@@ -31,9 +31,9 @@ use crate::store::{
 use crate::template::Vars;
 use crate::ticket::{
     Attempt, AttemptKind, AttemptState, CheckGroup, CloseProgress, Decision, DecisionKind,
-    DecisionState, GateRun, LaneRecord, Operation, OrphanKill, ProjectState, PullRequestRecord,
-    PullRequestSource, RefreshConflict, Refreshed, SETTLE_POLLS, STOP_IDLE_POLLS, STUCK,
-    ServiceState, Settle, SourceSnapshot, Ticket, TicketState,
+    DecisionState, GateRun, LaneRecord, MergeWait, Operation, OrphanKill, ProjectState,
+    PullRequestRecord, PullRequestSource, RefreshConflict, Refreshed, Released, SETTLE_POLLS,
+    STOP_IDLE_POLLS, STUCK, ServiceState, Settle, SourceSnapshot, Ticket, TicketState, WaitUntil,
 };
 
 /// How often a `pr-checks` gate reads the provider.
@@ -44,6 +44,10 @@ pub const PR_ERROR_GRACE_MS: u64 = 3_600_000;
 /// than asks: GitHub creates a new head's check runs a little after the
 /// push, so for a minute or so a repository with CI reads as one without.
 pub const PR_YOUNG_HEAD_MS: u64 = 120_000;
+
+/// How long a merged lane's base pipeline may run, or fail to be read,
+/// before a lane waiting on it is asked about its merge anyway.
+pub const BASE_RUN_WAIT_MS: u64 = 3_600_000;
 
 /// The pseudo-stage a refresh rebaser's attempts and questions carry:
 /// not in any pipeline, so no stage mistakes them for its own.
@@ -4790,11 +4794,15 @@ impl Runner {
                 Some(question) => question,
             },
             Ok(None) => self.no_pr(t, a, &target, now_ms)?,
-            Ok(Some(pr)) => {
+            Ok(Some(mut pr)) => {
+                if pr.state == "merged" && pr.merge_commit.is_none() {
+                    pr.merge_commit = self.merge_commit_by_number(&target, pr.number);
+                }
                 record_of(t, &a.stage, a.n).pr = Some(PullRequestRecord {
                     number: pr.number,
                     url: pr.url.clone(),
                     checks: pr.state.clone(),
+                    merge_commit: pr.merge_commit.clone(),
                     ..target.record(&pr.head, now_ms)
                 });
                 self.save_ticket(t, now_ms)?;
@@ -4839,7 +4847,7 @@ impl Runner {
             if flagged {
                 return self.remedy(t, ps, p, &a, cwd, lane, pr, &Remedy::Rebase, now_ms);
             }
-            return self.ask_merge(t, ps, &a, decision, merge_question(&a, None), now_ms);
+            return self.ask_merge(t, ps, p, &a, decision, None, now_ms);
         };
         let (files, probed) = match lane.map(|lane| self.probe_base(t, p, k, lane, cwd, head)) {
             None => (Vec::new(), true),
@@ -4866,7 +4874,7 @@ impl Runner {
         } else if flagged {
             "the provider reports it conflicting".to_owned()
         } else {
-            return self.ask_merge(t, ps, &a, decision, merge_question(&a, None), now_ms);
+            return self.ask_merge(t, ps, p, &a, decision, None, now_ms);
         };
         // The refresh at `k` fetches the same base, so a trip back while
         // the probe fails would only fail there.
@@ -4888,8 +4896,7 @@ impl Runner {
             "{why}, and it was not sent back through {}: {refusal}. Fix it there, then answer recheck.",
             p.stages[k].name
         );
-        let question = merge_question(&a, Some(&conflict));
-        self.ask_merge(t, ps, &a, decision, question, now_ms)
+        self.ask_merge(t, ps, p, &a, decision, Some(&conflict), now_ms)
     }
 
     /// The files a merge of the lane's tree at `head` with its base as the
@@ -4927,18 +4934,52 @@ impl Runner {
         self.git.conflicting_files(cwd, head, &onto_sha)
     }
 
-    /// The merge decision for the attempt, asked again when the pending
-    /// one says something else (a conflict found or gone), since a
-    /// pending decision is never rewritten.
+    /// The merge decision for the attempt, naming `conflict` when there
+    /// is one, asked again when the pending one says something else (a
+    /// conflict found or gone), since a pending decision is never
+    /// rewritten. A lane whose merge waits on another (`merge_after`) is
+    /// held instead, its question cancelled, until the hold releases;
+    /// the release is recorded with the question it asks.
+    #[allow(clippy::too_many_arguments)]
     fn ask_merge(
         &mut self,
         t: &mut Ticket,
         ps: &mut ProjectState,
+        p: &Pipeline,
         a: &Attempt,
         decision: &str,
-        question: String,
+        conflict: Option<&str>,
         now_ms: u64,
     ) -> Result<()> {
+        let after = match self.merge_hold(t, p, a, now_ms) {
+            Hold::Free => None,
+            Hold::Held(wait) => {
+                let cancelled = cancel_pending(t, a, decision);
+                let record = record_of(t, &a.stage, a.n);
+                let changed = record.waits.as_ref() != Some(&wait);
+                record.waits = Some(wait);
+                if changed || cancelled {
+                    self.save_ticket(t, now_ms)?;
+                }
+                if cancelled {
+                    self.unmark(t, ps, now_ms)?;
+                }
+                return Ok(());
+            }
+            Hold::Release(wait) => {
+                let released = wait.released.clone();
+                let record = record_of(t, &a.stage, a.n);
+                if record.waits.as_ref() != Some(&wait) {
+                    record.waits = Some(wait);
+                    // The release is kept even if the question's own
+                    // write below fails, so it is never read again.
+                    self.save_ticket(t, now_ms)?;
+                }
+                released
+            }
+            Hold::Released(released) => Some(released),
+        };
+        let question = merge_question(a, conflict, after.as_ref());
         let key = Some((a.stage.clone(), a.n));
         let mut stale = false;
         for d in t.decisions.iter_mut().filter(|d| {
@@ -4968,6 +5009,199 @@ impl Runner {
             },
             now_ms,
         )
+    }
+
+    /// Whether the merge question of attempt `a` waits on the lanes its
+    /// lane names in `merge_after`, worked out again from the record
+    /// and, for a merged lane whose base pipeline is waited on, the
+    /// provider. A release already recorded is final for the attempt and
+    /// reads nothing.
+    fn merge_hold(&self, t: &Ticket, p: &Pipeline, a: &Attempt, now_ms: u64) -> Hold {
+        if let Some(released) = a.waits.as_ref().and_then(|w| w.released.clone()) {
+            return Hold::Released(released);
+        }
+        let Some(lane) = p.lane(&a.context) else {
+            return Hold::Free;
+        };
+        let chosen: Vec<&str> = t
+            .lanes
+            .iter()
+            .filter(|l| l.chosen)
+            .map(|l| l.name.as_str())
+            .collect();
+        let deps = lane.merge_after_among(&chosen);
+        if deps.is_empty() {
+            return Hold::Free;
+        }
+        if let Some(carried) = carried_release(t, p, a) {
+            return carried;
+        }
+        let deploy = lane.deploy_wait();
+        let mut plain = Vec::new();
+        let mut but = Vec::new();
+        let mut first = None;
+        for dep in deps {
+            let ended = match self.dependency(t, a, dep, deploy, now_ms) {
+                Dep::Holds(wait) => {
+                    let since = a
+                        .waits
+                        .as_ref()
+                        .filter(|w| w.lane == wait.lane && w.until == wait.until)
+                        .map_or(now_ms, |w| w.since_ms);
+                    return Hold::Held(MergeWait {
+                        since_ms: since,
+                        ..wait
+                    });
+                }
+                Dep::Ends(wait, clause, is_plain) => {
+                    if is_plain {
+                        plain.push(clause);
+                    } else {
+                        but.push(clause);
+                    }
+                    wait
+                }
+            };
+            first.get_or_insert(ended);
+        }
+        let released = if but.is_empty() {
+            Released {
+                clause: plain.join("; "),
+                plain: true,
+            }
+        } else {
+            Released {
+                clause: but.join(", and "),
+                plain: false,
+            }
+        };
+        let wait = first.expect("a lane was waited on");
+        Hold::Release(MergeWait {
+            released: Some(released),
+            since_ms: now_ms,
+            ..wait
+        })
+    }
+
+    /// Where the merge of the dependent attempt `a` stands against lane
+    /// `dep`: still held, or done with the clause its question names.
+    fn dependency(
+        &self,
+        t: &Ticket,
+        a: &Attempt,
+        dep: &str,
+        deploy: DeployWait<'_>,
+        now_ms: u64,
+    ) -> Dep {
+        let wait = |until, commit: Option<&String>, run: Option<String>| MergeWait {
+            lane: dep.to_owned(),
+            until,
+            step: match until {
+                WaitUntil::Deploy => match deploy {
+                    DeployWait::Step(step) => Some(step.to_owned()),
+                    DeployWait::Merge | DeployWait::Run => None,
+                },
+                WaitUntil::Merge => None,
+            },
+            commit: commit.cloned(),
+            run,
+            since_ms: now_ms,
+            released: None,
+        };
+        let latest = t
+            .attempts
+            .iter()
+            .filter(|x| x.stage == a.stage && x.context == dep && x.kind == AttemptKind::GateOnly)
+            .max_by_key(|x| x.n);
+        let Some(latest) = latest else {
+            return Dep::Holds(wait(WaitUntil::Merge, None, None));
+        };
+        if let Some(unmerged) = unmerged(dep, latest, wait(WaitUntil::Merge, None, None)) {
+            return unmerged;
+        }
+        let pr = latest.pr.as_ref();
+        let commit = pr.and_then(|pr| pr.merge_commit.as_ref());
+        let merged_as = match commit {
+            Some(c) => format!("{dep} merged as {}", short_head(c)),
+            None => format!("{dep} merged"),
+        };
+        let step = match deploy {
+            DeployWait::Merge => {
+                return Dep::Ends(wait(WaitUntil::Merge, commit, None), merged_as, true);
+            }
+            DeployWait::Run => None,
+            DeployWait::Step(step) => Some(step),
+        };
+        // Bitbucket's run reads were never run against a pipeline (spike
+        // 16), so a wait there never ends in "merge it there".
+        let (commit, pr) = match (commit, pr) {
+            (Some(commit), Some(pr)) if pr.provider != "bitbucket" => (commit, pr),
+            (Some(commit), Some(_)) => {
+                let clause = format!(
+                    "{dep}'s base pipeline is on Bitbucket, where Dispatch does not read it; check it there"
+                );
+                return Dep::Ends(wait(WaitUntil::Deploy, Some(commit), None), clause, false);
+            }
+            _ => {
+                let clause = format!(
+                    "{dep}'s merge commit was not reported, so its base pipeline was not read"
+                );
+                return Dep::Ends(wait(WaitUntil::Deploy, None, None), clause, false);
+            }
+        };
+        let read = self
+            .prs_for(&pr.provider)
+            .commit_run(&pr.repo, commit, step);
+        self.health.borrow_mut().gh_call(&read);
+        let ended = latest.ended_ms.unwrap_or(now_ms);
+        let within = |ms: u64| now_ms < ended.saturating_add(ms);
+        let pipeline = match step {
+            Some(step) => format!("{dep}'s base pipeline step {step:?}"),
+            None => format!("{dep}'s base pipeline"),
+        };
+        let holds = |run: String| Dep::Holds(wait(WaitUntil::Deploy, Some(commit), Some(run)));
+        let ends = |clause: String, plain: bool| {
+            Dep::Ends(wait(WaitUntil::Deploy, Some(commit), None), clause, plain)
+        };
+        match read {
+            Ok(Checks::Passed) => ends(format!("{merged_as} and {pipeline} passed"), true),
+            Ok(Checks::Failed(names)) => match step {
+                Some(_) => ends(format!("{pipeline} failed"), false),
+                None => ends(format!("{pipeline} failed at {}", names.join(", ")), false),
+            },
+            Ok(Checks::Pending) if within(BASE_RUN_WAIT_MS) => holds("pending".to_owned()),
+            Ok(Checks::Pending) => ends(
+                format!(
+                    "{pipeline} has not finished after {} minutes",
+                    BASE_RUN_WAIT_MS / 60_000
+                ),
+                false,
+            ),
+            Ok(Checks::None) if within(PR_YOUNG_HEAD_MS) => holds("none".to_owned()),
+            Ok(Checks::None) => ends(
+                format!("{pipeline} reported nothing on {}", short_head(commit)),
+                false,
+            ),
+            Err(e) if within(BASE_RUN_WAIT_MS) => holds(format!("error: {e:#}")),
+            Err(e) => ends(format!("{pipeline} could not be read: {e:#}"), false),
+        }
+    }
+
+    /// The commit a merged pull request merged as, read by number when
+    /// the reading that saw it merged did not say; `None` when it cannot
+    /// be read.
+    fn merge_commit_by_number(&self, target: &PrTarget, number: u64) -> Option<String> {
+        let read = self
+            .prs_for(&target.provider)
+            .by_number(&target.repo, number);
+        self.health.borrow_mut().gh_call(&read);
+        match read {
+            Ok(pr) => pr.merge_commit,
+            Err(e) => {
+                log::info!("PR #{number}: its merge commit could not be read: {e:#}");
+                None
+            }
+        }
     }
 
     /// Every context of the ticket whose PR has not merged sent back from
@@ -5112,6 +5346,15 @@ impl Runner {
         let Some((stage, number)) = attempt else {
             return Ok(());
         };
+        // A merge asked with a "but" (a pipeline failed, not finished or
+        // not read) is worked out again; a plain one stands.
+        if let Some(a) = find_attempt_mut(t, stage, *number)
+            && let Some(wait) = &mut a.waits
+            && wait.released.as_ref().is_some_and(|r| !r.plain)
+        {
+            wait.released = None;
+            self.save_ticket(t, now_ms)?;
+        }
         let back = p
             .stages
             .iter()
@@ -5149,7 +5392,7 @@ impl Runner {
             "recheck was answered, but it was not sent back through {}: {reason}. Fix it there, then answer recheck.",
             p.stages[back].name
         );
-        self.ask_merge(t, ps, &a, decision, merge_question(&a, Some(&held)), now_ms)
+        self.ask_merge(t, ps, p, &a, decision, Some(&held), now_ms)
     }
 
     /// Whether a pull request the merge watch `stage` still waits on
@@ -6026,6 +6269,7 @@ impl Runner {
             checks: remedy.tag(),
             checked_ms: now_ms,
             error_since_ms: None,
+            merge_commit: None,
         };
         if let Some(seen) = &a.pr {
             record.provider.clone_from(&seen.provider);
@@ -8164,9 +8408,10 @@ fn pending_for(t: &Ticket, a: &Attempt, decision: &str) -> bool {
         .any(|d| d.pending() && d.stage == a.stage && d.name == decision && d.attempt == key)
 }
 
-/// The merge decision's question: the PR open at its head, and
-/// `conflict`, a conflict that was not sent back, when there is one.
-fn merge_question(a: &Attempt, conflict: Option<&str>) -> String {
+/// The merge decision's question: the PR open at its head, `after`,
+/// how a wait on another lane's merge ended, and `conflict`, a conflict
+/// that was not sent back, when there are those.
+fn merge_question(a: &Attempt, conflict: Option<&str>, after: Option<&Released>) -> String {
     let (number, url, head) =
         a.pr.as_ref()
             .map(|pr| (pr.number, pr.url.as_str(), pr.head.as_str()))
@@ -8177,14 +8422,94 @@ fn merge_question(a: &Attempt, conflict: Option<&str>) -> String {
         a.context,
         short_head(head)
     );
-    match conflict {
-        Some(conflict) => {
+    match (after, conflict) {
+        (None, None) => q.push_str("; merge it there."),
+        (Some(after), None) if after.plain => {
+            let _ = write!(q, "; {}; merge it there.", after.clause);
+        }
+        (Some(after), None) => {
+            let _ = write!(
+                q,
+                ", but {}; merge only once the base has the change.",
+                after.clause
+            );
+        }
+        (None, Some(conflict)) => {
             let _ = write!(q, ", but {conflict}");
         }
-        None => q.push_str("; merge it there."),
+        (Some(after), Some(conflict)) if after.plain => {
+            let _ = write!(q, "; {}, but {conflict}", after.clause);
+        }
+        (Some(after), Some(conflict)) => {
+            let _ = write!(q, ", but {}, and {conflict}", after.clause);
+        }
     }
     q.push_str(" Dispatch resolves this when the provider reports the merge.");
     q
+}
+
+/// Where a lane's merge stands against one lane it waits on.
+enum Dep {
+    /// Still waiting, on the merge or its base pipeline.
+    Holds(MergeWait),
+    /// Done waiting: the wait as it ended, the clause the question names,
+    /// and whether that clause is plain ("merge it there").
+    Ends(MergeWait, String, bool),
+}
+
+/// Where a lane's merge stands against `dep`, whose latest merge watch
+/// is `latest`, while `dep` has not merged: held on `wait`, or ended by
+/// a closed pull request or a failed watch. `None` once it merged.
+fn unmerged(dep: &str, latest: &Attempt, wait: MergeWait) -> Option<Dep> {
+    if latest.is_open()
+        && let Some(pr) = latest.pr.as_ref().filter(|pr| pr.checks == "closed")
+    {
+        let clause = format!("{dep}'s PR #{} was closed without merging", pr.number);
+        return Some(Dep::Ends(wait, clause, false));
+    }
+    if let AttemptState::Failed { reason } = &latest.state {
+        let clause = format!("{dep}'s merge watch failed: {reason}");
+        return Some(Dep::Ends(wait, clause, false));
+    }
+    (latest.state != AttemptState::Complete).then_some(Dep::Holds(wait))
+}
+
+/// Whether a lane's merge question is held behind another lane's merge.
+enum Hold {
+    /// No merge order applies.
+    Free,
+    /// Held: the wait to record.
+    Held(MergeWait),
+    /// The hold ends now: the wait to record, its `released` set.
+    Release(MergeWait),
+    /// It ended before: the question as it was asked.
+    Released(Released),
+}
+
+/// A plain release of an earlier attempt of `a`'s context at its stage
+/// (one sent back since) that still stands: the lane it waited on still
+/// merged, as the same commit. Nothing is read again for it.
+fn carried_release(t: &Ticket, p: &Pipeline, a: &Attempt) -> Option<Hold> {
+    let earlier = t
+        .attempts
+        .iter()
+        .filter(|x| x.stage == a.stage && x.context == a.context && x.n < a.n)
+        .filter_map(|x| x.waits.as_ref())
+        .rfind(|w| w.released.as_ref().is_some_and(|r| r.plain))?;
+    if !merged_in(t, p, &earlier.lane) {
+        return None;
+    }
+    let commit = t
+        .attempts
+        .iter()
+        .filter(|x| x.stage == a.stage && x.context == earlier.lane)
+        .max_by_key(|x| x.n)
+        .and_then(|x| x.pr.as_ref())
+        .and_then(|pr| pr.merge_commit.clone());
+    if commit != earlier.commit {
+        return None;
+    }
+    Some(Hold::Release(earlier.clone()))
 }
 
 /// A head as a question shows it.
@@ -8743,6 +9068,7 @@ impl PrTarget {
             checks: String::new(),
             checked_ms: now_ms,
             error_since_ms: None,
+            merge_commit: None,
         }
     }
 }
@@ -9369,6 +9695,7 @@ pub(crate) fn new_attempt(
         secret: BTreeSet::new(),
         forgotten: BTreeMap::new(),
         revisions: Vec::new(),
+        waits: None,
         settle: BTreeMap::new(),
         stop_at_ms: None,
         polls_since_stop: 0,
@@ -9649,6 +9976,34 @@ fn lane_hints(p: &Pipeline, labels: &[String]) -> Vec<String> {
     }
 }
 
+/// `{lane.merge_after}`: the sentence telling an agent in `lane` that
+/// its merge waits on others among `chosen`, the lanes the ticket
+/// chose, or empty.
+fn merge_after_text(p: &Pipeline, chosen: &[&str], lane: &str) -> String {
+    let Some(spec) = p.lane(lane) else {
+        return String::new();
+    };
+    let deps = spec.merge_after_among(chosen);
+    if deps.is_empty() {
+        return String::new();
+    }
+    let names = deps.join(" and ");
+    let pipelines = deps
+        .iter()
+        .map(|d| format!("{d}'s"))
+        .collect::<Vec<_>>()
+        .join(" and ");
+    let once = match spec.deploy_wait() {
+        DeployWait::Merge => String::new(),
+        DeployWait::Run => format!(", once {pipelines} base pipeline has finished"),
+        DeployWait::Step(step) => format!(", once {pipelines} base pipeline has passed {step:?}"),
+    };
+    format!(
+        "This lane merges after {names}{once}. Dispatch holds its merge question until then; \
+         state the dependency in the first line of your notes."
+    )
+}
+
 /// The prompt's fields for a ticket in a context.
 pub(crate) fn vars_for(t: &Ticket, p: &Pipeline, lane: Option<&str>) -> Vars {
     let mut vars = Vars::default();
@@ -9675,6 +10030,12 @@ pub(crate) fn vars_for(t: &Ticket, p: &Pipeline, lane: Option<&str>) -> Vars {
     let lanes = if chosen.is_empty() { &all } else { &chosen };
     vars.set("lanes", lanes.join(", "))
         .set("lanes.all", all.join(", "));
+    // Set everywhere, so a prompt naming it never reaches an agent
+    // as written where no order applies.
+    vars.set(
+        "lane.merge_after",
+        lane.map_or(String::new(), |l| merge_after_text(p, &chosen, l)),
+    );
     // The root context is the ticket's tree on the ticket's branch.
     if let Some(l) = lane.and_then(|name| t.lanes.iter().find(|x| x.name == name)) {
         vars.set("lane", l.name.clone())
@@ -10235,6 +10596,7 @@ mod tests {
             checks: checks.into(),
             checked_ms: 0,
             error_since_ms: None,
+            merge_commit: None,
         };
         let conflicting = record("conflicting");
         let failed = record("failed: ci");
@@ -11448,6 +11810,75 @@ prompt = "Write {notes}."
 
     fn field(v: &Vars, key: &str) -> Option<String> {
         v.0.get(key).cloned()
+    }
+
+    #[test]
+    fn lane_merge_after_is_the_order_sentence_in_an_ordered_lane_and_empty_elsewhere() {
+        let mut p = lanes_pipeline();
+        p.lanes[1].merge_after = vec!["A".into()];
+        p.lanes[1].merge_after_deploy = Some(crate::pipeline::MergeAfterDeploy::Done(true));
+        let mut t = notes_ticket(&[]);
+        t.lanes = vec![
+            crate::ticket::chosen_lane("A"),
+            crate::ticket::chosen_lane("B"),
+        ];
+        let b = vars_for(&t, &p, Some("B"));
+        assert_eq!(
+            b.render("{lane.merge_after}"),
+            "This lane merges after A, once A's base pipeline has finished. Dispatch holds its merge question until then; state the dependency in the first line of your notes."
+        );
+        for vars in [vars_for(&t, &p, Some("A")), vars_for(&t, &p, None)] {
+            assert_eq!(vars.render("[{lane.merge_after}]"), "[]");
+        }
+        // A lane waited on that the ticket did not choose holds nothing.
+        t.lanes.retain(|l| l.name == "B");
+        assert_eq!(
+            vars_for(&t, &p, Some("B")).render("[{lane.merge_after}]"),
+            "[]"
+        );
+    }
+
+    #[test]
+    fn a_merge_question_names_how_the_wait_ended() {
+        let mut a = new_attempt(
+            "merge",
+            1,
+            "docs",
+            AttemptKind::GateOnly,
+            AttemptState::Running,
+            BTreeMap::new(),
+            0,
+        );
+        a.pr = Some(PullRequestRecord {
+            provider: "github".into(),
+            repo: "o/r".into(),
+            number: 7,
+            url: "https://example.com/pr/7".into(),
+            head: "abcdef0123".into(),
+            checks: "open".into(),
+            checked_ms: 0,
+            error_since_ms: None,
+            merge_commit: None,
+        });
+        let plain = Released {
+            clause: "repo merged as feed1234 and repo's base pipeline passed".into(),
+            plain: true,
+        };
+        assert_eq!(
+            merge_question(&a, None, Some(&plain)),
+            "merge (docs): PR #7 https://example.com/pr/7 is open at abcdef01; repo merged as feed1234 and repo's base pipeline passed; merge it there. Dispatch resolves this when the provider reports the merge."
+        );
+        let but = Released {
+            clause: "repo's base pipeline failed at Deploy to dev".into(),
+            plain: false,
+        };
+        let q = merge_question(&a, None, Some(&but));
+        assert_eq!(
+            q,
+            "merge (docs): PR #7 https://example.com/pr/7 is open at abcdef01, but repo's base pipeline failed at Deploy to dev; merge only once the base has the change. Dispatch resolves this when the provider reports the merge."
+        );
+        assert!(!q.contains("merge it there"));
+        assert!(merge_question(&a, None, None).contains("; merge it there."));
     }
 
     #[test]
