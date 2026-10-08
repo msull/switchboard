@@ -475,3 +475,16 @@ table's `may` lists `runner`, refused while a deploy runs).
   README's two-minute local budget. Refresh the table when the suite
   is next touched, and consider a budget line for the whole serial
   run.
+- **A subscription delivery drops a stage the ticket has already left.**
+  On #154 the first delivery carried only `3708 lanes → plan`; the line
+  a second earlier, `3707 investigate → lanes`, never reached the
+  supervisor. A delivery reads its lines as replayed, and `confirmed`
+  (`dispatch/src/events.rs`) keeps a replayed `stage` or `sent-back`
+  line only while the record's stage still has that line's name, so a
+  stage the ticket passed through inside one settled burst is filtered
+  out. Decisions are matched by id and survive, so nothing actionable
+  was lost here, but the supervisor's picture of the path skips steps
+  (and would hide, say, a short `refresh` between `ready` and `merge`).
+  Either keep a passed-through stage line when a later line of the same
+  ticket bears it out, or have the guide say a delivery shows where the
+  ticket is, not every stage it crossed. Seen on #154, 2026-10-08.
