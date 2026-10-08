@@ -219,6 +219,10 @@ pub struct UiState {
     /// Messages being composed, one per session, so switching away and
     /// back does not lose a half-written prompt.
     pub input_drafts: HashMap<RecordId, String>,
+    /// Answers being typed to a session's text ask, with the time of
+    /// the ask each was typed for; apart from `input_drafts`, which a
+    /// send the owner makes clears.
+    pub ask_drafts: HashMap<RecordId, (SystemTime, String)>,
     /// Prompts the core primed for a session's Prompt Box editor (a
     /// clone's or a discard's), taken when that editor is next drawn.
     /// Separate from the drafts, which the cards' quick-send lines share.
@@ -340,6 +344,7 @@ impl Default for UiState {
             delete_set: None,
             space_editor: None,
             input_drafts: HashMap::new(),
+            ask_drafts: HashMap::new(),
             primed: HashMap::new(),
             terminals: HashMap::new(),
             applied_theme: None,

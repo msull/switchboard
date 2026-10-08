@@ -479,6 +479,10 @@ impl SwitchboardApp {
                 result: self.attach(&host, &title, &cwd),
             }),
             Effect::SendInput { host, text } => self.send_input(&host, &text),
+            Effect::SendAnswer { host, text } => {
+                let result = self.services.host.write_line(&host, &text);
+                failed(result, || format!("send an answer to {}", host.0))
+            }
             Effect::SendKeys { host, bytes } => failed(s.host.write(&host, &bytes), || {
                 format!("send keys to {}", host.0)
             }),

@@ -9,7 +9,8 @@ use egui::{RichText, Sense, Ui, vec2};
 
 use super::{DrawCtx, theme};
 use crate::core::{
-    AppAction, Approval, CardState, PinTarget, ProjectId, RecordId, SessionKind, SessionRecord,
+    AppAction, Approval, AskKind, CardState, PinTarget, ProjectId, RecordId, SessionKind,
+    SessionRecord,
 };
 use crate::ports::transcript::Conversation;
 
@@ -244,6 +245,7 @@ pub fn session_card(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord) {
         } else {
             let ask = cx.core.ask_beside_reason(record.id);
             card_body(ui, record, model, reason, ask, caption.as_deref());
+            ask_answer(cx, ui, record.id);
         }
         if !running && !entry && state == CardState::NotResumable {
             ui.label(
@@ -377,6 +379,95 @@ pub(super) fn dismiss_ask(cx: &mut DrawCtx<'_>, ui: &mut Ui, id: RecordId) {
             .clicked()
     {
         cx.dispatch(AppAction::DismissAsk(id));
+    }
+}
+
+/// The owner's answer to a session's confirm, choice or text ask: a
+/// button per answer, or a line and "Send answer". An answer already
+/// given shows instead, until the turn ends and it is sent.
+pub(super) fn ask_answer(cx: &mut DrawCtx<'_>, ui: &mut Ui, id: RecordId) {
+    let Some(ask) = cx.core.answerable_ask(id) else {
+        return;
+    };
+    let p = theme::palette(ui);
+    if let Some(answer) = &ask.answer {
+        ui.add(
+            egui::Label::new(
+                RichText::new(format!("Answered: {answer} · sent when the turn ends"))
+                    .small()
+                    .color(p.n600),
+            )
+            .wrap(),
+        );
+        return;
+    }
+    let mut answer = None;
+    match &ask.kind {
+        AskKind::Note => {}
+        AskKind::Confirm => {
+            ui.horizontal(|ui| {
+                super::action_spacing(ui);
+                if theme::secondary(ui, "Yes").clicked() {
+                    answer = Some("yes".to_owned());
+                }
+                if theme::secondary(ui, "No").clicked() {
+                    answer = Some("no".to_owned());
+                }
+            });
+        }
+        AskKind::Choice(options) => {
+            ui.horizontal_wrapped(|ui| {
+                super::action_spacing(ui);
+                for option in options {
+                    if theme::secondary(ui, option).clicked() {
+                        answer = Some(option.clone());
+                    }
+                }
+            });
+        }
+        AskKind::Text => {
+            // A draft written for an earlier ask must not answer this one.
+            let (taken, draft) = cx
+                .state
+                .ask_drafts
+                .entry(id)
+                .or_insert_with(|| (ask.at, String::new()));
+            if *taken != ask.at {
+                *taken = ask.at;
+                draft.clear();
+            }
+            let blank = draft.trim().is_empty();
+            let mut submit = false;
+            // Right to left, so the field takes what the button leaves.
+            ui.horizontal(|ui| {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    super::action_spacing(ui);
+                    let send = ui
+                        .add_enabled_ui(!blank, |ui| theme::secondary(ui, "Send answer"))
+                        .inner
+                        .clicked();
+                    let response = ui.add_sized(
+                        [ui.available_width(), ui.spacing().interact_size.y],
+                        egui::TextEdit::singleline(draft).hint_text("Your answer"),
+                    );
+                    let enter =
+                        response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                    submit = !blank && (send || enter);
+                });
+            });
+            // After the row, whose closure holds `draft` borrowed from
+            // the map, so the map can be changed here.
+            if submit {
+                answer = cx.state.ask_drafts.remove(&id).map(|(_, text)| text);
+            }
+        }
+    }
+    if let Some(answer) = answer {
+        cx.dispatch(AppAction::AnswerAsk {
+            id,
+            at: ask.at,
+            answer,
+        });
     }
 }
 

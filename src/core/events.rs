@@ -72,8 +72,13 @@ impl AppCore {
         // open when the prompt came. A `SessionStart` sets `Working`
         // without opening one.
         let turn_open = record.activity == Activity::Working && !self.started.contains(&id);
+        let pending = record
+            .asking
+            .as_ref()
+            .filter(|a| a.at < event.at)
+            .and_then(|a| a.answer.clone());
+        let name = record.name.clone();
         if let Some(new) = Self::rebound_session(id, &event, record.resume.as_ref()) {
-            let name = record.name.clone();
             self.edit_session(id, out, |s| {
                 s.resume = Some(ResumeHandle::ClaudeCode {
                     session_id: new,
@@ -111,6 +116,10 @@ impl AppCore {
             self.relayed.retain(|r| *r != id);
         }
         let answers = typed && !relayed && !turn_open;
+        // The typed reply wins over an answer left on the card; sending
+        // that after it would be a second, stale reply.
+        let dropped = pending.filter(|_| answers);
+        let stopped = matches!(event.kind, EventKind::Stopped { .. });
         self.edit_session(id, out, |s| {
             s.last_event_at = Some(event.at);
             s.last_seen = s.last_seen.max(event.at);
@@ -136,6 +145,16 @@ impl AppCore {
                 }
             }
         });
+        if let Some(answer) = dropped {
+            self.info_about(
+                id,
+                format!("{name}: your prompt replaced the answer \"{answer}\", which was not sent"),
+                now,
+            );
+        }
+        if stopped {
+            self.deliver_answer(id, out);
+        }
     }
 
     /// An end is not activity: a session killed after it was dismissed
@@ -186,10 +205,15 @@ fn interpret(kind: &EventKind) -> Option<(Activity, Option<String>)> {
                 waiting("input requested")
             }
             "quota_auto_resume_stale" | "quota_auto_resume_disabled" => waiting("quota"),
-            "quota_auto_resume_fired" => Some((Activity::Working, None)),
-            "idle_prompt" | "agent_completed" | "elicitation_complete" | "elicitation_response" => {
-                Some((Activity::Idle, None))
+            // An MCP tool's dialog closing hands back to the turn it
+            // interrupted; only a `Stop` ends that turn.
+            "quota_auto_resume_fired" | "elicitation_complete" | "elicitation_response" => {
+                Some((Activity::Working, None))
             }
+            "idle_prompt" => Some((Activity::Idle, None)),
+            // Anything else, `agent_completed` among them, says nothing
+            // about the main turn: a background agent can finish while
+            // that turn runs on.
             _ => None,
         },
     }

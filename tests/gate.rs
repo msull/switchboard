@@ -15,6 +15,7 @@
 //! cargo test --locked --test gate -- --ignored hook_events_while_down_apply_in_order --nocapture
 //! cargo test --locked --test gate -- --ignored codex_launches_bind_distinct_ids --nocapture
 //! cargo test --locked --test gate -- --ignored multi_paragraph_send_submits_once --nocapture
+//! cargo test --locked --test gate -- --ignored a_structured_answer_arrives_as_the_next_prompt --nocapture
 //! ```
 //!
 //! Interactive `claude` shows a trust dialog for a directory it has not
@@ -50,9 +51,9 @@ use switchboard::adapters::tmux::TmuxHost;
 use switchboard::adapters::transcript::ClaudeTranscripts;
 use switchboard::app::Services;
 use switchboard::core::{
-    Activity, AgentKind, AppAction, AppCore, Approval, CardLayout, CardState, Clock, Effect,
-    Launch, Project, ProjectEnv, ProjectId, RecordId, ResumeHandle, SessionKind, SessionRecord,
-    Workspace,
+    Activity, AgentKind, AppAction, AppCore, Approval, Ask, AskKind, CardLayout, CardState, Clock,
+    Effect, Launch, Project, ProjectEnv, ProjectId, RecordId, ResumeHandle, SessionKind,
+    SessionRecord, Workspace,
 };
 use switchboard::ports::agent::{AgentLaunch, AgentLauncher};
 use switchboard::ports::events::{EventKind, EventSource, SessionEvent};
@@ -1300,6 +1301,158 @@ fn multi_paragraph_send_submits_once() {
     // tags, as it does when the owner pastes; what matters is that the
     // whole text is in the one message.
     assert!(sent.contains(&prompt), "{sent:?}");
+
+    app.dispatch(AppAction::KillSession(id));
+    wait_until(&mut app, "pane gone", Duration::from_secs(5), QUICK, |_| {
+        gate.list().is_empty()
+    });
+}
+
+// ---- not a gate item: a structured ask's answer ----
+
+/// Every user message's text in a Claude transcript, in order.
+fn user_messages(transcript: &Path) -> Vec<String> {
+    let body = fs::read_to_string(transcript).unwrap();
+    body.lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .filter(|v| v["type"] == "user")
+        .filter_map(|v| {
+            let content = &v["message"]["content"];
+            content.as_str().map(str::to_owned).or_else(|| {
+                let parts: Vec<_> = content
+                    .as_array()?
+                    .iter()
+                    .filter_map(|p| p["text"].as_str())
+                    .collect();
+                (!parts.is_empty()).then(|| parts.join(""))
+            })
+        })
+        .collect()
+}
+
+/// Puts a choice ask on the record as `session.ask` would, which the
+/// test cannot call: the app keeps only the launch token's hash.
+fn seed_choice_ask(app: &mut SwitchboardApp, id: RecordId) -> SystemTime {
+    let at = SystemTime::now();
+    let core = app.core_mut_for_seeding();
+    let mut workspaces = core.workspaces().to_vec();
+    let host: Vec<HostStatus> = workspaces
+        .iter()
+        .flat_map(|w| &w.sessions)
+        .filter_map(|s| core.host_status(s.id).cloned())
+        .collect();
+    for s in workspaces.iter_mut().flat_map(|w| &mut w.sessions) {
+        if s.id == id {
+            s.asking = Some(Ask {
+                kind: AskKind::Choice(vec!["a".into(), "b".into()]),
+                ..Ask::note("pick", at)
+            });
+        }
+    }
+    core.seed(workspaces, host);
+    at
+}
+
+/// Proves: an answer clicked while the pane is between turns is typed
+/// into it at once, and one clicked mid-turn waits for the `Stop`; each
+/// reaches the transcript as the next user message,
+/// `Owner answered "pick": <option>`, submitted once.
+#[test]
+#[ignore = "runs one real claude session; a fraction of a cent"]
+fn a_structured_answer_arrives_as_the_next_prompt() {
+    let Some(gate) = Gate::new() else { return };
+    cheap_claude_settings(&gate.data_dir);
+    let root = TrustedRoot::new();
+    let mut reader = HookLog::new(&gate.data_dir);
+    let mut app = gate.started();
+    let project = add_project(&mut app, &root.0);
+    let id = new_session(
+        &mut app,
+        project,
+        "gate",
+        SessionKind::Agent(AgentKind::ClaudeCode),
+        &root.0,
+    );
+    let mut seen = Vec::new();
+    let stops = |seen: &[SessionEvent]| {
+        seen.iter()
+            .filter(|e| e.record_id == Some(id) && matches!(e.kind, EventKind::Stopped { .. }))
+            .count()
+    };
+    run_claude_turn(&gate, &mut app, &mut reader, &[id]);
+    let resume = app.core().session(id).unwrap().resume.clone();
+    let transcript = Agents::detect(&gate.data_dir)
+        .transcript_path(&resume.expect("a Claude handle"))
+        .expect("a transcript path");
+
+    // Between turns: sent at the click.
+    let at = seed_choice_ask(&mut app, id);
+    app.dispatch(AppAction::AnswerAsk {
+        id,
+        at,
+        answer: "b".into(),
+    });
+    assert_eq!(app.core().session(id).unwrap().asking, None);
+    wait_until(
+        &mut app,
+        "the answer's Stop",
+        Duration::from_secs(90),
+        SLOW,
+        |_| {
+            seen.extend(reader.poll());
+            stops(&seen) >= 1
+        },
+    );
+    let sent = user_messages(&transcript);
+    println!("user messages: {sent:?}");
+    assert_eq!(
+        sent.last().map(String::as_str),
+        Some("Owner answered \"pick\": b")
+    );
+
+    // Mid-turn: held for the `Stop`. The ask is raised inside the turn,
+    // as the session's own `switchboard-ask` would be; one standing
+    // before a typed prompt is answered by that prompt.
+    gate.type_line(id, "write four sentences about tmux, then stop");
+    wait_until(
+        &mut app,
+        "the turn opens",
+        Duration::from_secs(30),
+        QUICK,
+        |app| app.core().session(id).unwrap().activity == Activity::Working,
+    );
+    let at = seed_choice_ask(&mut app, id);
+    app.dispatch(AppAction::AnswerAsk {
+        id,
+        at,
+        answer: "a".into(),
+    });
+    let held = app.core().session(id).unwrap().asking.clone();
+    println!("held: {held:?}");
+    assert_eq!(held.and_then(|a| a.answer).as_deref(), Some("a"));
+    wait_until(
+        &mut app,
+        "the answer's own Stop",
+        Duration::from_secs(120),
+        SLOW,
+        |_| {
+            seen.extend(reader.poll());
+            stops(&seen) >= 3
+        },
+    );
+    let sent = user_messages(&transcript);
+    println!("user messages: {sent:?}");
+    assert_eq!(
+        sent.last().map(String::as_str),
+        Some("Owner answered \"pick\": a")
+    );
+    assert_eq!(
+        sent.iter()
+            .filter(|m| m.starts_with("Owner answered"))
+            .count(),
+        2,
+        "each answer submitted once"
+    );
 
     app.dispatch(AppAction::KillSession(id));
     wait_until(&mut app, "pane gone", Duration::from_secs(5), QUICK, |_| {

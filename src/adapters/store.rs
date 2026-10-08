@@ -341,16 +341,17 @@ pub fn migrate(value: serde_json::Value) -> Result<Workspace, String> {
         .and_then(serde_json::Value::as_u64)
         .ok_or_else(|| "missing schema_version".to_string())?;
     match version {
-        // v2 to v14 added optional fields and variants only (v8: the
+        // v2 to v15 added optional fields and variants only (v8: the
         // project's space; v9: the control port's operation id, the
         // outside waiting reason, the pending-launch mark and the last
         // stop time; v10: a session's launcher environment; v11: when a
         // round's agents were asked, and a failed run; v12: a project's
         // and a session's environment sets, and a session's launch-token
         // hash; v13: whether a round is the owner's objection; v14: a
-        // session's own ask), so an older document reads with their
-        // defaults; it is written back at the current version.
-        1..=14 => serde_json::from_value(value)
+        // session's own ask; v15: an ask's kind and pending answer), so
+        // an older document reads with their defaults; it is written back
+        // at the current version.
+        1..=15 => serde_json::from_value(value)
             .map(|mut w: Workspace| {
                 w.schema_version = SCHEMA_VERSION;
                 w
@@ -462,8 +463,8 @@ mod tests {
 
     use super::*;
     use crate::core::{
-        Activity, AgentKind, CardLayout, Launch, Project, RecordId, ResumeHandle, SessionKind,
-        SessionRecord, SpaceId,
+        Activity, AgentKind, AskKind, CardLayout, Launch, Project, RecordId, ResumeHandle,
+        SessionKind, SessionRecord, SpaceId,
     };
 
     fn workspace(name: &str) -> Workspace {
@@ -1175,5 +1176,25 @@ mod tests {
         let loaded = migrate(value).unwrap();
         assert_eq!(loaded.schema_version, SCHEMA_VERSION);
         assert!(loaded.sessions.iter().all(|s| s.asking.is_none()));
+    }
+
+    #[test]
+    fn v14_asks_read_as_notes_with_no_answer() {
+        let mut w = workspace("v14");
+        w.schema_version = 14;
+        let mut value = serde_json::to_value(&w).unwrap();
+        let at = serde_json::to_value(SystemTime::UNIX_EPOCH).unwrap();
+        for s in value["sessions"].as_array_mut().unwrap() {
+            s["asking"] = serde_json::json!({ "message": "which?", "at": at });
+        }
+        let loaded = migrate(value).unwrap();
+        assert_eq!(loaded.schema_version, SCHEMA_VERSION);
+        assert!(!loaded.sessions.is_empty());
+        for s in &loaded.sessions {
+            let ask = s.asking.as_ref().unwrap();
+            assert_eq!(ask.message, "which?");
+            assert_eq!(ask.kind, AskKind::Note);
+            assert_eq!(ask.answer, None);
+        }
     }
 }

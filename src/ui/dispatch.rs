@@ -219,6 +219,7 @@ fn supervisor_ask(cx: &mut DrawCtx<'_>, ui: &mut Ui, project: &ProjectView) {
         );
         super::cards::dismiss_ask(cx, ui, id);
     });
+    super::cards::ask_answer(cx, ui, id);
 }
 
 /// The project's supervisor: what it is doing, and Open, Resume, Trust
@@ -710,6 +711,7 @@ fn agent_card(cx: &mut DrawCtx<'_>, ui: &mut Ui, a: &WaitingAgent, ticket: Optio
             if let Some(ask) = cx.core.ask_beside_reason(a.session) {
                 ui.label(RichText::new(ask).color(p.accent_2_text));
             }
+            super::cards::ask_answer(cx, ui, a.session);
             ui.horizontal(|ui| {
                 if cx.core.at_trust_prompt(a.session)
                     && theme::secondary(ui, "Trust this folder")

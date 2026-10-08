@@ -20,10 +20,10 @@ use switchboard::adapters::fakes::{
 };
 use switchboard::app::Services;
 use switchboard::core::{
-    Activity, AgentKind, AppAction, Approval, Ask, BUILTIN_WORKFLOW, CardLayout, Definition,
-    HandoffMode, Launch, Notice, PinTarget, Project, ProjectEnv, ProjectId, RecordId, ResumeHandle,
-    Round, RunState, SessionKind, SessionRecord, SideTab, SpaceId, ThemeMode, Verdict, View,
-    VoiceSettings, WorkflowId, WorkflowRun, Workspace, round_paths,
+    Activity, AgentKind, AppAction, Approval, Ask, AskKind, BUILTIN_WORKFLOW, CardLayout,
+    Definition, HandoffMode, Launch, Notice, PinTarget, Project, ProjectEnv, ProjectId, RecordId,
+    ResumeHandle, Round, RunState, SessionKind, SessionRecord, SideTab, SpaceId, ThemeMode,
+    Verdict, View, VoiceSettings, WorkflowId, WorkflowRun, Workspace, round_paths,
 };
 use switchboard::ports::changes::{Changes, Commit, FileStat};
 use switchboard::ports::host::{HostId, HostStatus, Liveness};
@@ -1657,10 +1657,7 @@ fn seed_ask_with(
         .flat_map(|w| &mut w.sessions)
         .find(|s| s.id == id)
         .map(|s| {
-            s.asking = Some(Ask {
-                message: message.into(),
-                at: SystemTime::now(),
-            });
+            s.asking = Some(Ask::note(message, SystemTime::now()));
             edit(s);
         })
         .unwrap();
@@ -1712,6 +1709,152 @@ fn the_session_page_shows_a_sessions_question_and_dismisses_it() {
         actions(&harness)
     );
     assert!(harness.query_by_label(message).is_none());
+}
+
+/// A choice ask on the board card: one button per option, and a click
+/// answers with that option for the ask it was drawn for.
+#[test]
+fn a_board_card_answers_a_choice_ask() {
+    let (mut harness, ids) = harness();
+    let id = seed_claude(&mut harness, &ids);
+    seed_ask_with(&mut harness, id, "which first?", |s| {
+        s.asking.as_mut().unwrap().kind =
+            AskKind::Choice(vec!["rerun lane two".into(), "merge lane one".into()]);
+    });
+    showing(&mut harness, View::Board(ids.beta));
+    harness.get_by_label("rerun lane two");
+    harness.state_mut().dispatched.clear();
+    click(&mut harness, "merge lane one");
+    let at = ask_at(&harness, id);
+    assert_eq!(
+        actions(&harness),
+        [AppAction::AnswerAsk {
+            id,
+            at,
+            answer: "merge lane one".into()
+        }]
+    );
+}
+
+fn ask_at(harness: &Harness<'static, SwitchboardApp>, id: RecordId) -> SystemTime {
+    harness
+        .state()
+        .core()
+        .session(id)
+        .unwrap()
+        .asking
+        .as_ref()
+        .unwrap()
+        .at
+}
+
+/// A text ask on the session page: a line and "Send answer".
+#[test]
+fn the_session_page_answers_a_text_ask() {
+    let (mut harness, ids) = harness();
+    let id = seed_claude(&mut harness, &ids);
+    seed_ask_with(&mut harness, id, "which branch?", |s| {
+        s.asking.as_mut().unwrap().kind = AskKind::Text;
+    });
+    showing(&mut harness, View::Session(id));
+    let at = ask_at(&harness, id);
+    harness.state_mut().dispatched.clear();
+    let field = harness
+        .query_all_by_role(Role::TextInput)
+        .find(|n| n.accesskit_node().placeholder() == Some("Your answer"))
+        .expect("the answer field");
+    field.focus();
+    field.type_text("main");
+    harness.run_steps(2);
+    click(&mut harness, "Send answer");
+    assert_eq!(
+        actions(&harness),
+        [AppAction::AnswerAsk {
+            id,
+            at,
+            answer: "main".into()
+        }]
+    );
+    assert!(!harness.state().ui_state.ask_drafts.contains_key(&id));
+}
+
+/// Text typed for one ask never answers the next: a new ask starts
+/// with an empty field.
+#[test]
+fn a_draft_for_an_earlier_text_ask_is_dropped() {
+    let (mut harness, ids) = harness();
+    let id = seed_claude(&mut harness, &ids);
+    seed_ask_with(&mut harness, id, "which branch?", |s| {
+        s.asking.as_mut().unwrap().kind = AskKind::Text;
+    });
+    showing(&mut harness, View::Session(id));
+    let field = harness
+        .query_all_by_role(Role::TextInput)
+        .find(|n| n.accesskit_node().placeholder() == Some("Your answer"))
+        .expect("the answer field");
+    field.focus();
+    field.type_text("main");
+    harness.run_steps(2);
+    let draft = |h: &Harness<'static, SwitchboardApp>| {
+        h.state()
+            .ui_state
+            .ask_drafts
+            .get(&id)
+            .map(|(_, t)| t.clone())
+    };
+    assert_eq!(draft(&harness).as_deref(), Some("main"));
+    seed_ask_with(&mut harness, id, "which remote?", |s| {
+        let ask = s.asking.as_mut().unwrap();
+        ask.kind = AskKind::Text;
+        ask.at += Duration::from_secs(1);
+    });
+    harness.run_steps(2);
+    assert_eq!(draft(&harness).as_deref(), Some(""));
+}
+
+/// An answer sent by itself between turns leaves alone a prompt the
+/// owner is composing for the same session.
+#[test]
+fn a_delivered_answer_keeps_the_owners_prompt_draft() {
+    let (mut harness, ids) = harness();
+    let id = seed_claude(&mut harness, &ids);
+    seed_ask_with(&mut harness, id, "merge now?", |s| {
+        s.asking.as_mut().unwrap().kind = AskKind::Confirm;
+        s.activity = Activity::Idle;
+    });
+    harness
+        .state_mut()
+        .ui_state
+        .input_drafts
+        .insert(id, "half a prompt".into());
+    showing(&mut harness, View::Board(ids.beta));
+    click(&mut harness, "Yes");
+    assert_eq!(harness.state().core().session(id).unwrap().asking, None);
+    assert_eq!(
+        harness
+            .state()
+            .ui_state
+            .input_drafts
+            .get(&id)
+            .map(String::as_str),
+        Some("half a prompt")
+    );
+}
+
+/// An answer waiting for the turn to end shows in place of the buttons.
+#[test]
+fn a_pending_answer_shows_instead_of_the_buttons() {
+    let (mut harness, ids) = harness();
+    let id = seed_claude(&mut harness, &ids);
+    seed_ask_with(&mut harness, id, "merge now?", |s| {
+        let ask = s.asking.as_mut().unwrap();
+        ask.kind = AskKind::Confirm;
+        ask.answer = Some("yes".into());
+    });
+    showing(&mut harness, View::Board(ids.beta));
+    harness.get_by_label("Answered: yes · sent when the turn ends");
+    assert!(harness.query_by_label("Yes").is_none());
+    assert!(harness.query_by_label("No").is_none());
 }
 
 fn two_turns() -> Conversation {
@@ -4942,10 +5085,7 @@ fn the_supervisor_chip_opens_resumes_and_freshens_after_a_confirmation() {
 #[test]
 fn the_supervisor_chip_shows_what_the_supervisor_asked() {
     let (mut harness, id) = supervised_page(|r| {
-        r.asking = Some(Ask {
-            message: "merge #12 now?".into(),
-            at: SystemTime::now(),
-        });
+        r.asking = Some(Ask::note("merge #12 now?", SystemTime::now()));
     });
     harness
         .state_mut()
@@ -4964,6 +5104,43 @@ fn the_supervisor_chip_shows_what_the_supervisor_asked() {
     harness.get_by_label("merge #12 now?");
 }
 
+/// The supervisor's confirm is answered from its line on the Dispatch
+/// page.
+#[test]
+fn the_supervisor_ask_line_answers_a_confirm() {
+    let (mut harness, id) = supervised_page(|r| {
+        r.asking = Some(Ask {
+            kind: AskKind::Confirm,
+            ..Ask::note("merge #12 now?", SystemTime::now())
+        });
+    });
+    harness.set_size(egui::vec2(700.0, 900.0));
+    harness
+        .state_mut()
+        .dispatch(AppAction::HostListed(vec![HostStatus {
+            id: HostId(id.host_name()),
+            liveness: Liveness::Running {
+                pid: 9,
+                command: "claude".into(),
+            },
+            cwd: None,
+            last_activity: None,
+            title: None,
+        }]));
+    harness.run_steps(2);
+    let at = ask_at(&harness, id);
+    click(&mut harness, "Yes");
+    assert!(
+        actions(&harness).contains(&AppAction::AnswerAsk {
+            id,
+            at,
+            answer: "yes".into()
+        }),
+        "{:?}",
+        actions(&harness)
+    );
+}
+
 /// A long question is not cut to fit the chip's row: it has a line of
 /// its own, with its dismiss.
 #[test]
@@ -4971,10 +5148,7 @@ fn the_supervisor_ask_has_its_own_uncut_line() {
     let message = "the client project's pipeline failed on lane two; rerun it, merge lane one \
                    alone, or wait for the base pipeline to finish first?";
     let (mut harness, id) = supervised_page(|r| {
-        r.asking = Some(Ask {
-            message: message.into(),
-            at: SystemTime::now(),
-        });
+        r.asking = Some(Ask::note(message, SystemTime::now()));
     });
     harness.set_size(egui::vec2(700.0, 900.0));
     harness

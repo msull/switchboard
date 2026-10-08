@@ -251,6 +251,7 @@ fn questions(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord) {
             ui.add(egui::Label::new(RichText::new(ask).color(p.accent_2_text)).wrap());
             super::cards::dismiss_ask(cx, ui, record.id);
         });
+        super::cards::ask_answer(cx, ui, record.id);
     }
 }
 

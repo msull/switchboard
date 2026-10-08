@@ -6,8 +6,8 @@ use std::path::PathBuf;
 
 use crate::core::action::{AppCore, Clock, Effect, Flight, FlightKind, Out, View};
 use crate::core::model::{
-    Activity, AgentKind, CardLayout, CardState, Discarded, Launch, ProjectId, RecordId,
-    ResumeHandle, SessionKind, SessionRecord, Workspace,
+    Activity, AgentKind, Ask, AskKind, CardLayout, CardState, Discarded, Launch, ProjectId,
+    RecordId, ResumeHandle, SessionKind, SessionRecord, Workspace,
 };
 use crate::core::reconcile::env_with_record_id;
 use crate::ports::agent::AgentLaunch;
@@ -366,6 +366,92 @@ impl AppCore {
             .then(|| self.waiting_reason(id))
             .flatten();
         (reason.as_deref() != Some(ask)).then_some(ask)
+    }
+
+    /// The standing ask whole, with its kind and any pending answer,
+    /// while its pane runs.
+    #[must_use]
+    pub fn standing_ask_detail(&self, id: RecordId) -> Option<&Ask> {
+        if !self.is_running(id) {
+            return None;
+        }
+        self.session(id)?.asking.as_ref()
+    }
+
+    /// The standing ask the owner can answer on a card: a confirm, a
+    /// choice or text, which `session_ask` takes only from Claude Code.
+    #[must_use]
+    pub fn answerable_ask(&self, id: RecordId) -> Option<&Ask> {
+        self.standing_ask_detail(id)
+            .filter(|a| a.kind != AskKind::Note)
+    }
+
+    /// Whether the pane sits at its prompt between turns, where a line
+    /// typed into it starts the next turn. A permission prompt or a
+    /// failed stop is not: keys there would answer the dialog.
+    fn between_turns(&self, id: RecordId) -> bool {
+        self.is_running(id)
+            && self.session(id).is_some_and(|s| match s.activity {
+                Activity::Idle => true,
+                Activity::Working => self.started.contains(&id),
+                _ => false,
+            })
+    }
+
+    /// The owner answers the standing ask taken at `at`: sent into the
+    /// pane now if it is between turns, otherwise kept on the record for
+    /// `deliver_answer` at the turn's end. The ask clears in the step
+    /// that sends, so an answer goes out at most once.
+    pub(super) fn answer_ask(
+        &mut self,
+        id: RecordId,
+        at: std::time::SystemTime,
+        answer: &str,
+        now: Clock,
+        out: &mut Out,
+    ) {
+        if !self.is_running(id) {
+            let name = self.session_name(id);
+            self.error_about(id, format!("{name} is not running; return to it first"));
+            return;
+        }
+        let Some(ask) = self.answerable_ask(id).filter(|a| a.at == at) else {
+            self.info_about(id, "the question was already answered or withdrawn", now);
+            return;
+        };
+        let Some(answer) = valid_answer(&ask.kind, answer) else {
+            self.error_about(id, "that answer does not fit the question");
+            return;
+        };
+        self.edit_session(id, out, |s| {
+            if let Some(ask) = &mut s.asking {
+                ask.answer = Some(answer);
+            }
+        });
+        self.deliver_answer(id, out);
+    }
+
+    /// Sends a pending answer as the pane's next prompt once it is
+    /// between turns, clearing the ask in the same step; otherwise
+    /// nothing. Called at a `Stop` and on every host poll, so an answer
+    /// left by a restart still goes out.
+    pub(super) fn deliver_answer(&mut self, id: RecordId, out: &mut Out) {
+        if !self.between_turns(id) {
+            return;
+        }
+        let Some(text) = self
+            .session(id)
+            .and_then(|s| s.asking.as_ref())
+            .and_then(|a| Some(ask_answer_text(a, a.answer.as_deref()?)))
+        else {
+            return;
+        };
+        // Clearing `discard` follows the rule at the `SendInput` arm.
+        self.edit_session(id, out, |s| {
+            s.asking = None;
+            s.discard = None;
+        });
+        self.aim_at_pane(id, out, |host| Effect::SendAnswer { host, text });
     }
 
     /// Kill the record's pane and drop its status, so a launch right
@@ -937,4 +1023,25 @@ pub fn can_fork(record: &SessionRecord) -> bool {
             .resume
             .as_ref()
             .is_some_and(|h| h.transcript().is_some())
+}
+
+/// The prompt an answer goes into the pane as: one line, so it is typed
+/// rather than pasted.
+fn ask_answer_text(ask: &Ask, answer: &str) -> String {
+    format!("Owner answered \"{}\": {answer}", ask.message)
+}
+
+/// The answer as it is sent, if it fits the kind: `yes` or `no` for a
+/// confirm, one of the options exactly for a choice, a non-blank line
+/// for text; never for a plain ask.
+fn valid_answer(kind: &AskKind, answer: &str) -> Option<String> {
+    match kind {
+        AskKind::Note => None,
+        AskKind::Confirm => matches!(answer, "yes" | "no").then(|| answer.to_owned()),
+        AskKind::Choice(options) => options
+            .iter()
+            .any(|o| o == answer)
+            .then(|| answer.to_owned()),
+        AskKind::Text => super::control::ask_message(answer),
+    }
 }

@@ -343,7 +343,9 @@ fn model_of(body: Option<&Body>) -> Option<String> {
 /// Kept out of `GUIDE_ESSENTIALS`, which names `dispatch` verbs only.
 pub const ASK_GUIDE: &str = "When you end a turn with something the owner must answer or \
      decide, run `{ask} \"<one line>\"` before you stop; it shows on the owner's board until \
-     they reply.";
+     they reply. When the answer has a shape, add `--confirm`, `--choice \"<option>\"` (once \
+     per option) or `--text`, and the owner's answer arrives as your next prompt: `Owner \
+     answered \"<question>\": <answer>`.";
 
 /// The heading a rotation puts over the old hand-off.
 const ROTATED_HEADING: &str = "## From the session of ";
@@ -1437,6 +1439,7 @@ mod tests {
             with.contains("run `/opt/bin/switchboard-ask \"<one line>\"` before you stop"),
             "{with}"
         );
+        assert!(with.contains("--choice \"<option>\""), "{with}");
         // The line sits in "How you work", before the decisions.
         assert!(with.find("switchboard-ask") < with.find("## Decisions you answer"));
     }
