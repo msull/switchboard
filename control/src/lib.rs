@@ -33,6 +33,19 @@ pub const RECORD_ID_ENV: &str = "SWITCHBOARD_RECORD_ID";
 /// that one.
 pub const RECORD_TOKEN_ENV: &str = "SWITCHBOARD_RECORD_TOKEN";
 
+/// The shell automation runs in: agents' tool calls and Dispatch's
+/// services. Fixed and profile-free, so a remote worker can use the
+/// same value; the owner's own sessions keep their login shell.
+pub const AUTOMATION_SHELL: &str = "/bin/bash";
+
+/// Flags that keep `AUTOMATION_SHELL` from reading any profile or rc file.
+pub const AUTOMATION_SHELL_FLAGS: [&str; 2] = ["--noprofile", "--norc"];
+
+/// Directories, `:`-separated, that a launcher asks to have ahead of the
+/// PATH the host gives a pane. Only the directories: the host joins them
+/// to its current PATH at every spawn.
+pub const PATH_PREPEND_ENV: &str = "SWITCHBOARD_PATH_PREPEND";
+
 /// Switchboard's data directory as a command run in a pane finds it:
 /// `SWITCHBOARD_DATA_DIR`, else the app's Application Support dir.
 #[must_use]

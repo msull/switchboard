@@ -14417,6 +14417,7 @@ fn a_restart_at_the_current_stage_runs_the_fixed_setup_and_gate_on_check() {
     let d = rerun_about(&env, &id, "implement", 1);
     assert_eq!(d.options, vec!["rerun", "check", "park"]);
     assert!(d.question.contains("dispatch restart"), "{}", d.question);
+    assert!(d.question.contains("`[shell] path`"), "{}", d.question);
     live_edit(&env, SETUP, FIXED_SETUP);
     live_edit(&env, GATE_ARGV, FIXED_ARGV);
     let first = env.ticket(&id).pipeline_file.clone();
@@ -18697,9 +18698,12 @@ fn services_start_after_before_on_a_free_port_and_the_tester_is_told_the_url() {
         panic!("{launch:?}")
     };
     assert_eq!(
-        argv[1..],
+        argv[..],
         [
-            "-lc",
+            "/bin/bash",
+            "--noprofile",
+            "--norc",
+            "-c",
             "exec \"$@\"",
             "dispatch-service",
             "env",
@@ -18739,6 +18743,99 @@ fn services_start_after_before_on_a_free_port_and_the_tester_is_told_the_url() {
         view.services[0].url.as_deref(),
         Some("http://localhost:3100")
     );
+}
+
+/// A back-half ticket whose pipeline has `[shell] path`, or none,
+/// taken under a runner whose own PATH is `/usr/bin:/bin`, and run until
+/// its tester starts. `edit` changes the pipeline text first.
+fn shell_path_env(shell: bool, edit: impl FnOnce(&str) -> String) -> (Env, String) {
+    let mut env = Env::new();
+    env.runner.path = Some("/usr/bin:/bin".to_owned());
+    let mut text = edit(&BACK_HALF.replace("{worktrees}", &env.worktrees.display().to_string()));
+    if shell {
+        text.push_str("\n[shell]\npath = [\"/opt/node/bin\"]\n");
+    }
+    std::fs::write(env.data.pipeline("Orchard"), text).unwrap();
+    let id = take_orchard(&mut env, 42, BOTH);
+    deployed(&mut env, &id);
+    served(&mut env, &id);
+    (env, id)
+}
+
+/// The `env` of each `session.new` named `name`.
+fn session_envs(env: &Env, name: &str) -> Vec<std::collections::BTreeMap<String, String>> {
+    env.sb()
+        .calls
+        .iter()
+        .filter_map(|r| match &r.body {
+            Body::SessionNew { name: n, env, .. } if n.starts_with(name) => Some(env.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The PATH each of the runner's own commands was given: the setup of
+/// each lane set up so far, the deploy gate and the frontend's `before`.
+fn child_paths(env: &Env, id: &str) -> Vec<Option<String>> {
+    let path_of = |vars: &[(String, String)]| {
+        vars.iter()
+            .find(|(k, _)| k == "PATH")
+            .map(|(_, v)| v.clone())
+    };
+    let repo = env.repo.lock().unwrap();
+    assert!(!repo.ran_envs.is_empty(), "a lane was set up");
+    let mut paths: Vec<Option<String>> = repo.ran_envs.iter().map(|e| path_of(e)).collect();
+    for key in [deploy_key(id, 1), before_key(id, 1)] {
+        let check = repo.checks.iter().find(|c| c.key == key).unwrap();
+        paths.push(path_of(&check.env));
+    }
+    paths
+}
+
+#[test]
+fn a_pipelines_shell_path_reaches_its_sessions_and_its_commands() {
+    for confine in [false, true] {
+        let (env, id) = shell_path_env(true, |t| {
+            if confine {
+                t.replace(
+                    "trust_folders = true",
+                    "trust_folders = true\nconfine = true",
+                )
+            } else {
+                t.to_owned()
+            }
+        });
+        for name in ["frontend :", "tester"] {
+            let envs = session_envs(&env, name);
+            assert_eq!(envs.len(), 1, "{name}");
+            assert_eq!(
+                envs[0].get("SWITCHBOARD_PATH_PREPEND").map(String::as_str),
+                Some("/opt/node/bin"),
+                "{name}"
+            );
+            assert!(!envs[0].contains_key("PATH"), "{name}: {:?}", envs[0]);
+        }
+        for path in child_paths(&env, &id) {
+            assert_eq!(
+                path.as_deref(),
+                Some("/opt/node/bin:/usr/bin:/bin"),
+                "confine = {confine}"
+            );
+        }
+        if confine {
+            let repo = env.repo.lock().unwrap();
+            let gate = repo.checks.iter().find(|c| c.key == deploy_key(&id, 1));
+            assert!(gate.unwrap().confine.is_some(), "the gate ran confined");
+        }
+    }
+
+    // Without `[shell]`, nothing is added and the commands inherit.
+    let (env, id) = shell_path_env(false, str::to_owned);
+    for name in ["frontend :", "tester"] {
+        let envs = session_envs(&env, name);
+        assert!(!envs[0].contains_key("SWITCHBOARD_PATH_PREPEND"), "{name}");
+    }
+    assert!(child_paths(&env, &id).iter().all(Option::is_none));
 }
 
 #[test]

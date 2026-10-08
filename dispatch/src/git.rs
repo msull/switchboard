@@ -1687,6 +1687,8 @@ pub struct FakeRepo {
     pub ran: Vec<(PathBuf, Vec<String>)>,
     /// Commands run confined: dir, argv, what they were confined to.
     pub ran_confined: Vec<(PathBuf, Vec<String>, Confine)>,
+    /// The environment of each `run` and `run_confined`, in call order.
+    pub ran_envs: Vec<Vec<(String, String)>>,
     /// The next `run` or `run_confined` fails with this, once.
     pub fail_run: Option<String>,
     pub fail_worktree: Option<String>,
@@ -2200,8 +2202,9 @@ impl Repo for FakeRepo {
     fn summary(&self, dir: &Path, _base: &str) -> Result<String> {
         Ok(self.summaries.get(dir).cloned().unwrap_or_default())
     }
-    fn run(&mut self, dir: &Path, argv: &[String], _env: &[(String, String)]) -> Result<()> {
+    fn run(&mut self, dir: &Path, argv: &[String], env: &[(String, String)]) -> Result<()> {
         self.ran.push((dir.to_path_buf(), argv.to_vec()));
+        self.ran_envs.push(env.to_vec());
         if let Some(why) = self.fail_run.take() {
             bail!("{why}");
         }
@@ -2211,11 +2214,12 @@ impl Repo for FakeRepo {
         &mut self,
         dir: &Path,
         argv: &[String],
-        _env: &[(String, String)],
+        env: &[(String, String)],
         confine: &Confine,
     ) -> Result<String> {
         self.ran_confined
             .push((dir.to_path_buf(), argv.to_vec(), confine.clone()));
+        self.ran_envs.push(env.to_vec());
         let header = crate::confine::header(confine);
         if let Some(why) = self.fail_run.take() {
             return Err(anyhow::anyhow!("{why}").context(header));

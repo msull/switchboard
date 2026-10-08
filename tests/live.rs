@@ -31,6 +31,14 @@ use switchboard::ports::agent::AgentLauncher;
 use switchboard::ports::events::{EventKind, EventSource};
 use switchboard::ports::opener::Opener;
 
+/// The index of the agent's binary in a launcher argv: the word whose
+/// file name is the agent's, wherever the shell prefix ends.
+fn bin_index(argv: &[String], name: &str) -> usize {
+    argv.iter()
+        .position(|a| Path::new(a).file_name() == Some(name.as_ref()))
+        .expect("the agent's binary in the argv")
+}
+
 /// A nested Claude session inherits `CLAUDE*` variables that turn off
 /// transcript saving in the child (spike 03), so scrub them.
 fn scrub_claude_env(cmd: &mut Command) {
@@ -61,22 +69,25 @@ fn claude_live() {
     let Some(ResumeHandle::ClaudeCode { session_id, .. }) = launch.resume.clone() else {
         panic!("no Claude handle");
     };
-    assert_eq!(launch.argv[6], settings.to_string_lossy());
+    let bin = bin_index(&launch.argv, "claude");
+    assert_eq!(launch.argv[bin + 6], settings.to_string_lossy());
 
     // The real launch is interactive; `-p` with a one-turn prompt is the
-    // cheap stand-in. Same argv otherwise.
+    // cheap stand-in. Same argv otherwise, the flags going after the
+    // binary rather than after `env`.
     let mut cmd = Command::new(&launch.argv[0]);
-    cmd.args([
-        "-p",
-        "reply with pong",
-        "--max-turns",
-        "1",
-        "--model",
-        "haiku",
-    ])
-    .args(&launch.argv[1..])
-    .current_dir(&cwd)
-    .envs(launch.env.iter().map(|(k, v)| (k.as_str(), v.as_str())));
+    cmd.args(&launch.argv[1..=bin])
+        .args([
+            "-p",
+            "reply with pong",
+            "--max-turns",
+            "1",
+            "--model",
+            "haiku",
+        ])
+        .args(&launch.argv[bin + 1..])
+        .current_dir(&cwd)
+        .envs(launch.env.iter().map(|(k, v)| (k.as_str(), v.as_str())));
     scrub_claude_env(&mut cmd);
     println!("running: {cmd:?}");
     let out = cmd.output().expect("run claude");
@@ -145,15 +156,16 @@ fn codex_live() {
 
     let since = SystemTime::now() - Duration::from_secs(1);
     let mut cmd = Command::new(&launch.argv[0]);
-    cmd.args([
-        "exec",
-        "--skip-git-repo-check",
-        "-s",
-        "read-only",
-        "reply with the single word pong",
-    ])
-    .current_dir(&cwd)
-    .envs(launch.env.iter().map(|(k, v)| (k.as_str(), v.as_str())));
+    cmd.args(&launch.argv[1..=bin_index(&launch.argv, "codex")])
+        .args([
+            "exec",
+            "--skip-git-repo-check",
+            "-s",
+            "read-only",
+            "reply with the single word pong",
+        ])
+        .current_dir(&cwd)
+        .envs(launch.env.iter().map(|(k, v)| (k.as_str(), v.as_str())));
     println!("running: {cmd:?}");
     let out = cmd.output().expect("run codex");
     println!("stdout: {}", String::from_utf8_lossy(&out.stdout));
@@ -170,7 +182,7 @@ fn codex_live() {
         .prepare_resume(&handle, record, "switchboard-live", &cwd)
         .unwrap();
     println!("resume argv: {:?}", resume.argv);
-    assert_eq!(resume.argv[1], "resume");
+    assert_eq!(resume.argv[bin_index(&resume.argv, "codex") + 1], "resume");
 }
 
 #[test]
