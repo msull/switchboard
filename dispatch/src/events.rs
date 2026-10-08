@@ -1272,7 +1272,10 @@ impl For {
         })
     }
 
-    fn candidate(self, kind: Kind) -> bool {
+    /// Whether a line of `kind` is what this filter waits for; a park
+    /// or close ends every wait besides.
+    #[must_use]
+    pub fn candidate(self, kind: Kind) -> bool {
         match self {
             Self::Decision => kind == Kind::Decision,
             Self::Stage => matches!(kind, Kind::Stage | Kind::SentBack | Kind::Restarted),
@@ -1528,6 +1531,132 @@ pub fn wait_burst(
             None => return Ok(Burst::Lines(lines)),
         }
     }
+}
+
+/// The burst a subscription is due, for a pass that cannot wait: what
+/// `wait_burst` with `For::Move` returns from `since`, with the clock
+/// stepped by `FOLLOW_POLL_MS` at each look instead of sleeping, so the
+/// log is read as it is now. `None` when nothing is due: no line, a
+/// burst that may still grow (its last line neither a decision nor an
+/// end, within `SETTLE_MS` of `now_ms` and its first within
+/// `SETTLE_CAP_MS`), or a park the subscriber already has
+/// (`park_seen`, and the park's line at or before `since` or none).
+/// The park or close of an `Ended` burst is the last line returned.
+///
+/// The park rule compares the end's kind and seq, never its time: a park
+/// with no line of its own is made from the record, with `updated_ms`
+/// for its time, and every write to the parked ticket moves that.
+pub fn next_burst(
+    data: &DataDir,
+    ticket: &str,
+    since: u64,
+    park_seen: bool,
+    now_ms: u64,
+) -> Result<Option<Vec<Event>>> {
+    let log = log_path(data);
+    // Most passes find nothing new: skip the whole read of the log
+    // unless the record holds an end the subscriber may lack.
+    if last_seq(&log)? <= since {
+        let t = read_ticket(&data.ticket_file(ticket))?;
+        let unseen_end = match t.state {
+            TicketState::Closed { .. } => true,
+            TicketState::Parked { .. } => !park_seen,
+            _ => false,
+        };
+        if !unseen_end {
+            return Ok(None);
+        }
+    }
+    let clock = std::cell::Cell::new(now_ms);
+    let burst = wait_burst(
+        data,
+        ticket,
+        For::Move,
+        Some(since),
+        Some(now_ms),
+        &mut || clock.get(),
+        &mut || clock.set(clock.get() + FOLLOW_POLL_MS),
+    )?;
+    let lines = match burst {
+        Burst::TimedOut => return Ok(None),
+        Burst::Ended { lines, end } => {
+            let seen = end.kind == Kind::Parked && park_seen && (end.seq == 0 || end.seq <= since);
+            if seen && lines.is_empty() {
+                return Ok(None);
+            }
+            let mut lines = lines;
+            if !seen {
+                lines.push(*end);
+            }
+            return Ok(Some(lines));
+        }
+        Burst::Lines(lines) => lines,
+    };
+    let (Some(first), Some(last)) = (lines.first(), lines.last()) else {
+        return Ok(None);
+    };
+    let open = last.kind != Kind::Decision
+        && last.at_ms.saturating_add(SETTLE_MS) > now_ms
+        && first.at_ms.saturating_add(SETTLE_CAP_MS) > now_ms;
+    if open {
+        return Ok(None);
+    }
+    Ok(Some(lines))
+}
+
+/// An event as a line: as stored with `json`, else
+/// `seq  hh:mm:ss  ticket  stage  kind  text`.
+#[must_use]
+pub fn line(e: &Event, json: bool) -> String {
+    if json {
+        return e.to_line();
+    }
+    let text = if e.kind == Kind::Void {
+        let seqs: Vec<String> = e.voids.iter().map(u64::to_string).collect();
+        format!("withdraws {}: {}", seqs.join(", "), e.text)
+    } else {
+        e.text.clone()
+    };
+    format!(
+        "{}  {}  {}  {}  {}  {text}",
+        e.seq,
+        clock(e.at_ms),
+        e.ticket,
+        e.stage,
+        e.kind.as_str()
+    )
+}
+
+/// The `decide` line after a `decision` event, while that decision
+/// still waits on the user. `command` is how the reader runs it:
+/// `dispatch decide`, or the full path a supervisor's permission needs.
+#[must_use]
+pub fn decide_hint(e: &Event, t: &Ticket, command: &str) -> Option<String> {
+    let d = e.decision.as_ref()?;
+    t.waiting_on_you().iter().any(|w| &w.id == d).then(|| {
+        format!(
+            "    {command} {} {d} <answer> [--note <text> | --file <path>]",
+            t.id
+        )
+    })
+}
+
+/// `hh:mm:ss` of `ms` since the epoch, in the local zone: the reader is
+/// a person or an agent on this machine, and a UTC clock next to a local
+/// one (the shell's `date`, a log file) misleads twice a day. Falls back
+/// to UTC only when the moment is out of range.
+#[must_use]
+pub fn clock(ms: u64) -> String {
+    use chrono::{DateTime, Local, TimeZone as _};
+    let secs = i64::try_from(ms / 1000).unwrap_or(i64::MAX);
+    if let Some(utc) = DateTime::from_timestamp(secs, 0) {
+        return Local
+            .from_utc_datetime(&utc.naive_utc())
+            .format("%H:%M:%S")
+            .to_string();
+    }
+    let s = (ms / 1000) % 86_400;
+    format!("{:02}:{:02}:{:02}", s / 3600, (s / 60) % 60, s % 60)
 }
 
 /// Whether `e` is a park or close.
@@ -3816,6 +3945,61 @@ mod tests {
                 assert_eq!(burst, Burst::TimedOut, "{kind:?}");
             }
         }
+    }
+
+    /// A runner pass cannot wait: `next_burst` holds a burst while it
+    /// may still grow, and returns it once it settles or reaches the cap.
+    /// A park the subscriber already has is not returned again.
+    #[test]
+    fn next_burst_holds_an_open_burst_until_it_settles_or_hits_the_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = DataDir::new(dir.path());
+        let log = log_path(&data);
+        let mut t = ticket();
+        crate::store::write_ticket_stamped(&data, &mut t, 10).unwrap();
+        let since = last_seq(&log).unwrap();
+        assert_eq!(next_burst(&data, "t1", since, false, 500).unwrap(), None);
+        t.stage = 1;
+        crate::store::write_ticket_stamped(&data, &mut t, 1_000).unwrap();
+        assert_eq!(next_burst(&data, "t1", since, false, 1_500).unwrap(), None);
+        let lines = next_burst(&data, "t1", since, false, 3_001)
+            .unwrap()
+            .unwrap();
+        assert_eq!(kinds_of(&lines), [Kind::Stage]);
+
+        // A ticket that keeps moving: held while the first line is
+        // within the cap, then returned up to it.
+        t.updated_ms = 25_000;
+        crate::store::write_ticket(&data.ticket_file(&t.id), &t).unwrap();
+        let since = last_seq(&log).unwrap();
+        for at in (10_000..=20_500).step_by(1_500) {
+            let mut e = Event::new(&t, at, Kind::PrChecks, "#1", "pending".into());
+            append(&log, std::slice::from_mut(&mut e)).unwrap();
+        }
+        assert_eq!(next_burst(&data, "t1", since, false, 19_500).unwrap(), None);
+        let lines = next_burst(&data, "t1", since, false, 21_000)
+            .unwrap()
+            .unwrap();
+        assert_eq!(lines.len(), 7, "{lines:?}");
+        assert!(lines.iter().all(|e| e.at_ms <= 10_000 + SETTLE_CAP_MS));
+
+        let since = last_seq(&log).unwrap();
+        t.state = TicketState::Parked {
+            reason: "by hand".into(),
+        };
+        crate::store::write_ticket_stamped(&data, &mut t, 30_000).unwrap();
+        let lines = next_burst(&data, "t1", since, false, 30_001)
+            .unwrap()
+            .unwrap();
+        assert_eq!(lines.last().unwrap().kind, Kind::Parked);
+        let parked = last_seq(&log).unwrap();
+        assert_eq!(next_burst(&data, "t1", parked, true, 40_000).unwrap(), None);
+        // Seen, but delivered from an older cursor: the line is news.
+        assert!(
+            next_burst(&data, "t1", since, true, 40_000)
+                .unwrap()
+                .is_some()
+        );
     }
 
     /// A decision ends a burst at once: nothing after it is looked for.

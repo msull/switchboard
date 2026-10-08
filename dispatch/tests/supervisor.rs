@@ -3,6 +3,9 @@
 //! through the command line with `SWITCHBOARD_RECORD_ID` set as its pane
 //! would set it, what a supervisor may and may not do.
 
+// Tests assert emptiness with `assert!` throughout.
+#![allow(clippy::assert_is_empty)]
+
 // The in-memory Switchboard is shared with `first_slice`, which uses the
 // parts this file does not.
 #[allow(dead_code)]
@@ -1217,4 +1220,434 @@ impl Env {
     fn sb(&self) -> std::sync::MutexGuard<'_, FakeSwitchboard> {
         self.sb.lock().unwrap()
     }
+}
+
+// --- subscriptions: the runner types a ticket's moves into the pane
+
+impl Env {
+    /// A fresh supervisor for Orchard at its prompt; its session id.
+    fn idle_supervisor(&mut self) -> String {
+        let session = self.fresh().unwrap().session;
+        let now = self.now;
+        self.sb().stop(&session, now);
+        session
+    }
+
+    fn subscribe(&mut self, ticket: &str) {
+        let now = self.tick();
+        self.runner
+            .subscribe(ticket, "move", None, "owner", now)
+            .unwrap();
+    }
+
+    /// One delivery pass, late enough that every line written before it
+    /// has settled.
+    fn deliver(&mut self) {
+        self.now += 3_000;
+        self.deliver_now();
+    }
+
+    /// One delivery pass at the clock as it is.
+    fn deliver_now(&mut self) {
+        let now = self.now;
+        self.runner.deliver_subscriptions(ORCHARD, now).unwrap();
+    }
+
+    /// The ticket moved on a stage.
+    fn moved(&mut self, ticket: &str) {
+        let now = self.tick();
+        let mut t = self.runner.load_ticket(ticket).unwrap();
+        t.stage += 1;
+        self.runner.save_ticket(&mut t, now).unwrap();
+    }
+
+    fn set_state(&mut self, ticket: &str, state: TicketState) {
+        let now = self.tick();
+        let mut t = self.runner.load_ticket(ticket).unwrap();
+        t.state = state;
+        self.runner.save_ticket(&mut t, now).unwrap();
+    }
+
+    fn supervision(&self) -> dispatch::ticket::Supervision {
+        self.runner.load_project(ORCHARD).unwrap().supervisor
+    }
+
+    fn since(&self, ticket: &str) -> Option<u64> {
+        self.supervision()
+            .subscriptions
+            .iter()
+            .find(|s| s.ticket == ticket)
+            .map(|s| s.since)
+    }
+
+    /// The `session.prompt` requests seen: op and session.
+    fn prompts(&self) -> Vec<(String, String)> {
+        self.sb()
+            .calls
+            .iter()
+            .filter_map(|c| match &c.body {
+                Body::SessionPrompt { session, .. } => Some((c.op.clone(), session.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn sent(&self) -> Vec<(String, String)> {
+        self.sb().sent.clone()
+    }
+
+    fn tail(&self) -> u64 {
+        dispatch::events::last_seq(&dispatch::events::log_path(&self.data)).unwrap()
+    }
+}
+
+#[test]
+fn a_subscribed_move_is_typed_into_the_current_supervisor() {
+    let mut env = Env::new();
+    let sup = env.idle_supervisor();
+    let t = env.take(ORCHARD, 1);
+    env.subscribe(&t.id);
+    env.deliver();
+    assert!(env.prompts().is_empty(), "nothing is due, nothing is asked");
+    assert_eq!(env.sb().kinds_called("session"), 0);
+    env.moved(&t.id);
+    let seq = env.tail();
+    env.deliver();
+    let sent = env.sent();
+    assert_eq!(sent.len(), 1, "{sent:?}");
+    assert_eq!(sent[0].0, sup);
+    let text = &sent[0].1;
+    assert!(
+        text.starts_with(&format!("Dispatch subscription: events on {}\n", t.id)),
+        "{text}"
+    );
+    assert!(text.contains(&format!("{seq}  ")), "{text}");
+    assert!(text.contains("  stage  "), "{text}");
+    assert!(
+        text.ends_with("Act on these as your seed says; nothing to re-arm."),
+        "{text}"
+    );
+    assert_eq!(env.since(&t.id), Some(seq));
+    let s = env.supervision();
+    assert_eq!(s.delivery, None);
+    assert_eq!(s.delivery_waits, None);
+    // Delivered once.
+    env.sb().stop(&sup, 1);
+    env.deliver();
+    assert_eq!(env.sent().len(), 1);
+}
+
+#[test]
+fn a_burst_is_held_until_it_settles_and_goes_in_as_one_prompt() {
+    let mut env = Env::new();
+    env.idle_supervisor();
+    let t = env.take(ORCHARD, 1);
+    env.subscribe(&t.id);
+    env.moved(&t.id);
+    env.deliver_now();
+    assert!(env.prompts().is_empty(), "the burst may still grow");
+    let d = env.ask(&t.id, "inspect");
+    env.deliver();
+    let sent = env.sent();
+    assert_eq!(sent.len(), 1, "{sent:?}");
+    assert!(sent[0].1.contains("  stage  "), "{}", sent[0].1);
+    assert!(sent[0].1.contains("  decision  "), "{}", sent[0].1);
+    assert!(
+        sent[0].1.contains(&format!(
+            " decide {} {d} <answer> [--note <text> | --file <path>]",
+            t.id
+        )),
+        "{}",
+        sent[0].1
+    );
+}
+
+#[test]
+fn a_lost_reply_is_sent_again_under_its_op_and_typed_once() {
+    let mut env = Env::new();
+    env.idle_supervisor();
+    let t = env.take(ORCHARD, 1);
+    env.subscribe(&t.id);
+    let before = env.since(&t.id);
+    env.moved(&t.id);
+    env.sb().drop_reply_for = Some("session.prompt".into());
+    env.deliver();
+    assert!(env.supervision().delivery.is_some());
+    assert_eq!(env.since(&t.id), before, "no reply, no cursor");
+    env.deliver();
+    let prompts = env.prompts();
+    assert_eq!(prompts.len(), 2);
+    assert_eq!(prompts[0], prompts[1], "the same op, to the same session");
+    assert_eq!(env.sent().len(), 1, "answered from the log");
+    assert_eq!(env.supervision().delivery, None);
+    assert_eq!(env.since(&t.id), Some(env.tail()));
+}
+
+#[test]
+fn a_refused_delivery_keeps_the_cursor_and_goes_in_later() {
+    let mut env = Env::new();
+    env.idle_supervisor();
+    let t = env.take(ORCHARD, 1);
+    env.subscribe(&t.id);
+    let before = env.since(&t.id);
+    env.moved(&t.id);
+    env.sb().fail_next = Some("session.prompt".into());
+    env.deliver();
+    let s = env.supervision();
+    assert_eq!(s.delivery, None);
+    assert_eq!(
+        s.delivery_waits.as_deref(),
+        Some("session.prompt refused by the test")
+    );
+    assert_eq!(env.since(&t.id), before);
+    env.deliver();
+    assert_eq!(env.sent().len(), 1);
+    assert_eq!(env.supervision().delivery_waits, None);
+}
+
+#[test]
+fn a_busy_supervisor_is_asked_once_a_pass_and_written_once() {
+    let mut env = Env::new();
+    let sup = env.fresh().unwrap().session;
+    let t = env.take(ORCHARD, 1);
+    env.subscribe(&t.id);
+    env.moved(&t.id);
+    env.deliver();
+    let file = env.data.project_file(ORCHARD);
+    let written = std::fs::read_to_string(&file).unwrap();
+    assert_eq!(env.supervision().delivery_waits.as_deref(), Some("busy"));
+    for _ in 0..3 {
+        env.deliver();
+    }
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), written);
+    assert!(env.prompts().is_empty());
+    assert_eq!(env.sb().kinds_called("session"), 4);
+    // The turn ends.
+    env.sb().stop(&sup, 1);
+    env.deliver();
+    assert_eq!(env.sent().len(), 1);
+}
+
+#[test]
+fn an_idle_supervisor_with_its_own_ask_takes_a_delivery_and_one_at_a_prompt_does_not() {
+    let mut env = Env::new();
+    let sup = env.idle_supervisor();
+    let t = env.take(ORCHARD, 1);
+    env.subscribe(&t.id);
+    env.moved(&t.id);
+    env.sb().at_prompt.insert(sup.clone());
+    env.deliver();
+    assert!(env.prompts().is_empty());
+    assert_eq!(
+        env.supervision().delivery_waits.as_deref(),
+        Some("at a prompt (permission for Bash)")
+    );
+    env.sb().at_prompt.clear();
+    env.sb().session_mut(&sup).card = "waiting on you".into();
+    env.deliver();
+    assert_eq!(env.sent().len(), 1);
+}
+
+#[test]
+fn a_park_is_delivered_once_and_a_second_park_after_a_resume_again() {
+    let mut env = Env::new();
+    let sup = env.idle_supervisor();
+    let t = env.take(ORCHARD, 1);
+    env.subscribe(&t.id);
+    env.parked(&t.id);
+    env.deliver();
+    assert_eq!(env.sent().len(), 1);
+    assert!(env.sent()[0].1.contains("  parked  "), "{:?}", env.sent());
+    // A write to the parked ticket moves its time, not its park.
+    for _ in 0..3 {
+        env.sb().stop(&sup, 1);
+        let now = env.tick();
+        let mut parked = env.ticket(&t.id);
+        parked.source.body.push('x');
+        env.runner.save_ticket(&mut parked, now).unwrap();
+        env.deliver();
+    }
+    assert_eq!(env.sent().len(), 1);
+    assert_eq!(env.supervision().subscriptions.len(), 1, "a park keeps it");
+    env.set_state(&t.id, TicketState::Active);
+    env.deliver();
+    assert!(!env.supervision().subscriptions[0].park_seen);
+    env.parked(&t.id);
+    env.deliver();
+    assert_eq!(env.sent().len(), 2, "{:?}", env.sent());
+}
+
+#[test]
+fn subscribing_to_a_parked_ticket_delivers_nothing_until_it_moves() {
+    let mut env = Env::new();
+    env.idle_supervisor();
+    let t = env.take(ORCHARD, 1);
+    env.parked(&t.id);
+    env.subscribe(&t.id);
+    assert!(env.supervision().subscriptions[0].park_seen);
+    env.deliver();
+    env.deliver();
+    assert!(env.prompts().is_empty());
+    assert_eq!(env.sb().kinds_called("session"), 0, "nothing was due");
+}
+
+#[test]
+fn the_runner_pass_delivers_a_park() {
+    let mut env = Env::new();
+    env.idle_supervisor();
+    let t = env.take(ORCHARD, 1);
+    env.subscribe(&t.id);
+    env.parked(&t.id);
+    env.now += 3_000;
+    let now = env.now;
+    env.runner.step_all(now).unwrap();
+    assert_eq!(env.sent().len(), 1, "{:?}", env.sent());
+}
+
+#[test]
+fn a_close_delivered_ends_the_subscription() {
+    let mut env = Env::new();
+    env.idle_supervisor();
+    let t = env.take(ORCHARD, 1);
+    env.subscribe(&t.id);
+    env.set_state(
+        &t.id,
+        TicketState::Closed {
+            reason: "done".into(),
+        },
+    );
+    env.deliver();
+    assert!(env.sent()[0].1.contains("  closed  "), "{:?}", env.sent());
+    assert!(env.supervision().subscriptions.is_empty());
+    let out = env.cli(None, &["subscribe", &t.id]);
+    refused(&out, "is closed");
+}
+
+#[test]
+fn an_app_without_session_prompt_is_tried_again_after_a_while() {
+    let mut env = Env::new();
+    env.idle_supervisor();
+    let t = env.take(ORCHARD, 1);
+    env.subscribe(&t.id);
+    env.moved(&t.id);
+    env.sb().old_app = true;
+    env.deliver();
+    assert_eq!(env.prompts().len(), 1);
+    assert_eq!(
+        env.supervision().delivery_waits.as_deref(),
+        Some(dispatch::subscribe::UPDATE_THE_APP)
+    );
+    for _ in 0..5 {
+        env.deliver();
+    }
+    assert_eq!(env.prompts().len(), 1);
+    env.now += dispatch::subscribe::UNSUPPORTED_RETRY_MS;
+    env.deliver();
+    assert_eq!(env.prompts().len(), 2);
+    for _ in 0..5 {
+        env.deliver();
+    }
+    assert_eq!(
+        env.prompts().len(),
+        2,
+        "the second refusal restarts the wait"
+    );
+    env.now += dispatch::subscribe::UNSUPPORTED_RETRY_MS;
+    env.deliver();
+    assert_eq!(env.prompts().len(), 3);
+    assert!(env.sent().is_empty());
+}
+
+#[test]
+fn a_supervisor_not_running_is_never_resumed_for_a_delivery() {
+    for gone in [Liveness::Exited { code: Some(0) }, Liveness::Missing] {
+        let mut env = Env::new();
+        let sup = env.idle_supervisor();
+        let t = env.take(ORCHARD, 1);
+        env.subscribe(&t.id);
+        env.moved(&t.id);
+        env.sb().session_mut(&sup).liveness = gone;
+        env.deliver();
+        env.deliver();
+        assert!(env.prompts().is_empty());
+        assert_eq!(env.sb().kinds_called("session.resume"), 0);
+        assert_eq!(
+            env.supervision().delivery_waits.as_deref(),
+            Some("not running")
+        );
+    }
+}
+
+#[test]
+fn a_fresh_supervisor_inherits_the_backlog() {
+    let mut env = Env::new();
+    let old = env.fresh().unwrap().session;
+    let t = env.take(ORCHARD, 1);
+    env.subscribe(&t.id);
+    env.moved(&t.id);
+    env.deliver();
+    assert!(env.prompts().is_empty(), "the old one was busy");
+    let new = env.idle_supervisor();
+    assert_ne!(old, new);
+    env.deliver();
+    let sent = env.sent();
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0].0, new);
+}
+
+#[test]
+fn a_delivery_in_flight_to_a_replaced_supervisor_is_dropped_and_the_new_one_gets_it() {
+    let mut env = Env::new();
+    let old = env.idle_supervisor();
+    let t = env.take(ORCHARD, 1);
+    env.subscribe(&t.id);
+    let before = env.since(&t.id);
+    env.moved(&t.id);
+    env.sb().drop_reply_for = Some("session.prompt".into());
+    env.deliver();
+    assert_eq!(env.supervision().delivery.unwrap().session, old);
+    let new = env.idle_supervisor();
+    env.deliver();
+    assert_eq!(env.supervision().delivery, None);
+    assert_eq!(env.since(&t.id), before);
+    let to_old = env.prompts().iter().filter(|(_, s)| *s == old).count();
+    assert_eq!(to_old, 1, "never sent again to the old session");
+    env.deliver();
+    let sent = env.sent();
+    assert_eq!(sent.len(), 2);
+    assert_eq!(sent[1].0, new);
+    assert_eq!(sent[0].1, sent[1].1, "the same lines");
+}
+
+#[test]
+fn brief_and_subscriptions_show_what_is_not_delivered() {
+    let mut env = Env::new();
+    env.seat(ORCHARD, SUPERVISOR);
+    let t = env.take(ORCHARD, 1);
+    let other = env.take(GROVE, 2);
+    accepted(&env.cli(Some(SUPERVISOR), &["subscribe", &t.id]));
+    refused(
+        &env.cli(Some(SUPERVISOR), &["subscribe", &other.id]),
+        "may not act on Grove's tickets",
+    );
+    let sub = env.supervision().subscriptions[0].clone();
+    assert_eq!(sub.by, SUPERVISOR);
+    env.moved(&t.id);
+    let text = stdout(&env.cli(Some(SUPERVISOR), &["brief", ORCHARD]));
+    assert!(
+        text.contains("subscriptions (the runner types these into your pane when you are idle):"),
+        "{text}"
+    );
+    assert!(
+        text.contains(&format!("{} from seq {}: 1 undelivered", t.id, sub.since)),
+        "{text}"
+    );
+    let text = stdout(&env.cli(Some(SUPERVISOR), &["subscriptions", ORCHARD]));
+    assert!(text.contains("1 undelivered"), "{text}");
+    refused(
+        &env.cli(Some(SUPERVISOR), &["subscriptions", GROVE]),
+        "may not act on Grove",
+    );
+    accepted(&env.cli(Some(SUPERVISOR), &["unsubscribe", &t.id]));
+    assert!(env.supervision().subscriptions.is_empty());
 }

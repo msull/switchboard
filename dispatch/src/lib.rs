@@ -32,6 +32,8 @@
 //! - `supervisor`: a project's supervisor session: its seed, its flags,
 //!   which commands it may run, and the runner's making and replacing of
 //!   it.
+//! - `subscribe`: the tickets a supervisor follows, and the runner's
+//!   delivery of their events into its pane.
 //! - `serve`: Dispatch's own port, tickets as views and the commands.
 
 // Tests assert emptiness with `assert!` throughout; the rest of the
@@ -56,6 +58,7 @@ pub mod scheduler;
 pub mod serve;
 pub mod services;
 pub mod store;
+pub mod subscribe;
 pub mod supervisor;
 pub mod template;
 pub mod ticket;
@@ -127,6 +130,11 @@ Supervising (see docs/dispatch-agent-guide.md):
   dispatch wait <ticket> [--for decision|stage|pr|closed|move|any] [--since <seq>] [--timeout <secs>] [--json]
                                            block until it happens: exit 0 matched,
                                            2 timed out, 3 the ticket parked or closed
+  dispatch subscribe <ticket> [--for move] [--since <seq>]
+                                           the runner types the ticket's moves into the supervisor's pane
+                                           once it is idle; from the log's tail unless --since
+  dispatch unsubscribe <ticket>            stop that
+  dispatch subscriptions <project>         each subscription, what it has not delivered, and why it waits
   dispatch show <ticket> [--json]          one ticket: stage, lanes, attempts, decisions, files
   dispatch report <ticket> [--json]        how a ticket went
   dispatch report --project <name> [--since YYYY-MM-DD] [--json]

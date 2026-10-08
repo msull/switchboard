@@ -11,12 +11,12 @@ use std::time::SystemTime;
 
 use switchboard_control as wire;
 
-use super::action::{AppAction, Out, RULE_COLUMNS};
+use super::action::{AppAction, Out, RULE_COLUMNS, TYPED_HOLD};
 use super::env::{SecretScope, valid_set_name, valid_var_name};
 use super::{
-    AgentKind, AppCore, Ask, AskKind, AwsMethod, Clock, ENV_SETUP_LOCKED, Effect, EnvSet, EnvVar,
-    GridRect, Launch, PinTarget, PinnedItem, ProjectId, RecordId, SessionKind, SetId, SetRule,
-    Space, SpaceId, WorkflowDefinition, WorkflowId, WorkingSet, grid,
+    Activity, AgentKind, AppCore, Ask, AskKind, AwsMethod, Clock, ENV_SETUP_LOCKED, Effect, EnvSet,
+    EnvVar, GridRect, Launch, PinTarget, PinnedItem, ProjectId, RecordId, SessionKind, SetId,
+    SetRule, Space, SpaceId, WorkflowDefinition, WorkflowId, WorkingSet, grid,
 };
 use crate::ports::host::Liveness;
 
@@ -55,6 +55,12 @@ pub enum ControlAction {
         env_sets: Vec<String>,
     },
     SendInput {
+        id: RecordId,
+        text: String,
+    },
+    /// `SendInput` only when `AppCore::ready_for_prompt` allows it,
+    /// checked and typed in one step; otherwise refused with the reason.
+    Prompt {
         id: RecordId,
         text: String,
     },
@@ -299,6 +305,17 @@ impl AppCore {
                 }
                 self.session_action(AppAction::SendInput { id, text }, now, out);
                 Vec::new()
+            }
+            ControlAction::Prompt { id, text } => {
+                if let Err(why) = self.ready_for_prompt(id, now.wall) {
+                    self.error(why);
+                    return Vec::new();
+                }
+                // The pane reads as between turns until Claude Code
+                // reports the prompt, so the mark refuses a second one in
+                // that window.
+                self.mark_typed(id, now.wall, true);
+                self.apply_control(ControlAction::SendInput { id, text }, now, out)
             }
             ControlAction::Kill(id) => {
                 self.session_action(AppAction::KillSession(id), now, out);
@@ -653,6 +670,60 @@ impl AppCore {
         self.update_set(out, id, |s| s.items = items);
     }
 
+    /// Records that the session's input box may hold text now: a
+    /// `session.prompt` being submitted when `prompt`, else the owner's
+    /// keys.
+    pub(super) fn mark_typed(&mut self, id: RecordId, at: SystemTime, prompt: bool) {
+        self.typed.retain(|(r, ..)| *r != id);
+        self.typed.push((id, at, prompt));
+    }
+
+    /// Whether a line typed into the session now would arrive as its
+    /// next prompt and nothing else, or why not. The pane's own verdict
+    /// is `between_turns`, the rule an owner's queued answer is sent by;
+    /// in front of it go what that rule cannot see: the session's kind
+    /// (only Claude Code reports turns), the trust question, keys the
+    /// owner typed, and the owner's own answer, which goes first.
+    pub fn ready_for_prompt(&self, id: RecordId, now: SystemTime) -> Result<(), String> {
+        let Some(s) = self.session(id) else {
+            return Err("no such session".to_owned());
+        };
+        if s.kind != SessionKind::Agent(AgentKind::ClaudeCode) {
+            return Err("not a Claude Code session".to_owned());
+        }
+        if self.at_trust_prompt(id) {
+            return Err("at a prompt (trust)".to_owned());
+        }
+        // A clock that went backwards reads as just typed.
+        let typing = self.typed.iter().find(|(r, at, _)| {
+            *r == id && now.duration_since(*at).map_or(true, |d| d < TYPED_HOLD)
+        });
+        if let Some((.., prompt)) = typing {
+            return Err(if *prompt {
+                "a prompt is being submitted"
+            } else {
+                "the owner is typing"
+            }
+            .to_owned());
+        }
+        if s.asking.as_ref().is_some_and(|a| a.answer.is_some()) {
+            return Err("an answer waits".to_owned());
+        }
+        if self.between_turns(id) {
+            return Ok(());
+        }
+        if !self.is_running(id) {
+            return Err("not running".to_owned());
+        }
+        Err(match (s.activity, &s.activity_reason) {
+            (Activity::WaitingOnYou, Some(why)) => format!("at a prompt ({why})"),
+            (Activity::WaitingOnYou, None) => "at a prompt".to_owned(),
+            (Activity::Working, _) => "busy".to_owned(),
+            (Activity::Unknown, _) => "no turn reported yet".to_owned(),
+            (Activity::Idle | Activity::Ended, _) => "ended".to_owned(),
+        })
+    }
+
     // --- read models, in the wire's shapes
 
     /// One session as the port reports it; `None` for an unknown id.
@@ -694,6 +765,7 @@ impl AppCore {
             waiting: card == super::CardState::WaitingOnYou,
             waiting_reason: self.waiting_reason(id),
             trust_question: self.at_trust_prompt(id),
+            prompt_refusal: self.ready_for_prompt(id, now).err(),
             resume_id: s.resume.as_ref().map(super::ResumeHandle::provider_id),
             op: s.op.clone(),
         })
@@ -1044,6 +1116,7 @@ fn control_kind(action: &ControlAction) -> String {
         ControlAction::NewSession { .. } => "session.new",
         ControlAction::CloneSession { .. } => "session.clone",
         ControlAction::SendInput { .. } => "session.send",
+        ControlAction::Prompt { .. } => "session.prompt",
         ControlAction::Kill(_) => "session.kill",
         ControlAction::Resume(_) => "session.resume",
         ControlAction::Remove(_) => "session.remove",
@@ -1214,6 +1287,10 @@ impl TryFrom<wire::Body> for ControlAction {
                 env_sets,
             },
             wire::Body::SessionSend { session: s, text } => Self::SendInput {
+                id: session(&s)?,
+                text,
+            },
+            wire::Body::SessionPrompt { session: s, text } => Self::Prompt {
                 id: session(&s)?,
                 text,
             },

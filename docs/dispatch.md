@@ -2596,10 +2596,49 @@ makes it count as the owner. What a supervisor does is stamped
 `supervisor`: the answer's `by`, `state_by`, `taken_by`, and the events'
 `actor`.
 
+**Subscriptions.** A supervisor does not watch: `dispatch subscribe
+<ticket> [--since <seq>]` puts the ticket on the project's record
+(`Supervision.subscriptions`, a cursor per ticket starting at the log's
+tail), and each runner pass, after the supervisor's intent and before
+the project's tickets, types what is due into `supervisor.current`'s
+pane. What is due per ticket is `events::next_burst`: what `wait --for
+move` would return from the cursor, read with a stepped clock so the
+pass never blocks, held while the burst may still grow (its last line
+neither a decision nor an end, within `SETTLE_MS` of now, its first
+within `SETTLE_CAP_MS`). Every subscribed ticket's burst goes in one
+prompt, at most `DELIVERY_MAX_LINES` lines, headed `Dispatch
+subscription: events on <tickets>`, with each line as `wait` prints it
+and the `decide` line of a decision still pending. A delivered close
+ends the subscription; a park does not. A park standing when the
+subscription starts, or already delivered, is marked `park_seen`
+rather than compared by time, since a park made up from the record
+takes the record's `updated_ms`; the mark clears on a pass that reads
+the ticket unparked.
+
+The runner asks the app first (`session`, a query it does not log)
+and sends only when the view's `prompt_refusal` is empty, so a busy
+supervisor costs one query a pass and no write: `delivery_waits` is
+written only when the reason changes, and `dispatch subscriptions
+<project>` shows it. Then it writes the delivery (`Supervision.delivery`,
+its op, session, text and the cursors it moves) and sends Switchboard's
+`session.prompt`, which types only into a running Claude Code pane
+between turns, with no trust question or permission prompt up, no
+answer of the owner's waiting and no key typed into its embedded
+terminal in the last minute, checked and typed in one step. A lost
+reply is sent again under the same op, which the app answers from its
+log without typing twice; a refusal clears the delivery and keeps the
+cursors. An app that does not know `session.prompt` answers it as a
+bad request, which typed nothing: the runner says to update the app
+and tries again every `UNSUPPORTED_RETRY_MS`. A Fresh keeps the
+subscriptions, and a delivery in flight to the replaced session is
+dropped without a resend, its lines going to the new one. Nothing is
+resumed for a delivery: a supervisor that is not running gets its
+backlog when the owner resumes it.
+
 The rule guards against a supervisor's mistakes, not against a hostile
-agent, which can unset the variable. Gaps: nothing wakes an idle
-supervisor (a `session.send` costs money and cannot be replayed), so
-it follows the log with `events --follow --timeout`; setup runs
+agent, which can unset the variable. Gaps: a supervisor in a pane
+outside Switchboard gets no deliveries and still follows the log with
+`wait --for move`; setup runs
 unconfined and under the writer lock, like a lane's; with a
 non-default `DISPATCH_DATA_DIR` the supervisor's commands need the
 variable set, which its allow rule does not cover; and a refused

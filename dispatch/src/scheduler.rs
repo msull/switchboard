@@ -7718,6 +7718,9 @@ impl Runner {
             if let Err(e) = self.supervisor_intent(&project, now_ms) {
                 log::error!("project {project}: supervisor: {e:#}");
             }
+            if let Err(e) = self.deliver_subscriptions(&project, now_ms) {
+                log::error!("project {project}: subscriptions: {e:#}");
+            }
             if let Err(e) = self.step_project(&project, now_ms) {
                 log::error!("project {project}: {e}");
             }

@@ -4,7 +4,7 @@
 //! the crash windows: a reply dropped after acting, a launch that never
 //! reported, a record removed in the window.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 use std::sync::{Arc, Mutex};
 
@@ -40,7 +40,8 @@ pub struct FakeSwitchboard {
     /// Every request seen, in order.
     pub calls: Vec<Request>,
     pub killed: Vec<String>,
-    /// Lines typed into sessions with `session.send`: session, text.
+    /// Lines typed into sessions with `session.send` or
+    /// `session.prompt`: session, text.
     pub sent: Vec<(String, String)>,
     pub notes: BTreeMap<String, String>,
     pub waiting: BTreeMap<String, (bool, String)>,
@@ -84,6 +85,12 @@ pub struct FakeSwitchboard {
     /// Answer `session.screen` as an app from before it does: a bad
     /// request.
     pub screen_unknown: bool,
+    /// Sessions held at a permission or trust prompt: `session.prompt`
+    /// is refused there, as the app refuses it.
+    pub at_prompt: BTreeSet<String>,
+    /// Answer `session.prompt` as an app from before it does: a bad
+    /// request, never logged.
+    pub old_app: bool,
     counter: u64,
 }
 
@@ -154,6 +161,21 @@ impl FakeSwitchboard {
         self.calls.iter().filter(|r| r.body.kind() == kind).count()
     }
 
+    /// Why a `session.prompt` now would be refused, as the app's
+    /// `ready_for_prompt` says it: never for "waiting on you" alone,
+    /// which an idle session with its own ask reads as.
+    pub fn prompt_refusal(&self, s: &SessionView) -> Option<String> {
+        if s.liveness != Liveness::Running {
+            Some("not running".into())
+        } else if s.card == "working" {
+            Some("busy".into())
+        } else if self.at_prompt.contains(&s.id) {
+            Some("at a prompt (permission for Bash)".into())
+        } else {
+            None
+        }
+    }
+
     fn replied(&self, op: &str) -> Option<Reply> {
         self.log
             .iter()
@@ -186,6 +208,7 @@ impl FakeSwitchboard {
             waiting: false,
             waiting_reason: None,
             trust_question: false,
+            prompt_refusal: None,
             resume_id: Some(format!("resume-{id}")),
             op: Some(op.into()),
         });
@@ -404,6 +427,30 @@ impl FakeSwitchboard {
                 self.sent.push((session.clone(), text.clone()));
                 (vec![], false)
             }
+            Body::SessionPrompt { session, text } => {
+                if self.old_app {
+                    return Reply::failed(
+                        "bad request: unknown variant `session.prompt`, expected one of `project.add`",
+                    );
+                }
+                let Some(s) = self.sessions.iter().find(|s| &s.id == session) else {
+                    return Reply::failed("no such session");
+                };
+                if let Some(why) = self.prompt_refusal(s) {
+                    return Reply::failed(why);
+                }
+                self.session_mut(session).card = "working".into();
+                self.sent.push((session.clone(), text.clone()));
+                // The app logs every command's reply; a repeat of the op
+                // is answered from it.
+                self.log.push(LogLine {
+                    op: op.into(),
+                    kind: kind.clone(),
+                    ids: vec![],
+                    reply: None,
+                });
+                (vec![], false)
+            }
             Body::SessionRemove { session } => {
                 self.sessions.retain(|s| &s.id != session);
                 self.removed_by_port.push(session.clone());
@@ -576,6 +623,7 @@ impl FakeSwitchboard {
                         // Dispatch's mark wins over activity on the
                         // card, as `card_state` does in the app.
                         let mut s = s.clone();
+                        s.prompt_refusal = self.prompt_refusal(&s);
                         let marked = self.waiting.get(&s.id).is_some_and(|(on, _)| *on);
                         if marked && s.liveness == Liveness::Running {
                             s.card = "waiting on you".into();

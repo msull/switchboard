@@ -6,7 +6,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::Result;
 use dispatch::epoch_ms;
-use dispatch::events::{self, Burst, Event, For, Kind, base_name, short};
+use dispatch::events::{self, Burst, Event, For, Kind, base_name, clock, short};
 use dispatch::git::{GitCli, yyyymmdd};
 use dispatch::github::Gh;
 use dispatch::health;
@@ -17,6 +17,7 @@ use dispatch::scheduler::{BY_SUPERVISOR, Runner, attempt_label, kept_branches};
 use dispatch::serve::{Handler, Server, take_issue, take_pull_requests};
 use dispatch::serve::{ticket_paths, ticket_view};
 use dispatch::store::{DataDir, read_ticket};
+use dispatch::subscribe;
 use dispatch::supervisor::{self, Actor};
 use dispatch::ticket::{DecisionState, REFUSALS_KEPT, Refusal, ServiceState, Ticket, TicketState};
 use dispatch::{USAGE, UsageError};
@@ -182,6 +183,9 @@ fn command(args: &[&str]) -> Result<()> {
         ["tail", rest @ ..] => tail(rest),
         ["health", rest @ ..] => health(rest),
         ["brief", rest @ ..] => brief(rest),
+        ["subscribe", rest @ ..] => subscribe(rest),
+        ["unsubscribe", ticket] => unsubscribe(ticket),
+        ["subscriptions", project] => subscriptions(project),
         ["supervisor", rest @ ..] => supervise(rest),
         _ => usage(),
     }
@@ -684,23 +688,6 @@ impl<'a> Flags<'a> {
     }
 }
 
-/// `hh:mm:ss` of `ms` since the epoch, in the local zone: the reader is
-/// a person or an agent on this machine, and a UTC clock next to a local
-/// one (the shell's `date`, a log file) misleads twice a day. Falls back
-/// to UTC only when the moment is out of range.
-fn clock(ms: u64) -> String {
-    use chrono::{DateTime, Local, TimeZone as _};
-    let secs = i64::try_from(ms / 1000).unwrap_or(i64::MAX);
-    if let Some(utc) = DateTime::from_timestamp(secs, 0) {
-        return Local
-            .from_utc_datetime(&utc.naive_utc())
-            .format("%H:%M:%S")
-            .to_string();
-    }
-    let s = (ms / 1000) % 86_400;
-    format!("{:02}:{:02}:{:02}", s / 3600, (s / 60) % 60, s % 60)
-}
-
 /// `YYYY-MM-DD hh:mm` of `ms` since the epoch, in the local zone, as
 /// `clock` reads it; for a moment that may be days back.
 fn local_time(ms: u64) -> String {
@@ -727,28 +714,6 @@ fn span(ms: u64) -> String {
     } else {
         format!("{s}s")
     }
-}
-
-/// An event as a line: as stored with `--json`, else
-/// `seq  hh:mm:ss  ticket  stage  kind  text`.
-fn event_line(e: &Event, json: bool) -> String {
-    if json {
-        return e.to_line();
-    }
-    let text = if e.kind == Kind::Void {
-        let seqs: Vec<String> = e.voids.iter().map(u64::to_string).collect();
-        format!("withdraws {}: {}", seqs.join(", "), e.text)
-    } else {
-        e.text.clone()
-    };
-    format!(
-        "{}  {}  {}  {}  {}  {text}",
-        e.seq,
-        clock(e.at_ms),
-        e.ticket,
-        e.stage,
-        e.kind.as_str()
-    )
 }
 
 fn events(args: &[&str]) -> Result<()> {
@@ -784,7 +749,7 @@ fn events(args: &[&str]) -> Result<()> {
     for e in &all {
         last = last.max(e.seq);
         if keep(e) && !gone.contains(&e.seq) {
-            say!("{}", event_line(e, json));
+            say!("{}", events::line(e, json));
             printed = true;
         }
     }
@@ -800,7 +765,7 @@ fn events(args: &[&str]) -> Result<()> {
     loop {
         for e in follow.next_batch()? {
             if keep(&e) {
-                say!("{}", event_line(&e, json));
+                say!("{}", events::line(&e, json));
                 printed = true;
             }
         }
@@ -842,7 +807,7 @@ fn wait(args: &[&str]) -> Result<()> {
     match burst {
         Burst::Lines(lines) => {
             for e in &lines {
-                say!("{}", event_line(e, json));
+                say!("{}", events::line(e, json));
             }
             // Only the last line can be a decision: one ends the burst.
             let Some(e) = lines.last() else {
@@ -861,9 +826,9 @@ fn wait(args: &[&str]) -> Result<()> {
         }
         Burst::Ended { lines, end } => {
             for e in &lines {
-                say!("{}", event_line(e, json));
+                say!("{}", events::line(e, json));
             }
-            say!("{}", event_line(&end, json));
+            say!("{}", events::line(&end, json));
             std::process::exit(EXIT_ENDED);
         }
         Burst::TimedOut => {
@@ -877,17 +842,9 @@ fn wait(args: &[&str]) -> Result<()> {
     }
 }
 
-/// The `dispatch decide` line after a matched `decision` event, while
-/// that decision still waits on the user.
+/// `events::decide_hint` as this binary runs `decide`.
 fn decide_hint(e: &Event, t: &Ticket) -> Option<String> {
-    let d = e.decision.as_ref()?;
-    t.waiting_on_you().iter().any(|w| &w.id == d).then(|| {
-        format!(
-            "    {} {} {d} <answer> [--note <text> | --file <path>]",
-            decide_command(),
-            t.id
-        )
-    })
+    events::decide_hint(e, t, &decide_command())
 }
 
 /// `show`'s lines for a document a per-lane stage writes once per lane.
@@ -1526,9 +1483,25 @@ fn brief(args: &[&str]) -> Result<()> {
         .collect();
     say!("\nlast events:");
     for e in &mine[mine.len().saturating_sub(20)..] {
-        say!("  {}", event_line(e, false));
+        say!("  {}", events::line(e, false));
     }
     say!("  follow from seq {}", events::last_seq(&log)?);
+    let ps = runner.load_project(project)?;
+    if !ps.supervisor.subscriptions.is_empty() {
+        say!("\nsubscriptions (the runner types these into your pane when you are idle):");
+    }
+    for sub in &ps.supervisor.subscriptions {
+        let lines = subscribe::undelivered(&runner.data, sub)?;
+        say!(
+            "  {} from seq {}: {} undelivered",
+            sub.ticket,
+            sub.since,
+            lines.len()
+        );
+        for e in &lines[lines.len().saturating_sub(10)..] {
+            say!("    {}", events::line(e, false));
+        }
+    }
     say!("\nopen worktrees:");
     let mut trees = false;
     for t in &tickets {
@@ -1546,6 +1519,70 @@ fn brief(args: &[&str]) -> Result<()> {
         say!("{}", text.trim_end());
     } else {
         say!("(no hand-off yet)");
+    }
+    Ok(())
+}
+
+/// `dispatch subscribe <ticket> [--for move] [--since <seq>]`.
+fn subscribe(args: &[&str]) -> Result<()> {
+    let f = Flags::parse(args, &["--for", "--since"], &[]);
+    let ticket = f.one();
+    let what = f.value("--for").unwrap_or("move");
+    let by = match actor() {
+        Actor::Owner => "owner".to_owned(),
+        Actor::Supervisor(_) => {
+            std::env::var("SWITCHBOARD_RECORD_ID").unwrap_or_else(|_| BY_SUPERVISOR.to_owned())
+        }
+    };
+    let mut runner = offline_runner()?;
+    let sub = runner.subscribe(ticket, what, f.number("--since"), &by, now_ms())?;
+    say!(
+        "subscribed to {} from seq {}; the runner types its moves into the supervisor's pane",
+        sub.ticket,
+        sub.since
+    );
+    Ok(())
+}
+
+fn unsubscribe(ticket: &str) -> Result<()> {
+    if offline_runner()?.unsubscribe(ticket)? {
+        say!("unsubscribed from {ticket}");
+    } else {
+        say!("{ticket} was not subscribed");
+    }
+    Ok(())
+}
+
+/// Each subscription with its cursor and what has not been delivered,
+/// then a delivery in flight and why deliveries wait.
+fn subscriptions(project: &str) -> Result<()> {
+    let runner = offline_runner()?;
+    let ps = runner.load_project(project)?;
+    let sup = &ps.supervisor;
+    if sup.subscriptions.is_empty() {
+        say!("no subscriptions");
+    }
+    for sub in &sup.subscriptions {
+        let undelivered = subscribe::undelivered(&runner.data, sub)?.len();
+        say!(
+            "{} --for {} since {}: {undelivered} undelivered (by {}, {})",
+            sub.ticket,
+            sub.what,
+            sub.since,
+            sub.by,
+            local_time(sub.at_ms)
+        );
+    }
+    if let Some(d) = &sup.delivery {
+        say!(
+            "in flight: {} to {} since {}",
+            d.op,
+            d.session,
+            local_time(d.at_ms)
+        );
+    }
+    if let Some(why) = &sup.delivery_waits {
+        say!("waits: {why} (since {})", local_time(sup.delivery_waits_ms));
     }
     Ok(())
 }

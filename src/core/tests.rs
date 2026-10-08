@@ -10248,3 +10248,245 @@ mod answering {
         assert_eq!(core.standing_ask_detail(id), None);
     }
 }
+
+mod prompting {
+    use super::*;
+    use crate::core::action::TYPED_HOLD;
+    use crate::core::{ControlAction, token_hash};
+
+    fn hook(core: &mut AppCore, id: RecordId, kind: EventKind, at: u64) -> Vec<Effect> {
+        core.dispatch(
+            AppAction::Events(vec![SessionEvent {
+                record_id: Some(id),
+                ..event(kind, at)
+            }]),
+            Clock::at(at + 1),
+        )
+    }
+
+    fn stopped() -> EventKind {
+        EventKind::Stopped { last_message: None }
+    }
+
+    /// A running session of `kind` with the token "t", idle after a
+    /// `Stop` at 2s.
+    fn idle(kind: SessionKind) -> (AppCore, RecordId) {
+        let p = project("p");
+        let mut w = Workspace::new(p.clone());
+        let mut r = record(p.id, kind, 0);
+        r.token_hash = Some(token_hash("t"));
+        let id = r.id;
+        w.sessions.push(r);
+        let (mut core, _) = loaded(vec![w], vec![]);
+        core.dispatch(AppAction::HostListed(vec![running(id)]), Clock::at(1));
+        hook(&mut core, id, stopped(), 2_000);
+        (core, id)
+    }
+
+    /// Sends a `session.prompt` and returns its refusal and what it
+    /// typed. The session's view must agree with the command.
+    fn prompt(core: &mut AppCore, id: RecordId, at: u64) -> (Option<String>, Vec<String>) {
+        let wall = Clock::at(at).wall;
+        let view = core.session_view(id, wall).unwrap().prompt_refusal;
+        let op = format!("p{at}");
+        let effects = core.dispatch(
+            AppAction::Control {
+                op: op.clone(),
+                action: ControlAction::Prompt {
+                    id,
+                    text: "Dispatch subscription: events".into(),
+                },
+            },
+            Clock::at(at),
+        );
+        let error = core.take_control_outcome(&op).unwrap().error;
+        assert_eq!(view, error, "the view and the command agree");
+        let typed = effects
+            .iter()
+            .filter_map(|e| match e {
+                Effect::SendInput { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+        (error, typed)
+    }
+
+    #[test]
+    fn an_idle_claude_session_takes_the_prompt() {
+        let (mut core, id) = idle(agent());
+        let (error, typed) = prompt(&mut core, id, 3_000);
+        assert_eq!(error, None);
+        assert_eq!(typed, ["Dispatch subscription: events"]);
+    }
+
+    #[test]
+    fn each_refusal_names_its_reason() {
+        let (mut core, id) = idle(agent());
+        core.dispatch(AppAction::HostListed(vec![]), Clock::at(2_500));
+        assert_eq!(
+            prompt(&mut core, id, 3_000).0.as_deref(),
+            Some("not running")
+        );
+
+        let (mut core, id) = idle(agent());
+        hook(&mut core, id, EventKind::PromptSubmitted, 3_000);
+        let (error, typed) = prompt(&mut core, id, 4_000);
+        assert_eq!(error.as_deref(), Some("busy"));
+        assert!(typed.is_empty());
+
+        let (mut core, id) = idle(agent());
+        hook(
+            &mut core,
+            id,
+            EventKind::PermissionRequested {
+                tool: Some("Bash".into()),
+            },
+            3_000,
+        );
+        assert_eq!(
+            prompt(&mut core, id, 4_000).0.as_deref(),
+            Some("at a prompt (permission for Bash)")
+        );
+
+        let (mut core, id) = idle(agent());
+        core.prompted.push(id);
+        assert_eq!(
+            prompt(&mut core, id, 3_000).0.as_deref(),
+            Some("at a prompt (trust)")
+        );
+
+        let (mut core, id) = idle(agent());
+        hook(
+            &mut core,
+            id,
+            EventKind::StopFailed {
+                reason: Some("rate_limit".into()),
+            },
+            3_000,
+        );
+        assert_eq!(
+            prompt(&mut core, id, 4_000).0.as_deref(),
+            Some("at a prompt (rate limit)")
+        );
+
+        let (mut core, id) = idle(codex());
+        assert_eq!(
+            prompt(&mut core, id, 3_000).0.as_deref(),
+            Some("not a Claude Code session")
+        );
+    }
+
+    /// The owner's keys in the embedded terminal hold deliveries off
+    /// until a prompt is submitted or `TYPED_HOLD` passes.
+    #[test]
+    fn typing_holds_the_prompt_off() {
+        let hold = u64::try_from(TYPED_HOLD.as_millis()).unwrap();
+        let (mut core, id) = idle(agent());
+        let effects = core.dispatch(AppAction::InputTyped { id }, Clock::at(3_000));
+        assert_eq!(saves(&effects), 0, "the mark is transient");
+        assert_eq!(
+            prompt(&mut core, id, 4_000).0.as_deref(),
+            Some("the owner is typing")
+        );
+        let (error, typed) = prompt(&mut core, id, 3_000 + hold);
+        assert_eq!(error, None, "the mark expires");
+        assert_eq!(typed.len(), 1);
+
+        let (mut core, id) = idle(agent());
+        core.dispatch(AppAction::InputTyped { id }, Clock::at(3_000));
+        hook(&mut core, id, EventKind::PromptSubmitted, 4_000);
+        hook(&mut core, id, stopped(), 5_000);
+        assert_eq!(prompt(&mut core, id, 6_000).0, None, "a prompt clears it");
+    }
+
+    /// The pane reads as between turns until Claude Code reports the
+    /// typed prompt, so a second one in that window is refused.
+    #[test]
+    fn a_second_prompt_waits_for_the_first_to_land() {
+        let (mut core, id) = idle(agent());
+        assert_eq!(prompt(&mut core, id, 3_000).0, None);
+        assert_eq!(
+            prompt(&mut core, id, 3_500).0.as_deref(),
+            Some("a prompt is being submitted"),
+            "not blamed on the owner"
+        );
+        hook(&mut core, id, EventKind::PromptSubmitted, 4_000);
+        assert_eq!(prompt(&mut core, id, 4_500).0.as_deref(), Some("busy"));
+        hook(&mut core, id, stopped(), 5_000);
+        assert_eq!(prompt(&mut core, id, 6_000).0, None);
+    }
+
+    /// An answer of the owner's goes first; an idle session's own ask
+    /// with no answer does not block, and the delivery does not clear it.
+    #[test]
+    fn the_owners_answer_goes_first_and_an_open_ask_stays() {
+        let (mut core, id) = idle(agent());
+        let ask = ControlAction::Ask {
+            id,
+            token: "t".into(),
+            message: Some("pick".into()),
+            kind: Some("text".into()),
+            choices: vec![],
+        };
+        core.dispatch(
+            AppAction::Control {
+                op: "a".into(),
+                action: ask,
+            },
+            Clock::at(3_000),
+        );
+        assert_eq!(prompt(&mut core, id, 4_000).0, None);
+        hook(&mut core, id, EventKind::PromptSubmitted, 5_000);
+        assert!(core.session(id).unwrap().asking.is_some());
+
+        // An answer given mid-turn waits on the record for the `Stop`.
+        let at = core.session(id).unwrap().asking.as_ref().unwrap().at;
+        core.dispatch(
+            AppAction::AnswerAsk {
+                id,
+                at,
+                answer: "main".into(),
+            },
+            Clock::at(6_000),
+        );
+        assert_eq!(
+            prompt(&mut core, id, 6_500).0.as_deref(),
+            Some("an answer waits")
+        );
+        hook(&mut core, id, stopped(), 7_000);
+        assert_eq!(
+            core.session(id).unwrap().asking,
+            None,
+            "the answer went out"
+        );
+    }
+
+    /// `ready_for_prompt` is `Ok` exactly when `deliver_answer` would
+    /// send, for every activity, with nothing else in the way.
+    #[test]
+    fn readiness_agrees_with_the_answer_rule() {
+        let (mut core, id) = idle(agent());
+        let wall = Clock::at(3_000).wall;
+        let activities = [
+            Activity::Unknown,
+            Activity::Working,
+            Activity::WaitingOnYou,
+            Activity::Idle,
+            Activity::Ended,
+        ];
+        for started in [false, true] {
+            for activity in activities {
+                core.started.retain(|r| *r != id);
+                if started {
+                    core.started.push(id);
+                }
+                core.workspaces[0].sessions[0].activity = activity;
+                assert_eq!(
+                    core.ready_for_prompt(id, wall).is_ok(),
+                    core.between_turns(id),
+                    "{activity:?}, started {started}"
+                );
+            }
+        }
+    }
+}
