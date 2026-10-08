@@ -5747,6 +5747,7 @@ fn ticket_page_shows_the_attempts_pull_request() {
             url: "https://github.com/example-org/widgets/pull/20".into(),
             head: "fa62f3f78577".into(),
             checks: "pending".into(),
+            merge_commit: None,
         }),
         ..AttemptView::default()
     }];
@@ -5759,6 +5760,41 @@ fn ticket_page_shows_the_attempts_pull_request() {
     harness.run_steps(2);
     harness.get_by_label("PR #20");
     harness.get_by_label("pending at fa62f3f7");
+}
+
+/// A lane at `merge` whose question is held behind another lane's
+/// merge says what it waits for; one that is not held says nothing.
+#[test]
+fn ticket_page_shows_what_a_held_merge_waits_for() {
+    use switchboard::ports::dispatch::AttemptView;
+    let (mut harness, _ids) = harness();
+    let mut status = dispatch_status();
+    let merge = |n: u32, context: &str, waits: Option<&str>| AttemptView {
+        stage: "merge".into(),
+        n,
+        context: context.into(),
+        kind: "gate-only".into(),
+        state: "running".into(),
+        waits: waits.map(str::to_owned),
+        ..AttemptView::default()
+    };
+    status.tickets[0].attempts = vec![
+        merge(1, "repo", None),
+        merge(2, "docs", Some("repo's base pipeline")),
+    ];
+    harness
+        .state_mut()
+        .dispatch(AppAction::DispatchStatus(Some(status)));
+    harness
+        .state_mut()
+        .dispatch(AppAction::ShowTicket("t1".into()));
+    harness.run_steps(2);
+    harness.get_by_label("waits for repo's base pipeline");
+    assert_eq!(
+        harness.query_all_by_label_contains("waits for").count(),
+        1,
+        "only the held lane says it waits"
+    );
 }
 
 /// A secret artifact is listed by name with no button, so nothing on

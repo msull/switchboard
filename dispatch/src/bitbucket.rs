@@ -158,6 +158,8 @@ struct PrRow {
     destination: Source,
     #[serde(default)]
     title: String,
+    #[serde(default)]
+    merge_commit: Option<Commit>,
 }
 
 impl PrRow {
@@ -195,6 +197,11 @@ impl PrRow {
                 .map(|b| b.name.clone())
                 .unwrap_or_default(),
             title: self.title.clone(),
+            merge_commit: self
+                .merge_commit
+                .as_ref()
+                .map(|c| c.hash.clone())
+                .filter(|h| !h.is_empty()),
         }
     }
 }
@@ -277,6 +284,75 @@ fn parse_statuses(json: &[u8]) -> Result<Checks> {
         return Ok(Checks::Pending);
     }
     Ok(Checks::Passed)
+}
+
+#[derive(Deserialize)]
+struct PipelineRow {
+    #[serde(default)]
+    uuid: String,
+    #[serde(default)]
+    target: PipelineTarget,
+}
+
+#[derive(Deserialize, Default)]
+struct PipelineTarget {
+    #[serde(default)]
+    commit: Option<Commit>,
+}
+
+#[derive(Deserialize)]
+struct StepRow {
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    state: StepState,
+}
+
+#[derive(Deserialize, Default)]
+struct StepState {
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    result: Option<StepResult>,
+}
+
+#[derive(Deserialize)]
+struct StepResult {
+    #[serde(default)]
+    name: String,
+}
+
+/// The newest pipeline on `commit` from a page of pipelines, newest
+/// first: its `uuid`. The page gives the full hash and a pull request
+/// the short one, so either may be a prefix of the other.
+fn parse_pipeline_on(json: &[u8], commit: &str) -> Result<Option<String>> {
+    let page: Page<PipelineRow> = serde_json::from_slice(json).context("parse bitbucket's json")?;
+    Ok(page
+        .values
+        .into_iter()
+        .find(|p| {
+            p.target
+                .commit
+                .as_ref()
+                .is_some_and(|c| crate::github::same_commit(&c.hash, commit))
+        })
+        .map(|p| p.uuid))
+}
+
+/// The step named `step` from a pipeline's steps: passed once completed
+/// successfully, failed once completed otherwise, pending before.
+fn parse_step(json: &[u8], step: &str) -> Result<Checks> {
+    let page: Page<StepRow> = serde_json::from_slice(json).context("parse bitbucket's json")?;
+    let Some(row) = page.values.iter().find(|r| r.name == step) else {
+        return Ok(Checks::None);
+    };
+    if row.state.name != "COMPLETED" {
+        return Ok(Checks::Pending);
+    }
+    match row.state.result.as_ref().map(|r| r.name.as_str()) {
+        Some("SUCCESSFUL") => Ok(Checks::Passed),
+        _ => Ok(Checks::Failed(vec![row.name.clone()])),
+    }
 }
 
 #[derive(Deserialize)]
@@ -395,6 +471,27 @@ impl PullRequests for Bitbucket {
             format!("{API_ROOT}/repositories/{repo}/pullrequests/{number}/statuses?pagelen=100");
         parse_statuses(&self.get(&url)?)
     }
+
+    fn commit_run(&self, repo: &str, commit: &str, step: Option<&str>) -> Result<Checks> {
+        let Some(step) = step else {
+            let url = format!(
+                "{API_ROOT}/repositories/{repo}/commit/{}/statuses?pagelen=100",
+                encode(commit)
+            );
+            return parse_statuses(&self.get(&url)?);
+        };
+        // The newest pipelines, matched to the commit here rather than
+        // by a query on the target.
+        let url = format!("{API_ROOT}/repositories/{repo}/pipelines/?sort=-created_on&pagelen=50");
+        let Some(uuid) = parse_pipeline_on(&self.get(&url)?, commit)? else {
+            return Ok(Checks::None);
+        };
+        let url = format!(
+            "{API_ROOT}/repositories/{repo}/pipelines/{}/steps/?pagelen=100",
+            encode(&uuid)
+        );
+        parse_step(&self.get(&url)?, step)
+    }
 }
 
 #[cfg(test)]
@@ -446,6 +543,47 @@ mod tests {
         );
         let passed = br#"{"values":[{"name":"build","state":"SUCCESSFUL"}]}"#;
         assert_eq!(parse_statuses(passed).unwrap(), Checks::Passed);
+    }
+
+    #[test]
+    fn a_merged_pull_request_gives_its_merge_commit_from_the_list_and_by_number() {
+        let list = br#"{"values":[{"id":12,"state":"MERGED","title":"Add x","source":{"branch":{"name":"feature/x"},"commit":{"hash":"0a1b2c3d4e5f"}},"destination":{"branch":{"name":"main"},"commit":{"hash":"9f8e7d6c5b4a"}},"merge_commit":{"hash":"5e6f7a8b9c0d"},"links":{"html":{"href":"https://bitbucket.org/example-co/orchard-backend/pull-requests/12"}}}]}"#;
+        let pr = parse_prs(list).unwrap().unwrap();
+        assert_eq!(pr.merge_commit.as_deref(), Some("5e6f7a8b9c0d"));
+        let one = br#"{"id":12,"state":"MERGED","merge_commit":{"hash":"5e6f7a8b9c0d"}}"#;
+        assert_eq!(
+            parse_pr(one).unwrap().merge_commit.as_deref(),
+            Some("5e6f7a8b9c0d")
+        );
+        let open = br#"{"id":13,"state":"OPEN","merge_commit":null}"#;
+        assert_eq!(parse_pr(open).unwrap().merge_commit, None);
+    }
+
+    #[test]
+    fn a_named_step_is_read_from_the_pipeline_on_the_commit() {
+        let pipelines = br#"{"values":[
+            {"uuid":"{11111111-2222-3333-4444-555555555555}","target":{"ref_name":"main","commit":{"hash":"aaaaaaaaaaaabbbbbbbbbbbbccccccccccccdddd"}}},
+            {"uuid":"{66666666-7777-8888-9999-000000000000}","target":{"ref_name":"main","commit":{"hash":"5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f"}}}
+        ]}"#;
+        assert_eq!(
+            parse_pipeline_on(pipelines, "5e6f7a8b9c0d")
+                .unwrap()
+                .as_deref(),
+            Some("{66666666-7777-8888-9999-000000000000}")
+        );
+        assert_eq!(parse_pipeline_on(pipelines, "123456789abc").unwrap(), None);
+        let steps = br#"{"values":[
+            {"name":"Build","state":{"name":"COMPLETED","result":{"name":"SUCCESSFUL"}}},
+            {"name":"Deploy to dev","state":{"name":"IN_PROGRESS"}},
+            {"name":"Deploy to prod","state":{"name":"COMPLETED","result":{"name":"FAILED"}}}
+        ]}"#;
+        assert_eq!(parse_step(steps, "Build").unwrap(), Checks::Passed);
+        assert_eq!(parse_step(steps, "Deploy to dev").unwrap(), Checks::Pending);
+        assert_eq!(
+            parse_step(steps, "Deploy to prod").unwrap(),
+            Checks::Failed(vec!["Deploy to prod".into()])
+        );
+        assert_eq!(parse_step(steps, "Smoke").unwrap(), Checks::None);
     }
 
     /// `diffstat_conflicts` over `pages`, served in order whatever URL

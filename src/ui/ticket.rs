@@ -1023,6 +1023,11 @@ fn attempt_row(cx: &mut DrawCtx<'_>, ui: &mut Ui, t: &TicketView, a: &AttemptVie
                 if let Some(pr) = &a.pr {
                     pr_labels(ui, pr);
                 }
+                // Why a lane at `merge` with an open PR has no question:
+                // its merge is held behind another lane's.
+                if let Some(waits) = &a.waits {
+                    ui.label(theme::meta_text(ui, format!("waits for {waits}")));
+                }
                 // A fold with stale messages has moved the branch and
                 // holds the attempt open while it asks or rewords, so it
                 // is shown before the attempt completes.

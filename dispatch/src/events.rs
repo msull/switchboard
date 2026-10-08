@@ -111,6 +111,9 @@ pub enum Kind {
     /// The owner's objection to a finished plan review was sent as its
     /// next round.
     Revised,
+    /// A lane's merge question is held behind another lane's merge or
+    /// that merge's base pipeline (`merge_after`).
+    Waits,
 }
 
 impl Kind {
@@ -144,6 +147,7 @@ impl Kind {
             Self::Refused => "refused",
             Self::Forgotten => "forgotten",
             Self::Revised => "revised",
+            Self::Waits => "waits",
         }
     }
 }
@@ -647,6 +651,30 @@ pub(crate) fn names_list(names: &[String]) -> String {
         .join(", ")
 }
 
+/// A `waits` line when a merge hold begins, or moves to another lane
+/// or to another thing; the release is the question that follows.
+fn waits_event(
+    out: &mut Vec<Event>,
+    t: &Ticket,
+    a: &Attempt,
+    before: Option<&Attempt>,
+    at_ms: u64,
+) {
+    let Some(w) = a.waits.as_ref().filter(|w| w.holds()) else {
+        return;
+    };
+    let old = before.and_then(|b| b.waits.as_ref()).filter(|o| o.holds());
+    if old.is_none_or(|o| o.lane != w.lane || o.until != w.until) {
+        out.push(Event::of_attempt(
+            t,
+            at_ms,
+            Kind::Waits,
+            a,
+            format!("{} ({}) waits for {}", a.stage, a.context, w.describe()),
+        ));
+    }
+}
+
 fn attempt_events(
     out: &mut Vec<Event>,
     t: &Ticket,
@@ -694,6 +722,7 @@ fn attempt_events(
             });
         }
     }
+    waits_event(out, t, a, before, at_ms);
     if let Some(r) = &a.rewrite {
         let old = before.and_then(|b| b.rewrite.as_ref());
         let changed = match old {
@@ -1224,7 +1253,7 @@ pub enum For {
     Any,
     /// What a supervisor acts on: what `Stage` and `Pr` match (a stage
     /// move, a send-back, a restart, a pull request bound), plus a
-    /// decision asked and a `pr-checks` line.
+    /// decision asked, a `pr-checks` line and a merge held (`waits`).
     Move,
 }
 
@@ -1258,6 +1287,7 @@ impl For {
                     | Kind::Decision
                     | Kind::Pr
                     | Kind::PrChecks
+                    | Kind::Waits
             ),
         }
     }
@@ -1997,6 +2027,52 @@ mod tests {
     }
 
     #[test]
+    fn a_held_merge_logs_waits_when_it_begins_or_changes_and_not_on_release() {
+        use crate::ticket::{MergeWait, Released, WaitUntil};
+        let mut started = ticket();
+        let mut a = running("merge", 1);
+        a.context = "docs".into();
+        started.attempts.push(a);
+        let wait = MergeWait {
+            lane: "repo".into(),
+            until: WaitUntil::Merge,
+            step: None,
+            commit: None,
+            run: None,
+            since_ms: 1_000,
+            released: None,
+        };
+        let mut held = started.clone();
+        held.attempts[0].waits = Some(wait.clone());
+        let events = between(Some(&started), &held, 5, &names);
+        assert_eq!(kinds(Some(&started), &held), [Kind::Waits]);
+        assert_eq!(events[0].text, "merge (docs) waits for repo's merge");
+        assert_eq!(Kind::Waits.as_str(), "waits");
+        // The same hold read again, with a new run word: nothing.
+        let mut again = held.clone();
+        again.attempts[0].waits.as_mut().unwrap().run = Some("pending".into());
+        assert!(kinds(Some(&held), &again).is_empty());
+        // The wait moves on to the base pipeline.
+        let mut deploy = again.clone();
+        let w = deploy.attempts[0].waits.as_mut().unwrap();
+        w.until = WaitUntil::Deploy;
+        w.step = Some("Deploy to dev".into());
+        let events = between(Some(&again), &deploy, 5, &names);
+        assert_eq!(
+            events[0].text,
+            "merge (docs) waits for repo's base pipeline past \"Deploy to dev\""
+        );
+        // A release logs nothing; the question follows.
+        let mut released = deploy.clone();
+        released.attempts[0].waits.as_mut().unwrap().released = Some(Released {
+            clause: "repo merged".into(),
+            plain: true,
+        });
+        assert!(kinds(Some(&deploy), &released).is_empty());
+        assert!(For::Move.candidate(Kind::Waits));
+    }
+
+    #[test]
     fn attempts_start_end_and_bind_a_pr_whose_checks_change() {
         let t = ticket();
         let mut started = t.clone();
@@ -2012,6 +2088,7 @@ mod tests {
             checks: "pending".into(),
             checked_ms: 0,
             error_since_ms: None,
+            merge_commit: None,
         });
         let events = between(Some(&started), &pr, 5, &names);
         assert_eq!(events[0].kind, Kind::Pr);
@@ -3547,6 +3624,7 @@ mod tests {
             checks: "pending".into(),
             checked_ms: 0,
             error_since_ms: None,
+            merge_commit: None,
         }
     }
 

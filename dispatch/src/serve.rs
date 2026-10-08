@@ -23,7 +23,7 @@ use dispatch_control::{
 use crate::epoch_ms;
 use crate::events;
 use crate::github::Issues;
-use crate::pipeline::{Pipeline, Source};
+use crate::pipeline::{DeployWait, Pipeline, Source};
 use crate::scheduler::{Runner, lane_files};
 use crate::store::DataDir;
 use crate::ticket::{
@@ -549,7 +549,8 @@ fn lane_head(t: &Ticket, lane: &str) -> Option<String> {
         .and_then(|a| a.head.clone())
 }
 
-fn lane_view(t: &Ticket, l: &crate::ticket::LaneRecord) -> LaneView {
+fn lane_view(t: &Ticket, p: Option<&Pipeline>, l: &crate::ticket::LaneRecord) -> LaneView {
+    let spec = p.and_then(|p| p.lane(&l.name));
     LaneView {
         name: l.name.clone(),
         worktree: l.worktree.clone(),
@@ -577,6 +578,12 @@ fn lane_view(t: &Ticket, l: &crate::ticket::LaneRecord) -> LaneView {
             .map(|r| crate::scheduler::brought_up_by(t, &l.name, r)),
         brought_up_commits: l.refreshed.as_ref().is_some_and(|r| r.commits),
         clone: None,
+        merge_after: spec.map_or_else(Vec::new, |s| s.merge_after.clone()),
+        merge_after_run: spec.is_some_and(|s| s.deploy_wait() == DeployWait::Run),
+        merge_after_step: spec.and_then(|s| match s.deploy_wait() {
+            DeployWait::Step(step) => Some(step.to_owned()),
+            DeployWait::Merge | DeployWait::Run => None,
+        }),
     }
 }
 
@@ -606,6 +613,15 @@ pub fn ticket_view(t: &Ticket, p: Option<&Pipeline>) -> TicketView {
         stages: p.map_or_else(Vec::new, |p| {
             p.stages.iter().map(|s| s.name.clone()).collect()
         }),
+        stage_checks: p.map_or_else(Vec::new, |p| {
+            p.stages
+                .iter()
+                .map(|s| match &s.gate {
+                    Some(crate::pipeline::Gate::External { check, .. }) => Some(check.clone()),
+                    _ => None,
+                })
+                .collect()
+        }),
         stage: t.stage,
         tree: t.tree.clone(),
         tree_removed: t.close.tree_removed,
@@ -613,7 +629,7 @@ pub fn ticket_view(t: &Ticket, p: Option<&Pipeline>) -> TicketView {
         closable: t.closable(),
         trees_retryable: t.trees_retryable(),
         removes: p.map_or_else(Vec::new, |p| crate::scheduler::close_removes(t, p)),
-        lanes: t.lanes.iter().map(|l| lane_view(t, l)).collect(),
+        lanes: t.lanes.iter().map(|l| lane_view(t, p, l)).collect(),
         attempts: t.attempts.iter().map(attempt_view).collect(),
         decisions: t.decisions.iter().map(|d| decision_view(t, d)).collect(),
         root_project: t.root_project.clone(),
@@ -632,6 +648,9 @@ pub fn ticket_view(t: &Ticket, p: Option<&Pipeline>) -> TicketView {
 /// One attempt as the port shows it: secret artifacts by name only.
 fn attempt_view(a: &crate::ticket::Attempt) -> AttemptView {
     let (state, reason) = attempt_state(&a.state);
+    // An attempt ended by a send-back or a hand merge may keep a wait
+    // that never released; it holds nothing once the attempt is over.
+    let held = a.waits.as_ref().filter(|w| a.is_open() && w.holds());
     AttemptView {
         stage: a.stage.clone(),
         n: a.n,
@@ -669,7 +688,10 @@ fn attempt_view(a: &crate::ticket::Attempt) -> AttemptView {
             url: pr.url.clone(),
             head: pr.head.clone(),
             checks: pr.checks.clone(),
+            merge_commit: pr.merge_commit.clone(),
         }),
+        waits: held.map(crate::ticket::MergeWait::describe),
+        waits_since_ms: held.map(|w| w.since_ms),
         rewrite: a.rewrite.as_ref().map(|r| dispatch_control::RewriteView {
             mode: r.mode.as_str().to_owned(),
             before: r.before.clone(),

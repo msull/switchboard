@@ -659,6 +659,7 @@ mod tests {
             checks: "merged".into(),
             checked_ms: 0,
             error_since_ms: None,
+            merge_commit: None,
         });
         t.attempts = vec![plan, review_plan, implement, code, merge];
         t

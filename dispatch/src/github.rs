@@ -36,6 +36,8 @@ pub struct PullRequest {
     /// The branch it goes into.
     pub base: String,
     pub title: String,
+    /// The commit it merged as, once merged and where the provider says.
+    pub merge_commit: Option<String>,
 }
 
 /// What a PR's checks say, taken together.
@@ -57,6 +59,10 @@ pub trait PullRequests: Send {
     fn by_number(&self, repo: &str, number: u64) -> Result<PullRequest>;
     /// The checks on a PR, as a whole.
     fn checks(&self, repo: &str, number: u64) -> Result<Checks>;
+    /// What ran on a commit (a merge commit on the base): every run
+    /// taken together, or with `step` only the run or step of that name.
+    /// `Checks::None` until anything has reported.
+    fn commit_run(&self, repo: &str, commit: &str, step: Option<&str>) -> Result<Checks>;
 }
 
 /// `owner/name` from the ways a GitHub remote is written, or `None`
@@ -94,6 +100,14 @@ struct PrRow {
     base: String,
     #[serde(default)]
     title: String,
+    #[serde(rename = "mergeCommit", default)]
+    merge_commit: Option<Oid>,
+}
+
+#[derive(Deserialize)]
+struct Oid {
+    #[serde(default)]
+    oid: String,
 }
 
 impl PrRow {
@@ -111,11 +125,67 @@ impl PrRow {
             branch: self.branch.clone(),
             base: self.base.clone(),
             title: self.title.clone(),
+            merge_commit: self
+                .merge_commit
+                .as_ref()
+                .map(|c| c.oid.clone())
+                .filter(|c| !c.is_empty()),
         }
     }
 }
 
-const PR_FIELDS: &str = "number,url,headRefOid,state,mergeable,headRefName,baseRefName,title";
+const PR_FIELDS: &str =
+    "number,url,headRefOid,state,mergeable,headRefName,baseRefName,title,mergeCommit";
+
+#[derive(Deserialize)]
+struct CheckRuns {
+    #[serde(default)]
+    check_runs: Vec<CheckRun>,
+}
+
+#[derive(Deserialize)]
+struct CheckRun {
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    status: String,
+    #[serde(default)]
+    conclusion: Option<String>,
+}
+
+/// A commit's check runs taken together, or with `step` the runs of
+/// that name only: pending while any of them runs.
+fn parse_check_runs(json: &[u8], step: Option<&str>) -> Result<Checks> {
+    let page: CheckRuns = serde_json::from_slice(json).context("parse gh's json")?;
+    let runs: Vec<&CheckRun> = page
+        .check_runs
+        .iter()
+        .filter(|r| step.is_none_or(|s| r.name == s))
+        .collect();
+    if runs.is_empty() {
+        return Ok(Checks::None);
+    }
+    // A fast failure is not the run's end: a wait for the whole run
+    // would release on a lint while the deploy still runs.
+    if runs.iter().any(|r| r.status != "completed") {
+        return Ok(Checks::Pending);
+    }
+    let failed: Vec<String> = runs
+        .iter()
+        .filter(|r| {
+            r.status == "completed"
+                && !matches!(
+                    r.conclusion.as_deref(),
+                    Some("success" | "neutral" | "skipped")
+                )
+        })
+        .map(|r| r.name.clone())
+        .collect();
+    if !failed.is_empty() {
+        return Ok(Checks::Failed(failed));
+    }
+    Ok(Checks::Passed)
+}
 
 #[derive(Deserialize)]
 struct CheckRow {
@@ -200,6 +270,23 @@ impl PullRequests for Gh {
         }
         Ok(Checks::Passed)
     }
+
+    fn commit_run(&self, repo: &str, commit: &str, step: Option<&str>) -> Result<Checks> {
+        let out = Command::new("gh")
+            .args([
+                "api",
+                &format!("repos/{repo}/commits/{commit}/check-runs?per_page=100"),
+            ])
+            .output()
+            .context("run gh")?;
+        if !out.status.success() {
+            bail!(
+                "gh api repos/{repo}/commits/{commit}/check-runs: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
+        }
+        parse_check_runs(&out.stdout, step)
+    }
 }
 
 /// Pull requests a test hands out, shared with the test so it can move
@@ -214,6 +301,15 @@ pub struct FakePullRequests {
     pub fail: Option<String>,
     /// How many times a PR was looked for.
     pub looked: u32,
+    /// `(repo, commit, checks)`: what ran on a commit, which may be
+    /// written short; `<commit>#<step>` for one step. Absent means
+    /// `Checks::None`.
+    pub runs: Vec<(String, String, Checks)>,
+    /// How many times a commit's run was read.
+    pub run_reads: u32,
+    /// `find` leaves `merge_commit` out, as a provider's list may; only
+    /// `by_number` gives it.
+    pub list_omits_merge_commit: bool,
 }
 
 impl PullRequests for Arc<Mutex<FakePullRequests>> {
@@ -223,11 +319,15 @@ impl PullRequests for Arc<Mutex<FakePullRequests>> {
         if let Some(why) = &fake.fail {
             bail!("{why}");
         }
+        let omit = fake.list_omits_merge_commit;
         Ok(fake
             .prs
             .iter()
             .find(|(r, b, _)| r == repo && b == branch)
-            .map(|(_, _, pr)| pr.clone()))
+            .map(|(_, _, pr)| PullRequest {
+                merge_commit: pr.merge_commit.clone().filter(|_| !omit),
+                ..pr.clone()
+            }))
     }
 
     fn by_number(&self, repo: &str, number: u64) -> Result<PullRequest> {
@@ -253,6 +353,28 @@ impl PullRequests for Arc<Mutex<FakePullRequests>> {
             .find(|(r, n, _)| r == repo && *n == number)
             .map_or(Checks::None, |(_, _, c)| c.clone()))
     }
+
+    fn commit_run(&self, repo: &str, commit: &str, step: Option<&str>) -> Result<Checks> {
+        let mut fake = self.lock().unwrap();
+        fake.run_reads += 1;
+        if let Some(why) = &fake.fail {
+            bail!("{why}");
+        }
+        Ok(fake
+            .runs
+            .iter()
+            .find(|(r, key, _)| {
+                let (at, named) = key.split_once('#').unwrap_or((key, ""));
+                r == repo && same_commit(at, commit) && named == step.unwrap_or("")
+            })
+            .map_or(Checks::None, |(_, _, c)| c.clone()))
+    }
+}
+
+/// Whether two hashes name the same commit, either one possibly short.
+#[must_use]
+pub fn same_commit(a: &str, b: &str) -> bool {
+    !a.is_empty() && !b.is_empty() && (a.starts_with(b) || b.starts_with(a))
 }
 
 #[derive(Deserialize)]
@@ -331,7 +453,56 @@ impl Issues for FakeIssues {
 
 #[cfg(test)]
 mod tests {
-    use super::github_repo;
+    use super::*;
+
+    #[test]
+    fn a_pull_request_reads_its_merge_commit_when_merged() {
+        let merged = br#"{"number":145,"state":"MERGED","headRefName":"feature/x","mergeCommit":{"oid":"0a1b2c3d4e5f60718293a4b5c6d7e8f901234567"}}"#;
+        let row: PrRow = serde_json::from_slice(merged).unwrap();
+        assert_eq!(
+            row.pull_request().merge_commit.as_deref(),
+            Some("0a1b2c3d4e5f60718293a4b5c6d7e8f901234567")
+        );
+        let open = br#"{"number":146,"state":"OPEN","mergeCommit":null}"#;
+        let row: PrRow = serde_json::from_slice(open).unwrap();
+        assert_eq!(row.pull_request().merge_commit, None);
+    }
+
+    #[test]
+    fn a_commits_check_runs_read_together_or_by_name() {
+        let running = br#"{"total_count":2,"check_runs":[{"name":"check","status":"in_progress","conclusion":null},{"name":"msrv","status":"completed","conclusion":"success"}]}"#;
+        assert_eq!(parse_check_runs(running, None).unwrap(), Checks::Pending);
+        assert_eq!(
+            parse_check_runs(running, Some("msrv")).unwrap(),
+            Checks::Passed
+        );
+        assert_eq!(
+            parse_check_runs(running, Some("deploy")).unwrap(),
+            Checks::None
+        );
+        let failed = br#"{"total_count":2,"check_runs":[{"name":"check","status":"completed","conclusion":"failure"},{"name":"msrv","status":"completed","conclusion":"skipped"}]}"#;
+        assert_eq!(
+            parse_check_runs(failed, None).unwrap(),
+            Checks::Failed(vec!["check".into()])
+        );
+        // A lint that failed fast while the deploy runs is not the end.
+        let early = br#"{"total_count":2,"check_runs":[{"name":"lint","status":"completed","conclusion":"failure"},{"name":"deploy","status":"in_progress","conclusion":null}]}"#;
+        assert_eq!(parse_check_runs(early, None).unwrap(), Checks::Pending);
+        assert_eq!(
+            parse_check_runs(early, Some("lint")).unwrap(),
+            Checks::Failed(vec!["lint".into()])
+        );
+        let none = br#"{"total_count":0,"check_runs":[]}"#;
+        assert_eq!(parse_check_runs(none, None).unwrap(), Checks::None);
+    }
+
+    #[test]
+    fn a_short_hash_names_the_same_commit_as_its_long_one() {
+        assert!(same_commit("054d02d", "054d02d75414f015"));
+        assert!(same_commit("054d02d75414f015", "054d02d"));
+        assert!(!same_commit("054d02e", "054d02d75414f015"));
+        assert!(!same_commit("", "054d02d"));
+    }
 
     #[test]
     fn a_github_remote_is_read_in_every_spelling_and_others_are_not() {

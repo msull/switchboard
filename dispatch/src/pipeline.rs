@@ -207,6 +207,61 @@ pub struct Lane {
     /// `~` is expanded.
     #[serde(default)]
     pub writable: Vec<PathBuf>,
+    /// Lanes whose pull requests must merge before this lane's merge
+    /// question is asked.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub merge_after: Vec<String>,
+    /// Also wait for the base's pipeline on each such lane's merge
+    /// commit: `true` until it finishes, a step's name until that step
+    /// passes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merge_after_deploy: Option<MergeAfterDeploy>,
+}
+
+/// How much of a merged lane's base pipeline a `merge_after` waits for.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum MergeAfterDeploy {
+    /// `true`: the whole run on the merge commit; `false` waits for the
+    /// merge alone.
+    Done(bool),
+    /// The step of that name.
+    Step(String),
+}
+
+/// What a lane's merge waits for of each `merge_after` lane.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeployWait<'a> {
+    /// Its merge alone.
+    Merge,
+    /// The whole base run on its merge commit.
+    Run,
+    /// That step of the run.
+    Step(&'a str),
+}
+
+impl Lane {
+    /// What this lane's merge waits for after each `merge_after` lane
+    /// merges.
+    #[must_use]
+    pub fn deploy_wait(&self) -> DeployWait<'_> {
+        match &self.merge_after_deploy {
+            None | Some(MergeAfterDeploy::Done(false)) => DeployWait::Merge,
+            Some(MergeAfterDeploy::Done(true)) => DeployWait::Run,
+            Some(MergeAfterDeploy::Step(step)) => DeployWait::Step(step),
+        }
+    }
+
+    /// The lanes of `merge_after` among `chosen`, the lanes a ticket
+    /// chose: one it did not choose holds nothing.
+    #[must_use]
+    pub fn merge_after_among(&self, chosen: &[&str]) -> Vec<&str> {
+        self.merge_after
+            .iter()
+            .map(String::as_str)
+            .filter(|d| chosen.contains(d))
+            .collect()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1223,6 +1278,153 @@ impl Pipeline {
         Ok(())
     }
 
+    /// `merge_after` names other lanes, without a cycle, each watched by
+    /// every per-lane `pr-merged` stage that watches the lane naming it;
+    /// `merge_after_deploy` refines one, and not on Bitbucket.
+    fn validate_merge_order(&self) -> Result<()> {
+        let ordered = self.lanes.iter().any(|l| !l.merge_after.is_empty());
+        for lane in &self.lanes {
+            for name in &lane.merge_after {
+                if name == &lane.name {
+                    bail!("lane {:?}: merge_after names itself", lane.name);
+                }
+                if self.lane(name).is_none() {
+                    bail!(
+                        "lane {:?}: merge_after names {name:?}, which is not a lane",
+                        lane.name
+                    );
+                }
+            }
+            if lane.merge_after_deploy.is_some() && lane.merge_after.is_empty() {
+                bail!(
+                    "lane {:?}: merge_after_deploy needs a merge_after",
+                    lane.name
+                );
+            }
+            if matches!(&lane.merge_after_deploy, Some(MergeAfterDeploy::Step(s)) if s.trim().is_empty())
+            {
+                bail!("lane {:?}: merge_after_deploy names no step", lane.name);
+            }
+        }
+        if !ordered {
+            return Ok(());
+        }
+        let watches: Vec<&Stage> = self
+            .stages
+            .iter()
+            .filter(|s| {
+                matches!(&s.gate, Some(Gate::External { check, .. }) if check == "pr-merged")
+                    && matches!(s.context, Context::Each | Context::Lanes(_))
+            })
+            .collect();
+        if watches.is_empty() {
+            bail!(
+                "merge_after needs a pr-merged stage whose context is per lane (each or a list of lanes)"
+            );
+        }
+        // A dependency's merge is looked for at the dependent's own
+        // stage, so a stage that watches one without the other would
+        // hold it forever.
+        let watches_lane = |s: &Stage, lane: &str| match &s.context {
+            Context::Lanes(names) => names.iter().any(|n| n == lane),
+            _ => true,
+        };
+        for lane in self.lanes.iter().filter(|l| !l.merge_after.is_empty()) {
+            let mut at = watches
+                .iter()
+                .filter(|s| watches_lane(s, &lane.name))
+                .peekable();
+            if at.peek().is_none() {
+                bail!(
+                    "lane {:?}: merge_after needs a pr-merged stage that watches it",
+                    lane.name
+                );
+            }
+            for stage in at {
+                if let Some(dep) = lane.merge_after.iter().find(|d| !watches_lane(stage, d)) {
+                    bail!(
+                        "lane {:?}: merge_after names {dep:?}, which stage {:?} does not watch",
+                        lane.name,
+                        stage.name
+                    );
+                }
+            }
+            if lane.merge_after_deploy.is_some() && self.names_bitbucket(lane, &watches) {
+                bail!(
+                    "lane {:?}: merge_after_deploy reads a base pipeline, which is not verified on Bitbucket; wait for the merge alone",
+                    lane.name
+                );
+            }
+        }
+        // A lane is placed once everything it waits on is; a pass that
+        // places nothing leaves a cycle.
+        let mut placed: Vec<&str> = Vec::new();
+        while placed.len() < self.lanes.len() {
+            let before = placed.len();
+            for lane in &self.lanes {
+                if !placed.contains(&lane.name.as_str())
+                    && lane
+                        .merge_after
+                        .iter()
+                        .all(|n| placed.contains(&n.as_str()))
+                {
+                    placed.push(&lane.name);
+                }
+            }
+            if placed.len() == before {
+                let stuck: Vec<&str> = self
+                    .lanes
+                    .iter()
+                    .map(|l| l.name.as_str())
+                    .filter(|n| !placed.contains(n))
+                    .collect();
+                bail!("merge_after makes a cycle among {}", stuck.join(", "));
+            }
+        }
+        Ok(())
+    }
+
+    /// Whether the pull requests `lane`'s merge order reads are known to
+    /// be on Bitbucket: a watching stage says so, or the remote of the
+    /// lane or of a lane it waits on is there. A remote read from the
+    /// tree's origin is checked when the merge is.
+    fn names_bitbucket(&self, lane: &Lane, watches: &[&Stage]) -> bool {
+        let on_bitbucket = |name: &str| {
+            self.lane(name)
+                .and_then(|l| l.repo.as_deref())
+                .or(self.project.repo.as_deref())
+                .is_some_and(|r| crate::bitbucket::bitbucket_repo(r).is_some())
+        };
+        watches.iter().any(|s| {
+            matches!(&s.gate, Some(Gate::External { provider: Some(p), .. }) if p == "bitbucket")
+        }) || on_bitbucket(&lane.name)
+            || lane.merge_after.iter().any(|d| on_bitbucket(d))
+    }
+
+    /// `lanes` in merge order: a lane after every lane it waits on, and
+    /// in pipeline order where two are not ordered. A `merge_after` lane
+    /// not among `lanes` does not hold.
+    #[must_use]
+    pub fn merge_order<'a>(&self, lanes: &[&'a str]) -> Vec<&'a str> {
+        let mut out: Vec<&'a str> = Vec::new();
+        let mut rest: Vec<&'a str> = self
+            .lanes
+            .iter()
+            .filter_map(|l| lanes.iter().find(|n| **n == l.name).copied())
+            .collect();
+        while !rest.is_empty() {
+            let at = rest
+                .iter()
+                .position(|n| {
+                    self.lane(n)
+                        .is_none_or(|l| l.merge_after.iter().all(|d| !rest.contains(&d.as_str())))
+                })
+                .unwrap_or(0);
+            out.push(rest.remove(at));
+        }
+        out
+    }
+
     /// A gate-only command runs in its context's tree, so a gate that
     /// names a lane must be in that lane's context.
     fn validate_gate_context(stage: &Stage) -> Result<()> {
@@ -1620,6 +1822,7 @@ impl Pipeline {
             }
             Self::validate_serve(lane)?;
         }
+        self.validate_merge_order()?;
         let mut stage_names = std::collections::BTreeSet::new();
         let mut written: Vec<&str> = Vec::new();
         let mut secrets: Vec<&str> = Vec::new();
@@ -2025,6 +2228,119 @@ argv = ["make", "deps"]
         let none = supervised("guidance = \"g\"").unwrap().supervisor.unwrap();
         assert!(none.setup.argvs().is_empty());
         assert!(none.decides.is_empty());
+    }
+
+    /// `two_lanes`-shaped text with `a` and `b` as the lanes' extra
+    /// keys, and a per-lane merge watch unless `watch` is false.
+    fn ordered(a: &str, b: &str, watch: &str) -> Result<Pipeline> {
+        Pipeline::parse(&format!(
+            r#"
+version = 1
+
+[project]
+name = "P"
+repo = "git@example.com:o/p.git"
+space = "Dispatch · P"
+
+[source]
+kind = "github"
+repo = "o/p"
+label = "dispatch"
+
+[[lanes]]
+name = "A"
+path = "a"
+{a}
+
+[[lanes]]
+name = "B"
+path = "b"
+{b}
+
+[[stages]]
+name = "merge"
+context = {watch}
+gate = {{ kind = "external", check = "pr-merged" }}
+"#
+        ))
+    }
+
+    #[test]
+    fn a_merge_order_reads_and_names_lanes_without_a_cycle() {
+        let p = ordered(
+            "",
+            "merge_after = [\"A\"]\nmerge_after_deploy = true",
+            "\"each\"",
+        )
+        .unwrap();
+        assert_eq!(p.lanes[1].merge_after, ["A"]);
+        assert_eq!(p.lanes[1].deploy_wait(), DeployWait::Run);
+        assert_eq!(p.lanes[0].deploy_wait(), DeployWait::Merge);
+        assert_eq!(p.merge_order(&["B", "A"]), ["A", "B"]);
+        let step = ordered(
+            "",
+            "merge_after = [\"A\"]\nmerge_after_deploy = \"Deploy to dev\"",
+            "[\"A\", \"B\"]",
+        )
+        .unwrap();
+        assert_eq!(
+            step.lanes[1].deploy_wait(),
+            DeployWait::Step("Deploy to dev")
+        );
+        // A frozen copy without the keys reads as before, and one
+        // without an order writes none.
+        let plain = ordered("", "", "\"root\"").unwrap();
+        assert!(plain.lanes[0].merge_after.is_empty());
+        assert!(!toml::to_string(&plain).unwrap().contains("merge_after"));
+
+        let err = |a: &str, b: &str, watch: &str| ordered(a, b, watch).unwrap_err().to_string();
+        assert_eq!(
+            err("", "merge_after = [\"C\"]", "\"each\""),
+            "lane \"B\": merge_after names \"C\", which is not a lane"
+        );
+        assert_eq!(
+            err("", "merge_after = [\"B\"]", "\"each\""),
+            "lane \"B\": merge_after names itself"
+        );
+        assert_eq!(
+            err("merge_after = [\"B\"]", "merge_after = [\"A\"]", "\"each\""),
+            "merge_after makes a cycle among A, B"
+        );
+        assert_eq!(
+            err("", "merge_after_deploy = true", "\"each\""),
+            "lane \"B\": merge_after_deploy needs a merge_after"
+        );
+        // The dependency's merge is read at the dependent's own stage.
+        assert_eq!(
+            err("", "merge_after = [\"A\"]", "[\"B\"]"),
+            "lane \"B\": merge_after names \"A\", which stage \"merge\" does not watch"
+        );
+        assert_eq!(
+            err("", "merge_after = [\"A\"]", "[\"A\"]"),
+            "lane \"B\": merge_after needs a pr-merged stage that watches it"
+        );
+        // Bitbucket's base pipeline reads are not verified.
+        assert_eq!(
+            err(
+                "repo = \"git@bitbucket.org:o/a.git\"",
+                "merge_after = [\"A\"]\nmerge_after_deploy = true",
+                "\"each\""
+            ),
+            "lane \"B\": merge_after_deploy reads a base pipeline, which is not verified on Bitbucket; wait for the merge alone"
+        );
+        ordered(
+            "repo = \"git@bitbucket.org:o/a.git\"",
+            "merge_after = [\"A\"]",
+            "\"each\"",
+        )
+        .unwrap();
+        for watch in ["\"root\"", "\"joined\"", "\"lane:B\""] {
+            assert_eq!(
+                err("", "merge_after = [\"A\"]", watch),
+                "merge_after needs a pr-merged stage whose context is per lane (each or a list of lanes)",
+                "{watch}"
+            );
+        }
     }
 
     #[test]

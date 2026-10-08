@@ -346,8 +346,8 @@ dispatch/                the `dispatch` binary (docs/dispatch.md; docs/dispatch-
   src/git.rs             clones, worktrees and heads through fixed argv (a branch pushed only with a lease; a worktree removed, never forced; a detached worktree; `changes`, `uncommitted` for a close's preflight, and `tree_changes` for a tree's own dirt, its nested lanes left out), a stage's checks as child processes polled by key (confined, when the pipeline says so, through `Confine`), commits replayed with `merge-tree`/`commit-tree`, the commits whose rebase conflicts and the files a merge with the base conflicts in read the same way, a branch moved by compare-and-swap, whether the remote already holds a branch's commits, and whether a port is free and answers HTTP; a kept branch read, deleted or renamed out of a retake's way; a range's commits and diff size for a report; which names a commit's diff and a tree lack (`absent`); with a fake
   src/confine.rs         a pipeline command's confinement: the seatbelt profile and wrapper built everywhere, used on macOS; elsewhere the command runs unconfined and says so
   src/history.rs         which commits a code review's fix rounds fold into: pure plans for `fold` and `one`; the backticked names a folded message is checked for, and how a name is found in a diff or a tree
-  src/github.rs          issues and pull requests through gh, with fakes
-  src/bitbucket.rs       pull requests on Bitbucket Cloud through curl, conflicts read from the pull request's diffstat; credentials from the environment or <data>/env (NAME=value lines, mode 0600, never logged)
+  src/github.rs          issues and pull requests through gh, with fakes; a merged pull request's merge commit and the check runs on it (the base pipeline)
+  src/bitbucket.rs       pull requests on Bitbucket Cloud through curl, conflicts read from the pull request's diffstat, the merge commit and the base pipeline's statuses or a named step on it; credentials from the environment or <data>/env (NAME=value lines, mode 0600, never logged)
   src/port.rs            the Port trait over the control socket client; the connection remade after any error, a timeout included; `path()` names the socket for `health`
   src/template.rs        `{a.b}` substitution for prompts
   tests/first_slice.rs   the acceptance table against an in-memory Switchboard (tests/support)
@@ -356,7 +356,7 @@ dispatch/                the `dispatch` binary (docs/dispatch.md; docs/dispatch-
   tests/sandbox.rs       ignored, macOS: a confined gate's refused write fails the attempt and is named in checks.log
 vendor/egui_term/        embedded terminal widget (Harzu/egui_term @ 31bbc7ab, egui 0.36; see SWITCHBOARD-PATCHES.md)
 firmware/nunchuk/        CircuitPython for the Feather that reports the nunchuk's buttons and stick
-spikes/                  Spike 0 evidence, and later spikes such as 13-dispatch-service (a Dispatch service as a Switchboard service session; which bind sees a dev server's port) and 15-paste-buffer (a multi-line send as one tmux paste, bracketed only for a pane that asked)
+spikes/                  Spike 0 evidence, and later spikes such as 13-dispatch-service (a Dispatch service as a Switchboard service session; which bind sees a dev server's port) 15-paste-buffer (a multi-line send as one tmux paste, bracketed only for a pane that asked) and 16-base-pipeline (a merged pull request's merge commit and the base's run on it)
 ```
 
 The flow for any feature: the UI dispatches an `AppAction`; the core

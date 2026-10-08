@@ -187,8 +187,8 @@ pub fn seed(
          answer it {OWNER_ROUTES}. A `dispatch` command the owner types in this pane, a `!` \
          line included, runs as you and is refused the same way, so never suggest it, and \
          never change your environment to get round the rule. A `merge` question is \
-         answered `recheck` or `park`, never merged by you: Dispatch resolves it when the \
-         provider reports the merge. \
+         answered `recheck` or `park` and no answer resolves it: Dispatch resolves it when \
+         the provider reports the merge. {MERGE_ORDER} \
          You may not {restart_a_ticket}move the worktrees, {run_the_runner}, resume with \
          reruns unless `rerun` is yours, or replace yourself.\n\n",
         restart_a_ticket = if restart { "" } else { "restart a ticket, " },
@@ -198,19 +198,13 @@ pub fn seed(
             "run the runner"
         },
     );
+    out.push_str("## Pull requests\n\n");
     out.push_str(if sup.merges {
-        "## Pull requests\n\nThe pull request itself is yours to merge: once Dispatch logs \
-         `pr-checks passed`, read the pull request's body and commit message and check that \
-         they carry no client name and no attribution line, then merge it with \
-         `gh pr merge <n> --merge` and pull main in this workspace. Dispatch closes the \
-         ticket when it sees the merge. A failed check is yours to look at; a fix by hand \
-         goes on the ticket's branch, amended into its one commit and pushed with a lease, \
-         then answer `recheck`.\n\n"
+        MERGING_PRS
     } else {
-        "## Pull requests\n\nYou never merge a pull request. When Dispatch logs \
-         `pr-checks passed`, read the pull request's body and commit message, say to the \
-         owner that it is green and whether the body is clean, and stop: the owner merges.\n\n"
+        REPORTING_PRS
     });
+    out.push_str("\n\n");
     capability_sections(&mut out, runner, restart, &exe_text);
     out.push_str("## Commands\n\n");
     out.push_str(&GUIDE_ESSENTIALS.replace("{exe}", &exe_text));
@@ -244,15 +238,44 @@ fn capability_sections(out: &mut String, runner: bool, restart: bool, exe_text: 
     }
 }
 
+/// The seed's sentence on a merge order a pipeline declares, in the
+/// decisions paragraph whether or not the supervisor merges.
+pub const MERGE_ORDER: &str = "A merge order declared in the pipeline (`merge_after`) is \
+     enforced by Dispatch: a lane that waits on another has no `merge` question until that \
+     lane's pull request has merged and, when declared, its base pipeline has finished. \
+     Merge in that order.";
+
+/// The pull request paragraph of a supervisor that merges.
+pub const MERGING_PRS: &str = "The pull request itself is yours to merge. When `dispatch show` \
+     lists a `pr-merged` stage among the ticket's `stages:`, merge a lane's pull request only \
+     when Dispatch asks that lane's `merge` question and the question says \"merge it there\". \
+     A `merge` question that says \"but\" names a failure, a timeout, an unread pipeline, a \
+     closed dependency or a conflict: report it to the owner and do not merge. A `waits` event \
+     means hold off: that lane merges after another. When the stages have no `pr-merged` \
+     stage, merge once Dispatch logs `pr-checks passed`; such a pipeline cannot declare an \
+     order. Before merging, read the pull request's body and commit message and check that \
+     they carry no client name and no attribution line, then merge it with \
+     `gh pr merge <n> --merge` and pull main in this workspace. Dispatch closes the ticket \
+     when it sees the merge. A failed check is yours to look at; a fix by hand goes on the \
+     ticket's branch, amended into its one commit and pushed with a lease, then answer \
+     `recheck`.";
+
+/// The pull request paragraph of a supervisor that does not merge.
+pub const REPORTING_PRS: &str = "You never merge a pull request. When Dispatch logs \
+     `pr-checks passed`, read the pull request's body and commit message, say to the owner \
+     that it is green and whether the body is clean, and stop: the owner merges. When the \
+     ticket's lanes have a `merge order:` in `dispatch show`, say which pull request merges \
+     first and that the next one's `merge` question waits for it.";
+
 /// The hash of what the owner controls about the seed: the table as
-/// TOML, the project's name, `GUIDE_ESSENTIALS` and `ASK_GUIDE`. Never
-/// the rendered seed, which holds paths that differ between builds and
-/// machines.
+/// TOML, the project's name, `GUIDE_ESSENTIALS`, `ASK_GUIDE` and the
+/// merge paragraphs. Never the rendered seed, which holds paths that
+/// differ between builds and machines.
 #[must_use]
 pub fn seed_hash(project: &str, sup: &Supervisor) -> String {
     let table = toml::to_string(sup).unwrap_or_default();
     Pipeline::fingerprint(&format!(
-        "{table}\n{project}\n{GUIDE_ESSENTIALS}\n{ASK_GUIDE}"
+        "{table}\n{project}\n{GUIDE_ESSENTIALS}\n{ASK_GUIDE}\n{MERGE_ORDER}\n{MERGING_PRS}\n{REPORTING_PRS}"
     ))
 }
 
@@ -1251,6 +1274,37 @@ mod tests {
     }
 
     #[test]
+    fn the_seed_names_the_enforced_merge_order_and_merges_only_when_told_to() {
+        let mut merging = table();
+        merging.merges = true;
+        let seed_of = |sup: &Supervisor| {
+            seed(
+                "orchard",
+                sup,
+                Path::new("/opt/bin/dispatch"),
+                Path::new("/data/projects/orchard/supervisor/handoff.md"),
+                Path::new("/trees/supervisor-orchard"),
+                None,
+            )
+        };
+        for sup in [&merging, &table()] {
+            let s = seed_of(sup);
+            assert!(s.contains("enforced by Dispatch"), "{s}");
+            assert!(s.contains("Merge in that order."), "{s}");
+        }
+        let s = seed_of(&merging);
+        assert!(s.contains("the question says \"merge it there\""), "{s}");
+        assert!(s.contains("report it to the owner and do not merge"), "{s}");
+        assert!(
+            s.contains("When the stages have no `pr-merged` stage, merge once Dispatch logs `pr-checks passed`"),
+            "{s}"
+        );
+        assert!(!s.contains("never merged by you"), "{s}");
+        let s = seed_of(&table());
+        assert!(s.contains("which pull request merges first"), "{s}");
+    }
+
+    #[test]
     fn the_essentials_name_only_verbs_in_the_usage() {
         let verbs: Vec<&str> = crate::USAGE
             .lines()
@@ -1405,14 +1459,26 @@ mod tests {
     #[test]
     fn the_hash_covers_the_guide_essentials_and_the_ask_guide() {
         let table = toml::to_string(&table()).unwrap();
+        let merge = format!("{MERGE_ORDER}\n{MERGING_PRS}\n{REPORTING_PRS}");
         let with = Pipeline::fingerprint(&format!(
-            "{table}\norchard\n{GUIDE_ESSENTIALS}\n{ASK_GUIDE}"
+            "{table}\norchard\n{GUIDE_ESSENTIALS}\n{ASK_GUIDE}\n{merge}"
         ));
         assert_eq!(with, seed_hash("orchard", &super::tests::table()));
-        let no_essentials = Pipeline::fingerprint(&format!("{table}\norchard\n\n{ASK_GUIDE}"));
-        let no_ask = Pipeline::fingerprint(&format!("{table}\norchard\n{GUIDE_ESSENTIALS}"));
+        let no_essentials =
+            Pipeline::fingerprint(&format!("{table}\norchard\n\n{ASK_GUIDE}\n{merge}"));
+        let no_ask =
+            Pipeline::fingerprint(&format!("{table}\norchard\n{GUIDE_ESSENTIALS}\n\n{merge}"));
         assert_ne!(with, no_essentials);
         assert_ne!(with, no_ask);
+        // A live supervisor reads "seed changed" when a merge paragraph
+        // does.
+        for paragraph in [MERGE_ORDER, MERGING_PRS, REPORTING_PRS] {
+            let without = merge.replacen(paragraph, "", 1);
+            let changed = Pipeline::fingerprint(&format!(
+                "{table}\norchard\n{GUIDE_ESSENTIALS}\n{ASK_GUIDE}\n{without}"
+            ));
+            assert_ne!(with, changed);
+        }
     }
 
     #[test]

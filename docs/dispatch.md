@@ -739,6 +739,8 @@ the merge; answering it `merged` by hand is refused until the provider
 agrees (its options are `recheck`, which sends the ticket back through
 the `pr-checks` stage before it to bring the branch up and read the
 checks again, and `park`).
+A lane whose merge waits on another lane's (`merge_after`, under "Merge
+order") has no merge decision until that wait ends.
 
 A human gate on a gate-only stage other than `lanes` (an `inspect`
 stage after `implement`, before anything is pushed or a PR opened) is
@@ -802,6 +804,8 @@ base = "main"                 # omitted: the project's
 remotes = { github = "git@github.com:..." }   # this lane's mirrors, as the project's
 setup = ["cmd", "args"]       # run once, before the lane's first agent
 writable = ["~/.cargo"]       # under [policy] confine: extra paths the lane's setup, gates, checks and command reviewers may write
+merge_after = ["backend"]     # lanes whose pull requests merge first: this lane's merge question waits for them (see "Merge order")
+merge_after_deploy = true     # also wait for the base pipeline on their merge commit: true until it finishes, or a step's name ("Deploy to dev") until it passes
 
 [[resources]]
 name = "..."
@@ -837,7 +841,7 @@ operator = "..."              # present: an agent stage; absent with a review op
 context = "root" | "each" | "joined" | ["front"]
 writes = ["notes"]            # artifact names; each expands as {notes}, {plan}, ...
 writes = ["seed", { name = "personas", secret = true }]   # a gate-only command stage: the command writes each to $DISPATCH_WRITES_<NAME>; a secret one needs a [[resources]] entry in needs
-prompt = "..."                # templates: {issue.number} {issue.title} {task.text} {lane} {lanes} {lanes.all} {branch} {worktree} {project.root} {inputs.<artifact>}; the full list is the table below
+prompt = "..."                # templates: {issue.number} {issue.title} {task.text} {lane} {lane.merge_after} {lanes} {lanes.all} {branch} {worktree} {project.root} {inputs.<artifact>}; the full list is the table below
 gate = { kind = "command", argv = ["..."], in = "root" | "lane" | "lane:<name>" }
      | { kind = "command", per_lane = { <lane> = ["..."] }, in = "lane" }
      | { kind = "command", like = "implement" }   # an earlier stage's command gate by reference; its result at the same clean head is reused
@@ -958,6 +962,7 @@ as written.
 | `{task.text}`, `{task.context}` | the source as a task (title, body) |
 | `{project.root}` | the ticket's tree, or the project root for a pipeline that works in place |
 | `{worktree}`, `{branch}`, `{lane}` | the context's tree, branch and lane (`{branch}` only where a branch is cut: a lane, or the root of a pipeline with a `repo`; `{lane}` only in a lane context) |
+| `{lane.merge_after}` | in a lane whose merge waits on others the ticket chose (`merge_after`): "This lane merges after backend, once backend's base pipeline has finished. Dispatch holds its merge question until then; state the dependency in the first line of your notes." Empty everywhere else, so a `pr` stage's prompt can name it in every lane |
 | `{lanes}` | the lanes the ticket chose, comma-separated in pipeline order; every lane before the `lanes` decision, so `investigate` sees them all |
 | `{lanes.all}` | every lane of the pipeline, comma-separated in pipeline order |
 | `{inputs.<artifact>}` | the path from the newest completed attempt that wrote it, among this lane's and those of stages that run in one context; `$DISPATCH_INPUT_<ARTIFACT>` |
@@ -2144,6 +2149,68 @@ at the same head, no fixer, and a spent `max_fixes` are each a `pr`
 question. Rebases and fixes are counted separately; each kind counts
 only agents that ran.
 
+### Merge order
+
+A lane may name other lanes whose pull requests merge first:
+`merge_after = ["backend"]` on the `frontend` lane. Its merge watch then
+asks no `merge` question until `backend`'s watch completed (the provider
+reported the merge). With `merge_after_deploy = true` it also waits for
+the base's pipeline on that merge's commit to finish; with a step's name
+(`merge_after_deploy = "Deploy to dev"`) only until that step passes.
+The merge commit comes from the reading that saw the pull request
+merged (GitHub's `mergeCommit`, Bitbucket's `merge_commit.hash`, read
+by number when the list omits it) and is kept on the attempt's PR
+record. The run on it is GitHub's check runs on the commit, or
+Bitbucket's commit statuses, or for a step that step's state in the
+newest pipeline on the commit (`PullRequests::commit_run`), read once a
+minute with the watch's own reading of the PR. The order is static per
+pipeline: every ticket that chose both lanes waits, and a lane the
+ticket did not choose holds nothing. Validation refuses a name that is
+not a lane, a lane naming itself, a cycle, `merge_after_deploy` without
+`merge_after`, `merge_after` in a pipeline whose `pr-merged` stage is
+not per lane, and a per-lane `pr-merged` stage that watches a waiting
+lane but not every lane it names (the dependency's merge is read at the
+waiting lane's own stage, so it would hold forever). Bitbucket's base
+pipeline reads were never run against a real pipeline (spike 16), so
+`merge_after_deploy` is refused where the pipeline file names Bitbucket
+(a watching stage's `provider`, or the remote of either lane), and a
+Bitbucket pull request found at run time ends the wait at once with a
+"but": "<lane>'s base pipeline is on Bitbucket, where Dispatch does not
+read it; check it there". GitHub's run reads `pending` while any check
+run on the commit is unfinished, so a fast failure ends the wait only
+once the whole run has.
+
+While the wait holds, the attempt records it (`waits`: the lane, `merge`
+or `deploy`, the step, the commit, the run's word, since when), any
+merge question it had is cancelled, the session's waiting mark is
+cleared when nothing else waits, and a `waits` event is logged when the
+wait begins or moves on (`merge (frontend) waits for backend's merge`,
+then `… backend's base pipeline`, or `… past "Deploy to dev"`). The PR
+reading, a hand merge of the waiting lane, the conflict probe and the
+trip back through `ready` all go on as before. The wait ends:
+
+- plainly, once the lane merged and, when waited on, its run passed:
+  "… is open at <head>; backend merged as <sha> and backend's base
+  pipeline passed; merge it there.";
+- with a "but", which asks without "merge it there": the run failed,
+  ran past 60 minutes (`BASE_RUN_WAIT_MS`), reported nothing within two
+  minutes of the merge (`PR_YOUNG_HEAD_MS`) or could not be read for an
+  hour, no merge commit was reported, the lane's PR was closed without
+  merging, or its merge watch failed. A watch cancelled by a trip back
+  never ends the wait; the lane is simply not merged yet.
+
+A release is recorded on the attempt with the question and is final
+for it: the run is not read again, a restart asks the same question,
+and the question's text does not change between passes. A plain release
+carries to the lane's next attempt after a trip back while the lane
+waited on is still merged as the same commit. `recheck` on a "but"
+question clears it, so the run is read again on that attempt or on the
+next one. `dispatch show` prints the ticket's `stages:` with each
+external gate's check (`ready (pr-checks), merge (pr-merged)`), a
+`merge order:` line when a chosen lane waits on another (`backend, then
+frontend (after backend's base pipeline)`), and a line per held wait;
+the ticket page labels a held attempt with what it waits for.
+
 ## Tickets from pull requests
 
 The other kind of work: someone else's change, which the user tests,
@@ -2443,14 +2510,16 @@ answers do and that every other is the owner's, where the owner answers
 those (the ticket page's buttons, or `dispatch decide` from any shell
 but the supervisor's pane), that a command typed in its pane, a `!` line
 included, is its own, that `merge` is answered `recheck` or `park` and
-never merged by it, the full
-path of the `dispatch` executable (its allow rule matches that path),
-"run `dispatch brief <project>` first", the hand-off to keep current,
-and the commands it works with. The session's first prompt is "Read
-`<seed.md>` and do what it says". The seed is stale when a hash of the
-table, the project's name and the commands' text no longer matches the
-one the session was seeded with; the rendered seed's paths are left out,
-since they differ between builds.
+that no answer resolves it, that a merge order declared with
+`merge_after` is enforced by Dispatch and to merge in it
+(`MERGE_ORDER`), the full path of the `dispatch` executable (its allow
+rule matches that path), "run `dispatch brief <project>` first", the
+hand-off to keep current, and the commands it works with. The session's
+first prompt is "Read `<seed.md>` and do what it says". The seed is
+stale when a hash of the table, the project's name, the commands' text
+and the merge paragraphs (`MERGE_ORDER`, `MERGING_PRS`, `REPORTING_PRS`)
+no longer matches the one the session was seeded with; the rendered
+seed's paths are left out, since they differ between builds.
 
 **The session** is made through the control port as a ticket's are,
 each creation on the project's record before it is sent: the space,
@@ -2460,8 +2529,13 @@ a Switchboard project `Supervisor · <project>` rooted at the workspace
 supervisor directory, and with `merges = true` rules for `gh pr view`,
 `checks`, `diff` and `merge` and `git pull` and `log`, so a merging
 supervisor is not stopped at the merge. `merges` also chooses the seed's
-pull request paragraph: merge on green with a clean body, or report and
-stop for the owner. No settings file is written: `--settings`
+pull request paragraph. A merging one (`MERGING_PRS`) merges a lane's
+pull request only when that lane's `merge` question says "merge it
+there", reports a "but" question to the owner instead, holds off on a
+`waits` event, and merges on `pr-checks passed` only when the ticket's
+`stages:` in `dispatch show` have no `pr-merged` stage; it checks the
+body is clean either way. A reporting one (`REPORTING_PRS`) reports and
+stops for the owner, naming which pull request merges first. No settings file is written: `--settings`
 already carries Switchboard's hooks. `dispatch supervisor <project>
 --fresh [--setup]` (or Fresh on the Dispatch page, through the port's
 intent) sets up, writes the seed, kills the current session and keeps
@@ -2702,6 +2776,11 @@ and one against the real one:
 | The base moves cleanly under a ticket at `merge` | Nothing is rebased or pushed and the same decision waits (`a_clean_base_move_at_merge_leaves_the_branch_alone`) |
 | The trip back meets a conflict with no rebaser | `ready` asks its `refresh` question naming the file (`a_base_move_at_merge_the_rebaser_cannot_resolve_asks_refresh_naming_the_file`) |
 | A conflict at `merge` with a tree that is not clean | No trip back and no rebaser; the merge decision names the tree, the file or the provider's word; `recheck` while it is still not clean says so again; once clean, `recheck` sends it back; in two lanes, the dirty one holds both (`a_dirty_tree_at_merge_asks_instead_of_looping`, `a_dirty_tree_with_a_conflicting_pr_at_merge_starts_no_rebaser`, `a_dirty_second_lane_holds_the_send_back_of_a_clean_one`); a `root` merge with only the provider's word checks the lane trees too (`a_dirty_tree_under_a_root_merge_asks_instead_of_looping`) |
+| A lane whose `merge_after` lane has not merged | No merge question for it; one `waits` event; once the lane merges it asks, naming the merge commit and ending "merge it there"; a lane the ticket did not choose holds nothing (`a_lane_merges_after_the_lane_it_names`, `a_merge_order_is_ignored_for_a_lane_not_chosen`) |
+| `merge_after_deploy` set | It waits while the base run on the merge commit is pending; passed asks plainly, failed asks with a "but"; a named step waits for that step alone (`a_lane_waits_for_the_base_pipeline_of_the_merge`, `a_named_step_releases_the_merge`) |
+| The base run never appears, never ends, or no merge commit is reported | Each asks with its "but" clause, after two minutes, an hour, and at once (`a_base_run_that_never_appears_or_never_ends_asks`); a commit missing from the list is read by number (`a_merge_commit_missing_from_the_list_is_read_by_number`) |
+| A released merge question | Stays asked under the same id whatever the run reads after, with no read and no second `waits` (`a_released_merge_question_stays_asked`); a plain one carries across a trip back (`a_plain_release_carries_across_a_send_back`); `recheck` on a "but" one reads the run again, through `ready`, on a refused trip, or with no `pr-checks` stage (`a_late_pipeline_after_recheck_gives_the_plain_question`) |
+| While a lane waits | The lane waited on closed asks with a "but" (`a_dependency_closed_without_merging_releases_the_wait`); a hand merge closes the waiting lane (`a_waiting_lane_merged_by_hand_closes`); a restart holds again with no second event (`a_restart_while_waiting_holds_again`); a conflict still sends both lanes back, and back at `merge` it waits again (`a_conflict_while_waiting_still_goes_back`) |
 | A lane's PR merged by hand, then the other lane's base moves into a conflict | Only the other lane goes back; the merged lane keeps its passes and is neither rebased nor pushed, its dirty tree holding nothing (`a_merged_lane_stays_merged_when_the_other_lane_is_sent_back`) |
 | The probe's fetch fails while the merge decision names a conflict | The same decision stays pending (`a_failed_probe_keeps_the_pending_merge_decision`) |
 | The provider says conflicting at `merge` but the trip back moves nothing | The second reading asks, naming the head the trip left; no second trip (`a_trip_back_that_leaves_the_head_asks_once`); a trip on which a rebaser moved the head is followed by another when the conflict returns (`a_second_base_move_after_a_rebaser_push_sends_back_again`) |
