@@ -186,7 +186,11 @@ Dev aids, all environment variables:
   setup) for the setup commands. `switchboard-ask` sends it too, with
   `session.ask`; `switchboard-ask "a question"` in a shell the app
   launched marks that shell's card as waiting on you, and
-  `switchboard-ask --clear` takes the mark off.
+  `switchboard-ask --clear` takes the mark off. A Claude Code session
+  may add `--confirm`, `--choice "<option>"` (once per option) or
+  `--text`; the owner answers on the card, and the answer comes back
+  as the session's next prompt, `Owner answered "<question>": <answer>`,
+  once its turn has ended.
 - `SWITCHBOARD_TMUX_SOCKET=<name>`: use another tmux socket name.
 - `DISPATCH_DATA_DIR=<dir>`: where the Dispatch page looks for
   `dispatch.sock` and where its console opens (the `dispatch` binary
@@ -252,7 +256,7 @@ cargo test --test gate -- --ignored --nocapture     # the Milestone 1 gate items
 src/main.rs              launcher: wires real adapters, opens the window
 src/bin/switchboard-hook.rs  helper Claude Code hooks call (std only)
 src/bin/switchboard-env.rs   runs one child with a session's environment sets, resolved over the control port with its launch token; the sets' setup commands (std and the wire crate only)
-src/bin/switchboard-ask.rs   marks the session it runs in as asking the owner a one-line question, or clears it, over the control port with its launch token (std and the wire crate only)
+src/bin/switchboard-ask.rs   marks the session it runs in as asking the owner a one-line question, or a confirm, a choice or a line of text whose answer comes back as its next prompt, or clears it, over the control port with its launch token (std and the wire crate only)
 src/lib.rs               module tree and the layering rules
 src/core/
   model.rs               durable data model (Project, SessionRecord, ResumeHandle, CardState)
@@ -358,7 +362,7 @@ dispatch/                the `dispatch` binary (docs/dispatch.md; docs/dispatch-
   tests/sandbox.rs       ignored, macOS: a confined gate's refused write fails the attempt and is named in checks.log
 vendor/egui_term/        embedded terminal widget (Harzu/egui_term @ 31bbc7ab, egui 0.36; see SWITCHBOARD-PATCHES.md)
 firmware/nunchuk/        CircuitPython for the Feather that reports the nunchuk's buttons and stick
-spikes/                  Spike 0 evidence, and later spikes such as 13-dispatch-service (a Dispatch service as a Switchboard service session; which bind sees a dev server's port) 15-paste-buffer (a multi-line send as one tmux paste, bracketed only for a pane that asked) 16-base-pipeline (a merged pull request's merge commit and the base's run on it) 17-prompt-origin (telling a typed prompt from a task notification or a harness reminder) and 18-tmux-argv (keeping spawn's environment values off every process's argv)
+spikes/                  Spike 0 evidence, and later spikes such as 13-dispatch-service (a Dispatch service as a Switchboard service session; which bind sees a dev server's port) 15-paste-buffer (a multi-line send as one tmux paste, bracketed only for a pane that asked) 16-base-pipeline (a merged pull request's merge commit and the base's run on it) 17-prompt-origin (telling a typed prompt from a task notification or a harness reminder) 18-tmux-argv (keeping spawn's environment values off every process's argv) and 19-structured-ask (a card's answer reaching the pane as its next prompt)
 ```
 
 The flow for any feature: the UI dispatches an `AppAction`; the core

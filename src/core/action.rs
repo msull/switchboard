@@ -275,6 +275,15 @@ pub enum AppAction {
     /// The owner clears a session's own question without answering it;
     /// the session is not told.
     DismissAsk(RecordId),
+    /// The owner answers the session's standing ask, taken at `at`: a
+    /// confirm's `yes` or `no`, one of a choice's options, or a line of
+    /// text. Sent into the pane as its next prompt once it is between
+    /// turns; refused when the ask has changed since.
+    AnswerAsk {
+        id: RecordId,
+        at: SystemTime,
+        answer: String,
+    },
     SetAutostart(RecordId, bool),
     MoveCard {
         id: RecordId,
@@ -706,6 +715,13 @@ pub enum Effect {
         host: HostId,
         text: String,
     },
+    /// Write the owner's answer to an ask to the pane, then Enter. Apart
+    /// from `SendInput` because it goes out by itself at a turn's end,
+    /// so it must not clear a prompt the owner is composing.
+    SendAnswer {
+        host: HostId,
+        text: String,
+    },
     /// Raw bytes to the pane, no Enter (Escape, control characters).
     SendKeys {
         host: HostId,
@@ -1075,6 +1091,7 @@ impl AppCore {
             | AppAction::RenameSession(..)
             | AppAction::SetSessionNotes(..)
             | AppAction::DismissAsk(_)
+            | AppAction::AnswerAsk { .. }
             | AppAction::SetAutostart(..)
             | AppAction::MoveCard { .. }
             | AppAction::ReturnToSession(_)
@@ -1154,6 +1171,9 @@ impl AppCore {
             }
             AppAction::DismissAsk(id) => {
                 self.edit_session(id, out, |s| s.asking = None);
+            }
+            AppAction::AnswerAsk { id, at, answer } => {
+                self.answer_ask(id, at, &answer, now, out);
             }
             AppAction::SetAutostart(id, on) => {
                 self.edit_session(id, out, |s| s.autostart = on);

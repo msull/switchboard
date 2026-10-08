@@ -2,6 +2,12 @@
 //! card, the supervisor chip and the Dock badge show the message until
 //! the owner's next prompt, a dismiss, or `--clear`.
 //!
+//! A Claude Code session may ask for an answer of a shape: `--confirm`
+//! (Yes or No), `--choice <option>` once per option, or `--text` (a line
+//! of the owner's own). The owner answers on the card, and the answer
+//! arrives as the session's next prompt once its turn has ended:
+//! `Owner answered "<question>": <answer>`.
+//!
 //! Usage is `USAGE`. Silent on success, since what it prints reaches the
 //! agent's tool result; on a refusal it prints the app's reason.
 //!
@@ -23,7 +29,21 @@ const USAGE_EXIT: u8 = 64;
 
 const USAGE: &str = "usage:
   switchboard-ask \"<one line for the owner>\"
+  switchboard-ask \"<question>\" --confirm
+  switchboard-ask \"<question>\" --choice \"<option>\" --choice \"<option>\" ...
+  switchboard-ask \"<question>\" --text
   switchboard-ask --clear";
+
+/// What the arguments ask for.
+#[derive(Debug, PartialEq, Eq)]
+enum Parsed {
+    Clear,
+    Ask {
+        message: String,
+        kind: Option<String>,
+        choices: Vec<String>,
+    },
+}
 
 /// Why a run stopped: bad usage, or anything else, with the line to print.
 enum Stop {
@@ -47,34 +67,83 @@ fn main() -> ExitCode {
 }
 
 fn run(args: &[String]) -> Result<(), Stop> {
-    let message = parse(args).map_err(Stop::Usage)?;
+    let parsed = parse(args).map_err(Stop::Usage)?;
     let (session, token) = credentials().map_err(Stop::Usage)?;
-    match call(Body::SessionAsk {
-        session,
-        token,
-        message,
-    })? {
+    let body = match parsed {
+        Parsed::Clear => Body::SessionAsk {
+            session,
+            token,
+            message: None,
+            ask_kind: None,
+            choices: Vec::new(),
+        },
+        Parsed::Ask {
+            message,
+            kind,
+            choices,
+        } => Body::SessionAsk {
+            session,
+            token,
+            message: Some(message),
+            ask_kind: kind,
+            choices,
+        },
+    };
+    match call(body)? {
         Reply::Failed { reason } => Err(Stop::Failed(reason)),
         _ => Ok(()),
     }
 }
 
-/// The message to ask, or `None` for `--clear`. Several words are
-/// joined with spaces, so an unquoted question still reads as one.
-fn parse(args: &[String]) -> Result<Option<String>, String> {
+/// The ask, or `Clear`. The kind flags may stand anywhere; the other
+/// words are joined with spaces, so an unquoted question still reads as
+/// one.
+fn parse(args: &[String]) -> Result<Parsed, String> {
     match args {
-        [] => Err("no message".into()),
-        [flag] if flag == "--clear" => Ok(None),
-        [first, ..] if first == "--clear" => Err("--clear takes nothing after it".into()),
-        words => {
-            let message = words.join(" ");
-            if message.trim().is_empty() {
-                Err("no message".into())
-            } else {
-                Ok(Some(message))
-            }
+        [flag] if flag == "--clear" => return Ok(Parsed::Clear),
+        [first, ..] if first == "--clear" => {
+            return Err("--clear takes nothing after it".into());
         }
+        _ => {}
     }
+    let mut kind: Option<&str> = None;
+    let mut choices = Vec::new();
+    let mut words = Vec::new();
+    let mut rest = args.iter();
+    while let Some(arg) = rest.next() {
+        let flag = match arg.as_str() {
+            "--clear" => return Err("--clear takes nothing else".into()),
+            "--confirm" => "confirm",
+            "--text" => "text",
+            "--choice" => {
+                let Some(option) = rest.next() else {
+                    return Err("--choice needs an option after it".into());
+                };
+                choices.push(option.clone());
+                "choice"
+            }
+            _ => {
+                words.push(arg.as_str());
+                continue;
+            }
+        };
+        if kind.is_some_and(|k| k != flag) {
+            return Err("use one of --confirm, --choice and --text".into());
+        }
+        if kind == Some(flag) && flag != "choice" {
+            return Err(format!("--{flag} given twice"));
+        }
+        kind = Some(flag);
+    }
+    let message = words.join(" ");
+    if message.trim().is_empty() {
+        return Err("no message".into());
+    }
+    Ok(Parsed::Ask {
+        message,
+        kind: kind.map(str::to_owned),
+        choices,
+    })
 }
 
 /// One request, one reply. A missing or refusing socket means the app is
@@ -90,28 +159,73 @@ fn call(body: Body) -> Result<Reply, Stop> {
 
 #[cfg(test)]
 mod tests {
-    use super::parse;
+    use super::{Parsed, parse};
 
     fn args(words: &[&str]) -> Vec<String> {
         words.iter().map(|w| (*w).to_owned()).collect()
     }
 
+    fn plain(message: &str) -> Parsed {
+        Parsed::Ask {
+            message: message.to_owned(),
+            kind: None,
+            choices: vec![],
+        }
+    }
+
+    fn shaped(message: &str, kind: &str, choices: &[&str]) -> Parsed {
+        Parsed::Ask {
+            message: message.to_owned(),
+            kind: Some(kind.to_owned()),
+            choices: args(choices),
+        }
+    }
+
     #[test]
     fn clear_takes_no_message() {
-        assert_eq!(parse(&args(&["--clear"])), Ok(None));
+        assert_eq!(parse(&args(&["--clear"])), Ok(Parsed::Clear));
         assert!(parse(&args(&["--clear", "now"])).is_err());
     }
 
     #[test]
     fn a_message_is_one_argument_or_several_joined() {
+        assert_eq!(parse(&args(&["merge now?"])), Ok(plain("merge now?")));
+        assert_eq!(parse(&args(&["merge", "now?"])), Ok(plain("merge now?")));
+    }
+
+    #[test]
+    fn each_kind_flag_shapes_the_ask() {
         assert_eq!(
-            parse(&args(&["merge now?"])),
-            Ok(Some("merge now?".to_owned()))
+            parse(&args(&["merge?", "--confirm"])),
+            Ok(shaped("merge?", "confirm", &[]))
         );
         assert_eq!(
-            parse(&args(&["merge", "now?"])),
-            Ok(Some("merge now?".to_owned()))
+            parse(&args(&["--text", "which branch?"])),
+            Ok(shaped("which branch?", "text", &[]))
         );
+        assert_eq!(
+            parse(&args(&["pick", "--choice", "a", "--choice", "b c"])),
+            Ok(shaped("pick", "choice", &["a", "b c"]))
+        );
+    }
+
+    #[test]
+    fn flags_may_stand_among_the_words() {
+        assert_eq!(
+            parse(&args(&["pick", "--choice", "a", "one", "--choice", "b"])),
+            Ok(shaped("pick one", "choice", &["a", "b"]))
+        );
+    }
+
+    #[test]
+    fn mixed_or_incomplete_flags_are_usage_errors() {
+        assert!(parse(&args(&["q", "--confirm", "--text"])).is_err());
+        assert!(parse(&args(&["q", "--choice", "a", "--confirm"])).is_err());
+        assert!(parse(&args(&["q", "--confirm", "--confirm"])).is_err());
+        assert!(parse(&args(&["q", "--choice"])).is_err());
+        assert!(parse(&args(&["--clear", "--confirm"])).is_err());
+        assert!(parse(&args(&["q", "--confirm", "--clear"])).is_err());
+        assert!(parse(&args(&["--choice", "a", "--choice", "b"])).is_err());
     }
 
     #[test]

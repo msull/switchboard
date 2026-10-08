@@ -14,9 +14,9 @@ use switchboard_control as wire;
 use super::action::{AppAction, Out, RULE_COLUMNS};
 use super::env::{SecretScope, valid_set_name, valid_var_name};
 use super::{
-    AppCore, AwsMethod, Clock, ENV_SETUP_LOCKED, Effect, EnvSet, EnvVar, GridRect, Launch,
-    PinTarget, PinnedItem, ProjectId, RecordId, SessionKind, SetId, SetRule, Space, SpaceId,
-    WorkflowDefinition, WorkflowId, WorkingSet, grid,
+    AgentKind, AppCore, Ask, AskKind, AwsMethod, Clock, ENV_SETUP_LOCKED, Effect, EnvSet, EnvVar,
+    GridRect, Launch, PinTarget, PinnedItem, ProjectId, RecordId, SessionKind, SetId, SetRule,
+    Space, SpaceId, WorkflowDefinition, WorkflowId, WorkingSet, grid,
 };
 use crate::ports::host::Liveness;
 
@@ -78,6 +78,10 @@ pub enum ControlAction {
         id: RecordId,
         token: String,
         message: Option<String>,
+        /// `"confirm"`, `"choice"` or `"text"`; `None` for a plain ask.
+        kind: Option<String>,
+        /// A choice ask's options, in order.
+        choices: Vec<String>,
     },
     /// Answer Claude's folder trust question in the pane with yes.
     TrustFolder(RecordId),
@@ -319,8 +323,15 @@ impl AppCore {
                 self.edit_session(id, out, |s| s.waiting_on = reason);
                 Vec::new()
             }
-            ControlAction::Ask { id, token, message } => {
-                self.session_ask(id, &token, message, now, out);
+            ControlAction::Ask {
+                id,
+                token,
+                message,
+                kind,
+                choices,
+            } => {
+                let ask = message.map(|text| (text, kind, choices));
+                self.session_ask(id, &token, ask, now, out);
                 Vec::new()
             }
             ControlAction::TrustFolder(id) => {
@@ -667,8 +678,8 @@ impl AppCore {
             project: s.project.0.to_string(),
             name: s.name.clone(),
             kind: match s.kind {
-                SessionKind::Agent(super::AgentKind::ClaudeCode) => wire::SessionKind::Claude,
-                SessionKind::Agent(super::AgentKind::Codex) => wire::SessionKind::Codex,
+                SessionKind::Agent(AgentKind::ClaudeCode) => wire::SessionKind::Claude,
+                SessionKind::Agent(AgentKind::Codex) => wire::SessionKind::Codex,
                 SessionKind::Shell => wire::SessionKind::Shell,
                 SessionKind::Command => wire::SessionKind::Command,
                 SessionKind::Service => wire::SessionKind::Service,
@@ -905,12 +916,14 @@ fn rect_view(r: GridRect) -> wire::Rect {
 impl AppCore {
     /// Mark or clear a session's own question, for the holder of its
     /// launch token only, as `env.resolve` checks it. Never touches
-    /// `waiting_on`, which is Dispatch's.
+    /// `waiting_on`, which is Dispatch's. Only a Claude Code agent may
+    /// ask for an answer, since only its `Stop` hook says when to send it.
+    /// `ask` is the wire's message, kind and choices; `None` clears.
     fn session_ask(
         &mut self,
         id: RecordId,
         token: &str,
-        message: Option<String>,
+        ask: Option<(String, Option<String>, Vec<String>)>,
         now: Clock,
         out: &mut Out,
     ) {
@@ -926,16 +939,32 @@ impl AppCore {
             self.error("token does not match");
             return;
         }
-        let asking = match message {
+        let claude = record.kind == SessionKind::Agent(AgentKind::ClaudeCode);
+        let asking = match ask {
             None => None,
-            Some(text) => {
+            Some((text, kind, choices)) => {
                 let Some(message) = ask_message(&text) else {
                     self.error("an ask needs a message");
                     return;
                 };
-                Some(super::Ask {
+                let kind = match parse_ask_kind(kind.as_deref(), &choices) {
+                    Ok(kind) => kind,
+                    Err(why) => {
+                        self.error(why);
+                        return;
+                    }
+                };
+                if kind != AskKind::Note && !claude {
+                    self.error(
+                        "only a Claude Code session can ask for an answer; ask without --confirm, --choice or --text",
+                    );
+                    return;
+                }
+                Some(Ask {
                     message,
                     at: now.wall,
+                    kind,
+                    answer: None,
                 })
             }
         };
@@ -947,11 +976,55 @@ impl AppCore {
 /// cut at `ASK_MAX_CHARS` characters with "…" after. `None` when nothing
 /// is left, so a blank ask is refused rather than read as a clear.
 pub(crate) fn ask_message(text: &str) -> Option<String> {
+    cut_line(text, super::ASK_MAX_CHARS)
+}
+
+/// An ask's kind from the wire's name and options. Each option is cut
+/// like a message, to `ASK_CHOICE_MAX_CHARS`; a blank or repeated one
+/// is refused, as is a choice of fewer than two or more than
+/// `ASK_CHOICES_MAX`.
+pub(crate) fn parse_ask_kind(kind: Option<&str>, choices: &[String]) -> Result<AskKind, String> {
+    if kind != Some("choice") && !choices.is_empty() {
+        return Err("choices go only with a choice ask".into());
+    }
+    match kind {
+        None => Ok(AskKind::Note),
+        Some("confirm") => Ok(AskKind::Confirm),
+        Some("text") => Ok(AskKind::Text),
+        Some("choice") => {
+            if choices.len() < 2 {
+                return Err("a choice ask needs at least two choices".into());
+            }
+            if choices.len() > super::ASK_CHOICES_MAX {
+                return Err(format!(
+                    "a choice ask takes at most {} choices",
+                    super::ASK_CHOICES_MAX
+                ));
+            }
+            let mut kept: Vec<String> = Vec::with_capacity(choices.len());
+            for choice in choices {
+                let Some(option) = cut_line(choice, super::ASK_CHOICE_MAX_CHARS) else {
+                    return Err("a choice may not be blank".into());
+                };
+                if kept.contains(&option) {
+                    return Err("each choice must differ".into());
+                }
+                kept.push(option);
+            }
+            Ok(AskKind::Choice(kept))
+        }
+        Some(_) => Err("unknown ask kind; use confirm, choice or text".into()),
+    }
+}
+
+/// The first line of `text`, trimmed, cut at `max` characters with "…"
+/// after; `None` when nothing is left.
+fn cut_line(text: &str, max: usize) -> Option<String> {
     let line = text.lines().next().unwrap_or("").trim();
     if line.is_empty() {
         return None;
     }
-    match line.char_indices().nth(super::ASK_MAX_CHARS) {
+    match line.char_indices().nth(max) {
         Some((cut, _)) => Some(format!("{}…", line[..cut].trim_end())),
         None => Some(line.to_owned()),
     }
@@ -1009,8 +1082,8 @@ fn parse_id(kind: &str, text: &str) -> Result<uuid::Uuid, String> {
 
 fn session_kind(kind: wire::SessionKind) -> SessionKind {
     match kind {
-        wire::SessionKind::Claude => SessionKind::Agent(super::AgentKind::ClaudeCode),
-        wire::SessionKind::Codex => SessionKind::Agent(super::AgentKind::Codex),
+        wire::SessionKind::Claude => SessionKind::Agent(AgentKind::ClaudeCode),
+        wire::SessionKind::Codex => SessionKind::Agent(AgentKind::Codex),
         wire::SessionKind::Shell => SessionKind::Shell,
         wire::SessionKind::Command => SessionKind::Command,
         wire::SessionKind::Service => SessionKind::Service,
@@ -1071,8 +1144,8 @@ fn definition(d: wire::Definition) -> WorkflowDefinition {
     WorkflowDefinition {
         name: d.name,
         reviewer: match d.reviewer {
-            wire::AgentKind::Claude => super::AgentKind::ClaudeCode,
-            wire::AgentKind::Codex => super::AgentKind::Codex,
+            wire::AgentKind::Claude => AgentKind::ClaudeCode,
+            wire::AgentKind::Codex => AgentKind::Codex,
         },
         review_first: d.review_first,
         review_round: d.review_round,
@@ -1163,10 +1236,14 @@ impl TryFrom<wire::Body> for ControlAction {
                 session: s,
                 token,
                 message,
+                ask_kind,
+                choices,
             } => Self::Ask {
                 id: session(&s)?,
                 token,
                 message,
+                kind: ask_kind,
+                choices,
             },
             wire::Body::SessionTrust { session: s } => Self::TrustFolder(session(&s)?),
             wire::Body::SessionMove {

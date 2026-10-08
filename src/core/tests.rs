@@ -2837,7 +2837,7 @@ fn event_kinds_map_to_activities() {
             EventKind::Notification {
                 kind: "agent_completed".into(),
             },
-            CardState::Idle,
+            CardState::Working,
         ),
         (
             EventKind::StopFailed {
@@ -8076,6 +8076,8 @@ mod dispatch_page {
                     id,
                     token: "t".into(),
                     message: Some("merge now or run the checks first?".into()),
+                    kind: None,
+                    choices: vec![],
                 },
             },
             Clock::at(5_000),
@@ -8132,6 +8134,8 @@ mod dispatch_page {
                     id,
                     token: "t".into(),
                     message: Some("merge now?".into()),
+                    kind: None,
+                    choices: vec![],
                 },
             },
             Clock::at(1_000),
@@ -9586,6 +9590,8 @@ mod asking {
             id,
             token: token.into(),
             message: message.map(str::to_owned),
+            kind: None,
+            choices: vec![],
         }
     }
 
@@ -9603,10 +9609,7 @@ mod asking {
     }
 
     fn an_ask() -> Ask {
-        Ask {
-            message: "merge?".into(),
-            at: Clock::at(1).wall,
-        }
+        Ask::note("merge?", Clock::at(1).wall)
     }
 
     #[test]
@@ -9758,5 +9761,490 @@ mod asking {
         );
         assert_eq!(ask_message("   "), None);
         assert_eq!(ask_message(""), None);
+    }
+}
+
+mod answering {
+    use std::time::SystemTime;
+
+    use super::*;
+    use crate::core::{Ask, AskKind, ControlAction, token_hash};
+
+    fn sends(effects: &[Effect]) -> Vec<&str> {
+        effects
+            .iter()
+            .filter_map(|e| match e {
+                Effect::SendAnswer { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn hook(core: &mut AppCore, id: RecordId, kind: EventKind, at: u64) -> Vec<Effect> {
+        core.dispatch(
+            AppAction::Events(vec![SessionEvent {
+                record_id: Some(id),
+                ..event(kind, at)
+            }]),
+            Clock::at(at + 1),
+        )
+    }
+
+    fn stopped() -> EventKind {
+        EventKind::Stopped { last_message: None }
+    }
+
+    fn ask_op(id: RecordId, kind: Option<&str>, choices: &[&str]) -> ControlAction {
+        ControlAction::Ask {
+            id,
+            token: "t".into(),
+            message: Some("pick".into()),
+            kind: kind.map(str::to_owned),
+            choices: choices.iter().map(|c| (*c).to_owned()).collect(),
+        }
+    }
+
+    /// Asks over the control port and returns the refusal, if any.
+    fn ask(core: &mut AppCore, action: ControlAction, at: u64) -> Option<String> {
+        core.dispatch(
+            AppAction::Control {
+                op: format!("ask{at}"),
+                action,
+            },
+            Clock::at(at),
+        );
+        core.take_control_outcome(&format!("ask{at}"))
+            .unwrap()
+            .error
+    }
+
+    /// A running session of `kind` with the token "t", at its prompt
+    /// after a `Stop` at 2s.
+    fn at_prompt(kind: SessionKind) -> (AppCore, RecordId) {
+        let p = project("p");
+        let mut w = Workspace::new(p.clone());
+        let mut r = record(p.id, kind, 0);
+        r.token_hash = Some(token_hash("t"));
+        let id = r.id;
+        w.sessions.push(r);
+        let (mut core, _) = loaded(vec![w], vec![]);
+        core.dispatch(AppAction::HostListed(vec![running(id)]), Clock::at(1));
+        hook(&mut core, id, stopped(), 2_000);
+        (core, id)
+    }
+
+    /// A Claude Code agent at its prompt that asked "pick" at 3s.
+    fn asked(kind: &str, choices: &[&str]) -> (AppCore, RecordId) {
+        let (mut core, id) = at_prompt(agent());
+        assert_eq!(ask(&mut core, ask_op(id, Some(kind), choices), 3_000), None);
+        (core, id)
+    }
+
+    fn ask_at(core: &AppCore, id: RecordId) -> SystemTime {
+        core.session(id).unwrap().asking.as_ref().unwrap().at
+    }
+
+    fn answer(core: &mut AppCore, id: RecordId, text: &str, at: u64) -> Vec<Effect> {
+        let asked_at = ask_at(core, id);
+        answer_to(core, id, asked_at, text, at)
+    }
+
+    fn answer_to(
+        core: &mut AppCore,
+        id: RecordId,
+        asked_at: SystemTime,
+        text: &str,
+        at: u64,
+    ) -> Vec<Effect> {
+        core.dispatch(
+            AppAction::AnswerAsk {
+                id,
+                at: asked_at,
+                answer: text.into(),
+            },
+            Clock::at(at),
+        )
+    }
+
+    fn pending(core: &AppCore, id: RecordId) -> Option<String> {
+        core.session(id)?.asking.as_ref()?.answer.clone()
+    }
+
+    #[test]
+    fn each_kind_answered_between_turns_is_sent_at_once() {
+        let cases: [(&str, &[&str], &str, &str); 3] = [
+            ("confirm", &[], "yes", "yes"),
+            ("choice", &["a", "b"], "b", "b"),
+            ("text", &[], "  main, please \nmore", "main, please"),
+        ];
+        for (kind, choices, given, sent) in cases {
+            let (mut core, id) = asked(kind, choices);
+            assert!(core.answerable_ask(id).is_some(), "{kind}");
+            let e = answer(&mut core, id, given, 4_000);
+            assert_eq!(
+                sends(&e),
+                [format!("Owner answered \"pick\": {sent}").as_str()],
+                "{kind}"
+            );
+            assert_eq!(saves(&e), 1, "{kind}");
+            assert_eq!(core.session(id).unwrap().asking, None, "{kind}");
+        }
+    }
+
+    #[test]
+    fn an_answer_given_mid_turn_goes_out_at_the_stop_once() {
+        let (mut core, id) = asked("text", &[]);
+        hook(&mut core, id, EventKind::ToolFinished, 4_000);
+        let e = answer(&mut core, id, "main", 5_000);
+        assert!(sends(&e).is_empty());
+        assert_eq!(saves(&e), 1);
+        assert_eq!(pending(&core, id).as_deref(), Some("main"));
+        let e = hook(&mut core, id, stopped(), 6_000);
+        assert_eq!(sends(&e), ["Owner answered \"pick\": main"]);
+        assert_eq!(core.session(id).unwrap().asking, None);
+        let e = hook(&mut core, id, stopped(), 7_000);
+        assert!(sends(&e).is_empty());
+    }
+
+    #[test]
+    fn a_second_answer_before_the_stop_replaces_the_first() {
+        let (mut core, id) = asked("confirm", &[]);
+        hook(&mut core, id, EventKind::ToolFinished, 4_000);
+        answer(&mut core, id, "yes", 5_000);
+        answer(&mut core, id, "no", 6_000);
+        let e = hook(&mut core, id, stopped(), 7_000);
+        assert_eq!(sends(&e), ["Owner answered \"pick\": no"]);
+    }
+
+    #[test]
+    fn a_click_on_an_answered_or_replaced_ask_is_refused() {
+        let (mut core, id) = asked("confirm", &[]);
+        let old = ask_at(&core, id);
+        hook(&mut core, id, EventKind::PromptSubmitted, 4_000);
+        assert_eq!(core.session(id).unwrap().asking, None);
+        let e = answer_to(&mut core, id, old, "yes", 5_000);
+        assert!(sends(&e).is_empty());
+        assert_eq!(saves(&e), 0);
+        assert!(
+            core.notices()
+                .iter()
+                .any(|n| n.text.contains("already answered or withdrawn"))
+        );
+
+        let (mut core, id) = asked("confirm", &[]);
+        let old = ask_at(&core, id);
+        assert_eq!(ask(&mut core, ask_op(id, Some("text"), &[]), 4_000), None);
+        let e = answer_to(&mut core, id, old, "yes", 5_000);
+        assert!(sends(&e).is_empty());
+        assert_eq!(saves(&e), 0);
+        let s = core.session(id).unwrap().asking.clone().unwrap();
+        assert_eq!(s.kind, AskKind::Text);
+        assert_eq!(s.answer, None);
+    }
+
+    /// A prompt typed inside an open turn is a reminder, not the owner's
+    /// reply: the ask and its answer stand until the stop.
+    #[test]
+    fn a_prompt_inside_the_turn_leaves_the_answer_for_the_stop() {
+        let (mut core, id) = asked("confirm", &[]);
+        hook(&mut core, id, EventKind::ToolFinished, 4_000);
+        answer(&mut core, id, "yes", 5_000);
+        hook(&mut core, id, EventKind::PromptSubmitted, 6_000);
+        assert_eq!(pending(&core, id).as_deref(), Some("yes"));
+        let e = hook(&mut core, id, stopped(), 7_000);
+        assert_eq!(sends(&e), ["Owner answered \"pick\": yes"]);
+    }
+
+    /// Keys typed at a permission prompt or a failed stop would answer
+    /// that instead.
+    #[test]
+    fn a_dialog_in_the_pane_holds_the_answer() {
+        let (mut core, id) = asked("confirm", &[]);
+        hook(&mut core, id, EventKind::ToolFinished, 4_000);
+        answer(&mut core, id, "yes", 5_000);
+        let e = hook(
+            &mut core,
+            id,
+            EventKind::StopFailed {
+                reason: Some("rate_limit".into()),
+            },
+            6_000,
+        );
+        assert!(sends(&e).is_empty());
+        assert_eq!(pending(&core, id).as_deref(), Some("yes"));
+
+        let (mut core, id) = asked("confirm", &[]);
+        hook(
+            &mut core,
+            id,
+            EventKind::PermissionRequested {
+                tool: Some("Bash".into()),
+            },
+            4_000,
+        );
+        let e = answer(&mut core, id, "no", 5_000);
+        assert!(sends(&e).is_empty());
+        assert_eq!(saves(&e), 1);
+        assert_eq!(pending(&core, id).as_deref(), Some("no"));
+    }
+
+    /// An MCP tool's dialog closing hands back to the open turn, so
+    /// neither the next host list nor a click then sends.
+    #[test]
+    fn a_closed_mcp_dialog_does_not_end_the_turn() {
+        let (mut core, id) = asked("confirm", &[]);
+        hook(&mut core, id, EventKind::ToolFinished, 4_000);
+        answer(&mut core, id, "yes", 5_000);
+        let dialog = |kind: &str| EventKind::Notification { kind: kind.into() };
+        hook(&mut core, id, dialog("elicitation_dialog"), 6_000);
+        hook(&mut core, id, dialog("elicitation_complete"), 7_000);
+        let e = core.dispatch(AppAction::HostListed(vec![running(id)]), Clock::at(8_000));
+        assert!(sends(&e).is_empty());
+        let e = answer(&mut core, id, "no", 9_000);
+        assert!(sends(&e).is_empty());
+        assert_eq!(pending(&core, id).as_deref(), Some("no"));
+        let e = hook(&mut core, id, stopped(), 10_000);
+        assert_eq!(sends(&e), ["Owner answered \"pick\": no"]);
+    }
+
+    /// A background agent can finish while the main turn runs on.
+    #[test]
+    fn a_finished_background_agent_does_not_end_the_turn() {
+        let (mut core, id) = asked("confirm", &[]);
+        hook(&mut core, id, EventKind::ToolFinished, 4_000);
+        answer(&mut core, id, "yes", 5_000);
+        let done = EventKind::Notification {
+            kind: "agent_completed".into(),
+        };
+        hook(&mut core, id, done, 6_000);
+        let e = core.dispatch(AppAction::HostListed(vec![running(id)]), Clock::at(7_000));
+        assert!(sends(&e).is_empty());
+        let e = answer(&mut core, id, "no", 8_000);
+        assert!(sends(&e).is_empty());
+        assert_eq!(pending(&core, id).as_deref(), Some("no"));
+        let e = hook(&mut core, id, stopped(), 9_000);
+        assert_eq!(sends(&e), ["Owner answered \"pick\": no"]);
+    }
+
+    /// The ask stays on the record while the pane is gone, so the
+    /// refusal must not say it was answered.
+    #[test]
+    fn a_click_on_a_stopped_session_says_it_is_not_running() {
+        let (mut core, id) = asked("confirm", &[]);
+        let at = ask_at(&core, id);
+        core.dispatch(AppAction::HostListed(vec![]), Clock::at(4_000));
+        let e = answer_to(&mut core, id, at, "yes", 5_000);
+        assert!(sends(&e).is_empty());
+        assert_eq!(saves(&e), 0);
+        assert!(
+            core.notices()
+                .iter()
+                .any(|n| n.text.contains("is not running"))
+        );
+        assert!(core.session(id).unwrap().asking.is_some());
+    }
+
+    /// After a restart the replayed `Stop` lands before the first host
+    /// list; that host list sends the answer, once.
+    #[test]
+    fn an_answer_left_by_a_restart_goes_out_on_the_first_host_list() {
+        let p = project("p");
+        let mut w = Workspace::new(p.clone());
+        let mut r = record(p.id, agent(), 0);
+        r.activity = Activity::Working;
+        r.asking = Some(Ask {
+            answer: Some("yes".into()),
+            kind: AskKind::Confirm,
+            ..Ask::note("pick", Clock::at(1_000).wall)
+        });
+        let id = r.id;
+        w.sessions.push(r);
+        let mut core = AppCore::new();
+        core.dispatch(
+            AppAction::StoreLoaded(Ok(Loaded {
+                workspaces: vec![w],
+                notices: vec![],
+                ..Loaded::default()
+            })),
+            Clock::at(0),
+        );
+        let e = hook(&mut core, id, stopped(), 2_000);
+        assert!(sends(&e).is_empty(), "no pane is known yet");
+        assert_eq!(core.session(id).unwrap().activity, Activity::Idle);
+        let e = core.dispatch(AppAction::HostListed(vec![running(id)]), Clock::at(3_000));
+        assert_eq!(sends(&e), ["Owner answered \"pick\": yes"]);
+        assert_eq!(core.session(id).unwrap().asking, None);
+        let e = core.dispatch(AppAction::HostListed(vec![running(id)]), Clock::at(4_000));
+        assert!(sends(&e).is_empty());
+    }
+
+    /// After a failed stop the owner's typed prompt is the reply; the
+    /// stored answer is dropped, said so, and never sent after it.
+    #[test]
+    fn a_prompt_typed_after_a_failed_stop_drops_the_answer() {
+        let (mut core, id) = asked("confirm", &[]);
+        hook(&mut core, id, EventKind::ToolFinished, 4_000);
+        answer(&mut core, id, "yes", 5_000);
+        hook(&mut core, id, EventKind::StopFailed { reason: None }, 6_000);
+        let e = hook(&mut core, id, EventKind::PromptSubmitted, 7_000);
+        assert!(sends(&e).is_empty());
+        assert_eq!(core.session(id).unwrap().asking, None);
+        let dropped: Vec<_> = core
+            .notices()
+            .iter()
+            .filter(|n| n.text.contains("replaced the answer \"yes\""))
+            .collect();
+        assert_eq!(dropped.len(), 1);
+        let e = hook(&mut core, id, stopped(), 8_000);
+        assert!(sends(&e).is_empty());
+    }
+
+    #[test]
+    fn an_answer_that_does_not_fit_the_question_is_refused() {
+        let cases: [(Option<&str>, &[&str], &str); 4] = [
+            (Some("confirm"), &[], "maybe"),
+            (Some("choice"), &["a", "b"], "c"),
+            (Some("text"), &[], "  \n"),
+            (None, &[], "yes"),
+        ];
+        for (kind, choices, given) in cases {
+            let (mut core, id) = at_prompt(agent());
+            assert_eq!(ask(&mut core, ask_op(id, kind, choices), 3_000), None);
+            let before = core.session(id).unwrap().clone();
+            let e = answer(&mut core, id, given, 4_000);
+            assert!(sends(&e).is_empty(), "{kind:?}");
+            assert_eq!(saves(&e), 0, "{kind:?}");
+            assert_eq!(core.session(id).unwrap(), &before, "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn a_malformed_structured_ask_is_refused() {
+        let seven = ["1", "2", "3", "4", "5", "6", "7"];
+        let too_many = format!(
+            "a choice ask takes at most {} choices",
+            crate::core::ASK_CHOICES_MAX
+        );
+        let cases: [(Option<&str>, &[&str], &str); 6] = [
+            (
+                Some("choice"),
+                &["a"],
+                "a choice ask needs at least two choices",
+            ),
+            (Some("choice"), &seven, &too_many),
+            (Some("choice"), &["a", " a "], "each choice must differ"),
+            (Some("choice"), &["a", " "], "a choice may not be blank"),
+            (
+                Some("confirm"),
+                &["a", "b"],
+                "choices go only with a choice ask",
+            ),
+            (
+                Some("maybe"),
+                &[],
+                "unknown ask kind; use confirm, choice or text",
+            ),
+        ];
+        for (kind, choices, why) in cases {
+            let (mut core, id) = at_prompt(agent());
+            assert_eq!(
+                ask(&mut core, ask_op(id, kind, choices), 3_000).as_deref(),
+                Some(why)
+            );
+            assert_eq!(core.session(id).unwrap().asking, None, "{why}");
+        }
+        assert_eq!(seven.len(), crate::core::ASK_CHOICES_MAX + 1);
+    }
+
+    /// Only Claude Code's `Stop` says when to send; a Codex pane or a
+    /// shell may still ask plainly.
+    #[test]
+    fn only_claude_code_may_ask_for_an_answer() {
+        for kind in [codex(), SessionKind::Shell] {
+            let (mut core, id) = at_prompt(kind);
+            let why = ask(&mut core, ask_op(id, Some("confirm"), &[]), 3_000);
+            assert!(why.unwrap().contains("only a Claude Code session"));
+            assert_eq!(core.session(id).unwrap().asking, None);
+            assert_eq!(ask(&mut core, ask_op(id, None, &[]), 4_000), None);
+            assert!(core.answerable_ask(id).is_none());
+        }
+    }
+
+    #[test]
+    fn a_choice_ask_keeps_its_options_cut_and_in_order() {
+        let long = "x".repeat(crate::core::ASK_CHOICE_MAX_CHARS + 5);
+        let (mut core, id) = at_prompt(agent());
+        assert_eq!(
+            ask(
+                &mut core,
+                ask_op(id, Some("choice"), &[" b ", "a\nmore", &long]),
+                3_000
+            ),
+            None
+        );
+        let AskKind::Choice(options) = &core.session(id).unwrap().asking.as_ref().unwrap().kind
+        else {
+            panic!("not a choice");
+        };
+        assert_eq!(options[..2], ["b".to_owned(), "a".to_owned()]);
+        assert_eq!(
+            options[2].chars().count(),
+            crate::core::ASK_CHOICE_MAX_CHARS + 1
+        );
+    }
+
+    /// A dismiss, `--clear`, a new spawn and a newer ask each drop a
+    /// pending answer with the ask it belonged to.
+    #[test]
+    fn a_pending_answer_goes_with_its_ask() {
+        let held = || {
+            let (mut core, id) = asked("confirm", &[]);
+            hook(&mut core, id, EventKind::ToolFinished, 4_000);
+            answer(&mut core, id, "yes", 5_000);
+            assert_eq!(pending(&core, id).as_deref(), Some("yes"));
+            (core, id)
+        };
+        let (mut core, id) = held();
+        core.dispatch(AppAction::DismissAsk(id), Clock::at(6_000));
+        assert!(sends(&hook(&mut core, id, stopped(), 7_000)).is_empty());
+
+        let (mut core, id) = held();
+        let clear = ControlAction::Ask {
+            id,
+            token: "t".into(),
+            message: None,
+            kind: None,
+            choices: vec![],
+        };
+        assert_eq!(ask(&mut core, clear, 6_000), None);
+        assert!(sends(&hook(&mut core, id, stopped(), 7_000)).is_empty());
+
+        let (mut core, id) = held();
+        assert_eq!(ask(&mut core, ask_op(id, Some("text"), &[]), 6_000), None);
+        assert_eq!(pending(&core, id), None, "the newest question stands");
+        assert!(sends(&hook(&mut core, id, stopped(), 7_000)).is_empty());
+
+        let (mut core, pid, _) = with_records(&[], |_| None);
+        let (id, _) = new_session(&mut core, pid, agent(), Launch::Argv(vec![]));
+        core.seed_asking(
+            id,
+            Some(Ask {
+                kind: AskKind::Confirm,
+                answer: Some("yes".into()),
+                ..Ask::note("pick", Clock::at(1).wall)
+            }),
+        );
+        launch_agent(&mut core, id, Some(claude_handle()));
+        assert_eq!(core.session(id).unwrap().asking, None);
+    }
+
+    #[test]
+    fn a_plain_ask_cannot_be_answered_on_a_card() {
+        let (mut core, id) = at_prompt(agent());
+        assert_eq!(ask(&mut core, ask_op(id, None, &[]), 3_000), None);
+        assert!(core.standing_ask_detail(id).is_some());
+        assert!(core.answerable_ask(id).is_none());
+        core.dispatch(AppAction::HostListed(vec![]), Clock::at(4_000));
+        assert_eq!(core.standing_ask_detail(id), None);
     }
 }

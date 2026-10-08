@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 /// Bump when the on-disk shape changes incompatibly.
-pub const SCHEMA_VERSION: u32 = 14;
+pub const SCHEMA_VERSION: u32 = 15;
 
 /// How the UI picks its colours: follow the system, or force one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -1156,10 +1156,49 @@ pub struct Ask {
     /// When the app took it. A prompt submitted before this does not
     /// answer it.
     pub at: SystemTime,
+    /// How the owner answers. Absent in older files, which read as `Note`.
+    #[serde(default)]
+    pub kind: AskKind,
+    /// The owner's answer, waiting for the turn to end; dropped once sent.
+    #[serde(default)]
+    pub answer: Option<String>,
+}
+
+impl Ask {
+    /// A plain ask: shown and dismissed, never answered on the card.
+    #[must_use]
+    pub fn note(message: impl Into<String>, at: SystemTime) -> Self {
+        Self {
+            message: message.into(),
+            at,
+            kind: AskKind::Note,
+            answer: None,
+        }
+    }
+}
+
+/// What an ask takes for an answer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum AskKind {
+    /// A plain ask: shown, dismissed, never answered on the card.
+    #[default]
+    Note,
+    /// Yes or No.
+    Confirm,
+    /// One of these, in order.
+    Choice(Vec<String>),
+    /// One line of the owner's own.
+    Text,
 }
 
 /// The longest message an ask keeps, in characters, before the "…".
 pub const ASK_MAX_CHARS: usize = 200;
+
+/// How many options a choice ask may offer.
+pub const ASK_CHOICES_MAX: usize = 6;
+
+/// The longest option a choice ask keeps, in characters, before the "…".
+pub const ASK_CHOICE_MAX_CHARS: usize = 60;
 
 /// How many runs a record keeps; the logs of older ones are deleted
 /// with them.

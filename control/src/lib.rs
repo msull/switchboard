@@ -235,6 +235,13 @@ pub enum Body {
         token: String,
         #[serde(default)]
         message: Option<String>,
+        /// How the owner answers: `"confirm"`, `"choice"` or `"text"`;
+        /// absent for a plain ask. Not `kind`, which is the tag.
+        #[serde(default)]
+        ask_kind: Option<String>,
+        /// A choice ask's options, in order.
+        #[serde(default)]
+        choices: Vec<String>,
     },
     /// Answer Claude Code's folder trust question with yes; nothing is
     /// sent unless the pane was last seen showing it.
@@ -987,11 +994,22 @@ mod tests {
                 session: "s".into(),
                 token: "t".into(),
                 message: Some("merge now?".into()),
+                ask_kind: None,
+                choices: vec![],
             },
             Body::SessionAsk {
                 session: "s".into(),
                 token: "t".into(),
                 message: None,
+                ask_kind: None,
+                choices: vec![],
+            },
+            Body::SessionAsk {
+                session: "s".into(),
+                token: "t".into(),
+                message: Some("which?".into()),
+                ask_kind: Some("choice".into()),
+                choices: vec!["a".into(), "b".into()],
             },
             Body::SessionTrust {
                 session: "s".into(),
@@ -1162,6 +1180,37 @@ mod tests {
         let req =
             Request::parse(r#"{"op":"a","kind":"session.ask","session":"s","token":"t"}"#).unwrap();
         assert!(matches!(req.body, Body::SessionAsk { message: None, .. }));
+    }
+
+    #[test]
+    fn a_structured_ask_keeps_its_kind_tag_and_older_lines_read_as_plain() {
+        let body = Body::SessionAsk {
+            session: "s".into(),
+            token: "t".into(),
+            message: Some("pick".into()),
+            ask_kind: Some("choice".into()),
+            choices: vec!["a".into(), "b".into()],
+        };
+        let line = serde_json::to_string(&Request {
+            op: "a".into(),
+            body: body.clone(),
+        })
+        .unwrap();
+        assert!(line.contains(r#""kind":"session.ask""#), "{line}");
+        assert!(line.contains(r#""ask_kind":"choice""#), "{line}");
+        assert_eq!(Request::parse(&line).unwrap().body, body);
+        let req = Request::parse(
+            r#"{"op":"a","kind":"session.ask","session":"s","token":"t","message":"m"}"#,
+        )
+        .unwrap();
+        let Body::SessionAsk {
+            ask_kind, choices, ..
+        } = req.body
+        else {
+            panic!("not an ask");
+        };
+        assert_eq!(ask_kind, None);
+        assert_eq!(choices, Vec::<String>::new());
     }
 
     #[test]

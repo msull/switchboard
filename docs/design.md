@@ -2642,6 +2642,89 @@ Known gaps:
   The ask stands until it is dismissed or a prompt follows that turn's
   `Stop`.
 
+## Structured asks (2026-10-07)
+
+A Claude Code session may ask for an answer of a shape, and the owner
+answers on the card rather than in the pane. `switchboard-ask
+"<question>"` takes `--confirm` (Yes or No), `--choice "<option>"` once
+per option, or `--text` (one line of the owner's own); the wire's
+`session.ask` gains `ask_kind` and `choices` (not `kind`, the request's
+tag). Schema v15.
+
+- **The record.** `Ask` gains `kind: AskKind` (`Note`, `Confirm`,
+  `Choice(options)`, `Text`; older files read as `Note`, the plain ask
+  above) and `answer: Option<String>`, the owner's answer while it
+  waits to be sent. A choice takes 2 to `ASK_CHOICES_MAX` (6) options,
+  each cut to its first line and `ASK_CHOICE_MAX_CHARS` (60), none blank
+  or repeated. Any kind but `Note` is refused from a record that is not
+  a Claude Code agent, since only Claude Code's `Stop` hook says when
+  the answer can go in.
+- **Answering.** The board card, the session page, the supervisor's
+  line on the Dispatch page and a lane agent's card draw Yes and No, a
+  button per option, or a line and "Send answer" under the question
+  (`AppCore::answerable_ask`). A click dispatches `AnswerAsk { id, at,
+  answer }`, where `at` is the ask's, so a click on an ask that was
+  answered by a typed prompt, replaced by a newer ask, dismissed or
+  cleared is refused with an info line; one on a pane that stopped
+  since is refused as not running, and the ask stays. An answer that
+  does not fit the kind is refused. A text answer's draft is kept with
+  the `at` of the ask it was typed for and emptied when a newer ask
+  shows. The working-set card shows the question but takes no
+  answer; its body is clipped.
+- **Between turns.** The answer goes into the pane as one typed line,
+  `Owner answered "<question>": <answer>`, only when the pane runs and
+  sits at its prompt: activity `Idle`, or `Working` from a
+  `SessionStart` outside a turn (the `started` mark). An MCP dialog's
+  `elicitation_complete` or `elicitation_response` notification sets
+  `Working`, not `Idle`: the turn it interrupted goes on. A permission
+  prompt, an `AskUserQuestion` or a failed stop (`WaitingOnYou`) is not
+  between turns: keys there would answer that dialog. Otherwise the
+  answer is kept on the record, and a second answer replaces it.
+- **Delivery, at most once.** `deliver_answer` runs at every `Stop`
+  and for every record holding an answer on every host poll. The
+  second covers a restart: the app polls the hook log before tmux, so a
+  replayed `Stop` lands while no pane reads as running; it still sets
+  the record `Idle`, and the first host list sends. The ask clears in
+  the same step that emits the send, and the save precedes the send in
+  the effects, so a crash or a failed write loses the answer rather
+  than sending it twice (a duplicate prompt is a paid turn). The send
+  is `Effect::SendAnswer`, which the app writes like `SendInput` but
+  without clearing the owner's prompt draft for the session, since it
+  goes out by itself. It ends a pending discard's undo like any send,
+  and sets no `relayed` mark; the prompt it starts
+  comes back between turns with no ask left to clear.
+- **The typed reply wins.** A prompt typed between turns clears the ask
+  and any answer on it, as before. When that drops a stored answer
+  (after a failed stop), an info line names it: sending it after the
+  owner's own reply would be a second, stale one.
+- **The supervisor.** Its seed line on `switchboard-ask` names the
+  three flags and the shape of the reply. It is in `seed_hash`.
+- **Measured** (spike 19, Claude Code 2.1.293): an answer typed between
+  turns and one held through a turn each arrive as the next user
+  message, submitted once.
+
+Known gaps:
+
+- Codex panes and shells take plain asks only.
+- A pane that dies with an answer pending loses it: a new spawn clears
+  the ask.
+- A failed write loses the answer; the error toast ("send input to
+  <host>") is what remains, and the owner retypes it in the pane.
+- A new `switchboard-ask` in the same turn replaces the ask and a
+  pending answer with it.
+- A running supervisor learns the flags only after a Fresh.
+- The card keeps reading "sent when the turn ends" for an answer that
+  will not go out until the owner dismisses it:
+  - an Esc interrupt runs no `Stop` hook, so the activity stays
+    `Working` and an answer stored in that turn waits for a `Stop` that
+    does not come;
+  - the `started` mark is transient, so after a restart an answer
+    clicked at the prompt that follows a `/clear` reads the pane as mid
+    turn and is stored, and no `Stop` follows to send it.
+- By design: after a failed stop the owner's typed prompt drops a
+  stored answer rather than send it after the prompt; an info line
+  names the dropped answer.
+
 ## Multi-line sends paste (2026-10-07)
 
 A message with a blank line, sent from the message box or Prompt Box,

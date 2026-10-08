@@ -159,6 +159,18 @@ impl AppCore {
             .collect();
         self.record_exit_codes(out);
         self.close_runs(now, out);
+        // A `Stop` replayed after a restart lands before the first host
+        // list, while no pane reads as running; the answer goes out here.
+        let answered: Vec<_> = self
+            .workspaces
+            .iter()
+            .flat_map(|w| &w.sessions)
+            .filter(|s| s.asking.as_ref().is_some_and(|a| a.answer.is_some()))
+            .map(|s| s.id)
+            .collect();
+        for id in answered {
+            self.deliver_answer(id, out);
+        }
         if self.store_loaded && !self.reconciled {
             self.reconciled = true;
             self.autostart_services(now, out);
