@@ -1624,6 +1624,27 @@ impl AppCore {
         self.update_views(out, |v| *v = next);
     }
 
+    /// Hand `old`'s pins to `new` in place, at the same rect, on every
+    /// hand-placed set whose space `new` belongs to. A set that already
+    /// pins `new` just loses `old`'s card. Rule sets and dismissals are
+    /// left alone: a rule set holds no pins, and a dismissal belongs to
+    /// its own record.
+    pub(super) fn take_over_pins(&mut self, old: RecordId, new: RecordId, out: &mut Out) {
+        let (old, new) = (PinTarget::Session(old), PinTarget::Session(new));
+        let mut next = self.views.clone();
+        for set in &mut next.sets {
+            if set.rule.is_some() || !self.target_in(&new, set.space) {
+                continue;
+            }
+            if set.items.iter().any(|i| i.target == new) {
+                set.items.retain(|i| i.target != old);
+            } else if let Some(item) = set.items.iter_mut().find(|i| i.target == old) {
+                item.target = new.clone();
+            }
+        }
+        self.update_views(out, |v| *v = next);
+    }
+
     /// The target exists and its project is in `space`, or anywhere
     /// when `space` is the global one.
     pub(super) fn target_in(&self, target: &PinTarget, space: SpaceId) -> bool {

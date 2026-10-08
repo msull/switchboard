@@ -171,6 +171,11 @@ pub enum Body {
         /// `switchboard-env exec` resolves for its children. Names only.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         env_sets: Vec<String>,
+        /// The record whose hand-placed working-set pins this session
+        /// takes over in place, at the same rect. Not written when
+        /// `None`, so an older app reads the same request.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        replaces: Option<String>,
     },
     /// A new Claude Code session whose conversation is a copy of
     /// `source`'s whole transcript, in the source's project and cwd,
@@ -941,6 +946,7 @@ mod tests {
                 notes: "ticket".into(),
                 env: BTreeMap::from([("DISPATCH_INPUT_PLAN".into(), "/plan.md".into())]),
                 env_sets: vec!["aws-dev".into()],
+                replaces: Some("s0".into()),
             },
             Body::SessionClone {
                 source: "s1".into(),
@@ -962,6 +968,7 @@ mod tests {
                 notes: String::new(),
                 env: BTreeMap::new(),
                 env_sets: Vec::new(),
+                replaces: None,
             },
             Body::SpaceNew { name: "D".into() },
             Body::SetNew {
@@ -1311,6 +1318,29 @@ mod tests {
         );
         assert_eq!(req.body.kind(), "session.resume");
         round_trip_request(req.body);
+    }
+
+    #[test]
+    fn a_session_new_without_replaces_writes_no_replaces_key() {
+        let line = Request::new(
+            "a",
+            Body::SessionNew {
+                project: "p".into(),
+                name: "n".into(),
+                session_kind: SessionKind::Shell,
+                cwd: "/r".into(),
+                launch: Launch::Shell,
+                prompt: None,
+                notes: String::new(),
+                env: BTreeMap::new(),
+                env_sets: Vec::new(),
+                replaces: None,
+            },
+        )
+        .to_line();
+        assert!(!line.contains("replaces"), "{line}");
+        let req = Request::parse(&line).unwrap();
+        assert!(matches!(req.body, Body::SessionNew { replaces: None, .. }));
     }
 
     #[test]

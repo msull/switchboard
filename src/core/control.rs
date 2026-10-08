@@ -43,6 +43,9 @@ pub enum ControlAction {
         env: BTreeMap<String, String>,
         /// Environment sets granted to the session.
         env_sets: Vec<String>,
+        /// The record whose hand-placed working-set pins the new
+        /// session takes over in place.
+        replaces: Option<RecordId>,
     },
     /// A Claude Code session cloned from `source`'s whole transcript,
     /// launched with `prompt`.
@@ -261,6 +264,7 @@ impl AppCore {
                 notes,
                 env,
                 env_sets,
+                replaces,
             } => {
                 if let Some(text) = self.host_unavailable("start", &name) {
                     self.error(text);
@@ -274,6 +278,9 @@ impl AppCore {
                     s.env = env.into_iter().collect();
                     s.env_sets = env_sets;
                 });
+                if let Some(old) = replaces {
+                    self.take_over_pins(old, id, out);
+                }
                 if let Some(prompt) = prompt.filter(|_| matches!(kind, SessionKind::Agent(_))) {
                     self.first_prompts.push((id, prompt));
                 }
@@ -1262,6 +1269,7 @@ impl TryFrom<wire::Body> for ControlAction {
                 notes,
                 env,
                 env_sets,
+                replaces,
             } => Self::NewSession {
                 project: project(&p)?,
                 name,
@@ -1272,6 +1280,7 @@ impl TryFrom<wire::Body> for ControlAction {
                 notes,
                 env,
                 env_sets,
+                replaces: replaces.as_deref().map(session).transpose()?,
             },
             wire::Body::SessionClone {
                 source: s,

@@ -127,6 +127,7 @@ fn session_new(project: &str, prompt: Option<&str>) -> Body {
         notes: "Dispatch ticket 1".into(),
         env: std::collections::BTreeMap::new(),
         env_sets: Vec::new(),
+        replaces: None,
     }
 }
 
@@ -434,6 +435,84 @@ fn op_status_tells_a_lost_reply_from_a_launch_the_app_died_in() {
 
 /// The global space's fixed id, as the wire spells it.
 const GLOBAL: &str = "00000000-0000-0000-0000-000000000002";
+
+/// A session made to replace another takes its card's place on a set;
+/// an id that does not parse refuses the request.
+#[test]
+fn session_new_with_replaces_moves_the_pin() {
+    let mut port = port(Loaded::default(), FakeOperations::default());
+    let reply = call(
+        &mut port,
+        Request::new("sp", Body::SpaceNew { name: "s".into() }),
+    );
+    let space = made_id(&reply, RecordKind::Space);
+    let reply = call(
+        &mut port,
+        Request::new(
+            "pj",
+            Body::ProjectAdd {
+                space: space.clone(),
+                name: "p".into(),
+                root: PathBuf::from("/tmp"),
+            },
+        ),
+    );
+    let project = made_id(&reply, RecordKind::Project);
+    let mut sessions = Vec::new();
+    for n in ["a", "b"] {
+        let reply = call(
+            &mut port,
+            Request::new(format!("se-{n}"), session_new(&project, None)),
+        );
+        sessions.push(made_id(&reply, RecordKind::Session));
+    }
+    let reply = call(
+        &mut port,
+        Request::new(
+            "set",
+            Body::SetNew {
+                space: space.clone(),
+                name: "queue".into(),
+            },
+        ),
+    );
+    let set = made_id(&reply, RecordKind::Set);
+    let pin = |session: &str, x: u32| switchboard_control::Pin {
+        target: switchboard_control::PinTarget::Session {
+            session: session.to_owned(),
+        },
+        rect: switchboard_control::Rect {
+            x,
+            y: 0,
+            w: 10,
+            h: 8,
+        },
+    };
+    let items = vec![pin(&sessions[0], 0), pin(&sessions[1], 10)];
+    let reply = call(
+        &mut port,
+        Request::new("sync", Body::SetSync { set, items }),
+    );
+    assert!(matches!(reply, Reply::Persisted { .. }), "{reply:?}");
+
+    let mut body = session_new(&project, None);
+    if let Body::SessionNew { replaces, .. } = &mut body {
+        *replaces = Some(sessions[0].clone());
+    }
+    let reply = call(&mut port, Request::new("se-new", body));
+    let new = made_id(&reply, RecordKind::Session);
+    let Reply::Sets { sets } = call(&mut port, Request::new("sets", Body::Sets { space })) else {
+        panic!("sets");
+    };
+    assert_eq!(sets[0].items, vec![pin(&new, 0), pin(&sessions[1], 10)]);
+
+    let mut body = session_new(&project, None);
+    if let Body::SessionNew { replaces, .. } = &mut body {
+        *replaces = Some("not-an-id".into());
+    }
+    let reply = call(&mut port, Request::new("se-bad", body));
+    assert!(matches!(reply, Reply::Failed { .. }), "{reply:?}");
+}
 
 #[test]
 fn a_global_set_takes_cards_from_two_spaces_and_holds_no_project() {
@@ -911,6 +990,7 @@ fn granted_session(env: &mut EnvPort) -> (String, String) {
                 notes: String::new(),
                 env: std::collections::BTreeMap::new(),
                 env_sets: vec!["dev".into()],
+                replaces: None,
             },
         ),
     );
