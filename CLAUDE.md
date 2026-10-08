@@ -67,7 +67,8 @@ outside a `cfg(target_os = "macos")` table may need macOS to compile.
   prompt, and live only in `#[ignore]`d tests.
 - Keychain tests use a throwaway keychain file, never the login keychain.
 - Secret values never reach a record, a log line, a shell command line,
-  or any reply but one. They travel as tmux `-e` flags, or as the
+  or any reply but one. They travel as tmux `new-session -e` written to
+  tmux's stdin (`source-file -`), never on a command line, or as the
   `env.resolve` reply on `control.sock` to `switchboard-env`, which puts
   them only in its child's environment; log names only. That child may
   run under an agent's Bash tool, so what it prints reaches a tool

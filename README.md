@@ -358,7 +358,7 @@ dispatch/                the `dispatch` binary (docs/dispatch.md; docs/dispatch-
   tests/sandbox.rs       ignored, macOS: a confined gate's refused write fails the attempt and is named in checks.log
 vendor/egui_term/        embedded terminal widget (Harzu/egui_term @ 31bbc7ab, egui 0.36; see SWITCHBOARD-PATCHES.md)
 firmware/nunchuk/        CircuitPython for the Feather that reports the nunchuk's buttons and stick
-spikes/                  Spike 0 evidence, and later spikes such as 13-dispatch-service (a Dispatch service as a Switchboard service session; which bind sees a dev server's port) 15-paste-buffer (a multi-line send as one tmux paste, bracketed only for a pane that asked) 16-base-pipeline (a merged pull request's merge commit and the base's run on it) and 17-prompt-origin (telling a typed prompt from a task notification or a harness reminder)
+spikes/                  Spike 0 evidence, and later spikes such as 13-dispatch-service (a Dispatch service as a Switchboard service session; which bind sees a dev server's port) 15-paste-buffer (a multi-line send as one tmux paste, bracketed only for a pane that asked) 16-base-pipeline (a merged pull request's merge commit and the base's run on it) 17-prompt-origin (telling a typed prompt from a task notification or a harness reminder) and 18-tmux-argv (keeping spawn's environment values off every process's argv)
 ```
 
 The flow for any feature: the UI dispatches an `AppAction`; the core

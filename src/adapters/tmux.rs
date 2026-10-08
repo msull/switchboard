@@ -1,7 +1,10 @@
 //! tmux process host on a private socket (`-L switchboard`) with the app's
 //! own config file, so it never sees the user's sessions or `~/.tmux.conf`.
-//! Every method is one `std::process::Command` running the tmux client;
-//! the server starts implicitly on the first `new-session`. The command
+//! Every method is one `std::process::Command` running the tmux client.
+//! The server process keeps the argv of the client that started it for
+//! as long as it runs, so a spawn starts it with a bare `start-server`
+//! and sends `new-session` (with its `-e` values and pane command) on
+//! the client's stdin through `source-file -` (spike 18). The command
 //! mapping and the measured quirks come from spike 02.
 
 use std::io;
@@ -12,8 +15,16 @@ use std::time::{Duration, SystemTime};
 
 use crate::ports::host::{HostId, HostInfo, HostStatus, Liveness, ProcessHost, SpawnSpec};
 
-/// Oldest tmux that has `new-session -e` and `pane_dead_status`.
+/// Oldest tmux that has `new-session -e`, `pane_dead_status` and
+/// `source-file -`.
 const MIN_VERSION: (u32, u32) = (3, 2);
+
+/// The tmux client's argv for every spawn. The `";"` is its own element
+/// because no shell is involved: that is how tmux separates commands.
+/// `start-server` does nothing when a server runs already, and
+/// `source-file` cannot start one on its own. Everything taken from a
+/// `SpawnSpec` goes on stdin (`spawn_script`), never here.
+const SPAWN_ARGS: [&str; 4] = ["start-server", ";", "source-file", "-"];
 
 /// One line per pane, tab separated, in the order `parse_status` expects.
 const STATUS_FORMAT: &str = "#{session_name}\t#{pane_dead}\t#{pane_dead_status}\t#{pane_pid}\t\
@@ -99,7 +110,17 @@ impl TmuxHost {
     /// GitHub's runners (a plain container is fine), so the tests call
     /// this to skip cleanly there.
     pub fn smoke_test(&self) -> io::Result<()> {
-        let started = self.run(&["new-session", "-d", "-s", "smoke", "-c", "/"]);
+        // The same path `spawn` takes, so a tmux that cannot read
+        // commands from stdin is skipped here rather than failing every
+        // spawn test.
+        let smoke = SpawnSpec {
+            id: HostId("smoke".into()),
+            cwd: PathBuf::from("/"),
+            command: None,
+            env: Vec::new(),
+            scrollback: None,
+        };
+        let started = self.run_with_stdin(&SPAWN_ARGS, spawn_script(&smoke).as_bytes());
         let _ = self.run(&["kill-session", "-t", "=smoke"]);
         // Killing the last session makes the server exit on its own
         // time; a `new-session` that reaches it first is answered
@@ -300,34 +321,9 @@ impl ProcessHost for TmuxHost {
                 format!("tmux session {:?} already exists", spec.id.0),
             ));
         }
-        let cwd = spec.cwd.to_string_lossy().into_owned();
-        let mut args: Vec<String> = [
-            "new-session",
-            "-d",
-            "-s",
-            &spec.id.0,
-            "-c",
-            &cwd,
-            "-x",
-            "200",
-            "-y",
-            "50",
-        ]
-        .into_iter()
-        .map(str::to_owned)
-        .collect();
-        for (k, v) in &spec.env {
-            args.push("-e".into());
-            args.push(format!("{k}={v}"));
-        }
-        if let Some(argv) = &spec.command {
-            // tmux takes one shell-command string; quoting each element
-            // keeps the argv boundaries through its `sh -c`.
-            let quoted: Vec<String> = argv.iter().map(|a| shell_quote(a)).collect();
-            args.push(quoted.join(" "));
-        }
-        let args: Vec<&str> = args.iter().map(String::as_str).collect();
-        self.run(&args)?;
+        // The environment values (secrets among them) and the pane
+        // command go on stdin, so no process listing ever shows them.
+        self.run_with_stdin(&SPAWN_ARGS, spawn_script(spec).as_bytes())?;
         // A readable default title until the program sets its own.
         self.run(&[
             "select-pane",
@@ -558,6 +554,63 @@ fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
+/// Double-quote `s` for tmux's command parser, escaping every character
+/// it would otherwise act on: `\`, `"`, `$` (environment expansion) and
+/// `~` (home expansion at the start of a word). A line break is written
+/// as `\n`, never literally, because tmux drops a line that starts with
+/// `#` as a comment even inside quotes (single quotes too), which would
+/// cut a Markdown heading out of a prompt or a value. `#{}`, `%` and `;`
+/// mean nothing inside quotes. Unlike `shell_quote` it never leaves a word
+/// bare, because `%`, `#` and `;` mean something to tmux that they do not
+/// mean to `sh`.
+fn tmux_quote(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '\\' | '"' | '$' | '~' => {
+                out.push('\\');
+                out.push(c);
+            }
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            _ => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
+/// The `new-session` line `spawn` writes to the tmux client's stdin,
+/// ending in one newline. The pane command is `sh`-quoted per element,
+/// which keeps the argv boundaries through tmux's `sh -c`, and the
+/// joined string is then tmux-quoted as one argument.
+fn spawn_script(spec: &SpawnSpec) -> String {
+    let mut words = vec![
+        "new-session".to_owned(),
+        "-d".to_owned(),
+        "-s".to_owned(),
+        tmux_quote(&spec.id.0),
+        "-c".to_owned(),
+        tmux_quote(&spec.cwd.to_string_lossy()),
+        "-x".to_owned(),
+        "200".to_owned(),
+        "-y".to_owned(),
+        "50".to_owned(),
+    ];
+    for (k, v) in &spec.env {
+        words.push("-e".to_owned());
+        words.push(tmux_quote(&format!("{k}={v}")));
+    }
+    if let Some(argv) = &spec.command {
+        let quoted: Vec<String> = argv.iter().map(|a| shell_quote(a)).collect();
+        words.push(tmux_quote(&quoted.join(" ")));
+    }
+    let mut line = words.join(" ");
+    line.push('\n');
+    line
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -609,6 +662,37 @@ mod tests {
         assert_eq!(shell_quote("exit 3"), "'exit 3'");
         assert_eq!(shell_quote("it's"), "'it'\\''s'");
         assert_eq!(shell_quote(""), "''");
+    }
+
+    #[test]
+    fn quotes_for_tmux() {
+        assert_eq!(tmux_quote(""), r#""""#);
+        assert_eq!(tmux_quote("it's #{x} ; %"), r#""it's #{x} ; %""#);
+        assert_eq!(tmux_quote(r#"~/a "q" $H \"#), r#""\~/a \"q\" \$H \\""#);
+        assert_eq!(tmux_quote("a\n# b\r"), r#""a\n# b\r""#);
+    }
+
+    #[test]
+    fn spawn_script_keeps_spec_off_the_argv() {
+        let env_marker = format!("env-marker-{}", std::process::id());
+        let cmd_marker = format!("cmd-marker-{}", std::process::id());
+        let spec = SpawnSpec {
+            id: HostId("a".into()),
+            cwd: PathBuf::from("/tmp"),
+            command: Some(vec!["echo".into(), cmd_marker.clone()]),
+            env: vec![("SWITCHBOARD_TEST_MARKER".into(), env_marker.clone())],
+            scrollback: None,
+        };
+        // `SPAWN_ARGS` is a fixed `const`, so the argv cannot carry the
+        // spec; what matters is that the spec lands on stdin instead.
+        let script = spawn_script(&spec);
+        assert!(script.contains(&env_marker), "{script}");
+        assert!(script.contains(&cmd_marker), "{script}");
+        assert!(script.starts_with("new-session -d -s "), "{script}");
+        assert!(
+            script.ends_with('\n') && !script.ends_with("\n\n"),
+            "{script}"
+        );
     }
 
     #[test]
@@ -1093,6 +1177,89 @@ mod tests {
         s.host.kill(&id).unwrap();
         assert_eq!(s.host.status(&id).unwrap().liveness, Liveness::Missing);
         assert!(!s.host.list().unwrap().iter().any(|h| h.id == id));
+    }
+
+    #[test]
+    fn spawn_keeps_env_values_off_every_command_line() {
+        let Some(s) = server() else { return };
+        // Built at run time so this file's own text can never match.
+        let marker = format!(
+            "argv-marker-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        );
+        let id = HostId("marked".into());
+        let spec = SpawnSpec {
+            id: id.clone(),
+            cwd: std::env::temp_dir(),
+            command: Some(vec![
+                "sh".into(),
+                "-c".into(),
+                "printf '%s\\n' \"$SWITCHBOARD_TEST_MARKER\"; sleep 30".into(),
+            ]),
+            env: vec![("SWITCHBOARD_TEST_MARKER".into(), marker.clone())],
+            scrollback: None,
+        };
+        s.host.spawn(&spec).unwrap();
+        let pid = s.host.run(&["display-message", "-p", "#{pid}"]).unwrap();
+        let pid = pid.trim();
+        // The spawning client has exited by now; the long-lived server is
+        // what a process listing keeps showing, and the unit test
+        // `spawn_script_keeps_spec_off_the_argv` covers the client.
+        match Command::new("ps")
+            .args(["-o", "command=", "-p", pid])
+            .output()
+        {
+            Ok(out) if out.status.success() => {
+                let argv = String::from_utf8_lossy(&out.stdout);
+                assert!(argv.contains("start-server"), "{argv}");
+                assert!(!argv.contains(&marker), "server argv leaks: {argv}");
+            }
+            other => eprintln!("skipping the server argv check: ps failed: {other:?}"),
+        }
+        poll_on(Some(&s), "the marker in the pane", &mut || {
+            s.host.snapshot(&id, None).unwrap().contains(&marker)
+        });
+        s.host.kill(&id).unwrap();
+    }
+
+    #[test]
+    fn spawn_env_value_round_trips_through_tmux_quoting() {
+        let Some(s) = server() else { return };
+        // A line starting with `#` is a tmux comment even inside quotes,
+        // so the headings pin that line breaks never reach the parser.
+        let value = "it's \"q\" $HOME ~ ; \\; #{session_name} back\\slash\n\
+                     # Heading\n  ## Section\n~ last line";
+        let id = HostId("quoted".into());
+        // The pane prints both the argument and the variable, and the
+        // assertions read its screen. `show-environment` is not the oracle:
+        // tmux 3.4 vis-encodes a command's output to its client, so `$HOME`
+        // prints as `\$HOME` there while the pane's environment holds the
+        // value exactly (3.5 stopped encoding; `capture-pane` never did).
+        let spec = SpawnSpec {
+            id: id.clone(),
+            cwd: std::env::temp_dir(),
+            command: Some(vec![
+                "sh".into(),
+                "-c".into(),
+                "printf '<%s>[%s]' \"$1\" \"$SWITCHBOARD_TEST_QUOTED\"; sleep 30".into(),
+                "sh".into(),
+                value.into(),
+            ]),
+            env: vec![("SWITCHBOARD_TEST_QUOTED".into(), value.into())],
+            scrollback: None,
+        };
+        s.host.spawn(&spec).unwrap();
+        let first = "it's \"q\" $HOME ~ ; \\; #{session_name} back\\slash";
+        poll_on(Some(&s), "the quoted command's output", &mut || {
+            let shot = s.host.snapshot(&id, None).unwrap();
+            shot.contains(&format!("<{first}"))
+                && shot.contains("# Heading")
+                && shot.contains("  ## Section")
+                && shot.contains(&format!("~ last line>[{first}"))
+                && shot.contains("~ last line]")
+        });
+        s.host.kill(&id).unwrap();
     }
 
     #[test]
