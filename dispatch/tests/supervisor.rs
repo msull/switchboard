@@ -269,7 +269,7 @@ fn a_fresh_supervisor_is_set_up_seeded_and_recorded_before_it_is_sent() {
     // seed's path as its first prompt and the allow rules as flags.
     let sb = env.sb();
     let s = sb.session(&current.session);
-    assert_eq!(s.name, "Supervisor · Orchard");
+    assert_started_name(&s.name);
     assert_eq!(s.cwd, env.workspace());
     let seed = env.data.supervisor_dir(ORCHARD).join("seed.md");
     let text = std::fs::read_to_string(&seed).unwrap();
@@ -312,6 +312,17 @@ fn a_second_fresh_replaces_the_first_and_rotates_the_handoff() {
     assert!(env.sb().killed.contains(&first.session));
     // The Switchboard project is made once and reused.
     assert_eq!(env.sb().kinds_called("project.add"), 1);
+    assert_eq!(env.sb().projects.len(), 1);
+    assert_eq!(env.sb().projects[0].name, "Supervisor · Orchard");
+    // The second session takes over the first one's pins, and each is
+    // named with its start.
+    let news = session_news(&env);
+    assert_eq!(news.len(), 2);
+    assert_eq!(news[0].1, None);
+    assert_eq!(news[1].1.as_deref(), Some(first.session.as_str()));
+    for (name, _) in &news {
+        assert_started_name(name);
+    }
     let handoff = std::fs::read_to_string(env.handoff()).unwrap();
     assert!(handoff.starts_with("## From the session of "), "{handoff}");
     assert!(handoff.ends_with("watching #12\n"));
@@ -324,6 +335,48 @@ fn a_second_fresh_replaces_the_first_and_rotates_the_handoff() {
     assert_eq!(kept.len(), 1, "{kept:?}");
     let old = std::fs::read_to_string(env.data.supervisor_dir(ORCHARD).join(&kept[0])).unwrap();
     assert_eq!(old, "watching #12\n");
+}
+
+/// A Fresh whose `session.new` failed has already killed the old
+/// session, so the next Fresh still names it in `replaces`.
+#[test]
+fn a_fresh_after_a_failed_fresh_still_replaces_the_killed_session() {
+    let mut env = Env::new();
+    let first = env.fresh().unwrap();
+    env.sb().fail_next = Some("session.new".into());
+    env.fresh().unwrap_err();
+    let ps = env.runner.load_project(ORCHARD).unwrap();
+    assert_eq!(ps.supervisor.current, None);
+    assert_eq!(ps.supervisor.past.last().unwrap().session, first.session);
+    env.fresh().unwrap();
+    let news = session_news(&env);
+    assert_eq!(news.len(), 3);
+    assert_eq!(news[2].1.as_deref(), Some(first.session.as_str()));
+}
+
+/// Each `session.new` sent, as its name and `replaces`.
+fn session_news(env: &Env) -> Vec<(String, Option<String>)> {
+    env.sb()
+        .calls
+        .iter()
+        .filter_map(|c| match &c.body {
+            Body::SessionNew { name, replaces, .. } => Some((name.clone(), replaces.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
+/// `Supervisor · Orchard · YYYY-MM-DD HH:MM`, in whatever zone the
+/// test runs in.
+fn assert_started_name(name: &str) {
+    let at = name
+        .strip_prefix("Supervisor · Orchard · ")
+        .unwrap_or_else(|| panic!("{name}"));
+    let shape: String = at
+        .chars()
+        .map(|c| if c.is_ascii_digit() { '9' } else { c })
+        .collect();
+    assert_eq!(shape, "9999-99-99 99:99", "{name}");
 }
 
 #[test]
@@ -372,11 +425,9 @@ fn a_lost_session_reply_is_found_again_at_recovery() {
     env.runner.recover(now).unwrap();
     let ps = env.runner.load_project(ORCHARD).unwrap();
     let current = ps.supervisor.current.expect("found by its op");
-    assert_eq!(env.sb().sessions_named("Supervisor · Orchard").len(), 1);
-    assert_eq!(
-        env.sb().sessions_named("Supervisor · Orchard")[0].id,
-        current.session
-    );
+    let sb = env.sb();
+    assert_eq!(sb.sessions.len(), 1);
+    assert_started_name(&sb.session(&current.session).name);
     assert_eq!(ps.supervisor.error, None);
     assert!(!ps.supervisor.op.unwrap().unresolved());
 }

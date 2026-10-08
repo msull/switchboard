@@ -6083,6 +6083,7 @@ impl Runner {
                 notes,
                 env: spec.env,
                 env_sets: spec.env_sets,
+                replaces: None,
             }
         };
         let reply = self.send(t, ps, Some((stage.to_owned(), n)), "session", body, now_ms)?;

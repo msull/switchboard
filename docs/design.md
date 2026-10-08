@@ -825,7 +825,9 @@ file tree's menu (a submenu), and the document header lists every set
 with a check where it holds the item, a click toggling it, and "New
 working set with this". Adding never launches or resumes anything. The
 last view remembers the set (`SavedView::Set`; the older unit variant
-still reads as the first set).
+still reads as the first set). A session made over the control port
+with `replaces` takes over the old session's pins on every hand-placed
+set of its space, in place.
 
 Built so far: the model, store, core transitions (`AddToWorkingSet`,
 `RemoveFromWorkingSet`, `PlacePin`), the rail row, and the view, which
@@ -1539,6 +1541,12 @@ since Claude Code's multi-value flags would otherwise read the prompt
 as one more value), which is how a pipeline operator names a model and
 how Dispatch grants Claude Code its artifact directory with an
 `Edit(//<dir>/**)` allow rule.
+`session.new` takes an optional `replaces`, a record id: the new
+session takes that record's place on every hand-placed working set
+whose space it belongs to, at the same rect (`AppCore::take_over_pins`;
+a set that already pins the new session just drops the old card). It
+is not written when absent; an id that does not parse refuses the
+request, and one that matches no pin moves nothing.
 
 The port runs the other way too. Dispatch serves its own
 (`dispatch-control`, `<Dispatch data dir>/dispatch.sock`, while
@@ -2254,6 +2262,11 @@ long-lived Claude Code session that watches its tickets
   again under the same op and answered from the operations log. The
   app keeps no queue: Dispatch's cursor is the queue, offered once a
   pass, so a delivery lands on the first pass after the `Stop`.
+- A Fresh's `session.new` names the last session in `replaces`, so the
+  new supervisor's card takes the old one's place on the owner's
+  working sets, and each session is named `Supervisor · <project> ·
+  <date> <time>` from its start in the runner's local time, while the
+  Switchboard project keeps `Supervisor · <project>`.
 - Dispatch's port: `supervisor-fresh` writes the intent the runner's
   next pass carries out; `ProjectView.supervisor` is the chip's data.
 - The Dispatch page: a chip after each project's limits, `Supervisor ·
@@ -2310,6 +2323,10 @@ Known gaps:
   supervisor's report says who restarted the ticket.
 - The flags pass the allow rules on the command line; whether a second
   `--settings` would have replaced Switchboard's hooks was not tried.
+- An older app drops `replaces`, so the old card stays pinned and the
+  owner re-pins the new supervisor by hand.
+- Two Fresh runs within one minute make two sessions with the same
+  name.
 
 ## The rail scrolls (2026-10-05)
 

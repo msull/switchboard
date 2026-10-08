@@ -2551,10 +2551,12 @@ and the merge paragraphs (`MERGE_ORDER`, `MERGING_PRS`, `REPORTING_PRS`)
 no longer matches the one the session was seeded with; the rendered
 seed's paths are left out, since they differ between builds.
 
-**The session** is made through the control port as a ticket's are,
-each creation on the project's record before it is sent: the space,
-a Switchboard project `Supervisor · <project>` rooted at the workspace
-(made once), and a Claude session of the same name with the model,
+**The session** is made through the control port as a ticket's are, each
+creation on the project's record before it is sent: the space, a
+Switchboard project `Supervisor · <project>` rooted at the workspace
+(made once), and a Claude session `Supervisor · <project> · <date>
+<time>`, named with its start in the runner's local time so the dead
+cards on that board can be told apart, with the model,
 `--allowedTools Bash(<dispatch>:*)`, read and write rules for the
 supervisor directory, and with `merges = true` rules for `gh pr view`,
 `checks`, `diff` and `merge` and `git pull` and `log`, so a merging
@@ -2565,16 +2567,20 @@ there", reports a "but" question to the owner instead, holds off on a
 `waits` event, and merges on `pr-checks passed` only when the ticket's
 `stages:` in `dispatch show` have no `pr-merged` stage; it checks the
 body is clean either way. A reporting one (`REPORTING_PRS`) reports and
-stops for the owner, naming which pull request merges first. No settings file is written: `--settings`
-already carries Switchboard's hooks. `dispatch supervisor <project>
---fresh [--setup]` (or Fresh on the Dispatch page, through the port's
-intent) sets up, writes the seed, kills the current session and keeps
-it in `past`, rotates the hand-off under a single `## From the
-session of <date>` heading, which replaces the ones earlier rotations
-left on top (a hand-off that is empty, or holds only those headings,
-gets no heading), and makes the new one. `--resume` sends `session.resume`;
-`--kill [--reason]` kills it and keeps it in `past`. Nothing resumes or
-starts a supervisor by itself.
+stops for the owner, naming which pull request merges first. No settings
+file is written: `--settings` already carries Switchboard's hooks.
+`dispatch supervisor <project> --fresh [--setup]` (or Fresh on the
+Dispatch page, through the port's intent) sets up, writes the seed,
+kills the current session and keeps it in `past`, rotates the hand-off
+under a single `## From the session of <date>` heading, which replaces
+the ones earlier rotations left on top (a hand-off that is empty, or
+holds only those headings, gets no heading), and makes the new one. Its
+`session.new` carries `replaces`, the last session (current, or the last
+in `past` when an earlier Fresh failed after its kill), so the new
+session takes over the old one's hand-placed working-set pins at the
+same place. `--resume` sends `session.resume`; `--kill [--reason]` kills
+it and keeps it in `past`. Nothing resumes or starts a supervisor by
+itself.
 
 **The actor.** `dispatch` reads `SWITCHBOARD_RECORD_ID`, which the
 supervisor's pane sets and its Bash tool inherits. When it names a

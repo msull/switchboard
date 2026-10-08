@@ -484,6 +484,7 @@ impl Runner {
                 notes,
                 env: BTreeMap::new(),
                 env_sets: sets,
+                replaces: None,
             },
             now_ms,
         )?;
@@ -1281,6 +1282,7 @@ impl Runner {
                 notes,
                 env: BTreeMap::new(),
                 env_sets: sets,
+                replaces: None,
             },
             now_ms,
         )?;
@@ -2477,6 +2479,7 @@ impl Runner {
                 notes,
                 env: BTreeMap::new(),
                 env_sets: sets,
+                replaces: None,
             },
             now_ms,
         )?;

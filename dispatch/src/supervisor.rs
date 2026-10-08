@@ -368,6 +368,22 @@ pub fn rotated_handoff(old: &str, from_ms: u64) -> String {
     )
 }
 
+/// A supervisor session's name: the project's, then when it started in
+/// `zone`, so the dead cards on its board can be told apart.
+fn session_name<Tz: chrono::TimeZone>(project: &str, started_ms: u64, zone: &Tz) -> String
+where
+    Tz::Offset: std::fmt::Display,
+{
+    let at = i64::try_from(started_ms)
+        .ok()
+        .and_then(chrono::DateTime::from_timestamp_millis)
+        .map_or_else(
+            || started_ms.to_string(),
+            |t| t.with_timezone(zone).format("%Y-%m-%d %H:%M").to_string(),
+        );
+    format!("Supervisor · {project} · {at}")
+}
+
 fn stamp(ms: u64, format: &str) -> String {
     i64::try_from(ms)
         .ok()
@@ -813,6 +829,15 @@ impl Runner {
                 bail!("a request for {project}'s supervisor is still in flight; try again shortly");
             }
         }
+        // The last session even when it is already retired: a Fresh whose
+        // `session.new` failed has killed it, and its pins wait on its
+        // dead card. A session whose pins already moved repoints nothing.
+        let replaces = ps
+            .supervisor
+            .current
+            .as_ref()
+            .map(|c| c.session.clone())
+            .or_else(|| ps.supervisor.past.last().map(|p| p.session.clone()));
         let workspace = ps
             .supervisor
             .workspace
@@ -842,12 +867,14 @@ impl Runner {
         }
         let hash = seed_hash(project, &sup);
         let flags = launch_flags(&sup, &exe, &dir, ask.as_deref());
-        let name = format!("Supervisor · {project}");
+        let sb_project_name = format!("Supervisor · {project}");
+        let name = session_name(project, now_ms, &chrono::Local);
         let space = self.supervisor_space(&mut ps, &p, now_ms)?;
         let mut session = None;
         // A Switchboard project removed by hand is made again, once.
         for _ in 0..2 {
-            let sb_project = self.supervisor_project(&mut ps, &space, &name, &workspace, now_ms)?;
+            let sb_project =
+                self.supervisor_project(&mut ps, &space, &sb_project_name, &workspace, now_ms)?;
             let reply = self.send_supervisor(
                 &mut ps,
                 &format!("session:{hash}"),
@@ -861,6 +888,7 @@ impl Runner {
                     notes: format!("Dispatch supervisor of {project}"),
                     env: BTreeMap::new(),
                     env_sets: Vec::new(),
+                    replaces: replaces.clone(),
                 },
                 now_ms,
             )?;
@@ -1114,6 +1142,15 @@ pub(crate) fn apply_supervisor_reply(ps: &mut ProjectState, reply: &Reply) {
 mod tests {
     use super::*;
     use crate::pipeline::SupervisorSetup;
+
+    #[test]
+    fn a_session_name_carries_its_start_in_the_given_zone() {
+        let zone = chrono::FixedOffset::east_opt(2 * 3600).unwrap();
+        assert_eq!(
+            session_name("Orchard", 1_791_461_100_000, &zone),
+            "Supervisor · Orchard · 2026-10-08 14:05"
+        );
+    }
 
     fn table() -> Supervisor {
         Supervisor {

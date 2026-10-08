@@ -664,6 +664,7 @@ impl Runner {
             ),
             env: std::collections::BTreeMap::new(),
             env_sets: Vec::new(),
+            replaces: None,
         };
         let reply = self.send(t, ps, None, &rec.intent(), body, now_ms)?;
         if let Reply::Failed { reason } = reply {

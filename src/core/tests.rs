@@ -6321,7 +6321,7 @@ fn view_columns_saves_nothing() {
 
 mod control {
     use super::*;
-    use crate::core::{ControlAction, PinnedItem, RunState, SetId, WorkflowDefinition};
+    use crate::core::{ControlAction, PinnedItem, RunState, SetId, WorkflowDefinition, WorkingSet};
     use switchboard_control::RecordKind;
 
     fn control(core: &mut AppCore, op: &str, action: ControlAction, at: u64) -> Vec<Effect> {
@@ -6345,7 +6345,144 @@ mod control {
             notes: "Dispatch ticket 1, stage investigate".into(),
             env: BTreeMap::new(),
             env_sets: Vec::new(),
+            replaces: None,
         }
+    }
+
+    fn at(x: u32) -> GridRect {
+        GridRect {
+            x,
+            y: 0,
+            w: 10,
+            h: 8,
+        }
+    }
+
+    fn hand_set(space: SpaceId, pins: &[(RecordId, GridRect)]) -> WorkingSet {
+        WorkingSet {
+            space,
+            items: pins
+                .iter()
+                .map(|(id, rect)| PinnedItem {
+                    target: PinTarget::Session(*id),
+                    rect: *rect,
+                })
+                .collect(),
+            ..WorkingSet::default()
+        }
+    }
+
+    fn save_views(effects: &[Effect]) -> usize {
+        effects
+            .iter()
+            .filter(|e| matches!(e, Effect::SaveViews(_)))
+            .count()
+    }
+
+    /// A Fresh supervisor's card lands where the old one was pinned,
+    /// and nothing else on any set moves.
+    #[test]
+    fn a_new_session_that_replaces_another_takes_its_pins_in_place() {
+        let (mut core, pid, ids) = with_records(&[agent(), SessionKind::Shell], |_| None);
+        let [old, x] = [ids[0], ids[1]];
+        let a = hand_set(SpaceId::DEFAULT, &[(old, at(0)), (x, at(10))]);
+        let rule = WorkingSet {
+            rule: Some(SetRule::Recent { hours: 24 }),
+            dismissed: vec![crate::core::Dismissal {
+                record: old,
+                at: SystemTime::UNIX_EPOCH,
+            }],
+            ..WorkingSet::default()
+        };
+        core.seed_views(Views {
+            sets: vec![a.clone(), rule.clone()],
+            ..Views::default()
+        });
+        let mut op = new_session_op(pid, None);
+        if let ControlAction::NewSession { replaces, .. } = &mut op {
+            *replaces = Some(old);
+        }
+        let effects = control(&mut core, "op-1", op, 10);
+        let new = core
+            .workspace(pid)
+            .unwrap()
+            .sessions
+            .iter()
+            .find(|s| s.name == "investigator")
+            .map(|s| s.id)
+            .unwrap();
+        let after = core.working_set(a.id).unwrap();
+        assert_eq!(
+            after.items,
+            vec![
+                PinnedItem {
+                    target: PinTarget::Session(new),
+                    rect: at(0),
+                },
+                PinnedItem {
+                    target: PinTarget::Session(x),
+                    rect: at(10),
+                },
+            ]
+        );
+        assert_eq!(core.working_set(rule.id), Some(&rule));
+        assert_eq!(save_views(&effects), 1, "{effects:?}");
+    }
+
+    #[test]
+    fn a_takeover_into_a_set_that_already_pins_the_successor_drops_the_old_card() {
+        let (mut core, _, ids) = with_records(&[agent(), agent()], |_| None);
+        let [a, b] = [ids[0], ids[1]];
+        let set_a = hand_set(SpaceId::DEFAULT, &[(a, at(0))]);
+        let set_b = hand_set(SpaceId::DEFAULT, &[(a, at(0)), (b, at(10))]);
+        core.seed_views(Views {
+            sets: vec![set_a.clone(), set_b.clone()],
+            ..Views::default()
+        });
+        let mut out = crate::core::action::Out::default();
+        core.take_over_pins(a, b, &mut out);
+        assert_eq!(
+            core.working_set(set_b.id).unwrap().items,
+            vec![PinnedItem {
+                target: PinTarget::Session(b),
+                rect: at(10),
+            }]
+        );
+        assert_eq!(
+            core.working_set(set_a.id).unwrap().items,
+            vec![PinnedItem {
+                target: PinTarget::Session(b),
+                rect: at(0),
+            }]
+        );
+    }
+
+    /// A successor outside a set's space would be pruned off it, so the
+    /// old card stays where it is.
+    #[test]
+    fn a_takeover_leaves_a_set_of_another_space_alone() {
+        let (mut core, b_space, _, [in_default, in_b]) = two_spaces();
+        let set = hand_set(b_space, &[(in_b, at(0))]);
+        core.seed_views(Views {
+            sets: vec![set.clone()],
+            ..core.views.clone()
+        });
+        let mut out = crate::core::action::Out::default();
+        core.take_over_pins(in_b, in_default, &mut out);
+        assert_eq!(core.working_set(set.id), Some(&set));
+    }
+
+    #[test]
+    fn a_new_session_without_replaces_leaves_the_views_alone() {
+        let (mut core, pid, ids) = with_records(&[agent()], |_| None);
+        core.seed_views(Views {
+            sets: vec![hand_set(SpaceId::DEFAULT, &[(ids[0], at(0))])],
+            ..Views::default()
+        });
+        let before = core.views.clone();
+        let effects = control(&mut core, "op-1", new_session_op(pid, None), 10);
+        assert_eq!(core.views, before);
+        assert_eq!(save_views(&effects), 0, "{effects:?}");
     }
 
     /// A launcher's variables land on the record, where every spawn
@@ -9496,6 +9633,7 @@ mod env_sets {
                 notes: String::new(),
                 env: BTreeMap::new(),
                 env_sets: vec!["aws-dev".into()],
+                replaces: None,
             },
             10,
         );

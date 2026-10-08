@@ -1773,6 +1773,7 @@ mod tests {
                     ("SHARED".into(), "record".into()),
                 ]),
                 env_sets: Vec::new(),
+                replaces: None,
             },
         });
         let id = app.core.workspace(pid).unwrap().sessions[0].id;
@@ -1825,6 +1826,7 @@ mod tests {
                 notes: String::new(),
                 env: BTreeMap::new(),
                 env_sets: Vec::new(),
+                replaces: None,
             },
         });
         let id = app.core.workspace(pid).unwrap().sessions[0].id;
