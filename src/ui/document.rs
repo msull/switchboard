@@ -137,23 +137,90 @@ pub fn show(cx: &mut DrawCtx<'_>, ui: &mut Ui, pid: ProjectId, path: &Path) {
     let Some(size) = cx.state.preview.as_ref().map(|p| p.size) else {
         return;
     };
-    header(cx, ui, pid, path, size);
+    // The line an agent's link asked for, while it is this file's, and
+    // whether this frame is the first to see that request.
+    let line = cx
+        .core
+        .document_line()
+        .filter(|(p, ..)| *p == path)
+        .map(|(_, line, request)| (line, request));
+    let scroll_now = line.is_some_and(|(_, n)| cx.state.document_scrolled != Some(n));
+    header(cx, ui, pid, path, size, line.map(|(l, _)| l));
     // Prose wraps at the visible width, but a table or a wide image
     // cannot, so the area also scrolls sideways for those. The width
     // is taken before the scroll area, which offers unbounded room.
     let width = ui.available_width();
-    egui::ScrollArea::both()
+    let mut area = egui::ScrollArea::both()
         .id_salt("document")
-        .auto_shrink(false)
-        .show(ui, |ui| {
-            ui.set_max_width(width.min(MAX_READING_WIDTH));
-            Frame::new()
-                .inner_margin(egui::Margin::symmetric(0, 8))
-                .show(ui, |ui| {
-                    ui.set_width(ui.available_width());
-                    body(cx.state, ui);
-                });
-        });
+        .auto_shrink(false);
+    // egui keeps the offset under the one id for every file, so a view
+    // that follows a link's scroll starts back at the top, once.
+    if line.is_none() && cx.state.document_scrolled.take().is_some() {
+        area = area.scroll_offset(egui::Vec2::ZERO);
+    }
+    area.show(ui, |ui| {
+        ui.set_max_width(width.min(MAX_READING_WIDTH));
+        Frame::new()
+            .inner_margin(egui::Margin::symmetric(0, 8))
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                // As in `body`: the preview is read while the
+                // markdown cache is written, two fields at once.
+                let UiState {
+                    preview, markdown, ..
+                } = &mut *cx.state;
+                let Some(preview) = preview else {
+                    return;
+                };
+                if let Body::Text(text) = &preview.body {
+                    draw_text(ui, preview, text, line.map(|(l, _)| l), scroll_now);
+                } else {
+                    draw_body(preview, markdown, ui);
+                }
+            });
+    });
+    if let Some((_, n)) = line {
+        cx.state.document_scrolled = Some(n);
+    }
+}
+
+/// Lines of context kept above a line scrolled to.
+const LINES_ABOVE: f32 = 3.0;
+
+/// A text file in the full view: highlighted and not wrapped, so each
+/// source line is one row and a line number has a place. The line
+/// `line` (counted from one) is marked with a faint band, and scrolled
+/// to when `scroll`; the scroll area around it scrolls sideways for
+/// long lines.
+fn draw_text(ui: &mut Ui, preview: &Preview, text: &str, line: Option<u32>, scroll: bool) {
+    let (theme, lang) = highlighting(ui, preview);
+    let mut job =
+        egui_extras::syntax_highlighting::highlight(ui.ctx(), ui.style(), &theme, text, lang);
+    job.wrap.max_width = f32::INFINITY;
+    let galley = ui.painter().layout_job(job);
+    // Reserved before the text so the band is painted under it.
+    let band = ui.painter().add(egui::Shape::Noop);
+    let response = ui.add(
+        egui::Label::new(galley.clone())
+            .selectable(true)
+            .wrap_mode(egui::TextWrapMode::Extend),
+    );
+    let Some(row) = line
+        .and_then(|l| usize::try_from(l).ok()?.checked_sub(1))
+        .and_then(|i| galley.rows.get(i))
+    else {
+        return;
+    };
+    let rect = row.rect().translate(response.rect.min.to_vec2());
+    let rect = egui::Rect::from_x_y_ranges(response.rect.x_range(), rect.y_range());
+    ui.painter().set(
+        band,
+        egui::Shape::rect_filled(rect, 0.0, theme::palette(ui).accent_fill),
+    );
+    if scroll {
+        let above = rect.with_min_y(rect.min.y - LINES_ABOVE * rect.height());
+        ui.scroll_to_rect(above, Some(egui::Align::Min));
+    }
 }
 
 /// Prose stops here, however wide the window.
@@ -347,14 +414,7 @@ pub fn draw_body(preview: &Preview, markdown: &mut egui_commonmark::CommonMarkCa
             super::markdown::show(ui, markdown, text);
         }
         Body::Text(text) => {
-            // egui's built-in highlighter knows Rust, C-likes, Python,
-            // and TOML; everything else is plain.
-            let lang = preview
-                .path
-                .extension()
-                .and_then(|e| e.to_str())
-                .unwrap_or("");
-            let theme = egui_extras::syntax_highlighting::CodeTheme::from_style(ui.style());
+            let (theme, lang) = highlighting(ui, preview);
             egui_extras::syntax_highlighting::code_view_ui(ui, &theme, text, lang);
         }
         Body::Image(bytes) => {
@@ -382,6 +442,23 @@ pub fn draw_body(preview: &Preview, markdown: &mut egui_commonmark::CommonMarkCa
     }
 }
 
+/// How a text file is highlighted, wherever it is drawn: the theme of
+/// the style and the language its extension names. egui's built-in
+/// highlighter knows Rust, C-likes, Python, and TOML; everything else
+/// is plain.
+fn highlighting<'p>(
+    ui: &Ui,
+    preview: &'p Preview,
+) -> (egui_extras::syntax_highlighting::CodeTheme, &'p str) {
+    let lang = preview
+        .path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("");
+    let theme = egui_extras::syntax_highlighting::CodeTheme::from_style(ui.style());
+    (theme, lang)
+}
+
 fn weak(ui: &mut Ui, text: &str) {
     ui.label(theme::meta_text(ui, text));
 }
@@ -389,7 +466,14 @@ fn weak(ui: &mut Ui, text: &str) {
 /// Below this width the actions go on their own row under the title.
 const TIGHT_HEADER: f32 = 720.0;
 
-fn header(cx: &mut DrawCtx<'_>, ui: &mut Ui, pid: ProjectId, path: &Path, size: u64) {
+fn header(
+    cx: &mut DrawCtx<'_>,
+    ui: &mut Ui,
+    pid: ProjectId,
+    path: &Path,
+    size: u64,
+    line: Option<u32>,
+) {
     let project = cx.core.workspace(pid).map(|w| &w.project);
     let rel = project.and_then(|p| path.strip_prefix(&p.root).ok());
     let pinned = match (project, rel) {
@@ -419,8 +503,11 @@ fn header(cx: &mut DrawCtx<'_>, ui: &mut Ui, pid: ProjectId, path: &Path, size: 
             });
         });
     }
-    let shown = rel.unwrap_or(path);
-    ui.add(egui::Label::new(theme::mono_text(ui, shown.display().to_string())).truncate());
+    let mut shown = rel.unwrap_or(path).display().to_string();
+    if let Some(line) = line {
+        shown = format!("{shown}:{line}");
+    }
+    ui.add(egui::Label::new(theme::mono_text(ui, shown)).truncate());
     ui.add_space(8.0);
 }
 

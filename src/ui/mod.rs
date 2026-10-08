@@ -77,6 +77,9 @@ pub struct UiState {
     /// Parsed transcripts per agent session with the file time they were
     /// read at, filled by the app; the session view draws them.
     pub conversations: HashMap<RecordId, (Option<SystemTime>, Conversation)>,
+    /// Agent messages with the file paths they name made links, by
+    /// record and message text; pruned when the conversation is re-read.
+    pub file_links: crate::core::file_refs::Cache,
     /// Why a session has no conversation (unsupported agent, no file).
     pub conversation_errors: HashMap<RecordId, String>,
     /// Open every turn's activity list instead of just the summary line.
@@ -90,6 +93,10 @@ pub struct UiState {
     /// Variable names the project's environment defines, for the Run
     /// tab's "not defined" marks: project, when resolved, names.
     pub run_env: Option<(ProjectId, std::time::Instant, Vec<String>)>,
+    /// The request number of the last `document_line` the document view
+    /// scrolled to, so later frames leave the scroll to the user; taken
+    /// when the line is gone, to bring the next view back to the top.
+    pub document_scrolled: Option<u64>,
     /// Layout cache for the markdown in final responses.
     pub markdown: egui_commonmark::CommonMarkCache,
     pub add_project: Option<AddProjectDraft>,
@@ -291,6 +298,8 @@ impl Default for UiState {
             terminal_open: false,
             run_env: None,
             markdown: egui_commonmark::CommonMarkCache::default(),
+            file_links: crate::core::file_refs::Cache::new(),
+            document_scrolled: None,
             add_project: None,
             new_session: None,
             notes_draft: None,

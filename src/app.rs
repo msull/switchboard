@@ -16,7 +16,8 @@ use crate::adapters::scrollback::scrollback_dir;
 use crate::core::{
     Activity, AgentKind, AppAction, AppCore, Clock, ControlAction, ControlOutcome, DISPATCH_POLL,
     Effect, ProjectId, RECORD_TOKEN_ENV, RecordId, Resolved, ResumeHandle, SessionKind,
-    SessionRecord, SetsResolved, SpaceId, View, WorkflowId, aws_view, resolve_sets, token_hash,
+    SessionRecord, SetsResolved, SpaceId, View, WorkflowId, aws_view, file_refs, resolve_sets,
+    token_hash,
 };
 use crate::ports::agent::AgentLauncher;
 use crate::ports::artifacts::ArtifactFinder;
@@ -294,12 +295,14 @@ impl SwitchboardApp {
         // time; a swap of the handle behind it needs a fresh read.
         if let AppAction::TranscriptDiscarded { id, .. } | AppAction::UndoDiscard(id) = &action {
             self.ui_state.conversations.remove(id);
+            file_refs::keep_only(&mut self.ui_state.file_links, *id, None);
         }
         let handles_before = self.resume_handles(&action);
         let effects = self.core.dispatch(action, now);
         for (id, before) in handles_before {
             if self.core.session(id).map(|s| s.resume.clone()) != Some(before) {
                 self.ui_state.conversations.remove(&id);
+                file_refs::keep_only(&mut self.ui_state.file_links, id, None);
             }
         }
         let prompt_box = self.core.settings().prompt_box;
@@ -721,12 +724,14 @@ impl SwitchboardApp {
         match self.services.transcripts.read(&handle) {
             Ok(conversation) => {
                 self.ui_state.conversation_errors.remove(&id);
+                file_refs::keep_only(&mut self.ui_state.file_links, id, Some(&conversation));
                 self.ui_state
                     .conversations
                     .insert(id, (modified, conversation));
             }
             Err(e) => {
                 self.ui_state.conversations.remove(&id);
+                file_refs::keep_only(&mut self.ui_state.file_links, id, None);
                 self.ui_state.conversation_errors.insert(id, e);
             }
         }

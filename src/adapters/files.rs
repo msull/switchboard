@@ -7,7 +7,7 @@
 
 use std::cmp::Ordering;
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use ignore::{DirEntry, WalkBuilder};
 
@@ -343,6 +343,54 @@ fn score(text: &str, positions: &[usize], name_start: usize) -> i64 {
     total - PENALTY_PER_BYTE * i64::try_from(bytes.len()).unwrap_or(i64::MAX)
 }
 
+/// `~/rest` under the home directory; anything else as typed. `None`
+/// for a bare `~`, or `~/` with no home directory to put it under.
+#[must_use]
+pub fn expand_home(typed: &str) -> Option<PathBuf> {
+    if let Some(rest) = typed.strip_prefix("~/") {
+        std::env::var_os("HOME").map(|h| PathBuf::from(h).join(rest))
+    } else if typed == "~" {
+        None
+    } else {
+        Some(PathBuf::from(typed))
+    }
+}
+
+/// `p` with `.` dropped and `..` taken back a step, without asking the
+/// disk, so a path shows and matches a project root the way it reads.
+fn normalize(p: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for c in p.components() {
+        match c {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !out.pop() {
+                    out.push(c);
+                }
+            }
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+/// The existing file `typed` names: an absolute path as it is, `~/`
+/// under home, a relative one under `root` and then `cwd`. Directories
+/// do not count; the document view cannot show them.
+#[must_use]
+pub fn existing_file(typed: &str, root: &Path, cwd: &Path) -> Option<PathBuf> {
+    let path = expand_home(typed)?;
+    let candidates = if path.is_absolute() {
+        vec![path]
+    } else {
+        vec![root.join(&path), cwd.join(&path)]
+    };
+    candidates
+        .into_iter()
+        .map(|p| normalize(&p))
+        .find(|p| p.is_file())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -527,5 +575,23 @@ mod tests {
         let hits = fuzzy(&entries, "as", 10, false);
         assert_eq!(hits[0].entry.rel, Path::new("as.rs"));
         assert_eq!(hits[1].entry.rel, Path::new("src/app_state.rs"));
+    }
+
+    #[test]
+    fn existing_file_tries_the_root_then_the_cwd_and_wants_a_file() {
+        let root = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        fs::write(root.path().join("both.rs"), "").unwrap();
+        fs::write(cwd.path().join("both.rs"), "").unwrap();
+        fs::write(cwd.path().join("cwd.rs"), "").unwrap();
+        fs::create_dir(cwd.path().join("dir.d")).unwrap();
+        let at = |p: &str| existing_file(p, root.path(), cwd.path());
+        assert_eq!(at("both.rs"), Some(root.path().join("both.rs")));
+        assert_eq!(at("./cwd.rs"), Some(cwd.path().join("cwd.rs")));
+        assert_eq!(at("gone.rs"), None);
+        assert_eq!(at("dir.d"), None);
+        let abs = cwd.path().join("cwd.rs");
+        assert_eq!(at(&abs.display().to_string()), Some(abs));
+        assert_eq!(at("/nonexistent/x.rs"), None);
     }
 }

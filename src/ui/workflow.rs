@@ -130,13 +130,7 @@ fn resolve_plan(typed: &str, cwd: &Path) -> Option<PathBuf> {
     if typed.is_empty() {
         return None;
     }
-    let path = if let Some(rest) = typed.strip_prefix("~/") {
-        std::env::var_os("HOME").map(|h| PathBuf::from(h).join(rest))?
-    } else if typed == "~" {
-        return None;
-    } else {
-        PathBuf::from(typed)
-    };
+    let path = crate::adapters::files::expand_home(typed)?;
     Some(if path.is_absolute() {
         path
     } else {

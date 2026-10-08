@@ -221,7 +221,8 @@ Dev aids, all environment variables:
   the app can be put into a known state without clicking. See
   `src/script.rs` for the lines (`add-project`, `new-shell`, `new-claude`,
   `new-codex`, `new-service`, `show-board`, `show-session`, `show-document`,
-  `files`, `side-position`, `terminal`, `select-file`, `set-env`, `set-secret`, `dotenv`, `environment`, `config`,
+  `show-file`, `files`, `side-position`, `terminal`, `select-file`,
+  `set-env`, `set-secret`, `dotenv`, `environment`, `config`,
   `env-setup unlock|lock`,
   `send`, `interrupt`, `return`, `kill`, `remove`, `approve`, `revoke`, `side`,
   `switchboard`, `working-set`, `new-working-set`, `clone-working-set`,
@@ -267,6 +268,7 @@ src/core/
   controller.rs          the hand controller's meaning: the selected card per working set, Z's radial menu, the session C holds open
   definitions.rs         .switchboard/project.json entries -> records; hash-keyed approval
   env.rs                 environment resolution for a new session: global variables, opted-in .env files, the project's own; secrets by account name
+  file_refs.rs           file paths in an agent's prose as links: finder, rewrite given which name a file, per-message cache
   events.rs              hook events -> record activity (matched by record id, ordered by time)
   workflow.rs            plan review runs: reviewer and planner rounds as a state machine over records
   control.rs             the control port's commands run quietly under an operation id; read models in the wire's shapes; `ready_for_prompt`, the one verdict `session.prompt` and a view's `prompt_refusal` share
@@ -281,7 +283,7 @@ src/adapters/
   dispatch.rs            the Dispatch port's client over <Dispatch data dir>/dispatch.sock, reconnecting after an error; the `dispatch` beside the app's binary
   dock.rs                Dock badge with the waiting-session count (macOS)
   controller.rs          the nunchuk over USB serial: a thread owns the port, reconnects, hands events over a channel
-  files.rs               project file index: gitignore-aware scan, lazy children, fuzzy match
+  files.rs               project file index: gitignore-aware scan, lazy children, fuzzy match; the existing file a path an agent typed names
   git.rs                 branches, change counts, per-path status; finds repos one or two dirs down; a branch's commits and numstat over its base (`GitChanges`)
   keychain.rs            secrets as generic-password items in the login Keychain (tests use a temp keychain)
   dotenv.rs              .env parser (opt-in per project) and .env.example names

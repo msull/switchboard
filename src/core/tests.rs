@@ -373,6 +373,87 @@ fn document_view_and_file_actions() {
 }
 
 #[test]
+fn a_file_an_agent_named_opens_at_its_line_under_the_closest_project() {
+    let mut own = project("own");
+    own.root = PathBuf::from("/work/own");
+    let mut nested = project("nested");
+    nested.root = PathBuf::from("/work/own/vendor/nested");
+    let (pid, qid) = (own.id, nested.id);
+    let mut ws = Workspace::new(own);
+    ws.sessions.push(record(pid, agent(), 0));
+    let id = ws.sessions[0].id;
+    let (mut core, _) = loaded(vec![ws, Workspace::new(nested)], vec![]);
+    let show = |path: &str, line| AppAction::ShowFileRef {
+        record: id,
+        path: PathBuf::from(path),
+        line,
+    };
+
+    // Under the session's own root: its project, the line, a save.
+    let action_rs = PathBuf::from("/work/own/src/core/action.rs");
+    let effects = core.dispatch(
+        show("/work/own/src/core/action.rs", Some(1629)),
+        Clock::at(1),
+    );
+    assert_eq!(core.view(), View::Document(pid, action_rs.clone()));
+    assert_eq!(core.document_line(), Some((action_rs.as_path(), 1629, 1)));
+    assert_eq!(saves(&effects), 1);
+    // The same link again: the same view, a new request, so it scrolls.
+    core.dispatch(
+        show("/work/own/src/core/action.rs", Some(1629)),
+        Clock::at(2),
+    );
+    assert_eq!(core.view(), View::Document(pid, action_rs.clone()));
+    assert_eq!(core.document_line(), Some((action_rs.as_path(), 1629, 2)));
+    // The same file from the file tree comes up at the top.
+    core.dispatch(
+        AppAction::ShowDocument(pid, action_rs.clone()),
+        Clock::at(2),
+    );
+    assert_eq!(core.view(), View::Document(pid, action_rs.clone()));
+    assert_eq!(core.document_line(), None);
+    core.dispatch(
+        show("/work/own/src/core/action.rs", Some(1629)),
+        Clock::at(2),
+    );
+    // Any other view drops the line.
+    core.dispatch(AppAction::ShowBoard(pid), Clock::at(3));
+    assert_eq!(core.document_line(), None);
+
+    // Under another project's root, nested in this one: that project.
+    let lib_rs = PathBuf::from("/work/own/vendor/nested/lib.rs");
+    core.dispatch(
+        show("/work/own/vendor/nested/lib.rs", Some(3)),
+        Clock::at(4),
+    );
+    assert_eq!(core.view(), View::Document(qid, lib_rs.clone()));
+    assert_eq!(core.document_line(), Some((lib_rs.as_path(), 3, 4)));
+    // Back leaves the document and its line.
+    core.dispatch(AppAction::Back, Clock::at(5));
+    assert_eq!(core.view(), View::Board(pid));
+    assert_eq!(core.document_line(), None);
+
+    // Outside every project: the session's own, and no line given.
+    let notes = PathBuf::from("/Users/me/notes/plan.md");
+    core.dispatch(show("/Users/me/notes/plan.md", None), Clock::at(6));
+    assert_eq!(core.view(), View::Document(pid, notes));
+    assert_eq!(core.document_line(), None);
+
+    // A record that is gone: nothing.
+    let before = core.view();
+    let effects = core.dispatch(
+        AppAction::ShowFileRef {
+            record: RecordId::new(),
+            path: action_rs,
+            line: Some(1),
+        },
+        Clock::at(7),
+    );
+    assert!(effects.is_empty());
+    assert_eq!(core.view(), before);
+}
+
+#[test]
 fn a_space_shows_only_its_own_projects_and_sets() {
     let mut core = AppCore::new();
     let (a, b) = (Workspace::new(project("a")), Workspace::new(project("b")));

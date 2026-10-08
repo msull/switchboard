@@ -1592,6 +1592,15 @@ fn waiting_reason_is_shown_in_the_session_header() {
 /// A Claude Code session, running, with a resume handle: the shape the
 /// conversation view needs. Added on top of the standard seed.
 fn seed_claude(harness: &mut Harness<'static, SwitchboardApp>, ids: &Seeded) -> RecordId {
+    seed_claude_at(harness, ids, None)
+}
+
+/// [`seed_claude`], working in `cwd` when one is given.
+fn seed_claude_at(
+    harness: &mut Harness<'static, SwitchboardApp>,
+    ids: &Seeded,
+    cwd: Option<PathBuf>,
+) -> RecordId {
     let mut claude = record(
         ids.beta,
         "claude-agent",
@@ -1602,6 +1611,9 @@ fn seed_claude(harness: &mut Harness<'static, SwitchboardApp>, ids: &Seeded) -> 
         session_id: uuid::Uuid::nil(),
         transcript: Some(PathBuf::from("/nowhere/x.jsonl")),
     });
+    if let Some(cwd) = cwd {
+        claude.cwd = cwd;
+    }
     let id = claude.id;
     let core = harness.state_mut().core_mut_for_seeding();
     let mut workspaces = core.workspaces().to_vec();
@@ -2096,6 +2108,89 @@ fn messages_before_the_answer_are_their_own_blocks_with_the_tools_between() {
     click(&mut harness, "Expand activity");
     harness.get_by_label_contains("Bash: Read crate name");
     harness.get_by_label_contains("Edit: src/lib.rs");
+}
+
+#[test]
+fn a_file_an_agent_names_is_a_link_that_opens_it_at_the_line() {
+    let (mut harness, ids) = harness();
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("src/core")).unwrap();
+    std::fs::write(dir.path().join("src/core/action.rs"), "fn main() {}\n").unwrap();
+    // The beta project's root does not hold the file: only the cwd does.
+    let id = seed_claude_at(&mut harness, &ids, Some(dir.path().to_path_buf()));
+    let mut conversation = two_turns();
+    let mut tool = conversation.turns[1].activity[0].clone();
+    tool.line = "Read: src/core/action.rs:1629".into();
+    conversation.turns[1].activity = vec![
+        TranscriptActivity {
+            kind: ActivityKind::Text,
+            line: "See …".into(),
+            at: None,
+            error: false,
+            detail: None,
+            text: Some("See `src/core/action.rs:1629` and /nonexistent/x.rs.".into()),
+        },
+        tool,
+    ];
+    harness
+        .state_mut()
+        .ui_state
+        .conversations
+        .insert(id, (None, conversation));
+    showing(&mut harness, View::Session(id));
+    click(&mut harness, "Expand activity");
+    // Only the message's path links: not the missing one, not the tool row.
+    let links = || {
+        harness
+            .query_all_by_role(Role::Link)
+            .filter_map(|n| n.accesskit_node().label())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(links(), vec!["src/core/action.rs:1629".to_owned()]);
+    harness.state_mut().dispatched.clear();
+    harness
+        .query_all_by_role(Role::Link)
+        .find(|n| n.accesskit_node().label().as_deref() == Some("src/core/action.rs:1629"))
+        .unwrap()
+        .click();
+    harness.run_steps(2);
+    assert!(actions(&harness).contains(&AppAction::ShowFileRef {
+        record: id,
+        path: dir.path().join("src/core/action.rs"),
+        line: Some(1629),
+    }));
+    // The document view names the line under the title.
+    harness.get_by_label(&format!(
+        "{}:1629",
+        dir.path().join("src/core/action.rs").display()
+    ));
+}
+
+#[test]
+fn a_file_shown_again_after_a_link_comes_up_at_the_top() {
+    let (mut harness, _) = harness();
+    let (dir, pid, sid) = file_project(&mut harness);
+    let path = dir.path().join("a.rs");
+    std::fs::write(&path, format!("// first line\n{}", "// row\n".repeat(600))).unwrap();
+    showing(&mut harness, View::Document(pid, path.clone()));
+    let top =
+        |h: &Harness<'static, SwitchboardApp>| h.get_by_label_contains("first line").rect().top();
+    let at_top = top(&harness);
+    harness.state_mut().dispatch(AppAction::ShowFileRef {
+        record: sid,
+        path: path.clone(),
+        line: Some(400),
+    });
+    harness.run_steps(SCROLLED);
+    let scrolled = top(&harness);
+    assert!(scrolled < at_top - 1000.0, "{at_top} -> {scrolled}");
+    // The same file from the tree drops the line, and its scroll.
+    harness
+        .state_mut()
+        .dispatch(AppAction::ShowDocument(pid, path.clone()));
+    harness.run_steps(SCROLLED);
+    let back = top(&harness);
+    assert!((back - at_top).abs() < 1.0, "{at_top} -> {back}");
 }
 
 #[test]
