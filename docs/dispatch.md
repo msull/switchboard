@@ -295,7 +295,13 @@ mid-rebase, is off its branch, or could not be read. This rests on an
 assumption: a gate-only stage's command is taken not to commit, so its
 attempt does not count, and a commit such a command does make is kept
 and recorded in the new entry. A ranged restart is refused for a
-project that works in place and for a ticket from pull requests. Each
+project that works in place. A ticket from pull requests reviews
+someone else's branches, which are never reset: its ranged restart goes
+ahead only when every branch it would move already stands at its target
+head, so nothing moves, and is refused, naming the branch that moved,
+otherwise (a tester that committed, or a push picked up at a gate since
+the entry). A branch moved by hand between the command and the apply
+holds the restart with the same refusal. Each
 branch is checked (on its branch, not mid-rebase, clean) before any
 moves, and each reset is saved as it lands; a refused one parks the ticket with git's reason and
 the intent kept, `resume` refuses while a restart is held, and
@@ -305,12 +311,36 @@ and keeps the stage as brought up, so no bring-up runs. A lane whose
 `setup` differs between the copies runs it again: before its next
 agent, and before the checks a `check` answer starts, where a failing
 setup fails the checks (with `check` offered again) rather than parking.
-No agent of the stage launches until its `rerun` question is answered:
-an attempt that failed at its checks, an agent attempt cancelled or
+No agent of the stage launches until its `rerun` question is answered,
+unless the restart gave `--note`: the note is the answer, so the agent
+launches without asking and `check` is not offered; restart without a
+note to run the checks on the same work. Without a note, an attempt
+that failed at its checks, an agent attempt cancelled or
 discarded with its checks started, and a code review cancelled mid-check
 before its rewrite are offered `rerun | check | park`, so `check` runs
 the new gate on the same head; any other attempt, a finished code
-review included, is offered `rerun | park`. A gate-only stage opens its
+review included, is offered `rerun | park`.
+
+`dispatch restart <ticket> [<stage>] --note <text>` (or `--file
+<path>`, read as `decide --file` reads one) hands the target stage's
+next agent a note, as a human gate's send-back does: each context the
+stage ran in gets the note, followed by where that context's latest
+attempt left its notes, and the prompt of the next attempt carries it.
+A note is refused before anything is written at a stage that runs no
+agent, and at one that has not run on the ticket. A restart held across
+passes keeps its note; `dispatch restart` again replaces it when it
+gives one and keeps it when it gives none. A completed attempt the
+restart discards at the target stage quotes the note in its
+cancellation reason, so a park before the agent launches loses nothing
+there: the `rerun` answer after the resume puts it back. A failed
+attempt, or one the restart's own park cancelled, keeps its own reason,
+so such a park drops the note and `dispatch restart` gives it again.
+Attempts at later stages in the range carry no note. The note survives a detour through `deploy` too. A parked ticket
+holds nothing, so at `try` its stack is taken again and `deploy` runs
+again behind `rerun`, since another ticket may have deployed in
+between; an active ticket keeps its holds through the restart, except
+one a secret was made under, which the park behind the restart deletes,
+so that ticket deploys again as well. A gate-only stage opens its
 watch or question again at once, and after a ranged restart the reset
 branches are brought up on re-entry, as on any stage entry. Failures
 under an earlier copy do not count against `max_reruns`.
@@ -2828,7 +2858,15 @@ and one against the real one:
 | A restart at the current stage when the live file adds a stage before it | Refused, naming the added stage and saying to restart at it (`a_restart_at_the_current_stage_names_the_stage_the_live_file_adds`) |
 | The same on a ticket from pull requests | Refused without pointing at a ranged restart (`a_restart_at_the_current_stage_of_a_pull_request_ticket_does_not_point_at_a_ranged_restart`) |
 | A restart at a live-only stage after a failed agent, without entries | The tree is read: refused while it is ahead of its base, then goes ahead with nothing discarded (`a_live_only_restart_after_a_failed_agent_reads_whether_the_tree_moved`) |
-| A ranged restart of a ticket from pull requests | Refused: someone else's branches are never reset; only its current stage restarts (`a_restart_is_refused_ranged_on_a_pull_request_ticket`) |
+| A ranged restart of a ticket from pull requests | Refused, naming the branch, when one moved since the target's entry; nothing written and nothing reset. Once every branch stands at its entry head again it goes ahead and resets nothing (`a_ranged_restart_of_a_pull_request_ticket_goes_ahead_only_when_no_branch_moved`) |
+| A pull-request ticket at `tried` restarted at `try` with `--note` | The hold is kept and `deploy` does not run again; the tester's attempt is discarded with its notes kept, its service gets a new record with a fresh `before`, and the next tester launches unasked with the note and the previous notes' path (`a_pull_request_ticket_restarts_at_try_from_tried_with_a_note`) |
+| The same after the ticket parked | The stack is taken again, `deploy` runs again behind `rerun`, and the tester still gets the note (`a_parked_pull_request_ticket_restarted_at_try_redeploys_and_keeps_the_note`) |
+| The same, active, with a secret written under the hold | The park deletes the secret and drops its hold; the hold is retaken, `deploy` runs again behind `rerun`, and the tester gets the note (`an_active_restart_at_try_redeploys_when_the_deploy_wrote_a_secret`) |
+| A restart with `--note` at an agent stage whose attempt failed at its checks | No question offering `rerun`, `check` and `park`; the agent runs again with the note and the failed attempt's notes path (`a_restart_note_at_a_failed_agent_stage_reruns_the_agent_without_asking`) |
+| A park after a noted restart, before the agent launches | The park takes the note off; the `rerun` answer after the resume puts it back from the discarded attempt's reason (`a_restart_note_survives_a_park_before_the_tester_launches`) |
+| `--note` at a stage without an agent, or at one the ticket never ran | Refused; nothing written (`a_restart_note_at_a_stage_without_an_agent_is_refused`) |
+| A held restart, the runner restarted, `dispatch restart` again | Without a note the first note is kept; with one it is replaced; the apply sends the stage back with it (`a_held_restart_keeps_its_note`) |
+| A restart without a note, its `rerun` answered with one | The replacement is also told where the replaced attempt's notes are (`a_rerun_note_after_a_restart_points_at_the_previous_notes`) |
 | A restart, `check` fails under the new copy, then a rerun fails, with `max_reruns = 1` | Two failures under the new copy: the ticket parks; failures under the old copy are not counted (`a_checked_attempt_failing_under_the_new_copy_counts_toward_max_reruns`, `failures_under_the_old_copy_do_not_count_toward_max_reruns`) |
 | `status` and `queue` list a pull-request ticket | Its source reads `pr <lane>/<n>` (lanes joined by `+`), never `#<n>`, so it cannot be mistaken for the issue of that number; piping either command into `head` ends quietly |
 | `take <project> pr <lane>/<n>...` | A ticket on `<project>.pr.toml` with one PR per named lane, refused for a closed PR, an unknown or repeated lane, an unknown remote, two lanes in one repository, or a PR already on a live ticket |

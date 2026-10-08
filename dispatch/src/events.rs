@@ -3226,6 +3226,7 @@ mod tests {
             discarded: vec![],
             reset: vec![],
             setup_again: vec![],
+            note: None,
         });
         let events = between(Some(&old), &new, 9, &names);
         assert_eq!(
@@ -3786,6 +3787,7 @@ mod tests {
             discarded: vec![],
             reset: vec![],
             setup_again: vec![],
+            note: None,
         });
         t.updated_ms = 100;
         crate::store::write_ticket(&data.ticket_file(&t.id), &t).unwrap();

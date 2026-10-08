@@ -37,7 +37,9 @@ dispatch queue <project> <ticket>...              reorder it
 dispatch park <ticket> [--reason <text>]          a ticket's work stopped, its questions withdrawn
 dispatch resume <ticket> [--no-rerun]             a parked ticket back to active; what the park cancelled runs again
 dispatch close <ticket> [--reason <text>]         a ticket closed, its trees removed (its branches are kept; close lists them)
-dispatch restart <ticket> [<stage>]               a ticket at its stage, or an earlier one, under the live pipeline; later work discarded
+dispatch restart <ticket> [<stage>] [--note <text> | --file <path>]
+                                                  a ticket at its stage, or an earlier one, under the live pipeline; later work
+                                                  discarded; a note goes to the stage's next agent
 dispatch health [--timeout <secs>] [--stale <secs>] [--verbose] [--json]   is the runner alive and getting on; run it first
 dispatch runner stop|start|restart                stop or start the runner the app runs; restart waits for the new pid
 dispatch show <ticket> [--json]                   one ticket: stage, lanes, attempts, rounds, decisions, files
@@ -559,8 +561,17 @@ nothing needs restarting. What a change reaches depends on the key:
   work (or `rerun` for a fresh agent). Answering `check` without the
   restart runs the old copy. Name a stage (`dispatch restart <ticket>
   plan`) to go back to it and discard the later work; the branches go
-  back to where they were as the ticket entered that stage. A restart
-  launches no agent by itself.
+  back to where they were as the ticket entered that stage. A ticket
+  from pull requests goes back only when no branch moved since it
+  entered that stage, since someone else's branches are never reset. A
+  restart launches no agent by itself unless it gave `--note`, which
+  reruns the stage's agent with the note (never `check`) and tells it
+  where the previous attempt's notes are: `dispatch restart <ticket> try
+  --note "seeded; scenarios 3-9 untried"` sends the tester back with
+  what to cover. A note is refused at a stage without an agent or one
+  the ticket never ran. If the ticket was parked, or its deploy wrote a
+  secret, the restart goes through `deploy` again first, behind a
+  `rerun` question; the note waits for the tester.
 - A lane's `setup` runs once per worktree, before the lane's first
   agent, and again after a restart that changed it: before the next
   agent or the checks a `check` answer starts.

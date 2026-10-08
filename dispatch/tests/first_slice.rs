@@ -13908,12 +13908,12 @@ const FIXED_ARGV: &str = r#"argv = ["sh", "-c", "cargo nextest run"]"#;
 
 fn restart_at(env: &mut Env, id: &str, stage: Option<&str>) -> Ticket {
     let now = env.tick();
-    env.runner.restart(id, stage, now).unwrap()
+    env.runner.restart(id, stage, None, now).unwrap()
 }
 
 fn restart_refused(env: &mut Env, id: &str, stage: Option<&str>) -> String {
     let now = env.tick();
-    let e = env.runner.restart(id, stage, now).unwrap_err();
+    let e = env.runner.restart(id, stage, None, now).unwrap_err();
     format!("{e:#}")
 }
 
@@ -15602,9 +15602,10 @@ fn a_restart_is_refused_when_the_live_file_drops_a_lane() {
 }
 
 /// Someone else's branches are never reset: a ticket from pull requests
-/// restarts only at its current stage.
+/// restarts at an earlier stage only when no branch moved since it
+/// entered that stage, so nothing is moved back.
 #[test]
-fn a_restart_is_refused_ranged_on_a_pull_request_ticket() {
+fn a_ranged_restart_of_a_pull_request_ticket_goes_ahead_only_when_no_branch_moved() {
     let mut env = Env::new();
     let worktrees = env.data.root.join("wt");
     std::fs::write(env.data.pr_pipeline(PROJECT), pr_pipeline(&worktrees)).unwrap();
@@ -15632,15 +15633,40 @@ fn a_restart_is_refused_ranged_on_a_pull_request_ticket() {
         env.inspect(&id, "proceed", None);
     }
     env.steps_until(&id, "the merge stage", |t, _| t.stage == 1);
+    // The PR's author pushed to the docs branch after inspect.
+    let docs = env.ticket(&id).lanes[1].worktree.clone();
+    env.repo
+        .lock()
+        .unwrap()
+        .heads
+        .insert(docs.clone(), "pushed01".into());
+    let before = env.ticket(&id);
     let e = restart_refused(&mut env, &id, Some("inspect"));
     assert!(e.contains("someone else's branches"), "{e}");
+    assert!(e.contains("(docs moved since inspect)"), "{e}");
+    assert_eq!(env.ticket(&id), before, "nothing written");
+    assert!(env.repo.lock().unwrap().resets.is_empty());
     let t = restart_at(&mut env, &id, None);
     assert!(t.active(), "{:?}", t.state);
     assert!(t.pipeline_file.ends_with("pipeline.2.toml"));
+    // Back where inspect saw it, nothing would move, so the ranged
+    // restart is allowed and resets nothing.
+    env.steps_until(&id, "the merge stage again", |t, _| t.stage == 1);
+    env.repo
+        .lock()
+        .unwrap()
+        .heads
+        .insert(docs, "theirs00".into());
+    let t = restart_at(&mut env, &id, Some("inspect"));
+    assert!(t.active(), "{:?}", t.state);
+    assert_eq!(t.stage, 0);
+    assert!(t.restarts.last().unwrap().reset.is_empty());
+    assert!(env.repo.lock().unwrap().resets.is_empty());
 }
 
-/// A pull-request ticket cannot take a ranged restart, so the refusal
-/// for a stage added before its current one does not point at one.
+/// A pull-request ticket takes a ranged restart only when nothing would
+/// move, so the refusal for a stage added before its current one does
+/// not suggest one.
 #[test]
 fn a_restart_at_the_current_stage_of_a_pull_request_ticket_does_not_point_at_a_ranged_restart() {
     let mut env = Env::new();
@@ -19087,8 +19113,16 @@ const TOKEN: &str = "tok-SEKRET-0451";
 
 fn secret_env() -> (Env, String) {
     let mut env = Env::new();
-    let text = BACK_HALF
-        .replace("{worktrees}", &env.worktrees.display().to_string())
+    let text =
+        with_secret_setup(&BACK_HALF.replace("{worktrees}", &env.worktrees.display().to_string()));
+    std::fs::write(env.data.pipeline("Orchard"), text).unwrap();
+    let id = take_orchard(&mut env, 42, BOTH);
+    (env, id)
+}
+
+/// A back-half pipeline with `try-setup` between `deploy` and `try`.
+fn with_secret_setup(text: &str) -> String {
+    text
         .replace(
             "[[stages]]\nname = \"try\"\n",
             "[[stages]]\nname = \"try-setup\"\ncontext = \"lane:backend\"\nneeds = [\"my-dev\"]\nwrites = [{ name = \"personas\", secret = true }]\ngate = { kind = \"command\", in = \"lane:backend\", argv = [\"sh\", \"-c\", \"inv personas\"] }\n\n[[stages]]\nname = \"try\"\n",
@@ -19096,14 +19130,25 @@ fn secret_env() -> (Env, String) {
         .replace(
             "Report to {notes}.",
             "Personas at {inputs.personas} and {inputs.try-setup.personas}. Report to {notes}.",
-        );
-    std::fs::write(env.data.pipeline("Orchard"), text).unwrap();
-    let id = take_orchard(&mut env, 42, BOTH);
-    (env, id)
+        )
 }
 
-fn secret_stage(t: &Ticket) -> &'static str {
-    SECRET_STAGES.get(t.stage).copied().unwrap_or("done")
+/// The ticket's stage by name, read from its copy so a pull-request
+/// copy without `lanes` names it too; `SECRET_STAGES` for a copy that
+/// cannot be read.
+fn secret_stage(t: &Ticket) -> String {
+    let names = dispatch::events::stage_names(t);
+    if names.is_empty() {
+        return SECRET_STAGES
+            .get(t.stage)
+            .copied()
+            .unwrap_or("done")
+            .to_owned();
+    }
+    names
+        .get(t.stage)
+        .cloned()
+        .unwrap_or_else(|| "done".to_owned())
 }
 
 fn setup_key(id: &str, n: u32) -> String {
@@ -20471,4 +20516,437 @@ fn a_merge_commit_missing_from_the_list_is_read_by_number() {
     polls(&mut env, 1);
     let q = merge_q(&env.ticket(&id), "docs").unwrap().question;
     assert!(q.contains("repo merged as feed1234"), "{q}");
+}
+
+// --- a restart with a note: the next agent of the stage runs with it,
+// and a pull-request ticket goes back to `try` when nothing would move.
+
+/// `BACK_HALF` as a pull-request pipeline: no `lanes` question, each
+/// lane checked out on its pull request's branch, and the same deploy,
+/// tester with the frontend served, and `tried` confirmation, all
+/// holding `my-dev`.
+fn pr_back_half_env() -> (Env, String) {
+    pr_back_half_env_with(str::to_owned)
+}
+
+/// `pr_back_half_env` with the pipeline text changed by `edit` first.
+fn pr_back_half_env_with(edit: impl Fn(&str) -> String) -> (Env, String) {
+    let mut env = Env::new();
+    let text = edit(&BACK_HALF.replace("{worktrees}", &env.worktrees.display().to_string()))
+        .replace("git@example.com:", "git@github.com:")
+        .replace(
+            "kind = \"github\"\nrepo = \"example-org/orchard-workspace\"\nlabel = \"dispatch\"\nlane_hints = { \"area:backend\" = \"backend\", \"area:frontend\" = \"frontend\" }\n",
+            "kind = \"pull-request\"\n",
+        )
+        .replace(
+            "[[stages]]\nname = \"lanes\"\ngate = { kind = \"human\", decision = \"lanes\" }\n\n",
+            "",
+        )
+        .replace("decisions = { lanes = \"auto\" }\n", "");
+    std::fs::write(env.data.pr_pipeline("Orchard"), text).unwrap();
+    open_pr(
+        &env,
+        "example-org/orchard-backend",
+        9,
+        "feature/seed",
+        "Seed the personas",
+    );
+    open_pr(
+        &env,
+        "example-org/orchard-frontend",
+        3,
+        "feature/seed-ui",
+        "Show the personas",
+    );
+    let now = env.tick();
+    let t = dispatch::serve::take_pull_requests(
+        &mut env.runner,
+        "Orchard",
+        &["backend/9", "frontend/3"],
+        now,
+    )
+    .unwrap();
+    (env, t.id)
+}
+
+fn restart_noted(env: &mut Env, id: &str, stage: Option<&str>, note: &str) -> Ticket {
+    let now = env.tick();
+    env.runner.restart(id, stage, Some(note), now).unwrap()
+}
+
+fn restart_noted_refused(env: &mut Env, id: &str, stage: Option<&str>, note: &str) -> String {
+    let now = env.tick();
+    let e = env.runner.restart(id, stage, Some(note), now).unwrap_err();
+    format!("{e:#}")
+}
+
+/// The prompt of the latest tester launched.
+fn last_tester_prompt(env: &Env) -> String {
+    session_news(env, "tester").pop().unwrap().0
+}
+
+const SEEDED: &str = "seeded; scenarios 3-9 untried";
+
+#[test]
+fn a_pull_request_ticket_restarts_at_try_from_tried_with_a_note() {
+    let (mut env, id) = pr_back_half_env();
+    at_tried(&mut env, &id);
+    let t = env.ticket(&id);
+    let notes = artifact_of(&t, "try", "notes");
+    assert_eq!(holds(&t), ["my-dev"]);
+    let t = restart_noted(&mut env, &id, Some("try"), SEEDED);
+    assert!(t.active(), "{:?}", t.state);
+    assert_eq!(stage_name(&t), "try");
+    assert_eq!(holds(&t), ["my-dev"], "the deploy's hold is kept");
+    let tester = t.attempts_of("try").next().unwrap();
+    assert!(
+        matches!(&tester.state, AttemptState::Cancelled { reason } if reason == &format!("discarded by restart at try: {SEEDED}")),
+        "{tester:#?}"
+    );
+    assert!(notes.is_file(), "attempt 1's notes are kept");
+    let r = t.restarts.last().unwrap();
+    assert_eq!(r.note.as_deref(), Some(SEEDED));
+    assert!(r.reset.is_empty(), "nothing moved");
+    assert!(env.repo.lock().unwrap().resets.is_empty());
+    restarting(&mut env, &id, 2);
+    answering_again(&mut env, &id, 2);
+    let t = env.ticket(&id);
+    assert_eq!(t.attempts_of("deploy").count(), 1, "no deploy again");
+    assert_eq!(started(&env, &deploy_key(&id, 2)), 0);
+    assert_eq!(started(&env, &before_key(&id, 2)), 1, "a fresh before");
+    assert!(pending_named(&env, &id, "rerun").is_none(), "nothing asked");
+    let prompt = last_tester_prompt(&env);
+    assert!(prompt.contains(SEEDED), "{prompt}");
+    assert!(prompt.contains(&noted_at(&notes)), "{prompt}");
+    assert!(t.rework.is_empty(), "the note went with the attempt");
+    let kinds = events_of(&env.data, &id);
+    let restarted = kinds.iter().position(|k| k == "restarted").unwrap();
+    let launched = kinds.iter().rposition(|k| k == "attempt-started").unwrap();
+    assert!(restarted < launched, "{kinds:?}");
+}
+
+/// How a note points the next agent at the previous attempt's notes.
+fn noted_at(notes: &std::path::Path) -> String {
+    format!("(the previous attempt's notes are at {})", notes.display())
+}
+
+/// The prompt of the latest agent session launched.
+fn last_prompt(env: &Env) -> String {
+    env.sb()
+        .calls
+        .iter()
+        .rev()
+        .find_map(|r| match &r.body {
+            Body::SessionNew {
+                prompt: Some(prompt),
+                ..
+            } => Some(prompt.clone()),
+            _ => None,
+        })
+        .unwrap()
+}
+
+/// Steps until the ticket's tester `n` launches, answering every `rerun`
+/// question asked on the way with `rerun` and no note, finishing each
+/// command started (a deploy, and try-setup's, which writes its file)
+/// and serving the latest service record.
+fn rerun_to_tester(env: &mut Env, id: &str, n: u32) {
+    for _ in 0..60 {
+        let t = env.ticket(id);
+        if t.attempts_of("try")
+            .any(|a| a.n == n && a.session.is_some())
+        {
+            return;
+        }
+        if let Some(d) = pending_named(env, id, "rerun") {
+            answer(env, id, &d, "rerun");
+        }
+        for a in t.attempts.iter().filter(|a| a.is_open()) {
+            let key = format!("{id}/{}/{}", a.stage, a.n);
+            if a.stage == "try-setup" {
+                let writes = env
+                    .repo
+                    .lock()
+                    .unwrap()
+                    .checks
+                    .iter()
+                    .find(|c| c.key == key)
+                    .and_then(|c| {
+                        c.env
+                            .iter()
+                            .find(|(k, _)| k == "DISPATCH_WRITES_PERSONAS")
+                            .map(|(_, v)| PathBuf::from(v))
+                    });
+                if let Some(path) = writes {
+                    std::fs::write(path, TOKEN).unwrap();
+                }
+            }
+            if matches!(a.stage.as_str(), "deploy" | "try-setup") {
+                exits(env, &key, 0);
+            }
+        }
+        if let Some(rec) = t.services.iter().max_by_key(|s| s.n) {
+            exits(env, &before_key(id, rec.n), 0);
+            if let Some(port) = rec.port {
+                env.repo.lock().unwrap().answering.insert(port);
+            }
+        }
+        env.step();
+    }
+    panic!("tester {n} never launched: {:#?}", env.ticket(id));
+}
+
+#[test]
+fn a_parked_pull_request_ticket_restarted_at_try_redeploys_and_keeps_the_note() {
+    let (mut env, id) = pr_back_half_env();
+    at_tried(&mut env, &id);
+    let notes = artifact_of(&env.ticket(&id), "try", "notes");
+    tried(&mut env, &id, "park");
+    env.steps_until(&id, "parked", |t, _| is_parked(t));
+    let t = restart_noted(&mut env, &id, Some("try"), SEEDED);
+    assert!(t.active(), "{:?}", t.state);
+    assert!(t.holds.is_empty(), "a parked ticket holds nothing");
+    env.steps_until(&id, "the deploy asked again", |t, _| {
+        t.pending_decisions()
+            .iter()
+            .any(|d| d.name == "rerun" && d.attempt == Some(("deploy".to_owned(), 1)))
+    });
+    let t = env.ticket(&id);
+    assert_eq!(
+        stage_name(&t),
+        "deploy",
+        "my-dev was let go, so deploy runs again"
+    );
+    assert_eq!(
+        t.attempts_of("try").count(),
+        1,
+        "no tester before the deploy"
+    );
+    rerun_to_tester(&mut env, &id, 2);
+    assert_eq!(started(&env, &deploy_key(&id, 2)), 1);
+    let prompt = last_tester_prompt(&env);
+    assert!(prompt.contains(SEEDED), "{prompt}");
+    assert!(prompt.contains(&noted_at(&notes)), "{prompt}");
+}
+
+#[test]
+fn an_active_restart_at_try_redeploys_when_the_deploy_wrote_a_secret() {
+    let (mut env, id) = pr_back_half_env_with(with_secret_setup);
+    let secret = secret_at_tried(&mut env, &id);
+    assert!(secret.is_file());
+    let notes = artifact_of(&env.ticket(&id), "try", "notes");
+    let t = restart_noted(&mut env, &id, Some("try"), SEEDED);
+    assert!(t.active(), "{:?}", t.state);
+    assert!(!secret.exists(), "the park deleted the secret");
+    assert!(
+        t.holds.is_empty(),
+        "the hold the secret was made under is dropped"
+    );
+    env.steps_until(&id, "the deploy asked again", |t, _| {
+        t.pending_decisions()
+            .iter()
+            .any(|d| d.name == "rerun" && d.attempt == Some(("deploy".to_owned(), 1)))
+    });
+    assert_eq!(holds(&env.ticket(&id)), ["my-dev"], "the hold retaken");
+    rerun_to_tester(&mut env, &id, 2);
+    assert_eq!(started(&env, &deploy_key(&id, 2)), 1);
+    let prompt = last_tester_prompt(&env);
+    assert!(prompt.contains(SEEDED), "{prompt}");
+    assert!(prompt.contains(&noted_at(&notes)), "{prompt}");
+}
+
+#[test]
+fn a_restart_note_at_a_failed_agent_stage_reruns_the_agent_without_asking() {
+    let mut env = Env::new();
+    let id = implement_checks_127(&mut env);
+    let notes = artifact_of(&env.ticket(&id), "implement", "notes");
+    let t = restart_noted(&mut env, &id, None, "the checks need nextest");
+    assert!(t.active(), "{:?}", t.state);
+    assert_eq!(
+        t.rework.values().collect::<Vec<_>>(),
+        [&format!("the checks need nextest {}", noted_at(&notes))]
+    );
+    env.steps_until(&id, "the second implementer", |t, _| {
+        t.attempts_of("implement").count() == 2
+    });
+    assert!(
+        env.pending(&id).iter().all(|d| d.name != "rerun"),
+        "no rerun | check | park: {:#?}",
+        env.pending(&id)
+    );
+    let prompt = last_prompt(&env);
+    assert!(prompt.contains("the checks need nextest"), "{prompt}");
+    assert!(prompt.contains(&noted_at(&notes)), "{prompt}");
+}
+
+#[test]
+fn a_restart_note_survives_a_park_before_the_tester_launches() {
+    let (mut env, id) = back_half_env(BOTH);
+    at_tried(&mut env, &id);
+    let notes = artifact_of(&env.ticket(&id), "try", "notes");
+    restart_noted(&mut env, &id, Some("try"), SEEDED);
+    // The service is not answering yet, so the tester has not launched.
+    restarting(&mut env, &id, 2);
+    assert_eq!(env.ticket(&id).attempts_of("try").count(), 1);
+    let now = env.tick();
+    env.runner.request_park(&id, None, now).unwrap();
+    env.steps_until(&id, "parked", |t, _| is_parked(t));
+    assert!(
+        env.ticket(&id).rework.is_empty(),
+        "the park took the note off"
+    );
+    let now = env.tick();
+    env.runner.resume_asking(&id, now).unwrap();
+    rerun_to_tester(&mut env, &id, 2);
+    let prompt = last_tester_prompt(&env);
+    assert!(prompt.contains(SEEDED), "{prompt}");
+    assert!(prompt.contains(&noted_at(&notes)), "{prompt}");
+}
+
+#[test]
+fn a_restart_note_at_a_stage_without_an_agent_is_refused() {
+    let (mut env, id) = back_half_env(BOTH);
+    at_tried(&mut env, &id);
+    let before = env.ticket(&id);
+    let e = restart_noted_refused(&mut env, &id, Some("deploy"), "x");
+    assert!(
+        e.contains("a note reaches only an agent stage's prompt; deploy runs none"),
+        "{e}"
+    );
+    let e = restart_noted_refused(&mut env, &id, None, "x");
+    assert!(e.contains("tried runs none"), "{e}");
+    assert_eq!(env.ticket(&id), before, "nothing written");
+
+    // An agent stage only the live file has never ran: nothing to
+    // replace.
+    let mut env = Env::new();
+    let id = implement_checks_127(&mut env);
+    live_edit(
+        &env,
+        "[[stages]]\nname = \"implement\"",
+        "[[stages]]\nname = \"design\"\noperator = \"planner\"\ncontext = \"each\"\nwrites = [\"design\"]\nprompt = \"Design to {design}.\"\n\n[[stages]]\nname = \"implement\"",
+    );
+    let before = env.ticket(&id);
+    let e = restart_noted_refused(&mut env, &id, Some("design"), "x");
+    assert!(
+        e.contains("design has not run on this ticket; a note goes to the attempt it replaces"),
+        "{e}"
+    );
+    assert_eq!(env.ticket(&id), before, "nothing written");
+}
+
+#[test]
+fn a_held_restart_keeps_its_note() {
+    let (mut env, id) = back_half_env(BOTH);
+    deploying(&mut env, &id);
+    let tree = move_orchard_base(&env, &id);
+    exits(&env, &deploy_key(&id, 1), 0);
+    at_stage(&mut env, &id, "try");
+    served(&mut env, &id);
+    tester_done(&mut env, &id);
+    // The reset back to try's entry head waits on a clean tree.
+    env.repo.lock().unwrap().dirty.push(tree.clone());
+    let t = restart_noted(&mut env, &id, Some("try"), "first");
+    assert!(
+        matches!(&t.state, TicketState::Parked { reason } if reason.starts_with("restart at try held")),
+        "{:?}",
+        t.state
+    );
+    assert_eq!(t.restart.as_ref().unwrap().note.as_deref(), Some("first"));
+    env.restart();
+    let t = restart_at(&mut env, &id, Some("try"));
+    assert!(is_parked(&t), "{:?}", t.state);
+    assert_eq!(
+        t.restart.as_ref().unwrap().note.as_deref(),
+        Some("first"),
+        "kept with no note given"
+    );
+    let t = restart_noted(&mut env, &id, Some("try"), "second");
+    assert_eq!(t.restart.as_ref().unwrap().note.as_deref(), Some("second"));
+    env.repo.lock().unwrap().dirty.clear();
+    let t = restart_at(&mut env, &id, Some("try"));
+    assert!(t.active(), "{:?}", t.state);
+    assert_eq!(t.restarts.last().unwrap().note.as_deref(), Some("second"));
+    assert!(
+        t.rework.values().all(|n| n.starts_with("second")),
+        "{:?}",
+        t.rework
+    );
+    assert!(!t.rework.is_empty());
+}
+
+/// A restart without a note, answered `rerun --note`: the replacement
+/// is also told where the replaced attempt's notes are.
+#[test]
+fn a_rerun_note_after_a_restart_points_at_the_previous_notes() {
+    let (mut env, id) = back_half_env(BOTH);
+    at_tried(&mut env, &id);
+    let notes = artifact_of(&env.ticket(&id), "try", "notes");
+    restart_at(&mut env, &id, Some("try"));
+    restarting(&mut env, &id, 2);
+    let port = env
+        .ticket(&id)
+        .services
+        .iter()
+        .find(|s| s.n == 2)
+        .and_then(|s| s.port)
+        .unwrap();
+    env.repo.lock().unwrap().answering.insert(port);
+    env.steps_until(&id, "the rerun question", |t, _| {
+        t.pending_decisions()
+            .iter()
+            .any(|d| d.name == "rerun" && d.attempt == Some(("try".to_owned(), 1)))
+    });
+    let d = rerun_about(&env, &id, "try", 1);
+    let now = env.tick();
+    env.runner
+        .decide(&id, &d.id, "rerun", Some("look at scenario 4"), now)
+        .unwrap();
+    env.steps_until(&id, "the second tester", |t, _| {
+        t.attempts_of("try")
+            .any(|a| a.n == 2 && a.session.is_some())
+    });
+    let prompt = last_tester_prompt(&env);
+    assert!(prompt.contains("look at scenario 4"), "{prompt}");
+    assert!(prompt.contains(&noted_at(&notes)), "{prompt}");
+}
+
+/// A noted restart at `plan` from `inspect` discards `implement` too,
+/// but only `plan` was sent back: the implementer's discard reason
+/// carries no note, so a later `rerun` of it gets none.
+#[test]
+fn a_ranged_restart_note_reaches_only_the_target_stage() {
+    let mut env = Env::new();
+    let text = two_lane_pipeline(&env.worktrees);
+    let id = two_lanes(&mut env, &text);
+    let lanes = two_lanes_checking(&mut env, &id);
+    {
+        let mut repo = env.repo.lock().unwrap();
+        for (_, _, key) in &lanes {
+            repo.check_exits.insert(key.clone(), 0);
+        }
+    }
+    env.steps_until(&id, "inspect", |t, _| {
+        t.pending_decisions().iter().any(|d| d.name == "inspect")
+    });
+    let t = restart_noted(&mut env, &id, Some("plan"), "split the schema");
+    assert!(t.active(), "{:?}", t.state);
+    for a in t.attempts_of("plan") {
+        assert!(
+            matches!(&a.state, AttemptState::Cancelled { reason } if reason == "discarded by restart at plan: split the schema"),
+            "{a:#?}"
+        );
+    }
+    assert!(t.attempts_of("implement").next().is_some());
+    for a in t.attempts_of("implement") {
+        assert!(
+            matches!(&a.state, AttemptState::Cancelled { reason } if reason == "discarded by restart at plan"),
+            "{a:#?}"
+        );
+    }
+    assert!(
+        t.rework.keys().all(|k| k.starts_with("plan")),
+        "{:?}",
+        t.rework
+    );
 }

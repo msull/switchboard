@@ -22,6 +22,7 @@ use crate::pipeline::{
     env_key, env_sets,
 };
 use crate::port::Port;
+use crate::restart::DISCARDED_BY;
 use crate::review::{checks_key, find_reviewer_mut, reviewer_key};
 use crate::services::{push_stuck, stuck_answer, stuck_pending, withdraw_stuck};
 use crate::store::{
@@ -4675,15 +4676,11 @@ impl Runner {
                     a.stage == target && a.context == ctx && a.state == AttemptState::Complete
                 })
                 .max_by_key(|a| a.n)
-                .map(|a| (a.n, a.artifacts.get("notes").cloned()));
-            if let Some((n, notes)) = last {
+                .map(|a| (a.n, previous_notes(t, a)));
+            if let Some((n, previous)) = last {
                 // The next agent may want what the last one found.
-                if let Some(path) = notes.filter(|path| readable_notes(t, path).is_some()) {
-                    let _ = write!(
-                        note,
-                        " (the previous attempt's notes are at {})",
-                        path.display()
-                    );
+                if let Some(previous) = previous {
+                    note.push_str(&previous);
                 }
                 let done = record_of(t, &target, n);
                 done.state = AttemptState::Cancelled {
@@ -8253,7 +8250,7 @@ pub fn kept_branches(t: &Ticket, p: &Pipeline, data: &DataDir) -> Vec<(String, P
 
 /// The pull request whose branch is the ticket's tree: one in a lane
 /// without a repository of its own.
-fn tree_pr<'a>(t: &'a Ticket, p: &Pipeline) -> Option<&'a PullRequestSource> {
+pub(crate) fn tree_pr<'a>(t: &'a Ticket, p: &Pipeline) -> Option<&'a PullRequestSource> {
     t.source
         .pull_requests
         .iter()
@@ -8549,8 +8546,9 @@ const SENT_BACK_FROM: &str = "sent back from ";
 
 /// The note a `rerun` answer, on decision `decision`, gives its attempt's
 /// replacement, under its `rework` key: the answer's own note, else the
-/// one a send-back gave the attempt, quoted by its cancellation reason,
-/// which a park took off `t.rework` before any attempt carried it. An
+/// one a send-back or a restart's `--note` gave the attempt, quoted by
+/// its cancellation reason, which a park took off `t.rework` before any
+/// attempt carried it; then where the replaced attempt's notes are. An
 /// agent stage's prompt takes a note, and so does a code review's first
 /// fix pass (where "start over" also drops the carried points).
 fn rerun_note(t: &Ticket, p: &Pipeline, decision: usize) -> Option<(String, String)> {
@@ -8567,14 +8565,32 @@ fn rerun_note(t: &Ticket, p: &Pipeline, decision: usize) -> Option<(String, Stri
         DecisionState::Answered { note, .. } => note.clone(),
         _ => None,
     };
-    let note = own.or_else(|| match &replaced.state {
+    let mut note = own.or_else(|| match &replaced.state {
         AttemptState::Cancelled { reason } => reason
             .strip_prefix(SENT_BACK_FROM)
+            .or_else(|| reason.strip_prefix(DISCARDED_BY))
             .and_then(|rest| rest.split_once(": "))
             .map(|(_, note)| note.to_owned()),
         _ => None,
     })?;
+    if let Some(previous) = previous_notes(t, replaced) {
+        note.push_str(&previous);
+    }
     Some((rework_key(stage, &replaced.context), note))
+}
+
+/// What a note for the agent after `a` ends with: where `a`'s notes
+/// are, when Dispatch may point an agent at them, so the next agent can
+/// read what the last one found.
+pub(crate) fn previous_notes(t: &Ticket, a: &Attempt) -> Option<String> {
+    let path = a
+        .artifacts
+        .get("notes")
+        .filter(|path| readable_notes(t, path).is_some())?;
+    Some(format!(
+        " (the previous attempt's notes are at {})",
+        path.display()
+    ))
 }
 
 /// Whether a refresh rebaser has run on the lane since it last moved.

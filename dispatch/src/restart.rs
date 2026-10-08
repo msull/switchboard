@@ -4,7 +4,9 @@
 //! moves; then the branches go back to the heads recorded as the ticket
 //! entered the stage, or stay where they are when nothing after the
 //! target can have moved them or they are at their base; the later work
-//! is discarded, and the stage asks before any agent of it runs again.
+//! is discarded, and the stage asks before any agent of it runs again,
+//! unless the restart gave a note, which is the answer. A ticket from
+//! pull requests goes back only when no branch would move.
 //! The target may be a stage only the live file has, when every live
 //! stage before it was run.
 //!
@@ -17,14 +19,18 @@ use std::path::PathBuf;
 
 use anyhow::{Context as _, Result, bail};
 
-use crate::pipeline::{Gate, Lane, Pipeline};
-use crate::scheduler::{REFRESH, RESOLUTION, Runner, rework_key, tree_branch};
+use crate::pipeline::{Gate, Lane, Pipeline, StageKind};
+use crate::scheduler::{
+    REFRESH, RESOLUTION, Runner, previous_notes, rework_key, tree_branch, tree_pr,
+};
 use crate::ticket::{
     Attempt, AttemptKind, AttemptState, DecisionState, HeadReset, LaneAtEntry, Restart,
     RestartIntent, StageEntry, Ticket, TicketState,
 };
 
-/// The start of the reason a restart cancels a completed attempt with.
+/// The start of the reason a restart cancels a completed attempt with;
+/// the target stage follows, then `: ` and the restart's note when it
+/// gave one.
 pub const DISCARDED_BY: &str = "discarded by restart at ";
 
 /// A restart that passed its checks: the live file and where the
@@ -76,7 +82,18 @@ impl Runner {
     /// gone, now or on a later pass. The ticket comes back as it stands:
     /// active with the restart applied, still parking, or parked with
     /// why the restart is held.
-    pub fn restart(&mut self, ticket: &str, stage: Option<&str>, now_ms: u64) -> Result<Ticket> {
+    ///
+    /// A `note` is for the stage's next agent: the apply sends the
+    /// discarded attempt back with it, so the agent runs again with the
+    /// note and without a `rerun` question. A restart held already keeps
+    /// its note when this one gives none and goes to the same stage.
+    pub fn restart(
+        &mut self,
+        ticket: &str,
+        stage: Option<&str>,
+        note: Option<&str>,
+        now_ms: u64,
+    ) -> Result<Ticket> {
         self.transaction(|r| {
             let mut t = r.load_ticket(ticket)?;
             match &t.state {
@@ -99,10 +116,15 @@ impl Runner {
             }
             let old = r.pipeline_of(&t)?;
             let checked = r.check_restart(&t, &old, stage)?;
+            if note.is_some() {
+                check_note(&t, &checked)?;
+            }
+            let mut kept_note = None;
             let carried = match &t.restart {
                 Some(intent) => {
                     let earlier = target_name(&t, &old, intent.stage.as_deref());
                     if earlier == checked.to {
+                        kept_note.clone_from(&intent.note);
                         intent.reset.clone()
                     } else if intent.reset.is_empty() {
                         Vec::new()
@@ -121,6 +143,7 @@ impl Runner {
                 stage: stage.map(str::to_owned),
                 made_ms: now_ms,
                 reset: carried,
+                note: note.map(str::to_owned).or(kept_note),
             });
             let mut ps = r.load_project(&t.project)?;
             let before = ps.clone();
@@ -196,20 +219,25 @@ impl Runner {
             if !old.cuts_worktrees() {
                 bail!("the project works in place, so there is no branch to reset to {to}");
             }
-            if t.source.is_pull_request() {
-                bail!(
-                    "ticket {} reviews someone else's branches; restart it at its current stage",
-                    t.id
-                );
-            }
             range = old.stages[target_old..]
                 .iter()
                 .map(|s| s.name.clone())
                 .collect();
             entry = latest_entry(t, &old.stages[target_old].name).cloned();
-            targets = self
-                .reset_targets(t, old, &to, &range, entry.as_ref())
-                .map_err(anyhow::Error::msg)?;
+            let found = self.reset_targets(t, old, &to, &range, entry.as_ref());
+            // Someone else's branches are never moved: a pull-request
+            // ticket goes back only when every branch already stands
+            // where the restart would put it.
+            if t.source.is_pull_request() {
+                let moved = match &found {
+                    Ok(found) => self.unmoved(found, &to).err(),
+                    Err(why) => Some(why.clone()),
+                };
+                if let Some(why) = moved {
+                    bail!("{} ({why})", pr_refusal(t));
+                }
+            }
+            targets = found.map_err(anyhow::Error::msg)?;
         }
         Ok(Checked {
             text,
@@ -260,7 +288,10 @@ impl Runner {
             .as_ref()
             .map(|i| i.reset.clone())
             .unwrap_or_default();
-        let discarded = discard(t, &old, &checked);
+        let discarded = discard(t, &old, &checked, intent.note.as_deref());
+        if let Some(note) = &intent.note {
+            send_back_with(t, &checked.to, note);
+        }
         let setup_again = setup_changed(t, &old, &checked.new);
         if let Some(entry) = &checked.entry {
             // The tree's head goes back only when the entry read it, and
@@ -292,6 +323,7 @@ impl Runner {
             discarded,
             reset,
             setup_again,
+            note: intent.note.clone(),
         });
         t.restart = None;
         t.state = TicketState::Active;
@@ -363,6 +395,9 @@ impl Runner {
             };
             if current == target.to {
                 continue;
+            }
+            if t.source.is_pull_request() {
+                return Ok(Some(pr_refusal(t)));
             }
             if matches!(self.git.rebase_in_progress(&target.dir), Ok(true)) {
                 return Ok(Some(format!("{} is mid-rebase", target.dir.display())));
@@ -447,7 +482,7 @@ impl Runner {
                 Target {
                     key: "root".to_owned(),
                     dir: tree.clone(),
-                    branch: tree_branch(t, None),
+                    branch: tree_branch(t, tree_pr(t, old)),
                     to: String::new(),
                 },
                 base,
@@ -514,6 +549,26 @@ impl Runner {
             out.push(target);
         }
         Ok(out)
+    }
+
+    /// Whether every branch already stands at the head a restart would
+    /// put it at, so a restart to `to` moves nothing. `Err` names the
+    /// first that does not.
+    fn unmoved(&self, targets: &[Target], to: &str) -> Result<(), String> {
+        for target in targets {
+            match self.git.branch_head(&target.dir, &target.branch) {
+                Ok(Some(head)) if head == target.to => {}
+                Ok(Some(_)) => return Err(format!("{} moved since {to}", target.key)),
+                Ok(None) => {
+                    return Err(format!(
+                        "{} is not on its branch {}",
+                        target.key, target.branch
+                    ));
+                }
+                Err(e) => return Err(format!("{}'s head cannot be read: {e:#}", target.key)),
+            }
+        }
+        Ok(())
     }
 
     /// Whether a branch with no recorded head may stay where it is
@@ -714,9 +769,56 @@ fn latest_entry<'t>(t: &'t Ticket, stage: &str) -> Option<&'t StageEntry> {
 
 /// Whether a ticket can take a ranged restart: its project cuts
 /// worktrees, so there are branches to reset, and the branches are its
-/// own, not a pull request's.
+/// own, not a pull request's. A pull-request ticket may still take one
+/// that moves nothing, but that is not one to point at.
 fn can_range(t: &Ticket, old: &Pipeline) -> bool {
     old.cuts_worktrees() && !t.source.is_pull_request()
+}
+
+/// Why a pull-request ticket's ranged restart is refused.
+fn pr_refusal(t: &Ticket) -> String {
+    format!(
+        "ticket {} reviews someone else's branches; restart it at its current stage",
+        t.id
+    )
+}
+
+/// A note is refused where it would reach no agent: at a stage that
+/// runs none, or one with no attempt on this ticket to replace.
+fn check_note(t: &Ticket, c: &Checked) -> Result<()> {
+    let to = &c.to;
+    if c.new.stages[c.target_new].kind() != StageKind::Agent {
+        bail!("a note reaches only an agent stage's prompt; {to} runs none");
+    }
+    if !t.attempts.iter().any(|a| &a.stage == to) {
+        bail!("{to} has not run on this ticket; a note goes to the attempt it replaces");
+    }
+    Ok(())
+}
+
+/// Each context `to` ran in sent back with `note`, as a human gate's
+/// send-back does: its `rework` entry is the note and where that
+/// context's latest attempt left its notes, so the next agent launches
+/// with both and is not asked `rerun` first.
+fn send_back_with(t: &mut Ticket, to: &str, note: &str) {
+    let mut latest: BTreeMap<&str, &Attempt> = BTreeMap::new();
+    for a in t.attempts.iter().filter(|a| a.stage == to) {
+        let slot = latest.entry(a.context.as_str()).or_insert(a);
+        if a.n > slot.n {
+            *slot = a;
+        }
+    }
+    let entries: Vec<(String, String)> = latest
+        .into_iter()
+        .map(|(ctx, a)| {
+            let mut text = note.to_owned();
+            if let Some(previous) = previous_notes(t, a) {
+                text.push_str(&previous);
+            }
+            (rework_key(to, ctx), text)
+        })
+        .collect();
+    t.rework.extend(entries);
 }
 
 /// A rebaser or a resolution review started after the entry: it worked
@@ -729,14 +831,22 @@ fn after_entry(a: &Attempt, e: &StageEntry) -> bool {
 /// as done; their decisions and the range's cancelled; `lanes` asked
 /// again when it is in the range; and on a plain restart the attempts
 /// whose checks may be run again under the new copy flagged so their
-/// question offers `check`. Returns the attempts discarded.
-fn discard(t: &mut Ticket, old: &Pipeline, c: &Checked) -> Vec<(String, u32)> {
+/// question offers `check`. Returns the attempts discarded. The reason
+/// of the target stage's attempts quotes `note`, so a `rerun` answer
+/// after a park can put it back; a later stage's agent was not sent
+/// back, so its reason carries none.
+fn discard(t: &mut Ticket, old: &Pipeline, c: &Checked, note: Option<&str>) -> Vec<(String, u32)> {
     let range = &c.range;
-    let reason = format!("{DISCARDED_BY}{}", c.to);
+    let plain = format!("{DISCARDED_BY}{}", c.to);
+    let noted = note.map(|note| format!("{plain}: {note}"));
     let mut discarded = Vec::new();
     for a in &mut t.attempts {
         let rebased = c.entry.as_ref().is_some_and(|e| after_entry(a, e));
         if a.state == AttemptState::Complete && (range.contains(&a.stage) || rebased) {
+            let reason = match &noted {
+                Some(noted) if a.stage == c.to => noted,
+                _ => &plain,
+            };
             a.state = AttemptState::Cancelled {
                 reason: reason.clone(),
             };

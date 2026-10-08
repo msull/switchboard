@@ -1101,6 +1101,9 @@ pub struct Restart {
     /// The lanes whose setup changed, so it runs again.
     #[serde(default)]
     pub setup_again: Vec<String>,
+    /// The note `--note` or `--file` gave for the stage's next agent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
 }
 
 /// A restart asked for and not yet applied.
@@ -1116,6 +1119,11 @@ pub struct RestartIntent {
     /// carries on rather than moving a branch twice.
     #[serde(default)]
     pub reset: Vec<HeadReset>,
+    /// The note `--note` or `--file` gave, for the next agent of the
+    /// target stage.
+    /// It is put on `Ticket::rework` when the restart applies.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
 }
 
 /// One branch moved back by a restart: `root` for the ticket's tree, a

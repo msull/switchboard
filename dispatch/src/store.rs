@@ -23,7 +23,7 @@ use crate::ticket::{ProjectState, Ticket};
 /// carried a version reads as 0 and is brought up by `migrate`. A
 /// record above it was written by a newer `dispatch` and is refused
 /// both ways, so this build never drops fields it does not know.
-pub const RECORD_VERSION: u32 = 22;
+pub const RECORD_VERSION: u32 = 23;
 
 /// A lock file held while this lives: the writer lock, the runner's
 /// claim, or a ticket's close.
@@ -569,6 +569,11 @@ pub fn migrate(mut value: Value) -> Value {
         // must refuse the record, or a lane's wait would be logged again,
         // a released merge question asked again, and a merged lane's
         // commit lost.
+        //
+        // 22 to 23: a restart intent and a restart gain `note`, absent
+        // from its serde default. Nothing is transformed. A build that
+        // would drop it on its next write must refuse the record, or a
+        // held restart would lose the owner's note for the next agent.
         if version == 1 {
             settle_from_verdicts(&mut value);
         }
@@ -1230,6 +1235,34 @@ mod tests {
     }
 
     #[test]
+    fn a_version_twenty_two_held_restart_migrates_with_no_note() {
+        let text = TICKET_V0
+            .replacen('{', "{\n  \"version\": 22,", 1)
+            .replacen(
+                '{',
+                "{\n  \"restart\": {\"stage\": \"try\", \"made_ms\": 1000, \"reset\": []},",
+                1,
+            );
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.json");
+        fs::write(&path, text).unwrap();
+        let mut t = read_ticket(&path).unwrap();
+        assert_eq!(t.version, RECORD_VERSION);
+        let intent = t.restart.as_mut().unwrap();
+        assert_eq!(intent.note, None);
+        write_ticket(&path, &t).unwrap();
+        let written: Value = read_json(&path).unwrap();
+        assert_eq!(written["version"], RECORD_VERSION);
+        assert!(written["restart"].get("note").is_none());
+        assert_eq!(read_ticket(&path).unwrap(), t);
+        t.restart.as_mut().unwrap().note = Some("seeded; scenarios 3-9 untried".into());
+        write_ticket(&path, &t).unwrap();
+        let written: Value = read_json(&path).unwrap();
+        assert_eq!(written["restart"]["note"], "seeded; scenarios 3-9 untried");
+        assert_eq!(read_ticket(&path).unwrap(), t);
+    }
+
+    #[test]
     fn a_version_nineteen_record_migrates_with_no_tree_refreshed() {
         let entry =
             r#"{"stage": "plan", "at_ms": 1000, "heads": {"root": "base0000"}, "lanes": {}}"#;
@@ -1376,6 +1409,7 @@ mod tests {
                 from: "head0002".into(),
                 to: "head0001".into(),
             }],
+            note: None,
         });
         t.entered.push(crate::ticket::StageEntry {
             stage: "plan".into(),

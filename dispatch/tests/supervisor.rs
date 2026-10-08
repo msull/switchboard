@@ -998,6 +998,28 @@ fn a_restart_is_refused_to_a_supervisor_without_may_and_the_refusal_kept() {
             refusals(&env, ORCHARD),
             [format!("restart {} inspect", t.id)]
         );
+        // A note does not get a restart past the capability, and is
+        // not kept with the refusal.
+        let out = env.cli(
+            Some(SUPERVISOR),
+            &["restart", &t.id, "inspect", "--note", "try again"],
+        );
+        refused(
+            &out,
+            &format!(
+                "the supervisor may not run `dispatch restart {} inspect` unless its table's \
+                 `may` lists `restart`; the owner does",
+                t.id
+            ),
+        );
+        assert_eq!(env.ticket(&t.id), before);
+        assert_eq!(
+            refusals(&env, ORCHARD),
+            [
+                format!("restart {} inspect", t.id),
+                format!("restart {} inspect", t.id)
+            ]
+        );
         let shown = env.cli(None, &["supervisor", ORCHARD]);
         accepted(&shown);
         assert!(
@@ -1041,6 +1063,17 @@ fn a_restart_is_a_supervisors_once_its_table_says_may() {
         &env.cli(Some(SUPERVISOR), &["restart", &theirs.id]),
         "the supervisor of Orchard may not act on Grove's tickets",
     );
+    // With `may`, a note passes the capability; the restart itself
+    // refuses it, as inspect runs no agent.
+    let out = env.cli(
+        Some(SUPERVISOR),
+        &["restart", &b.id, "inspect", "--note", "try again"],
+    );
+    assert!(
+        stderr(&out).contains("a note reaches only an agent stage's prompt; inspect runs none"),
+        "{out:?}"
+    );
+    assert!(!stderr(&out).contains("may not"), "{out:?}");
     assert_eq!(refusals(&env, ORCHARD), Vec::<String>::new());
 }
 
