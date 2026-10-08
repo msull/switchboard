@@ -384,6 +384,8 @@ struct SetCardText {
     /// The answer is an agent's final response: Markdown.
     rendered: bool,
     reason: Option<String>,
+    /// What the session asked, when it is not already the reason.
+    ask: Option<String>,
     agent: bool,
     state: CardState,
     running: bool,
@@ -424,6 +426,7 @@ fn set_card_text(cx: &DrawCtx<'_>, record: &SessionRecord) -> SetCardText {
     let reason = (state == CardState::WaitingOnYou)
         .then(|| cx.core.waiting_reason(record.id))
         .flatten();
+    let ask = cx.core.ask_beside_reason(record.id).map(str::to_owned);
     let mut parts = vec![kind_label(record.kind).to_owned()];
     parts.extend(conversation.and_then(|c| c.model.clone()));
     parts.push(file_name(&record.cwd));
@@ -434,6 +437,7 @@ fn set_card_text(cx: &DrawCtx<'_>, record: &SessionRecord) -> SetCardText {
         answer,
         rendered,
         reason,
+        ask,
         agent,
         state,
         running,
@@ -495,6 +499,7 @@ fn set_card(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord, rule_set:
         answer,
         rendered,
         reason,
+        ask,
         agent,
         state,
         running,
@@ -551,9 +556,9 @@ fn set_card(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord, rule_set:
             body.set_clip_rect(body_rect.intersect(ui.clip_rect()));
             {
                 let ui = &mut body;
-                if let Some(reason) = &reason {
+                for line in reason.iter().chain(&ask) {
                     ui.label(
-                        RichText::new(reason)
+                        RichText::new(line)
                             .text_style(theme::meta())
                             .color(p.accent_2_text),
                     );

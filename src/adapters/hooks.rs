@@ -69,12 +69,17 @@ struct LogLine {
     #[serde(default)]
     error: Option<String>,
     last_message: Option<String>,
+    /// Set by the helper on `UserPromptSubmit` alone; older lines lack it
+    /// and read as typed.
+    #[serde(default)]
+    injected: bool,
 }
 
 impl LogLine {
     fn into_event(self) -> Option<SessionEvent> {
         let kind = match self.event.as_str() {
             "SessionStart" => EventKind::SessionStart,
+            "UserPromptSubmit" if self.injected => EventKind::PromptInjected,
             "UserPromptSubmit" => EventKind::PromptSubmitted,
             "PostToolUse" | "PostToolUseFailure" => EventKind::ToolFinished,
             "PermissionRequest" => EventKind::PermissionRequested {
@@ -449,6 +454,28 @@ mod tests {
                 EventKind::SessionEnded {
                     reason: Some("other".into())
                 },
+            ]
+        );
+    }
+
+    #[test]
+    fn reads_an_injected_prompt_apart_from_a_typed_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut text = line(1, "UserPromptSubmit", ",\"injected\":true");
+        text.push_str(&line(2, "UserPromptSubmit", ",\"injected\":false"));
+        text.push_str(&line(3, "UserPromptSubmit", ""));
+        fs::write(dir.path().join(LOG_FILE), text).unwrap();
+        let kinds: Vec<EventKind> = HookLog::new(dir.path())
+            .poll()
+            .into_iter()
+            .map(|e| e.kind)
+            .collect();
+        assert_eq!(
+            kinds,
+            vec![
+                EventKind::PromptInjected,
+                EventKind::PromptSubmitted,
+                EventKind::PromptSubmitted,
             ]
         );
     }

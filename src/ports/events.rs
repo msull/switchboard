@@ -13,6 +13,9 @@ pub enum EventKind {
     SessionStart,
     PromptSubmitted,
     ToolFinished,
+    /// A turn started by a background task's notification or a harness
+    /// reminder, not by the owner.
+    PromptInjected,
     PermissionRequested {
         tool: Option<String>,
     },

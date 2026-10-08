@@ -192,8 +192,33 @@ fn project_limits<'a>(
             }
             supervisor_chip(cx, ui, project);
         });
+        supervisor_ask(cx, ui, project);
     }
     confirm_supervisor_fresh(cx, ui.ctx());
+}
+
+/// What the supervisor asked, uncut on a line of its own: the chip's
+/// row has no room for a question the owner must read to answer.
+fn supervisor_ask(cx: &mut DrawCtx<'_>, ui: &mut Ui, project: &ProjectView) {
+    let Some(chip) = cx.core.supervisor_chip(project) else {
+        return;
+    };
+    let (Some(id), Some(ask)) = (chip.session, chip.ask) else {
+        return;
+    };
+    let p = theme::palette(ui);
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing.x = 6.0;
+        ui.add(
+            egui::Label::new(
+                RichText::new(ask)
+                    .text_style(theme::meta())
+                    .color(p.accent_2_text),
+            )
+            .wrap(),
+        );
+        super::cards::dismiss_ask(cx, ui, id);
+    });
 }
 
 /// The project's supervisor: what it is doing, and Open, Resume, Trust
@@ -680,6 +705,11 @@ fn agent_card(cx: &mut DrawCtx<'_>, ui: &mut Ui, a: &WaitingAgent, ticket: Optio
                 )));
             });
             ui.label(RichText::new(&a.reason).color(p.accent_2_text));
+            // A permission prompt names itself as the reason; the
+            // question it asked still stands under it.
+            if let Some(ask) = cx.core.ask_beside_reason(a.session) {
+                ui.label(RichText::new(ask).color(p.accent_2_text));
+            }
             ui.horizontal(|ui| {
                 if cx.core.at_trust_prompt(a.session)
                     && theme::secondary(ui, "Trust this folder")

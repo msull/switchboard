@@ -97,8 +97,23 @@ fn build_line(event: &str, fields: &[(String, String)]) -> String {
         });
         push_opt(&mut out, value.as_deref());
     }
+    // Only the verdict is written: the prompt is the owner's text and
+    // never reaches the log.
+    if event == "UserPromptSubmit" {
+        let injected = get("prompt").is_some_and(is_injected);
+        let _ = write!(out, ",\"injected\":{injected}");
+    }
     out.push_str("}\n");
     out
+}
+
+/// A turn Claude Code started on its own: a background task's
+/// notification or a harness reminder, which arrive as prompts but are
+/// not the owner typing (see `spikes/17-prompt-origin`).
+fn is_injected(prompt: &str) -> bool {
+    const TAGS: [&str; 2] = ["<task-notification>", "<system-reminder>"];
+    let prompt = prompt.trim_start();
+    TAGS.iter().any(|tag| prompt.starts_with(tag))
 }
 
 fn push_opt(out: &mut String, value: Option<&str>) {
@@ -319,6 +334,32 @@ mod tests {
         assert!(line.contains("\"error\":\"rate_limit\""));
         assert!(line.contains("\"reason\":\"say \\\"hi\\\"\\n\""));
         assert!(line.contains(&format!("\"last_message\":\"{}\"", "x".repeat(200))));
+    }
+
+    #[test]
+    fn flags_a_prompt_the_owner_did_not_type() {
+        let line = |prompt: &str| {
+            build_line(
+                "UserPromptSubmit",
+                &[("prompt".to_string(), prompt.to_string())],
+            )
+        };
+        let typed = line("fix the secret-sauce bug");
+        assert!(typed.contains("\"injected\":false"));
+        assert!(!typed.contains("secret-sauce"));
+        let task = line("<task-notification>\n<task-id>b1</task-id> secret-sauce");
+        assert!(task.contains("\"injected\":true"));
+        assert!(!task.contains("secret-sauce"));
+        assert!(line("  <system-reminder>a file changed").contains("\"injected\":true"));
+        assert!(
+            build_line("UserPromptSubmit", &[]).contains("\"injected\":false"),
+            "a payload without a prompt reads as typed"
+        );
+        let other = build_line(
+            "Stop",
+            &[("prompt".to_string(), "<system-reminder>".into())],
+        );
+        assert!(!other.contains("injected"));
     }
 
     #[cfg(unix)]

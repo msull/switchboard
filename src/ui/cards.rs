@@ -242,7 +242,8 @@ pub fn session_card(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord) {
         if entry {
             super::runs::card_body(cx, ui, record);
         } else {
-            card_body(ui, record, model, reason, caption.as_deref());
+            let ask = cx.core.ask_beside_reason(record.id);
+            card_body(ui, record, model, reason, ask, caption.as_deref());
         }
         if !running && !entry && state == CardState::NotResumable {
             ui.label(
@@ -261,13 +262,14 @@ pub fn session_card(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord) {
 }
 
 /// The meta line and the body of an agent's or a shell's card: kind,
-/// model, and directory, then why the session waits and the pane's last
-/// line.
+/// model, and directory, then why the session waits and what it asked,
+/// or else the pane's last line.
 fn card_body(
     ui: &mut Ui,
     record: &SessionRecord,
     model: Option<String>,
     reason: Option<String>,
+    ask: Option<&str>,
     caption: Option<&str>,
 ) {
     let p = theme::palette(ui);
@@ -278,6 +280,25 @@ fn card_body(
     // The body: why the session waits, or else the excerpt, clamped to
     // two lines so the action row below keeps its place.
     let body_style = theme::excerpt();
+    if let Some(ask) = ask {
+        // A permission prompt can block the pane while the question
+        // stands; both are the owner's to answer.
+        if let Some(reason) = reason {
+            ui.add(
+                egui::Label::new(RichText::new(reason).small().color(p.accent_2_text)).truncate(),
+            );
+        }
+        let text = clamp_lines(ui, ask, &theme::meta(), 2);
+        ui.add(
+            egui::Label::new(
+                RichText::new(text)
+                    .text_style(theme::meta())
+                    .color(p.accent_2_text),
+            )
+            .wrap(),
+        );
+        return;
+    }
     if let Some(reason) = reason {
         let text = clamp_lines(ui, &reason, &theme::meta(), 2);
         ui.add(

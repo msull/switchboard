@@ -1119,8 +1119,10 @@ pub struct SessionRecord {
     pub waiting_on: Option<String>,
     /// What the session itself asked the owner with `switchboard-ask`,
     /// and when. Separate from `waiting_on`, which is Dispatch's, so
-    /// neither clears the other. Cleared by the owner's next prompt, a
-    /// dismiss, the session's `--clear`, or a new spawn.
+    /// neither clears the other. Cleared by a dismiss, the session's
+    /// `--clear`, a new spawn, or the owner's next prompt typed while no
+    /// turn is open; never by a task notification, a harness reminder or
+    /// a `session.send` (`docs/design.md`, "Asking the owner").
     #[serde(default)]
     pub asking: Option<Ask>,
     /// A launch effect was emitted for this record and has not reported

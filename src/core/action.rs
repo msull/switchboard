@@ -895,6 +895,16 @@ pub struct AppCore {
     /// no event says so. Transient; the shell reports them from the
     /// pane's text and the first hook event clears them.
     pub(super) prompted: Vec<RecordId>,
+    /// Asking sessions sent a prompt over `control.sock`: the next typed
+    /// prompt event is that send arriving, not the owner answering, so
+    /// it leaves the ask. Transient; a restart loses it.
+    pub(super) relayed: Vec<RecordId>,
+    /// Sessions whose `Working` came from a `SessionStart` outside a
+    /// turn (a launch, `/clear`, `/resume`): Claude Code waits at its
+    /// prompt with no turn open, and runs no `Stop` to say so (spike 17).
+    /// The next hook event that sets an activity drops the mark.
+    /// Transient; a restart loses it.
+    pub(super) started: Vec<RecordId>,
     /// Text to submit as the first prompt of a record's next launch,
     /// on its command line. Consumed by `launch_prepared`.
     pub(super) first_prompts: Vec<(RecordId, String)>,
@@ -1942,6 +1952,8 @@ impl AppCore {
         self.codex_queue.retain(|r| !gone(*r));
         self.quiet.retain(|r| !gone(*r));
         self.prompted.retain(|r| !gone(*r));
+        self.relayed.retain(|r| !gone(*r));
+        self.started.retain(|r| !gone(*r));
         if self.codex_pending.is_some_and(gone) {
             self.codex_pending = None;
         }
