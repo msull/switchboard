@@ -112,6 +112,10 @@ impl AppCore {
         // a tool's `session.send` is marked when it is sent.
         let typed = event.kind == EventKind::PromptSubmitted;
         let relayed = typed && self.relayed.contains(&id);
+        // A submitted prompt took whatever the input box held.
+        if typed {
+            self.typed.retain(|(r, ..)| *r != id);
+        }
         if relayed {
             self.relayed.retain(|r| *r != id);
         }

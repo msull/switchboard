@@ -47,6 +47,9 @@ dispatch events [--since <seq>] [--follow [--timeout <secs>]] [--ticket <id>]...
 dispatch brief <project>                          the project at a glance: tickets, what waits, recent events, the hand-off
 dispatch supervisor <project>                     the project's supervisor session: its id, age, seed, workspace
 dispatch wait <ticket> [--for decision|stage|pr|closed|move|any] [--since <seq>] [--timeout <secs>] [--json]
+dispatch subscribe <ticket> [--for move] [--since <seq>]   the runner types the ticket's moves into the supervisor's pane
+dispatch unsubscribe <ticket>                     stop that
+dispatch subscriptions <project>                  each subscription, what it has not delivered, and why it waits
 dispatch report <ticket> [--json]                 how a ticket went: stage time, review points, fix passes, size
 dispatch report --project <name> [--since YYYY-MM-DD] [--json]
 dispatch tail <ticket> [--lines N]                what the ticket's running agents show
@@ -381,11 +384,34 @@ return, arm the next from the seq of the last event line it printed;
 after `timed out`, from the same seq again. A decision raised between
 two watches is then returned, and one left pending does not come back.
 
+**Subscribe.** A supervisor in Switchboard does not watch at all:
+`dispatch subscribe <ticket> --since <seq>`, from the `follow from
+seq` that `brief` printed, has the runner type that ticket's moves
+(what `wait --for move` returns, and its park or close) into the
+supervisor's pane as its next prompt, once the pane is idle. Each
+delivery is a settled burst, as `wait` returns one, headed `Dispatch
+subscription: events on <tickets>`, with each line's seq and the
+`decide` line for a decision still pending. Nothing is re-armed. The
+subscription is on the project's record, so a fresh supervisor
+inherits it; a delivered close ends it, and `dispatch unsubscribe
+<ticket>` ends it sooner. Without `--since` it starts at the log's
+tail and replays nothing, and a park standing when it starts is not
+delivered. The runner types only when Switchboard says the pane is
+ready for a prompt: a running Claude Code session between turns, no
+permission prompt or trust question up, no answer of the owner's
+waiting, and no key typed into its embedded terminal in the last
+minute. `dispatch subscriptions <project>` lists each subscription,
+how many lines it has not delivered, a delivery in flight, and why
+deliveries wait (busy, at a prompt, the owner typing, not running,
+or an app too old to know `session.prompt`). In a pane outside
+Switchboard nothing is typed, so a watch is still the way.
+
 **Brief.** `dispatch brief <project>` is what a supervisor reads
 first: its own session's line, the project's open tickets with stage
 and state, what waits on the owner with the `decide` line for each,
-the last 20 events with the seq to follow from, the open worktrees,
-and the supervisor's hand-off. It reads and changes nothing.
+the last 20 events with the seq to follow from, its subscriptions with
+the lines each has not delivered, the open worktrees, and the
+supervisor's hand-off. It reads and changes nothing.
 
 ### Supervisor sessions
 
@@ -398,8 +424,9 @@ hand-off file, which it keeps current for the next supervisor.
 
 A command run from a supervisor's session is the supervisor's: the
 session's `SWITCHBOARD_RECORD_ID` names it. It may run the read-only
-commands, `take` and `queue` on its own project, and `decide`, `park`,
-`resume --no-rerun` and `close` on its own project's tickets. A plain
+commands, `take`, `queue` and `subscriptions` on its own project, and
+`decide`, `park`, `resume --no-rerun`, `close`, `subscribe` and
+`unsubscribe` on its own project's tickets. A plain
 `resume` (which reruns, a paid run) needs `rerun` in `decides`.
 Everything else is refused with exit 1: `run`, `restart` and `runner`
 (each unless `may` lists it), `worktrees <path>` and `--migrate`,

@@ -23,7 +23,7 @@ use crate::ticket::{ProjectState, Ticket};
 /// carried a version reads as 0 and is brought up by `migrate`. A
 /// record above it was written by a newer `dispatch` and is refused
 /// both ways, so this build never drops fields it does not know.
-pub const RECORD_VERSION: u32 = 23;
+pub const RECORD_VERSION: u32 = 24;
 
 /// A lock file held while this lives: the writer lock, the runner's
 /// claim, or a ticket's close.
@@ -574,6 +574,14 @@ pub fn migrate(mut value: Value) -> Value {
         // from its serde default. Nothing is transformed. A build that
         // would drop it on its next write must refuse the record, or a
         // held restart would lose the owner's note for the next agent.
+        //
+        // 23 to 24: a project's supervision gains `subscriptions`,
+        // `delivery`, `delivery_waits` and `delivery_waits_ms`, empty and
+        // absent from their serde defaults. Nothing is transformed. A
+        // build that would drop them on its next write must refuse the
+        // record, or a supervisor would stop hearing of its tickets, and
+        // a delivery whose reply was lost would be typed again under a
+        // new op.
         if version == 1 {
             settle_from_verdicts(&mut value);
         }
@@ -938,6 +946,24 @@ mod tests {
         assert_eq!(ps.version, RECORD_VERSION);
         assert_eq!(ps.base_tree, None);
         assert_eq!(ps.queue, ["a1b2c3d4"]);
+    }
+
+    #[test]
+    fn a_version_twenty_three_project_reads_with_no_subscriptions() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("p.json");
+        let text = PROJECT_V0.replacen(
+            '{',
+            r#"{"version": 23, "supervisor": {"current": {"session": "s-1", "seed_hash": "h", "created_ms": 1}},"#,
+            1,
+        );
+        fs::write(&project, text).unwrap();
+        let ps = read_project(&project).unwrap();
+        assert_eq!(ps.version, RECORD_VERSION);
+        assert!(ps.supervisor.subscriptions.is_empty());
+        assert_eq!(ps.supervisor.delivery, None);
+        assert_eq!(ps.supervisor.delivery_waits, None);
+        assert_eq!(ps.supervisor.current.unwrap().session, "s-1");
     }
 
     #[test]

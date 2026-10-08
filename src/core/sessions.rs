@@ -389,7 +389,7 @@ impl AppCore {
     /// Whether the pane sits at its prompt between turns, where a line
     /// typed into it starts the next turn. A permission prompt or a
     /// failed stop is not: keys there would answer the dialog.
-    fn between_turns(&self, id: RecordId) -> bool {
+    pub(super) fn between_turns(&self, id: RecordId) -> bool {
         self.is_running(id)
             && self.session(id).is_some_and(|s| match s.activity {
                 Activity::Idle => true,

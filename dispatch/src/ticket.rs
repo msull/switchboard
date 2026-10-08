@@ -1471,6 +1471,63 @@ pub struct Supervision {
     /// allow them, newest last; only the last `REFUSALS_KEPT`.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub refusals: Vec<Refusal>,
+    /// Tickets whose events the runner types into the supervisor's pane.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub subscriptions: Vec<Subscription>,
+    /// The delivery written before it is sent and cleared by its reply.
+    /// It is kept apart from `op` so a delivery never blocks a Fresh's
+    /// creations, and the reverse.
+    pub delivery: Option<Delivery>,
+    /// Why the last delivery offered was not typed: the session's
+    /// `prompt_refusal` or the failure, for `dispatch subscriptions`.
+    /// Cleared by a typed delivery.
+    pub delivery_waits: Option<String>,
+    /// When `delivery_waits` last changed, or the app last refused
+    /// `session.prompt` as unknown, in Unix ms.
+    pub delivery_waits_ms: u64,
+}
+
+/// One ticket a supervisor follows: the runner types its settled bursts
+/// into the supervisor's pane.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Subscription {
+    /// The ticket's id.
+    pub ticket: String,
+    /// The `--for` word; only `move` for now.
+    pub what: String,
+    /// The last seq delivered, or the log's tail when subscribed.
+    pub since: u64,
+    /// The Switchboard record id or `owner` that subscribed; for the
+    /// reader only.
+    pub by: String,
+    /// When it was subscribed, in Unix ms.
+    pub at_ms: u64,
+    /// The supervisor already has the ticket's standing park: delivered,
+    /// or standing when it subscribed. Cleared on a pass that reads the
+    /// ticket as not parked. A park with no line of its own is made up
+    /// from the record with seq 0 and the record's `updated_ms`, which
+    /// every write moves, so neither its seq nor its time can mark it.
+    pub park_seen: bool,
+}
+
+/// One delivery to the supervisor's pane, written before its
+/// `session.prompt` is sent and settled by the reply.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Delivery {
+    /// The request's op, sent again unchanged after a lost reply.
+    pub op: String,
+    /// The supervisor session it was typed into.
+    pub session: String,
+    /// What was typed: the header, each line, and the closing line.
+    pub text: String,
+    /// Each ticket in `text` and the highest seq of its lines there.
+    pub through: Vec<(String, u64)>,
+    /// Tickets whose close is in `text`: their subscription ends.
+    pub closes: Vec<String>,
+    /// Tickets whose park is in `text`: their `park_seen` is set.
+    pub parks: Vec<String>,
+    /// When it was written, in Unix ms.
+    pub at_ms: u64,
 }
 
 /// How many refused commands a project's supervision keeps.

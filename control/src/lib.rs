@@ -312,6 +312,15 @@ pub enum Body {
     // --- commands: non-replayable
     #[serde(rename = "session.send")]
     SessionSend { session: String, text: String },
+    /// Type `text` into the session's pane only if it is ready for a
+    /// prompt: a running Claude Code agent between turns, with no answer
+    /// of the owner's waiting and no keys of the owner's lately. The
+    /// check and the typing are one step in the app; a refusal is a
+    /// `Failed` reply naming the reason (`SessionView::prompt_refusal`).
+    /// A method of its own rather than a flag on `session.send`, so an
+    /// app that does not know it refuses the line instead of typing.
+    #[serde(rename = "session.prompt")]
+    SessionPrompt { session: String, text: String },
     /// Resume an agent's conversation from its resume handle, with no
     /// terminal opened. A running pane is left alone, and a session that
     /// cannot be resumed is refused: it never launches fresh. Never
@@ -412,6 +421,7 @@ impl Body {
                 action: RunnerVerb::Restart,
             }
             | Self::SessionSend { .. }
+            | Self::SessionPrompt { .. }
             | Self::SessionResume { .. }
             | Self::WorkflowContinue { .. }
             | Self::WorkflowObject { .. } => Class::NonReplayable,
@@ -627,6 +637,10 @@ pub struct SessionView {
     /// comes before any hook and which `session.trust` answers.
     #[serde(default)]
     pub trust_question: bool,
+    /// Why a `session.prompt` now would be refused, or `None` when it
+    /// would type. An older app omits it.
+    #[serde(default)]
+    pub prompt_refusal: Option<String>,
     /// The provider's session id, once the agent has one.
     pub resume_id: Option<String>,
     pub op: Option<String>,
@@ -883,6 +897,7 @@ mod tests {
             waiting: false,
             waiting_reason: None,
             trust_question: false,
+            prompt_refusal: None,
             resume_id: Some("uuid".into()),
             op: Some("op-1".into()),
         }
@@ -1145,6 +1160,24 @@ mod tests {
             .class(),
             Class::NonReplayable
         );
+        // A conditional send types as a send does: never repeated.
+        let req = Request::parse(r#"{"op":"q","kind":"session.prompt","session":"s","text":"hi"}"#)
+            .unwrap();
+        assert_eq!(
+            req.body,
+            Body::SessionPrompt {
+                session: "s".into(),
+                text: "hi".into()
+            }
+        );
+        assert_eq!(req.body.class(), Class::NonReplayable);
+        assert_eq!(req.body.kind(), "session.prompt");
+        round_trip_request(req.body);
+        // A view from an older app has no refusal, which reads as none.
+        let mut line = serde_json::to_value(session()).unwrap();
+        line.as_object_mut().unwrap().remove("prompt_refusal");
+        let view: SessionView = serde_json::from_value(line).unwrap();
+        assert_eq!(view.prompt_refusal, None);
         // A resume starts a paid turn: recovery never repeats it.
         assert_eq!(
             Body::SessionResume {

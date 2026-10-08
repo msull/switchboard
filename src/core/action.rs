@@ -379,6 +379,12 @@ pub enum AppAction {
         id: RecordId,
         text: String,
     },
+    /// The owner pressed a key in the session's embedded terminal: a
+    /// draft may be in its input box, so `session.prompt` holds off for
+    /// `TYPED_HOLD`. Transient; nothing is saved.
+    InputTyped {
+        id: RecordId,
+    },
     /// Send Escape to the session's terminal, which stops an agent's
     /// current turn without leaving the conversation view.
     Interrupt(RecordId),
@@ -815,6 +821,10 @@ pub(crate) const UNDO_WINDOW: Duration = Duration::from_secs(10);
 /// `ENV_SETUP_LOCKED` and the settings menu's Unlock label both say this
 /// length in words; change them with it.
 pub const ENV_SETUP_WINDOW: Duration = Duration::from_mins(5);
+/// How long a key typed into a session's embedded terminal holds off
+/// `session.prompt`, unless a submitted prompt clears it first: a
+/// draft the owner left longer than this is pasted over.
+pub const TYPED_HOLD: Duration = Duration::from_mins(1);
 /// Why `switchboard-env`'s setup commands are refused outside the window.
 pub const ENV_SETUP_LOCKED: &str = "environment setup is locked: choose Unlock environment setup in Switchboard's settings menu, then run this again within five minutes";
 /// How far back a rule set may look, in hours: an hour to a month.
@@ -921,6 +931,11 @@ pub struct AppCore {
     /// The next hook event that sets an activity drops the mark.
     /// Transient; a restart loses it.
     pub(super) started: Vec<RecordId>,
+    /// When the owner last typed into each session's embedded terminal,
+    /// or a `session.prompt` typed into it, by wall clock, and whether
+    /// it was the prompt: the input box may hold text until `TYPED_HOLD`
+    /// passes or a prompt is submitted. Transient; a restart loses it.
+    pub(super) typed: Vec<(RecordId, SystemTime, bool)>,
     /// Text to submit as the first prompt of a record's next launch,
     /// on its command line. Consumed by `launch_prepared`.
     pub(super) first_prompts: Vec<(RecordId, String)>,
@@ -1096,6 +1111,7 @@ impl AppCore {
             | AppAction::MoveCard { .. }
             | AppAction::ReturnToSession(_)
             | AppAction::SendInput { .. }
+            | AppAction::InputTyped { .. }
             | AppAction::Interrupt(_)
             | AppAction::KillSession(_)
             | AppAction::RemoveSession(_)
@@ -1192,6 +1208,11 @@ impl AppCore {
                     self.edit_session(id, out, |s| s.discard = None);
                 }
                 self.aim_at_pane(id, out, |host| Effect::SendInput { host, text });
+            }
+            AppAction::InputTyped { id } => {
+                if self.session(id).is_some() {
+                    self.mark_typed(id, now.wall, false);
+                }
             }
             AppAction::Interrupt(id) => self.aim_at_pane(id, out, |host| Effect::SendKeys {
                 host,
@@ -1974,6 +1995,7 @@ impl AppCore {
         self.prompted.retain(|r| !gone(*r));
         self.relayed.retain(|r| !gone(*r));
         self.started.retain(|r| !gone(*r));
+        self.typed.retain(|(r, ..)| !gone(*r));
         if self.codex_pending.is_some_and(gone) {
             self.codex_pending = None;
         }

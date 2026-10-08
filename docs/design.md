@@ -2232,6 +2232,28 @@ long-lived Claude Code session that watches its tickets
   agent's conversation with no terminal, leaves a running pane alone,
   and refuses a session that cannot resume rather than launching it
   fresh (`ControlAction::Resume`).
+- The control port's `session.prompt` (non-replayable): `session.send`
+  only when `AppCore::ready_for_prompt` allows it, checked and typed in
+  one dispatch (`ControlAction::Prompt`), else a `Failed` naming the
+  reason, which `SessionView.prompt_refusal` also reports. A key into a
+  session's embedded terminal dispatches `AppAction::InputTyped`, a
+  transient mark a submitted prompt clears. Dispatch's subscriptions
+  deliver through it.
+- A supervisor subscribes to its tickets (`dispatch subscribe`), and
+  the runner types each settled burst into its pane through
+  `session.prompt`, which the core refuses unless
+  `AppCore::ready_for_prompt` holds: a running Claude Code agent
+  between turns by the same `between_turns` an owner's queued answer
+  waits for, no trust question, no answer waiting, and no key typed
+  into its embedded terminal within `TYPED_HOLD` (60 s) or since
+  before its last submitted prompt, nor a `session.prompt` typed and
+  not yet submitted (refused as "a prompt is being submitted", so the
+  wait is not blamed on the owner). The check and the typing are one
+  dispatch, and `SessionView.prompt_refusal` reports the same verdict
+  so Dispatch asks with a query before it writes. A lost reply is sent
+  again under the same op and answered from the operations log. The
+  app keeps no queue: Dispatch's cursor is the queue, offered once a
+  pass, so a delivery lands on the first pass after the `Stop`.
 - Dispatch's port: `supervisor-fresh` writes the intent the runner's
   next pass carries out; `ProjectView.supervisor` is the chip's data.
 - The Dispatch page: a chip after each project's limits, `Supervisor ·
@@ -2252,9 +2274,24 @@ long-lived Claude Code session that watches its tickets
 
 Known gaps:
 
-- Nothing wakes an idle supervisor: a `session.send` costs money and
-  cannot be replayed, so it follows the log with `events --follow
-  --timeout` in a loop.
+- Keys typed into an outside terminal attached to the supervisor's
+  tmux session are invisible to the typed mark.
+- A draft left in the embedded terminal past `TYPED_HOLD` is still in
+  Claude Code's input box: the delivery is pasted after it and both go
+  in as one prompt, which arrives as the owner's `PromptSubmitted`, so
+  the half-typed text reaches the agent and clears an ask as if the
+  owner had sent it.
+- After an Esc interrupt no `Stop` comes, so the pane reads busy and a
+  delivery waits for the owner's next prompt and its `Stop`; after a
+  `StopFailed` (a rate limit) it reads at a prompt until the next turn.
+- A Fresh while a delivery is in flight drops it unsent and gives the
+  new supervisor the same lines, which the old one may also have seen.
+- An app that dies after typing a delivery and before writing its
+  reply line has no record of the op, so the resend types it again;
+  each line carries its seq.
+- `deliver_answer` does not read the typed mark: an owner's answer
+  given between a delivery being typed and its `PromptSubmitted` can be
+  typed behind it, as with any `session.send`.
 - Setup runs unconfined and under the writer lock, as a lane's setup
   does.
 - With a non-default `DISPATCH_DATA_DIR`, the supervisor's commands

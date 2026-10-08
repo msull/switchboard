@@ -1448,6 +1448,22 @@ pub(super) fn live_pane(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecor
         .set_size(size);
     let response = ui.add(view);
     term.widget_id = Some(response.id);
+    // A key into the pane may leave a draft in the agent's input box,
+    // which no hook reports; the core holds deliveries off for a while.
+    let typed = response.has_focus()
+        && ui.input(|i| {
+            i.events.iter().any(|e| {
+                matches!(
+                    e,
+                    egui::Event::Text(_)
+                        | egui::Event::Paste(_)
+                        | egui::Event::Key { pressed: true, .. }
+                )
+            })
+        });
+    if typed {
+        cx.dispatch(AppAction::InputTyped { id: record.id });
+    }
 }
 
 #[cfg(test)]
