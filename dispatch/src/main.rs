@@ -161,8 +161,19 @@ fn command(args: &[&str]) -> Result<()> {
         ["resume", ticket, "--no-rerun"] => resume(ticket, false),
         ["close", ticket] => close(ticket, None),
         ["close", ticket, "--reason", reason] => close(ticket, Some(reason)),
-        ["restart", ticket] => restart(ticket, None),
-        ["restart", ticket, stage] => restart(ticket, Some(stage)),
+        ["restart", ticket, stage @ ..] if stage.len() <= 1 => {
+            restart(ticket, stage.first().copied(), None)
+        }
+        [
+            "restart",
+            ticket,
+            stage @ ..,
+            flag @ ("--note" | "--file"),
+            value,
+        ] if stage.len() <= 1 => {
+            let note = note_arg(ticket, flag, value)?;
+            restart(ticket, stage.first().copied(), Some(&note))
+        }
         ["worktrees", rest @ ..] => worktrees(rest),
         ["events", rest @ ..] => events(rest),
         ["wait", rest @ ..] => wait(rest),
@@ -465,12 +476,22 @@ fn resume(ticket: &str, rerun: bool) -> Result<()> {
     Ok(())
 }
 
+/// The note a trailing `--note <text>` or `--file <path>` gives: the
+/// text itself, or the file read under the ticket's rules for notes.
+fn note_arg(ticket: &str, flag: &str, value: &str) -> Result<String> {
+    if flag == "--file" {
+        offline_runner()?.note_from_file(ticket, Path::new(value))
+    } else {
+        Ok(value.to_owned())
+    }
+}
+
 /// Restart a ticket through Switchboard, as a park would run: its
 /// processes are read back as gone before anything moves, so this takes
 /// the real port.
-fn restart(ticket: &str, stage: Option<&str>) -> Result<()> {
+fn restart(ticket: &str, stage: Option<&str>, note: Option<&str>) -> Result<()> {
     let mut runner = runner()?;
-    let t = runner.restart(ticket, stage, now_ms())?;
+    let t = runner.restart(ticket, stage, note, now_ms())?;
     let standing = if matches!(t.state, TicketState::Parking { .. }) {
         "restarting (the runner finishes it on its next pass)".to_owned()
     } else {
@@ -489,6 +510,13 @@ fn restart(ticket: &str, stage: Option<&str>) -> Result<()> {
         return Ok(());
     };
     say!("  at {} from {}, under {}", r.to, r.from, r.after.display());
+    if let Some(line) = r
+        .note
+        .as_deref()
+        .and_then(|n| n.lines().find(|l| !l.trim().is_empty()))
+    {
+        say!("  note: {}", line.trim());
+    }
     for (stage, n) in &r.discarded {
         say!("  discarded {stage}/{n}");
     }

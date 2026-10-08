@@ -110,7 +110,9 @@ pub const USAGE: &str = "usage:
   dispatch park <ticket> [--reason <text>]  a ticket's work stopped, its questions withdrawn; resume brings it back
   dispatch resume <ticket> [--no-rerun]    a parked ticket back to active; what the park cancelled runs again
   dispatch close <ticket> [--reason <text>]  a ticket closed, its trees removed (its branches are kept; close lists them)
-  dispatch restart <ticket> [<stage>]      a ticket at its stage, or an earlier one, under the live pipeline; later work discarded
+  dispatch restart <ticket> [<stage>] [--note <text> | --file <path>]
+                                           a ticket at its stage, or an earlier one, under the live pipeline; later work
+                                           discarded; a note goes to the stage's next agent, which runs without asking
   dispatch worktrees [<path>] [--migrate]  where tickets' trees go (default ~/.dispatch/worktrees);
                                            with a path, set it; --migrate moves idle tickets' trees there
 

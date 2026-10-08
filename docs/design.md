@@ -1907,7 +1907,7 @@ line naming the holder, which writes `pid <n>: <command>` into the
 lock file. Gap: fetches, lane setup, rebases, port calls and PR reads
 on active tickets still run under a step's lock.
 
-`dispatch restart <ticket> [<stage>]` (`src/restart.rs`) gives a
+`dispatch restart <ticket> [<stage>] [--note <text> | --file <path>]` (`src/restart.rs`) gives a
 ticket a fixed pipeline: it puts the ticket at its stage, or an earlier
 one, under a fresh copy of the live file (`pipeline.<n>.toml`, the
 first copy never rewritten), with stages mapped by name. The target
@@ -1926,12 +1926,28 @@ is saved as it lands, and a refusal holds the restart parked with its
 intent, which `resume` will not drop. A lane whose `setup` changed runs
 it again, before a `check` answer's checks too, failing the checks
 rather than parking. No agent of the stage launches until its `rerun`
-question is answered, and attempts whose checks may be run again under
-the new copy are offered `check`. Gaps: no port body or Switchboard
-button yet (the CLI only); a ranged restart asks `rerun` again at each
-later agent stage it reaches, since those attempts are discarded too;
-and a ticket without entries can be restarted earlier only where no
-branch moved after the target.
+question is answered, unless the restart gave `--note`: the note is the
+answer, so the agent launches without asking and `check` is not
+offered. Without a note, attempts whose checks may be run again under
+the new copy are offered `check`. A note (record version 23, on the
+intent and the restart) is put on `rework` for each context the target
+ran in, with where that context's latest attempt left its notes, and
+the discarded attempt's reason quotes it so a `rerun` answer after a
+park puts it back. A ticket from pull requests takes a ranged restart
+only when every branch already stands at its target head, so nothing
+is reset; a moved branch refuses it, and a reset is never run on one.
+An active ticket keeps its holds through the restart except one a
+deleted secret was made under, so it deploys again as a parked one
+does, and the note waits for the tester. Gaps: no port body or
+Switchboard button yet (the CLI only); a ranged restart asks `rerun`
+again at each later agent stage it reaches, since those attempts are
+discarded too; a ticket without entries can be restarted earlier only
+where no branch moved after the target; a note on a never-run stage is
+refused rather than held for its first attempt; a code review stage
+takes no restart note; and a park before the agent launches keeps the
+note only through a completed attempt's discard reason, so the note on
+a failed or park-cancelled attempt at the current stage is lost to that
+park.
 
 ## Global workspace status (2026-10-01)
 

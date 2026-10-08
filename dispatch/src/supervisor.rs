@@ -229,7 +229,7 @@ fn capability_sections(out: &mut String, runner: bool, restart: bool, exe_text: 
         let _ = write!(
             out,
             "## Restarts\n\nYou may restart one of this project's tickets with \
-             `{exe_text} restart <ticket> [<stage>]`, and only when the owner named that ticket \
+             `{exe_text} restart <ticket> [<stage>] [--note <text> | --file <path>]`, and only when the owner named that ticket \
              for a restart, or when the ticket was handed to you to take to done and its pull \
              request at `merge` cannot merge because it conflicts. A restart of a ticket that \
              is running a deploy is refused; retry it when that stage ends, never ask the owner \
@@ -625,26 +625,40 @@ pub fn permit(actor: &Actor, args: &[&str], data: &DataDir) -> Result<()> {
             // command reports without a refusal to save.
             _ => Ok(()),
         },
-        Some(Rule::Restart) => match args {
-            [capability, ticket, stage @ ..] if stage.len() <= 1 => {
-                own_ticket(ticket)?;
-                if may(data, own).iter().any(|m| m == capability) {
-                    Ok(())
-                } else {
-                    Err(CapabilityRefused {
-                        project: own.clone(),
-                        capability: (*capability).to_owned(),
-                        action: args[1..].join(" "),
+        // A note rides along without changing what is restarted, so
+        // the capability is checked on what is left.
+        Some(Rule::Restart) => {
+            let target = restart_target(args);
+            match target {
+                [capability, ticket, stage @ ..] if stage.len() <= 1 => {
+                    own_ticket(ticket)?;
+                    if may(data, own).iter().any(|m| m == capability) {
+                        Ok(())
+                    } else {
+                        Err(CapabilityRefused {
+                            project: own.clone(),
+                            capability: (*capability).to_owned(),
+                            action: target[1..].join(" "),
+                        }
+                        .into())
                     }
-                    .into())
                 }
+                // A malformed restart is the usage error's, never saved.
+                _ => Ok(()),
             }
-            // A malformed restart is the usage error's, never saved.
-            _ => Ok(()),
-        },
+        }
         Some(Rule::Worktrees) if args.len() == 1 => Ok(()),
         Some(Rule::Supervisor) if args.len() == 2 => Ok(()),
         Some(Rule::Worktrees | Rule::Supervisor) => Err(refused(&args.join(" "))),
+    }
+}
+
+/// A restart's arguments without a trailing `--note <text>` or
+/// `--file <path>`, which say nothing about what is restarted.
+fn restart_target<'a, 'b>(args: &'a [&'b str]) -> &'a [&'b str] {
+    match args {
+        [rest @ .., "--note" | "--file", _] => rest,
+        _ => args,
     }
 }
 
@@ -1153,7 +1167,9 @@ mod tests {
         sup.may = vec!["restart".into()];
         let s = seed_of(&sup);
         assert!(
-            s.contains("`/opt/bin/dispatch restart <ticket> [<stage>]`"),
+            s.contains(
+                "`/opt/bin/dispatch restart <ticket> [<stage>] [--note <text> | --file <path>]`"
+            ),
             "{s}"
         );
         assert!(s.contains("say what you restarted"), "{s}");
