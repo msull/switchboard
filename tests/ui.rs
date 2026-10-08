@@ -1628,6 +1628,23 @@ fn seed_claude(harness: &mut Harness<'static, SwitchboardApp>, ids: &Seeded) -> 
 /// Mark `id` as asking the owner `message`, as `switchboard-ask` would,
 /// keeping every pane's status as it was.
 fn seed_ask(harness: &mut Harness<'static, SwitchboardApp>, id: RecordId, message: &str) {
+    seed_ask_with(harness, id, message, |_| {});
+}
+
+/// An ask that a permission prompt blocks the pane on top of.
+fn seed_blocked_ask(harness: &mut Harness<'static, SwitchboardApp>, id: RecordId, message: &str) {
+    seed_ask_with(harness, id, message, |s| {
+        s.activity = Activity::WaitingOnYou;
+        s.activity_reason = Some("permission for Bash".into());
+    });
+}
+
+fn seed_ask_with(
+    harness: &mut Harness<'static, SwitchboardApp>,
+    id: RecordId,
+    message: &str,
+    edit: impl FnOnce(&mut SessionRecord),
+) {
     let core = harness.state_mut().core_mut_for_seeding();
     let mut workspaces = core.workspaces().to_vec();
     let host: Vec<HostStatus> = workspaces
@@ -1639,11 +1656,14 @@ fn seed_ask(harness: &mut Harness<'static, SwitchboardApp>, id: RecordId, messag
         .iter_mut()
         .flat_map(|w| &mut w.sessions)
         .find(|s| s.id == id)
-        .unwrap()
-        .asking = Some(Ask {
-        message: message.into(),
-        at: SystemTime::now(),
-    });
+        .map(|s| {
+            s.asking = Some(Ask {
+                message: message.into(),
+                at: SystemTime::now(),
+            });
+            edit(s);
+        })
+        .unwrap();
     core.seed(workspaces, host);
     harness.run_steps(2);
 }
@@ -1661,6 +1681,37 @@ fn a_board_card_shows_a_sessions_question_and_dismisses_it() {
     click(&mut harness, "Dismiss question");
     assert_eq!(actions(&harness), [AppAction::DismissAsk(id)]);
     assert_eq!(harness.state().core().session(id).unwrap().asking, None);
+}
+
+/// A permission prompt on top of a question: the card names both.
+#[test]
+fn a_board_card_shows_a_question_beside_a_permission_prompt() {
+    let (mut harness, ids) = harness();
+    let id = seed_claude(&mut harness, &ids);
+    seed_blocked_ask(&mut harness, id, "merge now?");
+    showing(&mut harness, View::Board(ids.beta));
+    harness.get_by_label("permission for Bash");
+    harness.get_by_label("merge now?");
+}
+
+/// The session page shows the whole question with its dismiss, which
+/// the title row's state text has no room for.
+#[test]
+fn the_session_page_shows_a_sessions_question_and_dismisses_it() {
+    let (mut harness, ids) = harness();
+    let id = seed_claude(&mut harness, &ids);
+    let message = "merge now, or run the full checks first and wait for the base pipeline?";
+    seed_ask(&mut harness, id, message);
+    showing(&mut harness, View::Session(id));
+    harness.get_by_label(message);
+    harness.state_mut().dispatched.clear();
+    click(&mut harness, "Dismiss question");
+    assert!(
+        actions(&harness).contains(&AppAction::DismissAsk(id)),
+        "{:?}",
+        actions(&harness)
+    );
+    assert!(harness.query_by_label(message).is_none());
 }
 
 fn two_turns() -> Conversation {
@@ -3028,6 +3079,16 @@ fn a_rule_set_card_is_dismissed_from_its_corner() {
     );
     assert!(harness.state().core().rule_members(set).is_empty());
     harness.get_by_label("No session active in the last 24 h");
+}
+
+/// A set card blocked at a permission prompt still shows the question.
+#[test]
+fn a_working_set_card_shows_a_question_beside_a_permission_prompt() {
+    let (mut harness, ids) = harness();
+    let (_, id) = recent_set_of_one(&mut harness, &ids);
+    seed_blocked_ask(&mut harness, id, "merge now?");
+    harness.get_by_label("permission for Bash");
+    harness.get_by_label("merge now?");
 }
 
 /// A running set card whose session asked shows the question and its
@@ -4903,6 +4964,41 @@ fn the_supervisor_chip_shows_what_the_supervisor_asked() {
     harness.get_by_label("merge #12 now?");
 }
 
+/// A long question is not cut to fit the chip's row: it has a line of
+/// its own, with its dismiss.
+#[test]
+fn the_supervisor_ask_has_its_own_uncut_line() {
+    let message = "the client project's pipeline failed on lane two; rerun it, merge lane one \
+                   alone, or wait for the base pipeline to finish first?";
+    let (mut harness, id) = supervised_page(|r| {
+        r.asking = Some(Ask {
+            message: message.into(),
+            at: SystemTime::now(),
+        });
+    });
+    harness.set_size(egui::vec2(700.0, 900.0));
+    harness
+        .state_mut()
+        .dispatch(AppAction::HostListed(vec![HostStatus {
+            id: HostId(id.host_name()),
+            liveness: Liveness::Running {
+                pid: 9,
+                command: "claude".into(),
+            },
+            cwd: None,
+            last_activity: None,
+            title: None,
+        }]));
+    harness.run_steps(2);
+    harness.get_by_label(message);
+    click(&mut harness, "Dismiss question");
+    assert!(
+        actions(&harness).contains(&AppAction::DismissAsk(id)),
+        "{:?}",
+        actions(&harness)
+    );
+}
+
 /// Resume on a record that cannot resume would launch it fresh, with
 /// its first prompt again; only Fresh is offered.
 #[test]
@@ -5484,6 +5580,45 @@ fn dispatch_page_shows_a_lane_agents_question_and_dismisses_it() {
     click(&mut harness, "Dismiss question");
     assert!(actions(&harness).contains(&AppAction::DismissAsk(session)));
     assert!(harness.query_by_label("implement (repo) agent").is_none());
+}
+
+/// A lane agent at a permission prompt still shows what it asked.
+#[test]
+fn dispatch_page_shows_a_lane_agents_question_beside_a_permission_prompt() {
+    use switchboard::ports::dispatch::AttemptView;
+    let (mut harness, ids) = harness();
+    let session = ids.agent;
+    harness
+        .state_mut()
+        .dispatch(AppAction::HostListed(vec![HostStatus {
+            id: HostId(session.host_name()),
+            liveness: Liveness::Running {
+                pid: 7,
+                command: "codex".into(),
+            },
+            cwd: None,
+            last_activity: None,
+            title: None,
+        }]));
+    let mut status = dispatch_status();
+    status.tickets[1].attempts = vec![AttemptView {
+        stage: "implement".into(),
+        n: 1,
+        context: "repo".into(),
+        kind: "agent".into(),
+        state: "running".into(),
+        session: Some(session.0.to_string()),
+        ..AttemptView::default()
+    }];
+    harness
+        .state_mut()
+        .dispatch(AppAction::DispatchStatus(Some(status)));
+    seed_blocked_ask(&mut harness, session, "which schema?");
+    click(&mut harness, "Dispatch");
+    harness.get_by_label("implement (repo) agent");
+    harness.get_by_label("permission for Bash");
+    harness.get_by_label("which schema?");
+    harness.get_by_label("Dismiss question");
 }
 
 /// The worktree root is shown, and a typed path goes to the port with

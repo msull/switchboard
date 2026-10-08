@@ -2527,12 +2527,51 @@ Schema v14.
   controller even after a Dispatch status has arrived (it is not
   Dispatch's decision). The message is the waiting reason on the board
   card, the working-set card (which now reads `waiting_reason` like the
-  board), a lane agent's card on the Dispatch page, the port's
-  `SessionView.waiting_reason`, and beside the supervisor chip.
-- **Clearing it.** The record's next `UserPromptSubmit` event later than
-  the ask (a prompt from the turn that asked does not count), the
-  cards' "Dismiss question" (`DismissAsk`, the session is not told), the
-  session's own `--clear`, or any new spawn of the record.
+  board), a lane agent's card on the Dispatch page, and the port's
+  `SessionView.waiting_reason`. `AppCore::standing_ask` gives the whole
+  message while the pane runs, and the surfaces read it so the ask is
+  never hidden behind a reason that blocks the pane on top of it. The
+  session page shows it whole on a wrapped line under the header with
+  "Dismiss question", and the supervisor's ask has a wrapped line of
+  its own under its project's row (`SupervisorChip.ask`; the chip's
+  `reason` is `None` when it is the ask). The board card, the
+  working-set card and the lane agent's card show it under a waiting
+  reason that differs ("permission for Bash"), through
+  `AppCore::ask_beside_reason`, which is `None` when the reason already
+  is the ask; the board card clamps it to two lines and the working-set
+  card to its body, so the whole question is on the session page.
+- **Clearing it.** The owner's next typed prompt, sent while no turn is
+  open and later than the ask (a prompt from the turn that asked does
+  not count), the cards' "Dismiss question" (`DismissAsk`, the session
+  is not told), the session's own `--clear`, or any new spawn of the
+  record. What does not clear it:
+  - A background task's notification or a harness reminder. Where
+    Claude Code runs `UserPromptSubmit` for these, the tagged text is the
+    `prompt`. The helper writes `"injected": true` on the line when the
+    prompt, less leading whitespace, starts with `<task-notification>`
+    or `<system-reminder>` (spike 17: the payload has no field naming
+    the origin), and the adapter reads that as `PromptInjected`, which
+    sets the session working and leaves the ask. The prompt itself is
+    never written.
+  - A prompt the helper reads as typed while a turn is open (the
+    record's activity before the event is `Working`): the turn guard. A
+    reminder the helper could not flag arrives inside the turn it
+    interrupts, so it cannot pass for the owner's reply, even after an
+    earlier injected turn has stopped. A `SessionStart` sets `Working`
+    without opening a turn: Claude Code runs it on `/clear`, `/compact`
+    and `/resume` as well as at launch, with no `Stop` after, so the
+    record is marked in a transient `started` set that the next hook
+    event setting an activity drops, and the guard ignores a `Working`
+    it set. A
+    `SessionStart` inside an open turn (an automatic compaction) keeps
+    the turn open.
+  - A prompt sent with `session.send` over `control.sock`, such as
+    Dispatch's dirty-tree nudge. The send marks an asking session in a
+    transient `relayed` set, only while the pane runs, since nothing
+    reaches one that is gone; the next typed prompt event consumes the
+    mark and leaves the ask, and a new spawn drops it. The app's own
+    message box and Prompt Box (`AppAction::SendInput`) set no mark, so
+    the owner's sends clear.
 - **The supervisor.** Its seed gains one line telling it to run
   `<abs>/switchboard-ask` before it stops on something the owner must
   answer, and its launch flags an allow rule
@@ -2553,6 +2592,27 @@ Known gaps:
   the new seed.
 - Lane agents are not told about `switchboard-ask`; their prompts come
   from the pipeline.
+- A reminder injected while the pane is blocked at a mid-turn
+  permission or question prompt (`WaitingOnYou` with a turn open) reads
+  as typed if it carries neither tag, and clears the ask.
+- A reply typed after an Esc interrupt: Claude Code runs no `Stop` hook
+  on an interrupt, so the activity stays `Working` and the guard refuses
+  the reply. The ask stands until it is dismissed or a prompt follows a
+  later `Stop`. Spike 17 did not measure whether an interrupt fires any
+  other hook.
+- The `relayed` mark is transient. A send to a running pane that never
+  becomes a prompt (Claude Code drops it) leaves the mark until the
+  owner's next prompt, which then leaves the ask; a restart between a
+  send and its prompt loses the mark, and the send clears the ask.
+- The `started` mark is transient too, while the record's `Working`
+  persists. A restart between a `SessionStart` outside a turn (a
+  `/clear` after the ask) and the owner's reply loses the mark, the
+  guard reads the reply as typed inside a turn, and the ask stands
+  until it is dismissed or a prompt follows a later `Stop`.
+- The owner's reply sent from the message box while an injected turn
+  runs reads as typed inside an open turn, and the guard refuses it.
+  The ask stands until it is dismissed or a prompt follows that turn's
+  `Stop`.
 
 ## Multi-line sends paste (2026-10-07)
 

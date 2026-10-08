@@ -340,6 +340,34 @@ impl AppCore {
         }
     }
 
+    /// What the session asked the owner, while its pane runs: the whole
+    /// message, for the surfaces that show it beside `waiting_reason`,
+    /// which may name a permission prompt instead.
+    #[must_use]
+    pub fn standing_ask(&self, id: RecordId) -> Option<&str> {
+        if !self.is_running(id) {
+            return None;
+        }
+        self.session(id)?
+            .asking
+            .as_ref()
+            .map(|a| a.message.as_str())
+    }
+
+    /// The standing ask for a surface that shows `waiting_reason` while
+    /// the card waits on you: `None` when that reason already is the ask,
+    /// so the question shows once, and the ask when the reason names
+    /// something else (a permission prompt) that blocks the pane on top
+    /// of it.
+    #[must_use]
+    pub fn ask_beside_reason(&self, id: RecordId) -> Option<&str> {
+        let ask = self.standing_ask(id)?;
+        let reason = (self.card_state(id) == CardState::WaitingOnYou)
+            .then(|| self.waiting_reason(id))
+            .flatten();
+        (reason.as_deref() != Some(ask)).then_some(ask)
+    }
+
     /// Kill the record's pane and drop its status, so a launch right
     /// after can reuse the name before the next host poll.
     pub(super) fn kill_and_forget(&mut self, id: RecordId, out: &mut Out) {
@@ -771,6 +799,8 @@ impl AppCore {
                     s.last_exit = None;
                     s.pending_launch = false;
                 });
+                // Nor been sent anything for an ask it no longer has.
+                self.relayed.retain(|r| *r != id);
                 // Until the next host poll, treat the session as running so
                 // a "return" in that window attaches instead of spawning
                 // again. The poll replaces this placeholder.

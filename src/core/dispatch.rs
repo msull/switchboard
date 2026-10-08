@@ -74,8 +74,11 @@ pub struct SupervisorChip {
     pub state: SupervisorState,
     /// An agent with a conversation to resume and no pane running.
     pub resumable: bool,
-    /// Why it waits on you, while it does: what the session asked, say.
+    /// Why it waits on you, while it does and it is not `ask`: a
+    /// permission prompt, say.
     pub reason: Option<String>,
+    /// What the session asked the owner, in full, while its pane runs.
+    pub ask: Option<String>,
 }
 
 /// A column the ticket table can be ordered by.
@@ -855,6 +858,7 @@ impl AppCore {
                 state: SupervisorState::None,
                 resumable: false,
                 reason: None,
+                ask: None,
             });
         };
         let state = if self.at_trust_prompt(id) {
@@ -874,14 +878,18 @@ impl AppCore {
         // of what it replaced, at a cost.
         let resumable =
             !self.is_running(id) && self.session(id).is_some_and(SessionRecord::resumable);
+        let ask = self.standing_ask(id).map(str::to_owned);
+        // The ask has a line of its own, so the reason does not repeat it.
         let reason = (state == SupervisorState::WaitingOnYou)
             .then(|| self.waiting_reason(id))
-            .flatten();
+            .flatten()
+            .filter(|r| ask.as_ref() != Some(r));
         Some(SupervisorChip {
             session: Some(id),
             state,
             resumable,
             reason,
+            ask,
         })
     }
 

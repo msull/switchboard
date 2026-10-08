@@ -138,21 +138,7 @@ fn header(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord) {
     let p = theme::palette(ui);
     let state = cx.core.card_state(record.id);
     let running = cx.core.is_running(record.id);
-    // Claude's own folder trust question, answerable from here.
-    if cx.core.at_trust_prompt(record.id) {
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 6.0;
-            ui.label(
-                RichText::new("Claude asks whether to trust this folder").color(p.accent_2_text),
-            );
-            if theme::secondary(ui, "Trust this folder")
-                .on_hover_text("Answer yes in the pane")
-                .clicked()
-            {
-                cx.dispatch(AppAction::TrustFolder(record.id));
-            }
-        });
-    }
+    questions(cx, ui, record);
     if ui.available_width() < TIGHT_HEADER {
         ui.horizontal(|ui| title_row(cx, ui, record, &state));
         ui.horizontal_wrapped(|ui| header_actions(cx, ui, record, running, false));
@@ -236,6 +222,36 @@ fn header(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord) {
         });
     });
     super::runbar::show(cx, ui, record.project, true);
+}
+
+/// What waits on the owner above the title: Claude's folder trust
+/// question, and the session's own question, uncut, since the title
+/// row's state text has no room for it.
+fn questions(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord) {
+    let p = theme::palette(ui);
+    // Claude's own folder trust question, answerable from here.
+    if cx.core.at_trust_prompt(record.id) {
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 6.0;
+            ui.label(
+                RichText::new("Claude asks whether to trust this folder").color(p.accent_2_text),
+            );
+            if theme::secondary(ui, "Trust this folder")
+                .on_hover_text("Answer yes in the pane")
+                .clicked()
+            {
+                cx.dispatch(AppAction::TrustFolder(record.id));
+            }
+        });
+    }
+    if let Some(ask) = cx.core.standing_ask(record.id) {
+        let ask = ask.to_owned();
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing.x = 6.0;
+            ui.add(egui::Label::new(RichText::new(ask).color(p.accent_2_text)).wrap());
+            super::cards::dismiss_ask(cx, ui, record.id);
+        });
+    }
 }
 
 /// The resume handle behind a small menu: copy the session id, or the

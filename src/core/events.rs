@@ -68,6 +68,10 @@ impl AppCore {
             return;
         }
         let change = interpret(&event.kind);
+        // Read before this event replaces it: it says whether a turn was
+        // open when the prompt came. A `SessionStart` sets `Working`
+        // without opening one.
+        let turn_open = record.activity == Activity::Working && !self.started.contains(&id);
         if let Some(new) = Self::rebound_session(id, &event, record.resume.as_ref()) {
             let name = record.name.clone();
             self.edit_session(id, out, |s| {
@@ -89,6 +93,24 @@ impl AppCore {
         }
         // A hook ran, so Claude is past its own prompts.
         self.prompted.retain(|r| *r != id);
+        // An event that leaves the activity alone leaves the `Working`
+        // the `SessionStart` set, so the mark must stay with it.
+        if change.is_some() {
+            self.started.retain(|r| *r != id);
+        }
+        if event.kind == EventKind::SessionStart && !turn_open {
+            self.started.push(id);
+        }
+        // Only the owner answers a question: a notification or a
+        // reminder arrives as `PromptInjected`, a prompt typed while a
+        // turn is open is a reminder the helper could not tell apart, and
+        // a tool's `session.send` is marked when it is sent.
+        let typed = event.kind == EventKind::PromptSubmitted;
+        let relayed = typed && self.relayed.contains(&id);
+        if relayed {
+            self.relayed.retain(|r| *r != id);
+        }
+        let answers = typed && !relayed && !turn_open;
         self.edit_session(id, out, |s| {
             s.last_event_at = Some(event.at);
             s.last_seen = s.last_seen.max(event.at);
@@ -99,11 +121,8 @@ impl AppCore {
                 s.activity = activity;
                 s.activity_reason = reason;
             }
-            // The owner's next prompt answers the session's question; a
-            // prompt older than the ask started the turn that asked it.
-            if event.kind == EventKind::PromptSubmitted
-                && s.asking.as_ref().is_some_and(|a| a.at < event.at)
-            {
+            // A prompt older than the ask started the turn that asked it.
+            if answers && s.asking.as_ref().is_some_and(|a| a.at < event.at) {
                 s.asking = None;
             }
             if event.kind == EventKind::SessionStart
@@ -145,6 +164,7 @@ fn interpret(kind: &EventKind) -> Option<(Activity, Option<String>)> {
     match kind {
         EventKind::SessionStart
         | EventKind::PromptSubmitted
+        | EventKind::PromptInjected
         | EventKind::ToolFinished
         | EventKind::PermissionDenied => Some((Activity::Working, None)),
         EventKind::PermissionRequested { tool } => match tool.as_deref() {

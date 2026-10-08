@@ -8103,8 +8103,244 @@ mod dispatch_page {
             core.session(id).unwrap().asking.is_some(),
             "the prompt that started the asking turn does not answer it"
         );
+        core.dispatch(
+            AppAction::Events(vec![SessionEvent {
+                record_id: Some(id),
+                ..event(EventKind::Stopped { last_message: None }, 8_000)
+            }]),
+            Clock::at(8_100),
+        );
         core.dispatch(prompt(9_000), Clock::at(9_100));
         assert_eq!(core.session(id).unwrap().asking, None);
+    }
+
+    /// A running agent that asked at `1_000`, with a token for the ask.
+    fn asking_core() -> (AppCore, RecordId) {
+        use crate::core::{ControlAction, token_hash};
+        let p = project("p");
+        let mut w = Workspace::new(p.clone());
+        let mut r = record(p.id, agent(), 0);
+        r.token_hash = Some(token_hash("t"));
+        let id = r.id;
+        w.sessions.push(r);
+        let (mut core, _) = loaded(vec![w], vec![]);
+        core.dispatch(AppAction::HostListed(vec![running(id)]), Clock::at(1));
+        core.dispatch(
+            AppAction::Control {
+                op: "a".into(),
+                action: ControlAction::Ask {
+                    id,
+                    token: "t".into(),
+                    message: Some("merge now?".into()),
+                },
+            },
+            Clock::at(1_000),
+        );
+        assert!(core.session(id).unwrap().asking.is_some());
+        (core, id)
+    }
+
+    fn hook(core: &mut AppCore, id: RecordId, kind: EventKind, at: u64) {
+        core.dispatch(
+            AppAction::Events(vec![SessionEvent {
+                record_id: Some(id),
+                ..event(kind, at)
+            }]),
+            Clock::at(at + 1),
+        );
+    }
+
+    fn stopped() -> EventKind {
+        EventKind::Stopped { last_message: None }
+    }
+
+    /// A background task's notification or a harness reminder starts a
+    /// turn, but the owner has not answered.
+    #[test]
+    fn an_injected_prompt_leaves_the_ask_standing() {
+        let (mut core, id) = asking_core();
+        hook(&mut core, id, EventKind::PromptInjected, 2_000);
+        assert_eq!(core.session(id).unwrap().activity, Activity::Working);
+        assert!(core.session(id).unwrap().asking.is_some());
+        assert_eq!(core.card_state(id), CardState::WaitingOnYou);
+        assert_eq!(core.standing_ask(id), Some("merge now?"));
+    }
+
+    /// A prompt the helper reads as typed clears only when no turn is
+    /// open: one that arrives mid-turn is a reminder it could not flag.
+    #[test]
+    fn a_typed_prompt_answers_only_between_turns() {
+        let (mut core, id) = asking_core();
+        hook(&mut core, id, EventKind::ToolFinished, 2_000);
+        hook(&mut core, id, EventKind::PromptSubmitted, 3_000);
+        assert!(
+            core.session(id).unwrap().asking.is_some(),
+            "a turn was open"
+        );
+        hook(&mut core, id, stopped(), 4_000);
+        hook(&mut core, id, EventKind::PromptSubmitted, 5_000);
+        assert_eq!(core.session(id).unwrap().asking, None);
+    }
+
+    /// An injected turn's own stop does not let a later unflagged
+    /// reminder, inside the next injected turn, pass for the owner.
+    #[test]
+    fn a_reminder_inside_an_injected_turn_does_not_answer() {
+        let (mut core, id) = asking_core();
+        hook(&mut core, id, EventKind::PromptInjected, 2_000);
+        hook(&mut core, id, stopped(), 3_000);
+        hook(&mut core, id, EventKind::PromptInjected, 4_000);
+        hook(&mut core, id, EventKind::PromptSubmitted, 5_000);
+        assert!(core.session(id).unwrap().asking.is_some());
+        hook(&mut core, id, stopped(), 6_000);
+        hook(&mut core, id, EventKind::PromptSubmitted, 7_000);
+        assert_eq!(core.session(id).unwrap().asking, None);
+    }
+
+    /// A prompt another tool sends with `session.send` (Dispatch's
+    /// dirty-tree nudge) is not the owner's answer; one the owner sends
+    /// from the app is.
+    #[test]
+    fn a_prompt_sent_over_control_leaves_the_ask() {
+        use crate::core::ControlAction;
+        let (mut core, id) = asking_core();
+        hook(&mut core, id, stopped(), 2_000);
+        core.dispatch(
+            AppAction::Control {
+                op: "s".into(),
+                action: ControlAction::SendInput {
+                    id,
+                    text: "commit your work".into(),
+                },
+            },
+            Clock::at(2_500),
+        );
+        hook(&mut core, id, EventKind::PromptSubmitted, 3_000);
+        assert!(core.session(id).unwrap().asking.is_some());
+        hook(&mut core, id, stopped(), 4_000);
+        hook(&mut core, id, EventKind::PromptSubmitted, 5_000);
+        assert_eq!(core.session(id).unwrap().asking, None);
+
+        let (mut core, id) = asking_core();
+        hook(&mut core, id, stopped(), 2_000);
+        core.dispatch(
+            AppAction::SendInput {
+                id,
+                text: "merge it".into(),
+            },
+            Clock::at(2_500),
+        );
+        hook(&mut core, id, EventKind::PromptSubmitted, 3_000);
+        assert_eq!(core.session(id).unwrap().asking, None);
+    }
+
+    /// `/clear`, `/compact` and `/resume` run `SessionStart` between
+    /// turns with no `Stop` after (spike 17): the owner's next prompt
+    /// still answers, after any event that sets no activity. One inside
+    /// an open turn keeps it open.
+    #[test]
+    fn a_session_start_opens_no_turn() {
+        let (mut core, id) = asking_core();
+        hook(&mut core, id, stopped(), 2_000);
+        hook(
+            &mut core,
+            id,
+            EventKind::SessionEnded { reason: None },
+            3_000,
+        );
+        hook(&mut core, id, EventKind::SessionStart, 4_000);
+        assert_eq!(core.session(id).unwrap().activity, Activity::Working);
+        hook(&mut core, id, EventKind::PromptSubmitted, 5_000);
+        assert_eq!(core.session(id).unwrap().asking, None);
+
+        // A notification that sets no activity leaves the mark.
+        let (mut core, id) = asking_core();
+        hook(&mut core, id, stopped(), 2_000);
+        hook(&mut core, id, EventKind::SessionStart, 3_000);
+        hook(
+            &mut core,
+            id,
+            EventKind::Notification {
+                kind: "auth_success".into(),
+            },
+            4_000,
+        );
+        hook(&mut core, id, EventKind::PromptSubmitted, 5_000);
+        assert_eq!(core.session(id).unwrap().asking, None);
+
+        let (mut core, id) = asking_core();
+        hook(&mut core, id, EventKind::PromptInjected, 2_000);
+        hook(&mut core, id, EventKind::SessionStart, 3_000);
+        hook(&mut core, id, EventKind::PromptSubmitted, 4_000);
+        assert!(
+            core.session(id).unwrap().asking.is_some(),
+            "a compaction inside the injected turn"
+        );
+    }
+
+    fn relay(core: &mut AppCore, id: RecordId, at: u64) {
+        use crate::core::ControlAction;
+        core.dispatch(
+            AppAction::Control {
+                op: "s".into(),
+                action: ControlAction::SendInput {
+                    id,
+                    text: "commit your work".into(),
+                },
+            },
+            Clock::at(at),
+        );
+    }
+
+    /// A send that reaches no pane, or one before a relaunch, leaves no
+    /// mark to swallow the owner's next prompt.
+    #[test]
+    fn a_send_that_cannot_arrive_leaves_no_mark() {
+        let (mut core, id) = asking_core();
+        core.dispatch(AppAction::HostListed(vec![]), Clock::at(1_500));
+        relay(&mut core, id, 2_000);
+        core.dispatch(AppAction::HostListed(vec![running(id)]), Clock::at(2_500));
+        hook(&mut core, id, stopped(), 3_000);
+        hook(&mut core, id, EventKind::PromptSubmitted, 4_000);
+        assert_eq!(core.session(id).unwrap().asking, None);
+
+        let (mut core, id) = asking_core();
+        relay(&mut core, id, 2_000);
+        core.dispatch(AppAction::HostListed(vec![]), Clock::at(2_500));
+        core.dispatch(AppAction::ReturnToSession(id), Clock::at(3_000));
+        launch_agent(&mut core, id, Some(claude_handle()));
+        assert!(!core.relayed.contains(&id));
+    }
+
+    /// The cards show the ask under a reason only when the reason is
+    /// something else.
+    #[test]
+    fn the_ask_shows_once_beside_the_reason() {
+        let (mut core, id) = asking_core();
+        assert_eq!(core.waiting_reason(id).as_deref(), Some("merge now?"));
+        assert_eq!(core.ask_beside_reason(id), None);
+        hook(
+            &mut core,
+            id,
+            EventKind::PermissionRequested {
+                tool: Some("Bash".into()),
+            },
+            2_000,
+        );
+        assert_eq!(
+            core.waiting_reason(id).as_deref(),
+            Some("permission for Bash")
+        );
+        assert_eq!(core.ask_beside_reason(id), Some("merge now?"));
+    }
+
+    #[test]
+    fn an_ask_stands_only_while_the_pane_runs() {
+        let (mut core, id) = asking_core();
+        assert_eq!(core.standing_ask(id), Some("merge now?"));
+        core.dispatch(AppAction::HostListed(vec![]), Clock::at(2_000));
+        assert_eq!(core.standing_ask(id), None);
+        assert!(core.session(id).unwrap().asking.is_some());
     }
 
     /// The plan tab's feedback block, and the card's Revise…, apply to a
