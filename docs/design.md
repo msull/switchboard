@@ -236,14 +236,18 @@ never run anything on its own.
   it is a symlink; the README documents its schema.
 - **Secrets** come from the Keychain and from `.env` files the user
   already owns; Switchboard writes them nowhere else. They leave the app
-  only as tmux `-e` flags or as the `env.resolve` reply on the
-  owner-only `control.sock` to `switchboard-env`, which puts them in its
-  child's environment and nowhere else. `env.resolve` answers only the
-  holder of a record's launch token (`SWITCHBOARD_RECORD_TOKEN`, new at
-  every spawn, its SHA-256 on the record), so a session resolves only
-  its own grants; the token is as private as the pane's environment.
-  The same token gates `session.ask`, which marks only its holder's own
-  record as asking the owner something.
+  only as `new-session -e` written to the tmux client's stdin
+  (`start-server ; source-file -`, spike 18), or as the `env.resolve`
+  reply on the owner-only `control.sock` to `switchboard-env`, which
+  puts them in its child's environment and nowhere else. Neither is a
+  command line, so no value reaches the client's argv or the server's,
+  which keeps the argv of the client that started it. `env.resolve`
+  answers only the holder of a record's launch token
+  (`SWITCHBOARD_RECORD_TOKEN`, new at every spawn, its SHA-256 on the
+  record), so a session resolves only its own grants; the token is as
+  private as the pane's environment. The same token gates
+  `session.ask`, which marks only its holder's own record as asking the
+  owner something.
   The writes (`env.set.upsert`, `env.secret.store`, `env.grant`) are
   accepted only inside a five-minute setup window the owner opens from
   the app's settings menu, so an agent cannot grant itself a set. What a
@@ -604,8 +608,9 @@ per project.
   `com.sadburger.switchboard`, account `global/NAME` or
   `project/<id>/NAME`, or `set/<name>/NAME` for an environment set. The
   adapter is tested against a throwaway keychain file, never the login
-  keychain. Values reach tmux through `-e` flags, never a shell command
-  line, and are never logged (names only). A set's values reach only
+  keychain. Values reach tmux as `new-session -e` on the tmux client's
+  stdin, never on any command line (spike 18), and are never logged
+  (names only). A set's values reach only
   the `env.resolve` reply to `switchboard-env` and its child's
   environment.
 - **Dialog.** Settings > Environment… edits the global layer; the board's
@@ -2500,6 +2505,9 @@ both give an AWS method are an error naming both. Schema v12.
   sentence naming the absolute `switchboard-env` beside `dispatch`.
   Validation refuses `env` on a non-claude operator, and on a stage
   whose agent, implementer, or the policy's rebaser or fixer is one.
+- **Off the argv.** `spawn` writes its `new-session -e …` line to the
+  tmux client's stdin after `start-server` (spike 18), so no value,
+  launch token or pane command shows in any process listing.
 - **Spike 14.** A pane's `-e` variables reach a grandchild. Check (e),
   whether Claude Code with Dispatch's launch flags runs
   `<abs>/switchboard-env exec -- true` without a permission prompt, and
@@ -2511,7 +2519,11 @@ both give an AWS method are an error naming both. Schema v12.
 Known gaps:
 
 - No GUI editor for sets and grants; `switchboard-env` is the editor.
-- The global and project layers still travel as tmux `-e` flags.
+- The global and project layers still live in the pane's environment
+  (over stdin, not argv).
+- A `switchboard` server started by an older build keeps that spawn's
+  values in its argv until it exits; killing it ends every session on
+  it, and the values that appeared there should be rotated.
 - An expired SSO session is reported, not refreshed.
 - Codex operators are refused `env`: their sandbox may not reach
   `control.sock`.

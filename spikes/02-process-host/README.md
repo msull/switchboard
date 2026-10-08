@@ -577,7 +577,7 @@ Mapping for `TmuxHost`, all exercised in this spike:
 |---|---|
 | `probe` | `tmux -V`, parse version |
 | `list` | `list-sessions -F '#{session_name}'` |
-| `spawn` | `new-session -d -s <id> -c <cwd> -e K=V... -x -y [cmd]`, then `pipe-pane -o -t <id> "cat >> <scrollback>"` |
+| `spawn` | `new-session -d -s <id> -c <cwd> -e K=V... -x -y [cmd]` on the client's stdin after `start-server` (spike 18), then `pipe-pane -o -t <id> "cat >> <scrollback>"` |
 | `status` | `list-panes -t <id> -F '#{pane_dead} #{pane_dead_status} #{pane_pid} #{pane_current_command} #{pane_current_path} #{window_activity}'` |
 | `write` | `send-keys -t <id> -H <hex bytes>` (`-l` for literal text) |
 | `resize` | `resize-window -t <id> -x -y` (needs `window-size manual` on a detached session) |
