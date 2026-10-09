@@ -9,6 +9,10 @@
 //! `SWITCHBOARD_DATA_DIR` (defaults to the app's Application Support dir).
 //!
 //! Never prints to stdout: anything a hook prints is fed back to Claude.
+//!
+//! Besides the log, the helper keeps `crons/<session_id>`: a hash of each
+//! cron prompt the session's last `Stop` listed, never the text, so a
+//! later `UserPromptSubmit` can tell a fired wakeup from the owner typing.
 
 // Tests assert emptiness with `assert!` throughout; the rest of the
 // crate is held to the lint.
@@ -18,7 +22,7 @@ use std::fmt::Write as _;
 use std::fs::OpenOptions;
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// Payload field to log field, in output order.
@@ -45,9 +49,34 @@ fn main() {
     let fields = top_level_strings(&payload);
 
     let pending = (event == "Stop").then(|| pending_lists(&payload));
-    let line = build_line(&event, &fields, pending);
     let data_dir = data_dir();
     let _ = create_private_dir(&data_dir);
+    let get = |key: &str| {
+        fields
+            .iter()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| v.as_str())
+    };
+    let session = get("session_id").unwrap_or("");
+    let crons_dir = data_dir.join("crons");
+    // Crons belong to one `claude` process: any sign of a new one, or
+    // its end, drops the snapshot rather than risk a stale match.
+    let cron_fired = match event.as_str() {
+        "Stop" => {
+            let _ = save_crons(&crons_dir, session, &cron_hashes(&payload, session));
+            sweep_crons(&crons_dir, SystemTime::now(), CRONS_MAX_AGE);
+            false
+        }
+        "SessionStart" | "SessionEnd" => {
+            forget_crons(&crons_dir, session);
+            false
+        }
+        "UserPromptSubmit" => get("prompt").is_some_and(|prompt| {
+            read_crons(&crons_dir, session).contains(&prompt_hash(session, prompt))
+        }),
+        _ => false,
+    };
+    let line = build_line(&event, &fields, pending, cron_fired);
     if let Err(e) = append_line(&data_dir.join("events.log"), &line) {
         eprintln!("switchboard-hook: cannot append to events.log: {e}");
     }
@@ -63,11 +92,14 @@ fn data_dir() -> PathBuf {
     home.join("Library/Application Support/Switchboard")
 }
 
-/// `pending` is `pending_lists`' result, written only for a `Stop`.
+/// `pending` is `pending_lists`' result, written only for a `Stop`;
+/// `cron_fired` says a `UserPromptSubmit` prompt matched one of the
+/// crons the session's last `Stop` listed.
 fn build_line(
     event: &str,
     fields: &[(String, String)],
     pending: Option<(Option<String>, Option<String>)>,
+    cron_fired: bool,
 ) -> String {
     let get = |key: &str| {
         fields
@@ -106,7 +138,7 @@ fn build_line(
     // Only the verdict is written: the prompt is the owner's text and
     // never reaches the log.
     if event == "UserPromptSubmit" {
-        let injected = get("prompt").is_some_and(is_injected);
+        let injected = cron_fired || get("prompt").is_some_and(is_injected);
         let _ = write!(out, ",\"injected\":{injected}");
     }
     if let Some((tasks, crons)) = pending {
@@ -163,6 +195,117 @@ fn pending_lists(json: &str) -> (Option<String>, Option<String>) {
         list("background_tasks", &["type", "status", "agent_type"]),
         list("session_crons", &["schedule", "recurring"]),
     )
+}
+
+/// A `prompt_hash` of each `session_crons` entry's `prompt` in a `Stop`
+/// payload; empty when the list is absent, malformed, or holds anything
+/// but objects.
+fn cron_hashes(json: &str, session: &str) -> Vec<String> {
+    let Some(Json::Obj(top)) = parse_value(json, &mut 0, 0) else {
+        return Vec::new();
+    };
+    let Some((_, Json::Arr(items))) = top.iter().find(|(k, _)| k == "session_crons") else {
+        return Vec::new();
+    };
+    let mut out = Vec::with_capacity(items.len());
+    for item in items {
+        let Json::Obj(fields) = item else {
+            return Vec::new();
+        };
+        if let Some((_, Json::Str(prompt))) = fields.iter().find(|(k, _)| k == "prompt") {
+            out.push(prompt_hash(session, prompt));
+        }
+    }
+    out
+}
+
+/// FNV-1a 64 of the session id, a zero byte and the trimmed prompt, as
+/// 16 hex digits. Hand-rolled because `DefaultHasher` may change between
+/// Rust releases, and a helper rebuilt between a `Stop` and the wakeup it
+/// listed must still match. The session salt makes the same cron text
+/// hash differently in two sessions.
+fn prompt_hash(session: &str, prompt: &str) -> String {
+    const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const PRIME: u64 = 0x0100_0000_01b3;
+    let bytes = session.bytes().chain([0]).chain(prompt.trim().bytes());
+    let hash = bytes.fold(OFFSET, |h, b| (h ^ u64::from(b)).wrapping_mul(PRIME));
+    format!("{hash:016x}")
+}
+
+/// A day: a one-shot wakeup fires within `WAKEUP_HOLD` (65 minutes) of
+/// its `Stop`, so an older file can no longer match one, and a session
+/// killed without a `SessionEnd` must not leave its file forever.
+const CRONS_MAX_AGE: Duration = Duration::from_hours(24);
+
+/// The session's file under `dir`, or `None` for an id that could not be
+/// a safe path component.
+fn session_file(dir: &Path, session: &str) -> Option<PathBuf> {
+    let valid = (1..=64).contains(&session.len())
+        && session
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-');
+    valid.then(|| dir.join(session))
+}
+
+fn read_crons(dir: &Path, session: &str) -> Vec<String> {
+    session_file(dir, session)
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .map(|text| text.lines().map(str::to_string).collect())
+        .unwrap_or_default()
+}
+
+/// Replaces the session's file through a temp file and `rename`, so a
+/// reader never sees half of it; an empty list removes it instead.
+fn save_crons(dir: &Path, session: &str, hashes: &[String]) -> std::io::Result<()> {
+    let Some(path) = session_file(dir, session) else {
+        return Ok(());
+    };
+    if hashes.is_empty() {
+        forget_crons(dir, session);
+        return Ok(());
+    }
+    create_private_dir(dir)?;
+    let tmp = dir.join(format!(".{session}.{}.tmp", std::process::id()));
+    let mut options = OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let written = options.open(&tmp).and_then(|mut file| {
+        let mut text = hashes.join("\n");
+        text.push('\n');
+        file.write_all(text.as_bytes())
+    });
+    let result = written.and_then(|()| std::fs::rename(&tmp, &path));
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result
+}
+
+fn forget_crons(dir: &Path, session: &str) {
+    if let Some(path) = session_file(dir, session) {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+/// Removes every file in `dir` last modified more than `max_age` before
+/// `now`. `now` is an argument so a test needs no sleep.
+fn sweep_crons(dir: &Path, now: SystemTime, max_age: Duration) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let stale = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .is_ok_and(|at| now.duration_since(at).is_ok_and(|age| age > max_age));
+        if stale {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
 }
 
 /// Just enough of a JSON value for `pending_lists`: numbers and `null`
@@ -266,10 +409,12 @@ fn parse_value(json: &str, i: &mut usize, depth: usize) -> Option<Json> {
 }
 
 /// A turn Claude Code started on its own: a background task's
-/// notification or a harness reminder, which arrive as prompts but are
-/// not the owner typing (see `spikes/17-prompt-origin`).
+/// notification, a harness reminder or a subagent's hand-back, which
+/// arrive as prompts but are not the owner typing (see
+/// `spikes/17-prompt-origin` and `spikes/20-stop-pending`). The hand-back
+/// tag is matched without its `>` because it carries `from="…"`.
 fn is_injected(prompt: &str) -> bool {
-    const TAGS: [&str; 2] = ["<task-notification>", "<system-reminder>"];
+    const TAGS: [&str; 3] = ["<task-notification>", "<system-reminder>", "<agent-message"];
     let prompt = prompt.trim_start();
     TAGS.iter().any(|tag| prompt.starts_with(tag))
 }
@@ -485,7 +630,7 @@ mod tests {
             ("reason".to_string(), "say \"hi\"\n".to_string()),
             ("error".to_string(), "rate_limit".to_string()),
         ];
-        let line = build_line("Stop", &fields, None);
+        let line = build_line("Stop", &fields, None, false);
         assert!(line.ends_with("}\n"));
         assert!(line.contains("\"event\":\"Stop\""));
         assert!(line.contains("\"cwd\":null"));
@@ -501,6 +646,7 @@ mod tests {
                 "UserPromptSubmit",
                 &[("prompt".to_string(), prompt.to_string())],
                 None,
+                false,
             )
         };
         let typed = line("fix the secret-sauce bug");
@@ -510,14 +656,18 @@ mod tests {
         assert!(task.contains("\"injected\":true"));
         assert!(!task.contains("secret-sauce"));
         assert!(line("  <system-reminder>a file changed").contains("\"injected\":true"));
+        let hand_back = line("<agent-message from=\"a06\">secret-sauce");
+        assert!(hand_back.contains("\"injected\":true"));
+        assert!(!hand_back.contains("secret-sauce"));
         assert!(
-            build_line("UserPromptSubmit", &[], None).contains("\"injected\":false"),
+            build_line("UserPromptSubmit", &[], None, false).contains("\"injected\":false"),
             "a payload without a prompt reads as typed"
         );
         let other = build_line(
             "Stop",
             &[("prompt".to_string(), "<system-reminder>".into())],
             None,
+            false,
         );
         assert!(!other.contains("injected"));
     }
@@ -537,10 +687,101 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
+    /// Spike 20's one-shot wakeup fired its cron's prompt verbatim.
+    const WAKEUP_STOP: &str = r#"{"hook_event_name":"Stop","session_id":"s1",
+        "background_tasks":[],
+        "session_crons":[{"id":"dd0","schedule":"24 22 * * *","recurring":false,"prompt":"say woke"}]}"#;
+
+    #[test]
+    fn matches_a_fired_wakeup_from_the_last_stop() {
+        let fired = |session: &str, prompt: &str, crons: &[String]| {
+            crons.contains(&prompt_hash(session, prompt))
+        };
+        let hashes = cron_hashes(WAKEUP_STOP, "s1");
+        for prompt in ["say woke", "  say woke\n"] {
+            assert!(fired("s1", prompt, &hashes), "{prompt:?}");
+        }
+        let empty = r#"{"hook_event_name":"Stop","stop_hook_active":false,"background_tasks":[],"session_crons":[]}"#;
+        for crons in [Vec::new(), cron_hashes(empty, "s1")] {
+            assert!(!fired("s1", "say woke", &crons));
+        }
+        assert!(!fired("s2", "say woke", &hashes), "another session's cron");
+        let line = build_line(
+            "UserPromptSubmit",
+            &[("prompt".to_string(), "say woke".to_string())],
+            None,
+            true,
+        );
+        assert!(line.contains("\"injected\":true"), "{line}");
+        assert!(!line.contains("woke"), "{line}");
+    }
+
+    #[test]
+    fn hashes_only_well_formed_cron_lists() {
+        let none = [
+            r#"{"tool_input":{"session_crons":[{"prompt":"x"}]}}"#,
+            r#"{"session_crons":{"prompt":"x"}}"#,
+            r#"{"session_crons":[{"prompt":"x""#,
+            r#"{"session_crons":[{"schedule":"24 22 * * *","recurring":false}]}"#,
+            r#"{"session_crons":["x"]}"#,
+        ];
+        for json in none {
+            assert!(cron_hashes(json, "s1").is_empty(), "{json}");
+        }
+        let two = r#"{"session_crons":[{"prompt":"a"},{"prompt":"b"}]}"#;
+        let hashes = cron_hashes(two, "s1");
+        assert_eq!(hashes, [prompt_hash("s1", "a"), prompt_hash("s1", "b")]);
+        assert_eq!(hashes[0].len(), 16);
+        assert_ne!(prompt_hash("s1", "a"), prompt_hash("s2", "a"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn keeps_the_cron_file_private_and_textless() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp =
+            std::env::temp_dir().join(format!("switchboard-hook-crons-{}", std::process::id()));
+        let dir = tmp.join("data").join("crons");
+        let hashes = cron_hashes(WAKEUP_STOP, "s1");
+        save_crons(&dir, "s1", &hashes).unwrap();
+        assert_eq!(read_crons(&dir, "s1"), hashes);
+        let file = dir.join("s1");
+        let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&dir), 0o700);
+        assert_eq!(mode(&file), 0o600);
+        let text = std::fs::read_to_string(&file).unwrap();
+        assert!(!text.contains("say woke"), "{text}");
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1, "no temp left");
+
+        save_crons(&dir, "s1", &[]).unwrap();
+        assert!(!file.exists());
+        save_crons(&dir, "s1", &hashes).unwrap();
+        forget_crons(&dir, "s1");
+        assert!(!file.exists());
+
+        for bad in ["../x", ""] {
+            save_crons(&dir, bad, &hashes).unwrap();
+            assert!(read_crons(&dir, bad).is_empty());
+        }
+        assert!(!tmp.join("data").join("x").exists());
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0);
+
+        save_crons(&dir, "s1", &hashes).unwrap();
+        save_crons(&dir, "s2", &hashes).unwrap();
+        let written = std::fs::metadata(&file).unwrap().modified().unwrap();
+        let hour = Duration::from_hours(1);
+        sweep_crons(&dir, written + hour, CRONS_MAX_AGE);
+        assert_eq!(read_crons(&dir, "s1"), hashes);
+        sweep_crons(&dir, written + 25 * hour, CRONS_MAX_AGE);
+        assert!(read_crons(&dir, "s1").is_empty());
+        assert!(read_crons(&dir, "s2").is_empty());
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
     #[test]
     fn spike_03s_empty_lists_carry_through() {
         let json = r#"{"hook_event_name":"Stop","stop_hook_active":false,"background_tasks":[],"session_crons":[]}"#;
-        let line = build_line("Stop", &[], Some(pending_lists(json)));
+        let line = build_line("Stop", &[], Some(pending_lists(json)), false);
         assert!(line.contains(r#""tasks":[],"crons":[]}"#), "{line}");
     }
 
@@ -562,7 +803,12 @@ mod tests {
             crons.as_deref(),
             Some(r#"[{"schedule":"24 22 * * *","recurring":false}]"#)
         );
-        let line = build_line("Stop", &top_level_strings(json), Some((tasks, crons)));
+        let line = build_line(
+            "Stop",
+            &top_level_strings(json),
+            Some((tasks, crons)),
+            false,
+        );
         assert!(!line.contains("secret-sauce"), "{line}");
         assert!(!line.contains("sleep 90"), "{line}");
     }
@@ -575,9 +821,9 @@ mod tests {
         assert_eq!(pending_lists(not_objects), (None, None));
         let truncated = r#"{"background_tasks":[{"type":"shell""#;
         assert_eq!(pending_lists(truncated), (None, None));
-        let line = build_line("Stop", &[], Some(pending_lists(truncated)));
+        let line = build_line("Stop", &[], Some(pending_lists(truncated)), false);
         assert!(line.contains(r#""tasks":null,"crons":null}"#), "{line}");
-        assert!(!build_line("SessionEnd", &[], None).contains("tasks"));
+        assert!(!build_line("SessionEnd", &[], None, false).contains("tasks"));
         let deep = format!(
             r#"{{"x":{}1{},"session_crons":[]}}"#,
             "[".repeat(10_000),

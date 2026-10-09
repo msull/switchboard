@@ -2976,11 +2976,30 @@ still `busy`. While held, the attempt records `held` per session, which
 `dispatch show` prints; a failure after the hold ends names what the
 last `Stop` still listed.
 
+A subagent's hand-back and a fired wakeup start a turn the owner did
+not type, so the helper writes `injected` for both and an open ask and
+a waiting card answer survive them. The hand-back is recognised by its
+`<agent-message` tag. A fired one-shot wakeup carries no tag: its prompt
+is the cron's `prompt` verbatim (spike 20), so on every `Stop` the
+helper writes an FNV-1a hash of the session id and each listed cron's
+trimmed prompt, never the text, to `crons/<session_id>` (0600, temp file
+and rename), and a `UserPromptSubmit` whose hash is in that file is
+injected. Each helper call is its own process, so the file is how the
+`Stop` reaches the later prompt; the log keeps only the verdict. The
+file is replaced on every `Stop` (removed when the list is empty or
+unreadable), removed on `SessionStart` and `SessionEnd`, since crons
+belong to one `claude` process, and any file older than 24 hours is
+swept on each `Stop`, which covers a pane killed without a
+`SessionEnd`.
+
 Known gaps: there is no "the session is alive: wait" answer, so a pane
-still holding when the cap runs out fails into `rerun | park`. A fired
-wakeup's prompt and a subagent's `<agent-message>` hand-back carry no
-tag `is_injected` knows, so they read as the owner typing and can clear
-an open ask (spike 20).
+still holding when the cap runs out fails into `rerun | park`. Only a
+one-shot wakeup is claimed: a recurring `CronCreate` and a `/loop` are
+unmeasured, so whether they fire their listed prompt verbatim is
+unknown. A prompt the owner types byte for byte like a listed cron's
+reads as injected. A wakeup that fires after a `/compact` and before
+the next `Stop` reads as typed, because the `SessionStart` dropped the
+file.
 
 ## Open questions
 

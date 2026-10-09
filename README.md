@@ -94,6 +94,9 @@ the
 with `--settings`), `events.log` (the hook event log; a
 `UserPromptSubmit` line carries `injected`, never the prompt; a `Stop`
 line carries `tasks` and `crons`, kinds and schedules only),
+`crons/` (one file per Claude Code session: a hash of each cron prompt
+the last `Stop` listed, never the text; removed when the session starts
+or ends, and swept after a day),
 `wake.sock`, and
 `scrollback/` (one `<host>-r<n>.vt` per run of a command or service,
 the last 20 runs kept), `renders/` (first pages of PDFs shown on cards,

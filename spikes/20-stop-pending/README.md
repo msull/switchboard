@@ -48,9 +48,11 @@ empty. The subagent hand-back in case 1 starts `<agent-message from=…>`.
   `description`, `command` or `prompt`.
 - A one-shot fire time is the first local minute at or after the
   `Stop` (less a minute) that matches the schedule's fixed fields.
-- Neither the fired wakeup's prompt nor `<agent-message` begins with a
-  tag `is_injected` recognises, so both read as the owner typing and
-  clear an open ask. That is a separate bug, not fixed with this spike.
+- Neither the fired wakeup's prompt nor `<agent-message` began with a
+  tag `is_injected` recognised, so both read as the owner typing and
+  cleared an open ask. The fired prompt was the cron's `prompt` as the
+  preceding `Stop` listed it. Only the one-shot wakeup above was
+  captured; a recurring cron's fire is not.
 
 ## The live capture
 

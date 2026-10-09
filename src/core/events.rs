@@ -106,10 +106,11 @@ impl AppCore {
         if event.kind == EventKind::SessionStart && !turn_open {
             self.started.push(id);
         }
-        // Only the owner answers a question: a notification or a
-        // reminder arrives as `PromptInjected`, a prompt typed while a
-        // turn is open is a reminder the helper could not tell apart, and
-        // a tool's `session.send` is marked when it is sent.
+        // Only the owner answers a question: a notification, a
+        // reminder, a subagent's hand-back or a fired wakeup arrives as
+        // `PromptInjected`, a prompt typed while a turn is open is a
+        // reminder the helper could not tell apart, and a tool's
+        // `session.send` is marked when it is sent.
         let typed = event.kind == EventKind::PromptSubmitted;
         let relayed = typed && self.relayed.contains(&id);
         // A submitted prompt took whatever the input box held.
