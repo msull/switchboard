@@ -124,15 +124,46 @@ fn column_widths(min: &[f32], max: &[f32], available: f32) -> Vec<f32> {
 
 /// Draw `text`: prose through the viewer, tables through [`table`].
 pub fn show(ui: &mut Ui, cache: &mut CommonMarkCache, text: &str) {
+    show_linked(ui, cache, text, 0);
+}
+
+/// [`show`], where links to `switchboard-file:i` for each `i` below `n`
+/// are hooks: they open nothing themselves, and the index of the one
+/// clicked is returned. The viewer resets every hook at the start of
+/// each of its calls, and a message takes one call per prose segment
+/// and per table cell, so the hooks are read after each call.
+pub fn show_linked(
+    ui: &mut Ui,
+    cache: &mut CommonMarkCache,
+    text: &str,
+    n: usize,
+) -> Option<usize> {
+    let hooks: Vec<String> = (0..n)
+        .map(|i| format!("{}{i}", crate::core::file_refs::SCHEME))
+        .collect();
+    for hook in &hooks {
+        cache.add_link_hook(hook.as_str());
+    }
+    let mut clicked = None;
+    let mut viewer = |ui: &mut Ui, cache: &mut CommonMarkCache, source: &str| {
+        CommonMarkViewer::new().show(ui, cache, source);
+        if clicked.is_none() {
+            clicked = hooks
+                .iter()
+                .position(|h| cache.get_link_hook(h) == Some(true));
+        }
+    };
     for (i, segment) in split(text).into_iter().enumerate() {
         ui.push_id(i, |ui| match segment {
-            Segment::Prose(prose) => {
-                CommonMarkViewer::new().show(ui, cache, prose);
-            }
-            Segment::Table(t) => table(ui, cache, &t),
+            Segment::Prose(prose) => viewer(ui, cache, prose),
+            Segment::Table(t) => table(ui, cache, &t, &mut viewer),
         });
     }
+    clicked
 }
+
+/// Draws one piece of Markdown through the viewer.
+type Viewer<'v> = dyn FnMut(&mut Ui, &mut CommonMarkCache, &str) + 'v;
 
 /// Space on each side of a cell's text.
 const CELL_PAD: f32 = 8.0;
@@ -200,7 +231,7 @@ fn plain(text: &str) -> String {
 /// One table: a bold header row on a tinted ground, a hairline under
 /// every row, columns sized by [`column_widths`], cells wrapped inside
 /// them by the viewer. Alignment marks in the source are ignored.
-fn table(ui: &mut Ui, cache: &mut CommonMarkCache, t: &Table<'_>) {
+fn table(ui: &mut Ui, cache: &mut CommonMarkCache, t: &Table<'_>, viewer: &mut Viewer<'_>) {
     let columns = t.columns();
     if columns == 0 {
         return;
@@ -234,10 +265,18 @@ fn table(ui: &mut Ui, cache: &mut CommonMarkCache, t: &Table<'_>) {
 
     ui.add_space(4.0);
     if !t.header.is_empty() {
-        row(ui, cache, &widths, total, &t.header, Some(&head_font));
+        row(
+            ui,
+            cache,
+            viewer,
+            &widths,
+            total,
+            &t.header,
+            Some(&head_font),
+        );
     }
     for cells in &t.rows {
-        row(ui, cache, &widths, total, cells, None);
+        row(ui, cache, viewer, &widths, total, cells, None);
     }
     ui.add_space(4.0);
 }
@@ -245,6 +284,7 @@ fn table(ui: &mut Ui, cache: &mut CommonMarkCache, t: &Table<'_>) {
 fn row(
     ui: &mut Ui,
     cache: &mut CommonMarkCache,
+    viewer: &mut Viewer<'_>,
     widths: &[f32],
     total: f32,
     cells: &[&str],
@@ -275,7 +315,7 @@ fn row(
                                 ui.set_width(*width);
                                 if !cell.is_empty() {
                                     ui.push_id(c, |ui| {
-                                        CommonMarkViewer::new().show(ui, cache, cell);
+                                        viewer(ui, cache, cell);
                                     });
                                 }
                             });

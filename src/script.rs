@@ -541,6 +541,28 @@ fn working_set_step(app: &mut SwitchboardApp, w: &[&str]) -> Result<(), String> 
     Ok(())
 }
 
+/// `show-file <session> <path> [line]`: open a file as if the session's
+/// agent had named it, a relative path under the session's directory.
+fn show_file(app: &mut SwitchboardApp, n: &str, path: &str, line: &[&str]) -> Result<(), String> {
+    let record = session(app, n)?;
+    let cwd = app
+        .core()
+        .session(record)
+        .map(|s| s.cwd.clone())
+        .unwrap_or_default();
+    let line = match line {
+        [] => None,
+        [l] => Some(l.parse().map_err(|_| format!("bad line {l}"))?),
+        _ => return Err("show-file <session> <path> [line]".into()),
+    };
+    app.dispatch(AppAction::ShowFileRef {
+        record,
+        path: cwd.join(path),
+        line,
+    });
+    Ok(())
+}
+
 fn step(app: &mut SwitchboardApp, w: &[&str]) -> Result<(), String> {
     match w {
         ["add-project", name, root] => app.dispatch(AppAction::AddProject {
@@ -555,15 +577,13 @@ fn step(app: &mut SwitchboardApp, w: &[&str]) -> Result<(), String> {
             SessionKind::Agent(AgentKind::ClaudeCode),
             Launch::Shell,
         )?,
-        ["new-codex", p, n] => {
-            new_session(
-                app,
-                p,
-                n,
-                SessionKind::Agent(AgentKind::Codex),
-                Launch::Shell,
-            )?;
-        }
+        ["new-codex", p, n] => new_session(
+            app,
+            p,
+            n,
+            SessionKind::Agent(AgentKind::Codex),
+            Launch::Shell,
+        )?,
         ["new-service", p, n, cmd @ ..] => new_session(
             app,
             p,
@@ -582,6 +602,7 @@ fn step(app: &mut SwitchboardApp, w: &[&str]) -> Result<(), String> {
             let (id, root) = project(app, p)?;
             app.dispatch(AppAction::ShowDocument(id, root.join(rel)));
         }
+        ["show-file", n, path, line @ ..] => show_file(app, n, path, line)?,
         ["files", on] => app.dispatch(AppAction::SetFilesOpen(*on == "on")),
         ["side-position", at] => app.dispatch(AppAction::SetSideLeft(*at == "left")),
         ["terminal", on] => app.ui_state.terminal_open = *on == "on",

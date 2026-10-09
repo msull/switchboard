@@ -154,6 +154,14 @@ pub enum AppAction {
     UnpinDocument(ProjectId, PathBuf),
     /// Preview a file (absolute path) of the project.
     ShowDocument(ProjectId, PathBuf),
+    /// Open a file an agent named in its conversation in the full
+    /// document view, at `line` when one was given. The path is
+    /// absolute and was found on disk by the UI.
+    ShowFileRef {
+        record: RecordId,
+        path: PathBuf,
+        line: Option<u32>,
+    },
     ShowWorkingSet(SetId),
     /// Put a session or file on a working set, in the first free spot
     /// of a grid `columns` wide (what the window fits right now).
@@ -967,6 +975,13 @@ pub struct AppCore {
     /// Until when, on the clock's `mono`, `switchboard-env`'s setup
     /// commands are accepted. Transient: a restart closes it.
     pub(super) env_setup_until: Option<Duration>,
+    /// The line the document view should scroll to: the file, the line,
+    /// and the request it came from, so a repeat click scrolls again.
+    /// Cleared by every other show, the same file's too, and by Back.
+    /// Transient.
+    pub(super) document_line: Option<(PathBuf, u32, u64)>,
+    /// Requests to scroll to a line so far; numbers `document_line`.
+    pub(super) line_requests: u64,
 }
 
 impl AppCore {
@@ -1019,6 +1034,7 @@ impl AppCore {
             | AppAction::PinDocument(..)
             | AppAction::UnpinDocument(..)
             | AppAction::ShowDocument(..)
+            | AppAction::ShowFileRef { .. }
             | AppAction::OpenDocument(_)
             | AppAction::RevealDocument(_)
             | AppAction::OpenInEditor(_)
@@ -1053,7 +1069,10 @@ impl AppCore {
             | AppAction::ProjectConfigWritten { .. }
             | AppAction::ApproveDefinition(_)
             | AppAction::RevokeApproval(_) => self.definition_action(action, now, &mut out),
-            AppAction::Back => drop(self.view_stack.pop()),
+            AppAction::Back => {
+                self.view_stack.pop();
+                self.document_line = None;
+            }
             AppAction::DismissNotice => self.dismiss_notice(),
             AppAction::PromptSeen { id, seen } => self.prompt_seen(id, seen),
             AppAction::TrustFolder(id) => self.trust_folder(id, &mut out),
@@ -1830,9 +1849,39 @@ impl AppCore {
         {
             self.update_settings(out, |s| s.space = space);
         }
+        // Even the same file shown again comes up at the top; only
+        // `show_file_ref` sets a line, after this.
+        self.document_line = None;
         if self.view() != view {
             self.view_stack.push(view);
         }
+    }
+
+    /// Show the file an agent named, under the project whose root holds
+    /// it most closely (so Pin works), else under the session's own.
+    fn show_file_ref(
+        &mut self,
+        record: RecordId,
+        path: PathBuf,
+        line: Option<u32>,
+        now: Clock,
+        out: &mut Out,
+    ) {
+        let Some(own) = self.session(record).map(|s| s.project) else {
+            return;
+        };
+        if self.quiet_op.is_some() {
+            return;
+        }
+        let pid = self
+            .workspaces
+            .iter()
+            .filter(|w| path.starts_with(&w.project.root))
+            .max_by_key(|w| w.project.root.components().count())
+            .map_or(own, |w| w.project.id);
+        self.show(View::Document(pid, path.clone()), now, out);
+        self.line_requests += 1;
+        self.document_line = line.map(|l| (path, l, self.line_requests));
     }
 
     /// The space a view is in; the switchboard is in every space.
@@ -2325,6 +2374,15 @@ impl AppCore {
     pub fn workspace(&self, id: ProjectId) -> Option<&Workspace> {
         self.workspaces.iter().find(|w| w.project.id == id)
     }
+    /// The line the document view should scroll to, if any: the file,
+    /// the line (from 1), and the request number, which changes on every
+    /// request even for the same file and line.
+    #[must_use]
+    pub fn document_line(&self) -> Option<(&Path, u32, u64)> {
+        self.document_line
+            .as_ref()
+            .map(|(p, l, n)| (p.as_path(), *l, *n))
+    }
     #[must_use]
     pub fn session(&self, id: RecordId) -> Option<&SessionRecord> {
         self.workspaces
@@ -2668,6 +2726,9 @@ impl AppCore {
                 self.edit_project(id, out, |p| p.pinned.retain(|d| *d != path));
             }
             AppAction::ShowDocument(pid, path) => self.show(View::Document(pid, path), now, out),
+            AppAction::ShowFileRef { record, path, line } => {
+                self.show_file_ref(record, path, line, now, out);
+            }
             AppAction::OpenDocument(path) => out.push(Effect::OpenPath(path)),
             AppAction::RevealDocument(path) => out.push(Effect::Reveal(path)),
             AppAction::OpenInEditor(path) => out.push(Effect::OpenInEditor {

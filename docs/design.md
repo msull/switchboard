@@ -2797,6 +2797,44 @@ marker and submits once. Dispatch's `session.send` and the handoff
 prompts go through the same call. Claude Code records such a message
 inside `<pasted_content>` tags, as it does any paste.
 
+## File links in the conversation (2026-10-08)
+
+A path an agent writes in its prose is a link that opens the file in
+the full document view. It links in the agent's messages and in each
+turn's final answer, never in the user's prompt or the tool rows. A
+token links when it is path-shaped (it starts with `/`, `~/`, `./` or
+`../`, holds a `/`, or is a bare `name.ext`; it has a letter and no
+`://`), whether in prose or as a whole code span, outside code blocks,
+links, images and headings, and when it names an existing regular file.
+A `:line`, `:line:col` or `:line-line` suffix gives the line.
+Punctuation a sentence hangs on the end is dropped. A token right
+after `!` is not linked, since `![..](..)` would draw as an image.
+
+An absolute path is taken as it is and `~/` is under home. A relative
+path is tried under the session's project root, then under the
+session's working directory. The file opens under the project whose
+root holds it most closely, so Pin works for a file of any project, and
+under the session's own project when no root does
+(`AppAction::ShowFileRef`). The line rides beside the view in the core
+(`document_line`, with a request number so a repeat click scrolls
+again) and is cleared by every other show, the same file's from the
+file tree too, and by Back; nothing about it is saved.
+
+A text file is drawn unwrapped in the full view, so each source line is
+one row: it scrolls to the line with three lines above it and marks the
+line with a faint band, and the header shows `path:line`. The previews
+in working sets and workflows still wrap. A Markdown file opens at the
+top, since rendered Markdown has no line map.
+
+The finder and the rewrite are pure, in `core::file_refs`; whether a
+path exists is `adapters::files::existing_file`, a `stat` per token on
+the UI thread. It is made the first time a message text is drawn and
+cached per record and text hash in
+`UiState.file_links` for as long as that text is in the conversation.
+A re-read of the transcript keeps the entries of texts still there, so
+only new messages are scanned. A file created after its message was
+first drawn links only after a relaunch.
+
 ## Open questions
 
 - Shared project config runs with a hash-and-approve flow and no

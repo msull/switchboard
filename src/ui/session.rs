@@ -5,7 +5,7 @@
 //! shown in a panel under the message box.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, channel};
 
 use std::time::SystemTime;
@@ -17,6 +17,8 @@ use egui_term::{BackendSettings, PtyEvent, TerminalBackend, TerminalView};
 use super::cards::kind_label;
 use super::files::DraggedPath;
 use super::{DrawCtx, GAP, Renaming, UiState, theme};
+use crate::adapters::files::existing_file;
+use crate::core::file_refs;
 use crate::core::{
     AgentKind, AppAction, CardState, PinTarget, RecordId, ResumeHandle, SessionKind, SessionRecord,
     View,
@@ -581,12 +583,17 @@ fn terminal_panel(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord) {
 /// The conversation when the transcript is readable, otherwise the
 /// pointer to the terminal and the pane snapshot. Fills what is left.
 fn conversation_or_pane(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord) {
-    let p = theme::palette(ui);
     // Cloning is offered on the user's own messages of a Claude Code
     // session that has a transcript; the core refuses the rest anyway.
     let cloneable = crate::core::can_fork(record);
     let mut clone_at: Option<usize> = None;
     let mut discard_at: Option<usize> = None;
+    let mut open_file: Option<(PathBuf, Option<u32>)> = None;
+    // Cloned because the state is borrowed mutably below.
+    let root = cx
+        .core
+        .workspace(record.project)
+        .map_or_else(|| record.cwd.clone(), |w| w.project.root.clone());
     ui.set_min_size(ui.available_size());
     // Drawing needs several fields of the UI state at once; taking
     // them apart borrows each on its own, which the borrow checker
@@ -597,6 +604,7 @@ fn conversation_or_pane(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecor
         expand_activity,
         expand_applied,
         markdown,
+        file_links,
         snapshots,
         raw_message,
         message_links,
@@ -617,20 +625,7 @@ fn conversation_or_pane(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecor
     conversation_now.insert(window, record.id);
     let snapshot = snapshots.get(&record.id);
     let Some((_, conversation)) = conversations.get(&record.id) else {
-        ui.label(
-            RichText::new(
-                "This session runs in Ghostty. Use Open in terminal to bring its window up.",
-            )
-            .color(p.n700),
-        );
-        if let Some(e) = conversation_errors.get(&record.id) {
-            ui.label(theme::meta_text(ui, format!("No conversation view: {e}")));
-        }
-        if let Some(text) = snapshot {
-            egui::ScrollArea::both()
-                .auto_shrink([false, false])
-                .show(ui, |ui| code_block(ui, text));
-        }
+        no_conversation(ui, conversation_errors.get(&record.id), snapshot);
         return;
     };
     conversation_view(
@@ -644,12 +639,19 @@ fn conversation_or_pane(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecor
             nudge,
             jump,
         },
-        markdown,
+        &mut Prose {
+            markdown,
+            links: file_links,
+            record: record.id,
+            root: &root,
+            cwd: &record.cwd,
+        },
         Menus {
             raw_message,
             message_links,
             clone_at: cloneable.then_some(&mut clone_at),
             discard_at: cloneable.then_some(&mut discard_at),
+            open_file: &mut open_file,
         },
     );
     // Both borrow the conversation, so the prompts are looked up before
@@ -677,6 +679,31 @@ fn conversation_or_pane(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecor
             before,
             prompt,
         });
+    }
+    if let Some((path, line)) = open_file {
+        cx.dispatch(AppAction::ShowFileRef {
+            record: record.id,
+            path,
+            line,
+        });
+    }
+}
+
+/// What shows when the transcript cannot be read: the pointer to the
+/// terminal, why, and the pane snapshot.
+fn no_conversation(ui: &mut Ui, error: Option<&String>, snapshot: Option<&String>) {
+    let p = theme::palette(ui);
+    ui.label(
+        RichText::new("This session runs in Ghostty. Use Open in terminal to bring its window up.")
+            .color(p.n700),
+    );
+    if let Some(e) = error {
+        ui.label(theme::meta_text(ui, format!("No conversation view: {e}")));
+    }
+    if let Some(text) = snapshot {
+        egui::ScrollArea::both()
+            .auto_shrink([false, false])
+            .show(ui, |ui| code_block(ui, text));
     }
 }
 
@@ -852,7 +879,7 @@ fn conversation_view(
     name: &str,
     conversation: &Conversation,
     toggles: Toggles<'_>,
-    markdown: &mut CommonMarkCache,
+    prose: &mut Prose<'_>,
     mut menus: Menus<'_>,
 ) {
     let Toggles {
@@ -901,8 +928,7 @@ fn conversation_view(
         // back per turn would only carry that widening along.
         let width = ui.available_width().min(super::document::MAX_READING_WIDTH);
         for (i, turn) in conversation.turns.iter().enumerate() {
-            let block =
-                ui.scope(|ui| turn_block(ui, turn, open, markdown, width, menus.reborrow()));
+            let block = ui.scope(|ui| turn_block(ui, turn, open, prose, width, menus.reborrow()));
             if jump == Some(i) {
                 ui.scroll_to_rect(block.response.rect, Some(egui::Align::Min));
             }
@@ -974,7 +1000,7 @@ fn turn_block(
     ui: &mut Ui,
     turn: &Turn,
     open: Option<bool>,
-    markdown: &mut CommonMarkCache,
+    prose: &mut Prose<'_>,
     width: f32,
     mut menus: Menus<'_>,
 ) {
@@ -1030,8 +1056,11 @@ fn turn_block(
         activity_group(ui, turn, group_start..i, groups, open);
         groups += 1;
         group_start = i + 1;
-        let text = a.text.as_deref().unwrap_or(&a.line);
-        let rect = agent_block(ui, &time_text(a.at), text, ("agent", turn.n, i), markdown);
+        let text = file_refs::message_text(a);
+        let (rect, clicked) = agent_block(ui, &time_text(a.at), text, ("agent", turn.n, i), prose);
+        if clicked.is_some() {
+            *menus.open_file = clicked;
+        }
         message_menu(
             ui,
             rect,
@@ -1043,6 +1072,7 @@ fn turn_block(
     }
     activity_group(ui, turn, group_start..turn.activity.len(), groups, open);
     // The answer: surface block, kicker "CLAUDE · time", Markdown.
+    let mut clicked = None;
     let final_rect = theme::surface(ui)
         .inner_margin(Margin::symmetric(16, 14))
         .show(ui, |ui| {
@@ -1058,12 +1088,15 @@ fn turn_block(
             } else {
                 scrolls_sideways(ui, ("final", turn.n), |ui| {
                     super::document::markdown_style(ui);
-                    super::markdown::show(ui, markdown, &turn.final_text);
+                    clicked = linked_prose(ui, prose, &turn.final_text);
                 });
             }
         })
         .response
         .rect;
+    if clicked.is_some() {
+        *menus.open_file = clicked;
+    }
     if !turn.final_text.is_empty() {
         message_menu(
             ui,
@@ -1134,16 +1167,18 @@ fn group_line(rows: &[Activity]) -> String {
 }
 
 /// A message from the agent: surface block, kicker "AGENT · time",
-/// Markdown. Returns its rect for the context menu.
+/// Markdown. Returns its rect for the context menu, and the file of a
+/// path link clicked in it.
 fn agent_block(
     ui: &mut Ui,
     when: &str,
     text: &str,
     salt: (&str, usize, usize),
-    markdown: &mut CommonMarkCache,
-) -> egui::Rect {
+    prose: &mut Prose<'_>,
+) -> (egui::Rect, Option<(PathBuf, Option<u32>)>) {
     let p = theme::palette(ui);
-    theme::surface(ui)
+    let mut clicked = None;
+    let rect = theme::surface(ui)
         .inner_margin(Margin::symmetric(16, 14))
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
@@ -1151,11 +1186,35 @@ fn agent_block(
             theme::kicker(ui, &format!("Agent · {when}"), p.n600);
             scrolls_sideways(ui, salt, |ui| {
                 super::document::markdown_style(ui);
-                super::markdown::show(ui, markdown, text);
+                clicked = linked_prose(ui, prose, text);
             });
         })
         .response
-        .rect
+        .rect;
+    (rect, clicked)
+}
+
+/// What drawing an agent's prose needs: the Markdown cache, and the
+/// file-link cache with the places a relative path resolves against.
+struct Prose<'a> {
+    markdown: &'a mut CommonMarkCache,
+    links: &'a mut file_refs::Cache,
+    record: RecordId,
+    root: &'a Path,
+    cwd: &'a Path,
+}
+
+/// Draw `text` with the file paths it names as links, scanning it the
+/// first time it is drawn. Returns the file and line of a link clicked.
+fn linked_prose(ui: &mut Ui, prose: &mut Prose<'_>, text: &str) -> Option<(PathBuf, Option<u32>)> {
+    let (root, cwd) = (prose.root, prose.cwd);
+    let linked = prose
+        .links
+        .entry((prose.record, file_refs::text_key(text)))
+        .or_insert_with(|| file_refs::link(text, |r| existing_file(&r.path, root, cwd)));
+    let hit =
+        super::markdown::show_linked(ui, prose.markdown, &linked.markdown, linked.targets.len())?;
+    linked.targets.get(hit).cloned()
 }
 
 /// Text that wraps at the visible width but, where a word or a table
@@ -1180,6 +1239,8 @@ struct Menus<'a> {
     message_links: &'a mut Option<Vec<String>>,
     clone_at: Option<&'a mut Option<usize>>,
     discard_at: Option<&'a mut Option<usize>>,
+    /// A file path link clicked in the agent's prose, and its line.
+    open_file: &'a mut Option<(PathBuf, Option<u32>)>,
 }
 
 impl Menus<'_> {
@@ -1189,6 +1250,7 @@ impl Menus<'_> {
             message_links: self.message_links,
             clone_at: self.clone_at.as_deref_mut(),
             discard_at: self.discard_at.as_deref_mut(),
+            open_file: self.open_file,
         }
     }
     /// The same menus without the clone and discard items, for the
@@ -1199,6 +1261,7 @@ impl Menus<'_> {
             message_links: self.message_links,
             clone_at: None,
             discard_at: None,
+            open_file: self.open_file,
         }
     }
 }
