@@ -42,9 +42,14 @@ pub const PR_POLL_MS: u64 = 60_000;
 /// How long lookups may keep failing before the gate asks.
 pub const PR_ERROR_GRACE_MS: u64 = 3_600_000;
 /// How long after the tree's head moves a `none` reading waits rather
-/// than asks: GitHub creates a new head's check runs a little after the
+/// than asks: a provider attaches a new head's checks a little after the
 /// push, so for a minute or so a repository with CI reads as one without.
 pub const PR_YOUNG_HEAD_MS: u64 = 120_000;
+/// How long after Dispatch's own push a provider that still reports the
+/// head from before it is waited on rather than asked about: git said
+/// the remote took the push, so the provider's reading is the stale one.
+/// It exceeds `PR_POLL_MS` so at least one re-read falls inside it.
+pub const PR_PUSH_LAG_MS: u64 = 120_000;
 
 /// How long a merged lane's base pipeline may run, or fail to be read,
 /// before a lane waiting on it is asked about its merge anyway.
@@ -4342,6 +4347,12 @@ impl Runner {
         else {
             return Ok(());
         };
+        let pushed_ms = pushed_at(t, lane, &head);
+        let pushed = match pushed_ms {
+            None => Pushed::No,
+            Some(at) if now_ms < at.saturating_add(PR_PUSH_LAG_MS) => Pushed::Lagging,
+            Some(_) => Pushed::Overdue,
+        };
         let reading = self.read_pr(&target, none_expected);
         let question = match reading {
             Err(e) => match self.record_pr_error(t, a, &target, &head, &e, now_ms)? {
@@ -4350,7 +4361,9 @@ impl Runner {
             },
             Ok(None) => self.no_pr(t, a, &target, now_ms)?,
             Ok(Some((pr, _)))
-                if pr.state == "open" && pr.mergeable.as_deref() == Some("conflicting") =>
+                if pr.state == "open"
+                    && pr.mergeable.as_deref() == Some("conflicting")
+                    && (matches!(pushed, Pushed::No) || same_commit(&pr.head, &head)) =>
             {
                 record_of(t, &a.stage, a.n).pr = Some(PullRequestRecord {
                     number: pr.number,
@@ -4363,9 +4376,9 @@ impl Runner {
                 return self.remedy(t, ps, p, &a, cwd, lane, &pr, &Remedy::Rebase, now_ms);
             }
             Ok(Some((pr, checks))) => {
-                let young = now_ms < head_moved_ms(t, a).saturating_add(PR_YOUNG_HEAD_MS);
+                let young = head_young(t, a, pushed_ms, now_ms);
                 let (summary, verdict) =
-                    judge_pr(&pr, checks.as_ref(), &head, none_expected, young);
+                    judge_pr(&pr, checks.as_ref(), &head, none_expected, young, pushed);
                 let attempt = record_of(t, &a.stage, a.n);
                 attempt.pr = Some(PullRequestRecord {
                     number: pr.number,
@@ -9512,6 +9525,40 @@ fn head_moved_ms(t: &Ticket, a: &Attempt) -> u64 {
     ended.chain(rechecked).fold(a.started_ms, u64::max)
 }
 
+/// Whether the tree's head moved too recently for a provider to have
+/// registered checks on it: within `PR_YOUNG_HEAD_MS` of the later of
+/// its last recorded move and Dispatch's own push of it, since a refresh
+/// can push into an attempt that is already open.
+fn head_young(t: &Ticket, a: &Attempt, pushed_ms: Option<u64>, now_ms: u64) -> bool {
+    let moved = head_moved_ms(t, a).max(pushed_ms.unwrap_or(0));
+    now_ms < moved.saturating_add(PR_YOUNG_HEAD_MS)
+}
+
+/// When Dispatch's own push left the tree's head on the lane's branch:
+/// the lane's `pushed` time, when its head is the tree's. None for the
+/// tree context, a lane never pushed, or a tree that moved since.
+fn pushed_at(t: &Ticket, lane: Option<&str>, head: &str) -> Option<u64> {
+    let pushed = t
+        .lanes
+        .iter()
+        .find(|l| Some(l.name.as_str()) == lane)?
+        .pushed
+        .as_ref()?;
+    same_commit(&pushed.head, head).then_some(pushed.at_ms)
+}
+
+/// What the records say about the tree's head on the remote.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Pushed {
+    /// Dispatch did not push it, as far as the records say.
+    No,
+    /// Dispatch pushed it under `PR_PUSH_LAG_MS` ago.
+    Lagging,
+    /// Dispatch pushed it longer ago than that: the provider still lags,
+    /// or the branch moved since.
+    Overdue,
+}
+
 /// The head the lane's records last saw on its branch, the lease for a
 /// push: the newest attempt in the lane's context, refreshes aside,
 /// that recorded one (the full hash from local git over the
@@ -9552,13 +9599,16 @@ fn pr_head_seen(t: &Ticket, lane: &LaneRecord) -> Option<String> {
 
 /// What a reading of the PR means: its summary for the record, and
 /// pass (`Ok(true)`), wait (`Ok(false)`) or a question. `young` is a
-/// head that moved too recently for its checks to exist yet.
+/// head that moved too recently for its checks to exist yet; `pushed`
+/// says whether a provider reporting another head may just lag
+/// Dispatch's own push.
 fn judge_pr(
     pr: &crate::github::PullRequest,
     checks: Option<&Checks>,
     head: &str,
     none_expected: bool,
     young: bool,
+    pushed: Pushed,
 ) -> (String, Result<bool, String>) {
     let summary = match (pr.state.as_str(), checks) {
         ("merged", _) => "merged".to_owned(),
@@ -9572,12 +9622,21 @@ fn judge_pr(
     let verdict = match summary.as_str() {
         "merged" => Ok(true),
         "closed" => Err(format!("PR #{} is closed without being merged", pr.number)),
-        _ if !same_commit(&pr.head, head) => Err(format!(
-            "PR #{} is at {} but the tree is at {}; push the branch, then answer recheck",
-            pr.number,
-            short(&pr.head),
-            short(head)
-        )),
+        _ if !same_commit(&pr.head, head) => match pushed {
+            Pushed::Lagging => Ok(false),
+            Pushed::Overdue => Err(format!(
+                "Dispatch pushed {} to the branch but PR #{} reports {}: the provider has not caught up, or the branch moved since; compare the remote with the tree, then answer recheck",
+                short(head),
+                pr.number,
+                short(&pr.head)
+            )),
+            Pushed::No => Err(format!(
+                "PR #{} is at {} but the tree is at {}; push the branch, then answer recheck",
+                pr.number,
+                short(&pr.head),
+                short(head)
+            )),
+        },
         "none" if none_expected => Ok(true),
         "none" if young => Ok(false),
         "none" => Err(format!(
@@ -12155,5 +12214,85 @@ prompt = "Write {notes}."
             let vars = vars_for(&t, &p, Some(lane));
             assert_eq!(field(&vars, "inputs.deploy.commit").as_deref(), Some(head));
         }
+    }
+
+    fn pushed_ticket(head: &str, at_ms: u64) -> Ticket {
+        let mut t = bare_ticket();
+        t.lanes[0].pushed = Some(crate::ticket::PushedHead {
+            head: head.into(),
+            at_ms,
+        });
+        t
+    }
+
+    #[test]
+    fn pushed_at_vouches_only_for_the_trees_head_on_a_pushed_lane() {
+        let full = "rebased1aaaabbbbccccddddeeeeffff00001111";
+        let t = pushed_ticket(full, 5_000);
+        assert_eq!(pushed_at(&t, Some("api"), full), Some(5_000));
+        assert_eq!(pushed_at(&t, Some("api"), "rebased1"), Some(5_000));
+        assert_eq!(pushed_at(&t, Some("api"), "moved0001"), None);
+        assert_eq!(pushed_at(&t, None, full), None);
+        assert_eq!(pushed_at(&bare_ticket(), Some("api"), full), None);
+    }
+
+    fn open_pr_at(head: &str) -> crate::github::PullRequest {
+        crate::github::PullRequest {
+            number: 7,
+            url: String::new(),
+            head: head.into(),
+            state: "open".into(),
+            mergeable: None,
+            branch: String::new(),
+            base: String::new(),
+            title: String::new(),
+            merge_commit: None,
+        }
+    }
+
+    #[test]
+    fn a_reading_of_another_head_waits_out_dispatchs_own_push() {
+        let pr = open_pr_at("base0000");
+        let judge =
+            |pushed| judge_pr(&pr, Some(&Checks::Passed), "rebased1", false, false, pushed).1;
+        assert_eq!(judge(Pushed::Lagging), Ok(false));
+        assert_eq!(
+            judge(Pushed::Overdue),
+            Err("Dispatch pushed rebased1 to the branch but PR #7 reports base0000: the provider has not caught up, or the branch moved since; compare the remote with the tree, then answer recheck".into())
+        );
+        assert_eq!(
+            judge(Pushed::No),
+            Err("PR #7 is at base0000 but the tree is at rebased1; push the branch, then answer recheck".into())
+        );
+    }
+
+    #[test]
+    fn no_checks_just_after_a_push_waits() {
+        let t = pushed_ticket("rebased1", 200_000);
+        let a = new_attempt(
+            "ready",
+            1,
+            "api",
+            AttemptKind::GateOnly,
+            AttemptState::Running,
+            BTreeMap::new(),
+            1_000,
+        );
+        let pushed_ms = pushed_at(&t, Some("api"), "rebased1");
+        let now = 200_000 + PR_YOUNG_HEAD_MS / 2;
+        assert!(!head_young(&t, &a, None, now), "old without the push");
+        assert!(head_young(&t, &a, pushed_ms, now));
+        assert!(!head_young(&t, &a, pushed_ms, 200_000 + PR_YOUNG_HEAD_MS));
+        let pr = open_pr_at("rebased1");
+        let (summary, verdict) = judge_pr(
+            &pr,
+            Some(&Checks::None),
+            "rebased1",
+            false,
+            true,
+            Pushed::No,
+        );
+        assert_eq!(summary, "none");
+        assert_eq!(verdict, Ok(false));
     }
 }
