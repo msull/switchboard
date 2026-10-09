@@ -1362,6 +1362,34 @@ impl Ticket {
             .find_map(|a| a.artifacts.get(name).map(|p| (a.stage.as_str(), p)))
     }
 
+    /// `shown_where` with no filter.
+    #[must_use]
+    pub fn shown(&self, name: &str) -> Option<(&Attempt, &PathBuf)> {
+        self.shown_where(name, |_| true)
+    }
+
+    /// `input_where` for a reader who wants the document as it stands: a
+    /// workflow attempt still open counts too, since a review edits its
+    /// copy in place until `finalize` is answered. Display only; an agent
+    /// is handed `input_where`'s complete files.
+    #[must_use]
+    pub fn shown_where(
+        &self,
+        name: &str,
+        keep: impl Fn(&Attempt) -> bool,
+    ) -> Option<(&Attempt, &PathBuf)> {
+        self.attempts
+            .iter()
+            .rev()
+            .filter(|a| !a.forgotten.contains_key(name))
+            .filter(|a| {
+                a.state == AttemptState::Complete
+                    || (a.kind == AttemptKind::Workflow && a.is_open())
+            })
+            .filter(|a| keep(a))
+            .find_map(|a| a.artifacts.get(name).map(|p| (a, p)))
+    }
+
     #[must_use]
     pub fn pending_decisions(&self) -> Vec<&Decision> {
         self.decisions.iter().filter(|d| d.pending()).collect()
@@ -1692,6 +1720,83 @@ mod tests {
         assert_eq!(t.current_session().unwrap(), "s-plan-2");
         assert_eq!(t.attempts_of("plan").count(), 2);
         assert_eq!(Ticket::new_id().len(), 8);
+    }
+
+    #[test]
+    fn the_plan_shown_is_an_open_review_copy_but_an_input_never_is() {
+        let mut t = blank();
+        let attempt = |stage: &str, kind: AttemptKind, state: AttemptState, path: &str| {
+            new_attempt(
+                stage,
+                1,
+                "root",
+                kind,
+                state,
+                BTreeMap::from([("plan".to_owned(), PathBuf::from(path))]),
+                0,
+            )
+        };
+        let shown = |t: &Ticket| t.shown("plan").map(|(a, p)| (a.stage.clone(), p.clone()));
+        let at = |stage: &str, path: &str| Some((stage.to_owned(), PathBuf::from(path)));
+        t.attempts.push(attempt(
+            "plan",
+            AttemptKind::Agent,
+            AttemptState::Complete,
+            "/plan/1/plan.md",
+        ));
+        t.attempts.push(attempt(
+            "review-plan",
+            AttemptKind::Workflow,
+            AttemptState::Running,
+            "/review/1/plan.md",
+        ));
+        assert_eq!(shown(&t), at("review-plan", "/review/1/plan.md"));
+        assert_eq!(t.input("plan"), Some(&PathBuf::from("/plan/1/plan.md")));
+        // A parked review's copy is not the plan going forward.
+        for state in [
+            AttemptState::Cancelled {
+                reason: "parked".into(),
+            },
+            AttemptState::Failed { reason: "x".into() },
+        ] {
+            t.attempts[1].state = state;
+            assert_eq!(shown(&t), at("plan", "/plan/1/plan.md"));
+        }
+        // A plan stage rerun after a finished review writes the newer file.
+        t.attempts[1].state = AttemptState::Complete;
+        assert_eq!(shown(&t), at("review-plan", "/review/1/plan.md"));
+        t.attempts.push(attempt(
+            "plan",
+            AttemptKind::Agent,
+            AttemptState::Complete,
+            "/plan/2/plan.md",
+        ));
+        assert_eq!(shown(&t), at("plan", "/plan/2/plan.md"));
+        // An open agent attempt is still not shown: only a review edits
+        // its copy in place.
+        t.attempts.push(attempt(
+            "plan",
+            AttemptKind::Agent,
+            AttemptState::Running,
+            "/plan/3/plan.md",
+        ));
+        assert_eq!(shown(&t), at("plan", "/plan/2/plan.md"));
+        t.attempts.push(attempt(
+            "review-plan",
+            AttemptKind::Workflow,
+            AttemptState::Starting,
+            "/review/2/plan.md",
+        ));
+        assert_eq!(shown(&t), at("review-plan", "/review/2/plan.md"));
+        assert_eq!(t.input("plan"), Some(&PathBuf::from("/plan/2/plan.md")));
+        t.attempts[4].forgotten.insert(
+            "plan".into(),
+            Forgotten {
+                at_ms: 1,
+                why: "parked".into(),
+            },
+        );
+        assert_eq!(shown(&t), at("plan", "/plan/2/plan.md"));
     }
 
     #[test]

@@ -589,6 +589,16 @@ fn an_issue_becomes_one_project_four_sessions_one_run_and_a_finalize_decision() 
     assert_eq!(pending.len(), 1);
     assert_eq!(pending[0].name, "finalize");
     assert!(pending[0].question.contains(&copy.display().to_string()));
+    // `show` and the ticket page name the open copy; a prompt is still
+    // handed only the complete plan.
+    {
+        let t = env.ticket(&id);
+        assert_eq!(t.input("plan"), Some(&plan));
+        let paths = dispatch::serve::ticket_paths(&t, env.runner.pipeline_of(&t).ok().as_ref());
+        assert_eq!(paths.plan, Some(copy.clone()));
+        assert!(paths.plan_reviewed && paths.plan_reviewing);
+        assert_eq!(paths.plan_stage.as_deref(), Some("review"));
+    }
     let face = env.ticket(&id).current_session().cloned().unwrap();
     {
         let sb = env.sb();

@@ -243,8 +243,8 @@ pub struct Fetched {
     pub in_flight: bool,
 }
 
-/// One artifact's reads that have not brought its text yet. Transient,
-/// like `TicketEvents`.
+/// One artifact's reads that have not brought its current text yet.
+/// Transient, like `TicketEvents`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ArtifactRead {
     /// The ticket's `updated_ms` at the last ask: a failed read is asked
@@ -426,11 +426,17 @@ pub struct DispatchState {
     pub seen: bool,
     /// Artifact text by path, as read through the port.
     pub artifacts: HashMap<PathBuf, String>,
+    /// The ticket's `updated_ms` each text in `artifacts` was asked at:
+    /// a review edits its copy in place under one path, so the text is
+    /// read again once the ticket moves past it. `None` when the ticket
+    /// was not in the status yet, which is never asked again.
+    pub artifacts_at: HashMap<PathBuf, Option<u64>>,
     /// Events by ticket id, as read through the port.
     pub events: HashMap<String, TicketEvents>,
     /// Single-ticket replies by ticket id.
     pub details: HashMap<String, Fetched>,
-    /// Artifact reads with no text yet, by path.
+    /// Artifact reads not yet answered with text, by path: a first read,
+    /// or a re-read while the older text stays in `artifacts`.
     pub artifact_reads: HashMap<PathBuf, ArtifactRead>,
     /// The `dispatch` executable the console types.
     pub command: PathBuf,
@@ -706,14 +712,15 @@ impl AppCore {
     }
 
     /// Whether the ticket page should ask for the artifact at `path` of
-    /// ticket `t`: connected, no text yet, not already asking, and not
-    /// asked at the ticket's current `updated_ms`. Never for a secret
-    /// artifact, which the runner refuses to read.
+    /// ticket `t`: connected, no text read since the ticket last changed,
+    /// not already asking, and not asked at the ticket's current
+    /// `updated_ms`. Never for a secret artifact, which the runner
+    /// refuses to read.
     #[must_use]
     pub fn artifact_read_due(&self, t: &TicketView, path: &std::path::Path) -> bool {
         !t.attempts.iter().any(|a| a.secret_at(path))
             && self.dispatch.connected
-            && !self.dispatch.artifacts.contains_key(path)
+            && !self.artifact_current(path, Some(t.updated_ms))
             && self
                 .dispatch
                 .artifact_reads
@@ -721,7 +728,21 @@ impl AppCore {
                 .is_none_or(|r| !r.in_flight && r.asked_at != Some(t.updated_ms))
     }
 
-    /// The reads of the artifact at `path` that brought no text yet.
+    /// Whether the text held for `path` was read at the ticket's
+    /// `updated_ms`, or at a time that cannot be compared with it.
+    fn artifact_current(&self, path: &std::path::Path, updated_ms: Option<u64>) -> bool {
+        self.dispatch.artifacts.contains_key(path)
+            && match (
+                self.dispatch.artifacts_at.get(path).copied().flatten(),
+                updated_ms,
+            ) {
+                (Some(at), Some(now)) => at == now,
+                _ => true,
+            }
+    }
+
+    /// The reads of the artifact at `path` not yet answered with text: a
+    /// first read, or a re-read while the older text is still held.
     #[must_use]
     pub fn artifact_read(&self, path: &std::path::Path) -> Option<&ArtifactRead> {
         self.dispatch.artifact_reads.get(path)
@@ -1268,13 +1289,14 @@ impl AppCore {
         }
     }
 
-    /// A read of an artifact's text, asked unless it is already read or
-    /// on its way; a page's click asks again after a failure.
+    /// A read of an artifact's text, asked unless it is already read
+    /// since the ticket last changed or on its way; a page's click asks
+    /// again after a failure.
     fn read_artifact(&mut self, ticket: String, path: PathBuf, out: &mut Out) {
-        if self.dispatch.artifacts.contains_key(&path) {
+        let updated_ms = self.ticket(&ticket).map(|t| t.updated_ms);
+        if self.artifact_current(&path, updated_ms) {
             return;
         }
-        let updated_ms = self.ticket(&ticket).map(|t| t.updated_ms);
         let r = self
             .dispatch
             .artifact_reads
@@ -1371,7 +1393,12 @@ impl AppCore {
             }
             (_, Ok(Reply::Failed { reason })) => self.error(format!("Dispatch: {reason}")),
             (Body::Artifact { path, .. }, Ok(Reply::Artifact { text })) => {
-                self.dispatch.artifact_reads.remove(&path);
+                let asked_at = self
+                    .dispatch
+                    .artifact_reads
+                    .remove(&path)
+                    .and_then(|r| r.asked_at);
+                self.dispatch.artifacts_at.insert(path.clone(), asked_at);
                 self.dispatch.artifacts.insert(path, text);
             }
             (Body::Worktrees { .. }, Ok(Reply::Worktrees(v))) => {

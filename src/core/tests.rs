@@ -9332,7 +9332,72 @@ mod dispatch_page {
             Clock::at(9),
         );
         assert!(core.artifact_read(&path).is_none());
-        assert!(!core.artifact_read_due(&t(10), &path), "read");
+        assert!(!core.artifact_read_due(&t(0), &path), "read at 0");
+        assert!(
+            core.artifact_read_due(&t(10), &path),
+            "the ticket moved past the read"
+        );
+    }
+
+    /// A review edits its copy in place under one path, so text already
+    /// read is read again once the ticket moves; the old text stays until
+    /// a reply brings new text, and a failed re-read leaves it.
+    #[test]
+    fn an_artifact_read_again_replaces_its_text_and_a_failure_keeps_it() {
+        let mut core = connected();
+        let path = std::path::PathBuf::from("/dispatch/t1/review/1/plan.md");
+        let read = AppAction::DispatchReadArtifact {
+            ticket: "t1".into(),
+            path: path.clone(),
+        };
+        let replied = |result| AppAction::DispatchReplied {
+            body: Body::Artifact {
+                ticket: "t1".into(),
+                path: path.clone(),
+            },
+            result,
+        };
+        let moved = |updated_ms| {
+            let mut s = status(None);
+            s.tickets[0].updated_ms = updated_ms;
+            AppAction::DispatchStatus(Some(s))
+        };
+        let text = |core: &AppCore| core.dispatch_state().artifacts.get(&path).cloned();
+        core.dispatch(moved(5), Clock::at(1));
+        core.dispatch(read.clone(), Clock::at(2));
+        core.dispatch(
+            replied(Ok(Reply::Artifact { text: "v1".into() })),
+            Clock::at(3),
+        );
+        assert_eq!(text(&core).as_deref(), Some("v1"));
+        assert!(
+            core.dispatch(read.clone(), Clock::at(4)).is_empty(),
+            "current"
+        );
+
+        core.dispatch(moved(10), Clock::at(5));
+        let t = core.ticket("t1").unwrap().clone();
+        assert!(core.artifact_read_due(&t, &path));
+        assert_eq!(core.dispatch(read.clone(), Clock::at(6)).len(), 1);
+        assert_eq!(text(&core).as_deref(), Some("v1"), "drawn while read again");
+        core.dispatch(
+            replied(Ok(Reply::Artifact { text: "v2".into() })),
+            Clock::at(7),
+        );
+        assert_eq!(text(&core).as_deref(), Some("v2"));
+        assert!(!core.artifact_read_due(&t, &path));
+
+        core.dispatch(moved(20), Clock::at(8));
+        let t = core.ticket("t1").unwrap().clone();
+        core.dispatch(read.clone(), Clock::at(9));
+        core.dispatch(replied(Ok(Reply::failed("read: busy"))), Clock::at(10));
+        assert_eq!(text(&core).as_deref(), Some("v2"), "kept");
+        assert_eq!(
+            core.artifact_read(&path).and_then(|r| r.failed.as_deref()),
+            Some("read: busy")
+        );
+        assert!(!core.artifact_read_due(&t, &path), "asked at 20 already");
+        assert_eq!(core.dispatch(read, Clock::at(11)).len(), 1, "a click");
     }
 
     #[test]

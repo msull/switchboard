@@ -10235,34 +10235,63 @@ pub(crate) fn lane_files<'a>(
     p: Option<&Pipeline>,
     name: &str,
 ) -> Vec<(Option<&'a str>, &'a str, &'a PathBuf)> {
+    lane_files_by(t, p, name, false)
+        .into_iter()
+        .map(|(lane, a, path)| (lane, a.stage.as_str(), path))
+        .collect()
+}
+
+/// `lane_files` as the document stands, for display, with the attempt
+/// that wrote each file: a lane's open review copy stands in for its
+/// lane, as `Ticket::shown_where` says.
+pub(crate) fn shown_lane_files<'a>(
+    t: &'a Ticket,
+    p: Option<&Pipeline>,
+    name: &str,
+) -> Vec<(Option<&'a str>, &'a Attempt, &'a PathBuf)> {
+    lane_files_by(t, p, name, true)
+}
+
+fn lane_files_by<'a>(
+    t: &'a Ticket,
+    p: Option<&Pipeline>,
+    name: &str,
+    shown: bool,
+) -> Vec<(Option<&'a str>, &'a Attempt, &'a PathBuf)> {
+    // `&dyn Fn` because each call site passes a different closure; a
+    // reference to a closure is itself a closure, so it goes straight
+    // through to the picker. Keeping only complete attempts narrows
+    // `shown_where` to exactly what `input_where` picks.
+    let pick = |keep: &dyn Fn(&Attempt) -> bool| {
+        t.shown_where(name, |a| {
+            (shown || a.state == AttemptState::Complete) && keep(a)
+        })
+    };
     let Some(p) = p else {
-        return t
-            .input_with_stage(name)
-            .map(|(stage, path)| vec![(None, stage, path)])
+        return pick(&|_| true)
+            .map(|(a, path)| vec![(None, a, path)])
             .unwrap_or_default();
     };
     let stage_of = |a: &Attempt| p.stages.iter().find(|s| s.name == a.stage);
-    let Some((stage, path)) = t.input_where(name, |a| {
-        stage_of(a).is_some() || a.context == "root" || a.context == "joined"
-    }) else {
+    let Some((a, path)) =
+        pick(&|a| stage_of(a).is_some() || a.context == "root" || a.context == "joined")
+    else {
         return Vec::new();
     };
     if !p
         .stages
         .iter()
-        .find(|s| s.name == stage)
+        .find(|s| s.name == a.stage)
         .is_some_and(Stage::runs_per_lane)
     {
-        return vec![(None, stage, path)];
+        return vec![(None, a, path)];
     }
     p.lanes
         .iter()
         .filter_map(|l| t.lanes.iter().find(|x| x.name == l.name))
         .filter_map(|l| {
-            t.input_where(name, |a| {
-                a.context == l.name && stage_of(a).is_none_or(Stage::runs_per_lane)
-            })
-            .map(|(s, path)| (Some(l.name.as_str()), s, path))
+            pick(&|a| a.context == l.name && stage_of(a).is_none_or(Stage::runs_per_lane))
+                .map(|(a, path)| (Some(l.name.as_str()), a, path))
         })
         .collect()
 }
@@ -12057,6 +12086,50 @@ prompt = "Write {notes}."
             field(&vars, "inputs.notes").as_deref(),
             Some("/refresh-b.md")
         );
+    }
+
+    #[test]
+    fn an_open_review_copy_reaches_no_prompt_until_the_review_completes() {
+        let p = plan_pipeline();
+        let mut t = lanes_ticket("plan", &[("outline", "root", "/outline.md")], &["A", "B"]);
+        t.attempts.push(new_attempt(
+            "review",
+            1,
+            "root",
+            AttemptKind::Workflow,
+            AttemptState::Running,
+            BTreeMap::from([("plan".to_owned(), PathBuf::from("/review/1/plan.md"))]),
+            0,
+        ));
+        let given = |t: &Ticket| {
+            let plans: Vec<PathBuf> = lane_plans(t, &p, None)
+                .into_iter()
+                .map(|(_, plan)| plan.clone())
+                .collect();
+            (
+                lane_plan(t, &p, Some("A")).cloned(),
+                plans,
+                field(&vars_for(t, &p, Some("A")), "inputs.plan"),
+                plan_clause(t, &p, None),
+            )
+        };
+        let at = |path: &str| {
+            (
+                Some(PathBuf::from(path)),
+                vec![PathBuf::from(path)],
+                Some(path.to_owned()),
+                format!(" (the plan is at {path})"),
+            )
+        };
+        // Waiting on `finalize`: the planner may still be editing the copy.
+        assert_eq!(given(&t), at("/outline.md"));
+        assert_eq!(
+            shown_lane_files(&t, Some(&p), "plan")[0].2,
+            &PathBuf::from("/review/1/plan.md")
+        );
+        // Finalized: the next stage's prompt follows the reviewed copy.
+        t.attempts[1].state = AttemptState::Complete;
+        assert_eq!(given(&t), at("/review/1/plan.md"));
     }
 
     #[test]

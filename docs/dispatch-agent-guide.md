@@ -204,8 +204,14 @@ decisions with their options and the exact `dispatch decide` line; and
 the files to read next: the plan, the latest round's findings, the
 code review summary, the notes, and the PR's url and head. When the
 stage that last wrote the plan or the notes runs per lane, each lane's
-file is its own line (`plan (A): ...`, `notes (B): ...`). Read those
-files rather than guessing what they say.
+file is its own line (`plan (A): ...`, `notes (B): ...`). While a plan
+review is open, the plan line names the review's copy, which the
+planner may still be editing, and the line under it says so, under
+each lane's own line when the review runs per lane:
+`(reviewed copy, round N, review open)`, or `(reviewed copy, review
+open)` before round 1's first feedback file. That copy is what
+`finalize` would accept. Read those files rather than guessing what
+they say.
 
 **Events.** Every ticket write that changes something appends one
 line per change to `events.jsonl` in the data directory: `taken`,

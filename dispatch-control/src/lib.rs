@@ -409,8 +409,19 @@ fn reviews_resolution(a: &AttemptView, l: &LaneView) -> bool {
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PathsView {
-    /// The latest completed plan; `plan_files` has it per lane.
+    /// The plan as it stands: an open review's copy, else the newest
+    /// complete one; `plan_files` has it per lane.
     pub plan: Option<PathBuf>,
+    /// The stage whose attempt wrote `plan`; none from an older runner.
+    pub plan_stage: Option<String>,
+    /// `plan` is a plan review's copy, its review open or finished.
+    pub plan_reviewed: bool,
+    /// `plan` is a plan review's copy whose review is still open, so the
+    /// planner may still be editing it.
+    pub plan_reviewing: bool,
+    /// The newest round of that review, from its feedback files or a
+    /// `revise` answer; none before the first round's feedback.
+    pub plan_round: Option<u32>,
     /// The latest review round's findings: a code review round's
     /// aggregated feedback, else the plan review's latest round file.
     pub round_file: Option<PathBuf>,
@@ -425,8 +436,10 @@ pub struct PathsView {
     pub pr_head: Option<String>,
     /// The plan review's round files, first to last.
     pub plan_rounds: Vec<PlanRoundView>,
-    /// The plan, one file per lane when the stage that last wrote it
-    /// runs per lane, in pipeline lane order; else the one `plan` names.
+    /// The plan as it stands, one file per lane when the stage that last
+    /// wrote it runs per lane, in pipeline lane order, a lane's open
+    /// review copy standing in for its own lane; else the one `plan`
+    /// names.
     pub plan_files: Vec<LaneFile>,
     /// The notes, the same way.
     pub notes_files: Vec<LaneFile>,
@@ -442,6 +455,12 @@ pub struct LaneFile {
     pub stage: String,
     /// Where it is.
     pub path: PathBuf,
+    /// Written by a plan review whose review is still open, so the
+    /// planner may still be editing it.
+    pub reviewing: bool,
+    /// The newest round of the plan review that wrote it, as
+    /// `PathsView::plan_round` counts; none for any other writer.
+    pub round: Option<u32>,
 }
 
 /// One plan review round's files.
@@ -810,6 +829,15 @@ fn to_line<T: Serialize>(value: &T) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn paths_from_an_older_runner_read_with_no_plan_label() {
+        let v: PathsView = serde_json::from_str(r#"{"plan": "/plan/1/plan.md"}"#).unwrap();
+        assert_eq!(v.plan, Some(PathBuf::from("/plan/1/plan.md")));
+        assert_eq!(v.plan_stage, None);
+        assert!(!v.plan_reviewed && !v.plan_reviewing);
+        assert_eq!(v.plan_round, None);
+    }
 
     #[test]
     fn every_request_and_reply_round_trips_through_a_line() {

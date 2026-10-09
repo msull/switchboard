@@ -855,6 +855,10 @@ fn print_lane_files(name: &str, files: &[dispatch_control::LaneFile]) -> Result<
             .as_ref()
             .map_or_else(String::new, |l| format!(" ({l})"));
         say!("  {name}{lane}: {}", f.path.display());
+        if f.reviewing {
+            let round = f.round.map_or_else(String::new, |n| format!(", round {n}"));
+            say!("    (reviewed copy{round}, review open)");
+        }
     }
     Ok(())
 }
