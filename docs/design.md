@@ -1716,11 +1716,16 @@ an answer from the terminal is never overwritten by a pass that read
 the record before it; a second `dispatch run` on the same directory is
 refused by `runner.lock`. Every request keeps its body in the ledger,
 so a lost reply to an idempotent one (`workflow.finalize`,
-`session.kill`, `set.sync`) is sent again as the same operation; a
+`session.kill`) is sent again as the same operation; a
 lost reply to a non-replayable one (`session.send`,
 `workflow.continue`, `workflow.object`, and an objection the port
 answered "the app did not answer in time") is a `lost-send` question asked once, since its
-ledger entry is marked asked and recovery skips it from then on. An
+ledger entry is marked asked and recovery skips it from then on. A
+ticket's ledger holds only that ticket's requests: the queue set's
+`set.new` and `set.sync` live on the project record's `view_op`,
+resolved before any new sync. A lost `set.new` there is found as any
+creation is; a lost `set.sync` is not replayed but superseded by a
+redraw of the current queue, since the layout it carried may be stale. An
 attempt with no launch on the books fails rather than waits. Parking
 and a rerun follow the design's cancellation sequence: the intent is
 written (for parking, with every open decision on the ticket

@@ -1439,6 +1439,11 @@ pub struct ProjectState {
     pub shown: Vec<(String, String)>,
     /// The project's supervisor session and its workspace.
     pub supervisor: Supervision,
+    /// The one request to Switchboard for the queue's working set
+    /// (`set.new` or `set.sync`) in flight or last answered: this
+    /// project's ledger for its view. Kept apart from `supervisor.op`,
+    /// so a sync never waits on a Fresh, nor the reverse.
+    pub view_op: Option<Operation>,
     /// The tree a deploy of a lane the ticket did not choose runs in:
     /// a detached worktree of the project's clone at its base, shared
     /// by every ticket and pipeline of the project. Recorded the first

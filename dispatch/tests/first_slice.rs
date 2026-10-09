@@ -490,16 +490,13 @@ fn an_issue_becomes_one_project_four_sessions_one_run_and_a_finalize_decision() 
     assert!(t.ledger.iter().all(|o| o.reply.is_some()));
     // Every request was written down before it went out.
     let kinds: Vec<&str> = t.ledger.iter().map(|o| o.kind.as_str()).collect();
-    assert_eq!(
-        kinds,
-        [
-            "space.new",
-            "project.add",
-            "session.new",
-            "set.new",
-            "set.sync"
-        ]
-    );
+    assert_eq!(kinds, ["space.new", "project.add", "session.new"]);
+    // The queue set's requests are the project's, not the ticket's.
+    assert_eq!(env.sb().kinds_called("set.new"), 1);
+    assert_eq!(env.sb().kinds_called("set.sync"), 1);
+    let view_op = env.runner.load_project(PROJECT).unwrap().view_op.unwrap();
+    assert_eq!(view_op.kind, "set.sync");
+    assert!(view_op.reply.is_some());
 
     // Nothing moves while the agent works, or after a stop with no file.
     env.step();
@@ -10797,6 +10794,7 @@ fn a_close_cut_off_before_the_project_save_finishes_and_clears_the_set_once_answ
             .contains(&id)
     );
     let sessions = env.sb().sessions.len();
+    let syncs = env.sb().kinds_called("set.sync");
     env.sb().drop_reply_for = Some("set.sync".into());
     env.step();
     let t = env.ticket(&id);
@@ -10807,10 +10805,16 @@ fn a_close_cut_off_before_the_project_save_finishes_and_clears_the_set_once_answ
         (ps.queue.is_empty(), ps.closing.clone()),
         (true, vec![id.clone()])
     );
-    let sync = t.ledger.iter().rfind(|o| o.kind == "set.sync").unwrap();
-    assert!(sync.reply.is_none(), "on the closing ticket's own ledger");
+    // The close's sync lost its reply on the project's record, and the
+    // pass's own sync redrew over it.
+    assert_eq!(env.sb().kinds_called("set.sync"), syncs + 2);
+    let sync = ps.view_op.clone().unwrap();
+    assert_eq!(sync.kind, "set.sync");
+    assert!(sync.reply.is_some(), "superseded by the pass's redraw");
+    assert!(t.ledger.iter().all(|o| !o.kind.starts_with("set.")));
     assert!(env.runner.resume(&id, env.now).is_err());
     env.step();
+    assert_eq!(env.sb().kinds_called("set.sync"), syncs + 2, "nothing owed");
     let t = env.ticket(&id);
     assert!(matches!(t.state, TicketState::Closed { .. }), "{t:#?}");
     assert!(t.close.card_cleared);
@@ -10823,11 +10827,11 @@ fn a_close_cut_off_before_the_project_save_finishes_and_clears_the_set_once_answ
     assert!(!sb.session(&investigator).waiting);
 }
 
-/// A closing ticket that still holds the set's only card leaves it to
-/// its own close: the pass's sync has no other ticket to write under,
-/// and that is not an error to report on every pass.
+/// A closing ticket that still holds the set's only card has it cleared
+/// by whichever sync comes first, the pass's included: the request is
+/// the project's, so it needs no ticket to be written under.
 #[test]
-fn a_card_held_only_by_a_closing_ticket_is_left_to_its_close() {
+fn a_card_held_only_by_a_closing_ticket_is_cleared_by_the_next_sync() {
     let mut env = Env::new();
     let id = env.take(7).id;
     at_rerun(&mut env, &id);
@@ -10835,11 +10839,13 @@ fn a_card_held_only_by_a_closing_ticket_is_left_to_its_close() {
     let mut ps = env.runner.load_project(PROJECT).unwrap();
     ps.queue.retain(|q| q != &id);
     ps.closing.push(id.clone());
-    let calls = env.sb().calls.len();
+    let syncs = env.sb().kinds_called("set.sync");
     let now = env.tick();
-    dispatch::view::sync_queue(&mut env.runner, &mut ps, PROJECT, &[], None, now).unwrap();
-    assert_eq!(ps.shown.len(), 1, "the card stays for the close to clear");
-    assert_eq!(env.sb().calls.len(), calls, "nothing asked");
+    dispatch::view::sync_queue(&mut env.runner, &mut ps, PROJECT, &[], now).unwrap();
+    assert!(ps.shown.is_empty());
+    assert!(env.sb().sets[0].items.is_empty());
+    assert_eq!(env.sb().kinds_called("set.sync"), syncs + 1);
+    assert!(ps.view_op.unwrap().reply.is_some());
 }
 
 #[test]
@@ -11238,13 +11244,16 @@ fn a_card_left_up_with_nothing_to_show_is_cleared() {
         reason: "closed by hand".into(),
     };
     env.runner.save_ticket(&mut t, env.now).unwrap();
+    let closed = std::fs::read(env.data.ticket_file(&id)).unwrap();
     env.step();
     assert!(env.sb().sets[0].items.is_empty());
     let ps = env.runner.load_project(PROJECT).unwrap();
     assert!(ps.queue.is_empty() && ps.shown.is_empty());
-    let t = env.ticket(&id);
-    let sync = t.ledger.iter().rfind(|o| o.kind == "set.sync").unwrap();
-    assert!(sync.reply.is_some(), "the stale ticket's ledger, saved");
+    let sync = ps.view_op.unwrap();
+    assert_eq!(sync.kind, "set.sync");
+    assert!(sync.reply.is_some(), "on the project's record, saved");
+    let after = std::fs::read(env.data.ticket_file(&id)).unwrap();
+    assert_eq!(after, closed, "the closed ticket's record is left alone");
     let syncs = env.sb().kinds_called("set.sync");
     env.step();
     assert_eq!(env.sb().kinds_called("set.sync"), syncs, "once");
@@ -11309,6 +11318,247 @@ fn a_close_beside_a_parked_ticket_still_clears_its_card() {
     assert_eq!(items.len(), 1, "{items:?}");
     assert!(
         matches!(&items[0].target, switchboard_control::PinTarget::Session { session } if session == &a_session)
+    );
+}
+
+/// The sessions the queue set shows, top to bottom.
+fn set_sessions(env: &Env) -> Vec<String> {
+    env.sb().sets[0]
+        .items
+        .iter()
+        .filter_map(|p| match &p.target {
+            switchboard_control::PinTarget::Session { session } => Some(session.clone()),
+            switchboard_control::PinTarget::File { .. } => None,
+        })
+        .collect()
+}
+
+/// No ticket's ledger holds a queue-set request: they are the project's.
+fn no_set_requests_on_tickets(env: &Env, ids: &[&String]) {
+    for id in ids {
+        let t = env.ticket(id);
+        assert!(
+            t.ledger.iter().all(|o| !o.kind.starts_with("set.")),
+            "{id}: {:#?}",
+            t.ledger
+        );
+    }
+}
+
+/// Step until the ticket is closed; a close takes a few passes.
+fn step_until_closed(env: &mut Env, id: &str) {
+    for _ in 0..5 {
+        if matches!(env.ticket(id).state, TicketState::Closed { .. }) {
+            return;
+        }
+        env.step();
+    }
+    panic!("{id} never closed: {:#?}", env.ticket(id));
+}
+
+#[test]
+fn a_queue_change_leaves_a_parked_ticket_first_in_the_queue_untouched() {
+    let mut env = Env::new();
+    let a = env.take(7).id;
+    let b = env.take(8).id;
+    env.step();
+    for id in [&a, &b] {
+        let session = session_of(&env.ticket(id), "investigate");
+        env.sb().vanish(&session);
+    }
+    env.step();
+    let d = env.pending(&a)[0].id.clone();
+    let now = env.tick();
+    env.runner.decide(&a, &d, "park", None, now).unwrap();
+    env.step();
+    assert!(matches!(env.ticket(&a).state, TicketState::Parked { .. }));
+    let now = env.tick();
+    env.runner.close_by_hand(&b, None, now).unwrap();
+    let ps = env.runner.load_project(PROJECT).unwrap();
+    assert_eq!(ps.queue, std::slice::from_ref(&a));
+    let a_before = std::fs::read(env.data.ticket_file(&a)).unwrap();
+    let a_updated = env.ticket(&a).updated_ms;
+    let c = env.take(9).id;
+    for _ in 0..5 {
+        if env
+            .ticket(&c)
+            .attempts
+            .first()
+            .is_some_and(|at| at.state == AttemptState::Running)
+        {
+            break;
+        }
+        env.step();
+    }
+    assert_eq!(env.ticket(&c).attempts[0].state, AttemptState::Running);
+    let a_after = std::fs::read(env.data.ticket_file(&a)).unwrap();
+    assert!(
+        a_before == a_after,
+        "the parked ticket's record was written"
+    );
+    assert_eq!(env.ticket(&a).updated_ms, a_updated);
+    let view_op = env.runner.load_project(PROJECT).unwrap().view_op.unwrap();
+    assert_eq!(view_op.kind, "set.sync");
+    assert!(view_op.reply.is_some());
+    assert!(
+        view_op.op.starts_with(&format!("view-{PROJECT}-")),
+        "{}",
+        view_op.op
+    );
+    assert_eq!(
+        set_sessions(&env),
+        [
+            session_of(&env.ticket(&a), "investigate"),
+            session_of(&env.ticket(&c), "investigate")
+        ]
+    );
+    no_set_requests_on_tickets(&env, &[&a, &b, &c]);
+}
+
+/// Two tickets running, the second's arrival synced to the set with its
+/// reply lost: the set shows both while the project still says it shows
+/// the first, and `view_op` is left unresolved.
+fn a_lost_sync_of_two(env: &mut Env) -> (String, String, String) {
+    let a = env.take(7).id;
+    env.step();
+    let b = env.take(8).id;
+    env.sb().drop_reply_for = Some("set.sync".into());
+    env.step();
+    let a_session = session_of(&env.ticket(&a), "investigate");
+    let b_session = session_of(&env.ticket(&b), "investigate");
+    assert_eq!(set_sessions(env), [a_session.clone(), b_session]);
+    let ps = env.runner.load_project(PROJECT).unwrap();
+    assert_eq!(ps.shown, [(a.clone(), a_session)]);
+    let lost = ps.view_op.unwrap();
+    assert_eq!(lost.kind, "set.sync");
+    assert!(lost.unresolved());
+    (a, b, lost.op)
+}
+
+/// The lost op went out once, and the project's `view_op` is now a later
+/// `set.sync`, answered.
+fn superseded(env: &Env, lost: &str) {
+    let sb = env.sb();
+    let at = |op: &str| sb.calls.iter().position(|r| r.op == op);
+    assert_eq!(sb.calls.iter().filter(|r| r.op == lost).count(), 1);
+    let ps = env.runner.load_project(PROJECT).unwrap();
+    let redraw = ps.view_op.unwrap();
+    assert_ne!(redraw.op, lost);
+    assert!(redraw.op.starts_with(&format!("view-{PROJECT}-")));
+    assert_eq!(redraw.kind, "set.sync");
+    assert!(redraw.reply.is_some());
+    assert!(at(&redraw.op) > at(lost), "sent after the lost one");
+    assert_eq!(sb.kinds_called("set.new"), 1);
+    assert_eq!(sb.sets.len(), 1);
+}
+
+#[test]
+fn a_lost_set_sync_is_superseded_by_a_redraw_of_the_current_queue() {
+    let mut env = Env::new();
+    let (a, b, lost) = a_lost_sync_of_two(&mut env);
+    // The queue reverts to what the project last recorded as shown, so
+    // only the lost op says the set is out of step.
+    write_closing(&env, &b, |_| {});
+    step_until_closed(&mut env, &b);
+    superseded(&env, &lost);
+    assert_eq!(
+        set_sessions(&env),
+        [session_of(&env.ticket(&a), "investigate")]
+    );
+    assert!(env.ticket(&b).close.card_cleared);
+    no_set_requests_on_tickets(&env, &[&a, &b]);
+}
+
+#[test]
+fn a_lost_set_sync_with_nothing_left_to_show_is_redrawn_empty() {
+    let mut env = Env::new();
+    let (a, b, lost) = a_lost_sync_of_two(&mut env);
+    write_closing(&env, &a, |_| {});
+    write_closing(&env, &b, |_| {});
+    step_until_closed(&mut env, &a);
+    step_until_closed(&mut env, &b);
+    superseded(&env, &lost);
+    assert!(set_sessions(&env).is_empty());
+    let ps = env.runner.load_project(PROJECT).unwrap();
+    assert!(ps.shown.is_empty());
+    assert!(env.ticket(&a).close.card_cleared && env.ticket(&b).close.card_cleared);
+}
+
+#[test]
+fn a_lost_set_sync_is_left_owed_by_recovery_at_start_and_redrawn_by_the_next_pass() {
+    let mut env = Env::new();
+    let (a, b, lost) = a_lost_sync_of_two(&mut env);
+    let now = env.tick();
+    env.runner.recover(now).unwrap();
+    let ps = env.runner.load_project(PROJECT).unwrap();
+    let owed = ps.view_op.unwrap();
+    assert_eq!(owed.op, lost);
+    assert!(owed.unresolved(), "{owed:#?}");
+    env.step();
+    superseded(&env, &lost);
+    let ps = env.runner.load_project(PROJECT).unwrap();
+    assert_eq!(ps.shown.len(), 2);
+    assert_eq!(
+        set_sessions(&env),
+        [
+            session_of(&env.ticket(&a), "investigate"),
+            session_of(&env.ticket(&b), "investigate")
+        ]
+    );
+}
+
+/// The first take's `set.new` acted on with its reply lost, then the
+/// ticket parked before another pass can step it.
+fn a_lost_set_new_under_a_parked_ticket(env: &mut Env) -> String {
+    let a = env.take(7).id;
+    env.sb().drop_reply_for = Some("set.new".into());
+    env.step();
+    let ps = env.runner.load_project(PROJECT).unwrap();
+    assert_eq!(ps.set, None);
+    let lost = ps.view_op.unwrap();
+    assert_eq!(lost.kind, "set.new");
+    assert!(lost.unresolved());
+    let mut t = env.ticket(&a);
+    t.state = TicketState::Parked {
+        reason: "parked by hand".into(),
+    };
+    env.runner.save_ticket(&mut t, env.now).unwrap();
+    a
+}
+
+#[test]
+fn a_lost_set_new_under_a_parked_ticket_makes_no_second_set() {
+    let mut env = Env::new();
+    let a = a_lost_set_new_under_a_parked_ticket(&mut env);
+    env.step();
+    let ps = env.runner.load_project(PROJECT).unwrap();
+    assert_eq!(ps.set.as_deref(), Some(env.sb().sets[0].id.as_str()));
+    assert_eq!(env.sb().kinds_called("set.new"), 1);
+    assert_eq!(env.sb().sets.len(), 1);
+    assert_eq!(
+        set_sessions(&env),
+        [session_of(&env.ticket(&a), "investigate")]
+    );
+    no_set_requests_on_tickets(&env, &[&a]);
+}
+
+#[test]
+fn a_lost_set_new_is_found_by_recovery_at_start() {
+    let mut env = Env::new();
+    let a = a_lost_set_new_under_a_parked_ticket(&mut env);
+    let now = env.tick();
+    env.runner.recover(now).unwrap();
+    let ps = env.runner.load_project(PROJECT).unwrap();
+    assert_eq!(ps.set.as_deref(), Some(env.sb().sets[0].id.as_str()));
+    let found = ps.view_op.unwrap();
+    assert_eq!(found.kind, "set.new");
+    assert!(found.reply.is_some());
+    env.step();
+    assert_eq!(env.sb().kinds_called("set.new"), 1);
+    assert_eq!(env.sb().sets.len(), 1);
+    assert_eq!(
+        set_sessions(&env),
+        [session_of(&env.ticket(&a), "investigate")]
     );
 }
 
@@ -12117,8 +12367,11 @@ fn a_pass_during_a_hand_close_leaves_the_removal_to_it() {
     };
     gate.wait_entered();
     let calls = env.sb().calls.len();
+    let syncs = env.sb().kinds_called("set.sync");
     env.step();
-    assert_eq!(env.sb().calls.len(), calls, "the pass sent something");
+    // The pass's own sync clears the closing ticket's card; nothing else.
+    assert_eq!(env.sb().kinds_called("set.sync"), syncs + 1);
+    assert_eq!(env.sb().calls.len(), calls + 1, "the pass sent something");
     assert!(env.repo.lock().unwrap().removed.is_empty());
     assert!(matches!(env.ticket(&id).state, TicketState::Closing { .. }));
     gate.release();
