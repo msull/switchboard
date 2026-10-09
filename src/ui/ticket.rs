@@ -238,9 +238,16 @@ fn not_running(cx: &DrawCtx<'_>, ui: &mut Ui) -> bool {
 }
 
 /// A file of the ticket's as markdown, read through the port when the
-/// core says a read is due: the first time it is drawn, and after a
-/// failed read once the ticket changes.
+/// core says a read is due: the first time it is drawn and again
+/// whenever the ticket changes. The text already read stays drawn while
+/// it is read again.
 fn artifact_text(cx: &mut DrawCtx<'_>, ui: &mut Ui, t: &TicketView, path: &Path) {
+    if cx.core.artifact_read_due(t, path) {
+        cx.dispatch(AppAction::DispatchReadArtifact {
+            ticket: t.id.clone(),
+            path: path.to_path_buf(),
+        });
+    }
     let text = cx.core.dispatch_state().artifacts.get(path).cloned();
     match text {
         Some(text) if text.trim().is_empty() => {
@@ -249,12 +256,6 @@ fn artifact_text(cx: &mut DrawCtx<'_>, ui: &mut Ui, t: &TicketView, path: &Path)
         Some(text) => markdown::show(ui, &mut cx.state.markdown, &text),
         None if not_running(cx, ui) => {}
         None => {
-            if cx.core.artifact_read_due(t, path) {
-                cx.dispatch(AppAction::DispatchReadArtifact {
-                    ticket: t.id.clone(),
-                    path: path.to_path_buf(),
-                });
-            }
             let said = match cx.core.artifact_read(path) {
                 Some(r) if r.missing() => "Not written yet.".to_owned(),
                 Some(r) => r
@@ -410,6 +411,17 @@ fn details<'a>(cx: &DrawCtx<'a>, ui: &mut Ui, t: &TicketView) -> Option<&'a Tick
     None
 }
 
+/// Where the plan shown came from: a review's copy and its round, or
+/// the stage that wrote it; nothing from a runner that does not say.
+fn plan_label(p: &dispatch_control::PathsView) -> Option<String> {
+    match (p.plan_reviewing, p.plan_reviewed, p.plan_round) {
+        (true, _, Some(n)) => Some(format!("Reviewed copy, round {n}: review open")),
+        (true, _, None) => Some("Reviewed copy: review open".to_owned()),
+        (false, true, _) => Some("Reviewed copy".to_owned()),
+        _ => p.plan_stage.as_ref().map(|s| format!("From stage {s}")),
+    }
+}
+
 /// The plan, then each round of its review, folded.
 fn plan(cx: &mut DrawCtx<'_>, ui: &mut Ui, t: &TicketView) {
     let Some(d) = details(cx, ui, t) else {
@@ -420,6 +432,9 @@ fn plan(cx: &mut DrawCtx<'_>, ui: &mut Ui, t: &TicketView) {
             ui.label(
                 theme::mono_text(ui, path.display().to_string()).color(theme::palette(ui).n700),
             );
+            if let Some(said) = plan_label(&d.paths) {
+                ui.label(theme::meta_text(ui, said));
+            }
             artifact_text(cx, ui, t, path);
         }
         None => {

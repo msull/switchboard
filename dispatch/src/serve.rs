@@ -24,7 +24,7 @@ use crate::epoch_ms;
 use crate::events;
 use crate::github::Issues;
 use crate::pipeline::{DeployWait, Pipeline, Source};
-use crate::scheduler::{Runner, lane_files};
+use crate::scheduler::{Runner, lane_files, shown_lane_files};
 use crate::store::DataDir;
 use crate::ticket::{
     Attempt, AttemptKind, AttemptState, Decision, DecisionState, PullRequestSource, SourceSnapshot,
@@ -493,20 +493,41 @@ fn plan_rounds(a: &Attempt) -> Vec<PlanRoundView> {
         .collect()
 }
 
+/// The newest round of the plan review `a` is, from its feedback files
+/// or a `revise` answer, since a round opened from the app's box has no
+/// feedback file; none for an attempt that is not a review.
+fn review_round(a: &Attempt) -> Option<u32> {
+    if a.kind != AttemptKind::Workflow {
+        return None;
+    }
+    let file = plan_rounds(a).last().map(|r| r.n);
+    let revised = a.revisions.iter().map(|r| r.round).max();
+    file.max(revised)
+}
+
 /// Where a ticket's documents are, for `show` and the port's
 /// single-ticket reply; the one part of a view that touches files.
 #[must_use]
 pub fn ticket_paths(t: &Ticket, p: Option<&Pipeline>) -> PathsView {
-    let files = |name: &str| -> Vec<LaneFile> {
-        lane_files(t, p, name)
-            .into_iter()
-            .map(|(lane, stage, path)| LaneFile {
-                lane: lane.map(str::to_owned),
-                stage: stage.to_owned(),
-                path: path.clone(),
-            })
-            .collect()
-    };
+    let plan_files = shown_lane_files(t, p, "plan")
+        .into_iter()
+        .map(|(lane, a, path)| LaneFile {
+            lane: lane.map(str::to_owned),
+            stage: a.stage.clone(),
+            path: path.clone(),
+            reviewing: a.kind == AttemptKind::Workflow && a.is_open(),
+            round: review_round(a),
+        })
+        .collect();
+    let notes_files = lane_files(t, p, "notes")
+        .into_iter()
+        .map(|(lane, stage, path)| LaneFile {
+            lane: lane.map(str::to_owned),
+            stage: stage.to_owned(),
+            path: path.clone(),
+            ..LaneFile::default()
+        })
+        .collect();
     let last_round = t
         .attempts
         .iter()
@@ -519,11 +540,17 @@ pub fn ticket_paths(t: &Ticket, p: Option<&Pipeline>) -> PathsView {
         .rev()
         .filter(|a| a.kind == AttemptKind::Workflow)
         .find(|a| !a.artifacts.is_empty());
+    let shown = t.shown("plan");
+    let reviewed = shown.filter(|(a, _)| a.kind == AttemptKind::Workflow);
     let plan_rounds = review.map_or_else(Vec::new, plan_rounds);
     let round_file = last_round.or_else(|| plan_rounds.last().map(|r| r.feedback.clone()));
     let pr = t.attempts.iter().rev().find_map(|a| a.pr.as_ref());
     PathsView {
-        plan: t.input("plan").cloned(),
+        plan: shown.map(|(_, path)| path.clone()),
+        plan_stage: shown.map(|(a, _)| a.stage.clone()),
+        plan_reviewed: reviewed.is_some(),
+        plan_reviewing: reviewed.is_some_and(|(a, _)| a.is_open()),
+        plan_round: reviewed.and_then(|(a, _)| review_round(a)),
         round_file,
         review_summary: t
             .attempts
@@ -534,8 +561,8 @@ pub fn ticket_paths(t: &Ticket, p: Option<&Pipeline>) -> PathsView {
         pr_url: pr.map(|pr| pr.url.clone()),
         pr_head: pr.map(|pr| pr.head.clone()),
         plan_rounds,
-        plan_files: files("plan"),
-        notes_files: files("notes"),
+        plan_files,
+        notes_files,
     }
 }
 
@@ -1182,6 +1209,7 @@ slots = 1
                 lane: None,
                 stage: "outline".into(),
                 path: "/plan.md".into(),
+                ..LaneFile::default()
             }]
         );
         assert_eq!(paths.plan, Some(PathBuf::from("/plan.md")));
@@ -1195,6 +1223,7 @@ slots = 1
             lane: Some(lane.into()),
             stage: "plan".into(),
             path: path.into(),
+            ..LaneFile::default()
         };
         assert_eq!(
             paths.plan_files,
@@ -1203,6 +1232,163 @@ slots = 1
         // The single field is the newest plan, as older clients read it.
         assert_eq!(paths.plan, Some(PathBuf::from("/docs.md")));
         assert!(paths.notes_files.is_empty());
+    }
+
+    #[test]
+    fn the_paths_name_an_open_review_copy_with_its_round() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = Pipeline::parse(PIPELINE).unwrap();
+        let copy = dir.path().join("review/1/plan.md");
+        fs::create_dir_all(copy.parent().unwrap()).unwrap();
+        let attempt = |stage: &str, kind: AttemptKind, state: AttemptState, path: &Path| {
+            crate::scheduler::new_attempt(
+                stage,
+                1,
+                "root",
+                kind,
+                state,
+                std::collections::BTreeMap::from([("plan".to_owned(), path.to_path_buf())]),
+                0,
+            )
+        };
+        let mut t = crate::ticket::blank();
+        t.attempts.push(attempt(
+            "plan",
+            AttemptKind::Agent,
+            AttemptState::Complete,
+            Path::new("/plan/1/plan.md"),
+        ));
+        let paths = ticket_paths(&t, Some(&p));
+        assert_eq!(paths.plan, Some(PathBuf::from("/plan/1/plan.md")));
+        assert_eq!(paths.plan_stage.as_deref(), Some("plan"));
+        assert!(!paths.plan_reviewed && !paths.plan_reviewing);
+        assert_eq!(paths.plan_round, None);
+
+        t.attempts.push(attempt(
+            "review-plan",
+            AttemptKind::Workflow,
+            AttemptState::Running,
+            &copy,
+        ));
+        // Round 1 before the reviewer writes its first file.
+        let paths = ticket_paths(&t, Some(&p));
+        assert_eq!(paths.plan, Some(copy.clone()));
+        assert_eq!(
+            paths.plan_files,
+            [LaneFile {
+                lane: None,
+                stage: "review-plan".into(),
+                path: copy.clone(),
+                reviewing: true,
+                round: None,
+            }]
+        );
+        assert_eq!(paths.plan_stage.as_deref(), Some("review-plan"));
+        assert!(paths.plan_reviewed && paths.plan_reviewing);
+        assert_eq!(paths.plan_round, None);
+
+        fs::write(crate::report::round_file(&copy, 1), "x").unwrap();
+        assert_eq!(ticket_paths(&t, Some(&p)).plan_round, Some(1));
+        // A round from the app's box writes no file; its revision counts.
+        t.attempts[1].revisions.push(crate::ticket::Revision {
+            round: 2,
+            by: "you".into(),
+            at_ms: 5,
+        });
+        let paths = ticket_paths(&t, Some(&p));
+        assert_eq!(paths.plan_round, Some(2));
+        assert_eq!(paths.plan_files[0].round, Some(2));
+
+        t.attempts[1].revisions.clear();
+        fs::remove_file(crate::report::round_file(&copy, 1)).unwrap();
+        t.attempts[1].state = AttemptState::Complete;
+        let paths = ticket_paths(&t, Some(&p));
+        assert!(paths.plan_reviewed && !paths.plan_reviewing);
+        assert_eq!(paths.plan_round, None);
+    }
+
+    #[test]
+    fn a_lanes_open_review_copy_stands_in_for_that_lane_only() {
+        let text = PIPELINE.replace(
+            "[operators.a]",
+            "[[lanes]]\nname = \"docs\"\npath = \"docs\"\n[operators.a]",
+        ) + "[[stages]]\nname = \"plan\"\noperator = \"a\"\ncontext = \"each\"\nwrites = [\"plan\"]\nprompt = \"go {plan}\"\n[[stages]]\nname = \"review-plan\"\noperator = \"a\"\ncontext = \"each\"\nwrites = [\"plan\"]\nprompt = \"go {plan}\"\n";
+        let p = Pipeline::parse(&text).unwrap();
+        let attempt =
+            |stage: &str, ctx: &str, kind: AttemptKind, state: AttemptState, path: &str| {
+                crate::scheduler::new_attempt(
+                    stage,
+                    1,
+                    ctx,
+                    kind,
+                    state,
+                    std::collections::BTreeMap::from([("plan".to_owned(), PathBuf::from(path))]),
+                    0,
+                )
+            };
+        let mut t = crate::ticket::blank();
+        for lane in ["repo", "docs"] {
+            t.lanes.push(crate::ticket::chosen_lane(lane));
+        }
+        for lane in ["repo", "docs"] {
+            t.attempts.push(attempt(
+                "plan",
+                lane,
+                AttemptKind::Agent,
+                AttemptState::Complete,
+                &format!("/plan/1/{lane}/plan.md"),
+            ));
+        }
+        t.attempts.push(attempt(
+            "review-plan",
+            "repo",
+            AttemptKind::Workflow,
+            AttemptState::Running,
+            "/review/1/repo/plan.md",
+        ));
+        let file = |lane: &str, stage: &str, path: &str, reviewing: bool| LaneFile {
+            lane: Some(lane.into()),
+            stage: stage.into(),
+            path: path.into(),
+            reviewing,
+            round: None,
+        };
+        assert_eq!(
+            ticket_paths(&t, Some(&p)).plan_files,
+            [
+                file("repo", "review-plan", "/review/1/repo/plan.md", true),
+                file("docs", "plan", "/plan/1/docs/plan.md", false),
+            ]
+        );
+        // A later lane's finished review leaves the open one marked in
+        // its own lane, whatever the newest attempt says.
+        t.attempts.push(attempt(
+            "review-plan",
+            "docs",
+            AttemptKind::Workflow,
+            AttemptState::Complete,
+            "/review/1/docs/plan.md",
+        ));
+        let paths = ticket_paths(&t, Some(&p));
+        assert!(!paths.plan_reviewing);
+        assert_eq!(
+            paths.plan_files,
+            [
+                file("repo", "review-plan", "/review/1/repo/plan.md", true),
+                file("docs", "review-plan", "/review/1/docs/plan.md", false),
+            ]
+        );
+        // A lane's reader is still handed only a complete plan.
+        assert_eq!(
+            crate::scheduler::lane_plans(&t, &p, None)
+                .into_iter()
+                .map(|(_, plan)| plan.clone())
+                .collect::<Vec<_>>(),
+            [
+                PathBuf::from("/plan/1/repo/plan.md"),
+                PathBuf::from("/review/1/docs/plan.md"),
+            ]
+        );
     }
 
     #[test]

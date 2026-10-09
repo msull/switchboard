@@ -5717,6 +5717,71 @@ fn the_plan_tab_lists_its_review_rounds() {
     harness.get_by_label("/dispatch/tickets/t1/plan/1/plan.md");
 }
 
+/// The plan says where it came from: an open review's copy with its
+/// round, a finished review's copy, or the stage that wrote it.
+#[test]
+fn the_plan_tab_labels_a_reviewed_copy() {
+    use switchboard::ports::dispatch::PathsView;
+    let cases = [
+        (true, true, Some(2), "Reviewed copy, round 2: review open"),
+        (true, true, None, "Reviewed copy: review open"),
+        (true, false, None, "Reviewed copy"),
+        (false, false, None, "From stage plan"),
+    ];
+    for (reviewed, reviewing, round, said) in cases {
+        let (mut dispatch, edit) = ticket_with_documents();
+        dispatch.paths = PathsView {
+            plan_stage: Some(if reviewed { "review-plan" } else { "plan" }.into()),
+            plan_reviewed: reviewed,
+            plan_reviewing: reviewing,
+            plan_round: round,
+            ..dispatch.paths
+        };
+        let mut harness = ticket_page_on(dispatch, Changes::default(), edit);
+        click(&mut harness, "Plan");
+        harness.get_by_label(said);
+    }
+}
+
+/// A plan already read is read again once the ticket moves, and stays
+/// drawn while it is: a review edits its copy under the same path.
+#[test]
+fn the_plan_is_read_again_once_the_ticket_moves() {
+    use switchboard::ports::dispatch::{Body, Reply};
+    let (dispatch, edit) = ticket_with_documents();
+    let mut harness = ticket_page_on(dispatch, Changes::default(), edit);
+    click(&mut harness, "Plan");
+    let path = PathBuf::from("/dispatch/tickets/t1/plan/1/plan.md");
+    harness.state_mut().dispatch(AppAction::DispatchReplied {
+        body: Body::Artifact {
+            ticket: "t1".into(),
+            path: path.clone(),
+        },
+        result: Ok(Reply::Artifact {
+            text: "Step one of the plan.".into(),
+        }),
+    });
+    harness.run_steps(2);
+    harness.get_by_label("Step one of the plan.");
+    harness.state_mut().dispatched.clear();
+    harness.run_steps(2);
+    let reads = |harness: &Harness<'static, SwitchboardApp>| {
+        actions(harness)
+            .iter()
+            .filter(|a| matches!(a, AppAction::DispatchReadArtifact { path: p, .. } if *p == path))
+            .count()
+    };
+    assert_eq!(reads(&harness), 0, "read at this updated_ms");
+    let mut status = harness.state().core().dispatch_state().status.clone();
+    status.tickets[0].updated_ms += 1;
+    harness
+        .state_mut()
+        .dispatch(AppAction::DispatchStatus(Some(status)));
+    harness.run_steps(2);
+    assert_eq!(reads(&harness), 1, "{:?}", actions(&harness));
+    harness.get_by_label("Step one of the plan.");
+}
+
 /// A round the owner opened with an objection says so in its title.
 #[test]
 fn the_plan_tab_marks_the_owners_round() {

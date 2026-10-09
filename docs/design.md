@@ -2151,8 +2151,12 @@ tab body's scroll.
   shows the decision's full question and answer, not the log's capped
   line.
 - **Issue**: the title linked out, labels, the body as markdown.
-- **Plan**: the latest plan, then the plan review's rounds folded,
-  each read when opened. While a plan review's `finalize` is pending
+- **Plan**: the plan as it stands, an open review's copy labelled
+  with its round ("Reviewed copy, round 2: review open"), else the
+  newest complete plan labelled with the stage that wrote it; an
+  agent's prompt is still handed only complete files (`Ticket::shown`
+  against `Ticket::input`). Then the plan review's rounds folded, each
+  read when opened. While a plan review's `finalize` is pending
   (`dispatch::revisable`, which skips a workflow stage reviewing
   another subject), the tab pins the owner's note box and "Send my
   feedback" above the plan with the round count. Sending answers
@@ -2197,7 +2201,14 @@ still read. An artifact is read the same way (`artifact_read_due`,
 `DispatchState.artifact_reads`): a failed read is said under its name
 ("Not written yet." for a missing file, since an agent writes its notes
 after the runner hands out the path) without a notice, and asked again
-once the ticket's `updated_ms` moves or its button is clicked. Times
+once the ticket's `updated_ms` moves or its button is clicked. An
+artifact with text is read again once the ticket's `updated_ms` moves
+past the one it was read at (`DispatchState.artifacts_at`), since a
+review edits its copy in place under one path; the old text stays
+drawn until the new text arrives, and a failed re-read keeps it.
+During a review `updated_ms` moves on each `revise` answer, revision
+and `finalize` ask, so the copy is current whenever `finalize` is
+asked. Times
 read "3 min ago" with the local time on hover
 (`cards::ago_ms`), the ticket table's too.
 
@@ -2508,10 +2519,13 @@ code review lists every lane's plan in all three when the newest plan
 writer runs per lane: `{plan}` is each lane's path with its lane in
 parentheses, the decisions come one block per lane, and the rewriter's
 input has one line per lane. A root or joined
-human gate, `show`, `report` and the port's `PathsView.plan_files` and
-`notes_files` list one file per lane when the newest writer runs per
-lane, and the one file otherwise; a lane's refresh notes stand in for
-that lane only.
+human gate and `report` list one file per lane when the newest writer
+runs per lane, and the one file otherwise, and read complete files
+only; a lane's refresh notes stand in for that lane only. `show` and
+the port's `PathsView.plan_files` and `notes_files` follow the same
+per-lane rule, but `plan_files` shows an open review's copy for its
+lane (`scheduler::shown_lane_files`), since they show the plan as it
+stands rather than hand it to an agent.
 
 Known gaps:
 
