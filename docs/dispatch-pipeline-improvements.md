@@ -492,3 +492,13 @@ table's `may` lists `runner`, refused while a deploy runs).
   Either keep a passed-through stage line when a later line of the same
   ticket bears it out, or have the guide say a delivery shows where the
   ticket is, not every stage it crossed. Seen on #154, 2026-10-08.
+- **A new supervisor session cannot tell a live subscription from a
+  stale one.** Subscriptions belong to the project's supervisor pane and
+  survive a reseed, but `subscriptions` prints the session id that
+  created each one, so a fresh supervisor reads them as another
+  session's and subscribes again (harmless: only the `since` seq
+  moves). Either print where a delivery goes (the supervisor pane) in
+  place of the creating session, or have `brief` mark each in-flight
+  ticket as subscribed or not, so the seed's "subscribe what is not yet
+  subscribed" has a clear answer. Seen 2026-10-09 at the start of
+  session eeeb2948.
