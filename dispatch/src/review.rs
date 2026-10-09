@@ -18,10 +18,10 @@ use crate::history::{self, Commits};
 use crate::pipeline::{Gate, OperatorKind, Pipeline, Stage, env_sets};
 use crate::scheduler::{
     Ask, DirtyStep, GateStop, NO_SUCH_SESSION, Owner, RESOLUTION, Runner, SocketDown, asks_again,
-    busy, checks_env, confine_for, dirty_step, env_for, find_attempt, find_attempt_mut,
-    gate_network, guidance_prelude, held_in, idle_polls, lane_gate_argv, lane_plans,
-    latest_attempt, may_rerun, new_attempt, next_n, primary_tree, record_of, rework_key, sent_back,
-    session_kind, settle_file, stopped_after_nudges, vars_for,
+    busy, confine_for, dirty_step, find_attempt, find_attempt_mut, gate_network, guidance_prelude,
+    held_in, idle_polls, lane_gate_argv, lane_plans, latest_attempt, may_rerun, new_attempt,
+    next_n, primary_tree, record_of, rework_key, sent_back, session_kind, settle_file,
+    stopped_after_nudges, vars_for,
 };
 use crate::template::Vars;
 use crate::ticket::{
@@ -409,8 +409,9 @@ impl Runner {
             } else {
                 cwd.to_path_buf()
             };
-            let mut env = env_for(
+            let mut env = self.env_for(
                 t,
+                p,
                 lane,
                 lane.and_then(|l| t.lanes.iter().find(|x| x.name == l))
                     .map(|l| l.branch.as_str()),
@@ -482,7 +483,7 @@ impl Runner {
                 launch,
                 prompt: Some(prompt),
                 notes,
-                env: BTreeMap::new(),
+                env: p.session_env(),
                 env_sets: sets,
                 replaces: None,
             },
@@ -1280,7 +1281,7 @@ impl Runner {
                 launch,
                 prompt: Some(prompt),
                 notes,
-                env: BTreeMap::new(),
+                env: p.session_env(),
                 env_sets: sets,
                 replaces: None,
             },
@@ -1571,8 +1572,9 @@ impl Runner {
         }
         let round_dir = round.reviewers.first().and_then(|r| r.dir.parent());
         let log = round_dir.map_or_else(|| cwd.join("checks.log"), |d| d.join("checks.log"));
-        let mut env = checks_env(
+        let mut env = self.checks_env(
             t,
+            p,
             lane,
             lane.and_then(|l| t.lanes.iter().find(|x| x.name == l))
                 .map(|l| l.branch.as_str()),
@@ -2477,7 +2479,7 @@ impl Runner {
                 launch,
                 prompt: Some(prompt),
                 notes,
-                env: BTreeMap::new(),
+                env: p.session_env(),
                 env_sets: sets,
                 replaces: None,
             },

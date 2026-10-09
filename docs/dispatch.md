@@ -908,7 +908,25 @@ fixer = "fixer"               # the operator that fixes a PR whose checks are re
 max_fixes = 2                 # fixes one PR may get before red checks are a question
 confine = false               # true: setup, command gates, review checks and command reviewers run sandboxed (see the start of this document); absent, off
 network = "allow"             # or "deny": under confine, whether those commands reach off this machine; loopback stays open
+
+[shell]
+path = ["/opt/homebrew/opt/node@20/bin", "~/.nvm/versions/node/v20/bin"]   # absolute or ~/, no ":"; absent, nothing added
 ```
+
+`[shell] path` names directories that go ahead of the PATH every process
+the pipeline starts would otherwise get. Agents (stage operators,
+reviewers, implementers, rewriters, the supervisor) and services are
+sent them as `SWITCHBOARD_PATH_PREPEND`, which Switchboard puts ahead of
+the pane's PATH at every spawn; the runner's own children (setup,
+command gates, review checks, command reviewers and a service's
+`before`) get `PATH=<the directories>:<the runner's PATH>`. Agents and
+services run under the automation shell, `/bin/bash --noprofile
+--norc`, which reads no profile, so a tool your `~/.zshrc` puts on PATH
+(a node chosen through nvm, say) is found only when it is named here. A
+stage's sessions read it from the ticket's copy; the supervisor reads
+the live file when it is made, so an edit reaches it on `dispatch
+supervisor --fresh`, not on a resume. A clone (rebaser, fixer, a cloned
+attempt) keeps its source's directories.
 
 An agent stage needs no `gate` line: "the agent stopped and every
 artifact it writes settled" is the default, described under "Stage
@@ -1454,8 +1472,10 @@ What this pipeline showed, and what it added to the vocabulary:
   `ports` range, testing that it binds before choosing it, so a server
   you started by hand on the default port is simply not chosen; the
   service is a Switchboard service session made with `session.new`,
-  launched through the login shell as `env <serve.env> <serve.argv>`
-  with `{port}` filled in, so `serve.env` must hold no secrets (the
+  launched through the automation shell (`/bin/bash --noprofile
+  --norc -c 'exec "$@"'`) as `env <serve.env> <serve.argv>` with
+  `{port}` filled in, finding its program on the pane's PATH with any
+  `[shell] path` ahead, so `serve.env` must hold no secrets (the
   argv is kept on the record and the pane's command line); and
   readiness is the `ready` probe answering on that URL within its
   limit. A `before` failure, no free port, or a probe that never
@@ -2915,7 +2935,7 @@ and one against the real one:
 | Plan file from an earlier attempt exists | The new attempt's own path is empty, so nothing advances |
 | `project.add` fails to save | `failed` reply; attempt failed; nothing else made |
 | `slots` raised in the project's live pipeline file while a ticket waits on a copy that says one | The waiting ticket starts on the next pass; the limits are the live file's, a ticket's frozen copy standing in only when the live file is unreadable (`slots_come_from_the_live_pipeline_file_not_a_tickets_copy`) |
-| A gate exits 127 | The `rerun` question says a command was not found, names the lane's `setup` and the runner's `PATH` as the cause, and says to fix the pipeline, run `dispatch restart <ticket>` and answer `check`, since checking again without a restart runs the old copy |
+| A gate exits 127 | The `rerun` question says a command was not found, names the lane's `setup`, the pipeline's `[shell] path` and the runner's `PATH` as the cause, and says to fix the pipeline, run `dispatch restart <ticket>` and answer `check`, since checking again without a restart runs the old copy |
 | The pipeline is fixed, the ticket restarted at its stage, `check` answered | The new setup and the new gate run on the same attempt, with no agent and no bring-up (`a_restart_at_the_current_stage_runs_the_fixed_setup_and_gate_on_check`) |
 | A restart while the stage's checks ignore TERM | The ticket stays `parking` with the intent until they are gone, then the restart applies (`a_restart_waits_for_running_checks_then_applies`) |
 | `dispatch restart` on a ticket still parking without a restart | Refused with "still parking"; nothing written (`a_restart_is_refused_while_still_parking`) |
@@ -3006,7 +3026,8 @@ and one against the real one:
 | A stage names a lane in `needs` | The ticket parks: the in-place hold is not built (`a_stage_needing_a_lane_parks_as_not_built`) |
 | The runner restarts while a ticket holds `my-dev` | The hold is read back from the record and the other ticket still waits (`a_hold_survives_a_runner_restart`) |
 | `slots = 1` with a ticket holding `my-dev` at `tried` | Another ticket's tester does not start; `status` counts one running (`a_ticket_holding_a_resource_costs_a_slot_and_status_agrees`) |
-| `try` begins with the frontend chosen | Its `before` runs in the frontend tree; after exit 0 a service session on the first free port, launched as `$SHELL -lc 'exec "$@"' dispatch-service env BROWSER=none PORT=3100 npm start` in that tree; no tester until it answers; the tester is told the URL (`services_start_after_before_on_a_free_port_and_the_tester_is_told_the_url`) |
+| `try` begins with the frontend chosen | Its `before` runs in the frontend tree; after exit 0 a service session on the first free port, launched as `/bin/bash --noprofile --norc -c 'exec "$@"' dispatch-service env BROWSER=none PORT=3100 npm start` in that tree; no tester until it answers; the tester is told the URL (`services_start_after_before_on_a_free_port_and_the_tester_is_told_the_url`) |
+| The pipeline has `[shell] path = ["/opt/node/bin"]` and the runner's PATH is `/usr/bin:/bin`, with and without `confine` | The service's and the tester's `session.new` carry `SWITCHBOARD_PATH_PREPEND=/opt/node/bin` and no `PATH`; setup, the deploy gate and the `before` run with `PATH=/opt/node/bin:/usr/bin:/bin`; without `[shell]`, neither is added (`a_pipelines_shell_path_reaches_its_sessions_and_its_commands`) |
 | A backend-only ticket at `try` | Nothing is served and the tester reads `not served (no frontend lane)` (`a_lane_not_cut_is_not_served_and_reads_so`) |
 | The first port is taken; every port is taken | The next port is used; with none free, a `service` question (`retry`, `park`) and nothing launched (`a_busy_port_is_skipped_and_no_free_port_is_a_question`) |
 | The `before` exits 1 | A `service` question before any tester; `retry` makes record 2, whose `before` runs under its own key (`a_before_that_fails_is_a_question_before_the_tester_and_retry_runs_it_again`) |

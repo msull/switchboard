@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use anyhow::{Context as _, Result, bail};
 use serde::{Deserialize, Deserializer, Serialize};
 use sha2::{Digest, Sha256};
-use switchboard_control::valid_set_name;
+use switchboard_control::{PATH_PREPEND_ENV, valid_set_name};
 
 use crate::history::Commits;
 
@@ -33,7 +33,31 @@ pub struct Pipeline {
     /// the live `pipelines/<project>.toml`, never from a ticket's copy.
     #[serde(default)]
     pub supervisor: Option<Supervisor>,
+    /// `[shell]`: what the automation shell is given beyond the app's
+    /// PATH, for the sessions and the commands this pipeline starts.
+    #[serde(default, skip_serializing_if = "ShellSection::is_empty")]
+    pub shell: ShellSection,
 }
+
+/// `[shell]`: the environment Dispatch's automation runs with.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ShellSection {
+    /// Directories put ahead of the PATH every agent, service, setup,
+    /// gate, review check and command reviewer would otherwise get:
+    /// absolute, or under `~/`.
+    #[serde(default)]
+    pub path: Vec<String>,
+}
+
+impl ShellSection {
+    fn is_empty(&self) -> bool {
+        self.path.is_empty()
+    }
+}
+
+/// The PATH a child of the runner falls back to when the runner had
+/// none, so `env`, `sh` and `git` are still found.
+const FALLBACK_PATH: &str = "/usr/bin:/bin:/usr/sbin:/sbin";
 
 /// `[supervisor]`: one long-lived agent per project that watches its
 /// tickets and answers the decisions `decides` lists.
@@ -928,6 +952,49 @@ impl Default for Policy {
 }
 
 impl Pipeline {
+    /// `[shell] path` with `~` expanded, `:`-joined: what a pane is sent
+    /// as `PATH_PREPEND_ENV`. `None` when the pipeline names none.
+    #[must_use]
+    pub fn path_dirs(&self) -> Option<String> {
+        if self.shell.path.is_empty() {
+            return None;
+        }
+        let dirs: Vec<String> = self
+            .shell
+            .path
+            .iter()
+            .map(|d| {
+                crate::store::expand_home(std::path::Path::new(d))
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        Some(dirs.join(":"))
+    }
+
+    /// The variables every session the pipeline starts is sent: its
+    /// `[shell] path` as `PATH_PREPEND_ENV`, which the host puts ahead
+    /// of the PATH it gives the pane at every spawn. Never a whole
+    /// `PATH`, which would go stale on the record.
+    #[must_use]
+    pub fn session_env(&self) -> BTreeMap<String, String> {
+        self.path_dirs()
+            .map(|dirs| (PATH_PREPEND_ENV.to_owned(), dirs))
+            .into_iter()
+            .collect()
+    }
+
+    /// The PATH a command the runner starts itself is given: `[shell]
+    /// path` ahead of `base`, the runner's own PATH. `None` when the
+    /// pipeline names no directories, so the child inherits the
+    /// runner's PATH as it is. A runner without a PATH gets the system
+    /// directories as its base, never the pipeline's alone.
+    #[must_use]
+    pub fn child_path(&self, base: Option<&str>) -> Option<String> {
+        let dirs = self.path_dirs()?;
+        Some(format!("{dirs}:{}", base.unwrap_or(FALLBACK_PATH)))
+    }
+
     /// The branch a lane branches from: its own, else the project's.
     #[must_use]
     pub fn lane_base<'a>(&'a self, lane: &'a Lane) -> &'a str {
@@ -1783,6 +1850,14 @@ impl Pipeline {
             bail!("a pipeline needs at least one lane");
         }
         self.validate_operator_env()?;
+        for dir in &self.shell.path {
+            if dir.contains(':') {
+                bail!("[shell] path entry {dir:?} contains `:`, which PATH cannot hold");
+            }
+            if !(dir.starts_with('/') || dir.starts_with("~/")) {
+                bail!("[shell] path entry {dir:?} must be absolute or start with `~/`");
+            }
+        }
         for (key, name) in [
             ("rebaser", &self.policy.rebaser),
             ("fixer", &self.policy.fixer),
@@ -2714,6 +2789,32 @@ writes = ["plan"]"#,
             p.lanes[0].writable,
             vec![home.join(".cargo"), PathBuf::from("/opt/cache")]
         );
+    }
+
+    #[test]
+    fn shell_path_is_checked_expanded_and_joined_ahead_of_the_base() {
+        let p = Pipeline::parse(SWITCHBOARD).unwrap();
+        assert_eq!(p.path_dirs(), None);
+        assert_eq!(p.child_path(Some("/y")), None);
+        assert_eq!(p.child_path(None), None);
+
+        let with = |path: &str| format!("{SWITCHBOARD}\n[shell]\npath = {path}\n");
+        let p = Pipeline::parse(&with(r#"["/x"]"#)).unwrap();
+        assert_eq!(p.path_dirs().as_deref(), Some("/x"));
+        assert_eq!(
+            p.child_path(None).as_deref(),
+            Some("/x:/usr/bin:/bin:/usr/sbin:/sbin")
+        );
+        assert_eq!(p.child_path(Some("/y")).as_deref(), Some("/x:/y"));
+
+        let p = Pipeline::parse(&with(r#"["~/x", "/z"]"#)).unwrap();
+        let home = std::env::var("HOME").unwrap();
+        assert_eq!(p.path_dirs(), Some(format!("{home}/x:/z")));
+
+        let err = Pipeline::parse(&with(r#"["bin"]"#)).unwrap_err();
+        assert!(format!("{err:#}").contains("absolute"), "{err:#}");
+        let err = Pipeline::parse(&with(r#"["/a:/b"]"#)).unwrap_err();
+        assert!(format!("{err:#}").contains("`:`"), "{err:#}");
     }
 
     #[test]

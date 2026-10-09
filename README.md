@@ -150,6 +150,27 @@ for editing, with the options listed beside it and the parse result shown
 as you type; Save is the only time Switchboard writes into
 `.switchboard/`.
 
+### The automation shell
+
+Agents and Dispatch's services run under `/bin/bash --noprofile
+--norc`, not your login shell. Agents are started with `SHELL` and
+`CLAUDE_CODE_SHELL` set to it, so their tool calls use it too. It is
+macOS's bash 3.2, and Claude Code still sources a `~/.bashrc`, if you
+have one, into its shell snapshot.
+
+A pane's PATH is the app's PATH plus `/opt/homebrew/bin`,
+`/usr/local/bin`, `~/.local/bin` and `~/.cargo/bin`, computed at every
+spawn. A Dispatch pipeline's `[shell] path` goes ahead of it, sent as
+`SWITCHBOARD_PATH_PREPEND`; a `PATH` in a project's `.env` replaces it.
+The runner's setup, gates, review checks, command reviewers and a
+service's `before` get the same directories ahead of the runner's own
+PATH.
+
+Shell sessions, New session commands, `project.json` entries and the
+embedded terminal keep `$SHELL`. A pane command of several words is
+exec'd by tmux directly, so none of these go through a second shell
+either (spike 20).
+
 ## App bundle
 
 ```sh
@@ -368,7 +389,7 @@ dispatch/                the `dispatch` binary (docs/dispatch.md; docs/dispatch-
   tests/sandbox.rs       ignored, macOS: a confined gate's refused write fails the attempt and is named in checks.log
 vendor/egui_term/        embedded terminal widget (Harzu/egui_term @ 31bbc7ab, egui 0.36; see SWITCHBOARD-PATCHES.md)
 firmware/nunchuk/        CircuitPython for the Feather that reports the nunchuk's buttons and stick
-spikes/                  Spike 0 evidence, and later spikes such as 13-dispatch-service (a Dispatch service as a Switchboard service session; which bind sees a dev server's port) 15-paste-buffer (a multi-line send as one tmux paste, bracketed only for a pane that asked) 16-base-pipeline (a merged pull request's merge commit and the base's run on it) 17-prompt-origin (telling a typed prompt from a task notification or a harness reminder) 18-tmux-argv (keeping spawn's environment values off every process's argv) and 19-structured-ask (a card's answer reaching the pane as its next prompt)
+spikes/                  Spike 0 evidence, and later spikes such as 13-dispatch-service (a Dispatch service as a Switchboard service session; which bind sees a dev server's port) 15-paste-buffer (a multi-line send as one tmux paste, bracketed only for a pane that asked) 16-base-pipeline (a merged pull request's merge commit and the base's run on it) 17-prompt-origin (telling a typed prompt from a task notification or a harness reminder) 18-tmux-argv (keeping spawn's environment values off every process's argv) 19-structured-ask (a card's answer reaching the pane as its next prompt) and 20-automation-shell (where a pane's shell and PATH come from, and what tmux replaces)
 ```
 
 The flow for any feature: the UI dispatches an `AppAction`; the core

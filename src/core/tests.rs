@@ -6893,6 +6893,49 @@ mod control {
         assert!(clone.env.is_empty(), "{:?}", clone.env);
     }
 
+    /// A clone keeps its source's PATH directories, which are the
+    /// pipeline's and so shared, and none of its inputs.
+    #[test]
+    fn a_clone_keeps_only_the_sources_path_directories() {
+        let p = project("p");
+        let mut w = Workspace::new(p.clone());
+        let mut r = record(p.id, agent(), 0);
+        r.resume = Some(claude_handle());
+        r.env = vec![
+            ("DISPATCH_INPUT_PLAN".into(), "/d/plan.md".into()),
+            ("SWITCHBOARD_PATH_PREPEND".into(), "/opt/node/bin".into()),
+        ];
+        let source = r.id;
+        w.sessions.push(r);
+        let (mut core, _) = loaded(vec![w], vec![]);
+        control(
+            &mut core,
+            "op-p",
+            ControlAction::CloneSession {
+                source,
+                name: "fixer".into(),
+                prompt: "Fix.".into(),
+                notes: String::new(),
+                env_sets: Vec::new(),
+            },
+            12,
+        );
+        let clone = core
+            .workspace(p.id)
+            .unwrap()
+            .sessions
+            .iter()
+            .find(|s| s.name == "fixer")
+            .expect("the clone's record");
+        assert_eq!(
+            clone.env,
+            [(
+                "SWITCHBOARD_PATH_PREPEND".to_owned(),
+                "/opt/node/bin".to_owned()
+            )]
+        );
+    }
+
     /// The port's resume of a running pane leaves it as it is: the
     /// quiet port never opens a terminal.
     #[test]

@@ -135,6 +135,9 @@ pub struct Runner {
     /// launch's token, read at start; `None` for a runner started by
     /// hand, which can run no command gate with `env`.
     pub credentials: Option<RunnerCredentials>,
+    /// The runner's own PATH, read at start: the base a pipeline's
+    /// `[shell] path` goes ahead of for the commands it runs itself.
+    pub path: Option<String>,
 }
 
 /// The runner's own Switchboard record and launch token, from
@@ -316,6 +319,7 @@ impl Runner {
             base_waits: BTreeMap::new(),
             env_bin: None,
             credentials: None,
+            path: None,
         }
     }
 
@@ -3979,7 +3983,7 @@ impl Runner {
             .collect();
         for (i, setup, branch) in pending {
             let name = t.lanes[i].name.clone();
-            let env = env_for(t, Some(&name), Some(&branch));
+            let env = self.env_for(t, p, Some(&name), Some(&branch));
             let ran = match confine_for(t, p, Some(&name), &[], None) {
                 Some(confine) => self
                     .git
@@ -5733,7 +5737,7 @@ impl Runner {
             )));
         }
         if !lane.setup.is_empty() {
-            let env = env_for(t, Some(name), Some(p.lane_base(&lane)));
+            let env = self.env_for(t, p, Some(name), Some(p.lane_base(&lane)));
             let ran = match confine_for(t, p, Some(name), &[&tree], None) {
                 Some(confine) => self.git.run_confined(&cwd, &lane.setup, &env, &confine),
                 None => self
@@ -6142,7 +6146,11 @@ impl Runner {
                 launch,
                 prompt: Some(prompt),
                 notes,
-                env: spec.env,
+                env: {
+                    let mut env = spec.env;
+                    env.extend(p.session_env());
+                    env
+                },
                 env_sets: spec.env_sets,
                 replaces: None,
             }
@@ -6709,7 +6717,7 @@ impl Runner {
                 lane_record.map(|l| l.branch.as_str()),
             ),
         };
-        let mut env = checks_env(t, env_lane, env_branch, a, cwd, &head);
+        let mut env = self.checks_env(t, p, env_lane, env_branch, a, cwd, &head);
         if a.kind == AttemptKind::GateOnly
             && let Err(e) = prepare_writes(a, &dir, &mut env)
         {
@@ -9413,13 +9421,14 @@ fn lane_names(answer: &str) -> Vec<String> {
 
 /// Why a check failed, from its exit code. 127 is the shell saying a
 /// command was not found: the lane's `setup` did not install it and
-/// nothing on the runner's `PATH` stands in, so running the same checks
-/// again cannot help and the question says so.
+/// nothing on the pipeline's `[shell] path` or the runner's `PATH`
+/// stands in, so running the same checks again cannot help and the
+/// question says so.
 pub(crate) fn checks_reason(code: i32, log: &Path) -> String {
     let base = format!("checks exited {code}; output at {}", log.display());
     if code == 127 {
         format!(
-            "{base}. Exit 127 means a command was not found: the lane's setup did not install it and the runner's PATH has no copy; fix the pipeline's setup or gate, then run `dispatch restart <ticket>` and answer `check`; checking again without a restart runs the old copy"
+            "{base}. Exit 127 means a command was not found: the lane's setup did not install it and neither the pipeline's `[shell] path` nor the runner's PATH has a copy; fix the pipeline's setup or gate, then run `dispatch restart <ticket>` and answer `check`; checking again without a restart runs the old copy"
         )
     } else {
         base
@@ -10570,38 +10579,51 @@ pub(crate) fn gate_network(p: &Pipeline, stage: &Stage) -> Option<Network> {
     }
 }
 
-/// What a stage's checks get in their environment: `env_for`'s, and
-/// which attempt they check, where, and at which head.
-pub(crate) fn checks_env(
-    t: &Ticket,
-    lane: Option<&str>,
-    branch: Option<&str>,
-    a: &Attempt,
-    cwd: &Path,
-    head: &str,
-) -> Vec<(String, String)> {
-    let mut env = env_for(t, lane, branch);
-    env.push(("DISPATCH_STAGE".to_owned(), a.stage.clone()));
-    env.push(("DISPATCH_CONTEXT".to_owned(), a.context.clone()));
-    env.push(("DISPATCH_TREE".to_owned(), cwd.display().to_string()));
-    env.push(("DISPATCH_HEAD".to_owned(), head.to_owned()));
-    env
-}
+impl Runner {
+    /// What a stage's checks get in their environment: `env_for`'s, and
+    /// which attempt they check, where, and at which head.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn checks_env(
+        &self,
+        t: &Ticket,
+        p: &Pipeline,
+        lane: Option<&str>,
+        branch: Option<&str>,
+        a: &Attempt,
+        cwd: &Path,
+        head: &str,
+    ) -> Vec<(String, String)> {
+        let mut env = self.env_for(t, p, lane, branch);
+        env.push(("DISPATCH_STAGE".to_owned(), a.stage.clone()));
+        env.push(("DISPATCH_CONTEXT".to_owned(), a.context.clone()));
+        env.push(("DISPATCH_TREE".to_owned(), cwd.display().to_string()));
+        env.push(("DISPATCH_HEAD".to_owned(), head.to_owned()));
+        env
+    }
 
-/// What a command run for a ticket gets in its environment.
-pub(crate) fn env_for(
-    t: &Ticket,
-    lane: Option<&str>,
-    branch: Option<&str>,
-) -> Vec<(String, String)> {
-    let mut env = vec![("DISPATCH_TICKET".to_owned(), t.id.clone())];
-    if let Some(l) = lane {
-        env.push(("DISPATCH_LANE".to_owned(), l.to_owned()));
+    /// What a command the runner starts for a ticket gets in its
+    /// environment. Its PATH is `Pipeline::child_path` over the
+    /// runner's own when the pipeline names `[shell] path`, so every
+    /// command started through here gets those directories.
+    pub(crate) fn env_for(
+        &self,
+        t: &Ticket,
+        p: &Pipeline,
+        lane: Option<&str>,
+        branch: Option<&str>,
+    ) -> Vec<(String, String)> {
+        let mut env = vec![("DISPATCH_TICKET".to_owned(), t.id.clone())];
+        if let Some(path) = p.child_path(self.path.as_deref()) {
+            env.push(("PATH".to_owned(), path));
+        }
+        if let Some(l) = lane {
+            env.push(("DISPATCH_LANE".to_owned(), l.to_owned()));
+        }
+        if let Some(b) = branch {
+            env.push(("DISPATCH_BRANCH".to_owned(), b.to_owned()));
+        }
+        env
     }
-    if let Some(b) = branch {
-        env.push(("DISPATCH_BRANCH".to_owned(), b.to_owned()));
-    }
-    env
 }
 
 /// The records a reply made, applied to the ticket by what the request

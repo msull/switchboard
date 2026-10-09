@@ -215,6 +215,10 @@ left to the implementation:
   project or the Dispatch runner is granted sets, and
   `switchboard-env exec -- <command>` puts their variables in that one
   child's environment, resolved over `env.resolve`.
+- Agents and Dispatch's services run in a fixed automation shell with a
+  PATH computed at each spawn, while the owner's own sessions keep
+  their login shell (built 2026-10-08; see "The automation shell"
+  below).
 
 ### Trust boundary
 
@@ -2938,6 +2942,62 @@ Known gaps:
   plain.
 - `DispatchState.diffs` is never evicted while the app runs.
 - No side-by-side view yet.
+
+## The automation shell (2026-10-08)
+
+Agents' tool calls and Dispatch's services ran in whatever the owner's
+login shell made of them, so a gate or a service behaved one way from a
+terminal and another from the app. Spike 20 found why: tmux runs a
+one-word pane command as `default-shell -c "<word>"`, and
+`spawn_script` joined every argv into one word, so the runner, every
+service and every agent went through `zsh -c` and the owner's
+`~/.zshenv`. On the owner's machine that file was the only thing
+putting `~/.cargo/bin` on a Dock-launched app's panes.
+
+- `spawn_script` hands tmux a command of several elements as separate
+  words, which tmux execs with no shell. A one-element command
+  keeps the `default-shell -c` form.
+- tmux replaces a pane's `SHELL` with `default-shell` after it applies
+  `new-session -e`, so the shell is not set through the environment.
+  The agent launcher prefixes its argv with `/usr/bin/env
+  SHELL=/bin/bash CLAUDE_CODE_SHELL=/bin/bash` (Codex: `SHELL` only).
+  It decides this at every launch, resume and clone, so it is policy,
+  not a record field, and old agent records pick it up on their next
+  spawn. The server's `default-shell` stays the owner's.
+- tmux also replaces `-e PATH` with the PATH of the unattached client
+  that sent the `new-session`. `TmuxHost::spawn` therefore sets that
+  client's PATH: the spec's own `PATH` (a project's `.env`) if it has
+  one, else `SWITCHBOARD_PATH_PREPEND` ahead of the augmented PATH,
+  which includes `~/.cargo/bin`. It is computed per spawn, so a
+  long-lived server never pins the PATH it started with.
+- Dispatch's services run `/bin/bash --noprofile --norc -c 'exec "$@"'
+  dispatch-service env … <argv>`. A pipeline's `[shell] path` reaches
+  its sessions as `SWITCHBOARD_PATH_PREPEND` and the runner's own
+  children as `PATH=<dirs>:<runner's PATH>`. A clone keeps its source's
+  `SWITCHBOARD_PATH_PREPEND`. The constants live in
+  `switchboard-control`: `AUTOMATION_SHELL`, `AUTOMATION_SHELL_FLAGS`,
+  `PATH_PREPEND_ENV`.
+- Owner commands run in the owner's login shell: Shell sessions, New
+  session commands, `project.json` entries and the embedded terminal use
+  `$SHELL -lc` (or a login shell), exec'd directly by tmux.
+
+Known gaps:
+
+- A Dispatch service record made by an older Dispatch keeps its stored
+  `zsh -lc` argv until Dispatch makes the service again. Services are
+  per lane per stage and short-lived, so they are not migrated.
+- The supervisor keeps the `[shell] path` it was made with until
+  `dispatch supervisor --fresh`; a resume does not re-read it.
+- Codex is given `SHELL=/bin/bash`, but whether its shell tool follows
+  `$SHELL` is unverified.
+- `/bin/bash` on macOS is 3.2, and Claude Code still sources a
+  `~/.bashrc` into its snapshot.
+- A missing program in a multi-word command is tmux's failed exec,
+  status 1, where `zsh -c` reported 127. Dispatch's checks are the
+  runner's children, not panes, so its 127 reason is unaffected.
+- No live test pins Claude Code's choice of shell: its snapshot is
+  built at the first Bash exec, not at startup, and deleted at exit, so
+  a one-turn run cannot show it (spike 20).
 
 ## Open questions
 

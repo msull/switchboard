@@ -11,6 +11,7 @@ use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
+use switchboard_control::AUTOMATION_SHELL;
 use uuid::Uuid;
 
 use super::{find_in, home_dir, path_dirs};
@@ -100,6 +101,30 @@ fn claude_slug(cwd: &Path) -> String {
         .collect()
 }
 
+/// The words ahead of an agent's binary that make its tool calls run in
+/// the automation shell. They go through `env` rather than the pane's
+/// environment because tmux replaces a pane's `SHELL` with the server's
+/// `default-shell` after it applies `new-session -e`. Claude Code reads
+/// `CLAUDE_CODE_SHELL` first and `SHELL` after it; Codex has only
+/// `SHELL`.
+fn shell_prefix(kind: AgentKind) -> Vec<String> {
+    let mut prefix = vec![
+        "/usr/bin/env".to_owned(),
+        format!("SHELL={AUTOMATION_SHELL}"),
+    ];
+    if kind == AgentKind::ClaudeCode {
+        prefix.push(format!("CLAUDE_CODE_SHELL={AUTOMATION_SHELL}"));
+    }
+    prefix
+}
+
+/// `shell_prefix(kind)` followed by `rest`.
+fn with_shell(kind: AgentKind, rest: Vec<String>) -> Vec<String> {
+    let mut argv = shell_prefix(kind);
+    argv.extend(rest);
+    argv
+}
+
 impl AgentLauncher for Agents {
     fn available(&self, kind: AgentKind) -> bool {
         self.binary(kind).is_ok()
@@ -118,15 +143,18 @@ impl AgentLauncher for Agents {
             AgentKind::ClaudeCode => {
                 let session_id = Uuid::new_v4();
                 Ok(AgentLaunch {
-                    argv: vec![
-                        bin,
-                        "--session-id".into(),
-                        session_id.to_string(),
-                        "--name".into(),
-                        name.into(),
-                        "--settings".into(),
-                        self.hook_settings.to_string_lossy().into_owned(),
-                    ],
+                    argv: with_shell(
+                        kind,
+                        vec![
+                            bin,
+                            "--session-id".into(),
+                            session_id.to_string(),
+                            "--name".into(),
+                            name.into(),
+                            "--settings".into(),
+                            self.hook_settings.to_string_lossy().into_owned(),
+                        ],
+                    ),
                     env,
                     resume: Some(ResumeHandle::ClaudeCode {
                         session_id,
@@ -135,7 +163,7 @@ impl AgentLauncher for Agents {
                 })
             }
             AgentKind::Codex => Ok(AgentLaunch {
-                argv: vec![bin],
+                argv: with_shell(kind, vec![bin]),
                 env,
                 resume: None,
             }),
@@ -152,24 +180,30 @@ impl AgentLauncher for Agents {
         let env = self.env(record);
         match handle {
             ResumeHandle::ClaudeCode { session_id, .. } => Ok(AgentLaunch {
-                argv: vec![
-                    self.binary(AgentKind::ClaudeCode)?,
-                    "--resume".into(),
-                    session_id.to_string(),
-                    "--name".into(),
-                    name.into(),
-                    "--settings".into(),
-                    self.hook_settings.to_string_lossy().into_owned(),
-                ],
+                argv: with_shell(
+                    AgentKind::ClaudeCode,
+                    vec![
+                        self.binary(AgentKind::ClaudeCode)?,
+                        "--resume".into(),
+                        session_id.to_string(),
+                        "--name".into(),
+                        name.into(),
+                        "--settings".into(),
+                        self.hook_settings.to_string_lossy().into_owned(),
+                    ],
+                ),
                 env,
                 resume: Some(handle.clone()),
             }),
             ResumeHandle::Codex { rollout_id, .. } => Ok(AgentLaunch {
-                argv: vec![
-                    self.binary(AgentKind::Codex)?,
-                    "resume".into(),
-                    rollout_id.clone(),
-                ],
+                argv: with_shell(
+                    AgentKind::Codex,
+                    vec![
+                        self.binary(AgentKind::Codex)?,
+                        "resume".into(),
+                        rollout_id.clone(),
+                    ],
+                ),
                 env,
                 resume: Some(handle.clone()),
             }),
@@ -363,7 +397,10 @@ mod tests {
         assert_eq!(
             launch.argv,
             vec![
-                "/opt/bin/claude".to_string(),
+                "/usr/bin/env".to_string(),
+                "SHELL=/bin/bash".into(),
+                "CLAUDE_CODE_SHELL=/bin/bash".into(),
+                "/opt/bin/claude".into(),
                 "--session-id".into(),
                 session_id.to_string(),
                 "--name".into(),
@@ -417,7 +454,10 @@ mod tests {
         assert_eq!(
             claude.argv,
             vec![
-                "/opt/bin/claude".to_string(),
+                "/usr/bin/env".to_string(),
+                "SHELL=/bin/bash".into(),
+                "CLAUDE_CODE_SHELL=/bin/bash".into(),
+                "/opt/bin/claude".into(),
                 "--resume".into(),
                 id.to_string(),
                 "--name".into(),
@@ -439,14 +479,34 @@ mod tests {
             .unwrap();
         assert_eq!(
             codex.argv,
-            vec!["/opt/bin/codex".to_string(), "resume".into(), "abc".into()]
+            vec![
+                "/usr/bin/env".to_string(),
+                "SHELL=/bin/bash".into(),
+                "/opt/bin/codex".into(),
+                "resume".into(),
+                "abc".into()
+            ]
+        );
+        // Codex has no `CLAUDE_CODE_SHELL`; only Claude Code reads it.
+        assert!(
+            !codex
+                .argv
+                .iter()
+                .any(|a| a.starts_with("CLAUDE_CODE_SHELL="))
         );
         assert_eq!(codex.env[0].1, record.0.to_string());
 
         let launch = a
             .prepare_launch(AgentKind::Codex, record, "n", dir.path())
             .unwrap();
-        assert_eq!(launch.argv, vec!["/opt/bin/codex".to_string()]);
+        assert_eq!(
+            launch.argv,
+            vec![
+                "/usr/bin/env".to_string(),
+                "SHELL=/bin/bash".into(),
+                "/opt/bin/codex".into()
+            ]
+        );
         assert!(launch.resume.is_none());
     }
 

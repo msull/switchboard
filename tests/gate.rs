@@ -953,7 +953,12 @@ fn codex_launches_bind_distinct_ids() {
             &work,
         )
         .unwrap();
-    assert_eq!(resume.argv[1..], ["resume".to_string(), id_a]);
+    let bin = resume
+        .argv
+        .iter()
+        .position(|a| Path::new(a).file_name() == Some("codex".as_ref()))
+        .unwrap();
+    assert_eq!(resume.argv[bin + 1..], ["resume".to_string(), id_a]);
 
     app.dispatch(AppAction::KillSession(a));
     app.dispatch(AppAction::KillSession(b));

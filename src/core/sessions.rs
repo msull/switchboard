@@ -4,6 +4,8 @@
 
 use std::path::PathBuf;
 
+use switchboard_control::PATH_PREPEND_ENV;
+
 use crate::core::action::{AppCore, Clock, Effect, Flight, FlightKind, Out, View};
 use crate::core::model::{
     Activity, AgentKind, Ask, AskKind, CardLayout, CardState, Discarded, Launch, ProjectId,
@@ -741,10 +743,16 @@ impl AppCore {
             waiting_on: None,
             pending_launch: true,
             last_stop_at: None,
-            // A clone is a new Dispatch attempt and is sent its own, and
-            // may be a different operator, so it is granted only the sets
-            // the asker names.
-            env: Vec::new(),
+            // A clone is a new Dispatch attempt and is sent its own inputs,
+            // and may be a different operator, so it is granted only the
+            // sets the asker names. The PATH directories are the
+            // pipeline's, which the source shares, so they come along.
+            env: record
+                .env
+                .iter()
+                .filter(|(k, _)| k == PATH_PREPEND_ENV)
+                .cloned()
+                .collect(),
             env_sets,
             token_hash: None,
             asking: None,

@@ -11,10 +11,12 @@
 use std::collections::BTreeSet;
 
 use anyhow::Result;
-use switchboard_control::{self as wire, Body, Made, Reply};
+use switchboard_control::{
+    self as wire, AUTOMATION_SHELL, AUTOMATION_SHELL_FLAGS, Body, Made, Reply,
+};
 
 use crate::pipeline::{Pipeline, Serve, Stage};
-use crate::scheduler::{Ask, NO_SUCH_SESSION, Runner, SocketDown, confine_for, env_for};
+use crate::scheduler::{Ask, NO_SUCH_SESSION, Runner, SocketDown, confine_for};
 use crate::ticket::{
     Attempt, AttemptState, Decision, DecisionKind, DecisionState, Forgotten, GateRun, Hold,
     LaneRecord, ProjectState, STUCK, ServiceRecord, ServiceState, Ticket, TicketState,
@@ -556,7 +558,7 @@ impl Runner {
         std::fs::create_dir_all(&dir)?;
         let log = dir.join("before.log");
         let head = self.git.head(&lane.worktree)?;
-        let env = env_for(t, Some(&lane.name), Some(&lane.branch));
+        let env = self.env_for(t, p, Some(&lane.name), Some(&lane.branch));
         // Confined as the lane's checks are, when the pipeline says so.
         let started = match confine_for(t, p, Some(&lane.name), &[&dir], None) {
             Some(confine) => {
@@ -599,10 +601,12 @@ impl Runner {
     }
 
     /// The service's launch: a Switchboard service session in the
-    /// ticket's project, in the lane's tree, run through the login shell
-    /// so the user's PATH finds `npm`. The environment and command are
-    /// argv elements, never shell source; only the pipeline file's
-    /// `serve.env` values and the port reach them.
+    /// ticket's project, in the lane's tree, run through the automation
+    /// shell with no profile, so the owner's rc files stay out of it;
+    /// `npm` is found on the pane's PATH, which the host computes and
+    /// the pipeline's `[shell] path` goes ahead of. The environment and
+    /// command are argv elements, never shell source; only the pipeline
+    /// file's `serve.env` values and the port reach them.
     fn send_service(
         &mut self,
         t: &mut Ticket,
@@ -629,17 +633,9 @@ impl Runner {
         else {
             return self.fail_service(t, i, "its lane has no tree", now_ms);
         };
-        let shell = std::env::var("SHELL")
-            .ok()
-            .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| "/bin/zsh".to_owned());
-        let mut argv = vec![
-            shell,
-            "-lc".to_owned(),
-            "exec \"$@\"".to_owned(),
-            "dispatch-service".to_owned(),
-            "env".to_owned(),
-        ];
+        let mut argv = vec![AUTOMATION_SHELL.to_owned()];
+        argv.extend(AUTOMATION_SHELL_FLAGS.map(str::to_owned));
+        argv.extend(["-c", "exec \"$@\"", "dispatch-service", "env"].map(str::to_owned));
         argv.extend(
             serve
                 .env
@@ -662,7 +658,7 @@ impl Runner {
                 rec.lane,
                 rec.stage
             ),
-            env: std::collections::BTreeMap::new(),
+            env: p.session_env(),
             env_sets: Vec::new(),
             replaces: None,
         };

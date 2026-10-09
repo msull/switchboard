@@ -7,11 +7,14 @@
 //! the client's stdin through `source-file -` (spike 18). The command
 //! mapping and the measured quirks come from spike 02.
 
+use std::ffi::{OsStr, OsString};
 use std::io;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, SystemTime};
+
+use switchboard_control::PATH_PREPEND_ENV;
 
 use crate::ports::host::{HostId, HostInfo, HostStatus, Liveness, ProcessHost, SpawnSpec};
 
@@ -161,8 +164,9 @@ impl TmuxHost {
         let mut cmd = Command::new(&self.bin);
         cmd.arg("-L").arg(&self.socket).arg("-f").arg(&self.config);
         // The server inherits this process's environment on first start,
-        // and every pane inherits the server's. An app launched from the
-        // Dock gets launchd's minimal PATH, so add the usual tool dirs.
+        // and a pane takes its PATH from the client that spawned it. An
+        // app launched from the Dock gets launchd's minimal PATH, so add
+        // the usual tool dirs.
         cmd.env("PATH", augmented_path());
         // Without a UTF-8 locale tmux replaces the tab separators in
         // `-F` output with `_` (and a server started that way treats pane
@@ -198,29 +202,9 @@ impl TmuxHost {
     /// go on a command line: there is no argument limit on stdin, and a
     /// message never shows in a process listing.
     fn run_with_stdin(&self, args: &[&str], input: &[u8]) -> io::Result<String> {
-        let mut child = self
-            .command()
-            .args(args)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()?;
-        // Dropping the handle closes the pipe, which is the end of input
-        // tmux waits for. A failed write still waits for the child, so it
-        // is reaped, and tmux's own complaint wins over the broken pipe it
-        // caused.
-        let written = child
-            .stdin
-            .take()
-            .map_or(Ok(()), |mut stdin| stdin.write_all(input));
-        let out = child.wait_with_output()?;
-        if !out.status.success() {
-            return Err(io::Error::other(
-                String::from_utf8_lossy(&out.stderr).trim_end().to_owned(),
-            ));
-        }
-        written?;
-        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+        let mut cmd = self.command();
+        cmd.args(args);
+        feed(cmd, input)
     }
 
     /// Text with a line break goes as one paste, so a TUI reads its line
@@ -321,9 +305,15 @@ impl ProcessHost for TmuxHost {
                 format!("tmux session {:?} already exists", spec.id.0),
             ));
         }
+        // tmux gives a pane spawned by an unattached client that client's
+        // PATH, after and over any `-e PATH`, so the PATH the pane is to
+        // have goes on this client.
+        let mut cmd = self.command();
+        cmd.env("PATH", pane_path(&spec.env, &augmented_path()));
+        cmd.args(SPAWN_ARGS);
         // The environment values (secrets among them) and the pane
         // command go on stdin, so no process listing ever shows them.
-        self.run_with_stdin(&SPAWN_ARGS, spawn_script(spec).as_bytes())?;
+        feed(cmd, spawn_script(spec).as_bytes())?;
         // A readable default title until the program sets its own.
         self.run(&[
             "select-pane",
@@ -422,6 +412,32 @@ impl ProcessHost for TmuxHost {
     }
 }
 
+/// Run `cmd` with `input` on its stdin and its stdout as the result, or
+/// its stderr as the error.
+fn feed(mut cmd: Command, input: &[u8]) -> io::Result<String> {
+    let mut child = cmd
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    // Dropping the handle closes the pipe, which is the end of input
+    // tmux waits for. A failed write still waits for the child, so it
+    // is reaped, and tmux's own complaint wins over the broken pipe it
+    // caused.
+    let written = child
+        .stdin
+        .take()
+        .map_or(Ok(()), |mut stdin| stdin.write_all(input));
+    let out = child.wait_with_output()?;
+    if !out.status.success() {
+        return Err(io::Error::other(
+            String::from_utf8_lossy(&out.stderr).trim_end().to_owned(),
+        ));
+    }
+    written?;
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
 /// Whether the locale variables tmux consults name a UTF-8 codeset.
 fn has_utf8_locale() -> bool {
     ["LC_ALL", "LC_CTYPE", "LANG"]
@@ -436,6 +452,7 @@ fn extra_bin_dirs() -> Vec<PathBuf> {
         PathBuf::from("/opt/homebrew/bin"),
         PathBuf::from("/usr/local/bin"),
         super::home_dir().join(".local/bin"),
+        super::home_dir().join(".cargo/bin"),
     ]
 }
 
@@ -448,7 +465,7 @@ fn locate_tmux() -> PathBuf {
 }
 
 /// The current PATH with any missing [`extra_bin_dirs`] appended.
-fn augmented_path() -> std::ffi::OsString {
+fn augmented_path() -> OsString {
     let mut dirs = super::path_dirs();
     for d in extra_bin_dirs() {
         if !dirs.contains(&d) {
@@ -456,6 +473,30 @@ fn augmented_path() -> std::ffi::OsString {
         }
     }
     std::env::join_paths(dirs).unwrap_or_else(|_| std::env::var_os("PATH").unwrap_or_default())
+}
+
+/// The PATH a pane is spawned with: the spec's own `PATH` (from a
+/// project's `.env`, say), which wins as any spec variable does, else
+/// the launcher's [`PATH_PREPEND_ENV`] directories, if any, ahead of
+/// `base`.
+fn pane_path(env: &[(String, String)], base: &OsStr) -> OsString {
+    if let Some((_, own)) = env.iter().rev().find(|(k, _)| k == "PATH") {
+        return OsString::from(own);
+    }
+    let prepend = env
+        .iter()
+        .rev()
+        .find(|(k, v)| k == PATH_PREPEND_ENV && !v.is_empty())
+        .map(|(_, v)| v);
+    match prepend {
+        Some(dirs) => {
+            let mut path = OsString::from(dirs);
+            path.push(":");
+            path.push(base);
+            path
+        }
+        None => base.to_owned(),
+    }
 }
 
 /// The body of a paste: line breaks as LF and ESC removed. tmux passes
@@ -543,7 +584,8 @@ fn parse_status(line: &str) -> Option<HostStatus> {
     })
 }
 
-/// Single-quote `s` for `sh` unless it is made only of safe characters.
+/// Single-quote `s` for `sh` unless it is made only of safe characters,
+/// for the one-word pane command tmux hands to `default-shell -c`.
 /// Leaving plain words bare matters: tmux derives `pane_current_command`
 /// of a dead pane from the command string, and `'sh'` reads badly.
 fn shell_quote(s: &str) -> String {
@@ -582,9 +624,12 @@ fn tmux_quote(s: &str) -> String {
 }
 
 /// The `new-session` line `spawn` writes to the tmux client's stdin,
-/// ending in one newline. The pane command is `sh`-quoted per element,
-/// which keeps the argv boundaries through tmux's `sh -c`, and the
-/// joined string is then tmux-quoted as one argument.
+/// ending in one newline. A pane command of several elements goes to
+/// tmux as one tmux-quoted word each, which tmux execs directly with no
+/// shell, so the owner's `default-shell` and its rc files stay out of
+/// it. A one-element command is a single word, which tmux runs through
+/// `default-shell -c`; it is `sh`-quoted first so it stays one argv
+/// element there.
 fn spawn_script(spec: &SpawnSpec) -> String {
     let mut words = vec![
         "new-session".to_owned(),
@@ -602,9 +647,10 @@ fn spawn_script(spec: &SpawnSpec) -> String {
         words.push("-e".to_owned());
         words.push(tmux_quote(&format!("{k}={v}")));
     }
-    if let Some(argv) = &spec.command {
-        let quoted: Vec<String> = argv.iter().map(|a| shell_quote(a)).collect();
-        words.push(tmux_quote(&quoted.join(" ")));
+    match spec.command.as_deref() {
+        Some([only]) => words.push(tmux_quote(&shell_quote(only))),
+        Some(argv) => words.extend(argv.iter().map(|a| tmux_quote(a))),
+        None => {}
     }
     let mut line = words.join(" ");
     line.push('\n');
@@ -693,6 +739,45 @@ mod tests {
             script.ends_with('\n') && !script.ends_with("\n\n"),
             "{script}"
         );
+    }
+
+    #[test]
+    fn spawn_script_passes_a_multi_word_command_as_words() {
+        let mut spec = SpawnSpec {
+            id: HostId("a".into()),
+            cwd: PathBuf::from("/tmp"),
+            command: Some(vec!["/bin/sh".into(), "-c".into(), "echo 'hi' $X".into()]),
+            env: Vec::new(),
+            scrollback: None,
+        };
+        let script = spawn_script(&spec);
+        assert!(
+            script.ends_with(
+                r#" "/bin/sh" "-c" "echo 'hi' \$X"
+"#
+            ),
+            "{script}"
+        );
+        // One word still goes to `default-shell -c`, sh-quoted.
+        spec.command = Some(vec!["echo hi".into()]);
+        let script = spawn_script(&spec);
+        assert!(script.ends_with(" \"'echo hi'\"\n"), "{script}");
+    }
+
+    #[test]
+    fn pane_path_puts_the_prepend_ahead_and_yields_to_a_spec_path() {
+        let base = OsStr::new("/usr/bin:/bin");
+        assert_eq!(pane_path(&[], base), OsString::from("/usr/bin:/bin"));
+        let prepend = [(PATH_PREPEND_ENV.to_owned(), "/a:/b".to_owned())];
+        assert_eq!(
+            pane_path(&prepend, base),
+            OsString::from("/a:/b:/usr/bin:/bin")
+        );
+        let own = [
+            (PATH_PREPEND_ENV.to_owned(), "/a".to_owned()),
+            ("PATH".to_owned(), "/mine".to_owned()),
+        ];
+        assert_eq!(pane_path(&own, base), OsString::from("/mine"));
     }
 
     #[test]
@@ -1306,6 +1391,147 @@ mod tests {
         let job = listed.iter().find(|h| h.id == id).expect("listed");
         assert_eq!(job.liveness, Liveness::Exited { code: Some(3) });
         assert_eq!(job.cwd, None);
+    }
+
+    /// A command spawned on `s` whose output lands in a file, and that
+    /// file once it is complete (it ends in a newline).
+    fn spawned_output(s: &Server, id: &str, command: Vec<String>, env: &[(&str, &str)]) -> String {
+        let dir = tempfile::tempdir().unwrap();
+        let spec = SpawnSpec {
+            id: HostId(id.into()),
+            cwd: dir.path().to_path_buf(),
+            command: Some(command),
+            env: env
+                .iter()
+                .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+                .collect(),
+            scrollback: None,
+        };
+        s.host.spawn(&spec).unwrap();
+        let out = dir.path().join("out");
+        poll_on(Some(s), "the pane's output file", &mut || {
+            std::fs::read_to_string(&out).is_ok_and(|t| t.ends_with('\n'))
+        });
+        // Left running: killing the last session stops the server, and
+        // a caller may still ask it something. The guard kills it.
+        std::fs::read_to_string(&out).unwrap()
+    }
+
+    /// The marker is no shell any host has, so the cases differ even
+    /// where the server's own `SHELL` is already `/bin/bash`.
+    const SHELL_MARKER: &str = "/bin/sb-test-marker";
+
+    #[test]
+    fn an_env_prefix_sets_the_panes_shell() {
+        let Some(s) = server() else { return };
+        let out = spawned_output(
+            &s,
+            "envshell",
+            vec![
+                "/usr/bin/env".into(),
+                format!("SHELL={SHELL_MARKER}"),
+                "/bin/sh".into(),
+                "-c".into(),
+                "echo \"$SHELL\" > out; sleep 30".into(),
+            ],
+            &[],
+        );
+        assert_eq!(out.trim(), SHELL_MARKER);
+    }
+
+    /// tmux replaces a pane's `SHELL` with its `default-shell` after it
+    /// applies `-e`, which is why agents get theirs through `env`.
+    #[test]
+    fn tmux_replaces_a_spec_shell_with_its_default_shell() {
+        let Some(s) = server() else { return };
+        let out = spawned_output(
+            &s,
+            "specshell",
+            vec![
+                "/bin/sh".into(),
+                "-c".into(),
+                "echo \"$SHELL\" > out; sleep 30".into(),
+            ],
+            &[("SHELL", SHELL_MARKER)],
+        );
+        let default_shell = s
+            .host
+            .run(&["show-options", "-gv", "default-shell"])
+            .unwrap();
+        assert_eq!(out.trim(), default_shell.trim());
+        assert_ne!(out.trim(), SHELL_MARKER);
+    }
+
+    #[test]
+    fn a_pane_gets_the_prepend_ahead_of_the_tool_dirs_unless_it_names_a_path() {
+        let Some(s) = server() else { return };
+        let print_path = || {
+            vec![
+                "/bin/sh".to_owned(),
+                "-c".to_owned(),
+                "echo \"$PATH\" > out; sleep 30".to_owned(),
+            ]
+        };
+        let out = spawned_output(
+            &s,
+            "prepend",
+            print_path(),
+            &[(PATH_PREPEND_ENV, "/sb-test-prepend")],
+        );
+        let dirs: Vec<&str> = out.trim().split(':').collect();
+        assert_eq!(dirs[0], "/sb-test-prepend", "{out}");
+        let cargo = crate::adapters::home_dir().join(".cargo/bin");
+        assert!(
+            dirs[1..].contains(&cargo.to_string_lossy().as_ref()),
+            "{out}"
+        );
+        let out = spawned_output(
+            &s,
+            "ownpath",
+            print_path(),
+            &[
+                (PATH_PREPEND_ENV, "/sb-test-prepend"),
+                ("PATH", "/usr/bin:/bin"),
+            ],
+        );
+        assert_eq!(out.trim(), "/usr/bin:/bin");
+    }
+
+    /// With no shell in between, a missing program is tmux's own failed
+    /// exec, which still leaves a dead pane with a non-zero status.
+    #[test]
+    fn a_missing_multi_word_program_leaves_a_failed_pane() {
+        let Some(s) = server() else { return };
+        let id = HostId("missing".into());
+        let spec = SpawnSpec {
+            id: id.clone(),
+            cwd: std::env::temp_dir(),
+            command: Some(vec!["/nonexistent/sb-test-program".into(), "arg".into()]),
+            env: Vec::new(),
+            scrollback: None,
+        };
+        s.host.spawn(&spec).unwrap();
+        poll_on(Some(&s), "the pane's exit", &mut || {
+            matches!(
+                s.host.status(&id).unwrap().liveness,
+                Liveness::Exited { .. }
+            )
+        });
+        let failed = poll_for(Some(&s), Duration::from_secs(5), &mut || {
+            matches!(
+                s.host.status(&id).unwrap().liveness,
+                Liveness::Exited { code: Some(c) } if c != 0
+            )
+        });
+        if let Err(seen) = failed {
+            // Older tmux can leave a dead pane without a status, as in
+            // `command_exit_code_is_reported`.
+            assert_eq!(
+                s.host.status(&id).unwrap().liveness,
+                Liveness::Exited { code: None },
+                "{seen}"
+            );
+        }
     }
 
     #[test]

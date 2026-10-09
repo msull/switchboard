@@ -8,6 +8,9 @@ and is it gone, port and all, after `tmux kill-session`? Which check
 reads a dev server's port as taken? How fast does a readiness probe
 fail against a server that is not up yet?
 
+Spike 20 ([`20-automation-shell`](../20-automation-shell/README.md))
+measures the automation shell that launches the service today.
+
 **Setup.** tmux 3.7c on a `switchboard-test-spike11` socket, node 24.3,
 macOS. `server.js` starts the way react-scripts does: a parent `node`
 that spawns a child `node` listening on `$PORT` and waits on it.
@@ -47,6 +50,8 @@ after 200ms: 0 in group, 0 listen lines
 
 The login shell's `exec` hands the pane to `env`, then to `npm`: the
 pane's pid is `npm` itself, and PATH resolved from the user's profile.
+(The automation shell's `exec` hands over the same way; its PATH is the
+pane's.)
 Every descendant stays in the pane's process group, and all of it was
 gone, port free, within 200 ms of `kill-session`. No grandchild
 survived either time; the port-free condition in Dispatch's stop stays,
