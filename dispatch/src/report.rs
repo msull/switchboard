@@ -126,6 +126,11 @@ pub struct TicketReport {
     /// Answered decisions by who answered: `you`, `supervisor`,
     /// `dispatch`, `resume`.
     pub answered_by: BTreeMap<String, u32>,
+    /// Evidence files listed, across every attempt, as recorded when
+    /// each writer finished; a swept directory still counts.
+    pub evidence_files: u32,
+    /// Their size in bytes.
+    pub evidence_bytes: u64,
 }
 
 /// The plan review's round files beside `subject`: `<stem>.feedback-<n>.md`.
@@ -279,6 +284,12 @@ pub fn of(
     plan_review(t, read, rounds, &mut r);
     code_review(t, read, &mut r);
     r.rebases = rebases(t);
+    for ev in t.attempts.iter().filter_map(|a| a.evidence.as_ref()) {
+        r.evidence_files = r
+            .evidence_files
+            .saturating_add(u32::try_from(ev.files.len()).unwrap_or(u32::MAX));
+        r.evidence_bytes += ev.files.iter().map(|f| f.bytes).sum::<u64>();
+    }
     r.pr_url = t
         .attempts
         .iter()
@@ -455,6 +466,8 @@ pub fn total(reports: &[TicketReport]) -> TicketReport {
         sum.code_incomplete |= r.code_incomplete;
         sum.fix_passes += r.fix_passes;
         sum.rebases += r.rebases;
+        sum.evidence_files += r.evidence_files;
+        sum.evidence_bytes += r.evidence_bytes;
         sum.commits = add(sum.commits, r.commits);
         if let Some(g) = r.range {
             let s = sum.range.get_or_insert_with(RangeSize::default);

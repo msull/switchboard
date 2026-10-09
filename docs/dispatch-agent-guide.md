@@ -36,13 +36,16 @@ dispatch queue <project>                          the project's queue in order
 dispatch queue <project> <ticket>...              reorder it
 dispatch park <ticket> [--reason <text>]          a ticket's work stopped, its questions withdrawn
 dispatch resume <ticket> [--no-rerun]             a parked ticket back to active; what the park cancelled runs again
-dispatch close <ticket> [--reason <text>]         a ticket closed, its trees removed (its branches are kept; close lists them)
+dispatch close <ticket> [--reason <text>] [--drop-evidence]
+                                                  a ticket closed, its trees removed (its branches are kept; close lists them);
+                                                  --drop-evidence removes its evidence directories now
 dispatch restart <ticket> [<stage>] [--note <text> | --file <path>]
                                                   a ticket at its stage, or an earlier one, under the live pipeline; later work
                                                   discarded; a note goes to the stage's next agent
 dispatch health [--timeout <secs>] [--stale <secs>] [--verbose] [--json]   is the runner alive and getting on; run it first
 dispatch runner stop|start|restart                stop or start the runner the app runs; restart waits for the new pid
 dispatch show <ticket> [--json]                   one ticket: stage, lanes, attempts, rounds, decisions, files
+dispatch evidence <ticket> [<stage>]              each attempt's evidence files, by absolute path
 dispatch events [--since <seq>] [--follow [--timeout <secs>]] [--ticket <id>]... [--project <name>] [--json]
 dispatch brief <project>                          the project at a glance: tickets, what waits, recent events, the hand-off
 dispatch supervisor <project>                     the project's supervisor session: its id, age, seed, workspace
@@ -229,7 +232,8 @@ by this one before they ran again or the attempt was cancelled),
 answer to a decision that is not its to answer), `forgotten` (a secret
 artifact's file deleted, with its name and why), `revised` (the owner's
 objection to a finished plan review sent as its next round, by whom),
-and `void`. A take,
+`evidence-swept` (an attempt's evidence directory removed, with its
+file count and why), and `void`. A take,
 park, resume, close or answer a supervisor session made carries
 `"actor":"supervisor"` and its text ends `(by supervisor)` or reads
 `by supervisor`. The human line is
@@ -541,6 +545,12 @@ refused while anything of the ticket runs (park it first) or a tree
 has uncommitted changes; the refusal names them. Closing is the
 owner's call unless you were told to close that ticket.
 
+A closed ticket's evidence directories stay for the pipeline's
+`evidence_keep_days` (30 by default) and are then removed by the
+runner. `--drop-evidence` removes them as the close finishes, or at
+once on a ticket already closed; it is the owner's call too, since
+screenshots are often what they keep to look back at.
+
 ## Where things live
 
 Dispatch's data directory is `$DISPATCH_DATA_DIR`, by default
@@ -683,6 +693,44 @@ profiles. Say also that it uses the file (passes its path to a probe or
 a seeding script) without printing its contents, and that it prints no
 variable `switchboard-env` gives a command: whatever an agent prints
 stays in its transcript and in Switchboard's scrollback.
+
+A stage may keep files it produced beside its notes, such as
+screenshots, in one evidence directory: `writes = ["notes", { name =
+"evidence", dir = true }]`. Dispatch makes `<attempt dir>/evidence/`
+(mode 0700) before the launch, gives the agent its path as `{evidence}`
+in the prompt and as `$DISPATCH_WRITES_EVIDENCE` in its session, lists
+the regular files in it when the agent finishes (links, FIFOs and
+anything over `evidence_file_mb`, or past `evidence_attempt_mb` in
+total, are not listed), and shows the count on the `tried` question.
+`dispatch evidence <ticket>` prints each file's path. No other stage
+reads the directory (`{inputs.<stage>.evidence}` is refused), a
+`codex` operator cannot keep one, and a gate-only command gets the
+same variable.
+
+What reaches the directory unasked, measured in spike 21:
+
+- the Write tool: yes, under the allow rule Dispatch already passes for
+  the attempt directory. Tell the tester to write its files with the
+  Write tool;
+- Bash `cp`, `mv` and `mkdir` into it: no, they ask for permission, and
+  an added directory does not change that. Do not tell the tester to
+  copy files in;
+- a Playwright screenshot: only when the tester's Playwright MCP server
+  runs with `--allow-unrestricted-file-access` and the tester passes
+  `{evidence}/<file>.png` as `browser_take_screenshot`'s `filename`.
+  Without the flag the server refuses any path outside the agent's
+  cwd. The flag also lets the browser read any local file and open
+  `file://` URLs, so it goes in the tester operator's own `--mcp-config`
+  only when the owner says so:
+
+  ```toml
+  [operators.tester]
+  kind = "claude"
+  args = ["--mcp-config", "/path/to/tester-mcp.json"]
+  # tester-mcp.json:
+  # {"mcpServers":{"playwright":{"command":"npx",
+  #   "args":["-y","@playwright/mcp@0.0.82","--allow-unrestricted-file-access"]}}}
+  ```
 
 Before saving, read the file back: a pipeline that does not parse is
 refused at the next `take` with the parser's reason, and `status`

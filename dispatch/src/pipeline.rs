@@ -590,6 +590,10 @@ pub struct Write {
     /// Written by a gate-only command only, never read by Dispatch, and
     /// deleted when the hold its stage needs is released.
     pub secret: bool,
+    /// An evidence directory, not a file: `{name}` is a directory the
+    /// writer fills, listed when it finishes and removed some days
+    /// after the ticket closes. Read by no other stage.
+    pub dir: bool,
 }
 
 impl Write {
@@ -599,6 +603,7 @@ impl Write {
         Self {
             name: name.to_owned(),
             secret: false,
+            dir: false,
         }
     }
 }
@@ -611,8 +616,10 @@ enum WriteFile {
     Name(String),
     Table {
         name: String,
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         secret: bool,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        dir: bool,
     },
 }
 
@@ -622,18 +629,20 @@ impl From<WriteFile> for Write {
             WriteFile::Name(name) => Self {
                 name,
                 secret: false,
+                dir: false,
             },
-            WriteFile::Table { name, secret } => Self { name, secret },
+            WriteFile::Table { name, secret, dir } => Self { name, secret, dir },
         }
     }
 }
 
 impl From<Write> for WriteFile {
     fn from(w: Write) -> Self {
-        if w.secret {
+        if w.secret || w.dir {
             Self::Table {
                 name: w.name,
-                secret: true,
+                secret: w.secret,
+                dir: w.dir,
             }
         } else {
             Self::Name(w.name)
@@ -732,9 +741,19 @@ impl Stage {
         }
     }
 
-    /// The names of the artifacts the stage writes.
+    /// The names of the file artifacts the stage writes; an evidence
+    /// directory is not one.
     pub fn write_names(&self) -> impl Iterator<Item = &str> {
-        self.writes.iter().map(|w| w.name.as_str())
+        self.writes
+            .iter()
+            .filter(|w| !w.dir)
+            .map(|w| w.name.as_str())
+    }
+
+    /// The name of the stage's evidence directory, if it keeps one.
+    #[must_use]
+    pub fn evidence_dir(&self) -> Option<&str> {
+        self.writes.iter().find(|w| w.dir).map(|w| w.name.as_str())
     }
 
     /// The names of the stage's secret artifacts.
@@ -881,6 +900,30 @@ pub struct Policy {
     /// not `style`.
     #[serde(default)]
     pub resolution_reviewer: Option<String>,
+    /// An evidence file larger than this many MB is kept on disk but not
+    /// listed. Read from the ticket's copy, like `max_reruns`.
+    #[serde(default = "default_evidence_file_mb")]
+    pub evidence_file_mb: u64,
+    /// The files of one attempt's evidence listed until their total
+    /// passes this many MB; the rest are kept but not listed.
+    #[serde(default = "default_evidence_attempt_mb")]
+    pub evidence_attempt_mb: u64,
+    /// Days after a ticket closes before its evidence directories are
+    /// removed.
+    #[serde(default = "default_evidence_keep_days")]
+    pub evidence_keep_days: u32,
+}
+
+fn default_evidence_file_mb() -> u64 {
+    25
+}
+
+fn default_evidence_attempt_mb() -> u64 {
+    200
+}
+
+fn default_evidence_keep_days() -> u32 {
+    30
 }
 
 fn default_max_fixes() -> u32 {
@@ -923,6 +966,9 @@ impl Default for Policy {
             confine: false,
             network: crate::git::Network::default(),
             resolution_reviewer: None,
+            evidence_file_mb: default_evidence_file_mb(),
+            evidence_attempt_mb: default_evidence_attempt_mb(),
+            evidence_keep_days: default_evidence_keep_days(),
         }
     }
 }
@@ -1226,11 +1272,12 @@ impl Pipeline {
     fn validate_writes(&self, stage: &Stage) -> Result<()> {
         let name = &stage.name;
         let mut seen = std::collections::BTreeSet::new();
-        for w in stage.write_names() {
-            if !seen.insert(w) {
-                bail!("stage {name:?} writes {w:?} twice");
+        for w in &stage.writes {
+            if !seen.insert(w.name.as_str()) {
+                bail!("stage {name:?} writes {:?} twice", w.name);
             }
         }
+        self.validate_evidence(stage)?;
         if stage.write_names().any(|w| w == "commit") {
             bail!("stage {name:?} writes \"commit\", which inputs.{name}.commit already names");
         }
@@ -1274,6 +1321,52 @@ impl Pipeline {
                     "stage {name:?}: secret {secret:?} needs a [[resources]] entry in needs, whose release deletes it"
                 );
             }
+        }
+        Ok(())
+    }
+
+    /// A stage's evidence directory, when it declares one, is one per
+    /// stage, not secret, under a name Dispatch never reads, and not for
+    /// Codex, which writes inside its cwd alone.
+    fn validate_evidence(&self, stage: &Stage) -> Result<()> {
+        let name = &stage.name;
+        let dirs: Vec<&Write> = stage.writes.iter().filter(|w| w.dir).collect();
+        let Some(dir) = dirs.first() else {
+            return Ok(());
+        };
+        if dirs.len() > 1 {
+            bail!("stage {name:?} keeps more than one evidence directory");
+        }
+        let ev = &dir.name;
+        if !matches!(stage.kind(), StageKind::Agent | StageKind::GateOnly) {
+            bail!(
+                "stage {name:?}: evidence directory {ev:?}: only an agent stage or a gate-only command keeps one"
+            );
+        }
+        if dir.secret {
+            bail!(
+                "stage {name:?}: {ev:?} is a directory and secret; a secret is a file, so there is nothing to hold"
+            );
+        }
+        if ev == "commit" || READ_BY_NAME.contains(&ev.as_str()) {
+            bail!(
+                "stage {name:?}: {ev:?} is read by Dispatch, so it cannot be an evidence directory"
+            );
+        }
+        if let Some(file) = stage.write_names().find(|f| env_key(f) == env_key(ev)) {
+            bail!(
+                "stage {name:?}: evidence directory {ev:?} has the same variable name as {file:?}"
+            );
+        }
+        let codex = stage
+            .operator
+            .as_ref()
+            .and_then(|o| self.operators.get(o))
+            .is_some_and(|o| o.kind == OperatorKind::Codex);
+        if codex {
+            bail!(
+                "stage {name:?}: evidence directory {ev:?}: codex writes only inside its cwd, so it cannot keep one"
+            );
         }
         Ok(())
     }
@@ -1833,6 +1926,7 @@ impl Pipeline {
             }
             self.validate_stage(stage, &written)?;
             self.validate_inputs(stage, &self.stages[..i])?;
+            self.validate_evidence_inputs(stage, &self.stages[..i])?;
             if let Some(subject) = &stage.subject
                 && secrets.contains(&subject.as_str())
             {
@@ -1940,6 +2034,33 @@ impl Pipeline {
                         );
                     }
                 }
+            }
+        }
+        Ok(())
+    }
+
+    /// No template names another stage's evidence directory as an
+    /// input: only its own writer is told where it is.
+    fn validate_evidence_inputs(&self, stage: &Stage, before: &[Stage]) -> Result<()> {
+        let text = self.templates_of(stage);
+        for (s, x) in crate::template::input_names(&text) {
+            let named = |b: &&Stage| s.as_ref().is_none_or(|s| s == &b.name);
+            let keeper = before
+                .iter()
+                .filter(named)
+                .find(|b| b.evidence_dir() == Some(x.as_str()));
+            let a_file = before
+                .iter()
+                .filter(named)
+                .any(|b| produced(b).any(|p| p == x));
+            if let Some(b) = keeper
+                && !a_file
+            {
+                bail!(
+                    "stage {:?} names {x:?} of {:?} as an input, but it is an evidence directory, which no other stage reads",
+                    stage.name,
+                    b.name
+                );
             }
         }
         Ok(())
@@ -3078,7 +3199,8 @@ ports = [3100, 3199]
             [
                 Write {
                     name: "personas".into(),
-                    secret: true
+                    secret: true,
+                    dir: false
                 },
                 Write::named("seed")
             ]
@@ -3146,6 +3268,94 @@ ports = [3100, 3199]
             "needs = [\"backend\"]\nwrites = [{",
             "needs a [[resources]] entry",
         );
+    }
+
+    /// The back half with `try` keeping an evidence directory.
+    fn evidence_half() -> String {
+        DEPLOYING_BACK_HALF.replace(
+            "writes = [\"notes\"]",
+            "writes = [\"notes\", { name = \"evidence\", dir = true }]",
+        )
+    }
+
+    fn evidence_half_refused(from: &str, to: &str, expected: &str) {
+        let base = evidence_half();
+        let text = base.replace(from, to);
+        assert_ne!(text, base, "{from}");
+        let err = Pipeline::parse(&text).unwrap_err().to_string();
+        assert!(err.contains(expected), "{from}: {err}");
+    }
+
+    #[test]
+    fn an_evidence_directory_is_a_table_and_not_a_file_artifact() {
+        #[derive(Serialize, Deserialize)]
+        struct Writes {
+            writes: Vec<Write>,
+        }
+        let p = Pipeline::parse(&evidence_half()).unwrap();
+        let try_ = &p.stages[3];
+        assert_eq!(try_.name, "try");
+        assert_eq!(try_.evidence_dir(), Some("evidence"));
+        assert_eq!(try_.write_names().collect::<Vec<_>>(), ["notes"]);
+        assert_eq!(
+            serde_json::to_value(&try_.writes).unwrap(),
+            serde_json::json!(["notes", { "name": "evidence", "dir": true }])
+        );
+        let back = toml::to_string(&Writes {
+            writes: try_.writes.clone(),
+        })
+        .unwrap();
+        assert_eq!(toml::from_str::<Writes>(&back).unwrap().writes, try_.writes);
+        assert_eq!(p.stages[0].evidence_dir(), None);
+    }
+
+    #[test]
+    fn an_evidence_directory_is_refused_where_it_could_not_be_kept() {
+        let ev = "{ name = \"evidence\", dir = true }";
+        evidence_half_refused(
+            "\"notes\", {",
+            "\"evidence\", {",
+            "writes \"evidence\" twice",
+        );
+        evidence_half_refused(
+            ev,
+            "{ name = \"evidence\", dir = true, secret = true }",
+            "nothing to hold",
+        );
+        evidence_half_refused(
+            ev,
+            "{ name = \"evidence\", dir = true }, { name = \"shots\", dir = true }",
+            "more than one evidence directory",
+        );
+        evidence_half_refused(ev, "{ name = \"commit\", dir = true }", "read by Dispatch");
+        evidence_half_refused(ev, "{ name = \"summary\", dir = true }", "read by Dispatch");
+        evidence_half_refused(
+            "\"notes\", { name = \"evidence\"",
+            "\"my-notes\", { name = \"my_notes\"",
+            "same variable name",
+        );
+        evidence_half_refused(
+            "[operators.tester]\nkind = \"claude\"",
+            "[operators.tester]\nkind = \"codex\"",
+            "codex writes only inside its cwd",
+        );
+        evidence_half_refused(
+            "prompt = \"Push {branch}.\"",
+            "prompt = \"Push {branch} with {inputs.try.evidence}.\"",
+            "evidence directory, which no other stage reads",
+        );
+        evidence_half_refused(
+            "prompt = \"Push {branch}.\"",
+            "prompt = \"Push {branch} with {inputs.evidence}.\"",
+            "evidence directory, which no other stage reads",
+        );
+    }
+
+    #[test]
+    fn a_gate_only_command_may_keep_an_evidence_directory() {
+        let text = secret_half().replace("\"seed\"]", "\"seed\", { name = \"logs\", dir = true }]");
+        let p = Pipeline::parse(&text).unwrap();
+        assert_eq!(p.stages[3].evidence_dir(), Some("logs"));
     }
 
     #[test]

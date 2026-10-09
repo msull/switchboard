@@ -579,8 +579,28 @@ pub struct AttemptView {
     /// counted against them, because their last Stop listed background
     /// work or a wakeup the app still holds them for.
     pub held: Vec<HeldView>,
+    /// The files the stage's evidence directory held when its writer
+    /// finished, as recorded then; empty without one.
+    pub evidence: Vec<EvidenceView>,
+    /// Paths under the evidence directory kept on disk but not listed,
+    /// because they were over a cap.
+    pub evidence_over_cap: Vec<String>,
+    /// When the evidence directory was removed, in ms.
+    pub evidence_swept_ms: Option<u64>,
     pub started_ms: u64,
     pub ended_ms: Option<u64>,
+}
+
+/// One file of an attempt's evidence directory.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct EvidenceView {
+    /// Absolute, so the app can open or reveal it as it is.
+    pub path: PathBuf,
+    /// The path under the evidence directory.
+    pub rel: String,
+    pub bytes: u64,
+    pub modified_ms: u64,
 }
 
 /// One session's hold, as `show` prints it.

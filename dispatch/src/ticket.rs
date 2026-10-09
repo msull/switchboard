@@ -358,8 +358,39 @@ pub struct Attempt {
     /// `hold_if_held` while the hold lasts.
     #[serde(default)]
     pub held: BTreeMap<String, Held>,
+    /// The evidence directory the stage declared, when it keeps one.
+    #[serde(default)]
+    pub evidence: Option<Evidence>,
     pub started_ms: u64,
     pub ended_ms: Option<u64>,
+}
+
+/// The evidence directory a stage declared: made before the launch,
+/// listed once the writer finished, removed by the sweep.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Evidence {
+    /// The name the stage gave it: `{name}` in the prompt.
+    pub name: String,
+    /// Under the attempt directory, made mode 0700.
+    pub dir: PathBuf,
+    /// Sorted by `rel`; recorded, never re-read, so the page, `show`
+    /// and `report` agree after a sweep.
+    pub files: Vec<EvidenceFile>,
+    /// Relative paths kept on disk but not listed: over a cap.
+    pub over_cap: Vec<String>,
+    /// When and why the directory was removed; the listing stays.
+    pub swept: Option<Forgotten>,
+}
+
+/// One regular file in an evidence directory, as listed.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct EvidenceFile {
+    /// The path under the evidence directory.
+    pub rel: String,
+    pub bytes: u64,
+    pub modified_ms: u64,
 }
 
 /// Why a stopped agent's missing artifact is not yet counted against it:
@@ -449,13 +480,15 @@ pub struct Revision {
     pub at_ms: u64,
 }
 
-/// A secret artifact's file deleted.
+/// A secret artifact's file deleted, or an evidence directory removed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Forgotten {
     /// When the file was deleted, in ms.
     pub at_ms: u64,
-    /// Why: `"<resource> released"`, `"attempt failed"`, `"attempt
-    /// cancelled"`, `"attempt replaced"`, `"parked"` or `"closed"`.
+    /// Why: for a secret, `"<resource> released"`, `"attempt failed"`,
+    /// `"attempt cancelled"`, `"attempt replaced"`, `"parked"` or
+    /// `"closed"`; for evidence, `"kept <n> days after close"` or
+    /// `"dropped at close"`.
     pub why: String,
 }
 
@@ -1023,6 +1056,13 @@ pub struct CloseProgress {
     pub trees_kept: Option<String>,
     /// The working set was synced without this ticket.
     pub card_cleared: bool,
+    /// When the ticket became `Closed`: the evidence sweep counts its
+    /// keep days from here. A ticket closed before it was recorded gets
+    /// its `updated_ms` the first time the sweep sees it.
+    pub closed_ms: Option<u64>,
+    /// Remove the evidence directories as the close finishes, asked
+    /// for with `close --drop-evidence`.
+    pub drop_evidence: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

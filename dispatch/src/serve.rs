@@ -89,6 +89,19 @@ impl Handler {
                 if let Some(name) = t.secret_at(&file) {
                     bail!("{name} is secret; Dispatch never reads it");
                 }
+                // An agent fills its evidence directory with whatever it
+                // likes, so a file there is read only up to a bound.
+                if under_evidence(&t, &file) {
+                    let len = fs::metadata(&file)
+                        .with_context(|| format!("read {}", file.display()))?
+                        .len();
+                    if len > EVIDENCE_TEXT_MAX {
+                        bail!(
+                            "{} is {len} bytes, over the {EVIDENCE_TEXT_MAX} shown inline; open it instead",
+                            path.display()
+                        );
+                    }
+                }
                 let text = fs::read_to_string(&file)
                     .with_context(|| format!("read {}", file.display()))?;
                 Reply::Artifact { text }
@@ -124,7 +137,7 @@ impl Handler {
             Body::Close { ticket, reason } => {
                 let t = self
                     .runner
-                    .request_close(ticket, reason.as_deref(), now_ms)?;
+                    .request_close(ticket, reason.as_deref(), false, now_ms)?;
                 Reply::Ticket(self.view(&t))
             }
             Body::Take { project, issue } => {
@@ -672,6 +685,34 @@ pub fn ticket_view(t: &Ticket, p: Option<&Pipeline>) -> TicketView {
     }
 }
 
+/// The most of an evidence file `Body::Artifact` reads inline.
+pub const EVIDENCE_TEXT_MAX: u64 = 1024 * 1024;
+
+/// Whether `file`, already canonical, lies under one of the ticket's
+/// evidence directories.
+fn under_evidence(t: &crate::ticket::Ticket, file: &Path) -> bool {
+    t.attempts
+        .iter()
+        .filter_map(|a| a.evidence.as_ref())
+        .any(|e| {
+            let dir = e.dir.canonicalize().unwrap_or_else(|_| e.dir.clone());
+            file.starts_with(dir)
+        })
+}
+
+/// An evidence directory's recorded files, each with its absolute path.
+fn evidence_views(ev: &crate::ticket::Evidence) -> Vec<dispatch_control::EvidenceView> {
+    ev.files
+        .iter()
+        .map(|f| dispatch_control::EvidenceView {
+            path: ev.dir.join(&f.rel),
+            rel: f.rel.clone(),
+            bytes: f.bytes,
+            modified_ms: f.modified_ms,
+        })
+        .collect()
+}
+
 /// One attempt as the port shows it: secret artifacts by name only.
 fn attempt_view(a: &crate::ticket::Attempt) -> AttemptView {
     let (state, reason) = attempt_state(&a.state);
@@ -730,6 +771,17 @@ fn attempt_view(a: &crate::ticket::Attempt) -> AttemptView {
                 until_ms: h.until_ms,
             })
             .collect(),
+        evidence: a.evidence.iter().flat_map(evidence_views).collect(),
+        evidence_over_cap: a
+            .evidence
+            .as_ref()
+            .map(|e| e.over_cap.clone())
+            .unwrap_or_default(),
+        evidence_swept_ms: a
+            .evidence
+            .as_ref()
+            .and_then(|e| e.swept.as_ref())
+            .map(|s| s.at_ms),
         rewrite: a.rewrite.as_ref().map(|r| dispatch_control::RewriteView {
             mode: r.mode.as_str().to_owned(),
             before: r.before.clone(),
@@ -1057,6 +1109,120 @@ slots = 1
             5_000,
         );
         assert!(matches!(no_such, Reply::Failed { .. }));
+    }
+
+    /// A ticket taken through the port with one attempt keeping an
+    /// evidence directory, and a reader of a path through `Artifact`.
+    fn with_evidence(h: &mut Handler) -> (String, PathBuf) {
+        let Reply::Taken(t) = h.handle(
+            &Request::new(
+                "1",
+                Body::Take {
+                    project: "P".into(),
+                    issue: "#7".into(),
+                },
+            ),
+            1_000,
+        ) else {
+            panic!("taken")
+        };
+        let dir = h
+            .runner
+            .data
+            .ticket_dir(&t.id)
+            .join("investigate/1/root/evidence");
+        fs::create_dir_all(dir.join("shots")).unwrap();
+        let mut ticket = h.runner.load_ticket(&t.id).unwrap();
+        let mut a = crate::scheduler::new_attempt(
+            "investigate",
+            1,
+            "root",
+            AttemptKind::Agent,
+            crate::ticket::AttemptState::Complete,
+            std::collections::BTreeMap::new(),
+            1_000,
+        );
+        a.evidence = Some(crate::ticket::Evidence {
+            name: "evidence".into(),
+            dir: dir.clone(),
+            files: vec![crate::ticket::EvidenceFile {
+                rel: "shots/home.png".into(),
+                bytes: 3,
+                modified_ms: 900,
+            }],
+            ..Default::default()
+        });
+        ticket.attempts.push(a);
+        h.runner.save_ticket(&mut ticket, 1_000).unwrap();
+        (t.id, dir)
+    }
+
+    fn read(h: &mut Handler, ticket: &str, path: PathBuf) -> Reply {
+        h.handle(
+            &Request::new(
+                "r",
+                Body::Artifact {
+                    ticket: ticket.into(),
+                    path,
+                },
+            ),
+            2_000,
+        )
+    }
+
+    #[test]
+    fn an_attempts_evidence_is_listed_by_absolute_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut h = handler(dir.path());
+        let (id, ev) = with_evidence(&mut h);
+        let t = h.runner.load_ticket(&id).unwrap();
+        let view = attempt_view(&t.attempts[0]);
+        assert_eq!(view.evidence.len(), 1);
+        assert_eq!(view.evidence[0].path, ev.join("shots/home.png"));
+        assert!(view.evidence[0].path.is_absolute());
+        assert_eq!(view.evidence[0].rel, "shots/home.png");
+        assert_eq!(view.evidence_swept_ms, None);
+    }
+
+    #[test]
+    fn evidence_reads_inline_up_to_a_bound_and_other_artifacts_do_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut h = handler(dir.path());
+        let (id, ev) = with_evidence(&mut h);
+        fs::write(ev.join("steps.md"), "# steps").unwrap();
+        assert_eq!(
+            read(&mut h, &id, ev.join("steps.md")),
+            Reply::Artifact {
+                text: "# steps".into()
+            }
+        );
+        let big = usize::try_from(EVIDENCE_TEXT_MAX).unwrap() + 1;
+        fs::write(ev.join("big.txt"), "x".repeat(big)).unwrap();
+        let refused = read(&mut h, &id, ev.join("big.txt"));
+        assert!(
+            matches!(&refused, Reply::Failed { reason } if reason.contains("open it instead")),
+            "{refused:?}"
+        );
+        // A link out of the ticket's directory is refused by where it
+        // leads.
+        let outside = dir.path().join("outside.md");
+        fs::write(&outside, "elsewhere").unwrap();
+        std::os::unix::fs::symlink(&outside, ev.join("out.md")).unwrap();
+        assert!(matches!(
+            read(&mut h, &id, ev.join("out.md")),
+            Reply::Failed { .. }
+        ));
+        // A checks log is not evidence: read whole, past both bounds.
+        let log = h
+            .runner
+            .data
+            .ticket_dir(&id)
+            .join("investigate/1/root/checks.log");
+        fs::write(&log, "y".repeat(big)).unwrap();
+        let Reply::Artifact { text } = read(&mut h, &id, log) else {
+            panic!("a checks log reads")
+        };
+        assert_eq!(text.len(), big);
     }
 
     /// A close through the port: only the intent in the reply, the

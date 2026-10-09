@@ -643,6 +643,32 @@ fn place_details(t: &TicketView, groups: &mut [TimelineGroup]) -> Vec<(String, u
         .collect()
 }
 
+/// Kinds of evidence file the ticket page offers to open. A file an
+/// agent wrote carries no quarantine flag, so opening a `.command`,
+/// `.app` or `.html` would run it unasked; those get Reveal only.
+const EVIDENCE_OPENS: [&str; 15] = [
+    "png", "jpg", "jpeg", "gif", "webp", "heic", "pdf", "csv", "tsv", "txt", "md", "json", "log",
+    "mp4", "mov",
+];
+
+/// Whether the ticket page offers Open for the evidence file at `path`:
+/// its extension, in any case, is on a short list of documents and
+/// images.
+#[must_use]
+pub fn evidence_opens(path: &std::path::Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| EVIDENCE_OPENS.contains(&e.to_ascii_lowercase().as_str()))
+}
+
+/// Whether the ticket page shows the evidence file at `path` inline.
+#[must_use]
+pub fn evidence_inline(path: &std::path::Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| matches!(e.to_ascii_lowercase().as_str(), "md" | "txt"))
+}
+
 /// Whether the ticket is parked, which is when Resume is offered.
 #[must_use]
 pub fn parked(t: &TicketView) -> bool {

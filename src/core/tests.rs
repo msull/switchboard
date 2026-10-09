@@ -11391,3 +11391,24 @@ mod prompting {
         }
     }
 }
+
+#[test]
+fn evidence_opens_documents_and_images_and_refuses_what_would_run() {
+    use crate::core::dispatch::{evidence_inline, evidence_opens};
+    use std::path::Path;
+    assert!(evidence_opens(Path::new("/e/shot.PNG")));
+    assert!(evidence_opens(Path::new("/e/r.pdf")));
+    for refused in [
+        "x.command",
+        "a.app",
+        "page.html",
+        "t.terminal",
+        "s.scpt",
+        "p.pkg",
+        "noext",
+    ] {
+        assert!(!evidence_opens(Path::new(refused)), "{refused}");
+    }
+    assert!(evidence_inline(Path::new("steps.MD")));
+    assert!(!evidence_inline(Path::new("shot.png")));
+}

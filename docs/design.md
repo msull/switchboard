@@ -3001,6 +3001,48 @@ reads as injected. A wakeup that fires after a `/compact` and before
 the next `Stop` reads as typed, because the `SessionStart` dropped the
 file.
 
+## Evidence directories (2026-10-09)
+
+A stage may keep the files it produced beside its notes, mainly a
+tester's screenshots, in one evidence directory:
+`writes = ["notes", { name = "evidence", dir = true }]`. It is not a
+file artifact: `Stage::write_names()` leaves it out, so nothing that
+assumes a file (the missing-artifact check, the artifact buttons, the
+port's inline read) sees it, and no other stage reads it. The attempt
+records it as `Attempt.evidence`: made under the attempt directory,
+mode 0700, before the launch; `{evidence}` in the prompt and
+`DISPATCH_WRITES_EVIDENCE` in the session's env (kept on the session
+record, so a resume keeps it), the same variable for a gate-only
+command. While the writer settles, the directory is one settle entry
+(total size, newest time); when it finishes, one walk that never
+follows a symlink lists its regular files, with anything over
+`evidence_file_mb` or past `evidence_attempt_mb` kept but not listed.
+The listing is recorded once and never re-read, so the ticket page,
+`show`, `report` and `dispatch evidence` agree after a sweep. The
+`tried` question names the count.
+
+A closed ticket's directories are removed `evidence_keep_days` (30)
+after `close.closed_ms`, by a sweep the runner runs once a day, or at
+close with `dispatch close --drop-evidence`; the attempt keeps
+`evidence.swept` and the event log an `evidence-swept` line. The
+ticket page lists each file with its size and age, Open only for
+documents and images (`evidence_opens`, since an agent's file has no
+quarantine flag), Reveal for every file, and View for `.md` and `.txt`
+through the port, which reads an evidence file only up to 1 MiB.
+
+Spike 21 measured which writes reach the directory unasked: the Write
+tool does under the attempt directory's existing allow rule; Bash `cp`,
+`mv` and `mkdir` ask even with `--add-dir`, so no flag was added; a
+Playwright MCP screenshot reaches it only when the operator's server
+runs with `--allow-unrestricted-file-access`, the owner's choice.
+
+Known gaps: a runner on another machine records paths that do not open
+here. Codex is refused, since it writes only inside its cwd. Images are
+not drawn inline. Keep days are read from the ticket's copy, so
+shortening them does not reach older tickets. Bash copies into the
+directory ask for permission, and a screenshot needs the Playwright
+flag above.
+
 ## Open questions
 
 - Shared project config runs with a hash-and-approve flow and no

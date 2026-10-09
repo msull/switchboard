@@ -7,9 +7,9 @@ use std::io;
 use std::path::PathBuf;
 
 pub use dispatch_control::{
-    AttemptView, Body, DecisionView, EventView, EventsView, LaneView, PathsView, PlanRoundView,
-    ProjectView, PullRequestView, Reply, ReviewRoundView, RewriteView, ServiceView, Status,
-    SupervisorView, TicketView, WorktreesView, nudged,
+    AttemptView, Body, DecisionView, EventView, EventsView, EvidenceView, LaneView, PathsView,
+    PlanRoundView, ProjectView, PullRequestView, Reply, ReviewRoundView, RewriteView, ServiceView,
+    Status, SupervisorView, TicketView, WorktreesView, nudged,
 };
 
 pub trait DispatchPort: Send {
