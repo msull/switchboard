@@ -127,8 +127,15 @@ impl AppCore {
         self.edit_session(id, out, |s| {
             s.last_event_at = Some(event.at);
             s.last_seen = s.last_seen.max(event.at);
-            if matches!(event.kind, EventKind::Stopped { .. }) {
-                s.last_stop_at = Some(event.at);
+            match &event.kind {
+                EventKind::Stopped { pending, .. } => {
+                    s.last_stop_at = Some(event.at);
+                    s.pending_at_stop.clone_from(pending);
+                }
+                EventKind::SessionStart
+                | EventKind::StopFailed { .. }
+                | EventKind::SessionEnded { .. } => s.pending_at_stop = None,
+                _ => {}
             }
             if let Some((activity, reason)) = change {
                 s.activity = activity;

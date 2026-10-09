@@ -3,13 +3,13 @@
 //! migration in the store adapter.
 
 use std::path::PathBuf;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 /// Bump when the on-disk shape changes incompatibly.
-pub const SCHEMA_VERSION: u32 = 15;
+pub const SCHEMA_VERSION: u32 = 16;
 
 /// How the UI picks its colours: follow the system, or force one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -1134,6 +1134,12 @@ pub struct SessionRecord {
     /// `last_event_at` moves on every event; this one only on a stop.
     #[serde(default)]
     pub last_stop_at: Option<SystemTime>,
+    /// What the agent's last Stop said was still in flight. Replaced on
+    /// every Stop, cleared on `SessionStart`, `StopFailure` and
+    /// `SessionEnd` and on a new spawn. `None` is "not reported" (an
+    /// older Claude Code, or no Stop yet) and holds nothing.
+    #[serde(default)]
+    pub pending_at_stop: Option<StopPending>,
     /// Variables an outside launcher asked for, set on every spawn under
     /// the launcher's own; paths and names, never secret values.
     #[serde(default)]
@@ -1146,6 +1152,96 @@ pub struct SessionRecord {
     /// at every spawn, so a dead pane's token stops working.
     #[serde(default)]
     pub token_hash: Option<String>,
+}
+
+/// How long background work may hold a stopped agent: a dev server or a
+/// monitor may never finish, so the hold has to end somewhere.
+pub const BACKGROUND_HOLD: Duration = Duration::from_mins(30);
+
+/// The longest a one-shot wakeup may hold a stopped agent: an hour, the
+/// longest `ScheduleWakeup` delay, plus the runtime's rounding up to a
+/// whole minute and its slack. A fire time past it is a schedule whose
+/// minute had already gone by at the `Stop` (rolled to the next day), a
+/// `CronCreate` days out, or a DST gap; none of those should hold an
+/// attempt open for a day.
+pub const WAKEUP_HOLD: Duration = Duration::from_mins(65);
+
+/// Background work and wakeups a Stop listed (`spikes/20-stop-pending`):
+/// kinds and fire times only, never a task's description or command or
+/// a cron's prompt, which are the owner's text.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StopPending {
+    /// One per background task: `subagent general-purpose`, `shell`,
+    /// `monitor`, `workflow`.
+    pub tasks: Vec<String>,
+    /// One per session cron (`ScheduleWakeup`, `CronCreate`, `/loop`).
+    pub wakeups: Vec<Wakeup>,
+}
+
+/// One session cron a Stop listed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Wakeup {
+    /// A one-shot cron's fire time; `None` for a recurring one or a
+    /// schedule the adapter could not read.
+    pub fire_at: Option<SystemTime>,
+    /// True for a cron that fires on every match of its schedule, which
+    /// has no single fire time to wait for.
+    pub recurring: bool,
+}
+
+impl StopPending {
+    /// True when the Stop listed nothing in flight.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.tasks.is_empty() && self.wakeups.is_empty()
+    }
+
+    /// Until when a Stop at `stop` that reported this is not the end of
+    /// the work: a one-shot wakeup's fire time plus `STOP_GRACE`, never
+    /// past `stop + WAKEUP_HOLD`, and `stop + BACKGROUND_HOLD` for tasks,
+    /// a recurring cron or an unreadable one; the later of the two.
+    /// `None` when nothing is pending.
+    #[must_use]
+    pub fn held_until(&self, stop: SystemTime) -> Option<SystemTime> {
+        let capped = !self.tasks.is_empty()
+            || self
+                .wakeups
+                .iter()
+                .any(|w| w.recurring || w.fire_at.is_none());
+        let cap = capped.then(|| stop + BACKGROUND_HOLD);
+        let wakeup = self
+            .wakeups
+            .iter()
+            .filter(|w| !w.recurring)
+            .filter_map(|w| w.fire_at)
+            .max()
+            .map(|at| (at + crate::core::workflow::STOP_GRACE).min(stop + WAKEUP_HOLD));
+        cap.max(wakeup)
+    }
+
+    /// One label per entry, for a card or a view: the task labels, then
+    /// `wakeup` or `recurring wakeup` per cron.
+    #[must_use]
+    pub fn labels(&self) -> Vec<String> {
+        let wakeups = self.wakeups.iter().map(|w| {
+            if w.recurring {
+                "recurring wakeup".to_string()
+            } else {
+                "wakeup".to_string()
+            }
+        });
+        self.tasks.iter().cloned().chain(wakeups).collect()
+    }
+
+    /// The earliest one-shot wakeup's fire time.
+    #[must_use]
+    pub fn next_wakeup(&self) -> Option<SystemTime> {
+        self.wakeups
+            .iter()
+            .filter(|w| !w.recurring)
+            .filter_map(|w| w.fire_at)
+            .min()
+    }
 }
 
 /// A session's own question to the owner.
@@ -1272,6 +1368,16 @@ impl SessionRecord {
     #[must_use]
     pub fn last_run(&self) -> Option<&Run> {
         self.runs.last()
+    }
+
+    /// Until when the last Stop's pending work holds this agent
+    /// (`StopPending::held_until`), or `None` when nothing does.
+    #[must_use]
+    pub fn held_until(&self) -> Option<SystemTime> {
+        self.pending_at_stop
+            .as_ref()
+            .zip(self.last_stop_at)
+            .and_then(|(pending, stop)| pending.held_until(stop))
     }
     #[must_use]
     pub fn approval(&self) -> Approval {

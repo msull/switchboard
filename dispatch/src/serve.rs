@@ -719,6 +719,17 @@ fn attempt_view(a: &crate::ticket::Attempt) -> AttemptView {
         }),
         waits: held.map(crate::ticket::MergeWait::describe),
         waits_since_ms: held.map(|w| w.since_ms),
+        held: a
+            .held
+            .iter()
+            .filter(|_| a.is_open())
+            .map(|(session, h)| dispatch_control::HeldView {
+                session: session.clone(),
+                pending: h.pending.clone(),
+                wakeup_at_ms: h.wakeup_at_ms,
+                until_ms: h.until_ms,
+            })
+            .collect(),
         rewrite: a.rewrite.as_ref().map(|r| dispatch_control::RewriteView {
             mode: r.mode.as_str().to_owned(),
             before: r.before.clone(),

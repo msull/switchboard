@@ -3,7 +3,7 @@
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use uuid::Uuid;
 
@@ -16,6 +16,7 @@ use super::model::{
     ProjectEnv, ProjectId, RecordId, ResumeHandle, SavedView, SessionKind, SessionRecord, SetId,
     SetRule, Settings, SideTab, Space, SpaceId, ThemeMode, Views, WindowFrame, Workspace,
 };
+use super::model::{BACKGROUND_HOLD, StopPending, WAKEUP_HOLD, Wakeup};
 use super::reconcile::RECORD_ID_ENV;
 use crate::ports::agent::AgentLaunch;
 use crate::ports::changes::{DiffBody, DiffLine, FileDiff, FileStatus, LineKind};
@@ -83,6 +84,7 @@ fn record(project: ProjectId, kind: SessionKind, order: u32) -> SessionRecord {
         waiting_on: None,
         pending_launch: false,
         last_stop_at: None,
+        pending_at_stop: None,
         env: Vec::new(),
         env_sets: Vec::new(),
         token_hash: None,
@@ -1629,6 +1631,161 @@ fn host_unavailable_blocks_launches_with_a_notice() {
 
 // --- 2. card state
 
+fn wakeup_at(ms: u64) -> Wakeup {
+    Wakeup {
+        fire_at: Some(Clock::at(ms).wall),
+        recurring: false,
+    }
+}
+
+#[test]
+fn held_until_takes_the_later_of_a_wakeup_and_the_background_cap() {
+    let stop = Clock::at(10_000).wall;
+    let wakeup = StopPending {
+        tasks: vec![],
+        wakeups: vec![wakeup_at(100_000)],
+    };
+    assert_eq!(
+        wakeup.held_until(stop),
+        Some(Clock::at(100_000).wall + crate::core::workflow::STOP_GRACE)
+    );
+    let tasks = StopPending {
+        tasks: vec!["shell".into()],
+        wakeups: vec![],
+    };
+    assert_eq!(tasks.held_until(stop), Some(stop + BACKGROUND_HOLD));
+    let both = StopPending {
+        tasks: vec!["shell".into()],
+        wakeups: vec![wakeup_at(100_000)],
+    };
+    assert_eq!(both.held_until(stop), Some(stop + BACKGROUND_HOLD));
+    let late = StopPending {
+        tasks: vec!["shell".into()],
+        wakeups: vec![wakeup_at(3_600_000)],
+    };
+    assert_eq!(
+        late.held_until(stop),
+        Some(Clock::at(3_600_000).wall + crate::core::workflow::STOP_GRACE),
+        "a wakeup after the cap wins"
+    );
+    let recurring = StopPending {
+        tasks: vec![],
+        wakeups: vec![Wakeup {
+            fire_at: None,
+            recurring: true,
+        }],
+    };
+    assert_eq!(recurring.held_until(stop), Some(stop + BACKGROUND_HOLD));
+    assert_eq!(StopPending::default().held_until(stop), None);
+}
+
+#[test]
+fn a_wakeup_read_as_tomorrow_holds_no_longer_than_the_wakeup_cap() {
+    // A Stop at 22:26:10 listing `24 22 * * *` reads it as tomorrow's
+    // 22:24: the agent kept working past the minute it scheduled.
+    let stop = Clock::at(10_000).wall;
+    let late = StopPending {
+        tasks: vec![],
+        wakeups: vec![wakeup_at(10_000 + 23 * 3_600_000 + 58 * 60_000)],
+    };
+    assert_eq!(late.held_until(stop), Some(stop + WAKEUP_HOLD));
+    let with_tasks = StopPending {
+        tasks: vec!["shell".into()],
+        ..late
+    };
+    assert_eq!(with_tasks.held_until(stop), Some(stop + WAKEUP_HOLD));
+}
+
+#[test]
+fn a_stop_keeps_what_it_listed_until_the_session_starts_or_ends() {
+    let (mut core, _, ids) = with_records(&[agent()], |s| Some(running(s.id)));
+    let id = ids[0];
+    let listed = StopPending {
+        tasks: vec!["subagent general-purpose".into()],
+        wakeups: vec![wakeup_at(90_000)],
+    };
+    let send = |core: &mut AppCore, kind: EventKind, at: u64| {
+        core.dispatch(
+            AppAction::Events(vec![SessionEvent {
+                record_id: Some(id),
+                ..event(kind, at)
+            }]),
+            Clock::at(at),
+        );
+    };
+    let stopped = |pending: Option<StopPending>| EventKind::Stopped {
+        last_message: None,
+        pending,
+    };
+    send(&mut core, stopped(Some(listed.clone())), 2_000);
+    assert_eq!(
+        core.session(id).unwrap().pending_at_stop,
+        Some(listed.clone())
+    );
+    // A turn started by the work it listed leaves it until its own Stop.
+    send(&mut core, EventKind::PromptInjected, 3_000);
+    assert_eq!(
+        core.session(id).unwrap().pending_at_stop,
+        Some(listed.clone())
+    );
+    send(&mut core, stopped(Some(StopPending::default())), 4_000);
+    assert_eq!(
+        core.session(id).unwrap().pending_at_stop,
+        Some(StopPending::default())
+    );
+    send(&mut core, stopped(Some(listed.clone())), 5_000);
+    send(&mut core, EventKind::SessionEnded { reason: None }, 6_000);
+    assert_eq!(core.session(id).unwrap().pending_at_stop, None);
+    send(&mut core, stopped(Some(listed.clone())), 7_000);
+    send(&mut core, EventKind::SessionStart, 8_000);
+    assert_eq!(core.session(id).unwrap().pending_at_stop, None);
+    send(&mut core, stopped(Some(listed)), 9_000);
+    send(&mut core, EventKind::StopFailed { reason: None }, 10_000);
+    assert_eq!(core.session(id).unwrap().pending_at_stop, None);
+}
+
+#[test]
+fn the_session_view_says_what_the_stop_listed_and_until_when_it_holds() {
+    let (mut core, _, ids) = with_records(&[agent()], |s| Some(running(s.id)));
+    let id = ids[0];
+    let view = core.session_view(id, Clock::at(1_000).wall).unwrap();
+    assert!(view.pending.is_empty());
+    assert_eq!((view.wakeup_at_ms, view.held_until_ms), (None, None));
+    core.dispatch(
+        AppAction::Events(vec![SessionEvent {
+            record_id: Some(id),
+            ..event(
+                EventKind::Stopped {
+                    last_message: None,
+                    pending: Some(StopPending {
+                        tasks: vec!["shell".into()],
+                        wakeups: vec![
+                            wakeup_at(90_000),
+                            Wakeup {
+                                fire_at: None,
+                                recurring: true,
+                            },
+                        ],
+                    }),
+                },
+                2_000,
+            )
+        }]),
+        Clock::at(2_000),
+    );
+    let view = core.session_view(id, Clock::at(3_000).wall).unwrap();
+    assert_eq!(view.pending, ["shell", "wakeup", "recurring wakeup"]);
+    let ms =
+        |t: SystemTime| u64::try_from(t.duration_since(UNIX_EPOCH).unwrap().as_millis()).unwrap();
+    assert_eq!(view.wakeup_at_ms, Some(ms(Clock::at(90_000).wall)));
+    assert_eq!(
+        view.held_until_ms,
+        Some(ms(Clock::at(2_000).wall + BACKGROUND_HOLD))
+    );
+    assert_eq!(core.state_text(id), "idle: 3 pending");
+    assert_eq!(view.card, CardState::Idle.label());
+}
+
 #[test]
 fn a_stop_is_remembered_on_its_own_and_an_outside_wait_reads_as_waiting() {
     let (mut core, _, ids) = with_records(&[agent()], |s| Some(running(s.id)));
@@ -1647,7 +1804,13 @@ fn a_stop_is_remembered_on_its_own_and_an_outside_wait_reads_as_waiting() {
         AppAction::Events(vec![SessionEvent {
             record_id: Some(id),
             // A second later: the wall clock is whole seconds.
-            ..event(EventKind::Stopped { last_message: None }, 2_100)
+            ..event(
+                EventKind::Stopped {
+                    last_message: None,
+                    pending: None,
+                },
+                2_100,
+            )
         }]),
         Clock::at(1),
     );
@@ -3003,7 +3166,13 @@ fn events_match_by_provider_session_id() {
     core.dispatch(
         AppAction::Events(vec![SessionEvent {
             provider_session_id: Some(hb.provider_id()),
-            ..event(EventKind::Stopped { last_message: None }, 100)
+            ..event(
+                EventKind::Stopped {
+                    last_message: None,
+                    pending: None,
+                },
+                100,
+            )
         }]),
         Clock::at(1),
     );
@@ -3016,14 +3185,32 @@ fn unmatched_events_are_ignored() {
     let (mut core, _, ids) = with_records(&[agent()], |s| Some(running(s.id)));
     let e = core.dispatch(
         AppAction::Events(vec![
-            event(EventKind::Stopped { last_message: None }, 100),
+            event(
+                EventKind::Stopped {
+                    last_message: None,
+                    pending: None,
+                },
+                100,
+            ),
             SessionEvent {
                 provider_session_id: Some("nobody".into()),
-                ..event(EventKind::Stopped { last_message: None }, 101)
+                ..event(
+                    EventKind::Stopped {
+                        last_message: None,
+                        pending: None,
+                    },
+                    101,
+                )
             },
             SessionEvent {
                 record_id: Some(RecordId::new()),
-                ..event(EventKind::Stopped { last_message: None }, 102)
+                ..event(
+                    EventKind::Stopped {
+                        last_message: None,
+                        pending: None,
+                    },
+                    102,
+                )
             },
         ]),
         Clock::at(1),
@@ -3046,15 +3233,33 @@ fn older_or_equal_events_are_ignored() {
     // A spooled Stop from before the live prompt must not win.
     let e = core.dispatch(
         AppAction::Events(vec![
-            at(EventKind::Stopped { last_message: None }, 4_000),
-            at(EventKind::Stopped { last_message: None }, 5_000),
+            at(
+                EventKind::Stopped {
+                    last_message: None,
+                    pending: None,
+                },
+                4_000,
+            ),
+            at(
+                EventKind::Stopped {
+                    last_message: None,
+                    pending: None,
+                },
+                5_000,
+            ),
         ]),
         Clock::at(2),
     );
     assert!(e.is_empty());
     assert_eq!(core.card_state(ids[0]), CardState::Working);
     core.dispatch(
-        AppAction::Events(vec![at(EventKind::Stopped { last_message: None }, 6_000)]),
+        AppAction::Events(vec![at(
+            EventKind::Stopped {
+                last_message: None,
+                pending: None,
+            },
+            6_000,
+        )]),
         Clock::at(3),
     );
     assert_eq!(core.card_state(ids[0]), CardState::Idle);
@@ -3131,6 +3336,7 @@ fn event_kinds_map_to_activities() {
         (
             EventKind::Stopped {
                 last_message: Some("done".into()),
+                pending: None,
             },
             CardState::Idle,
         ),
@@ -4887,7 +5093,15 @@ mod workflow {
     }
 
     fn stop(core: &mut AppCore, id: RecordId, at_ms: u64) {
-        hook(core, id, EventKind::Stopped { last_message: None }, at_ms);
+        hook(
+            core,
+            id,
+            EventKind::Stopped {
+                last_message: None,
+                pending: None,
+            },
+            at_ms,
+        );
     }
 
     /// A probe that finds the awaited file missing.
@@ -4931,6 +5145,100 @@ mod workflow {
             view.state,
             switchboard_control::RunState::Paused { failed: true, .. }
         ));
+    }
+
+    fn stop_listing(core: &mut AppCore, id: RecordId, at_ms: u64, pending: StopPending) {
+        hook(
+            core,
+            id,
+            EventKind::Stopped {
+                last_message: None,
+                pending: Some(pending),
+            },
+            at_ms,
+        );
+    }
+
+    fn wakeup(fire_ms: u64) -> StopPending {
+        StopPending {
+            tasks: vec![],
+            wakeups: vec![super::wakeup_at(fire_ms)],
+        }
+    }
+
+    #[test]
+    fn a_reviewer_holding_on_a_wakeup_fails_only_after_it_has_passed() {
+        let (mut core, run, _, reviewer, _) = started();
+        stop_listing(&mut core, reviewer, 5_000, wakeup(95_000));
+        missing(&mut core, run, past_grace(5_000));
+        assert_eq!(run_of(&core).state, RunState::AwaitingFeedback, "held");
+        missing(&mut core, run, past_grace(95_000) - 1_000);
+        assert_eq!(run_of(&core).state, RunState::AwaitingFeedback, "held");
+        missing(&mut core, run, past_grace(95_000));
+        assert!(
+            matches!(&run_of(&core).state, RunState::Failed(why) if why.contains("stopped without writing")),
+            "{:?}",
+            run_of(&core).state
+        );
+    }
+
+    #[test]
+    fn a_held_stop_whose_pane_is_gone_fails_after_the_grace() {
+        let (mut core, run, _, reviewer, _) = started();
+        stop_listing(
+            &mut core,
+            reviewer,
+            5_000,
+            StopPending {
+                tasks: vec!["shell".into()],
+                wakeups: vec![],
+            },
+        );
+        core.dispatch(AppAction::HostListed(vec![]), Clock::at(6_000));
+        assert!(!core.is_running(reviewer));
+        missing(&mut core, run, past_grace(5_000));
+        assert!(matches!(run_of(&core).state, RunState::Failed(_)));
+    }
+
+    #[test]
+    fn a_held_agent_gone_quiet_is_not_stalled_until_the_hold_ends() {
+        let (mut core, run, _, reviewer, _) = started();
+        stop_listing(&mut core, reviewer, 5_000, wakeup(600_000));
+        core.dispatch(
+            AppAction::HostListed(vec![HostStatus {
+                last_activity: Some(Clock::at(5_000).wall),
+                ..running(reviewer)
+            }]),
+            Clock::at(6_000),
+        );
+        core.dispatch(AppAction::Tick, Clock::at(300_000));
+        assert!(!core.stalled(run));
+        assert!(core.notice().is_none());
+        assert_eq!(core.card_state(reviewer), CardState::Idle);
+        assert!(core.stalled_agents().next().is_none());
+        // Once the wakeup and its grace are past, the stall check runs.
+        core.dispatch(AppAction::Tick, Clock::at(past_grace(600_000)));
+        assert!(core.stalled(run));
+        assert!(core.notice().is_some());
+        assert_eq!(core.card_state(reviewer), CardState::WaitingOnYou);
+    }
+
+    #[test]
+    fn a_hold_that_starts_lifts_a_stall_mark() {
+        let (mut core, run, _, reviewer, _) = started();
+        core.dispatch(
+            AppAction::HostListed(vec![HostStatus {
+                last_activity: Some(Clock::at(5_000).wall),
+                ..running(reviewer)
+            }]),
+            Clock::at(6_000),
+        );
+        core.dispatch(AppAction::Tick, Clock::at(200_000));
+        assert!(core.stalled(run));
+        stop_listing(&mut core, reviewer, 201_000, wakeup(400_000));
+        core.dispatch(AppAction::Tick, Clock::at(202_000));
+        assert!(!core.stalled(run));
+        assert_eq!(core.card_state(reviewer), CardState::Idle);
     }
 
     #[test]
@@ -8592,7 +8900,13 @@ mod dispatch_page {
         core.dispatch(
             AppAction::Events(vec![SessionEvent {
                 record_id: Some(id),
-                ..event(EventKind::Stopped { last_message: None }, 8_000)
+                ..event(
+                    EventKind::Stopped {
+                        last_message: None,
+                        pending: None,
+                    },
+                    8_000,
+                )
             }]),
             Clock::at(8_100),
         );
@@ -8639,7 +8953,10 @@ mod dispatch_page {
     }
 
     fn stopped() -> EventKind {
-        EventKind::Stopped { last_message: None }
+        EventKind::Stopped {
+            last_message: None,
+            pending: None,
+        }
     }
 
     /// A background task's notification or a harness reminder starts a
@@ -10341,7 +10658,10 @@ mod answering {
     }
 
     fn stopped() -> EventKind {
-        EventKind::Stopped { last_message: None }
+        EventKind::Stopped {
+            last_message: None,
+            pending: None,
+        }
     }
 
     fn ask_op(id: RecordId, kind: Option<&str>, choices: &[&str]) -> ControlAction {
@@ -10815,7 +11135,10 @@ mod prompting {
     }
 
     fn stopped() -> EventKind {
-        EventKind::Stopped { last_message: None }
+        EventKind::Stopped {
+            last_message: None,
+            pending: None,
+        }
     }
 
     /// A running session of `kind` with the token "t", idle after a

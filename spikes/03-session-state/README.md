@@ -95,6 +95,9 @@ Sample payloads (from `interactive.hooks.log`, trimmed):
 {"hook_event_name":"SessionEnd","reason":"prompt_input_exit", …}
 ```
 
+Spike 20 (`spikes/20-stop-pending/`) fills `background_tasks` and
+`session_crons` with a background agent and a wakeup.
+
 ## 2. Proof runs
 
 Hook: `bin/log-hook.sh <Event>` appends `{ts, registered, ...payload}` to

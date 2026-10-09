@@ -19,9 +19,9 @@ use crate::pipeline::{Gate, OperatorKind, Pipeline, Stage, env_sets};
 use crate::scheduler::{
     Ask, DirtyStep, GateStop, NO_SUCH_SESSION, Owner, RESOLUTION, Runner, SocketDown, asks_again,
     busy, checks_env, confine_for, dirty_step, env_for, find_attempt, find_attempt_mut,
-    gate_network, guidance_prelude, held_in, idle_polls, lane_gate_argv, lane_plans,
+    gate_network, guidance_prelude, held_in, hold_if_held, idle_polls, lane_gate_argv, lane_plans,
     latest_attempt, may_rerun, new_attempt, next_n, primary_tree, record_of, rework_key, sent_back,
-    session_kind, settle_file, stopped_after_nudges, vars_for,
+    session_kind, settle_file, still_listed, stopped_after_nudges, vars_for,
 };
 use crate::template::Vars;
 use crate::ticket::{
@@ -1117,6 +1117,7 @@ impl Runner {
         let Some(session) = r.session.clone() else {
             return Ok(());
         };
+        record_of(t, &key.0, key.1).held.remove(&session);
         let view = match self.seen(&session)? {
             Seen::View(v) => *v,
             Seen::Gone => {
@@ -1128,7 +1129,13 @@ impl Runner {
             Seen::Unknown => return Ok(()),
         };
         let no_feedback = stage_no_feedback(t, key);
-        let rm = reviewer_mut(t, key, round_n, &r.name);
+        let record = record_of(t, &key.0, key.1);
+        let rm = record
+            .rounds
+            .iter_mut()
+            .find(|x| x.n == round_n)
+            .and_then(|x| x.reviewers.iter_mut().find(|x| x.name == r.name))
+            .expect("the reviewer exists");
         if let Some(stop) = view.last_stop_at_ms {
             rm.stop_at_ms = Some(stop);
         }
@@ -1152,12 +1159,16 @@ impl Runner {
             return Ok(());
         }
         if !present {
+            let (holds, polls) = (&mut record.held, &mut rm.polls_since_stop);
+            if claude && hold_if_held(holds, &session, &view, now_ms, polls) {
+                return self.save_ticket(t, now_ms);
+            }
             if claude {
                 rm.polls_since_stop = idle_polls(&view, rm.polls_since_stop);
             }
             if !running || (claude && rm.polls_since_stop >= STOP_IDLE_POLLS) {
                 rm.result = Some(ReviewerResult::Failed {
-                    reason: "stopped without writing feedback".into(),
+                    reason: format!("stopped without writing feedback{}", still_listed(&view)),
                 });
             }
             return Ok(());
@@ -1362,6 +1373,7 @@ impl Runner {
         let Some(session) = round.implementer.clone() else {
             return Ok(());
         };
+        record_of(t, &key.0, key.1).held.remove(&session);
         let view = match self.seen(&session)? {
             Seen::View(v) => *v,
             Seen::Gone => {
@@ -1371,7 +1383,8 @@ impl Runner {
             Seen::Unknown => return Ok(()),
         };
         let ticket_id = t.id.clone();
-        let rm = record_of(t, &key.0, key.1)
+        let record = record_of(t, &key.0, key.1);
+        let rm = record
             .rounds
             .iter_mut()
             .find(|x| x.n == round.n)
@@ -1400,12 +1413,17 @@ impl Runner {
             return self.save_ticket(t, now_ms);
         }
         if !response.is_file() {
+            let (holds, polls) = (&mut record.held, &mut rm.polls_since_stop);
+            if hold_if_held(holds, &session, &view, now_ms, polls) {
+                return self.save_ticket(t, now_ms);
+            }
             rm.polls_since_stop = idle_polls(&view, rm.polls_since_stop);
             if rm.polls_since_stop >= STOP_IDLE_POLLS || !running {
                 let reason = format!(
-                    "round {}: the implementer stopped without writing {}",
+                    "round {}: the implementer stopped without writing {}{}",
                     round.n,
-                    response.display()
+                    response.display(),
+                    still_listed(&view)
                 );
                 return self.fail_round(t, ps, &key, round.n, &reason, now_ms);
             }
@@ -2582,6 +2600,7 @@ impl Runner {
         session: &str,
         now_ms: u64,
     ) -> Result<()> {
+        record_of(t, &key.0, key.1).held.remove(session);
         let view = match self.seen(session)? {
             Seen::View(v) => *v,
             Seen::Gone => {
@@ -2602,7 +2621,12 @@ impl Runner {
             .filter(|(k, _)| k.starts_with("message/") && *k != "message/input")
             .map(|(_, f)| f.clone())
             .collect();
-        let m = message_of(t, key);
+        let record = record_of(t, &key.0, key.1);
+        let m = record
+            .rewrite
+            .as_mut()
+            .and_then(|r| r.message.as_mut())
+            .expect("the message record exists");
         if let Some(stop) = view.last_stop_at_ms {
             m.stop_at_ms = Some(stop);
         }
@@ -2620,9 +2644,17 @@ impl Runner {
             return self.save_ticket(t, now_ms);
         }
         if let Some(missing) = outputs.iter().find(|f| !f.is_file()) {
+            let (holds, polls) = (&mut record.held, &mut m.polls_since_stop);
+            if hold_if_held(holds, session, &view, now_ms, polls) {
+                return self.save_ticket(t, now_ms);
+            }
             m.polls_since_stop = idle_polls(&view, m.polls_since_stop);
             if m.polls_since_stop >= STOP_IDLE_POLLS || !running {
-                let reason = format!("the rewriter stopped without writing {}", missing.display());
+                let reason = format!(
+                    "the rewriter stopped without writing {}{}",
+                    missing.display(),
+                    still_listed(&view)
+                );
                 return self.message_failed(t, ps, p, key, &reason, now_ms);
             }
             return self.save_ticket(t, now_ms);

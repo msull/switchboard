@@ -130,11 +130,25 @@ impl FakeSwitchboard {
         self.sessions.iter().filter(|s| s.name == name).collect()
     }
 
-    /// The agent finished its turn.
+    /// The agent finished its turn with nothing in flight.
     pub fn stop(&mut self, id: &str, at_ms: u64) {
         let s = self.session_mut(id);
         s.last_stop_at_ms = Some(at_ms);
         s.card = "idle".into();
+        s.pending.clear();
+        s.wakeup_at_ms = None;
+        s.held_until_ms = None;
+    }
+
+    /// The agent's last Stop listed `pending` work, which the app holds
+    /// it for until `until_ms`; a `wakeup` entry fires 30 s before that.
+    pub fn held(&mut self, id: &str, until_ms: u64, pending: &[&str]) {
+        let s = self.session_mut(id);
+        s.pending = pending.iter().map(|p| (*p).to_owned()).collect();
+        s.wakeup_at_ms = pending
+            .contains(&"wakeup")
+            .then(|| until_ms.saturating_sub(30_000));
+        s.held_until_ms = Some(until_ms);
     }
 
     /// The pane is gone, no stop reported.
@@ -211,6 +225,9 @@ impl FakeSwitchboard {
             prompt_refusal: None,
             resume_id: Some(format!("resume-{id}")),
             op: Some(op.into()),
+            pending: Vec::new(),
+            wakeup_at_ms: None,
+            held_until_ms: None,
         });
         self.resumable.push(id.clone());
         id

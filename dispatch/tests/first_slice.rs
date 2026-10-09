@@ -5279,6 +5279,162 @@ fn a_stop_idle_without_notes_fails_after_the_grace() {
     assert_eq!(pending[0].name, "rerun");
 }
 
+/// The background hold the app gives a Stop that lists a task, in ms.
+const BACKGROUND_HOLD_MS: u64 = 30 * 60_000;
+
+/// The investigate attempt's holds as `show` reads them.
+fn holds_shown(t: &Ticket) -> Vec<dispatch_control::HeldView> {
+    let view = dispatch::serve::ticket_view(t, None);
+    view.attempts
+        .iter()
+        .rfind(|a| a.stage == "investigate")
+        .unwrap()
+        .held
+        .clone()
+}
+
+/// The issue's sequence: an investigator that ends its turn with a
+/// background agent still running, idle at its prompt for longer than
+/// the grace, is held while the app says the Stop listed it; the agent's
+/// notification starts a turn that writes the notes and stops clean.
+#[test]
+fn a_stop_listing_a_background_agent_holds_the_attempt_until_the_notes_land() {
+    let mut env = Env::new();
+    let id = env.take(7).id;
+    env.step();
+    let t = env.ticket(&id);
+    let investigator = session_of(&t, "investigate");
+    let notes = artifact_of(&t, "investigate", "notes");
+    let now = env.now;
+    env.sb().stop(&investigator, now);
+    env.sb().held(
+        &investigator,
+        now + BACKGROUND_HOLD_MS,
+        &["subagent general-purpose"],
+    );
+    for _ in 0..STOP_IDLE_POLLS + 36 {
+        env.step();
+    }
+    let t = env.ticket(&id);
+    let a = t.attempts_of("investigate").last().unwrap();
+    assert!(a.is_open(), "{a:?}");
+    assert!(env.pending(&id).is_empty(), "nothing waits on the user");
+    assert!(!env.sb().killed.contains(&investigator));
+    let shown = holds_shown(&t);
+    assert_eq!(shown.len(), 1, "{shown:?}");
+    assert_eq!(shown[0].session, investigator);
+    assert_eq!(shown[0].pending, ["subagent general-purpose"]);
+    assert_eq!(shown[0].until_ms, now + BACKGROUND_HOLD_MS);
+    // The notification's turn: working, then the notes and a clean Stop.
+    env.sb().session_mut(&investigator).card = "working".into();
+    env.step();
+    std::fs::write(&notes, "# notes\nfindings").unwrap();
+    env.step();
+    let now = env.now;
+    env.sb().stop(&investigator, now);
+    env.steps_until(&id, "the investigation completing", |t, _| {
+        t.attempts_of("investigate").next().unwrap().state == AttemptState::Complete
+    });
+    assert!(env.sb().killed.contains(&investigator));
+    let t = env.ticket(&id);
+    assert!(t.attempts_of("investigate").next().unwrap().held.is_empty());
+}
+
+/// A wakeup holds the attempt until its time and the grace are past;
+/// then the idle count runs from zero and fails it as it would have.
+#[test]
+fn a_stop_listing_a_wakeup_holds_until_it_has_passed() {
+    let mut env = Env::new();
+    let id = env.take(7).id;
+    env.step();
+    let investigator = session_of(&env.ticket(&id), "investigate");
+    let open = |env: &Env| {
+        env.ticket(&id)
+            .attempts_of("investigate")
+            .last()
+            .unwrap()
+            .is_open()
+    };
+    let now = env.now;
+    env.sb().stop(&investigator, now);
+    let until = now + 90_000;
+    env.sb().held(&investigator, until, &["wakeup"]);
+    for _ in 0..STOP_IDLE_POLLS + 5 {
+        env.step();
+    }
+    assert!(open(&env), "held");
+    let shown = holds_shown(&env.ticket(&id));
+    assert_eq!(shown[0].wakeup_at_ms, Some(until - 30_000));
+    env.wait(until - env.now);
+    for _ in 0..STOP_IDLE_POLLS - 1 {
+        env.step();
+    }
+    assert!(open(&env), "the count starts once the hold ends");
+    assert!(holds_shown(&env.ticket(&id)).is_empty());
+    env.step();
+    let t = env.ticket(&id);
+    assert!(
+        matches!(&t.attempts_of("investigate").last().unwrap().state, AttemptState::Failed { reason } if reason.contains("stopped without writing notes")),
+        "{t:#?}"
+    );
+    let pending = env.pending(&id);
+    assert_eq!(pending.len(), 1, "{pending:#?}");
+    assert_eq!(pending[0].name, "rerun");
+}
+
+/// Background work holds for the app's cap and no longer: a dev server
+/// left running fails the attempt once the cap and the grace are past,
+/// and the reason names what the last Stop still listed.
+#[test]
+fn a_background_hold_that_runs_out_fails_and_names_what_was_listed() {
+    let mut env = Env::new();
+    let id = env.take(7).id;
+    env.step();
+    let investigator = session_of(&env.ticket(&id), "investigate");
+    let now = env.now;
+    env.sb().stop(&investigator, now);
+    env.sb()
+        .held(&investigator, now + BACKGROUND_HOLD_MS, &["shell"]);
+    env.idle_past_grace();
+    assert!(
+        env.ticket(&id)
+            .attempts_of("investigate")
+            .last()
+            .unwrap()
+            .is_open()
+    );
+    env.wait(BACKGROUND_HOLD_MS);
+    env.idle_past_grace();
+    let t = env.ticket(&id);
+    assert!(
+        matches!(&t.attempts_of("investigate").last().unwrap().state, AttemptState::Failed { reason } if reason.ends_with("stopped without writing notes (still listed: shell)")),
+        "{t:#?}"
+    );
+}
+
+/// A present artifact settles and completes whatever the last Stop
+/// listed: an agent that wrote its notes and left a dev server running
+/// is not kept open for the hold.
+#[test]
+fn notes_present_complete_while_the_stop_still_holds() {
+    let mut env = Env::new();
+    let id = env.take(7).id;
+    env.step();
+    let t = env.ticket(&id);
+    let investigator = session_of(&t, "investigate");
+    let notes = artifact_of(&t, "investigate", "notes");
+    std::fs::write(&notes, "# notes\nfindings").unwrap();
+    let now = env.now;
+    env.sb().stop(&investigator, now);
+    env.sb()
+        .held(&investigator, now + BACKGROUND_HOLD_MS, &["shell"]);
+    env.steps_until(&id, "the investigation completing", |t, _| {
+        t.attempts_of("investigate").next().unwrap().state == AttemptState::Complete
+    });
+    let t = env.ticket(&id);
+    assert!(t.attempts_of("investigate").next().unwrap().held.is_empty());
+}
+
 /// A reply recovered on a pass that changes nothing else is still
 /// written, so the operation is not recovered again on every pass.
 #[test]
@@ -7418,6 +7574,126 @@ fn a_reviewer_that_stops_busy_and_writes_later_completes_the_round() {
     );
     assert_eq!(reviewer(&t, 1, "lint").result, Some(ReviewerResult::Clean));
     assert!(review_attempt(&t).is_open());
+}
+
+/// A Claude reviewer idle at its prompt is held, past the grace, while
+/// its last Stop listed a background agent; its feedback and a clean
+/// Stop then finish the round.
+#[test]
+fn a_reviewer_held_by_its_stop_writes_later_and_completes_the_round() {
+    let mut env = Env::new();
+    let id = at_review(&mut env);
+    let style = reviewer(&env.ticket(&id), 1, "style").session.unwrap();
+    let now = env.now;
+    env.sb().stop(&style, now);
+    env.sb().held(
+        &style,
+        now + BACKGROUND_HOLD_MS,
+        &["subagent general-purpose"],
+    );
+    for _ in 0..STOP_IDLE_POLLS + 5 {
+        env.step();
+    }
+    let t = env.ticket(&id);
+    assert_eq!(reviewer(&t, 1, "style").result, None);
+    assert_eq!(review_attempt(&t).rounds[0].state, RoundState::Reviewing);
+    assert!(review_attempt(&t).held.contains_key(&style));
+    assert!(!env.pending(&id).iter().any(|d| d.name == "rerun"));
+    assert!(!env.sb().killed.contains(&style));
+    style_says(
+        &mut env,
+        &id,
+        1,
+        "- src/x.rs: the name `tmp` says nothing\n",
+    );
+    lint_exits(&mut env, &id, 1, 0, "");
+    env.steps_until(&id, "the round question", |t, _| {
+        t.pending_decisions()
+            .iter()
+            .any(|d| d.name == "review-code")
+    });
+    let t = env.ticket(&id);
+    assert_eq!(
+        reviewer(&t, 1, "style").result,
+        Some(ReviewerResult::Findings)
+    );
+    assert!(review_attempt(&t).held.is_empty());
+}
+
+/// A held reviewer whose session goes away fails, and the attempt keeps
+/// no hold for it.
+#[test]
+fn a_held_reviewer_whose_session_is_gone_leaves_no_hold() {
+    let mut env = Env::new();
+    let id = at_review(&mut env);
+    let style = reviewer(&env.ticket(&id), 1, "style").session.unwrap();
+    let now = env.now;
+    env.sb().stop(&style, now);
+    env.sb().held(&style, now + BACKGROUND_HOLD_MS, &["shell"]);
+    env.step();
+    assert!(review_attempt(&env.ticket(&id)).held.contains_key(&style));
+    env.sb().sessions.retain(|s| s.id != style);
+    env.step();
+    let t = env.ticket(&id);
+    assert!(
+        matches!(&reviewer(&t, 1, "style").result, Some(ReviewerResult::Failed { reason }) if reason == "session gone"),
+        "{t:#?}"
+    );
+    assert!(review_attempt(&t).held.is_empty());
+}
+
+/// A reviewer's feedback present at a Stop that still holds settles
+/// and counts at once.
+#[test]
+fn a_reviewers_feedback_present_counts_while_its_stop_holds() {
+    let mut env = Env::new();
+    let id = at_review(&mut env);
+    let r = reviewer(&env.ticket(&id), 1, "style");
+    let style = r.session.clone().unwrap();
+    std::fs::write(&r.feedback, "- src/x.rs: the name `tmp` says nothing\n").unwrap();
+    let now = env.now;
+    env.sb().stop(&style, now);
+    env.sb().held(&style, now + BACKGROUND_HOLD_MS, &["shell"]);
+    env.steps_until(&id, "the style result", |t, _| {
+        reviewer(t, 1, "style").result == Some(ReviewerResult::Findings)
+    });
+    assert!(review_attempt(&env.ticket(&id)).held.is_empty());
+}
+
+/// The round's implementer is held the same way by what its Stop
+/// listed, with its card idle.
+#[test]
+fn an_implementer_held_by_its_stop_keeps_its_round() {
+    let (mut env, id, _) = findings_asked_and_fixed();
+    let t = env.ticket(&id);
+    let round = &review_attempt(&t).rounds[0];
+    let fixer = round.implementer.clone().unwrap();
+    let response = round.response.clone().unwrap();
+    let now = env.now;
+    env.sb().stop(&fixer, now);
+    env.sb().held(&fixer, now + BACKGROUND_HOLD_MS, &["shell"]);
+    for _ in 0..=STOP_IDLE_POLLS {
+        env.step();
+    }
+    let t = env.ticket(&id);
+    assert_eq!(review_attempt(&t).rounds[0].state, RoundState::Fixing);
+    assert!(review_attempt(&t).held.contains_key(&fixer));
+    assert!(!env.sb().killed.contains(&fixer));
+    let tree = t.lanes[0].worktree.clone();
+    env.repo
+        .lock()
+        .unwrap()
+        .heads
+        .insert(tree, "fix00001".into());
+    env.finish(
+        &fixer,
+        &response,
+        "- r1/style-1: fixed\n- r1/style-2: fixed\n- r1/lint-1: fixed\n",
+    );
+    env.steps_until(&id, "the round fixed", |t, _| {
+        review_attempt(t).rounds[0].state == RoundState::Fixed
+    });
+    assert!(review_attempt(&env.ticket(&id)).held.is_empty());
 }
 
 /// The round's implementer is held by a busy Stop the same way, and

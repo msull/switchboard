@@ -393,6 +393,7 @@ impl AppCore {
             waiting_on: None,
             pending_launch: false,
             last_stop_at: None,
+            pending_at_stop: None,
             env: Vec::new(),
             // A planner is no Dispatch stage and is granted nothing.
             env_sets: Vec::new(),
@@ -458,13 +459,16 @@ impl AppCore {
     /// An agent that has printed nothing for [`STALL_AFTER`] while its
     /// file is awaited is most likely at an approval prompt Switchboard
     /// cannot see (Codex has no hooks). Say so once; a pane that moves
-    /// again clears the mark, so a later stall is noticed again.
+    /// again, or a hold that starts, clears the mark, so a later stall
+    /// is noticed again.
     fn watch_for_stall(&mut self, run: WorkflowId, agent: RecordId, path: &Path, now: Clock) {
         let quiet = self
             .running_status(agent)
             .and_then(|h| h.last_activity)
             .and_then(|t| now.wall.duration_since(t).ok());
-        let stalled = quiet.is_some_and(|q| q >= STALL_AFTER);
+        // An agent waiting at its prompt on a wakeup or background work
+        // is quiet by design, not at an approval prompt.
+        let stalled = quiet.is_some_and(|q| q >= STALL_AFTER) && !self.held_now(agent, now);
         let marked = self.stalled.contains(&run);
         if stalled && !marked {
             self.stalled.push(run);
@@ -532,7 +536,8 @@ impl AppCore {
     }
 
     /// The awaited file is missing: fail the run when its agent stopped
-    /// after it was asked and has read idle for [`STOP_GRACE`]. A round
+    /// after it was asked, has read idle for [`STOP_GRACE`], and is not
+    /// held by what that Stop listed (`held_now`). A round
     /// with no asked time (saved before it was kept) never fails here,
     /// since a recorded stop may be the previous round's.
     fn fail_if_stopped(&mut self, id: WorkflowId, path: &Path, now: Clock, out: &mut Out) {
@@ -549,6 +554,7 @@ impl AppCore {
             .wall
             .duration_since(stop)
             .is_ok_and(|idle| idle >= STOP_GRACE)
+            && !self.held_now(agent, now)
         {
             let name = self.session_name(agent);
             let file = path.display().to_string();
@@ -559,6 +565,16 @@ impl AppCore {
                 out,
             );
         }
+    }
+
+    /// The agent's pane runs and its last Stop listed background work or
+    /// a wakeup that still holds it (`SessionRecord::held_until`). A pane
+    /// that is gone has nothing left to finish, so it is never held.
+    fn held_now(&self, agent: RecordId, now: Clock) -> bool {
+        let Some(session) = self.session(agent) else {
+            return false;
+        };
+        self.is_running(agent) && session.held_until().is_some_and(|until| now.wall < until)
     }
 
     /// The agent's last Stop, when it came strictly after `asked` (one

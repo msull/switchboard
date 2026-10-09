@@ -245,7 +245,11 @@ feedback file landed eight seconds after the Stop.
 fix attempts with no failure and no completion; a missing artifact fails
 after thirty idle polls in a row (`STOP_IDLE_POLLS`) or when the pane
 exits. Answering a decision now clears every session it marked, so a mark
-cannot hold a stopped agent forever.
+cannot hold a stopped agent forever. #157 adds the idle Stop that lists
+work still in flight: the hold reads the `Stop`'s `background_tasks` and
+`session_crons`, a wakeup holds until its time plus 30 s, background work
+holds for at most 30 minutes, and the app's plan review follows the same
+rule. A present artifact completes whatever the Stop listed.
 
 ## 10. The plan's decisions reach the code reviewers as settled
 

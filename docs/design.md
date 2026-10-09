@@ -2939,6 +2939,49 @@ Known gaps:
 - `DispatchState.diffs` is never evicted while the app runs.
 - No side-by-side view yet.
 
+## Held stops (2026-10-08)
+
+A Claude Code `Stop` ends a turn, not always the work: an agent can end
+its turn with a background agent or shell still running, or with a
+`ScheduleWakeup` set, and write its file in a later turn. The `Stop`
+payload says so in `background_tasks` and `session_crons`
+(`spikes/20-stop-pending`). The helper keeps each task's `type`,
+`status` and `agent_type` and each cron's `schedule` and `recurring`,
+never a description, command or prompt, and writes them as `tasks` and
+`crons` on the `Stop` line. The hook adapter turns them into a
+`StopPending` (task kinds, wakeups with a fire time read from a one-shot
+`M H * * *` schedule in local time) on `EventKind::Stopped`.
+
+The record keeps the last snapshot as `SessionRecord::pending_at_stop`:
+replaced on every `Stop`, cleared on `SessionStart`, `StopFailure`,
+`SessionEnd` and a new spawn. `StopPending::held_until(stop)` is the
+rule, in one place, read through `SessionRecord::held_until`: a one-shot
+wakeup holds until its time plus `STOP_GRACE`, but never past
+`WAKEUP_HOLD` (65 minutes, `ScheduleWakeup`'s longest delay and its
+rounding) after the `Stop`, so a schedule whose minute had passed by the
+`Stop` and rolled to the next day cannot hold for a day; background
+work, a recurring cron or an unreadable one holds for `BACKGROUND_HOLD`
+(30 minutes) after the `Stop`; the later of the two wins. The card still reads idle, with "idle: N pending" as
+its state text, so a held agent never counts as waiting on you and a
+`session.prompt` is not refused as busy.
+
+The app's plan review (`fail_if_stopped`) fails a round only once the
+grace is past and the agent is not held (its pane runs and the hold is
+in the future); the stall notice and mark are skipped while held. The
+control port's session view carries `pending`, `wakeup_at_ms` and
+`held_until_ms`. Dispatch's `held(view, now)` resets the idle count on
+the missing-artifact path only (stage agent, reviewer, implementer,
+rewriter): a present artifact completes as ever, and a `working` card is
+still `busy`. While held, the attempt records `held` per session, which
+`dispatch show` prints; a failure after the hold ends names what the
+last `Stop` still listed.
+
+Known gaps: there is no "the session is alive: wait" answer, so a pane
+still holding when the cap runs out fails into `rerun | park`. A fired
+wakeup's prompt and a subagent's `<agent-message>` hand-back carry no
+tag `is_injected` knows, so they read as the owner typing and can clear
+an open ask (spike 20).
+
 ## Open questions
 
 - Shared project config runs with a hash-and-approve flow and no

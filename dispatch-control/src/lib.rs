@@ -575,8 +575,26 @@ pub struct AttemptView {
     pub waits: Option<String>,
     /// When that wait began, in ms.
     pub waits_since_ms: Option<u64>,
+    /// The open attempt's sessions whose missing artifact is not yet
+    /// counted against them, because their last Stop listed background
+    /// work or a wakeup the app still holds them for.
+    pub held: Vec<HeldView>,
     pub started_ms: u64,
     pub ended_ms: Option<u64>,
+}
+
+/// One session's hold, as `show` prints it.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct HeldView {
+    /// The held agent's Switchboard session id.
+    pub session: String,
+    /// Background task kinds, then `wakeup` or `recurring wakeup`.
+    pub pending: Vec<String>,
+    /// The earliest one-shot wakeup's fire time, in ms.
+    pub wakeup_at_ms: Option<u64>,
+    /// When the app stops holding it, in ms.
+    pub until_ms: u64,
 }
 
 impl AttemptView {
