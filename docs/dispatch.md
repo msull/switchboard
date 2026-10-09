@@ -236,8 +236,8 @@ ticket does not undo the intent to close), every process read back as gone,
 pending decisions cancelled, the session unmarked once Switchboard
 answers, each lane with a repository of its own removed from its clone
 with `git worktree remove` and then the ticket's tree, never forced,
-the card taken off the set by a `set.sync` on the closing ticket's own
-ledger, and only then `closed`. The branch, the ticket's directory, the
+the card taken off the set by a `set.sync` on the project's record,
+and only then `closed`. The branch, the ticket's directory, the
 record and its Switchboard projects stay. A later take of the same issue
 deletes a kept branch that has nothing beyond its base, and asks
 `reuse | fresh | park` about one that has commits (see Decisions);
@@ -2350,9 +2350,11 @@ differently:
   Only an `op` missing from the log means nothing ran.
 - *Idempotent state* (`session.notes`, `session.waiting`,
   `session.kill`, `session.remove`, `workflow.pause`,
-  `workflow.finalize`, `workflow.remove`, `set.sync`) is recovered
+  `workflow.finalize`, `workflow.remove`) is recovered
   from the state itself: repeating one is harmless, so a lost reply
-  is answered by sending it again.
+  is answered by sending it again. The queue set's `set.sync` is not
+  repeated but superseded by a redraw of the current queue, whose
+  layout may differ from the lost one's.
 - *Non-replayable* (`session.send`, `session.resume`,
   `workflow.continue`, `workflow.object`, and `dispatch.runner` with `restart`, which a
   repeat would stop a second time; its `stop` and `start` are
@@ -2670,7 +2672,9 @@ exist:
   each ticket's current session and sends it as one `set.sync`, when
   a ticket's current session changes and when the queue is reordered,
   so a replaced card never leaves the old one behind and a swap of
-  two positions never collides with itself. The order of record is the
+  two positions never collides with itself. Its requests are the
+  project's, on the project record, so a queue change never touches
+  another ticket's record. The order of record is the
   queue on Dispatch's side, edited with `dispatch queue`, because a
   grid has no order of its own. A ticket card of Switchboard's own
   (one that stays put across a ticket's fresh sessions and shows its

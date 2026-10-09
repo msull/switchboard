@@ -945,6 +945,53 @@ impl Runner {
             .with_context(|| format!("{intent}: the control socket failed"))
     }
 
+    /// One request for the queue's working set, written to the
+    /// project's `view_op` before it is sent and its reply after. It is
+    /// the project's, so it is counted on no ticket's health, even when
+    /// a ticket's close or step is the one that asked.
+    pub(crate) fn send_view(
+        &mut self,
+        ps: &mut ProjectState,
+        intent: &str,
+        body: Body,
+        now_ms: u64,
+    ) -> Result<Reply> {
+        let op = format!(
+            "view-{}-{}",
+            ps.name,
+            &uuid::Uuid::new_v4().simple().to_string()[..8]
+        );
+        ps.view_op = Some(Operation::new(op.clone(), &body, None, intent, now_ms));
+        self.save_project(ps)?;
+        let result = self.uncharged(|r| r.call(None, &Request::new(op, body)));
+        if let Some(entry) = ps.view_op.as_mut() {
+            match &result {
+                Ok(reply) => entry.reply = Some(reply.clone()),
+                Err(e) => entry.error = Some(e.to_string()),
+            }
+        }
+        // The outcome is written down either way: a recorded failure is
+        // what makes the next `sync_queue` redraw after a lost `set.sync`.
+        if let Ok(reply) = &result {
+            crate::view::apply_view_reply(ps, intent, reply);
+        }
+        self.save_project(ps)?;
+        result
+            .map_err(SocketDown::from)
+            .with_context(|| format!("{intent}: the control socket failed"))
+    }
+
+    /// `f` with no ticket current. `call` charges every request to the
+    /// ticket `health.current` names, which a step or a close sets for
+    /// its whole run, so a request of the project's own is made with it
+    /// taken out and put back after.
+    pub(crate) fn uncharged<T>(&mut self, f: impl FnOnce(&mut Self) -> T) -> T {
+        let current = self.health.borrow_mut().current.take();
+        let result = f(self);
+        self.health.borrow_mut().current = current;
+        result
+    }
+
     /// A query: never in the ledger, since it changes nothing.
     pub(crate) fn ask(&mut self, body: Body) -> Result<Reply> {
         self.call(
@@ -1965,10 +2012,11 @@ impl Runner {
         if was_queued || !was_listed {
             self.save_project(ps)?;
         }
-        // A lost `session.waiting off` or `set.sync` of an earlier run is
-        // resolved before anything is asked again; `step` never visits a
-        // closing ticket to do it. An op recovery already settled is
-        // left alone; a close can take several passes.
+        // A lost `session.waiting off` of an earlier run is resolved
+        // before anything is asked again; `step` never visits a closing
+        // ticket to do it. An op recovery already settled is left alone;
+        // a close can take several passes. A lost queue-set request is
+        // the project's `view_op`, resolved by `sync_queue`.
         let pending = t.unsettled();
         if !pending.is_empty() {
             let mut failed = None;
@@ -2064,7 +2112,7 @@ impl Runner {
                 .filter_map(|id| self.load_ticket(id).ok())
                 .collect();
             let project = ps.name.clone();
-            crate::view::sync_queue(self, ps, &project, &others, Some(t), now_ms)?;
+            crate::view::sync_queue(self, ps, &project, &others, now_ms)?;
             t.close.card_cleared = true;
             self.save_ticket(t, now_ms)?;
         }
@@ -7595,7 +7643,7 @@ impl Runner {
                 .iter()
                 .filter_map(|id| r.load_ticket(id).ok())
                 .collect();
-            if let Err(e) = crate::view::sync_queue(r, &mut ps, project, &refreshed, None, now_ms) {
+            if let Err(e) = crate::view::sync_queue(r, &mut ps, project, &refreshed, now_ms) {
                 log::warn!("queue view: {e}");
             }
             r.save_project(&ps)
@@ -11150,6 +11198,31 @@ gate = { kind = "human", decision = "inspect" }
         fn call(&mut self, _: &Request) -> std::io::Result<Reply> {
             Err(std::io::Error::other("no Switchboard in this test"))
         }
+    }
+
+    #[test]
+    fn a_lost_queue_set_recovered_inside_a_step_is_charged_to_no_ticket() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut r = Runner::new(
+            DataDir::new(dir.path()),
+            Box::new(NoPort),
+            Box::new(crate::git::FakeRepo::default()),
+        );
+        let body = Body::SetNew {
+            space: "s".into(),
+            name: "Dispatch · P".into(),
+        };
+        let mut ps = ProjectState {
+            name: "P".into(),
+            view_op: Some(Operation::new("view-P-1".into(), &body, None, "set", 0)),
+            ..ProjectState::default()
+        };
+        r.health.borrow_mut().current = Some("closing".into());
+        assert!(r.transaction(|r| r.recover_view(&mut ps)).is_err());
+        let health = r.health.borrow();
+        assert_eq!(health.current.as_deref(), Some("closing"));
+        assert_eq!(health.port.failures.len(), 1);
+        assert_eq!(health.port.failures[0].ticket, None);
     }
 
     #[test]

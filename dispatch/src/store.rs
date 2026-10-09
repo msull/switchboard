@@ -23,7 +23,7 @@ use crate::ticket::{ProjectState, Ticket};
 /// carried a version reads as 0 and is brought up by `migrate`. A
 /// record above it was written by a newer `dispatch` and is refused
 /// both ways, so this build never drops fields it does not know.
-pub const RECORD_VERSION: u32 = 24;
+pub const RECORD_VERSION: u32 = 25;
 
 /// A lock file held while this lives: the writer lock, the runner's
 /// claim, or a ticket's close.
@@ -582,6 +582,11 @@ pub fn migrate(mut value: Value) -> Value {
         // record, or a supervisor would stop hearing of its tickets, and
         // a delivery whose reply was lost would be typed again under a
         // new op.
+        //
+        // 24 to 25: a project gains `view_op`, absent from its serde
+        // default. Nothing is transformed. A build that would drop it on
+        // its next write must refuse the record, or a `set.new` whose
+        // reply was lost would be sent again and make a second set.
         if version == 1 {
             settle_from_verdicts(&mut value);
         }
@@ -964,6 +969,20 @@ mod tests {
         assert_eq!(ps.supervisor.delivery, None);
         assert_eq!(ps.supervisor.delivery_waits, None);
         assert_eq!(ps.supervisor.current.unwrap().session, "s-1");
+    }
+
+    #[test]
+    fn a_version_twenty_four_project_reads_with_no_view_op() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("p.json");
+        fs::write(&project, PROJECT_V0.replacen('{', "{\"version\": 24,", 1)).unwrap();
+        let ps = read_project(&project).unwrap();
+        assert_eq!(ps.version, RECORD_VERSION);
+        assert_eq!(ps.view_op, None);
+        assert_eq!(ps.queue, ["a1b2c3d4"]);
+        write_project(&project, &ps).unwrap();
+        let value: Value = read_json(&project).unwrap();
+        assert_eq!(value["version"], RECORD_VERSION);
     }
 
     #[test]

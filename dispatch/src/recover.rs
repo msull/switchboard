@@ -8,6 +8,7 @@ use switchboard_control::{Body, Found, Made, OpStatus, Reply, Request};
 use crate::scheduler::{Ask, NUDGE, Runner, apply_reply};
 use crate::supervisor::apply_supervisor_reply;
 use crate::ticket::{DecisionKind, Operation, ProjectState, Ticket, TicketState};
+use crate::view::apply_view_reply;
 
 /// Recovery's verdicts on an operation with no reply, as the reader
 /// sees them. Whether an op is settled is its `settled` flag, not these
@@ -26,6 +27,28 @@ pub(crate) const SUPERSEDED: &str = "reply lost; a later request for the session
 fn give_verdict(op: &mut Operation, verdict: &str) {
     op.error = Some(verdict.into());
     op.settled = true;
+}
+
+/// What `find` and `op.status` say became of a lost creation.
+enum Resolution {
+    /// Switchboard is still on it; nothing may be decided yet.
+    InProgress,
+    /// It was made: the reply it would have carried.
+    Reply(Box<Reply>),
+    /// It was not, or not wholly: recovery's verdict.
+    Verdict(&'static str),
+}
+
+/// Where the project's queue-set slot stands once `recover_view` has
+/// looked at it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ViewState {
+    /// No request is owed: the next sync is sent only if the queue changed.
+    Settled,
+    /// A `set.new` Switchboard is still on: nothing new may be sent.
+    InFlight,
+    /// A lost `set.sync`: the current queue must be drawn over it.
+    Redraw,
 }
 
 impl Runner {
@@ -61,6 +84,7 @@ impl Runner {
             if ps.supervisor.op.as_ref().is_some_and(Operation::unresolved) {
                 self.recover_supervisor(&mut ps)?;
             }
+            self.recover_view(&mut ps)?;
         }
         Ok(())
     }
@@ -85,6 +109,59 @@ impl Runner {
             self.save_project(ps)?;
             return Ok(());
         }
+        match self.resolve_creation(&op)? {
+            Resolution::InProgress => return Ok(()),
+            Resolution::Verdict(v) => verdict(ps, v),
+            Resolution::Reply(reply) => {
+                if let Some(o) = ps.supervisor.op.as_mut() {
+                    o.reply = Some((*reply).clone());
+                }
+                apply_supervisor_reply(ps, &reply);
+            }
+        }
+        self.save_project(ps)
+    }
+
+    /// The project's queue-set request whose reply never came, resolved
+    /// so `sync_queue` knows what it may send. A lost `set.new` is
+    /// resolved as a ticket's creation is, and the project saved; it is
+    /// the project's, so its queries are counted on no ticket's health.
+    /// A lost `set.sync` is never settled: Switchboard may or may not
+    /// have acted on it, so the set may not show `ps.shown`, and only the
+    /// redraw that `send_view` writes over it retires it. Until then it
+    /// stays unresolved on disk, so a crash still owes the redraw.
+    pub(crate) fn recover_view(&mut self, ps: &mut ProjectState) -> Result<ViewState> {
+        let Some(op) = ps.view_op.clone().filter(Operation::unresolved) else {
+            return Ok(ViewState::Settled);
+        };
+        if op.class != "creation" {
+            return Ok(ViewState::Redraw);
+        }
+        log::info!("{} recovering queue set {} ({})", ps.name, op.op, op.kind);
+        match self.uncharged(|r| r.resolve_creation(&op))? {
+            Resolution::InProgress => return Ok(ViewState::InFlight),
+            // No set to show: the next sync makes another.
+            Resolution::Verdict(v) => {
+                if let Some(o) = ps.view_op.as_mut() {
+                    give_verdict(o, v);
+                }
+            }
+            Resolution::Reply(reply) => {
+                if let Some(o) = ps.view_op.as_mut() {
+                    o.reply = Some((*reply).clone());
+                }
+                apply_view_reply(ps, &op.intent, &reply);
+            }
+        }
+        self.save_project(ps)?;
+        Ok(ViewState::Settled)
+    }
+
+    /// What became of a creation whose reply never came: the reply
+    /// rebuilt from `find` or read from `op.status`, or recovery's
+    /// verdict when the records were removed by hand or the request was
+    /// lost or cut short.
+    fn resolve_creation(&mut self, op: &Operation) -> Result<Resolution> {
         let found = match self.call(
             None,
             &Request::new(
@@ -97,32 +174,18 @@ impl Runner {
             Reply::Found { records } => records,
             other => anyhow::bail!("find answered {other:?}"),
         };
-        let reply = if found.iter().any(|f| f.removed) {
-            verdict(ps, REMOVED);
-            None
-        } else if found.is_empty() {
-            match self.status_of(&op.op)? {
-                OpStatus::InProgress => return Ok(()),
-                OpStatus::Done { reply } => Some(*reply),
-                OpStatus::Unknown => {
-                    verdict(ps, LOST);
-                    None
-                }
-                OpStatus::Interrupted => {
-                    verdict(ps, INTERRUPTED);
-                    None
-                }
-            }
-        } else {
-            Some(rebuild(&found))
-        };
-        if let Some(reply) = reply {
-            if let Some(o) = ps.supervisor.op.as_mut() {
-                o.reply = Some(reply.clone());
-            }
-            apply_supervisor_reply(ps, &reply);
+        if found.iter().any(|f| f.removed) {
+            return Ok(Resolution::Verdict(REMOVED));
         }
-        self.save_project(ps)
+        if !found.is_empty() {
+            return Ok(Resolution::Reply(Box::new(rebuild(&found))));
+        }
+        Ok(match self.status_of(&op.op)? {
+            OpStatus::InProgress => Resolution::InProgress,
+            OpStatus::Done { reply } => Resolution::Reply(reply),
+            OpStatus::Unknown => Resolution::Verdict(LOST),
+            OpStatus::Interrupted => Resolution::Verdict(INTERRUPTED),
+        })
     }
 
     /// One unanswered operation, resolved by its class.

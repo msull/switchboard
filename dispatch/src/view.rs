@@ -3,8 +3,9 @@
 //! show changes. The order of record is the queue on Dispatch's side.
 
 use anyhow::{Result, bail};
-use switchboard_control::{Body, Pin, PinTarget, Rect, Reply};
+use switchboard_control::{Body, Pin, PinTarget, RecordKind, Rect, Reply};
 
+use crate::recover::ViewState;
 use crate::scheduler::Runner;
 use crate::ticket::{ProjectState, Ticket, TicketState};
 
@@ -12,17 +13,26 @@ use crate::ticket::{ProjectState, Ticket, TicketState};
 const CARD: (u32, u32) = (10, 8);
 
 /// Make the set once, then keep it showing the current session of every
-/// ticket in flight or waiting, top to bottom in queue order. The
-/// request goes on `owner`'s ledger when one is given (a closing ticket
-/// clearing its own card), else on the one `ledger_ticket` picks.
+/// ticket in flight or waiting, top to bottom in queue order. Every
+/// request goes on the project's `view_op`, never a ticket's ledger, so
+/// a queue change leaves every ticket's record alone. A request of an
+/// earlier call whose reply never came is resolved first: a `set.new`
+/// still in flight holds every new request back, and a lost `set.sync`
+/// is superseded by a redraw of what the queue shows now.
 pub fn sync_queue(
     runner: &mut Runner,
     ps: &mut ProjectState,
     project: &str,
     tickets: &[Ticket],
-    owner: Option<&mut Ticket>,
     now_ms: u64,
 ) -> Result<()> {
+    let redraw = match runner.recover_view(ps)? {
+        // An error, not a quiet return: a close takes `Ok` to mean its
+        // card is off the set.
+        ViewState::InFlight => bail!("a request for the queue set is still in flight"),
+        ViewState::Redraw => true,
+        ViewState::Settled => false,
+    };
     let shown: Vec<(String, String)> = ps
         .queue
         .iter()
@@ -35,9 +45,10 @@ pub fn sync_queue(
         })
         .filter_map(|t| t.current_session().map(|s| (t.id.clone(), s.clone())))
         .collect();
-    if shown == ps.shown && ps.set.is_some() {
+    if !redraw && shown == ps.shown && ps.set.is_some() {
         return Ok(());
     }
+    // A superseded `set.sync` implies a set, so `redraw` never gets here.
     if shown.is_empty() && ps.set.is_none() {
         return Ok(());
     }
@@ -45,21 +56,9 @@ pub fn sync_queue(
     let Some(space) = ps.space.clone() else {
         return Ok(());
     };
-    let mut found = match owner {
-        Some(_) => None,
-        None => ledger_ticket(runner, ps, &shown, tickets)?,
-    };
-    let t: &mut Ticket = match (owner, found.as_mut()) {
-        (Some(owner), _) => owner,
-        (None, Some(t)) => t,
-        (None, None) => return Ok(()),
-    };
     if ps.set.is_none() {
-        // The queue view is not an attempt's, so the request names none.
-        let reply = runner.send(
-            t,
+        let reply = runner.send_view(
             ps,
-            None,
             "set",
             Body::SetNew {
                 space,
@@ -89,7 +88,7 @@ pub fn sync_queue(
             },
         })
         .collect();
-    let reply = runner.send(t, ps, None, "sync", Body::SetSync { set, items }, now_ms)?;
+    let reply = runner.send_view(ps, "sync", Body::SetSync { set, items }, now_ms)?;
     if let Reply::Failed { reason } = reply {
         bail!("set.sync: {reason}");
     }
@@ -97,43 +96,13 @@ pub fn sync_queue(
     Ok(())
 }
 
-/// The ticket a set request is written under when no closing ticket
-/// brings its own: the first one shown, as the set was made under the
-/// first ticket's ledger, else one whose card the set still holds
-/// though it no longer has a session to show. `None` when every card
-/// left belongs to a closing ticket: each clears its own when its close
-/// gets there. A ticket nobody can read is an error, never a sync
-/// pretended. `send` saves the ledger it writes, so the copy returned
-/// needs no save of its own.
-fn ledger_ticket(
-    runner: &Runner,
-    ps: &ProjectState,
-    shown: &[(String, String)],
-    tickets: &[Ticket],
-) -> Result<Option<Ticket>> {
-    if let Some(t) = tickets
-        .iter()
-        .find(|t| shown.iter().any(|(id, _)| id == &t.id))
+/// A queue-set reply applied to the project by the op's intent: a
+/// `set.new` names the set. Recovery uses this too, with a reply rebuilt
+/// from `find`.
+pub(crate) fn apply_view_reply(ps: &mut ProjectState, intent: &str, reply: &Reply) {
+    if intent == "set"
+        && let Some(made) = reply.made().iter().find(|m| m.kind == RecordKind::Set)
     {
-        return Ok(Some(t.clone()));
+        ps.set = Some(made.id.clone());
     }
-    let mut closing = false;
-    let mut unreadable = Vec::new();
-    for (id, _) in &ps.shown {
-        match runner.load_ticket(id) {
-            Ok(t) if matches!(t.state, TicketState::Closing { .. }) => closing = true,
-            Ok(t) => return Ok(Some(t)),
-            Err(e) => unreadable.push(format!("{id}: {e:#}")),
-        }
-    }
-    if closing {
-        return Ok(None);
-    }
-    if unreadable.is_empty() {
-        bail!("nothing shown and no ticket to sync the set under");
-    }
-    bail!(
-        "nothing shown, and the set's tickets cannot be read to sync it under: {}",
-        unreadable.join("; ")
-    )
 }
