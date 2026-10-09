@@ -17,8 +17,8 @@ use dispatch::git::{FakeRepo, Gate, Network};
 use dispatch::github::{Checks, FakePullRequests, PullRequest};
 use dispatch::history::{Commit, Commits, Group};
 use dispatch::scheduler::{
-    NUDGE_TEXT, PR_ERROR_GRACE_MS, PR_POLL_MS, PR_YOUNG_HEAD_MS, REFRESH, RESOLUTION, Runner,
-    STOP_LIMIT_MS,
+    NUDGE_TEXT, PR_ERROR_GRACE_MS, PR_POLL_MS, PR_PUSH_LAG_MS, PR_YOUNG_HEAD_MS, REFRESH,
+    RESOLUTION, Runner, STOP_LIMIT_MS,
 };
 use dispatch::store::DataDir;
 use dispatch::ticket::{
@@ -9724,6 +9724,171 @@ fn a_refused_lease_at_ready_asks_the_pr_question() {
         d.question
     );
     assert_eq!(d.options, vec!["recheck", "park"]);
+}
+
+/// The refresh at `ready` pushed `rebased1` and `ready` has read a
+/// provider still reporting `base0000`.
+fn ready_read_after_a_refresh_push(env: &mut Env) -> String {
+    let (id, _) = main_moved_before_ready(env, "base0000", 1);
+    env.inspect(&id, "proceed", None);
+    env.steps_until(&id, "the first ready reading", |t, _| {
+        t.attempts_of("ready")
+            .last()
+            .is_some_and(|a| a.pr.is_some())
+    });
+    let t = env.ticket(&id);
+    assert_eq!(env.repo.lock().unwrap().pushed.len(), 1);
+    assert_eq!(
+        t.lanes[0].pushed.as_ref().map(|p| p.head.as_str()),
+        Some("rebased1")
+    );
+    id
+}
+
+/// The `pr` decision pending on the ticket.
+fn pr_question(env: &Env, id: &str) -> Decision {
+    let pending = env.pending(id);
+    assert_eq!(pending.len(), 1, "one pr decision: {pending:?}");
+    assert_eq!(pending[0].name, "pr");
+    assert_eq!(pending[0].options, vec!["recheck", "park"]);
+    pending[0].clone()
+}
+
+/// Whether a rebaser session was ever started, new or cloned.
+fn rebaser_launched(env: &Env) -> bool {
+    env.sb().calls.iter().any(|r| {
+        matches!(&r.body, Body::SessionNew { name, .. } | Body::SessionClone { name, .. } if name == "rebaser")
+    })
+}
+
+/// A provider that reports the head from before Dispatch's own refresh
+/// push for a minute: `ready` waits it out and reads the checks at the
+/// pushed head, with no question about a push that happened.
+#[test]
+fn a_provider_that_lags_a_refresh_push_reaches_checks_without_a_question() {
+    let mut env = Env::new();
+    let id = ready_read_after_a_refresh_push(&mut env);
+    let t = env.ticket(&id);
+    assert!(t.pending_decisions().is_empty(), "{t:#?}");
+    let ready = t.attempts_of("ready").last().unwrap();
+    assert!(ready.is_open());
+    assert_eq!(ready.pr.as_ref().unwrap().head, "base0000");
+    env.wait(PR_POLL_MS);
+    env.step();
+    let t = env.ticket(&id);
+    assert!(t.pending_decisions().is_empty(), "{t:#?}");
+    let ready = t.attempts_of("ready").last().unwrap();
+    assert!(ready.is_open());
+    assert_eq!(ready.pr.as_ref().unwrap().head, "base0000");
+    env.pr_is(&id, "rebased1", "open", Checks::Pending);
+    env.wait(PR_POLL_MS);
+    env.step();
+    let t = env.ticket(&id);
+    assert!(t.pending_decisions().is_empty(), "{t:#?}");
+    let ready = t.attempts_of("ready").last().unwrap();
+    assert_eq!(ready.pr.as_ref().unwrap().checks, "pending");
+    env.pr_is(&id, "rebased1", "open", Checks::Passed);
+    env.wait(PR_POLL_MS);
+    env.step();
+    let t = env.ticket(&id);
+    let ready = t.attempts_of("ready").last().unwrap();
+    assert_eq!(ready.state, AttemptState::Complete);
+    assert_eq!(ready.head.as_deref(), Some("rebased1"));
+    assert!(!t.decisions.iter().any(|d| d.name == "pr"), "{t:#?}");
+    assert_in_order(&events_of(&env.data, &id), &["refreshed", "pushed", "pr"]);
+}
+
+/// A provider still behind Dispatch's push past `PR_PUSH_LAG_MS`: the
+/// question names the push and both heads.
+#[test]
+fn a_provider_still_stale_past_the_push_grace_asks_naming_the_push() {
+    let mut env = Env::new();
+    let id = ready_read_after_a_refresh_push(&mut env);
+    env.wait(PR_POLL_MS);
+    env.step();
+    assert!(env.pending(&id).is_empty(), "inside the grace");
+    env.wait(PR_POLL_MS);
+    env.step();
+    let d = pr_question(&env, &id);
+    assert!(
+        d.question
+            .contains("Dispatch pushed rebased1 to the branch but PR #7 reports base0000"),
+        "{}",
+        d.question
+    );
+    assert!(
+        d.question.contains("or the branch moved since"),
+        "{}",
+        d.question
+    );
+}
+
+/// A stale reading that also says `conflicting`, for the head from
+/// before the refresh push: no rebaser starts on the rebased tree, and
+/// past the grace the question is the overdue one, not the remedy's.
+#[test]
+fn a_stale_conflicting_reading_after_a_refresh_push_starts_no_rebaser() {
+    let mut env = Env::new();
+    let (id, _) = main_moved_before_ready(&mut env, "base0000", 1);
+    env.pr_is_with(&id, "base0000", "open", Checks::Passed, Some("conflicting"));
+    env.inspect(&id, "proceed", None);
+    env.steps_until(&id, "the first ready reading", |t, _| {
+        t.attempts_of("ready")
+            .last()
+            .is_some_and(|a| a.pr.is_some())
+    });
+    assert!(!rebaser_launched(&env));
+    assert!(env.pending(&id).is_empty());
+    for _ in 0..2 {
+        env.wait(PR_POLL_MS);
+        env.step();
+    }
+    assert!(!rebaser_launched(&env));
+    let d = pr_question(&env, &id);
+    assert!(
+        d.question
+            .contains("Dispatch pushed rebased1 to the branch but PR #7 reports base0000"),
+        "{}",
+        d.question
+    );
+}
+
+/// The branch moved from elsewhere long after Dispatch's push: the
+/// question names both heads and allows that the branch moved.
+#[test]
+fn a_branch_moved_long_after_a_refresh_push_asks_naming_both_heads() {
+    let mut env = Env::new();
+    let id = ready_read_after_a_refresh_push(&mut env);
+    env.pr_is(&id, "rebased1", "open", Checks::Pending);
+    env.wait(PR_POLL_MS);
+    env.step();
+    let t = env.ticket(&id);
+    assert!(t.pending_decisions().is_empty(), "{t:#?}");
+    assert_eq!(
+        t.attempts_of("ready")
+            .last()
+            .unwrap()
+            .pr
+            .as_ref()
+            .unwrap()
+            .checks,
+        "pending"
+    );
+    env.wait(PR_PUSH_LAG_MS * 5);
+    env.pr_is(&id, "other001", "open", Checks::Pending);
+    env.step();
+    let d = pr_question(&env, &id);
+    assert!(
+        d.question
+            .contains("Dispatch pushed rebased1 to the branch but PR #7 reports other001"),
+        "{}",
+        d.question
+    );
+    assert!(
+        d.question.contains("or the branch moved since"),
+        "{}",
+        d.question
+    );
 }
 
 /// The same refresh with no pull request for the branch: nothing is

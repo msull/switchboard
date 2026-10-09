@@ -1949,11 +1949,25 @@ branch's head revision at the time of the check. Its readings are:
 pending (wait), green at the head (pass), red at the head (a decision
 with the failed check named), no PR or no checks configured (a
 decision; a `none` reading within two minutes of the head's last move,
-`PR_YOUNG_HEAD_MS`, is pending instead, since GitHub creates a pushed
-head's check runs a little after the push), and any lookup error
-(retry with backoff, a decision after an hour). Green at an older head
-is not green: a moved head voids it along with every other result made
-against the old head set, as described under "Stage semantics".
+`PR_YOUNG_HEAD_MS`, is pending instead, since a provider attaches a
+pushed head's checks a little after the push, and a push Dispatch made
+counts as a head move), and any lookup error (retry with backoff, a
+decision after an hour). Green at an older head is not green: a moved
+head voids it along with every other result made against the old head
+set, as described under "Stage semantics".
+
+A provider can also lag a push itself and keep reporting the head from
+before it. When the tree sits at the head Dispatch last pushed to the
+lane's branch (the lane's `pushed`, recorded only once git said the
+remote took it), a reading of another head is waited on for
+`PR_PUSH_LAG_MS` (two minutes, so at least one more reading falls
+inside it) rather than asked about, and that reading's `conflicting`
+never starts the rebaser on a tree that was just rebased. Past the
+grace the `pr` question names both heads and says either the provider
+has not caught up or the branch moved since, and asks for the remote
+to be compared with the tree: `pushed` is never cleared, so Dispatch
+cannot tell the two apart. A push by hand or by an agent gets no
+grace.
 `pr-merged` reads the same PR and resolves the pending merge decision;
 it never merges.
 
@@ -2014,14 +2028,16 @@ saw (the newest attempt in its context that recorded one, or the
 lane's `pushed`, the head a refresh last pushed, when that came
 later), after the rebase or the rebaser, at whatever stage the refresh
 runs; a lane without one pushes nothing, and a refused lease is left
-to the `pr` question about the head. A rebase that stops on a conflict
-is aborted, and the policy's `rebaser` is continued from the lane's
-last finished agent, told the base and the stage's checks, and asked
-to resolve without pushing or, when a conflict's intent is unclear, to
-leave the branch as it was and say why; the stage waits for it, reads
-the branch again when it stops, and after `max_rebases` such attempts,
-or without a rebaser, asks a `refresh` question with `recheck`. The
-rebaser's attempts, and the `rerun` questions about them, carry the
+to the `pr` question about the head. `ready` trusts the recorded push
+while the provider catches up, as described under "PR checks and
+merges". A rebase that stops on a conflict is aborted, and the
+policy's `rebaser` is continued from the lane's last finished agent,
+told the base and the stage's checks, and asked to resolve without
+pushing or, when a conflict's intent is unclear, to leave the branch
+as it was and say why; the stage waits for it, reads the branch again
+when it stops, and after `max_rebases` such attempts, or without a
+rebaser, asks a `refresh` question with `recheck`. The rebaser's
+attempts, and the `rerun` questions about them, carry the
 pseudo-stage `refresh`, so no stage mistakes them for its own; the
 `refresh` question carries the real stage, is named `refresh`, and
 names the files the rebase conflicts in (`Repo::conflicting_files`,
@@ -2869,6 +2885,10 @@ and one against the real one:
 | The base moved while a plan sat; implementation begins | The branch is brought up to the base, `base_sha` is the new base, the implementer is told the range; nothing but git ran (`a_plan_that_sat_is_implemented_on_a_branch_brought_up_to_its_base`) |
 | The base moved after the PR was opened; `ready` begins | The branch is rebased and pushed once with a lease on the head last seen; `ready` reads the PR at the tree's head (`a_refresh_at_ready_pushes_the_rebased_branch_once_with_the_lease`, `a_refresh_at_ready_pushes_after_the_rebaser_resolves_it`) |
 | The same, the remote moved meanwhile | The lease refuses the push; `ready` asks its `pr` question about the head (`a_refused_lease_at_ready_asks_the_pr_question`) |
+| The same, the provider still reports the head from before the push | `ready` records the stale reading and waits; once the provider reports the pushed head its checks are read and no question is asked (`a_provider_that_lags_a_refresh_push_reaches_checks_without_a_question`) |
+| The same, the provider still stale past `PR_PUSH_LAG_MS` | One `pr` question naming the pushed head and the provider's (`a_provider_still_stale_past_the_push_grace_asks_naming_the_push`) |
+| The same, the stale reading says `conflicting` | No rebaser starts; past the grace it is the same `pr` question (`a_stale_conflicting_reading_after_a_refresh_push_starts_no_rebaser`) |
+| The branch moved from elsewhere long after a refresh push | The `pr` question names both heads and says the provider lags or the branch moved (`a_branch_moved_long_after_a_refresh_push_asks_naming_both_heads`) |
 | The same, with no pull request for the branch | Nothing is pushed; `ready` asks for a PR to be opened (`a_refresh_at_ready_without_a_pull_request_pushes_nothing`) |
 | A stage begins and the rebase onto the moved base conflicts | The rebaser, a clone of the lane's last finished agent, is told the base and the checks; the stage waits, then reads the branch again (`a_conflicting_refresh_is_rebased_by_a_clone_of_the_lanes_last_agent`) |
 | The same, with no rebaser in the policy | A `refresh` question with `recheck`, answered after a rebase by hand (`a_conflicting_refresh_without_a_rebaser_is_a_question`) |
@@ -2942,7 +2962,7 @@ and one against the real one:
 | An agent stops while its card still reads `working`, and writes its notes in a later turn | The attempt is held with no failure, no question and no kill; notes written mid-turn complete nothing until a Stop leaves the card idle (`a_stop_while_still_working_holds_the_attempt_until_the_notes_land`; idle without notes fails only after `STOP_IDLE_POLLS`: `a_stop_idle_without_notes_fails_after_the_grace`) |
 | A Claude reviewer stops busy and writes later | No result, no rerun, no sibling killed while it works; its later write and Stop finish the round (`a_reviewer_that_stops_busy_and_writes_later_completes_the_round`; the implementer the same: `an_implementer_that_stops_busy_keeps_its_round`) |
 | A `workflow` query the app could not answer, or a socket timeout | The review attempt keeps running and the next pass reads the run; only `no such run` fails it; a park waits until the run is confirmed paused (`a_workflow_query_the_app_could_not_answer_leaves_the_attempt_running`, `a_run_switchboard_no_longer_has_fails_the_attempt`, `parking_waits_while_the_app_cannot_say_the_run_paused`) |
-| A PR reads no checks within two minutes of a push | The reading is recorded and the gate waits; past `PR_YOUNG_HEAD_MS` it is the `pr` question (`a_none_reading_soon_after_a_push_waits_then_asks`) |
+| A provider reads no checks within two minutes of a head move | The reading is recorded and the gate waits; past `PR_YOUNG_HEAD_MS` it is the `pr` question (`a_none_reading_soon_after_a_push_waits_then_asks`) |
 | A decision marked a session that is no longer the ticket's newest (the `lanes` question's investigator, another lane's planner) | Answering clears every session the ledger still marks, so an agent held by the mark is given up on after the grace; a lost `waiting off` is sent again; a waiting request replaced by a later one is never sent after it (`an_answer_clears_every_mark_so_a_marked_agent_is_still_given_up_on`, `a_lost_unmark_is_sent_again_until_it_lands`, `a_replaced_waiting_request_is_never_sent_after_the_one_that_replaced_it`) |
 | A command reviewer exits 1 with nothing on stdout | A failed reviewer (`a_command_reviewers_exit_codes_are_read_as_the_protocol_says`) |
 | The tree is dirty when reviewers finish; the implementer leaves it dirty | The round's evidence is void, a `rerun` question naming the change; the fixer is nudged once past the commit wait, and a second dirty stop fails the round with `after 1 nudge` (`a_changed_tree_voids_the_round_and_a_dirty_implementer_fails_it`) |

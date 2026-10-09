@@ -1665,7 +1665,8 @@ through `gh` (the provider is read from the remote; another host
 parks the ticket until an adapter exists), reads its checks once a
 minute, and completes bound to the tree's head when they are green at
 it, or at once on a merged PR or, with `checks = "none"` on the
-stage, on an open PR at the head; no PR, another head, red checks or
+stage, on an open PR at the head; no PR, another head (unless Dispatch
+pushed the tree's head under two minutes ago), red checks or
 missing checks past the young-head window is one `pr` decision with
 `recheck` and `park`, never a failed attempt, and a provider that
 cannot be read is retried quietly for an hour first. The PR is
