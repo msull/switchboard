@@ -115,6 +115,17 @@ impl Notice {
     pub const ELSEWHERE: &'static str = "Something in another workspace needs you";
 }
 
+/// Which of the owner's boxes sent a message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Composer {
+    /// The conversation view's message box or a card's quick-send line,
+    /// whose draft is `UiState.input_drafts[id]`.
+    Line,
+    /// The session's Prompt Box editor, which empties itself when it
+    /// sends.
+    Editor,
+}
+
 /// Inputs from UI, workers, and the host poll.
 #[derive(Debug, Clone, PartialEq)]
 // The largest variant carries the loaded store, dispatched once at
@@ -386,6 +397,16 @@ pub enum AppAction {
     SendInput {
         id: RecordId,
         text: String,
+    },
+    /// The owner sent a message from one of the boxes. It is typed into
+    /// the pane like `SendInput`, and the app settles the box's draft by
+    /// the outcome of the write. Every other writer (control port,
+    /// pipelines, console, scripts) keeps `SendInput`, so no other write
+    /// touches a draft.
+    SendMessage {
+        id: RecordId,
+        text: String,
+        from: Composer,
     },
     /// The owner pressed a key in the session's embedded terminal: a
     /// draft may be in its input box, so `session.prompt` holds off for
@@ -729,9 +750,17 @@ pub enum Effect {
         host: HostId,
         text: String,
     },
-    /// Write the owner's answer to an ask to the pane, then Enter. Apart
-    /// from `SendInput` because it goes out by itself at a turn's end,
-    /// so it must not clear a prompt the owner is composing.
+    /// Write `text` to the pane, then Enter, and settle the `from` box's
+    /// draft for `id`.
+    SendMessage {
+        id: RecordId,
+        host: HostId,
+        text: String,
+        from: Composer,
+    },
+    /// Write the owner's answer to an ask to the pane, then Enter. It
+    /// goes out by itself at a turn's end, not from a box, so like
+    /// `SendInput` it settles no draft. Only `SendMessage` does.
     SendAnswer {
         host: HostId,
         text: String,
@@ -1130,6 +1159,7 @@ impl AppCore {
             | AppAction::MoveCard { .. }
             | AppAction::ReturnToSession(_)
             | AppAction::SendInput { .. }
+            | AppAction::SendMessage { .. }
             | AppAction::InputTyped { .. }
             | AppAction::Interrupt(_)
             | AppAction::KillSession(_)
@@ -1178,6 +1208,7 @@ impl AppCore {
     }
 
     /// The session records' transitions, split out of `dispatch` for length.
+    #[allow(clippy::too_many_lines)] // one arm per session action
     pub(super) fn session_action(&mut self, action: AppAction, now: Clock, out: &mut Out) {
         match action {
             AppAction::NewSession {
@@ -1219,14 +1250,20 @@ impl AppCore {
             }),
             AppAction::ReturnToSession(id) => self.return_to_session(id, now, out),
             AppAction::SendInput { id, text } => {
-                // A message that reaches the pane ends the chance to undo
-                // a discard; one that finds no pane does not.
-                if self.host_status(id).is_some()
-                    && self.session(id).is_some_and(|s| s.discard.is_some())
-                {
-                    self.edit_session(id, out, |s| s.discard = None);
+                self.send_to_pane(id, out, |host| Effect::SendInput { host, text });
+            }
+            AppAction::SendMessage { id, text, from } => {
+                // The editor emptied itself when it queued the text, so a
+                // send that finds no pane hands the text back.
+                if from == Composer::Editor && self.running_host(id).is_none() {
+                    self.primed.push((id, text.clone()));
                 }
-                self.aim_at_pane(id, out, |host| Effect::SendInput { host, text });
+                self.send_to_pane(id, out, |host| Effect::SendMessage {
+                    id,
+                    host,
+                    text,
+                    from,
+                });
             }
             AppAction::InputTyped { id } => {
                 if self.session(id).is_some() {
@@ -2816,6 +2853,15 @@ impl AppCore {
     pub fn host_status(&self, id: RecordId) -> Option<&HostStatus> {
         let name = id.host_name();
         self.host.iter().find(|h| h.id.0 == name)
+    }
+    /// Type a message into the record's pane. A message that reaches the
+    /// pane ends the chance to undo a discard; one that finds no pane
+    /// does not.
+    fn send_to_pane(&mut self, id: RecordId, out: &mut Out, effect: impl FnOnce(HostId) -> Effect) {
+        if self.host_status(id).is_some() && self.session(id).is_some_and(|s| s.discard.is_some()) {
+            self.edit_session(id, out, |s| s.discard = None);
+        }
+        self.aim_at_pane(id, out, effect);
     }
     /// Emit an effect aimed at a record's running pane, or a notice when
     /// there is none.

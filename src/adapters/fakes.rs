@@ -94,6 +94,8 @@ pub struct FakeHostState {
     pub snapshots: HashMap<HostId, String>,
     /// Every spec `spawn` was given, oldest first.
     pub spawned: Vec<SpawnSpec>,
+    /// Every line `write_line` put in a pane, oldest first.
+    pub written: Vec<(HostId, String)>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -138,7 +140,9 @@ impl ProcessHost for FakeHost {
     }
     fn write_line(&self, id: &HostId, text: &str) -> std::io::Result<()> {
         self.write(id, text.as_bytes())?;
-        self.write(id, b"\r")
+        self.write(id, b"\r")?;
+        self.state().written.push((id.clone(), text.to_owned()));
+        Ok(())
     }
     fn kill(&self, _id: &HostId) -> std::io::Result<()> {
         Ok(())

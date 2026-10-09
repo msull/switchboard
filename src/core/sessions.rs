@@ -446,7 +446,7 @@ impl AppCore {
         else {
             return;
         };
-        // Clearing `discard` follows the rule at the `SendInput` arm.
+        // Clearing `discard` follows the rule in `send_to_pane`.
         self.edit_session(id, out, |s| {
             s.asking = None;
             s.discard = None;

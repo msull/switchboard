@@ -12,7 +12,7 @@ use super::document::{self, Body};
 use super::{DrawCtx, GAP, Renaming, UiState, theme};
 use crate::core::grid::{MIN_HEIGHT, MIN_WIDTH};
 use crate::core::{
-    AppAction, AppCore, CardState, GridRect, MenuKind, PinTarget, PinnedItem, RULE_SCALE,
+    AppAction, AppCore, CardState, Composer, GridRect, MenuKind, PinTarget, PinnedItem, RULE_SCALE,
     RadialMenu, RecordId, SessionKind, SessionRecord, SetId, SetRule, UiRequest, clamp_scale,
 };
 
@@ -869,9 +869,10 @@ fn send_line(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord, running:
     let enter = ui.input(|i| i.key_pressed(egui::Key::Enter) && i.modifiers.is_none());
     if response.lost_focus() && enter && !draft.trim().is_empty() {
         let text = draft.clone();
-        cx.dispatch(AppAction::SendInput {
+        cx.dispatch(AppAction::SendMessage {
             id: record.id,
             text,
+            from: Composer::Line,
         });
         ui.memory_mut(|m| m.request_focus(field_id));
     }
