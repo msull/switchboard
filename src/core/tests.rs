@@ -10969,6 +10969,28 @@ mod answering {
         assert!(sends(&e).is_empty());
     }
 
+    /// A fired wakeup or a subagent's hand-back after a failed stop is
+    /// not the owner replying: the stored answer waits for the `Stop`.
+    #[test]
+    fn an_injected_wakeup_keeps_the_answer_for_its_stop() {
+        let (mut core, id) = asked("confirm", &[]);
+        hook(&mut core, id, EventKind::ToolFinished, 4_000);
+        answer(&mut core, id, "yes", 5_000);
+        hook(&mut core, id, EventKind::StopFailed { reason: None }, 6_000);
+        let e = hook(&mut core, id, EventKind::PromptInjected, 7_000);
+        assert!(sends(&e).is_empty());
+        let asking = core.session(id).unwrap().asking.as_ref().unwrap();
+        assert_eq!(asking.answer.as_deref(), Some("yes"));
+        assert!(
+            !core
+                .notices()
+                .iter()
+                .any(|n| n.text.contains("replaced the answer"))
+        );
+        let e = hook(&mut core, id, stopped(), 8_000);
+        assert_eq!(sends(&e), ["Owner answered \"pick\": yes"]);
+    }
+
     #[test]
     fn an_answer_that_does_not_fit_the_question_is_refused() {
         let cases: [(Option<&str>, &[&str], &str); 4] = [
