@@ -84,6 +84,7 @@ impl AppCore {
             waiting_on: None,
             pending_launch: false,
             last_stop_at: None,
+            pending_at_stop: None,
             env: Vec::new(),
             env_sets: Vec::new(),
             token_hash: None,
@@ -741,6 +742,7 @@ impl AppCore {
             waiting_on: None,
             pending_launch: true,
             last_stop_at: None,
+            pending_at_stop: None,
             // A clone is a new Dispatch attempt and is sent its own, and
             // may be a different operator, so it is granted only the sets
             // the asker names.
@@ -882,6 +884,8 @@ impl AppCore {
                     s.activity_reason = None;
                     // A new process has asked nothing yet.
                     s.asking = None;
+                    // Nor left anything in flight.
+                    s.pending_at_stop = None;
                     s.last_exit = None;
                     s.pending_launch = false;
                 });

@@ -24,7 +24,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use serde::Deserialize;
 use uuid::Uuid;
 
-use crate::core::RecordId;
+use crate::core::{RecordId, StopPending, Wakeup};
 use crate::ports::events::{EventKind, EventSource, SessionEvent};
 
 const LOG_FILE: &str = "events.log";
@@ -73,10 +73,116 @@ struct LogLine {
     /// and read as typed.
     #[serde(default)]
     injected: bool,
+    /// The `Stop` payload's `background_tasks`, kinds only; absent on
+    /// other events and from an older helper.
+    #[serde(default)]
+    tasks: Option<Vec<TaskLine>>,
+    /// The `Stop` payload's `session_crons`, schedules only.
+    #[serde(default)]
+    crons: Option<Vec<CronLine>>,
+}
+
+/// One background task as the helper keeps it (`spikes/20-stop-pending`).
+#[derive(Debug, Deserialize)]
+struct TaskLine {
+    #[serde(rename = "type")]
+    kind: Option<String>,
+    agent_type: Option<String>,
+}
+
+/// One session cron as the helper keeps it.
+#[derive(Debug, Deserialize)]
+struct CronLine {
+    schedule: Option<String>,
+    #[serde(default)]
+    recurring: bool,
+}
+
+/// What a Stop at `at` listed, or `None` when the line had neither list.
+fn stop_pending(
+    tasks: Option<Vec<TaskLine>>,
+    crons: Option<Vec<CronLine>>,
+    at: SystemTime,
+) -> Option<StopPending> {
+    if tasks.is_none() && crons.is_none() {
+        return None;
+    }
+    let tasks = tasks
+        .unwrap_or_default()
+        .into_iter()
+        .map(|t| match (t.kind.as_deref(), t.agent_type) {
+            (Some("subagent"), Some(agent)) if !agent.is_empty() => format!("subagent {agent}"),
+            (Some(kind), _) => kind.to_owned(),
+            (None, _) => "task".to_owned(),
+        })
+        .collect();
+    let wakeups = crons
+        .unwrap_or_default()
+        .into_iter()
+        .map(|c| Wakeup {
+            fire_at: c
+                .schedule
+                .filter(|_| !c.recurring)
+                .and_then(|s| fire_time(&chrono::Local, &s, at)),
+            recurring: c.recurring,
+        })
+        .collect();
+    Some(StopPending { tasks, wakeups })
+}
+
+/// A one-shot cron's fire time: the first minute in `tz` at or after
+/// `after` (less a minute) that the five-field `schedule` matches.
+/// Claude Code writes a wakeup as `M H * * *` in local time (spike 20);
+/// a field may also be a plain number, and anything else (a step, a
+/// range, a list) gives `None`. The minute of slack keeps a wakeup that
+/// fires in the same minute as the Stop from rolling to tomorrow.
+fn fire_time<Tz: chrono::TimeZone>(
+    tz: &Tz,
+    schedule: &str,
+    after: SystemTime,
+) -> Option<SystemTime> {
+    use chrono::{Datelike as _, Days, NaiveTime, Timelike as _};
+
+    let fields: Vec<&str> = schedule.split_whitespace().collect();
+    let [minute, hour, day, month, weekday] = fields.as_slice() else {
+        return None;
+    };
+    let field = |f: &str| -> Option<Option<u32>> {
+        if f == "*" {
+            Some(None)
+        } else {
+            f.parse().ok().map(Some)
+        }
+    };
+    let (Some(minute), Some(hour)) = (field(minute)?, field(hour)?) else {
+        return None;
+    };
+    let (day, month, weekday) = (field(day)?, field(month)?, field(weekday)?);
+    let time = NaiveTime::from_hms_opt(hour, minute, 0)?;
+    // Whole minutes: the minute before the Stop's own counts entire.
+    let start = chrono::DateTime::<chrono::Utc>::from(after.checked_sub(Duration::from_secs(60))?)
+        .with_timezone(tz)
+        .with_second(0)?
+        .with_nanosecond(0)?;
+    let first = start.date_naive();
+    // A year and a day covers every fixed day and month.
+    (0..=366).find_map(|n| {
+        let date = first + Days::new(n);
+        let matches = day.is_none_or(|d| date.day() == d)
+            && month.is_none_or(|m| date.month() == m)
+            // Cron counts Sunday as 0 and also 7.
+            && weekday.is_none_or(|w| date.weekday().num_days_from_sunday() == w % 7);
+        if !matches {
+            return None;
+        }
+        let at = tz.from_local_datetime(&date.and_time(time)).earliest()?;
+        (at >= start).then(|| SystemTime::from(at.with_timezone(&chrono::Utc)))
+    })
 }
 
 impl LogLine {
     fn into_event(self) -> Option<SessionEvent> {
+        let at = UNIX_EPOCH + Duration::from_millis(self.at);
         let kind = match self.event.as_str() {
             "SessionStart" => EventKind::SessionStart,
             "UserPromptSubmit" if self.injected => EventKind::PromptInjected,
@@ -88,6 +194,7 @@ impl LogLine {
             "PermissionDenied" => EventKind::PermissionDenied,
             "Stop" => EventKind::Stopped {
                 last_message: self.last_message,
+                pending: stop_pending(self.tasks, self.crons, at),
             },
             "StopFailure" => EventKind::StopFailed { reason: self.error },
             "Notification" => EventKind::Notification {
@@ -99,7 +206,7 @@ impl LogLine {
             _ => return None,
         };
         Some(SessionEvent {
-            at: UNIX_EPOCH + Duration::from_millis(self.at),
+            at,
             seq: self.seq,
             record_id: self
                 .record_id
@@ -406,9 +513,121 @@ mod tests {
         assert_eq!(
             events[0].kind,
             EventKind::Stopped {
-                last_message: Some("pong".into())
+                last_message: Some("pong".into()),
+                pending: None,
             }
         );
+    }
+
+    #[test]
+    fn a_stop_line_carries_its_pending_lists() {
+        let dir = tempfile::tempdir().unwrap();
+        let tasks = r#","tasks":[{"type":"subagent","status":"running","agent_type":"general-purpose"},{"type":"shell","status":"running","agent_type":null}],"crons":[{"schedule":"*/5 * * * *","recurring":true}]"#;
+        let text = line(1, "Stop", tasks) + &line(2, "Stop", r#","tasks":[],"crons":[]"#);
+        fs::write(dir.path().join(LOG_FILE), text).unwrap();
+        let events = HookLog::new(dir.path()).poll();
+        let pending = |n: usize| match &events[n].kind {
+            EventKind::Stopped { pending, .. } => pending.clone(),
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(
+            pending(0),
+            Some(StopPending {
+                tasks: vec!["subagent general-purpose".into(), "shell".into()],
+                wakeups: vec![Wakeup {
+                    fire_at: None,
+                    recurring: true
+                }],
+            })
+        );
+        assert_eq!(pending(1), Some(StopPending::default()));
+    }
+
+    /// 2026-10-08 22:22:04 UTC.
+    fn stop_at() -> SystemTime {
+        UNIX_EPOCH + Duration::from_secs(1_791_498_124)
+    }
+
+    fn utc(day: u32, hour: u32, minute: u32) -> SystemTime {
+        use chrono::TimeZone as _;
+        chrono::Utc
+            .with_ymd_and_hms(2026, 10, day, hour, minute, 0)
+            .unwrap()
+            .into()
+    }
+
+    #[test]
+    fn a_one_shot_wakeup_fires_later_today() {
+        assert_eq!(stop_at(), utc(8, 22, 22) + Duration::from_secs(4));
+        assert_eq!(
+            fire_time(&chrono::Utc, "24 22 * * *", stop_at()),
+            Some(utc(8, 22, 24))
+        );
+        // In the Stop's own minute, or the one before, it has not fired yet.
+        assert_eq!(
+            fire_time(&chrono::Utc, "22 22 * * *", stop_at()),
+            Some(utc(8, 22, 22))
+        );
+        assert_eq!(
+            fire_time(&chrono::Utc, "21 22 * * *", stop_at()),
+            Some(utc(8, 22, 21))
+        );
+        assert_eq!(
+            fire_time(&chrono::Utc, "20 22 * * *", stop_at()),
+            Some(utc(9, 22, 20))
+        );
+        let east = chrono::FixedOffset::east_opt(2 * 3600).unwrap();
+        assert_eq!(
+            fire_time(&east, "30 0 * * *", stop_at()),
+            Some(utc(8, 22, 30))
+        );
+    }
+
+    #[test]
+    fn a_one_shot_wakeup_past_its_time_rolls_to_tomorrow() {
+        assert_eq!(
+            fire_time(&chrono::Utc, "5 22 * * *", stop_at()),
+            Some(utc(9, 22, 5))
+        );
+        // A Stop a few minutes after the minute it scheduled, the turn
+        // having run on; `StopPending::held_until` caps what this holds.
+        assert_eq!(
+            fire_time(&chrono::Utc, "18 22 * * *", stop_at()),
+            Some(utc(9, 22, 18))
+        );
+        assert_eq!(
+            fire_time(&chrono::Utc, "0 9 12 10 *", stop_at()),
+            Some(utc(12, 9, 0))
+        );
+    }
+
+    #[test]
+    fn a_recurring_or_unreadable_cron_has_no_fire_time() {
+        let pending = stop_pending(
+            None,
+            Some(vec![
+                CronLine {
+                    schedule: Some("24 22 * * *".into()),
+                    recurring: true,
+                },
+                CronLine {
+                    schedule: Some("*/5 22 * * *".into()),
+                    recurring: false,
+                },
+                CronLine {
+                    schedule: None,
+                    recurring: false,
+                },
+            ]),
+            stop_at(),
+        )
+        .unwrap();
+        assert!(pending.tasks.is_empty());
+        assert!(pending.wakeups.iter().all(|w| w.fire_at.is_none()));
+        for bad in ["", "24 22 * *", "61 22 * * *", "24 x * * *", "* 22 * * *"] {
+            assert_eq!(fire_time(&chrono::Utc, bad, stop_at()), None, "{bad}");
+        }
+        assert_eq!(stop_pending(None, None, stop_at()), None);
     }
 
     #[test]

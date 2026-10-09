@@ -3031,16 +3031,23 @@ impl AppCore {
             .collect()
     }
     /// The card state as text, with the reason when the session waits:
-    /// "waiting on you: permission for Bash".
+    /// "waiting on you: permission for Bash", or what an idle agent's
+    /// last Stop left in flight: "idle: 2 pending".
     #[must_use]
     pub fn state_text(&self, id: RecordId) -> String {
         let state = self.card_state(id);
         let label = state.label();
-        match self
-            .session(id)
-            .filter(|_| state == CardState::WaitingOnYou)
-            .and_then(|s| s.activity_reason.as_deref())
-        {
+        let session = self.session(id);
+        let reason = match state {
+            CardState::WaitingOnYou => session.and_then(|s| s.activity_reason.clone()),
+            // An idle card's pane runs, so what its Stop listed is live.
+            CardState::Idle => session
+                .and_then(|s| s.pending_at_stop.as_ref())
+                .filter(|p| !p.is_empty())
+                .map(|p| format!("{} pending", p.tasks.len() + p.wakeups.len())),
+            _ => None,
+        };
+        match reason {
             Some(reason) => format!("{label}: {reason}"),
             None => label,
         }

@@ -751,6 +751,7 @@ impl AppCore {
             _ => None,
         };
         let card = self.card_state(id);
+        let pending = s.pending_at_stop.as_ref();
         Some(wire::SessionView {
             id: id.0.to_string(),
             project: s.project.0.to_string(),
@@ -775,6 +776,11 @@ impl AppCore {
             prompt_refusal: self.ready_for_prompt(id, now).err(),
             resume_id: s.resume.as_ref().map(super::ResumeHandle::provider_id),
             op: s.op.clone(),
+            pending: pending.map(super::StopPending::labels).unwrap_or_default(),
+            wakeup_at_ms: pending
+                .and_then(super::StopPending::next_wakeup)
+                .and_then(epoch_ms),
+            held_until_ms: s.held_until().and_then(epoch_ms),
         })
     }
 

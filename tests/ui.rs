@@ -20,11 +20,11 @@ use switchboard::adapters::fakes::{
 };
 use switchboard::app::Services;
 use switchboard::core::{
-    Activity, AgentKind, AppAction, Approval, Ask, AskKind, BUILTIN_WORKFLOW, CardLayout, Composer,
-    ControlAction, Definition, HandoffMode, Launch, Notice, PinTarget, Project, ProjectEnv,
-    ProjectId, RecordId, ResumeHandle, Round, RunState, SessionKind, SessionRecord, SideTab,
-    SpaceId, ThemeMode, Verdict, View, VoiceSettings, WorkflowId, WorkflowRun, Workspace,
-    round_paths,
+    Activity, AgentKind, AppAction, Approval, Ask, AskKind, BUILTIN_WORKFLOW, CardLayout,
+    CardState, Composer, ControlAction, Definition, HandoffMode, Launch, Notice, PinTarget,
+    Project, ProjectEnv, ProjectId, RecordId, ResumeHandle, Round, RunState, SessionKind,
+    SessionRecord, SideTab, SpaceId, StopPending, ThemeMode, Verdict, View, VoiceSettings, Wakeup,
+    WorkflowId, WorkflowRun, Workspace, round_paths,
 };
 use switchboard::ports::changes::{Changes, Commit, FileStat};
 use switchboard::ports::events::{EventKind, SessionEvent};
@@ -99,6 +99,7 @@ fn record(project: ProjectId, name: &str, kind: SessionKind, order: u32) -> Sess
         waiting_on: None,
         pending_launch: false,
         last_stop_at: None,
+        pending_at_stop: None,
         env: Vec::new(),
         env_sets: Vec::new(),
         token_hash: None,
@@ -1591,6 +1592,39 @@ fn waiting_reason_is_shown_in_the_session_header() {
     harness.get_by_label("waiting on you: permission for Bash");
 }
 
+/// An idle agent whose last Stop left work in flight says how much, and
+/// still reads idle rather than waiting on you.
+#[test]
+fn an_idle_agent_with_pending_work_says_so_in_the_header() {
+    let (mut harness, ids) = harness();
+    let id = seed_claude(&mut harness, &ids);
+    let core = harness.state_mut().core_mut_for_seeding();
+    let mut workspaces = core.workspaces().to_vec();
+    let host: Vec<HostStatus> = workspaces
+        .iter()
+        .flat_map(|w| &w.sessions)
+        .filter_map(|s| core.host_status(s.id).cloned())
+        .collect();
+    let record = workspaces
+        .iter_mut()
+        .flat_map(|w| &mut w.sessions)
+        .find(|s| s.id == id)
+        .unwrap();
+    record.activity = Activity::Idle;
+    record.last_stop_at = Some(SystemTime::now());
+    record.pending_at_stop = Some(StopPending {
+        tasks: vec!["shell".into()],
+        wakeups: vec![Wakeup {
+            fire_at: None,
+            recurring: true,
+        }],
+    });
+    core.seed(workspaces, host);
+    showing(&mut harness, View::Session(id));
+    harness.get_by_label("idle: 2 pending");
+    assert_eq!(harness.state().core().card_state(id), CardState::Idle);
+}
+
 /// A Claude Code session, running, with a resume handle: the shape the
 /// conversation view needs. Added on top of the standard seed.
 fn seed_claude(harness: &mut Harness<'static, SwitchboardApp>, ids: &Seeded) -> RecordId {
@@ -2363,7 +2397,10 @@ fn a_delivery_leaves_the_message_box_draft() {
             provider_session_id: None,
             cwd: None,
             transcript_path: None,
-            kind: EventKind::Stopped { last_message: None },
+            kind: EventKind::Stopped {
+                last_message: None,
+                pending: None,
+            },
         }]));
     let view = harness
         .state()

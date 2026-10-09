@@ -256,7 +256,8 @@ pub const DIRTY_WAIT_MS: u64 = 300_000;
 /// artifact before it counts as finished without it: about thirty
 /// seconds at one poll a second. A card that reads anything but idle
 /// (background agents still working, a question to the user) starts
-/// the count again.
+/// the count again, and so does a poll while the app holds the stop
+/// for the background work or wakeup it listed (`held_until_ms`).
 pub const STOP_IDLE_POLLS: u32 = 30;
 
 /// One run of one stage in one context.
@@ -350,8 +351,27 @@ pub struct Attempt {
     /// and once released, how its question was asked.
     #[serde(default)]
     pub waits: Option<MergeWait>,
+    /// Sessions whose artifact is missing but whose last Stop listed
+    /// background work or a wakeup the app still holds them for, keyed
+    /// by session id; what `show` says keeps the attempt open. Removed
+    /// before each poll reads the session and written back by
+    /// `hold_if_held` while the hold lasts.
+    #[serde(default)]
+    pub held: BTreeMap<String, Held>,
     pub started_ms: u64,
     pub ended_ms: Option<u64>,
+}
+
+/// Why a stopped agent's missing artifact is not yet counted against it:
+/// its last Stop listed work still in flight.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Held {
+    /// Background task kinds, then `wakeup` or `recurring wakeup`.
+    pub pending: Vec<String>,
+    /// The earliest one-shot wakeup's fire time, in ms.
+    pub wakeup_at_ms: Option<u64>,
+    /// When the app stops holding it, in ms.
+    pub until_ms: u64,
 }
 
 /// A lane's merge question held until another lane merges and, when

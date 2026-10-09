@@ -32,7 +32,7 @@ use crate::store::{
 use crate::template::Vars;
 use crate::ticket::{
     Attempt, AttemptKind, AttemptState, CheckGroup, CloseProgress, Decision, DecisionKind,
-    DecisionState, GateRun, LaneRecord, MergeWait, Operation, OrphanKill, ProjectState,
+    DecisionState, GateRun, Held, LaneRecord, MergeWait, Operation, OrphanKill, ProjectState,
     PullRequestRecord, PullRequestSource, RefreshConflict, Refreshed, Released, SETTLE_POLLS,
     STOP_IDLE_POLLS, STUCK, ServiceState, Settle, SourceSnapshot, Ticket, TicketState, WaitUntil,
 };
@@ -6388,6 +6388,7 @@ impl Runner {
         if a.gate.is_some() {
             return self.poll_gate(t, ps, p, a, stage, cwd, lane, now_ms);
         }
+        record_of(t, &a.stage, a.n).held.remove(&session);
         let Some(view) = self.watched_view(t, ps, a, &session, now_ms)? else {
             return Ok(());
         };
@@ -6423,6 +6424,10 @@ impl Runner {
         let running = view.liveness == wire::Liveness::Running;
         let missing = missing_artifacts(attempt);
         if !missing.is_empty() {
+            let (holds, polls) = (&mut attempt.held, &mut attempt.polls_since_stop);
+            if hold_if_held(holds, &session, &view, now_ms, polls) {
+                return self.save_ticket(t, now_ms);
+            }
             attempt.polls_since_stop = idle_polls(&view, attempt.polls_since_stop);
             if !running || attempt.polls_since_stop >= STOP_IDLE_POLLS {
                 return self.fail_attempt(
@@ -6430,7 +6435,11 @@ impl Runner {
                     ps,
                     &a.stage,
                     a.n,
-                    &format!("stopped without writing {}", missing.join(", ")),
+                    &format!(
+                        "stopped without writing {}{}",
+                        missing.join(", "),
+                        still_listed(&view)
+                    ),
                     now_ms,
                 );
             }
@@ -8123,6 +8132,50 @@ pub(crate) const NO_SUCH_RUN: &str = "no such run";
 /// a turn ended but the work did not (background agents, a tool).
 pub(crate) fn busy(view: &wire::SessionView) -> bool {
     view.liveness == wire::Liveness::Running && view.card == wire::CARD_WORKING
+}
+
+/// A running pane whose last Stop listed background work or a wakeup
+/// the app still holds it for: the turn ended, the work did not. Checked
+/// only with an artifact missing, so a present one completes as ever.
+fn held(view: &wire::SessionView, now_ms: u64) -> bool {
+    view.liveness == wire::Liveness::Running
+        && view.held_until_ms.is_some_and(|until| now_ms < until)
+}
+
+/// For a poll with an artifact missing: when the view is `held`, record
+/// the hold under `session` in `holds` and restart the idle count. Each
+/// poller removes the session's entry before it reads the view, so an
+/// entry stands only while every poll writes it back here.
+pub(crate) fn hold_if_held(
+    holds: &mut BTreeMap<String, Held>,
+    session: &str,
+    view: &wire::SessionView,
+    now_ms: u64,
+    polls: &mut u32,
+) -> bool {
+    if !held(view, now_ms) {
+        return false;
+    }
+    *polls = 0;
+    holds.insert(
+        session.to_owned(),
+        Held {
+            pending: view.pending.clone(),
+            wakeup_at_ms: view.wakeup_at_ms,
+            until_ms: view.held_until_ms.unwrap_or_default(),
+        },
+    );
+    true
+}
+
+/// The end of a "stopped without writing" reason when the last Stop
+/// still listed work: ` (still listed: shell)`, else nothing.
+pub(crate) fn still_listed(view: &wire::SessionView) -> String {
+    if view.pending.is_empty() {
+        String::new()
+    } else {
+        format!(" (still listed: {})", view.pending.join(", "))
+    }
 }
 
 /// The idle count after one more poll with an artifact missing: only a
@@ -9823,6 +9876,7 @@ pub(crate) fn new_attempt(
         forgotten: BTreeMap::new(),
         revisions: Vec::new(),
         waits: None,
+        held: BTreeMap::new(),
         settle: BTreeMap::new(),
         stop_at_ms: None,
         polls_since_stop: 0,

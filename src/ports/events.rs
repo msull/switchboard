@@ -6,7 +6,7 @@ use std::time::SystemTime;
 
 use serde::{Deserialize, Serialize};
 
-use crate::core::RecordId;
+use crate::core::{RecordId, StopPending};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum EventKind {
@@ -22,6 +22,10 @@ pub enum EventKind {
     PermissionDenied,
     Stopped {
         last_message: Option<String>,
+        /// What the Stop listed as still in flight; `None` when the
+        /// hook line had neither list (an older helper or Claude Code).
+        #[serde(default)]
+        pending: Option<StopPending>,
     },
     /// The turn ended on an API error; `reason` is the provider's short
     /// code (`rate_limit`, `authentication_failed`, ...).

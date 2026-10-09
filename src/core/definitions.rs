@@ -253,6 +253,7 @@ fn upsert(
         waiting_on: None,
         pending_launch: false,
         last_stop_at: None,
+        pending_at_stop: None,
         env: Vec::new(),
         env_sets: Vec::new(),
         token_hash: None,

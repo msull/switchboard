@@ -688,6 +688,25 @@ impl<'a> Flags<'a> {
     }
 }
 
+/// Why an open attempt's agent is not yet failed for its missing
+/// artifact: `  root held: subagent general-purpose, wakeup at
+/// 2026-10-08 15:40 (until 2026-10-08 16:10)`.
+fn held_line(context: &str, h: &dispatch_control::HeldView) -> String {
+    let mut pending = h.pending.clone();
+    // The earliest one-shot wakeup is one of the plain `wakeup` entries.
+    if let (Some(at), Some(first)) = (
+        h.wakeup_at_ms,
+        pending.iter_mut().find(|p| p.as_str() == "wakeup"),
+    ) {
+        *first = format!("wakeup at {}", local_time(at));
+    }
+    format!(
+        "  {context} held: {} (until {})",
+        pending.join(", "),
+        local_time(h.until_ms)
+    )
+}
+
 /// `YYYY-MM-DD hh:mm` of `ms` since the epoch, in the local zone, as
 /// `clock` reads it; for a moment that may be days back.
 fn local_time(ms: u64) -> String {
@@ -924,6 +943,9 @@ fn show(args: &[&str]) -> Result<()> {
                 a.context,
                 local_time(since)
             );
+        }
+        for h in &a.held {
+            say!("{}", held_line(&a.context, h));
         }
     }
     print_attempts(&view)?;

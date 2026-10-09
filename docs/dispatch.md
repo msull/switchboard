@@ -555,10 +555,17 @@ interrupted attempt.
   written on the attempt when seen. A Stop while the card reads
   `working` is a turn ended, not the work (background agents or a
   tool still at it), so the attempt is held, neither failed nor
-  completed, whatever the artifact says. A stop with no file fails
-  once the pane has sat idle at its prompt for about thirty seconds
-  in a row (`STOP_IDLE_POLLS`; any other card starts the count again)
-  or the pane exits. A card that reads idle is not a stop on its own:
+  completed, whatever the artifact says. A Stop that listed
+  background work or a wakeup holds the same way while Switchboard's
+  view of the session gives a `held_until_ms` still ahead (the
+  wakeup's time plus thirty seconds but no more than 65 minutes after
+  the Stop, or thirty minutes after the Stop
+  for background work, a recurring cron or one it cannot read); the
+  attempt records the hold, which `dispatch show` prints, and a
+  failure after it ends names what the Stop still listed. A stop with
+  no file fails once the pane has sat idle at its prompt, unheld, for
+  about thirty seconds in a row (`STOP_IDLE_POLLS`; any other card
+  starts the count again) or the pane exits. A card that reads idle is not a stop on its own:
   for a Codex session Switchboard shows a quiet pane as idle after
   twenty seconds, which can be an agent thinking. For Claude Code,
   `idle` follows a Stop, and only after one does it count toward the
@@ -2960,6 +2967,11 @@ and one against the real one:
 | The base moved under a branch with no commits | The branch moves; no rebase check (`a_review_after_a_clean_move_has_no_rebase_check`) |
 | A command reviewer exits 2; an agent reviewer stops with no file | The round fails into `rerun`; the sibling session is killed first; neither is an approval (`a_failed_reviewer_fails_the_round_after_its_siblings_are_killed`) |
 | An agent stops while its card still reads `working`, and writes its notes in a later turn | The attempt is held with no failure, no question and no kill; notes written mid-turn complete nothing until a Stop leaves the card idle (`a_stop_while_still_working_holds_the_attempt_until_the_notes_land`; idle without notes fails only after `STOP_IDLE_POLLS`: `a_stop_idle_without_notes_fails_after_the_grace`) |
+| An agent stops idle with notes missing and its Stop listed a background agent, then writes them in a later turn | The attempt is held past the grace with no failure, question or kill, and `show` prints the hold; the later turn's notes and Stop complete it and drop the hold (`a_stop_listing_a_background_agent_holds_the_attempt_until_the_notes_land`) |
+| A Stop listed a wakeup | Held until the wakeup's time and the grace are past; then the idle count runs from zero and fails it into `rerun` (`a_stop_listing_a_wakeup_holds_until_it_has_passed`) |
+| A Stop listed background work that never ends | Held for the thirty-minute cap only; the failure ends `(still listed: shell)` (`a_background_hold_that_runs_out_fails_and_names_what_was_listed`) |
+| The notes are present at a Stop that still holds | They settle and complete the attempt; no hold is kept (`notes_present_complete_while_the_stop_still_holds`) |
+| A Claude reviewer or the round's implementer is held by what its Stop listed | No result, no rerun, no kill while held; its later write finishes the round, and feedback already present counts at once; a held reviewer whose session goes away fails and leaves no hold (`a_reviewer_held_by_its_stop_writes_later_and_completes_the_round`, `a_reviewers_feedback_present_counts_while_its_stop_holds`, `an_implementer_held_by_its_stop_keeps_its_round`, `a_held_reviewer_whose_session_is_gone_leaves_no_hold`) |
 | A Claude reviewer stops busy and writes later | No result, no rerun, no sibling killed while it works; its later write and Stop finish the round (`a_reviewer_that_stops_busy_and_writes_later_completes_the_round`; the implementer the same: `an_implementer_that_stops_busy_keeps_its_round`) |
 | A `workflow` query the app could not answer, or a socket timeout | The review attempt keeps running and the next pass reads the run; only `no such run` fails it; a park waits until the run is confirmed paused (`a_workflow_query_the_app_could_not_answer_leaves_the_attempt_running`, `a_run_switchboard_no_longer_has_fails_the_attempt`, `parking_waits_while_the_app_cannot_say_the_run_paused`) |
 | A provider reads no checks within two minutes of a head move | The reading is recorded and the gate waits; past `PR_YOUNG_HEAD_MS` it is the `pr` question (`a_none_reading_soon_after_a_push_waits_then_asks`) |

@@ -649,6 +649,20 @@ pub struct SessionView {
     /// The provider's session id, once the agent has one.
     pub resume_id: Option<String>,
     pub op: Option<String>,
+    /// What the agent's last Stop listed as still in flight: background
+    /// task kinds (`shell`, `subagent general-purpose`), then `wakeup` or
+    /// `recurring wakeup` per cron. Empty from an older app.
+    #[serde(default)]
+    pub pending: Vec<String>,
+    /// The earliest one-shot wakeup's fire time, in milliseconds since
+    /// the epoch.
+    #[serde(default)]
+    pub wakeup_at_ms: Option<u64>,
+    /// Until when the last Stop is not the end of the agent's work: the
+    /// wakeup's time plus a grace, or a cap on background work. `None`
+    /// when nothing is pending; an older app omits it.
+    #[serde(default)]
+    pub held_until_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -905,6 +919,9 @@ mod tests {
             prompt_refusal: None,
             resume_id: Some("uuid".into()),
             op: Some("op-1".into()),
+            pending: vec!["shell".into(), "wakeup".into()],
+            wakeup_at_ms: Some(2),
+            held_until_ms: Some(3),
         }
     }
 
