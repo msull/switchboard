@@ -10680,7 +10680,7 @@ fn closing_by_hand_removes_the_lanes_then_the_tree_and_keeps_the_rest() {
     let artifact = artifact_of(&env.ticket(&id), "investigate", "notes");
     std::fs::write(&artifact, "# half").unwrap();
     let now = env.tick();
-    let t = env.runner.close_by_hand(&id, None, now).unwrap();
+    let t = env.runner.close_by_hand(&id, None, false, now).unwrap();
     assert!(
         matches!(&t.state, TicketState::Closed { reason } if reason == "closed by hand"),
         "{t:#?}"
@@ -10717,14 +10717,17 @@ fn a_parked_ticket_closes_with_the_reason_given_and_is_never_stepped_again() {
     let now = env.tick();
     let t = env
         .runner
-        .close_by_hand(&id, Some("fixed upstream"), now)
+        .close_by_hand(&id, Some("fixed upstream"), false, now)
         .unwrap();
     assert!(matches!(&t.state, TicketState::Closed { reason } if reason == "fixed upstream"));
     assert_eq!(env.repo.lock().unwrap().removed.len(), 3);
     let calls = env.sb().calls.len();
     env.step();
     assert_eq!(env.sb().calls.len(), calls, "a closed ticket is quiet");
-    let e = env.runner.close_by_hand(&id, None, env.now).unwrap_err();
+    let e = env
+        .runner
+        .close_by_hand(&id, None, false, env.now)
+        .unwrap_err();
     assert!(e.to_string().contains("already closed"), "{e:#}");
 }
 
@@ -10734,7 +10737,7 @@ fn a_ticket_whose_pipeline_copy_is_unreadable_closes_and_keeps_its_trees() {
     let t = env.ticket(&id);
     std::fs::remove_file(&t.pipeline_file).unwrap();
     let now = env.tick();
-    let t = env.runner.close_by_hand(&id, None, now).unwrap();
+    let t = env.runner.close_by_hand(&id, None, false, now).unwrap();
     assert!(matches!(t.state, TicketState::Closed { .. }), "{t:#?}");
     let kept = t.close.trees_kept.as_deref().unwrap_or_default();
     assert!(kept.contains("pipeline copy unreadable"), "{kept}");
@@ -10747,7 +10750,7 @@ fn refused(env: &mut Env, id: &str, why: &str) {
     let project = env.ticket(id).project;
     let ps = env.runner.load_project(&project).unwrap();
     let now = env.tick();
-    let e = env.runner.close_by_hand(id, None, now).unwrap_err();
+    let e = env.runner.close_by_hand(id, None, false, now).unwrap_err();
     assert!(format!("{e:#}").contains(why), "{e:#}");
     assert_eq!(std::fs::read(env.data.ticket_file(id)).unwrap(), before);
     assert_eq!(env.runner.load_project(&project).unwrap(), ps);
@@ -10785,7 +10788,7 @@ fn a_close_is_refused_while_anything_runs_or_a_tree_has_changes() {
         vec!["orchard-backend".into(), "orchard-frontend".into()],
     );
     let now = env.tick();
-    env.runner.close_by_hand(&id, None, now).unwrap();
+    env.runner.close_by_hand(&id, None, false, now).unwrap();
 }
 
 // --- a retake after close: the kept branches of the closed ticket are
@@ -10801,7 +10804,7 @@ fn retake_branch() -> String {
 /// the new ticket's id.
 fn close_and_retake(env: &mut Env, id: &str, edit: impl FnOnce(&mut FakeRepo)) -> String {
     let now = env.tick();
-    let t = env.runner.close_by_hand(id, None, now).unwrap();
+    let t = env.runner.close_by_hand(id, None, false, now).unwrap();
     assert!(matches!(t.state, TicketState::Closed { .. }), "{t:#?}");
     edit(&mut env.repo.lock().unwrap());
     let now = env.tick();
@@ -11224,7 +11227,7 @@ fn a_pipeline_that_works_in_place_closes_and_removes_nothing() {
     std::fs::write(env.data.pipeline(PROJECT), &text).unwrap();
     let id = env.take(7).id;
     let now = env.tick();
-    let t = env.runner.close_by_hand(&id, None, now).unwrap();
+    let t = env.runner.close_by_hand(&id, None, false, now).unwrap();
     assert!(matches!(t.state, TicketState::Closed { .. }), "{t:#?}");
     assert!(env.repo.lock().unwrap().removed.is_empty());
     assert!(env.sb().calls.is_empty(), "nothing made, nothing to undo");
@@ -11388,7 +11391,7 @@ fn a_waiting_mark_is_cleared_after_a_stop_and_only_counted_once_answered() {
     let investigator = at_rerun(&mut env, &id);
     env.sb().drop_reply_for = Some("session.waiting".into());
     let now = env.tick();
-    let e = env.runner.close_by_hand(&id, None, now).unwrap_err();
+    let e = env.runner.close_by_hand(&id, None, false, now).unwrap_err();
     assert!(format!("{e:#}").contains("is closing"), "{e:#}");
     let t = env.ticket(&id);
     assert!(matches!(t.state, TicketState::Closing { .. }));
@@ -11404,7 +11407,7 @@ fn a_waiting_mark_is_cleared_after_a_stop_and_only_counted_once_answered() {
 fn a_closed_ticket_left_in_the_closing_list_is_dropped_by_the_next_pass() {
     let (mut env, id) = parked_workspace();
     let now = env.tick();
-    env.runner.close_by_hand(&id, None, now).unwrap();
+    env.runner.close_by_hand(&id, None, false, now).unwrap();
     let mut ps = env.runner.load_project("Orchard").unwrap();
     ps.closing.push(id.clone());
     env.runner.save_project(&ps).unwrap();
@@ -11482,7 +11485,7 @@ fn a_close_waits_for_a_launch_in_flight_and_kills_what_it_brought_up() {
     };
     env.runner.save_ticket(&mut t, env.now).unwrap();
     let now = env.tick();
-    let t = env.runner.close_by_hand(&id, None, now).unwrap();
+    let t = env.runner.close_by_hand(&id, None, false, now).unwrap();
     assert!(matches!(t.state, TicketState::Closing { .. }), "{t:#?}");
     assert!(env.sb().killed.is_empty(), "{:?}", env.sb().killed);
     env.sb().in_progress_for = None;
@@ -11739,7 +11742,7 @@ fn a_ticket_never_on_the_set_closes_without_a_sync() {
     let id = env.take(8).id;
     let syncs = env.sb().kinds_called("set.sync");
     let now = env.tick();
-    let t = env.runner.close_by_hand(&id, None, now).unwrap();
+    let t = env.runner.close_by_hand(&id, None, false, now).unwrap();
     assert!(t.close.card_cleared && matches!(t.state, TicketState::Closed { .. }));
     assert_eq!(env.sb().kinds_called("set.sync"), syncs, "unchanged");
 }
@@ -11762,7 +11765,7 @@ fn a_close_beside_a_parked_ticket_still_clears_its_card() {
     env.step();
     assert!(matches!(env.ticket(&a).state, TicketState::Parked { .. }));
     let now = env.tick();
-    env.runner.close_by_hand(&b, None, now).unwrap();
+    env.runner.close_by_hand(&b, None, false, now).unwrap();
     let a_session = session_of(&env.ticket(&a), "investigate");
     let sb = env.sb();
     let items = &sb.sets[0].items;
@@ -11824,7 +11827,7 @@ fn a_queue_change_leaves_a_parked_ticket_first_in_the_queue_untouched() {
     env.step();
     assert!(matches!(env.ticket(&a).state, TicketState::Parked { .. }));
     let now = env.tick();
-    env.runner.close_by_hand(&b, None, now).unwrap();
+    env.runner.close_by_hand(&b, None, false, now).unwrap();
     let ps = env.runner.load_project(PROJECT).unwrap();
     assert_eq!(ps.queue, std::slice::from_ref(&a));
     let a_before = std::fs::read(env.data.ticket_file(&a)).unwrap();
@@ -12018,7 +12021,7 @@ fn a_dirty_tree_at_the_pipelines_end_is_kept_and_removed_by_hand_later() {
     let mut env = Env::new();
     let (id, tree) = closed_with_a_kept_tree(&mut env);
     let now = env.tick();
-    let t = env.runner.close_by_hand(&id, None, now).unwrap();
+    let t = env.runner.close_by_hand(&id, None, false, now).unwrap();
     assert!(t.close.tree_removed && t.close.trees_kept.is_none());
     assert!(matches!(&t.state, TicketState::Closed { reason } if reason == "every stage is done"));
     assert_eq!(
@@ -12814,7 +12817,7 @@ fn a_pass_during_a_hand_close_leaves_the_removal_to_it() {
     let now = env.tick();
     let closer = {
         let id = id.clone();
-        std::thread::spawn(move || cli.runner().close_by_hand(&id, None, now))
+        std::thread::spawn(move || cli.runner().close_by_hand(&id, None, false, now))
     };
     gate.wait_entered();
     let calls = env.sb().calls.len();
@@ -12845,7 +12848,7 @@ fn a_retry_in_progress_keeps_its_trees_retryable() {
     let now = env.tick();
     let retry = {
         let id = id.clone();
-        std::thread::spawn(move || cli.runner().close_by_hand(&id, None, now))
+        std::thread::spawn(move || cli.runner().close_by_hand(&id, None, false, now))
     };
     gate.wait_entered();
     // What a retry killed here would leave: still marked, still
@@ -12874,11 +12877,11 @@ fn a_second_retry_during_a_retry_is_turned_away() {
     let now = env.tick();
     let retry = {
         let id = id.clone();
-        std::thread::spawn(move || cli.runner().close_by_hand(&id, None, now))
+        std::thread::spawn(move || cli.runner().close_by_hand(&id, None, false, now))
     };
     gate.wait_entered();
     let now = env.tick();
-    let e = env.runner.close_by_hand(&id, None, now).unwrap_err();
+    let e = env.runner.close_by_hand(&id, None, false, now).unwrap_err();
     assert!(
         format!("{e:#}").contains("its trees are being removed by another dispatch"),
         "{e:#}"
@@ -15094,7 +15097,7 @@ fn a_restart_is_refused_for_a_closed_ticket() {
     let mut env = Env::new();
     let id = env.take(30).id;
     let now = env.tick();
-    env.runner.close_by_hand(&id, None, now).unwrap();
+    env.runner.close_by_hand(&id, None, false, now).unwrap();
     let e = restart_refused(&mut env, &id, None);
     assert!(e.contains("retake"), "{e}");
 }
@@ -17941,7 +17944,7 @@ fn a_close_at_the_rerun_question_waits_for_a_lost_deploy_still_running() {
     let creds = creds_written(&mut env, &id);
     at_lost_deploy_rerun(&mut env, &id);
     let now = env.tick();
-    env.runner.close_by_hand(&id, None, now).unwrap();
+    env.runner.close_by_hand(&id, None, false, now).unwrap();
     for _ in 0..2 {
         closing_waits_on_the_lost_deploy(&env, &id);
         assert!(creds.exists(), "the secret stays while the deploy runs");
@@ -17975,7 +17978,7 @@ fn a_close_from_parked_waits_for_a_lost_deploy_still_running() {
     let a = deploy_attempt(&env.ticket(&id));
     assert!(a.gate.as_ref().unwrap().group.is_some() && !a.is_open());
     let now = env.tick();
-    env.runner.close_by_hand(&id, None, now).unwrap();
+    env.runner.close_by_hand(&id, None, false, now).unwrap();
     for _ in 0..2 {
         let t = env.ticket(&id);
         assert!(matches!(t.state, TicketState::Closing { .. }), "{t:#?}");
@@ -18574,7 +18577,7 @@ fn parking_and_closing_release_the_hold_after_the_service_is_gone() {
     let session = env.ticket(&id).services[0].session.clone().unwrap();
     env.repo.lock().unwrap().busy_ports.insert(3100);
     let now = env.tick();
-    let t = env.runner.close_by_hand(&id, None, now).unwrap();
+    let t = env.runner.close_by_hand(&id, None, false, now).unwrap();
     assert!(matches!(t.state, TicketState::Closing { .. }), "{t:#?}");
     assert_eq!(holds(&t), ["my-dev"]);
     env.step();
@@ -19118,7 +19121,7 @@ fn parking_and_closing_wait_for_a_running_before() {
         env.step();
     }
     let now = env.tick();
-    env.runner.close_by_hand(&id, None, now).unwrap();
+    env.runner.close_by_hand(&id, None, false, now).unwrap();
     for _ in 0..3 {
         env.step();
     }
@@ -19254,7 +19257,7 @@ fn a_close_held_by_a_hung_before_asks_stuck_and_can_be_answered_while_closing() 
         env.step();
     }
     let now = env.tick();
-    env.runner.close_by_hand(&id, None, now).unwrap();
+    env.runner.close_by_hand(&id, None, false, now).unwrap();
     env.step();
     env.wait(STOP_LIMIT_MS);
     env.step();
@@ -20174,7 +20177,7 @@ fn a_secret_is_deleted_when_the_ticket_closes() {
     let (mut env, id) = secret_env();
     let path = secret_at_tried(&mut env, &id);
     let now = env.tick();
-    env.runner.close_by_hand(&id, None, now).unwrap();
+    env.runner.close_by_hand(&id, None, false, now).unwrap();
     env.steps_until(&id, "closed", |t, _| {
         matches!(t.state, TicketState::Closed { .. })
     });
@@ -21653,4 +21656,357 @@ fn a_ranged_restart_note_reaches_only_the_target_stage() {
         "{:?}",
         t.rework
     );
+}
+
+// --- evidence directories: a stage keeps files it produced, listed at
+// completion and removed some days after the ticket closes
+
+const DAY_MS: u64 = 86_400_000;
+
+/// The back half with `try` keeping an evidence directory, and `policy`
+/// lines added to the policy table.
+fn evidence_env(policy: &str) -> (Env, String) {
+    let mut env = Env::new();
+    let text = BACK_HALF
+        .replace("{worktrees}", &env.worktrees.display().to_string())
+        .replace(
+            "writes = [\"notes\"]\nprompt = \"my-dev",
+            "writes = [\"notes\", { name = \"evidence\", dir = true }]\nprompt = \"Screenshots to {evidence}. my-dev",
+        )
+        .replace("trust_folders = true\n", &format!("trust_folders = true\n{policy}"));
+    std::fs::write(env.data.pipeline("Orchard"), text).unwrap();
+    let id = take_orchard(&mut env, 42, BOTH);
+    (env, id)
+}
+
+/// Deployed and served: the tester is running, and its evidence
+/// directory is made.
+fn tester_running(env: &mut Env, id: &str) -> PathBuf {
+    deployed(env, id);
+    served(env, id);
+    let t = env.ticket(id);
+    let a = t.attempts_of("try").last().unwrap();
+    a.evidence
+        .as_ref()
+        .expect("the attempt records its evidence")
+        .dir
+        .clone()
+}
+
+fn try_evidence(env: &Env, id: &str) -> dispatch::ticket::Evidence {
+    env.ticket(id)
+        .attempts_of("try")
+        .last()
+        .and_then(|a| a.evidence.clone())
+        .unwrap()
+}
+
+fn tried_question(env: &mut Env, id: &str) -> Decision {
+    env.steps_until(id, "the tried question", |t, _| {
+        t.pending_decisions().iter().any(|d| d.name == "tried")
+    });
+    pending_named(env, id, "tried").unwrap()
+}
+
+fn evidence_listed(env: &Env, id: &str) -> Vec<String> {
+    try_evidence(env, id)
+        .files
+        .into_iter()
+        .map(|f| f.rel)
+        .collect()
+}
+
+#[test]
+fn a_tester_is_told_its_evidence_directory_and_its_files_are_listed_at_completion() {
+    use std::os::unix::fs::PermissionsExt;
+    let (mut env, id) = evidence_env("");
+    let dir = tester_running(&mut env, &id);
+    assert!(dir.is_dir());
+    assert_eq!(dir.file_name().unwrap(), "evidence");
+    assert_eq!(
+        std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777,
+        0o700
+    );
+    let testers = session_news(&env, "tester");
+    assert_eq!(testers.len(), 1);
+    let (prompt, vars) = &testers[0];
+    assert!(
+        prompt.contains(&format!("Screenshots to {}.", dir.display())),
+        "{prompt}"
+    );
+    assert_eq!(
+        vars.get("DISPATCH_WRITES_EVIDENCE"),
+        Some(&dir.display().to_string())
+    );
+    std::fs::create_dir_all(dir.join("shots")).unwrap();
+    std::fs::write(dir.join("shots/home.png"), "png").unwrap();
+    std::fs::write(dir.join("steps.md"), "# steps").unwrap();
+    // Never listed: links (one to a file, one to an ancestor that would
+    // loop a walk that followed it) and a FIFO.
+    std::os::unix::fs::symlink(dir.join("steps.md"), dir.join("link.md")).unwrap();
+    std::os::unix::fs::symlink(dir.parent().unwrap(), dir.join("up")).unwrap();
+    let fifo = std::process::Command::new("mkfifo")
+        .arg(dir.join("pipe"))
+        .status()
+        .unwrap();
+    assert!(fifo.success());
+    tester_done(&mut env, &id);
+    assert_eq!(evidence_listed(&env, &id), ["shots/home.png", "steps.md"]);
+    let ev = try_evidence(&env, &id);
+    assert_eq!(ev.files[0].bytes, 3);
+    assert!(ev.over_cap.is_empty());
+    let tried = tried_question(&mut env, &id);
+    assert!(
+        tried.question.contains("evidence: 2 files"),
+        "{}",
+        tried.question
+    );
+}
+
+#[test]
+fn an_empty_evidence_directory_does_not_hold_the_tester() {
+    let (mut env, id) = evidence_env("");
+    tester_running(&mut env, &id);
+    tester_done(&mut env, &id);
+    let t = env.ticket(&id);
+    assert_eq!(
+        t.attempts_of("try").last().unwrap().state,
+        AttemptState::Complete
+    );
+    assert!(evidence_listed(&env, &id).is_empty());
+    let tried = tried_question(&mut env, &id);
+    assert!(!tried.question.contains("evidence:"), "{}", tried.question);
+}
+
+#[test]
+fn evidence_over_a_cap_is_kept_on_disk_and_not_listed() {
+    let (mut env, id) = evidence_env("evidence_file_mb = 1\nevidence_attempt_mb = 2\n");
+    let dir = tester_running(&mut env, &id);
+    let kb = |n: usize| vec![b'x'; n * 1024];
+    std::fs::write(dir.join("a.bin"), kb(900)).unwrap();
+    std::fs::write(dir.join("b.bin"), kb(900)).unwrap();
+    std::fs::write(dir.join("big.bin"), kb(1500)).unwrap();
+    std::fs::write(dir.join("c.bin"), kb(900)).unwrap();
+    tester_done(&mut env, &id);
+    let ev = try_evidence(&env, &id);
+    assert_eq!(evidence_listed(&env, &id), ["a.bin", "b.bin"]);
+    assert_eq!(ev.over_cap, ["big.bin", "c.bin"]);
+    assert!(dir.join("big.bin").is_file() && dir.join("c.bin").is_file());
+}
+
+#[test]
+fn an_evidence_file_still_growing_holds_completion() {
+    let (mut env, id) = evidence_env("");
+    let dir = tester_running(&mut env, &id);
+    let t = env.ticket(&id);
+    let tester = session_of(&t, "try");
+    std::fs::write(artifact_of(&t, "try", "notes"), "it works").unwrap();
+    let now = env.now;
+    env.sb().stop(&tester, now);
+    let shot = dir.join("shot.png");
+    for i in 0..(SETTLE_POLLS + 2) {
+        std::fs::write(&shot, vec![b'p'; 10 + i as usize]).unwrap();
+        env.step();
+    }
+    let t = env.ticket(&id);
+    assert_eq!(
+        t.attempts_of("try").last().unwrap().state,
+        AttemptState::Running
+    );
+    env.steps_until(&id, "tried", |t, _| stage_name(t) == "tried");
+    assert_eq!(evidence_listed(&env, &id), ["shot.png"]);
+}
+
+#[test]
+fn a_gate_only_command_is_given_its_evidence_directory_and_it_is_listed_after_exit_0() {
+    let mut env = Env::new();
+    let text = with_secret_setup(
+        &BACK_HALF.replace("{worktrees}", &env.worktrees.display().to_string()),
+    )
+    .replace(
+        "writes = [{ name = \"personas\", secret = true }]",
+        "writes = [{ name = \"personas\", secret = true }, { name = \"logs\", dir = true }]",
+    );
+    std::fs::write(env.data.pipeline("Orchard"), text).unwrap();
+    let id = take_orchard(&mut env, 42, BOTH);
+    let personas = setup_started(&mut env, &id);
+    let logs = {
+        let repo = env.repo.lock().unwrap();
+        let check = repo
+            .checks
+            .iter()
+            .find(|c| c.key == setup_key(&id, 1))
+            .unwrap();
+        check
+            .env
+            .iter()
+            .find(|(k, _)| k == "DISPATCH_WRITES_LOGS")
+            .map_or_else(
+                || panic!("no DISPATCH_WRITES_LOGS: {:?}", check.env),
+                |(_, v)| PathBuf::from(v),
+            )
+    };
+    assert!(logs.is_dir());
+    std::fs::write(&personas, TOKEN).unwrap();
+    std::fs::write(logs.join("seed.log"), "seeded").unwrap();
+    exits(&env, &setup_key(&id, 1), 0);
+    env.steps_until(&id, "try", |t, _| secret_stage(t) == "try");
+    let a = setup_attempt(&env.ticket(&id));
+    let ev = a.evidence.unwrap();
+    assert_eq!(ev.dir, logs);
+    assert_eq!(
+        ev.files.iter().map(|f| f.rel.as_str()).collect::<Vec<_>>(),
+        ["seed.log"]
+    );
+}
+
+/// A ticket whose tester kept one file, closed at the returned time;
+/// the evidence directory.
+fn closed_with_evidence(env: &mut Env, id: &str, drop: bool) -> (u64, PathBuf) {
+    let dir = tester_running(env, id);
+    std::fs::write(dir.join("shot.png"), "png").unwrap();
+    tester_done(env, id);
+    let now = env.tick();
+    env.runner.request_park(id, None, now).unwrap();
+    env.steps_until(id, "parked", |t, _| {
+        matches!(t.state, TicketState::Parked { .. })
+    });
+    let now = env.tick();
+    let t = env.runner.close_by_hand(id, None, drop, now).unwrap();
+    assert!(matches!(t.state, TicketState::Closed { .. }), "{t:#?}");
+    assert_eq!(t.close.closed_ms, Some(now));
+    (now, dir)
+}
+
+fn swept_events(env: &Env, id: &str) -> Vec<String> {
+    dispatch::events::read_since(&dispatch::events::log_path(&env.data), 0)
+        .unwrap()
+        .into_iter()
+        .filter(|e| e.ticket == id && e.kind == dispatch::events::Kind::EvidenceSwept)
+        .map(|e| e.text)
+        .collect()
+}
+
+#[test]
+fn the_sweep_removes_evidence_once_the_keep_days_have_passed() {
+    let (mut env, id) = evidence_env("evidence_keep_days = 3\n");
+    let (closed, dir) = closed_with_evidence(&mut env, &id, false);
+    assert!(dir.is_dir(), "a plain close keeps it");
+    let keep = 3 * DAY_MS;
+    env.runner.sweep_evidence(closed + keep - 1);
+    assert!(dir.is_dir());
+    assert!(try_evidence(&env, &id).swept.is_none());
+    env.runner.sweep_evidence(closed + keep);
+    assert!(!dir.exists());
+    let swept = try_evidence(&env, &id).swept.unwrap();
+    assert_eq!(swept.at_ms, closed + keep);
+    assert_eq!(swept.why, "kept 3 days after close");
+    assert_eq!(
+        evidence_listed(&env, &id),
+        ["shot.png"],
+        "the listing stays"
+    );
+    assert_eq!(
+        swept_events(&env, &id),
+        ["evidence removed, 1 files: kept 3 days after close"]
+    );
+}
+
+#[test]
+fn a_ticket_closed_without_a_close_time_is_swept_from_its_first_reading() {
+    let (mut env, id) = evidence_env("");
+    let (_, dir) = closed_with_evidence(&mut env, &id, false);
+    let mut t = env.ticket(&id);
+    t.close.closed_ms = None;
+    let then = env.tick();
+    env.runner.save_ticket(&mut t, then).unwrap();
+    env.runner.sweep_evidence(then + DAY_MS);
+    let t = env.ticket(&id);
+    assert_eq!(t.close.closed_ms, Some(then), "fixed from updated_ms");
+    assert!(dir.is_dir());
+    let mut t = env.ticket(&id);
+    env.runner.save_ticket(&mut t, then + 2 * DAY_MS).unwrap();
+    env.runner.sweep_evidence(then + 30 * DAY_MS);
+    assert!(
+        !dir.exists(),
+        "counted from the first reading, not the later save"
+    );
+
+    let mut t = env.ticket(&id);
+    t.close.closed_ms = None;
+    for a in &mut t.attempts {
+        a.evidence = None;
+    }
+    let old = then + 31 * DAY_MS;
+    env.runner.save_ticket(&mut t, old).unwrap();
+    env.runner.sweep_evidence(old + 30 * DAY_MS);
+    let t = env.ticket(&id);
+    assert_eq!(t.close.closed_ms, None, "nothing to sweep, so not fixed");
+    assert_eq!(t.updated_ms, old, "nor written");
+}
+
+#[test]
+fn the_sweep_uses_the_default_keep_days_when_the_copy_does_not_read() {
+    let (mut env, id) = evidence_env("evidence_keep_days = 3\n");
+    let (closed, dir) = closed_with_evidence(&mut env, &id, false);
+    std::fs::write(&env.ticket(&id).pipeline_file, "not a pipeline").unwrap();
+    env.runner.sweep_evidence(closed + 3 * DAY_MS);
+    assert!(dir.is_dir(), "the copy's 3 days are not read");
+    env.runner.sweep_evidence(closed + 30 * DAY_MS);
+    assert!(!dir.exists());
+}
+
+#[test]
+fn an_unreadable_ticket_does_not_stop_the_sweep() {
+    let (mut env, id) = evidence_env("");
+    let (closed, dir) = closed_with_evidence(&mut env, &id, false);
+    std::fs::write(env.data.root.join("tickets").join("0000broken.json"), "{").unwrap();
+    env.runner.sweep_evidence(closed + 30 * DAY_MS);
+    assert!(!dir.exists());
+}
+
+#[test]
+fn drop_evidence_at_close_removes_it_and_on_a_closed_ticket_removes_it_now() {
+    let (mut env, id) = evidence_env("");
+    let (_, dir) = closed_with_evidence(&mut env, &id, true);
+    assert!(!dir.exists());
+    assert_eq!(
+        try_evidence(&env, &id).swept.unwrap().why,
+        "dropped at close"
+    );
+    assert_eq!(swept_events(&env, &id).len(), 1);
+
+    let (mut env, id) = evidence_env("");
+    let (_, dir) = closed_with_evidence(&mut env, &id, false);
+    assert!(dir.is_dir());
+    let now = env.tick();
+    let t = env.runner.close_by_hand(&id, None, true, now).unwrap();
+    assert!(!dir.exists());
+    assert!(matches!(t.state, TicketState::Closed { .. }));
+    assert_eq!(try_evidence(&env, &id).swept.unwrap().at_ms, now);
+}
+
+#[test]
+fn drop_evidence_on_a_closing_ticket_is_saved_for_the_finisher() {
+    let (mut env, id) = evidence_env("");
+    let dir = tester_running(&mut env, &id);
+    std::fs::write(dir.join("shot.png"), "png").unwrap();
+    tester_done(&mut env, &id);
+    let now = env.tick();
+    env.runner.request_park(&id, None, now).unwrap();
+    env.steps_until(&id, "parked", |t, _| {
+        matches!(t.state, TicketState::Parked { .. })
+    });
+    let now = env.tick();
+    let t = env.runner.request_close(&id, None, false, now).unwrap();
+    assert!(matches!(t.state, TicketState::Closing { .. }), "{t:#?}");
+    assert!(!t.close.drop_evidence);
+    let now = env.tick();
+    let t = env.runner.close_by_hand(&id, None, true, now).unwrap();
+    assert!(t.close.drop_evidence);
+    assert!(dir.is_dir());
+    env.steps_until(&id, "closed", |t, _| {
+        matches!(t.state, TicketState::Closed { .. })
+    });
+    assert!(!dir.exists());
 }

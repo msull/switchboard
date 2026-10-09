@@ -160,8 +160,16 @@ fn command(args: &[&str]) -> Result<()> {
         ["park", ticket, "--reason", reason] => park(ticket, Some(reason)),
         ["resume", ticket] => resume(ticket, true),
         ["resume", ticket, "--no-rerun"] => resume(ticket, false),
-        ["close", ticket] => close(ticket, None),
-        ["close", ticket, "--reason", reason] => close(ticket, Some(reason)),
+        ["close", ticket] => close(ticket, None, false),
+        ["close", ticket, "--reason", reason] => close(ticket, Some(reason), false),
+        ["close", ticket, "--drop-evidence"] => close(ticket, None, true),
+        ["close", ticket, "--reason", reason, "--drop-evidence"]
+        | ["close", ticket, "--drop-evidence", "--reason", reason] => {
+            close(ticket, Some(reason), true)
+        }
+        ["evidence", ticket, stage @ ..] if stage.len() <= 1 => {
+            evidence(ticket, stage.first().copied())
+        }
         ["restart", ticket, stage @ ..] if stage.len() <= 1 => {
             restart(ticket, stage.first().copied(), None)
         }
@@ -544,9 +552,9 @@ fn restart(ticket: &str, stage: Option<&str>, note: Option<&str>) -> Result<()> 
 /// Close a ticket through Switchboard, as the runner would: its
 /// processes are read back and its session unmarked, so this takes the
 /// real port, not `NoPort`.
-fn close(ticket: &str, reason: Option<&str>) -> Result<()> {
+fn close(ticket: &str, reason: Option<&str>, drop_evidence: bool) -> Result<()> {
     let mut runner = runner()?;
-    let t = runner.close_by_hand(ticket, reason, now_ms())?;
+    let t = runner.close_by_hand(ticket, reason, drop_evidence, now_ms())?;
     let mut standing = t.state.label();
     if matches!(t.state, TicketState::Closing { .. }) {
         standing.push_str(" (the runner finishes it on its next pass)");
@@ -569,6 +577,23 @@ fn close(ticket: &str, reason: Option<&str>) -> Result<()> {
     }
     if let Some(why) = &t.close.trees_kept {
         say!("  kept: {why}");
+    }
+    if drop_evidence {
+        if t.close.drop_evidence && matches!(t.state, TicketState::Closing { .. }) {
+            say!("  evidence: dropped as the close finishes");
+        } else {
+            // Counted over every removed directory, by this close or an
+            // earlier sweep, so the line states what is gone, not who
+            // removed it.
+            let gone: usize = t
+                .attempts
+                .iter()
+                .filter_map(|a| a.evidence.as_ref())
+                .filter(|e| e.swept.is_some())
+                .map(|e| e.files.len())
+                .sum();
+            say!("  evidence removed: {gone} files");
+        }
     }
     // The close has happened; a pipeline that no longer reads only
     // leaves the branches unlisted.
@@ -973,6 +998,36 @@ fn show(args: &[&str]) -> Result<()> {
     Ok(())
 }
 
+/// A ticket's evidence files, by attempt: each listed file's absolute
+/// path, what was kept but not listed, and when a directory was swept.
+fn evidence(ticket: &str, stage: Option<&str>) -> Result<()> {
+    let runner = offline_runner()?;
+    let t = runner.load_ticket(ticket)?;
+    let mut any = false;
+    for a in &t.attempts {
+        let Some(ev) = &a.evidence else { continue };
+        if stage.is_some_and(|s| s != a.stage) {
+            continue;
+        }
+        any = true;
+        say!("{}/{} #{}:", a.stage, a.context, a.n);
+        if let Some(swept) = &ev.swept {
+            say!("  swept {} ({})", date_of(swept.at_ms), swept.why);
+            continue;
+        }
+        for f in &ev.files {
+            say!("  {}", ev.dir.join(&f.rel).display());
+        }
+        if !ev.over_cap.is_empty() {
+            say!("  kept, not listed: {}", ev.over_cap.join(", "));
+        }
+    }
+    if !any {
+        say!("no evidence");
+    }
+    Ok(())
+}
+
 /// The stages in order, an external gate's check after its name:
 /// `plan, implement, ready (pr-checks), merge (pr-merged)`.
 fn stages_line(view: &dispatch_control::TicketView) -> String {
@@ -1071,6 +1126,11 @@ fn print_attempts(view: &dispatch_control::TicketView) -> Result<()> {
             a.head.as_deref().map_or("-", short),
             nudged_clause(a.nudges.len())
         );
+        if let Some(at) = a.evidence_swept_ms {
+            say!("    evidence: swept {}", date_of(at));
+        } else if !a.evidence.is_empty() {
+            say!("    evidence: {} files", a.evidence.len());
+        }
         if let Some(pr) = &a.pr {
             say!(
                 "    PR #{} {} head {} checks {}",
@@ -1367,6 +1427,13 @@ fn print_report(r: &TicketReport) -> Result<()> {
     say!("  answered: {}", answered_line(&r.answered_by));
     say!("  fix passes: {}", r.fix_passes);
     say!("  rebases: at least {}", r.rebases);
+    if r.evidence_files > 0 {
+        say!(
+            "  evidence: {} files, {} bytes",
+            r.evidence_files,
+            r.evidence_bytes
+        );
+    }
     match &r.pr_url {
         None => say!("  PR: none"),
         Some(url) => {

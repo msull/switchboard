@@ -393,6 +393,8 @@ Version 20 adds a ticket's `tree_refreshed`, the tree's last bring-up
 to the project's base, and a stage entry's `tree_refreshed`, the
 ticket's as the stage was entered; both are absent in older records.
 Version 21 adds a project's `base_tree`, absent in older records.
+Version 27 adds an attempt's `evidence` and a close's `closed_ms` and
+`drop_evidence`, absent in older records.
 
 A project's record (`projects/<project>.json`) holds, besides its
 space, set and queue, its supervisor (see "Supervisor"): `supervisor`
@@ -892,6 +894,7 @@ release = "kb"                # an in-place lane, by name, whose hold ends with 
 context = "root" | "each" | "joined" | ["front"]
 writes = ["notes"]            # artifact names; each expands as {notes}, {plan}, ...
 writes = ["seed", { name = "personas", secret = true }]   # a gate-only command stage: the command writes each to $DISPATCH_WRITES_<NAME>; a secret one needs a [[resources]] entry in needs
+writes = ["notes", { name = "evidence", dir = true }]    # one evidence directory: {evidence} and $DISPATCH_WRITES_EVIDENCE are its path; listed at completion, removed evidence_keep_days after close (see "Evidence directories")
 prompt = "..."                # templates: {issue.number} {issue.title} {task.text} {lane} {lane.merge_after} {lanes} {lanes.all} {branch} {worktree} {project.root} {inputs.<artifact>}; the full list is the table below
 gate = { kind = "command", argv = ["..."], in = "root" | "lane" | "lane:<name>" }
      | { kind = "command", per_lane = { <lane> = ["..."] }, in = "lane" }
@@ -935,6 +938,9 @@ fixer = "fixer"               # the operator that fixes a PR whose checks are re
 max_fixes = 2                 # fixes one PR may get before red checks are a question
 confine = false               # true: setup, command gates, review checks and command reviewers run sandboxed (see the start of this document); absent, off
 network = "allow"             # or "deny": under confine, whether those commands reach off this machine; loopback stays open
+evidence_file_mb = 25         # an evidence file larger than this is kept on disk but not listed; read from the ticket's copy
+evidence_attempt_mb = 200     # one attempt's listed evidence stops at this total; the rest is kept but not listed
+evidence_keep_days = 30       # days after a ticket closes before the runner removes its evidence directories; read from the ticket's copy
 
 [supervisor]                  # read only from the live <project>.toml (see "Supervisor")
 guidance = "..."              # what it is for; the seed opens with it; required
@@ -1043,6 +1049,57 @@ implementer, a code review's `review_prompt` and `fix_prompt`, a
 workflow reviewer's templates, and, for a `pr-checks` or `pr-merged`
 gate, the guidance of the policy's `rebaser` (and of its `fixer` for
 `pr-checks`).
+
+### Evidence directories
+
+`{ name = "evidence", dir = true }` in `writes` gives an agent stage,
+or a gate-only command stage, one directory for files it produced
+beside its artifacts (screenshots, logs). Dispatch makes
+`tickets/<id>/<stage>/<n>/<context>/<name>/`, mode 0700, before the
+launch. An agent is told its path as `{<name>}` in the prompt and as
+`DISPATCH_WRITES_<NAME>` in its session, which Switchboard keeps on
+the session record, so a resume keeps it; a gate-only command gets
+the same variable. The directory is not an artifact: it never gates
+completion, an empty one is fine, and it is not an input of any other
+stage.
+
+While the writer settles, the directory counts as one more file whose
+size is its regular files' total and whose time is the newest of
+theirs, so a screenshot still being written holds completion. When it
+finishes, the regular files under it are listed on the attempt
+(`evidence.files`, each with its path under the directory, size and
+time), sorted by path, by a walk that never follows a symlink and
+skips links, FIFOs, sockets and devices. A file over
+`evidence_file_mb`, and every file once the listed total would pass
+`evidence_attempt_mb`, stays on disk but goes to `evidence.over_cap`,
+with a warning in the runner's log. The listing is what the ticket
+page, `show`, `report` and `dispatch evidence <ticket> [<stage>]`
+read; nothing reads the directory again. The `tried` question names
+the count beside the notes it came with (`· evidence: 3 files`).
+
+Validation refuses two evidence directories on one stage, one that is
+also `secret`, one named `commit`, `plan`, `notes`, `summary` or
+`checks`, one on a stage whose operator is `codex` (its sandbox writes
+only inside its cwd) or on a workflow or code review stage, one whose
+variable name is a file artifact's, and any template that names it as
+`{inputs.<name>}` or `{inputs.<stage>.<name>}`.
+
+The runner sweeps once a day: a closed ticket's directories are
+removed `evidence_keep_days` after `close.closed_ms`, read from the
+ticket's copy (the default when the copy no longer reads). A ticket
+closed before close times were kept gets its `updated_ms` as
+`closed_ms` the first time the sweep sees it. Each directory is
+removed first and then marked `evidence.swept` (`{at_ms, why}`, why
+`kept N days after close` or `dropped at close`), which logs an
+`evidence-swept` event; the listing stays. `dispatch close <ticket>
+--drop-evidence` removes them as the close finishes (the flag is kept
+on the close intent as `close.drop_evidence`, so a close finished by a
+later pass still drops them), and on a ticket already closed removes
+them at once. Switchboard's ticket page offers Open only for
+documents and images (`png jpg jpeg gif webp heic pdf csv tsv txt md
+json log mp4 mov`), since a file an agent wrote carries no quarantine
+flag; every file gets Reveal. The port reads an evidence file inline
+only up to 1 MiB.
 
 ### Pipeline: Switchboard
 

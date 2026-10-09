@@ -112,7 +112,9 @@ pub const USAGE: &str = "usage:
   dispatch queue <project> [<ticket>...]   show, or reorder, a project's queue
   dispatch park <ticket> [--reason <text>]  a ticket's work stopped, its questions withdrawn; resume brings it back
   dispatch resume <ticket> [--no-rerun]    a parked ticket back to active; what the park cancelled runs again
-  dispatch close <ticket> [--reason <text>]  a ticket closed, its trees removed (its branches are kept; close lists them)
+  dispatch close <ticket> [--reason <text>] [--drop-evidence]
+                                           a ticket closed, its trees removed (its branches are kept; close lists them);
+                                           --drop-evidence removes its evidence now rather than days after
   dispatch restart <ticket> [<stage>] [--note <text> | --file <path>]
                                            a ticket at its stage, or an earlier one, under the live pipeline; later work
                                            discarded; a note goes to the stage's next agent, which runs without asking
@@ -136,6 +138,7 @@ Supervising (see docs/dispatch-agent-guide.md):
   dispatch unsubscribe <ticket>            stop that
   dispatch subscriptions <project>         each subscription, what it has not delivered, and why it waits
   dispatch show <ticket> [--json]          one ticket: stage, lanes, attempts, decisions, files
+  dispatch evidence <ticket> [<stage>]     the files each attempt kept in its evidence directory
   dispatch report <ticket> [--json]        how a ticket went
   dispatch report --project <name> [--since YYYY-MM-DD] [--json]
   dispatch tail <ticket> [--lines N]       what its running agents' panes show

@@ -15,7 +15,9 @@ use super::diff::file_diff;
 use super::dispatch::{decision_card, title_of};
 use super::{DrawCtx, GAP, markdown, theme};
 use crate::core::diff::DiffRange;
-use crate::core::dispatch::{TimelineRow, close_offered, parked, revisable};
+use crate::core::dispatch::{
+    TimelineRow, close_offered, evidence_inline, evidence_opens, parked, revisable,
+};
 use crate::core::{AppAction, RecordId};
 use crate::ports::changes::Changes;
 use crate::ports::dispatch::{
@@ -1126,12 +1128,78 @@ fn attempt_row(cx: &mut DrawCtx<'_>, ui: &mut Ui, t: &TicketView, a: &AttemptVie
                 artifact_buttons(cx, ui, t, a);
             });
             if let Some(path) = cx.state.dispatch_artifact.clone().filter(|chosen| {
-                a.artifacts.iter().any(|(_, p)| p == chosen) && !a.secret_at(chosen)
+                let evidence = a.evidence.iter().any(|e| &e.path == chosen);
+                (a.artifacts.iter().any(|(_, p)| p == chosen) && !a.secret_at(chosen)) || evidence
             }) {
                 ui.label(theme::mono_text(ui, path.display().to_string()).color(p.n700));
                 artifact_text(cx, ui, t, &path);
             }
+            evidence_section(cx, ui, t, a);
         });
+}
+
+/// The files the attempt kept in its evidence directory, as listed when
+/// its writer finished: Open for documents and images only, Reveal for
+/// every file, and View for text shown inline. Once swept, when.
+fn evidence_section(cx: &mut DrawCtx<'_>, ui: &mut Ui, t: &TicketView, a: &AttemptView) {
+    if a.evidence.is_empty() && a.evidence_swept_ms.is_none() && a.evidence_over_cap.is_empty() {
+        return;
+    }
+    ui.add_space(4.0);
+    ui.label(theme::strong_text(format!(
+        "Evidence · {}",
+        a.evidence.len()
+    )));
+    if let Some(at) = a.evidence_swept_ms {
+        ui.label(theme::meta_text(ui, format!("swept {}", at_local(at))));
+        return;
+    }
+    let now = now_ms();
+    for f in &a.evidence {
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing.x = 6.0;
+            ui.label(theme::mono_text(ui, &f.rel))
+                .on_hover_text(f.path.display().to_string());
+            ui.label(theme::meta_text(
+                ui,
+                format!(
+                    "{} · {}",
+                    super::document::size_text(f.bytes),
+                    ago_ms(f.modified_ms, now)
+                ),
+            ));
+            if evidence_opens(&f.path) && theme::ghost(ui, "Open").clicked() {
+                cx.dispatch(AppAction::OpenDocument(f.path.clone()));
+            }
+            if theme::ghost(ui, "Reveal").clicked() {
+                cx.dispatch(AppAction::RevealDocument(f.path.clone()));
+            }
+            if evidence_inline(&f.path) {
+                let selected = cx.state.dispatch_artifact.as_ref() == Some(&f.path);
+                let button = if selected {
+                    theme::secondary(ui, "View")
+                } else {
+                    theme::ghost(ui, "View")
+                };
+                if button.clicked() {
+                    cx.state.dispatch_artifact = (!selected).then(|| f.path.clone());
+                    if !selected {
+                        cx.dispatch(AppAction::DispatchReadArtifact {
+                            ticket: t.id.clone(),
+                            path: f.path.clone(),
+                        });
+                    }
+                }
+            }
+        });
+    }
+    if !a.evidence_over_cap.is_empty() {
+        ui.label(theme::meta_text(
+            ui,
+            format!("kept, not listed: {}", a.evidence_over_cap.join(", ")),
+        ))
+        .on_hover_text("over the policy's evidence_file_mb or evidence_attempt_mb");
+    }
 }
 
 /// A button per artifact of the attempt; the chosen one is filled, and

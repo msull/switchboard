@@ -114,6 +114,10 @@ pub enum Kind {
     /// A lane's merge question is held behind another lane's merge or
     /// that merge's base pipeline (`merge_after`).
     Waits,
+    /// An attempt's evidence directory was removed, by the sweep after
+    /// the ticket closed or at close; the text says how many files and
+    /// why.
+    EvidenceSwept,
 }
 
 impl Kind {
@@ -148,6 +152,7 @@ impl Kind {
             Self::Forgotten => "forgotten",
             Self::Revised => "revised",
             Self::Waits => "waits",
+            Self::EvidenceSwept => "evidence-swept",
         }
     }
 }
@@ -755,6 +760,7 @@ fn attempt_events(
     nudge_events(out, t, a, before, at_ms);
     orphan_events(out, t, a, before, at_ms);
     forgotten_events(out, t, a, before, at_ms);
+    evidence_events(out, t, a, before, at_ms);
     for round in &a.rounds {
         let old = before.and_then(|b| b.rounds.iter().find(|x| x.n == round.n));
         if old.is_none_or(|o| o.state != round.state) {
@@ -920,6 +926,22 @@ fn forgotten_events(
             let text = format!("{name} deleted: {}", f.why);
             out.push(Event::of_attempt(t, at_ms, Kind::Forgotten, a, text));
         }
+    }
+}
+
+fn evidence_events(
+    out: &mut Vec<Event>,
+    t: &Ticket,
+    a: &Attempt,
+    before: Option<&Attempt>,
+    at_ms: u64,
+) {
+    let swept = |x: &Attempt| x.evidence.as_ref().and_then(|e| e.swept.clone());
+    if let (Some(ev), Some(s)) = (&a.evidence, swept(a))
+        && before.and_then(swept).is_none()
+    {
+        let text = format!("{} removed, {} files: {}", ev.name, ev.files.len(), s.why);
+        out.push(Event::of_attempt(t, at_ms, Kind::EvidenceSwept, a, text));
     }
 }
 
@@ -2107,6 +2129,33 @@ mod tests {
         assert_eq!(events[0].text, "personas deleted: dev-stack released");
         assert_eq!(Kind::Forgotten.as_str(), "forgotten");
         assert!(between(Some(&deleted), &deleted, 5, &names).is_empty());
+    }
+
+    #[test]
+    fn evidence_swept_is_one_event_with_the_count_and_why() {
+        let mut done = ticket();
+        let mut a = running("try", 1);
+        a.state = AttemptState::Complete;
+        a.evidence = Some(crate::ticket::Evidence {
+            name: "evidence".into(),
+            dir: "/x/evidence".into(),
+            files: vec![crate::ticket::EvidenceFile::default(); 2],
+            ..Default::default()
+        });
+        done.attempts.push(a);
+        let mut swept = done.clone();
+        swept.attempts[0].evidence.as_mut().unwrap().swept = Some(crate::ticket::Forgotten {
+            at_ms: 9,
+            why: "kept 30 days after close".into(),
+        });
+        let events = between(Some(&done), &swept, 5, &names);
+        assert_eq!(kinds(Some(&done), &swept), [Kind::EvidenceSwept]);
+        assert_eq!(
+            events[0].text,
+            "evidence removed, 2 files: kept 30 days after close"
+        );
+        assert_eq!(Kind::EvidenceSwept.as_str(), "evidence-swept");
+        assert!(between(Some(&swept), &swept, 5, &names).is_empty());
     }
 
     #[test]

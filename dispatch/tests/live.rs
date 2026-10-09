@@ -19,6 +19,15 @@
 //! directory under an allow rule, so no permission prompt. The window is
 //! closed by killing the child by pid; the tmux server is killed by
 //! socket name.
+//!
+//! The evidence check alone:
+//!
+//! ```sh
+//! cargo test --locked -p dispatch --test live -- --ignored --nocapture an_agent_keeps_a_file_in_its_evidence_directory
+//! ```
+//!
+//! runs the same stage told to write a file into `{evidence}` with the
+//! Write tool, under the same allow rule.
 
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -64,11 +73,22 @@ fn now_ms() -> u64 {
     epoch_ms(SystemTime::now())
 }
 
-// One run, start to finish, read in order.
-#[test]
-#[ignore = "opens the Switchboard window and runs claude with --model haiku"]
+/// A finished live run: the ticket as it ended, and what must outlive
+/// the test's assertions.
+struct Run {
+    ticket: dispatch::ticket::Ticket,
+    control: PathBuf,
+    sb_dir: PathBuf,
+    _app: App,
+    _repo: Repo,
+    _tmp: tempfile::TempDir,
+}
+
+/// One run, start to finish: a Switchboard, a one-stage pipeline whose
+/// `investigate` stage writes `writes` and is told `prompt`, and the
+/// scheduler stepped until the ticket is no longer active.
 #[allow(clippy::too_many_lines)]
-fn an_issue_is_investigated_by_a_real_agent() {
+fn live(writes: &str, prompt: &str) -> Run {
     let tmp = tempfile::tempdir().unwrap();
     let sb_dir = tmp.path().join("sb");
     let data = DataDir::new(tmp.path().join("dz"));
@@ -140,8 +160,8 @@ guidance = "Do exactly what the prompt says, ask nothing, then stop."
 name = "investigate"
 operator = "investigator"
 context = "root"
-writes = ["notes"]
-prompt = "Write the single word pong to the file {{notes}} and stop."
+writes = {writes}
+prompt = "{prompt}"
 "#,
         root = repo.0.display(),
     );
@@ -184,6 +204,24 @@ prompt = "Write the single word pong to the file {{notes}} and stop."
         assert!(Instant::now() < deadline, "timed out: {t:#?}");
         std::thread::sleep(Duration::from_secs(1));
     };
+    Run {
+        ticket,
+        control,
+        sb_dir,
+        _app: app,
+        _repo: repo,
+        _tmp: tmp,
+    }
+}
+
+#[test]
+#[ignore = "opens the Switchboard window and runs claude with --model haiku"]
+fn an_issue_is_investigated_by_a_real_agent() {
+    let run = live(
+        r#"["notes"]"#,
+        "Write the single word pong to the file {notes} and stop.",
+    );
+    let (ticket, control, sb_dir) = (&run.ticket, &run.control, &run.sb_dir);
     assert!(
         matches!(&ticket.state, TicketState::Closed { .. }),
         "{ticket:#?}"
@@ -196,7 +234,7 @@ prompt = "Write the single word pong to the file {{notes}} and stop."
     // The investigator was killed, and the operations log has a reply
     // for every request Dispatch made (and the request line too for the
     // ones that made records).
-    let mut client = Client::connect(&control).unwrap();
+    let mut client = Client::connect(control).unwrap();
     let session = attempt.session.clone().unwrap();
     let reply = client
         .call(&Request::new(
@@ -225,5 +263,24 @@ prompt = "Write the single word pong to the file {{notes}} and stop."
             op.kind
         );
     }
-    drop(app);
+    drop(run);
+}
+
+#[test]
+#[ignore = "opens the Switchboard window and runs claude with --model haiku"]
+fn an_agent_keeps_a_file_in_its_evidence_directory() {
+    let run = live(
+        r#"["notes", { name = "evidence", dir = true }]"#,
+        "With the Write tool, write the word shot to the file {evidence}/shots/one.txt, then the single word pong to the file {notes}, and stop.",
+    );
+    let ticket = &run.ticket;
+    let attempt = ticket.attempts_of("investigate").last().unwrap();
+    assert_eq!(attempt.state, AttemptState::Complete, "{ticket:#?}");
+    let ev = attempt.evidence.as_ref().unwrap();
+    assert_eq!(
+        ev.files.iter().map(|f| f.rel.as_str()).collect::<Vec<_>>(),
+        ["shots/one.txt"],
+        "{ticket:#?}"
+    );
+    drop(run);
 }

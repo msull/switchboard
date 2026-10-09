@@ -6658,6 +6658,116 @@ fn a_secret_artifact_is_a_label_and_a_click_on_it_reads_nothing() {
     harness.get_by_label("personas (deleted)");
 }
 
+/// The status with one complete `try` attempt whose evidence directory
+/// listed `files`.
+fn evidence_status(files: &[&str]) -> switchboard::ports::dispatch::Status {
+    use switchboard::ports::dispatch::{AttemptView, EvidenceView};
+    let mut status = dispatch_status();
+    status.tickets[0].attempts = vec![AttemptView {
+        stage: "try".into(),
+        n: 1,
+        context: "joined".into(),
+        kind: "agent".into(),
+        state: "complete".into(),
+        evidence: files
+            .iter()
+            .map(|rel| EvidenceView {
+                path: format!("/dispatch/t1/try/1/joined/evidence/{rel}").into(),
+                rel: (*rel).to_owned(),
+                bytes: 2048,
+                modified_ms: 0,
+            })
+            .collect(),
+        ..AttemptView::default()
+    }];
+    status
+}
+
+fn show_ticket(
+    harness: &mut Harness<'_, SwitchboardApp>,
+    status: switchboard::ports::dispatch::Status,
+) {
+    harness
+        .state_mut()
+        .dispatch(AppAction::DispatchStatus(Some(status)));
+    harness
+        .state_mut()
+        .dispatch(AppAction::ShowTicket("t1".into()));
+    harness.run_steps(2);
+}
+
+/// An attempt's evidence: a row per file, Open for an image and none
+/// for a file that would run, Reveal for both.
+#[test]
+fn ticket_page_lists_evidence_and_opens_only_documents() {
+    let (mut harness, _ids) = harness();
+    show_ticket(
+        &mut harness,
+        evidence_status(&["shots/home.png", "run.command"]),
+    );
+    harness.get_by_label("Evidence · 2");
+    harness.get_by_label("shots/home.png");
+    harness.get_by_label("run.command");
+    assert_eq!(
+        harness
+            .query_all_by_role_and_label(Role::Button, "Open")
+            .count(),
+        1,
+        "the .command row has no Open"
+    );
+    assert_eq!(
+        harness
+            .query_all_by_role_and_label(Role::Button, "Reveal")
+            .count(),
+        2
+    );
+    harness.state_mut().dispatched.clear();
+    harness.get_by_role_and_label(Role::Button, "Open").click();
+    harness.run_steps(2);
+    let shot = std::path::PathBuf::from("/dispatch/t1/try/1/joined/evidence/shots/home.png");
+    assert!(
+        actions(&harness).contains(&AppAction::OpenDocument(shot)),
+        "{:?}",
+        actions(&harness)
+    );
+}
+
+/// A text file of the evidence is read through the runner when View is
+/// clicked, as an artifact is.
+#[test]
+fn ticket_page_views_an_evidence_note_inline() {
+    let (mut harness, _ids) = harness();
+    show_ticket(&mut harness, evidence_status(&["steps.md"]));
+    harness.state_mut().dispatched.clear();
+    harness.get_by_role_and_label(Role::Button, "View").click();
+    harness.run_steps(2);
+    assert!(
+        actions(&harness).iter().any(|a| matches!(
+            a,
+            AppAction::DispatchReadArtifact { path, .. }
+                if path.ends_with("evidence/steps.md")
+        )),
+        "{:?}",
+        actions(&harness)
+    );
+}
+
+/// Swept evidence says so in place of its rows.
+#[test]
+fn ticket_page_shows_swept_evidence() {
+    let (mut harness, _ids) = harness();
+    let mut status = evidence_status(&["shots/home.png"]);
+    status.tickets[0].attempts[0].evidence_swept_ms = Some(1_000);
+    show_ticket(&mut harness, status);
+    assert_eq!(harness.query_all_by_label_contains("swept ").count(), 1);
+    assert!(harness.query_by_label("shots/home.png").is_none());
+    assert!(
+        harness
+            .query_by_role_and_label(Role::Button, "Reveal")
+            .is_none()
+    );
+}
+
 /// An attempt and a review round that were nudged after a dirty stop
 /// say how many times, with no clock that would depend on the zone.
 #[test]

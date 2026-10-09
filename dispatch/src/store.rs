@@ -23,7 +23,7 @@ use crate::ticket::{ProjectState, Ticket};
 /// carried a version reads as 0 and is brought up by `migrate`. A
 /// record above it was written by a newer `dispatch` and is refused
 /// both ways, so this build never drops fields it does not know.
-pub const RECORD_VERSION: u32 = 26;
+pub const RECORD_VERSION: u32 = 27;
 
 /// A lock file held while this lives: the writer lock, the runner's
 /// claim, or a ticket's close.
@@ -592,6 +592,12 @@ pub fn migrate(mut value: Value) -> Value {
         // default. Nothing is transformed. A build that would drop it
         // must refuse the record, or `show` would lose why an attempt is
         // open.
+        //
+        // 26 to 27: an attempt gains `evidence`, and a close gains
+        // `closed_ms` and `drop_evidence`, absent from their serde
+        // defaults. Nothing is transformed. A build that would drop them
+        // must refuse the record, or a swept directory would be listed
+        // again and a drop asked for at close would be lost.
         if version == 1 {
             settle_from_verdicts(&mut value);
         }
@@ -1274,6 +1280,37 @@ mod tests {
         let written: Value = read_json(&path).unwrap();
         assert_eq!(written["version"], RECORD_VERSION);
         assert_eq!(written["attempts"][0]["held"]["s-1"]["until_ms"], 2_000);
+        assert_eq!(read_ticket(&path).unwrap(), t);
+    }
+
+    #[test]
+    fn a_version_twenty_six_record_migrates_with_no_evidence_or_close_time() {
+        let attempt = r#"{"stage": "try", "n": 1, "context": "root", "kind": "agent", "state": "running", "project": null, "session": "s-1", "run": null, "artifacts": {}, "settle": {}, "stop_at_ms": null, "head": null, "started_ms": 1000, "ended_ms": null}"#;
+        let text = TICKET_V0
+            .replacen('{', "{\n  \"version\": 26,", 1)
+            .replacen(
+                r#""attempts": [],"#,
+                &format!(r#""attempts": [{attempt}],"#),
+                1,
+            );
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.json");
+        fs::write(&path, text).unwrap();
+        let mut t = read_ticket(&path).unwrap();
+        assert_eq!(t.version, RECORD_VERSION);
+        assert_eq!(t.attempts[0].evidence, None);
+        assert_eq!(t.close.closed_ms, None);
+        assert!(!t.close.drop_evidence);
+        t.attempts[0].evidence = Some(crate::ticket::Evidence {
+            name: "evidence".into(),
+            dir: "/x/evidence".into(),
+            ..Default::default()
+        });
+        t.close.closed_ms = Some(5_000);
+        write_ticket(&path, &t).unwrap();
+        let written: Value = read_json(&path).unwrap();
+        assert_eq!(written["attempts"][0]["evidence"]["name"], "evidence");
+        assert_eq!(written["close"]["closed_ms"], 5_000);
         assert_eq!(read_ticket(&path).unwrap(), t);
     }
 

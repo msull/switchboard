@@ -32,10 +32,15 @@ use crate::store::{
 use crate::template::Vars;
 use crate::ticket::{
     Attempt, AttemptKind, AttemptState, CheckGroup, CloseProgress, Decision, DecisionKind,
-    DecisionState, GateRun, Held, LaneRecord, MergeWait, Operation, OrphanKill, ProjectState,
-    PullRequestRecord, PullRequestSource, RefreshConflict, Refreshed, Released, SETTLE_POLLS,
-    STOP_IDLE_POLLS, STUCK, ServiceState, Settle, SourceSnapshot, Ticket, TicketState, WaitUntil,
+    DecisionState, Evidence, EvidenceFile, Forgotten, GateRun, Held, LaneRecord, MergeWait,
+    Operation, OrphanKill, ProjectState, PullRequestRecord, PullRequestSource, RefreshConflict,
+    Refreshed, Released, SETTLE_POLLS, STOP_IDLE_POLLS, STUCK, ServiceState, Settle,
+    SourceSnapshot, Ticket, TicketState, WaitUntil,
 };
+
+/// A day in ms: how often the evidence sweep runs, and the unit of
+/// `evidence_keep_days`.
+const DAY_MS: u64 = 86_400_000;
 
 /// How often a `pr-checks` gate reads the provider.
 pub const PR_POLL_MS: u64 = 60_000;
@@ -135,6 +140,10 @@ pub struct Runner {
     /// launch's token, read at start; `None` for a runner started by
     /// hand, which can run no command gate with `env`.
     pub credentials: Option<RunnerCredentials>,
+    /// When this runner last swept closed tickets' evidence. Not saved:
+    /// a restarted runner sweeps again at once, which removes nothing
+    /// new.
+    last_evidence_sweep_ms: Option<u64>,
 }
 
 /// The runner's own Switchboard record and launch token, from
@@ -316,6 +325,7 @@ impl Runner {
             base_waits: BTreeMap::new(),
             env_bin: None,
             credentials: None,
+            last_evidence_sweep_ms: None,
         }
     }
 
@@ -1938,6 +1948,7 @@ impl Runner {
             rework: None,
             env: BTreeMap::new(),
             env_sets: env_sets(p.operators.get(operator), None),
+            evidence: None,
         };
         self.launch_agent(t, ps, p, REFRESH, &name, &cwd, n, spec, now_ms)
     }
@@ -2122,7 +2133,7 @@ impl Runner {
             self.save_ticket(t, now_ms)?;
         }
         log::info!("ticket {} closed: {reason}", t.id);
-        t.state = TicketState::Closed { reason };
+        mark_closed(t, reason, now_ms);
         self.save_ticket(t, now_ms)?;
         ps.closing.retain(|id| id != &t.id);
         self.save_project(ps)
@@ -2254,13 +2265,17 @@ impl Runner {
     /// ticket comes back as it stands: `Closed`, or `Closing` when a
     /// process is still going and the next pass finishes it. On a closed
     /// ticket whose trees were kept, the removal is tried again.
+    ///
+    /// `drop_evidence` removes the ticket's evidence directories as the
+    /// close finishes; on a ticket already closed it removes them now.
     pub fn close_by_hand(
         &mut self,
         ticket: &str,
         reason: Option<&str>,
+        drop_evidence: bool,
         now_ms: u64,
     ) -> Result<Ticket> {
-        self.close_checked(ticket, reason, true, now_ms)
+        self.close_checked(ticket, reason, true, drop_evidence, now_ms)
     }
 
     /// `close_by_hand` for a caller that must not wait on Switchboard:
@@ -2273,9 +2288,10 @@ impl Runner {
         &mut self,
         ticket: &str,
         reason: Option<&str>,
+        drop_evidence: bool,
         now_ms: u64,
     ) -> Result<Ticket> {
-        self.close_checked(ticket, reason, false, now_ms)
+        self.close_checked(ticket, reason, false, drop_evidence, now_ms)
     }
 
     fn close_checked(
@@ -2283,11 +2299,21 @@ impl Runner {
         ticket: &str,
         reason: Option<&str>,
         finish: bool,
+        drop: bool,
         now_ms: u64,
     ) -> Result<Ticket> {
         self.transaction(|r| {
             let mut t = r.load_ticket(ticket)?;
             match &t.state {
+                TicketState::Closed { .. } if drop => {
+                    fix_closed_ms(&mut t);
+                    drop_evidence(&mut t, "dropped at close", now_ms);
+                    r.save_ticket(&mut t, now_ms)?;
+                    if t.close.trees_kept.is_some() {
+                        r.retry_removal(&mut t, now_ms)?;
+                    }
+                    return Ok(t);
+                }
                 TicketState::Parking { .. } => {
                     bail!("ticket {ticket} is still parking; try again when it is parked")
                 }
@@ -2308,10 +2334,19 @@ impl Runner {
                     return Ok(t);
                 }
                 TicketState::Closed { .. } => bail!("ticket {ticket} is already closed"),
-                TicketState::Closing { .. } => return Ok(t),
+                // Saved for the finisher, which drops them as it closes.
+                TicketState::Closing { .. } => {
+                    if drop && !t.close.drop_evidence {
+                        t.close.drop_evidence = true;
+                        r.save_ticket(&mut t, now_ms)?;
+                    }
+                    return Ok(t);
+                }
                 TicketState::Active | TicketState::Parked { .. } => {}
             }
             r.preflight_trees(&t)?;
+            // On the intent, so a restart mid-close still drops them.
+            t.close.drop_evidence = drop;
             let mut ps = r.load_project(&t.project)?;
             r.write_close_intent(&mut t, &mut ps, reason.unwrap_or("closed by hand"), now_ms)?;
             if finish {
@@ -2321,6 +2356,60 @@ impl Runner {
             }
             Ok(t)
         })
+    }
+
+    /// Remove the evidence directories of every closed ticket kept past
+    /// its `evidence_keep_days`. Each ticket is read and saved on its
+    /// own, so one that does not read is skipped and the rest are still
+    /// swept. `step_all` calls it at most once a day.
+    pub fn sweep_evidence(&mut self, now_ms: u64) {
+        let files = match self.data.ticket_files() {
+            Ok(files) => files,
+            Err(e) => {
+                log::warn!("evidence sweep: {e:#}");
+                return;
+            }
+        };
+        for path in files {
+            let swept = self.transaction(|r| {
+                let mut t = read_ticket(&path)?;
+                // A ticket with nothing left to sweep is not read for its
+                // policy or saved, so an old closed ticket keeps its
+                // `updated_ms` and its place in the listing.
+                let unswept = t
+                    .attempts
+                    .iter()
+                    .filter_map(|a| a.evidence.as_ref())
+                    .any(|e| e.swept.is_none());
+                if !matches!(t.state, TicketState::Closed { .. }) || !unswept {
+                    return Ok(());
+                }
+                let mut changed = fix_closed_ms(&mut t);
+                let keep_days = match r.pipeline_of(&t) {
+                    Ok(p) => p.policy.evidence_keep_days,
+                    Err(e) => {
+                        log::warn!(
+                            "ticket {}: pipeline copy unreadable, evidence kept the default days: {e:#}",
+                            t.id
+                        );
+                        crate::pipeline::Policy::default().evidence_keep_days
+                    }
+                };
+                let closed_ms = t.close.closed_ms.unwrap_or(t.updated_ms);
+                let due = closed_ms.saturating_add(u64::from(keep_days) * DAY_MS) <= now_ms;
+                if due {
+                    let why = format!("kept {keep_days} days after close");
+                    changed |= drop_evidence(&mut t, &why, now_ms);
+                }
+                if changed {
+                    r.save_ticket(&mut t, now_ms)?;
+                }
+                Ok(())
+            });
+            if let Err(e) = swept {
+                log::warn!("evidence sweep: {}: {e:#}", path.display());
+            }
+        }
     }
 
     /// The removal of a closed ticket's kept trees, tried again; the
@@ -4232,6 +4321,9 @@ impl Runner {
             now_ms,
         );
         a.secret = stage.secret_writes().map(str::to_owned).collect();
+        if stage.evidence_dir().is_some() {
+            a.evidence = make_evidence(stage, &self.attempt_dir(t, &stage.name, n, ctx)?)?;
+        }
         log::info!("ticket {} {}/{ctx} attempt {}", t.id, stage.name, a.n);
         t.attempts.push(a);
         self.save_ticket(t, now_ms)
@@ -4636,8 +4728,20 @@ impl Runner {
         let _ = write!(q, "\n\nTree: {}", cwd.display());
         for (line, notes) in notes_files(t, p, lane) {
             q.push_str(&line);
-            if let Some(first) = notes_first_line(t, notes) {
+            let first = notes_first_line(t, notes);
+            if let Some(first) = &first {
                 let _ = write!(q, "\n  {first}");
+            }
+            // What the writer of these notes kept beside them.
+            let kept = t
+                .attempts
+                .iter()
+                .find(|x| x.artifacts.values().any(|v| v == notes))
+                .and_then(|x| x.evidence.as_ref())
+                .map_or(0, |e| e.files.len());
+            if kept > 0 {
+                let lead = if first.is_some() { "  · " } else { "\n  " };
+                let _ = write!(q, "{lead}evidence: {kept} files");
             }
         }
         q.push_str(&deployed_and_served(t, p));
@@ -5998,13 +6102,24 @@ impl Runner {
         }
         let dir = self.attempt_dir(t, &stage.name, n, ctx)?;
         let artifacts = artifact_paths(stage, &dir);
+        let evidence = make_evidence(stage, &dir)?;
         let mut vars = vars_for(t, p, lane);
         for (name, path) in &artifacts {
             vars.set(name.clone(), path.display().to_string());
         }
+        if let Some(ev) = &evidence {
+            vars.set(ev.name.clone(), ev.dir.display().to_string());
+        }
         let guidance = &p.operators[&operator].guidance;
         let template = stage.prompt.as_deref().unwrap_or_default();
-        let env = input_env(&vars, &format!("{guidance}\n{template}"));
+        let mut env = input_env(&vars, &format!("{guidance}\n{template}"));
+        // Kept on the session record, so a resumed session still has it.
+        if let Some(ev) = &evidence {
+            env.insert(
+                format!("DISPATCH_WRITES_{}", env_key(&ev.name)),
+                ev.dir.display().to_string(),
+            );
+        }
         let mut prompt = guidance_prelude(guidance, &vars);
         prompt.push_str(&vars.render(template));
         if let Some(moved) = lane
@@ -6035,6 +6150,7 @@ impl Runner {
             rework,
             env,
             env_sets,
+            evidence,
         };
         self.launch_agent(t, ps, p, &stage.name, ctx, cwd, n, spec, now_ms)
     }
@@ -6097,6 +6213,7 @@ impl Runner {
         );
         attempt.project = Some(project.clone());
         attempt.pr = spec.pr;
+        attempt.evidence = spec.evidence;
         // Not saved here: `send` writes the attempt and its request in
         // one go, so no record ever shows the one without the other.
         t.attempts.push(attempt);
@@ -6359,6 +6476,7 @@ impl Runner {
             rework: None,
             env: BTreeMap::new(),
             env_sets,
+            evidence: None,
         };
         let (stage_name, ctx) = (a.stage.clone(), a.context.clone());
         self.launch_agent(t, ps, p, &stage_name, &ctx, cwd, n, spec, now_ms)
@@ -6448,6 +6566,9 @@ impl Runner {
         if !settle(attempt)? {
             return self.save_ticket(t, now_ms);
         }
+        // Listed again on every finish, so a nudged agent that stops a
+        // second time is listed as it left the directory then.
+        list_attempt_evidence(attempt, p);
         let gated = matches!(stage.gate, Some(Gate::Command { .. }));
         // Before the kill: a dirty tree may yet be committed by the
         // agent in the same session, once told.
@@ -6844,6 +6965,9 @@ impl Runner {
             attempt.head = Some(head);
             attempt.state = AttemptState::Complete;
             attempt.ended_ms = Some(now_ms);
+            if a.kind == AttemptKind::GateOnly {
+                list_attempt_evidence(attempt, p);
+            }
         }
         log::info!(
             "ticket {} {}/{} checks passed at {}",
@@ -7785,6 +7909,13 @@ impl Runner {
 
     /// One pass over every project.
     pub fn step_all(&mut self, now_ms: u64) -> Result<()> {
+        if self
+            .last_evidence_sweep_ms
+            .is_none_or(|last| now_ms >= last.saturating_add(DAY_MS))
+        {
+            self.last_evidence_sweep_ms = Some(now_ms);
+            self.sweep_evidence(now_ms);
+        }
         for project in self.projects()? {
             if let Err(e) = self.supervisor_intent(&project, now_ms) {
                 log::error!("project {project}: supervisor: {e:#}");
@@ -9169,6 +9300,8 @@ struct AgentSpec {
     /// The Switchboard environment sets the session is granted: its
     /// operator's, then its stage's.
     env_sets: Vec<String>,
+    /// The stage's evidence directory, already made.
+    evidence: Option<Evidence>,
 }
 
 /// One context's poll of a PR-reading stage.
@@ -9750,12 +9883,84 @@ fn artifact_paths(stage: &Stage, dir: &Path) -> BTreeMap<String, PathBuf> {
         .collect()
 }
 
+/// Every evidence directory of the ticket not yet swept removed, then
+/// marked swept with `why`: removed first and recorded after, so a
+/// failed removal is tried again rather than recorded as done. A
+/// directory already gone counts as removed. True when any was marked.
+fn drop_evidence(t: &mut Ticket, why: &str, now_ms: u64) -> bool {
+    let mut marked = false;
+    for a in &mut t.attempts {
+        let Some(ev) = a.evidence.as_mut().filter(|e| e.swept.is_none()) else {
+            continue;
+        };
+        match std::fs::remove_dir_all(&ev.dir) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                log::warn!(
+                    "ticket {} {}/{}: evidence {} kept: {e}",
+                    t.id,
+                    a.stage,
+                    a.context,
+                    ev.dir.display()
+                );
+                continue;
+            }
+            _ => {}
+        }
+        marked = true;
+        ev.swept = Some(Forgotten {
+            at_ms: now_ms,
+            why: why.to_owned(),
+        });
+    }
+    marked
+}
+
+/// A closed ticket's close time, taken from `updated_ms` when it closed
+/// before close times were kept. Fixed once, since a later save moves
+/// `updated_ms`. True when it changed.
+fn fix_closed_ms(t: &mut Ticket) -> bool {
+    if t.close.closed_ms.is_some() {
+        return false;
+    }
+    t.close.closed_ms = Some(t.updated_ms);
+    true
+}
+
+/// The stage's evidence directory made under the attempt directory,
+/// closed to other users since a screenshot may show anything, and its
+/// record with nothing listed yet. `None` when the stage keeps none.
+fn make_evidence(stage: &Stage, attempt_dir: &Path) -> Result<Option<Evidence>> {
+    use std::os::unix::fs::DirBuilderExt;
+    let Some(name) = stage.evidence_dir() else {
+        return Ok(None);
+    };
+    let dir = attempt_dir.join(name);
+    match std::fs::DirBuilder::new().mode(0o700).create(&dir) {
+        Err(e) if e.kind() != std::io::ErrorKind::AlreadyExists => {
+            return Err(e).with_context(|| format!("making {}", dir.display()));
+        }
+        _ => {}
+    }
+    Ok(Some(Evidence {
+        name: name.to_owned(),
+        dir,
+        ..Evidence::default()
+    }))
+}
+
 /// A gate-only command's artifacts made ready before it starts: each
 /// path in its environment as `DISPATCH_WRITES_<NAME>`, any file left
 /// from an earlier run removed so that one existing afterwards is this
 /// run's, and the attempt directory closed to other users when one of
 /// them is secret (the child writes the file under its own umask).
 fn prepare_writes(a: &Attempt, dir: &Path, env: &mut Vec<(String, String)>) -> Result<()> {
+    // New per attempt, so nothing in it is an earlier run's.
+    if let Some(ev) = &a.evidence {
+        env.push((
+            format!("DISPATCH_WRITES_{}", env_key(&ev.name)),
+            ev.dir.display().to_string(),
+        ));
+    }
     for (name, path) in a.artifacts.iter().filter(|(n, _)| *n != "checks") {
         env.push((
             format!("DISPATCH_WRITES_{}", env_key(name)),
@@ -9877,6 +10082,7 @@ pub(crate) fn new_attempt(
         revisions: Vec::new(),
         waits: None,
         held: BTreeMap::new(),
+        evidence: None,
         settle: BTreeMap::new(),
         stop_at_ms: None,
         polls_since_stop: 0,
@@ -9902,14 +10108,119 @@ fn settle(attempt: &mut Attempt) -> Result<bool> {
             all = false;
         }
     }
+    // The evidence directory as one entry: its total size and newest
+    // file, so a screenshot still being written holds completion.
+    if let Some(ev) = &attempt.evidence {
+        let files = walk_evidence(&ev.dir);
+        let len = files.iter().map(|f| f.1).sum();
+        let mtime_ms = files.iter().map(|f| f.2).max().unwrap_or(0);
+        let mut entry = attempt.settle.get(&ev.name).cloned();
+        if !settle_seen(mtime_ms, len, &mut entry) {
+            all = false;
+        }
+        attempt
+            .settle
+            .insert(ev.name.clone(), entry.expect("settle_seen fills it"));
+    }
     Ok(all)
+}
+
+/// Every regular file under an evidence directory, as (path under it,
+/// bytes, mtime ms), sorted by path. The one reader of the directory:
+/// it never follows a symlink at any depth, so a link to `$HOME` or an
+/// ancestor is never entered, and it keeps regular files only, so a
+/// link, FIFO, socket or device never reaches Open or Reveal. A
+/// directory that cannot be read lists nothing.
+pub(crate) fn walk_evidence(dir: &Path) -> Vec<(String, u64, u64)> {
+    fn walk(dir: &Path, prefix: &str, out: &mut Vec<(String, u64, u64)>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Ok(meta) = std::fs::symlink_metadata(&path) else {
+                continue;
+            };
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let rel = if prefix.is_empty() {
+                name
+            } else {
+                format!("{prefix}/{name}")
+            };
+            if meta.is_dir() {
+                walk(&path, &rel, out);
+            } else if meta.is_file() {
+                let mtime = meta.modified().map_or(0, crate::epoch_ms);
+                out.push((rel, meta.len(), mtime));
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(dir, "", &mut out);
+    out.sort();
+    out
+}
+
+/// The evidence directory's listing replaced from disk: a file over
+/// `file_cap` bytes, and every file once the listed total would pass
+/// `attempt_cap`, is kept on disk but goes to `over_cap`.
+pub(crate) fn list_evidence(ev: &mut Evidence, file_cap: u64, attempt_cap: u64) {
+    ev.files.clear();
+    ev.over_cap.clear();
+    let mut total = 0u64;
+    let mut full = false;
+    for (rel, bytes, modified_ms) in walk_evidence(&ev.dir) {
+        full = full || total.saturating_add(bytes) > attempt_cap;
+        if bytes > file_cap || full {
+            log::warn!(
+                "evidence {}: {rel} ({bytes} bytes) is over a cap; kept, not listed",
+                ev.dir.display()
+            );
+            ev.over_cap.push(rel);
+            continue;
+        }
+        total += bytes;
+        ev.files.push(EvidenceFile {
+            rel,
+            bytes,
+            modified_ms,
+        });
+    }
+}
+
+/// The attempt's evidence directory listed under the caps of `p`, the
+/// ticket's copy; nothing without one.
+fn list_attempt_evidence(attempt: &mut Attempt, p: &Pipeline) {
+    const MB: u64 = 1024 * 1024;
+    if let Some(ev) = &mut attempt.evidence {
+        list_evidence(
+            ev,
+            p.policy.evidence_file_mb.saturating_mul(MB),
+            p.policy.evidence_attempt_mb.saturating_mul(MB),
+        );
+    }
+}
+
+/// The ticket closed: its evidence dropped first when the close asked
+/// for it, and the time kept for the sweep.
+fn mark_closed(t: &mut Ticket, reason: String, now_ms: u64) {
+    if t.close.drop_evidence {
+        drop_evidence(t, "dropped at close", now_ms);
+    }
+    t.close.closed_ms = Some(now_ms);
+    t.state = TicketState::Closed { reason };
 }
 
 /// Whether a file has looked the same for `SETTLE_POLLS` polls.
 pub(crate) fn settle_file(path: &Path, settle: &mut Option<Settle>) -> Result<bool> {
     let meta = std::fs::metadata(path)?;
     let mtime_ms = crate::epoch_ms(meta.modified()?);
-    let len = meta.len();
+    Ok(settle_seen(mtime_ms, meta.len(), settle))
+}
+
+/// One more look at a size and mtime: true once they have been the same
+/// for `SETTLE_POLLS` looks in a row.
+fn settle_seen(mtime_ms: u64, len: u64, settle: &mut Option<Settle>) -> bool {
     let entry = settle.get_or_insert(Settle {
         mtime_ms,
         len,
@@ -9924,7 +10235,7 @@ pub(crate) fn settle_file(path: &Path, settle: &mut Option<Settle>) -> Result<bo
             polls: 1,
         };
     }
-    Ok(entry.polls >= SETTLE_POLLS)
+    entry.polls >= SETTLE_POLLS
 }
 
 /// The definition a reviewer operator installs, with Dispatch's

@@ -487,6 +487,7 @@ pub const SUPERVISOR_VERBS: &[(&str, Rule)] = &[
     ("events", Rule::Allowed),
     ("wait", Rule::Allowed),
     ("show", Rule::Allowed),
+    ("evidence", Rule::Allowed),
     ("report", Rule::Allowed),
     ("tail", Rule::Allowed),
     ("health", Rule::Allowed),
