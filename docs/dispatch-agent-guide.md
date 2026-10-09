@@ -571,18 +571,27 @@ owner may delegate them to you; the next section says how.
 
 ## Managing a pipeline file, when the owner asks
 
+[Writing a pipeline file](dispatch-pipeline-guide.md) builds a file up
+step by step and says what each key buys, what it costs, and what goes
+wrong without it. This section is what to know while editing one.
+
 Only when the owner has said so for a named project. Edit
 `pipelines/<project>.toml` in place with an ordinary editor or `sed`;
-nothing needs restarting. What a change reaches depends on the key:
+Dispatch itself needs no restart. Whether a running ticket sees the
+change depends on the key:
 
-- `[policy] slots`, `waiting_on_me`, `min_free_gb` and `refresh` are
-  read from the live file on every pass, for every ticket of the
-  project. Raising `slots` lets
-  the next waiting ticket start within a second or two and
-  `dispatch status` shows the new limit at once. When a project has a
-  `.pr.toml` as well, its `[policy]` counts do not apply: the
-  project's `.toml` governs both files' tickets, and `status` shows
-  one line per project for that reason.
+- `[policy] slots`, `waiting_on_me` and `min_free_gb` are read from
+  the live file on every pass, for every ticket of the project.
+  Raising `slots` lets the next waiting ticket start within a second
+  or two and `dispatch status` shows the new limit at once. When a
+  project has a `.pr.toml` as well, its `[policy]` counts do not
+  apply: the project's `.toml` governs both files' tickets, and
+  `status` shows one line per project for that reason. `refresh` is
+  not read live: it is copied into a ticket at take like the rest of
+  the policy.
+- A code review stage's `style_rounds` is read from the live file (the
+  `.pr.toml` for a ticket from a pull request) at every round, so an
+  edit reaches a running review.
 - Everything else (lanes, `setup`, gates, operators, stages, prompts,
   the `decisions` dials) is copied into a ticket when it is taken.
   Tickets already running keep their copy until they are restarted, so
