@@ -2925,6 +2925,121 @@ ports = [3100, 3199]
         assert_eq!(p.stages[at("review-code")].kind(), StageKind::Review);
     }
 
+    /// `fragment` merged into `base`: tables key by key, and arrays of
+    /// tables (`lanes`, `stages`, `resources`) by `name`, a match
+    /// replaced and anything else appended.
+    fn merge_fragment(base: &mut toml::Table, fragment: toml::Table) {
+        for (key, value) in fragment {
+            match (base.get_mut(&key), value) {
+                (Some(toml::Value::Table(into)), toml::Value::Table(from)) => {
+                    merge_fragment(into, from);
+                }
+                (Some(toml::Value::Array(into)), toml::Value::Array(from))
+                    if from.iter().all(toml::Value::is_table) =>
+                {
+                    for entry in from {
+                        let name = entry.get("name").cloned();
+                        match into
+                            .iter_mut()
+                            .find(|e| name.is_some() && e.get("name") == name.as_ref())
+                        {
+                            Some(slot) => *slot = entry,
+                            None => into.push(entry),
+                        }
+                    }
+                }
+                (_, value) => {
+                    base.insert(key, value);
+                }
+            }
+        }
+    }
+
+    /// Every key path of `source` is in `parsed`, so a key the parser
+    /// ignores (a misspelling, a key on the wrong table) is caught. A
+    /// value the parser reshapes (`context`, `writes`, `on_dirty`) is
+    /// compared by presence alone.
+    fn keys_survive(source: &toml::Table, parsed: &toml::Table, at: &str, block: usize) {
+        for (key, value) in source {
+            let path = format!("{at}{key}");
+            let Some(back) = parsed.get(key) else {
+                panic!("block at line {block}: {path} is not a key the parser keeps");
+            };
+            match (value, back) {
+                (toml::Value::Table(s), toml::Value::Table(p)) => {
+                    keys_survive(s, p, &format!("{path}."), block);
+                }
+                (toml::Value::Array(s), toml::Value::Array(p)) => {
+                    for (i, (s, p)) in s.iter().zip(p).enumerate() {
+                        if let (toml::Value::Table(s), toml::Value::Table(p)) = (s, p) {
+                            keys_survive(s, p, &format!("{path}[{i}]."), block);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    #[test]
+    fn every_block_in_the_pipeline_guide_is_a_pipeline_the_parser_knows() {
+        let doc = include_str!("../../docs/dispatch-pipeline-guide.md");
+        let mut whole: Option<toml::Table> = None;
+        let mut checked = 0;
+        let mut lines = doc.lines().enumerate();
+        while let Some((at, line)) = lines.next() {
+            let Some(info) = line.strip_prefix("```") else {
+                continue;
+            };
+            let mut body = String::new();
+            for (_, l) in lines.by_ref() {
+                if l.starts_with("```") {
+                    break;
+                }
+                body.push_str(l);
+                body.push('\n');
+            }
+            // A recased or padded fence would otherwise drop out of the check
+            // silently; the `other` arm below refuses it, and the exact count
+            // at the end catches a misspelled one.
+            if !info.to_ascii_lowercase().contains("toml") {
+                continue;
+            }
+            let block = at + 1;
+            let table: toml::Table = toml::from_str(&body)
+                .unwrap_or_else(|e| panic!("block at line {block} is not TOML: {e}"));
+            let source = match info {
+                "toml" => {
+                    assert!(
+                        body.starts_with("version = 1\n"),
+                        "block at line {block}: a whole file starts with version = 1"
+                    );
+                    whole = Some(table.clone());
+                    table
+                }
+                "toml fragment" => {
+                    let mut merged = whole.clone().unwrap_or_else(|| {
+                        panic!("fragment at line {block} has no whole file above it")
+                    });
+                    merge_fragment(&mut merged, table);
+                    merged
+                }
+                other => {
+                    panic!("block at line {block}: ```{other} is neither toml nor toml fragment")
+                }
+            };
+            let text = toml::to_string(&source).unwrap();
+            let p =
+                Pipeline::parse(&text).unwrap_or_else(|e| panic!("block at line {block}: {e:#}"));
+            p.validate_for_take()
+                .unwrap_or_else(|e| panic!("block at line {block}: {e:#}"));
+            let parsed = toml::Table::try_from(&p).unwrap();
+            keys_survive(&source, &parsed, "", block);
+            checked += 1;
+        }
+        assert_eq!(checked, 14, "toml blocks in the guide");
+    }
+
     fn back_half_refused(from: &str, to: &str, expected: &str) {
         let text = DEPLOYING_BACK_HALF.replace(from, to);
         assert_ne!(text, DEPLOYING_BACK_HALF, "{from}");

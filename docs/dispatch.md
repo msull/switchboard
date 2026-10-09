@@ -812,7 +812,8 @@ decision's text as a reminder, not verified.
 ## The pipeline file
 
 One file per project, TOML, in Dispatch's data directory (never in the
-repository).
+repository). [Writing a pipeline file](dispatch-pipeline-guide.md)
+builds one up step by step, with what each key buys and costs.
 
 ```toml
 version = 1
@@ -831,6 +832,11 @@ remotes = { github = "git@github.com:..." }   # mirrors a pull request may be ta
 
 [source]
 kind = "github" | "task-file" | "manual" | "pull-request"   # pull-request: see "Tickets from pull requests"
+repo = "owner/name"           # github: the repository issues come from
+label = "dispatch"            # github, required: the label that marks an issue as handed over
+lane_hints = { "area:backend" = "backend" }   # github: issue labels that suggest an answer to the lanes decision
+path = "task-list.md"         # task-file: the file of task lines, relative to the root
+marker = "@dispatch"          # task-file: a task line carrying this is handed over
 
 [[lanes]]
 name = "..."
@@ -843,6 +849,9 @@ setup = ["cmd", "args"]       # run once, before the lane's first agent
 writable = ["~/.cargo"]       # under [policy] confine: extra paths the lane's setup, gates, checks and command reviewers may write
 merge_after = ["backend"]     # lanes whose pull requests merge first: this lane's merge question waits for them (see "Merge order")
 merge_after_deploy = true     # also wait for the base pipeline on their merge commit: true until it finishes, or a step's name ("Deploy to dev") until it passes
+serve = { argv = ["npm", "start"], env = { PORT = "{port}" }, url = "http://localhost:{port}", ready = { http = "/", within_secs = 120 } }
+                              # how a stage's `services` run this lane: env holds literals and {port} only (it is on the
+                              # command line), url is what the agent is told, ready.http a path probed until it answers
 
 [[resources]]
 name = "..."
@@ -850,6 +859,7 @@ count = 1
 
 [operators.<name>]
 kind = "claude" | "codex" | "command"
+args = ["--model", "sonnet"]  # extra flags for the agent's command line
 guidance = "..."
 budget_usd = 0.0              # per ticket across the operator's attempts; 0 means the project default
 argv = ["cmd", "args"]        # kind = "command" only: local tooling a code review stage runs as a reviewer
@@ -875,6 +885,10 @@ cap = 4
 [[stages]]
 name = "..."
 operator = "..."              # present: an agent stage; absent with a review operator: a workflow stage; absent: gate-only
+review = "..."                # a workflow stage: the reviewer operator, which has an [operators.<name>.review] table
+subject = "plan"              # a workflow stage: the artifact it reviews, written by an earlier stage
+manifest = "manifest"         # an artifact Dispatch parses and checks as the stage settles (see "Manifests")
+release = "kb"                # an in-place lane, by name, whose hold ends with this stage (see "Pipeline: PTA")
 context = "root" | "each" | "joined" | ["front"]
 writes = ["notes"]            # artifact names; each expands as {notes}, {plan}, ...
 writes = ["seed", { name = "personas", secret = true }]   # a gate-only command stage: the command writes each to $DISPATCH_WRITES_<NAME>; a secret one needs a [[resources]] entry in needs
@@ -885,8 +899,13 @@ gate = { kind = "command", argv = ["..."], in = "root" | "lane" | "lane:<name>" 
      | { kind = "command", argv = ["..."], network = "allow" | "deny" }   # under confine: this gate's network over the policy's; a like gate takes the named gate's
      | { kind = "external", check = "review-finalized" | "pr-checks" | "pr-merged" }
      | { kind = "external", check = "pr-checks", checks = "none" }   # a repository with no CI: a PR at the head is enough
+     | { kind = "external", check = "pr-checks" | "pr-merged", provider = "github" | "bitbucket" }   # overrides the provider read from the lane's remote
+     | { kind = "external", check = "pr-merged", decision = "merge" }   # the pending decision while it waits; absent, `merge`
      | { kind = "human", decision = "...", confirm = true }
 on_dirty = { nudge = 1 } | "ask"   # an agent stage with a command gate, or a code review stage's implementer: overrides the policy's
+without_lane = "base"         # a gate-only command stage in lane:<name>: when the ticket did not choose the lane, run it on the lane's base from the project's base tree
+services = ["frontend"]       # lanes with a serve, started for this stage if the ticket cut them; needs a [[resources]] entry in needs and [policy] ports
+before = { frontend = ["npm", "run", "link-env"] }   # per served lane: run before its service starts; idempotent; keys among services
 needs = ["resource name"]     # held over each run of consecutive stages that name it, released at its end and retaken at the next; a workflow stage only last in a run; never a code review stage (refused at take and restart)
 reviewers = ["style", "lint"] # present: a code review stage (see "The code review stage"); operators, run at once each round
 implementer = "implementer"   # the claude operator that addresses a round's findings, fresh each round
@@ -901,6 +920,7 @@ env = ["aws-dev"]             # Switchboard environment sets: added to the stage
 [policy]
 slots = 1                     # tickets with a running attempt or a held resource; read live from <project>.toml on every pass, not from a ticket's copy
 waiting_on_me = 2             # pending decisions across the project before nothing new starts; live as well
+ports = [3100, 3199]          # the range services' ports are allocated from, each tested free before use; required by a stage with services
 rates = { "claude-sonnet-5" = [3.0, 15.0], ... }   # $ per million input, output tokens
 decisions = { lanes = "ask", finalize = "ask", merge = "ask", budget = "ask", review-code = "ask", resolution = "ask" }
 trust_folders = false         # true: Claude Code's folder trust question, which every fresh worktree asks, is answered for the project's agents
@@ -915,6 +935,15 @@ fixer = "fixer"               # the operator that fixes a PR whose checks are re
 max_fixes = 2                 # fixes one PR may get before red checks are a question
 confine = false               # true: setup, command gates, review checks and command reviewers run sandboxed (see the start of this document); absent, off
 network = "allow"             # or "deny": under confine, whether those commands reach off this machine; loopback stays open
+
+[supervisor]                  # read only from the live <project>.toml (see "Supervisor")
+guidance = "..."              # what it is for; the seed opens with it; required
+read = ["CLAUDE.md"]          # files to read first, relative to its workspace
+setup = ["git", "clone", "git@...", "."]   # or [[supervisor.setup]] argv = [...] entries; absent, git clone <repo> .
+model = "sonnet"              # the session's --model
+decides = ["finalize", "rerun"]   # decisions it may answer: Dispatch's own, or one a gate of this file asks
+merges = false                # true: it merges a green, clean pull request itself
+may = ["runner", "restart"]   # capabilities beyond decisions; never written empty
 ```
 
 An agent stage needs no `gate` line: "the agent stopped and every
