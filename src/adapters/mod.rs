@@ -5,6 +5,7 @@ pub mod agents;
 pub mod artifacts;
 pub mod control;
 pub mod controller;
+pub mod diff;
 pub mod dispatch;
 pub mod dock;
 pub mod dotenv;

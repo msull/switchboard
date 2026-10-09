@@ -5194,7 +5194,15 @@ fn ticket_page_on(
     changes: Changes,
     edit: impl FnOnce(&mut switchboard::ports::dispatch::TicketView),
 ) -> Harness<'static, SwitchboardApp> {
-    ticket_page_built(dispatch, changes, egui::vec2(1200.0, 900.0), edit)
+    ticket_page_built(
+        dispatch,
+        FakeChanges {
+            changes,
+            ..FakeChanges::default()
+        },
+        egui::vec2(1200.0, 900.0),
+        edit,
+    )
 }
 
 /// `ticket_page` in a window of `size`.
@@ -5202,7 +5210,7 @@ fn ticket_page_sized(
     size: egui::Vec2,
     edit: impl FnOnce(&mut switchboard::ports::dispatch::TicketView),
 ) -> Harness<'static, SwitchboardApp> {
-    ticket_page_built(FakeDispatch::default(), Changes::default(), size, edit)
+    ticket_page_built(FakeDispatch::default(), FakeChanges::default(), size, edit)
 }
 
 /// `ticket_page` against a runner that answers with the same status,
@@ -5212,7 +5220,7 @@ fn ticket_page_sized(
 /// `updated_ms` changes.
 fn ticket_page_built(
     mut dispatch: FakeDispatch,
-    changes: Changes,
+    changes: FakeChanges,
     size: egui::Vec2,
     edit: impl FnOnce(&mut switchboard::ports::dispatch::TicketView),
 ) -> Harness<'static, SwitchboardApp> {
@@ -5223,7 +5231,7 @@ fn ticket_page_built(
     dispatch.status = Some(status.clone());
     let services = Services {
         dispatch: Some(Box::new(dispatch)),
-        changes: Arc::new(FakeChanges { changes }),
+        changes: Arc::new(changes),
         ..fake_services(
             FakeOpener::default(),
             FakeSecrets::default(),
@@ -5817,6 +5825,7 @@ fn the_changes_tab_lists_the_branchs_commits_and_files() {
             path: "src/import.rs".into(),
             added: 3,
             removed: 1,
+            ..FileStat::default()
         }],
     };
     let mut harness = ticket_page_on(FakeDispatch::default(), changes, |t| {
@@ -5842,6 +5851,146 @@ fn the_changes_tab_lists_the_branchs_commits_and_files() {
     assert!(actions(&harness).contains(&AppAction::OpenDocument("/wt/t1/src/import.rs".into())));
     click(&mut harness, "Reveal");
     assert!(actions(&harness).contains(&AppAction::RevealDocument("/wt/t1/src/import.rs".into())));
+}
+
+/// `src/import.rs` over its base as `git diff --unified=5000` gives it:
+/// the whole file, one line changed, and a run of unchanged lines long
+/// enough to fold.
+const IMPORT_DIFF: &str = r"diff --git a/src/import.rs b/src/import.rs
+index 1111111..2222222 100644
+--- a/src/import.rs
++++ b/src/import.rs
+@@ -1,13 +1,13 @@
+ use std::io;
+ // line 2
+-fn import() {}
++fn import_all() {}
+ // line 4
+ // line 5
+ // line 6
+ // line 7
+ // line 8
+ // line 9
+ // line 10
+ // line 11
+ // line 12
+ // line 13
+";
+
+/// A click on a changed file reads its diff on the app's thread and
+/// shows it under the row: unchanged lines folded until clicked, and a
+/// new-side line number opening the tree's file at that line.
+#[test]
+fn clicking_a_changed_file_shows_its_diff() {
+    use switchboard::core::diff::DiffRange;
+    use switchboard::ports::dispatch::LaneView;
+    let changes = Changes {
+        commits: Vec::new(),
+        files: vec![FileStat {
+            path: "src/import.rs".into(),
+            added: 1,
+            removed: 1,
+            ..FileStat::default()
+        }],
+    };
+    let diff = switchboard::adapters::diff::parse(IMPORT_DIFF, 5000);
+    let fake = FakeChanges {
+        changes,
+        diffs: [("src/import.rs".to_owned(), diff)].into(),
+    };
+    let mut updated_ms = 0;
+    let mut harness = ticket_page_built(
+        FakeDispatch::default(),
+        fake,
+        egui::vec2(1200.0, 900.0),
+        |t| {
+            t.lanes = vec![LaneView {
+                name: "repo".into(),
+                worktree: "/wt/t1".into(),
+                branch: "dispatch/104-one-file".into(),
+                base_sha: Some("base0000".into()),
+                head: Some("head1111".into()),
+                ..LaneView::default()
+            }];
+            updated_ms = t.updated_ms;
+        },
+    );
+    click(&mut harness, "Changes");
+    let wait_for = |harness: &mut Harness<'static, SwitchboardApp>, text: &str| {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while harness.query_by_label_contains(text).is_none() {
+            assert!(Instant::now() < deadline, "{text} never showed");
+            std::thread::sleep(Duration::from_millis(10));
+            harness.run_steps(1);
+        }
+    };
+    wait_for(&mut harness, "src/import.rs");
+    click(&mut harness, "src/import.rs");
+    let read = AppAction::ReadFileDiff {
+        ticket: "t1".into(),
+        lane: "repo".into(),
+        path: "src/import.rs".into(),
+        old_path: None,
+        range: DiffRange {
+            dir: "/wt/t1".into(),
+            base: "base0000".into(),
+            head: "head1111".into(),
+            updated_ms,
+        },
+    };
+    assert!(actions(&harness).contains(&read));
+    wait_for(&mut harness, "fn import_all() {}");
+    harness.get_by_label_contains("    1     1");
+    harness.get_by_label_contains("          3 +");
+    // Lines 7 to 13 are folded until clicked.
+    assert!(harness.query_by_label_contains("// line 10").is_none());
+    click(&mut harness, "⋯ 7 unchanged lines");
+    harness.get_by_label_contains("// line 10");
+
+    // The path closes the diff and opens it again, from what is held.
+    click(&mut harness, "src/import.rs");
+    assert!(
+        harness
+            .query_by_label_contains("fn import_all() {}")
+            .is_none()
+    );
+    click(&mut harness, "src/import.rs");
+    harness.get_by_label_contains("fn import_all() {}");
+    let reads = actions(&harness)
+        .iter()
+        .filter(|a| matches!(a, AppAction::ReadFileDiff { .. }))
+        .count();
+    assert_eq!(reads, 1);
+
+    // The gutter's middle row of the first block is the added line 3.
+    harness.get_by_label_contains("    1     1").click();
+    harness.run_steps(2);
+    assert!(actions(&harness).iter().any(|a| matches!(
+        a,
+        AppAction::ShowFileAt { path, line: 3, .. } if path == Path::new("/wt/t1/src/import.rs")
+    )));
+}
+
+/// The `ticket-diff` script line opens the ticket's Changes tab with
+/// that lane's file open.
+#[test]
+fn the_ticket_diff_script_line_opens_a_files_diff() {
+    let mut status = dispatch_status();
+    status.tickets[0].decisions.clear();
+    let harness = scripted_harness(status, false, "ticket-diff t1 repo src/import.rs");
+    assert_eq!(harness.state().core().view(), View::Ticket("t1".into()));
+    assert_eq!(
+        harness.state().ui_state.dispatch_ticket_tabs.get("t1"),
+        Some(&switchboard::ui::ticket::TicketTab::Changes)
+    );
+    assert_eq!(
+        harness
+            .state()
+            .ui_state
+            .ticket_diff_open
+            .get(&("t1".to_owned(), "repo".to_owned())),
+        Some(&"src/import.rs".to_owned())
+    );
 }
 
 /// The `ticket-tab` script line opens the ticket's page on that tab,

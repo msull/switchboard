@@ -11,8 +11,10 @@ use egui::{RichText, Ui};
 
 use super::cards::{ago_ms, at_local, now_ms};
 use super::dialogs::{dialog, dialog_actions};
+use super::diff::file_diff;
 use super::dispatch::{decision_card, title_of};
 use super::{DrawCtx, GAP, markdown, theme};
+use crate::core::diff::DiffRange;
 use crate::core::dispatch::{TimelineRow, close_offered, parked, revisable};
 use crate::core::{AppAction, RecordId};
 use crate::ports::changes::Changes;
@@ -590,6 +592,12 @@ fn changes(cx: &mut DrawCtx<'_>, ui: &mut Ui, t: &TicketView, now: u64) {
             ui.label(theme::meta_text(ui, "No branch."));
             continue;
         };
+        let range = DiffRange {
+            dir: dir.clone(),
+            base: base.clone(),
+            head: head.clone(),
+            updated_ms: t.updated_ms,
+        };
         let scan = scan_changes(cx, ui.ctx(), t, &l.name, (dir, base, head));
         match scan {
             None => {
@@ -600,7 +608,13 @@ fn changes(cx: &mut DrawCtx<'_>, ui: &mut Ui, t: &TicketView, now: u64) {
             }
             Some(Ok(c)) => {
                 let tree = (!l.removed).then_some(l.worktree.as_path());
-                show_changes(cx, ui, &c, tree, now);
+                let lane = LaneChanges {
+                    ticket: t,
+                    lane: &l.name,
+                    range: &range,
+                    tree,
+                };
+                show_changes(cx, ui, &c, &lane, now);
             }
         }
     }
@@ -639,9 +653,21 @@ fn scan_changes(
     scan.last.clone()
 }
 
-/// Commits, newest first, then files with their line counts; a file can
-/// be opened or revealed while the lane's tree stands.
-fn show_changes(cx: &mut DrawCtx<'_>, ui: &mut Ui, c: &Changes, tree: Option<&Path>, now: u64) {
+/// Which lane a Changes list is of: its ticket, its name, the range it
+/// was read over, and its tree while it stands.
+pub(super) struct LaneChanges<'a> {
+    pub ticket: &'a TicketView,
+    pub lane: &'a str,
+    pub range: &'a DiffRange,
+    pub tree: Option<&'a Path>,
+}
+
+/// Commits, newest first, then files with their line counts; a click
+/// on a file opens its diff under its row, and a file can be opened or
+/// revealed while the lane's tree stands.
+fn show_changes(cx: &mut DrawCtx<'_>, ui: &mut Ui, c: &Changes, lane: &LaneChanges<'_>, now: u64) {
+    let tree = lane.tree;
+    let key = (lane.ticket.id.clone(), lane.lane.to_owned());
     let p = theme::palette(ui);
     theme::section(ui, &format!("Commits · {}", c.commits.len()));
     if c.commits.is_empty() {
@@ -657,13 +683,31 @@ fn show_changes(cx: &mut DrawCtx<'_>, ui: &mut Ui, c: &Changes, tree: Option<&Pa
     }
     theme::section(ui, &format!("Files · {}", c.files.len()));
     for file in &c.files {
+        let open = cx.state.ticket_diff_open.get(&key) == Some(&file.path);
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing.x = 6.0;
-            ui.label(theme::mono_text(ui, &file.path));
-            ui.label(theme::meta_text(
-                ui,
-                format!("+{} −{}", file.added, file.removed),
-            ));
+            let name = match &file.old_path {
+                Some(old) => format!("{old} → {}", file.path),
+                None => file.path.clone(),
+            };
+            if ui
+                .selectable_label(open, theme::mono_text(ui, name))
+                .clicked()
+            {
+                if open {
+                    cx.state.ticket_diff_open.remove(&key);
+                } else {
+                    cx.state
+                        .ticket_diff_open
+                        .insert(key.clone(), file.path.clone());
+                }
+            }
+            let counts = if file.binary {
+                "binary".to_owned()
+            } else {
+                format!("+{} −{}", file.added, file.removed)
+            };
+            ui.label(theme::meta_text(ui, counts));
             let Some(tree) = tree else {
                 return;
             };
@@ -679,6 +723,9 @@ fn show_changes(cx: &mut DrawCtx<'_>, ui: &mut Ui, c: &Changes, tree: Option<&Pa
                 cx.dispatch(AppAction::RevealDocument(path));
             }
         });
+        if open {
+            file_diff(cx, ui, lane, file);
+        }
     }
 }
 

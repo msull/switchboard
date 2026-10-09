@@ -47,6 +47,11 @@ pub struct Palette {
     /// Code blocks stay dark on both themes.
     pub code_fill: Color32,
     pub code_text: Color32,
+    /// A diff's added and removed rows, and the words changed on them.
+    pub diff_add: Color32,
+    pub diff_add_word: Color32,
+    pub diff_del: Color32,
+    pub diff_del_word: Color32,
 }
 
 // Hex colors read as designers write them (`0xf3f2f2`); separators
@@ -76,6 +81,10 @@ const LIGHT: Palette = Palette {
     n800: rgb(0x444141),
     code_fill: rgb(0x2d2b2b),
     code_text: rgb(0xf8f4f4),
+    diff_add: rgb(0xe6f4ea),
+    diff_add_word: rgb(0xb7e1c1),
+    diff_del: rgb(0xfbe9eb),
+    diff_del_word: rgb(0xf3b8bf),
 };
 
 const DARK: Palette = Palette {
@@ -98,6 +107,10 @@ const DARK: Palette = Palette {
     n800: rgb(0xd7d3d3),
     code_fill: rgb(0x2d2b2b),
     code_text: rgb(0xf8f4f4),
+    diff_add: rgb(0x1f3326),
+    diff_add_word: rgb(0x2f5a3b),
+    diff_del: rgb(0x3d2226),
+    diff_del_word: rgb(0x6e3139),
 };
 
 /// The palette of the theme the window is drawing in. Read from the

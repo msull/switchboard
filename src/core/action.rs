@@ -619,6 +619,31 @@ pub enum AppAction {
         id: String,
         updated_ms: u64,
     },
+    /// Read one file's diff over the lane's base, unless it is held for
+    /// this range or already on its way.
+    ReadFileDiff {
+        ticket: String,
+        lane: String,
+        path: String,
+        old_path: Option<String>,
+        range: crate::core::diff::DiffRange,
+    },
+    /// A file's diff as read on the app's thread.
+    FileDiffRead {
+        ticket: String,
+        lane: String,
+        path: String,
+        range: crate::core::diff::DiffRange,
+        result: Result<crate::ports::changes::FileDiff, String>,
+    },
+    /// Open a file in the full document view at `line`, under the
+    /// project whose root holds it most closely, else the project whose
+    /// record id is `project`, else the active one.
+    ShowFileAt {
+        path: PathBuf,
+        line: u32,
+        project: Option<String>,
+    },
     /// What a `DispatchCall` came back with.
     DispatchReplied {
         body: crate::ports::dispatch::Body,
@@ -806,6 +831,15 @@ pub enum Effect {
     /// One request to Dispatch's port; the reply returns as
     /// `AppAction::DispatchReplied`.
     DispatchCall(crate::ports::dispatch::Body),
+    /// Read one file's diff on a thread; the answer returns as
+    /// `AppAction::FileDiffRead`.
+    ReadFileDiff {
+        ticket: String,
+        lane: String,
+        path: String,
+        old_path: Option<String>,
+        range: crate::core::diff::DiffRange,
+    },
 }
 
 /// What a record is waiting on. A record with a flight is "in flight":
@@ -1064,6 +1098,7 @@ impl AppCore {
             | AppAction::UnpinDocument(..)
             | AppAction::ShowDocument(..)
             | AppAction::ShowFileRef { .. }
+            | AppAction::ShowFileAt { .. }
             | AppAction::OpenDocument(_)
             | AppAction::RevealDocument(_)
             | AppAction::OpenInEditor(_)
@@ -1200,6 +1235,9 @@ impl AppCore {
             | AppAction::PopOutDispatch
             | AppAction::CloseDispatchWindow
             | AppAction::DispatchWindowMoved(_) => self.dispatch_action(action, now, &mut out),
+            AppAction::ReadFileDiff { .. } | AppAction::FileDiffRead { .. } => {
+                self.diff_action(action, &mut out);
+            }
         }
         self.remember_view(&mut out);
         self.prune_working_set(&mut out);
@@ -1907,6 +1945,43 @@ impl AppCore {
         let Some(own) = self.session(record).map(|s| s.project) else {
             return;
         };
+        self.show_file_under(path, line, own, now, out);
+    }
+
+    /// Show a file at a line, as the ticket page's diff asks: under the
+    /// project whose root holds it most closely, else the one whose
+    /// record id is `project`, else the active one. With no project at
+    /// all, nothing.
+    fn show_file_at(
+        &mut self,
+        path: PathBuf,
+        line: u32,
+        project: Option<&str>,
+        now: Clock,
+        out: &mut Out,
+    ) {
+        // Dispatch names the ticket's project by its record id, the one
+        // `project.add` answered with.
+        let named = project
+            .and_then(|id| uuid::Uuid::parse_str(id).ok())
+            .map(ProjectId)
+            .filter(|pid| self.workspaces.iter().any(|w| w.project.id == *pid));
+        let Some(fallback) = named.or_else(|| self.active_project()) else {
+            return;
+        };
+        self.show_file_under(path, Some(line), fallback, now, out);
+    }
+
+    /// Show `path` in the full document view under the project whose
+    /// root holds it most closely (so Pin works), else `fallback`.
+    fn show_file_under(
+        &mut self,
+        path: PathBuf,
+        line: Option<u32>,
+        fallback: ProjectId,
+        now: Clock,
+        out: &mut Out,
+    ) {
         if self.quiet_op.is_some() {
             return;
         }
@@ -1915,7 +1990,7 @@ impl AppCore {
             .iter()
             .filter(|w| path.starts_with(&w.project.root))
             .max_by_key(|w| w.project.root.components().count())
-            .map_or(own, |w| w.project.id);
+            .map_or(fallback, |w| w.project.id);
         self.show(View::Document(pid, path.clone()), now, out);
         self.line_requests += 1;
         self.document_line = line.map(|l| (path, l, self.line_requests));
@@ -2766,6 +2841,11 @@ impl AppCore {
             AppAction::ShowFileRef { record, path, line } => {
                 self.show_file_ref(record, path, line, now, out);
             }
+            AppAction::ShowFileAt {
+                path,
+                line,
+                project,
+            } => self.show_file_at(path, line, project.as_deref(), now, out),
             AppAction::OpenDocument(path) => out.push(Effect::OpenPath(path)),
             AppAction::RevealDocument(path) => out.push(Effect::Reveal(path)),
             AppAction::OpenInEditor(path) => out.push(Effect::OpenInEditor {
