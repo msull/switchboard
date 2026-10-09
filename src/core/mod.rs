@@ -4,6 +4,7 @@ pub mod action;
 mod control;
 mod controller;
 mod definitions;
+pub mod diff;
 pub mod dispatch;
 pub mod env;
 mod events;

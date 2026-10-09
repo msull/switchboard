@@ -450,11 +450,15 @@ fn highlighting<'p>(
     ui: &Ui,
     preview: &'p Preview,
 ) -> (egui_extras::syntax_highlighting::CodeTheme, &'p str) {
-    let lang = preview
-        .path
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("");
+    highlighting_for(ui, &preview.path)
+}
+
+/// [`highlighting`] for a file known by its path alone.
+pub(super) fn highlighting_for<'p>(
+    ui: &Ui,
+    path: &'p Path,
+) -> (egui_extras::syntax_highlighting::CodeTheme, &'p str) {
+    let lang = path.extension().and_then(|e| e.to_str()).unwrap_or("");
     let theme = egui_extras::syntax_highlighting::CodeTheme::from_style(ui.style());
     (theme, lang)
 }

@@ -10,6 +10,7 @@ use uuid::Uuid;
 use super::action::{AppAction, AppCore, Clock, Composer, Effect, Notice, UNDO_WINDOW, View};
 use super::controller::{MenuKind, UiRequest};
 use super::definitions::entry_hash;
+use super::diff::{DiffRange, runs};
 use super::model::{
     Activity, AgentKind, Approval, CardState, Discarded, GridRect, Launch, PinTarget, Project,
     ProjectEnv, ProjectId, RecordId, ResumeHandle, SavedView, SessionKind, SessionRecord, SetId,
@@ -17,6 +18,7 @@ use super::model::{
 };
 use super::reconcile::RECORD_ID_ENV;
 use crate::ports::agent::AgentLaunch;
+use crate::ports::changes::{DiffBody, DiffLine, FileDiff, FileStatus, LineKind};
 use crate::ports::controller::{Button, ControllerEvent, Direction};
 use crate::ports::events::{EventKind, SessionEvent};
 use crate::ports::host::{HostId, HostStatus, Liveness};
@@ -451,6 +453,206 @@ fn a_file_an_agent_named_opens_at_its_line_under_the_closest_project() {
     );
     assert!(effects.is_empty());
     assert_eq!(core.view(), before);
+}
+
+#[test]
+fn show_file_at_picks_the_deepest_root_else_the_project_by_id() {
+    let mut own = project("own");
+    own.root = PathBuf::from("/work/own");
+    let mut other = project("other");
+    other.root = PathBuf::from("/work/other");
+    // The active project, when nothing else decides.
+    other.last_active = Clock::at(1).wall;
+    let (pid, oid) = (own.id, other.id);
+    let (mut core, _) = loaded(vec![Workspace::new(own), Workspace::new(other)], vec![]);
+    let at = |path: &str, project: Option<ProjectId>| AppAction::ShowFileAt {
+        path: PathBuf::from(path),
+        line: 12,
+        project: project.map(|p| p.0.to_string()),
+    };
+
+    // Under a project's root: that project, whatever is named.
+    let lib = PathBuf::from("/work/own/src/lib.rs");
+    core.dispatch(at("/work/own/src/lib.rs", Some(oid)), Clock::at(2));
+    assert_eq!(core.view(), View::Document(pid, lib.clone()));
+    assert_eq!(core.document_line(), Some((lib.as_path(), 12, 1)));
+
+    // A ticket's tree outside every root: the project the ticket names
+    // by record id.
+    let tree = PathBuf::from("/trees/t1/src/lib.rs");
+    core.dispatch(at("/trees/t1/src/lib.rs", Some(pid)), Clock::at(3));
+    assert_eq!(core.view(), View::Document(pid, tree.clone()));
+    assert_eq!(core.document_line(), Some((tree.as_path(), 12, 2)));
+
+    // No project named, or one that is not here: the active one.
+    let gone = ProjectId(uuid::Uuid::new_v4());
+    core.dispatch(at("/trees/t1/src/lib.rs", Some(gone)), Clock::at(4));
+    assert_eq!(core.view(), View::Document(oid, tree.clone()));
+    core.dispatch(at("/trees/t1/src/lib.rs", None), Clock::at(5));
+    assert_eq!(core.view(), View::Document(oid, tree));
+
+    // With no project at all, nothing.
+    let mut empty = AppCore::new();
+    assert!(
+        empty
+            .dispatch(at("/trees/t1/src/lib.rs", None), Clock::at(6))
+            .is_empty()
+    );
+    assert_eq!(empty.view(), View::Switchboard);
+}
+
+fn diff_range(head: &str) -> DiffRange {
+    DiffRange {
+        dir: PathBuf::from("/wt/t1"),
+        base: "base0000".into(),
+        head: head.into(),
+        updated_ms: 7,
+    }
+}
+
+fn read_diff(path: &str, range: &DiffRange) -> AppAction {
+    AppAction::ReadFileDiff {
+        ticket: "t1".into(),
+        lane: "repo".into(),
+        path: path.into(),
+        old_path: None,
+        range: range.clone(),
+    }
+}
+
+fn diff_read(path: &str, range: &DiffRange, result: Result<FileDiff, String>) -> AppAction {
+    AppAction::FileDiffRead {
+        ticket: "t1".into(),
+        lane: "repo".into(),
+        path: path.into(),
+        range: range.clone(),
+        result,
+    }
+}
+
+#[test]
+fn a_file_diff_is_stored_per_file_and_per_head() {
+    let mut core = AppCore::new();
+    let (one, two) = (diff_range("head1111"), diff_range("head2222"));
+    assert!(core.file_diff_due("t1", "repo", "a.rs", &one));
+    let effects = core.dispatch(read_diff("a.rs", &one), Clock::at(1));
+    assert_eq!(
+        effects,
+        vec![Effect::ReadFileDiff {
+            ticket: "t1".into(),
+            lane: "repo".into(),
+            path: "a.rs".into(),
+            old_path: None,
+            range: one.clone(),
+        }]
+    );
+    // Asked again while on its way: nothing more.
+    assert!(!core.file_diff_due("t1", "repo", "a.rs", &one));
+    assert!(
+        core.dispatch(read_diff("a.rs", &one), Clock::at(2))
+            .is_empty()
+    );
+
+    let first = FileDiff {
+        status: FileStatus::Added,
+        body: DiffBody::Binary,
+    };
+    let effects = core.dispatch(diff_read("a.rs", &one, Ok(first.clone())), Clock::at(3));
+    assert!(effects.is_empty(), "a diff is never saved");
+    let held = core.file_diff("t1", "repo", "a.rs").unwrap();
+    assert_eq!(held.last, Some((one.clone(), Ok(first.clone()))));
+    assert!(!core.file_diff_due("t1", "repo", "a.rs", &one));
+    assert!(
+        core.dispatch(read_diff("a.rs", &one), Clock::at(4))
+            .is_empty()
+    );
+
+    // The head moved: due again, and the old diff stays up meanwhile.
+    assert!(core.file_diff_due("t1", "repo", "a.rs", &two));
+    assert_eq!(
+        core.dispatch(read_diff("a.rs", &two), Clock::at(5)).len(),
+        1
+    );
+    let held = core.file_diff("t1", "repo", "a.rs").unwrap();
+    assert!(held.in_flight);
+    assert_eq!(held.last, Some((one.clone(), Ok(first))));
+    core.dispatch(
+        diff_read("a.rs", &two, Ok(FileDiff::default())),
+        Clock::at(6),
+    );
+    assert_eq!(
+        core.file_diff("t1", "repo", "a.rs").unwrap().last,
+        Some((two.clone(), Ok(FileDiff::default())))
+    );
+
+    // Another file of the lane is its own.
+    assert!(core.file_diff("t1", "repo", "b.rs").is_none());
+    assert!(core.file_diff_due("t1", "repo", "b.rs", &two));
+    assert_eq!(
+        core.dispatch(read_diff("b.rs", &two), Clock::at(7)).len(),
+        1
+    );
+    assert!(!core.file_diff_due("t1", "repo", "a.rs", &two));
+}
+
+#[test]
+fn a_failed_diff_is_not_due_again_but_a_click_asks() {
+    let mut core = AppCore::new();
+    let range = diff_range("head1111");
+    core.dispatch(read_diff("a.rs", &range), Clock::at(1));
+    core.dispatch(
+        diff_read("a.rs", &range, Err("bad revision".into())),
+        Clock::at(2),
+    );
+    // The page does not ask every frame...
+    assert!(!core.file_diff_due("t1", "repo", "a.rs", &range));
+    // ...but Retry dispatches the read, and the core sends it.
+    assert_eq!(
+        core.dispatch(read_diff("a.rs", &range), Clock::at(3)).len(),
+        1
+    );
+    assert!(core.file_diff("t1", "repo", "a.rs").unwrap().in_flight);
+}
+
+fn diff_lines(kinds: &str) -> Vec<DiffLine> {
+    kinds
+        .chars()
+        .map(|c| DiffLine {
+            kind: match c {
+                '+' => LineKind::Added,
+                '-' => LineKind::Removed,
+                _ => LineKind::Context,
+            },
+            ..DiffLine::default()
+        })
+        .collect()
+}
+
+#[test]
+fn runs_fold_long_unchanged_stretches() {
+    use super::diff::Run::{Folded, Lines};
+    // Ten unchanged, a change, twelve unchanged, a change, ten unchanged.
+    let lines = diff_lines(&format!(
+        "{}+{}-{}",
+        " ".repeat(10),
+        " ".repeat(12),
+        " ".repeat(10)
+    ));
+    assert_eq!(
+        runs(&lines),
+        vec![
+            Folded(0..7),
+            Lines(7..14),
+            Folded(14..20),
+            Lines(20..27),
+            Folded(27..34),
+        ]
+    );
+    // Hiding fewer than four lines is not worth a fold.
+    let lines = diff_lines(&format!("{}+{}-", " ".repeat(6), " ".repeat(9)));
+    assert_eq!(runs(&lines), vec![Lines(0..17)]);
+    // No change at all: every line shows.
+    assert_eq!(runs(&diff_lines("     ")), vec![Lines(0..5)]);
 }
 
 #[test]

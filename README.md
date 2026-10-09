@@ -231,7 +231,7 @@ Dev aids, all environment variables:
   `add-file-to-working-set`, `arrange`, `show-message`, `clone-session`,
   `discard-to`, `undo-discard`, `review-plan`, `show-review`,
   `show-dispatch`, `dispatch-runner-start`, `dispatch-runner-stop`,
-  `show-ticket`, `close-ticket`, `ticket-tab`,
+  `show-ticket`, `close-ticket`, `ticket-tab`, `ticket-diff`,
   `review-file`, `review-continue`, `review-object`, `review-finalize`, `show-artifact`,
   `pop-out`, `close-pop-out`, `files-root`, `zoom`, `place-pop-out`,
   `place-card`, `new-workspace`, `workspace`, `workspace-global`,
@@ -272,9 +272,10 @@ src/core/
   events.rs              hook events -> record activity (matched by record id, ordered by time)
   workflow.rs            plan review runs: reviewer and planner rounds as a state machine over records
   control.rs             the control port's commands run quietly under an operation id; read models in the wire's shapes; `ready_for_prompt`, the one verdict `session.prompt` and a view's `prompt_refusal` share
+  diff.rs                a changed file's diff as held per ticket, lane and path, when a re-read is due, which unchanged runs fold
   dispatch.rs            Dispatch as the app shows it: the runner's last status as views, decisions answered as calls, a ticket's events and full view read once per change and its timeline, a project's supervisor chip, the console session
   tests.rs               state-transition tests for the core
-src/ports/               traits: store, host, events, agent, opener, transcript, secrets, project_config, round_files, artifacts, changes (a branch's commits and files over its base), controller, control (the operations log), dispatch (Dispatch's port)
+src/ports/               traits: store, host, events, agent, opener, transcript, secrets, project_config, round_files, artifacts, changes (a branch's commits and files over its base, one file's diff), controller, control (the operations log), dispatch (Dispatch's port)
 src/adapters/
   store.rs               JSON store: atomic writes, .bak, flock
   tmux.rs                tmux process host on the private socket
@@ -284,7 +285,8 @@ src/adapters/
   dock.rs                Dock badge with the waiting-session count (macOS)
   controller.rs          the nunchuk over USB serial: a thread owns the port, reconnects, hands events over a channel
   files.rs               project file index: gitignore-aware scan, lazy children, fuzzy match; the existing file a path an agent typed names
-  git.rs                 branches, change counts, per-path status; finds repos one or two dirs down; a branch's commits and numstat over its base (`GitChanges`)
+  git.rs                 branches, change counts, per-path status; finds repos one or two dirs down; a branch's commits and numstat over its base, one file's diff (`GitChanges`)
+  diff.rs                one file's `git diff` read into numbered hunks, changed words marked with `similar`
   keychain.rs            secrets as generic-password items in the login Keychain (tests use a temp keychain)
   dotenv.rs              .env parser (opt-in per project) and .env.example names
   project_config.rs      reads and validates .switchboard/project.json (capped, no symlinks)
@@ -318,7 +320,8 @@ src/ui/
   config.rs              project config editor: .switchboard/project.json as text, options listed, parse shown
   workflow.rs            plan review: the Review plan dialog, the run's page (rounds, plan with diff, feedback beside response, controls), the feedback block pinned under the header
   dispatch.rs            the Dispatch page: tickets with what waits on you (filtered by project), each project's supervisor chip (Open, Resume, Trust, Fresh behind a confirmation), and the console; Pop out
-  ticket.rs              one ticket's page: header, pending decisions pinned, tabs for timeline, issue, plan with its review rounds, notes, code review, and branch changes read on a thread; the owner's feedback on a pending finalize pinned above the plan
+  diff.rs                a changed file's diff on the ticket page: highlighted hunks beside a line-number gutter, changed rows tinted, folds, a new-side number opens the file
+  ticket.rs              one ticket's page: header, pending decisions pinned, tabs for timeline, issue, plan with its review rounds, notes, code review, and branch changes read on a thread with a file's diff under its row; the owner's feedback on a pending finalize pinned above the plan
   cards.rs               the one card for every entry kind, the card grid, pinned document cards
   session.rs             session view: header, embedded terminal or conversation + message box
   switchboard.rs         every session across projects, waiting first

@@ -145,6 +145,33 @@ pub struct SwitchboardApp {
     pub dispatched: Vec<AppAction>,
     /// The control port, once `listen` bound it.
     control: Option<ControlSocket>,
+    /// File diffs being read on threads of their own.
+    diff_reads: DiffReads,
+}
+
+/// A file diff's answer from its thread.
+struct DiffDone {
+    ticket: String,
+    lane: String,
+    path: String,
+    /// The range it was read for.
+    range: crate::core::diff::DiffRange,
+    result: Result<crate::ports::changes::FileDiff, String>,
+}
+
+/// The threads reading file diffs: each sends one answer, and `out`
+/// counts the ones not yet drained.
+struct DiffReads {
+    tx: std::sync::mpsc::Sender<DiffDone>,
+    rx: std::sync::mpsc::Receiver<DiffDone>,
+    out: usize,
+}
+
+impl Default for DiffReads {
+    fn default() -> Self {
+        let (tx, rx) = std::sync::mpsc::channel();
+        Self { tx, rx, out: 0 }
+    }
 }
 
 /// Turn an adapter failure into the notice the user sees; the log keeps
@@ -184,6 +211,7 @@ impl SwitchboardApp {
             record_actions: false,
             dispatched: Vec::new(),
             control: None,
+            diff_reads: DiffReads::default(),
         }
     }
 
@@ -526,6 +554,7 @@ impl SwitchboardApp {
                         result: result.map_err(|e| e.to_string()),
                     })
             }
+            Effect::ReadFileDiff { .. } => self.read_file_diff(effect),
             // Windows are the UI's; `logic` raises the one asked for.
             Effect::FocusWindow(id) => {
                 self.ui_state.focus_windows.push(id);
@@ -1067,6 +1096,75 @@ impl SwitchboardApp {
         self.deliver_dispatch(done);
     }
 
+    /// Read one file's diff on a thread of its own; `drain_diffs` takes
+    /// the answer.
+    fn read_file_diff(&mut self, effect: Effect) -> Option<AppAction> {
+        let Effect::ReadFileDiff {
+            ticket,
+            lane,
+            path,
+            old_path,
+            range,
+        } = effect
+        else {
+            unreachable!("not a diff read")
+        };
+        // An `Arc` clone is a second handle to the same reader, which the
+        // thread owns while it runs.
+        let reader = std::sync::Arc::clone(&self.services.changes);
+        let tx = self.diff_reads.tx.clone();
+        self.diff_reads.out += 1;
+        std::thread::spawn(move || {
+            // A panic still sends an answer, or the core would wait on
+            // this read for the life of the app. `AssertUnwindSafe` says
+            // the borrowed values are fine to use after a panic: the
+            // closure only reads `range` and `path`, and the reader goes
+            // with the thread.
+            let read = std::panic::AssertUnwindSafe(|| {
+                reader.diff(
+                    &range.dir,
+                    &range.base,
+                    &range.head,
+                    &path,
+                    old_path.as_deref(),
+                )
+            });
+            let result = std::panic::catch_unwind(read)
+                .unwrap_or_else(|_| Err("the diff read panicked".to_owned()));
+            let _ = tx.send(DiffDone {
+                ticket,
+                lane,
+                path,
+                range,
+                result,
+            });
+        });
+        None
+    }
+
+    /// File diffs whose threads answered since the last frame, each one
+    /// an action.
+    fn drain_diffs(&mut self) {
+        let done: Vec<DiffDone> = self.diff_reads.rx.try_iter().collect();
+        for DiffDone {
+            ticket,
+            lane,
+            path,
+            range,
+            result,
+        } in done
+        {
+            self.diff_reads.out = self.diff_reads.out.saturating_sub(1);
+            self.dispatch(AppAction::FileDiffRead {
+                ticket,
+                lane,
+                path,
+                range,
+                result,
+            });
+        }
+    }
+
     fn deliver_dispatch(&mut self, done: Vec<DispatchDone>) {
         for (body, result) in done {
             if matches!(body, Body::Status) {
@@ -1088,6 +1186,11 @@ impl eframe::App for SwitchboardApp {
     /// window raises they ask for) lives here rather than in `ui`.
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.dispatch(AppAction::Tick);
+        self.drain_diffs();
+        if self.diff_reads.out > 0 {
+            // The read threads have no context to wake the frame with.
+            ctx.request_repaint_after(Duration::from_millis(50));
+        }
         if self.last_poll.is_some() {
             // Only after `start`: UI tests never call it, so they never
             // poll or badge.

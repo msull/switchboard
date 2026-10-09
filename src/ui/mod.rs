@@ -13,6 +13,7 @@ mod board;
 mod cards;
 pub mod config;
 pub mod dialogs;
+mod diff;
 pub mod dispatch;
 pub mod document;
 pub mod env;
@@ -125,6 +126,11 @@ pub struct UiState {
     /// Each ticket lane's branch changes, read on a thread, by ticket
     /// and lane.
     pub ticket_changes: HashMap<(String, String), ticket::ChangesScan>,
+    /// The changed file whose diff is open, by ticket and lane.
+    pub ticket_diff_open: HashMap<(String, String), String>,
+    /// Folds of unchanged lines the owner expanded, as ticket, lane,
+    /// path and the new-side number of the fold's first line.
+    pub diff_unfolded: HashSet<(String, String, String, Option<u32>)>,
     /// The Dispatch project the page is narrowed to; every one when none.
     pub dispatch_project: Option<String>,
     /// How the ticket table is narrowed and ordered.
@@ -313,6 +319,8 @@ impl Default for UiState {
             focus_feedback: None,
             dispatch_ticket_tabs: HashMap::new(),
             ticket_changes: HashMap::new(),
+            ticket_diff_open: HashMap::new(),
+            diff_unfolded: HashSet::new(),
             dispatch_project: None,
             dispatch_listing: crate::core::TicketListing::default(),
             dispatch_waiting_fold_set: false,

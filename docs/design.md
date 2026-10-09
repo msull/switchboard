@@ -2173,12 +2173,14 @@ tab body's scroll.
   responses folded, its summary, and what it did to the commits.
 - **Changes**: per lane, the branch's commits over its base and the
   files it changes with their line counts, read through the
-  `BranchChanges` port (`git log base..head`, `git diff --numstat
-  base...head`) on a thread when the ticket's `updated_ms` or the
+  `BranchChanges` port (`git log base..head`, `git diff --numstat -z
+  -M base...head`, so a rename names both paths) on a thread when the
+  ticket's `updated_ms` or the
   lane's range moves. The base and head are the status's lane, current
   every poll; the full ticket only adds the clone. The tree is the lane's worktree, or Dispatch's clone of the lane
   (`LaneView.clone`) once the worktree is removed. Open and Reveal are
-  offered while the worktree stands.
+  offered while the worktree stands. A click on a file's path opens its
+  diff under the row (below).
 
 Reads. The events read is `Body::Events { ticket, since }`; the runner
 answers with the ticket's events after `since` from `events.jsonl`, the
@@ -2866,6 +2868,76 @@ cached per record and text hash in
 A re-read of the transcript keeps the entries of texts still there, so
 only new messages are scanned. A file created after its message was
 first drawn links only after a relaunch.
+
+## A file's diff on the Changes tab (2026-10-08)
+
+A click on a changed file's path on the ticket page's Changes tab shows
+its `base...head` diff under the row; a second click closes it. One
+file is open per lane, which lives in `UiState.ticket_diff_open`
+beside the expanded folds, so a relaunch shows none.
+
+The diff is read through `BranchChanges::diff` with pinned flags:
+`git --literal-pathspecs -c core.quotepath=off diff --no-color
+--no-ext-diff --no-textconv -M --unified=5000 base...head -- path
+[old_path]`. The path comes from numstat, never from a diff header, and
+goes after `--` as a literal path, so `[id]` or a leading `:` in a name
+is never a glob or pathspec magic. Output over
+1 MiB is not parsed, and a diff body over 5000 lines (`DIFF_LINE_CAP`)
+is `TooLarge`; both say "Too large to show here".
+
+The context equals the cap, so a file under it comes back as one hunk
+holding the whole file, and folding is a pure view over its context
+runs (`core::diff::runs`): a run between two changes keeps three lines
+each side, a leading or trailing run keeps the three nearest the
+change, and a fold that would hide fewer than four lines is not made.
+Expanding a fold is view state and never reads git again; it is keyed
+by the new-side number of the fold's first line, so it stays with those
+lines when the head moves and the diff is read again.
+
+`adapters::diff::parse` is a hand-written reader of that one format:
+the extended header (`new file mode`, `deleted file mode`, `rename
+from`, `Binary files`), then `@@` hunks numbered on both sides, `\ No
+newline at end of file` flagging the line before it, and an empty line
+read as blank context (`diff.suppressBlankEmpty`). The crates looked at
+either have no notion of git's extended headers or are unmaintained.
+Changed words are marked on the read thread: each run of removed lines
+is paired with the added run right after it, line by line, and each
+pair goes through `similar`'s word diff with its default config (no
+deadline, so the marks are deterministic). A pair with a line over 500
+bytes, or with fewer than half its words equal, is a rewrite and gets
+no marks.
+
+The core holds each diff in `DispatchState.diffs` by ticket, lane and
+path, with the `DiffRange` it answered: the lane's tree, base and head,
+and the ticket's `updated_ms`, since the head may be a branch name that
+never moves. `ReadFileDiff` is sent only when nothing is on its way and
+nothing good is held for that range; the page asks
+`AppCore::file_diff_due` each frame, so a moved head re-reads while the
+held diff stays drawn. A failure is not due again at the same range;
+Retry dispatches the read, which the core then sends. The read is an
+`Effect::ReadFileDiff` that the app runs on a thread of its own and
+drains in `logic` as `FileDiffRead`, repainting every 50 ms while one
+is out. Nothing is saved.
+
+The diff draws each run as one highlighted block, unwrapped and
+scrolling sideways per hunk, beside a gutter of old and new line
+numbers in the same font. Added and removed rows are tinted full width
+(`diff_add`, `diff_del`) and their changed words take `diff_add_word`
+or `diff_del_word`. While the lane's worktree stands, a new-side number
+opens the tree's file at that line (`AppAction::ShowFileAt`), under the
+project whose root holds it most closely, else the ticket's
+`root_project`, else the active one. The `ticket-diff <id> <lane>
+<path>` script line opens a file's diff.
+
+Known gaps:
+
+- The gutter jump opens the worktree's file at head's line number, so
+  uncommitted edits in the tree can shift it.
+- A removed lane with no clone shows nothing, as the list does.
+- Only egui's built-in languages are coloured; everything else is
+  plain.
+- `DispatchState.diffs` is never evicted while the app runs.
+- No side-by-side view yet.
 
 ## Open questions
 

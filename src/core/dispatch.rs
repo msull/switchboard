@@ -438,6 +438,9 @@ pub struct DispatchState {
     /// Artifact reads not yet answered with text, by path: a first read,
     /// or a re-read while the older text stays in `artifacts`.
     pub artifact_reads: HashMap<PathBuf, ArtifactRead>,
+    /// Changed files' diffs by ticket, lane and path, as read from the
+    /// lane's tree. Never saved.
+    pub diffs: HashMap<(String, String, String), super::diff::DiffRead>,
     /// The `dispatch` executable the console types.
     pub command: PathBuf,
     /// Dispatch's data directory: the console's and the runner's

@@ -110,6 +110,7 @@ const REVIEW_LINES: &[&str] = &[
     "show-ticket",
     "close-ticket",
     "ticket-tab",
+    "ticket-diff",
     "pop-out",
     "close-pop-out",
     "files-root",
@@ -281,6 +282,12 @@ fn review_step(app: &mut SwitchboardApp, w: &[&str]) -> Result<(), String> {
         ["show-ticket", id] => app.dispatch(AppAction::ShowTicket((*id).to_owned())),
         ["close-ticket", id] => close_ticket(app, id)?,
         ["ticket-tab", id, tab] => ticket_tab(app, id, tab)?,
+        ["ticket-diff", id, lane, path] => {
+            ticket_tab(app, id, "changes")?;
+            app.ui_state
+                .ticket_diff_open
+                .insert(((*id).to_owned(), (*lane).to_owned()), (*path).to_owned());
+        }
         ["review-continue"] => {
             let id = newest_review(app)?;
             app.dispatch(AppAction::ContinueWorkflow(id));

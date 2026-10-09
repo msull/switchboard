@@ -7,7 +7,10 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use crate::ports::changes::{BranchChanges, Changes, Commit, FileStat};
+use super::diff::{self, DIFF_LINE_CAP};
+use crate::ports::changes::{
+    BranchChanges, Changes, Commit, DiffBody, FileDiff, FileStat, FileStatus,
+};
 
 /// How a path differs from the index and HEAD.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -161,13 +164,58 @@ impl BranchChanges for GitChanges {
                 &format!("{base}..{head}"),
             ],
         )?;
-        let numstat = git_or_why(dir, &["diff", "--numstat", &format!("{base}...{head}")])?;
+        let numstat = git_or_why(
+            dir,
+            &["diff", "--numstat", "-z", "-M", &format!("{base}...{head}")],
+        )?;
         Ok(Changes {
             commits: parse_log(&log),
             files: parse_numstat(&numstat),
         })
     }
+
+    fn diff(
+        &self,
+        dir: &Path,
+        base: &str,
+        head: &str,
+        path: &str,
+        old_path: Option<&str>,
+    ) -> Result<FileDiff, String> {
+        let unified = format!("--unified={DIFF_LINE_CAP}");
+        let range = format!("{base}...{head}");
+        // The paths come from numstat, so they are literal: a `[id]` or a
+        // leading `:` in a name is not a glob or pathspec magic.
+        let mut args = vec![
+            "--literal-pathspecs",
+            "-c",
+            "core.quotepath=off",
+            "diff",
+            "--no-color",
+            "--no-ext-diff",
+            "--no-textconv",
+            "-M",
+            &unified,
+            &range,
+            "--",
+            path,
+        ];
+        args.extend(old_path);
+        let out = git_or_why(dir, &args)?;
+        if out.len() > DIFF_MAX_BYTES {
+            return Ok(FileDiff {
+                status: FileStatus::Modified,
+                body: DiffBody::TooLarge {
+                    lines: out.lines().count(),
+                },
+            });
+        }
+        Ok(diff::parse(&out, DIFF_LINE_CAP))
+    }
 }
+
+/// A diff's output past which it is not parsed at all.
+const DIFF_MAX_BYTES: usize = 1 << 20;
 
 /// `git` in `repo`, with its own complaint when it fails.
 fn git_or_why(repo: &Path, args: &[&str]) -> Result<String, String> {
@@ -200,19 +248,34 @@ fn parse_log(out: &str) -> Vec<Commit> {
         .collect()
 }
 
-/// `added<TAB>removed<TAB>path` lines; `-` (a binary file) reads as 0.
+/// `numstat -z` records: `added<TAB>removed<TAB>path<NUL>`, or for a
+/// rename `added<TAB>removed<TAB><NUL>old<NUL>new<NUL>`. `-` for both
+/// counts is a binary file, read as 0.
 fn parse_numstat(out: &str) -> Vec<FileStat> {
-    out.lines()
-        .filter_map(|line| {
-            let mut f = line.splitn(3, '\t');
-            let (added, removed, path) = (f.next()?, f.next()?, f.next()?);
-            Some(FileStat {
-                path: path.to_owned(),
-                added: added.parse().unwrap_or(0),
-                removed: removed.parse().unwrap_or(0),
-            })
-        })
-        .collect()
+    let mut files = Vec::new();
+    let mut fields = out.split('\0');
+    while let Some(record) = fields.next() {
+        let mut f = record.splitn(3, '\t');
+        let (Some(added), Some(removed), Some(path)) = (f.next(), f.next(), f.next()) else {
+            continue;
+        };
+        let (path, old_path) = if path.is_empty() {
+            let (Some(old), Some(new)) = (fields.next(), fields.next()) else {
+                break;
+            };
+            (new.to_owned(), Some(old.to_owned()))
+        } else {
+            (path.to_owned(), None)
+        };
+        files.push(FileStat {
+            path,
+            added: added.parse().unwrap_or(0),
+            removed: removed.parse().unwrap_or(0),
+            old_path,
+            binary: added == "-" && removed == "-",
+        });
+    }
+    files
 }
 
 fn branch_of(repo: &Path) -> Option<String> {
@@ -321,16 +384,93 @@ mod tests {
                 FileStat {
                     path: "a.txt".into(),
                     added: 2,
-                    removed: 1
+                    removed: 1,
+                    old_path: None,
+                    binary: false,
                 },
                 FileStat {
                     path: "b.txt".into(),
                     added: 1,
-                    removed: 0
+                    removed: 0,
+                    old_path: None,
+                    binary: false,
                 },
             ]
         );
         assert!(GitChanges.read(root, "nope", "work").is_err());
+    }
+
+    #[test]
+    fn reads_a_files_diff_over_its_base() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let commit = "git -c user.name=t -c user.email=t@t commit -q";
+        sh(
+            root,
+            &format!("git init -q -b main . && {commit} --allow-empty -m init"),
+        );
+        let lines =
+            "line 1\nline 2\nline 3\nline 4\nline 5\nline 6\nline 7\nline 8\nline 9\nline 10\n";
+        std::fs::write(root.join("m.txt"), lines).unwrap();
+        std::fs::write(root.join("old.txt"), lines).unwrap();
+        std::fs::write(root.join("bin.dat"), b"a\0b").unwrap();
+        std::fs::write(root.join("[m].txt"), "a\n").unwrap();
+        sh(
+            root,
+            &format!("git add . && {commit} -m base && git branch base"),
+        );
+        sh(root, "git checkout -q -b work && git mv old.txt new.txt");
+        std::fs::write(root.join("m.txt"), lines.replace("line 5\n", "line five\n")).unwrap();
+        std::fs::write(
+            root.join("new.txt"),
+            lines.replace("line 9\n", "line nine\n"),
+        )
+        .unwrap();
+        std::fs::write(root.join("bin.dat"), b"a\0c").unwrap();
+        std::fs::write(root.join("[m].txt"), "b\n").unwrap();
+        sh(root, &format!("git add -A && {commit} -m work"));
+
+        let files = GitChanges.read(root, "base", "work").unwrap().files;
+        let find = |p: &str| files.iter().find(|f| f.path == p).unwrap();
+        assert!(find("bin.dat").binary);
+        assert_eq!(find("new.txt").old_path.as_deref(), Some("old.txt"));
+        assert_eq!(
+            (find("m.txt").added, find("m.txt").old_path.clone()),
+            (1, None)
+        );
+
+        let m = GitChanges
+            .diff(root, "base", "work", "m.txt", None)
+            .unwrap();
+        assert_eq!(m.status, FileStatus::Modified);
+        let DiffBody::Hunks(h) = &m.body else {
+            panic!("{m:?}")
+        };
+        // The context is as wide as the cap, so the whole file is one hunk.
+        assert_eq!((h.len(), h[0].lines.len()), (1, 11));
+        let renamed = GitChanges
+            .diff(root, "base", "work", "new.txt", Some("old.txt"))
+            .unwrap();
+        assert_eq!(renamed.status, FileStatus::Renamed);
+        assert!(matches!(renamed.body, DiffBody::Hunks(_)));
+        let bin = GitChanges
+            .diff(root, "base", "work", "bin.dat", None)
+            .unwrap();
+        assert_eq!(bin.body, DiffBody::Binary);
+        // As a glob `[m].txt` would match `m.txt` too, whose diff would
+        // then run on into this one's.
+        let glob = GitChanges
+            .diff(root, "base", "work", "[m].txt", None)
+            .unwrap();
+        let DiffBody::Hunks(h) = &glob.body else {
+            panic!("{glob:?}")
+        };
+        assert_eq!((h.len(), h[0].lines.len()), (1, 2));
+        assert!(
+            GitChanges
+                .diff(root, "nope", "work", "m.txt", None)
+                .is_err()
+        );
     }
 
     #[test]

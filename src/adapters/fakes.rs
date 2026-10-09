@@ -13,7 +13,7 @@ use crate::core::{
     AgentKind, ProjectId, RECORD_ID_ENV, RecordId, ResumeHandle, Settings, Views, Workspace,
 };
 use crate::ports::agent::{AgentLaunch, AgentLauncher};
-use crate::ports::changes::{BranchChanges, Changes};
+use crate::ports::changes::{BranchChanges, Changes, FileDiff};
 use crate::ports::control::{OpLine, Operations};
 use crate::ports::controller::{Controller, ControllerEvent};
 use crate::ports::dispatch::{
@@ -167,11 +167,26 @@ impl EventSource for FakeEvents {
 #[derive(Debug, Default, Clone)]
 pub struct FakeChanges {
     pub changes: Changes,
+    /// Each file's diff by path; a missing path answers `Err("no diff")`.
+    pub diffs: HashMap<String, FileDiff>,
 }
 
 impl BranchChanges for FakeChanges {
     fn read(&self, _dir: &Path, _base: &str, _head: &str) -> Result<Changes, String> {
         Ok(self.changes.clone())
+    }
+    fn diff(
+        &self,
+        _dir: &Path,
+        _base: &str,
+        _head: &str,
+        path: &str,
+        _old_path: Option<&str>,
+    ) -> Result<FileDiff, String> {
+        self.diffs
+            .get(path)
+            .cloned()
+            .ok_or_else(|| "no diff".to_owned())
     }
 }
 
