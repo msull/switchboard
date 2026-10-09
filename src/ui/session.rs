@@ -20,8 +20,8 @@ use super::{DrawCtx, GAP, Renaming, UiState, theme};
 use crate::adapters::files::existing_file;
 use crate::core::file_refs;
 use crate::core::{
-    AgentKind, AppAction, CardState, PinTarget, RecordId, ResumeHandle, SessionKind, SessionRecord,
-    View,
+    AgentKind, AppAction, CardState, Composer, PinTarget, RecordId, ResumeHandle, SessionKind,
+    SessionRecord, View,
 };
 use crate::ports::host::HostId;
 use crate::ports::transcript::{
@@ -798,14 +798,15 @@ fn message_box(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord) {
             );
         });
     });
-    // The draft stays in the box until the app reports the pane took it
-    // (`SwitchboardApp` clears it after a successful write), so a dead
-    // session or a failed write does not lose what was typed.
+    // The draft stays in the box until the pane has this message, and
+    // only this Send clears it. A delivery or any other write leaves it
+    // alone.
     if send && !draft.trim().is_empty() {
         let text = draft.clone();
-        cx.dispatch(AppAction::SendInput {
+        cx.dispatch(AppAction::SendMessage {
             id: record.id,
             text,
+            from: Composer::Line,
         });
         ui.memory_mut(|m| m.request_focus(field_id));
     }

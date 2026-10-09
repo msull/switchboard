@@ -20,12 +20,14 @@ use switchboard::adapters::fakes::{
 };
 use switchboard::app::Services;
 use switchboard::core::{
-    Activity, AgentKind, AppAction, Approval, Ask, AskKind, BUILTIN_WORKFLOW, CardLayout,
-    Definition, HandoffMode, Launch, Notice, PinTarget, Project, ProjectEnv, ProjectId, RecordId,
-    ResumeHandle, Round, RunState, SessionKind, SessionRecord, SideTab, SpaceId, ThemeMode,
-    Verdict, View, VoiceSettings, WorkflowId, WorkflowRun, Workspace, round_paths,
+    Activity, AgentKind, AppAction, Approval, Ask, AskKind, BUILTIN_WORKFLOW, CardLayout, Composer,
+    ControlAction, Definition, HandoffMode, Launch, Notice, PinTarget, Project, ProjectEnv,
+    ProjectId, RecordId, ResumeHandle, Round, RunState, SessionKind, SessionRecord, SideTab,
+    SpaceId, ThemeMode, Verdict, View, VoiceSettings, WorkflowId, WorkflowRun, Workspace,
+    round_paths,
 };
 use switchboard::ports::changes::{Changes, Commit, FileStat};
+use switchboard::ports::events::{EventKind, SessionEvent};
 use switchboard::ports::host::{HostId, HostStatus, Liveness};
 use switchboard::ports::store::Store;
 use switchboard::ports::transcript::{
@@ -2267,9 +2269,10 @@ fn message_box_is_multiline_and_enter_sends() {
     harness.run_steps(2);
     harness.key_press(egui::Key::Enter);
     harness.run_steps(2);
-    assert!(actions(&harness).contains(&AppAction::SendInput {
+    assert!(actions(&harness).contains(&AppAction::SendMessage {
         id,
-        text: "first line\nsecond line".into()
+        text: "first line\nsecond line".into(),
+        from: Composer::Line,
     }));
     // The fake pane took it, so the draft is gone (the box re-creates an
     // empty one on the next frame).
@@ -2295,9 +2298,10 @@ fn a_failed_send_keeps_the_draft() {
     type_into(&mut harness, "Message", "do not lose me");
     harness.key_press(egui::Key::Enter);
     harness.run_steps(2);
-    assert!(actions(&harness).contains(&AppAction::SendInput {
+    assert!(actions(&harness).contains(&AppAction::SendMessage {
         id,
-        text: "do not lose me".into()
+        text: "do not lose me".into(),
+        from: Composer::Line,
     }));
     assert_eq!(
         harness
@@ -2308,11 +2312,101 @@ fn a_failed_send_keeps_the_draft() {
             .map(String::as_str),
         Some("do not lose me")
     );
-    harness.get_by_label_contains("send input");
+    harness.get_by_label_contains("send a message to");
     assert_eq!(
         harness.get_by_label("Message").value().as_deref(),
         Some("do not lose me")
     );
+}
+
+/// What the fake pane was typed, oldest first.
+fn written(host: &FakeHost) -> Vec<String> {
+    host.state()
+        .written
+        .iter()
+        .map(|(_, text)| text.clone())
+        .collect()
+}
+
+/// Delivers a `session.prompt` to `id` as Dispatch's runner would.
+fn deliver(harness: &mut Harness<'static, SwitchboardApp>, id: RecordId) {
+    harness.state_mut().dispatch(AppAction::Control {
+        op: "deliver".into(),
+        action: ControlAction::Prompt {
+            id,
+            text: "Dispatch subscription: events".into(),
+        },
+    });
+    harness.run_steps(2);
+}
+
+fn draft(harness: &Harness<'static, SwitchboardApp>, id: RecordId) -> Option<String> {
+    harness.state().ui_state.input_drafts.get(&id).cloned()
+}
+
+#[test]
+fn a_delivery_leaves_the_message_box_draft() {
+    let host = FakeHost::default();
+    let (mut harness, ids) =
+        harness_build(FakeOpener::default(), FakeSecrets::default(), host.clone());
+    plain_message_box(&mut harness);
+    let id = seed_claude(&mut harness, &ids);
+    showing(&mut harness, View::Session(id));
+    type_into(&mut harness, "Message", "half typed");
+    // Between turns, so the delivery is accepted.
+    harness
+        .state_mut()
+        .dispatch(AppAction::Events(vec![SessionEvent {
+            at: SystemTime::now(),
+            seq: 0,
+            record_id: Some(id),
+            provider_session_id: None,
+            cwd: None,
+            transcript_path: None,
+            kind: EventKind::Stopped { last_message: None },
+        }]));
+    let view = harness
+        .state()
+        .core()
+        .session_view(id, SystemTime::now())
+        .unwrap();
+    assert_eq!(view.prompt_refusal, None);
+    deliver(&mut harness, id);
+    assert_eq!(written(&host), vec!["Dispatch subscription: events"]);
+    assert_eq!(draft(&harness, id).as_deref(), Some("half typed"));
+    assert_eq!(
+        harness.get_by_label("Message").value().as_deref(),
+        Some("half typed")
+    );
+    // The box's own Send still clears it.
+    harness.get_by_label("Message").focus();
+    harness.run_steps(2);
+    harness.key_press(egui::Key::Enter);
+    harness.run_steps(2);
+    assert_eq!(
+        written(&host).last().map(String::as_str),
+        Some("half typed")
+    );
+    assert_eq!(draft(&harness, id).as_deref().unwrap_or(""), "");
+}
+
+#[test]
+fn a_session_send_leaves_the_card_line_draft() {
+    let host = FakeHost::default();
+    let (mut harness, ids) =
+        harness_build(FakeOpener::default(), FakeSecrets::default(), host.clone());
+    let (id, _) = working_set_of_two(&mut harness, &ids);
+    type_into(&mut harness, "Line to send", "not yet");
+    harness.state_mut().dispatch(AppAction::Control {
+        op: "send".into(),
+        action: ControlAction::SendInput {
+            id,
+            text: "from the port".into(),
+        },
+    });
+    harness.run_steps(2);
+    assert_eq!(written(&host), vec!["from the port"]);
+    assert_eq!(draft(&harness, id).as_deref(), Some("not yet"));
 }
 
 #[test]
@@ -3846,7 +3940,8 @@ fn working_set_cards_show_the_last_exchange_and_send_a_line() {
     assert!(
         harness.state().dispatched.iter().any(|a| matches!(
             a,
-            AppAction::SendInput { id: sid, text } if *sid == id && text == "ls -la"
+            AppAction::SendMessage { id: sid, text, from: Composer::Line }
+                if *sid == id && text == "ls -la"
         )),
         "{:?}",
         harness.state().dispatched
@@ -3931,9 +4026,10 @@ fn agent_sessions_get_the_prompt_box_and_send_goes_to_the_pane() {
     harness.run_steps(2);
     harness.get_by_label("Send →").click();
     harness.run_steps(3);
-    assert!(actions(&harness).contains(&AppAction::SendInput {
+    assert!(actions(&harness).contains(&AppAction::SendMessage {
         id,
         text: "fix the failing test".into(),
+        from: Composer::Editor,
     }));
     let editor = &harness.state().ui_state.prompt_boxes.editors[&id];
     assert_eq!(
@@ -3943,6 +4039,58 @@ fn agent_sessions_get_the_prompt_box_and_send_goes_to_the_pane() {
     );
     // Sending never touched the clipboard: nothing was copied.
     harness.get_by_label("Prompt sent");
+}
+
+#[test]
+fn a_failed_editor_write_gives_the_prompt_back() {
+    let host = FakeHost::default();
+    host.state().fail_write = Some("pane is dead".into());
+    let (mut harness, ids) = harness_build(FakeOpener::default(), FakeSecrets::default(), host);
+    let id = seed_claude(&mut harness, &ids);
+    showing(&mut harness, View::Session(id));
+    let field = prompt_field(&mut harness);
+    field.focus();
+    field.type_text("keep this prompt");
+    harness.run_steps(2);
+    harness.get_by_label("Send →").click();
+    harness.run_steps(3);
+    let notice = harness.state().core().notice().map(|n| n.text.clone());
+    assert!(
+        notice
+            .as_deref()
+            .is_some_and(|n| n.contains("send a message to")),
+        "{notice:?}"
+    );
+    let editor = &harness.state().ui_state.prompt_boxes.editors[&id];
+    assert_eq!(editor.core().doc().committed(), "keep this prompt");
+    // A known gap: promptbox settles a delivery when the text is queued,
+    // so its toast says sent. This fails once a host can settle later.
+    assert_eq!(
+        editor.core().toast().map(|t| t.text.as_str()),
+        Some("Prompt sent")
+    );
+}
+
+#[test]
+fn an_editor_send_leaves_the_card_line_draft() {
+    let host = FakeHost::default();
+    let (mut harness, ids) =
+        harness_build(FakeOpener::default(), FakeSecrets::default(), host.clone());
+    let id = seed_claude(&mut harness, &ids);
+    harness
+        .state_mut()
+        .ui_state
+        .input_drafts
+        .insert(id, "card line".into());
+    showing(&mut harness, View::Session(id));
+    let field = prompt_field(&mut harness);
+    field.focus();
+    field.type_text("from the editor");
+    harness.run_steps(2);
+    harness.get_by_label("Send →").click();
+    harness.run_steps(3);
+    assert_eq!(written(&host), vec!["from the editor"]);
+    assert_eq!(draft(&harness, id).as_deref(), Some("card line"));
 }
 
 #[test]
@@ -3959,7 +4107,7 @@ fn a_send_into_a_cold_session_fails_and_keeps_the_prompt() {
     assert!(
         !actions(&harness)
             .iter()
-            .any(|a| matches!(a, AppAction::SendInput { .. }))
+            .any(|a| matches!(a, AppAction::SendMessage { .. }))
     );
     harness.get_by_label("Send failed: the session is not running. Prompt kept.");
     let editor = &harness.state().ui_state.prompt_boxes.editors[&ids.agent];
@@ -4819,7 +4967,8 @@ fn an_editor_made_from_a_cards_microphone_can_send_into_its_running_pane() {
     harness.run_steps(3);
     assert!(actions(&harness).iter().any(|a| matches!(
         a,
-        AppAction::SendInput { id: i, text } if *i == id && text == "hello from the card"
+        AppAction::SendMessage { id: i, text, from: Composer::Editor }
+            if *i == id && text == "hello from the card"
     )));
     assert!(
         harness

@@ -7,7 +7,7 @@ use std::time::{Duration, SystemTime};
 
 use uuid::Uuid;
 
-use super::action::{AppAction, AppCore, Clock, Effect, Notice, UNDO_WINDOW, View};
+use super::action::{AppAction, AppCore, Clock, Composer, Effect, Notice, UNDO_WINDOW, View};
 use super::controller::{MenuKind, UiRequest};
 use super::definitions::entry_hash;
 use super::model::{
@@ -3351,6 +3351,70 @@ fn send_input_targets_a_running_session_only() {
             text: "ls".into()
         }]
     );
+}
+
+#[test]
+fn send_message_types_into_the_pane_and_ends_a_discard() {
+    let p = project("p");
+    let mut w = Workspace::new(p.clone());
+    let mut r = record(p.id, agent(), 0);
+    r.discard = Some(Discarded {
+        previous: claude_handle(),
+        before: 2,
+        prompt: "x".into(),
+    });
+    let id = r.id;
+    w.sessions.push(r);
+    let (mut core, _) = loaded(vec![w], vec![]);
+    let send = |core: &mut AppCore, at| {
+        core.dispatch(
+            AppAction::SendMessage {
+                id,
+                text: "go".into(),
+                from: Composer::Line,
+            },
+            Clock::at(at),
+        )
+    };
+    // No pane: nothing is typed and the discard can still be undone.
+    assert!(send(&mut core, 1).is_empty());
+    assert!(core.session(id).unwrap().discard.is_some());
+
+    core.dispatch(AppAction::HostListed(vec![running(id)]), Clock::at(2));
+    let e = send(&mut core, 3);
+    assert_eq!(saves(&e), 1);
+    assert!(e.contains(&Effect::SendMessage {
+        id,
+        host: HostId(id.host_name()),
+        text: "go".into(),
+        from: Composer::Line,
+    }));
+    assert_eq!(core.session(id).unwrap().discard, None);
+}
+
+#[test]
+fn an_editor_message_that_finds_no_pane_is_primed_back() {
+    let (mut core, _, ids) = with_records(&[SessionKind::Shell], |_| None);
+    let id = ids[0];
+    let send = |core: &mut AppCore, from| {
+        core.dispatch(
+            AppAction::SendMessage {
+                id,
+                text: "go".into(),
+                from,
+            },
+            Clock::at(1),
+        )
+    };
+    assert!(send(&mut core, Composer::Editor).is_empty());
+    assert_eq!(core.take_primed(), vec![(id, "go".to_owned())]);
+    // The line box never emptied itself, so it has nothing to get back.
+    assert!(send(&mut core, Composer::Line).is_empty());
+    assert!(core.take_primed().is_empty());
+
+    core.dispatch(AppAction::HostListed(vec![running(id)]), Clock::at(2));
+    assert!(!send(&mut core, Composer::Editor).is_empty());
+    assert!(core.take_primed().is_empty(), "the pane has it");
 }
 
 #[test]
@@ -10520,6 +10584,12 @@ mod prompting {
         );
         let error = core.take_control_outcome(&op).unwrap().error;
         assert_eq!(view, error, "the view and the command agree");
+        assert!(
+            !effects
+                .iter()
+                .any(|e| matches!(e, Effect::SendMessage { .. })),
+            "a delivery settles no box's draft: {effects:?}"
+        );
         let typed = effects
             .iter()
             .filter_map(|e| match e {

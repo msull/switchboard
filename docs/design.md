@@ -859,9 +859,9 @@ shows up to a screenful on hover, and opens the raw message dialog on
 click. An agent card has "Terminal" at the bottom
 right of its actions row: hovering it shows the pane's last 40 lines
 in a code block, so the raw output is a glance away without opening the
-session. Enter in the send box dispatches `SendInput`;
-the box is off while the session is not running. Commands and services
-keep the board card. A file card shows the file inside the card,
+session. Enter in the send box dispatches `SendMessage`, which
+clears the line only once the pane has it; the box is off while the
+session is not running. Commands and services keep the board card. A file card shows the file inside the card,
 scrolling: Markdown rendered with a Raw toggle, raw and plain text with
 a Wrap/Sideways toggle, plus Open in app and Take off. Previews for
 file cards are loaded per path and reloaded when the file changes.
@@ -913,8 +913,10 @@ listening on a session (re)binds it, finishing another session's
 utterance into that session first; the rail shows "● Listening · name"
 with Stop listening while the runtime is live, whatever view is up, and
 the click goes to that session. Send hands the prompt to the session's
-pane (`SendInput`) through the editor's sink; a session that is not
-running refuses it and the prompt stays. The clipboard is never touched
+pane (`SendMessage`) through the editor's sink; a session that is not
+running refuses it and the prompt stays. A write that fails gives the
+prompt back to the editor, which still shows "Prompt sent" and lists
+the prompt in its recent list. The clipboard is never touched
 by Send; Copy still copies.
 
 Nothing is shared with the standalone Prompt Box app: settings are
@@ -929,7 +931,10 @@ Prompt Box's own path, downloaded once by either app.
 in scripts) falls back to the plain message box. Known gaps: no Dock
 badge while recording (Switchboard's badge is the waiting count); the
 level meter and status glyphs rely on the fallback fonts; the standalone
-app's project vocabulary is not available to embedded editors.
+app's project vocabulary is not available to embedded editors; a
+failed write still reads as "Prompt sent" in the editor and its recent
+list, because promptbox settles a delivery when the text is queued, not
+when it is written.
 
 ## Notes in the side (2026-09-16)
 
@@ -960,8 +965,10 @@ again, and a running agent is stopped because it sits on the old
 conversation. The record keeps the handle it replaced in `discard`
 (`Discarded { previous, before, prompt }`), so "Undo discard" in the
 session header swaps it back, across restarts, until a message reaches
-the pane: `SendInput` with a live pane clears it, and a prompt typed in
-the terminal shows as a turn past the cut and hides the button. Neither
+the pane: a message from the owner's boxes or any other writer
+(`SendMessage` or `SendInput`) with a live pane clears it, and a prompt
+typed in the terminal shows as a turn past the cut and hides the
+button. Neither
 transcript file is ever modified; the unused copy stays on disk.
 
 ## Shown folders (2026-09-16)
@@ -2246,7 +2253,12 @@ long-lived Claude Code session that watches its tickets
   reason, which `SessionView.prompt_refusal` also reports. A key into a
   session's embedded terminal dispatches `AppAction::InputTyped`, a
   transient mark a submitted prompt clears. Dispatch's subscriptions
-  deliver through it.
+  deliver through it. A delivery leaves the message box's draft and
+  the Prompt Box editor alone. Only the box's own Send
+  (`AppAction::SendMessage`) settles its draft: it is cleared once the
+  pane has the message, kept on a failed write, and given back to the
+  editor on a failed editor write. A draft in a box does not hold
+  deliveries off. Only keys in the embedded terminal do.
 - A supervisor subscribes to its tickets (`dispatch subscribe`), and
   the runner types each settled burst into its pane through
   `session.prompt`, which the core refuses unless
@@ -2652,7 +2664,7 @@ Schema v14.
     transient `relayed` set, only while the pane runs, since nothing
     reaches one that is gone; the next typed prompt event consumes the
     mark and leaves the ask, and a new spawn drops it. The app's own
-    message box and Prompt Box (`AppAction::SendInput`) set no mark, so
+    message box and Prompt Box (`AppAction::SendMessage`) set no mark, so
     the owner's sends clear.
 - **The supervisor.** Its seed gains one line telling it to run
   `<abs>/switchboard-ask` before it stops on something the owner must
@@ -2742,11 +2754,11 @@ tag). Schema v15.
   the same step that emits the send, and the save precedes the send in
   the effects, so a crash or a failed write loses the answer rather
   than sending it twice (a duplicate prompt is a paid turn). The send
-  is `Effect::SendAnswer`, which the app writes like `SendInput` but
-  without clearing the owner's prompt draft for the session, since it
-  goes out by itself. It ends a pending discard's undo like any send,
-  and sets no `relayed` mark; the prompt it starts
-  comes back between turns with no ask left to clear.
+  is `Effect::SendAnswer`, which the app writes like `SendInput`, and
+  like it settles no draft: only the box's own `SendMessage` does. It
+  ends a pending discard's undo like any send, and sets no `relayed`
+  mark; the prompt it starts comes back between turns with no ask left
+  to clear.
 - **The typed reply wins.** A prompt typed between turns clears the ask
   and any answer on it, as before. When that drops a stored answer
   (after a failed stop), an info line names it: sending it after the

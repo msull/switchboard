@@ -14,10 +14,10 @@ use crate::adapters::control::{ControlSocket, Incoming};
 use crate::adapters::hooks::WakeSocket;
 use crate::adapters::scrollback::scrollback_dir;
 use crate::core::{
-    Activity, AgentKind, AppAction, AppCore, Clock, ControlAction, ControlOutcome, DISPATCH_POLL,
-    Effect, ProjectId, RECORD_TOKEN_ENV, RecordId, Resolved, ResumeHandle, SessionKind,
-    SessionRecord, SetsResolved, SpaceId, View, WorkflowId, aws_view, file_refs, resolve_sets,
-    token_hash,
+    Activity, AgentKind, AppAction, AppCore, Clock, Composer, ControlAction, ControlOutcome,
+    DISPATCH_POLL, Effect, ProjectId, RECORD_TOKEN_ENV, RecordId, Resolved, ResumeHandle,
+    SessionKind, SessionRecord, SetsResolved, SpaceId, View, WorkflowId, aws_view, file_refs,
+    resolve_sets, token_hash,
 };
 use crate::ports::agent::AgentLauncher;
 use crate::ports::artifacts::ArtifactFinder;
@@ -321,24 +321,33 @@ impl SwitchboardApp {
         }
     }
 
-    /// Type a message into a pane. The message box keeps its draft until
-    /// the pane has the text, so a dead session or a failed write leaves
-    /// it there to resend.
-    fn send_input(&mut self, host: &HostId, text: &str) -> Option<AppAction> {
-        let result = self.services.host.write_line(host, text);
-        if result.is_ok() {
-            let sent = self
-                .core
-                .workspaces()
-                .iter()
-                .flat_map(|w| &w.sessions)
-                .find(|r| r.id.host_name() == host.0)
-                .map(|r| r.id);
-            if let Some(id) = sent {
-                self.ui_state.input_drafts.remove(&id);
+    /// Type a message from one of the owner's boxes and settle that box's
+    /// draft by the outcome. The box keeps its draft until the pane has
+    /// the text, so a dead session or a failed write leaves it to resend.
+    fn send_message(
+        &mut self,
+        id: RecordId,
+        host: &HostId,
+        text: String,
+        from: Composer,
+    ) -> Option<AppAction> {
+        let result = self.services.host.write_line(host, &text);
+        match (from, result.is_ok()) {
+            // Only while the draft is still this message: the owner may
+            // have typed on since it was sent.
+            (Composer::Line, true) => {
+                if self.ui_state.input_drafts.get(&id) == Some(&text) {
+                    self.ui_state.input_drafts.remove(&id);
+                }
+            }
+            (Composer::Line, false) | (Composer::Editor, true) => {}
+            // The editor emptied itself when it queued the text, so a
+            // failed write hands the text back for its next draw.
+            (Composer::Editor, false) => {
+                self.ui_state.primed.insert(id, text);
             }
         }
-        failed(result, || format!("send input to {}", host.0))
+        failed(result, || format!("send a message to {}", host.0))
     }
 
     /// The persistence effects; only a workspace save reports back.
@@ -481,14 +490,10 @@ impl SwitchboardApp {
                 id,
                 result: self.attach(&host, &title, &cwd),
             }),
-            Effect::SendInput { host, text } => self.send_input(&host, &text),
-            Effect::SendAnswer { host, text } => {
-                let result = self.services.host.write_line(&host, &text);
-                failed(result, || format!("send an answer to {}", host.0))
-            }
-            Effect::SendKeys { host, bytes } => failed(s.host.write(&host, &bytes), || {
-                format!("send keys to {}", host.0)
-            }),
+            Effect::SendInput { .. }
+            | Effect::SendMessage { .. }
+            | Effect::SendAnswer { .. }
+            | Effect::SendKeys { .. } => self.run_pane_write(effect),
             Effect::ReadProjectConfig { project, root } => {
                 self.config_seen
                     .insert(project, s.project_config.modified(&root));
@@ -534,6 +539,29 @@ impl SwitchboardApp {
             Effect::Reveal(path) => failed(s.opener.reveal(&path), || {
                 format!("reveal {}", path.display())
             }),
+        }
+    }
+
+    /// The writes into a pane, kept out of `run_effect` for its length.
+    fn run_pane_write(&mut self, effect: Effect) -> Option<AppAction> {
+        let host_port = &self.services.host;
+        match effect {
+            Effect::SendInput { host, text } => failed(host_port.write_line(&host, &text), || {
+                format!("send input to {}", host.0)
+            }),
+            Effect::SendMessage {
+                id,
+                host,
+                text,
+                from,
+            } => self.send_message(id, &host, text, from),
+            Effect::SendAnswer { host, text } => failed(host_port.write_line(&host, &text), || {
+                format!("send an answer to {}", host.0)
+            }),
+            Effect::SendKeys { host, bytes } => failed(host_port.write(&host, &bytes), || {
+                format!("send keys to {}", host.0)
+            }),
+            _ => unreachable!("not a pane write"),
         }
     }
 

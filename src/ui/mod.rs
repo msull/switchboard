@@ -43,8 +43,8 @@ use egui::{Key, Modifiers, RichText, Ui};
 
 use crate::app::{Services, SwitchboardApp};
 use crate::core::{
-    AppAction, AppCore, PinTarget, ProjectId, RecordId, SessionKind, SetId, SideTab, ThemeMode,
-    UiRequest, View, WindowFrame, WorkflowId,
+    AppAction, AppCore, Composer, PinTarget, ProjectId, RecordId, SessionKind, SetId, SideTab,
+    ThemeMode, UiRequest, View, WindowFrame, WorkflowId,
 };
 use crate::ports::transcript::Conversation;
 
@@ -230,8 +230,10 @@ pub struct UiState {
     /// the ask each was typed for; apart from `input_drafts`, which a
     /// send the owner makes clears.
     pub ask_drafts: HashMap<RecordId, (SystemTime, String)>,
-    /// Prompts the core primed for a session's Prompt Box editor (a
-    /// clone's or a discard's), taken when that editor is next drawn.
+    /// Prompts primed for a session's Prompt Box editor (a clone's or a
+    /// discard's, or an editor Send that found no pane, from the core; or
+    /// one whose write failed, which the app puts back), taken when that
+    /// editor is next drawn.
     /// Separate from the drafts, which the cards' quick-send lines share.
     pub primed: HashMap<RecordId, String>,
     /// Embedded terminals, only for the panes drawn last frame: a
@@ -416,7 +418,11 @@ pub fn draw(app: &mut SwitchboardApp, ui: &mut Ui) {
         app.dispatch(action);
     }
     for (id, text) in sent {
-        app.dispatch(AppAction::SendInput { id, text });
+        app.dispatch(AppAction::SendMessage {
+            id,
+            text,
+            from: Composer::Editor,
+        });
     }
 }
 
