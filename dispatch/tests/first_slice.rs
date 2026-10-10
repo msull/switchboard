@@ -1086,12 +1086,21 @@ fn at_ready(env: &mut Env) -> String {
 /// `implement` done with the checks green and a summary for the tree,
 /// stepped to the `inspect` question.
 fn at_inspect(env: &mut Env) -> String {
+    at_inspect_summarized(
+        env,
+        "abc1234 Escape leaves the field\n src/ui/set.rs | 4 +-",
+    )
+}
+
+/// `at_inspect` with `summary` as the tree's commits and diffstat.
+fn at_inspect_summarized(env: &mut Env, summary: &str) -> String {
     let (id, implementer) = at_implement(env);
     let tree = env.ticket(&id).lanes[0].worktree.clone();
-    env.repo.lock().unwrap().summaries.insert(
-        tree,
-        "abc1234 Escape leaves the field\n src/ui/set.rs | 4 +-".into(),
-    );
+    env.repo
+        .lock()
+        .unwrap()
+        .summaries
+        .insert(tree, summary.into());
     implementer_stops(env, &id, &implementer);
     env.steps_until(&id, "the checks starting", |t, _| {
         t.attempts_of("implement")
@@ -1107,6 +1116,41 @@ fn at_inspect(env: &mut Env) -> String {
         t.pending_decisions().iter().any(|d| d.name == "inspect")
     });
     id
+}
+
+/// An `inspect` question carries six `--stat` rows, a count of the
+/// rest and git's totals line; the Changes tab lists them all.
+#[test]
+fn an_inspect_question_cuts_a_long_stat() {
+    let mut env = Env::new();
+    let rows: Vec<String> = (1..=13)
+        .map(|i| format!(" src/f{i:02}.rs | 2 +-"))
+        .collect();
+    let summary = format!(
+        "abc1234 Escape leaves the field\ndef5678 Enter saves the field\n{}\n 13 files changed, 120 insertions(+), 92 deletions(-)",
+        rows.join("\n")
+    );
+    let id = at_inspect_summarized(&mut env, &summary);
+    let d = env
+        .pending(&id)
+        .into_iter()
+        .find(|d| d.name == "inspect")
+        .unwrap();
+    let q = &d.question;
+    for want in [
+        "abc1234 Escape leaves the field",
+        "def5678 Enter saves the field",
+        "\u{2026} and 7 more files",
+        "13 files changed, 120 insertions(+), 92 deletions(-)",
+    ] {
+        assert!(q.contains(want), "{want} in {q}");
+    }
+    for i in 1..=6 {
+        assert!(q.contains(&format!("src/f{i:02}.rs")), "f{i:02} in {q}");
+    }
+    for i in 7..=13 {
+        assert!(!q.contains(&format!("src/f{i:02}.rs")), "no f{i:02} in {q}");
+    }
 }
 
 /// The `inspect` stage asks once per lane with the branch, what it

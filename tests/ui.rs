@@ -5847,6 +5847,47 @@ fn a_pending_decision_is_pinned_on_every_tab() {
     }
 }
 
+/// A ticket page whose one pending decision asks `question`.
+fn ticket_page_asking(question: String) -> Harness<'static, SwitchboardApp> {
+    ticket_page(|t| {
+        let mut d = dispatch_status().tickets[0].decisions[0].clone();
+        d.question = question;
+        t.decisions = vec![d];
+    })
+}
+
+/// A question longer than eight lines past its first paragraph folds,
+/// so the tabs and the tab's body stay in the window; the toggle
+/// shows the rest.
+#[test]
+fn a_long_question_folds_and_keeps_the_tabs_in_view() {
+    let rows: Vec<String> = (1..=60).map(|i| format!("row {i:02}")).collect();
+    let mut harness = ticket_page_asking(format!(
+        "inspect (repo): branch dispatch/104-x at abcd1234 over origin/main.\n\n{}",
+        rows.join("\n")
+    ));
+    harness.get_by_label("inspect (repo): branch dispatch/104-x at abcd1234 over origin/main.");
+    assert!(harness.query_by_label_contains("row 20").is_none());
+    harness.get_by_label("\u{2026} 60 more lines");
+    assert!(harness.get_by_label("Changes").rect().max.y < 900.0);
+    click(&mut harness, "Changes");
+    assert!(harness.get_by_label("No branch.").rect().min.y < 900.0);
+    click(&mut harness, "\u{2026} 60 more lines");
+    harness.get_by_label_contains("row 20");
+    harness.get_by_label_contains("row 60");
+    harness.get_by_label("Show less");
+}
+
+/// A question with eight lines or fewer past its first paragraph
+/// draws whole, with no toggle.
+#[test]
+fn a_short_question_draws_unfolded() {
+    let rows: Vec<String> = (1..=5).map(|i| format!("row {i}")).collect();
+    let harness = ticket_page_asking(format!("inspect (repo): ready.\n\n{}", rows.join("\n")));
+    harness.get_by_label_contains("row 5");
+    assert!(harness.query_by_label_contains("more lines").is_none());
+}
+
 /// The Changes tab reads the lane's commits and files over its base
 /// on a thread; a file opens from the lane's tree.
 #[test]
@@ -7201,6 +7242,43 @@ fn dispatch_page_answers_a_decision_with_a_click() {
     assert!(actions(&harness).contains(&AppAction::PopOutDispatch));
     assert!(harness.state().core().settings().dispatch_window.is_some());
     assert_ne!(harness.state().core().view(), View::Dispatch);
+}
+
+/// Decision ids repeat across tickets, so a question's fold is kept by
+/// ticket and id: opening one ticket's `d1` leaves another's folded.
+#[test]
+fn dispatch_page_folds_each_tickets_question_apart() {
+    let (mut harness, _) = harness();
+    let mut status = dispatch_status();
+    let first = status.tickets[0].decisions[0].clone();
+    for (i, t) in status.tickets.iter_mut().enumerate() {
+        let rows: Vec<String> = (1..=10).map(|r| format!("ticket {i} row {r}")).collect();
+        t.decisions = vec![switchboard::ports::dispatch::DecisionView {
+            ticket: t.id.clone(),
+            question: format!("Question {i}?\n\n{}", rows.join("\n")),
+            ..first.clone()
+        }];
+    }
+    harness
+        .state_mut()
+        .dispatch(AppAction::DispatchStatus(Some(status)));
+    harness.run_steps(2);
+    click(&mut harness, "Dispatch");
+    assert_eq!(
+        harness.query_all_by_label("\u{2026} 10 more lines").count(),
+        2
+    );
+    harness
+        .query_all_by_label("\u{2026} 10 more lines")
+        .next()
+        .expect("a fold toggle")
+        .click();
+    harness.run_steps(2);
+    assert_eq!(
+        harness.query_all_by_label("\u{2026} 10 more lines").count(),
+        1
+    );
+    assert_eq!(harness.query_all_by_label("Show less").count(), 1);
 }
 
 #[test]

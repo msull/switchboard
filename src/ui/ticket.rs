@@ -113,8 +113,9 @@ pub fn ticket(cx: &mut DrawCtx<'_>, ui: &mut Ui, id: &str) {
     let now = now_ms();
     // The header stays put so the pending decisions and the tabs are
     // always in view. Its meta row wraps by whole items, so the header
-    // alone stays short; several long pending decisions under it can
-    // still push the tabs down on a short window.
+    // alone stays short, and a long question folds past its first
+    // paragraph; only many pending decisions under it can still push
+    // the tabs down on a short window.
     egui::ScrollArea::vertical()
         .id_salt(("ticket-tab", tab))
         .auto_shrink([false, false])
@@ -176,7 +177,7 @@ fn plan_feedback(cx: &mut DrawCtx<'_>, ui: &mut Ui, d: &DecisionView) {
             }
         });
     if let Some(note) = send {
-        cx.state.dispatch_note_drafts.remove(&d.id);
+        super::dispatch::forget_decision(cx, d);
         cx.dispatch(AppAction::DispatchDecide {
             ticket: d.ticket.clone(),
             decision: d.id.clone(),

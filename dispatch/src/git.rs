@@ -941,7 +941,13 @@ impl Repo for GitCli {
     fn summary(&self, dir: &Path, base: &str) -> Result<String> {
         let range = format!("{base}..HEAD");
         let log = output(git_in(dir).args(["log", "--oneline", "--no-decorate", &range]))?;
-        let stat = output(git_in(dir).args(["diff", "--stat", &range]))?;
+        // git translates the totals line, which the inspect question
+        // reads to cut a long stat.
+        let stat = output(
+            git_in(dir)
+                .env("LC_ALL", "C")
+                .args(["diff", "--stat", &range]),
+        )?;
         Ok(format!("{log}\n{stat}").trim().to_owned())
     }
 

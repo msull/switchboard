@@ -2137,7 +2137,8 @@ The chosen tab per ticket is `UiState.dispatch_ticket_tabs`, transient;
 a tab click dispatches nothing. The meta row wraps by whole items: a
 chip or the PR link that does not fit moves to the next row rather than
 breaking inside, and the header and pinned decisions sit outside the
-tab body's scroll.
+tab body's scroll. A long question folds past its first paragraph (see
+"Long decisions fold").
 
 - **Timeline**: `AppCore::ticket_timeline` groups rows newest first,
   a new group each time the stage changes. The rows are the runner's
@@ -3042,6 +3043,31 @@ not drawn inline. Keep days are read from the ticket's copy, so
 shortening them does not reach older tickets. Bash copies into the
 directory ask for permission, and a screenshot needs the Playwright
 flag above.
+
+## Long decisions fold (2026-10-10)
+
+A decision card draws its question's first paragraph (up to the first
+blank line) always. The rest is drawn whole when it is 8 lines or
+fewer, counted by newlines so the default does not depend on the
+window's width; past 8 it folds behind a "… N more lines" toggle that
+reads "Show less" when open. The toggled state is
+`UiState.dispatch_question_folds`, by ticket and decision id (decision
+ids repeat across tickets): transient, kept for the run
+across the overview and the ticket page, and dropped when the decision
+is answered from a card. The overview and the ticket page draw the same
+card, so both fold.
+
+Dispatch's `inspect` question carries at most 6 `diff --stat` file
+rows, then "… and N more files" and git's totals line; the ticket
+page's Changes tab lists every file. The scheduler finds the rows by
+counting back from the totals line rather than matching `" | "`, which
+a commit subject can contain, and leaves a summary with no totals line
+as it is. `GitCli::summary` runs `diff --stat` with `LC_ALL=C` so the
+totals line is English under any locale.
+
+Known gaps: several pending decisions can still push the ticket page's
+tabs down on a short window. Decisions already pending keep their long
+question until answered, and `report` and `show` print it whole.
 
 ## Open questions
 

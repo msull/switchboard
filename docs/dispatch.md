@@ -785,9 +785,11 @@ A human gate on a gate-only stage other than `lanes` (an `inspect`
 stage after `implement`, before anything is pushed or a PR opened) is
 one permission decision per context: the question names the branch and
 its head, what it adds over its base (the commits and the files
-changed), the tree to open and the latest notes, each notes file with
-its first line of text under it (control characters made spaces, at
-most 200 characters; a secret artifact is never read). `proceed`
+changed; past 6 files, the first 6, a count of the rest and git's
+totals line, while the ticket page's Changes tab lists them all), the
+tree to open and the latest notes, each notes file with its first line
+of text under it (control characters made spaces, at most 200
+characters; a secret artifact is never read). `proceed`
 completes the attempt bound to the head. `rerun` with a note sends
 that context back: the gate's attempt and the nearest earlier agent
 stage's result for that context are cancelled, the ticket stands at

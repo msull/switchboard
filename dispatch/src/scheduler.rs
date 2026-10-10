@@ -4722,7 +4722,7 @@ impl Runner {
             let summary = self.git.summary(cwd, &base)?;
             if !summary.trim().is_empty() {
                 q.push_str("\n\n");
-                q.push_str(summary.trim());
+                q.push_str(&short_summary(summary.trim(), STAT_ROWS));
             }
         }
         let _ = write!(q, "\n\nTree: {}", cwd.display());
@@ -10749,6 +10749,41 @@ fn notes_files<'a>(t: &'a Ticket, p: &Pipeline, lane: Option<&str>) -> Vec<(Stri
         .collect()
 }
 
+/// How many `--stat` file rows an inspect question carries.
+const STAT_ROWS: usize = 6;
+
+/// `summary` with its `--stat` cut to the first `rows` file rows, a
+/// count of the rest and git's totals line; unchanged when it has no
+/// totals line or no more than `rows` files. The ticket page's
+/// Changes tab lists them all.
+fn short_summary(summary: &str, rows: usize) -> String {
+    let lines: Vec<&str> = summary.lines().collect();
+    let Some((totals, before)) = lines.split_last() else {
+        return summary.to_owned();
+    };
+    // Counting rows back from git's totals line, rather than matching
+    // `" | "`, keeps a commit subject with a pipe in the log.
+    let files = totals.trim_start().split_once(' ').and_then(|(n, rest)| {
+        let changed = rest.starts_with("file changed") || rest.starts_with("files changed");
+        n.parse::<usize>().ok().filter(|_| changed)
+    });
+    let Some(files) = files else {
+        return summary.to_owned();
+    };
+    if files <= rows || before.len() < files {
+        return summary.to_owned();
+    }
+    let (log, stat) = before.split_at(before.len() - files);
+    let shown = &stat[..rows];
+    let more = format!("\u{2026} and {} more files", files - rows);
+    log.iter()
+        .chain(shown)
+        .copied()
+        .chain([more.as_str(), totals])
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// The first line of a notes file a human gate shows, read from at
 /// most `NOTES_PEEK` bytes; `None` for a secret artifact, which
 /// Dispatch never reads, or a file that cannot be read.
@@ -11104,6 +11139,52 @@ mod tests {
                 .count(),
             2
         );
+    }
+
+    /// Two log lines over `n` stat rows and git's totals line.
+    fn stat(n: usize) -> String {
+        let mut s = String::from("abc1234 First | with a pipe\ndef5678 Second");
+        for i in 1..=n {
+            let _ = write!(s, "\n src/f{i:02}.rs | 2 +-");
+        }
+        let _ = write!(
+            s,
+            "\n {n} files changed, 120 insertions(+), 92 deletions(-)"
+        );
+        s
+    }
+
+    #[test]
+    fn a_long_stat_is_cut_to_six_rows() {
+        let out = short_summary(&stat(13), STAT_ROWS);
+        assert!(
+            out.starts_with("abc1234 First | with a pipe\ndef5678 Second\n"),
+            "{out}"
+        );
+        for i in 1..=6 {
+            assert!(out.contains(&format!("src/f{i:02}.rs")), "{out}");
+        }
+        for i in 7..=13 {
+            assert!(!out.contains(&format!("src/f{i:02}.rs")), "{out}");
+        }
+        assert!(
+            out.ends_with(
+                "\n\u{2026} and 7 more files\n 13 files changed, 120 insertions(+), 92 deletions(-)"
+            ),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn a_short_stat_or_one_without_totals_is_unchanged() {
+        for s in [
+            stat(6),
+            "abc1234 Escape leaves the field\n src/ui/set.rs | 4 +-".to_owned(),
+            "abc1234 One\ndef5678 Two".to_owned(),
+            String::new(),
+        ] {
+            assert_eq!(short_summary(&s, STAT_ROWS), s);
+        }
     }
 
     #[test]

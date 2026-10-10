@@ -114,6 +114,10 @@ pub struct UiState {
     /// A note typed under a decision, by decision id, sent with the
     /// answer; a send-back from a human gate carries it to the agent.
     pub dispatch_note_drafts: std::collections::HashMap<String, String>,
+    /// Whether a decision's question is shown past its first paragraph,
+    /// by ticket and decision id (decision ids repeat across tickets),
+    /// when the owner has toggled it; otherwise it follows the line count.
+    pub dispatch_question_folds: std::collections::HashMap<String, bool>,
     /// The artifact the ticket page is showing.
     pub dispatch_artifact: Option<PathBuf>,
     /// The feedback box to focus, asked for until it holds the focus:
@@ -315,6 +319,7 @@ impl Default for UiState {
             dispatch_console_draft: String::new(),
             dispatch_settings: None,
             dispatch_note_drafts: std::collections::HashMap::new(),
+            dispatch_question_folds: std::collections::HashMap::new(),
             dispatch_artifact: None,
             focus_feedback: None,
             dispatch_ticket_tabs: HashMap::new(),

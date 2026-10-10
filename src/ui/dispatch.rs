@@ -553,6 +553,55 @@ pub(super) fn title_of(t: &TicketView) -> String {
     }
 }
 
+/// Lines past a question's first paragraph that are drawn unfolded.
+const FOLD_LINES: usize = 8;
+
+/// A decision's question: its first paragraph always, the rest folded
+/// behind a toggle when it runs past `FOLD_LINES` lines, so a long
+/// `--stat` does not push the ticket page's tabs off a short window.
+fn question(cx: &mut DrawCtx<'_>, ui: &mut Ui, d: &DecisionView) {
+    let (head, rest) = d
+        .question
+        .split_once("\n\n")
+        .unwrap_or((d.question.as_str(), ""));
+    ui.add(egui::Label::new(head).wrap());
+    if rest.trim().is_empty() {
+        return;
+    }
+    // Newlines, not wrapped rows, so the default does not depend on the
+    // window's width.
+    let n = rest.lines().count();
+    let key = format!("{}/{}", d.ticket, d.id);
+    let open = cx
+        .state
+        .dispatch_question_folds
+        .get(&key)
+        .copied()
+        .unwrap_or(n <= FOLD_LINES);
+    if open {
+        ui.add(egui::Label::new(rest).wrap());
+    }
+    if n > FOLD_LINES {
+        let toggle = if open {
+            "Show less".to_owned()
+        } else {
+            format!("\u{2026} {n} more lines")
+        };
+        if theme::ghost(ui, &toggle).clicked() {
+            cx.state.dispatch_question_folds.insert(key, !open);
+        }
+    }
+}
+
+/// Drops what the page kept for a decision once it is answered from a
+/// card: its note draft and its question's fold.
+pub(super) fn forget_decision(cx: &mut DrawCtx<'_>, d: &DecisionView) {
+    cx.state.dispatch_note_drafts.remove(&d.id);
+    cx.state
+        .dispatch_question_folds
+        .remove(&format!("{}/{}", d.ticket, d.id));
+}
+
 /// A decision with its options as buttons, the recommended one filled.
 /// `with_ticket` names the ticket above the question, for the overview.
 pub(super) fn decision_card(
@@ -579,7 +628,7 @@ pub(super) fn decision_card(
             } else {
                 ui.label(theme::meta_text(ui, format!("{} · {}", d.stage, d.name)));
             }
-            ui.add(egui::Label::new(&d.question).wrap());
+            question(cx, ui, d);
             if d.state != "pending" {
                 let by = d
                     .answered_by
@@ -645,7 +694,7 @@ pub(super) fn decision_card(
                         .on_disabled_hover_text(format!("Write the note first: {option} needs one"))
                         .clicked();
                     if clicked {
-                        cx.state.dispatch_note_drafts.remove(&d.id);
+                        forget_decision(cx, d);
                         cx.dispatch(AppAction::DispatchDecide {
                             ticket: d.ticket.clone(),
                             decision: d.id.clone(),
@@ -785,6 +834,7 @@ fn multiple_choice(cx: &mut DrawCtx<'_>, ui: &mut Ui, d: &DecisionView) {
             .on_hover_text("Send the ticked options as the answer")
             .clicked()
         {
+            forget_decision(cx, d);
             cx.dispatch(AppAction::DispatchDecide {
                 ticket: d.ticket.clone(),
                 decision: d.id.clone(),
