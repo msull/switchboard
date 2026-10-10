@@ -900,7 +900,31 @@ tester that could not test anything should say so on that first line.
 Answering `rerun` tests again on the same deploy, with the services
 restarted.
 
-The tester's evidence is its notes.
+**An evidence directory** keeps what the tester produced besides its
+notes: screenshots, a rendered PDF, an exported CSV. A stage's `writes`
+may name one directory as `{ name = "evidence", dir = true }`. Dispatch
+makes it inside the attempt directory before the launch and hands it
+to the agent as `{evidence}` and `$DISPATCH_WRITES_EVIDENCE`; a
+gate-only command gets the variable too. When the attempt completes,
+the files are listed on the attempt (path, size, time; a file still
+being written holds completion), the ticket page shows them under the
+attempt with Open and Reveal, the `tried` question carries the count,
+and `dispatch evidence <ticket>` prints their paths. The contents are
+never read into the app: Open hands the path to the system opener, and
+only for a list of safe extensions. Without the directory, a screenshot
+lands in the worktree or `/tmp`, dirties the tree or is lost when the
+tree is removed, and the notes can only describe it.
+
+What reaches the directory without a permission prompt is measured in
+`spikes/21-evidence-writes`: the Write tool does, and so does any
+gate-only command; Bash `cp`, `mv` and `mkdir` ask, so the tester is
+told to write files there rather than copy them. A Playwright MCP
+screenshot reaches it only when the tester's server runs with
+`--allow-unrestricted-file-access` in the operator's `--mcp-config`
+and the tester passes `{evidence}/<file>` as `filename`; that flag also
+lets the browser read any local file, so it is your choice per
+operator. An empty directory never fails the attempt. Codex writes only
+in its cwd, so `dir = true` on a Codex stage is refused.
 
 ```toml
 version = 1
@@ -1048,8 +1072,8 @@ context = "joined"
 needs = ["my-dev"]
 services = ["frontend", "admin"]
 before = { frontend = ["npm", "run", "link-env"], admin = ["npm", "run", "link-env"] }
-writes = ["notes"]
-prompt = "my-dev runs backend commit {inputs.deploy.commit}. The frontend: {services.frontend}. The admin frontend: {services.admin}. The plan is at {inputs.plan}. Try issue #{issue.number} end to end. Write to {notes}, first line the result, then the commands and their output."
+writes = ["notes", { name = "evidence", dir = true }]
+prompt = "my-dev runs backend commit {inputs.deploy.commit}. The frontend: {services.frontend}. The admin frontend: {services.admin}. The plan is at {inputs.plan}. Try issue #{issue.number} end to end. Write to {notes}, first line the result, then the commands and their output. Save screenshots and any file you produce under {evidence} with the Write tool, not cp or mv."
 
 [[stages]]
 name = "tried"
@@ -1258,6 +1282,13 @@ with step 6 merged in and every policy key below set.
 - **`min_free_gb`** (default 10) is the free space on the worktrees'
   volume below which nothing new starts. A build on a full disk fails
   for nothing and costs the run.
+- **`evidence_file_mb`** (default 25), **`evidence_attempt_mb`**
+  (default 200) and **`evidence_keep_days`** (default 30) govern
+  evidence directories (section 5). A file over the first, or the files
+  past the second, stay on disk but are not listed. The runner removes a
+  closed ticket's evidence after the third, once a day, and logs
+  `evidence-swept`; `dispatch close <ticket> --drop-evidence` removes it
+  at once. All three are read from the ticket's copy.
 - **`refresh`** (default true) brings each lane's branch up to its base
   when a stage begins, so a plan that sat is not implemented on stale
   code. A clean rebase is mechanical, and a conflict goes to the
@@ -1439,8 +1470,8 @@ context = "joined"
 needs = ["my-dev"]
 services = ["frontend", "admin"]
 before = { frontend = ["npm", "run", "link-env"], admin = ["npm", "run", "link-env"] }
-writes = ["notes"]
-prompt = "my-dev runs backend commit {inputs.deploy.commit}. The frontend: {services.frontend}. The admin frontend: {services.admin}. The plan is at {inputs.plan}. Try issue #{issue.number} end to end. Write to {notes}, first line the result, then the commands and their output."
+writes = ["notes", { name = "evidence", dir = true }]
+prompt = "my-dev runs backend commit {inputs.deploy.commit}. The frontend: {services.frontend}. The admin frontend: {services.admin}. The plan is at {inputs.plan}. Try issue #{issue.number} end to end. Write to {notes}, first line the result, then the commands and their output. Save screenshots and any file you produce under {evidence} with the Write tool, not cp or mv."
 
 [[stages]]
 name = "tried"
@@ -1472,6 +1503,7 @@ decisions = { lanes = "ask", finalize = "ask", review-code = "auto" }
 max_reruns = 3
 on_dirty = { nudge = 1 }
 min_free_gb = 10
+evidence_keep_days = 30
 refresh = true
 trust_folders = true
 confine = true
@@ -1567,6 +1599,8 @@ Each row is a key from the steps above, and what goes wrong without it.
 | an operator's `env` | the agent has no credentials, and looks for them on disk |
 | an operator's `budget_usd` | nothing today: budget reporting is not built |
 | a stage's `writes` | later stages have no `{inputs.<name>}` to read |
+| `writes = [{ name = "evidence", dir = true }]` | screenshots and rendered files land in the worktree or `/tmp`, and are gone with the tree |
+| `evidence_keep_days` | a closed ticket's evidence is removed after 30 days |
 | a command `gate` on an agent stage | the stage completes when the agent stops, tests failing or not |
 | `per_lane` | one command must suit every lane's toolchain |
 | `like = "implement"` | the review's accepted head is never checked |
