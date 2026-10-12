@@ -73,6 +73,12 @@ window's frame, for a launch with no terminal to log to),
 `operations.log` and `control.sock` (the control port: every command
 another process sent, its reply, and the socket it came in on; see
 `docs/dispatch.md`),
+`identity.json` (the remote port's identity: the server id, its display
+name, the self-signed certificate and its key hash, and whether the
+port listens on the local network and on which port; the certificate's
+private key is in the Keychain) and `devices.json` (the devices paired
+with this host: name, scope, when paired and last seen, and the SHA-256
+of each bearer token, never the token; see `docs/remote-client.md`),
 `settings.json` (theme, the active workspace, editor, global variables, file
 side shown next to sessions and its tab, the directory each project's
 file side starts at when narrowed, the screen to reopen on, the
@@ -106,7 +112,8 @@ on a private tmux server (`tmux -L switchboard`), never on your default
 one. Nothing is written into a project directory except what the Config
 editor saves on your click. Secret values live in the login Keychain,
 never in these files, under the accounts `global/<VAR>`,
-`project/<id>/<VAR>` and `set/<name>/<VAR>` (an environment set's).
+`project/<id>/<VAR>` and `set/<name>/<VAR>` (an environment set's), and
+`remote-key:<server id>` (the remote port's private key, as PEM).
 
 ### Defining commands and services
 
@@ -196,6 +203,14 @@ Dev aids, all environment variables:
   as the session's next prompt, `Owner answered "<question>": <answer>`,
   once its turn has ended.
 - `SWITCHBOARD_TMUX_SOCKET=<name>`: use another tmux socket name.
+- `SWITCHBOARD_REMOTE_PORT=<port>`: bind the remote port there instead
+  of the port in `identity.json`, so two instances can run on one
+  machine; `0` picks a free one. The port answers `/api/v1/info` to
+  anyone and every other read to a paired device; pair one from the
+  settings menu's Remote devices dialog, and read with the token it
+  was given (`curl --insecure` trusts any certificate; a real client
+  pins the key hash the dialog shows):
+  `curl -sk -H "Authorization: Bearer <token>" https://127.0.0.1:43187/api/v1/waiting`.
 - `DISPATCH_DATA_DIR=<dir>`: where the Dispatch page looks for
   `dispatch.sock` and where its console opens (the `dispatch` binary
   reads the same variable). Tickets' trees go under
@@ -230,7 +245,7 @@ Dev aids, all environment variables:
   `new-codex`, `new-service`, `show-board`, `show-session`, `show-document`,
   `show-file`, `files`, `side-position`, `terminal`, `select-file`,
   `set-env`, `set-secret`, `dotenv`, `environment`, `config`,
-  `env-setup unlock|lock`,
+  `env-setup unlock|lock`, `pairing <code>|close`, `remote-devices`,
   `send`, `interrupt`, `return`, `kill`, `remove`, `approve`, `revoke`, `side`,
   `switchboard`, `working-set`, `new-working-set`, `clone-working-set`,
   `rename-working-set`, `delete-working-set`, `new-recent-set`,
@@ -279,15 +294,17 @@ src/core/
   events.rs              hook events -> record activity (matched by record id, ordered by time)
   workflow.rs            plan review runs: reviewer and planner rounds as a state machine over records
   control.rs             the control port's commands run quietly under an operation id; read models in the wire's shapes; `ready_for_prompt`, the one verdict `session.prompt` and a view's `prompt_refusal` share
+  remote.rs              the remote port's state: the host's identity and paired devices as loaded, the pairing window with its code, scope and failure count, a device's scope and revocation
   diff.rs                a changed file's diff as held per ticket, lane and path, when a re-read is due, which unchanged runs fold
   dispatch.rs            Dispatch as the app shows it: the runner's last status as views, decisions answered as calls, a ticket's events and full view read once per change and its timeline, a project's supervisor chip, the console session
   tests.rs               state-transition tests for the core
-src/ports/               traits: store, host, events, agent, opener, transcript, secrets, project_config, round_files, artifacts, changes (a branch's commits and files over its base, one file's diff), controller, control (the operations log), dispatch (Dispatch's port)
+src/ports/               traits: store, host, events, agent, opener, transcript, secrets, project_config, round_files, artifacts, changes (a branch's commits and files over its base, one file's diff), controller, control (the operations log), dispatch (Dispatch's port), remote (the identity and paired-device files)
 src/adapters/
   store.rs               JSON store: atomic writes, .bak, flock
   tmux.rs                tmux process host on the private socket
   hooks.rs               append-first event log + socket wake-up + hook settings JSON
   control.rs             the control port: operations.log (append-only, synced) and control.sock (one thread per connection, requests handed to the frame)
+  remote.rs              the remote port: identity.json and devices.json, the certificate and key (`rcgen`), the pinned client a device uses, and the TLS listener (`rustls`, one thread per connection, pools of 4 unauthenticated and 12 paired, 5 s handshake, `/pair` and `/info` rate limits, requests handed to the frame 8 per pass)
   dispatch.rs            the Dispatch port's client over <Dispatch data dir>/dispatch.sock, reconnecting after an error; the `dispatch` beside the app's binary
   dock.rs                Dock badge with the waiting-session count (macOS)
   controller.rs          the nunchuk over USB serial: a thread owns the port, reconnects, hands events over a channel
@@ -325,6 +342,7 @@ src/ui/
   popout.rs              a session in a window of its own: the page and side panel in a viewport, frame saved on settle; the Dispatch window the same way
   zoom.rs                Cmd+= and Cmd+- per window, remembered per display; a pop-out's pass runs at its display's zoom
   env.rs                 Environment dialog: variables, secrets, .env opt-in, masked preview
+  remote.rs              Remote devices dialog: the host's name, id, key and address, the pairing window with its QR code, the paired devices with scope and Revoke
   config.rs              project config editor: .switchboard/project.json as text, options listed, parse shown
   workflow.rs            plan review: the Review plan dialog, the run's page (rounds, plan with diff, feedback beside response, controls), the feedback block pinned under the header
   dispatch.rs            the Dispatch page: tickets with what waits on you (filtered by project), each project's supervisor chip (Open, Resume, Trust, Fresh behind a confirmation), and the console; Pop out
@@ -338,6 +356,7 @@ src/ui/
 assets/fonts/            Source Serif 4 (Regular, Semibold, Italic; OFL), embedded by theme.rs
 tests/ui.rs              headless flows via egui_kittest with fakes
 tests/control.rs         the control port over a real socket with fakes: ops on records, logged replies, interrupted launches, a pane's screen with secrets named
+tests/remote.rs          the remote port over a real TLS listener with fakes: /info to anyone, pairing with the host's key and code, a token that reads every view, revocation, scope, the allowlist, bounded strings, a redacted screen, a missing key remaking the identity
 tests/fixtures/          a small real Claude Code transcript for the parser tests
 tests/live.rs            ignored: real claude / codex / Ghostty runs
 tests/gate.rs            Milestone 1 gate: real store, tmux, hooks; agents ignored

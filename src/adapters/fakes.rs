@@ -24,6 +24,7 @@ use crate::ports::events::{EventSource, SessionEvent};
 use crate::ports::host::{HostId, HostInfo, HostStatus, ProcessHost, SpawnSpec};
 use crate::ports::opener::Opener;
 use crate::ports::project_config::{ProjectConfig, ProjectConfigReader};
+use crate::ports::remote::{Identity, PairedDevice, RemoteStore};
 use crate::ports::store::{Loaded, Store, StoreError};
 use crate::ports::transcript::{Conversation, TranscriptReader};
 
@@ -38,6 +39,7 @@ pub fn services() -> Services {
         events: Box::new(FakeEvents),
         agents: Box::new(FakeAgents),
         opener: Box::new(FakeOpener::default()),
+        remote: Box::new(FakeRemoteStore::default()),
         transcripts: Box::new(FakeTranscripts::default()),
         secrets: Box::new(FakeSecrets::default()),
         project_config: Box::new(FakeProjectConfig),
@@ -456,6 +458,52 @@ impl Opener for FakeOpener {
         let mut s = self.state();
         s.raised.push(title.into());
         Ok(s.existing.iter().any(|t| t == title))
+    }
+}
+
+/// The identity and device files in memory, shared so a test can read
+/// back what the app saved or pre-fill what it loads.
+#[derive(Debug, Clone, Default)]
+pub struct FakeRemoteStore(pub Arc<Mutex<FakeRemoteState>>);
+
+#[derive(Debug, Default)]
+pub struct FakeRemoteState {
+    pub identity: Option<Identity>,
+    pub devices: Vec<PairedDevice>,
+    /// Every load and save fails with this message.
+    pub fail: Option<String>,
+}
+
+impl FakeRemoteStore {
+    pub fn state(&self) -> std::sync::MutexGuard<'_, FakeRemoteState> {
+        self.0.lock().expect("fake remote store lock")
+    }
+}
+
+impl RemoteStore for FakeRemoteStore {
+    fn load_identity(&self) -> Result<Option<Identity>, String> {
+        let state = self.state();
+        state.fail.clone().map_or(Ok(state.identity.clone()), Err)
+    }
+    fn save_identity(&self, identity: &Identity) -> Result<(), String> {
+        let mut state = self.state();
+        if let Some(e) = &state.fail {
+            return Err(e.clone());
+        }
+        state.identity = Some(identity.clone());
+        Ok(())
+    }
+    fn load_devices(&self) -> Result<Vec<PairedDevice>, String> {
+        let state = self.state();
+        state.fail.clone().map_or(Ok(state.devices.clone()), Err)
+    }
+    fn save_devices(&self, devices: &[PairedDevice]) -> Result<(), String> {
+        let mut state = self.state();
+        if let Some(e) = &state.fail {
+            return Err(e.clone());
+        }
+        state.devices = devices.to_vec();
+        Ok(())
     }
 }
 

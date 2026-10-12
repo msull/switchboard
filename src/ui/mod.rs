@@ -24,6 +24,7 @@ pub mod palette;
 pub mod popout;
 pub mod prompt_box;
 mod rail;
+pub mod remote;
 mod run;
 mod runbar;
 pub mod runs;
@@ -160,6 +161,8 @@ pub struct UiState {
     pub palette: Option<palette::PaletteDraft>,
     /// The Environment dialog, while open.
     pub env_dialog: Option<env::EnvDraft>,
+    /// The Remote devices dialog, while open.
+    pub remote_dialog: Option<remote::RemoteDraft>,
     /// The project config editor, while open.
     pub config_dialog: Option<config::ConfigDraft>,
     /// The "Review a plan" dialog while it is open.
@@ -332,6 +335,7 @@ impl Default for UiState {
             editor_draft: None,
             palette: None,
             env_dialog: None,
+            remote_dialog: None,
             config_dialog: None,
             review_dialog: None,
             review_views: HashMap::new(),
@@ -532,6 +536,7 @@ fn draw_frame(cx: &mut DrawCtx<'_>, ui: &mut Ui) {
     dialogs::show(cx, ui.ctx());
     palette::show(cx, ui.ctx());
     env::show(cx, ui.ctx());
+    remote::show(cx, ui.ctx());
     config::show(cx, ui.ctx());
     workflow::dialog_show(cx, ui.ctx());
     zoom::end_frame(cx, ui.ctx());
@@ -746,6 +751,7 @@ fn keyboard(cx: &mut DrawCtx<'_>, ui: &Ui, view: &View) {
         || cx.state.new_session.is_some()
         || cx.state.palette.is_some()
         || cx.state.env_dialog.is_some()
+        || cx.state.remote_dialog.is_some()
         || cx.state.config_dialog.is_some()
         || cx.state.review_dialog.is_some()
         || cx.state.confirm_cleanup.is_some()

@@ -7256,3 +7256,68 @@ fn dispatch_page_folds_a_pile_of_questions_behind_their_count() {
     harness.get_by_label("Which lanes does #104 need?");
     harness.get_by_label("Question 4?");
 }
+
+/// The Remote devices dialog: opened from the settings menu, it shows
+/// the host, opens a pairing window whose code it then shows, and
+/// revokes a paired device; every change is an action.
+#[test]
+fn remote_devices_dialog_opens_pairing_and_revokes_a_device() {
+    use switchboard::ports::remote::{Identity, Listen, PairedDevice, Scope};
+    let (mut harness, _) = harness();
+    let device = PairedDevice {
+        id: uuid::Uuid::new_v4(),
+        name: "Vision Pro".into(),
+        scope: Scope::Read,
+        token_sha256: "ab".repeat(32),
+        created: at(0),
+        last_seen: None,
+    };
+    harness.state_mut().dispatch(AppAction::IdentityLoaded {
+        identity: Identity {
+            schema_version: 1,
+            server_id: uuid::Uuid::new_v4(),
+            server_name: "Studio".into(),
+            certificate: "MIIB".into(),
+            spki_sha256: "cd".repeat(32),
+            created: at(0),
+            listen: Listen::default(),
+        },
+        devices: vec![device.clone()],
+        rotated: false,
+    });
+    harness.state_mut().dispatched.clear();
+    click(&mut harness, "Settings");
+    click(&mut harness, "Remote devices…");
+    harness.get_by_label("Remote devices");
+    harness.get_by_label("Vision Pro");
+    assert!(harness.query_by_label("Stop pairing").is_none());
+    click(&mut harness, "Allow pairing for 5 minutes");
+    let code = actions(&harness)
+        .into_iter()
+        .find_map(|a| match a {
+            AppAction::OpenPairing { code, scope } => {
+                assert_eq!(scope, Scope::Read);
+                Some(code)
+            }
+            _ => None,
+        })
+        .expect("a pairing window was opened");
+    assert_eq!(code.len(), 8);
+    assert!(harness.state().core().pairing().is_some());
+    // The code shows in two halves, as it is read aloud.
+    let (a, b) = code.split_at(4);
+    harness.get_by_label(format!("{a} {b}").as_str());
+    // The window grew around the QR code; a frame settles its place
+    // before the next click.
+    harness.run_steps(2);
+    click(&mut harness, "Stop pairing");
+    assert!(actions(&harness).contains(&AppAction::ClosePairing));
+    assert!(harness.state().core().pairing().is_none());
+    harness.run_steps(2);
+    click(&mut harness, "Revoke");
+    assert!(actions(&harness).contains(&AppAction::RevokeDevice(device.id)));
+    assert!(harness.state().core().devices().is_empty());
+    harness.get_by_label("No device is paired.");
+    click(&mut harness, "Close");
+    assert!(harness.state().ui_state.remote_dialog.is_none());
+}

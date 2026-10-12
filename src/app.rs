@@ -5,13 +5,16 @@
 
 use std::collections::HashMap;
 use std::io;
+use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
 use switchboard_control as wire;
 
 use crate::adapters::control::{ControlSocket, Incoming};
 use crate::adapters::hooks::WakeSocket;
+use crate::adapters::remote::{self, RemoteIncoming, RemotePort, RemoteReply, RemoteRequest};
 use crate::adapters::scrollback::scrollback_dir;
 use crate::content::ConversationCache;
 use crate::core::{
@@ -29,6 +32,7 @@ use crate::ports::events::EventSource;
 use crate::ports::host::{HostId, ProcessHost, SpawnSpec};
 use crate::ports::opener::Opener;
 use crate::ports::project_config::ProjectConfigReader;
+use crate::ports::remote::{Listen, RemoteStore};
 use crate::ports::round_files::RoundFiles;
 use crate::ports::secrets::SecretStore;
 use crate::ports::store::{Store, StoreError};
@@ -70,6 +74,8 @@ pub struct Services {
     pub controller: Box<dyn Controller>,
     /// The control port's operations log.
     pub operations: Box<dyn Operations>,
+    /// The remote port's identity and device files.
+    pub remote: Box<dyn RemoteStore>,
     /// Dispatch's port: tickets as views, decisions answered. The app
     /// takes it into a worker of its own when it starts, so it is
     /// `None` after `SwitchboardApp::with_services`; `None` before it
@@ -149,6 +155,19 @@ pub struct SwitchboardApp {
     pub dispatched: Vec<AppAction>,
     /// The control port, once `listen` bound it.
     control: Option<ControlSocket>,
+    /// The remote port's listener while it is bound, and how to wake
+    /// the frame when a request arrives (kept so a change of address
+    /// can rebind). `remote_bound` is what the listener was bound with.
+    remote: Option<RemotePort>,
+    remote_wake: Option<Arc<dyn Fn() + Send + Sync>>,
+    remote_bound: Option<Listen>,
+    /// `SWITCHBOARD_REMOTE_PORT`: a port in place of the identity's, so
+    /// two instances can run on one machine; `0` picks a free one.
+    remote_port_override: Option<u16>,
+    /// This run's epoch and the revision counter every remote reply
+    /// carries; the counter moves only once the read-model diff lands.
+    epoch: uuid::Uuid,
+    revision: u64,
     /// File diffs being read on threads of their own.
     diff_reads: DiffReads,
 }
@@ -216,6 +235,12 @@ impl SwitchboardApp {
             record_actions: false,
             dispatched: Vec::new(),
             control: None,
+            remote: None,
+            remote_wake: None,
+            remote_bound: None,
+            remote_port_override: None,
+            epoch: uuid::Uuid::new_v4(),
+            revision: 0,
             diff_reads: DiffReads::default(),
         }
     }
@@ -233,6 +258,7 @@ impl SwitchboardApp {
             Err(e) => Err(e),
         };
         self.dispatch(AppAction::StoreLoaded(loaded));
+        self.load_identity();
         self.dispatch(AppAction::DispatchConfigured {
             command: self.dispatch_port.command.clone(),
             data_dir: self.dispatch_port.data_dir.clone(),
@@ -488,6 +514,7 @@ impl SwitchboardApp {
             | Effect::Delete(_)
             | Effect::StoreSecret { .. }
             | Effect::DeleteSecret(_) => self.run_store_effect(effect),
+            Effect::SaveIdentity(_) | Effect::SaveDevices(_) => self.run_remote_effect(effect),
             Effect::PrepareLaunch { .. }
             | Effect::PrepareResume { .. }
             | Effect::CheckTranscript { .. }
@@ -1313,7 +1340,8 @@ impl SwitchboardApp {
 
     /// Answer every request that has arrived. Called from `logic`, which
     /// runs before every frame and while the window is hidden; a test
-    /// calls it while its client waits.
+    /// calls it while its client waits. The remote port is drained at
+    /// most `DRAIN_PER_PASS` requests per pass, in arrival order.
     pub fn serve_pending(&mut self) {
         let incoming: Vec<Incoming> = self
             .control
@@ -1323,6 +1351,496 @@ impl SwitchboardApp {
         for Incoming { request, reply } in incoming {
             let answer = self.serve(&request);
             let _ = reply.send(answer);
+        }
+        let incoming: Vec<RemoteIncoming> = self
+            .remote
+            .as_mut()
+            .map(|port| port.poll(remote::DRAIN_PER_PASS))
+            .unwrap_or_default();
+        for RemoteIncoming { request, reply } in incoming {
+            let answer = self.serve_remote(&request);
+            let _ = reply.try_send(answer);
+        }
+    }
+
+    // --- the remote port
+
+    /// The identity at start: loaded from `identity.json` with its key
+    /// from the secret store, or made now. A certificate whose key is
+    /// gone (a Keychain reset, an unsigned build) is remade over a new
+    /// key, which invalidates every pairing, so `devices.json` is
+    /// cleared and the owner is told. A secret store that errors is
+    /// not a missing key: the identity is kept and the port refuses to
+    /// listen rather than throw the pairings away.
+    fn load_identity(&mut self) {
+        let loaded = match self.services.remote.load_identity() {
+            Ok(loaded) => loaded,
+            Err(e) => {
+                log::error!("identity: {e}");
+                self.dispatch_inner(AppAction::Failed(format!("read the host identity: {e}")));
+                return;
+            }
+        };
+        let mut devices = match self.services.remote.load_devices() {
+            Ok(devices) => devices,
+            Err(e) => {
+                log::error!("paired devices: {e}");
+                self.dispatch_inner(AppAction::Failed(format!("read the paired devices: {e}")));
+                Vec::new()
+            }
+        };
+        let (identity, rotated) = match loaded {
+            Some(identity) => match self.services.secrets.get(&identity.key_account()) {
+                Ok(Some(key))
+                    if remote::spki_sha256_of_key(&key).ok().as_deref()
+                        == Some(identity.spki_sha256.as_str()) =>
+                {
+                    (identity, false)
+                }
+                Ok(_) if self.core.read_only() => (identity, false),
+                Ok(_) => {
+                    log::warn!("the remote key is missing; making a new identity");
+                    match self.make_identity(
+                        Some(identity.server_id),
+                        &identity.server_name,
+                        identity.listen.clone(),
+                    ) {
+                        Some(fresh) => {
+                            devices.clear();
+                            if let Err(e) = self.services.remote.save_devices(&devices) {
+                                log::error!("devices.json: {e}");
+                            }
+                            (fresh, true)
+                        }
+                        None => (identity, false),
+                    }
+                }
+                Err(e) => {
+                    log::error!("the remote key could not be read: {e}");
+                    self.dispatch_inner(AppAction::Failed(format!(
+                        "read the remote port's key: {e}; the port is not listening"
+                    )));
+                    (identity, false)
+                }
+            },
+            None if self.core.read_only() => return,
+            None => {
+                let name = remote::default_server_name();
+                match self.make_identity(None, &name, Listen::default()) {
+                    Some(fresh) => {
+                        if !devices.is_empty() {
+                            devices.clear();
+                            if let Err(e) = self.services.remote.save_devices(&devices) {
+                                log::error!("devices.json: {e}");
+                            }
+                        }
+                        (fresh, false)
+                    }
+                    None => return,
+                }
+            }
+        };
+        self.dispatch_inner(AppAction::IdentityLoaded {
+            identity,
+            devices,
+            rotated,
+        });
+    }
+
+    /// A new certificate and key, the key stored first so a crash
+    /// between the two leaves an unused key rather than a certificate
+    /// without one. `None` when either store refused, with a notice.
+    fn make_identity(
+        &mut self,
+        server_id: Option<uuid::Uuid>,
+        name: &str,
+        listen: Listen,
+    ) -> Option<crate::ports::remote::Identity> {
+        let made = remote::make_identity(server_id, name, listen).and_then(|(identity, key)| {
+            self.services
+                .secrets
+                .set(&identity.key_account(), &key)
+                .map_err(|e| format!("store the key: {e}"))?;
+            self.services
+                .remote
+                .save_identity(&identity)
+                .map_err(|e| format!("write identity.json: {e}"))?;
+            Ok(identity)
+        });
+        match made {
+            Ok(identity) => {
+                log::info!("remote identity {} made", identity.server_id);
+                Some(identity)
+            }
+            Err(e) => {
+                log::error!("remote identity: {e}");
+                self.dispatch_inner(AppAction::Failed(format!("make the host identity: {e}")));
+                None
+            }
+        }
+    }
+
+    /// The identity and device files; a changed address rebinds the port.
+    fn run_remote_effect(&mut self, effect: Effect) -> Option<AppAction> {
+        match effect {
+            Effect::SaveIdentity(identity) => {
+                let saved = self.services.remote.save_identity(&identity);
+                if self.remote_wake.is_some()
+                    && self.remote_bound.as_ref() != Some(&identity.listen)
+                {
+                    match self.bind_remote() {
+                        Ok(addr) => log::info!("remote port at {addr}"),
+                        Err(e) => {
+                            return failed(Err::<(), _>(e), || "bind the remote port");
+                        }
+                    }
+                }
+                failed(saved, || "save the host identity")
+            }
+            Effect::SaveDevices(devices) => failed(
+                self.services.remote.save_devices(&devices),
+                || "save the paired devices",
+            ),
+            _ => None,
+        }
+    }
+
+    /// A port in place of the identity's (`SWITCHBOARD_REMOTE_PORT`);
+    /// `0` picks a free one, which is what tests use.
+    pub fn set_remote_port_override(&mut self, port: Option<u16>) {
+        self.remote_port_override = port;
+    }
+
+    /// Bind the remote port as the identity says: loopback until the
+    /// owner allows the local network. `wake` runs on a connection
+    /// thread whenever a request is queued. Refused for a read-only
+    /// instance and for one whose key is unavailable.
+    pub fn listen_remote(
+        &mut self,
+        wake: impl Fn() + Send + Sync + 'static,
+    ) -> io::Result<SocketAddr> {
+        self.remote_wake = Some(Arc::new(wake));
+        self.bind_remote()
+    }
+
+    fn bind_remote(&mut self) -> io::Result<SocketAddr> {
+        self.remote = None;
+        self.remote_bound = None;
+        if self.core.read_only() {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "another instance holds the data directory; not listening",
+            ));
+        }
+        let identity = self
+            .core
+            .identity()
+            .cloned()
+            .ok_or_else(|| io::Error::other("no host identity"))?;
+        let key = self
+            .services
+            .secrets
+            .get(&identity.key_account())
+            .map_err(io::Error::other)?
+            .ok_or_else(|| io::Error::other("the remote key is missing"))?;
+        let tls = remote::tls_config(&identity, &key).map_err(io::Error::other)?;
+        let wake = self
+            .remote_wake
+            .clone()
+            .ok_or_else(|| io::Error::other("no wake"))?;
+        let ip = if identity.listen.lan {
+            IpAddr::from([0, 0, 0, 0])
+        } else {
+            IpAddr::from([127, 0, 0, 1])
+        };
+        let port = self.remote_port_override.unwrap_or(identity.listen.port);
+        let bound = RemotePort::bind(SocketAddr::new(ip, port), tls, move || wake())?;
+        let addr = bound.addr();
+        self.remote = Some(bound);
+        self.remote_bound = Some(identity.listen);
+        Ok(addr)
+    }
+
+    /// Where the remote port is bound, while it is.
+    #[must_use]
+    pub fn remote_addr(&self) -> Option<SocketAddr> {
+        self.remote.as_ref().map(RemotePort::addr)
+    }
+
+    /// One HTTP request from a device, answered on the frame: `/info`
+    /// and `/pair` to anyone, the allowlisted reads to a paired device,
+    /// everything else refused before it is translated to the wire.
+    fn serve_remote(&mut self, request: &RemoteRequest) -> RemoteReply {
+        let Some(rest) = request.path.strip_prefix("/api/v1/") else {
+            return self.refuse(request, 404, "not_found", "no such endpoint", false);
+        };
+        let segments: Vec<&str> = rest.split('/').collect();
+        match (request.method.as_str(), segments.as_slice()) {
+            ("GET", ["info"]) => return self.remote_info(),
+            ("POST", ["pair"]) => return self.remote_pair(request),
+            _ => {}
+        }
+        let Some(token) = &request.bearer else {
+            return self.refuse(
+                request,
+                401,
+                "unauthorized",
+                "pair this device first",
+                false,
+            );
+        };
+        let Some(device) = self
+            .core
+            .device_by_token(&remote::token_sha256(token))
+            .cloned()
+        else {
+            return self.refuse(
+                request,
+                401,
+                "unauthorized",
+                "the token is not known; pair again",
+                false,
+            );
+        };
+        self.dispatch_inner(AppAction::DeviceSeen(device.id));
+        let notes_cap = if matches!(segments.as_slice(), ["sessions", _]) {
+            NOTES_CAP_ALONE
+        } else {
+            STRING_CAP
+        };
+        let body = match (request.method.as_str(), segments.as_slice()) {
+            ("GET", ["projects"]) => wire::Body::Projects {
+                space: request.param("space").map(str::to_owned),
+            },
+            ("GET", ["spaces"]) => wire::Body::Spaces,
+            ("GET", ["spaces", space, "sets"]) => wire::Body::Sets {
+                space: (*space).to_owned(),
+            },
+            ("GET", ["sets", set]) => return self.remote_set(request, set),
+            ("GET", ["projects", project, "sessions"]) => wire::Body::Sessions {
+                project: (*project).to_owned(),
+            },
+            ("GET", ["sessions", session]) => wire::Body::Session {
+                session: (*session).to_owned(),
+            },
+            ("GET", ["waiting"]) => wire::Body::Waiting,
+            ("GET", ["sessions", session, "screen"]) => wire::Body::SessionScreen {
+                session: (*session).to_owned(),
+                lines: request.param("lines").and_then(|n| n.parse().ok()),
+            },
+            _ => {
+                return self.refuse(
+                    request,
+                    404,
+                    "not_found",
+                    "not available on this port",
+                    true,
+                );
+            }
+        };
+        self.remote_reply(request, &self.answer(&body), notes_cap)
+    }
+
+    /// Who this host is, to anyone: nothing in it is a secret and
+    /// nothing in it is trusted until the key is pinned.
+    fn remote_info(&self) -> RemoteReply {
+        let Some(identity) = self.core.identity() else {
+            return RemoteReply {
+                status: 503,
+                body: self.error_json("no_identity", "the host has no identity yet"),
+                authenticated: false,
+            };
+        };
+        let body = serde_json::json!({
+            "server_id": identity.server_id,
+            "server_name": identity.server_name,
+            "protocol": REMOTE_PROTOCOL,
+            "capabilities": ["read"],
+            "spki_sha256": identity.spki_sha256,
+            "limits": {
+                "body_bytes": BODY_CAP,
+                "string_bytes": STRING_CAP,
+                "notes_bytes": NOTES_CAP_ALONE,
+                "screen_lines": 200,
+            },
+            "pairing_open": self.core.pairing_at(self.clock()).is_some(),
+        });
+        self.envelope(200, &body, false)
+    }
+
+    /// The pairing handshake: inside the window, with the host's own
+    /// key hash (so a request relayed through a substituted
+    /// certificate fails even with the code) and the code. A match
+    /// makes a token the device keeps and the host stores only the hash
+    /// of; a mismatch counts against the window.
+    fn remote_pair(&mut self, request: &RemoteRequest) -> RemoteReply {
+        let now = self.clock();
+        let Some(window) = self.core.pairing_at(now).cloned() else {
+            return self.refuse(
+                request,
+                403,
+                "pairing_closed",
+                "pairing is not open on the host",
+                false,
+            );
+        };
+        let Some(identity) = self.core.identity().cloned() else {
+            return self.refuse(
+                request,
+                503,
+                "no_identity",
+                "the host has no identity",
+                false,
+            );
+        };
+        let Ok(body) = serde_json::from_slice::<serde_json::Value>(&request.body) else {
+            return self.refuse(request, 400, "bad_request", "the body is not JSON", false);
+        };
+        let field = |name: &str| {
+            body.get(name)
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim()
+                .to_owned()
+        };
+        if field("spki_sha256") != identity.spki_sha256 {
+            self.dispatch_inner(AppAction::PairingFailed);
+            return self.refuse(
+                request,
+                403,
+                "wrong_key",
+                "this is not the host whose code was scanned",
+                false,
+            );
+        }
+        if field("code").to_ascii_uppercase() != window.code {
+            self.dispatch_inner(AppAction::PairingFailed);
+            return self.refuse(request, 403, "wrong_code", "the code does not match", false);
+        }
+        let name = field("device_name");
+        let name = if name.is_empty() {
+            "Device"
+        } else {
+            name.as_str()
+        };
+        let token = remote::bearer_token();
+        let device = self
+            .core
+            .new_device(name, remote::token_sha256(&token), now.wall);
+        let reply = serde_json::json!({
+            "token": token,
+            "scope": device.scope,
+            "server_id": identity.server_id,
+            "device_id": device.id,
+        });
+        log::info!(
+            "remote: paired {:?} with {} scope",
+            device.name,
+            device.scope.word()
+        );
+        self.dispatch_inner(AppAction::Paired(device));
+        self.envelope(200, &reply, false)
+    }
+
+    /// One working set with its pins, found across every space.
+    fn remote_set(&self, request: &RemoteRequest, set: &str) -> RemoteReply {
+        let found = parse_uuid("set", set).ok().and_then(|id| {
+            self.core
+                .space_views()
+                .iter()
+                .filter_map(|space| uuid::Uuid::parse_str(&space.id).ok())
+                .flat_map(|space| self.core.set_views(SpaceId(space)))
+                .find(|view| view.id == id.to_string())
+        });
+        match found {
+            Some(set) => {
+                self.remote_reply(request, &wire::Reply::Sets { sets: vec![set] }, STRING_CAP)
+            }
+            None => self.refuse(request, 404, "not_found", "no such set", true),
+        }
+    }
+
+    /// A wire reply as the HTTP body: the tag dropped, every string
+    /// bounded with the cut ones named, the whole under the body cap.
+    fn remote_reply(
+        &self,
+        request: &RemoteRequest,
+        reply: &wire::Reply,
+        notes_cap: usize,
+    ) -> RemoteReply {
+        if let wire::Reply::Failed { reason } = reply {
+            let (status, code) = if reason.starts_with("no such") {
+                (404, "not_found")
+            } else {
+                (400, "failed")
+            };
+            return self.refuse(request, status, code, reason, true);
+        }
+        let mut value = serde_json::to_value(reply).unwrap_or_default();
+        if let serde_json::Value::Object(map) = &mut value {
+            map.remove("reply");
+        }
+        bound_strings(&mut value, notes_cap);
+        let out = self.envelope(200, &value, true);
+        if out.body.len() > BODY_CAP {
+            log::warn!(
+                "remote: {} {} is {} bytes, over the cap",
+                request.method,
+                request.path,
+                out.body.len()
+            );
+            return self.refuse(
+                request,
+                500,
+                "too_large",
+                "the reply is over the body cap",
+                true,
+            );
+        }
+        out
+    }
+
+    fn envelope(&self, status: u16, body: &serde_json::Value, authenticated: bool) -> RemoteReply {
+        let text = serde_json::json!({
+            "epoch": self.epoch,
+            "revision": self.revision,
+            "body": body,
+        });
+        RemoteReply {
+            status,
+            body: text.to_string().into_bytes(),
+            authenticated,
+        }
+    }
+
+    fn error_json(&self, code: &str, message: &str) -> Vec<u8> {
+        serde_json::json!({
+            "epoch": self.epoch,
+            "revision": self.revision,
+            "error": { "code": code, "message": message },
+        })
+        .to_string()
+        .into_bytes()
+    }
+
+    /// A refusal, logged by method, path and code only.
+    fn refuse(
+        &self,
+        request: &RemoteRequest,
+        status: u16,
+        code: &str,
+        message: &str,
+        authenticated: bool,
+    ) -> RemoteReply {
+        log::info!(
+            "remote: {} {} refused: {code}",
+            request.method,
+            request.path
+        );
+        RemoteReply {
+            status,
+            body: self.error_json(code, message),
+            authenticated,
         }
     }
 
@@ -1789,6 +2307,55 @@ impl DispatchWorker {
 
 /// How many lines above the asked-for ones `screen` reads and redacts.
 const SCREEN_SLACK_LINES: usize = 8;
+
+/// The remote port's protocol version, in `/info`.
+const REMOTE_PROTOCOL: u32 = 1;
+/// The remote port's caps: a reply's bytes, a string in a view, and a
+/// session's notes when the session is read alone.
+const BODY_CAP: usize = 1024 * 1024;
+const STRING_CAP: usize = 4 * 1024;
+const NOTES_CAP_ALONE: usize = 64 * 1024;
+
+/// Cut every string in `value` to its cap, `notes` to `notes_cap` and
+/// the rest to `STRING_CAP`, naming each cut field in a `truncated`
+/// list on its object, so no field leaves unbounded and a client can
+/// tell a short value from a cut one.
+fn bound_strings(value: &mut serde_json::Value, notes_cap: usize) {
+    match value {
+        serde_json::Value::Object(map) => {
+            let mut cut = Vec::new();
+            for (name, field) in map.iter_mut() {
+                match field {
+                    serde_json::Value::String(s) => {
+                        let cap = if name == "notes" {
+                            notes_cap
+                        } else {
+                            STRING_CAP
+                        };
+                        if s.len() > cap {
+                            let mut end = cap;
+                            while !s.is_char_boundary(end) {
+                                end -= 1;
+                            }
+                            s.truncate(end);
+                            cut.push(name.clone());
+                        }
+                    }
+                    other => bound_strings(other, notes_cap),
+                }
+            }
+            if !cut.is_empty() {
+                map.insert("truncated".into(), serde_json::json!(cut));
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                bound_strings(item, notes_cap);
+            }
+        }
+        _ => {}
+    }
+}
 
 /// `text` with every occurrence of each secret's value replaced by
 /// `<NAME>`. Longer values go first, so a value that holds another is

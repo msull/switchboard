@@ -247,7 +247,11 @@ never run anything on its own.
   record), so a session resolves only its own grants; the token is as
   private as the pane's environment. The same token gates
   `session.ask`, which marks only its holder's own record as asking the
-  owner something.
+  owner something. The one other way a secret's surroundings leave the
+  app is as redacted text on the remote port: a paired device reads a
+  pane's screen with every value Switchboard holds for the project
+  replaced by its name, and the port's key and tokens never reach a
+  record or a log.
   The writes (`env.set.upsert`, `env.secret.store`, `env.grant`) are
   accepted only inside a five-minute setup window the owner opens from
   the app's settings menu, so an agent cannot grant itself a set. What a
@@ -3133,6 +3137,35 @@ Built so far:
   the same-size rewrite, the rename and the regrown log that mtime,
   size and length miss. Not measured: the visionOS pinning delegate
   and the read-model diff.
+- **A1, identity and an authenticated read-only host.** `identity.json`
+  holds the server id, the display name, the self-signed certificate
+  (made with `rcgen` on first start) and its SPKI hash, and where the
+  port binds (loopback until the owner allows the local network, port
+  43187 or `SWITCHBOARD_REMOTE_PORT`); the private key is a Keychain
+  item under `remote-key:<server id>`. A certificate whose key is gone
+  is remade over a new key under the same id, `devices.json` is cleared
+  and the dialog says so; a Keychain error keeps the identity and the
+  port does not listen. `adapters/remote.rs` is the TLS listener in the
+  control socket's shape, with the pools, deadlines, body cap and rate
+  limits of the spec's §4.1, handing at most eight requests per pass
+  to the frame; `app.rs` authenticates the bearer, routes the
+  allowlist (`/info`, `/pair`, projects, spaces, sets, one set,
+  sessions, one session, waiting, screen) onto the control port's
+  `answer`, bounds every string in a reply (4 KiB, notes 64 KiB alone,
+  each cut named in `truncated`), caps the body at 1 MiB and wraps it
+  in `{epoch, revision, body}`; everything else is refused by name,
+  before translation. Pairing: the Remote devices dialog (settings
+  menu) opens a five-minute window with an eight-character Crockford
+  code shown as a QR carrying the server id, key hash, code and
+  address; `/pair` must carry the host's own key hash and the code,
+  three failures from any connection close the window, the first
+  success spends it, and the device gets a 43-character bearer token
+  whose SHA-256 is what `devices.json` keeps. The dialog lists devices
+  with scope (read or control, changed there and nowhere else), last
+  seen and Revoke. Not in A1: events, the content worker (the screen
+  is answered on the frame as the control port answers it, until the
+  screen cache of A4), Bonjour (A2), and `server_name` lives in
+  `identity.json` rather than `Settings`, which the spec now says.
 
 ## Open questions
 

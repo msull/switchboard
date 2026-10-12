@@ -617,7 +617,8 @@ fn step(app: &mut SwitchboardApp, w: &[&str]) -> Result<(), String> {
             app.ui_state.files.entry(id).or_default().selected = Some(root.join(rel));
         }
         [
-            "set-env" | "set-secret" | "dotenv" | "environment" | "config" | "env-setup",
+            "set-env" | "set-secret" | "dotenv" | "environment" | "config" | "env-setup"
+            | "pairing" | "remote-devices",
             ..,
         ] => {
             env_step(app, w)?;
@@ -724,6 +725,14 @@ fn env_step(app: &mut SwitchboardApp, w: &[&str]) -> Result<(), String> {
             app.dispatch(AppAction::SetEnvSetup {
                 open: *verb == "unlock",
             });
+        }
+        ["pairing", "close"] => app.dispatch(AppAction::ClosePairing),
+        ["pairing", code] => app.dispatch(AppAction::OpenPairing {
+            code: (*code).to_owned(),
+            scope: crate::ports::remote::Scope::Read,
+        }),
+        ["remote-devices"] => {
+            app.ui_state.remote_dialog = Some(crate::ui::remote::RemoteDraft::open(app.core()));
         }
         _ => return Err(format!("unknown environment line: {}", w.join(" "))),
     }

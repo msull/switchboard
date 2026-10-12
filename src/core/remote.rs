@@ -1,0 +1,176 @@
+//! The remote port's state: the host's identity, the devices paired
+//! with it, and the pairing window. Random material (the code, a
+//! token) is made outside and arrives in the action; here it is only
+//! compared and kept, so every transition is a plain function of its
+//! inputs.
+
+use std::time::SystemTime;
+
+use uuid::Uuid;
+
+use super::action::PairingWindow;
+use super::action::{AppAction, AppCore, Clock, Effect, Out, PAIRING_ATTEMPTS, PAIRING_WINDOW};
+use crate::ports::remote::{Identity, PairedDevice, Scope};
+
+/// A device's last-seen time is saved when it moved by at least this
+/// much, so a polling device does not rewrite `devices.json` on every
+/// request.
+const LAST_SEEN_SAVE_INTERVAL_SECS: u64 = 300;
+
+impl AppCore {
+    pub(super) fn remote_action(&mut self, action: AppAction, now: Clock, out: &mut Out) {
+        match action {
+            AppAction::IdentityLoaded {
+                identity,
+                devices,
+                rotated,
+            } => {
+                self.identity = Some(identity);
+                self.devices = devices;
+                self.identity_rotated_at = rotated.then_some(now.mono);
+            }
+            AppAction::SetServerName(name) => {
+                let name = name.trim().to_owned();
+                if !name.is_empty() {
+                    self.update_identity(out, |i| i.server_name = name);
+                }
+            }
+            AppAction::SetRemoteListen { lan, port } => {
+                if port != 0 {
+                    self.update_identity(out, |i| {
+                        i.listen.lan = lan;
+                        i.listen.port = port;
+                    });
+                }
+            }
+            AppAction::OpenPairing { code, scope } => {
+                // Typed by hand on the device, so case never matters.
+                self.pairing = Some(PairingWindow {
+                    until: now.mono + PAIRING_WINDOW,
+                    code: code.trim().to_ascii_uppercase(),
+                    scope,
+                    failures: 0,
+                });
+            }
+            AppAction::ClosePairing => self.pairing = None,
+            AppAction::PairingFailed => {
+                if let Some(p) = &mut self.pairing {
+                    p.failures += 1;
+                    if p.failures >= PAIRING_ATTEMPTS {
+                        self.pairing = None;
+                        self.error("Pairing closed: three attempts failed.");
+                    }
+                }
+            }
+            AppAction::Paired(device) => {
+                // The code is single-use: the window closes with the
+                // first pairing made through it.
+                self.pairing = None;
+                self.devices.push(device);
+                self.save_devices(out);
+            }
+            AppAction::DeviceSeen(id) => {
+                let Some(device) = self.devices.iter_mut().find(|d| d.id == id) else {
+                    return;
+                };
+                let stale = device.last_seen.is_none_or(|seen| {
+                    now.wall
+                        .duration_since(seen)
+                        .is_ok_and(|d| d.as_secs() >= LAST_SEEN_SAVE_INTERVAL_SECS)
+                });
+                device.last_seen = Some(now.wall);
+                if stale {
+                    self.save_devices(out);
+                }
+            }
+            AppAction::RevokeDevice(id) => {
+                let before = self.devices.len();
+                self.devices.retain(|d| d.id != id);
+                if self.devices.len() != before {
+                    self.save_devices(out);
+                }
+            }
+            AppAction::SetDeviceScope { device, scope } => {
+                if let Some(d) = self.devices.iter_mut().find(|d| d.id == device)
+                    && d.scope != scope
+                {
+                    d.scope = scope;
+                    self.save_devices(out);
+                }
+            }
+            _ => unreachable!("dispatched by `dispatch` itself"),
+        }
+    }
+
+    fn update_identity(&mut self, out: &mut Out, change: impl FnOnce(&mut Identity)) {
+        let Some(identity) = &self.identity else {
+            return;
+        };
+        let mut next = identity.clone();
+        change(&mut next);
+        if Some(&next) != self.identity.as_ref() {
+            self.identity = Some(next.clone());
+            if !self.read_only {
+                out.push(Effect::SaveIdentity(next));
+            }
+        }
+    }
+
+    fn save_devices(&self, out: &mut Out) {
+        if !self.read_only {
+            out.push(Effect::SaveDevices(self.devices.clone()));
+        }
+    }
+
+    /// The host's identity, once loaded.
+    #[must_use]
+    pub fn identity(&self) -> Option<&Identity> {
+        self.identity.as_ref()
+    }
+
+    /// The key was remade at this launch: every earlier pairing is gone.
+    #[must_use]
+    pub fn identity_rotated(&self) -> bool {
+        self.identity_rotated_at.is_some()
+    }
+
+    /// The devices paired with this host.
+    #[must_use]
+    pub fn devices(&self) -> &[PairedDevice] {
+        &self.devices
+    }
+
+    /// The device holding the token with this hash.
+    #[must_use]
+    pub fn device_by_token(&self, token_sha256: &str) -> Option<&PairedDevice> {
+        self.devices.iter().find(|d| d.token_sha256 == token_sha256)
+    }
+
+    /// The pairing window, while it is open at `now`. `Tick` clears a
+    /// passed one; between ticks this checks the time itself.
+    #[must_use]
+    pub fn pairing_at(&self, now: Clock) -> Option<&PairingWindow> {
+        self.pairing.as_ref().filter(|p| p.until > now.mono)
+    }
+
+    /// The pairing window as last set, passed or not; the dialog uses
+    /// `pairing_at` and this is for tests.
+    #[must_use]
+    pub fn pairing(&self) -> Option<&PairingWindow> {
+        self.pairing.as_ref()
+    }
+
+    /// A device record for a pairing that matched: the window's scope,
+    /// the token's hash, and the time.
+    #[must_use]
+    pub fn new_device(&self, name: &str, token_sha256: String, at: SystemTime) -> PairedDevice {
+        PairedDevice {
+            id: Uuid::new_v4(),
+            name: name.trim().chars().take(64).collect(),
+            scope: self.pairing.as_ref().map_or(Scope::Read, |p| p.scope),
+            token_sha256,
+            created: at,
+            last_seen: None,
+        }
+    }
+}

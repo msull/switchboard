@@ -36,6 +36,7 @@ use crate::ports::controller::{ControllerEvent, Direction};
 use crate::ports::events::SessionEvent;
 use crate::ports::host::{HostId, HostStatus, Liveness, SpawnSpec};
 use crate::ports::project_config::ProjectConfig;
+use crate::ports::remote::{Identity, PairedDevice, Scope};
 use crate::ports::round_files::Probed;
 use crate::ports::store::{Loaded, StoreError};
 
@@ -269,6 +270,40 @@ pub enum AppAction {
     RecordTokenIssued {
         id: RecordId,
         hash: String,
+    },
+    // --- the remote port
+    /// The host's identity and paired devices, loaded at start.
+    /// `rotated` says the key had to be remade, so every pairing made
+    /// before is gone and the owner is told.
+    IdentityLoaded {
+        identity: Identity,
+        devices: Vec<PairedDevice>,
+        rotated: bool,
+    },
+    SetServerName(String),
+    /// Where the remote port binds; a change rebinds it.
+    SetRemoteListen {
+        lan: bool,
+        port: u16,
+    },
+    /// Open the pairing window with the code the QR carries. It lasts
+    /// `PAIRING_WINDOW`, is never saved, and grants `scope`.
+    OpenPairing {
+        code: String,
+        scope: Scope,
+    },
+    ClosePairing,
+    /// A `/pair` whose code or key did not match; `PAIRING_ATTEMPTS`
+    /// of them, from any connection, close the window.
+    PairingFailed,
+    /// A `/pair` that matched: the device is kept and the code is spent.
+    Paired(PairedDevice),
+    /// An authenticated request from the device, for its last-seen time.
+    DeviceSeen(uuid::Uuid),
+    RevokeDevice(uuid::Uuid),
+    SetDeviceScope {
+        device: uuid::Uuid,
+        scope: Scope,
     },
     // --- sessions
     NewSession {
@@ -675,6 +710,9 @@ pub enum Effect {
     Delete(ProjectId),
     SaveSettings(Settings),
     SaveViews(Views),
+    /// `identity.json` and `devices.json`, the remote port's files.
+    SaveIdentity(Identity),
+    SaveDevices(Vec<PairedDevice>),
     /// Compose a fresh launch for an agent record (worker; reports `LaunchPrepared`).
     PrepareLaunch {
         id: RecordId,
@@ -898,6 +936,22 @@ pub const ENV_SETUP_WINDOW: Duration = Duration::from_mins(5);
 pub const TYPED_HOLD: Duration = Duration::from_mins(1);
 /// Why `switchboard-env`'s setup commands are refused outside the window.
 pub const ENV_SETUP_LOCKED: &str = "environment setup is locked: choose Unlock environment setup in Switchboard's settings menu, then run this again within five minutes";
+
+/// How long the pairing window stays open, and how many wrong codes
+/// close it early. Three tries at a 40-bit code is no odds at all, and
+/// the owner sees the window close.
+pub const PAIRING_WINDOW: Duration = Duration::from_mins(5);
+pub const PAIRING_ATTEMPTS: u32 = 3;
+
+/// The pairing window while it is open: the code the QR carries, what
+/// a pairing made through it grants, and how many attempts failed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PairingWindow {
+    pub until: Duration,
+    pub code: String,
+    pub scope: Scope,
+    pub failures: u32,
+}
 /// How far back a rule set may look, in hours: an hour to a month.
 pub const RULE_HOURS: std::ops::RangeInclusive<u32> = 1..=720;
 /// The width, in grid units, a rule set is laid out at where no view
@@ -1038,6 +1092,16 @@ pub struct AppCore {
     /// Until when, on the clock's `mono`, `switchboard-env`'s setup
     /// commands are accepted. Transient: a restart closes it.
     pub(super) env_setup_until: Option<Duration>,
+    /// Who this installation is to a remote device; `None` until the
+    /// app has loaded or made it.
+    pub(super) identity: Option<Identity>,
+    /// When, on the clock's `mono`, the key was remade at this launch,
+    /// so the pairings made before are gone. `None` when it was kept.
+    pub(super) identity_rotated_at: Option<Duration>,
+    /// The devices paired with this host, as `devices.json` holds them.
+    pub(super) devices: Vec<PairedDevice>,
+    /// The pairing window while it is open. Transient.
+    pub(super) pairing: Option<PairingWindow>,
     /// The line the document view should scroll to: the file, the line,
     /// and the request it came from, so a repeat click scrolls again.
     /// Cleared by every other show, the same file's too, and by Back.
@@ -1144,6 +1208,16 @@ impl AppCore {
             AppAction::SetEnvSetup { open } => {
                 self.env_setup_until = open.then_some(now.mono + ENV_SETUP_WINDOW);
             }
+            AppAction::IdentityLoaded { .. }
+            | AppAction::SetServerName(_)
+            | AppAction::SetRemoteListen { .. }
+            | AppAction::OpenPairing { .. }
+            | AppAction::ClosePairing
+            | AppAction::PairingFailed
+            | AppAction::Paired(_)
+            | AppAction::DeviceSeen(_)
+            | AppAction::RevokeDevice(_)
+            | AppAction::SetDeviceScope { .. } => self.remote_action(action, now, &mut out),
             AppAction::RecordTokenIssued { id, hash } => {
                 self.edit_session(id, &mut out, |s| s.token_hash = Some(hash));
             }
@@ -1889,6 +1963,9 @@ impl AppCore {
         self.expire_notices(now);
         if self.env_setup_until.is_some_and(|t| t <= now.mono) {
             self.env_setup_until = None;
+        }
+        if self.pairing.as_ref().is_some_and(|p| p.until <= now.mono) {
+            self.pairing = None;
         }
         self.controller_tick(now, out);
         let expired: Vec<(RecordId, ProjectId)> = self

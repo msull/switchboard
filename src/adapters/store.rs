@@ -233,7 +233,12 @@ impl JsonStore {
     /// crash mid-write can only leave a stray `.tmp`, which loads ignore
     /// and the next save overwrites. With `backup`, the file it replaces
     /// becomes `.bak` first. The directory is synced last.
-    fn write_atomic(dir: &Path, path: &Path, bytes: &[u8], backup: bool) -> Result<(), StoreError> {
+    pub(crate) fn write_atomic(
+        dir: &Path,
+        path: &Path,
+        bytes: &[u8],
+        backup: bool,
+    ) -> Result<(), StoreError> {
         ensure_dir(dir)?;
         let tmp = Self::temp_path(path);
         let mut file = open_private(&tmp, true)?;
