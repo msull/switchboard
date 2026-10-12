@@ -305,6 +305,7 @@ src/adapters/
   ghostty.rs             open, reveal, Ghostty window launch and raise
   fakes.rs               test doubles for every port
 src/app.rs               SwitchboardApp: owns core + adapters; runs effects; polls host and events; answers control-port queries (`session.screen` with the project's secret values redacted)
+src/content.rs           the app's content caches: parsed transcripts with the handle and file time each was read at (`ConversationCache`), read by the views through `DrawCtx`
 src/script.rs            SWITCHBOARD_SCRIPT dev aid
 src/ui/
   mod.rs                 UiState, draw loop (collect actions, then dispatch), keyboard, side panel tabs

@@ -13,6 +13,7 @@ use switchboard_control as wire;
 use crate::adapters::control::{ControlSocket, Incoming};
 use crate::adapters::hooks::WakeSocket;
 use crate::adapters::scrollback::scrollback_dir;
+use crate::content::ConversationCache;
 use crate::core::{
     Activity, AgentKind, AppAction, AppCore, Clock, Composer, ControlAction, ControlOutcome,
     DISPATCH_POLL, Effect, ProjectId, RECORD_TOKEN_ENV, RecordId, Resolved, ResumeHandle,
@@ -136,6 +137,9 @@ pub struct SwitchboardApp {
     /// re-reads only a changed file.
     config_seen: HashMap<ProjectId, Option<SystemTime>>,
     last_config: Option<Instant>,
+    /// Parsed transcripts with the version each was read at, for the
+    /// views and a remote port alike.
+    pub conversations: ConversationCache,
     /// Transient state owned by the UI (dialog drafts, embedded terminals).
     /// Nothing in here is persisted or read by the core.
     pub ui_state: UiState,
@@ -207,6 +211,7 @@ impl SwitchboardApp {
             discoveries: Vec::new(),
             config_seen: HashMap::new(),
             last_config: None,
+            conversations: ConversationCache::default(),
             ui_state: UiState::default(),
             record_actions: false,
             dispatched: Vec::new(),
@@ -319,17 +324,17 @@ impl SwitchboardApp {
     /// what the UI asked for.
     fn dispatch_inner(&mut self, action: AppAction) {
         let now = self.clock();
-        // The conversation cache is keyed on the file's modification
-        // time; a swap of the handle behind it needs a fresh read.
+        // A discard puts a cut copy behind a new handle; the cache is
+        // dropped at once so the view never shows the old file first.
         if let AppAction::TranscriptDiscarded { id, .. } | AppAction::UndoDiscard(id) = &action {
-            self.ui_state.conversations.remove(id);
+            self.conversations.remove(*id);
             file_refs::keep_only(&mut self.ui_state.file_links, *id, None);
         }
         let handles_before = self.resume_handles(&action);
         let effects = self.core.dispatch(action, now);
         for (id, before) in handles_before {
             if self.core.session(id).map(|s| s.resume.clone()) != Some(before) {
-                self.ui_state.conversations.remove(&id);
+                self.conversations.remove(id);
                 file_refs::keep_only(&mut self.ui_state.file_links, id, None);
             }
         }
@@ -774,22 +779,18 @@ impl SwitchboardApp {
             return;
         };
         let modified = self.services.transcripts.modified(&handle);
-        let cached = self.ui_state.conversations.get(&id).map(|(m, _)| *m);
-        if cached == Some(modified) {
+        if self.conversations.is_current(id, &handle, modified) {
             return;
         }
         match self.services.transcripts.read(&handle) {
             Ok(conversation) => {
-                self.ui_state.conversation_errors.remove(&id);
                 file_refs::keep_only(&mut self.ui_state.file_links, id, Some(&conversation));
-                self.ui_state
-                    .conversations
-                    .insert(id, (modified, conversation));
+                self.conversations
+                    .insert(id, handle, modified, conversation);
             }
             Err(e) => {
-                self.ui_state.conversations.remove(&id);
                 file_refs::keep_only(&mut self.ui_state.file_links, id, None);
-                self.ui_state.conversation_errors.insert(id, e);
+                self.conversations.fail(id, e);
             }
         }
     }

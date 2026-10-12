@@ -437,10 +437,9 @@ fn turn_of(
     let id = session(app, name)?;
     let before: usize = turn.parse().map_err(|_| "bad turn number")?;
     let prompt = app
-        .ui_state
         .conversations
-        .get(&id)
-        .and_then(|(_, c)| c.turns.iter().find(|t| t.n == before))
+        .get(id)
+        .and_then(|c| c.turns.iter().find(|t| t.n == before))
         .map(|t| t.user.clone())
         .unwrap_or_default();
     Ok((id, before, prompt))

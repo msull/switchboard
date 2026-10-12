@@ -400,7 +400,7 @@ fn set_card_text(cx: &DrawCtx<'_>, record: &SessionRecord) -> SetCardText {
         .workspace(record.project)
         .map(|w| w.project.name.clone())
         .unwrap_or_default();
-    let conversation = cx.state.conversations.get(&record.id).map(|(_, c)| c);
+    let conversation = cx.conversations.get(record.id);
     let last = conversation.and_then(|c| c.turns.last());
     let prompt = last.map(|t| t.user.clone()).filter(|u| !u.is_empty());
     let rendered = agent && last.is_some_and(|t| !t.final_text.is_empty());

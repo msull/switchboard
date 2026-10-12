@@ -3100,6 +3100,26 @@ built-in. Dispatch's install and start are two requests, so a second
 definition; the start then fails with "no workflow definition called …"
 and Dispatch fails the attempt, which a retry recovers.
 
+## Remote client (2026-10-12)
+
+A native visionOS and iPadOS client that browses the sessions and
+working sets of several running Switchboard installations and sends
+prompts to them is specified in `docs/remote-client.md`: a port over
+the control port's wire contract, pairing with a pinned host key, one
+revision counter and `changed` events, and content work off the frame
+thread. The plan is Spike 15 and then Milestone A as five commits.
+
+Built so far:
+
+- **A0, the conversation cache in the app.** Parsed transcripts moved
+  from `UiState` to `SwitchboardApp::conversations`
+  (`content::ConversationCache`): each entry keeps the handle and file
+  time it was read through, `is_current` answers the refresh without a
+  read, and the views reach the cache through `DrawCtx::conversations`.
+  A seeded conversation (tests, the script) has no handle and no file
+  time and is never read over. Behaviour is unchanged; the UI tests
+  seed the new place.
+
 ## Open questions
 
 - Shared project config runs with a hash-and-approve flow and no

@@ -43,11 +43,11 @@ use std::time::SystemTime;
 use egui::{Key, Modifiers, RichText, Ui};
 
 use crate::app::{Services, SwitchboardApp};
+use crate::content::ConversationCache;
 use crate::core::{
     AppAction, AppCore, Composer, PinTarget, ProjectId, RecordId, SessionKind, SetId, SideTab,
     ThemeMode, UiRequest, View, WindowFrame, WorkflowId,
 };
-use crate::ports::transcript::Conversation;
 
 pub use dialogs::{AddProjectDraft, NewSessionDraft};
 pub use session::EmbeddedTerminal;
@@ -75,14 +75,9 @@ pub struct UiState {
     /// Screen snapshots per session, filled by the app; shown read-only
     /// for agent sessions and for sessions that are not running.
     pub snapshots: HashMap<RecordId, String>,
-    /// Parsed transcripts per agent session with the file time they were
-    /// read at, filled by the app; the session view draws them.
-    pub conversations: HashMap<RecordId, (Option<SystemTime>, Conversation)>,
     /// Agent messages with the file paths they name made links, by
     /// record and message text; pruned when the conversation is re-read.
     pub file_links: crate::core::file_refs::Cache,
-    /// Why a session has no conversation (unsupported agent, no file).
-    pub conversation_errors: HashMap<RecordId, String>,
     /// Open every turn's activity list instead of just the summary line.
     pub expand_activity: bool,
     /// The last `expand_activity` value pushed into the collapsing
@@ -303,8 +298,6 @@ impl Default for UiState {
             embed_terminals: true,
             captions: HashMap::new(),
             snapshots: HashMap::new(),
-            conversations: HashMap::new(),
-            conversation_errors: HashMap::new(),
             expand_activity: false,
             expand_applied: None,
             terminal_open: false,
@@ -395,6 +388,8 @@ impl Default for UiState {
 pub struct DrawCtx<'a> {
     pub core: &'a AppCore,
     pub services: &'a Services,
+    /// The parsed transcripts the app holds.
+    pub conversations: &'a ConversationCache,
     pub state: &'a mut UiState,
     actions: Vec<AppAction>,
 }
@@ -412,6 +407,7 @@ pub fn draw(app: &mut SwitchboardApp, ui: &mut Ui) {
         let mut cx = DrawCtx {
             core: app.core(),
             services: app.services(),
+            conversations: &app.conversations,
             state: &mut state,
             actions: Vec::new(),
         };

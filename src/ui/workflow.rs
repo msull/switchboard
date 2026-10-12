@@ -38,10 +38,9 @@ impl ReviewDraft {
             .map(|s| s.cwd.clone())
             .unwrap_or_default();
         let candidates = cx
-            .state
             .conversations
-            .get(&source)
-            .map(|(_, c)| {
+            .get(source)
+            .map(|c| {
                 written_markdown(c, &cwd)
                     .into_iter()
                     .take(CANDIDATES_SHOWN)
