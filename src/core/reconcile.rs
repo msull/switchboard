@@ -41,6 +41,10 @@ impl AppCore {
                     }
                     self.error(notice.to_string());
                 }
+                // After the notices, so a locked load prunes memory only
+                // and never writes a file another instance owns.
+                let live = self.live_definitions();
+                self.update_settings(out, |s| super::workflow::prune_dispatch(s, &live, None));
             }
             Err(StoreError::Locked) => {
                 self.read_only = true;

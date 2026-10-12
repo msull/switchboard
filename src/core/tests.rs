@@ -5574,6 +5574,84 @@ mod workflow {
         )));
     }
 
+    /// A settled, finalized run whose planner is running, renamed to a
+    /// definition that is not in the settings.
+    fn finished_naming(definition: &str) -> (AppCore, WorkflowId, RecordId) {
+        let (mut core, run, _, _, planner) = started();
+        settle(&mut core, run, "No further feedback.", 400);
+        core.dispatch(
+            AppAction::HostListed(vec![running(planner)]),
+            Clock::at(410),
+        );
+        core.dispatch(AppAction::FinalizeWorkflow(run), Clock::at(420));
+        assert_eq!(run_of(&core).state, RunState::Finalized);
+        core.workspaces[0].workflows[0].definition = definition.into();
+        (core, run, planner)
+    }
+
+    #[test]
+    fn a_finished_dispatch_run_whose_definition_is_gone_refuses_a_note() {
+        let (mut core, run, _) = finished_naming("Dispatch: reviewer@gone");
+        let effects = core.dispatch(
+            AppAction::UserFeedback {
+                run,
+                text: "Split step 3.".into(),
+            },
+            Clock::at(430),
+        );
+        let r = run_of(&core);
+        assert_eq!(r.state, RunState::Finalized);
+        assert_eq!(r.rounds.len(), 1);
+        assert!(sent(&effects).is_empty(), "no planner prompt");
+        let n = core.notices.last().unwrap();
+        assert!(n.is_error);
+        assert!(n.text.contains("Dispatch: reviewer@gone"), "{}", n.text);
+    }
+
+    #[test]
+    fn a_finished_dispatch_run_whose_definition_is_gone_refuses_a_handoff() {
+        let (mut core, run, _) = finished_naming("Dispatch: reviewer@gone");
+        core.workspaces[0].workflows[0].state = RunState::HandedOff;
+        core.dispatch(
+            AppAction::HandOffWorkflow {
+                run,
+                mode: HandoffMode::AsIs,
+            },
+            Clock::at(430),
+        );
+        assert_eq!(run_of(&core).state, RunState::HandedOff);
+        assert!(core.take_primed().is_empty());
+        let n = core.notices.last().unwrap();
+        assert!(n.text.contains("Dispatch: reviewer@gone"), "{}", n.text);
+    }
+
+    #[test]
+    fn a_finished_owner_run_whose_definition_is_gone_falls_back_to_the_builtin() {
+        let (mut core, run, planner) = finished_naming("Deleted by the owner");
+        let effects = core.dispatch(
+            AppAction::UserFeedback {
+                run,
+                text: "Split step 3.".into(),
+            },
+            Clock::at(430),
+        );
+        assert_eq!(run_of(&core).state, RunState::AwaitingResponse);
+        let sent = sent(&effects);
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0].0, HostId(planner.host_name()));
+        assert!(sent[0].1.contains("plan.response-2.md"), "{}", sent[0].1);
+    }
+
+    #[test]
+    fn a_pause_leaves_a_finished_run_finished_so_it_cannot_be_continued() {
+        let (mut core, run, _) = finished_naming("Dispatch: reviewer@gone");
+        core.dispatch(AppAction::PauseWorkflow(run), Clock::at(430));
+        assert_eq!(run_of(&core).state, RunState::Finalized);
+        let effects = core.dispatch(AppAction::ContinueWorkflow(run), Clock::at(440));
+        assert_eq!(run_of(&core).state, RunState::Finalized);
+        assert!(sent(&effects).is_empty(), "no prompt from the built-in");
+    }
+
     #[test]
     fn an_objection_opens_a_round_for_the_planner_and_the_reviewer_re_reads() {
         let (mut core, run, _, reviewer, planner) = started();
@@ -6976,7 +7054,9 @@ fn view_columns_saves_nothing() {
 
 mod control {
     use super::*;
-    use crate::core::{ControlAction, PinnedItem, RunState, SetId, WorkflowDefinition, WorkingSet};
+    use crate::core::{
+        ControlAction, PinnedItem, RunState, SetId, WorkflowDefinition, WorkflowId, WorkingSet,
+    };
     use switchboard_control::RecordKind;
 
     fn control(core: &mut AppCore, op: &str, action: ControlAction, at: u64) -> Vec<Effect> {
@@ -7587,6 +7667,159 @@ mod control {
         );
         assert_ne!(core.card_state(id), CardState::WaitingOnYou);
         assert!(core.waiting_views(now).is_empty());
+    }
+
+    fn named(name: &str) -> WorkflowDefinition {
+        WorkflowDefinition {
+            name: name.into(),
+            ..WorkflowDefinition::default()
+        }
+    }
+
+    /// A bare run in the first workspace that names `definition`.
+    fn seed_run(core: &mut AppCore, definition: &str, state: RunState) {
+        let t = Clock::at(0).wall;
+        let project = core.workspaces[0].project.id;
+        core.workspaces[0].workflows.push(crate::core::WorkflowRun {
+            id: WorkflowId::new(),
+            project,
+            definition: definition.into(),
+            source: RecordId::new(),
+            plan: "/p/plan.md".into(),
+            planner: None,
+            reviewer: RecordId::new(),
+            rounds: Vec::new(),
+            state,
+            cap: 4,
+            cleaned: false,
+            created: t,
+            updated: t,
+            op: None,
+        });
+    }
+
+    fn definition_names(core: &AppCore) -> Vec<&str> {
+        core.settings()
+            .workflows
+            .iter()
+            .map(|d| d.name.as_str())
+            .collect()
+    }
+
+    fn settings_saves(effects: &[Effect]) -> usize {
+        effects
+            .iter()
+            .filter(|e| matches!(e, Effect::SaveSettings(_)))
+            .count()
+    }
+
+    #[test]
+    fn a_dispatch_install_prunes_definitions_no_unfinished_run_names() {
+        let (mut core, _) = resumable_agent();
+        seed_run(
+            &mut core,
+            "Dispatch: reviewer@old",
+            RunState::AwaitingFeedback,
+        );
+        seed_run(&mut core, "Dispatch: reviewer@done", RunState::Finalized);
+        core.settings.workflows = vec![
+            named("Mine"),
+            named("Dispatch: reviewer@old"),
+            named("Dispatch: reviewer@done"),
+            named("Dispatch: reviewer@x"),
+        ];
+        let effects = control(
+            &mut core,
+            "def",
+            ControlAction::InstallDefinition(named("Dispatch: reviewer@new")),
+            1,
+        );
+        assert_eq!(core.take_control_outcome("def").unwrap().error, None);
+        assert_eq!(
+            definition_names(&core),
+            ["Mine", "Dispatch: reviewer@old", "Dispatch: reviewer@new"]
+        );
+        assert_eq!(settings_saves(&effects), 1, "one closure, one save");
+    }
+
+    #[test]
+    fn a_failed_run_keeps_its_definition_through_an_install() {
+        let (mut core, _) = resumable_agent();
+        seed_run(
+            &mut core,
+            "Dispatch: reviewer@old",
+            RunState::Failed("the reviewer stopped".into()),
+        );
+        core.settings.workflows = vec![named("Dispatch: reviewer@old")];
+        control(
+            &mut core,
+            "def",
+            ControlAction::InstallDefinition(named("Dispatch: reviewer@new")),
+            1,
+        );
+        assert_eq!(
+            definition_names(&core),
+            ["Dispatch: reviewer@old", "Dispatch: reviewer@new"]
+        );
+    }
+
+    #[test]
+    fn an_owner_install_prunes_nothing() {
+        let (mut core, _) = resumable_agent();
+        core.settings.workflows =
+            vec![named("Dispatch: reviewer@a"), named("Dispatch: reviewer@b")];
+        control(
+            &mut core,
+            "def",
+            ControlAction::InstallDefinition(named("Mine")),
+            1,
+        );
+        assert_eq!(
+            definition_names(&core),
+            ["Dispatch: reviewer@a", "Dispatch: reviewer@b", "Mine"]
+        );
+    }
+
+    fn stale_settings() -> Settings {
+        Settings {
+            workflows: vec![
+                named("Dispatch: reviewer@a"),
+                named("Mine"),
+                named("Dispatch: reviewer@b"),
+                named("Dispatch: reviewer@c"),
+            ],
+            ..Settings::default()
+        }
+    }
+
+    #[test]
+    fn a_load_prunes_stale_dispatch_definitions_and_saves() {
+        let mut core = AppCore::new();
+        let effects = core.dispatch(
+            AppAction::StoreLoaded(Ok(Loaded {
+                settings: stale_settings(),
+                ..Loaded::default()
+            })),
+            Clock::at(0),
+        );
+        assert_eq!(definition_names(&core), ["Mine"]);
+        assert_eq!(settings_saves(&effects), 1);
+    }
+
+    #[test]
+    fn a_locked_load_prunes_memory_but_writes_nothing() {
+        let mut core = AppCore::new();
+        let effects = core.dispatch(
+            AppAction::StoreLoaded(Ok(Loaded {
+                settings: stale_settings(),
+                notices: vec![StoreError::Locked],
+                ..Loaded::default()
+            })),
+            Clock::at(0),
+        );
+        assert!(core.read_only());
+        assert_eq!(definition_names(&core), ["Mine"]);
+        assert_eq!(settings_saves(&effects), 0);
     }
 
     #[test]

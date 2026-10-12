@@ -3069,6 +3069,37 @@ Known gaps: several pending decisions can still push the ticket page's
 tabs down on a short window. Decisions already pending keep their long
 question until answered, and `report` and `show` print it whole.
 
+## Dispatch definitions pruned (2026-10-11)
+
+Dispatch installs one reviewer definition per operator and content
+hash, named with `DISPATCH_WORKFLOW_PREFIX` (`"Dispatch: "`), and never
+deletes any. Switchboard prunes them: a Dispatch install, and every
+store load, drops each `Dispatch: ` definition that no unfinished run
+in any workspace names, keeping the one just installed. Unfinished is
+every state but `Finalized` and `HandedOff`: a `Failed` or `Paused` run
+can be continued, `Converged` and `AtCap` take more rounds, and each
+reads its prompts from its definition, where a missing one would fall
+back to the built-in's, which do not name the ticket's worktree. The
+prefix is reserved, so an owner's definition named this way is pruned
+too; an owner install prunes nothing. The prune at load runs after the
+store's notices, so a locked load prunes memory only and writes no
+settings. The pruned list reaches disk through the usual
+`SaveSettings`; there is no record change.
+
+The Review plan dialog never lists `Dispatch: ` definitions, since
+Dispatch starts its own reviews. Past six definitions it draws a
+"Definition" menu instead of radios, so its height no longer depends on
+how many there are.
+
+Known gaps: a finished Dispatch run whose definition was pruned
+refuses an owner's note and a handoff with an error, rather than run
+them on the built-in prompts; the owner starts a fresh review instead.
+An owner-named run whose definition was deleted still falls back to the
+built-in. Dispatch's install and start are two requests, so a second
+`dispatch` process installing between them can prune the first
+definition; the start then fails with "no workflow definition called …"
+and Dispatch fails the attempt, which a retry recovers.
+
 ## Open questions
 
 - Shared project config runs with a hash-and-approve flow and no

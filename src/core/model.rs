@@ -223,6 +223,14 @@ pub const DEFAULT_ROUND_CAP: u32 = 4;
 /// Name of the definition that ships with the app.
 pub const BUILTIN_WORKFLOW: &str = "Plan review";
 
+/// Prefix of the reviewer definitions Dispatch installs
+/// (`definition_of` in `dispatch/src/scheduler.rs` formats its names
+/// with it).
+/// Switchboard prunes such a definition once no unfinished run names
+/// it, so the prefix is reserved: an owner's definition named this way
+/// is pruned too.
+pub const DISPATCH_WORKFLOW_PREFIX: &str = "Dispatch: ";
+
 /// The first line a reviewer writes when it has nothing further to say.
 /// A string compare, never a reading of prose.
 pub const NO_FEEDBACK_LINE: &str = "No further feedback.";

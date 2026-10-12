@@ -24,7 +24,7 @@ use switchboard::core::{
     CardState, Composer, ControlAction, Definition, HandoffMode, Launch, Notice, PinTarget,
     Project, ProjectEnv, ProjectId, RecordId, ResumeHandle, Round, RunState, SessionKind,
     SessionRecord, SideTab, SpaceId, StopPending, ThemeMode, Verdict, View, VoiceSettings, Wakeup,
-    WorkflowId, WorkflowRun, Workspace, round_paths,
+    WorkflowDefinition, WorkflowId, WorkflowRun, Workspace, round_paths,
 };
 use switchboard::ports::changes::{Changes, Commit, FileStat};
 use switchboard::ports::events::{EventKind, SessionEvent};
@@ -4619,6 +4619,71 @@ fn the_review_plan_dialog_keeps_its_buttons_on_screen_in_a_long_session() {
         plan: PathBuf::from("/nowhere/docs/plan-29.md"),
         definition: BUILTIN_WORKFLOW.into(),
     }));
+}
+
+/// The Review plan dialog on a session with `definitions` installed,
+/// in a 1200×900 window.
+fn review_dialog_with(definitions: &[String]) -> Harness<'static, SwitchboardApp> {
+    let (mut harness, ids) = harness();
+    let id = seed_claude(&mut harness, &ids);
+    seed_written_plans(&mut harness, id, 30);
+    let defs = definitions
+        .iter()
+        .map(|name| WorkflowDefinition {
+            name: name.clone(),
+            ..WorkflowDefinition::default()
+        })
+        .collect();
+    harness.state_mut().core_mut_for_seeding().dispatch(
+        AppAction::SetWorkflowDefinitions(defs),
+        switchboard::core::Clock::at(0),
+    );
+    harness.set_size(egui::vec2(1200.0, 900.0));
+    showing(&mut harness, View::Session(id));
+    click(&mut harness, "Review plan");
+    harness
+}
+
+#[test]
+fn the_review_plan_dialog_hides_dispatch_definitions_and_keeps_its_height() {
+    let plain = review_dialog_with(&[]);
+    let unseeded = plain.get_by_label("Start review").rect();
+    drop(plain);
+    let many: Vec<String> = (0..100)
+        .map(|i| format!("Dispatch: reviewer@{i}"))
+        .collect();
+    let harness = review_dialog_with(&many);
+    for label in ["Start review", "Cancel"] {
+        let bottom = harness.get_by_label(label).rect().bottom();
+        assert!(
+            bottom <= 900.0,
+            "{label} ends at {bottom}, below the window"
+        );
+    }
+    assert_eq!(harness.get_by_label("Start review").rect(), unseeded);
+    assert!(harness.query_by_label("Dispatch: reviewer@0").is_none());
+}
+
+#[test]
+fn the_review_plan_dialog_offers_many_owner_definitions_as_a_menu() {
+    let seven: Vec<String> = (0..7).map(|i| format!("Mine {i}")).collect();
+    let harness = review_dialog_with(&seven);
+    harness.get_by_role_and_label(Role::ComboBox, "Definition");
+    assert!(
+        harness
+            .query_by_role_and_label(Role::RadioButton, "Mine 0")
+            .is_none()
+    );
+    drop(harness);
+    let two: Vec<String> = (0..2).map(|i| format!("Mine {i}")).collect();
+    let harness = review_dialog_with(&two);
+    assert!(
+        harness
+            .query_by_role_and_label(Role::ComboBox, "Definition")
+            .is_none()
+    );
+    harness.get_by_role_and_label(Role::RadioButton, "Mine 0");
+    harness.get_by_role_and_label(Role::RadioButton, BUILTIN_WORKFLOW);
 }
 
 #[test]

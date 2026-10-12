@@ -2,13 +2,15 @@
 //! A run launches its reviewer, clones its planner, and then only ever
 //! waits for a file, prompts an agent, or stops. Nothing here retries.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use crate::core::action::{AppAction, AppCore, Clock, Effect, Out, View};
 use crate::core::model::{
-    Activity, AgentKind, CardLayout, HandoffMode, Launch, RecordId, ResumeHandle, Round, RunState,
-    SessionKind, SessionRecord, Verdict, WorkflowDefinition, WorkflowId, WorkflowRun,
+    Activity, AgentKind, CardLayout, DISPATCH_WORKFLOW_PREFIX, HandoffMode, Launch, RecordId,
+    ResumeHandle, Round, RunState, SessionKind, SessionRecord, Settings, Verdict,
+    WorkflowDefinition, WorkflowId, WorkflowRun,
 };
 use crate::core::sessions::next_order;
 use crate::ports::host::Liveness;
@@ -43,6 +45,17 @@ pub fn snapshot_dir(data_dir: &Path, run: WorkflowId, n: u32) -> PathBuf {
         .join("workflows")
         .join(run.0.to_string())
         .join(format!("round-{n}"))
+}
+
+/// Drops every `Dispatch: ` definition no unfinished run names, except
+/// `keep`. Dispatch installs one per reviewer version and never deletes
+/// any, so without this the list only grows.
+pub(super) fn prune_dispatch(settings: &mut Settings, live: &HashSet<String>, keep: Option<&str>) {
+    settings.workflows.retain(|d| {
+        !d.name.starts_with(DISPATCH_WORKFLOW_PREFIX)
+            || live.contains(&d.name)
+            || keep == Some(d.name.as_str())
+    });
 }
 
 fn round_count(run: &WorkflowRun) -> u32 {
@@ -215,6 +228,33 @@ impl AppCore {
     #[must_use]
     pub fn definition_of(&self, run: &WorkflowRun) -> WorkflowDefinition {
         self.settings.workflow(&run.definition).unwrap_or_default()
+    }
+
+    /// The definition of a run about to take a note or a handoff. A
+    /// finished Dispatch run's definition may have been pruned; such a
+    /// run refuses with an error, since the built-in's prompts would not
+    /// name its worktree. Any other run falls back to the built-in.
+    fn usable_definition_of(&mut self, run: &WorkflowRun) -> Option<WorkflowDefinition> {
+        if run.definition.starts_with(DISPATCH_WORKFLOW_PREFIX)
+            && self.settings.workflow(&run.definition).is_none()
+        {
+            self.error(format!(
+                "the definition {} this review used is gone; start a fresh review",
+                run.definition
+            ));
+            return None;
+        }
+        Some(self.definition_of(run))
+    }
+
+    /// Definition names an unfinished run still reads: a failed or
+    /// paused run can be continued, so only finalized and handed-off
+    /// runs let theirs go.
+    pub(super) fn live_definitions(&self) -> HashSet<String> {
+        self.workflows()
+            .filter(|r| !matches!(r.state, RunState::Finalized | RunState::HandedOff))
+            .map(|r| r.definition.clone())
+            .collect()
     }
 
     fn workflow_mut(&mut self, id: WorkflowId) -> Option<&mut WorkflowRun> {
@@ -725,9 +765,14 @@ impl AppCore {
         self.halt_workflow(id, RunState::Failed(reason.to_owned()), now, out);
     }
 
-    /// Stop waiting: no more probes, and the run rests in `state`.
+    /// Stop waiting: no more probes, and the run rests in `state`. A
+    /// finished run stays finished: its definition may already be
+    /// pruned, and a pause would offer Continue on it.
     fn halt_workflow(&mut self, id: WorkflowId, state: RunState, now: Clock, out: &mut Out) {
-        if self.workflow(id).is_none() {
+        let Some(run) = self.workflow(id) else {
+            return;
+        };
+        if matches!(run.state, RunState::Finalized | RunState::HandedOff) {
             return;
         }
         self.probes.retain(|p| p.run != id);
@@ -833,7 +878,9 @@ impl AppCore {
             self.error("the review is still running");
             return;
         }
-        let def = self.definition_of(&run);
+        let Some(def) = self.usable_definition_of(&run) else {
+            return;
+        };
         let Some(round) = run.current().cloned() else {
             return;
         };
@@ -897,7 +944,9 @@ impl AppCore {
         if text.is_empty() {
             return;
         }
-        let def = self.definition_of(&run);
+        let Some(def) = self.usable_definition_of(&run) else {
+            return;
+        };
         let n = round_count(&run) + 1;
         let round = Round {
             verdict: Some(Verdict::Changes),
