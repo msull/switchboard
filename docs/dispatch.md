@@ -128,7 +128,10 @@ confined; they run in Switchboard.
   Reviewer definitions are installed into Switchboard under
   `Dispatch: <operator>@<content hash>`, so an edited definition is a
   new name and a run in flight keeps looking up the one it started
-  with.
+  with. Switchboard drops a `Dispatch: ` definition on the next install or
+  launch once no unfinished run names it, so its settings hold the
+  in-flight ones and the newest. A finished review whose definition is
+  gone refuses a further note or handoff.
 - **Attempt.** One run of one stage in one context. Every launch,
   gate command, file, and result belongs to an attempt, which is why
   a restart can tell what was already done. A failed or abandoned

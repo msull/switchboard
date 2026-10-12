@@ -12,8 +12,8 @@ use egui::{Context, RichText, Ui};
 use super::dialogs::{dialog, dialog_actions, field};
 use super::{DrawCtx, GAP, UiState, document, theme};
 use crate::core::{
-    AppAction, BUILTIN_WORKFLOW, HandoffMode, RecordId, Round, RunState, Verdict, WorkflowId,
-    WorkflowRun, snapshot_dir,
+    AppAction, BUILTIN_WORKFLOW, DISPATCH_WORKFLOW_PREFIX, HandoffMode, RecordId, Round, RunState,
+    Verdict, WorkflowId, WorkflowRun, snapshot_dir,
 };
 use crate::ports::transcript::Conversation;
 
@@ -138,6 +138,9 @@ fn resolve_plan(typed: &str, cwd: &Path) -> Option<PathBuf> {
     })
 }
 
+/// Definitions the dialog still offers as radios; past this, a menu.
+const DEFINITION_RADIOS: usize = 6;
+
 /// The dialog, while a draft exists.
 pub fn dialog_show(cx: &mut DrawCtx<'_>, ctx: &Context) {
     let Some(mut draft) = cx.state.review_dialog.take() else {
@@ -155,6 +158,9 @@ pub fn dialog_show(cx: &mut DrawCtx<'_>, ctx: &Context) {
                 .map(|d| d.name.clone())
                 .filter(|n| n != BUILTIN_WORKFLOW),
         )
+        // Dispatch installs one per reviewer version and starts its own
+        // reviews; offering them here would only grow the dialog.
+        .filter(|n| !n.starts_with(DISPATCH_WORKFLOW_PREFIX))
         .collect();
     let cap = cx
         .core
@@ -204,13 +210,7 @@ pub fn dialog_show(cx: &mut DrawCtx<'_>, ctx: &Context) {
             ui,
             format!("Absolute, or relative to {}", source.cwd.display()),
         ));
-        if names.len() > 1 {
-            ui.horizontal_wrapped(|ui| {
-                for name in &names {
-                    ui.radio_value(&mut draft.definition, name.clone(), name);
-                }
-            });
-        }
+        definition_picker(ui, &names, &mut draft.definition);
         ui.label(theme::meta_text(
             ui,
             format!("Up to {cap} rounds before it stops to ask (Settings)"),
@@ -234,6 +234,27 @@ pub fn dialog_show(cx: &mut DrawCtx<'_>, ctx: &Context) {
     }
     if keep {
         cx.state.review_dialog = Some(draft);
+    }
+}
+
+/// The definition choice: nothing with only the built-in, radios for a
+/// few, and past a handful a menu, which keeps the dialog's height fixed
+/// so its buttons stay on screen however many definitions there are.
+fn definition_picker(ui: &mut Ui, names: &[String], chosen: &mut String) {
+    if names.len() > DEFINITION_RADIOS {
+        egui::ComboBox::from_label("Definition")
+            .selected_text(chosen.as_str())
+            .show_ui(ui, |ui| {
+                for name in names {
+                    ui.selectable_value(chosen, name.clone(), name);
+                }
+            });
+    } else if names.len() > 1 {
+        ui.horizontal_wrapped(|ui| {
+            for name in names {
+                ui.radio_value(chosen, name.clone(), name);
+            }
+        });
     }
 }
 

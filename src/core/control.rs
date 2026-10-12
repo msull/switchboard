@@ -14,9 +14,10 @@ use switchboard_control as wire;
 use super::action::{AppAction, Out, RULE_COLUMNS, TYPED_HOLD};
 use super::env::{SecretScope, valid_set_name, valid_var_name};
 use super::{
-    Activity, AgentKind, AppCore, Ask, AskKind, AwsMethod, Clock, ENV_SETUP_LOCKED, Effect, EnvSet,
-    EnvVar, GridRect, Launch, PinTarget, PinnedItem, ProjectId, RecordId, SessionKind, SetId,
-    SetRule, Space, SpaceId, WorkflowDefinition, WorkflowId, WorkingSet, grid,
+    Activity, AgentKind, AppCore, Ask, AskKind, AwsMethod, Clock, DISPATCH_WORKFLOW_PREFIX,
+    ENV_SETUP_LOCKED, Effect, EnvSet, EnvVar, GridRect, Launch, PinTarget, PinnedItem, ProjectId,
+    RecordId, SessionKind, SetId, SetRule, Space, SpaceId, WorkflowDefinition, WorkflowId,
+    WorkingSet, grid,
 };
 use crate::ports::host::Liveness;
 
@@ -425,9 +426,15 @@ impl AppCore {
                     self.error("a definition needs a name");
                     return Vec::new();
                 }
+                let live = self.live_definitions();
+                let dispatch = def.name.starts_with(DISPATCH_WORKFLOW_PREFIX);
+                let name = def.name.clone();
                 self.update_settings(out, |s| {
                     s.workflows.retain(|d| d.name != def.name);
                     s.workflows.push(def);
+                    if dispatch {
+                        super::workflow::prune_dispatch(s, &live, Some(&name));
+                    }
                 });
                 Vec::new()
             }

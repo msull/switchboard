@@ -10282,6 +10282,7 @@ fn definition_of(
     };
     let text = serde_json::to_string(&review).unwrap_or_default();
     wire::Definition {
+        // Switchboard prunes by this prefix (`DISPATCH_WORKFLOW_PREFIX`).
         name: format!("Dispatch: {reviewer_name}@{}", Pipeline::fingerprint(&text)),
         reviewer: match review.reviewer {
             crate::pipeline::OperatorKind::Claude | crate::pipeline::OperatorKind::Command => {
