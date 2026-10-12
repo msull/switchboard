@@ -120,7 +120,7 @@ Each host is authoritative for its own resources. The client aggregates views wi
 ### 4.1 Implementation
 
 - **No Tokio.** The host is std threads and `mpsc`; the core is owned by `SwitchboardApp` and every state change is a dispatch on the frame thread. The remote port follows the `ControlSocket` shape: an accept thread per listener, one thread per connection, each request handed over a channel to the frame, answered by the same `serve` path in `app.rs` (`serve_pending` runs before every frame, hidden ones included), the reply sent back on the connection's channel. A second runtime inside an egui app buys nothing for a handful of connections.
-- **The frame does core state only.** A metadata request (a view, a command) is answered on the frame as the control port is. A content request (conversation, screen, run output, file) takes two steps: the frame answers with the **handle and the redaction policy** (the transcript path and resume handle, the pane's host id, the run's log path, the file's root and relative path, plus the secret values to mask and the policy fingerprint), and the **connection thread** does the read, the parse, the mask, the version check and the serialization, then sends one small action back to the frame to record the version it observed (§4.4). The watch poll (§4.4) runs on one worker thread of its own the same way. A multi-megabyte transcript, a 768 KiB file or a slow Keychain call therefore costs a connection thread its time, never a frame. The handle is read under the frame's authority, so a record removed or rebound between the two steps makes the worker's version action a no-op and the reply carries the handle it read from.
+- **The frame does core state only.** A metadata request (a view, a command) is answered on the frame as the control port is. A content request (conversation, screen, run output, file) takes two steps: the frame answers with the **handle and the redaction policy** (the transcript path and resume handle, the pane's host id, the run's log path, the file's root and relative path, plus the secret values to mask and the policy fingerprint), and one **content worker thread** does the read, the parse, the mask, the version check and the serialization from a queue of such requests (one at a time, so one large parse is in memory at once; Spike 22 measured 575 MB peak for the largest transcript), then sends one small action back to the frame to record the version it observed (§4.4), and the connection thread writes the reply. The watch poll (§4.4) runs through the same worker. A multi-megabyte transcript, a 768 KiB file or a slow Keychain call therefore costs the worker its time and the asking connection its wait, never a frame. The handle is read under the frame's authority, so a record removed or rebound between the two steps makes the worker's version action a no-op and the reply carries the handle it read from.
 - **Bounds.** The port is one user's few devices, and the limits say so:
   - at most 16 connections in total and 4 unauthenticated ones; a further accept is closed at once. The 4 are a separate pool: an unauthenticated flood fills its own slots and never a paired client's;
   - `/pair` is answered at most six times a minute per listener and `/info` sixty; past that the connection thread answers 429 without reaching the frame;
@@ -129,7 +129,7 @@ Each host is authoritative for its own resources. The client aggregates views wi
   - the frame drains at most 8 remote requests per pass, in arrival order, the rest waiting on the channel; the channel is bounded at 64 and a full channel answers 503 from the connection thread without reaching the frame; a frame-side request is a view or a handle lookup and takes microseconds, so the count is the bound;
   - each WebSocket subscriber has an event queue of 256; when it fills, the subscriber is sent `resync_required` and closed, never silently trimmed (§4.4);
   - the watch set (§4.4) is capped at 128 keys for the whole port; past the cap the least recently read key is evicted silently, since a read of an evicted key always works and re-enters it.
-- Preferred crates: a blocking HTTP/1.1 server over `std::net::TcpListener` (hand-rolled or `tiny_http`), `tungstenite` for WebSocket, `rustls` with `rcgen` for the per-installation certificate, and `mdns-sd` (or the system `dns-sd` through a small macOS adapter) for Bonjour. All of it in `src/adapters/remote.rs` behind a `ports::remote` trait with a fake, and all of it must compile on Linux CI (Bonjour may be a `cfg(target_os = "macos")` adapter with a no-op elsewhere). **Spike 15 (§10) decides the exact crates before any of this is built.**
+- Preferred crates: a blocking HTTP/1.1 server over `std::net::TcpListener` (hand-rolled or `tiny_http`), `tungstenite` for WebSocket, `rustls` with `rcgen` for the per-installation certificate, and `mdns-sd` (or the system `dns-sd` through a small macOS adapter) for Bonjour. All of it in `src/adapters/remote.rs` behind a `ports::remote` trait with a fake, and all of it must compile on Linux CI (Bonjour may be a `cfg(target_os = "macos")` adapter with a no-op elsewhere). **Spike 22 (§10) decides the exact crates before any of this is built.**
 - Handlers are thin: HTTP request → auth and scope check → allowlist → `wire::Request` → `serve` → redaction → `wire::Reply` → HTTP response. No session or transcript logic lives in the adapter.
 - Only the instance holding the store lock listens (as the control port does); a read-only instance refuses to bind.
 - Bind to loopback by default until remote access is explicitly enabled in Settings. For LAN access, bind the chosen interface and require pairing.
@@ -366,7 +366,7 @@ Every server is an authenticated endpoint; nothing assumes RFC1918 addresses or 
 
 ## 10. Delivery plan and acceptance criteria
 
-### Spike 15 — `spikes/15-remote-port`
+### Spike 22 — `spikes/22-remote-port`
 
 Before any host code, with measured results in its README:
 
@@ -379,6 +379,22 @@ Before any host code, with measured results in its README:
 - Two instances on one machine (`SWITCHBOARD_DATA_DIR`, `SWITCHBOARD_TMUX_SOCKET=switchboard-test-*`, different ports) each advertising with its own key.
 
 Loopback-only and no auth are fine here and nowhere else.
+
+**Results (2026-10-12, `spikes/22-remote-port/README.md`).** The host
+half ran: the frame's share is under 0.25 ms per pass against the 1 ms
+target; a request's latency is one frame interval, since a client that
+sends on the reply synchronizes with the frame; the pools, the 5 s
+handshake timeout and the subscriber overflow behave as §4.1 says under
+20 stalled connections and an unread socket, with a paired client
+unaffected; a wrong pin fails at the handshake; `mdns-sd` advertises
+and `dns-sd` sees it; the 146 MB largest transcript parses in 290 ms at
+575 MB peak, which is why content work is off the frame; ctime and
+inode catch the same-size rewrite, the rename and the regrown log. Two
+amendments follow: content reads go to **one worker thread** with a
+queue rather than each connection thread, so one large parse is in
+memory at a time (§4.1 is read with that change), and the Bonjour
+instance name carries a short id suffix beside the display name. Not
+run: the visionOS pinning delegate and the read-model diff timing.
 
 ### Milestone A — Host port and multi-host client foundation
 

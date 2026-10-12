@@ -936,6 +936,40 @@ mod tests {
         assert_eq!(line(serde_json::json!({"name":"Bare"})), "Bare");
     }
 
+    /// Spike 22: what the largest transcript costs to read and parse,
+    /// which bounds what the remote port can serve. Run with
+    /// `SWITCHBOARD_SPIKE_TRANSCRIPT=<path> cargo test --release --lib
+    /// parse_timing -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "a measurement against a transcript named in the environment"]
+    fn parse_timing() {
+        let path = std::env::var("SWITCHBOARD_SPIKE_TRANSCRIPT").expect("a transcript path");
+        let t0 = std::time::Instant::now();
+        let text = std::fs::read_to_string(&path).unwrap();
+        let read = t0.elapsed();
+        let t1 = std::time::Instant::now();
+        let conversation = parse(&text);
+        let parsed = t1.elapsed();
+        let turn_text: usize = conversation
+            .turns
+            .iter()
+            .map(|t| {
+                t.user.len()
+                    + t.final_text.len()
+                    + t.activity
+                        .iter()
+                        .map(|a| a.text.as_deref().map_or(0, str::len) + a.line.len())
+                        .sum::<usize>()
+            })
+            .sum();
+        println!(
+            "parse_timing: {} bytes read in {read:?}, parsed in {parsed:?}: {} turns, {} bytes of turn text kept",
+            text.len(),
+            conversation.turns.len(),
+            turn_text
+        );
+    }
+
     #[test]
     fn codex_is_not_supported() {
         let r = ClaudeTranscripts.read(&ResumeHandle::Codex {

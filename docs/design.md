@@ -3107,7 +3107,7 @@ working sets of several running Switchboard installations and sends
 prompts to them is specified in `docs/remote-client.md`: a port over
 the control port's wire contract, pairing with a pinned host key, one
 revision counter and `changed` events, and content work off the frame
-thread. The plan is Spike 15 and then Milestone A as five commits.
+thread. The plan is Spike 22 and then Milestone A as five commits.
 
 Built so far:
 
@@ -3119,6 +3119,20 @@ Built so far:
   A seeded conversation (tests, the script) has no handle and no file
   time and is never read over. Behaviour is unchanged; the UI tests
   seed the new place.
+- **Spike 22** (`spikes/22-remote-port`). A pinned-TLS HTTP and
+  WebSocket port on std threads with the frame as the executor works
+  as specified: the frame's share is under 0.25 ms per pass, a
+  request's latency is one frame interval (a client that sends on the
+  reply synchronizes with the frame), the connection pools, the
+  handshake timeout and the subscriber overflow hold under a stall and
+  an unread socket, a wrong pin fails at the handshake, and `mdns-sd`
+  advertises a service `dns-sd` sees. The largest transcript on this
+  machine (146 MB) reads and parses in 290 ms at 575 MB peak, which
+  settles that content work runs off the frame and argues for one
+  content worker rather than one per connection. ctime and inode see
+  the same-size rewrite, the rename and the regrown log that mtime,
+  size and length miss. Not measured: the visionOS pinning delegate
+  and the read-model diff.
 
 ## Open questions
 
