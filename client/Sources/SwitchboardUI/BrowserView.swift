@@ -409,22 +409,32 @@ public struct SessionCardView: View {
 
 /// The source-machine label, with the disconnected state made plain.
 public struct SourceLabel: View {
+    public enum Size: Sendable {
+        case regular
+        /// For a card window's header, where width is short.
+        case small
+    }
+
     public let name: String
     public let stale: Bool
+    public var size: Size = .regular
 
-    public init(name: String, stale: Bool) {
+    public init(name: String, stale: Bool, size: Size = .regular) {
         self.name = name
         self.stale = stale
+        self.size = size
     }
 
     public var body: some View {
-        HStack(spacing: 4) {
+        HStack(spacing: 3) {
             Image(systemName: stale ? "wifi.slash" : "desktopcomputer")
             Text(stale ? "\(name) (offline)" : name)
+                .lineLimit(1)
+                .truncationMode(.middle)
         }
-        .font(.caption)
-        .padding(.horizontal, 6)
-        .padding(.vertical, 2)
+        .font(size == .small ? .caption2 : .caption)
+        .padding(.horizontal, size == .small ? 5 : 6)
+        .padding(.vertical, size == .small ? 1 : 2)
         .background(.quaternary, in: Capsule())
     }
 }

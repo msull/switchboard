@@ -3313,6 +3313,13 @@ Built so far:
   missing after the restoration grace opens it, and the card header
   carries a Sessions button that brings the main window forward (it
   is a value-keyed window group, so this never makes a second one).
+  From the first hours with it: the card header is small (a short
+  host pill, the Sessions button an icon) so a tall narrow card, the
+  shape the conversation and document modes will want, holds
+  together; and the screen's text scales by a slider under the pane
+  and by a pinch on it, kept per window while it is open and starting
+  over in a new one, since the comfortable size depends on where the
+  window sits in the room.
   Milestone B runs on the headset, installed from the terminal with
   `client/scripts/device.sh` once the one-time Xcode setup was done
   (Developer Mode, the device paired in Xcode's Devices window, one

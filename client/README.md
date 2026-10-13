@@ -44,7 +44,11 @@ scripts/sim.sh run               # the visionOS app on the simulator (below)
   `SessionCardView`, `SourceLabel` and `ServersView` in SwiftUI, over a
   `BrowserModel` that mirrors the manager's store when it changes;
   `CardWindowView`, one window on one session with the `compact` and
-  `screen` modes (the screen holds a watch while it is on screen) and a
+  `screen` modes (the screen holds a watch while it is on screen, and
+  its text scales by a slider and a pinch, `ScreenScale`, as state of
+  the window: kept across a mode switch, gone when it closes), a small
+  header (the host pill and an icon-only Sessions button, so a tall
+  narrow card fits) and a
   banner when the host is away or the session was removed; the
   presentation model (`ViewMode`, `CardWindowRequest`, `CardStanding`,
   `BrowseMode`, `FocusCursor`) and `PresentationState` in a JSON file

@@ -49,6 +49,24 @@ public enum ViewMode: String, Codable, CaseIterable, Sendable, Identifiable {
 
 /// What a card window is opened on: a qualified session and an id of
 /// its own, so two windows on one session are two windows.
+/// The screen's text scale in a card window: a multiplier on the
+/// base type size that a slider and a pinch both set.
+public enum ScreenScale {
+    public static let initial = 1.0
+    public static let range = 0.5...3.0
+    /// The monospaced size at scale 1.
+    public static let basePoints = 15.0
+
+    public static func clamped(_ scale: Double) -> Double {
+        min(max(scale, range.lowerBound), range.upperBound)
+    }
+
+    /// The scale as a percentage for the slider's readout.
+    public static func label(_ scale: Double) -> String {
+        "\(Int((scale * 100).rounded()))%"
+    }
+}
+
 /// The main window, one per app: the id and the value it is opened
 /// with, so opening it again brings the open one forward instead of
 /// making a second.

@@ -142,4 +142,13 @@ final class BrowsingTests: XCTestCase {
         shown.visible = false
         XCTAssertTrue(shown.claim(), "the main window went away before the ask")
     }
+
+    func testTheScreenScaleIsClampedAndReadAsAPercentage() {
+        XCTAssertEqual(ScreenScale.initial, 1)
+        XCTAssertEqual(ScreenScale.clamped(0.1), ScreenScale.range.lowerBound)
+        XCTAssertEqual(ScreenScale.clamped(9), ScreenScale.range.upperBound)
+        XCTAssertEqual(ScreenScale.clamped(1.5), 1.5)
+        XCTAssertEqual(ScreenScale.label(1), "100%")
+        XCTAssertEqual(ScreenScale.label(1.256), "126%")
+    }
 }

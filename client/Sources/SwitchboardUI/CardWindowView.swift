@@ -10,6 +10,9 @@ public struct CardWindowView: View {
     @Bindable var model: BrowserModel
     public let request: CardWindowRequest
     @State private var mode: ViewMode = .compact
+    /// The screen's text scale: window state, so it survives a mode
+    /// switch and goes with the window, and a new window starts at 1.
+    @State private var screenScale = ScreenScale.initial
     @Environment(\.openWindow) private var openWindow
 
     public init(model: BrowserModel, request: CardWindowRequest) {
@@ -72,15 +75,22 @@ public struct CardWindowView: View {
                         .font(.caption).foregroundStyle(.secondary)
                 }
             }
-            Spacer()
+            Spacer(minLength: 4)
             if let item {
-                SourceLabel(name: item.serverName, stale: item.stale)
+                SourceLabel(name: item.serverName, stale: item.stale, size: .small)
             }
+            // Icon only, and small: a tall narrow card has no room for
+            // a word here.
             Button {
                 openWindow(id: MainWindow.id, value: MainWindow.value)
             } label: {
-                Label("Sessions", systemImage: "rectangle.grid.2x2")
+                Image(systemName: "rectangle.grid.2x2")
+                    .font(.caption)
             }
+            .buttonStyle(.bordered)
+            .buttonBorderShape(.circle)
+            .controlSize(.mini)
+            .accessibilityLabel("Sessions")
             .help("The main window, with every session")
         }
     }
@@ -91,6 +101,7 @@ public struct CardWindowView: View {
                 ForEach(ViewMode.offered(for: kind)) { offered in
                     Button(offered.title) { mode = offered }
                         .buttonStyle(.bordered)
+                        .controlSize(.small)
                         .tint(offered == mode ? .accentColor : nil)
                         .disabled(!offered.drawn || !standing.controlsEnabled)
                 }
@@ -108,7 +119,7 @@ public struct CardWindowView: View {
         case .compact:
             CompactDetailView(item: item)
         case .screen:
-            ScreenView(model: model, ref: item.ref)
+            ScreenView(model: model, ref: item.ref, scale: $screenScale)
         case .lastResponse, .conversation, .runOutput:
             VStack {
                 Spacer()
@@ -156,27 +167,42 @@ struct CompactDetailView: View {
 }
 
 /// The pane's text, live through a watch held while the view is on
-/// screen; the last read stays up when the host goes away.
+/// screen; the last read stays up when the host goes away. The text
+/// is scaled by a slider and by a pinch, both onto one value the
+/// window owns.
 struct ScreenView: View {
     @Bindable var model: BrowserModel
     let ref: SessionRef
+    @Binding var scale: Double
+    /// The scale when a pinch began, which the pinch multiplies.
+    @State private var pinchFrom: Double?
 
     var body: some View {
         Group {
             if let screen = model.screens[ref] {
-                ScrollViewReader { proxy in
-                    ScrollView {
-                        Text(screen.text)
-                            .font(.system(.body, design: .monospaced))
-                            .textSelection(.enabled)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                        Color.clear.frame(height: 1).id("end")
+                // Both axes scroll, so a line never wraps at a large
+                // scale; the text is at least as wide as the viewport
+                // and as tall, so a short pane sits at the top left, not
+                // centered.
+                GeometryReader { viewport in
+                    ScrollViewReader { proxy in
+                        ScrollView([.vertical, .horizontal]) {
+                            VStack(alignment: .leading, spacing: 0) {
+                                Text(screen.text)
+                                    .font(.system(size: ScreenScale.basePoints * scale, design: .monospaced))
+                                    .textSelection(.enabled)
+                                Color.clear.frame(height: 1).id("end")
+                            }
+                            .frame(minWidth: viewport.size.width, minHeight: viewport.size.height, alignment: .topLeading)
+                        }
+                        .gesture(pinch)
+                        .onChange(of: screen.text) { _, _ in
+                            proxy.scrollTo("end", anchor: .bottom)
+                        }
+                        .onAppear { proxy.scrollTo("end", anchor: .bottom) }
                     }
-                    .onChange(of: screen.text) { _, _ in
-                        proxy.scrollTo("end", anchor: .bottom)
-                    }
-                    .onAppear { proxy.scrollTo("end", anchor: .bottom) }
                 }
+                scaleRow
                 if screen.truncated {
                     Text("Cut at the host's size cap.").font(.caption2).foregroundStyle(.secondary)
                 }
@@ -200,5 +226,30 @@ struct ScreenView: View {
             }
             await model.unwatch(ref)
         }
+    }
+
+    private var scaleRow: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "textformat.size.smaller")
+            Slider(value: $scale, in: ScreenScale.range)
+            Image(systemName: "textformat.size.larger")
+            Text(ScreenScale.label(scale))
+                .font(.caption2.monospacedDigit())
+                .frame(width: 40, alignment: .trailing)
+        }
+        .controlSize(.mini)
+        .font(.caption)
+        .foregroundStyle(.secondary)
+        .accessibilityLabel("Text size")
+    }
+
+    private var pinch: some Gesture {
+        MagnifyGesture()
+            .onChanged { value in
+                let from = pinchFrom ?? scale
+                pinchFrom = from
+                scale = ScreenScale.clamped(from * value.magnification)
+            }
+            .onEnded { _ in pinchFrom = nil }
     }
 }
