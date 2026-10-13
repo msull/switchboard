@@ -91,7 +91,8 @@ scripts/sim.sh run               # the visionOS app on the simulator (below)
   text once the typing pauses (the host's reply is the text, a newer
   edit outranks it), dictation goes to it as the editor's speech
   events in order (`Dictation.onEvents`, one recognizer session per
-  run), the editor's tools sit above the field (`DraftTools`: undo,
+  run), the editor's tools sit in a row over the field at its left,
+  away from Send (`DraftTools`: undo,
   redo, the last sentence deleted, clear, the AI pass where the host
   has a key) and Send takes the draft to the pane under an op; a
   caption says when the host's editor is listening or degraded. On an

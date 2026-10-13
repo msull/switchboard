@@ -245,6 +245,7 @@ struct ControlBar: View {
                 Text("This device reads only. Raise its scope on the host.")
                     .font(.caption).foregroundStyle(.secondary)
             } else {
+                if session.trustQuestion || (session.liveness != .running && session.resumeID != nil) {
                 HStack(spacing: 8) {
                     if session.trustQuestion {
                         Button("Trust this folder") { run { await model.trust(ref) } }
@@ -263,9 +264,11 @@ struct ControlBar: View {
                                 Button("Resume") { run { await model.resume(ref) } }
                             }
                     }
-                    Spacer(minLength: 0)
-                    if hosted { DraftTools(draft: hostDraft, enabled: canControl, apply: tool) }
                 }
+                }
+                // The editor's tools sit over the field, at its left,
+                // away from Send so a tap at one is not the other.
+                if hosted { DraftTools(draft: hostDraft, enabled: canControl, apply: tool) }
                 HStack(spacing: 8) {
                     HStack(alignment: .bottom, spacing: 6) {
                         Button {
