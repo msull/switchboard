@@ -632,9 +632,8 @@ fn the_allowlist_refuses_everything_else_with_no_side_effect() {
     let token = pair(&mut port, "ABCD2345", Scope::Control, "Pad");
     let t = Some(token.as_str());
     for (method, path) in [
-        ("POST", format!("/api/v1/sessions/{session}/send")),
-        ("POST", format!("/api/v1/sessions/{session}/resume")),
-        ("POST", format!("/api/v1/sessions/{session}/trust")),
+        ("POST", format!("/api/v1/sessions/{session}/kill")),
+        ("POST", format!("/api/v1/sessions/{session}/notes")),
         ("GET", format!("/api/v1/sessions/{session}/env")),
         ("GET", "/api/v1/env/resolve".into()),
         ("POST", "/api/v1/projects".into()),
@@ -661,6 +660,149 @@ fn the_allowlist_refuses_everything_else_with_no_side_effect() {
             .notes,
         ""
     );
+}
+
+/// Make the fake host list `session` as a running Claude pane showing
+/// `screen`.
+fn running(port: &mut Port, session: &str, screen: &str) {
+    let record = RecordId(uuid::Uuid::parse_str(session).unwrap());
+    let pane = HostId(record.host_name());
+    port.host.state().statuses.push(HostStatus {
+        id: pane.clone(),
+        liveness: HostLiveness::Running {
+            pid: 7,
+            command: "claude".into(),
+        },
+        cwd: None,
+        last_activity: None,
+        title: None,
+    });
+    port.host.state().snapshots.insert(pane, screen.into());
+    port.app.poll_now();
+}
+
+/// The control scope (§4.5): `send`, `resume` and `trust` go through
+/// the control socket's `serve`, so the device's op is the idempotency
+/// key and a repeat is answered from the log without reaching the pane
+/// again; a read device is refused by name and nothing runs.
+#[test]
+fn the_control_scope_sends_with_the_op_as_the_key_and_a_read_device_is_refused() {
+    let mut port = port();
+    let (_, _, session) = seed(&mut port, "");
+    let token = pair(&mut port, "ABCD2345", Scope::Read, "Vision Pro");
+    let t = Some(token.as_str());
+    let send = format!("/api/v1/sessions/{session}/send");
+    let hello = r#"{"op":"tx1","text":"hello"}"#;
+    let (status, reply) = call(&mut port, "POST", &send, t, hello);
+    assert_eq!((status, code(&reply)), (403, "scope"), "{reply}");
+    assert!(port.host.state().written.is_empty());
+
+    let id = port.app.core().devices()[0].id;
+    port.app.dispatch(AppAction::SetDeviceScope {
+        device: id,
+        scope: Scope::Control,
+    });
+    // A resume on the not-running session launches it once; the op is
+    // the key, so a repeat does not spend a second turn.
+    let spawned = port.host.state().spawned.len();
+    let resume = format!("/api/v1/sessions/{session}/resume");
+    let (status, reply) = call(&mut port, "POST", &resume, t, r#"{"op":"rs0"}"#);
+    assert_eq!(status, 200, "{reply}");
+    assert_eq!(port.host.state().spawned.len(), spawned + 1, "launched");
+    let (status, _) = call(&mut port, "POST", &resume, t, r#"{"op":"rs0"}"#);
+    assert_eq!(status, 200);
+    assert_eq!(port.host.state().spawned.len(), spawned + 1, "once");
+
+    running(&mut port, &session, "\u{276f} ");
+    let (status, reply) = call(&mut port, "POST", &send, t, hello);
+    assert_eq!(status, 200, "{reply}");
+    assert_eq!(reply["body"]["made"], serde_json::json!([]));
+    let written = port.host.state().written.clone();
+    assert_eq!(written.len(), 1, "{written:?}");
+    assert_eq!(written[0].1, "hello");
+    let (status, again) = call(&mut port, "POST", &send, t, hello);
+    assert_eq!(status, 200, "{again}");
+    assert_eq!(
+        port.host.state().written.len(),
+        1,
+        "a repeat never types twice"
+    );
+    let (_, done) = get(&mut port, "/api/v1/ops/tx1", t);
+    assert_eq!(done["body"]["status"]["status"], "done");
+
+    for body in [
+        r#"{"text":"hi"}"#,
+        r#"{"op":"tx3"}"#,
+        r#"{"op":"","text":"x"}"#,
+        "nope",
+    ] {
+        let (status, reply) = call(&mut port, "POST", &send, t, body);
+        assert_eq!(
+            (status, code(&reply)),
+            (400, "bad_request"),
+            "{body}: {reply}"
+        );
+    }
+    assert_eq!(port.host.state().written.len(), 1);
+
+    // A resume while running is accepted and launches nothing; trust
+    // with no question asked is refused by name; an unknown session is
+    // not found.
+    let (status, reply) = call(&mut port, "POST", &resume, t, r#"{"op":"rs1"}"#);
+    assert_eq!(status, 200, "{reply}");
+    assert_eq!(port.host.state().spawned.len(), spawned + 1);
+    let trust = format!("/api/v1/sessions/{session}/trust");
+    let (status, reply) = call(&mut port, "POST", &trust, t, r#"{"op":"tr1"}"#);
+    assert_eq!((status, code(&reply)), (400, "failed"), "{reply}");
+    assert_eq!(port.host.state().written.len(), 1);
+    let (status, reply) = call(
+        &mut port,
+        "POST",
+        "/api/v1/sessions/00000000-0000-0000-0000-000000000000/send",
+        t,
+        r#"{"op":"tx9","text":"x"}"#,
+    );
+    assert_eq!((status, code(&reply)), (400, "failed"), "{reply}");
+
+    // Lowered again, the next command is refused.
+    port.app.dispatch(AppAction::SetDeviceScope {
+        device: id,
+        scope: Scope::Read,
+    });
+    let (status, reply) = call(
+        &mut port,
+        "POST",
+        &send,
+        t,
+        r#"{"op":"tx4","text":"hello"}"#,
+    );
+    assert_eq!((status, code(&reply)), (403, "scope"), "{reply}");
+}
+
+/// A pane at Claude Code's folder question: the session view says so,
+/// `trust` answers it, and the answer reaches the pane once.
+#[test]
+fn trust_answers_the_folder_question_the_session_view_carries() {
+    let mut port = port();
+    let (_, _, session) = seed(&mut port, "");
+    let token = pair(&mut port, "ABCD2345", Scope::Control, "Vision Pro");
+    let t = Some(token.as_str());
+    running(
+        &mut port,
+        &session,
+        "Quick safety check: Is this a project you created or one you trust?\n\
+         \u{276f} No, exit\n  Yes, I trust this folder\n",
+    );
+    let (_, view) = get(&mut port, &format!("/api/v1/sessions/{session}"), t);
+    assert_eq!(view["body"]["session"]["trust_question"], true, "{view}");
+    let trust = format!("/api/v1/sessions/{session}/trust");
+    let (status, reply) = call(&mut port, "POST", &trust, t, r#"{"op":"tr1"}"#);
+    assert_eq!(status, 200, "{reply}");
+    let keys = port.host.state().keys.len();
+    assert!(keys >= 1, "the answer reached the pane");
+    let (status, _) = call(&mut port, "POST", &trust, t, r#"{"op":"tr1"}"#);
+    assert_eq!(status, 200);
+    assert_eq!(port.host.state().keys.len(), keys, "once");
 }
 
 #[test]
@@ -1026,6 +1168,12 @@ fn write_fixtures(dir: &std::path::Path) {
             }),
         ),
     ];
+    // The command fixtures need the control scope.
+    let device = port.app.core().devices()[0].id;
+    port.app.dispatch(AppAction::SetDeviceScope {
+        device,
+        scope: Scope::Control,
+    });
     files.extend(content_fixtures(&mut port, &session, &command, &token));
     for (name, value) in &mut files {
         if *name == "pair" {
@@ -1086,6 +1234,18 @@ fn content_fixtures(
             )
             .1,
         ),
+        (
+            "command",
+            call(
+                port,
+                "POST",
+                &format!("/api/v1/sessions/{session}/send"),
+                t,
+                r#"{"op":"fixture-send","text":"ping"}"#,
+            )
+            .1,
+        ),
+        ("op_status", get(port, "/api/v1/ops/fixture-send", t).1),
     ]
 }
 

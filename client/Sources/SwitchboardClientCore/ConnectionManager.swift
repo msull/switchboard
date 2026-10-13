@@ -251,6 +251,21 @@ public actor ConnectionManager {
         await connections[ref.serverID]?.readConversation(ref.recordID, from: from, limit: limit)
     }
 
+    /// Text into the session's pane, as the app's own message box does.
+    public func send(_ ref: SessionRef, text: String) async -> CommandOutcome {
+        await connections[ref.serverID]?.command(ref.recordID, .send, text: text) ?? .unanswered("no host")
+    }
+
+    /// Resume a not-running agent; spends a turn, so the window confirms first.
+    public func resume(_ ref: SessionRef) async -> CommandOutcome {
+        await connections[ref.serverID]?.command(ref.recordID, .resume) ?? .unanswered("no host")
+    }
+
+    /// Answer Claude Code's folder question with yes.
+    public func trust(_ ref: SessionRef) async -> CommandOutcome {
+        await connections[ref.serverID]?.command(ref.recordID, .trust) ?? .unanswered("no host")
+    }
+
     public func readTurn(_ ref: SessionRef, n: Int) async {
         await connections[ref.serverID]?.readTurn(ref.recordID, n: n)
     }

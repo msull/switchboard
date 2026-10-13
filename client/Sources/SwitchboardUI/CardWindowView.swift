@@ -42,6 +42,11 @@ public struct CardWindowView: View {
             if let item {
                 modeRow(for: item.session.kind)
                 content(item)
+                if item.session.kind == .claude {
+                    ControlBar(
+                        model: model, ref: item.ref, session: item.session,
+                        enabled: standing.controlsEnabled, scope: model.scope(for: item.ref))
+                }
             } else {
                 Spacer()
             }
@@ -194,6 +199,89 @@ public struct CardWindowView: View {
 /// The time of a wire millisecond stamp, short.
 func clock(_ ms: UInt64?) -> String? {
     ms.map { Date(timeIntervalSince1970: Double($0) / 1000).formatted(date: .omitted, time: .shortened) }
+}
+
+/// The controls of a Claude Code session (§4.5): a message into its
+/// pane, the folder question answered, and a resume for one that is
+/// not running, which spends a turn and so asks first. Dictation is
+/// the system keyboard's: nothing here is voice-specific. Only a
+/// device with the control scope can use any of it.
+struct ControlBar: View {
+    @Bindable var model: BrowserModel
+    let ref: SessionRef
+    let session: SessionView
+    let enabled: Bool
+    let scope: Scope?
+    @State private var draft = ""
+    @State private var busy = false
+    @State private var note: String?
+    @State private var confirmResume = false
+
+    private var canControl: Bool { enabled && scope == .control && !busy }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            if scope != .control {
+                Text("This device reads only. Raise its scope on the host.")
+                    .font(.caption).foregroundStyle(.secondary)
+            } else {
+                HStack(spacing: 8) {
+                    if session.trustQuestion {
+                        Button("Trust this folder") { run { await model.trust(ref) } }
+                            .buttonStyle(.borderedProminent)
+                            .controlSize(.small)
+                            .disabled(!canControl)
+                    }
+                    if session.liveness != .running, session.resumeID != nil {
+                        Button("Resume…") { confirmResume = true }
+                            .buttonStyle(.bordered)
+                            .controlSize(.small)
+                            .disabled(!canControl)
+                            .confirmationDialog(
+                                "Resume spends a turn", isPresented: $confirmResume, titleVisibility: .visible
+                            ) {
+                                Button("Resume") { run { await model.resume(ref) } }
+                            }
+                    }
+                    TextField("Message", text: $draft, axis: .vertical)
+                        .lineLimit(1...4)
+                        .textFieldStyle(.roundedBorder)
+                        .onSubmit(send)
+                        .disabled(!canControl)
+                    Button(action: send) {
+                        Image(systemName: "paperplane.fill")
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.small)
+                    .disabled(!canControl || draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    .accessibilityLabel("Send")
+                }
+                if let note {
+                    Text(note).font(.caption).foregroundStyle(.secondary)
+                }
+            }
+        }
+    }
+
+    private func send() {
+        let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty, canControl else { return }
+        run {
+            let outcome = await model.send(ref, text: text)
+            if outcome == .accepted { draft = "" }
+            return outcome
+        }
+    }
+
+    private func run(_ command: @escaping () async -> CommandOutcome) {
+        busy = true
+        note = nil
+        Task {
+            let outcome = await command()
+            note = outcome.note
+            busy = false
+        }
+    }
 }
 
 /// The window's text scale, handed down to the prose views so every

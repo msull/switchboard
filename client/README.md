@@ -7,7 +7,7 @@ macOS 14, iOS 17 and visionOS 1.
 
 ```sh
 swift build                      # every target
-swift test                       # 47 tests: fixtures, pinning, the connection core, events, watches, conversations, presentation, browsing
+swift test                       # 50 tests: fixtures, commands, pinning, the connection core, events, watches, conversations, presentation, browsing
 swift run switchboard-remote     # the command-line browser (usage below)
 scripts/sim.sh run               # the visionOS app on the simulator (below)
 ```
@@ -41,7 +41,11 @@ scripts/sim.sh run               # the visionOS app on the simulator (below)
   the last, resent after a reconnect before the snapshot, with what is
   held on a key re-read on `changed` past its held revision: the
   screen, the last response and the conversation from its last turn,
-  a run's output; `ConversationState`, the pages merged by turn),
+  a run's output; `ConversationState`, the pages merged by turn;
+  `command`, a send, resume or trust under the control scope with a
+  UUID op per command, and on a timeout the op's status rather than a
+  resend: done takes the logged reply, interrupted is reported as
+  started, unknown goes once more with the same op),
   and `ConnectionManager`
   with the unified store, filters and the cross-host order; its loop
   only retries hosts that are not connected.
@@ -60,7 +64,12 @@ scripts/sim.sh run               # the visionOS app on the simulator (below)
   kept across a mode switch, gone when it closes), a small header (the
   host pill and an icon-only Sessions button) and mode pills that
   turn into icons rather than wrap, so a tall narrow card fits, and a
-  banner when the host is away or the session was removed; the
+  banner when the host is away or the session was removed; on a
+  Claude session a control bar (`ControlBar`): a message field with
+  Send (the system keyboard's dictation is the voice input), "Trust
+  this folder" when the host says the question is up, and Resume for a
+  session that is not running, behind "Resume spends a turn"; a read
+  device sees why the bar is off instead; the
   presentation model (`ViewMode`, `CardWindowRequest`, `CardStanding`,
   `BrowseMode`, `FocusCursor`) and `PresentationState` in a JSON file
   in the app's container: the layout (list, grid, or one session in

@@ -42,7 +42,7 @@ use crate::ports::events::EventSource;
 use crate::ports::host::{HostId, ProcessHost, SpawnSpec};
 use crate::ports::opener::Opener;
 use crate::ports::project_config::ProjectConfigReader;
-use crate::ports::remote::{Advertisement, Advertiser, Listen, RemoteStore};
+use crate::ports::remote::{Advertisement, Advertiser, Listen, PairedDevice, RemoteStore, Scope};
 use crate::ports::round_files::RoundFiles;
 use crate::ports::secrets::SecretStore;
 use crate::ports::store::{Store, StoreError};
@@ -2396,6 +2396,9 @@ impl SwitchboardApp {
             ("GET", ["sessions", session, "runs"]) => {
                 return Served::Now(self.remote_runs(request, session));
             }
+            ("POST", ["sessions", session, verb @ ("send" | "resume" | "trust")]) => {
+                return Served::Now(self.remote_command(request, &device, session, verb));
+            }
             (
                 "GET",
                 ["sessions", _, "screen" | "conversation" | "last-response"]
@@ -2417,6 +2420,71 @@ impl SwitchboardApp {
         Served::Now(self.remote_reply(request, &self.answer(&body), notes_cap))
     }
 
+    /// A command under `control` scope. The body's `op` is the operation
+    /// id the device made, which is the idempotency key: the command
+    /// goes through `serve` as the control socket's do, so a send or a
+    /// resume is logged before it runs and a repeat of the op is
+    /// answered from the log without running again (§4.5).
+    fn remote_command(
+        &mut self,
+        request: &RemoteRequest,
+        device: &PairedDevice,
+        session: &str,
+        verb: &str,
+    ) -> RemoteReply {
+        if device.scope != Scope::Control {
+            return self.refuse(
+                request,
+                403,
+                "scope",
+                "this device reads only; raise its scope on the host",
+                true,
+            );
+        }
+        let Ok(body) = serde_json::from_slice::<serde_json::Value>(&request.body) else {
+            return self.refuse(request, 400, "bad_request", "the body is not JSON", true);
+        };
+        let field = |name: &str| body.get(name).and_then(|v| v.as_str()).map(str::trim);
+        let op = field("op").unwrap_or_default();
+        if op.is_empty() || op.len() > OP_CAP {
+            return self.refuse(
+                request,
+                400,
+                "bad_request",
+                "op is the operation id, 1 to 64 characters",
+                true,
+            );
+        }
+        let session = session.to_owned();
+        let body = match verb {
+            "send" => {
+                let text = field("text").unwrap_or_default();
+                if text.is_empty() || text.len() > SEND_BYTES_CAP {
+                    return self.refuse(
+                        request,
+                        400,
+                        "bad_request",
+                        "text is the message, 1 byte to 16 KiB",
+                        true,
+                    );
+                }
+                wire::Body::SessionSend {
+                    session,
+                    text: text.to_owned(),
+                }
+            }
+            "resume" => wire::Body::SessionResume { session },
+            _ => wire::Body::SessionTrust { session },
+        };
+        let reply = self.serve(&wire::Request::new(op, body));
+        if let wire::Reply::Failed { reason } = &reply
+            && reason.starts_with("interrupted")
+        {
+            return self.refuse(request, 409, "interrupted", reason, true);
+        }
+        self.remote_reply(request, &reply, STRING_CAP)
+    }
+
     /// Who this host is, to anyone: nothing in it is a secret and
     /// nothing in it is trusted until the key is pinned.
     fn remote_info(&self) -> RemoteReply {
@@ -2431,7 +2499,7 @@ impl SwitchboardApp {
             "server_id": identity.server_id,
             "server_name": identity.server_name,
             "protocol": REMOTE_PROTOCOL,
-            "capabilities": ["read"],
+            "capabilities": ["read", "control"],
             "spki_sha256": identity.spki_sha256,
             "limits": {
                 "body_bytes": BODY_CAP,
@@ -2442,6 +2510,8 @@ impl SwitchboardApp {
                 "conversation_turns": PAGE_TURNS_CAP,
                 "turn_bytes": TURN_BYTES_CAP,
                 "activity_bytes": ACTIVITY_BYTES_CAP,
+                "send_bytes": SEND_BYTES_CAP,
+                "op_chars": OP_CAP,
             },
             "pairing_open": self.core.pairing_at(self.clock()).is_some(),
         });
@@ -3131,6 +3201,10 @@ const REMOTE_PROTOCOL: u32 = 1;
 /// session's notes when the session is read alone.
 const BODY_CAP: usize = 1024 * 1024;
 const STRING_CAP: usize = 4 * 1024;
+/// The most a `send` carries, and the longest operation id a device
+/// may make.
+const SEND_BYTES_CAP: usize = 16 * 1024;
+const OP_CAP: usize = 64;
 const NOTES_CAP_ALONE: usize = 64 * 1024;
 
 /// Cut every string in `value` to its cap, `notes` to `notes_cap` and

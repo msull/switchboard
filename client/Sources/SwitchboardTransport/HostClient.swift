@@ -100,6 +100,11 @@ public protocol HostAPI: Sendable {
     func turn(_ id: String, n: Int) async throws -> Envelope<TurnBody>
     func runs(_ id: String) async throws -> Envelope<RunsBody>
     func runOutput(_ id: String, run: Int, lines: Int?) async throws -> Envelope<RunOutputBody>
+    /// A command under the control scope; `op` is its idempotency key.
+    func command(_ id: String, _ verb: CommandVerb, op: String, text: String?) async throws
+        -> Envelope<CommandBody>
+    /// What became of an op, after a command got no answer.
+    func opStatus(_ op: String) async throws -> Envelope<OpStatusBody>
 }
 
 /// One host over HTTPS with the pinning delegate and a bearer token.
@@ -247,6 +252,18 @@ public final class HostClient: HostAPI, @unchecked Sendable {
         try await get("sessions/\(id)/conversation/\(n)", query: nil)
     }
 
+    public func command(_ id: String, _ verb: CommandVerb, op: String, text: String?) async throws
+        -> Envelope<CommandBody>
+    {
+        var body: [String: String] = ["op": op]
+        if let text { body["text"] = text }
+        return try await post("sessions/\(id)/\(verb.rawValue)", json: body)
+    }
+
+    public func opStatus(_ op: String) async throws -> Envelope<OpStatusBody> {
+        try await get("ops/\(op)", query: nil)
+    }
+
     public func runs(_ id: String) async throws -> Envelope<RunsBody> {
         try await get("sessions/\(id)/runs", query: nil)
     }
@@ -265,6 +282,16 @@ public final class HostClient: HostAPI, @unchecked Sendable {
         }
         var req = URLRequest(url: url)
         req.httpMethod = "GET"
+        return try await send(req)
+    }
+
+    private func post<T: Decodable & Sendable>(_ path: String, json: [String: String]) async throws
+        -> Envelope<T>
+    {
+        var req = URLRequest(url: address.baseURL.appendingPathComponent(path))
+        req.httpMethod = "POST"
+        req.httpBody = try JSONEncoder().encode(json)
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         return try await send(req)
     }
 

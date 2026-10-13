@@ -6,7 +6,7 @@
     "from": 1,
     "model": "claude-fable-5-1",
     "next": 2,
-    "resume_id": "f372b259-c780-4d78-bd6b-3885f758e066",
+    "resume_id": "eeb1a1ef-27e4-4a33-b2d6-d1b8827a9a2c",
     "start_ms": null,
     "title": "explain-repo",
     "total": 2,
@@ -48,6 +48,6 @@
     },
     "version": null
   },
-  "epoch": "328786a8-c75f-4f82-af97-e817328b6898",
+  "epoch": "4d9b99db-f398-4a54-a359-f2e011f479f7",
   "revision": 12
 }

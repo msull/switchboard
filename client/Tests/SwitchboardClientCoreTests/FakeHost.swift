@@ -34,6 +34,15 @@ final class FakeHost: HostAPI, @unchecked Sendable {
     var conversations: [String: ConversationBody] = [:]
     var runs: [String: [RunView]] = [:]
     var runOutputs: [RunKey: RunOutputBody] = [:]
+    /// Commands get no answer this many times (the request is still
+    /// recorded, as one that reached the host would be).
+    var commandSilences = 0
+    /// Thrown by every command while set, after the call is recorded.
+    var commandRefusal: RemoteError?
+    /// What `opStatus` answers, by op; an op not here is unknown.
+    var opStatuses: [String: OpStatusView] = [:]
+    /// The op of every command, in order.
+    var ops: [String] = []
     /// Runs after a `sessions` reply is built and before it is returned:
     /// a mutation between the snapshot and its delivery.
     var afterSessionsBuilt: (() -> Void)?
@@ -251,6 +260,28 @@ final class FakeHost: HostAPI, @unchecked Sendable {
         return try answer("turn:\(n)") { TurnBody(resumeID: whole.resumeID, total: whole.turns.count, turn: turn) }
     }
 
+    func command(_ id: String, _ verb: CommandVerb, op: String, text: String?) async throws
+        -> Envelope<CommandBody>
+    {
+        lock.lock()
+        calls.append(text.map { "\(verb.rawValue):\(id):\($0)" } ?? "\(verb.rawValue):\(id)")
+        ops.append(op)
+        let silent = commandSilences > 0
+        if silent { commandSilences -= 1 }
+        let refusal = commandRefusal
+        lock.unlock()
+        if silent { throw RemoteError.transport("timed out") }
+        if let refusal { throw refusal }
+        return try answer("command") { CommandBody() }
+    }
+
+    func opStatus(_ op: String) async throws -> Envelope<OpStatusBody> {
+        lock.lock()
+        let status = opStatuses[op] ?? .unknown
+        lock.unlock()
+        return try answer("op:\(op)") { OpStatusBody(status: status) }
+    }
+
     func lastResponse(_ id: String) async throws -> Envelope<LastResponseBody> {
         lock.lock()
         let held = lastResponses[id]
@@ -342,6 +373,14 @@ struct Route: HostAPI {
     }
     func turn(_ id: String, n: Int) async throws -> Envelope<TurnBody> {
         try await network.route(address, pin).turn(id, n: n)
+    }
+    func command(_ id: String, _ verb: CommandVerb, op: String, text: String?) async throws
+        -> Envelope<CommandBody>
+    {
+        try await network.route(address, pin).command(id, verb, op: op, text: text)
+    }
+    func opStatus(_ op: String) async throws -> Envelope<OpStatusBody> {
+        try await network.route(address, pin).opStatus(op)
     }
     func lastResponse(_ id: String) async throws -> Envelope<LastResponseBody> {
         try await network.route(address, pin).lastResponse(id)

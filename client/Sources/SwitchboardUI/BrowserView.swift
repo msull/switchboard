@@ -180,6 +180,30 @@ public final class BrowserModel {
         await pull()
     }
 
+    /// The device's scope on a session's host, which says whether the
+    /// window's controls can do anything.
+    public func scope(for ref: SessionRef) -> Scope? {
+        store.hosts.first { $0.id == ref.serverID }?.server.scope
+    }
+
+    public func send(_ ref: SessionRef, text: String) async -> CommandOutcome {
+        let outcome = await manager.send(ref, text: text)
+        await pull()
+        return outcome
+    }
+
+    public func resume(_ ref: SessionRef) async -> CommandOutcome {
+        let outcome = await manager.resume(ref)
+        await pull()
+        return outcome
+    }
+
+    public func trust(_ ref: SessionRef) async -> CommandOutcome {
+        let outcome = await manager.trust(ref)
+        await pull()
+        return outcome
+    }
+
     /// A turn whole, for a window that opened its activity: the page
     /// carried only the head of each tool call's text.
     public func loadTurn(_ ref: SessionRef, n: Int) async {

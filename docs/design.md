@@ -3378,9 +3378,38 @@ Built so far:
   status and the tail, scaled like the screen). Seen on the simulator
   against a throwaway host: a real transcript's last page scrolled to
   its end, and a service's run with its exit code and log. Not yet in
-  C: `file.read` (no view asks for a file before Milestone D), the
-  control scope (`send`, `resume`, `trust`), dictation, and the policy
-  reads off the frame.
+  C: `file.read` (no view asks for a file before Milestone D) and the
+  policy reads off the frame.
+- **C3, the control scope.** `POST sessions/{id}/send|resume|trust`
+  for a device whose scope is `control` (a read device is refused
+  `scope`, by name, with nothing run). The body carries the device's
+  own operation id, `op`, and for a send the text (16 KiB at most).
+  The request becomes the wire request the control socket would carry
+  and goes through the same `serve`, so nothing new runs or logs: a
+  send or a resume is written to `operations.log` before it runs, a
+  repeat of the op is answered from the log without typing or
+  launching again, and an op that was started and never answered is
+  refused `interrupted` (409) rather than run twice. `/info` lists
+  `control` among the capabilities and the send and op caps among the
+  limits. The client makes a UUID per command and follows the spec's
+  rule on a timeout: a status query, never a blind resend; `done`
+  takes the logged reply (its failure reason included), `interrupted`
+  is shown as started with the outcome unknown, `unknown` resends once
+  with the same op. A `scope` refusal names the reason and keeps the
+  pairing (only an unauthorized or revoked token drops it), and a
+  timeout on a command does not count against the connection. The
+  card window of a Claude session ends in a control bar: a message
+  field (the system keyboard's dictation is the voice input; nothing
+  is voice-specific), Send, "Trust this folder" when the session view
+  carries the question, and Resume for a not-running session with a
+  handle, behind "Resume spends a turn". The bar is disabled unless
+  the session is live, and a read device sees why instead of the
+  controls. Tests cover a read device refused, a send typed once for
+  one op, a resume launching once, a running one launching nothing,
+  trust answering the question once, the bad bodies, and the scope
+  lowered again; on the client the op per command, the three status
+  outcomes after a timeout, the one resend and the give-up, and the
+  refusals.
 
 ## Open questions
 

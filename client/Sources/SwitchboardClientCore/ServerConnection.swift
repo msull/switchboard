@@ -3,6 +3,29 @@ import SwitchboardProtocol
 import SwitchboardTransport
 
 /// Where one host stands (§6.2).
+/// What became of a command (§4.5).
+public enum CommandOutcome: Equatable, Sendable {
+    /// The host ran it, or had already.
+    case accepted
+    /// The host refused it and nothing ran; the reason is the host's.
+    case refused(String)
+    /// The host started it and the outcome is not known. The session's
+    /// state says what happened; it is never resubmitted.
+    case interrupted
+    /// No answer either way, and the host never saw it.
+    case unanswered(String)
+
+    /// A line for the window.
+    public var note: String? {
+        switch self {
+        case .accepted: return nil
+        case .refused(let why): return why
+        case .interrupted: return "The host started this; check the session."
+        case .unanswered(let why): return "No answer from the host: \(why)"
+        }
+    }
+}
+
 public enum ConnectionState: Equatable, Sendable {
     case discovered
     case unpaired
@@ -517,6 +540,52 @@ public actor ServerConnection {
     /// How many pages a follow-up of a change reads toward the end
     /// before it leaves the rest to the next change.
     public static let followHops = 10
+
+    /// A command under the control scope (§4.5). The op is made here
+    /// and is the idempotency key: a command that gets no answer is
+    /// followed by a status query, never a blind resend; `unknown`
+    /// means the host never saw it and it goes again with the same op,
+    /// `interrupted` means it started and the outcome is not known.
+    public func command(
+        _ session: String, _ verb: CommandVerb, text: String? = nil, op: String = UUID().uuidString
+    ) async -> CommandOutcome {
+        guard let api else { return .unanswered("not connected") }
+        for attempt in 0...1 {
+            do {
+                _ = try await api.command(session, verb, op: op, text: text)
+                return .accepted
+            } catch RemoteError.refused(let status, let code, let message) {
+                if status == 409 || code == "interrupted" { return .interrupted }
+                if status == 401 || (status == 403 && code != "scope") {
+                    handle(.refused(status: status, code: code, message: message))
+                }
+                return .refused(message)
+            } catch let error as RemoteError {
+                if case .pinMismatch = error {
+                    handle(error)
+                    return .unanswered("\(error)")
+                }
+                lastError = "\(error)"
+            } catch {
+                lastError = "\(error)"
+            }
+            // No answer either way: ask what became of the op.
+            switch await status(of: op) {
+            case .some(.done(failed: nil)): return .accepted
+            case .some(.done(failed: .some(let reason))): return .refused(reason)
+            case .some(.interrupted), .some(.inProgress): return .interrupted
+            case .some(.unknown): if attempt == 0 { continue }
+            case .none: break
+            }
+            break
+        }
+        return .unanswered(lastError ?? "no answer")
+    }
+
+    private func status(of op: String) async -> OpStatusView? {
+        guard let api else { return nil }
+        return try? await api.opStatus(op).body.status
+    }
 
     public func readConversation(_ session: String, from: Int?, limit: Int?) async {
         _ = await readConversation(session, from: from, before: nil, limit: limit)

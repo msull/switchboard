@@ -10,7 +10,7 @@ final class FixturesTests: XCTestCase {
     func testEveryFixtureDecodes() throws {
         let info: Envelope<ServerInfo> = try Fixtures.load("info")
         XCTAssertEqual(info.body.protocolVersion, RemoteProtocol.version)
-        XCTAssertEqual(info.body.capabilities, ["read"])
+        XCTAssertEqual(info.body.capabilities, ["read", "control"])
         XCTAssertEqual(info.body.spkiSha256.count, 64)
         XCTAssertEqual(info.body.limits.screenLines, 200)
         XCTAssertFalse(info.body.pairingOpen)
@@ -69,6 +69,19 @@ final class FixturesTests: XCTestCase {
         let output: Envelope<RunOutputBody> = try Fixtures.load("run_output")
         XCTAssertEqual(output.body.n, 1)
         XCTAssertTrue(output.body.text.hasPrefix("$ make"))
+
+        let command: Envelope<CommandBody> = try Fixtures.load("command")
+        XCTAssertEqual(command.body.made, [])
+        let status: Envelope<OpStatusBody> = try Fixtures.load("op_status")
+        XCTAssertEqual(status.body.status, .done(failed: nil))
+        let failed = try Wire.decode(
+            OpStatusBody.self,
+            from: Data(#"{"status":{"status":"done","reply":{"reply":"failed","reason":"not running"}}}"#.utf8))
+        XCTAssertEqual(failed.status, .done(failed: "not running"))
+        XCTAssertEqual(
+            try Wire.decode(OpStatusBody.self, from: Data(#"{"status":{"status":"interrupted"}}"#.utf8)).status,
+            .interrupted)
+        XCTAssertTrue(info.body.capabilities.contains("control"))
 
         let error = try Fixtures.decode(ErrorEnvelope.self, "error")
         XCTAssertEqual(error.error.code, "unauthorized")

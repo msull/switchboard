@@ -99,6 +99,9 @@ pub struct FakeHostState {
     pub spawned: Vec<SpawnSpec>,
     /// Every line `write_line` put in a pane, oldest first.
     pub written: Vec<(HostId, String)>,
+    /// Every raw `write` into a pane, oldest first: keys as well as
+    /// the bytes of each line.
+    pub keys: Vec<(HostId, Vec<u8>)>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -135,10 +138,11 @@ impl ProcessHost for FakeHost {
     fn snapshot(&self, id: &HostId, _lines: Option<usize>) -> std::io::Result<String> {
         Ok(self.state().snapshots.get(id).cloned().unwrap_or_default())
     }
-    fn write(&self, _id: &HostId, _bytes: &[u8]) -> std::io::Result<()> {
+    fn write(&self, id: &HostId, bytes: &[u8]) -> std::io::Result<()> {
         if let Some(e) = &self.state().fail_write {
             return Err(std::io::Error::other(e.clone()));
         }
+        self.state().keys.push((id.clone(), bytes.to_vec()));
         Ok(())
     }
     fn write_line(&self, id: &HostId, text: &str) -> std::io::Result<()> {

@@ -432,7 +432,7 @@ Across A1 to A4: README (Layout, dev aids, data directory) and the design.md sta
 - Live updates over the WebSocket through the watch set; scroll and disclosure restoration across incremental refetches and reconnects.
 - System dictation into the text field as the initial voice input.
 
-*C1 and C2 built 2026-10-13 (the content endpoints but `file.read`, the conversation paged and merged, the three modes drawn); see design.md's remote client status. `file.read`, the control scope, dictation and the policy reads off the frame remain.*
+*C1 and C2 built 2026-10-13 (the content endpoints but `file.read`, the conversation paged and merged, the three modes drawn), C3 the same day (`send`, `resume` and `trust` under the control scope through the control socket's `serve` and log, the op the key, `/ops/{op}` on a timeout; a control bar on a Claude session's window with the system keyboard's dictation); see design.md's remote client status. `file.read` and the policy reads off the frame remain.*
 
 ### Milestone D — Shared iPadOS shell
 
