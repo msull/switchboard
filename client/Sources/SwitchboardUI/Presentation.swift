@@ -64,14 +64,17 @@ public enum ScreenScale {
     public static let range = 0.5...3.0
     /// The sizes to snap to.
     public static let presets = [0.5, 0.75, 1.0, 1.5, 2.0]
-    /// The monospaced size at scale 1.
-    public static let basePoints = 15.0
-    /// The prose sizes at scale 1: an answer, a secondary line, a
-    /// caption, a smaller caption.
-    public static let prosePoints = 17.0
-    public static let calloutPoints = 16.0
-    public static let captionPoints = 12.0
-    public static let caption2Points = 11.0
+    /// The sizes at scale 1: three quarters of the system sizes, which
+    /// is what reads best on the headset at the distance a card window
+    /// usually sits, so the default is the size most windows want.
+    /// The monospaced size.
+    public static let basePoints = 11.25
+    /// The prose sizes: an answer, a secondary line, a caption, a
+    /// smaller caption.
+    public static let prosePoints = 12.75
+    public static let calloutPoints = 12.0
+    public static let captionPoints = 9.0
+    public static let caption2Points = 8.25
 
     public static func clamped(_ scale: Double) -> Double {
         min(max(scale, range.lowerBound), range.upperBound)
