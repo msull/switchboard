@@ -10,13 +10,18 @@ import XCTest
 final class PresentationTests: XCTestCase {
     let a = ServerID("11111111-1111-1111-1111-111111111111")
 
-    func testTheModesOfferedFollowTheKindAndTheMonospacedOnesScale() {
+    func testTheModesOfferedFollowTheKindAndAllButTheCardScale() {
         XCTAssertEqual(ViewMode.offered(for: .claude), [.compact, .screen, .lastResponse, .conversation])
         XCTAssertEqual(ViewMode.offered(for: .shell), [.compact, .screen])
         XCTAssertEqual(ViewMode.offered(for: .service), [.compact, .screen, .runOutput])
         XCTAssertTrue(ViewMode.screen.scalable)
         XCTAssertTrue(ViewMode.runOutput.scalable)
-        XCTAssertFalse(ViewMode.conversation.scalable)
+        XCTAssertTrue(ViewMode.conversation.scalable)
+        XCTAssertTrue(ViewMode.lastResponse.scalable)
+        XCTAssertFalse(ViewMode.compact.scalable)
+        XCTAssertGreaterThan(ScreenScale.prosePoints, ScreenScale.calloutPoints)
+        XCTAssertGreaterThan(ScreenScale.calloutPoints, ScreenScale.captionPoints)
+        XCTAssertGreaterThan(ScreenScale.captionPoints, ScreenScale.caption2Points)
     }
 
     func testTwoRequestsOnOneSessionAreTwoWindowsAndARequestRoundTrips() throws {

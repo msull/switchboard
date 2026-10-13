@@ -3320,9 +3320,12 @@ Built so far:
   host pill, the Sessions button an icon) so a tall narrow card, the
   shape the conversation and document modes will want, holds
   together, and the mode pills are mini and become icons when the
-  titles would wrap; the screen's text scales through a readout at
-  the end of the mode row that opens a slider and snap sizes (50 to
-  200 percent), kept per window while it is open and starting over in
+  titles would wrap; the text of every mode but the card (the screen,
+  the run output, the last response and the conversation, through an
+  environment value the prose views size their fonts from) scales
+  through a readout at the end of the mode row that opens a slider
+  and snap sizes (50 to 200 percent), kept per window while it is open
+  and starting over in
   a new one, since the comfortable size depends on where the window
   sits in the room. A pinch on the pane was tried first and did
   nothing on the headset, and a slider along the window's bottom edge

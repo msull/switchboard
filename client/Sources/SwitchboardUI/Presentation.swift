@@ -45,17 +45,20 @@ public enum ViewMode: String, Codable, CaseIterable, Sendable, Identifiable {
         }
     }
 
-    /// Whether the mode shows monospaced text the window scales.
+    /// Whether the mode shows text the window scales: everything but
+    /// the card, whose few lines are fine at the system size.
     public var scalable: Bool {
         switch self {
-        case .screen, .runOutput: return true
-        case .compact, .lastResponse, .conversation: return false
+        case .screen, .runOutput, .lastResponse, .conversation: return true
+        case .compact: return false
         }
     }
 }
 
-/// The screen's text scale in a card window: a multiplier on the
-/// base type size, set by a slider or snapped to a preset.
+/// The text scale in a card window: a multiplier on the base type
+/// sizes, set by a slider or snapped to a preset. The monospaced
+/// modes and the prose ones share it, so switching modes keeps the
+/// size the window was set to.
 public enum ScreenScale {
     public static let initial = 1.0
     public static let range = 0.5...3.0
@@ -63,6 +66,12 @@ public enum ScreenScale {
     public static let presets = [0.5, 0.75, 1.0, 1.5, 2.0]
     /// The monospaced size at scale 1.
     public static let basePoints = 15.0
+    /// The prose sizes at scale 1: an answer, a secondary line, a
+    /// caption, a smaller caption.
+    public static let prosePoints = 17.0
+    public static let calloutPoints = 16.0
+    public static let captionPoints = 12.0
+    public static let caption2Points = 11.0
 
     public static func clamped(_ scale: Double) -> Double {
         min(max(scale, range.lowerBound), range.upperBound)

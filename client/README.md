@@ -54,7 +54,7 @@ scripts/sim.sh run               # the visionOS app on the simulator (below)
   with its inline Markdown), `conversation` (turns with the activity
   folded, earlier pages on demand, the end following the host) and
   `run_output` (a run picker and the tail) modes (the screen holds a watch while it is on screen, and
-  its text scales through a readout in the mode row that opens a
+  the text of every mode but the card scales through a readout in the mode row that opens a
   slider and the snap sizes, `ScreenScale`, as state of the window:
   kept across a mode switch, gone when it closes), a small header (the
   host pill and an icon-only Sessions button) and mode pills that

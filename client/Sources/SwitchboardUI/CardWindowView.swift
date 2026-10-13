@@ -10,8 +10,8 @@ public struct CardWindowView: View {
     @Bindable var model: BrowserModel
     public let request: CardWindowRequest
     @State private var mode: ViewMode = .compact
-    /// The screen's text scale: window state, so it survives a mode
-    /// switch and goes with the window, and a new window starts at 1.
+    /// The text scale: window state, so it survives a mode switch and
+    /// goes with the window, and a new window starts at 1.
     @State private var screenScale = ScreenScale.initial
     @State private var scalePopover = false
     @Environment(\.openWindow) private var openWindow
@@ -181,9 +181,9 @@ public struct CardWindowView: View {
         case .screen:
             ScreenView(model: model, ref: item.ref, scale: screenScale)
         case .lastResponse:
-            LastResponseView(model: model, ref: item.ref)
+            LastResponseView(model: model, ref: item.ref).environment(\.textScale, screenScale)
         case .conversation:
-            ConversationView(model: model, ref: item.ref)
+            ConversationView(model: model, ref: item.ref).environment(\.textScale, screenScale)
         case .runOutput:
             RunOutputView(model: model, ref: item.ref, scale: screenScale)
         }
@@ -195,20 +195,49 @@ func clock(_ ms: UInt64?) -> String? {
     ms.map { Date(timeIntervalSince1970: Double($0) / 1000).formatted(date: .omitted, time: .shortened) }
 }
 
+/// The window's text scale, handed down to the prose views so every
+/// line in them sizes off the one control.
+private struct TextScaleKey: EnvironmentKey {
+    static let defaultValue = ScreenScale.initial
+}
+
+extension EnvironmentValues {
+    var textScale: Double {
+        get { self[TextScaleKey.self] }
+        set { self[TextScaleKey.self] = newValue }
+    }
+}
+
+/// The prose fonts at a scale.
+enum Scaled {
+    static func prose(_ scale: Double) -> Font { .system(size: ScreenScale.prosePoints * scale) }
+    static func callout(_ scale: Double) -> Font { .system(size: ScreenScale.calloutPoints * scale) }
+    static func caption(_ scale: Double) -> Font { .system(size: ScreenScale.captionPoints * scale) }
+    static func caption2(_ scale: Double) -> Font { .system(size: ScreenScale.caption2Points * scale) }
+    static func mono(_ scale: Double) -> Font {
+        .system(size: ScreenScale.captionPoints * scale, design: .monospaced)
+    }
+}
+
 /// Text the agent wrote, with its Markdown read where it parses and
 /// shown plain where it does not.
 struct AgentText: View {
     let text: String
+    @Environment(\.textScale) private var scale
 
     var body: some View {
-        if let rich = try? AttributedString(
-            markdown: text,
-            options: AttributedString.MarkdownParsingOptions(interpretedSyntax: .inlineOnlyPreservingWhitespace))
-        {
-            Text(rich).textSelection(.enabled)
-        } else {
-            Text(text).textSelection(.enabled)
+        Group {
+            if let rich = try? AttributedString(
+                markdown: text,
+                options: AttributedString.MarkdownParsingOptions(interpretedSyntax: .inlineOnlyPreservingWhitespace))
+            {
+                Text(rich)
+            } else {
+                Text(text)
+            }
         }
+        .font(Scaled.prose(scale))
+        .textSelection(.enabled)
     }
 }
 
@@ -217,6 +246,7 @@ struct AgentText: View {
 struct LastResponseView: View {
     @Bindable var model: BrowserModel
     let ref: SessionRef
+    @Environment(\.textScale) private var scale
 
     var body: some View {
         Group {
@@ -232,7 +262,7 @@ struct LastResponseView: View {
                                     if let at = clock(last.endMs) { Text("· \(at)") }
                                     if last.truncated { Text("· cut at the host's cap") }
                                 }
-                                .font(.caption).foregroundStyle(.secondary)
+                                .font(Scaled.caption(scale)).foregroundStyle(.secondary)
                                 AgentText(text: last.text)
                                     .frame(maxWidth: .infinity, alignment: .leading)
                                 Color.clear.frame(height: 1).id("end")
@@ -331,17 +361,18 @@ struct ConversationView: View {
 struct TurnRow: View {
     let turn: TurnView
     @State private var open = false
+    @Environment(\.textScale) private var scale
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(alignment: .firstTextBaseline) {
-                Text("\(turn.n)").font(.caption.monospacedDigit()).foregroundStyle(.secondary)
-                Text(turn.user).textSelection(.enabled)
+                Text("\(turn.n)").font(Scaled.caption(scale).monospacedDigit()).foregroundStyle(.secondary)
+                Text(turn.user).font(Scaled.prose(scale)).textSelection(.enabled)
                     .padding(8)
                     .background(.quaternary, in: RoundedRectangle(cornerRadius: 8))
                 Spacer(minLength: 0)
                 if let at = clock(turn.atMs) {
-                    Text(at).font(.caption2).foregroundStyle(.secondary)
+                    Text(at).font(Scaled.caption2(scale)).foregroundStyle(.secondary)
                 }
             }
             if !turn.activity.isEmpty {
@@ -353,17 +384,17 @@ struct TurnRow: View {
                     }
                     .padding(.leading, 8)
                 } label: {
-                    Text(summary).font(.caption).foregroundStyle(.secondary)
+                    Text(summary).font(Scaled.caption(scale)).foregroundStyle(.secondary)
                 }
             }
             if turn.finalText.isEmpty {
                 Text(turn.endMs == nil ? "working…" : "(no answer)")
-                    .font(.callout).foregroundStyle(.secondary)
+                    .font(Scaled.callout(scale)).foregroundStyle(.secondary)
             } else {
                 AgentText(text: turn.finalText)
             }
             if turn.truncated {
-                Text("Cut at the host's turn cap.").font(.caption2).foregroundStyle(.secondary)
+                Text("Cut at the host's turn cap.").font(Scaled.caption2(scale)).foregroundStyle(.secondary)
             }
         }
     }
@@ -383,17 +414,18 @@ struct TurnRow: View {
 struct ActivityRow: View {
     let activity: ActivityView
     @State private var open = false
+    @Environment(\.textScale) private var scale
 
     var body: some View {
         if let detail = activity.detail {
             DisclosureGroup(isExpanded: $open) {
                 VStack(alignment: .leading, spacing: 4) {
                     if !detail.input.isEmpty {
-                        Text(detail.input).font(.system(.caption, design: .monospaced)).textSelection(.enabled)
+                        Text(detail.input).font(Scaled.mono(scale)).textSelection(.enabled)
                     }
                     if !detail.result.isEmpty {
                         Divider()
-                        Text(detail.result).font(.system(.caption, design: .monospaced)).textSelection(.enabled)
+                        Text(detail.result).font(Scaled.mono(scale)).textSelection(.enabled)
                     }
                 }
                 .padding(.leading, 8)
@@ -407,8 +439,8 @@ struct ActivityRow: View {
 
     private var line: some View {
         HStack(alignment: .firstTextBaseline, spacing: 4) {
-            Image(systemName: symbol).font(.caption2)
-            Text(activity.text ?? activity.line).font(.callout)
+            Image(systemName: symbol).font(Scaled.caption2(scale))
+            Text(activity.text ?? activity.line).font(Scaled.callout(scale))
                 .foregroundStyle(activity.error ? AnyShapeStyle(.red) : AnyShapeStyle(.primary))
                 .textSelection(.enabled)
         }
