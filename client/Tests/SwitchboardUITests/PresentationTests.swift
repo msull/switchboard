@@ -235,4 +235,41 @@ final class BrowsingTests: XCTestCase {
         XCTAssertNil(state.openWindow(on: r2, appeared: appeared), "a saved window not on screen this run is not it")
         XCTAssertNil(state.openWindow(on: SessionRef(serverID: a, recordID: "r3"), appeared: appeared))
     }
+
+    func testUtterancesCommitTheLiveOneWhenTheNextStartsLater() {
+        var u = Utterances()
+        u.take("fix the", start: 0.3, finished: false)
+        u.take("fix the test", start: 0.4, finished: false)
+        XCTAssertEqual(u.heard, "fix the test")
+        XCTAssertEqual(u.live, "fix the test")
+        // After a pause the recognizer covers only the new phrase, from later in the audio.
+        u.take("and run it", start: 3.1, finished: false)
+        XCTAssertEqual(u.committed, "fix the test")
+        XCTAssertEqual(u.heard, "fix the test and run it")
+        u.take("and run it twice", start: 3.1, finished: true)
+        XCTAssertEqual(u.committed, "fix the test and run it twice")
+        XCTAssertEqual(u.live, "")
+        // The next task's audio starts over at zero; its first result is a new utterance.
+        u.take("then push", start: 0.2, finished: false)
+        XCTAssertEqual(u.heard, "fix the test and run it twice then push")
+    }
+
+    func testAnEditInsideTheLiveUtteranceDropsItsRevisions() {
+        var u = Utterances()
+        u.take("hello", start: 0.1, finished: false)
+        u.take("world", start: 2.0, finished: false)
+        u.absorb(keepingLive: false)
+        XCTAssertEqual(u.heard, "")
+        u.take("world again", start: 2.0, finished: false)
+        XCTAssertEqual(u.heard, "", "a revision of the edited utterance is dropped")
+        u.take("next", start: 4.0, finished: false)
+        XCTAssertEqual(u.heard, "next")
+        var kept = Utterances()
+        kept.take("hello", start: 0.1, finished: false)
+        kept.take("world", start: 2.0, finished: false)
+        kept.absorb(keepingLive: true)
+        XCTAssertEqual(kept.heard, "world")
+        kept.take("world again", start: 2.0, finished: false)
+        XCTAssertEqual(kept.heard, "world again")
+    }
 }

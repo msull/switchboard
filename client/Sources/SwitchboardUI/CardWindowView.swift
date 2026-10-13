@@ -273,6 +273,22 @@ struct ControlBar: View {
                     .onChange(of: dictation.heard) { _, heard in
                         draft = Dictation.joined(typedBeforeDictation, heard)
                     }
+                    .onChange(of: draft) { _, draft in
+                        // An edit by hand while listening: the text is
+                        // the field's now, and what is heard next goes
+                        // after it. The live utterance goes on revising
+                        // when it is still whole at the end.
+                        guard dictation.listening, draft != Dictation.joined(typedBeforeDictation, dictation.heard)
+                        else { return }
+                        let live = dictation.live.trimmingCharacters(in: .whitespaces)
+                        if !live.isEmpty, draft.hasSuffix(live) {
+                            typedBeforeDictation = String(draft.dropLast(live.count))
+                            dictation.absorb(keepingLive: true)
+                        } else {
+                            typedBeforeDictation = draft
+                            dictation.absorb(keepingLive: false)
+                        }
+                    }
                     .onChange(of: dictation.problem) { _, problem in
                         if let problem { note = problem }
                     }

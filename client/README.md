@@ -7,7 +7,7 @@ macOS 14, iOS 17 and visionOS 1.
 
 ```sh
 swift build                      # every target
-swift test                       # 52 tests: fixtures, commands, pinning, the connection core, events, watches, conversations, presentation, browsing
+swift test                       # 54 tests: fixtures, commands, pinning, the connection core, events, watches, conversations, presentation, browsing
 swift run switchboard-remote     # the command-line browser (usage below)
 scripts/sim.sh run               # the visionOS app on the simulator (below)
 ```
@@ -72,7 +72,11 @@ scripts/sim.sh run               # the visionOS app on the simulator (below)
   Claude session a control bar (`ControlBar`): a message field with
   Send and a microphone button that starts dictation at once through
   the Speech framework (`Dictation`: on-device recognition where the
-  device has it, what is heard revised in place after what was typed;
+  device has it; what is heard goes after what was typed as utterances,
+  `Utterances`, the finished ones kept and the live one revised in
+  place, since the recognizer starts over after a pause and would
+  otherwise replace the earlier phrase; a hand edit while listening
+  keeps the field's text and the live utterance goes on after it;
   the system keyboard's own mic still works; visionOS gives an app no
   gaze or dwell event and "look to dictate" belongs to search fields
   only, so the button is a tap), "Trust
