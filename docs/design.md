@@ -3316,10 +3316,15 @@ Built so far:
   From the first hours with it: the card header is small (a short
   host pill, the Sessions button an icon) so a tall narrow card, the
   shape the conversation and document modes will want, holds
-  together; and the screen's text scales by a slider under the pane
-  and by a pinch on it, kept per window while it is open and starting
-  over in a new one, since the comfortable size depends on where the
-  window sits in the room.
+  together, and the mode pills are mini and become icons when the
+  titles would wrap; the screen's text scales through a readout at
+  the end of the mode row that opens a slider and snap sizes (50 to
+  200 percent), kept per window while it is open and starting over in
+  a new one, since the comfortable size depends on where the window
+  sits in the room. A pinch on the pane was tried first and did
+  nothing on the headset, and a slider along the window's bottom edge
+  was hard to take hold of next to the system's own bar, so the
+  control moved up; the pinch may come back later.
   Milestone B runs on the headset, installed from the terminal with
   `client/scripts/device.sh` once the one-time Xcode setup was done
   (Developer Mode, the device paired in Xcode's Devices window, one

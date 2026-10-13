@@ -24,6 +24,17 @@ public enum ViewMode: String, Codable, CaseIterable, Sendable, Identifiable {
         }
     }
 
+    /// The icon that stands for the mode when the titles do not fit.
+    public var symbol: String {
+        switch self {
+        case .compact: return "rectangle.on.rectangle"
+        case .screen: return "terminal"
+        case .lastResponse: return "text.bubble"
+        case .conversation: return "bubble.left.and.bubble.right"
+        case .runOutput: return "doc.plaintext"
+        }
+    }
+
     /// The modes a session of `kind` can take, in the order the window
     /// offers them.
     public static func offered(for kind: SessionKind) -> [ViewMode] {
@@ -50,10 +61,12 @@ public enum ViewMode: String, Codable, CaseIterable, Sendable, Identifiable {
 /// What a card window is opened on: a qualified session and an id of
 /// its own, so two windows on one session are two windows.
 /// The screen's text scale in a card window: a multiplier on the
-/// base type size that a slider and a pinch both set.
+/// base type size, set by a slider or snapped to a preset.
 public enum ScreenScale {
     public static let initial = 1.0
     public static let range = 0.5...3.0
+    /// The sizes to snap to.
+    public static let presets = [0.5, 0.75, 1.0, 1.5, 2.0]
     /// The monospaced size at scale 1.
     public static let basePoints = 15.0
 

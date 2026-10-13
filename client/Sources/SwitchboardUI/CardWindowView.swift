@@ -13,6 +13,7 @@ public struct CardWindowView: View {
     /// The screen's text scale: window state, so it survives a mode
     /// switch and goes with the window, and a new window starts at 1.
     @State private var screenScale = ScreenScale.initial
+    @State private var scalePopover = false
     @Environment(\.openWindow) private var openWindow
 
     public init(model: BrowserModel, request: CardWindowRequest) {
@@ -97,13 +98,16 @@ public struct CardWindowView: View {
 
     private func modeRow(for kind: SessionKind) -> some View {
         VStack(alignment: .leading, spacing: 4) {
-            HStack {
-                ForEach(ViewMode.offered(for: kind)) { offered in
-                    Button(offered.title) { mode = offered }
-                        .buttonStyle(.bordered)
-                        .controlSize(.small)
-                        .tint(offered == mode ? .accentColor : nil)
-                        .disabled(!offered.drawn || !standing.controlsEnabled)
+            HStack(spacing: 6) {
+                // The pills never wrap: when the titles do not fit the
+                // width, the row is icons instead.
+                ViewThatFits(in: .horizontal) {
+                    modeButtons(for: kind, titled: true)
+                    modeButtons(for: kind, titled: false)
+                }
+                Spacer(minLength: 0)
+                if mode == .screen {
+                    scaleControl
                 }
             }
             if ViewMode.offered(for: kind).contains(where: { !$0.drawn }) {
@@ -113,13 +117,73 @@ public struct CardWindowView: View {
         }
     }
 
+    private func modeButtons(for kind: SessionKind, titled: Bool) -> some View {
+        HStack(spacing: 4) {
+            ForEach(ViewMode.offered(for: kind)) { offered in
+                Button {
+                    mode = offered
+                } label: {
+                    if titled {
+                        Text(offered.title)
+                    } else {
+                        Image(systemName: offered.symbol)
+                    }
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.mini)
+                .tint(offered == mode ? .accentColor : nil)
+                .disabled(!offered.drawn || !standing.controlsEnabled)
+                .accessibilityLabel(offered.title)
+                .help(offered.title)
+            }
+        }
+        // The full width is what `ViewThatFits` must measure; a pill
+        // that could shrink by truncating its title would always fit.
+        .fixedSize(horizontal: true, vertical: false)
+    }
+
+    /// The screen's text scale: a small readout that opens a slider
+    /// and the snap sizes, kept out of the window's bottom edge where
+    /// the system's own controls sit.
+    private var scaleControl: some View {
+        Button {
+            scalePopover.toggle()
+        } label: {
+            Label(ScreenScale.label(screenScale), systemImage: "textformat.size")
+                .font(.caption2.monospacedDigit())
+        }
+        .buttonStyle(.bordered)
+        .controlSize(.mini)
+        .accessibilityLabel("Text size")
+        .popover(isPresented: $scalePopover) {
+            VStack(spacing: 12) {
+                HStack(spacing: 6) {
+                    Image(systemName: "textformat.size.smaller")
+                    Slider(value: $screenScale, in: ScreenScale.range)
+                    Image(systemName: "textformat.size.larger")
+                }
+                .foregroundStyle(.secondary)
+                HStack(spacing: 6) {
+                    ForEach(ScreenScale.presets, id: \.self) { preset in
+                        Button(ScreenScale.label(preset)) { screenScale = preset }
+                            .buttonStyle(.bordered)
+                            .controlSize(.small)
+                            .tint(preset == screenScale ? .accentColor : nil)
+                    }
+                }
+            }
+            .padding()
+            .frame(width: 360)
+        }
+    }
+
     @ViewBuilder
     private func content(_ item: UnifiedSession) -> some View {
         switch mode {
         case .compact:
             CompactDetailView(item: item)
         case .screen:
-            ScreenView(model: model, ref: item.ref, scale: $screenScale)
+            ScreenView(model: model, ref: item.ref, scale: screenScale)
         case .lastResponse, .conversation, .runOutput:
             VStack {
                 Spacer()
@@ -168,14 +232,11 @@ struct CompactDetailView: View {
 
 /// The pane's text, live through a watch held while the view is on
 /// screen; the last read stays up when the host goes away. The text
-/// is scaled by a slider and by a pinch, both onto one value the
-/// window owns.
+/// is drawn at the scale the window chose.
 struct ScreenView: View {
     @Bindable var model: BrowserModel
     let ref: SessionRef
-    @Binding var scale: Double
-    /// The scale when a pinch began, which the pinch multiplies.
-    @State private var pinchFrom: Double?
+    let scale: Double
 
     var body: some View {
         Group {
@@ -195,14 +256,12 @@ struct ScreenView: View {
                             }
                             .frame(minWidth: viewport.size.width, minHeight: viewport.size.height, alignment: .topLeading)
                         }
-                        .gesture(pinch)
                         .onChange(of: screen.text) { _, _ in
                             proxy.scrollTo("end", anchor: .bottom)
                         }
                         .onAppear { proxy.scrollTo("end", anchor: .bottom) }
                     }
                 }
-                scaleRow
                 if screen.truncated {
                     Text("Cut at the host's size cap.").font(.caption2).foregroundStyle(.secondary)
                 }
@@ -226,30 +285,5 @@ struct ScreenView: View {
             }
             await model.unwatch(ref)
         }
-    }
-
-    private var scaleRow: some View {
-        HStack(spacing: 6) {
-            Image(systemName: "textformat.size.smaller")
-            Slider(value: $scale, in: ScreenScale.range)
-            Image(systemName: "textformat.size.larger")
-            Text(ScreenScale.label(scale))
-                .font(.caption2.monospacedDigit())
-                .frame(width: 40, alignment: .trailing)
-        }
-        .controlSize(.mini)
-        .font(.caption)
-        .foregroundStyle(.secondary)
-        .accessibilityLabel("Text size")
-    }
-
-    private var pinch: some Gesture {
-        MagnifyGesture()
-            .onChanged { value in
-                let from = pinchFrom ?? scale
-                pinchFrom = from
-                scale = ScreenScale.clamped(from * value.magnification)
-            }
-            .onEnded { _ in pinchFrom = nil }
     }
 }

@@ -150,5 +150,9 @@ final class BrowsingTests: XCTestCase {
         XCTAssertEqual(ScreenScale.clamped(1.5), 1.5)
         XCTAssertEqual(ScreenScale.label(1), "100%")
         XCTAssertEqual(ScreenScale.label(1.256), "126%")
+        XCTAssertEqual(ScreenScale.presets.map(ScreenScale.label), ["50%", "75%", "100%", "150%", "200%"])
+        XCTAssertTrue(ScreenScale.presets.allSatisfy { ScreenScale.range.contains($0) })
+        XCTAssertTrue(ScreenScale.presets.contains(ScreenScale.initial))
+        XCTAssertEqual(Set(ViewMode.allCases.map(\.symbol)).count, ViewMode.allCases.count, "every mode has its own icon")
     }
 }
