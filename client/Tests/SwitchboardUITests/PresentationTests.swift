@@ -279,6 +279,21 @@ final class BrowsingTests: XCTestCase {
         XCTAssertEqual(u.heard, "Fix the test. and run it")
     }
 
+    /// The prompt window marks the live utterance in amber by the
+    /// draft's byte range, which the host counts in UTF-8.
+    func testThePromptWindowMarksTheLiveUtterance() {
+        let draft = DraftView(text: "Fix the café. and run it", live: [15, 25], status: "listening")
+        XCTAssertEqual(draft.liveText, "and run it")
+        let marked = PromptWindowView.marked(draft)
+        let runs = marked.runs.map { (String(marked[$0.range].characters), $0.foregroundColor != nil) }
+        XCTAssertEqual(runs.map(\.0), ["Fix the café. ", "and run it"])
+        XCTAssertEqual(runs.map(\.1), [false, true])
+        let plain = PromptWindowView.marked(DraftView(text: "done"))
+        XCTAssertEqual(plain.runs.count, 1)
+        XCTAssertNil(DraftView(text: "x", live: [0, 9]).liveText, "a range past the text marks nothing")
+        XCTAssertNotEqual(PromptWindow.id, MainWindow.id)
+    }
+
     func testTheRecognizerClosesAnUtteranceBySendingItsWordsAgainLater() {
         var u = Utterances()
         u.take("fix the test", start: 0.4, finished: false)

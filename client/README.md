@@ -7,7 +7,7 @@ macOS 14, iOS 17 and visionOS 1.
 
 ```sh
 swift build                      # every target
-swift test                       # 60 tests: fixtures, commands, pinning, the connection core, events, watches, conversations, the draft, presentation, browsing
+swift test                       # 61 tests: fixtures, commands, pinning, the connection core, events, watches, conversations, the draft, presentation, browsing
 swift run switchboard-remote     # the command-line browser (usage below)
 scripts/sim.sh run               # the visionOS app on the simulator (below)
 ```
@@ -98,7 +98,16 @@ scripts/sim.sh run               # the visionOS app on the simulator (below)
   caption says when the host's editor is listening or degraded. On an
   older host the field is the device's own, what is heard goes after
   what was typed, and a hand edit while listening keeps the field's
-  text with the live utterance going on after it; "Trust
+  text with the live utterance going on after it; the prompt window
+  (`PromptWindowView`, one per app like the main window, opened from
+  a card's header or the Sessions toolbar): the whole draft of the
+  session whose input is active (`BrowserModel.activeInput`, the last
+  one a control bar typed, dictated or used a tool in), large and
+  scaled (`ScaleControl`), the live utterance in amber, with a
+  microphone, the tools and Send of its own, placed once and left
+  where it is while the cards come and go, as the desktop preview is
+  used with the Working Set; it is a view of the host's editor and
+  changes nothing else; "Trust
   this folder" when the host says the question is up, and Resume for a
   session that is not running, behind "Resume spends a turn"; a read
   device sees why the bar is off instead; the

@@ -31,8 +31,8 @@ public struct DraftView: Codable, Sendable, Equatable {
         self.busy = busy
     }
 
-    /// The live utterance's text, for a view that marks it.
-    public var liveText: Substring? {
+    /// The live utterance's range in the text, for a view that marks it.
+    public var liveRange: Range<String.Index>? {
         guard let live, live.count == 2 else { return nil }
         let utf8 = text.utf8
         guard live[0] <= live[1], live[1] <= utf8.count,
@@ -40,7 +40,12 @@ public struct DraftView: Codable, Sendable, Equatable {
             let end = utf8.index(utf8.startIndex, offsetBy: live[1], limitedBy: utf8.endIndex),
             let s = start.samePosition(in: text), let e = end.samePosition(in: text)
         else { return nil }
-        return text[s..<e]
+        return s..<e
+    }
+
+    /// The live utterance's text.
+    public var liveText: Substring? {
+        liveRange.map { text[$0] }
     }
 
     public var listening: Bool { status == "listening" || status == "finishing" }

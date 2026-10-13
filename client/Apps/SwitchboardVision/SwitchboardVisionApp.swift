@@ -33,6 +33,16 @@ struct SwitchboardVisionApp: App {
             }
         }
         .defaultSize(width: 760, height: 560)
+        // The prompt window, one per app like the main one: the whole
+        // draft of the session whose input is active, placed once and
+        // left where it is while the cards come and go.
+        WindowGroup("Prompt", id: PromptWindow.id, for: Int.self) { _ in
+            PromptWindowView(model: model)
+                .task { await model.boot(invite: Self.inviteFromEnvironment) }
+        } defaultValue: {
+            PromptWindow.value
+        }
+        .defaultSize(width: 900, height: 420)
     }
 
     /// A dev aid: `SWITCHBOARD_INVITE` holds invites' JSON (the text of

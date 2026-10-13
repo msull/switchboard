@@ -66,6 +66,14 @@ public struct RootView: View {
             NavigationStack {
                 BrowserView(model: model)
                     .navigationTitle("Sessions")
+                    .toolbar {
+                        Button {
+                            openWindow(id: PromptWindow.id, value: PromptWindow.value)
+                        } label: {
+                            Label("Prompt window", systemImage: "text.alignleft")
+                        }
+                        .help("The prompt window: the whole draft of the session being worked on")
+                    }
             }
             .tabItem { Label("Sessions", systemImage: "rectangle.grid.2x2") }
             NavigationStack {

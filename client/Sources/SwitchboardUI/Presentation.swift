@@ -147,6 +147,13 @@ public enum MainWindow {
     public static let value = 0
 }
 
+/// The prompt window, one per app: the whole draft of the session whose
+/// input is active, with the editor's tools, wherever it is placed.
+public enum PromptWindow {
+    public static let id = "prompt"
+    public static let value = 0
+}
+
 /// Whether a card window should bring the main window back at launch.
 /// visionOS restores the windows that were open when the app last
 /// quit, so a run that ended with only card windows comes back

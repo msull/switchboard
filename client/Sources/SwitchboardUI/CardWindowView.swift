@@ -13,7 +13,6 @@ public struct CardWindowView: View {
     /// The text scale: window state, so it survives a mode switch and
     /// goes with the window, and a new window starts at 1.
     @State private var screenScale = ScreenScale.initial
-    @State private var scalePopover = false
     @Environment(\.openWindow) private var openWindow
 
     public init(model: BrowserModel, request: CardWindowRequest) {
@@ -88,6 +87,17 @@ public struct CardWindowView: View {
             // Icon only, and small: a tall narrow card has no room for
             // a word here.
             Button {
+                openWindow(id: PromptWindow.id, value: PromptWindow.value)
+            } label: {
+                Image(systemName: "text.alignleft")
+                    .font(.caption)
+            }
+            .buttonStyle(.bordered)
+            .buttonBorderShape(.circle)
+            .controlSize(.mini)
+            .accessibilityLabel("Prompt window")
+            .help("The prompt window: the whole draft of the session being worked on")
+            Button {
                 openWindow(id: MainWindow.id, value: MainWindow.value)
             } label: {
                 Image(systemName: "rectangle.grid.2x2")
@@ -143,40 +153,8 @@ public struct CardWindowView: View {
         .fixedSize(horizontal: true, vertical: false)
     }
 
-    /// The screen's text scale: a small readout that opens a slider
-    /// and the snap sizes, kept out of the window's bottom edge where
-    /// the system's own controls sit.
     private var scaleControl: some View {
-        Button {
-            scalePopover.toggle()
-        } label: {
-            Label(ScreenScale.label(screenScale), systemImage: "textformat.size")
-                .font(.caption2.monospacedDigit())
-        }
-        .buttonStyle(.bordered)
-        .controlSize(.mini)
-        .accessibilityLabel("Text size")
-        .popover(isPresented: $scalePopover) {
-            VStack(spacing: 12) {
-                HStack(spacing: 6) {
-                    Image(systemName: "textformat.size.smaller")
-                    Slider(value: $screenScale, in: ScreenScale.range)
-                    Image(systemName: "textformat.size.larger")
-                }
-                .foregroundStyle(.secondary)
-                HStack(spacing: 6) {
-                    ForEach(ScreenScale.presets, id: \.self) { preset in
-                        Button(ScreenScale.label(preset)) { screenScale = preset }
-                            .buttonStyle(.bordered)
-                            .controlSize(.small)
-                            .fixedSize()
-                            .tint(preset == screenScale ? .accentColor : nil)
-                    }
-                }
-            }
-            .padding()
-            .frame(width: 440)
-        }
+        ScaleControl(scale: $screenScale)
     }
 
     @ViewBuilder
@@ -193,6 +171,47 @@ public struct CardWindowView: View {
                 .environment(\.textScale, screenScale)
         case .runOutput:
             RunOutputView(model: model, ref: item.ref, scale: screenScale)
+        }
+    }
+}
+
+/// A text scale: a small readout that opens a slider and the snap
+/// sizes, kept out of the window's bottom edge where the system's own
+/// controls sit.
+struct ScaleControl: View {
+    @Binding var scale: Double
+    @State private var popover = false
+
+    var body: some View {
+        Button {
+            popover.toggle()
+        } label: {
+            Label(ScreenScale.label(scale), systemImage: "textformat.size")
+                .font(.caption2.monospacedDigit())
+        }
+        .buttonStyle(.bordered)
+        .controlSize(.mini)
+        .accessibilityLabel("Text size")
+        .popover(isPresented: $popover) {
+            VStack(spacing: 12) {
+                HStack(spacing: 6) {
+                    Image(systemName: "textformat.size.smaller")
+                    Slider(value: $scale, in: ScreenScale.range)
+                    Image(systemName: "textformat.size.larger")
+                }
+                .foregroundStyle(.secondary)
+                HStack(spacing: 6) {
+                    ForEach(ScreenScale.presets, id: \.self) { preset in
+                        Button(ScreenScale.label(preset)) { scale = preset }
+                            .buttonStyle(.bordered)
+                            .controlSize(.small)
+                            .fixedSize()
+                            .tint(preset == scale ? .accentColor : nil)
+                    }
+                }
+            }
+            .padding()
+            .frame(width: 440)
         }
     }
 }

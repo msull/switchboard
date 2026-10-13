@@ -3436,7 +3436,11 @@ Built so far:
   the text once it pauses, dictation goes as speech events in order
   with a recognizer session per run, the tools sit above the field,
   Send goes through the draft under an op, and `changed {draft}`
-  re-reads what a bar holds. Known gaps: the AI
+  re-reads what a bar holds. The prompt window on the headset
+  (`PromptWindowView`, one per app) shows the whole draft of the
+  session whose input is active, the live utterance in amber, with a
+  microphone, the tools and Send, the desktop preview's role for the
+  Working Set. Known gaps: the AI
   pass runs in the editor's worker, pumped by the host's frame, so a
   host whose window is occluded finishes it on its next frame; the
   Mac's own voice runtime and a device dictate into the same editor
