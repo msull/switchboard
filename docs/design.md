@@ -3255,6 +3255,17 @@ Built so far:
   paired subscriber keeps receiving. Not in A4: the conversation, file
   and run-output content kinds (Milestone C), which take the same
   worker and cache.
+- **B1, the app shell.** The visionOS app is an xcodegen project
+  (`client/project.yml`, the `.xcodeproj` git-ignored) with one thin
+  target over the package: the entry declares the main window and
+  where the registry lives, and `RootView` in `SwitchboardUI` draws
+  the sessions and hosts tabs, so the iPad shell will reuse it.
+  Bonjour on visionOS needs the service and the local-network reason
+  in `Info.plist`. `scripts/sim.sh` builds, installs, launches and
+  screenshots the app on the simulator from the terminal, and a
+  launch-time `SWITCHBOARD_INVITE` pairs it with a host without
+  typing. Measured: the simulator paired with a throwaway host on this
+  Mac and listed its sessions under the source label.
 
 ## Open questions
 

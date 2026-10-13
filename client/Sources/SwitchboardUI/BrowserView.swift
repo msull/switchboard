@@ -33,6 +33,18 @@ public final class BrowserModel {
         pump?.cancel()
     }
 
+    /// Load the registry, pair with `invite` if one is given (a dev
+    /// aid), start the manager's loop with Bonjour, and mirror its
+    /// store; the apps call this once from their first scene.
+    public func boot(invite: String? = nil) async {
+        try? await manager.load()
+        if let invite, let parsed = try? PairingInvite.parse(invite) {
+            try? await manager.pair(invite: parsed)
+        }
+        await manager.start()
+        start()
+    }
+
     public func pull() async {
         store = await manager.store
         discovered = await manager.discovered.map {

@@ -6,3 +6,6 @@ target/
 # The Swift package's build products.
 client/.build/
 client/.swiftpm/
+# The Xcode project xcodegen writes from client/project.yml, and its build products.
+client/*.xcodeproj/
+client/build/

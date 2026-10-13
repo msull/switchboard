@@ -9,6 +9,7 @@ macOS 14, iOS 17 and visionOS 1.
 swift build                      # every target
 swift test                       # 29 tests: fixtures, pinning, the connection core, events, watches
 swift run switchboard-remote     # the command-line browser (usage below)
+scripts/sim.sh run               # the visionOS app on the simulator (below)
 ```
 
 ## Modules (§7 of the spec)
@@ -39,8 +40,44 @@ swift run switchboard-remote     # the command-line browser (usage below)
   `changed` past its held revision), and `ConnectionManager`
   with the unified store, filters and the cross-host order; its loop
   only retries hosts that are not connected.
-- `SwitchboardUI`: `BrowserView`, `SessionCardView`, `SourceLabel` and
-  `ServersView` in SwiftUI, over a `BrowserModel`.
+- `SwitchboardUI`: `RootView` (the main window's tabs), `BrowserView`,
+  `SessionCardView`, `SourceLabel` and `ServersView` in SwiftUI, over a
+  `BrowserModel`; nothing visionOS-only, so the iPad shell draws the
+  same views.
+- `Apps/SwitchboardVision`: the visionOS app, an entry that declares
+  the scenes and where the registry lives (`servers.json` in the app's
+  container, the token and pin in the Keychain, nothing from a host on
+  disk).
+
+## The Xcode project
+
+Swift Package Manager builds the libraries and the command-line
+browser; an app for the headset needs an Xcode app target, which
+`project.yml` describes and `xcodegen generate` writes as the
+git-ignored `SwitchboardClient.xcodeproj` (`brew install xcodegen`).
+The project references the package beside it, so every view and test
+stays in the package.
+
+`scripts/sim.sh` drives the simulator from the terminal: `build`
+generates and builds, `run` boots the simulator, installs and launches,
+`shot <file>` screenshots it, `log` streams the app's log. The
+simulator shares the Mac's network, so it discovers and pairs with a
+Switchboard running here. A dev aid skips the typing: launched with
+`SWITCHBOARD_INVITE` set to an invite's JSON (the QR code's text) the
+app pairs with it on start, which `simctl launch` passes as
+`SIMCTL_CHILD_SWITCHBOARD_INVITE`:
+
+```sh
+INVITE=$(pbpaste)   # after "Copy invite" in the host's Remote devices dialog
+SIMCTL_CHILD_SWITCHBOARD_INVITE="$INVITE" xcrun simctl launch --terminate-running-process \
+  "Apple Vision Pro" com.sadburger.switchboard.vision
+```
+
+Bonjour on visionOS needs `NSBonjourServices` and
+`NSLocalNetworkUsageDescription` in `Info.plist`; both are there. The
+headset itself needs the one-time Xcode setup: Developer Mode on the
+device, the device paired in Xcode's Devices window, and a development
+team chosen for the target.
 
 ## The command-line browser
 
