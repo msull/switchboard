@@ -77,6 +77,13 @@ public actor ServerConnection {
     private var pump: Task<Void, Never>?
     private var buffer: [EventFrame] = []
     private var buffering = false
+    /// How many views hold each watched session's screen; `watch` goes
+    /// out at the first and `unwatch` at the last (§4.4), and every
+    /// watch is resent after `hello` on a reconnect.
+    private var watches: [String: Int] = [:]
+    /// The text last read per session, watched or not, at the revision
+    /// its key holds.
+    public private(set) var screens: [String: ScreenBody] = [:]
     /// Told whenever the snapshot or the state moved, so the owner can
     /// rebuild its view without polling.
     private var onChange: (@Sendable () -> Void)?
@@ -212,6 +219,9 @@ public actor ServerConnection {
             buffering = true
             buffer = []
             startPump(subscription)
+            for session in watches.keys.sorted() {
+                try await send(watch: true, session: session, on: subscription)
+            }
             state = .syncing
             try await fetchAll(api: api)
             buffering = false
@@ -219,6 +229,9 @@ public actor ServerConnection {
             buffer = []
             for frame in pending {
                 try await apply(frame, api: api)
+            }
+            for session in watches.keys.sorted() {
+                await readScreen(session)
             }
             failures = 0
             nextTry = .distantPast
@@ -301,6 +314,7 @@ public actor ServerConnection {
         var next = snapshot ?? HostSnapshot(epoch: projects.epoch, revision: 0)
         if next.epoch != projects.epoch {
             held = [:]
+            screens = [:]
             next = HostSnapshot(epoch: projects.epoch, revision: 0)
         }
         next.fetchedAt = Date()
@@ -350,6 +364,7 @@ public actor ServerConnection {
             // A frame from another run of the host: start over.
             held = [:]
             self.snapshot = nil
+            screens = [:]
             try await fetchAll(api: api)
             changed()
             return
@@ -360,8 +375,76 @@ public actor ServerConnection {
             return
         }
         if let heldRevision = heldRevision(for: key), revision <= heldRevision { return }
+        if case .screen(let session) = key {
+            await readScreen(session)
+            return
+        }
         try await refetch(key, api: api)
         changed()
+    }
+
+    // MARK: Watched content
+
+    /// Hold a watch on a session's screen: the host polls the pane and
+    /// says `changed` when it moves, and the text is read then. The
+    /// first holder sends `watch` and reads once; a second changes
+    /// nothing on the host.
+    public func watch(screen session: String) async {
+        let holders = (watches[session] ?? 0) + 1
+        watches[session] = holders
+        guard holders == 1 else { return }
+        if let subscription {
+            try? await send(watch: true, session: session, on: subscription)
+        }
+        await readScreen(session)
+    }
+
+    /// Release one hold; the last sends `unwatch`.
+    public func unwatch(screen session: String) async {
+        guard let holders = watches[session] else { return }
+        if holders > 1 {
+            watches[session] = holders - 1
+            return
+        }
+        watches[session] = nil
+        if let subscription {
+            try? await send(watch: false, session: session, on: subscription)
+        }
+    }
+
+    /// The sessions watched now, for tests.
+    public var watchedScreens: [String] { watches.keys.sorted() }
+
+    private func send(watch: Bool, session: String, on subscription: EventSubscription)
+        async throws
+    {
+        let frame: [String: Any] = [
+            "type": watch ? "watch" : "unwatch",
+            "resource": ["kind": "screen", "id": session],
+        ]
+        let data = try JSONSerialization.data(withJSONObject: frame)
+        try await subscription.send(String(decoding: data, as: UTF8.self))
+    }
+
+    /// Read a session's screen now, watched or not, under the revision
+    /// rule. A refusal (the pane is not running) clears what was held;
+    /// a transport failure is the connection's.
+    public func readScreen(_ session: String, lines: Int? = nil) async {
+        guard let api else { return }
+        do {
+            let reply = try await api.screen(session, lines: lines)
+            apply(.screen(session: session), at: reply.revision) {
+                screens[session] = reply.body
+            }
+            changed()
+        } catch RemoteError.refused(let status, _, _) where status == 400 {
+            screens[session] = nil
+            changed()
+        } catch let error as RemoteError {
+            handle(error)
+        } catch {
+            handle(.transport("\(error)"))
+        }
     }
 
     /// The revision a resource was last observed at: its own, or the
@@ -426,6 +509,9 @@ public actor ServerConnection {
         case .waiting:
             // Derived from the sessions, whose own events accompany it.
             return
+        case .screen:
+            // Content: read through `readScreen`, never as a view.
+            return
         }
         next.revision = held.values.max() ?? 0
         next.fetchedAt = Date()
@@ -435,7 +521,9 @@ public actor ServerConnection {
     private func remove(_ key: ResourceKey, at revision: UInt64) {
         guard var next = snapshot else { return }
         switch key {
-        case .session(let id): next.sessions.removeAll { $0.id == id }
+        case .session(let id):
+            next.sessions.removeAll { $0.id == id }
+            screens[id] = nil
         case .set(let id): next.sets.removeAll { $0.id == id }
         case .project(let id):
             next.projects.removeAll { $0.id == id }
@@ -515,6 +603,7 @@ public actor ServerConnection {
             try? credentials.setPin(nil, for: server.id)
             snapshot = nil
             held = [:]
+            screens = [:]
             server.needsPairing = true
             disconnect(to: .unpaired)
         case .refused(let status, _, _) where status == 401 || status == 403:
@@ -543,6 +632,8 @@ public actor ServerConnection {
         try? credentials.forget(server.id)
         snapshot = nil
         held = [:]
+        screens = [:]
+        watches = [:]
         info = nil
         server.needsPairing = true
         disconnect(to: .unpaired)

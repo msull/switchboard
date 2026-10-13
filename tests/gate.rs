@@ -117,7 +117,7 @@ impl Gate {
     fn app(&self) -> SwitchboardApp {
         SwitchboardApp::with_services(Services {
             store: Box::new(JsonStore::new(self.data_dir.clone())),
-            host: Box::new(self.host.clone()),
+            host: std::sync::Arc::new(self.host.clone()),
             events: Box::new(HookLog::new(&self.data_dir)),
             agents: Box::new(Agents::detect(&self.data_dir)),
             opener: Box::new(self.opener.clone()),

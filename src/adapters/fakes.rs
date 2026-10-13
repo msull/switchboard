@@ -35,7 +35,7 @@ use crate::ports::transcript::{Conversation, TranscriptReader};
 pub fn services() -> Services {
     Services {
         store: Box::new(MemoryStore::default()),
-        host: Box::new(FakeHost::default()),
+        host: Arc::new(FakeHost::default()),
         events: Box::new(FakeEvents),
         agents: Box::new(FakeAgents),
         opener: Box::new(FakeOpener::default()),

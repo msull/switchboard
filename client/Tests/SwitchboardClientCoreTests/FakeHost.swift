@@ -20,7 +20,12 @@ final class FakeHost: HostAPI, @unchecked Sendable {
     var failure: RemoteError?
     var pairCode = "ABCD2345"
     var pairs = 0
+    /// Every call by name; a frame a device sent is `watch:<id>` or
+    /// `unwatch:<id>`.
     var calls: [String] = []
+    /// What `screen` answers, by session id; a session not here is
+    /// refused as not running.
+    var screens: [String: ScreenBody] = [:]
     /// Runs after a `sessions` reply is built and before it is returned:
     /// a mutation between the snapshot and its delivery.
     var afterSessionsBuilt: (() -> Void)?
@@ -64,12 +69,32 @@ final class FakeHost: HostAPI, @unchecked Sendable {
         nextSubscriber += 1
         subscribers[id] = continuation
         lock.unlock()
-        return EventSubscription(frames: stream) { [self] in
-            lock.lock()
-            let held = subscribers.removeValue(forKey: id)
-            lock.unlock()
-            held?.finish()
-        }
+        return EventSubscription(
+            frames: stream,
+            send: { [self] text in
+                // A `watch` is answered `watching` to this subscriber only.
+                let frame = try JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any]
+                let type = frame?["type"] as? String ?? "?"
+                let resource = frame?["resource"] as? [String: String]
+                let sessionID = resource?["id"] ?? "?"
+                lock.lock()
+                calls.append("\(type):\(sessionID)")
+                let target = subscribers[id]
+                let (epoch, revision, serverID) = (self.epoch, self.revision, self.serverID)
+                lock.unlock()
+                if type == "watch", let kind = resource?["kind"] {
+                    target?.yield(
+                        EventFrame(
+                            kind: .watching, serverID: serverID, epoch: epoch, revision: revision,
+                            resource: ResourceRef(kind: kind, id: sessionID)))
+                }
+            },
+            close: { [self] in
+                lock.lock()
+                let held = subscribers.removeValue(forKey: id)
+                lock.unlock()
+                held?.finish()
+            })
     }
 
     /// An event to every subscriber, at the host's current revision and
@@ -172,7 +197,13 @@ final class FakeHost: HostAPI, @unchecked Sendable {
     }
 
     func screen(_ id: String, lines: Int?) async throws -> Envelope<ScreenBody> {
-        throw RemoteError.refused(status: 400, code: "failed", message: "no pane")
+        lock.lock()
+        let held = screens[id]
+        lock.unlock()
+        guard let held else {
+            throw RemoteError.refused(status: 400, code: "failed", message: "not running")
+        }
+        return try answer("screen") { held }
     }
 }
 

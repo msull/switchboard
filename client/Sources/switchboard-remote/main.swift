@@ -14,6 +14,7 @@ let usage = """
     switchboard-remote hosts                    the known hosts and their state
     switchboard-remote forget <server id>
     switchboard-remote watch [seconds]          the unified view, refreshed on a timer
+    switchboard-remote screen <session id>      a session's pane, live through a watch
     """
 
 // Line-buffered even into a file, so a `watch` log reads as it goes.
@@ -141,6 +142,33 @@ func run() async -> Int32 {
                 try? await Task.sleep(nanoseconds: UInt64(interval * 1_000_000_000))
                 print("\u{1B}[2J\u{1B}[H\(Date())")
                 printStore(await manager.store)
+            }
+        case "screen":
+            guard let id = args.dropFirst().first else {
+                print(usage)
+                return 2
+            }
+            await manager.start(interval: 2)
+            // The session is found on whichever host lists it.
+            var ref: SessionRef?
+            for _ in 0..<50 where ref == nil {
+                ref = await manager.store.sessions.first { $0.session.id == id }?.ref
+                if ref == nil { try? await Task.sleep(nanoseconds: 100_000_000) }
+            }
+            guard let ref else {
+                print("no connected host lists session \(id)")
+                return 1
+            }
+            await manager.watch(screen: ref)
+            var shown: String?
+            while true {
+                let screen = await manager.screen(for: ref)
+                let text = screen.map { $0.text + ($0.truncated ? "\n[cut]" : "") } ?? "(not running)"
+                if text != shown {
+                    shown = text
+                    print("\u{1B}[2J\u{1B}[H\(Date())  \(ref.recordID)\n\(text)")
+                }
+                try? await Task.sleep(nanoseconds: 250_000_000)
             }
         default:
             print(usage)

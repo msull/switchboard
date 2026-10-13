@@ -21,8 +21,9 @@ use switchboard::SwitchboardApp;
 use switchboard::adapters::fakes::{
     self, FakeAdvertiser, FakeHost, FakeOperations, FakeRemoteStore, FakeSecrets, MemoryStore,
 };
-use switchboard::adapters::remote::{self, pinned_client};
+use switchboard::adapters::remote::{self, MAX_UNAUTHENTICATED, pinned_client};
 use switchboard::app::Services;
+use switchboard::content::ContentKey;
 use switchboard::core::{AppAction, RecordId};
 use switchboard::ports::host::{HostId, HostStatus, Liveness as HostLiveness};
 use switchboard::ports::remote::{Listen, Scope};
@@ -55,7 +56,7 @@ fn port_with(host: FakeHost, secrets: FakeSecrets, remote: FakeRemoteStore) -> P
     let advertiser = FakeAdvertiser::default();
     let services = Services {
         secrets: Box::new(secrets.clone()),
-        host: Box::new(host.clone()),
+        host: Arc::new(host.clone()),
         remote: Box::new(remote.clone()),
         advertiser: Box::new(advertiser.clone()),
         operations: Box::new(FakeOperations::default()),
@@ -993,9 +994,33 @@ fn the_client_fixtures_decode_on_both_sides() {
 /// the pinned connection, each text frame handed over `frames`, the
 /// close as an `Err`. While `paused` the thread reads nothing, which is
 /// how a test makes a subscriber fall behind.
+/// What the test sends down its subscriber's socket.
+enum Out {
+    Text(String),
+    Close,
+}
+
 struct Subscriber {
     frames: std::sync::mpsc::Receiver<Result<String, String>>,
+    outbox: std::sync::mpsc::Sender<Out>,
     paused: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl Subscriber {
+    /// A `watch` or `unwatch` frame for a screen.
+    fn send(&self, kind: &str, resource_kind: &str, id: &str) {
+        let text = serde_json::json!({
+            "type": kind,
+            "resource": { "kind": resource_kind, "id": id },
+        })
+        .to_string();
+        self.outbox.send(Out::Text(text)).expect("socket thread");
+    }
+
+    /// Close the socket from the device's side.
+    fn close(&self) {
+        let _ = self.outbox.send(Out::Close);
+    }
 }
 
 fn subscribe(port: &mut Port, token: &str) -> Subscriber {
@@ -1003,6 +1028,7 @@ fn subscribe(port: &mut Port, token: &str) -> Subscriber {
     let config = Arc::clone(&port.client);
     let token = token.to_owned();
     let (tx, frames) = std::sync::mpsc::channel();
+    let (outbox, out_rx) = std::sync::mpsc::channel::<Out>();
     let paused = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let hold = Arc::clone(&paused);
     std::thread::spawn(move || {
@@ -1026,9 +1052,25 @@ fn subscribe(port: &mut Port, token: &str) -> Subscriber {
                 return;
             }
         };
+        // A short read timeout, so the outbox is looked at between
+        // frames; the library keeps a part-read frame across it.
+        ws.get_mut()
+            .sock
+            .set_read_timeout(Some(Duration::from_millis(20)))
+            .expect("timeout");
         loop {
             while hold.load(std::sync::atomic::Ordering::SeqCst) {
                 std::thread::sleep(Duration::from_millis(5));
+            }
+            for out in out_rx.try_iter() {
+                match out {
+                    Out::Text(text) => ws.send(tungstenite::Message::text(text)).expect("send"),
+                    Out::Close => {
+                        let _ = ws.close(None);
+                        let _ = ws.flush();
+                        return;
+                    }
+                }
             }
             match ws.read() {
                 Ok(tungstenite::Message::Text(text)) => {
@@ -1041,6 +1083,11 @@ fn subscribe(port: &mut Port, token: &str) -> Subscriber {
                     return;
                 }
                 Ok(_) => {}
+                Err(tungstenite::Error::Io(e))
+                    if matches!(
+                        e.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    ) => {}
                 Err(e) => {
                     let _ = tx.send(Err(format!("closed: {e}")));
                     return;
@@ -1048,7 +1095,11 @@ fn subscribe(port: &mut Port, token: &str) -> Subscriber {
             }
         }
     });
-    let subscriber = Subscriber { frames, paused };
+    let subscriber = Subscriber {
+        frames,
+        outbox,
+        paused,
+    };
     let hello = next_frame(port, &subscriber, 5)
         .expect("hello")
         .expect("a frame");
@@ -1430,4 +1481,285 @@ fn the_fingerprint_pass_over_three_hundred_sessions_is_measured() {
         "fingerprint pass over {} resources: {per_pass:?}; compare: {compare:?}",
         fp.len()
     );
+}
+
+/// Put `session`'s pane on the fake host, running, showing `text`.
+fn pane_running(port: &mut Port, session: &str, text: &str) -> RecordId {
+    let record = RecordId(uuid::Uuid::parse_str(session).unwrap());
+    let pane = HostId(record.host_name());
+    {
+        let mut state = port.host.state();
+        state.statuses.retain(|s| s.id != pane);
+        state.statuses.push(HostStatus {
+            id: pane.clone(),
+            liveness: HostLiveness::Running {
+                pid: 7,
+                command: "claude".into(),
+            },
+            cwd: None,
+            last_activity: None,
+            title: None,
+        });
+        state.snapshots.insert(pane, text.into());
+    }
+    port.app.poll_now();
+    record
+}
+
+/// Serve until `check` holds or `secs` pass.
+fn settle(port: &mut Port, secs: u64, check: impl Fn(&SwitchboardApp) -> bool) -> bool {
+    let deadline = std::time::Instant::now() + Duration::from_secs(secs);
+    loop {
+        port.app.serve_pending();
+        if check(&port.app) {
+            return true;
+        }
+        if std::time::Instant::now() > deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+/// A screen read by a paired device: the revision and the text.
+fn screen(port: &mut Port, session: &str, token: &str, lines: Option<usize>) -> (u64, String) {
+    let query = lines.map(|n| format!("?lines={n}")).unwrap_or_default();
+    let (status, reply) = get(
+        port,
+        &format!("/api/v1/sessions/{session}/screen{query}"),
+        Some(token),
+    );
+    assert_eq!(status, 200, "{reply}");
+    (
+        reply["revision"].as_u64().unwrap(),
+        reply["body"]["text"].as_str().unwrap().to_owned(),
+    )
+}
+
+/// A `watch` is answered `watching` and enters the key; the poll then
+/// observes the pane and emits `changed` for the screen; two reads of
+/// the same text carry one revision, however many lines each asks for,
+/// and the poll says nothing while the pane holds still; a pane that
+/// moves is a new revision, which the next read carries.
+#[test]
+fn a_watched_screen_moves_on_poll_and_an_unchanged_read_keeps_its_revision() {
+    let mut port = port();
+    let (_, _, session) = seed(&mut port, "");
+    let record = pane_running(&mut port, &session, "one\ntwo\n");
+    port.app.set_watch_poll(Duration::from_millis(50));
+    let token = pair(&mut port, "ABCD2345", Scope::Read, "Vision Pro");
+    let sub = subscribe(&mut port, &token);
+    sub.send("watch", "screen", &session);
+    let got = events(&mut port, &sub);
+    let moved = resources(&got);
+    assert_eq!(
+        moved.first(),
+        Some(&("watching".into(), "screen".into(), session.clone())),
+        "{moved:?}"
+    );
+    assert!(
+        moved.contains(&("changed".into(), "screen".into(), session.clone())),
+        "{moved:?}"
+    );
+    assert_eq!(port.app.watched_keys(), vec![ContentKey::Screen(record)]);
+    let first = port
+        .app
+        .content_revision(&ContentKey::Screen(record))
+        .unwrap();
+    assert_eq!(got.last().unwrap()["revision"], first);
+
+    let (r1, text) = screen(&mut port, &session, &token, None);
+    assert_eq!((r1, text.as_str()), (first, "one\ntwo"));
+    let (r2, text) = screen(&mut port, &session, &token, Some(1));
+    assert_eq!((r2, text.as_str()), (first, "two"));
+    assert!(events(&mut port, &sub).is_empty(), "nothing moved");
+
+    port.host
+        .state()
+        .snapshots
+        .insert(HostId(record.host_name()), "one\ntwo\nthree\n".into());
+    let got = events(&mut port, &sub);
+    assert_eq!(
+        resources(&got),
+        vec![("changed".into(), "screen".into(), session.clone())]
+    );
+    let next = got[0]["revision"].as_u64().unwrap();
+    assert!(next > first);
+    let (r3, text) = screen(&mut port, &session, &token, None);
+    assert_eq!((r3, text.as_str()), (next, "one\ntwo\nthree"));
+}
+
+/// A secret added to the project after the watch moves the screen
+/// though the pane did not: the policy is in the version, and the next
+/// read carries the value's name instead of the value.
+#[test]
+fn a_policy_change_moves_a_watched_screen_though_the_pane_did_not() {
+    let mut port = port();
+    let (_, project, session) = seed(&mut port, "");
+    pane_running(&mut port, &session, "$ env\nAPI_TOKEN=tok-5e3cr3t\n");
+    port.app.set_watch_poll(Duration::from_millis(50));
+    let token = pair(&mut port, "ABCD2345", Scope::Read, "Vision Pro");
+    let sub = subscribe(&mut port, &token);
+    sub.send("watch", "screen", &session);
+    let got = events(&mut port, &sub);
+    assert_eq!(got.len(), 2, "{got:?}");
+    let (first, text) = screen(&mut port, &session, &token, None);
+    assert!(
+        text.contains("tok-5e3cr3t"),
+        "no secret declared yet: {text}"
+    );
+
+    let pid = switchboard::core::ProjectId(uuid::Uuid::parse_str(&project).unwrap());
+    port.secrets.state().insert(
+        switchboard::core::SecretScope::Project(pid).account("API_TOKEN"),
+        "tok-5e3cr3t".into(),
+    );
+    port.app.dispatch(AppAction::SetProjectEnv(
+        pid,
+        switchboard::core::ProjectEnv {
+            vars: vec![switchboard::core::EnvVar {
+                name: "API_TOKEN".into(),
+                value: String::new(),
+                secret: true,
+            }],
+            ..Default::default()
+        },
+    ));
+    let got = events(&mut port, &sub);
+    let moved = resources(&got);
+    assert!(
+        moved.contains(&("changed".into(), "screen".into(), session.clone())),
+        "{moved:?}"
+    );
+    let (next, text) = screen(&mut port, &session, &token, None);
+    assert!(next > first);
+    assert_eq!(text, "$ env\nAPI_TOKEN=<API_TOKEN>");
+}
+
+/// Past the cap the least recently read key goes, silently; a read of
+/// an evicted key works and puts it back, at another's expense.
+#[test]
+fn the_watch_set_is_capped_and_a_read_of_an_evicted_key_puts_it_back() {
+    let mut port = port();
+    let (_, project, _) = seed(&mut port, "");
+    let token = pair(&mut port, "ABCD2345", Scope::Read, "Pad");
+    let mut sessions = Vec::new();
+    for n in 0..(switchboard::content::WATCH_CAP + 2) {
+        // An op id of its own each: a repeated id is replayed.
+        let reply = control(
+            &mut port,
+            Request::new(
+                format!("se{n}"),
+                Body::SessionNew {
+                    project: project.clone(),
+                    name: format!("s{n}"),
+                    session_kind: SessionKind::Claude,
+                    cwd: PathBuf::from("/tmp"),
+                    launch: Launch::Shell,
+                    prompt: None,
+                    notes: String::new(),
+                    env: std::collections::BTreeMap::new(),
+                    env_sets: Vec::new(),
+                    replaces: None,
+                },
+            ),
+        );
+        let session = made_id(&reply, RecordKind::Session);
+        let record = pane_running(&mut port, &session, &format!("pane {n}\n"));
+        sessions.push((session, ContentKey::Screen(record)));
+    }
+    for (session, _) in &sessions {
+        screen(&mut port, session, &token, Some(1));
+    }
+    let watched = port.app.watched_keys();
+    assert_eq!(watched.len(), switchboard::content::WATCH_CAP);
+    assert!(!watched.contains(&sessions[0].1), "the first read went");
+    assert!(!watched.contains(&sessions[1].1), "and the second");
+    assert!(watched.contains(&sessions[2].1));
+
+    let (_, text) = screen(&mut port, &sessions[0].0, &token, Some(1));
+    assert_eq!(text, "pane 0");
+    let watched = port.app.watched_keys();
+    assert_eq!(watched.len(), switchboard::content::WATCH_CAP);
+    assert!(watched.contains(&sessions[0].1), "back in");
+    assert!(!watched.contains(&sessions[2].1), "the oldest went for it");
+}
+
+/// A key stays while any subscriber holds it: one device's `unwatch`
+/// leaves the other's watch, a closed socket drops its watches, and a
+/// revocation drops the device's at once. A watch of a pane that is
+/// not running is answered `watching` too; it is read when it runs.
+#[test]
+fn unwatch_a_closed_socket_and_a_revocation_each_drop_their_watches() {
+    let mut port = port();
+    let (_, _, session) = seed(&mut port, "");
+    let record = RecordId(uuid::Uuid::parse_str(&session).unwrap());
+    let key = ContentKey::Screen(record);
+    let token = pair(&mut port, "ABCD2345", Scope::Read, "Pad");
+    let a = subscribe(&mut port, &token);
+    let b = subscribe(&mut port, &token);
+    a.send("watch", "screen", &session);
+    b.send("watch", "screen", &session);
+    assert_eq!(resources(&events(&mut port, &a)).len(), 1, "watching");
+    assert_eq!(resources(&events(&mut port, &b)).len(), 1, "watching");
+    assert_eq!(port.app.watched_keys(), vec![key.clone()]);
+
+    a.send("unwatch", "screen", &session);
+    assert!(events(&mut port, &a).is_empty());
+    assert_eq!(
+        port.app.watched_keys(),
+        vec![key.clone()],
+        "b still holds it"
+    );
+
+    b.close();
+    assert!(
+        settle(&mut port, 5, |app| app.watched_keys().is_empty()),
+        "b's close dropped the watch"
+    );
+    assert_eq!(port.app.subscriber_count(), 1);
+
+    a.send("watch", "screen", &session);
+    assert!(settle(&mut port, 5, |app| !app.watched_keys().is_empty()));
+    let device = port.app.core().devices()[0].id;
+    port.app.dispatch(AppAction::RevokeDevice(device));
+    assert!(
+        port.app.watched_keys().is_empty(),
+        "revoked with its watches"
+    );
+    assert_eq!(port.app.subscriber_count(), 0);
+}
+
+/// Strangers that connect and say nothing fill the unauthenticated
+/// pool and no more: the fifth is closed at once, a paired subscriber
+/// keeps receiving meanwhile, and the slots are free once they hang up.
+#[test]
+fn stalled_strangers_fill_their_own_pool_and_never_a_paired_clients() {
+    let mut port = port();
+    let token = pair(&mut port, "ABCD2345", Scope::Read, "Pad");
+    let sub = subscribe(&mut port, &token);
+    let strangers: Vec<TcpStream> = (0..MAX_UNAUTHENTICATED)
+        .map(|_| TcpStream::connect(port.addr).expect("connect"))
+        .collect();
+    // The listener has handed each to a thread before it accepts more.
+    std::thread::sleep(Duration::from_millis(100));
+    let mut fifth = TcpStream::connect(port.addr).expect("connect");
+    fifth
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    let mut buf = [0u8; 1];
+    let closed = matches!(fifth.read(&mut buf), Ok(0) | Err(_));
+    assert!(closed, "the fifth stranger was closed at once");
+
+    let (_, _, session) = seed(&mut port, "");
+    let moved = resources(&events(&mut port, &sub));
+    assert!(
+        moved.contains(&("changed".into(), "session".into(), session.clone())),
+        "the paired subscriber kept receiving: {moved:?}"
+    );
+
+    drop(strangers);
+    std::thread::sleep(Duration::from_millis(100));
+    let (status, _) = get(&mut port, "/api/v1/waiting", Some(&token));
+    assert_eq!(status, 200, "the slots are free again");
 }

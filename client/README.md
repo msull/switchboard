@@ -7,7 +7,7 @@ macOS 14, iOS 17 and visionOS 1.
 
 ```sh
 swift build                      # every target
-swift test                       # 25 tests: fixtures, pinning, the connection core, events
+swift test                       # 29 tests: fixtures, pinning, the connection core, events, watches
 swift run switchboard-remote     # the command-line browser (usage below)
 ```
 
@@ -33,7 +33,10 @@ swift run switchboard-remote     # the command-line browser (usage below)
   snapshot with the buffered events reconciled against each resource's
   held revision, live events refetching only past it, the epoch check,
   `resync_required` and a closed socket reconnecting, a key change
-  dropping the token and keeping the entry), and `ConnectionManager`
+  dropping the token and keeping the entry, reference-counted screen
+  watches sent at the first holder and released at the last, resent
+  after a reconnect before the snapshot, with the screen read on
+  `changed` past its held revision), and `ConnectionManager`
   with the unified store, filters and the cross-host order; its loop
   only retries hosts that are not connected.
 - `SwitchboardUI`: `BrowserView`, `SessionCardView`, `SourceLabel` and
@@ -49,6 +52,7 @@ switchboard-remote pair <host:port> <code> <spki_sha256>
 switchboard-remote hosts                  the known hosts and their state
 switchboard-remote forget <server id>
 switchboard-remote watch [seconds]        the unified view, refreshed on a timer
+switchboard-remote screen <session id>    a session's pane, live through a watch
 ```
 
 The registry and credentials live under

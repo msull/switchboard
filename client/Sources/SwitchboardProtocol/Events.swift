@@ -87,6 +87,9 @@ public enum ResourceKey: Hashable, Sendable {
     case sets(space: String)
     case sessions(project: String)
     case waiting
+    /// A session's pane, a content key: watched by `watch` and read by
+    /// `screen`.
+    case screen(session: String)
 
     /// The key a frame names, or `nil` for a kind this client does not
     /// hold (a content kind before its endpoint exists here).
@@ -101,6 +104,7 @@ public enum ResourceKey: Hashable, Sendable {
         case "sets": self = .sets(space: ref.id)
         case "sessions": self = .sessions(project: ref.id)
         case "waiting": self = .waiting
+        case "screen": self = .screen(session: ref.id)
         default: return nil
         }
     }

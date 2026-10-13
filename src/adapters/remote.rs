@@ -14,7 +14,7 @@ use std::fmt::Write as _;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream, UdpSocket};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
@@ -414,11 +414,23 @@ const SUBSCRIBER_POLL: Duration = Duration::from_millis(50);
 
 /// The frame's end of a subscriber: events go in as JSON text; a full
 /// queue drops the sender with `overflow` set, which the connection
-/// thread turns into `resync_required` and a close.
+/// thread turns into `resync_required` and a close. `id` names the
+/// subscriber in the frames it sends back.
 pub struct SubscriberQueue {
+    pub id: u64,
     pub tx: SyncSender<String>,
     pub overflow: Arc<AtomicBool>,
 }
+
+/// A text frame a subscribed device sent (`watch`, `unwatch`), or
+/// `None` once its socket ended, however it ended.
+pub struct SubscriberFrame {
+    pub subscriber: u64,
+    pub text: Option<String>,
+}
+
+/// How many device frames may wait for the frame thread.
+const FRAMES: usize = 64;
 
 /// The most a request line and its headers may take, and the most a
 /// body may be.
@@ -613,12 +625,37 @@ struct Limits {
     info: Mutex<RateWindow>,
 }
 
+impl Limits {
+    /// Whether a request for `path` is over its window; a poisoned lock
+    /// counts as over, never as open.
+    fn limited(&self, path: &str) -> bool {
+        let window = match path {
+            PAIR_PATH => &self.pair,
+            INFO_PATH => &self.info,
+            _ => return false,
+        };
+        !window.lock().map_or(true, |mut w| w.allow(Instant::now()))
+    }
+}
+
+/// What every connection thread shares.
+struct Shared {
+    tls: Arc<ServerConfig>,
+    requests: SyncSender<RemoteIncoming>,
+    frames: SyncSender<SubscriberFrame>,
+    wake: Arc<dyn Fn() + Send + Sync>,
+    pools: Pools,
+    limits: Limits,
+    next_subscriber: AtomicU64,
+}
+
 /// The TLS listener: an accept thread, one thread per connection,
 /// requests handed to the frame over a bounded channel. Bound only by
 /// the instance that holds the store lock.
 pub struct RemotePort {
     addr: SocketAddr,
     requests: Receiver<RemoteIncoming>,
+    frames: Receiver<SubscriberFrame>,
     stop: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
 }
@@ -635,12 +672,19 @@ impl RemotePort {
         let listener = TcpListener::bind(addr)?;
         let addr = listener.local_addr()?;
         let (tx, requests) = mpsc::sync_channel(INBOX);
+        let (frames_tx, frames) = mpsc::sync_channel(FRAMES);
         let stop = Arc::new(AtomicBool::new(false));
-        let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(wake);
-        let pools = Arc::new(Pools::default());
-        let limits = Arc::new(Limits {
-            pair: Mutex::new(RateWindow::new(PAIR_PER_MINUTE, Duration::from_secs(60))),
-            info: Mutex::new(RateWindow::new(INFO_PER_MINUTE, Duration::from_secs(60))),
+        let shared = Arc::new(Shared {
+            tls,
+            requests: tx,
+            frames: frames_tx,
+            wake: Arc::new(wake),
+            pools: Pools::default(),
+            limits: Limits {
+                pair: Mutex::new(RateWindow::new(PAIR_PER_MINUTE, Duration::from_secs(60))),
+                info: Mutex::new(RateWindow::new(INFO_PER_MINUTE, Duration::from_secs(60))),
+            },
+            next_subscriber: AtomicU64::new(1),
         });
         let thread = {
             let stop = Arc::clone(&stop);
@@ -654,29 +698,25 @@ impl RemotePort {
                         let Ok(stream) = stream else { continue };
                         // Past the pool a stranger is closed at once:
                         // dropping the stream is the close.
-                        if pools.unauthenticated.load(Ordering::SeqCst) >= MAX_UNAUTHENTICATED {
+                        if shared.pools.unauthenticated.load(Ordering::SeqCst)
+                            >= MAX_UNAUTHENTICATED
+                        {
                             drop(stream);
                             continue;
                         }
-                        pools.unauthenticated.fetch_add(1, Ordering::SeqCst);
-                        let tls = Arc::clone(&tls);
-                        let tx = tx.clone();
-                        let wake = Arc::clone(&wake);
-                        let pools = Arc::clone(&pools);
-                        let limits = Arc::clone(&limits);
+                        shared.pools.unauthenticated.fetch_add(1, Ordering::SeqCst);
+                        let shared = Arc::clone(&shared);
                         let _ = std::thread::Builder::new()
                             .name("switchboard-remote-conn".into())
                             .spawn(move || {
                                 let paired = AtomicBool::new(false);
-                                if let Err(e) =
-                                    connection(stream, &tls, &tx, &*wake, &pools, &limits, &paired)
-                                {
+                                if let Err(e) = connection(stream, &shared, &paired) {
                                     log::debug!("remote connection: {e}");
                                 }
                                 if paired.load(Ordering::SeqCst) {
-                                    pools.paired.fetch_sub(1, Ordering::SeqCst);
+                                    shared.pools.paired.fetch_sub(1, Ordering::SeqCst);
                                 } else {
-                                    pools.unauthenticated.fetch_sub(1, Ordering::SeqCst);
+                                    shared.pools.unauthenticated.fetch_sub(1, Ordering::SeqCst);
                                 }
                             });
                     }
@@ -685,6 +725,7 @@ impl RemotePort {
         Ok(Self {
             addr,
             requests,
+            frames,
             stop,
             thread: Some(thread),
         })
@@ -694,6 +735,11 @@ impl RemotePort {
     /// arrival order; the rest wait on the channel.
     pub fn poll(&mut self, max: usize) -> Vec<RemoteIncoming> {
         self.requests.try_iter().take(max).collect()
+    }
+
+    /// Every frame subscribed devices sent since the last poll.
+    pub fn poll_frames(&mut self) -> Vec<SubscriberFrame> {
+        self.frames.try_iter().collect()
     }
 
     #[must_use]
@@ -721,21 +767,13 @@ impl Drop for RemotePort {
 
 /// One connection: the handshake, then a request and a reply at a time
 /// until the device hangs up or a deadline passes.
-fn connection(
-    tcp: TcpStream,
-    tls: &Arc<ServerConfig>,
-    tx: &SyncSender<RemoteIncoming>,
-    wake: &dyn Fn(),
-    pools: &Pools,
-    limits: &Limits,
-    paired: &AtomicBool,
-) -> io::Result<()> {
+fn connection(tcp: TcpStream, shared: &Arc<Shared>, paired: &AtomicBool) -> io::Result<()> {
     tcp.set_read_timeout(Some(HANDSHAKE_TIMEOUT))?;
     tcp.set_write_timeout(Some(WRITE_TIMEOUT))?;
     // A reply is one record and goes out at once; Nagle with the
     // device's delayed ACK would otherwise add milliseconds per request.
     tcp.set_nodelay(true)?;
-    let conn = ServerConnection::new(Arc::clone(tls)).map_err(io::Error::other)?;
+    let conn = ServerConnection::new(Arc::clone(&shared.tls)).map_err(io::Error::other)?;
     let mut stream = StreamOwned::new(conn, tcp);
     while stream.conn.is_handshaking() {
         stream.conn.complete_io(&mut stream.sock)?;
@@ -747,18 +785,7 @@ fn connection(
             reader.get_ref().sock.set_read_timeout(Some(IDLE_TIMEOUT))?;
             first = false;
         }
-        let limited = match request.path.as_str() {
-            PAIR_PATH => !limits
-                .pair
-                .lock()
-                .map_or(true, |mut w| w.allow(Instant::now())),
-            INFO_PATH => !limits
-                .info
-                .lock()
-                .map_or(true, |mut w| w.allow(Instant::now())),
-            _ => false,
-        };
-        if limited {
+        if shared.limits.limited(&request.path) {
             respond(
                 reader.get_mut(),
                 429,
@@ -772,10 +799,16 @@ fn connection(
         let queue_for_frame = upgrade_key.as_ref().map(|_| {
             let (q_tx, q_rx) = mpsc::sync_channel::<String>(SUBSCRIBER_QUEUE);
             let overflow = Arc::new(AtomicBool::new(false));
-            queue = Some((q_rx, Arc::clone(&overflow)));
-            SubscriberQueue { tx: q_tx, overflow }
+            let id = shared.next_subscriber.fetch_add(1, Ordering::SeqCst);
+            queue = Some((id, q_rx, Arc::clone(&overflow)));
+            SubscriberQueue {
+                id,
+                tx: q_tx,
+                overflow,
+            }
         });
-        if tx
+        if shared
+            .requests
             .try_send(RemoteIncoming {
                 request,
                 reply: reply_tx,
@@ -790,7 +823,7 @@ fn connection(
             )?;
             continue;
         }
-        wake();
+        (shared.wake)();
         let reply = match reply_rx.recv_timeout(ANSWER_TIMEOUT) {
             Ok(reply) => reply,
             Err(_) => RemoteReply {
@@ -802,7 +835,7 @@ fn connection(
         if reply.authenticated && !paired.load(Ordering::SeqCst) {
             // The device moves from the unauthenticated pool to the
             // paired one on its first authenticated request.
-            if pools.paired.load(Ordering::SeqCst) >= MAX_PAIRED {
+            if shared.pools.paired.load(Ordering::SeqCst) >= MAX_PAIRED {
                 respond(
                     reader.get_mut(),
                     503,
@@ -810,15 +843,23 @@ fn connection(
                 )?;
                 return Ok(());
             }
-            pools.paired.fetch_add(1, Ordering::SeqCst);
-            pools.unauthenticated.fetch_sub(1, Ordering::SeqCst);
+            shared.pools.paired.fetch_add(1, Ordering::SeqCst);
+            shared.pools.unauthenticated.fetch_sub(1, Ordering::SeqCst);
             paired.store(true, Ordering::SeqCst);
         }
         if reply.status == SUBSCRIBED
-            && let (Some(key), Some((q_rx, overflow))) = (upgrade_key, queue)
+            && let (Some(key), Some((id, q_rx, overflow))) = (upgrade_key, queue)
         {
             respond_upgrade(reader.get_mut(), &key)?;
-            return subscriber(reader.into_inner(), &q_rx, &overflow);
+            let out = subscriber(reader.into_inner(), &q_rx, &overflow, id, shared);
+            let ended = SubscriberFrame {
+                subscriber: id,
+                text: None,
+            };
+            if shared.frames.send(ended).is_ok() {
+                (shared.wake)();
+            }
+            return out;
         }
         respond(reader.get_mut(), reply.status, &reply.body)?;
     }
@@ -830,14 +871,16 @@ fn connection(
 /// or the device closes. The socket is non-blocking: an event goes out
 /// the moment it is queued, the device's own frames are looked for
 /// only when there is nothing to send (a close ends the subscription,
-/// a ping is answered by the library, a text frame is not understood
-/// yet), and a device that stops reading stalls only this thread, for
-/// `WRITE_TIMEOUT` at most, while the frame fills and then drops its
-/// queue.
+/// a ping is answered by the library, a text frame goes to the frame
+/// thread as a `SubscriberFrame`), and a device that stops reading
+/// stalls only this thread, for `WRITE_TIMEOUT` at most, while the
+/// frame fills and then drops its queue.
 fn subscriber(
     stream: StreamOwned<ServerConnection, TcpStream>,
     events: &Receiver<String>,
     overflow: &AtomicBool,
+    id: u64,
+    shared: &Shared,
 ) -> io::Result<()> {
     stream.sock.set_nonblocking(true)?;
     let mut ws =
@@ -860,6 +903,15 @@ fn subscriber(
         }
         match ws.read() {
             Ok(tungstenite::Message::Close(_)) => return Ok(()),
+            Ok(tungstenite::Message::Text(text)) => {
+                let frame = SubscriberFrame {
+                    subscriber: id,
+                    text: Some(text.to_string()),
+                };
+                if shared.frames.try_send(frame).is_ok() {
+                    (shared.wake)();
+                }
+            }
             Ok(_) => {}
             Err(tungstenite::Error::Io(e)) if e.kind() == io::ErrorKind::WouldBlock => {}
             Err(tungstenite::Error::ConnectionClosed | tungstenite::Error::AlreadyClosed) => {

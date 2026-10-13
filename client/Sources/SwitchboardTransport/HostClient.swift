@@ -58,13 +58,20 @@ public enum RemoteError: Error, CustomStringConvertible, Sendable {
     }
 }
 
-/// An open events socket: the frames as they arrive, and the close.
+/// An open events socket: the frames as they arrive, a way to send a
+/// text frame (`watch`, `unwatch`), and the close.
 public struct EventSubscription: Sendable {
     public let frames: AsyncThrowingStream<EventFrame, Error>
+    public let send: @Sendable (String) async throws -> Void
     public let close: @Sendable () -> Void
 
-    public init(frames: AsyncThrowingStream<EventFrame, Error>, close: @escaping @Sendable () -> Void) {
+    public init(
+        frames: AsyncThrowingStream<EventFrame, Error>,
+        send: @escaping @Sendable (String) async throws -> Void = { _ in },
+        close: @escaping @Sendable () -> Void
+    ) {
         self.frames = frames
+        self.send = send
         self.close = close
     }
 }
@@ -160,9 +167,16 @@ public final class HostClient: HostAPI, @unchecked Sendable {
                 task.cancel(with: .normalClosure, reason: nil)
             }
         }
-        return EventSubscription(frames: frames) {
-            task.cancel(with: .normalClosure, reason: nil)
-        }
+        return EventSubscription(
+            frames: frames,
+            send: { text in
+                do {
+                    try await task.send(.string(text))
+                } catch {
+                    throw RemoteError.transport("events: \(error.localizedDescription)")
+                }
+            },
+            close: { task.cancel(with: .normalClosure, reason: nil) })
     }
 
     public func pair(_ request: PairRequest) async throws -> Envelope<PairReply> {

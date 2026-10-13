@@ -17,11 +17,14 @@ use switchboard_control as wire;
 use crate::adapters::control::{ControlSocket, Incoming};
 use crate::adapters::hooks::WakeSocket;
 use crate::adapters::remote::{
-    self, RemoteIncoming, RemotePort, RemoteReply, RemoteRequest, SubscriberQueue,
+    self, RemoteIncoming, RemotePort, RemoteReply, RemoteRequest, SubscriberFrame, SubscriberQueue,
 };
 use crate::adapters::scrollback::scrollback_dir;
-use crate::content::ConversationCache;
-use crate::core::revision::{Fingerprints, Resource};
+use crate::content::{
+    ContentJob, ContentKey, ContentVersion, ContentWorker, ConversationCache, Observed, Policy,
+    SCREEN_LINES_CAP, SCREEN_SLACK_LINES, WATCH_CAP, WATCH_IDLE, Watch, redact,
+};
+use crate::core::revision::Fingerprints;
 use crate::core::{
     Activity, AgentKind, AppAction, AppCore, Clock, Composer, ControlAction, ControlOutcome,
     DISPATCH_POLL, Effect, ProjectId, RECORD_TOKEN_ENV, RecordId, Resolved, ResumeHandle,
@@ -62,7 +65,8 @@ const DISCOVERY_TIMEOUT: Duration = Duration::from_hours(24);
 
 pub struct Services {
     pub store: Box<dyn Store>,
-    pub host: Box<dyn ProcessHost>,
+    /// An `Arc`: the content worker reads panes through the same host.
+    pub host: Arc<dyn ProcessHost>,
     pub events: Box<dyn EventSource>,
     pub agents: Box<dyn AgentLauncher>,
     pub opener: Box<dyn Opener>,
@@ -183,14 +187,34 @@ pub struct SwitchboardApp {
     /// The devices subscribed to events, each with its connection's
     /// queue; a revocation drops the device's entry and so its socket.
     subscribers: Vec<Subscriber>,
+    /// The content worker, started with the port, and what it reports.
+    content: Option<ContentWorker>,
+    observed: Option<mpsc::Receiver<Observed>>,
+    /// The version last served per content key, and the keys devices
+    /// watch or read lately, with who asked and when each was read.
+    versions: std::collections::HashMap<ContentKey, ContentVersion>,
+    watches: std::collections::HashMap<ContentKey, Watch>,
+    watch_dirty: bool,
+    last_watch_sweep: Option<Instant>,
+    /// Each session's redaction policy as last resolved; cleared by any
+    /// save or secret change, since either may have moved it.
+    policies: std::collections::HashMap<RecordId, Policy>,
     /// File diffs being read on threads of their own.
     diff_reads: DiffReads,
 }
 
 /// One WebSocket subscriber as the frame holds it.
 struct Subscriber {
+    id: u64,
     queue: SubscriberQueue,
     device: uuid::Uuid,
+}
+
+/// How a remote request was answered: now, or by the content worker
+/// through the reply channel it was handed.
+enum Served {
+    Now(RemoteReply),
+    Deferred,
 }
 
 /// A file diff's answer from its thread.
@@ -265,6 +289,13 @@ impl SwitchboardApp {
             fingerprints: None,
             dirty: false,
             subscribers: Vec::new(),
+            content: None,
+            observed: None,
+            versions: std::collections::HashMap::new(),
+            watches: std::collections::HashMap::new(),
+            watch_dirty: false,
+            last_watch_sweep: None,
+            policies: std::collections::HashMap::new(),
             diff_reads: DiffReads::default(),
         }
     }
@@ -349,6 +380,7 @@ impl SwitchboardApp {
         }
         self.dispatch_inner(action);
         self.diff_pass();
+        self.sweep_watches();
     }
 
     /// Tell the core how wide the working-set view is. Not recorded: it
@@ -379,7 +411,16 @@ impl SwitchboardApp {
         if let AppAction::RevokeDevice(device) = &action {
             // Dropping the queue is the close: the connection thread
             // sees the channel end and closes the socket.
+            let gone: Vec<u64> = self
+                .subscribers
+                .iter()
+                .filter(|s| s.device == *device)
+                .map(|s| s.id)
+                .collect();
             self.subscribers.retain(|s| s.device != *device);
+            for id in gone {
+                self.forget_subscriber(id);
+            }
         }
         // A discard puts a cut copy behind a new handle; the cache is
         // dropped at once so the view never shows the old file first.
@@ -544,7 +585,12 @@ impl SwitchboardApp {
             | Effect::Save(_)
             | Effect::Delete(_)
             | Effect::StoreSecret { .. }
-            | Effect::DeleteSecret(_) => self.run_store_effect(effect),
+            | Effect::DeleteSecret(_) => {
+                // Any of these may have moved a session's secret set.
+                self.policies.clear();
+                self.watch_dirty = true;
+                self.run_store_effect(effect)
+            }
             Effect::SaveIdentity(_) | Effect::SaveDevices(_) => self.run_remote_effect(effect),
             Effect::PrepareLaunch { .. }
             | Effect::PrepareResume { .. }
@@ -1396,9 +1442,330 @@ impl SwitchboardApp {
             subscriber,
         } in incoming
         {
-            let answer = self.serve_remote(&request, subscriber);
-            let _ = reply.try_send(answer);
+            if let Served::Now(answer) = self.serve_remote(&request, subscriber, &reply) {
+                let _ = reply.try_send(answer);
+            }
         }
+        let frames: Vec<SubscriberFrame> = self
+            .remote
+            .as_mut()
+            .map(RemotePort::poll_frames)
+            .unwrap_or_default();
+        for frame in frames {
+            self.subscriber_frame(&frame);
+        }
+        let observed: Vec<Observed> = self
+            .observed
+            .as_ref()
+            .map(|rx| rx.try_iter().collect())
+            .unwrap_or_default();
+        for observation in observed {
+            self.observe(observation);
+        }
+        self.sweep_watches();
+    }
+
+    // --- content: the worker, the versions, the watch set
+
+    /// The content worker's report on one read: a moved source or
+    /// policy takes a new revision and emits `changed`; the reply, if
+    /// one waits, is stamped with the key's revision, so two reads of
+    /// unchanged content carry the same one. A key whose record is gone
+    /// changes nothing; the reply still carries what was read.
+    fn observe(&mut self, observation: Observed) {
+        let Observed {
+            key,
+            policy,
+            result,
+            reply,
+        } = observation;
+        match result {
+            Ok((source, body)) => {
+                if self.core.session(key.record()).is_some() {
+                    let moved = self
+                        .versions
+                        .get(&key)
+                        .is_none_or(|v| v.source != source || v.policy != policy);
+                    if moved {
+                        self.revision += 1;
+                        self.versions.insert(
+                            key.clone(),
+                            ContentVersion {
+                                source,
+                                policy,
+                                revision: self.revision,
+                            },
+                        );
+                        let text =
+                            self.event_json("changed", Some((key.kind(), &key.id())), now_ms());
+                        self.broadcast(&text);
+                    }
+                }
+                if let Some(reply) = reply {
+                    let revision = self
+                        .versions
+                        .get(&key)
+                        .map_or(self.revision, |v| v.revision);
+                    let out = self.envelope_at(revision, &body);
+                    let out = if out.body.len() > BODY_CAP {
+                        log::warn!("remote: {} {} is over the body cap", key.kind(), key.id());
+                        RemoteReply {
+                            status: 500,
+                            body: self.error_json("too_large", "the reply is over the body cap"),
+                            authenticated: true,
+                        }
+                    } else {
+                        out
+                    };
+                    let _ = reply.try_send(out);
+                }
+            }
+            Err(reason) => {
+                if let Some(reply) = reply {
+                    log::info!("remote: {} {} refused: failed", key.kind(), key.id());
+                    let _ = reply.try_send(RemoteReply {
+                        status: 400,
+                        body: self.error_json("failed", &reason),
+                        authenticated: true,
+                    });
+                }
+            }
+        }
+    }
+
+    /// A frame from a subscribed device: `watch` puts the key in the
+    /// set and is answered `watching` once it is there; `unwatch` takes
+    /// the device off it; the socket's end takes it off every key. A
+    /// watch is never refused.
+    fn subscriber_frame(&mut self, frame: &SubscriberFrame) {
+        let Some(text) = &frame.text else {
+            self.subscribers.retain(|s| s.id != frame.subscriber);
+            self.forget_subscriber(frame.subscriber);
+            return;
+        };
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(text) else {
+            return;
+        };
+        let kind = value["resource"]["kind"].as_str().unwrap_or("");
+        let id = value["resource"]["id"].as_str().unwrap_or("");
+        let Some(key) = ContentKey::parse(kind, id) else {
+            log::info!("remote: a frame named {kind:?}, which this host does not serve");
+            return;
+        };
+        match value["type"].as_str() {
+            Some("watch") => {
+                self.watches
+                    .entry(key.clone())
+                    .or_insert_with(|| Watch {
+                        last_read: None,
+                        subscribers: std::collections::HashSet::new(),
+                    })
+                    .subscribers
+                    .insert(frame.subscriber);
+                self.watch_dirty = true;
+                let text = self.event_json("watching", Some((key.kind(), &key.id())), now_ms());
+                if let Some(s) = self.subscribers.iter().find(|s| s.id == frame.subscriber) {
+                    let _ = s.queue.tx.try_send(text);
+                }
+            }
+            Some("unwatch") => {
+                if let Some(w) = self.watches.get_mut(&key) {
+                    w.subscribers.remove(&frame.subscriber);
+                    self.watch_dirty = true;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// A subscriber is gone: its watches go with it.
+    fn forget_subscriber(&mut self, id: u64) {
+        for w in self.watches.values_mut() {
+            if w.subscribers.remove(&id) {
+                self.watch_dirty = true;
+            }
+        }
+    }
+
+    /// A content read of `key` keeps it in the set for a minute.
+    fn touch_watch(&mut self, key: &ContentKey) {
+        let now = Instant::now();
+        if let Some(w) = self.watches.get_mut(key) {
+            w.last_read = Some(now);
+        } else {
+            self.watches.insert(
+                key.clone(),
+                Watch {
+                    last_read: Some(now),
+                    subscribers: std::collections::HashSet::new(),
+                },
+            );
+            self.watch_dirty = true;
+        }
+    }
+
+    /// Keep the watch set within its bounds and hand the worker what
+    /// to poll: a key with no subscriber and no read for a minute goes,
+    /// past the cap the least recently read goes, and only a running
+    /// pane is polled. Taken when the set or a policy moved, and every
+    /// few seconds for the idle rule.
+    fn sweep_watches(&mut self) {
+        let due = self
+            .last_watch_sweep
+            .is_none_or(|t| t.elapsed() >= Duration::from_secs(5));
+        if !self.watch_dirty && !due {
+            return;
+        }
+        self.watch_dirty = false;
+        self.last_watch_sweep = Some(Instant::now());
+        let now = Instant::now();
+        self.watches.retain(|_, w| {
+            !w.subscribers.is_empty() || w.last_read.is_some_and(|t| now - t < WATCH_IDLE)
+        });
+        while self.watches.len() > WATCH_CAP {
+            let Some(oldest) = self
+                .watches
+                .iter()
+                .min_by_key(|(_, w)| w.last_read)
+                .map(|(k, _)| k.clone())
+            else {
+                break;
+            };
+            self.watches.remove(&oldest);
+        }
+        let keys: Vec<ContentKey> = self.watches.keys().cloned().collect();
+        let mut jobs = Vec::new();
+        for key in keys {
+            let id = key.record();
+            if !self.core.is_running(id) {
+                continue;
+            }
+            if let Ok(policy) = self.policy_for(id) {
+                jobs.push(ContentJob {
+                    key,
+                    pane: HostId(id.host_name()),
+                    lines: SCREEN_LINES_CAP,
+                    policy,
+                    reply: None,
+                });
+            }
+        }
+        if let Some(content) = &self.content {
+            content.set_watch(jobs);
+        }
+    }
+
+    /// A session's redaction policy: the project's secret variables and
+    /// its granted sets' secrets, with the fingerprint that names it. A
+    /// secret store that fails is an error, never an unmasked text.
+    fn resolve_policy(&self, id: RecordId) -> Result<Policy, String> {
+        let Some(record) = self.core.session(id) else {
+            return Err("no such session".into());
+        };
+        let mut secrets: Vec<(String, String)> =
+            resolve_project_env(&self.core, &self.services, record.project)
+                .vars
+                .into_iter()
+                .filter(|v| v.secret)
+                .filter_map(|v| v.value.filter(|x| !x.is_empty()).map(|x| (v.name, x)))
+                .collect();
+        // A child of `switchboard-env exec` may print a set's secret too.
+        let resolved = self.resolve_record_sets(record)?;
+        let secret_names = self.set_secret_names();
+        secrets.extend(
+            resolved
+                .pairs
+                .into_iter()
+                .filter(|(name, value)| !value.is_empty() && secret_names.contains(name)),
+        );
+        Ok(Policy::new(secrets))
+    }
+
+    /// `resolve_policy`, cached until a save or a secret change.
+    fn policy_for(&mut self, id: RecordId) -> Result<Policy, String> {
+        if let Some(p) = self.policies.get(&id) {
+            return Ok(p.clone());
+        }
+        let policy = self.resolve_policy(id)?;
+        self.policies.insert(id, policy.clone());
+        Ok(policy)
+    }
+
+    /// A device's screen read: the frame checks the record and resolves
+    /// the policy, the worker reads and masks, and the reply goes out
+    /// on the connection's channel once the frame has stamped it.
+    fn remote_screen(
+        &mut self,
+        request: &RemoteRequest,
+        session: &str,
+        reply: &mpsc::SyncSender<RemoteReply>,
+    ) -> Served {
+        let id = match parse_uuid("session", session) {
+            Ok(id) => RecordId(id),
+            Err(reason) => return Served::Now(self.refuse(request, 400, "failed", &reason, true)),
+        };
+        if !self.core.is_running(id) {
+            return Served::Now(self.refuse(request, 400, "failed", "not running", true));
+        }
+        let policy = match self.policy_for(id) {
+            Ok(policy) => policy,
+            Err(reason) => {
+                log::warn!("remote: screen for {}: policy: {reason}", id.host_name());
+                return Served::Now(self.refuse(
+                    request,
+                    503,
+                    "policy",
+                    "the secret set could not be resolved; nothing is sent unredacted",
+                    true,
+                ));
+            }
+        };
+        let lines = request
+            .param("lines")
+            .and_then(|n| n.parse::<usize>().ok())
+            .unwrap_or(40)
+            .clamp(1, SCREEN_LINES_CAP);
+        let key = ContentKey::Screen(id);
+        let job = ContentJob {
+            key: key.clone(),
+            pane: HostId(id.host_name()),
+            lines,
+            policy,
+            reply: Some(reply.clone()),
+        };
+        let Some(content) = &self.content else {
+            return Served::Now(self.refuse(request, 503, "busy", "no content worker", true));
+        };
+        if content.submit(job).is_err() {
+            return Served::Now(self.refuse(
+                request,
+                503,
+                "busy",
+                "the content worker is behind; try again",
+                true,
+            ));
+        }
+        self.touch_watch(&key);
+        Served::Deferred
+    }
+
+    /// How often the worker polls the watched keys; tests shorten it.
+    pub fn set_watch_poll(&self, every: Duration) {
+        if let Some(content) = &self.content {
+            content.set_poll(every);
+        }
+    }
+
+    /// The keys in the watch set now.
+    #[must_use]
+    pub fn watched_keys(&self) -> Vec<ContentKey> {
+        self.watches.keys().cloned().collect()
+    }
+
+    /// The revision a content key was last served at.
+    #[must_use]
+    pub fn content_revision(&self, key: &ContentKey) -> Option<u64> {
+        self.versions.get(key).map(|v| v.revision)
     }
 
     // --- the revision and its events
@@ -1425,13 +1792,17 @@ impl SwitchboardApp {
         let at_ms = epoch_millis(SystemTime::now());
         for change in changes {
             let kind = if change.removed { "removed" } else { "changed" };
-            let text = self.event_json(kind, Some(&change.resource), at_ms);
+            let text = self.event_json(
+                kind,
+                Some((change.resource.kind.word(), &change.resource.id)),
+                at_ms,
+            );
             self.broadcast(&text);
         }
     }
 
     /// One event frame as the subscribers get it.
-    fn event_json(&self, kind: &str, resource: Option<&Resource>, at_ms: u64) -> String {
+    fn event_json(&self, kind: &str, resource: Option<(&str, &str)>, at_ms: u64) -> String {
         let server_id = self.core.identity().map(|i| i.server_id.to_string());
         let mut value = serde_json::json!({
             "server_id": server_id,
@@ -1440,11 +1811,8 @@ impl SwitchboardApp {
             "type": kind,
             "at_ms": at_ms,
         });
-        if let Some(resource) = resource {
-            value["resource"] = serde_json::json!({
-                "kind": resource.kind.word(),
-                "id": resource.id,
-            });
+        if let Some((kind, id)) = resource {
+            value["resource"] = serde_json::json!({ "kind": kind, "id": id });
         }
         value.to_string()
     }
@@ -1494,7 +1862,11 @@ impl SwitchboardApp {
                 true,
             );
         }
-        self.subscribers.push(Subscriber { queue, device });
+        self.subscribers.push(Subscriber {
+            id: queue.id,
+            queue,
+            device,
+        });
         RemoteReply {
             status: remote::SUBSCRIBED,
             body: Vec::new(),
@@ -1709,7 +2081,17 @@ impl SwitchboardApp {
             IpAddr::from([127, 0, 0, 1])
         };
         let port = self.remote_port_override.unwrap_or(identity.listen.port);
-        let bound = RemotePort::bind(SocketAddr::new(ip, port), tls, move || wake())?;
+        let waker = Arc::clone(&wake);
+        let bound = RemotePort::bind(SocketAddr::new(ip, port), tls, move || waker())?;
+        if self.content.is_none() {
+            let (tx, rx) = mpsc::channel();
+            self.content = Some(ContentWorker::spawn(
+                Arc::clone(&self.services.host),
+                tx,
+                wake,
+            ));
+            self.observed = Some(rx);
+        }
         let addr = bound.addr();
         self.remote = Some(bound);
         self.remote_bound = Some(identity.listen);
@@ -1750,41 +2132,42 @@ impl SwitchboardApp {
         &mut self,
         request: &RemoteRequest,
         subscriber: Option<SubscriberQueue>,
-    ) -> RemoteReply {
+        reply: &mpsc::SyncSender<RemoteReply>,
+    ) -> Served {
         let Some(rest) = request.path.strip_prefix("/api/v1/") else {
-            return self.refuse(request, 404, "not_found", "no such endpoint", false);
+            return Served::Now(self.refuse(request, 404, "not_found", "no such endpoint", false));
         };
         let segments: Vec<&str> = rest.split('/').collect();
         match (request.method.as_str(), segments.as_slice()) {
-            ("GET", ["info"]) => return self.remote_info(),
-            ("POST", ["pair"]) => return self.remote_pair(request),
+            ("GET", ["info"]) => return Served::Now(self.remote_info()),
+            ("POST", ["pair"]) => return Served::Now(self.remote_pair(request)),
             _ => {}
         }
         let Some(token) = &request.bearer else {
-            return self.refuse(
+            return Served::Now(self.refuse(
                 request,
                 401,
                 "unauthorized",
                 "pair this device first",
                 false,
-            );
+            ));
         };
         let Some(device) = self
             .core
             .device_by_token(&remote::token_sha256(token))
             .cloned()
         else {
-            return self.refuse(
+            return Served::Now(self.refuse(
                 request,
                 401,
                 "unauthorized",
                 "the token is not known; pair again",
                 false,
-            );
+            ));
         };
         self.dispatch_inner(AppAction::DeviceSeen(device.id));
         if let ("GET", ["events"]) = (request.method.as_str(), segments.as_slice()) {
-            return self.remote_subscribe(request, device.id, subscriber);
+            return Served::Now(self.remote_subscribe(request, device.id, subscriber));
         }
         let notes_cap = if matches!(segments.as_slice(), ["sessions", _]) {
             NOTES_CAP_ALONE
@@ -1799,7 +2182,7 @@ impl SwitchboardApp {
             ("GET", ["spaces", space, "sets"]) => wire::Body::Sets {
                 space: (*space).to_owned(),
             },
-            ("GET", ["sets", set]) => return self.remote_set(request, set),
+            ("GET", ["sets", set]) => return Served::Now(self.remote_set(request, set)),
             ("GET", ["projects", project, "sessions"]) => wire::Body::Sessions {
                 project: (*project).to_owned(),
             },
@@ -1810,21 +2193,20 @@ impl SwitchboardApp {
             ("GET", ["ops", op]) => wire::Body::OpStatus {
                 operation: (*op).to_owned(),
             },
-            ("GET", ["sessions", session, "screen"]) => wire::Body::SessionScreen {
-                session: (*session).to_owned(),
-                lines: request.param("lines").and_then(|n| n.parse().ok()),
-            },
+            ("GET", ["sessions", session, "screen"]) => {
+                return self.remote_screen(request, session, reply);
+            }
             _ => {
-                return self.refuse(
+                return Served::Now(self.refuse(
                     request,
                     404,
                     "not_found",
                     "not available on this port",
                     true,
-                );
+                ));
             }
         };
-        self.remote_reply(request, &self.answer(&body), notes_cap)
+        Served::Now(self.remote_reply(request, &self.answer(&body), notes_cap))
     }
 
     /// Who this host is, to anyone: nothing in it is a secret and
@@ -1984,6 +2366,20 @@ impl SwitchboardApp {
             );
         }
         out
+    }
+
+    /// A content reply at the revision its key holds.
+    fn envelope_at(&self, revision: u64, body: &serde_json::Value) -> RemoteReply {
+        let text = serde_json::json!({
+            "epoch": self.epoch,
+            "revision": revision,
+            "body": body,
+        });
+        RemoteReply {
+            status: 200,
+            body: text.to_string().into_bytes(),
+            authenticated: true,
+        }
     }
 
     fn envelope(&self, status: u16, body: &serde_json::Value, authenticated: bool) -> RemoteReply {
@@ -2280,30 +2676,15 @@ impl SwitchboardApp {
             Ok(text) => text,
             Err(e) => return wire::Reply::failed(format!("snapshot: {e}")),
         };
-        let mut secrets: Vec<(String, String)> = self
-            .core
-            .session(id)
-            .map(|s| resolve_project_env(&self.core, &self.services, s.project))
-            .map(|resolved| {
-                resolved
-                    .vars
-                    .into_iter()
-                    .filter(|v| v.secret)
-                    .filter_map(|v| v.value.filter(|x| !x.is_empty()).map(|x| (v.name, x)))
-                    .collect()
-            })
-            .unwrap_or_default();
-        // A child of `switchboard-env exec` may print a set's secret too.
-        if let Some(Ok(resolved)) = self.core.session(id).map(|s| self.resolve_record_sets(s)) {
-            let secret_names = self.set_secret_names();
-            secrets.extend(
-                resolved
-                    .pairs
-                    .into_iter()
-                    .filter(|(name, value)| !value.is_empty() && secret_names.contains(name)),
-            );
-        }
-        let redacted = redact(&text, &secrets);
+        let policy = match self.resolve_policy(id) {
+            Ok(policy) => policy,
+            Err(reason) => {
+                return wire::Reply::failed(format!(
+                    "the secret set could not be resolved ({reason}); nothing is sent unredacted"
+                ));
+            }
+        };
+        let redacted = redact(&text, &policy.secrets);
         if redacted != text {
             log::debug!("session.screen for {}: secrets redacted", id.host_name());
         }
@@ -2371,6 +2752,10 @@ impl SwitchboardApp {
             None => wire::OpStatus::Unknown,
         }
     }
+}
+
+fn now_ms() -> u64 {
+    epoch_millis(SystemTime::now())
 }
 
 /// Milliseconds since the epoch, the wire's time; zero before it.
@@ -2528,9 +2913,6 @@ impl DispatchWorker {
     }
 }
 
-/// How many lines above the asked-for ones `screen` reads and redacts.
-const SCREEN_SLACK_LINES: usize = 8;
-
 /// The remote port's protocol version, in `/info`.
 const REMOTE_PROTOCOL: u32 = 1;
 /// The remote port's caps: a reply's bytes, a string in a view, and a
@@ -2580,83 +2962,15 @@ fn bound_strings(value: &mut serde_json::Value, notes_cap: usize) {
     }
 }
 
-/// `text` with every occurrence of each secret's value replaced by
-/// `<NAME>`. Longer values go first, so a value that holds another is
-/// replaced whole rather than leaving a fragment around the shorter one.
-/// A pane's capture breaks a line longer than the pane where it wraps,
-/// so a value is also found with line breaks inside it.
-/// The capture also trims each row's trailing spaces, so a space in the
-/// value that fell at a wrap may be gone.
-fn redact(text: &str, secrets: &[(String, String)]) -> String {
-    let mut by_length: Vec<&(String, String)> =
-        secrets.iter().filter(|(_, v)| !v.is_empty()).collect();
-    by_length.sort_by_key(|(_, v)| std::cmp::Reverse(v.len()));
-    let mut out = text.to_owned();
-    for (name, value) in by_length {
-        let placeholder = format!("<{name}>");
-        let mut from = 0;
-        while let Some((start, end)) = find_across_breaks(&out, value, from) {
-            out.replace_range(start..end, &placeholder);
-            from = start + placeholder.len();
-        }
-    }
-    out
-}
-
-/// The byte range of the first occurrence of `value` in `text` at or
-/// after `from`, where `text` may break a line anywhere inside it and
-/// some of a run of spaces in `value` at such a break may be missing:
-/// the row before the break lost its trailing ones, and the row after
-/// holds the rest. Byte matching stays on character boundaries: a
-/// value's first byte is never a UTF-8 continuation byte, and a line
-/// break never sits inside one.
-fn find_across_breaks(text: &str, value: &str, from: usize) -> Option<(usize, usize)> {
-    let hay = text.as_bytes();
-    let needle = value.as_bytes();
-    let is_break = |b: u8| b == b'\n' || b == b'\r';
-    let spaces = |bytes: &[u8], at: usize| {
-        bytes
-            .get(at..)
-            .map_or(0, |rest| rest.iter().take_while(|&&b| b == b' ').count())
-    };
-    (from..hay.len()).find_map(|start| {
-        let mut i = start;
-        let mut k = 0;
-        while let Some(&want) = needle.get(k) {
-            let at_break = hay.get(i).copied().is_some_and(is_break);
-            if k > 0 && !is_break(want) && at_break {
-                while hay.get(i).copied().is_some_and(is_break) {
-                    i += 1;
-                }
-                if want == b' ' {
-                    let kept = spaces(hay, i);
-                    let run = spaces(needle, k);
-                    if kept > run {
-                        return None;
-                    }
-                    i += kept;
-                    k += run;
-                    continue;
-                }
-            }
-            if hay.get(i) != Some(&want) {
-                return None;
-            }
-            i += 1;
-            k += 1;
-        }
-        Some((start, i))
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
     use std::path::PathBuf;
     use std::time::SystemTime;
 
-    use super::{SwitchboardApp, redact};
+    use super::SwitchboardApp;
     use crate::adapters::fakes;
+    use crate::content::redact;
     use crate::core::model::{Project, ProjectEnv, ProjectId, SessionKind, SpaceId, Workspace};
     use crate::core::{AppAction, ControlAction, Launch};
     use crate::core::{RECORD_TOKEN_ENV, token_hash};
@@ -2721,7 +3035,7 @@ mod tests {
     fn a_spawn_carries_a_fresh_token_whose_hash_is_on_the_record() {
         let host = fakes::FakeHost::default();
         let mut services = fakes::services();
-        services.host = Box::new(host.clone());
+        services.host = std::sync::Arc::new(host.clone());
         let mut app = SwitchboardApp::with_services(services);
         let project = Project {
             id: ProjectId::new(),

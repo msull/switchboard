@@ -185,7 +185,7 @@ fn main() -> eframe::Result {
             let operations = operations_log(&data_dir);
             let services = Services {
                 store: Box::new(store),
-                host: Box::new(host),
+                host: std::sync::Arc::new(host),
                 events: Box::new(HookLog::new(data_dir.clone())),
                 agents: Box::new(Agents::detect(data_dir.clone())),
                 opener: Box::new(MacOpener::detect()),

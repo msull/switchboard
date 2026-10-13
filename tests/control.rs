@@ -58,7 +58,7 @@ fn port_with(
             initial,
             ..MemoryStore::default()
         }),
-        host: Box::new(host),
+        host: std::sync::Arc::new(host),
         opener: Box::new(opener.clone()),
         operations: Box::new(operations.clone()),
         ..fakes::services()
@@ -1025,7 +1025,7 @@ fn env_port() -> EnvPort {
         .expect("operations log");
     let services = Services {
         secrets: Box::new(secrets.clone()),
-        host: Box::new(host.clone()),
+        host: std::sync::Arc::new(host.clone()),
         operations: Box::new(operations),
         ..fakes::services()
     };

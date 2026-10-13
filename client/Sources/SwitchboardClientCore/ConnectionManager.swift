@@ -207,6 +207,20 @@ public actor ConnectionManager {
         connections[id]
     }
 
+    /// Hold a watch on a session's screen on its host (§4.4).
+    public func watch(screen ref: SessionRef) async {
+        await connections[ref.serverID]?.watch(screen: ref.recordID)
+    }
+
+    public func unwatch(screen ref: SessionRef) async {
+        await connections[ref.serverID]?.unwatch(screen: ref.recordID)
+    }
+
+    /// The screen last read for a session, if its host gave one.
+    public func screen(for ref: SessionRef) async -> ScreenBody? {
+        await connections[ref.serverID]?.screens[ref.recordID]
+    }
+
     public func setEnabled(_ id: ServerID, _ enabled: Bool) async {
         await connections[id]?.setEnabled(enabled)
         await persist()

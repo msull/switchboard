@@ -211,7 +211,7 @@ fn harness_sized(
 
 fn fake_services(opener: FakeOpener, secrets: FakeSecrets, host: FakeHost) -> Services {
     Services {
-        host: Box::new(host),
+        host: std::sync::Arc::new(host),
         opener: Box::new(opener),
         secrets: Box::new(secrets),
         ..fakes::services()

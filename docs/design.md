@@ -3225,6 +3225,36 @@ Built so far:
   socket under its backoff; the timer refresh is gone, the manager's
   loop retries only hosts that are not connected. Not in A3: watched
   content (A4) and the `runs` collection, which has no endpoint yet.
+- **A4, watched content.** A screen read is the spec's two-step
+  handoff: the frame checks the record and resolves the redaction
+  policy (the project's secret values and its granted sets', with a
+  fingerprint), one content worker thread (`content::ContentWorker`,
+  over the same `Arc<dyn ProcessHost>`) snapshots the pane's whole
+  window, hashes it as the source version, masks and trims it, and
+  reports back; the frame assigns the key a new revision and emits
+  `changed {screen, id}` only when the source or the policy moved, and
+  stamps the reply with the key's revision, so two reads of one text
+  carry one revision however many lines each asked for, and a secret
+  added to the project moves a watched screen though the pane did not.
+  A policy that fails to resolve refuses the read; nothing is served
+  unmasked. The worker polls the watch set every two seconds: every key
+  a subscriber sent `watch` for (answered `watching`, never refused)
+  plus every key read in the last minute, capped at 128 with the least
+  recently read evicted and re-entered by its next read; `unwatch`, a
+  closed socket and a revocation each drop their watches. The policy
+  is resolved and cached on the frame, cleared by any save or secret
+  change, which is the one Keychain read left there until Milestone C.
+  The control port's `session.screen` shares the policy and refuses
+  the same way. The Swift client counts holders per screen, sends
+  `watch` at the first and `unwatch` at the last, reads the screen on
+  `changed` past its held revision, resends every watch after `hello`
+  on a reconnect before it snapshots, and the command-line browser's
+  `screen <session id>` shows a pane live. Measured with the real
+  adapter: five tests in `tests/remote.rs`, including four stalled
+  strangers filling only their pool and a fifth closed at once while a
+  paired subscriber keeps receiving. Not in A4: the conversation, file
+  and run-output content kinds (Milestone C), which take the same
+  worker and cache.
 
 ## Open questions
 
