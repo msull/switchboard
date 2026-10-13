@@ -44,6 +44,7 @@ swift run switchboard-remote     # the command-line browser (usage below)
 ```sh
 switchboard-remote discover [seconds]     what advertises on this network
 switchboard-remote pair '<invite json>'   the text of the host's QR code
+switchboard-remote pair "$(pbpaste)"      the same, after "Copy invite" in the host's dialog
 switchboard-remote pair <host:port> <code> <spki_sha256>
 switchboard-remote hosts                  the known hosts and their state
 switchboard-remote forget <server id>

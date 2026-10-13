@@ -395,6 +395,9 @@ pub struct DrawCtx<'a> {
     /// The parsed transcripts the app holds.
     pub conversations: &'a ConversationCache,
     pub state: &'a mut UiState,
+    /// The port the remote port is bound on, while it is: the one a
+    /// pairing invite names (a dev instance overrides the identity's).
+    pub remote_port: Option<u16>,
     actions: Vec<AppAction>,
 }
 
@@ -413,6 +416,7 @@ pub fn draw(app: &mut SwitchboardApp, ui: &mut Ui) {
             services: app.services(),
             conversations: &app.conversations,
             state: &mut state,
+            remote_port: app.remote_addr().map(|a| a.port()),
             actions: Vec::new(),
         };
         draw_frame(&mut cx, ui);

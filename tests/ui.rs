@@ -7310,6 +7310,27 @@ fn remote_devices_dialog_opens_pairing_and_revokes_a_device() {
     // The window grew around the QR code; a frame settles its place
     // before the next click.
     harness.run_steps(2);
+    // The clipboard command is in the click's own frame.
+    harness.get_by_label("Copy invite").click();
+    harness.step();
+    let invite = harness
+        .output()
+        .platform_output
+        .commands
+        .iter()
+        .find_map(|c| match c {
+            egui::OutputCommand::CopyText(text) => Some(text.clone()),
+            _ => None,
+        })
+        .expect("the invite went to the clipboard");
+    let invite: serde_json::Value = serde_json::from_str(&invite).unwrap();
+    assert_eq!(invite["code"], code);
+    assert_eq!(
+        invite["spki_sha256"],
+        harness.state().core().identity().unwrap().spki_sha256
+    );
+    assert!(invite["addresses"].is_array());
+    harness.run_steps(2);
     click(&mut harness, "Stop pairing");
     assert!(actions(&harness).contains(&AppAction::ClosePairing));
     assert!(harness.state().core().pairing().is_none());

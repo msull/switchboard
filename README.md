@@ -213,7 +213,9 @@ Dev aids, all environment variables:
   pins the key hash the dialog shows):
   `curl -sk -H "Authorization: Bearer <token>" https://127.0.0.1:43187/api/v1/waiting`.
   The Swift client's command-line browser does the pinned version:
-  `client/README.md`. Script lines `remote-listen lan <port>` and
+  `client/README.md`; the dialog's "Copy invite" puts the QR code's
+  text on the clipboard, so `switchboard-remote pair "$(pbpaste)"`
+  pairs it. Script lines `remote-listen lan <port>` and
   `pairing <code>` put an instance on the network with a window open.
 - `DISPATCH_DATA_DIR=<dir>`: where the Dispatch page looks for
   `dispatch.sock` and where its console opens (the `dispatch` binary

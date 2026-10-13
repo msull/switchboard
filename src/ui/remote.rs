@@ -153,8 +153,9 @@ fn pairing(cx: &mut DrawCtx<'_>, ui: &mut Ui, draft: &mut RemoteDraft) {
         return;
     };
     if let Some(window) = cx.core.pairing().cloned() {
+        let port = cx.remote_port.unwrap_or(identity.listen.port);
         let address = remote::local_address()
-            .map(|ip| format!("{ip}:{}", identity.listen.port))
+            .map(|ip| format!("{ip}:{port}"))
             .unwrap_or_default();
         let payload = serde_json::json!({
             "server_id": identity.server_id,
@@ -194,9 +195,19 @@ fn pairing(cx: &mut DrawCtx<'_>, ui: &mut Ui, draft: &mut RemoteDraft) {
                         window.scope.word()
                     ),
                 ));
-                if theme::secondary(ui, "Stop pairing").clicked() {
-                    cx.dispatch(AppAction::ClosePairing);
-                }
+                ui.horizontal(|ui| {
+                    // The QR's text, for a client without a camera (the
+                    // command-line browser takes it as one argument).
+                    if theme::secondary(ui, "Copy invite")
+                        .on_hover_text("The QR code's text, to paste into a client")
+                        .clicked()
+                    {
+                        ui.ctx().copy_text(payload.clone());
+                    }
+                    if theme::secondary(ui, "Stop pairing").clicked() {
+                        cx.dispatch(AppAction::ClosePairing);
+                    }
+                });
             });
         });
     } else {
