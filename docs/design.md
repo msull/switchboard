@@ -3335,6 +3335,41 @@ Built so far:
   conversation, last-response and run-output modes (Milestone C), the
   QR scanner (the invite is pasted or passed at launch), and the
   Xcode project is generated, not checked in.
+- **C1 and C2, content on the wire and the conversation.** The port
+  serves `session.conversation` (a page of turns from a number or
+  `from=last`, stopping at `limit`, 100 at most, or the page's byte
+  cap, with `next`; a turn over 256 KiB loses its tool detail and
+  notes first, then its prompt is shortened, then its answer is cut
+  from the front, and says `truncated`), `session.last_response` (the
+  last turn's answer, a projection of the conversation key at its
+  revision), `session.runs` (from the record, artifacts by name) and
+  `session.run_output` (the log's tail, 500 lines at most). The
+  content worker reads them all: a transcript is parsed through the
+  reader's new `read_masked`, which runs the mask over every text
+  before the parser's caps, and the parsed, masked conversation stays
+  on the worker by handle, file version and policy, so a poll is a
+  stat and a page is served from memory; a run's log is read through
+  `scrollback::tail_masked`, which starts the longest secret's length
+  before the tail window so a value on the window's edge is masked
+  whole, and is versioned by inode, change time and size. The key for
+  a run is `record/n`, and the diff pass fingerprints a record's runs
+  as the `runs` collection. Only a Claude Code session has a
+  conversation; the rest are refused `no_conversation`. The client
+  holds a conversation as pages merged by turn number (`ConversationState`):
+  a `changed {conversation}` refetches from the last turn held, which
+  replaces that turn and everything after, a page reaching the end
+  drops anything after it, and another `resume_id` drops it all; the
+  card windows draw Last response (the answer with its inline
+  Markdown), Conversation (each turn's prompt, its activity folded
+  under a line with the tool calls' input and result one level deeper,
+  its answer; "Earlier turns" loads the page before the first held;
+  the end follows the host) and Run output (a run picker with its
+  status and the tail, scaled like the screen). Seen on the simulator
+  against a throwaway host: a real transcript's last page scrolled to
+  its end, and a service's run with its exit code and log. Not yet in
+  C: `file.read` (no view asks for a file before Milestone D), the
+  control scope (`send`, `resume`, `trust`), dictation, and the policy
+  reads off the frame.
 
 ## Open questions
 

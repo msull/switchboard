@@ -121,7 +121,7 @@ impl Gate {
             events: Box::new(HookLog::new(&self.data_dir)),
             agents: Box::new(Agents::detect(&self.data_dir)),
             opener: Box::new(self.opener.clone()),
-            transcripts: Box::new(ClaudeTranscripts),
+            transcripts: std::sync::Arc::new(ClaudeTranscripts),
             secrets: Box::new(FakeSecrets::default()),
             project_config: Box::new(FileConfigReader::new()),
             round_files: Box::new(switchboard::adapters::round_files::DiskRoundFiles),

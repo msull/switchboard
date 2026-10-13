@@ -17,6 +17,18 @@ public final class BrowserModel {
     /// connection; the holders per session are the open screen views.
     public private(set) var screens: [SessionRef: ScreenBody] = [:]
     private var holders: [SessionRef: Int] = [:]
+    /// The conversation content per watched session: the last response
+    /// and the turns held; the holders are the open response and
+    /// conversation views.
+    public private(set) var lastResponses: [SessionRef: LastResponseBody] = [:]
+    public private(set) var conversations: [SessionRef: ConversationState] = [:]
+    private var conversationHolders: [SessionRef: Int] = [:]
+    /// The runs read per session, and the output per run watched.
+    public private(set) var runs: [SessionRef: [RunView]] = [:]
+    public private(set) var runOutputs: [RunRef: RunOutputBody] = [:]
+    private var runHolders: [RunRef: Int] = [:]
+    /// How many turns a conversation page asks for.
+    public static let conversationPage = 20
     /// Every session seen from a host, and the ones a connected host
     /// no longer lists: a window on one says it was removed.
     private var seen: Set<SessionRef> = []
@@ -91,6 +103,24 @@ public final class BrowserModel {
             screens[ref] = await manager.screen(for: ref)
         }
         self.screens = screens
+        var lastResponses: [SessionRef: LastResponseBody] = [:]
+        var conversations: [SessionRef: ConversationState] = [:]
+        var runs: [SessionRef: [RunView]] = [:]
+        for ref in conversationHolders.keys {
+            lastResponses[ref] = await manager.lastResponse(for: ref)
+            conversations[ref] = await manager.conversation(for: ref)
+        }
+        for ref in Set(runHolders.keys.map(\.session)).union(self.runs.keys) {
+            runs[ref] = await manager.runs(for: ref)
+        }
+        var runOutputs: [RunRef: RunOutputBody] = [:]
+        for ref in runHolders.keys {
+            runOutputs[ref] = await manager.runOutput(for: ref)
+        }
+        self.lastResponses = lastResponses
+        self.conversations = conversations
+        self.runs = runs
+        self.runOutputs = runOutputs
         let present = Set(store.sessions.map(\.ref))
         let connected = Set(store.hosts.filter { $0.state.isConnected }.map(\.id))
         seen.formUnion(present)
@@ -116,6 +146,68 @@ public final class BrowserModel {
         holders[ref] = nil
         screens[ref] = nil
         await manager.unwatch(screen: ref)
+    }
+
+    /// A response or conversation view opened on `ref`: the first
+    /// holder takes the watch and reads both the last response and the
+    /// last page, so either view has what it shows.
+    public func watchConversation(_ ref: SessionRef) async {
+        conversationHolders[ref, default: 0] += 1
+        if conversationHolders[ref] == 1 {
+            await manager.watch(conversation: ref)
+            await manager.readLastResponse(ref)
+            await manager.readConversation(ref, from: nil, limit: Self.conversationPage)
+        }
+        await pull()
+    }
+
+    public func unwatchConversation(_ ref: SessionRef) async {
+        guard let n = conversationHolders[ref] else { return }
+        if n > 1 {
+            conversationHolders[ref] = n - 1
+            return
+        }
+        conversationHolders[ref] = nil
+        lastResponses[ref] = nil
+        conversations[ref] = nil
+        await manager.unwatch(conversation: ref)
+    }
+
+    /// The page before the first turn held.
+    public func loadEarlier(_ ref: SessionRef) async {
+        guard let first = conversations[ref]?.firstHeld, first > 1 else { return }
+        let from = max(1, first - Self.conversationPage)
+        await manager.readConversation(ref, from: from, limit: first - from)
+        await pull()
+    }
+
+    /// The runs of a command or service, read now and kept fresh by
+    /// the host's `changed {runs}`.
+    public func readRuns(_ ref: SessionRef) async {
+        await manager.readRuns(ref)
+        runs[ref] = await manager.runs(for: ref)
+    }
+
+    /// An output view opened on a run: the first holder takes the
+    /// watch and reads the tail.
+    public func watchRunOutput(_ ref: RunRef) async {
+        runHolders[ref, default: 0] += 1
+        if runHolders[ref] == 1 {
+            await manager.watch(runOutput: ref)
+            await manager.readRunOutput(ref)
+        }
+        await pull()
+    }
+
+    public func unwatchRunOutput(_ ref: RunRef) async {
+        guard let n = runHolders[ref] else { return }
+        if n > 1 {
+            runHolders[ref] = n - 1
+            return
+        }
+        runHolders[ref] = nil
+        runOutputs[ref] = nil
+        await manager.unwatch(runOutput: ref)
     }
 
     /// The mode a card window shows, `compact` until it chooses.

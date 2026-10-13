@@ -21,17 +21,60 @@ const TAIL_BYTES: u64 = 128 * 1024;
 /// # Errors
 /// The file cannot be opened or read.
 pub fn tail_text(path: &Path, max_lines: usize) -> std::io::Result<String> {
+    tail_masked(path, max_lines, &|s| s.to_owned(), 0).map(|(_, text)| text)
+}
+
+/// What a log file is at a read: inode, change time and size. A log
+/// truncated and regrown to its old length has a new change time; a
+/// rotated one a new inode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct LogVersion {
+    pub inode: u64,
+    pub ctime: i64,
+    pub ctime_nsec: i64,
+    pub size: u64,
+}
+
+impl LogVersion {
+    fn of(meta: &std::fs::Metadata) -> Self {
+        use std::os::unix::fs::MetadataExt as _;
+        Self {
+            inode: meta.ino(),
+            ctime: meta.ctime(),
+            ctime_nsec: meta.ctime_nsec(),
+            size: meta.len(),
+        }
+    }
+}
+
+/// The last `max_lines` non-blank lines of the stream at `path` with
+/// `mask` over the text, and the file's version at the read. The read
+/// starts `overlap` bytes before the tail window so a masked value
+/// that straddles the window's first byte is masked whole; the lines
+/// kept are the last ones either way.
+///
+/// # Errors
+/// The file cannot be opened or read.
+pub fn tail_masked(
+    path: &Path,
+    max_lines: usize,
+    mask: &dyn Fn(&str) -> String,
+    overlap: usize,
+) -> std::io::Result<(LogVersion, String)> {
     let mut file = std::fs::File::open(path)?;
-    let len = file.metadata()?.len();
-    let start = len.saturating_sub(TAIL_BYTES);
+    let meta = file.metadata()?;
+    let version = LogVersion::of(&meta);
+    let start = meta
+        .len()
+        .saturating_sub(TAIL_BYTES + u64::try_from(overlap).unwrap_or(u64::MAX));
     file.seek(SeekFrom::Start(start))?;
     let mut bytes = Vec::new();
     file.read_to_end(&mut bytes)?;
     let text = String::from_utf8_lossy(&bytes);
-    let plain = strip_escapes(&text);
+    let plain = mask(&strip_escapes(&text));
     let lines: Vec<&str> = plain.lines().filter(|l| !l.trim().is_empty()).collect();
     let keep = lines.len().saturating_sub(max_lines);
-    Ok(lines[keep..].join("\n"))
+    Ok((version, lines[keep..].join("\n")))
 }
 
 /// Drop ANSI escape sequences and control characters, honoring `\r` as
@@ -109,6 +152,35 @@ mod tests {
             "Build Succeeded\nUploading\n"
         );
         assert_eq!(strip_escapes("10%\r\r20%\r\n"), "20%\n");
+    }
+
+    #[test]
+    fn a_masked_tail_finds_a_value_across_the_window_edge_and_versions_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("x.vt");
+        // A file past the tail window, with the secret straddling the
+        // window's first byte: the line holding it starts the file,
+        // and the window starts four bytes into the value.
+        let secret = "tok-5e3cr3t";
+        let tail = usize::try_from(TAIL_BYTES).unwrap();
+        let mut text = format!("key={secret}\n");
+        let head = text.len();
+        text.push_str(&"b\n".repeat((tail + 8 - head) / 2));
+        assert_eq!(text.len() - tail, 8, "the window starts inside the value");
+        std::fs::write(&p, &text).unwrap();
+        let mask = |s: &str| s.replace(secret, "<TOKEN>");
+        let (_, out) = tail_masked(&p, usize::MAX, &mask, 0).unwrap();
+        assert!(
+            out.starts_with("5e3cr3t\n"),
+            "no overlap: a fragment leaks: {out:.20}"
+        );
+        let (v1, out) = tail_masked(&p, usize::MAX, &mask, secret.len()).unwrap();
+        assert!(out.starts_with("key=<TOKEN>\nb"), "{out:.20}");
+        let (v2, _) = tail_masked(&p, 1, &mask, 0).unwrap();
+        assert_eq!(v1, v2, "a read does not move the version");
+        std::fs::write(&p, "other\n").unwrap();
+        let (v3, _) = tail_masked(&p, 1, &mask, 0).unwrap();
+        assert_ne!(v1, v3, "a rewrite moves it");
     }
 
     #[test]

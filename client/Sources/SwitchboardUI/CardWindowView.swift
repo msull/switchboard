@@ -106,13 +106,9 @@ public struct CardWindowView: View {
                     modeButtons(for: kind, titled: false)
                 }
                 Spacer(minLength: 0)
-                if mode == .screen {
+                if mode.scalable {
                     scaleControl
                 }
-            }
-            if ViewMode.offered(for: kind).contains(where: { !$0.drawn }) {
-                Text("The greyed modes arrive with \(ViewMode.arrivesWith).")
-                    .font(.caption2).foregroundStyle(.secondary)
             }
         }
     }
@@ -132,7 +128,7 @@ public struct CardWindowView: View {
                 .buttonStyle(.bordered)
                 .controlSize(.mini)
                 .tint(offered == mode ? .accentColor : nil)
-                .disabled(!offered.drawn || !standing.controlsEnabled)
+                .disabled(!standing.controlsEnabled)
                 .accessibilityLabel(offered.title)
                 .help(offered.title)
             }
@@ -184,14 +180,353 @@ public struct CardWindowView: View {
             CompactDetailView(item: item)
         case .screen:
             ScreenView(model: model, ref: item.ref, scale: screenScale)
-        case .lastResponse, .conversation, .runOutput:
-            VStack {
-                Spacer()
-                Text("\(mode.title) arrives with \(ViewMode.arrivesWith).")
-                    .foregroundStyle(.secondary)
-                Spacer()
+        case .lastResponse:
+            LastResponseView(model: model, ref: item.ref)
+        case .conversation:
+            ConversationView(model: model, ref: item.ref)
+        case .runOutput:
+            RunOutputView(model: model, ref: item.ref, scale: screenScale)
+        }
+    }
+}
+
+/// The time of a wire millisecond stamp, short.
+func clock(_ ms: UInt64?) -> String? {
+    ms.map { Date(timeIntervalSince1970: Double($0) / 1000).formatted(date: .omitted, time: .shortened) }
+}
+
+/// Text the agent wrote, with its Markdown read where it parses and
+/// shown plain where it does not.
+struct AgentText: View {
+    let text: String
+
+    var body: some View {
+        if let rich = try? AttributedString(
+            markdown: text,
+            options: AttributedString.MarkdownParsingOptions(interpretedSyntax: .inlineOnlyPreservingWhitespace))
+        {
+            Text(rich).textSelection(.enabled)
+        } else {
+            Text(text).textSelection(.enabled)
+        }
+    }
+}
+
+/// The last turn's answer, live through the conversation watch held
+/// while the view is on screen (§4.3: a projection of the conversation).
+struct LastResponseView: View {
+    @Bindable var model: BrowserModel
+    let ref: SessionRef
+
+    var body: some View {
+        Group {
+            if let last = model.lastResponses[ref] {
+                if last.n == 0 {
+                    placeholder("No response yet.")
+                } else {
+                    ScrollViewReader { proxy in
+                        ScrollView {
+                            VStack(alignment: .leading, spacing: 8) {
+                                HStack {
+                                    Text("Turn \(last.n) of \(last.total)")
+                                    if let at = clock(last.endMs) { Text("· \(at)") }
+                                    if last.truncated { Text("· cut at the host's cap") }
+                                }
+                                .font(.caption).foregroundStyle(.secondary)
+                                AgentText(text: last.text)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                Color.clear.frame(height: 1).id("end")
+                            }
+                        }
+                        .onChange(of: last) { _, _ in proxy.scrollTo("end", anchor: .bottom) }
+                    }
+                }
+            } else {
+                placeholder("No conversation: the session has not started one, or is not a Claude Code session.")
             }
-            .frame(maxWidth: .infinity)
+        }
+        .task(id: ref) {
+            await model.watchConversation(ref)
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+            }
+            await model.unwatchConversation(ref)
+        }
+    }
+
+    private func placeholder(_ text: String) -> some View {
+        VStack {
+            Spacer()
+            Text(text).foregroundStyle(.secondary).multilineTextAlignment(.center)
+            Spacer()
+        }
+        .frame(maxWidth: .infinity)
+    }
+}
+
+/// The conversation by turn: the prompt, the activity folded under a
+/// line, the answer; earlier pages load above, and the end follows the
+/// host's `changed` (§4.3).
+struct ConversationView: View {
+    @Bindable var model: BrowserModel
+    let ref: SessionRef
+    @State private var loading = false
+
+    var body: some View {
+        Group {
+            if let conversation = model.conversations[ref] {
+                ScrollViewReader { proxy in
+                    ScrollView {
+                        LazyVStack(alignment: .leading, spacing: 14) {
+                            if conversation.hasEarlier {
+                                Button {
+                                    loading = true
+                                    Task {
+                                        await model.loadEarlier(ref)
+                                        loading = false
+                                    }
+                                } label: {
+                                    Label(
+                                        "Earlier turns (\((conversation.firstHeld ?? 1) - 1) before)",
+                                        systemImage: "arrow.up")
+                                }
+                                .buttonStyle(.bordered)
+                                .controlSize(.small)
+                                .disabled(loading)
+                            }
+                            ForEach(conversation.turns) { turn in
+                                TurnRow(turn: turn)
+                            }
+                            Color.clear.frame(height: 1).id("end")
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .onChange(of: conversation.lastHeld) { _, _ in proxy.scrollTo("end", anchor: .bottom) }
+                    .onChange(of: conversation.turns.last?.finalText) { _, _ in
+                        proxy.scrollTo("end", anchor: .bottom)
+                    }
+                    .onAppear { proxy.scrollTo("end", anchor: .bottom) }
+                }
+            } else {
+                VStack {
+                    Spacer()
+                    Text("No conversation: the session has not started one, or is not a Claude Code session.")
+                        .foregroundStyle(.secondary).multilineTextAlignment(.center)
+                    Spacer()
+                }
+                .frame(maxWidth: .infinity)
+            }
+        }
+        .task(id: ref) {
+            await model.watchConversation(ref)
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+            }
+            await model.unwatchConversation(ref)
+        }
+    }
+}
+
+/// One turn: the prompt, the activity behind a disclosure, the answer.
+struct TurnRow: View {
+    let turn: TurnView
+    @State private var open = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(alignment: .firstTextBaseline) {
+                Text("\(turn.n)").font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+                Text(turn.user).textSelection(.enabled)
+                    .padding(8)
+                    .background(.quaternary, in: RoundedRectangle(cornerRadius: 8))
+                Spacer(minLength: 0)
+                if let at = clock(turn.atMs) {
+                    Text(at).font(.caption2).foregroundStyle(.secondary)
+                }
+            }
+            if !turn.activity.isEmpty {
+                DisclosureGroup(isExpanded: $open) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        ForEach(turn.activity) { activity in
+                            ActivityRow(activity: activity)
+                        }
+                    }
+                    .padding(.leading, 8)
+                } label: {
+                    Text(summary).font(.caption).foregroundStyle(.secondary)
+                }
+            }
+            if turn.finalText.isEmpty {
+                Text(turn.endMs == nil ? "working…" : "(no answer)")
+                    .font(.callout).foregroundStyle(.secondary)
+            } else {
+                AgentText(text: turn.finalText)
+            }
+            if turn.truncated {
+                Text("Cut at the host's turn cap.").font(.caption2).foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private var summary: String {
+        var parts: [String] = []
+        if turn.tools > 0 { parts.append("\(turn.tools) tool\(turn.tools == 1 ? "" : "s")") }
+        if turn.errors > 0 { parts.append("\(turn.errors) failed") }
+        if turn.thinking > 0 { parts.append("thought \(turn.thinking)×") }
+        let system = turn.activity.filter { $0.kind == .system }.count
+        if system > 0 { parts.append("\(system) system") }
+        return parts.isEmpty ? "\(turn.activity.count) steps" : parts.joined(separator: ", ")
+    }
+}
+
+/// One activity line; a tool call opens on its input and result.
+struct ActivityRow: View {
+    let activity: ActivityView
+    @State private var open = false
+
+    var body: some View {
+        if let detail = activity.detail {
+            DisclosureGroup(isExpanded: $open) {
+                VStack(alignment: .leading, spacing: 4) {
+                    if !detail.input.isEmpty {
+                        Text(detail.input).font(.system(.caption, design: .monospaced)).textSelection(.enabled)
+                    }
+                    if !detail.result.isEmpty {
+                        Divider()
+                        Text(detail.result).font(.system(.caption, design: .monospaced)).textSelection(.enabled)
+                    }
+                }
+                .padding(.leading, 8)
+            } label: {
+                line
+            }
+        } else {
+            line
+        }
+    }
+
+    private var line: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 4) {
+            Image(systemName: symbol).font(.caption2)
+            Text(activity.text ?? activity.line).font(.callout)
+                .foregroundStyle(activity.error ? AnyShapeStyle(.red) : AnyShapeStyle(.primary))
+                .textSelection(.enabled)
+        }
+    }
+
+    private var symbol: String {
+        switch activity.kind {
+        case .tool: return activity.error ? "xmark.circle" : "wrench"
+        case .text: return "text.alignleft"
+        case .system: return "gearshape"
+        }
+    }
+}
+
+/// A command's or service's runs and the tail of one run's log, live
+/// through a watch on the run chosen (the latest until another is).
+struct RunOutputView: View {
+    @Bindable var model: BrowserModel
+    let ref: SessionRef
+    let scale: Double
+    @State private var chosen: Int?
+
+    private var runs: [RunView] { model.runs[ref] ?? [] }
+    private var current: RunRef? {
+        (chosen ?? runs.last?.n).map { RunRef(session: ref, n: $0) }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            if runs.isEmpty {
+                VStack {
+                    Spacer()
+                    Text("No runs yet.").foregroundStyle(.secondary)
+                    Spacer()
+                }
+                .frame(maxWidth: .infinity)
+            } else {
+                runPicker
+                if let current {
+                    RunTail(model: model, run: current, scale: scale)
+                }
+            }
+        }
+        .task(id: ref) { await model.readRuns(ref) }
+    }
+
+    private var runPicker: some View {
+        HStack(spacing: 6) {
+            Picker("Run", selection: Binding(get: { current?.n ?? 0 }, set: { chosen = $0 })) {
+                ForEach(runs) { run in
+                    Text("Run \(run.n)").tag(run.n)
+                }
+            }
+            .pickerStyle(.menu)
+            .controlSize(.mini)
+            if let run = runs.first(where: { $0.n == current?.n }) {
+                Text(status(of: run)).font(.caption2).foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private func status(of run: RunView) -> String {
+        var parts: [String] = []
+        if let at = clock(run.startedMs) { parts.append("started \(at)") }
+        if run.open {
+            parts.append("running")
+        } else if let exit = run.exit {
+            parts.append(exit == 0 ? "exit 0" : "exit \(exit)")
+        } else {
+            parts.append("ended")
+        }
+        if !run.artifacts.isEmpty { parts.append("\(run.artifacts.count) files") }
+        return parts.joined(separator: " · ")
+    }
+}
+
+/// The tail of one run's log, watched while on screen.
+struct RunTail: View {
+    @Bindable var model: BrowserModel
+    let run: RunRef
+    let scale: Double
+
+    var body: some View {
+        Group {
+            if let output = model.runOutputs[run] {
+                GeometryReader { viewport in
+                    ScrollViewReader { proxy in
+                        ScrollView([.vertical, .horizontal]) {
+                            VStack(alignment: .leading, spacing: 0) {
+                                Text(output.text)
+                                    .font(.system(size: ScreenScale.basePoints * scale, design: .monospaced))
+                                    .textSelection(.enabled)
+                                Color.clear.frame(height: 1).id("end")
+                            }
+                            .frame(minWidth: viewport.size.width, minHeight: viewport.size.height, alignment: .topLeading)
+                        }
+                        .onChange(of: output.text) { _, _ in proxy.scrollTo("end", anchor: .bottom) }
+                        .onAppear { proxy.scrollTo("end", anchor: .bottom) }
+                    }
+                }
+                if output.truncated {
+                    Text("Cut at the host's size cap.").font(.caption2).foregroundStyle(.secondary)
+                }
+            } else {
+                VStack {
+                    Spacer()
+                    Text("No output: the run's log is gone, or has not been read.").foregroundStyle(.secondary)
+                    Spacer()
+                }
+                .frame(maxWidth: .infinity)
+            }
+        }
+        .task(id: run) {
+            await model.watchRunOutput(run)
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+            }
+            await model.unwatchRunOutput(run)
         }
     }
 }

@@ -189,7 +189,7 @@ fn main() -> eframe::Result {
                 events: Box::new(HookLog::new(data_dir.clone())),
                 agents: Box::new(Agents::detect(data_dir.clone())),
                 opener: Box::new(MacOpener::detect()),
-                transcripts: Box::new(ClaudeTranscripts),
+                transcripts: std::sync::Arc::new(ClaudeTranscripts),
                 secrets: secret_store(),
                 project_config: Box::new(FileConfigReader::new()),
                 round_files: Box::new(switchboard::adapters::round_files::DiskRoundFiles),

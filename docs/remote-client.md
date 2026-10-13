@@ -431,6 +431,8 @@ Across A1 to A4: README (Layout, dev aids, data directory) and the design.md sta
 - Live updates over the WebSocket through the watch set; scroll and disclosure restoration across incremental refetches and reconnects.
 - System dictation into the text field as the initial voice input.
 
+*C1 and C2 built 2026-10-13 (the content endpoints but `file.read`, the conversation paged and merged, the three modes drawn); see design.md's remote client status. `file.read`, the control scope, dictation and the policy reads off the frame remain.*
+
 ### Milestone D — Shared iPadOS shell
 
 - The same modules and components on iPad with platform-appropriate navigation and windows.

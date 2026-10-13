@@ -21,8 +21,10 @@ use crate::adapters::remote::{
 };
 use crate::adapters::scrollback::scrollback_dir;
 use crate::content::{
-    ContentJob, ContentKey, ContentVersion, ContentWorker, ConversationCache, Observed, Policy,
-    SCREEN_LINES_CAP, SCREEN_SLACK_LINES, WATCH_CAP, WATCH_IDLE, Watch, redact,
+    ContentJob, ContentKey, ContentVersion, ContentView, ContentWorker, ConversationCache,
+    Observed, PAGE_TURNS_CAP, PAGE_TURNS_DEFAULT, PageFrom, Policy, RUN_LINES_CAP,
+    SCREEN_LINES_CAP, SCREEN_SLACK_LINES, Source, TURN_BYTES_CAP, WATCH_CAP, WATCH_IDLE, Watch,
+    redact,
 };
 use crate::core::revision::Fingerprints;
 use crate::core::{
@@ -70,7 +72,7 @@ pub struct Services {
     pub events: Box<dyn EventSource>,
     pub agents: Box<dyn AgentLauncher>,
     pub opener: Box<dyn Opener>,
-    pub transcripts: Box<dyn TranscriptReader>,
+    pub transcripts: Arc<dyn TranscriptReader>,
     pub secrets: Box<dyn SecretStore>,
     pub project_config: Box<dyn ProjectConfigReader>,
     pub round_files: Box<dyn RoundFiles>,
@@ -1636,23 +1638,95 @@ impl SwitchboardApp {
         let keys: Vec<ContentKey> = self.watches.keys().cloned().collect();
         let mut jobs = Vec::new();
         for key in keys {
-            let id = key.record();
-            if !self.core.is_running(id) {
-                continue;
-            }
-            if let Ok(policy) = self.policy_for(id) {
-                jobs.push(ContentJob {
-                    key,
-                    pane: HostId(id.host_name()),
+            let view = match key {
+                ContentKey::Screen(_) => ContentView::Screen {
                     lines: SCREEN_LINES_CAP,
-                    policy,
-                    reply: None,
-                });
+                },
+                ContentKey::Conversation(_) => ContentView::LastResponse,
+                ContentKey::RunOutput(..) => ContentView::Tail {
+                    lines: RUN_LINES_CAP,
+                },
+            };
+            if let Ok(job) = self.content_job(&key, view, None) {
+                jobs.push(job);
             }
         }
         if let Some(content) = &self.content {
             content.set_watch(jobs);
         }
+    }
+
+    /// The job that reads `key`: its source resolved from the record
+    /// (a running pane, a Claude Code transcript, a run's log) and the
+    /// session's policy. The error is a refusal's code and reason.
+    fn content_job(
+        &mut self,
+        key: &ContentKey,
+        view: ContentView,
+        reply: Option<mpsc::SyncSender<RemoteReply>>,
+    ) -> Result<ContentJob, (u16, &'static str, String)> {
+        let id = key.record();
+        let Some(record) = self.core.session(id) else {
+            return Err((404, "not_found", "no such session".into()));
+        };
+        let source = match key {
+            ContentKey::Screen(_) => {
+                if !self.core.is_running(id) {
+                    return Err((400, "failed", "not running".into()));
+                }
+                Source::Pane(HostId(id.host_name()))
+            }
+            ContentKey::Conversation(_) => {
+                if record.kind != SessionKind::Agent(AgentKind::ClaudeCode) {
+                    return Err((
+                        400,
+                        "no_conversation",
+                        "only a Claude Code session has a conversation".into(),
+                    ));
+                }
+                match &record.resume {
+                    Some(handle @ ResumeHandle::ClaudeCode { .. }) => {
+                        Source::Transcript(handle.clone())
+                    }
+                    _ => {
+                        return Err((
+                            400,
+                            "no_conversation",
+                            "the session has not started a conversation yet".into(),
+                        ));
+                    }
+                }
+            }
+            ContentKey::RunOutput(_, n) => {
+                let Some(run) = record.runs.iter().find(|r| r.n == *n) else {
+                    return Err((
+                        404,
+                        "no_run",
+                        "no such run: it was never made, or its log was pruned".into(),
+                    ));
+                };
+                Source::Log(scrollback_dir(&self.services.store.data_dir()).join(&run.log))
+            }
+        };
+        let policy = self.policy_for(id).map_err(|reason| {
+            log::warn!(
+                "remote: {} for {}: policy: {reason}",
+                key.kind(),
+                id.host_name()
+            );
+            (
+                503,
+                "policy",
+                "the secret set could not be resolved; nothing is sent unredacted".into(),
+            )
+        })?;
+        Ok(ContentJob {
+            key: key.clone(),
+            source,
+            view,
+            policy,
+            reply,
+        })
     }
 
     /// A session's redaction policy: the project's secret variables and
@@ -1691,52 +1765,105 @@ impl SwitchboardApp {
         Ok(policy)
     }
 
-    /// A device's screen read: the frame checks the record and resolves
-    /// the policy, the worker reads and masks, and the reply goes out
-    /// on the connection's channel once the frame has stamped it.
-    fn remote_screen(
+    /// The content reads by path: the screen, the conversation page or
+    /// the last response, and a run's output, each a key and a view
+    /// for the worker.
+    fn remote_content_route(
         &mut self,
         request: &RemoteRequest,
-        session: &str,
+        segments: &[&str],
         reply: &mpsc::SyncSender<RemoteReply>,
     ) -> Served {
-        let id = match parse_uuid("session", session) {
+        let id = match parse_uuid("session", segments[1]) {
             Ok(id) => RecordId(id),
             Err(reason) => return Served::Now(self.refuse(request, 400, "failed", &reason, true)),
         };
-        if !self.core.is_running(id) {
-            return Served::Now(self.refuse(request, 400, "failed", "not running", true));
-        }
-        let policy = match self.policy_for(id) {
-            Ok(policy) => policy,
-            Err(reason) => {
-                log::warn!("remote: screen for {}: policy: {reason}", id.host_name());
+        let (key, view) = match segments {
+            [_, _, "screen"] => (
+                ContentKey::Screen(id),
+                ContentView::Screen {
+                    lines: Self::lines_param(request, 40, SCREEN_LINES_CAP),
+                },
+            ),
+            [_, _, "last-response"] => (ContentKey::Conversation(id), ContentView::LastResponse),
+            [_, _, "conversation"] => {
+                let from = match request.param("from") {
+                    None => PageFrom::Turn(1),
+                    Some("last") => PageFrom::Last,
+                    Some(n) => match n.parse::<usize>() {
+                        Ok(n) if n >= 1 => PageFrom::Turn(n),
+                        _ => {
+                            return Served::Now(self.refuse(
+                                request,
+                                400,
+                                "bad_request",
+                                "from is a turn number or last",
+                                true,
+                            ));
+                        }
+                    },
+                };
+                let limit = request
+                    .param("limit")
+                    .and_then(|n| n.parse::<usize>().ok())
+                    .unwrap_or(PAGE_TURNS_DEFAULT)
+                    .clamp(1, PAGE_TURNS_CAP);
+                (
+                    ContentKey::Conversation(id),
+                    ContentView::Page { from, limit },
+                )
+            }
+            [_, _, "runs", n, "output"] => {
+                let Ok(n) = n.parse::<u32>() else {
+                    return Served::Now(self.refuse(
+                        request,
+                        400,
+                        "bad_request",
+                        "the run is a number",
+                        true,
+                    ));
+                };
+                (
+                    ContentKey::RunOutput(id, n),
+                    ContentView::Tail {
+                        lines: Self::lines_param(request, 200, RUN_LINES_CAP),
+                    },
+                )
+            }
+            _ => {
                 return Served::Now(self.refuse(
                     request,
-                    503,
-                    "policy",
-                    "the secret set could not be resolved; nothing is sent unredacted",
+                    404,
+                    "not_found",
+                    "no such endpoint",
                     true,
                 ));
             }
         };
-        let lines = request
-            .param("lines")
-            .and_then(|n| n.parse::<usize>().ok())
-            .unwrap_or(40)
-            .clamp(1, SCREEN_LINES_CAP);
-        let key = ContentKey::Screen(id);
-        let job = ContentJob {
-            key: key.clone(),
-            pane: HostId(id.host_name()),
-            lines,
-            policy,
-            reply: Some(reply.clone()),
+        self.remote_content(request, &key, view, reply)
+    }
+
+    /// A device's content read: the frame checks the record and
+    /// resolves the policy, the worker reads and masks, and the reply
+    /// goes out on the connection's channel once the frame has stamped
+    /// it.
+    fn remote_content(
+        &mut self,
+        request: &RemoteRequest,
+        key: &ContentKey,
+        view: ContentView,
+        reply: &mpsc::SyncSender<RemoteReply>,
+    ) -> Served {
+        let job = match self.content_job(key, view, Some(reply.clone())) {
+            Ok(job) => job,
+            Err((status, code, reason)) => {
+                return Served::Now(self.refuse(request, status, code, &reason, true));
+            }
         };
         let Some(content) = &self.content else {
             return Served::Now(self.refuse(request, 503, "busy", "no content worker", true));
         };
-        if content.submit(job).is_err() {
+        if !content.submit(job) {
             return Served::Now(self.refuse(
                 request,
                 503,
@@ -1745,8 +1872,47 @@ impl SwitchboardApp {
                 true,
             ));
         }
-        self.touch_watch(&key);
+        self.touch_watch(key);
         Served::Deferred
+    }
+
+    /// The `lines` a read asks for, within `cap`.
+    fn lines_param(request: &RemoteRequest, default: usize, cap: usize) -> usize {
+        request
+            .param("lines")
+            .and_then(|n| n.parse::<usize>().ok())
+            .unwrap_or(default)
+            .clamp(1, cap)
+    }
+
+    /// A command's or service's runs as the record holds them: the
+    /// numbers, times, exits and the artifacts' names, never paths.
+    fn remote_runs(&self, request: &RemoteRequest, session: &str) -> RemoteReply {
+        let record = parse_uuid("session", session)
+            .ok()
+            .and_then(|id| self.core.session(RecordId(id)));
+        let Some(record) = record else {
+            return self.refuse(request, 404, "not_found", "no such session", true);
+        };
+        let runs: Vec<serde_json::Value> = record
+            .runs
+            .iter()
+            .map(|r| {
+                serde_json::json!({
+                    "n": r.n,
+                    "started_ms": epoch_millis(r.started),
+                    "ended_ms": r.ended.map(epoch_millis),
+                    "exit": r.exit,
+                    "artifacts": r
+                        .artifacts
+                        .iter()
+                        .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+                        .collect::<Vec<_>>(),
+                })
+            })
+            .collect();
+        let body = serde_json::json!({ "runs": runs });
+        self.envelope(200, &body, true)
     }
 
     /// How often the worker polls the watched keys; tests shorten it.
@@ -2087,6 +2253,7 @@ impl SwitchboardApp {
             let (tx, rx) = mpsc::channel();
             self.content = Some(ContentWorker::spawn(
                 Arc::clone(&self.services.host),
+                Arc::clone(&self.services.transcripts),
                 tx,
                 wake,
             ));
@@ -2193,8 +2360,15 @@ impl SwitchboardApp {
             ("GET", ["ops", op]) => wire::Body::OpStatus {
                 operation: (*op).to_owned(),
             },
-            ("GET", ["sessions", session, "screen"]) => {
-                return self.remote_screen(request, session, reply);
+            ("GET", ["sessions", session, "runs"]) => {
+                return Served::Now(self.remote_runs(request, session));
+            }
+            (
+                "GET",
+                ["sessions", _, "screen" | "conversation" | "last-response"]
+                | ["sessions", _, "runs", _, "output"],
+            ) => {
+                return self.remote_content_route(request, &segments, reply);
             }
             _ => {
                 return Served::Now(self.refuse(
@@ -2229,7 +2403,10 @@ impl SwitchboardApp {
                 "body_bytes": BODY_CAP,
                 "string_bytes": STRING_CAP,
                 "notes_bytes": NOTES_CAP_ALONE,
-                "screen_lines": 200,
+                "screen_lines": SCREEN_LINES_CAP,
+                "run_lines": RUN_LINES_CAP,
+                "conversation_turns": PAGE_TURNS_CAP,
+                "turn_bytes": TURN_BYTES_CAP,
             },
             "pairing_open": self.core.pairing_at(self.clock()).is_some(),
         });

@@ -2851,9 +2851,7 @@ fn claude_session_without_a_conversation_falls_back_to_the_snapshot() {
 #[test]
 fn polling_reads_the_transcript_into_the_ui_state() {
     let services = Services {
-        transcripts: Box::new(FakeTranscripts {
-            conversation: Some(two_turns()),
-        }),
+        transcripts: Arc::new(FakeTranscripts::with(two_turns())),
         ..fakes::services()
     };
     let mut harness = Harness::builder()

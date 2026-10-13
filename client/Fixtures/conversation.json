@@ -1,0 +1,39 @@
+{
+  "body": {
+    "branch": "main",
+    "context_tokens": null,
+    "end_ms": null,
+    "from": 1,
+    "model": "claude-fable-5-1",
+    "next": 2,
+    "resume_id": "7b8f01de-c637-43e3-bbcf-5afe62185e35",
+    "start_ms": null,
+    "title": "explain-repo",
+    "total": 2,
+    "turns": [
+      {
+        "activity": [],
+        "assistant_msgs": 1,
+        "at_ms": null,
+        "end_ms": null,
+        "errors": 0,
+        "final_text": "answer 1",
+        "n": 1,
+        "permission_mode": null,
+        "thinking": 0,
+        "tools": 0,
+        "truncated": false,
+        "user": "prompt 1"
+      }
+    ],
+    "usage": {
+      "cache_create": 0,
+      "cache_read": 0,
+      "input": 0,
+      "output": 0
+    },
+    "version": null
+  },
+  "epoch": "2feedd04-8948-4740-89ba-f3d2deb9e6ae",
+  "revision": 12
+}

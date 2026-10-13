@@ -15,7 +15,7 @@ cargo test --locked --workspace                      # unit + headless UI + tmux
 cargo test --locked -p egui_term --lib               # the vendored terminal widget (outside the workspace)
 cargo clippy --locked --workspace --all-targets -- -D warnings   # lint
 cargo fmt --all                                      # format
-(cd client && swift test)                            # the Swift client's packages, 36 tests (Xcode; not in the hook or CI)
+(cd client && swift test)                            # the Swift client's packages, 43 tests (Xcode; not in the hook or CI)
 (cd client && scripts/sim.sh run)                    # the visionOS app on the simulator (xcodegen; see client/README.md)
 ./scripts/test-times.sh                              # every test timed serially, the slowest ten, the budget checked
 ```
@@ -303,7 +303,7 @@ src/core/
   workflow.rs            plan review runs: reviewer and planner rounds as a state machine over records
   control.rs             the control port's commands run quietly under an operation id; read models in the wire's shapes; `ready_for_prompt`, the one verdict `session.prompt` and a view's `prompt_refusal` share
   remote.rs              the remote port's state: the host's identity and paired devices as loaded, the pairing window with its code, scope and failure count, a device's scope and revocation
-  revision.rs            the read-model fingerprints behind the remote port's revision: every exported view hashed with its time-derived fields held still, and the `changed`/`removed` diff between two passes
+  revision.rs            the read-model fingerprints behind the remote port's revision: every exported view hashed with its time-derived fields held still, and the `changed`/`removed` diff between two passes (and a record's runs as the `runs` collection)
   diff.rs                a changed file's diff as held per ticket, lane and path, when a re-read is due, which unchanged runs fold
   dispatch.rs            Dispatch as the app shows it: the runner's last status as views, decisions answered as calls, a ticket's events and full view read once per change and its timeline, a project's supervisor chip, the console session
   tests.rs               state-transition tests for the core
@@ -325,14 +325,14 @@ src/adapters/
   dotenv.rs              .env parser (opt-in per project) and .env.example names
   project_config.rs      reads and validates .switchboard/project.json (capped, no symlinks)
   round_files.rs         a workflow's round files on disk: probe, snapshot into the data dir, delete
-  scrollback.rs          read the pipe-pane stream back as plain text (cold sessions)
+  scrollback.rs          read the pipe-pane stream back as plain text (cold sessions); the masked tail with its overlap and the log's version for the remote port
   artifacts.rs           a run's declared outputs: glob under the cwd, modified since the run began
   agents.rs              Claude Code / Codex launch, resume, preflight, discovery
-  transcript.rs          Claude Code transcript (JSONL) -> Conversation turns
+  transcript.rs          Claude Code transcript (JSONL) -> Conversation turns; `read_masked` runs the mask over every text before the parser's caps
   ghostty.rs             open, reveal, Ghostty window launch and raise
   fakes.rs               test doubles for every port
 src/app.rs               SwitchboardApp: owns core + adapters; runs effects; polls host and events; answers control-port queries (`session.screen` with the project's secret values redacted); serves the remote port (the views on the frame, a screen through the content worker with the policy resolved on the frame, the watch set, the revision per content key)
-src/content.rs           the app's content caches and the port's content worker: parsed transcripts with the handle and file time each was read at (`ConversationCache`), read by the views through `DrawCtx`; `ContentWorker`, the one thread that reads a pane for a device (the full window hashed as the source version, the policy's secrets masked, the asked-for lines kept, cut at 256 KiB) and polls the watched keys every two seconds; `redact`, the content keys, the policy with its fingerprint, the versions and the watch set's bounds (128 keys, a minute idle)
+src/content.rs           the app's content caches and the port's content worker: parsed transcripts with the handle and file time each was read at (`ConversationCache`), read by the views through `DrawCtx`; `ContentWorker`, the one thread that reads content for a device (a pane's full window hashed as the source version; a Claude Code transcript parsed masked and kept on the worker by handle, file version and policy, served as a page of turns by number or as the last response, the two sharing one key; a run's log tail with the overlap that masks a value on the window's edge) and polls the watched keys every two seconds; `redact`, the content keys, the policy with its fingerprint, the page, turn and tail caps, the versions and the watch set's bounds (128 keys, a minute idle)
 src/script.rs            SWITCHBOARD_SCRIPT dev aid
 src/ui/
   mod.rs                 UiState, draw loop (collect actions, then dispatch), keyboard, side panel tabs
@@ -366,7 +366,7 @@ src/ui/
 assets/fonts/            Source Serif 4 (Regular, Semibold, Italic; OFL), embedded by theme.rs
 tests/ui.rs              headless flows via egui_kittest with fakes
 tests/control.rs         the control port over a real socket with fakes: ops on records, logged replies, interrupted launches, a non-replayable command logged before it runs and answered `interrupted` on a retry, a pane's screen with secrets named
-tests/remote.rs          the remote port over a real TLS listener with fakes: /info to anyone, pairing with the host's key and code, a token that reads every view, revocation, scope, the allowlist, bounded strings, a redacted screen, a missing key remaking the identity, Bonjour following the listen preference, the events socket (`hello`, `changed` and `removed` from the diff, a rename and a trust question with no save, ten quiet passes emitting nothing, the event and the snapshot at one revision, overflow and revocation closing the socket), watched screens (`watch` answered `watching`, the poll emitting `changed` when a pane or its policy moves and nothing while it holds still, two reads of one text at one revision, the cap evicting the least recently read, `unwatch`, a closed socket and a revocation dropping their watches), stalled strangers filling only their pool, `/ops/{op}`, the fingerprint pass timed, and the client fixtures (`client/Fixtures`, rewritten with `SWITCHBOARD_WRITE_FIXTURES=1`)
+tests/remote.rs          the remote port over a real TLS listener with fakes (a conversation paged by turn with `from=last`, its last response at the conversation's revision, a shell refused, a watched conversation moving as the transcript grows; a command's runs, a run's output masked, a missing run refused, a watched run output moving as the log grows): /info to anyone, pairing with the host's key and code, a token that reads every view, revocation, scope, the allowlist, bounded strings, a redacted screen, a missing key remaking the identity, Bonjour following the listen preference, the events socket (`hello`, `changed` and `removed` from the diff, a rename and a trust question with no save, ten quiet passes emitting nothing, the event and the snapshot at one revision, overflow and revocation closing the socket), watched screens (`watch` answered `watching`, the poll emitting `changed` when a pane or its policy moves and nothing while it holds still, two reads of one text at one revision, the cap evicting the least recently read, `unwatch`, a closed socket and a revocation dropping their watches), stalled strangers filling only their pool, `/ops/{op}`, the fingerprint pass timed, and the client fixtures (`client/Fixtures`, rewritten with `SWITCHBOARD_WRITE_FIXTURES=1`)
 tests/fixtures/          a small real Claude Code transcript for the parser tests
 tests/live.rs            ignored: real claude / codex / Ghostty runs
 tests/gate.rs            Milestone 1 gate: real store, tmux, hooks; agents ignored

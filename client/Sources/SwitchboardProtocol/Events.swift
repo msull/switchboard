@@ -90,6 +90,41 @@ public enum ResourceKey: Hashable, Sendable {
     /// A session's pane, a content key: watched by `watch` and read by
     /// `screen`.
     case screen(session: String)
+    /// A Claude Code session's transcript; the last response is read
+    /// from the same key and moves with it.
+    case conversation(session: String)
+    /// A command's or service's runs, a collection on the record.
+    case runs(session: String)
+    /// One run's log; the wire id is `record/n`.
+    case runOutput(session: String, run: Int)
+
+    /// The `kind` and `id` a frame names for this key.
+    public var wire: (kind: String, id: String) {
+        switch self {
+        case .project(let id): return ("project", id)
+        case .space(let id): return ("space", id)
+        case .set(let id): return ("set", id)
+        case .session(let id): return ("session", id)
+        case .projects: return ("projects", "")
+        case .spaces: return ("spaces", "")
+        case .sets(let space): return ("sets", space)
+        case .sessions(let project): return ("sessions", project)
+        case .waiting: return ("waiting", "")
+        case .screen(let session): return ("screen", session)
+        case .conversation(let session): return ("conversation", session)
+        case .runs(let session): return ("runs", session)
+        case .runOutput(let session, let run): return ("run_output", "\(session)/\(run)")
+        }
+    }
+
+    /// Whether the key is content the host versions by its source
+    /// rather than a view it fingerprints.
+    public var isContent: Bool {
+        switch self {
+        case .screen, .conversation, .runOutput: return true
+        default: return false
+        }
+    }
 
     /// The key a frame names, or `nil` for a kind this client does not
     /// hold (a content kind before its endpoint exists here).
@@ -105,6 +140,12 @@ public enum ResourceKey: Hashable, Sendable {
         case "sessions": self = .sessions(project: ref.id)
         case "waiting": self = .waiting
         case "screen": self = .screen(session: ref.id)
+        case "conversation": self = .conversation(session: ref.id)
+        case "runs": self = .runs(session: ref.id)
+        case "run_output":
+            guard let slash = ref.id.lastIndex(of: "/"), let run = Int(ref.id[ref.id.index(after: slash)...])
+            else { return nil }
+            self = .runOutput(session: String(ref.id[..<slash]), run: run)
         default: return nil
         }
     }

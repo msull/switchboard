@@ -90,6 +90,11 @@ public protocol HostAPI: Sendable {
     func session(_ id: String) async throws -> Envelope<SessionBody>
     func waiting() async throws -> Envelope<SessionsBody>
     func screen(_ id: String, lines: Int?) async throws -> Envelope<ScreenBody>
+    /// A page of the conversation: `from` is a turn number or `"last"`.
+    func conversation(_ id: String, from: String?, limit: Int?) async throws -> Envelope<ConversationBody>
+    func lastResponse(_ id: String) async throws -> Envelope<LastResponseBody>
+    func runs(_ id: String) async throws -> Envelope<RunsBody>
+    func runOutput(_ id: String, run: Int, lines: Int?) async throws -> Envelope<RunOutputBody>
 }
 
 /// One host over HTTPS with the pinning delegate and a bearer token.
@@ -216,6 +221,28 @@ public final class HostClient: HostAPI, @unchecked Sendable {
 
     public func screen(_ id: String, lines: Int?) async throws -> Envelope<ScreenBody> {
         try await get("sessions/\(id)/screen", query: lines.map { "lines=\($0)" })
+    }
+
+    public func conversation(_ id: String, from: String?, limit: Int?) async throws
+        -> Envelope<ConversationBody>
+    {
+        var parts: [String] = []
+        if let from { parts.append("from=\(from)") }
+        if let limit { parts.append("limit=\(limit)") }
+        return try await get(
+            "sessions/\(id)/conversation", query: parts.isEmpty ? nil : parts.joined(separator: "&"))
+    }
+
+    public func lastResponse(_ id: String) async throws -> Envelope<LastResponseBody> {
+        try await get("sessions/\(id)/last-response", query: nil)
+    }
+
+    public func runs(_ id: String) async throws -> Envelope<RunsBody> {
+        try await get("sessions/\(id)/runs", query: nil)
+    }
+
+    public func runOutput(_ id: String, run: Int, lines: Int?) async throws -> Envelope<RunOutputBody> {
+        try await get("sessions/\(id)/runs/\(run)/output", query: lines.map { "lines=\($0)" })
     }
 
     private func get<T: Decodable & Sendable>(_ path: String, query: String?) async throws

@@ -26,7 +26,7 @@ use crate::ports::opener::Opener;
 use crate::ports::project_config::{ProjectConfig, ProjectConfigReader};
 use crate::ports::remote::{Advertisement, Advertiser, Identity, PairedDevice, RemoteStore};
 use crate::ports::store::{Loaded, Store, StoreError};
-use crate::ports::transcript::{Conversation, TranscriptReader};
+use crate::ports::transcript::{Conversation, TranscriptReader, TranscriptVersion};
 
 /// Every port as its fake's default, Dispatch included, and no wake
 /// socket. Tests name the fields they script and take the rest from
@@ -41,7 +41,7 @@ pub fn services() -> Services {
         opener: Box::new(FakeOpener::default()),
         remote: Box::new(FakeRemoteStore::default()),
         advertiser: Box::new(FakeAdvertiser::default()),
-        transcripts: Box::new(FakeTranscripts::default()),
+        transcripts: Arc::new(FakeTranscripts::default()),
         secrets: Box::new(FakeSecrets::default()),
         project_config: Box::new(FakeProjectConfig),
         round_files: Box::new(FakeRoundFiles),
@@ -541,21 +541,56 @@ impl crate::ports::secrets::SecretStore for FakeSecrets {
 }
 
 /// Serves one scripted conversation for every handle; `None` reads as
-/// a missing transcript.
-#[derive(Debug, Default)]
+/// a missing transcript. Shared handles so a test can replace the
+/// conversation under a running app, which moves the version.
+#[derive(Debug, Default, Clone)]
 pub struct FakeTranscripts {
+    state: Arc<Mutex<FakeTranscriptState>>,
+}
+
+#[derive(Debug, Default)]
+pub struct FakeTranscriptState {
     pub conversation: Option<Conversation>,
+    /// Bumped by every `set`, so a version names each conversation.
+    pub version: u64,
+}
+
+impl FakeTranscripts {
+    #[must_use]
+    pub fn with(conversation: Conversation) -> Self {
+        let fake = Self::default();
+        fake.set(Some(conversation));
+        fake
+    }
+
+    /// Replace the conversation every handle reads; the version moves.
+    pub fn set(&self, conversation: Option<Conversation>) {
+        let mut state = self.state.lock().expect("fake transcripts");
+        state.conversation = conversation;
+        state.version += 1;
+    }
 }
 
 impl TranscriptReader for FakeTranscripts {
     fn read(&self, _handle: &ResumeHandle) -> Result<Conversation, String> {
-        self.conversation
+        self.state
+            .lock()
+            .expect("fake transcripts")
+            .conversation
             .clone()
             .ok_or_else(|| "no transcript".to_owned())
     }
-    fn modified(&self, _handle: &ResumeHandle) -> Option<SystemTime> {
-        // A fixed time: the fake never changes, so the app reads it once.
-        self.conversation.as_ref().map(|_| std::time::UNIX_EPOCH)
+    fn modified(&self, handle: &ResumeHandle) -> Option<SystemTime> {
+        self.version(handle)?.modified
+    }
+    fn version(&self, _handle: &ResumeHandle) -> Option<TranscriptVersion> {
+        let state = self.state.lock().expect("fake transcripts");
+        // A fixed time and the set count as the size: the app reads a
+        // conversation once per `set`.
+        state.conversation.as_ref().map(|_| TranscriptVersion {
+            size: state.version,
+            modified: Some(std::time::UNIX_EPOCH),
+        })
     }
     fn clone_all(&self, handle: &ResumeHandle) -> Result<ResumeHandle, String> {
         self.clone_before(handle, 0)

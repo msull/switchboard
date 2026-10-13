@@ -19,7 +19,8 @@ use rustls::pki_types::ServerName;
 use rustls::{ClientConfig, ClientConnection, StreamOwned};
 use switchboard::SwitchboardApp;
 use switchboard::adapters::fakes::{
-    self, FakeAdvertiser, FakeHost, FakeOperations, FakeRemoteStore, FakeSecrets, MemoryStore,
+    self, FakeAdvertiser, FakeHost, FakeOperations, FakeRemoteStore, FakeSecrets, FakeTranscripts,
+    MemoryStore,
 };
 use switchboard::adapters::remote::{self, MAX_UNAUTHENTICATED, pinned_client};
 use switchboard::app::Services;
@@ -27,6 +28,7 @@ use switchboard::content::ContentKey;
 use switchboard::core::{AppAction, RecordId};
 use switchboard::ports::host::{HostId, HostStatus, Liveness as HostLiveness};
 use switchboard::ports::remote::{Listen, Scope};
+use switchboard::ports::transcript::{Conversation, Turn};
 use switchboard_control::{Body, Client, Launch, Made, RecordKind, Reply, Request, SessionKind};
 use tungstenite::client::IntoClientRequest as _;
 
@@ -39,6 +41,7 @@ struct Port {
     secrets: FakeSecrets,
     remote: FakeRemoteStore,
     advertiser: FakeAdvertiser,
+    transcripts: FakeTranscripts,
     _dir: tempfile::TempDir,
 }
 
@@ -54,12 +57,14 @@ fn port() -> Port {
 
 fn port_with(host: FakeHost, secrets: FakeSecrets, remote: FakeRemoteStore) -> Port {
     let advertiser = FakeAdvertiser::default();
+    let transcripts = FakeTranscripts::default();
     let services = Services {
         secrets: Box::new(secrets.clone()),
         host: Arc::new(host.clone()),
         remote: Box::new(remote.clone()),
         advertiser: Box::new(advertiser.clone()),
         operations: Box::new(FakeOperations::default()),
+        transcripts: Arc::new(transcripts.clone()),
         ..fakes::services()
     };
     let mut app = SwitchboardApp::with_services(services);
@@ -87,8 +92,85 @@ fn port_with(host: FakeHost, secrets: FakeSecrets, remote: FakeRemoteStore) -> P
         secrets,
         remote,
         advertiser,
+        transcripts,
         _dir: dir,
     }
+}
+
+/// A conversation of `n` turns; the last answer names a token.
+fn conversation(n: usize) -> Conversation {
+    let mut c = Conversation {
+        title: Some("explain-repo".into()),
+        model: Some("claude-fable-5-1".into()),
+        branch: Some("main".into()),
+        ..Conversation::default()
+    };
+    for i in 1..=n {
+        c.turns.push(Turn {
+            n: i,
+            user: format!("prompt {i}"),
+            final_text: if i == n {
+                "the token is tok-5e3cr3t".into()
+            } else {
+                format!("answer {i}")
+            },
+            assistant_msgs: 1,
+            ..Turn::default()
+        });
+    }
+    c
+}
+
+/// Launch the session so the fake agent launcher binds a Claude Code
+/// handle to it (the transcript fake serves every handle).
+fn launched(port: &mut Port, session: &str) -> RecordId {
+    let id = RecordId(uuid::Uuid::parse_str(session).unwrap());
+    port.app.dispatch(AppAction::ReturnToSession(id));
+    port.app.poll_now();
+    id
+}
+
+/// A command session with its first run opened, and the run's log
+/// written with `text`.
+fn command_with_run(port: &mut Port, project: &str, text: &str) -> (String, RecordId) {
+    let reply = control(
+        port,
+        Request::new(
+            "cmd",
+            Body::SessionNew {
+                project: project.to_owned(),
+                name: "build".into(),
+                session_kind: SessionKind::Command,
+                cwd: PathBuf::from("/tmp"),
+                launch: Launch::Command {
+                    command: "make".into(),
+                    shell: "sh".into(),
+                },
+                prompt: None,
+                notes: String::new(),
+                env: std::collections::BTreeMap::new(),
+                env_sets: Vec::new(),
+                replaces: None,
+            },
+        ),
+    );
+    let session = made_id(&reply, RecordKind::Session);
+    let id = launched(port, &session);
+    let run = port
+        .app
+        .core()
+        .session(id)
+        .unwrap()
+        .runs
+        .last()
+        .unwrap()
+        .log
+        .clone();
+    let dir =
+        switchboard::adapters::scrollback::scrollback_dir(&fakes::services().store.data_dir());
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join(run), text).unwrap();
+    (session, id)
 }
 
 /// One HTTP request over a fresh pinned TLS connection: the status and
@@ -846,7 +928,12 @@ fn bonjour_advertises_only_while_the_port_is_on_the_lan() {
 /// Every fixture from a seeded port, written to `dir`.
 fn write_fixtures(dir: &std::path::Path) {
     let mut port = port();
+    let mut scripted = conversation(2);
+    scripted.turns[1].final_text = "pong".into();
+    port.transcripts.set(Some(scripted));
     let (space, project, session) = seed(&mut port, "ticket 1\nnotes with two lines");
+    launched(&mut port, &session);
+    let (command, _) = command_with_run(&mut port, &project, "$ make\nbuilding\n");
     let record = RecordId(uuid::Uuid::parse_str(&session).unwrap());
     let pane = HostId(record.host_name());
     port.host.state().statuses.push(HostStatus {
@@ -925,6 +1012,7 @@ fn write_fixtures(dir: &std::path::Path) {
             }),
         ),
     ];
+    files.extend(content_fixtures(&mut port, &session, &command, &token));
     for (name, value) in &mut files {
         if *name == "pair" {
             // A fixture never carries a real token.
@@ -933,6 +1021,49 @@ fn write_fixtures(dir: &std::path::Path) {
         let text = serde_json::to_string_pretty(value).unwrap();
         std::fs::write(dir.join(format!("{name}.json")), text + "\n").unwrap();
     }
+}
+
+/// The content replies: a page, the last response, the runs, a tail.
+fn content_fixtures(
+    port: &mut Port,
+    session: &str,
+    command: &str,
+    token: &str,
+) -> Vec<(&'static str, serde_json::Value)> {
+    let t = Some(token);
+    vec![
+        (
+            "conversation",
+            get(
+                port,
+                &format!("/api/v1/sessions/{session}/conversation?limit=1"),
+                t,
+            )
+            .1,
+        ),
+        (
+            "last_response",
+            get(
+                port,
+                &format!("/api/v1/sessions/{session}/last-response"),
+                t,
+            )
+            .1,
+        ),
+        (
+            "runs",
+            get(port, &format!("/api/v1/sessions/{command}/runs"), t).1,
+        ),
+        (
+            "run_output",
+            get(
+                port,
+                &format!("/api/v1/sessions/{command}/runs/1/output"),
+                t,
+            )
+            .1,
+        ),
+    ]
 }
 
 #[test]
@@ -967,6 +1098,19 @@ fn the_client_fixtures_decode_on_both_sides() {
             "{name}: a failure fixture"
         );
     }
+    // The content shapes have no wire type on the control side; they
+    // are checked by field.
+    let page = read("conversation");
+    assert_eq!(page["body"]["next"], 2);
+    assert_eq!(page["body"]["turns"][0]["n"], 1);
+    let last = read("last_response");
+    assert_eq!(last["body"]["n"], 2);
+    assert!(last["body"]["text"].is_string());
+    let runs = read("runs");
+    assert_eq!(runs["body"]["runs"][0]["n"], 1);
+    let output = read("run_output");
+    assert_eq!(output["body"]["n"], 1);
+    assert!(output["body"]["text"].is_string());
     let info = read("info");
     assert_eq!(info["body"]["protocol"], 1);
     assert!(info["body"]["spki_sha256"].is_string());
@@ -1762,4 +1906,273 @@ fn stalled_strangers_fill_their_own_pool_and_never_a_paired_clients() {
     std::thread::sleep(Duration::from_millis(100));
     let (status, _) = get(&mut port, "/api/v1/waiting", Some(&token));
     assert_eq!(status, 200, "the slots are free again");
+}
+
+// --- conversations and runs
+
+/// A Claude Code session's conversation pages by turn with `next` for
+/// the rest, `from=last` is its tail, the last response is the last
+/// turn's answer at the conversation's revision, and both are masked;
+/// a shell has no conversation.
+#[test]
+fn a_conversation_pages_by_turn_and_its_last_response_shares_the_revision() {
+    let mut port = port();
+    port.transcripts.set(Some(conversation(3)));
+    let (_, project, session) = seed(&mut port, "");
+    let pid = switchboard::core::ProjectId(uuid::Uuid::parse_str(&project).unwrap());
+    port.secrets.state().insert(
+        switchboard::core::SecretScope::Project(pid).account("API_TOKEN"),
+        "tok-5e3cr3t".into(),
+    );
+    port.app.dispatch(AppAction::SetProjectEnv(
+        pid,
+        switchboard::core::ProjectEnv {
+            vars: vec![switchboard::core::EnvVar {
+                name: "API_TOKEN".into(),
+                value: String::new(),
+                secret: true,
+            }],
+            ..Default::default()
+        },
+    ));
+    let token = pair(&mut port, "ABCD2345", Scope::Read, "Vision Pro");
+    let t = Some(token.as_str());
+
+    launched(&mut port, &session);
+    let (status, page) = get(
+        &mut port,
+        &format!("/api/v1/sessions/{session}/conversation?limit=2"),
+        t,
+    );
+    assert_eq!(status, 200, "{page}");
+    let body = &page["body"];
+    assert_eq!(body["title"], "explain-repo");
+    assert_eq!(body["total"], 3);
+    assert_eq!(body["from"], 1);
+    assert_eq!(body["next"], 3);
+    let turns = body["turns"].as_array().unwrap();
+    assert_eq!(turns.len(), 2);
+    assert_eq!(turns[0]["n"], 1);
+    assert_eq!(turns[0]["user"], "prompt 1");
+    assert_eq!(turns[1]["final_text"], "answer 2");
+    let revision = page["revision"].as_u64().unwrap();
+
+    let (_, rest) = get(
+        &mut port,
+        &format!("/api/v1/sessions/{session}/conversation?from=3"),
+        t,
+    );
+    assert_eq!(rest["body"]["next"], serde_json::Value::Null);
+    assert_eq!(
+        rest["body"]["turns"][0]["final_text"],
+        "the token is <API_TOKEN>"
+    );
+    assert_eq!(rest["revision"], revision, "one conversation, one revision");
+    let (_, last_page) = get(
+        &mut port,
+        &format!("/api/v1/sessions/{session}/conversation?from=last&limit=1"),
+        t,
+    );
+    assert_eq!(last_page["body"]["from"], 3);
+
+    let (status, last) = get(
+        &mut port,
+        &format!("/api/v1/sessions/{session}/last-response"),
+        t,
+    );
+    assert_eq!(status, 200, "{last}");
+    assert_eq!(last["body"]["n"], 3);
+    assert_eq!(last["body"]["total"], 3);
+    assert_eq!(last["body"]["text"], "the token is <API_TOKEN>");
+    assert_eq!(
+        last["revision"], revision,
+        "a projection of the conversation"
+    );
+    assert!(last["body"]["resume_id"].is_string());
+
+    let reply = control(
+        &mut port,
+        Request::new(
+            "sh",
+            Body::SessionNew {
+                project: project.clone(),
+                name: "shell".into(),
+                session_kind: SessionKind::Shell,
+                cwd: PathBuf::from("/tmp"),
+                launch: Launch::Shell,
+                prompt: None,
+                notes: String::new(),
+                env: std::collections::BTreeMap::new(),
+                env_sets: Vec::new(),
+                replaces: None,
+            },
+        ),
+    );
+    let shell = made_id(&reply, RecordKind::Session);
+    let (status, reply) = get(
+        &mut port,
+        &format!("/api/v1/sessions/{shell}/last-response"),
+        t,
+    );
+    assert_eq!(status, 400);
+    assert_eq!(code(&reply), "no_conversation");
+}
+
+/// A watched conversation moves when the transcript grows, with one
+/// `changed {conversation}` the last response follows, and nothing is
+/// said while it holds still.
+#[test]
+fn a_watched_conversation_moves_when_the_transcript_grows() {
+    let mut port = port();
+    port.transcripts.set(Some(conversation(2)));
+    let (_, _, session) = seed(&mut port, "");
+    let record = launched(&mut port, &session);
+    port.app.set_watch_poll(Duration::from_millis(50));
+    let token = pair(&mut port, "ABCD2345", Scope::Read, "Vision Pro");
+    let sub = subscribe(&mut port, &token);
+    sub.send("watch", "conversation", &session);
+    let got = events(&mut port, &sub);
+    let moved = resources(&got);
+    assert_eq!(
+        moved.first(),
+        Some(&("watching".into(), "conversation".into(), session.clone())),
+        "{moved:?}"
+    );
+    assert!(
+        moved.contains(&("changed".into(), "conversation".into(), session.clone())),
+        "{moved:?}"
+    );
+    assert_eq!(
+        port.app.watched_keys(),
+        vec![ContentKey::Conversation(record)]
+    );
+    let first = port
+        .app
+        .content_revision(&ContentKey::Conversation(record))
+        .unwrap();
+    let (_, last) = get(
+        &mut port,
+        &format!("/api/v1/sessions/{session}/last-response"),
+        Some(&token),
+    );
+    assert_eq!(
+        (
+            last["revision"].as_u64().unwrap(),
+            last["body"]["n"].as_u64().unwrap()
+        ),
+        (first, 2)
+    );
+    assert!(events(&mut port, &sub).is_empty(), "nothing moved");
+
+    port.transcripts.set(Some(conversation(3)));
+    let got = events(&mut port, &sub);
+    assert_eq!(
+        resources(&got),
+        vec![("changed".into(), "conversation".into(), session.clone())]
+    );
+    let next = got[0]["revision"].as_u64().unwrap();
+    assert!(next > first);
+    let (_, last) = get(
+        &mut port,
+        &format!("/api/v1/sessions/{session}/last-response"),
+        Some(&token),
+    );
+    assert_eq!(
+        (
+            last["revision"].as_u64().unwrap(),
+            last["body"]["n"].as_u64().unwrap()
+        ),
+        (next, 3)
+    );
+}
+
+/// A command's runs are listed from the record, a run's output is the
+/// tail of its log with the project's secret masked, a run that never
+/// was is refused, and a watched run output moves when the log grows.
+#[test]
+fn a_runs_output_is_the_logs_masked_tail_and_moves_when_the_log_grows() {
+    let mut port = port();
+    let (_, project, _) = seed(&mut port, "");
+    let pid = switchboard::core::ProjectId(uuid::Uuid::parse_str(&project).unwrap());
+    port.secrets.state().insert(
+        switchboard::core::SecretScope::Project(pid).account("API_TOKEN"),
+        "tok-5e3cr3t".into(),
+    );
+    port.app.dispatch(AppAction::SetProjectEnv(
+        pid,
+        switchboard::core::ProjectEnv {
+            vars: vec![switchboard::core::EnvVar {
+                name: "API_TOKEN".into(),
+                value: String::new(),
+                secret: true,
+            }],
+            ..Default::default()
+        },
+    ));
+    let (session, record) = command_with_run(
+        &mut port,
+        &project,
+        "$ make\nAPI_TOKEN=tok-5e3cr3t\nbuilding\n",
+    );
+    port.app.set_watch_poll(Duration::from_millis(50));
+    let token = pair(&mut port, "ABCD2345", Scope::Read, "Pad");
+    let t = Some(token.as_str());
+
+    let (status, runs) = get(&mut port, &format!("/api/v1/sessions/{session}/runs"), t);
+    assert_eq!(status, 200, "{runs}");
+    let list = runs["body"]["runs"].as_array().unwrap();
+    assert_eq!(list.len(), 1);
+    assert_eq!(list[0]["n"], 1);
+    assert!(list[0]["started_ms"].is_u64());
+    // The fake host lists no pane, so the reconcile closed the run.
+    assert!(list[0]["ended_ms"].is_u64());
+    assert_eq!(list[0]["exit"], serde_json::Value::Null);
+
+    let (status, out) = get(
+        &mut port,
+        &format!("/api/v1/sessions/{session}/runs/1/output?lines=2"),
+        t,
+    );
+    assert_eq!(status, 200, "{out}");
+    assert_eq!(out["body"]["n"], 1);
+    assert_eq!(out["body"]["text"], "API_TOKEN=<API_TOKEN>\nbuilding");
+    let first = out["revision"].as_u64().unwrap();
+    let (status, missing) = get(
+        &mut port,
+        &format!("/api/v1/sessions/{session}/runs/2/output"),
+        t,
+    );
+    assert_eq!(status, 404);
+    assert_eq!(code(&missing), "no_run");
+
+    let sub = subscribe(&mut port, &token);
+    let key = ContentKey::RunOutput(record, 1);
+    sub.send("watch", "run_output", &key.id());
+    let got = resources(&events(&mut port, &sub));
+    assert_eq!(
+        got.first(),
+        Some(&("watching".into(), "run_output".into(), key.id())),
+        "{got:?}"
+    );
+    assert!(events(&mut port, &sub).is_empty(), "the log held still");
+    let log = port.app.core().session(record).unwrap().runs[0].log.clone();
+    let dir =
+        switchboard::adapters::scrollback::scrollback_dir(&fakes::services().store.data_dir());
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(dir.join(log))
+        .unwrap();
+    writeln!(file, "done").unwrap();
+    let got = events(&mut port, &sub);
+    assert_eq!(
+        resources(&got),
+        vec![("changed".into(), "run_output".into(), key.id())]
+    );
+    assert!(got[0]["revision"].as_u64().unwrap() > first);
+    let (_, out) = get(
+        &mut port,
+        &format!("/api/v1/sessions/{session}/runs/1/output?lines=1"),
+        t,
+    );
+    assert_eq!(out["body"]["text"], "done");
 }

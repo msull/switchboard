@@ -26,6 +26,17 @@ public struct ServerID: Hashable, Codable, Sendable, CustomStringConvertible {
 
 /// Every reference a client holds is qualified by its owning server,
 /// so two hosts with the same record id never collide.
+/// One run of a session on one host.
+public struct RunRef: Hashable, Codable, Sendable {
+    public let session: SessionRef
+    public let n: Int
+
+    public init(session: SessionRef, n: Int) {
+        self.session = session
+        self.n = n
+    }
+}
+
 public struct SessionRef: Hashable, Codable, Sendable {
     public let serverID: ServerID
     public let recordID: String

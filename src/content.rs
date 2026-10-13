@@ -1,21 +1,22 @@
 //! What the app read from outside the core and keeps between frames,
 //! with the version it was read at: the parsed transcripts, and the
 //! content the remote port serves through one worker thread (a pane's
-//! screen today; conversations, run output and files follow). The
-//! views read the transcript cache through `DrawCtx`, and the remote
-//! port reads the same one, so a transcript is parsed once per change
-//! for everyone who shows it. Nothing here is persisted or read by the
-//! core.
+//! screen, a conversation and the last response read from it, a run's
+//! output; pinned files follow). The views read the transcript cache
+//! through `DrawCtx`, and the remote port reads its own masked copy on
+//! the worker, so a transcript is parsed once per change for each.
+//! Nothing here is persisted or read by the core.
 //!
 //! The worker does the read, the mask, the version and the
 //! serialization off the frame, one job at a time, and reports what it
 //! observed; the frame keeps the versions, assigns revisions and emits
 //! `changed`. The same worker polls every watched key every
-//! [`WATCH_POLL`], so a watched pane moves for a device while the host
-//! shows something else or is hidden.
+//! [`WATCH_POLL`], so a watched pane or transcript moves for a device
+//! while the host shows something else or is hidden.
 
 use std::collections::HashMap;
 use std::hash::{DefaultHasher, Hash, Hasher};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Sender, SyncSender};
 use std::sync::{Arc, Mutex};
@@ -23,9 +24,12 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime};
 
 use crate::adapters::remote::RemoteReply;
+use crate::adapters::scrollback;
 use crate::core::{RecordId, ResumeHandle};
 use crate::ports::host::{HostId, ProcessHost};
-use crate::ports::transcript::Conversation;
+use crate::ports::transcript::{
+    ActivityKind, Conversation, TranscriptReader, TranscriptVersion, Turn,
+};
 
 /// How often the worker reads every watched key.
 pub const WATCH_POLL: Duration = Duration::from_secs(2);
@@ -33,7 +37,8 @@ pub const WATCH_POLL: Duration = Duration::from_secs(2);
 pub const WATCH_IDLE: Duration = Duration::from_secs(60);
 /// The most keys the set holds; past it the least recently read goes.
 pub const WATCH_CAP: usize = 128;
-/// A screen's text after masking is cut from the top to this.
+/// A screen's or a run output's text after masking is cut from the
+/// top to this.
 pub const SCREEN_BYTES_CAP: usize = 256 * 1024;
 /// How many lines above the asked-for ones a screen read takes and
 /// masks with them, so a value wrapped across the window's first line
@@ -42,6 +47,16 @@ pub const SCREEN_SLACK_LINES: usize = 8;
 
 /// The most lines a screen read returns.
 pub const SCREEN_LINES_CAP: usize = 200;
+/// The most lines a run output read returns.
+pub const RUN_LINES_CAP: usize = 500;
+/// One turn's JSON is cut to this: the final text kept where possible,
+/// the tool detail and the notes dropped first.
+pub const TURN_BYTES_CAP: usize = 256 * 1024;
+/// A conversation page stops before its turns' JSON passes this.
+pub const PAGE_BYTES_CAP: usize = 640 * 1024;
+/// The most turns a page carries, and how many without `limit`.
+pub const PAGE_TURNS_CAP: usize = 100;
+pub const PAGE_TURNS_DEFAULT: usize = 20;
 /// How many jobs may wait for the worker.
 const JOBS: usize = 64;
 
@@ -49,6 +64,11 @@ const JOBS: usize = 64;
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ContentKey {
     Screen(RecordId),
+    /// A Claude Code session's transcript; the last response is a
+    /// projection of it and shares its version.
+    Conversation(RecordId),
+    /// One run's log, by the record and the run number.
+    RunOutput(RecordId, u32),
 }
 
 impl ContentKey {
@@ -57,24 +77,31 @@ impl ContentKey {
     pub fn kind(&self) -> &'static str {
         match self {
             Self::Screen(_) => "screen",
+            Self::Conversation(_) => "conversation",
+            Self::RunOutput(..) => "run_output",
         }
     }
 
-    /// The `id` on the wire.
+    /// The `id` on the wire: the record, or `record/n` for a run.
     #[must_use]
     pub fn id(&self) -> String {
         match self {
-            Self::Screen(id) => id.0.to_string(),
+            Self::Screen(id) | Self::Conversation(id) => id.0.to_string(),
+            Self::RunOutput(id, n) => format!("{}/{n}", id.0),
         }
     }
 
     /// The key a `watch` frame names, if this host serves the kind.
     #[must_use]
     pub fn parse(kind: &str, id: &str) -> Option<Self> {
+        let record = |s: &str| uuid::Uuid::parse_str(s).ok().map(RecordId);
         match kind {
-            "screen" => uuid::Uuid::parse_str(id)
-                .ok()
-                .map(|u| Self::Screen(RecordId(u))),
+            "screen" => record(id).map(Self::Screen),
+            "conversation" => record(id).map(Self::Conversation),
+            "run_output" => {
+                let (rec, n) = id.split_once('/')?;
+                Some(Self::RunOutput(record(rec)?, n.parse().ok()?))
+            }
             _ => None,
         }
     }
@@ -82,7 +109,7 @@ impl ContentKey {
     #[must_use]
     pub fn record(&self) -> RecordId {
         match self {
-            Self::Screen(id) => *id,
+            Self::Screen(id) | Self::Conversation(id) | Self::RunOutput(id, _) => *id,
         }
     }
 }
@@ -108,6 +135,44 @@ impl Policy {
             secrets,
         }
     }
+
+    /// The longest value, which is how far a windowed read reaches
+    /// back so a value on the window's edge is masked whole.
+    #[must_use]
+    pub fn overlap(&self) -> usize {
+        self.secrets.iter().map(|(_, v)| v.len()).max().unwrap_or(0)
+    }
+
+    fn mask(&self, text: &str) -> String {
+        redact(text, &self.secrets)
+    }
+}
+
+/// Where a job's content comes from, resolved on the frame from the
+/// record so the worker touches no core state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Source {
+    Pane(HostId),
+    Transcript(ResumeHandle),
+    Log(PathBuf),
+}
+
+/// Which turn a page starts at.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PageFrom {
+    /// A 1-based turn number.
+    Turn(usize),
+    /// The last `limit` turns.
+    Last,
+}
+
+/// What of the content a job wants.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContentView {
+    Screen { lines: usize },
+    Page { from: PageFrom, limit: usize },
+    LastResponse,
+    Tail { lines: usize },
 }
 
 /// One read for the worker: what to read, how to mask it, and where
@@ -115,8 +180,8 @@ impl Policy {
 #[derive(Clone)]
 pub struct ContentJob {
     pub key: ContentKey,
-    pub pane: HostId,
-    pub lines: usize,
+    pub source: Source,
+    pub view: ContentView,
     pub policy: Policy,
     pub reply: Option<SyncSender<RemoteReply>>,
 }
@@ -165,16 +230,18 @@ pub struct ContentWorker {
 }
 
 impl ContentWorker {
-    /// Start the worker over `host`; every observation goes to
-    /// `observed` and `wake` runs after each so the frame picks it up.
+    /// Start the worker over `host` and `transcripts`; every
+    /// observation goes to `observed` and `wake` runs after each so the
+    /// frame picks it up.
     #[must_use]
     pub fn spawn(
         host: Arc<dyn ProcessHost>,
+        transcripts: Arc<dyn TranscriptReader>,
         observed: Sender<Observed>,
         wake: Arc<dyn Fn() + Send + Sync>,
     ) -> Self {
         let (jobs, inbox) = mpsc::sync_channel(JOBS);
-        let watch = Arc::new(Mutex::new(Vec::new()));
+        let watch: Arc<Mutex<Vec<ContentJob>>> = Arc::new(Mutex::new(Vec::new()));
         let poll = Arc::new(Mutex::new(WATCH_POLL));
         let stop = Arc::new(AtomicBool::new(false));
         let thread = {
@@ -182,13 +249,14 @@ impl ContentWorker {
             std::thread::Builder::new()
                 .name("switchboard-content".into())
                 .spawn(move || {
+                    let mut parsed = Parsed::default();
                     let every = || *poll.lock().expect("poll");
                     let mut next_poll = Instant::now() + every();
                     while !stop.load(Ordering::SeqCst) {
                         let wait = next_poll.saturating_duration_since(Instant::now());
                         match inbox.recv_timeout(wait) {
                             Ok(Work::Job(job)) => {
-                                let out = observe(&*host, &job);
+                                let out = observe(&*host, &*transcripts, &mut parsed, &job);
                                 if observed.send(out).is_err() {
                                     return;
                                 }
@@ -198,8 +266,12 @@ impl ContentWorker {
                             Err(mpsc::RecvTimeoutError::Disconnected) => return,
                             Err(mpsc::RecvTimeoutError::Timeout) => {
                                 let jobs = watch.lock().map(|w| w.clone()).unwrap_or_default();
+                                let keep: Vec<RecordId> =
+                                    jobs.iter().map(|j| j.key.record()).collect();
+                                parsed.retain(&keep);
                                 for job in jobs {
-                                    if observed.send(observe(&*host, &job)).is_err() {
+                                    let out = observe(&*host, &*transcripts, &mut parsed, &job);
+                                    if observed.send(out).is_err() {
                                         return;
                                     }
                                 }
@@ -220,16 +292,11 @@ impl ContentWorker {
         }
     }
 
-    /// Queue one read; back when the worker is too far behind.
-    pub fn submit(&self, job: ContentJob) -> Result<(), ContentJob> {
-        self.jobs.try_send(Work::Job(job)).map_err(|e| match e {
-            mpsc::TrySendError::Full(Work::Job(j))
-            | mpsc::TrySendError::Disconnected(Work::Job(j)) => j,
-            mpsc::TrySendError::Full(Work::Nudge)
-            | mpsc::TrySendError::Disconnected(Work::Nudge) => {
-                unreachable!("a job was sent")
-            }
-        })
+    /// Queue one read; false when the worker is too far behind, and
+    /// the job is dropped.
+    #[must_use]
+    pub fn submit(&self, job: ContentJob) -> bool {
+        self.jobs.try_send(Work::Job(job)).is_ok()
     }
 
     /// Replace what the poll reads.
@@ -259,36 +326,112 @@ impl Drop for ContentWorker {
     }
 }
 
-/// One job on the worker: a pane's whole window with slack, versioned
-/// by that text, masked, the asked-for lines kept, cut to the byte
-/// cap. The read is always the full window so a short read and the
-/// poll see one version.
-fn observe(host: &dyn ProcessHost, job: &ContentJob) -> Observed {
-    let result = match &job.key {
-        ContentKey::Screen(_) => host
-            .snapshot(&job.pane, Some(SCREEN_LINES_CAP + SCREEN_SLACK_LINES))
+/// The worker's masked transcripts, one per record, each with the
+/// handle, file version and policy it was parsed under: a poll is a
+/// stat, and a read of an unchanged file is served from here. Records
+/// no longer watched or read are dropped at the next poll.
+#[derive(Default)]
+struct Parsed {
+    entries: HashMap<RecordId, ParsedEntry>,
+}
+
+struct ParsedEntry {
+    handle: ResumeHandle,
+    version: TranscriptVersion,
+    policy: u64,
+    conversation: Conversation,
+    touched: Instant,
+}
+
+impl Parsed {
+    /// The masked conversation for `job`'s record under `handle`, read
+    /// only when the file, the handle or the policy moved since.
+    fn conversation(
+        &mut self,
+        transcripts: &dyn TranscriptReader,
+        record: RecordId,
+        handle: &ResumeHandle,
+        policy: &Policy,
+    ) -> Result<(u64, &Conversation), String> {
+        let version = transcripts
+            .version(handle)
+            .ok_or_else(|| "no transcript file yet".to_owned())?;
+        let current = self.entries.get(&record).is_some_and(|e| {
+            &e.handle == handle && e.version == version && e.policy == policy.fingerprint
+        });
+        if !current {
+            let conversation = transcripts.read_masked(handle, &|s| policy.mask(s))?;
+            self.entries.insert(
+                record,
+                ParsedEntry {
+                    handle: handle.clone(),
+                    version,
+                    policy: policy.fingerprint,
+                    conversation,
+                    touched: Instant::now(),
+                },
+            );
+        }
+        let entry = self.entries.get_mut(&record).expect("just inserted");
+        entry.touched = Instant::now();
+        let mut h = DefaultHasher::new();
+        (handle.provider_id(), version).hash(&mut h);
+        Ok((h.finish(), &entry.conversation))
+    }
+
+    /// Keep only the records in `keep` and anything read in the last
+    /// minute, so a read with no watch is not reparsed on each read.
+    fn retain(&mut self, keep: &[RecordId]) {
+        let now = Instant::now();
+        self.entries
+            .retain(|id, e| keep.contains(id) || now - e.touched < WATCH_IDLE);
+    }
+}
+
+/// One job on the worker: the source read whole, versioned by what
+/// names its content, masked, cut to the view asked for.
+fn observe(
+    host: &dyn ProcessHost,
+    transcripts: &dyn TranscriptReader,
+    parsed: &mut Parsed,
+    job: &ContentJob,
+) -> Observed {
+    let result = match (&job.source, job.view) {
+        (Source::Pane(pane), ContentView::Screen { lines }) => host
+            .snapshot(pane, Some(SCREEN_LINES_CAP + SCREEN_SLACK_LINES))
             .map_err(|e| format!("snapshot: {e}"))
             .map(|text| {
                 let mut h = DefaultHasher::new();
                 text.hash(&mut h);
-                let source = h.finish();
-                let redacted = redact(&text, &job.policy.secrets);
-                let kept: Vec<&str> = redacted.trim_end().lines().collect();
-                let mut text = kept[kept.len().saturating_sub(job.lines)..].join("\n");
-                let mut truncated = false;
-                if text.len() > SCREEN_BYTES_CAP {
-                    let mut cut = text.len() - SCREEN_BYTES_CAP;
-                    while !text.is_char_boundary(cut) {
-                        cut += 1;
-                    }
-                    text = text[cut..].to_owned();
-                    truncated = true;
-                }
-                (
-                    source,
-                    serde_json::json!({ "text": text, "truncated": truncated }),
-                )
+                let redacted = job.policy.mask(&text);
+                (h.finish(), tail_body(&redacted, lines))
             }),
+        (Source::Transcript(handle), view) => parsed
+            .conversation(transcripts, job.key.record(), handle, &job.policy)
+            .map(|(source, conversation)| {
+                let resume_id = handle.provider_id();
+                let body = match view {
+                    ContentView::Page { from, limit } => {
+                        conversation_page(conversation, &resume_id, from, limit)
+                    }
+                    _ => last_response(conversation, &resume_id),
+                };
+                (source, body)
+            }),
+        (Source::Log(path), ContentView::Tail { lines }) => {
+            scrollback::tail_masked(path, lines, &|s| job.policy.mask(s), job.policy.overlap())
+                .map_err(|e| format!("log: {e}"))
+                .map(|(version, text)| {
+                    let mut h = DefaultHasher::new();
+                    version.hash(&mut h);
+                    let mut body = tail_body(&text, lines);
+                    if let ContentKey::RunOutput(_, n) = job.key {
+                        body["n"] = serde_json::json!(n);
+                    }
+                    (h.finish(), body)
+                })
+        }
+        (source, view) => Err(format!("{view:?} is not a view of {source:?}")),
     };
     Observed {
         key: job.key.clone(),
@@ -296,6 +439,192 @@ fn observe(host: &dyn ProcessHost, job: &ContentJob) -> Observed {
         result,
         reply: job.reply.clone(),
     }
+}
+
+/// The last `lines` of a masked text, cut from the top to the byte cap.
+fn tail_body(redacted: &str, lines: usize) -> serde_json::Value {
+    let kept: Vec<&str> = redacted.trim_end().lines().collect();
+    let mut text = kept[kept.len().saturating_sub(lines)..].join("\n");
+    let mut truncated = false;
+    if text.len() > SCREEN_BYTES_CAP {
+        let mut cut = text.len() - SCREEN_BYTES_CAP;
+        while !text.is_char_boundary(cut) {
+            cut += 1;
+        }
+        text = text[cut..].to_owned();
+        truncated = true;
+    }
+    serde_json::json!({ "text": text, "truncated": truncated })
+}
+
+fn ms(t: Option<SystemTime>) -> Option<u64> {
+    t.and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
+        .and_then(|d| u64::try_from(d.as_millis()).ok())
+}
+
+/// A page of a conversation on the wire: the metadata, the turns from
+/// `from` up to `limit` of them or the page's byte cap, whichever comes
+/// first, and `next`, the turn to continue from, when more follow.
+#[must_use]
+pub fn conversation_page(
+    conversation: &Conversation,
+    resume_id: &str,
+    from: PageFrom,
+    limit: usize,
+) -> serde_json::Value {
+    let total = conversation.turns.len();
+    let limit = limit.clamp(1, PAGE_TURNS_CAP);
+    let first = match from {
+        PageFrom::Turn(n) => n.max(1),
+        PageFrom::Last => total.saturating_sub(limit) + 1,
+    };
+    let mut turns = Vec::new();
+    let mut bytes = 0;
+    let mut next = None;
+    for turn in conversation.turns.iter().skip(first - 1) {
+        let (value, size) = turn_json(turn);
+        if turns.len() >= limit || (!turns.is_empty() && bytes + size > PAGE_BYTES_CAP) {
+            next = Some(turn.n);
+            break;
+        }
+        bytes += size;
+        turns.push(value);
+    }
+    let usage = conversation.usage;
+    serde_json::json!({
+        "resume_id": resume_id,
+        "title": conversation.title,
+        "model": conversation.model,
+        "version": conversation.version,
+        "branch": conversation.branch,
+        "start_ms": ms(conversation.start),
+        "end_ms": ms(conversation.end),
+        "usage": {
+            "input": usage.input,
+            "output": usage.output,
+            "cache_read": usage.cache_read,
+            "cache_create": usage.cache_create,
+        },
+        "context_tokens": conversation.context_tokens(),
+        "total": total,
+        "from": first,
+        "next": next,
+        "turns": turns,
+    })
+}
+
+/// The last turn's answer on the wire: a projection of the
+/// conversation, carrying its version. An empty conversation is turn
+/// zero with no text.
+#[must_use]
+pub fn last_response(conversation: &Conversation, resume_id: &str) -> serde_json::Value {
+    let last = conversation.turns.last();
+    let (text, truncated) = last.map_or((String::new(), false), |t| {
+        cap_text(&t.final_text, TURN_BYTES_CAP)
+    });
+    serde_json::json!({
+        "resume_id": resume_id,
+        "n": last.map_or(0, |t| t.n),
+        "at_ms": ms(last.and_then(|t| t.at)),
+        "end_ms": ms(last.and_then(|t| t.end)),
+        "total": conversation.turns.len(),
+        "text": text,
+        "truncated": truncated,
+    })
+}
+
+/// One turn on the wire and its size. Over the turn cap the tool
+/// detail and the agent's notes go first, then the prompt is shortened,
+/// then the answer is cut from its front; `truncated` says so.
+fn turn_json(turn: &Turn) -> (serde_json::Value, usize) {
+    let mut lean = false;
+    let mut user = turn.user.clone();
+    let mut final_text = turn.final_text.clone();
+    let mut truncated = false;
+    loop {
+        let value = turn_value(turn, &user, &final_text, lean, truncated);
+        let size = value.to_string().len();
+        if size <= TURN_BYTES_CAP {
+            return (value, size);
+        }
+        truncated = true;
+        if !lean {
+            lean = true;
+        } else if user.len() > 4096 {
+            user = cap_text(&user, 4096).0;
+        } else if final_text.len() > TURN_BYTES_CAP / 2 {
+            final_text = cap_text(&final_text, TURN_BYTES_CAP / 2).0;
+        } else {
+            return (value, size);
+        }
+    }
+}
+
+fn turn_value(
+    turn: &Turn,
+    user: &str,
+    final_text: &str,
+    lean: bool,
+    truncated: bool,
+) -> serde_json::Value {
+    let activity: Vec<serde_json::Value> = turn
+        .activity
+        .iter()
+        .map(|a| {
+            let kind = match a.kind {
+                ActivityKind::Tool => "tool",
+                ActivityKind::Text => "text",
+                ActivityKind::System => "system",
+            };
+            let mut v = serde_json::json!({
+                "kind": kind,
+                "line": a.line,
+                "at_ms": ms(a.at),
+                "error": a.error,
+            });
+            if !lean {
+                if let Some(d) = &a.detail {
+                    v["detail"] = serde_json::json!({
+                        "name": d.name,
+                        "input": d.input,
+                        "result": d.result,
+                        "path": d.path.as_ref().map(|p| p.display().to_string()),
+                    });
+                }
+                if let Some(t) = &a.text {
+                    v["text"] = serde_json::json!(t);
+                }
+            }
+            v
+        })
+        .collect();
+    serde_json::json!({
+        "n": turn.n,
+        "at_ms": ms(turn.at),
+        "end_ms": ms(turn.end),
+        "user": user,
+        "final_text": final_text,
+        "activity": activity,
+        "assistant_msgs": turn.assistant_msgs,
+        "tools": turn.tools,
+        "thinking": turn.thinking,
+        "errors": turn.errors,
+        "permission_mode": turn.permission_mode,
+        "truncated": truncated,
+    })
+}
+
+/// The last `cap` bytes of `text` on a character boundary, and
+/// whether anything was cut.
+fn cap_text(text: &str, cap: usize) -> (String, bool) {
+    if text.len() <= cap {
+        return (text.to_owned(), false);
+    }
+    let mut cut = text.len() - cap;
+    while !text.is_char_boundary(cut) {
+        cut += 1;
+    }
+    (text[cut..].to_owned(), true)
 }
 
 /// `text` with every occurrence of each secret's value replaced by
@@ -481,6 +810,106 @@ impl ConversationCache {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn turns(n: usize) -> Conversation {
+        let mut c = Conversation::default();
+        for i in 1..=n {
+            c.turns.push(Turn {
+                n: i,
+                user: format!("prompt {i}"),
+                final_text: format!("answer {i}"),
+                ..Turn::default()
+            });
+        }
+        c
+    }
+
+    #[test]
+    fn a_page_stops_at_its_limit_and_says_where_to_continue() {
+        let c = turns(5);
+        let page = conversation_page(&c, "r", PageFrom::Turn(1), 2);
+        assert_eq!(page["total"], 5);
+        assert_eq!(page["from"], 1);
+        assert_eq!(page["next"], 3);
+        assert_eq!(page["turns"].as_array().unwrap().len(), 2);
+        let page = conversation_page(&c, "r", PageFrom::Turn(3), 10);
+        assert_eq!(page["next"], serde_json::Value::Null);
+        assert_eq!(page["turns"][0]["n"], 3);
+        assert_eq!(page["turns"].as_array().unwrap().len(), 3);
+        let page = conversation_page(&c, "r", PageFrom::Last, 2);
+        assert_eq!(page["from"], 4, "the last two");
+        assert_eq!(page["turns"][1]["final_text"], "answer 5");
+        let page = conversation_page(&c, "r", PageFrom::Turn(9), 2);
+        assert!(page["turns"].as_array().unwrap().is_empty(), "past the end");
+        assert_eq!(page["next"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn an_oversized_turn_is_cut_and_marked_with_its_answer_kept() {
+        let mut c = turns(1);
+        c.turns[0]
+            .activity
+            .push(crate::ports::transcript::Activity {
+                kind: ActivityKind::Tool,
+                line: "Read x".into(),
+                at: None,
+                error: false,
+                detail: Some(crate::ports::transcript::ToolDetail {
+                    name: "Read".into(),
+                    input: "x".repeat(TURN_BYTES_CAP),
+                    result: String::new(),
+                    path: None,
+                }),
+                text: None,
+            });
+        let page = conversation_page(&c, "r", PageFrom::Turn(1), 1);
+        let turn = &page["turns"][0];
+        assert_eq!(turn["truncated"], true);
+        assert_eq!(turn["final_text"], "answer 1");
+        assert!(
+            turn["activity"][0].get("detail").is_none(),
+            "the detail went"
+        );
+        assert_eq!(turn["activity"][0]["line"], "Read x");
+    }
+
+    #[test]
+    fn a_page_stops_before_its_byte_cap_but_always_carries_one_turn() {
+        let mut c = turns(4);
+        for t in &mut c.turns {
+            t.final_text = "y".repeat(200 * 1024);
+        }
+        let page = conversation_page(&c, "r", PageFrom::Turn(1), 10);
+        assert_eq!(page["turns"].as_array().unwrap().len(), 3);
+        assert_eq!(page["next"], 4);
+        // A turn over its own cap is cut first, and the cut size counts.
+        c.turns[0].final_text = "y".repeat(PAGE_BYTES_CAP);
+        let page = conversation_page(&c, "r", PageFrom::Turn(1), 10);
+        assert_eq!(page["turns"][0]["truncated"], true);
+        assert_eq!(page["turns"].as_array().unwrap().len(), 3);
+        assert_eq!(page["next"], 4);
+    }
+
+    #[test]
+    fn the_last_response_is_the_last_turns_answer() {
+        assert_eq!(last_response(&Conversation::default(), "r")["n"], 0);
+        let last = last_response(&turns(3), "r");
+        assert_eq!(last["n"], 3);
+        assert_eq!(last["text"], "answer 3");
+        assert_eq!(last["total"], 3);
+    }
+
+    #[test]
+    fn a_run_output_key_is_the_record_and_the_run_number() {
+        let id = RecordId::new();
+        let key = ContentKey::RunOutput(id, 4);
+        assert_eq!(ContentKey::parse("run_output", &key.id()), Some(key));
+        assert_eq!(ContentKey::parse("run_output", &id.0.to_string()), None);
+        assert_eq!(
+            ContentKey::parse("conversation", &id.0.to_string()),
+            Some(ContentKey::Conversation(id))
+        );
+    }
 
     fn handle(s: &str) -> ResumeHandle {
         ResumeHandle::Codex {

@@ -77,13 +77,21 @@ public actor ServerConnection {
     private var pump: Task<Void, Never>?
     private var buffer: [EventFrame] = []
     private var buffering = false
-    /// How many views hold each watched session's screen; `watch` goes
-    /// out at the first and `unwatch` at the last (§4.4), and every
-    /// watch is resent after `hello` on a reconnect.
-    private var watches: [String: Int] = [:]
+    /// How many views hold each watched content key; `watch` goes out
+    /// at the first and `unwatch` at the last (§4.4), and every watch
+    /// is resent after `hello` on a reconnect.
+    private var watches: [ResourceKey: Int] = [:]
     /// The text last read per session, watched or not, at the revision
     /// its key holds.
     public private(set) var screens: [String: ScreenBody] = [:]
+    /// The last response per session, read from the conversation key.
+    public private(set) var lastResponses: [String: LastResponseBody] = [:]
+    /// The conversation per session, the pages read merged by turn.
+    public private(set) var conversations: [String: ConversationState] = [:]
+    /// The runs per command or service session.
+    public private(set) var runs: [String: [RunView]] = [:]
+    /// The output tail per run read.
+    public private(set) var runOutputs: [RunKey: RunOutputBody] = [:]
     /// Told whenever the snapshot or the state moved, so the owner can
     /// rebuild its view without polling.
     private var onChange: (@Sendable () -> Void)?
@@ -219,8 +227,8 @@ public actor ServerConnection {
             buffering = true
             buffer = []
             startPump(subscription)
-            for session in watches.keys.sorted() {
-                try await send(watch: true, session: session, on: subscription)
+            for key in watchedKeys {
+                try await send(watch: true, key: key, on: subscription)
             }
             state = .syncing
             try await fetchAll(api: api)
@@ -230,8 +238,8 @@ public actor ServerConnection {
             for frame in pending {
                 try await apply(frame, api: api)
             }
-            for session in watches.keys.sorted() {
-                await readScreen(session)
+            for key in watchedKeys {
+                await read(key)
             }
             failures = 0
             nextTry = .distantPast
@@ -314,7 +322,7 @@ public actor ServerConnection {
         var next = snapshot ?? HostSnapshot(epoch: projects.epoch, revision: 0)
         if next.epoch != projects.epoch {
             held = [:]
-            screens = [:]
+            clearContent()
             next = HostSnapshot(epoch: projects.epoch, revision: 0)
         }
         next.fetchedAt = Date()
@@ -364,7 +372,7 @@ public actor ServerConnection {
             // A frame from another run of the host: start over.
             held = [:]
             self.snapshot = nil
-            screens = [:]
+            clearContent()
             try await fetchAll(api: api)
             changed()
             return
@@ -375,8 +383,8 @@ public actor ServerConnection {
             return
         }
         if let heldRevision = heldRevision(for: key), revision <= heldRevision { return }
-        if case .screen(let session) = key {
-            await readScreen(session)
+        if key.isContent || { if case .runs = key { return true } else { return false } }() {
+            await read(key)
             return
         }
         try await refetch(key, api: api)
@@ -385,45 +393,182 @@ public actor ServerConnection {
 
     // MARK: Watched content
 
-    /// Hold a watch on a session's screen: the host polls the pane and
-    /// says `changed` when it moves, and the text is read then. The
-    /// first holder sends `watch` and reads once; a second changes
-    /// nothing on the host.
-    public func watch(screen session: String) async {
-        let holders = (watches[session] ?? 0) + 1
-        watches[session] = holders
-        guard holders == 1 else { return }
-        if let subscription {
-            try? await send(watch: true, session: session, on: subscription)
-        }
-        await readScreen(session)
+    /// Hold a watch on a content key: the host polls its source and
+    /// says `changed` when it moves, and what is held on it is read
+    /// then. The first holder sends `watch`; a second changes nothing
+    /// on the host. The holder reads what it wants after this.
+    public func watch(_ key: ResourceKey) async {
+        let holders = (watches[key] ?? 0) + 1
+        watches[key] = holders
+        guard holders == 1, let subscription else { return }
+        try? await send(watch: true, key: key, on: subscription)
     }
 
     /// Release one hold; the last sends `unwatch`.
-    public func unwatch(screen session: String) async {
-        guard let holders = watches[session] else { return }
+    public func unwatch(_ key: ResourceKey) async {
+        guard let holders = watches[key] else { return }
         if holders > 1 {
-            watches[session] = holders - 1
+            watches[key] = holders - 1
             return
         }
-        watches[session] = nil
+        watches[key] = nil
         if let subscription {
-            try? await send(watch: false, session: session, on: subscription)
+            try? await send(watch: false, key: key, on: subscription)
         }
     }
 
-    /// The sessions watched now, for tests.
-    public var watchedScreens: [String] { watches.keys.sorted() }
+    /// Hold a watch on a session's screen; the first holder reads it.
+    public func watch(screen session: String) async {
+        let first = (watches[.screen(session: session)] ?? 0) == 0
+        await watch(.screen(session: session))
+        if first {
+            await readScreen(session)
+        }
+    }
 
-    private func send(watch: Bool, session: String, on subscription: EventSubscription)
+    public func unwatch(screen session: String) async {
+        await unwatch(.screen(session: session))
+    }
+
+    /// The keys watched now, in a fixed order.
+    public var watchedKeys: [ResourceKey] {
+        watches.keys.sorted { $0.wire.kind + $0.wire.id < $1.wire.kind + $1.wire.id }
+    }
+
+    /// The sessions whose screens are watched, for tests.
+    public var watchedScreens: [String] {
+        watches.keys.compactMap {
+            if case .screen(let session) = $0 { return session } else { return nil }
+        }.sorted()
+    }
+
+    private func send(watch: Bool, key: ResourceKey, on subscription: EventSubscription)
         async throws
     {
+        let (kind, id) = key.wire
         let frame: [String: Any] = [
             "type": watch ? "watch" : "unwatch",
-            "resource": ["kind": "screen", "id": session],
+            "resource": ["kind": kind, "id": id],
         ]
         let data = try JSONSerialization.data(withJSONObject: frame)
         try await subscription.send(String(decoding: data, as: UTF8.self))
+    }
+
+    /// Re-read what is held on a key: after `changed`, and after a
+    /// reconnect for every watched key. A conversation key refreshes
+    /// the last response and the conversation, whichever are held,
+    /// the latter from the last turn held on (it was in progress).
+    private func read(_ key: ResourceKey) async {
+        switch key {
+        case .screen(let session):
+            await readScreen(session)
+        case .conversation(let session):
+            if lastResponses[session] != nil || conversations[session] == nil {
+                await readLastResponse(session)
+            }
+            if let held = conversations[session] {
+                await readConversation(session, from: held.lastHeld, limit: nil)
+            }
+        case .runs(let session):
+            if runs[session] != nil { await readRuns(session) }
+        case .runOutput(let session, let run):
+            if runOutputs[RunKey(session: session, n: run)] != nil {
+                await readRunOutput(session, run: run, lines: nil)
+            }
+        default:
+            return
+        }
+    }
+
+    private func clearContent() {
+        screens = [:]
+        lastResponses = [:]
+        conversations = [:]
+        runs = [:]
+        runOutputs = [:]
+    }
+
+    /// Read the last response now, under the revision rule. A refusal
+    /// (no conversation) clears what was held.
+    public func readLastResponse(_ session: String) async {
+        guard let api else { return }
+        do {
+            let reply = try await api.lastResponse(session)
+            apply(.conversation(session: session), at: reply.revision) {
+                lastResponses[session] = reply.body
+            }
+            changed()
+        } catch RemoteError.refused(let status, _, _) where status == 400 || status == 404 {
+            lastResponses[session] = nil
+            changed()
+        } catch let error as RemoteError {
+            handle(error)
+        } catch {
+            handle(.transport("\(error)"))
+        }
+    }
+
+    /// Read a page of the conversation: from `from`, or the last page
+    /// when `nil`, merged into what is held.
+    public func readConversation(_ session: String, from: Int?, limit: Int?) async {
+        guard let api else { return }
+        do {
+            let reply = try await api.conversation(
+                session, from: from.map(String.init) ?? "last", limit: limit)
+            apply(.conversation(session: session), at: reply.revision) {
+                if var held = conversations[session] {
+                    held.merge(reply.body)
+                    conversations[session] = held
+                } else {
+                    conversations[session] = ConversationState(page: reply.body)
+                }
+            }
+            changed()
+        } catch RemoteError.refused(let status, _, _) where status == 400 || status == 404 {
+            conversations[session] = nil
+            changed()
+        } catch let error as RemoteError {
+            handle(error)
+        } catch {
+            handle(.transport("\(error)"))
+        }
+    }
+
+    public func readRuns(_ session: String) async {
+        guard let api else { return }
+        do {
+            let reply = try await api.runs(session)
+            apply(.runs(session: session), at: reply.revision) {
+                runs[session] = reply.body.runs
+            }
+            changed()
+        } catch RemoteError.refused(let status, _, _) where status == 400 || status == 404 {
+            runs[session] = nil
+            changed()
+        } catch let error as RemoteError {
+            handle(error)
+        } catch {
+            handle(.transport("\(error)"))
+        }
+    }
+
+    public func readRunOutput(_ session: String, run: Int, lines: Int?) async {
+        guard let api else { return }
+        let key = RunKey(session: session, n: run)
+        do {
+            let reply = try await api.runOutput(session, run: run, lines: lines)
+            apply(.runOutput(session: session, run: run), at: reply.revision) {
+                runOutputs[key] = reply.body
+            }
+            changed()
+        } catch RemoteError.refused(let status, _, _) where status == 400 || status == 404 {
+            runOutputs[key] = nil
+            changed()
+        } catch let error as RemoteError {
+            handle(error)
+        } catch {
+            handle(.transport("\(error)"))
+        }
     }
 
     /// Read a session's screen now, watched or not, under the revision
@@ -509,8 +654,8 @@ public actor ServerConnection {
         case .waiting:
             // Derived from the sessions, whose own events accompany it.
             return
-        case .screen:
-            // Content: read through `readScreen`, never as a view.
+        case .screen, .conversation, .runs, .runOutput:
+            // Content: read through its own reader, never as a view.
             return
         }
         next.revision = held.values.max() ?? 0
@@ -524,6 +669,9 @@ public actor ServerConnection {
         case .session(let id):
             next.sessions.removeAll { $0.id == id }
             screens[id] = nil
+            lastResponses[id] = nil
+            conversations[id] = nil
+            runs[id] = nil
         case .set(let id): next.sets.removeAll { $0.id == id }
         case .project(let id):
             next.projects.removeAll { $0.id == id }
@@ -603,7 +751,7 @@ public actor ServerConnection {
             try? credentials.setPin(nil, for: server.id)
             snapshot = nil
             held = [:]
-            screens = [:]
+            clearContent()
             server.needsPairing = true
             disconnect(to: .unpaired)
         case .refused(let status, _, _) where status == 401 || status == 403:
@@ -632,7 +780,7 @@ public actor ServerConnection {
         try? credentials.forget(server.id)
         snapshot = nil
         held = [:]
-        screens = [:]
+        clearContent()
         watches = [:]
         info = nil
         server.needsPairing = true

@@ -126,4 +126,73 @@ final class WatchTests: XCTestCase {
         let state = await connection.state
         XCTAssertEqual(state, .connected)
     }
+
+    func testAConversationWatchReadsWhatIsHeldAndFollowsChanged() async throws {
+        let (_, fake, connection) = try await host()
+        fake.set {
+            $0.lastResponses = ["r1": LastResponseBody(resumeID: "h1", n: 1, total: 1, text: "pong")]
+            $0.conversations = [
+                "r1": ConversationBody(
+                    resumeID: "h1", total: 1, from: 1, next: nil,
+                    turns: [TurnView(n: 1, user: "ping", finalText: "pong")])
+            ]
+        }
+        await connection.watch(.conversation(session: "r1"))
+        await connection.readLastResponse("r1")
+        await connection.readConversation("r1", from: nil, limit: 20)
+        XCTAssertEqual(fake.calls.filter { $0 == "watch:r1" }.count, 1, "\(fake.calls)")
+        let held = await connection.lastResponses["r1"]
+        XCTAssertEqual(held?.text, "pong")
+        let turns = await connection.conversations["r1"]?.turns.map(\.n)
+        XCTAssertEqual(turns, [1])
+
+        fake.set {
+            $0.revision = 9
+            $0.lastResponses = ["r1": LastResponseBody(resumeID: "h1", n: 2, total: 2, text: "pong again")]
+            $0.conversations["r1"] = ConversationBody(
+                resumeID: "h1", total: 2, from: 1, next: nil,
+                turns: [
+                    TurnView(n: 1, user: "ping", finalText: "pong"),
+                    TurnView(n: 2, user: "again", finalText: "pong again"),
+                ])
+        }
+        fake.emit(.changed, ResourceRef(kind: "conversation", id: "r1"))
+        await settle(connection) { await $0.lastResponses["r1"]?.n == 2 }
+        let after = await connection.lastResponses["r1"]
+        XCTAssertEqual(after?.text, "pong again")
+        await settle(connection) { await $0.conversations["r1"]?.turns.count == 2 }
+        let merged = await connection.conversations["r1"]?.turns.map(\.n)
+        XCTAssertEqual(merged, [1, 2], "the page from the last held turn replaced it and added the next")
+        XCTAssertEqual(fake.calls.filter { $0 == "conversation" }.count, 2, "one page per change")
+
+        await connection.unwatch(.conversation(session: "r1"))
+        XCTAssertEqual(fake.calls.filter { $0 == "unwatch:r1" }.count, 1)
+    }
+
+    func testARunOutputWatchNamesTheRunAndFollowsChanged() async throws {
+        let (_, fake, connection) = try await host()
+        fake.set {
+            $0.runs = ["r1": [RunView(n: 1, startedMs: 1), RunView(n: 2, startedMs: 2)]]
+            $0.runOutputs = [RunKey(session: "r1", n: 2): RunOutputBody(n: 2, text: "building")]
+        }
+        await connection.readRuns("r1")
+        let runs = await connection.runs["r1"]?.map(\.n)
+        XCTAssertEqual(runs, [1, 2])
+        await connection.watch(.runOutput(session: "r1", run: 2))
+        await connection.readRunOutput("r1", run: 2, lines: nil)
+        XCTAssertEqual(fake.calls.filter { $0 == "watch:r1/2" }.count, 1, "\(fake.calls)")
+        let text = await connection.runOutputs[RunKey(session: "r1", n: 2)]?.text
+        XCTAssertEqual(text, "building")
+        fake.set {
+            $0.revision = 9
+            $0.runOutputs[RunKey(session: "r1", n: 2)] = RunOutputBody(n: 2, text: "building\ndone")
+            $0.runs["r1"]?[1] = RunView(n: 2, startedMs: 2, endedMs: 3, exit: 0)
+        }
+        fake.emit(.changed, ResourceRef(kind: "run_output", id: "r1/2"))
+        fake.emit(.changed, ResourceRef(kind: "runs", id: "r1"))
+        await settle(connection) { await $0.runOutputs[RunKey(session: "r1", n: 2)]?.text == "building\ndone" }
+        await settle(connection) { await $0.runs["r1"]?[1].exit == 0 }
+        let exit = await connection.runs["r1"]?[1].exit
+        XCTAssertEqual(exit, 0, "the runs collection refetched on its event")
+    }
 }

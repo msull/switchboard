@@ -31,6 +31,9 @@ pub enum ResourceKind {
     /// A project's sessions; the id is the project's.
     Sessions,
     Waiting,
+    /// A command's or service's runs; the id is the record's. Moves
+    /// when a run starts or ends, and when one is pruned.
+    Runs,
 }
 
 impl ResourceKind {
@@ -47,6 +50,7 @@ impl ResourceKind {
             Self::Sets => "sets",
             Self::Sessions => "sessions",
             Self::Waiting => "waiting",
+            Self::Runs => "runs",
         }
     }
 }
@@ -132,6 +136,11 @@ impl Fingerprints {
                     view.quiet_secs = None;
                     put(ResourceKind::Session, &view.id, hash_of(&view));
                     ids.push(view.id);
+                }
+                if !s.runs.is_empty() {
+                    let runs: Vec<(u32, Option<SystemTime>, Option<i32>)> =
+                        s.runs.iter().map(|r| (r.n, r.ended, r.exit)).collect();
+                    put(ResourceKind::Runs, &s.id.0.to_string(), hash_of(&runs));
                 }
             }
             put(ResourceKind::Sessions, &p.id, ids_hash(ids.iter()));

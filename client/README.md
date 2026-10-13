@@ -7,7 +7,7 @@ macOS 14, iOS 17 and visionOS 1.
 
 ```sh
 swift build                      # every target
-swift test                       # 36 tests: fixtures, pinning, the connection core, events, watches, presentation, browsing
+swift test                       # 43 tests: fixtures, pinning, the connection core, events, watches, conversations, presentation, browsing
 swift run switchboard-remote     # the command-line browser (usage below)
 scripts/sim.sh run               # the visionOS app on the simulator (below)
 ```
@@ -16,8 +16,10 @@ scripts/sim.sh run               # the visionOS app on the simulator (below)
 
 - `SwitchboardProtocol`: the wire views as `Codable` with the host's
   own snake_case keys spelled out, the reply envelope, `/info` and
-  `/pair`, the QR invite, and qualified refs (`SessionRef`,
-  `WorkingSetRef`, `FileRef`). `Fixtures/*.json` are written by the
+  `/pair`, the QR invite, the content replies (`ConversationBody` with
+  its turns and their activity, `LastResponseBody`, `RunsBody`,
+  `RunOutputBody`), and qualified refs (`SessionRef`,
+  `WorkingSetRef`, `FileRef`, `RunRef`). `Fixtures/*.json` are written by the
   Rust port's test (`SWITCHBOARD_WRITE_FIXTURES=1 cargo test --test
   remote fixtures`) and decoded by both sides' tests.
 - `SwitchboardTransport`: `HostClient` over `URLSession` with
@@ -34,10 +36,13 @@ scripts/sim.sh run               # the visionOS app on the simulator (below)
   snapshot with the buffered events reconciled against each resource's
   held revision, live events refetching only past it, the epoch check,
   `resync_required` and a closed socket reconnecting, a key change
-  dropping the token and keeping the entry, reference-counted screen
-  watches sent at the first holder and released at the last, resent
-  after a reconnect before the snapshot, with the screen read on
-  `changed` past its held revision), and `ConnectionManager`
+  dropping the token and keeping the entry, reference-counted content
+  watches by resource key sent at the first holder and released at
+  the last, resent after a reconnect before the snapshot, with what is
+  held on a key re-read on `changed` past its held revision: the
+  screen, the last response and the conversation from its last turn,
+  a run's output; `ConversationState`, the pages merged by turn),
+  and `ConnectionManager`
   with the unified store, filters and the cross-host order; its loop
   only retries hosts that are not connected.
 - `SwitchboardUI`: `RootView` (the main window's tabs), `BrowserView`,
@@ -45,8 +50,10 @@ scripts/sim.sh run               # the visionOS app on the simulator (below)
   `BrowserModel` that mirrors the manager's store when it changes;
   `CardWindowView`, one window on one session (a click on a listed
   session brings its open window forward; the context menu opens
-  another) with the `compact` and
-  `screen` modes (the screen holds a watch while it is on screen, and
+  another) with the `compact`, `screen`, `last_response` (the answer
+  with its inline Markdown), `conversation` (turns with the activity
+  folded, earlier pages on demand, the end following the host) and
+  `run_output` (a run picker and the tail) modes (the screen holds a watch while it is on screen, and
   its text scales through a readout in the mode row that opens a
   slider and the snap sizes, `ScreenScale`, as state of the window:
   kept across a mode switch, gone when it closes), a small header (the

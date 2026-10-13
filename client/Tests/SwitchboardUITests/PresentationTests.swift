@@ -10,14 +10,13 @@ import XCTest
 final class PresentationTests: XCTestCase {
     let a = ServerID("11111111-1111-1111-1111-111111111111")
 
-    func testTheModesOfferedFollowTheKindAndTheUndrawnOnesNameTheirMilestone() {
+    func testTheModesOfferedFollowTheKindAndTheMonospacedOnesScale() {
         XCTAssertEqual(ViewMode.offered(for: .claude), [.compact, .screen, .lastResponse, .conversation])
         XCTAssertEqual(ViewMode.offered(for: .shell), [.compact, .screen])
         XCTAssertEqual(ViewMode.offered(for: .service), [.compact, .screen, .runOutput])
-        XCTAssertTrue(ViewMode.compact.drawn)
-        XCTAssertTrue(ViewMode.screen.drawn)
-        XCTAssertFalse(ViewMode.conversation.drawn)
-        XCTAssertEqual(ViewMode.arrivesWith, "Milestone C")
+        XCTAssertTrue(ViewMode.screen.scalable)
+        XCTAssertTrue(ViewMode.runOutput.scalable)
+        XCTAssertFalse(ViewMode.conversation.scalable)
     }
 
     func testTwoRequestsOnOneSessionAreTwoWindowsAndARequestRoundTrips() throws {

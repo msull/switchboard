@@ -228,6 +228,61 @@ public actor ConnectionManager {
         await connections[ref.serverID]?.screens[ref.recordID]
     }
 
+    /// Hold a watch on a session's conversation; the last response and
+    /// the conversation both move with it.
+    public func watch(conversation ref: SessionRef) async {
+        await connections[ref.serverID]?.watch(.conversation(session: ref.recordID))
+    }
+
+    public func unwatch(conversation ref: SessionRef) async {
+        await connections[ref.serverID]?.unwatch(.conversation(session: ref.recordID))
+    }
+
+    public func readLastResponse(_ ref: SessionRef) async {
+        await connections[ref.serverID]?.readLastResponse(ref.recordID)
+    }
+
+    public func lastResponse(for ref: SessionRef) async -> LastResponseBody? {
+        await connections[ref.serverID]?.lastResponses[ref.recordID]
+    }
+
+    /// Read a page of the conversation from `from`, or its end.
+    public func readConversation(_ ref: SessionRef, from: Int?, limit: Int?) async {
+        await connections[ref.serverID]?.readConversation(ref.recordID, from: from, limit: limit)
+    }
+
+    public func conversation(for ref: SessionRef) async -> ConversationState? {
+        await connections[ref.serverID]?.conversations[ref.recordID]
+    }
+
+    public func readRuns(_ ref: SessionRef) async {
+        await connections[ref.serverID]?.readRuns(ref.recordID)
+    }
+
+    public func runs(for ref: SessionRef) async -> [RunView]? {
+        await connections[ref.serverID]?.runs[ref.recordID]
+    }
+
+    /// Hold a watch on one run's output.
+    public func watch(runOutput ref: RunRef) async {
+        await connections[ref.session.serverID]?.watch(
+            .runOutput(session: ref.session.recordID, run: ref.n))
+    }
+
+    public func unwatch(runOutput ref: RunRef) async {
+        await connections[ref.session.serverID]?.unwatch(
+            .runOutput(session: ref.session.recordID, run: ref.n))
+    }
+
+    public func readRunOutput(_ ref: RunRef, lines: Int? = nil) async {
+        await connections[ref.session.serverID]?.readRunOutput(
+            ref.session.recordID, run: ref.n, lines: lines)
+    }
+
+    public func runOutput(for ref: RunRef) async -> RunOutputBody? {
+        await connections[ref.session.serverID]?.runOutputs[RunKey(session: ref.session.recordID, n: ref.n)]
+    }
+
     public func setEnabled(_ id: ServerID, _ enabled: Bool) async {
         await connections[id]?.setEnabled(enabled)
         await persist()

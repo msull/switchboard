@@ -45,17 +45,13 @@ public enum ViewMode: String, Codable, CaseIterable, Sendable, Identifiable {
         }
     }
 
-    /// Whether this client draws the mode; the rest arrive with
-    /// Milestone C.
-    public var drawn: Bool {
+    /// Whether the mode shows monospaced text the window scales.
+    public var scalable: Bool {
         switch self {
-        case .compact, .screen: return true
-        case .lastResponse, .conversation, .runOutput: return false
+        case .screen, .runOutput: return true
+        case .compact, .lastResponse, .conversation: return false
         }
     }
-
-    /// The milestone that brings a mode this client does not draw.
-    public static let arrivesWith = "Milestone C"
 }
 
 /// The screen's text scale in a card window: a multiplier on the
