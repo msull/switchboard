@@ -11897,3 +11897,129 @@ mod remote {
         assert!(e.is_empty(), "already gone: {e:?}");
     }
 }
+
+mod revision {
+    //! The read-model fingerprints behind the remote port's revision.
+
+    use super::*;
+    use crate::core::revision::{Fingerprints, ResourceKind};
+
+    fn changed(fp: &Fingerprints, next: &Fingerprints) -> Vec<(ResourceKind, String, bool)> {
+        fp.changes(next)
+            .into_iter()
+            .map(|c| (c.resource.kind, c.resource.id, c.removed))
+            .collect()
+    }
+
+    #[test]
+    fn age_alone_changes_nothing_but_the_quiet_transition_does() {
+        let p = project("p");
+        let mut w = Workspace::new(p.clone());
+        let r = record(p.id, codex(), 0);
+        let id = r.id;
+        w.sessions.push(r);
+        let (mut core, _) = loaded(vec![w], vec![]);
+        let now = Clock::at(60_000);
+        let mut status = running(id);
+        status.last_activity = Some(now.wall - Duration::from_secs(5));
+        core.dispatch(AppAction::HostListed(vec![status.clone()]), now);
+        let first = Fingerprints::of(&core, now.wall);
+        assert!(
+            first.len() > 4,
+            "projects, spaces, the session, its collections"
+        );
+        // Ten seconds later with nothing listed again: `quiet_secs`
+        // moved on every session view and nothing else did.
+        let later = Fingerprints::of(&core, now.wall + Duration::from_secs(10));
+        assert_eq!(changed(&first, &later), vec![]);
+        // The pane passes the quiet interval: the card's word moves.
+        status.last_activity = Some(now.wall - Duration::from_secs(30));
+        core.dispatch(AppAction::HostListed(vec![status]), now);
+        let quiet = Fingerprints::of(&core, now.wall);
+        assert_eq!(
+            changed(&later, &quiet),
+            vec![(ResourceKind::Session, id.0.to_string(), false)]
+        );
+    }
+
+    #[test]
+    fn a_removed_session_is_removed_and_its_collection_changed() {
+        let (mut core, pid, ids) =
+            with_records(&[SessionKind::Shell, SessionKind::Shell], |_| None);
+        let before = Fingerprints::of(&core, Clock::at(1).wall);
+        core.dispatch(AppAction::RemoveSession(ids[0]), Clock::at(2));
+        let after = Fingerprints::of(&core, Clock::at(2).wall);
+        let mut moved = changed(&before, &after);
+        moved.sort();
+        assert_eq!(
+            moved,
+            vec![
+                (ResourceKind::Session, ids[0].0.to_string(), true),
+                (ResourceKind::Sessions, pid.0.to_string(), false),
+            ]
+        );
+        assert_eq!(
+            changed(&after, &after),
+            vec![],
+            "a pass with nothing moving"
+        );
+    }
+
+    #[test]
+    fn a_set_rename_and_a_trust_question_move_only_their_resource() {
+        let (mut core, _pid, ids) =
+            with_records(&[SessionKind::Agent(AgentKind::ClaudeCode)], |s| {
+                Some(running(s.id))
+            });
+        core.dispatch(
+            AppAction::NewWorkingSet {
+                name: Some("Desk".into()),
+                clone_of: None,
+                with: None,
+                columns: 4,
+            },
+            Clock::at(1),
+        );
+        let set = core
+            .set_views(SpaceId::GLOBAL)
+            .into_iter()
+            .chain(
+                core.space_views()
+                    .iter()
+                    .filter_map(|s| Uuid::parse_str(&s.id).ok())
+                    .flat_map(|s| core.set_views(SpaceId(s))),
+            )
+            .find(|s| s.name == "Desk")
+            .expect("the set");
+        let before = Fingerprints::of(&core, Clock::at(2).wall);
+        core.dispatch(
+            AppAction::RenameWorkingSet {
+                set: SetId(Uuid::parse_str(&set.id).unwrap()),
+                name: "Bench".into(),
+            },
+            Clock::at(3),
+        );
+        let renamed = Fingerprints::of(&core, Clock::at(3).wall);
+        assert_eq!(
+            changed(&before, &renamed),
+            vec![(ResourceKind::Set, set.id.clone(), false)]
+        );
+        core.dispatch(
+            AppAction::PromptSeen {
+                id: ids[0],
+                seen: true,
+            },
+            Clock::at(4),
+        );
+        let asked = Fingerprints::of(&core, Clock::at(4).wall);
+        let moved = changed(&renamed, &asked);
+        assert!(
+            moved.contains(&(ResourceKind::Session, ids[0].0.to_string(), false)),
+            "{moved:?}"
+        );
+        assert!(
+            moved.contains(&(ResourceKind::Waiting, String::new(), false)),
+            "the trust question waits on the owner: {moved:?}"
+        );
+    }
+}

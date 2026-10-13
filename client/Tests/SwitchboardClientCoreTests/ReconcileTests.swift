@@ -199,13 +199,17 @@ final class ReconcileTests: XCTestCase {
 
     func testAnotherInstallationAtTheAddressIsRefused() async throws {
         let (manager, network, _) = try await twoHosts()
-        // A's address now answers with A's key but another id, and so
-        // another epoch.
-        network.hosts[addrA]!.set {
+        // A's address now answers with A's key but another id: the old
+        // socket closes with the old host, and the reconnect's `/info`
+        // says who answers now.
+        let moved = network.hosts[addrA]!
+        moved.closeSockets()
+        moved.set {
             $0.serverID = self.b
             $0.epoch = "e9"
         }
-        await manager.refreshAll()
+        try await Task.sleep(nanoseconds: 1_600_000_000)
+        await manager.retryOffline()
         let store = await manager.store
         guard case .offline(let reason) = host(store, a).state else {
             return XCTFail("\(host(store, a).state)")

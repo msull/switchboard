@@ -8,15 +8,20 @@ use std::io;
 use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
+use std::sync::mpsc;
 use std::time::{Duration, Instant, SystemTime};
 
 use switchboard_control as wire;
 
 use crate::adapters::control::{ControlSocket, Incoming};
 use crate::adapters::hooks::WakeSocket;
-use crate::adapters::remote::{self, RemoteIncoming, RemotePort, RemoteReply, RemoteRequest};
+use crate::adapters::remote::{
+    self, RemoteIncoming, RemotePort, RemoteReply, RemoteRequest, SubscriberQueue,
+};
 use crate::adapters::scrollback::scrollback_dir;
 use crate::content::ConversationCache;
+use crate::core::revision::{Fingerprints, Resource};
 use crate::core::{
     Activity, AgentKind, AppAction, AppCore, Clock, Composer, ControlAction, ControlOutcome,
     DISPATCH_POLL, Effect, ProjectId, RECORD_TOKEN_ENV, RecordId, Resolved, ResumeHandle,
@@ -167,11 +172,25 @@ pub struct SwitchboardApp {
     /// two instances can run on one machine; `0` picks a free one.
     remote_port_override: Option<u16>,
     /// This run's epoch and the revision counter every remote reply
-    /// carries; the counter moves only once the read-model diff lands.
+    /// carries; the counter moves once per pass whose read-model diff
+    /// found a change.
     epoch: uuid::Uuid,
     revision: u64,
+    /// The read models as the last diff pass saw them, and whether a
+    /// dispatch since then makes another pass worth taking.
+    fingerprints: Option<Fingerprints>,
+    dirty: bool,
+    /// The devices subscribed to events, each with its connection's
+    /// queue; a revocation drops the device's entry and so its socket.
+    subscribers: Vec<Subscriber>,
     /// File diffs being read on threads of their own.
     diff_reads: DiffReads,
+}
+
+/// One WebSocket subscriber as the frame holds it.
+struct Subscriber {
+    queue: SubscriberQueue,
+    device: uuid::Uuid,
 }
 
 /// A file diff's answer from its thread.
@@ -243,6 +262,9 @@ impl SwitchboardApp {
             remote_port_override: None,
             epoch: uuid::Uuid::new_v4(),
             revision: 0,
+            fingerprints: None,
+            dirty: false,
+            subscribers: Vec::new(),
             diff_reads: DiffReads::default(),
         }
     }
@@ -326,6 +348,7 @@ impl SwitchboardApp {
             self.dispatched.push(action.clone());
         }
         self.dispatch_inner(action);
+        self.diff_pass();
     }
 
     /// Tell the core how wide the working-set view is. Not recorded: it
@@ -352,6 +375,12 @@ impl SwitchboardApp {
     /// what the UI asked for.
     fn dispatch_inner(&mut self, action: AppAction) {
         let now = self.clock();
+        self.dirty = true;
+        if let AppAction::RevokeDevice(device) = &action {
+            // Dropping the queue is the close: the connection thread
+            // sees the channel end and closes the socket.
+            self.subscribers.retain(|s| s.device != *device);
+        }
         // A discard puts a cut copy behind a new handle; the cache is
         // dropped at once so the view never shows the old file first.
         if let AppAction::TranscriptDiscarded { id, .. } | AppAction::UndoDiscard(id) = &action {
@@ -1080,6 +1109,7 @@ impl SwitchboardApp {
             self.last_dispatch = Some(Instant::now());
             self.poll_dispatch();
         }
+        self.diff_pass();
     }
 
     /// Ask Dispatch's port for its status. No runner is a quick error
@@ -1345,6 +1375,7 @@ impl SwitchboardApp {
     /// calls it while its client waits. The remote port is drained at
     /// most `DRAIN_PER_PASS` requests per pass, in arrival order.
     pub fn serve_pending(&mut self) {
+        self.diff_pass();
         let incoming: Vec<Incoming> = self
             .control
             .as_mut()
@@ -1359,10 +1390,128 @@ impl SwitchboardApp {
             .as_mut()
             .map(|port| port.poll(remote::DRAIN_PER_PASS))
             .unwrap_or_default();
-        for RemoteIncoming { request, reply } in incoming {
-            let answer = self.serve_remote(&request);
+        for RemoteIncoming {
+            request,
+            reply,
+            subscriber,
+        } in incoming
+        {
+            let answer = self.serve_remote(&request, subscriber);
             let _ = reply.try_send(answer);
         }
+    }
+
+    // --- the revision and its events
+
+    /// Fingerprint every read model and compare with the last pass:
+    /// one `changed` or `removed` per resource that moved, the
+    /// revision bumped once if anything did. Taken only when a
+    /// dispatch happened since the last pass, and only while the port
+    /// is bound, since nothing else reads the revision.
+    fn diff_pass(&mut self) {
+        if !self.dirty || self.remote.is_none() {
+            return;
+        }
+        self.dirty = false;
+        let next = Fingerprints::of(&self.core, SystemTime::now());
+        let Some(previous) = self.fingerprints.replace(next) else {
+            return;
+        };
+        let changes = previous.changes(self.fingerprints.as_ref().unwrap_or(&previous));
+        if changes.is_empty() {
+            return;
+        }
+        self.revision += 1;
+        let at_ms = epoch_millis(SystemTime::now());
+        for change in changes {
+            let kind = if change.removed { "removed" } else { "changed" };
+            let text = self.event_json(kind, Some(&change.resource), at_ms);
+            self.broadcast(&text);
+        }
+    }
+
+    /// One event frame as the subscribers get it.
+    fn event_json(&self, kind: &str, resource: Option<&Resource>, at_ms: u64) -> String {
+        let server_id = self.core.identity().map(|i| i.server_id.to_string());
+        let mut value = serde_json::json!({
+            "server_id": server_id,
+            "epoch": self.epoch,
+            "revision": self.revision,
+            "type": kind,
+            "at_ms": at_ms,
+        });
+        if let Some(resource) = resource {
+            value["resource"] = serde_json::json!({
+                "kind": resource.kind.word(),
+                "id": resource.id,
+            });
+        }
+        value.to_string()
+    }
+
+    /// Hand one frame to every subscriber. A full queue is a subscriber
+    /// that fell `SUBSCRIBER_QUEUE` events behind: it is dropped with
+    /// its overflow flag set, never trimmed, so its connection sends
+    /// `resync_required` and closes.
+    fn broadcast(&mut self, text: &str) {
+        self.subscribers
+            .retain(|s| match s.queue.tx.try_send(text.to_owned()) {
+                Ok(()) => true,
+                Err(mpsc::TrySendError::Full(_)) => {
+                    s.queue.overflow.store(true, Ordering::SeqCst);
+                    log::warn!("remote: a subscriber fell behind and is dropped");
+                    false
+                }
+                Err(mpsc::TrySendError::Disconnected(_)) => false,
+            });
+    }
+
+    /// Accept a device's subscription: `hello` with the revision as it
+    /// stands goes into the queue first, so a snapshot the device takes
+    /// after it can be reconciled against everything that follows.
+    fn remote_subscribe(
+        &mut self,
+        request: &RemoteRequest,
+        device: uuid::Uuid,
+        subscriber: Option<SubscriberQueue>,
+    ) -> RemoteReply {
+        let Some(queue) = subscriber.filter(|_| request.upgrade.is_some()) else {
+            return self.refuse(
+                request,
+                400,
+                "upgrade_required",
+                "events are a WebSocket; upgrade the connection",
+                true,
+            );
+        };
+        let hello = self.event_json("hello", None, epoch_millis(SystemTime::now()));
+        if queue.tx.try_send(hello).is_err() {
+            return self.refuse(
+                request,
+                503,
+                "busy",
+                "the subscription could not start",
+                true,
+            );
+        }
+        self.subscribers.push(Subscriber { queue, device });
+        RemoteReply {
+            status: remote::SUBSCRIBED,
+            body: Vec::new(),
+            authenticated: true,
+        }
+    }
+
+    /// How many devices are subscribed to events.
+    #[must_use]
+    pub fn subscriber_count(&self) -> usize {
+        self.subscribers.len()
+    }
+
+    /// The revision every reply carries now.
+    #[must_use]
+    pub fn revision(&self) -> u64 {
+        self.revision
     }
 
     // --- the remote port
@@ -1597,7 +1746,11 @@ impl SwitchboardApp {
     /// One HTTP request from a device, answered on the frame: `/info`
     /// and `/pair` to anyone, the allowlisted reads to a paired device,
     /// everything else refused before it is translated to the wire.
-    fn serve_remote(&mut self, request: &RemoteRequest) -> RemoteReply {
+    fn serve_remote(
+        &mut self,
+        request: &RemoteRequest,
+        subscriber: Option<SubscriberQueue>,
+    ) -> RemoteReply {
         let Some(rest) = request.path.strip_prefix("/api/v1/") else {
             return self.refuse(request, 404, "not_found", "no such endpoint", false);
         };
@@ -1630,6 +1783,9 @@ impl SwitchboardApp {
             );
         };
         self.dispatch_inner(AppAction::DeviceSeen(device.id));
+        if let ("GET", ["events"]) = (request.method.as_str(), segments.as_slice()) {
+            return self.remote_subscribe(request, device.id, subscriber);
+        }
         let notes_cap = if matches!(segments.as_slice(), ["sessions", _]) {
             NOTES_CAP_ALONE
         } else {
@@ -1651,6 +1807,9 @@ impl SwitchboardApp {
                 session: (*session).to_owned(),
             },
             ("GET", ["waiting"]) => wire::Body::Waiting,
+            ("GET", ["ops", op]) => wire::Body::OpStatus {
+                operation: (*op).to_owned(),
+            },
             ("GET", ["sessions", session, "screen"]) => wire::Body::SessionScreen {
                 session: (*session).to_owned(),
                 lines: request.param("lines").and_then(|n| n.parse().ok()),
@@ -1889,6 +2048,26 @@ impl SwitchboardApp {
             Ok(action) => action,
             Err(reason) => return wire::Reply::failed(reason),
         };
+        if request.body.class() == wire::Class::NonReplayable {
+            // A repeat could spend money or type twice, so the request
+            // line goes down before anything runs: an op with a request
+            // line and no reply was started and is never run again.
+            if self.requested(op) {
+                return wire::Reply::failed(
+                    "interrupted: the host started this operation and its outcome is unknown",
+                );
+            }
+            let line = OpLine::Requested {
+                op: op.clone(),
+                kind: request.body.kind(),
+                ids: Vec::new(),
+                at: SystemTime::now(),
+            };
+            if let Err(e) = self.services.operations.append(&line) {
+                log::error!("operations log: {e}");
+                return wire::Reply::failed(format!("the operations log refused the request: {e}"));
+            }
+        }
         self.dispatch(AppAction::Control {
             op: op.clone(),
             action,
@@ -1921,6 +2100,15 @@ impl SwitchboardApp {
             log::error!("operations log: {e}");
         }
         reply
+    }
+
+    /// Whether the log holds a request line for `op`.
+    fn requested(&self, op: &str) -> bool {
+        self.services
+            .operations
+            .find(op)
+            .iter()
+            .any(|l| matches!(l, OpLine::Requested { .. }))
     }
 
     /// The reply already given to `op`, if the log has one.
@@ -2183,6 +2371,14 @@ impl SwitchboardApp {
             None => wire::OpStatus::Unknown,
         }
     }
+}
+
+/// Milliseconds since the epoch, the wire's time; zero before it.
+fn epoch_millis(t: SystemTime) -> u64 {
+    t.duration_since(SystemTime::UNIX_EPOCH)
+        .ok()
+        .and_then(|d| u64::try_from(d.as_millis()).ok())
+        .unwrap_or(0)
 }
 
 /// A card's caption: the last line of a pane with something on it.

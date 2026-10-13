@@ -49,6 +49,9 @@ public struct SessionView: Decodable, Sendable, Equatable, Identifiable {
     public let lastExit: Int?
     public let lastStopAtMs: UInt64?
     public let quietSecs: UInt64?
+    /// When the pane last printed, for a client that derives quiet
+    /// itself; an older host omits it.
+    public let lastActivityMs: UInt64?
     public let waiting: Bool
     public let waitingReason: String?
     public let trustQuestion: Bool
@@ -66,6 +69,7 @@ public struct SessionView: Decodable, Sendable, Equatable, Identifiable {
         case lastExit = "last_exit"
         case lastStopAtMs = "last_stop_at_ms"
         case quietSecs = "quiet_secs"
+        case lastActivityMs = "last_activity_ms"
         case waitingReason = "waiting_reason"
         case trustQuestion = "trust_question"
         case promptRefusal = "prompt_refusal"
@@ -87,6 +91,7 @@ public struct SessionView: Decodable, Sendable, Equatable, Identifiable {
         lastExit = try c.decodeIfPresent(Int.self, forKey: .lastExit)
         lastStopAtMs = try c.decodeIfPresent(UInt64.self, forKey: .lastStopAtMs)
         quietSecs = try c.decodeIfPresent(UInt64.self, forKey: .quietSecs)
+        lastActivityMs = try c.decodeIfPresent(UInt64.self, forKey: .lastActivityMs)
         waiting = try c.decode(Bool.self, forKey: .waiting)
         waitingReason = try c.decodeIfPresent(String.self, forKey: .waitingReason)
         trustQuestion = try c.decodeIfPresent(Bool.self, forKey: .trustQuestion) ?? false
@@ -117,6 +122,7 @@ public struct SessionView: Decodable, Sendable, Equatable, Identifiable {
         self.lastExit = nil
         self.lastStopAtMs = lastStopAtMs
         self.quietSecs = nil
+        self.lastActivityMs = nil
         self.waiting = waiting
         self.waitingReason = waitingReason
         self.trustQuestion = false

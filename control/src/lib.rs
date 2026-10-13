@@ -518,7 +518,7 @@ pub struct EnvSetView {
 }
 
 /// What a session runs as.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Hash)]
 #[serde(rename_all = "kebab-case")]
 pub enum SessionKind {
     Claude,
@@ -569,13 +569,13 @@ pub struct Definition {
 }
 
 /// One card of a working set.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Hash)]
 pub struct Pin {
     pub target: PinTarget,
     pub rect: Rect,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Hash)]
 #[serde(rename_all = "kebab-case")]
 pub enum PinTarget {
     Session { session: String },
@@ -583,7 +583,7 @@ pub enum PinTarget {
 }
 
 /// Grid units, not pixels.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Hash)]
 pub struct Rect {
     pub x: u32,
     pub y: u32,
@@ -610,7 +610,7 @@ pub struct Made {
 }
 
 /// Whether the pane exists and what it is doing.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Hash)]
 #[serde(rename_all = "kebab-case")]
 pub enum Liveness {
     Running,
@@ -619,7 +619,7 @@ pub enum Liveness {
 }
 
 /// One session as the port reports it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Hash)]
 pub struct SessionView {
     pub id: String,
     pub project: String,
@@ -636,6 +636,10 @@ pub struct SessionView {
     pub last_stop_at_ms: Option<u64>,
     /// How long the pane has printed nothing, when it is running.
     pub quiet_secs: Option<u64>,
+    /// When the pane last printed, in milliseconds since the epoch, for
+    /// a client that derives quiet itself. An older app omits it.
+    #[serde(default)]
+    pub last_activity_ms: Option<u64>,
     pub waiting: bool,
     pub waiting_reason: Option<String>,
     /// The pane shows Claude Code's own folder trust question, which
@@ -665,7 +669,7 @@ pub struct SessionView {
     pub held_until_ms: Option<u64>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Hash)]
 pub struct ProjectView {
     pub id: String,
     pub name: String,
@@ -674,7 +678,7 @@ pub struct ProjectView {
     pub op: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Hash)]
 pub struct SpaceView {
     pub id: String,
     pub name: String,
@@ -686,7 +690,7 @@ pub struct SpaceView {
     pub view: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Hash)]
 pub struct SetView {
     pub id: String,
     pub name: String,
@@ -700,7 +704,7 @@ pub struct SetView {
 }
 
 /// What chooses a rule set's cards.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Hash)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum SetRule {
     /// Every session active within the last `hours`.
@@ -912,6 +916,7 @@ mod tests {
             card: "exited (0)".into(),
             last_exit: Some(0),
             last_stop_at_ms: Some(1),
+            last_activity_ms: None,
             quiet_secs: None,
             waiting: false,
             waiting_reason: None,

@@ -1,8 +1,8 @@
 {
-  "epoch": "6386092b-b275-4aaa-9b31-8a64d4c528bd",
+  "epoch": "efbc650d-bdb9-483e-b811-9272260a94d8",
   "error": {
     "code": "unauthorized",
     "message": "pair this device first"
   },
-  "revision": 0
+  "revision": 6
 }

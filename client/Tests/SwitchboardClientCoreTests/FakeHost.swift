@@ -21,6 +21,11 @@ final class FakeHost: HostAPI, @unchecked Sendable {
     var pairCode = "ABCD2345"
     var pairs = 0
     var calls: [String] = []
+    /// Runs after a `sessions` reply is built and before it is returned:
+    /// a mutation between the snapshot and its delivery.
+    var afterSessionsBuilt: (() -> Void)?
+    private var subscribers: [Int: AsyncThrowingStream<EventFrame, Error>.Continuation] = [:]
+    private var nextSubscriber = 0
 
     init(serverID: ServerID, name: String, spki: String) {
         self.serverID = serverID
@@ -40,6 +45,59 @@ final class FakeHost: HostAPI, @unchecked Sendable {
         calls.append(call)
         if let failure { throw failure }
         return Envelope(epoch: epoch, revision: revision, body: body())
+    }
+
+    /// The events socket: `hello` at the current revision, then
+    /// whatever the test emits.
+    func events() async throws -> EventSubscription {
+        lock.lock()
+        calls.append("events")
+        if let failure {
+            lock.unlock()
+            throw failure
+        }
+        let hello = EventFrame(kind: .hello, serverID: serverID, epoch: epoch, revision: revision)
+        var continuation: AsyncThrowingStream<EventFrame, Error>.Continuation!
+        let stream = AsyncThrowingStream<EventFrame, Error> { continuation = $0 }
+        continuation.yield(hello)
+        let id = nextSubscriber
+        nextSubscriber += 1
+        subscribers[id] = continuation
+        lock.unlock()
+        return EventSubscription(frames: stream) { [self] in
+            lock.lock()
+            let held = subscribers.removeValue(forKey: id)
+            lock.unlock()
+            held?.finish()
+        }
+    }
+
+    /// An event to every subscriber, at the host's current revision and
+    /// epoch unless the frame says otherwise.
+    func emit(_ kind: EventFrame.Kind, _ resource: ResourceRef? = nil, revision: UInt64? = nil) {
+        lock.lock()
+        let frame = EventFrame(
+            kind: kind, serverID: serverID, epoch: epoch, revision: revision ?? self.revision,
+            resource: resource)
+        let targets = Array(subscribers.values)
+        lock.unlock()
+        for c in targets { c.yield(frame) }
+    }
+
+    /// Close every subscriber's socket, as a host restart or a
+    /// revocation would.
+    func closeSockets() {
+        lock.lock()
+        let targets = Array(subscribers.values)
+        subscribers = [:]
+        lock.unlock()
+        for c in targets { c.finish() }
+    }
+
+    var subscriberCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return subscribers.count
     }
 
     func info() async throws -> Envelope<ServerInfo> {
@@ -94,7 +152,13 @@ final class FakeHost: HostAPI, @unchecked Sendable {
     }
 
     func sessions(project: String) async throws -> Envelope<SessionsBody> {
-        try answer("sessions") { SessionsBody(sessions: sessions[project] ?? []) }
+        let reply = try answer("sessions") { SessionsBody(sessions: sessions[project] ?? []) }
+        lock.lock()
+        let hook = afterSessionsBuilt
+        afterSessionsBuilt = nil
+        lock.unlock()
+        hook?()
+        return reply
     }
 
     func session(_ id: String) async throws -> Envelope<SessionBody> {
@@ -152,6 +216,7 @@ struct Route: HostAPI {
     let pin: PinPolicy
 
     func info() async throws -> Envelope<ServerInfo> { try await network.route(address, pin).info() }
+    func events() async throws -> EventSubscription { try await network.route(address, pin).events() }
     func pair(_ request: PairRequest) async throws -> Envelope<PairReply> {
         try await network.route(address, pin).pair(request)
     }

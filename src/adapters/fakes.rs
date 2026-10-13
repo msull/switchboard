@@ -326,10 +326,18 @@ impl DispatchPort for FakeDispatch {
 #[derive(Debug, Default, Clone)]
 pub struct FakeOperations {
     pub lines: Arc<Mutex<Vec<OpLine>>>,
+    /// Every reply line fails to append (the disk went away between a
+    /// command's run and its reply), request lines still land.
+    pub fail_replies: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl Operations for FakeOperations {
     fn append(&mut self, line: &OpLine) -> std::io::Result<()> {
+        if matches!(line, OpLine::Replied { .. })
+            && self.fail_replies.load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(std::io::Error::other("the log is not writable"));
+        }
         self.lines.lock().unwrap().push(line.clone());
         Ok(())
     }

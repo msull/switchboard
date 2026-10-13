@@ -366,6 +366,9 @@ pub struct RemoteRequest {
     pub body: Vec<u8>,
     /// The `Authorization: Bearer` value, if any.
     pub bearer: Option<String>,
+    /// The `Sec-WebSocket-Key` of a request that asks to upgrade to a
+    /// WebSocket; the frame answers [`SUBSCRIBED`] to accept it.
+    pub upgrade: Option<String>,
 }
 
 impl RemoteRequest {
@@ -389,10 +392,32 @@ pub struct RemoteReply {
     pub authenticated: bool,
 }
 
-/// One request off a connection, with the channel its reply goes back on.
+/// One request off a connection, with the channel its reply goes back
+/// on and, for an upgrade request, the queue the connection will feed
+/// its WebSocket from once the frame accepts.
 pub struct RemoteIncoming {
     pub request: RemoteRequest,
     pub reply: SyncSender<RemoteReply>,
+    pub subscriber: Option<SubscriberQueue>,
+}
+
+/// The status the frame answers an upgrade request with to accept it;
+/// the connection thread then writes the 101 and becomes a subscriber.
+pub const SUBSCRIBED: u16 = 101;
+
+/// How many events a subscriber may fall behind before it is dropped.
+pub const SUBSCRIBER_QUEUE: usize = 256;
+
+/// How long a subscriber's thread waits for an event before it looks
+/// for a frame from the device (a close, a ping, a `watch`).
+const SUBSCRIBER_POLL: Duration = Duration::from_millis(50);
+
+/// The frame's end of a subscriber: events go in as JSON text; a full
+/// queue drops the sender with `overflow` set, which the connection
+/// thread turns into `resync_required` and a close.
+pub struct SubscriberQueue {
+    pub tx: SyncSender<String>,
+    pub overflow: Arc<AtomicBool>,
 }
 
 /// The most a request line and its headers may take, and the most a
@@ -451,6 +476,10 @@ fn read_request<R: Read>(reader: &mut BufReader<R>) -> io::Result<Option<RemoteR
         .and_then(|v| v.strip_prefix("Bearer "))
         .map(|t| t.trim().to_owned())
         .filter(|t| !t.is_empty());
+    let upgrade = header("upgrade")
+        .filter(|u| u.eq_ignore_ascii_case("websocket"))
+        .and_then(|_| header("sec-websocket-key"))
+        .map(str::to_owned);
     let (path, query) = target.split_once('?').unwrap_or((target, ""));
     let query = query
         .split('&')
@@ -468,7 +497,20 @@ fn read_request<R: Read>(reader: &mut BufReader<R>) -> io::Result<Option<RemoteR
         query,
         body,
         bearer,
+        upgrade,
     }))
+}
+
+/// The 101 that switches a connection to WebSocket. The request was
+/// already read by `read_request`, so `tungstenite::accept` cannot be
+/// used; the stream is wrapped with `from_raw_socket` after this.
+fn respond_upgrade<W: Write>(w: &mut W, key: &str) -> io::Result<()> {
+    write!(
+        w,
+        "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {}\r\n\r\n",
+        tungstenite::handshake::derive_accept_key(key.as_bytes())
+    )?;
+    w.flush()
 }
 
 /// Write one response. Head and body in one write, so a reply is one
@@ -725,10 +767,19 @@ fn connection(
             continue;
         }
         let (reply_tx, reply_rx) = mpsc::sync_channel(1);
+        let upgrade_key = request.upgrade.clone();
+        let mut queue = None;
+        let queue_for_frame = upgrade_key.as_ref().map(|_| {
+            let (q_tx, q_rx) = mpsc::sync_channel::<String>(SUBSCRIBER_QUEUE);
+            let overflow = Arc::new(AtomicBool::new(false));
+            queue = Some((q_rx, Arc::clone(&overflow)));
+            SubscriberQueue { tx: q_tx, overflow }
+        });
         if tx
             .try_send(RemoteIncoming {
                 request,
                 reply: reply_tx,
+                subscriber: queue_for_frame,
             })
             .is_err()
         {
@@ -763,9 +814,92 @@ fn connection(
             pools.unauthenticated.fetch_sub(1, Ordering::SeqCst);
             paired.store(true, Ordering::SeqCst);
         }
+        if reply.status == SUBSCRIBED
+            && let (Some(key), Some((q_rx, overflow))) = (upgrade_key, queue)
+        {
+            respond_upgrade(reader.get_mut(), &key)?;
+            return subscriber(reader.into_inner(), &q_rx, &overflow);
+        }
         respond(reader.get_mut(), reply.status, &reply.body)?;
     }
     Ok(())
+}
+
+/// Feed one WebSocket from its queue until the frame drops the queue
+/// (a revocation, or an overflow, which ends with `resync_required`)
+/// or the device closes. The socket is non-blocking: an event goes out
+/// the moment it is queued, the device's own frames are looked for
+/// only when there is nothing to send (a close ends the subscription,
+/// a ping is answered by the library, a text frame is not understood
+/// yet), and a device that stops reading stalls only this thread, for
+/// `WRITE_TIMEOUT` at most, while the frame fills and then drops its
+/// queue.
+fn subscriber(
+    stream: StreamOwned<ServerConnection, TcpStream>,
+    events: &Receiver<String>,
+    overflow: &AtomicBool,
+) -> io::Result<()> {
+    stream.sock.set_nonblocking(true)?;
+    let mut ws =
+        tungstenite::WebSocket::from_raw_socket(stream, tungstenite::protocol::Role::Server, None);
+    loop {
+        match events.recv_timeout(SUBSCRIBER_POLL) {
+            Ok(text) => {
+                send_text(&mut ws, text)?;
+                continue;
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                if overflow.load(Ordering::SeqCst) {
+                    let _ = send_text(&mut ws, "{\"type\":\"resync_required\"}".into());
+                }
+                let _ = ws.close(None);
+                let _ = flush_by(&mut ws, Instant::now() + WRITE_TIMEOUT);
+                return Ok(());
+            }
+        }
+        match ws.read() {
+            Ok(tungstenite::Message::Close(_)) => return Ok(()),
+            Ok(_) => {}
+            Err(tungstenite::Error::Io(e)) if e.kind() == io::ErrorKind::WouldBlock => {}
+            Err(tungstenite::Error::ConnectionClosed | tungstenite::Error::AlreadyClosed) => {
+                return Ok(());
+            }
+            Err(e) => return Err(io::Error::other(e.to_string())),
+        }
+    }
+}
+
+type Socket = tungstenite::WebSocket<StreamOwned<ServerConnection, TcpStream>>;
+
+/// Queue one text frame and write it out, waiting up to `WRITE_TIMEOUT`
+/// for a full socket to drain.
+fn send_text(ws: &mut Socket, text: String) -> io::Result<()> {
+    match ws.write(tungstenite::Message::Text(text.into())) {
+        Ok(()) => {}
+        Err(tungstenite::Error::Io(e)) if e.kind() == io::ErrorKind::WouldBlock => {}
+        Err(e) => return Err(io::Error::other(e.to_string())),
+    }
+    flush_by(ws, Instant::now() + WRITE_TIMEOUT)
+}
+
+/// Flush what is queued, retrying a full socket until `deadline`.
+fn flush_by(ws: &mut Socket, deadline: Instant) -> io::Result<()> {
+    loop {
+        match ws.flush() {
+            Ok(()) => return Ok(()),
+            Err(tungstenite::Error::Io(e)) if e.kind() == io::ErrorKind::WouldBlock => {
+                if Instant::now() >= deadline {
+                    return Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "the device stopped reading",
+                    ));
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            Err(e) => return Err(io::Error::other(e.to_string())),
+        }
+    }
 }
 
 /// The address a device on the local network would reach this machine

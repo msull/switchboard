@@ -3190,6 +3190,41 @@ Built so far:
   no goodbye). Not in A2: the visionOS and iPadOS app targets (an
   Xcode project; the package builds for both), events (A3), and the
   Swift tests are not in the pre-commit hook or CI.
+- **A3, synchronization.** The revision moves from a read-model diff:
+  `core::revision::Fingerprints` hashes every exported view (sessions
+  with `quiet_secs` held still, sets, projects, spaces, and each
+  collection's membership) and the app compares two passes, once per
+  pass that dispatched something while the port is bound, before
+  requests are served and again at the end of the frame; one `changed`
+  or `removed` per resource that moved, the counter bumped once. The
+  diff is the gate rather than the effect list, so a set rename, a
+  trust question and a quiet Codex pane all surface with no save, and
+  ten passes over a running pane emit nothing. Measured: 0.4 ms per
+  pass over three hundred sessions in a release build (3.3 ms debug),
+  against the spec's 1 ms; the first cut hashed each view's JSON with
+  SHA-256 and took 1.1 ms, so the wire views derive `Hash` and are
+  hashed directly. `GET /api/v1/events` with an upgrade is the events
+  socket: `hello` with the revision goes into the subscriber's queue
+  on the frame before anything later can move the counter, so a
+  snapshot taken after it reconciles against everything that follows;
+  the connection thread runs the socket non-blocking (an earlier cut
+  blocked up to 100 ms in a read between events, and any burst past
+  the queue inside that window dropped every subscriber), writes with
+  the 10 s deadline, drops a subscriber that fell 256 events behind
+  with `resync_required` and the close, and closes on Revoke. The
+  control port's `serve` logs a non-replayable command's request line
+  before it runs and refuses to append nothing; an op with a request
+  line and no reply is answered `interrupted` and never run again;
+  `/api/v1/ops/{op}` reads the status. `SessionView` gains the
+  additive `last_activity_ms`. The Swift client opens the socket
+  through the same session and pin, waits for `hello`, buffers frames
+  while it fetches the collections, applies the buffer against each
+  resource's held revision (a member falls back to its collection's),
+  refetches only past the held revision, drops on `removed`, starts
+  over on a new epoch, and reconnects on `resync_required` or a closed
+  socket under its backoff; the timer refresh is gone, the manager's
+  loop retries only hosts that are not connected. Not in A3: watched
+  content (A4) and the `runs` collection, which has no endpoint yet.
 
 ## Open questions
 

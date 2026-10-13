@@ -116,8 +116,9 @@ public struct UnifiedStore: Sendable, Equatable {
 }
 
 /// Owns one `ServerConnection` per known server, the registry, and the
-/// unified store; refreshes every host on a timer until the events of
-/// A3 replace it. Discovery adds candidates and addresses, never trust.
+/// unified store. A connected host drives the store through its
+/// events; the loop only retries hosts that are not connected, with
+/// their backoff. Discovery adds candidates and addresses, never trust.
 public actor ConnectionManager {
     public let registry: RegistryStore
     public let credentials: CredentialStore
@@ -143,12 +144,21 @@ public actor ConnectionManager {
     public var known: [KnownServer] { servers }
 
     /// Load the registry and make a connection per server.
-    public func load() throws {
+    public func load() async throws {
         servers = try registry.load()
         for server in servers where connections[server.id] == nil {
-            connections[server.id] = ServerConnection(
-                server: server, credentials: credentials, deviceName: deviceName, factory: factory)
+            connections[server.id] = await make(server)
         }
+    }
+
+    private func make(_ server: KnownServer) async -> ServerConnection {
+        let connection = ServerConnection(
+            server: server, credentials: credentials, deviceName: deviceName, factory: factory)
+        await connection.setOnChange { [weak self] in
+            guard let self else { return }
+            Task { await self.rebuild() }
+        }
+        return connection
     }
 
     private func persist() async {
@@ -174,8 +184,7 @@ public actor ConnectionManager {
         }
         let server = KnownServer(id: id, name: name, addresses: [address])
         servers.append(server)
-        let connection = ServerConnection(
-            server: server, credentials: credentials, deviceName: deviceName, factory: factory)
+        let connection = await make(server)
         connections[id] = connection
         await persist()
         return connection
@@ -263,9 +272,10 @@ public actor ConnectionManager {
         await rebuild()
     }
 
-    /// The timer refresh of A2: every `interval` seconds, every host,
-    /// with Bonjour feeding addresses in between.
-    public func start(interval: TimeInterval = 5, browse: Bool = true) {
+    /// Connect what is not connected, every `interval` seconds, each
+    /// host under its own backoff; a connected host needs nothing from
+    /// the loop. Bonjour feeds addresses in between.
+    public func start(interval: TimeInterval = 2, browse: Bool = true) {
         loop?.cancel()
         if browse, discovery == nil {
             let discovery = Discovery()
@@ -281,9 +291,27 @@ public actor ConnectionManager {
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: UInt64(interval * 1_000_000_000))
                 if Task.isCancelled { break }
-                await self.refreshAll()
+                await self.retryOffline()
             }
         }
+    }
+
+    /// One pass of the loop: re-resolve and reconnect every host that
+    /// is not connected and whose backoff has elapsed.
+    public func retryOffline() async {
+        await reresolveOffline()
+        await withTaskGroup(of: Void.self) { group in
+            for connection in connections.values {
+                group.addTask {
+                    let state = await connection.state
+                    guard !state.isConnected, state != .unpaired, state != .syncing,
+                        await connection.dueForTry
+                    else { return }
+                    await connection.connect()
+                }
+            }
+        }
+        await rebuild()
     }
 
     public func stop() {
@@ -305,6 +333,12 @@ public actor ConnectionManager {
                 ))
         }
         store = UnifiedStore.build(from: parts)
-        servers = parts.map(\.0)
+        // Merge by id: a server added while this rebuild awaited the
+        // connections is not in `parts` and must not be dropped.
+        for (server, _, _, _, _) in parts {
+            if let i = servers.firstIndex(where: { $0.id == server.id }) {
+                servers[i] = server
+            }
+        }
     }
 }

@@ -7,7 +7,7 @@ macOS 14, iOS 17 and visionOS 1.
 
 ```sh
 swift build                      # every target
-swift test                       # 18 tests: fixtures, pinning, the connection core
+swift test                       # 25 tests: fixtures, pinning, the connection core, events
 swift run switchboard-remote     # the command-line browser (usage below)
 ```
 
@@ -23,15 +23,19 @@ swift run switchboard-remote     # the command-line browser (usage below)
   `PinnedSessionDelegate`, which accepts a certificate only when the
   SHA-256 of its P-256 `SubjectPublicKeyInfo` is the pinned one
   (`.expect`) or records what it saw for an unpaired `/info`
-  (`.observe`); `Discovery` browses `_switchboard._tcp` with
-  `Network.framework` and resolves a record to an address.
+  (`.observe`); the events socket (`URLSessionWebSocketTask`) shares
+  the session and so the pin; `Discovery` browses `_switchboard._tcp`
+  with `Network.framework` and resolves a record to an address.
 - `SwitchboardClientCore`: `KnownServer` and the registry, the
   credential stores (`KeychainCredentials` for the apps,
   `FileCredentials` for the command line, memory for tests), the
-  `ServerConnection` actor (the §6.2 states, backoff, the revision rule
-  per resource key, the epoch check, a key change dropping the token
-  and keeping the entry), and `ConnectionManager` with the unified
-  store, filters and the cross-host order.
+  `ServerConnection` actor (the §6.2 states, backoff, subscribe then
+  snapshot with the buffered events reconciled against each resource's
+  held revision, live events refetching only past it, the epoch check,
+  `resync_required` and a closed socket reconnecting, a key change
+  dropping the token and keeping the entry), and `ConnectionManager`
+  with the unified store, filters and the cross-host order; its loop
+  only retries hosts that are not connected.
 - `SwitchboardUI`: `BrowserView`, `SessionCardView`, `SourceLabel` and
   `ServersView` in SwiftUI, over a `BrowserModel`.
 

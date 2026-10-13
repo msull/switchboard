@@ -34,16 +34,6 @@ public struct HostSnapshot: Sendable, Equatable {
     }
 }
 
-/// The resource keys the client holds a revision for. One per
-/// collection; a session's metadata, conversation and screen will be
-/// separate keys when the content endpoints arrive.
-public enum ResourceKey: Hashable, Sendable {
-    case projects
-    case spaces
-    case sets
-    case sessions
-}
-
 /// Makes the network side for an address, so tests pass a fake.
 public typealias HostAPIFactory = @Sendable (Address, PinPolicy, String?) -> HostAPI
 
@@ -51,10 +41,19 @@ public let liveHostAPI: HostAPIFactory = { address, pin, token in
     HostClient(address: address, pin: pin, token: token)
 }
 
+/// How long `hello` may take after the socket opens.
+let helloTimeout: TimeInterval = 10
+
 /// One known host: its state machine, its credentials, its snapshot,
-/// and the revision rule that drops an older reply arriving late. The
-/// manager owns one per known server; a stall here never touches
-/// another host.
+/// its event subscription, and the revision rule that drops an older
+/// reply arriving late. The manager owns one per known server; a stall
+/// here never touches another host.
+///
+/// Subscribe first, then snapshot (§4.4): the socket is opened and
+/// `hello` read before any collection is fetched; events that arrive
+/// meanwhile are buffered and applied after the snapshots, each against
+/// the revision its resource was fetched at, so nothing can fall
+/// between the subscription and the snapshot.
 public actor ServerConnection {
     public private(set) var server: KnownServer
     public private(set) var state: ConnectionState
@@ -64,6 +63,8 @@ public actor ServerConnection {
     /// new pairing, and the cached snapshot is dropped.
     public private(set) var identityChanged = false
     public private(set) var lastError: String?
+    /// How many times the host told this client to resync.
+    public private(set) var resyncs = 0
 
     private let credentials: CredentialStore
     private let factory: HostAPIFactory
@@ -71,6 +72,14 @@ public actor ServerConnection {
     private var api: HostAPI?
     private var held: [ResourceKey: UInt64] = [:]
     private var failures = 0
+    private var nextTry = Date.distantPast
+    private var subscription: EventSubscription?
+    private var pump: Task<Void, Never>?
+    private var buffer: [EventFrame] = []
+    private var buffering = false
+    /// Told whenever the snapshot or the state moved, so the owner can
+    /// rebuild its view without polling.
+    private var onChange: (@Sendable () -> Void)?
 
     public init(
         server: KnownServer, credentials: CredentialStore, deviceName: String,
@@ -83,20 +92,31 @@ public actor ServerConnection {
         self.state = server.needsPairing ? .unpaired : .connecting
     }
 
+    public func setOnChange(_ handler: @escaping @Sendable () -> Void) {
+        onChange = handler
+    }
+
+    private func changed() {
+        onChange?()
+    }
+
     /// Where it will be reached next.
     public var address: Address? { server.addresses.first }
+
+    /// Whether the backoff allows a try now.
+    public var dueForTry: Bool { Date() >= nextTry }
 
     public func setAddresses(_ addresses: [Address]) {
         guard !addresses.isEmpty, addresses != server.addresses else { return }
         server.addresses = addresses
         api = nil
+        nextTry = .distantPast
     }
 
     public func setEnabled(_ enabled: Bool) {
         server.enabled = enabled
         if !enabled {
-            state = .offline(reason: "disabled")
-            api = nil
+            disconnect(to: .offline(reason: "disabled"))
         }
     }
 
@@ -126,6 +146,7 @@ public actor ServerConnection {
             }
             identityChanged = false
             api = nil
+            nextTry = .distantPast
             state = .connecting
             lastError = nil
         } catch {
@@ -135,8 +156,9 @@ public actor ServerConnection {
         }
     }
 
-    /// Verify the pin, present the token, check `/info`, then fetch the
-    /// collections. Each failure is this host's alone.
+    /// Verify the pin, present the token, check `/info`, subscribe,
+    /// then fetch the collections and apply what arrived meanwhile.
+    /// Each failure is this host's alone.
     public func connect() async {
         guard server.enabled else { return }
         guard let address else {
@@ -154,7 +176,9 @@ public actor ServerConnection {
             api = factory(address, .expect(spkiSha256: pin), token)
         }
         guard let api else { return }
-        if case .connected = state {} else { state = .connecting }
+        closeSubscription()
+        state = .connecting
+        changed()
         do {
             let reply = try await api.info()
             let info = reply.body
@@ -162,49 +186,45 @@ public actor ServerConnection {
                 state = .offline(
                     reason: "the host at \(address) is another installation (\(info.serverName))")
                 self.api = nil
+                changed()
                 return
             }
             guard info.protocolVersion == RemoteProtocol.version else {
                 state = .offline(
                     reason: "protocol \(info.protocolVersion) is not the \(RemoteProtocol.version) this client speaks")
+                changed()
                 return
             }
             self.info = info
             server.name = info.serverName
-            if let snapshot, snapshot.epoch != reply.epoch {
+            let subscription = try await api.events()
+            let hello = try await firstFrame(of: subscription)
+            guard hello.kind == .hello, let epoch = hello.epoch else {
+                subscription.close()
+                throw RemoteError.badReply("the first frame was not hello")
+            }
+            if let snapshot, snapshot.epoch != epoch {
                 // The host restarted: everything is refetched from zero.
                 held = [:]
                 self.snapshot = nil
             }
+            self.subscription = subscription
+            buffering = true
+            buffer = []
+            startPump(subscription)
             state = .syncing
-            _ = try await refresh(api: api, epoch: reply.epoch)
-            failures = 0
-            lastError = nil
-            state = .connected
-        } catch let error as RemoteError {
-            handle(error)
-        } catch {
-            handle(.transport("\(error)"))
-        }
-    }
-
-    /// Refetch the collections; a reply older than the held revision
-    /// for its key is dropped.
-    public func refresh() async {
-        guard server.enabled, let api, state.isConnected || state == .syncing else {
-            await connect()
-            return
-        }
-        do {
-            if try await refresh(api: api, epoch: snapshot?.epoch) {
-                // The host restarted, or another one answers here: back
-                // through `/info` and a refetch from zero.
-                await connect()
-                return
+            try await fetchAll(api: api)
+            buffering = false
+            let pending = buffer
+            buffer = []
+            for frame in pending {
+                try await apply(frame, api: api)
             }
             failures = 0
+            nextTry = .distantPast
             lastError = nil
             state = .connected
+            changed()
         } catch let error as RemoteError {
             handle(error)
         } catch {
@@ -212,39 +232,222 @@ public actor ServerConnection {
         }
     }
 
-    /// Fetch the collections and apply them; `true` when the host's
-    /// epoch is not the one expected, in which case nothing is applied.
-    private func refresh(api: HostAPI, epoch: String?) async throws -> Bool {
+    /// The frames after `hello`, each applied as it arrives.
+    private func startPump(_ subscription: EventSubscription) {
+        pump?.cancel()
+        pump = Task { [weak self] in
+            do {
+                for try await frame in subscription.frames {
+                    guard let self else { return }
+                    await self.received(frame)
+                }
+                await self?.socketEnded(reason: "the host closed the events socket")
+            } catch {
+                await self?.socketEnded(reason: "\(error)")
+            }
+        }
+    }
+
+    private func received(_ frame: EventFrame) async {
+        if buffering {
+            buffer.append(frame)
+            return
+        }
+        guard let api else { return }
+        do {
+            try await apply(frame, api: api)
+        } catch let error as RemoteError {
+            handle(error)
+        } catch {
+            handle(.transport("\(error)"))
+        }
+    }
+
+    private func socketEnded(reason: String) {
+        guard subscription != nil else { return }
+        subscription = nil
+        pump = nil
+        if case .unpaired = state { return }
+        lastError = reason
+        failures += 1
+        nextTry = Date().addingTimeInterval(backoff)
+        state = .reconnecting(attempt: failures)
+        changed()
+    }
+
+    private func firstFrame(of subscription: EventSubscription) async throws -> EventFrame {
+        try await withThrowingTaskGroup(of: EventFrame.self) { group in
+            group.addTask {
+                for try await frame in subscription.frames {
+                    return frame
+                }
+                throw RemoteError.transport("the events socket closed before hello")
+            }
+            group.addTask {
+                try await Task.sleep(nanoseconds: UInt64(helloTimeout * 1_000_000_000))
+                throw RemoteError.transport("no hello within \(Int(helloTimeout)) s")
+            }
+            let first = try await group.next()!
+            group.cancelAll()
+            return first
+        }
+    }
+
+    /// Fetch every collection; a reply older than the held revision
+    /// for its key is dropped.
+    private func fetchAll(api: HostAPI) async throws {
         let projects = try await api.projects()
-        if let epoch, projects.epoch != epoch {
-            held = [:]
-            snapshot = nil
-            return true
-        }
         let spaces = try await api.spaces()
-        var sessions: [(UInt64, [SessionView])] = []
-        for project in projects.body.projects {
-            let reply = try await api.sessions(project: project.id)
-            sessions.append((reply.revision, reply.body.sessions))
+        var next = snapshot ?? HostSnapshot(epoch: projects.epoch, revision: 0)
+        if next.epoch != projects.epoch {
+            held = [:]
+            next = HostSnapshot(epoch: projects.epoch, revision: 0)
         }
-        var sets: [(UInt64, [SetView])] = []
-        for space in spaces.body.spaces {
-            let reply = try await api.sets(space: space.id)
-            sets.append((reply.revision, reply.body.sets))
-        }
-        let now = Date()
-        var next = snapshot ?? HostSnapshot(epoch: projects.epoch, revision: 0, fetchedAt: now)
-        next.epoch = projects.epoch
-        next.fetchedAt = now
+        next.fetchedAt = Date()
         apply(.projects, at: projects.revision) { next.projects = projects.body.projects }
         apply(.spaces, at: spaces.revision) { next.spaces = spaces.body.spaces }
-        let sessionRevision = sessions.map(\.0).min() ?? projects.revision
-        apply(.sessions, at: sessionRevision) { next.sessions = sessions.flatMap(\.1) }
-        let setRevision = sets.map(\.0).min() ?? spaces.revision
-        apply(.sets, at: setRevision) { next.sets = sets.flatMap(\.1) }
+        for project in next.projects {
+            let reply = try await api.sessions(project: project.id)
+            apply(.sessions(project: project.id), at: reply.revision) {
+                next.sessions.removeAll { $0.project == project.id }
+                next.sessions.append(contentsOf: reply.body.sessions)
+            }
+        }
+        for space in next.spaces {
+            let reply = try await api.sets(space: space.id)
+            apply(.sets(space: space.id), at: reply.revision) {
+                next.sets.removeAll { $0.space == space.id }
+                next.sets.append(contentsOf: reply.body.sets)
+            }
+        }
         next.revision = held.values.max() ?? 0
         snapshot = next
-        return false
+    }
+
+    /// One event against the held revisions: a `changed` past what a
+    /// resource was fetched at refetches that resource, a `removed`
+    /// drops it, and anything at or below the held revision was already
+    /// in the snapshot.
+    private func apply(_ frame: EventFrame, api: HostAPI) async throws {
+        switch frame.kind {
+        case .hello, .watching, .unknown:
+            return
+        case .resyncRequired:
+            resyncs += 1
+            held = [:]
+            closeSubscription()
+            lastError = "the host asked for a resync"
+            state = .reconnecting(attempt: failures)
+            nextTry = .distantPast
+            changed()
+            return
+        case .changed, .removed:
+            break
+        }
+        guard let ref = frame.resource, let key = ResourceKey(ref), let revision = frame.revision
+        else { return }
+        if let epoch = frame.epoch, let snapshot, epoch != snapshot.epoch {
+            // A frame from another run of the host: start over.
+            held = [:]
+            self.snapshot = nil
+            try await fetchAll(api: api)
+            changed()
+            return
+        }
+        if frame.kind == .removed {
+            remove(key, at: revision)
+            changed()
+            return
+        }
+        if let heldRevision = heldRevision(for: key), revision <= heldRevision { return }
+        try await refetch(key, api: api)
+        changed()
+    }
+
+    /// The revision a resource was last observed at: its own, or the
+    /// collection's it was fetched as a member of.
+    private func heldRevision(for key: ResourceKey) -> UInt64? {
+        if let own = held[key] { return own }
+        switch key {
+        case .project: return held[.projects]
+        case .space: return held[.spaces]
+        case .session(let id):
+            guard let project = snapshot?.sessions.first(where: { $0.id == id })?.project else {
+                return nil
+            }
+            return held[.sessions(project: project)]
+        case .set(let id):
+            guard let space = snapshot?.sets.first(where: { $0.id == id })?.space else {
+                return nil
+            }
+            return held[.sets(space: space)]
+        default: return nil
+        }
+    }
+
+    private func refetch(_ key: ResourceKey, api: HostAPI) async throws {
+        var next = snapshot ?? HostSnapshot(epoch: "", revision: 0)
+        switch key {
+        case .projects, .project:
+            let reply = try await api.projects()
+            apply(.projects, at: reply.revision) { next.projects = reply.body.projects }
+        case .spaces, .space:
+            let reply = try await api.spaces()
+            apply(.spaces, at: reply.revision) { next.spaces = reply.body.spaces }
+        case .sets(let space):
+            let reply = try await api.sets(space: space)
+            apply(key, at: reply.revision) {
+                next.sets.removeAll { $0.space == space }
+                next.sets.append(contentsOf: reply.body.sets)
+            }
+        case .set(let id):
+            // A set is read through its space's collection.
+            let space = next.sets.first { $0.id == id }?.space
+            let spaces = space.map { [$0] } ?? next.spaces.map(\.id)
+            for space in spaces {
+                let reply = try await api.sets(space: space)
+                apply(.sets(space: space), at: reply.revision) {
+                    next.sets.removeAll { $0.space == space }
+                    next.sets.append(contentsOf: reply.body.sets)
+                }
+            }
+        case .sessions(let project):
+            let reply = try await api.sessions(project: project)
+            apply(key, at: reply.revision) {
+                next.sessions.removeAll { $0.project == project }
+                next.sessions.append(contentsOf: reply.body.sessions)
+            }
+        case .session(let id):
+            let reply = try await api.session(id)
+            apply(key, at: reply.revision) {
+                next.sessions.removeAll { $0.id == id }
+                next.sessions.append(reply.body.session)
+            }
+        case .waiting:
+            // Derived from the sessions, whose own events accompany it.
+            return
+        }
+        next.revision = held.values.max() ?? 0
+        next.fetchedAt = Date()
+        snapshot = next
+    }
+
+    private func remove(_ key: ResourceKey, at revision: UInt64) {
+        guard var next = snapshot else { return }
+        switch key {
+        case .session(let id): next.sessions.removeAll { $0.id == id }
+        case .set(let id): next.sets.removeAll { $0.id == id }
+        case .project(let id):
+            next.projects.removeAll { $0.id == id }
+            next.sessions.removeAll { $0.project == id }
+        case .space(let id):
+            next.spaces.removeAll { $0.id == id }
+            next.sets.removeAll { $0.space == id }
+        default: return
+        }
+        held[key] = revision
+        next.revision = max(next.revision, revision)
+        snapshot = next
     }
 
     /// The revision rule: apply only at or past the held revision.
@@ -254,17 +457,50 @@ public actor ServerConnection {
         body()
     }
 
-    /// Replace a collection from a reply, for the manager and tests:
-    /// the same rule as a fetch.
+    /// Replace the sessions from a reply, for tests: the same rule as a
+    /// fetch.
     public func applySessions(_ reply: Envelope<SessionsBody>) {
         var next = snapshot ?? HostSnapshot(epoch: reply.epoch, revision: reply.revision)
         if next.epoch != reply.epoch {
             held = [:]
             next = HostSnapshot(epoch: reply.epoch, revision: reply.revision)
         }
-        apply(.sessions, at: reply.revision) { next.sessions = reply.body.sessions }
+        apply(.sessions(project: "*"), at: reply.revision) { next.sessions = reply.body.sessions }
         next.revision = held.values.max() ?? 0
         snapshot = next
+    }
+
+    /// A full refetch by hand (the command line's `hosts`); events make
+    /// it unnecessary while connected.
+    public func refresh() async {
+        guard server.enabled, let api, state.isConnected else {
+            await connect()
+            return
+        }
+        do {
+            try await fetchAll(api: api)
+            changed()
+        } catch let error as RemoteError {
+            handle(error)
+        } catch {
+            handle(.transport("\(error)"))
+        }
+    }
+
+    private func closeSubscription() {
+        pump?.cancel()
+        pump = nil
+        subscription?.close()
+        subscription = nil
+        buffering = false
+        buffer = []
+    }
+
+    private func disconnect(to next: ConnectionState) {
+        closeSubscription()
+        api = nil
+        state = next
+        changed()
     }
 
     private func handle(_ error: RemoteError) {
@@ -280,16 +516,17 @@ public actor ServerConnection {
             snapshot = nil
             held = [:]
             server.needsPairing = true
-            api = nil
-            state = .unpaired
+            disconnect(to: .unpaired)
         case .refused(let status, _, _) where status == 401 || status == 403:
             try? credentials.setToken(nil, for: server.id)
             server.needsPairing = true
-            api = nil
-            state = .unpaired
+            disconnect(to: .unpaired)
         default:
             failures += 1
+            nextTry = Date().addingTimeInterval(backoff)
+            closeSubscription()
             state = .reconnecting(attempt: failures)
+            changed()
         }
     }
 
@@ -307,8 +544,7 @@ public actor ServerConnection {
         snapshot = nil
         held = [:]
         info = nil
-        api = nil
-        state = .unpaired
         server.needsPairing = true
+        disconnect(to: .unpaired)
     }
 }

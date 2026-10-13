@@ -27,6 +27,7 @@ use switchboard::core::{AppAction, RecordId};
 use switchboard::ports::host::{HostId, HostStatus, Liveness as HostLiveness};
 use switchboard::ports::remote::{Listen, Scope};
 use switchboard_control::{Body, Client, Launch, Made, RecordKind, Reply, Request, SessionKind};
+use tungstenite::client::IntoClientRequest as _;
 
 struct Port {
     app: SwitchboardApp,
@@ -983,5 +984,450 @@ fn the_client_fixtures_decode_on_both_sides() {
         remote::spki_sha256_of_cert(&der).unwrap(),
         pin["spki_sha256"].as_str().unwrap(),
         "the pin fixture's hash is the certificate's"
+    );
+}
+
+// --- events
+
+/// A device's event subscription: a thread holding the WebSocket over
+/// the pinned connection, each text frame handed over `frames`, the
+/// close as an `Err`. While `paused` the thread reads nothing, which is
+/// how a test makes a subscriber fall behind.
+struct Subscriber {
+    frames: std::sync::mpsc::Receiver<Result<String, String>>,
+    paused: Arc<std::sync::atomic::AtomicBool>,
+}
+
+fn subscribe(port: &mut Port, token: &str) -> Subscriber {
+    let addr = port.addr;
+    let config = Arc::clone(&port.client);
+    let token = token.to_owned();
+    let (tx, frames) = std::sync::mpsc::channel();
+    let paused = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let hold = Arc::clone(&paused);
+    std::thread::spawn(move || {
+        let tcp = TcpStream::connect(addr).expect("connect");
+        let conn = ClientConnection::new(config, ServerName::try_from("localhost").unwrap())
+            .expect("client");
+        let mut s = StreamOwned::new(conn, tcp);
+        while s.conn.is_handshaking() {
+            s.conn.complete_io(&mut s.sock).expect("handshake");
+        }
+        let mut request = "wss://localhost/api/v1/events"
+            .into_client_request()
+            .unwrap();
+        request
+            .headers_mut()
+            .insert("Authorization", format!("Bearer {token}").parse().unwrap());
+        let (mut ws, _) = match tungstenite::client(request, s) {
+            Ok(ok) => ok,
+            Err(e) => {
+                let _ = tx.send(Err(format!("upgrade refused: {e}")));
+                return;
+            }
+        };
+        loop {
+            while hold.load(std::sync::atomic::Ordering::SeqCst) {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            match ws.read() {
+                Ok(tungstenite::Message::Text(text)) => {
+                    if tx.send(Ok(text.to_string())).is_err() {
+                        return;
+                    }
+                }
+                Ok(tungstenite::Message::Close(_)) => {
+                    let _ = tx.send(Err("closed".into()));
+                    return;
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    let _ = tx.send(Err(format!("closed: {e}")));
+                    return;
+                }
+            }
+        }
+    });
+    let subscriber = Subscriber { frames, paused };
+    let hello = next_frame(port, &subscriber, 5)
+        .expect("hello")
+        .expect("a frame");
+    let hello: serde_json::Value = serde_json::from_str(&hello).unwrap();
+    assert_eq!(hello["type"], "hello", "{hello}");
+    subscriber
+}
+
+/// The next frame within `secs`, the app serving meanwhile.
+fn next_frame(port: &mut Port, s: &Subscriber, secs: u64) -> Option<Result<String, String>> {
+    let deadline = std::time::Instant::now() + Duration::from_secs(secs);
+    loop {
+        port.app.serve_pending();
+        match s.frames.try_recv() {
+            Ok(frame) => return Some(frame),
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => return None,
+            Err(std::sync::mpsc::TryRecvError::Empty) => {}
+        }
+        if std::time::Instant::now() > deadline {
+            return None;
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+}
+
+/// Every event frame that arrives before 300 ms of silence, parsed.
+fn events(port: &mut Port, s: &Subscriber) -> Vec<serde_json::Value> {
+    let mut out = Vec::new();
+    let mut quiet = std::time::Instant::now();
+    loop {
+        port.app.serve_pending();
+        match s.frames.try_recv() {
+            Ok(Ok(text)) => {
+                out.push(serde_json::from_str(&text).unwrap());
+                quiet = std::time::Instant::now();
+                continue;
+            }
+            Ok(Err(_)) | Err(std::sync::mpsc::TryRecvError::Disconnected) => break,
+            Err(std::sync::mpsc::TryRecvError::Empty) => {}
+        }
+        if quiet.elapsed() > Duration::from_millis(300) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    out
+}
+
+/// `(type, kind, id)` of each event, for comparing.
+fn resources(events: &[serde_json::Value]) -> Vec<(String, String, String)> {
+    events
+        .iter()
+        .map(|e| {
+            (
+                e["type"].as_str().unwrap_or("").to_owned(),
+                e["resource"]["kind"].as_str().unwrap_or("").to_owned(),
+                e["resource"]["id"].as_str().unwrap_or("").to_owned(),
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn a_subscriber_gets_hello_then_changed_and_removed_as_the_state_moves() {
+    let mut port = port();
+    let token = pair(&mut port, "ABCD2345", Scope::Read, "Vision Pro");
+    let sub = subscribe(&mut port, &token);
+    assert_eq!(port.app.subscriber_count(), 1);
+    let before = port.app.revision();
+    let (space, project, session) = seed(&mut port, "ticket 1");
+    let got = events(&mut port, &sub);
+    let moved = resources(&got);
+    for expected in [
+        ("changed", "space", space.as_str()),
+        ("changed", "spaces", ""),
+        ("changed", "project", project.as_str()),
+        ("changed", "projects", ""),
+        ("changed", "session", session.as_str()),
+        ("changed", "sessions", project.as_str()),
+    ] {
+        let expected = (
+            expected.0.to_owned(),
+            expected.1.to_owned(),
+            expected.2.to_owned(),
+        );
+        assert!(moved.contains(&expected), "{expected:?} in {moved:?}");
+    }
+    let identity = port.remote.state().identity.clone().unwrap();
+    for event in &got {
+        assert_eq!(event["server_id"], identity.server_id.to_string());
+        assert!(event["revision"].as_u64().unwrap() > before, "{event}");
+        assert!(event["at_ms"].as_u64().unwrap() > 0);
+        assert!(event["epoch"].is_string());
+    }
+    assert_eq!(port.app.revision(), got.last().unwrap()["revision"]);
+
+    let record = RecordId(uuid::Uuid::parse_str(&session).unwrap());
+    port.app.dispatch(AppAction::RemoveSession(record));
+    let moved = resources(&events(&mut port, &sub));
+    assert!(
+        moved.contains(&("removed".into(), "session".into(), session.clone())),
+        "{moved:?}"
+    );
+    assert!(
+        moved.contains(&("changed".into(), "sessions".into(), project.clone())),
+        "{moved:?}"
+    );
+}
+
+/// What the effect list would miss: a set rename (`SaveViews`), a trust
+/// question (`PromptSeen`, no save) and a Codex pane passing its quiet
+/// interval (`HostListed`, no save) each emit `changed`; ten ticks over
+/// a running pane with nothing else moving emit nothing, though
+/// `quiet_secs` moved on each.
+#[test]
+fn a_rename_a_trust_question_and_a_quiet_pane_emit_but_ten_quiet_passes_do_not() {
+    let mut port = port();
+    let (space, _project, session) = seed(&mut port, "");
+    control(
+        &mut port,
+        Request::new(
+            "st",
+            Body::SetNew {
+                space: space.clone(),
+                name: "Desk".into(),
+            },
+        ),
+    );
+    let set = port
+        .app
+        .core()
+        .set_views(switchboard::core::SpaceId(
+            uuid::Uuid::parse_str(&space).unwrap(),
+        ))
+        .into_iter()
+        .find(|s| s.name == "Desk")
+        .unwrap();
+    let token = pair(&mut port, "ABCD2345", Scope::Read, "Pad");
+    let sub = subscribe(&mut port, &token);
+    port.app.dispatch(AppAction::RenameWorkingSet {
+        set: switchboard::core::SetId(uuid::Uuid::parse_str(&set.id).unwrap()),
+        name: "Bench".into(),
+    });
+    assert_eq!(
+        resources(&events(&mut port, &sub)),
+        vec![("changed".into(), "set".into(), set.id.clone())]
+    );
+
+    let record = RecordId(uuid::Uuid::parse_str(&session).unwrap());
+    let pane = HostId(record.host_name());
+    port.host.state().statuses.push(HostStatus {
+        id: pane.clone(),
+        liveness: HostLiveness::Running {
+            pid: 7,
+            command: "claude".into(),
+        },
+        cwd: None,
+        last_activity: Some(std::time::SystemTime::now()),
+        title: None,
+    });
+    port.app.poll_now();
+    let _ = events(&mut port, &sub);
+    port.app.dispatch(AppAction::PromptSeen {
+        id: record,
+        seen: true,
+    });
+    let moved = resources(&events(&mut port, &sub));
+    assert!(
+        moved.contains(&("changed".into(), "session".into(), session.clone())),
+        "{moved:?}"
+    );
+    assert!(
+        moved.contains(&("changed".into(), "waiting".into(), String::new())),
+        "{moved:?}"
+    );
+    let revision = port.app.revision();
+    for _ in 0..10 {
+        port.app.dispatch(AppAction::Tick);
+        port.app.serve_pending();
+    }
+    assert_eq!(events(&mut port, &sub), Vec::<serde_json::Value>::new());
+    assert_eq!(port.app.revision(), revision, "nothing moved");
+}
+
+/// A mutation after `hello`: its event and a snapshot taken after it
+/// carry the same revision, so the client reconciles the two as one.
+#[test]
+fn a_mutation_after_hello_is_seen_at_the_revision_the_snapshot_carries() {
+    let mut port = port();
+    let (_, _, session) = seed(&mut port, "before");
+    let token = pair(&mut port, "ABCD2345", Scope::Read, "Pad");
+    let sub = subscribe(&mut port, &token);
+    let hello_revision = port.app.revision();
+    let record = RecordId(uuid::Uuid::parse_str(&session).unwrap());
+    port.app
+        .dispatch(AppAction::SetSessionNotes(record, "after".into()));
+    let got = events(&mut port, &sub);
+    let changed = got
+        .iter()
+        .find(|e| e["resource"]["kind"] == "session")
+        .expect("the session changed");
+    assert_eq!(changed["revision"], hello_revision + 1);
+    let (status, reply) = get(
+        &mut port,
+        &format!("/api/v1/sessions/{session}"),
+        Some(&token),
+    );
+    assert_eq!(status, 200);
+    assert_eq!(reply["body"]["session"]["notes"], "after");
+    assert_eq!(reply["revision"], changed["revision"]);
+}
+
+/// A subscriber that stops reading is dropped once it falls a queue
+/// behind: it gets `resync_required` and the close, and a subscriber
+/// that keeps up sees every event meanwhile. The device's socket
+/// buffers hold a good deal before the host's send blocks, so the
+/// burst here is a hundred and fifty sessions flipping between listed
+/// and not, as many times as it takes.
+#[test]
+fn an_overflowed_subscriber_is_told_to_resync_and_closed_while_another_keeps_up() {
+    let mut port = port();
+    let (_, project, _) = seed(&mut port, "");
+    let token = pair(&mut port, "ABCD2345", Scope::Read, "Pad");
+    let slow = subscribe(&mut port, &token);
+    let fast = subscribe(&mut port, &token);
+    slow.paused.store(true, std::sync::atomic::Ordering::SeqCst);
+    for n in 1..150 {
+        port.app.dispatch(AppAction::Control {
+            op: format!("se{n}"),
+            action: switchboard::core::ControlAction::try_from(Body::SessionNew {
+                project: project.clone(),
+                name: format!("s{n}"),
+                session_kind: SessionKind::Shell,
+                cwd: PathBuf::from("/tmp"),
+                launch: Launch::Shell,
+                prompt: None,
+                notes: String::new(),
+                env: std::collections::BTreeMap::new(),
+                env_sets: Vec::new(),
+                replaces: None,
+            })
+            .unwrap(),
+        });
+    }
+    let all: Vec<HostStatus> = port.app.core().workspaces()[0]
+        .sessions
+        .iter()
+        .map(|s| HostStatus {
+            id: HostId(s.id.host_name()),
+            liveness: HostLiveness::Running {
+                pid: 7,
+                command: "sh".into(),
+            },
+            cwd: None,
+            last_activity: None,
+            title: None,
+        })
+        .collect();
+    let mut rounds = 0;
+    while port.app.subscriber_count() == 2 && rounds < 200 {
+        port.host.state().statuses = if rounds % 2 == 0 {
+            all.clone()
+        } else {
+            Vec::new()
+        };
+        port.app.poll_now();
+        port.app.serve_pending();
+        rounds += 1;
+    }
+    assert_eq!(port.app.subscriber_count(), 1, "the slow one is dropped");
+    slow.paused
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+    let mut last_text = None;
+    let mut closed = false;
+    while let Some(frame) = next_frame(&mut port, &slow, 15) {
+        let Ok(text) = frame else {
+            closed = true;
+            break;
+        };
+        last_text = Some(text);
+    }
+    let last: serde_json::Value = serde_json::from_str(&last_text.expect("frames")).unwrap();
+    assert_eq!(last["type"], "resync_required", "{last}");
+    assert!(closed, "the socket was closed after it");
+    let seen_by_fast = events(&mut port, &fast);
+    assert!(
+        seen_by_fast.len() > 300,
+        "{} events reached the fast one",
+        seen_by_fast.len()
+    );
+    assert_eq!(
+        port.app.subscriber_count(),
+        1,
+        "the fast one is still subscribed"
+    );
+}
+
+/// Revoke in the dialog closes the device's socket at once, with no
+/// `resync_required`: there is nothing to come back for.
+#[test]
+fn revoke_closes_the_devices_socket() {
+    let mut port = port();
+    let token = pair(&mut port, "ABCD2345", Scope::Read, "Pad");
+    let sub = subscribe(&mut port, &token);
+    let device = port.app.core().devices()[0].id;
+    port.app.dispatch(AppAction::RevokeDevice(device));
+    assert_eq!(port.app.subscriber_count(), 0);
+    match next_frame(&mut port, &sub, 5) {
+        Some(Err(reason)) => assert!(reason.starts_with("closed"), "{reason}"),
+        other => panic!("expected the close, got {other:?}"),
+    }
+    let (status, _) = get(&mut port, "/api/v1/waiting", Some(&token));
+    assert_eq!(status, 401, "the token is gone too");
+}
+
+/// `/ops/{op}` on the port: a creation's status is `done` with its
+/// reply, an op never seen is `unknown`; and `/events` without an
+/// upgrade is refused by name.
+#[test]
+fn ops_status_is_read_on_the_port_and_events_needs_an_upgrade() {
+    let mut port = port();
+    seed(&mut port, "");
+    let token = pair(&mut port, "ABCD2345", Scope::Read, "Pad");
+    let (status, reply) = get(&mut port, "/api/v1/ops/se", Some(&token));
+    assert_eq!(status, 200, "{reply}");
+    assert_eq!(reply["body"]["status"]["status"], "done");
+    assert_eq!(reply["body"]["status"]["reply"]["reply"], "launched");
+    let (_, reply) = get(&mut port, "/api/v1/ops/never", Some(&token));
+    assert_eq!(reply["body"]["status"]["status"], "unknown");
+    let (status, reply) = get(&mut port, "/api/v1/events", Some(&token));
+    assert_eq!((status, code(&reply)), (400, "upgrade_required"), "{reply}");
+    let (status, _) = get(&mut port, "/api/v1/events", None);
+    assert_eq!(status, 401);
+}
+
+/// The diff pass over three hundred sessions, timed and printed (run
+/// with `--nocapture`); the spec's budget is 1 ms of frame time per
+/// pass.
+#[test]
+fn the_fingerprint_pass_over_three_hundred_sessions_is_measured() {
+    let mut port = port();
+    let (_, project, _) = seed(&mut port, "ticket");
+    for n in 1..300 {
+        port.app.dispatch(AppAction::Control {
+            op: format!("se{n}"),
+            action: switchboard::core::ControlAction::try_from(Body::SessionNew {
+                project: project.clone(),
+                name: format!("s{n}"),
+                session_kind: SessionKind::Shell,
+                cwd: PathBuf::from("/tmp"),
+                launch: Launch::Shell,
+                prompt: None,
+                notes: "n".repeat(500),
+                env: std::collections::BTreeMap::new(),
+                env_sets: Vec::new(),
+                replaces: None,
+            })
+            .unwrap(),
+        });
+    }
+    assert_eq!(port.app.core().workspaces()[0].sessions.len(), 300);
+    let now = std::time::SystemTime::now();
+    let t0 = std::time::Instant::now();
+    let runs = 20;
+    let mut fp = None;
+    for _ in 0..runs {
+        fp = Some(switchboard::core::revision::Fingerprints::of(
+            port.app.core(),
+            now,
+        ));
+    }
+    let per_pass = t0.elapsed() / runs;
+    let fp = fp.unwrap();
+    let t1 = std::time::Instant::now();
+    let changes = fp.changes(&fp);
+    let compare = t1.elapsed();
+    assert!(changes.is_empty());
+    println!(
+        "fingerprint pass over {} resources: {per_pass:?}; compare: {compare:?}",
+        fp.len()
     );
 }

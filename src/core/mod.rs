@@ -13,6 +13,7 @@ pub mod grid;
 pub mod model;
 pub mod reconcile;
 mod remote;
+pub mod revision;
 mod sessions;
 mod workflow;
 

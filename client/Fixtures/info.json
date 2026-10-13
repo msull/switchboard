@@ -11,10 +11,10 @@
     },
     "pairing_open": false,
     "protocol": 1,
-    "server_id": "bde60e57-d51a-4f7d-b0f9-6e3cf31a2bca",
+    "server_id": "85192cf3-1997-48c8-9328-593ab6f9d037",
     "server_name": "Desk Mac",
-    "spki_sha256": "46218f34afb219e848c973bc92025a07eb55a013829a5b4d3fc96bb90ae9b866"
+    "spki_sha256": "97370725ae44f9f8375e80ca521b08f1b62321e6ec0aee24f65225a3a3b0270a"
   },
-  "epoch": "6386092b-b275-4aaa-9b31-8a64d4c528bd",
-  "revision": 0
+  "epoch": "efbc650d-bdb9-483e-b811-9272260a94d8",
+  "revision": 6
 }

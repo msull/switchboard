@@ -58,10 +58,23 @@ public enum RemoteError: Error, CustomStringConvertible, Sendable {
     }
 }
 
+/// An open events socket: the frames as they arrive, and the close.
+public struct EventSubscription: Sendable {
+    public let frames: AsyncThrowingStream<EventFrame, Error>
+    public let close: @Sendable () -> Void
+
+    public init(frames: AsyncThrowingStream<EventFrame, Error>, close: @escaping @Sendable () -> Void) {
+        self.frames = frames
+        self.close = close
+    }
+}
+
 /// What a per-host connection needs from the network, so the core is
 /// tested against a fake and `HostClient` is the real one.
 public protocol HostAPI: Sendable {
     func info() async throws -> Envelope<ServerInfo>
+    /// Subscribe to the host's events; the first frame is `hello`.
+    func events() async throws -> EventSubscription
     func pair(_ request: PairRequest) async throws -> Envelope<PairReply>
     func projects() async throws -> Envelope<ProjectsBody>
     func spaces() async throws -> Envelope<SpacesBody>
@@ -110,6 +123,46 @@ public final class HostClient: HostAPI, @unchecked Sendable {
 
     public func info() async throws -> Envelope<ServerInfo> {
         try await get("info", query: nil)
+    }
+
+    /// The events socket over the same session and so the same pin;
+    /// the bearer goes in the upgrade request's header, never the URL.
+    public func events() async throws -> EventSubscription {
+        guard let token else {
+            throw RemoteError.refused(status: 401, code: "unauthorized", message: "no token")
+        }
+        var components = URLComponents(url: address.baseURL.appendingPathComponent("events"), resolvingAgainstBaseURL: false)!
+        components.scheme = "wss"
+        var request = URLRequest(url: components.url!)
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        let task = session.webSocketTask(with: request)
+        task.resume()
+        let frames = AsyncThrowingStream<EventFrame, Error> { continuation in
+            let pump = Task {
+                do {
+                    while !Task.isCancelled {
+                        let message = try await task.receive()
+                        let data: Data
+                        switch message {
+                        case .string(let text): data = Data(text.utf8)
+                        case .data(let bytes): data = bytes
+                        @unknown default: continue
+                        }
+                        continuation.yield(try Wire.decode(EventFrame.self, from: data))
+                    }
+                    continuation.finish()
+                } catch {
+                    continuation.finish(throwing: RemoteError.transport("events: \(error.localizedDescription)"))
+                }
+            }
+            continuation.onTermination = { _ in
+                pump.cancel()
+                task.cancel(with: .normalClosure, reason: nil)
+            }
+        }
+        return EventSubscription(frames: frames) {
+            task.cancel(with: .normalClosure, reason: nil)
+        }
     }
 
     public func pair(_ request: PairRequest) async throws -> Envelope<PairReply> {
