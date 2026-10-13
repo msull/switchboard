@@ -211,7 +211,9 @@ final class FakeHost: HostAPI, @unchecked Sendable {
         return try answer("screen") { held }
     }
 
-    func conversation(_ id: String, from: String?, limit: Int?) async throws -> Envelope<ConversationBody> {
+    func conversation(_ id: String, from: String?, before: Int?, limit: Int?) async throws
+        -> Envelope<ConversationBody>
+    {
         lock.lock()
         let whole = conversations[id]
         lock.unlock()
@@ -219,8 +221,13 @@ final class FakeHost: HostAPI, @unchecked Sendable {
             throw RemoteError.refused(status: 400, code: "no_conversation", message: "no conversation")
         }
         let limit = limit ?? 20
-        let first = from == "last" || from == nil ? max(1, whole.turns.count - limit + 1) : Int(from!) ?? 1
-        let page = whole.turns.filter { $0.n >= first }.prefix(limit)
+        // Anchored at the end: the last `limit` turns before the anchor.
+        let end = before.map { min($0 - 1, whole.turns.count) }
+        let first =
+            if let end { max(1, end - limit + 1) }
+            else if from == "last" || from == nil { max(1, whole.turns.count - limit + 1) }
+            else { Int(from!) ?? 1 }
+        let page = whole.turns.filter { $0.n >= first && (end == nil || $0.n <= end!) }.prefix(limit)
         let next = page.last.flatMap { last in whole.turns.contains { $0.n > last.n } ? last.n + 1 : nil }
         return try answer("conversation") {
             ConversationBody(
@@ -313,8 +320,10 @@ struct Route: HostAPI {
     func screen(_ id: String, lines: Int?) async throws -> Envelope<ScreenBody> {
         try await network.route(address, pin).screen(id, lines: lines)
     }
-    func conversation(_ id: String, from: String?, limit: Int?) async throws -> Envelope<ConversationBody> {
-        try await network.route(address, pin).conversation(id, from: from, limit: limit)
+    func conversation(_ id: String, from: String?, before: Int?, limit: Int?) async throws
+        -> Envelope<ConversationBody>
+    {
+        try await network.route(address, pin).conversation(id, from: from, before: before, limit: limit)
     }
     func lastResponse(_ id: String) async throws -> Envelope<LastResponseBody> {
         try await network.route(address, pin).lastResponse(id)

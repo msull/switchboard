@@ -7,7 +7,7 @@ macOS 14, iOS 17 and visionOS 1.
 
 ```sh
 swift build                      # every target
-swift test                       # 43 tests: fixtures, pinning, the connection core, events, watches, conversations, presentation, browsing
+swift test                       # 44 tests: fixtures, pinning, the connection core, events, watches, conversations, presentation, browsing
 swift run switchboard-remote     # the command-line browser (usage below)
 scripts/sim.sh run               # the visionOS app on the simulator (below)
 ```

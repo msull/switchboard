@@ -176,8 +176,7 @@ public final class BrowserModel {
     /// The page before the first turn held.
     public func loadEarlier(_ ref: SessionRef) async {
         guard let first = conversations[ref]?.firstHeld, first > 1 else { return }
-        let from = max(1, first - Self.conversationPage)
-        await manager.readConversation(ref, from: from, limit: first - from)
+        await manager.readConversation(ref, before: first, limit: Self.conversationPage)
         await pull()
     }
 

@@ -511,10 +511,17 @@ public actor ServerConnection {
     /// Read a page of the conversation: from `from`, or the last page
     /// when `nil`, merged into what is held.
     public func readConversation(_ session: String, from: Int?, limit: Int?) async {
+        await readConversation(session, from: from, before: nil, limit: limit)
+    }
+
+    /// The page before turn `before` when given, else the one from
+    /// `from`, or the tail when neither.
+    public func readConversation(_ session: String, from: Int?, before: Int?, limit: Int?) async {
         guard let api else { return }
         do {
             let reply = try await api.conversation(
-                session, from: from.map(String.init) ?? "last", limit: limit)
+                session, from: before == nil ? from.map(String.init) ?? "last" : nil,
+                before: before, limit: limit)
             apply(.conversation(session: session), at: reply.revision) {
                 if var held = conversations[session] {
                     held.merge(reply.body)

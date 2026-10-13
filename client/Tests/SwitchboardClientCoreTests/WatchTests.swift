@@ -169,6 +169,29 @@ final class WatchTests: XCTestCase {
         XCTAssertEqual(fake.calls.filter { $0 == "unwatch:r1" }.count, 1)
     }
 
+    func testEarlierTurnsArriveAsThePageEndingBeforeTheFirstHeld() async throws {
+        let (manager, fake, _) = try await host()
+        let ref = SessionRef(serverID: a, recordID: "r1")
+        fake.set {
+            $0.conversations = [
+                "r1": ConversationBody(
+                    resumeID: "h1", total: 5, from: 1, next: nil,
+                    turns: (1...5).map { TurnView(n: $0, user: "p\($0)", finalText: "a\($0)") })
+            ]
+        }
+        await manager.readConversation(ref, from: nil, limit: 2)
+        let tail = await manager.conversation(for: ref)
+        XCTAssertEqual(tail?.turns.map(\.n), [4, 5], "the tail first")
+        await manager.readConversation(ref, before: 4, limit: 2)
+        let more = await manager.conversation(for: ref)
+        XCTAssertEqual(more?.turns.map(\.n), [2, 3, 4, 5], "the page before joined in front")
+        XCTAssertTrue(more?.hasEarlier == true)
+        await manager.readConversation(ref, before: 2, limit: 2)
+        let all = await manager.conversation(for: ref)
+        XCTAssertEqual(all?.turns.map(\.n), [1, 2, 3, 4, 5])
+        XCTAssertFalse(all?.hasEarlier == true)
+    }
+
     func testARunOutputWatchNamesTheRunAndFollowsChanged() async throws {
         let (_, fake, connection) = try await host()
         fake.set {

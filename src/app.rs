@@ -1787,10 +1787,10 @@ impl SwitchboardApp {
             ),
             [_, _, "last-response"] => (ContentKey::Conversation(id), ContentView::LastResponse),
             [_, _, "conversation"] => {
-                let from = match request.param("from") {
-                    None => PageFrom::Turn(1),
-                    Some("last") => PageFrom::Last,
-                    Some(n) => match n.parse::<usize>() {
+                let from = match (request.param("from"), request.param("before")) {
+                    (None, None) => PageFrom::Turn(1),
+                    (Some("last"), None) => PageFrom::Last,
+                    (Some(n), None) => match n.parse::<usize>() {
                         Ok(n) if n >= 1 => PageFrom::Turn(n),
                         _ => {
                             return Served::Now(self.refuse(
@@ -1802,6 +1802,27 @@ impl SwitchboardApp {
                             ));
                         }
                     },
+                    (None, Some(n)) => match n.parse::<usize>() {
+                        Ok(n) if n >= 1 => PageFrom::Before(n),
+                        _ => {
+                            return Served::Now(self.refuse(
+                                request,
+                                400,
+                                "bad_request",
+                                "before is a turn number",
+                                true,
+                            ));
+                        }
+                    },
+                    (Some(_), Some(_)) => {
+                        return Served::Now(self.refuse(
+                            request,
+                            400,
+                            "bad_request",
+                            "from and before do not go together",
+                            true,
+                        ));
+                    }
                 };
                 let limit = request
                     .param("limit")

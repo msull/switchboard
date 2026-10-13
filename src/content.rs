@@ -157,13 +157,18 @@ pub enum Source {
     Log(PathBuf),
 }
 
-/// Which turn a page starts at.
+/// Where a page is anchored. A page anchored at its start runs
+/// forward and stops at `limit` or the byte cap, saying `next`; a
+/// page anchored at its end runs backward from there, so it always
+/// holds the anchor and `from` is wherever it filled up.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PageFrom {
-    /// A 1-based turn number.
+    /// Starts at a 1-based turn number.
     Turn(usize),
-    /// The last `limit` turns.
+    /// Ends at the last turn.
     Last,
+    /// Ends at the turn before this 1-based turn number.
+    Before(usize),
 }
 
 /// What of the content a job wants.
@@ -462,8 +467,8 @@ fn ms(t: Option<SystemTime>) -> Option<u64> {
         .and_then(|d| u64::try_from(d.as_millis()).ok())
 }
 
-/// A page of a conversation on the wire: the metadata, the turns from
-/// `from` up to `limit` of them or the page's byte cap, whichever comes
+/// A page of a conversation on the wire: the metadata, up to `limit`
+/// turns or the page's byte cap from the anchor, whichever comes
 /// first, and `next`, the turn to continue from, when more follow.
 #[must_use]
 pub fn conversation_page(
@@ -474,22 +479,46 @@ pub fn conversation_page(
 ) -> serde_json::Value {
     let total = conversation.turns.len();
     let limit = limit.clamp(1, PAGE_TURNS_CAP);
-    let first = match from {
-        PageFrom::Turn(n) => n.max(1),
-        PageFrom::Last => total.saturating_sub(limit) + 1,
-    };
-    let mut turns = Vec::new();
     let mut bytes = 0;
-    let mut next = None;
-    for turn in conversation.turns.iter().skip(first - 1) {
-        let (value, size) = turn_json(turn);
-        if turns.len() >= limit || (!turns.is_empty() && bytes + size > PAGE_BYTES_CAP) {
-            next = Some(turn.n);
-            break;
+    let fits = |taken: usize, bytes: usize, size: usize| {
+        taken < limit && (taken == 0 || bytes + size <= PAGE_BYTES_CAP)
+    };
+    let (first, turns, next) = match from {
+        PageFrom::Turn(n) => {
+            let first = n.max(1);
+            let mut turns = Vec::new();
+            let mut next = None;
+            for turn in conversation.turns.iter().skip(first - 1) {
+                let (value, size) = turn_json(turn);
+                if !fits(turns.len(), bytes, size) {
+                    next = Some(turn.n);
+                    break;
+                }
+                bytes += size;
+                turns.push(value);
+            }
+            (first, turns, next)
         }
-        bytes += size;
-        turns.push(value);
-    }
+        PageFrom::Last | PageFrom::Before(_) => {
+            let end = match from {
+                PageFrom::Before(n) => n.saturating_sub(1).min(total),
+                _ => total,
+            };
+            let mut turns = Vec::new();
+            for turn in conversation.turns[..end].iter().rev() {
+                let (value, size) = turn_json(turn);
+                if !fits(turns.len(), bytes, size) {
+                    break;
+                }
+                bytes += size;
+                turns.push(value);
+            }
+            turns.reverse();
+            let first = end + 1 - turns.len();
+            let next = (end < total).then_some(end + 1);
+            (first, turns, next)
+        }
+    };
     let usage = conversation.usage;
     serde_json::json!({
         "resume_id": resume_id,
@@ -838,7 +867,18 @@ mod tests {
         assert_eq!(page["turns"].as_array().unwrap().len(), 3);
         let page = conversation_page(&c, "r", PageFrom::Last, 2);
         assert_eq!(page["from"], 4, "the last two");
+        assert_eq!(page["next"], serde_json::Value::Null);
         assert_eq!(page["turns"][1]["final_text"], "answer 5");
+        let page = conversation_page(&c, "r", PageFrom::Before(4), 2);
+        assert_eq!(page["from"], 2, "the two before turn 4");
+        assert_eq!(page["next"], 4);
+        assert_eq!(page["turns"][1]["n"], 3);
+        let page = conversation_page(&c, "r", PageFrom::Before(1), 2);
+        assert!(page["turns"].as_array().unwrap().is_empty());
+        assert_eq!(page["from"], 1);
+        let page = conversation_page(&c, "r", PageFrom::Before(99), 2);
+        assert_eq!(page["from"], 4, "past the end: the tail");
+        assert_eq!(page["next"], serde_json::Value::Null);
         let page = conversation_page(&c, "r", PageFrom::Turn(9), 2);
         assert!(page["turns"].as_array().unwrap().is_empty(), "past the end");
         assert_eq!(page["next"], serde_json::Value::Null);
@@ -888,6 +928,28 @@ mod tests {
         assert_eq!(page["turns"][0]["truncated"], true);
         assert_eq!(page["turns"].as_array().unwrap().len(), 3);
         assert_eq!(page["next"], 4);
+    }
+
+    #[test]
+    fn a_page_anchored_at_its_end_fills_backward_and_always_reaches_it() {
+        let mut c = turns(8);
+        for t in &mut c.turns {
+            t.final_text = "y".repeat(200 * 1024);
+        }
+        let page = conversation_page(&c, "r", PageFrom::Last, 20);
+        let ns: Vec<_> = page["turns"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["n"].as_u64().unwrap())
+            .collect();
+        assert_eq!(ns, [6, 7, 8], "the last turns that fit, ending at the end");
+        assert_eq!(page["from"], 6);
+        assert_eq!(page["next"], serde_json::Value::Null);
+        let page = conversation_page(&c, "r", PageFrom::Before(6), 20);
+        assert_eq!(page["from"], 3);
+        assert_eq!(page["next"], 6);
+        assert_eq!(page["turns"].as_array().unwrap().len(), 3);
     }
 
     #[test]

@@ -91,7 +91,10 @@ public protocol HostAPI: Sendable {
     func waiting() async throws -> Envelope<SessionsBody>
     func screen(_ id: String, lines: Int?) async throws -> Envelope<ScreenBody>
     /// A page of the conversation: `from` is a turn number or `"last"`.
-    func conversation(_ id: String, from: String?, limit: Int?) async throws -> Envelope<ConversationBody>
+    /// A page anchored at `from` (a turn number or `last`) or ending
+    /// before turn `before`; the two do not go together.
+    func conversation(_ id: String, from: String?, before: Int?, limit: Int?) async throws
+        -> Envelope<ConversationBody>
     func lastResponse(_ id: String) async throws -> Envelope<LastResponseBody>
     func runs(_ id: String) async throws -> Envelope<RunsBody>
     func runOutput(_ id: String, run: Int, lines: Int?) async throws -> Envelope<RunOutputBody>
@@ -223,11 +226,12 @@ public final class HostClient: HostAPI, @unchecked Sendable {
         try await get("sessions/\(id)/screen", query: lines.map { "lines=\($0)" })
     }
 
-    public func conversation(_ id: String, from: String?, limit: Int?) async throws
+    public func conversation(_ id: String, from: String?, before: Int?, limit: Int?) async throws
         -> Envelope<ConversationBody>
     {
         var parts: [String] = []
         if let from { parts.append("from=\(from)") }
+        if let before { parts.append("before=\(before)") }
         if let limit { parts.append("limit=\(limit)") }
         return try await get(
             "sessions/\(id)/conversation", query: parts.isEmpty ? nil : parts.joined(separator: "&"))

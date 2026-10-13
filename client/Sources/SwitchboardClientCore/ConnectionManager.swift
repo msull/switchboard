@@ -251,6 +251,11 @@ public actor ConnectionManager {
         await connections[ref.serverID]?.readConversation(ref.recordID, from: from, limit: limit)
     }
 
+    public func readConversation(_ ref: SessionRef, before: Int, limit: Int?) async {
+        await connections[ref.serverID]?.readConversation(
+            ref.recordID, from: nil, before: before, limit: limit)
+    }
+
     public func conversation(for ref: SessionRef) async -> ConversationState? {
         await connections[ref.serverID]?.conversations[ref.recordID]
     }

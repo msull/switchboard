@@ -3336,9 +3336,12 @@ Built so far:
   QR scanner (the invite is pasted or passed at launch), and the
   Xcode project is generated, not checked in.
 - **C1 and C2, content on the wire and the conversation.** The port
-  serves `session.conversation` (a page of turns from a number or
-  `from=last`, stopping at `limit`, 100 at most, or the page's byte
-  cap, with `next`; a turn over 256 KiB loses its tool detail and
+  serves `session.conversation` (a page of turns from a number,
+  stopping at `limit`, 100 at most, or the page's byte cap, with
+  `next`; or anchored at its end with `from=last` or `before=n`,
+  filling backward so the anchor is always in it, since a page of
+  large turns walked forward from a count stopped short of the end and
+  showed a stale tail; a turn over 256 KiB loses its tool detail and
   notes first, then its prompt is shortened, then its answer is cut
   from the front, and says `truncated`), `session.last_response` (the
   last turn's answer, a projection of the conversation key at its
@@ -3362,7 +3365,7 @@ Built so far:
   card windows draw Last response (the answer with its inline
   Markdown), Conversation (each turn's prompt, its activity folded
   under a line with the tool calls' input and result one level deeper,
-  its answer; "Earlier turns" loads the page before the first held;
+  its answer; "Earlier turns" loads the page ending before the first held;
   the end follows the host) and Run output (a run picker with its
   status and the tail, scaled like the screen). Seen on the simulator
   against a throwaway host: a real transcript's last page scrolled to

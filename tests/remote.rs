@@ -1915,6 +1915,30 @@ fn stalled_strangers_fill_their_own_pool_and_never_a_paired_clients() {
 /// turn's answer at the conversation's revision, and both are masked;
 /// a shell has no conversation.
 #[test]
+fn a_conversation_page_anchored_before_a_held_turn_ends_there() {
+    let mut port = port();
+    port.transcripts.set(Some(conversation(3)));
+    let (_, _, session) = seed(&mut port, "");
+    let token = pair(&mut port, "ABCD2345", Scope::Read, "Vision Pro");
+    let t = Some(token.as_str());
+    launched(&mut port, &session);
+    let (_, before) = get(
+        &mut port,
+        &format!("/api/v1/sessions/{session}/conversation?before=3&limit=1"),
+        t,
+    );
+    assert_eq!(before["body"]["from"], 2, "the page ending before turn 3");
+    assert_eq!(before["body"]["next"], 3);
+    assert_eq!(before["body"]["turns"][0]["n"], 2);
+    let (status, _) = get(
+        &mut port,
+        &format!("/api/v1/sessions/{session}/conversation?from=1&before=3"),
+        t,
+    );
+    assert_eq!(status, 400, "one anchor per page");
+}
+
+#[test]
 fn a_conversation_pages_by_turn_and_its_last_response_shares_the_revision() {
     let mut port = port();
     port.transcripts.set(Some(conversation(3)));
