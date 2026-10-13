@@ -8,7 +8,8 @@
 #   scripts/device.sh devices      the devices the Mac is paired with
 # The signing team comes from DEVELOPMENT_TEAM, or from the repo's
 # git-ignored .env; the device from SWITCHBOARD_DEVICE (a devicectl
-# identifier), or the first connected one.
+# identifier), or the first paired headset (the tunnel to it comes up
+# on demand, so "disconnected" in the listing means nothing).
 set -eu
 cd "$(dirname "$0")/.."
 if [ -z "${DEVELOPMENT_TEAM:-}" ] && [ -f ../.env ]; then
@@ -28,7 +29,7 @@ device() {
     xcrun devicectl list devices --json-output "$LIST" >/dev/null 2>&1
     python3 -c 'import json, sys
 for d in json.load(open(sys.argv[1]))["result"]["devices"]:
-    if d["hardwareProperties"].get("platform") == "visionOS" and d["connectionProperties"].get("tunnelState") == "connected":
+    if d["hardwareProperties"].get("platform") == "visionOS" and d["connectionProperties"].get("pairingState") == "paired":
         print(d["identifier"]); break' "$LIST"
     rm -f "$LIST"
 }
@@ -46,7 +47,7 @@ case "${1:-}" in
     run)
         build
         ID=$(device)
-        [ -n "$ID" ] || { echo "no connected device; see 'devices'" >&2; exit 2; }
+        [ -n "$ID" ] || { echo "no paired headset; see 'devices'" >&2; exit 2; }
         xcrun devicectl device install app --device "$ID" "$APP"
         xcrun devicectl device process launch --terminate-existing --device "$ID" "$BUNDLE"
         ;;
