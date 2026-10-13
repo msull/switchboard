@@ -167,7 +167,7 @@ as you type; Save is the only time Switchboard writes into
 
 ```sh
 ./scripts/bundle.sh          # installs ~/Applications/Switchboard.app
-./scripts/icon.sh            # regenerates the icon from assets/Switchboard.svg
+./scripts/icon.sh            # regenerates the icons from assets/Switchboard.svg and assets/vision/*.svg
 ```
 
 The bundle carries the binaries side by side in `Contents/MacOS`:
@@ -183,7 +183,10 @@ Box Dev" certificate from Keychain Access (keeps the Accessibility grant,
 but the Keychain asks for its items again after each build), else ad-hoc
 (the grant is reset each rebuild). `scripts/icon.sh`
 renders the SVG with AppKit into `assets/Switchboard.icns` for Finder and
-`assets/icon-256.rgba`, which `src/main.rs` embeds for the Dock.
+`assets/icon-256.rgba`, which `src/main.rs` embeds for the Dock, and the
+three layers of the visionOS icon (`assets/vision/*.svg`, the same
+drawing split for the headset's parallax and circular mask) into the
+client's asset catalog.
 
 Dev aids, all environment variables:
 

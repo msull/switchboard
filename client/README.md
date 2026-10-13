@@ -87,7 +87,10 @@ scripts/sim.sh run               # the visionOS app on the simulator (below)
 - `Apps/SwitchboardVision`: the visionOS app, an entry that declares
   the scenes and where the registry lives (`servers.json` in the app's
   container, the token and pin in the Keychain, nothing from a host on
-  disk).
+  disk), and its icon: `Assets.xcassets/AppIcon.solidimagestack`, the
+  Mac icon split into the three layers visionOS lights in parallax
+  (background, faceplate with jacks, cords), rendered from
+  `assets/vision/*.svg` by the repo's `scripts/icon.sh`.
 
 ## The Xcode project
 
