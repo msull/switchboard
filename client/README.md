@@ -7,7 +7,7 @@ macOS 14, iOS 17 and visionOS 1.
 
 ```sh
 swift build                      # every target
-swift test                       # 59 tests: fixtures, commands, pinning, the connection core, events, watches, conversations, the draft, presentation, browsing
+swift test                       # 60 tests: fixtures, commands, pinning, the connection core, events, watches, conversations, the draft, presentation, browsing
 swift run switchboard-remote     # the command-line browser (usage below)
 scripts/sim.sh run               # the visionOS app on the simulator (below)
 ```
@@ -26,7 +26,10 @@ scripts/sim.sh run               # the visionOS app on the simulator (below)
   `PinnedSessionDelegate`, which accepts a certificate only when the
   SHA-256 of its P-256 `SubjectPublicKeyInfo` is the pinned one
   (`.expect`) or records what it saw for an unpaired `/info`
-  (`.observe`); the events socket (`URLSessionWebSocketTask`) shares
+  (`.observe`), and a failed request is a key mismatch only when the
+  delegate refused a certificate under another key, never when the
+  request was merely cut short (a host relaunching, a task cancelled),
+  which is a transport failure to retry; the events socket (`URLSessionWebSocketTask`) shares
   the session and so the pin; `Discovery` browses `_switchboard._tcp`
   with `Network.framework` and resolves a record to an address.
 - `SwitchboardClientCore`: `KnownServer` and the registry, the
@@ -156,8 +159,10 @@ device (Settings, Privacy & Security), the device paired in Xcode's
 Devices window (with the headset on its Remote Devices settings
 screen), and the app run from Xcode once with a development team on
 the target so the device trusts the developer. After that
-`scripts/device.sh run` builds, installs and launches on the headset
-from the terminal, and `devices` lists what the Mac is paired with.
+`scripts/device.sh run` builds (Release, unless
+`SWITCHBOARD_CONFIGURATION=Debug`), installs and launches on the
+headset from the terminal, and `devices` lists what the Mac is paired
+with.
 The team comes from `DEVELOPMENT_TEAM` in the environment or in the
 repo's git-ignored `.env`; `project.yml` reads it at generation, so a
 project generated without one (as for the simulator) has no team.

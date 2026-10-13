@@ -42,4 +42,17 @@ final class PinningTests: XCTestCase {
             XCTAssertTrue("\(error)".contains("pinned"))
         }
     }
+
+    /// A request cut short is not a key change: only a certificate the
+    /// delegate refused under another key drops the pairing.
+    func testOnlyACertificateUnderAnotherKeyIsAMismatch() {
+        let cancelled = NSError(domain: NSURLErrorDomain, code: NSURLErrorCancelled)
+        let cut = HostClient.classify(cancelled, policy: .expect(spkiSha256: "ka"), mismatch: nil)
+        guard case .transport = cut else { return XCTFail("\(cut)") }
+        let untrusted = NSError(domain: NSURLErrorDomain, code: NSURLErrorServerCertificateUntrusted)
+        let refused = HostClient.classify(untrusted, policy: .expect(spkiSha256: "ka"), mismatch: "kb")
+        XCTAssertEqual("\(refused)", "the host's key kb is not the pinned ka")
+        let observed = HostClient.classify(cancelled, policy: .observe, mismatch: "kb")
+        guard case .transport = observed else { return XCTFail("\(observed)") }
+    }
 }

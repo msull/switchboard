@@ -313,6 +313,18 @@ public final class HostClient: HostAPI, @unchecked Sendable {
         return try await send(req)
     }
 
+    /// What a failed request means. A key mismatch is declared only
+    /// when the delegate saw a certificate under another key: a
+    /// request cut short (the host relaunching, the app's own task
+    /// cancelled, the network gone) is a transport failure to retry,
+    /// never a reason to drop the pairing.
+    static func classify(_ error: Error, policy: PinPolicy, mismatch: String?) -> RemoteError {
+        if case .expect(let expected) = policy, let seen = mismatch {
+            return .pinMismatch(expected: expected, seen: seen)
+        }
+        return .transport(error.localizedDescription)
+    }
+
     private func send<T: Decodable & Sendable>(_ request: URLRequest) async throws -> Envelope<T> {
         var request = request
         if let token {
@@ -323,18 +335,7 @@ public final class HostClient: HostAPI, @unchecked Sendable {
         do {
             (data, response) = try await session.data(for: request)
         } catch {
-            if case .expect(let expected) = delegate.policy, let seen = delegate.mismatch {
-                throw RemoteError.pinMismatch(expected: expected, seen: seen)
-            }
-            let nsError = error as NSError
-            if nsError.domain == NSURLErrorDomain,
-                nsError.code == NSURLErrorServerCertificateUntrusted
-                    || nsError.code == NSURLErrorCancelled,
-                case .expect(let expected) = delegate.policy
-            {
-                throw RemoteError.pinMismatch(expected: expected, seen: nil)
-            }
-            throw RemoteError.transport(error.localizedDescription)
+            throw Self.classify(error, policy: delegate.policy, mismatch: delegate.mismatch)
         }
         guard let http = response as? HTTPURLResponse else {
             throw RemoteError.badReply("not HTTP")

@@ -9,7 +9,8 @@
 # The signing team comes from DEVELOPMENT_TEAM, or from the repo's
 # git-ignored .env; the device from SWITCHBOARD_DEVICE (a devicectl
 # identifier), or the first paired headset (the tunnel to it comes up
-# on demand, so "disconnected" in the listing means nothing).
+# on demand, so "disconnected" in the listing means nothing). The build
+# is Release unless SWITCHBOARD_CONFIGURATION says Debug.
 set -eu
 cd "$(dirname "$0")/.."
 if [ -z "${DEVELOPMENT_TEAM:-}" ] && [ -f ../.env ]; then
@@ -18,7 +19,8 @@ fi
 export DEVELOPMENT_TEAM="${DEVELOPMENT_TEAM:-}"
 DERIVED=build/DerivedData
 BUNDLE=com.sadburger.switchboard.vision
-APP="$DERIVED/Build/Products/Debug-xros/Switchboard.app"
+CONFIGURATION="${SWITCHBOARD_CONFIGURATION:-Release}"
+APP="$DERIVED/Build/Products/$CONFIGURATION-xros/Switchboard.app"
 
 device() {
     if [ -n "${SWITCHBOARD_DEVICE:-}" ]; then
@@ -39,7 +41,7 @@ build() {
     xcodegen generate --quiet
     xcodebuild -project SwitchboardClient.xcodeproj -scheme SwitchboardVision \
         -destination "generic/platform=visionOS" -allowProvisioningUpdates \
-        -derivedDataPath "$DERIVED" -quiet build
+        -configuration "$CONFIGURATION" -derivedDataPath "$DERIVED" -quiet build
 }
 
 case "${1:-}" in
