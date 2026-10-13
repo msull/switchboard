@@ -27,6 +27,9 @@ final class FakeHost: HostAPI, @unchecked Sendable {
     /// refused as not running.
     var screens: [String: ScreenBody] = [:]
     var lastResponses: [String: LastResponseBody] = [:]
+    /// The turns as a read of one whole gives them, when they differ
+    /// from the page's copies in `conversations`.
+    var turns: [String: [TurnView]] = [:]
     /// Whole conversations; a page is cut from one by `from` and `limit`.
     var conversations: [String: ConversationBody] = [:]
     var runs: [String: [RunView]] = [:]
@@ -236,6 +239,18 @@ final class FakeHost: HostAPI, @unchecked Sendable {
         }
     }
 
+    func turn(_ id: String, n: Int) async throws -> Envelope<TurnBody> {
+        lock.lock()
+        let whole = conversations[id]
+        let full = turns[id]
+        lock.unlock()
+        guard let whole else {
+            throw RemoteError.refused(status: 400, code: "no_conversation", message: "no conversation")
+        }
+        let turn = (full ?? whole.turns).first { $0.n == n }
+        return try answer("turn:\(n)") { TurnBody(resumeID: whole.resumeID, total: whole.turns.count, turn: turn) }
+    }
+
     func lastResponse(_ id: String) async throws -> Envelope<LastResponseBody> {
         lock.lock()
         let held = lastResponses[id]
@@ -324,6 +339,9 @@ struct Route: HostAPI {
         -> Envelope<ConversationBody>
     {
         try await network.route(address, pin).conversation(id, from: from, before: before, limit: limit)
+    }
+    func turn(_ id: String, n: Int) async throws -> Envelope<TurnBody> {
+        try await network.route(address, pin).turn(id, n: n)
     }
     func lastResponse(_ id: String) async throws -> Envelope<LastResponseBody> {
         try await network.route(address, pin).lastResponse(id)

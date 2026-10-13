@@ -21,10 +21,10 @@ use crate::adapters::remote::{
 };
 use crate::adapters::scrollback::scrollback_dir;
 use crate::content::{
-    ContentJob, ContentKey, ContentVersion, ContentView, ContentWorker, ConversationCache,
-    Observed, PAGE_TURNS_CAP, PAGE_TURNS_DEFAULT, PageFrom, Policy, RUN_LINES_CAP,
-    SCREEN_LINES_CAP, SCREEN_SLACK_LINES, Source, TURN_BYTES_CAP, WATCH_CAP, WATCH_IDLE, Watch,
-    redact,
+    ACTIVITY_BYTES_CAP, ContentJob, ContentKey, ContentVersion, ContentView, ContentWorker,
+    ConversationCache, Observed, PAGE_TURNS_CAP, PAGE_TURNS_DEFAULT, PageFrom, Policy,
+    RUN_LINES_CAP, SCREEN_LINES_CAP, SCREEN_SLACK_LINES, Source, TURN_BYTES_CAP, WATCH_CAP,
+    WATCH_IDLE, Watch, redact,
 };
 use crate::core::revision::Fingerprints;
 use crate::core::{
@@ -1786,6 +1786,18 @@ impl SwitchboardApp {
                 },
             ),
             [_, _, "last-response"] => (ContentKey::Conversation(id), ContentView::LastResponse),
+            [_, _, "conversation", n] => match n.parse::<usize>() {
+                Ok(n) if n >= 1 => (ContentKey::Conversation(id), ContentView::Turn { n }),
+                _ => {
+                    return Served::Now(self.refuse(
+                        request,
+                        400,
+                        "bad_request",
+                        "the turn is a number",
+                        true,
+                    ));
+                }
+            },
             [_, _, "conversation"] => {
                 let from = match (request.param("from"), request.param("before")) {
                     (None, None) => PageFrom::Turn(1),
@@ -2387,6 +2399,7 @@ impl SwitchboardApp {
             (
                 "GET",
                 ["sessions", _, "screen" | "conversation" | "last-response"]
+                | ["sessions", _, "conversation", _]
                 | ["sessions", _, "runs", _, "output"],
             ) => {
                 return self.remote_content_route(request, &segments, reply);
@@ -2428,6 +2441,7 @@ impl SwitchboardApp {
                 "run_lines": RUN_LINES_CAP,
                 "conversation_turns": PAGE_TURNS_CAP,
                 "turn_bytes": TURN_BYTES_CAP,
+                "activity_bytes": ACTIVITY_BYTES_CAP,
             },
             "pairing_open": self.core.pairing_at(self.clock()).is_some(),
         });

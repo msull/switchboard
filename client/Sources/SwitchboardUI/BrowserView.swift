@@ -180,6 +180,13 @@ public final class BrowserModel {
         await pull()
     }
 
+    /// A turn whole, for a window that opened its activity: the page
+    /// carried only the head of each tool call's text.
+    public func loadTurn(_ ref: SessionRef, n: Int) async {
+        await manager.readTurn(ref, n: n)
+        await pull()
+    }
+
     /// The runs of a command or service, read now and kept fresh by
     /// the host's `changed {runs}`.
     public func readRuns(_ ref: SessionRef) async {

@@ -54,19 +54,22 @@ public struct ActivityView: Decodable, Sendable, Equatable, Identifiable {
     public let error: Bool
     public let detail: ToolDetailView?
     public let text: String?
+    /// The page carries only the head of the detail or text; the turn
+    /// read on its own carries it whole.
+    public let more: Bool
     /// Position in the turn; activities are not identified on the wire.
     public var index: Int = 0
 
     public var id: Int { index }
 
     enum CodingKeys: String, CodingKey {
-        case kind, line, error, detail, text
+        case kind, line, error, detail, text, more
         case atMs = "at_ms"
     }
 
     public init(
         kind: ActivityKindView, line: String, atMs: UInt64? = nil, error: Bool = false,
-        detail: ToolDetailView? = nil, text: String? = nil
+        detail: ToolDetailView? = nil, text: String? = nil, more: Bool = false
     ) {
         self.kind = kind
         self.line = line
@@ -74,6 +77,7 @@ public struct ActivityView: Decodable, Sendable, Equatable, Identifiable {
         self.error = error
         self.detail = detail
         self.text = text
+        self.more = more
     }
 
     public init(from decoder: Decoder) throws {
@@ -84,6 +88,26 @@ public struct ActivityView: Decodable, Sendable, Equatable, Identifiable {
         error = try c.decodeIfPresent(Bool.self, forKey: .error) ?? false
         detail = try c.decodeIfPresent(ToolDetailView.self, forKey: .detail)
         text = try c.decodeIfPresent(String.self, forKey: .text)
+        more = try c.decodeIfPresent(Bool.self, forKey: .more) ?? false
+    }
+}
+
+/// One turn read whole (`session.turn`): the page's turn with its
+/// activity uncut, or no turn when the number is past the end.
+public struct TurnBody: Decodable, Sendable, Equatable {
+    public let resumeID: String
+    public let total: Int
+    public let turn: TurnView?
+
+    enum CodingKeys: String, CodingKey {
+        case total, turn
+        case resumeID = "resume_id"
+    }
+
+    public init(resumeID: String, total: Int, turn: TurnView?) {
+        self.resumeID = resumeID
+        self.total = total
+        self.turn = turn
     }
 }
 

@@ -115,6 +115,20 @@ fn conversation(n: usize) -> Conversation {
                 format!("answer {i}")
             },
             assistant_msgs: 1,
+            activity: vec![switchboard::ports::transcript::Activity {
+                kind: switchboard::ports::transcript::ActivityKind::Tool,
+                line: "Read README.md".into(),
+                at: None,
+                error: false,
+                detail: Some(switchboard::ports::transcript::ToolDetail {
+                    name: "Read".into(),
+                    input: r#"{"file_path": "README.md"}"#.into(),
+                    result: "# Switchboard\n".repeat(i * 40),
+                    path: None,
+                }),
+                text: None,
+            }],
+            tools: 1,
             ..Turn::default()
         });
     }
@@ -1042,6 +1056,15 @@ fn content_fixtures(
             .1,
         ),
         (
+            "turn",
+            get(
+                port,
+                &format!("/api/v1/sessions/{session}/conversation/1"),
+                t,
+            )
+            .1,
+        ),
+        (
             "last_response",
             get(
                 port,
@@ -1914,6 +1937,51 @@ fn stalled_strangers_fill_their_own_pool_and_never_a_paired_clients() {
 /// the rest, `from=last` is its tail, the last response is the last
 /// turn's answer at the conversation's revision, and both are masked;
 /// a shell has no conversation.
+#[test]
+fn a_page_carries_the_head_of_a_tool_result_and_the_turn_alone_carries_it_whole() {
+    let mut port = port();
+    port.transcripts.set(Some(conversation(3)));
+    let (_, _, session) = seed(&mut port, "");
+    let token = pair(&mut port, "ABCD2345", Scope::Read, "Vision Pro");
+    let t = Some(token.as_str());
+    launched(&mut port, &session);
+    let (_, page) = get(
+        &mut port,
+        &format!("/api/v1/sessions/{session}/conversation?from=3"),
+        t,
+    );
+    let activity = &page["body"]["turns"][0]["activity"][0];
+    assert_eq!(activity["more"], true, "{activity}");
+    assert_eq!(activity["detail"]["result"].as_str().unwrap().len(), 512);
+    let (status, whole) = get(
+        &mut port,
+        &format!("/api/v1/sessions/{session}/conversation/3"),
+        t,
+    );
+    assert_eq!(status, 200, "{whole}");
+    assert_eq!(whole["body"]["total"], 3);
+    assert_eq!(whole["body"]["turn"]["n"], 3);
+    let activity = &whole["body"]["turn"]["activity"][0];
+    assert!(activity.get("more").is_none());
+    assert_eq!(
+        activity["detail"]["result"].as_str().unwrap().len(),
+        "# Switchboard\n".len() * 120
+    );
+    assert_eq!(whole["revision"], page["revision"]);
+    let (_, missing) = get(
+        &mut port,
+        &format!("/api/v1/sessions/{session}/conversation/9"),
+        t,
+    );
+    assert_eq!(missing["body"]["turn"], serde_json::Value::Null);
+    let (status, _) = get(
+        &mut port,
+        &format!("/api/v1/sessions/{session}/conversation/x"),
+        t,
+    );
+    assert_eq!(status, 400);
+}
+
 #[test]
 fn a_conversation_page_anchored_before_a_held_turn_ends_there() {
     let mut port = port();

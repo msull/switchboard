@@ -36,6 +36,15 @@ public struct ConversationState: Sendable, Equatable {
         turns = page.turns
     }
 
+    /// A turn read whole takes the place of the page's copy, when it
+    /// is from the same transcript and held.
+    public mutating func fill(_ whole: TurnBody) {
+        guard whole.resumeID == resumeID, let turn = whole.turn,
+            let i = turns.firstIndex(where: { $0.n == turn.n })
+        else { return }
+        turns[i] = turn
+    }
+
     /// The first turn held, so a window knows whether earlier ones
     /// exist to load.
     public var firstHeld: Int? { turns.first?.n }

@@ -28,6 +28,17 @@ final class ConversationTests: XCTestCase {
         XCTAssertEqual(held.turns.map(\.n), [1, 2, 3, 4])
     }
 
+    func testAWholeTurnFillsThePagesCopyOnlyFromTheSameTranscript() {
+        var held = ConversationState(page: ConversationBody(
+            resumeID: "h", total: 2, from: 1, next: nil, turns: [turn(1), turn(2)]))
+        held.fill(TurnBody(resumeID: "h", total: 2, turn: turn(2, "whole")))
+        XCTAssertEqual(held.turns[1].finalText, "whole")
+        held.fill(TurnBody(resumeID: "other", total: 2, turn: turn(1, "stray")))
+        XCTAssertEqual(held.turns[0].finalText, "a1", "another transcript's turn is ignored")
+        held.fill(TurnBody(resumeID: "h", total: 2, turn: nil))
+        XCTAssertEqual(held.turns.count, 2)
+    }
+
     func testAnotherResumeHandleDropsEverythingHeld() {
         var held = ConversationState(page: ConversationBody(
             resumeID: "h", total: 2, from: 1, next: nil, turns: [turn(1), turn(2)]))

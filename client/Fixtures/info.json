@@ -4,6 +4,7 @@
       "read"
     ],
     "limits": {
+      "activity_bytes": 512,
       "body_bytes": 1048576,
       "conversation_turns": 100,
       "notes_bytes": 65536,
@@ -14,10 +15,10 @@
     },
     "pairing_open": false,
     "protocol": 1,
-    "server_id": "e93cb078-f95d-465b-ab1e-e4a1d375c17c",
+    "server_id": "3a322788-8861-493a-b7e9-581b8d6a9c61",
     "server_name": "Desk Mac",
-    "spki_sha256": "3d49f7aa8f9643cf82fcb6c9e5e249199a4c7c31a6939d5c7562953bbe49d746"
+    "spki_sha256": "f60d7441afaeda8bf263c260511a9241e6f6687517b972c0cfe6119860eae8b6"
   },
-  "epoch": "2feedd04-8948-4740-89ba-f3d2deb9e6ae",
+  "epoch": "328786a8-c75f-4f82-af97-e817328b6898",
   "revision": 10
 }

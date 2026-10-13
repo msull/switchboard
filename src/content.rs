@@ -54,6 +54,9 @@ pub const RUN_LINES_CAP: usize = 500;
 pub const TURN_BYTES_CAP: usize = 256 * 1024;
 /// A conversation page stops before its turns' JSON passes this.
 pub const PAGE_BYTES_CAP: usize = 640 * 1024;
+/// The most of a tool call's input, its result, or an activity's text
+/// a page carries; a turn read on its own carries them whole.
+pub const ACTIVITY_BYTES_CAP: usize = 512;
 /// The most turns a page carries, and how many without `limit`.
 pub const PAGE_TURNS_CAP: usize = 100;
 pub const PAGE_TURNS_DEFAULT: usize = 20;
@@ -174,10 +177,21 @@ pub enum PageFrom {
 /// What of the content a job wants.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ContentView {
-    Screen { lines: usize },
-    Page { from: PageFrom, limit: usize },
+    Screen {
+        lines: usize,
+    },
+    Page {
+        from: PageFrom,
+        limit: usize,
+    },
     LastResponse,
-    Tail { lines: usize },
+    /// One turn whole, with its tool detail uncut.
+    Turn {
+        n: usize,
+    },
+    Tail {
+        lines: usize,
+    },
 }
 
 /// One read for the worker: what to read, how to mask it, and where
@@ -419,6 +433,7 @@ fn observe(
                     ContentView::Page { from, limit } => {
                         conversation_page(conversation, &resume_id, from, limit)
                     }
+                    ContentView::Turn { n } => turn_body(conversation, &resume_id, n),
                     _ => last_response(conversation, &resume_id),
                 };
                 (source, body)
@@ -489,7 +504,7 @@ pub fn conversation_page(
             let mut turns = Vec::new();
             let mut next = None;
             for turn in conversation.turns.iter().skip(first - 1) {
-                let (value, size) = turn_json(turn);
+                let (value, size) = turn_json(turn, false);
                 if !fits(turns.len(), bytes, size) {
                     next = Some(turn.n);
                     break;
@@ -506,7 +521,7 @@ pub fn conversation_page(
             };
             let mut turns = Vec::new();
             for turn in conversation.turns[..end].iter().rev() {
-                let (value, size) = turn_json(turn);
+                let (value, size) = turn_json(turn, false);
                 if !fits(turns.len(), bytes, size) {
                     break;
                 }
@@ -565,13 +580,32 @@ pub fn last_response(conversation: &Conversation, resume_id: &str) -> serde_json
 /// One turn on the wire and its size. Over the turn cap the tool
 /// detail and the agent's notes go first, then the prompt is shortened,
 /// then the answer is cut from its front; `truncated` says so.
-fn turn_json(turn: &Turn) -> (serde_json::Value, usize) {
+/// One turn whole on the wire, for a client that opened a turn's
+/// activity on a page and wants the detail the page cut.
+#[must_use]
+pub fn turn_body(conversation: &Conversation, resume_id: &str, n: usize) -> serde_json::Value {
+    let turn = n
+        .checked_sub(1)
+        .and_then(|i| conversation.turns.get(i))
+        .map(|t| turn_json(t, true).0);
+    serde_json::json!({
+        "resume_id": resume_id,
+        "total": conversation.turns.len(),
+        "turn": turn,
+    })
+}
+
+/// A turn under its byte cap: whole when it fits, else its tool detail
+/// and notes go first, then its prompt is shortened, then its answer is
+/// cut from the front. `full` carries each activity's text whole; a
+/// page carries the head of each, marked `more`, to stay light.
+fn turn_json(turn: &Turn, full: bool) -> (serde_json::Value, usize) {
     let mut lean = false;
     let mut user = turn.user.clone();
     let mut final_text = turn.final_text.clone();
     let mut truncated = false;
     loop {
-        let value = turn_value(turn, &user, &final_text, lean, truncated);
+        let value = turn_value(turn, &user, &final_text, lean, truncated, full);
         let size = value.to_string().len();
         if size <= TURN_BYTES_CAP {
             return (value, size);
@@ -595,7 +629,15 @@ fn turn_value(
     final_text: &str,
     lean: bool,
     truncated: bool,
+    full: bool,
 ) -> serde_json::Value {
+    let head = |text: &str| {
+        if full {
+            (text.to_owned(), false)
+        } else {
+            head_text(text, ACTIVITY_BYTES_CAP)
+        }
+    };
     let activity: Vec<serde_json::Value> = turn
         .activity
         .iter()
@@ -612,16 +654,25 @@ fn turn_value(
                 "error": a.error,
             });
             if !lean {
+                let mut more = false;
                 if let Some(d) = &a.detail {
+                    let (input, cut_input) = head(&d.input);
+                    let (result, cut_result) = head(&d.result);
+                    more |= cut_input || cut_result;
                     v["detail"] = serde_json::json!({
                         "name": d.name,
-                        "input": d.input,
-                        "result": d.result,
+                        "input": input,
+                        "result": result,
                         "path": d.path.as_ref().map(|p| p.display().to_string()),
                     });
                 }
                 if let Some(t) = &a.text {
-                    v["text"] = serde_json::json!(t);
+                    let (text, cut) = head(t);
+                    more |= cut;
+                    v["text"] = serde_json::json!(text);
+                }
+                if more {
+                    v["more"] = serde_json::json!(true);
                 }
             }
             v
@@ -641,6 +692,19 @@ fn turn_value(
         "permission_mode": turn.permission_mode,
         "truncated": truncated,
     })
+}
+
+/// The first `cap` bytes of `text` on a character boundary, and
+/// whether anything was cut.
+fn head_text(text: &str, cap: usize) -> (String, bool) {
+    if text.len() <= cap {
+        return (text.to_owned(), false);
+    }
+    let mut cut = cap;
+    while !text.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    (text[..cut].to_owned(), true)
 }
 
 /// The last `cap` bytes of `text` on a character boundary, and
@@ -902,8 +966,14 @@ mod tests {
                 }),
                 text: None,
             });
+        // On a page the detail is the head of itself, so the turn fits.
         let page = conversation_page(&c, "r", PageFrom::Turn(1), 1);
         let turn = &page["turns"][0];
+        assert_eq!(turn["truncated"], false);
+        assert_eq!(turn["activity"][0]["more"], true);
+        // Read whole, the detail is over the turn's cap and goes.
+        let whole = turn_body(&c, "r", 1);
+        let turn = &whole["turn"];
         assert_eq!(turn["truncated"], true);
         assert_eq!(turn["final_text"], "answer 1");
         assert!(
@@ -950,6 +1020,54 @@ mod tests {
         assert_eq!(page["from"], 3);
         assert_eq!(page["next"], 6);
         assert_eq!(page["turns"].as_array().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn a_page_carries_the_head_of_each_tool_detail_and_a_turn_read_alone_is_whole() {
+        let mut c = turns(2);
+        c.turns[1]
+            .activity
+            .push(crate::ports::transcript::Activity {
+                kind: ActivityKind::Tool,
+                line: "Read x".into(),
+                at: None,
+                error: false,
+                detail: Some(crate::ports::transcript::ToolDetail {
+                    name: "Read".into(),
+                    input: "i".repeat(ACTIVITY_BYTES_CAP + 1),
+                    result: "héllo".into(),
+                    path: None,
+                }),
+                text: None,
+            });
+        let page = conversation_page(&c, "r", PageFrom::Turn(1), 10);
+        let activity = &page["turns"][1]["activity"][0];
+        assert_eq!(activity["more"], true);
+        assert_eq!(
+            activity["detail"]["input"].as_str().unwrap().len(),
+            ACTIVITY_BYTES_CAP
+        );
+        assert_eq!(
+            activity["detail"]["result"], "héllo",
+            "short: whole, no mark"
+        );
+        assert!(page["turns"][0]["activity"].as_array().unwrap().is_empty());
+
+        let whole = turn_body(&c, "r", 2);
+        assert_eq!(whole["total"], 2);
+        let activity = &whole["turn"]["activity"][0];
+        assert!(activity.get("more").is_none());
+        assert_eq!(
+            activity["detail"]["input"].as_str().unwrap().len(),
+            ACTIVITY_BYTES_CAP + 1
+        );
+        assert_eq!(turn_body(&c, "r", 3)["turn"], serde_json::Value::Null);
+        assert_eq!(turn_body(&c, "r", 0)["turn"], serde_json::Value::Null);
+        assert_eq!(
+            head_text("héllo", 2).0,
+            "h",
+            "a cut lands on a character boundary"
+        );
     }
 
     #[test]

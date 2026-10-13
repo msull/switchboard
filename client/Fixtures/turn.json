@@ -1,0 +1,35 @@
+{
+  "body": {
+    "resume_id": "f372b259-c780-4d78-bd6b-3885f758e066",
+    "total": 2,
+    "turn": {
+      "activity": [
+        {
+          "at_ms": null,
+          "detail": {
+            "input": "{\"file_path\": \"README.md\"}",
+            "name": "Read",
+            "path": null,
+            "result": "# Switchboard\n# Switchboard\n# Switchboard\n# Switchboard\n# Switchboard\n# Switchboard\n# Switchboard\n# Switchboard\n# Switchboard\n# Switchboard\n# Switchboard\n# Switchboard\n# Switchboard\n# Switchboard\n# Switchboard\n# Switchboard\n# Switchboard\n# Switchboard\n# Switchboard\n# Switchboard\n# Switchboard\n# Switchboard\n# Switchboard\n# Switchboard\n# Switchboard\n# Switchboard\n# Switchboard\n# Switchboard\n# Switchboard\n# Switchboard\n# Switchboard\n# Switchboard\n# Switchboard\n# Switchboard\n# Switchboard\n# Switchboard\n# Switchboard\n# Switchboard\n# Switchboard\n# Switchboard\n"
+          },
+          "error": false,
+          "kind": "tool",
+          "line": "Read README.md"
+        }
+      ],
+      "assistant_msgs": 1,
+      "at_ms": null,
+      "end_ms": null,
+      "errors": 0,
+      "final_text": "answer 1",
+      "n": 1,
+      "permission_mode": null,
+      "thinking": 0,
+      "tools": 1,
+      "truncated": false,
+      "user": "prompt 1"
+    }
+  },
+  "epoch": "328786a8-c75f-4f82-af97-e817328b6898",
+  "revision": 12
+}

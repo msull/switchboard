@@ -169,6 +169,61 @@ final class WatchTests: XCTestCase {
         XCTAssertEqual(fake.calls.filter { $0 == "unwatch:r1" }.count, 1)
     }
 
+    func testAChangeIsFollowedToTheEndAcrossSeveralPages() async throws {
+        let (_, fake, connection) = try await host()
+        fake.set {
+            $0.conversations = [
+                "r1": ConversationBody(
+                    resumeID: "h1", total: 1, from: 1, next: nil,
+                    turns: [TurnView(n: 1, user: "p1", finalText: "a1")])
+            ]
+        }
+        await connection.watch(.conversation(session: "r1"))
+        await connection.readConversation("r1", from: nil, limit: 20)
+        // Forty-four turns arrive while the window was away: the fake
+        // pages twenty at a time, so following the change takes three.
+        fake.set {
+            $0.revision = 9
+            $0.conversations["r1"] = ConversationBody(
+                resumeID: "h1", total: 45, from: 1, next: nil,
+                turns: (1...45).map { TurnView(n: $0, user: "p\($0)", finalText: "a\($0)") })
+        }
+        fake.emit(.changed, ResourceRef(kind: "conversation", id: "r1"))
+        await settle(connection) { await $0.conversations["r1"]?.lastHeld == 45 }
+        let held = await connection.conversations["r1"]?.turns.map(\.n)
+        XCTAssertEqual(held, Array(1...45), "no gap and the end reached")
+        XCTAssertEqual(fake.calls.filter { $0 == "conversation" }.count, 4, "\(fake.calls)")
+    }
+
+    func testOpeningATurnReadsItWholeInPlaceOfThePagesCopy() async throws {
+        let (manager, fake, _) = try await host()
+        let ref = SessionRef(serverID: a, recordID: "r1")
+        let head = ActivityView(
+            kind: .tool, line: "Read x", detail: ToolDetailView(name: "Read", input: "{}", result: "# Swi"),
+            more: true)
+        let whole = ActivityView(
+            kind: .tool, line: "Read x", detail: ToolDetailView(name: "Read", input: "{}", result: "# Switchboard"))
+        fake.set {
+            $0.conversations = [
+                "r1": ConversationBody(
+                    resumeID: "h1", total: 1, from: 1, next: nil,
+                    turns: [TurnView(n: 1, user: "p1", finalText: "a1", activity: [head])])
+            ]
+            $0.turns = ["r1": [TurnView(n: 1, user: "p1", finalText: "a1", activity: [whole])]]
+        }
+        await manager.readConversation(ref, from: nil, limit: 20)
+        let page = await manager.conversation(for: ref)
+        XCTAssertEqual(page?.turns[0].activity[0].more, true)
+        await manager.readTurn(ref, n: 1)
+        let filled = await manager.conversation(for: ref)
+        XCTAssertEqual(filled?.turns[0].activity[0].more, false)
+        XCTAssertEqual(filled?.turns[0].activity[0].detail?.result, "# Switchboard")
+        XCTAssertEqual(fake.calls.filter { $0 == "turn:1" }.count, 1)
+        await manager.readTurn(ref, n: 9)
+        let same = await manager.conversation(for: ref)
+        XCTAssertEqual(same, filled, "a turn past the end changes nothing")
+    }
+
     func testEarlierTurnsArriveAsThePageEndingBeforeTheFirstHeld() async throws {
         let (manager, fake, _) = try await host()
         let ref = SessionRef(serverID: a, recordID: "r1")

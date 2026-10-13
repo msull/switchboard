@@ -466,8 +466,12 @@ public actor ServerConnection {
             if lastResponses[session] != nil || conversations[session] == nil {
                 await readLastResponse(session)
             }
-            if let held = conversations[session] {
-                await readConversation(session, from: held.lastHeld, limit: nil)
+            // From the last turn held to the end: a page holds only
+            // so many turns, and more than that may have arrived.
+            var from = conversations[session]?.lastHeld
+            for _ in 0..<Self.followHops {
+                guard from != nil else { break }
+                from = await readConversation(session, from: from, before: nil, limit: nil)
             }
         case .runs(let session):
             if runs[session] != nil { await readRuns(session) }
@@ -510,14 +514,22 @@ public actor ServerConnection {
 
     /// Read a page of the conversation: from `from`, or the last page
     /// when `nil`, merged into what is held.
+    /// How many pages a follow-up of a change reads toward the end
+    /// before it leaves the rest to the next change.
+    public static let followHops = 10
+
     public func readConversation(_ session: String, from: Int?, limit: Int?) async {
-        await readConversation(session, from: from, before: nil, limit: limit)
+        _ = await readConversation(session, from: from, before: nil, limit: limit)
     }
 
     /// The page before turn `before` when given, else the one from
-    /// `from`, or the tail when neither.
-    public func readConversation(_ session: String, from: Int?, before: Int?, limit: Int?) async {
-        guard let api else { return }
+    /// `from`, or the tail when neither. Returns the page's `next`:
+    /// the turn to continue from when the page stopped short.
+    @discardableResult
+    public func readConversation(_ session: String, from: Int?, before: Int?, limit: Int?) async
+        -> Int?
+    {
+        guard let api else { return nil }
         do {
             let reply = try await api.conversation(
                 session, from: before == nil ? from.map(String.init) ?? "last" : nil,
@@ -531,8 +543,26 @@ public actor ServerConnection {
                 }
             }
             changed()
+            return reply.body.next
         } catch RemoteError.refused(let status, _, _) where status == 400 || status == 404 {
             conversations[session] = nil
+            changed()
+        } catch let error as RemoteError {
+            handle(error)
+        } catch {
+            handle(.transport("\(error)"))
+        }
+        return nil
+    }
+
+    /// One turn whole, put in place of the page's copy.
+    public func readTurn(_ session: String, n: Int) async {
+        guard let api else { return }
+        do {
+            let reply = try await api.turn(session, n: n)
+            apply(.conversation(session: session), at: reply.revision) {
+                conversations[session]?.fill(reply.body)
+            }
             changed()
         } catch let error as RemoteError {
             handle(error)

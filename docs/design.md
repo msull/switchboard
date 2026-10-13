@@ -3344,7 +3344,12 @@ Built so far:
   `next`; or anchored at its end with `from=last` or `before=n`,
   filling backward so the anchor is always in it, since a page of
   large turns walked forward from a count stopped short of the end and
-  showed a stale tail; a turn over 256 KiB loses its tool detail and
+  showed a stale tail; a page carries the first 512 bytes of each
+  tool call's input and result, marked `more`, and
+  `session.turn` reads one turn whole for a client that opened its
+  activity, which cut a page of this project's own transcript from
+  half a megabyte for six turns to a page of twenty; a client follows
+  a change page after page to the end; a turn over 256 KiB loses its tool detail and
   notes first, then its prompt is shortened, then its answer is cut
   from the front, and says `truncated`), `session.last_response` (the
   last turn's answer, a projection of the conversation key at its

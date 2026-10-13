@@ -96,6 +96,8 @@ public protocol HostAPI: Sendable {
     func conversation(_ id: String, from: String?, before: Int?, limit: Int?) async throws
         -> Envelope<ConversationBody>
     func lastResponse(_ id: String) async throws -> Envelope<LastResponseBody>
+    /// One turn whole, with the detail its page cut.
+    func turn(_ id: String, n: Int) async throws -> Envelope<TurnBody>
     func runs(_ id: String) async throws -> Envelope<RunsBody>
     func runOutput(_ id: String, run: Int, lines: Int?) async throws -> Envelope<RunOutputBody>
 }
@@ -239,6 +241,10 @@ public final class HostClient: HostAPI, @unchecked Sendable {
 
     public func lastResponse(_ id: String) async throws -> Envelope<LastResponseBody> {
         try await get("sessions/\(id)/last-response", query: nil)
+    }
+
+    public func turn(_ id: String, n: Int) async throws -> Envelope<TurnBody> {
+        try await get("sessions/\(id)/conversation/\(n)", query: nil)
     }
 
     public func runs(_ id: String) async throws -> Envelope<RunsBody> {

@@ -326,7 +326,7 @@ struct ConversationView: View {
                                 .disabled(loading)
                             }
                             ForEach(conversation.turns) { turn in
-                                TurnRow(turn: turn)
+                                TurnRow(model: model, ref: ref, turn: turn)
                             }
                             Color.clear.frame(height: 1).id("end")
                         }
@@ -360,6 +360,8 @@ struct ConversationView: View {
 
 /// One turn: the prompt, the activity behind a disclosure, the answer.
 struct TurnRow: View {
+    @Bindable var model: BrowserModel
+    let ref: SessionRef
     let turn: TurnView
     @State private var open = false
     @Environment(\.textScale) private var scale
@@ -386,6 +388,13 @@ struct TurnRow: View {
                     .padding(.leading, 8)
                 } label: {
                     Text(summary).font(Scaled.caption(scale)).foregroundStyle(.secondary)
+                }
+                // The page carries the head of each tool call's text;
+                // opening the activity fetches the turn whole.
+                .onChange(of: open) { _, open in
+                    if open, turn.activity.contains(where: \.more) {
+                        Task { await model.loadTurn(ref, n: turn.n) }
+                    }
                 }
             }
             if turn.finalText.isEmpty {
@@ -427,6 +436,9 @@ struct ActivityRow: View {
                     if !detail.result.isEmpty {
                         Divider()
                         Text(detail.result).font(Scaled.mono(scale)).textSelection(.enabled)
+                    }
+                    if activity.more {
+                        Text("Loading the rest…").font(Scaled.caption2(scale)).foregroundStyle(.secondary)
                     }
                 }
                 .padding(.leading, 8)
