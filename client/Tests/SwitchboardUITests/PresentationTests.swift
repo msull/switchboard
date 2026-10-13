@@ -254,6 +254,18 @@ final class BrowsingTests: XCTestCase {
         XCTAssertEqual(u.heard, "fix the test and run it twice then push")
     }
 
+    func testTheRecognizerClosesAnUtteranceBySendingItsWordsAgainLater() {
+        var u = Utterances()
+        u.take("fix the test", start: 0.4, finished: false)
+        u.take("Fix the test.", start: 3.0, finished: false)
+        XCTAssertEqual(u.committed, "Fix the test.")
+        XCTAssertEqual(u.live, "")
+        u.take("and run it", start: 3.2, finished: false)
+        XCTAssertEqual(u.heard, "Fix the test. and run it")
+        XCTAssertTrue(Utterances.sameWords("fix the test", "Fix, the test!"))
+        XCTAssertFalse(Utterances.sameWords("fix the test", "fix the tests"))
+    }
+
     func testAnEditInsideTheLiveUtteranceDropsItsRevisions() {
         var u = Utterances()
         u.take("hello", start: 0.1, finished: false)

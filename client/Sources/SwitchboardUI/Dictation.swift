@@ -37,6 +37,14 @@ public struct Utterances: Equatable, Sendable {
     /// one, so the live text is committed first.
     public mutating func take(_ text: String, start: TimeInterval?, finished: Bool) {
         if let liveStart, let start, start > liveStart + Self.slack {
+            // The recognizer closes an utterance by sending its words
+            // once more, re-timed and sometimes re-punctuated: that is
+            // the end of the live one, not the next.
+            if Self.sameWords(text, live) {
+                if !ignoring { live = text }
+                commit()
+                return
+            }
             commit()
         } else if ignoring {
             if finished { commit() }
@@ -72,6 +80,14 @@ public struct Utterances: Equatable, Sendable {
     /// utterance: the recognizer re-times its first word a little as
     /// it revises.
     static let slack: TimeInterval = 0.4
+
+    /// The same words, whatever the case, punctuation and spacing.
+    static func sameWords(_ a: String, _ b: String) -> Bool {
+        func words(_ s: String) -> [Character] {
+            s.lowercased().filter { $0.isLetter || $0.isNumber }
+        }
+        return words(a) == words(b)
+    }
 }
 
 /// Dictation into the message field, started by its microphone button.

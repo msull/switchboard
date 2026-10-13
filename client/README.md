@@ -7,7 +7,7 @@ macOS 14, iOS 17 and visionOS 1.
 
 ```sh
 swift build                      # every target
-swift test                       # 54 tests: fixtures, commands, pinning, the connection core, events, watches, conversations, presentation, browsing
+swift test                       # 55 tests: fixtures, commands, pinning, the connection core, events, watches, conversations, presentation, browsing
 swift run switchboard-remote     # the command-line browser (usage below)
 scripts/sim.sh run               # the visionOS app on the simulator (below)
 ```
@@ -75,7 +75,8 @@ scripts/sim.sh run               # the visionOS app on the simulator (below)
   device has it; what is heard goes after what was typed as utterances,
   `Utterances`, the finished ones kept and the live one revised in
   place, since the recognizer starts over after a pause and would
-  otherwise replace the earlier phrase; a hand edit while listening
+  otherwise replace the earlier phrase, and closes one by sending its
+  words once more, re-timed; a hand edit while listening
   keeps the field's text and the live utterance goes on after it;
   the system keyboard's own mic still works; visionOS gives an app no
   gaze or dwell event and "look to dictate" belongs to search fields
