@@ -7,7 +7,7 @@ macOS 14, iOS 17 and visionOS 1.
 
 ```sh
 swift build                      # every target
-swift test                       # 55 tests: fixtures, commands, pinning, the connection core, events, watches, conversations, presentation, browsing
+swift test                       # 59 tests: fixtures, commands, pinning, the connection core, events, watches, conversations, the draft, presentation, browsing
 swift run switchboard-remote     # the command-line browser (usage below)
 scripts/sim.sh run               # the visionOS app on the simulator (below)
 ```
@@ -45,7 +45,11 @@ scripts/sim.sh run               # the visionOS app on the simulator (below)
   `command`, a send, resume or trust under the control scope with a
   UUID op per command, and on a timeout the op's status rather than a
   resend: done takes the logged reply, interrupted is reported as
-  started, unknown goes once more with the same op),
+  started, unknown goes once more with the same op; the draft, a
+  session's prompt as the host's Prompt Box editor holds it, read on
+  `changed {draft}` without a watch, replaced whole, worked with the
+  editor's tools, dictated into as speech events, and sent under an
+  op as a command is),
   and `ConnectionManager`
   with the unified store, filters and the cross-host order; its loop
   only retries hosts that are not connected.
@@ -69,18 +73,28 @@ scripts/sim.sh run               # the visionOS app on the simulator (below)
   host pill and an icon-only Sessions button) and mode pills that
   turn into icons rather than wrap, so a tall narrow card fits, and a
   banner when the host is away or the session was removed; on a
-  Claude session a control bar (`ControlBar`): a message field with
+  Claude session a control bar (`ControlBar`): the prompt field with
   Send and a microphone button that starts dictation at once through
   the Speech framework (`Dictation`: on-device recognition where the
-  device has it; what is heard goes after what was typed as utterances,
-  `Utterances`, the finished ones kept and the live one revised in
-  place, since the recognizer starts over after a pause and would
-  otherwise replace the earlier phrase, and closes one by sending its
-  words once more, re-timed; a hand edit while listening
-  keeps the field's text and the live utterance goes on after it;
-  the system keyboard's own mic still works; visionOS gives an app no
-  gaze or dwell event and "look to dictate" belongs to search fields
-  only, so the button is a tap), "Trust
+  device has it; what is heard is kept as utterances, `Utterances`,
+  the finished ones and the live one revised in place, since the
+  recognizer starts over after a pause and would otherwise replace the
+  earlier phrase, and closes one by sending its words once more,
+  re-timed; the system keyboard's own mic still works; visionOS gives
+  an app no gaze or dwell event and "look to dictate" belongs to
+  search fields only, so the button is a tap). On a host that keeps a
+  draft (`/info` lists `draft`) the field is the host's Prompt Box
+  editor: the draft is held while the bar is up, typing replaces its
+  text once the typing pauses (the host's reply is the text, a newer
+  edit outranks it), dictation goes to it as the editor's speech
+  events in order (`Dictation.onEvents`, one recognizer session per
+  run), the editor's tools sit above the field (`DraftTools`: undo,
+  redo, the last sentence deleted, clear, the AI pass where the host
+  has a key) and Send takes the draft to the pane under an op; a
+  caption says when the host's editor is listening or degraded. On an
+  older host the field is the device's own, what is heard goes after
+  what was typed, and a hand edit while listening keeps the field's
+  text with the live utterance going on after it; "Trust
   this folder" when the host says the question is up, and Resume for a
   session that is not running, behind "Resume spends a turn"; a read
   device sees why the bar is off instead; the

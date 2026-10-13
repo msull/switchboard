@@ -246,6 +246,38 @@ public actor ConnectionManager {
         await connections[ref.serverID]?.lastResponses[ref.recordID]
     }
 
+    // MARK: The draft (§4.5)
+
+    /// Whether a host keeps a draft per session.
+    public func hasDraft(_ id: ServerID) async -> Bool {
+        await connections[id]?.hasDraft ?? false
+    }
+
+    public func draft(for ref: SessionRef) async -> DraftView? {
+        await connections[ref.serverID]?.drafts[ref.recordID]
+    }
+
+    public func readDraft(_ ref: SessionRef) async {
+        await connections[ref.serverID]?.readDraft(ref.recordID)
+    }
+
+    public func draftAction(_ ref: SessionRef, _ tool: DraftTool) async -> DraftOutcome {
+        await connections[ref.serverID]?.draftAction(ref.recordID, tool) ?? .unanswered("no host")
+    }
+
+    public func replaceDraft(_ ref: SessionRef, text: String) async -> DraftOutcome {
+        await connections[ref.serverID]?.replaceDraft(ref.recordID, text: text) ?? .unanswered("no host")
+    }
+
+    public func sendDraft(_ ref: SessionRef) async -> DraftOutcome {
+        await connections[ref.serverID]?.sendDraft(ref.recordID) ?? .unanswered("no host")
+    }
+
+    public func dictate(_ ref: SessionRef, recognizer: UInt64, events: [DictationEvent]) async -> DraftOutcome {
+        await connections[ref.serverID]?.dictate(ref.recordID, recognizer: recognizer, events: events)
+            ?? .unanswered("no host")
+    }
+
     /// Read a page of the conversation from `from`, or its end.
     public func readConversation(_ ref: SessionRef, from: Int?, limit: Int?) async {
         await connections[ref.serverID]?.readConversation(ref.recordID, from: from, limit: limit)

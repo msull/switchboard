@@ -41,6 +41,13 @@ final class FakeHost: HostAPI, @unchecked Sendable {
     var commandRefusal: RemoteError?
     /// What `opStatus` answers, by op; an op not here is unknown.
     var opStatuses: [String: OpStatusView] = [:]
+    /// The drafts, by session: finals append, replace sets, undo takes
+    /// the last change back, send clears and is a `send:` call.
+    var drafts: [String: DraftView] = [:]
+    var draftHistory: [String: [String]] = [:]
+    /// `(recognizer session, events)` as received.
+    var dictations: [(UInt64, [DictationEvent])] = []
+    var capabilities = ["read", "control", "draft"]
     /// The op of every command, in order.
     var ops: [String] = []
     /// Runs after a `sessions` reply is built and before it is returned:
@@ -149,7 +156,7 @@ final class FakeHost: HostAPI, @unchecked Sendable {
                 from: Data(
                     """
                     {"server_id":"\(serverID)","server_name":"\(name)","protocol":1,
-                     "capabilities":["read"],"spki_sha256":"\(spki)",
+                     "capabilities":[\(capabilities.map { "\"\($0)\"" }.joined(separator: ","))],"spki_sha256":"\(spki)",
                      "limits":{"body_bytes":1,"string_bytes":1,"notes_bytes":1,"screen_lines":1},
                      "pairing_open":false}
                     """.utf8))
@@ -282,6 +289,88 @@ final class FakeHost: HostAPI, @unchecked Sendable {
         return try answer("op:\(op)") { OpStatusBody(status: status) }
     }
 
+    func draft(_ id: String) async throws -> Envelope<DraftBody> {
+        lock.lock()
+        let draft = drafts[id]
+        lock.unlock()
+        guard let draft else { throw RemoteError.refused(status: 400, code: "no_draft", message: "no draft") }
+        return try answer("draft:\(id)") { DraftBody(draft: draft) }
+    }
+
+    private func change(_ id: String, _ edit: (inout DraftView) -> Void) {
+        var draft = drafts[id] ?? DraftView()
+        draftHistory[id, default: []].append(draft.text)
+        edit(&draft)
+        draft.canUndo = !(draftHistory[id] ?? []).isEmpty
+        drafts[id] = draft
+    }
+
+    func draftAction(_ id: String, _ body: DraftActionBody) async throws -> Envelope<DraftBody> {
+        lock.lock()
+        calls.append("draft:\(id):\(body.action)")
+        let silent = commandSilences > 0
+        if silent { commandSilences -= 1 }
+        let refusal = commandRefusal
+        if body.action == "send" { ops.append(body.op ?? "") }
+        if !silent, refusal == nil {
+            switch body.action {
+            case "replace": change(id) { $0.text = body.text ?? "" }
+            case "undo":
+                if let last = draftHistory[id]?.popLast() {
+                    drafts[id]?.text = last
+                    drafts[id]?.canUndo = !(draftHistory[id] ?? []).isEmpty
+                }
+            case "clear": change(id) { $0.text = "" }
+            case "send":
+                let text = drafts[id]?.text ?? ""
+                calls.append("send:\(id):\(text)")
+                change(id) { $0.text = "" }
+            default: break
+            }
+        }
+        let draft = drafts[id] ?? DraftView()
+        lock.unlock()
+        if silent { throw RemoteError.transport("timed out") }
+        if let refusal { throw refusal }
+        return try answer("draft-reply") { DraftBody(draft: draft) }
+    }
+
+    /// The committed text before the live span, which a partial or a
+    /// final replaces from.
+    private static func beforeLive(_ draft: DraftView) -> String {
+        guard let live = draft.live else { return draft.text }
+        return String(decoding: draft.text.utf8.prefix(live[0]), as: UTF8.self)
+            .trimmingCharacters(in: .whitespaces)
+    }
+
+    func dictate(_ id: String, _ body: DictationBody) async throws -> Envelope<DraftBody> {
+        lock.lock()
+        dictations.append((body.session, body.events))
+        for event in body.events {
+            switch event.kind {
+            case .started: change(id) { $0.status = "listening" }
+            case .stopped: change(id) { $0.status = "idle"; $0.live = nil }
+            case .partial:
+                change(id) { d in
+                    let base = FakeHost.beforeLive(d)
+                    let joined = base.isEmpty ? event.text : base + " " + event.text
+                    d.live = [base.isEmpty ? 0 : base.utf8.count + 1, joined.utf8.count]
+                    d.text = joined
+                }
+            case .final:
+                change(id) { d in
+                    let base = FakeHost.beforeLive(d)
+                    d.text = base.isEmpty ? event.text : base + " " + event.text
+                    d.live = nil
+                }
+            case .voiceStarted, .voiceEnded: break
+            }
+        }
+        let draft = drafts[id] ?? DraftView()
+        lock.unlock()
+        return try answer("dictate:\(id)") { DraftBody(draft: draft) }
+    }
+
     func lastResponse(_ id: String) async throws -> Envelope<LastResponseBody> {
         lock.lock()
         let held = lastResponses[id]
@@ -381,6 +470,15 @@ struct Route: HostAPI {
     }
     func opStatus(_ op: String) async throws -> Envelope<OpStatusBody> {
         try await network.route(address, pin).opStatus(op)
+    }
+    func draft(_ id: String) async throws -> Envelope<DraftBody> {
+        try await network.route(address, pin).draft(id)
+    }
+    func draftAction(_ id: String, _ body: DraftActionBody) async throws -> Envelope<DraftBody> {
+        try await network.route(address, pin).draftAction(id, body)
+    }
+    func dictate(_ id: String, _ body: DictationBody) async throws -> Envelope<DraftBody> {
+        try await network.route(address, pin).dictate(id, body)
     }
     func lastResponse(_ id: String) async throws -> Envelope<LastResponseBody> {
         try await network.route(address, pin).lastResponse(id)

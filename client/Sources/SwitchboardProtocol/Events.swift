@@ -97,6 +97,9 @@ public enum ResourceKey: Hashable, Sendable {
     case runs(session: String)
     /// One run's log; the wire id is `record/n`.
     case runOutput(session: String, run: Int)
+    /// A session's draft, the host's editor: read on `changed`, with
+    /// no watch, since the host emits it for every subscriber.
+    case draft(session: String)
 
     /// The `kind` and `id` a frame names for this key.
     public var wire: (kind: String, id: String) {
@@ -114,6 +117,7 @@ public enum ResourceKey: Hashable, Sendable {
         case .conversation(let session): return ("conversation", session)
         case .runs(let session): return ("runs", session)
         case .runOutput(let session, let run): return ("run_output", "\(session)/\(run)")
+        case .draft(let session): return ("draft", session)
         }
     }
 
@@ -142,6 +146,7 @@ public enum ResourceKey: Hashable, Sendable {
         case "screen": self = .screen(session: ref.id)
         case "conversation": self = .conversation(session: ref.id)
         case "runs": self = .runs(session: ref.id)
+        case "draft": self = .draft(session: ref.id)
         case "run_output":
             guard let slash = ref.id.lastIndex(of: "/"), let run = Int(ref.id[ref.id.index(after: slash)...])
             else { return nil }

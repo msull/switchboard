@@ -27,6 +27,15 @@ public final class BrowserModel {
     public private(set) var runs: [SessionRef: [RunView]] = [:]
     public private(set) var runOutputs: [RunRef: RunOutputBody] = [:]
     private var runHolders: [RunRef: Int] = [:]
+    /// The draft per session a control bar or the prompt window holds:
+    /// the host's editor as last read (§4.5), and the hosts that keep
+    /// one; a host without the capability leaves the bar its own field.
+    public private(set) var drafts: [SessionRef: DraftView] = [:]
+    private var draftHolders: [SessionRef: Int] = [:]
+    public private(set) var draftHosts: Set<ServerID> = []
+    /// The session whose input is active: the last one a control bar
+    /// typed or dictated into, which the prompt window follows.
+    public private(set) var activeInput: SessionRef?
     /// How many turns a conversation page asks for.
     public static let conversationPage = 20
     /// Every session seen from a host, and the ones a connected host
@@ -121,6 +130,16 @@ public final class BrowserModel {
         self.conversations = conversations
         self.runs = runs
         self.runOutputs = runOutputs
+        var drafts: [SessionRef: DraftView] = [:]
+        for ref in draftHolders.keys {
+            drafts[ref] = await manager.draft(for: ref)
+        }
+        self.drafts = drafts
+        var draftHosts: Set<ServerID> = []
+        for host in store.hosts where await manager.hasDraft(host.id) {
+            draftHosts.insert(host.id)
+        }
+        self.draftHosts = draftHosts
         let present = Set(store.sessions.map(\.ref))
         let connected = Set(store.hosts.filter { $0.state.isConnected }.map(\.id))
         seen.formUnion(present)
@@ -178,6 +197,72 @@ public final class BrowserModel {
         guard let first = conversations[ref]?.firstHeld, first > 1 else { return }
         await manager.readConversation(ref, before: first, limit: Self.conversationPage)
         await pull()
+    }
+
+    // MARK: The draft (§4.5)
+
+    /// Whether the session's host keeps a draft for it.
+    public func hasDraft(_ ref: SessionRef) -> Bool {
+        draftHosts.contains(ref.serverID)
+    }
+
+    /// A control bar or the prompt window opened on `ref`: the first
+    /// holder reads the draft; `changed` keeps it current after that.
+    public func holdDraft(_ ref: SessionRef) async {
+        draftHolders[ref, default: 0] += 1
+        if draftHolders[ref] == 1 {
+            await manager.readDraft(ref)
+        }
+        await pull()
+    }
+
+    public func releaseDraft(_ ref: SessionRef) async {
+        guard let n = draftHolders[ref] else { return }
+        if n > 1 {
+            draftHolders[ref] = n - 1
+            return
+        }
+        draftHolders[ref] = nil
+        drafts[ref] = nil
+    }
+
+    /// Input went into a session: typing, dictation or a tool.
+    public func inputActivated(_ ref: SessionRef) {
+        activeInput = ref
+    }
+
+    private func took(_ ref: SessionRef, _ outcome: DraftOutcome) {
+        if case .applied(let draft) = outcome, draftHolders[ref] != nil {
+            drafts[ref] = draft
+        }
+    }
+
+    public func draftAction(_ ref: SessionRef, _ tool: DraftTool) async -> DraftOutcome {
+        inputActivated(ref)
+        let outcome = await manager.draftAction(ref, tool)
+        took(ref, outcome)
+        return outcome
+    }
+
+    public func replaceDraft(_ ref: SessionRef, text: String) async -> DraftOutcome {
+        inputActivated(ref)
+        let outcome = await manager.replaceDraft(ref, text: text)
+        took(ref, outcome)
+        return outcome
+    }
+
+    public func sendDraft(_ ref: SessionRef) async -> DraftOutcome {
+        let outcome = await manager.sendDraft(ref)
+        took(ref, outcome)
+        await pull()
+        return outcome
+    }
+
+    public func dictate(_ ref: SessionRef, recognizer: UInt64, events: [DictationEvent]) async -> DraftOutcome {
+        inputActivated(ref)
+        let outcome = await manager.dictate(ref, recognizer: recognizer, events: events)
+        took(ref, outcome)
+        return outcome
     }
 
     /// The device's scope on a session's host, which says whether the

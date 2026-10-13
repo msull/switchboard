@@ -202,11 +202,15 @@ func clock(_ ms: UInt64?) -> String? {
     ms.map { Date(timeIntervalSince1970: Double($0) / 1000).formatted(date: .omitted, time: .shortened) }
 }
 
-/// The controls of a Claude Code session (§4.5): a message into its
-/// pane, the folder question answered, and a resume for one that is
-/// not running, which spends a turn and so asks first. Dictation is
-/// the system keyboard's: nothing here is voice-specific. Only a
-/// device with the control scope can use any of it.
+/// The controls of a Claude Code session (§4.5): the prompt, the
+/// folder question answered, and a resume for one that is not running,
+/// which spends a turn and so asks first. On a host that keeps a draft
+/// the field is the host's Prompt Box editor: what is typed replaces
+/// its text, dictation goes to it as speech events, and its tools
+/// (undo, redo, the last sentence deleted, clear, the AI pass) sit in
+/// the row above; on an older host the field is the device's own and
+/// dictation lands in it as text. Only a device with the control scope
+/// can use any of it.
 struct ControlBar: View {
     @Bindable var model: BrowserModel
     let ref: SessionRef
@@ -218,11 +222,22 @@ struct ControlBar: View {
     @State private var note: String?
     @State private var confirmResume = false
     @State private var dictation = Dictation()
-    /// The field's text when dictation started: what is heard goes
-    /// after it, revised in place as the recognizer settles.
+    /// The field's text when dictation started, on a host without a
+    /// draft: what is heard goes after it, revised in place.
     @State private var typedBeforeDictation = ""
+    /// On a host with a draft: the text last taken from it, so a change
+    /// of the field that is not the host's is an edit to send; the
+    /// edits are numbered so the reply to an older one never overwrites
+    /// a newer one, and the host's text is applied only between edits.
+    @State private var hostText = ""
+    @State private var edit = 0
+    @State private var settled = 0
 
     private var canControl: Bool { enabled && scope == .control && !busy }
+    private var hosted: Bool { model.hasDraft(ref) }
+    private var hostDraft: DraftView? { hosted ? model.drafts[ref] : nil }
+    private var editing: Bool { edit != settled }
+    private var empty: Bool { draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -248,6 +263,10 @@ struct ControlBar: View {
                                 Button("Resume") { run { await model.resume(ref) } }
                             }
                     }
+                    Spacer(minLength: 0)
+                    if hosted { DraftTools(draft: hostDraft, enabled: canControl, apply: tool) }
+                }
+                HStack(spacing: 8) {
                     HStack(alignment: .bottom, spacing: 6) {
                         Button {
                             if !dictation.listening { typedBeforeDictation = draft }
@@ -271,23 +290,16 @@ struct ControlBar: View {
                     .padding(.vertical, 8)
                     .background(.quaternary, in: RoundedRectangle(cornerRadius: 12))
                     .onChange(of: dictation.heard) { _, heard in
+                        guard !hosted else { return }
                         draft = Dictation.joined(typedBeforeDictation, heard)
                     }
                     .onChange(of: draft) { _, draft in
-                        // An edit by hand while listening: the text is
-                        // the field's now, and what is heard next goes
-                        // after it. The live utterance goes on revising
-                        // when it is still whole at the end.
-                        guard dictation.listening, draft != Dictation.joined(typedBeforeDictation, dictation.heard)
-                        else { return }
-                        let live = dictation.live.trimmingCharacters(in: .whitespaces)
-                        if !live.isEmpty, draft.hasSuffix(live) {
-                            typedBeforeDictation = String(draft.dropLast(live.count))
-                            dictation.absorb(keepingLive: true)
-                        } else {
-                            typedBeforeDictation = draft
-                            dictation.absorb(keepingLive: false)
-                        }
+                        if hosted { hostEdited(draft) } else { localEdited(draft) }
+                    }
+                    .onChange(of: hostDraft) { _, host in
+                        guard let host, !editing, host.text != draft else { return }
+                        hostText = host.text
+                        draft = host.text
                     }
                     .onChange(of: dictation.problem) { _, problem in
                         if let problem { note = problem }
@@ -297,20 +309,112 @@ struct ControlBar: View {
                     }
                     .buttonStyle(.borderedProminent)
                     .controlSize(.small)
-                    .disabled(!canControl || draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    .disabled(!canControl || empty)
                     .accessibilityLabel("Send")
                 }
                 if let note {
                     Text(note).font(.caption).foregroundStyle(.secondary)
+                } else if let host = hostDraft, let status = DraftTools.caption(host) {
+                    Text(status).font(.caption).foregroundStyle(.secondary)
                 }
             }
+        }
+        .task(id: hosted) {
+            guard hosted else { return }
+            await model.holdDraft(ref)
+            if let host = model.drafts[ref], !editing {
+                hostText = host.text
+                draft = host.text
+            }
+        }
+        .onAppear {
+            dictation.onEvents = { recognizer, events in
+                guard await model.hasDraft(ref) else { return }
+                _ = await model.dictate(ref, recognizer: recognizer, events: events)
+            }
+        }
+        .onDisappear {
+            dictation.stop()
+            if hosted { Task { await model.releaseDraft(ref) } }
+        }
+    }
+
+    /// An edit by hand on a host without a draft, while listening: the
+    /// text is the field's now, and what is heard next goes after it.
+    /// The live utterance goes on revising when it is still whole at
+    /// the end.
+    private func localEdited(_ draft: String) {
+        guard dictation.listening, draft != Dictation.joined(typedBeforeDictation, dictation.heard)
+        else { return }
+        let live = dictation.live.trimmingCharacters(in: .whitespaces)
+        if !live.isEmpty, draft.hasSuffix(live) {
+            typedBeforeDictation = String(draft.dropLast(live.count))
+            dictation.absorb(keepingLive: true)
+        } else {
+            typedBeforeDictation = draft
+            dictation.absorb(keepingLive: false)
+        }
+    }
+
+    /// An edit by hand on a host with a draft: sent whole once the
+    /// typing pauses, as the editor's replace. The host's reply is the
+    /// text now; a newer edit outranks it.
+    private func hostEdited(_ text: String) {
+        guard text != hostText else { return }
+        edit += 1
+        let mine = edit
+        Task {
+            try? await Task.sleep(nanoseconds: 350_000_000)
+            guard mine == edit else { return }
+            let outcome = await model.replaceDraft(ref, text: text)
+            guard mine == edit else { return }
+            settled = mine
+            switch outcome {
+            case .applied(let host):
+                hostText = host.text
+                if host.text != draft { draft = host.text }
+            default:
+                note = outcome.note
+            }
+        }
+    }
+
+    private func tool(_ tool: DraftTool) {
+        busy = true
+        note = nil
+        Task {
+            await dictation.settle()
+            let outcome = await model.draftAction(ref, tool)
+            note = outcome.note
+            busy = false
         }
     }
 
     private func send() {
         dictation.stop()
+        guard !empty, canControl else { return }
+        if hosted {
+            busy = true
+            note = nil
+            Task {
+                await dictation.settle()
+                if draft != hostText {
+                    // The typing has not reached the host yet.
+                    edit += 1
+                    settled = edit
+                    _ = await model.replaceDraft(ref, text: draft)
+                }
+                let outcome = await model.sendDraft(ref)
+                note = outcome.note
+                if case .applied(let host) = outcome {
+                    hostText = host.text
+                    draft = host.text
+                }
+                busy = false
+            }
+            return
+        }
         let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty, canControl else { return }
         run {
             let outcome = await model.send(ref, text: text)
             if outcome == .accepted { draft = "" }
@@ -325,6 +429,49 @@ struct ControlBar: View {
             let outcome = await command()
             note = outcome.note
             busy = false
+        }
+    }
+}
+
+/// The editor's tools on a draft, as icons: undo, redo, the last
+/// sentence deleted, clear, and the AI pass where the host has a key.
+struct DraftTools: View {
+    let draft: DraftView?
+    let enabled: Bool
+    let apply: (DraftTool) -> Void
+
+    var body: some View {
+        HStack(spacing: 2) {
+            button(.undo, "arrow.uturn.backward", "Undo", on: draft?.canUndo ?? false)
+            button(.redo, "arrow.uturn.forward", "Redo", on: draft?.canRedo ?? false)
+            button(.deleteSentence, "delete.left", "Delete the last sentence", on: !(draft?.text.isEmpty ?? true))
+            button(.clear, "xmark.circle", "Clear", on: !(draft?.text.isEmpty ?? true))
+            if draft?.busy == true {
+                ProgressView().controlSize(.small).frame(width: 28, height: 22)
+            } else {
+                button(.cleanUp, "sparkles", "Clean up with AI", on: draft?.ai ?? false)
+            }
+        }
+    }
+
+    private func button(_ tool: DraftTool, _ symbol: String, _ label: String, on: Bool) -> some View {
+        Button { apply(tool) } label: {
+            Image(systemName: symbol).frame(width: 28, height: 22)
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(on && enabled ? AnyShapeStyle(.primary) : AnyShapeStyle(.tertiary))
+        .disabled(!on || !enabled)
+        .accessibilityLabel(label)
+        .help(label)
+    }
+
+    /// The line under the field for a draft that is not simply idle.
+    static func caption(_ draft: DraftView) -> String? {
+        switch draft.status {
+        case "listening": return "Listening into the host's editor."
+        case "finishing": return "Finishing the last words."
+        case "degraded", "error": return draft.statusText ?? draft.status
+        default: return draft.busy ? "The AI pass is running on the host." : nil
         }
     }
 }

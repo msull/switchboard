@@ -238,8 +238,8 @@ final class BrowsingTests: XCTestCase {
 
     func testUtterancesCommitTheLiveOneWhenTheNextStartsLater() {
         var u = Utterances()
-        u.take("fix the", start: 0.3, finished: false)
-        u.take("fix the test", start: 0.4, finished: false)
+        _ = u.take("fix the", start: 0.3, finished: false)
+        _ = u.take("fix the test", start: 0.4, finished: false)
         XCTAssertEqual(u.heard, "fix the test")
         XCTAssertEqual(u.live, "fix the test")
         // After a pause the recognizer covers only the new phrase, from later in the audio.
@@ -252,6 +252,31 @@ final class BrowsingTests: XCTestCase {
         // The next task's audio starts over at zero; its first result is a new utterance.
         u.take("then push", start: 0.2, finished: false)
         XCTAssertEqual(u.heard, "fix the test and run it twice then push")
+    }
+
+    func testUtterancesProduceTheEditorsEventsInOrder() {
+        var u = Utterances()
+        var events = u.begin()
+        events += u.take("fix the", start: 0.3, finished: false)
+        events += u.take("fix the test", start: 0.4, finished: false)
+        events += u.take("Fix the test.", start: 3.0, finished: false)
+        events += u.take("and run it", start: 3.2, finished: false)
+        events += u.end()
+        XCTAssertEqual(events.map(\.sequence), Array(1...UInt64(events.count)), "numbered in order")
+        XCTAssertEqual(
+            events.map { "\($0.kind.rawValue):\($0.utterance):\($0.revision):\($0.text)" },
+            [
+                "started:0:0:",
+                "voice_started:1:0:",
+                "partial:1:1:fix the",
+                "partial:1:2:fix the test",
+                "final:1:2:Fix the test.",
+                "voice_started:2:0:",
+                "partial:2:1:and run it",
+                "final:2:1:and run it",
+                "stopped:0:0:",
+            ])
+        XCTAssertEqual(u.heard, "Fix the test. and run it")
     }
 
     func testTheRecognizerClosesAnUtteranceBySendingItsWordsAgainLater() {

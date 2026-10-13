@@ -3431,7 +3431,12 @@ Built so far:
   recognizes and the editor keeps the document. The drafts are
   fingerprinted every 150 ms while a subscriber is connected and an
   editor that moved emits `changed {draft, id}`; the device holding it
-  re-reads. `/info` lists the `draft` capability. Known gaps: the AI
+  re-reads. `/info` lists the `draft` capability. The client's
+  control bar on such a host is a view of the editor: typing replaces
+  the text once it pauses, dictation goes as speech events in order
+  with a recognizer session per run, the tools sit above the field,
+  Send goes through the draft under an op, and `changed {draft}`
+  re-reads what a bar holds. Known gaps: the AI
   pass runs in the editor's worker, pumped by the host's frame, so a
   host whose window is occluded finishes it on its next frame; the
   Mac's own voice runtime and a device dictate into the same editor

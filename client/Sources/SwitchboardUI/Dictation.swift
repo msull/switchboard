@@ -1,5 +1,6 @@
 import Foundation
 import Observation
+import SwitchboardProtocol
 
 #if canImport(Speech) && canImport(AVFoundation)
 import AVFoundation
@@ -10,10 +11,14 @@ import Speech
 /// and kept, and the one in progress, revised in place until the
 /// recognizer moves on. Apple's recognizer does not keep one running
 /// transcription across a pause; after silence its results cover only
-/// the new phrase. So a result is taken as a revision of the live
-/// utterance while it starts where the live one started, and as the
-/// next utterance once it starts later, which commits the live text
-/// first. Pure, so the Mac tests cover it without the Speech framework.
+/// the new phrase, and it closes an utterance by sending its words
+/// once more, later and sometimes re-punctuated. So a result is taken
+/// as a revision of the live utterance while it starts where the live
+/// one started, as its close when the same words start later, and as
+/// the next utterance when different words do, which commits the live
+/// text first. Every change is also an event for the host's editor
+/// (§4.5), numbered as its recognizer numbers its own. Pure, so the
+/// Mac tests cover it without the Speech framework.
 public struct Utterances: Equatable, Sendable {
     /// The finished utterances, joined.
     public var committed = ""
@@ -25,42 +30,82 @@ public struct Utterances: Equatable, Sendable {
     /// The live utterance was edited by hand, so its revisions are
     /// dropped until the next utterance starts.
     public var ignoring = false
+    /// The event numbering: the sequence over the run, the utterance
+    /// open on the host (0 when none) and its revision.
+    public var sequence: UInt64 = 0
+    public var utterance: UInt64 = 0
+    public var revision: UInt64 = 0
+    private var nextUtterance: UInt64 = 1
 
     public init() {}
 
     /// Everything heard so far.
     public var heard: String { Dictation.joined(committed, live) }
 
+    private mutating func event(_ kind: DictationEvent.Kind, text: String = "") -> DictationEvent {
+        sequence += 1
+        return DictationEvent(sequence: sequence, kind: kind, utterance: utterance, revision: revision, text: text)
+    }
+
+    /// The run begins: the host's editor goes to listening.
+    public mutating func begin() -> [DictationEvent] {
+        [event(.started)]
+    }
+
+    /// The run ends: the live utterance is committed and the editor
+    /// goes back to idle.
+    public mutating func end() -> [DictationEvent] {
+        var out = commit()
+        out.append(event(.stopped))
+        return out
+    }
+
     /// Takes a result: `text` starting at `start` seconds into the
     /// audio; `finished` when the recognizer has closed the utterance.
-    /// A result that starts after the live utterance did is the next
-    /// one, so the live text is committed first.
-    public mutating func take(_ text: String, start: TimeInterval?, finished: Bool) {
+    @discardableResult
+    public mutating func take(_ text: String, start: TimeInterval?, finished: Bool) -> [DictationEvent] {
+        var out: [DictationEvent] = []
         if let liveStart, let start, start > liveStart + Self.slack {
-            // The recognizer closes an utterance by sending its words
-            // once more, re-timed and sometimes re-punctuated: that is
-            // the end of the live one, not the next.
             if Self.sameWords(text, live) {
                 if !ignoring { live = text }
-                commit()
-                return
+                out += commit()
+                return out
             }
-            commit()
+            out += commit()
         } else if ignoring {
-            if finished { commit() }
-            return
+            if finished { out += commit() }
+            return out
+        }
+        if utterance == 0 {
+            utterance = nextUtterance
+            nextUtterance += 1
+            revision = 0
+            out.append(event(.voiceStarted))
         }
         live = text
         if liveStart == nil { liveStart = start }
-        if finished { commit() }
+        revision += 1
+        out.append(event(.partial, text: text))
+        if finished { out += commit() }
+        return out
     }
 
-    /// Moves the live utterance into the finished text.
-    public mutating func commit() {
+    /// Moves the live utterance into the finished text; the host gets
+    /// its final (empty when nothing was heard, which the editor
+    /// ignores).
+    @discardableResult
+    public mutating func commit() -> [DictationEvent] {
+        var out: [DictationEvent] = []
+        if utterance != 0 {
+            out.append(event(.final, text: live))
+            utterance = 0
+            revision = 0
+        }
         committed = Dictation.joined(committed, live)
         live = ""
         liveStart = nil
         ignoring = false
+        return out
     }
 
     /// The text is in the field now (the user edited around it), so
@@ -92,8 +137,10 @@ public struct Utterances: Equatable, Sendable {
 
 /// Dictation into the message field, started by its microphone button.
 /// The system keyboard's own mic is still there; this one starts at
-/// once, without the keyboard, and keeps the text it hears beside what
-/// was typed. On-device recognition is asked for where the device has
+/// once, without the keyboard. What it hears is kept two ways: as text
+/// beside what was typed, for a host without a draft, and as the
+/// speech events the host's editor takes (§4.5), handed to `onEvents`
+/// in order. On-device recognition is asked for where the device has
 /// it. visionOS gives an app no gaze or dwell event, and "look to
 /// dictate" is a system affordance of search fields only, so the
 /// button is a tap.
@@ -108,11 +155,17 @@ public final class Dictation {
     public private(set) var live = ""
     /// Why dictation could not run, for the window.
     public private(set) var problem: String?
+    /// The recognizer session this run's events belong to, picked at
+    /// start apart from the host's own numbering.
+    public private(set) var recognizer: UInt64 = 0
+    /// Where the events go, each batch after the one before.
+    public var onEvents: ((UInt64, [DictationEvent]) async -> Void)?
 
     private var utterances = Utterances()
     /// Counts starts and stops, so a result from a task that was
     /// stopped or replaced is dropped.
     private var generation = 0
+    private var chain: Task<Void, Never>?
 
     public init() {}
 
@@ -134,9 +187,25 @@ public final class Dictation {
         publish()
     }
 
+    /// Waits for every event handed out so far to be delivered, so a
+    /// send after a stop follows the final.
+    public func settle() async {
+        await chain?.value
+    }
+
     private func publish() {
         heard = utterances.heard
         live = utterances.live
+    }
+
+    private func emit(_ events: [DictationEvent]) {
+        guard !events.isEmpty, let onEvents else { return }
+        let recognizer = self.recognizer
+        let previous = chain
+        chain = Task {
+            await previous?.value
+            await onEvents(recognizer, events)
+        }
     }
 
     #if canImport(Speech) && canImport(AVFoundation)
@@ -145,7 +214,7 @@ public final class Dictation {
     /// recognizer ends a task and listening goes on with a new one.
     private let feed = Feed()
     private var task: SFSpeechRecognitionTask?
-    private var recognizer: SFSpeechRecognizer?
+    private var speech: SFSpeechRecognizer?
 
     public func toggle() async {
         if listening { stop() } else { await start() }
@@ -155,14 +224,14 @@ public final class Dictation {
         problem = nil
         utterances = Utterances()
         publish()
-        guard let recognizer = SFSpeechRecognizer(), recognizer.isAvailable else {
+        guard let speech = SFSpeechRecognizer(), speech.isAvailable else {
             problem = "Speech recognition is not available."
             return
         }
-        let speech = await withCheckedContinuation { (c: CheckedContinuation<SFSpeechRecognizerAuthorizationStatus, Never>) in
+        let allowed = await withCheckedContinuation { (c: CheckedContinuation<SFSpeechRecognizerAuthorizationStatus, Never>) in
             SFSpeechRecognizer.requestAuthorization { c.resume(returning: $0) }
         }
-        guard speech == .authorized else {
+        guard allowed == .authorized else {
             problem = "Allow speech recognition for Switchboard in Settings."
             return
         }
@@ -186,9 +255,11 @@ public final class Dictation {
             engine.inputNode.removeTap(onBus: 0)
             return
         }
-        self.recognizer = recognizer
+        self.speech = speech
         listening = true
         generation += 1
+        recognizer = UInt64.random(in: 1 << 32 ... UInt64.max)
+        emit(utterances.begin())
         beginTask()
     }
 
@@ -196,23 +267,24 @@ public final class Dictation {
     /// after a long pause (its result is then final); listening goes
     /// on with the next task, into the same utterances.
     private func beginTask() {
-        guard let recognizer else { return }
+        guard let speech else { return }
         let request = SFSpeechAudioBufferRecognitionRequest()
         request.shouldReportPartialResults = true
         request.addsPunctuation = true
-        if recognizer.supportsOnDeviceRecognition {
+        if speech.supportsOnDeviceRecognition {
             request.requiresOnDeviceRecognition = true
         }
         feed.replace(request)
         let generation = self.generation
-        task = recognizer.recognitionTask(with: request) { [weak self] result, error in
+        task = speech.recognitionTask(with: request) { [weak self] result, error in
             Task { @MainActor [weak self] in
                 guard let self, self.generation == generation else { return }
                 if let result {
                     let start = result.bestTranscription.segments.first?.timestamp
-                    self.utterances.take(
+                    let events = self.utterances.take(
                         result.bestTranscription.formattedString, start: start, finished: result.isFinal)
                     self.publish()
+                    self.emit(events)
                     if result.isFinal { self.beginTask() }
                 } else if let error {
                     self.problem = error.localizedDescription
@@ -231,8 +303,8 @@ public final class Dictation {
         feed.replace(nil)
         task?.cancel()
         task = nil
-        recognizer = nil
-        utterances.commit()
+        speech = nil
+        emit(utterances.end())
         publish()
         Self.deactivateAudioSession()
     }

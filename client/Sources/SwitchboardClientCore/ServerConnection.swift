@@ -4,6 +4,27 @@ import SwitchboardTransport
 
 /// Where one host stands (§6.2).
 /// What became of a command (§4.5).
+/// What became of a change to a draft (§4.5).
+public enum DraftOutcome: Sendable, Equatable {
+    /// The host applied it; this is the draft now.
+    case applied(DraftView)
+    /// The host refused, with its reason.
+    case refused(String)
+    /// A send the host started whose outcome is unknown.
+    case interrupted
+    /// No answer.
+    case unanswered(String)
+
+    public var note: String? {
+        switch self {
+        case .applied: return nil
+        case .refused(let why): return why
+        case .interrupted: return "The host started the send; check the session."
+        case .unanswered(let why): return why
+        }
+    }
+}
+
 public enum CommandOutcome: Equatable, Sendable {
     /// The host ran it, or had already.
     case accepted
@@ -115,6 +136,8 @@ public actor ServerConnection {
     public private(set) var runs: [String: [RunView]] = [:]
     /// The output tail per run read.
     public private(set) var runOutputs: [RunKey: RunOutputBody] = [:]
+    /// The drafts held, by session: the host's editor as last read.
+    public private(set) var drafts: [String: DraftView] = [:]
     /// Told whenever the snapshot or the state moved, so the owner can
     /// rebuild its view without polling.
     private var onChange: (@Sendable () -> Void)?
@@ -406,7 +429,9 @@ public actor ServerConnection {
             return
         }
         if let heldRevision = heldRevision(for: key), revision <= heldRevision { return }
-        if key.isContent || { if case .runs = key { return true } else { return false } }() {
+        if key.isContent || { if case .runs = key { return true } else { return false } }()
+            || { if case .draft = key { return true } else { return false } }()
+        {
             await read(key)
             return
         }
@@ -502,6 +527,8 @@ public actor ServerConnection {
             if runOutputs[RunKey(session: session, n: run)] != nil {
                 await readRunOutput(session, run: run, lines: nil)
             }
+        case .draft(let session):
+            if drafts[session] != nil { await readDraft(session) }
         default:
             return
         }
@@ -513,6 +540,126 @@ public actor ServerConnection {
         conversations = [:]
         runs = [:]
         runOutputs = [:]
+        drafts = [:]
+    }
+
+    // MARK: The draft
+
+    /// Whether the host keeps a draft per session (§4.5): an older
+    /// host without the capability leaves the device its own field.
+    public var hasDraft: Bool {
+        info?.capabilities.contains("draft") ?? false
+    }
+
+    /// Read a session's draft now, under the revision rule. A refusal
+    /// (not an agent session) clears what was held.
+    public func readDraft(_ session: String) async {
+        guard let api else { return }
+        do {
+            let reply = try await api.draft(session)
+            apply(.draft(session: session), at: reply.revision) {
+                drafts[session] = reply.body.draft
+            }
+            changed()
+        } catch RemoteError.refused(let status, _, _) where status == 400 {
+            drafts[session] = nil
+            changed()
+        } catch let error as RemoteError {
+            handle(error)
+        } catch {
+            handle(.transport("\(error)"))
+        }
+    }
+
+    /// What became of a change to the draft.
+    private func took(_ session: String, _ reply: Envelope<DraftBody>) -> DraftOutcome {
+        apply(.draft(session: session), at: reply.revision) {
+            drafts[session] = reply.body.draft
+        }
+        changed()
+        return .applied(reply.body.draft)
+    }
+
+    private func draftRefusal(_ status: Int, _ code: String, _ message: String) -> DraftOutcome {
+        if status == 409 || code == "interrupted" { return .interrupted }
+        if status == 401 || (status == 403 && code != "scope") {
+            handle(.refused(status: status, code: code, message: message))
+        }
+        return .refused(message)
+    }
+
+    /// One of the editor's tools on the draft, or the text replaced
+    /// whole. The reply is the draft as it stands.
+    public func draftAction(_ session: String, _ tool: DraftTool) async -> DraftOutcome {
+        await draftAction(session, DraftActionBody(action: tool.rawValue))
+    }
+
+    public func replaceDraft(_ session: String, text: String) async -> DraftOutcome {
+        await draftAction(session, DraftActionBody(action: "replace", text: text))
+    }
+
+    private func draftAction(_ session: String, _ body: DraftActionBody) async -> DraftOutcome {
+        guard let api else { return .unanswered("not connected") }
+        do {
+            return took(session, try await api.draftAction(session, body))
+        } catch RemoteError.refused(let status, let code, let message) {
+            return draftRefusal(status, code, message)
+        } catch let error as RemoteError {
+            if case .pinMismatch = error { handle(error) }
+            return .unanswered("\(error)")
+        } catch {
+            return .unanswered("\(error)")
+        }
+    }
+
+    /// Send the draft to the pane under an op of its own (§4.5): a
+    /// timeout is followed by the op's status, never a blind resend,
+    /// and a send that went has cleared the draft on the host, which
+    /// is read again then.
+    public func sendDraft(_ session: String, op: String = UUID().uuidString) async -> DraftOutcome {
+        guard let api else { return .unanswered("not connected") }
+        for attempt in 0...1 {
+            do {
+                return took(session, try await api.draftAction(session, DraftActionBody(action: "send", op: op)))
+            } catch RemoteError.refused(let status, let code, let message) {
+                return draftRefusal(status, code, message)
+            } catch let error as RemoteError {
+                if case .pinMismatch = error {
+                    handle(error)
+                    return .unanswered("\(error)")
+                }
+                lastError = "\(error)"
+            } catch {
+                lastError = "\(error)"
+            }
+            switch await status(of: op) {
+            case .some(.done(failed: nil)):
+                await readDraft(session)
+                return drafts[session].map(DraftOutcome.applied) ?? .unanswered("sent; the draft could not be read")
+            case .some(.done(failed: .some(let reason))): return .refused(reason)
+            case .some(.interrupted), .some(.inProgress): return .interrupted
+            case .some(.unknown): if attempt == 0 { continue }
+            case .none: break
+            }
+            break
+        }
+        return .unanswered(lastError ?? "no answer")
+    }
+
+    /// The device's speech events into the draft, in order. The reply
+    /// is the draft with them landed.
+    public func dictate(_ session: String, recognizer: UInt64, events: [DictationEvent]) async -> DraftOutcome {
+        guard let api else { return .unanswered("not connected") }
+        do {
+            return took(session, try await api.dictate(session, DictationBody(session: recognizer, events: events)))
+        } catch RemoteError.refused(let status, let code, let message) {
+            return draftRefusal(status, code, message)
+        } catch let error as RemoteError {
+            if case .pinMismatch = error { handle(error) }
+            return .unanswered("\(error)")
+        } catch {
+            return .unanswered("\(error)")
+        }
     }
 
     /// Read the last response now, under the revision rule. A refusal
@@ -760,7 +907,7 @@ public actor ServerConnection {
         case .waiting:
             // Derived from the sessions, whose own events accompany it.
             return
-        case .screen, .conversation, .runs, .runOutput:
+        case .screen, .conversation, .runs, .runOutput, .draft:
             // Content: read through its own reader, never as a view.
             return
         }
@@ -778,6 +925,7 @@ public actor ServerConnection {
             lastResponses[id] = nil
             conversations[id] = nil
             runs[id] = nil
+            drafts[id] = nil
         case .set(let id): next.sets.removeAll { $0.id == id }
         case .project(let id):
             next.projects.removeAll { $0.id == id }

@@ -105,6 +105,12 @@ public protocol HostAPI: Sendable {
         -> Envelope<CommandBody>
     /// What became of an op, after a command got no answer.
     func opStatus(_ op: String) async throws -> Envelope<OpStatusBody>
+    /// A session's draft: the host's editor for it (§4.5).
+    func draft(_ id: String) async throws -> Envelope<DraftBody>
+    /// One of the editor's tools on the draft, or `send` with an `op`.
+    func draftAction(_ id: String, _ body: DraftActionBody) async throws -> Envelope<DraftBody>
+    /// The device's speech events into the draft.
+    func dictate(_ id: String, _ body: DictationBody) async throws -> Envelope<DraftBody>
 }
 
 /// One host over HTTPS with the pinning delegate and a bearer token.
@@ -264,6 +270,18 @@ public final class HostClient: HostAPI, @unchecked Sendable {
         try await get("ops/\(op)", query: nil)
     }
 
+    public func draft(_ id: String) async throws -> Envelope<DraftBody> {
+        try await get("sessions/\(id)/draft", query: nil)
+    }
+
+    public func draftAction(_ id: String, _ body: DraftActionBody) async throws -> Envelope<DraftBody> {
+        try await post("sessions/\(id)/draft", json: body)
+    }
+
+    public func dictate(_ id: String, _ body: DictationBody) async throws -> Envelope<DraftBody> {
+        try await post("sessions/\(id)/dictation", json: body)
+    }
+
     public func runs(_ id: String) async throws -> Envelope<RunsBody> {
         try await get("sessions/\(id)/runs", query: nil)
     }
@@ -285,7 +303,7 @@ public final class HostClient: HostAPI, @unchecked Sendable {
         return try await send(req)
     }
 
-    private func post<T: Decodable & Sendable>(_ path: String, json: [String: String]) async throws
+    private func post<T: Decodable & Sendable, B: Encodable>(_ path: String, json: B) async throws
         -> Envelope<T>
     {
         var req = URLRequest(url: address.baseURL.appendingPathComponent(path))
