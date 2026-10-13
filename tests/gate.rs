@@ -42,7 +42,8 @@ use std::time::{Duration, Instant, SystemTime};
 use switchboard::SwitchboardApp;
 use switchboard::adapters::agents::Agents;
 use switchboard::adapters::fakes::{
-    FakeController, FakeDispatch, FakeOpener, FakeOperations, FakeRemoteStore, FakeSecrets,
+    FakeAdvertiser, FakeController, FakeDispatch, FakeOpener, FakeOperations, FakeRemoteStore,
+    FakeSecrets,
 };
 use switchboard::adapters::hooks::{HookLog, unix_millis, write_hook_settings};
 use switchboard::adapters::project_config::FileConfigReader;
@@ -129,6 +130,7 @@ impl Gate {
             controller: Box::new(FakeController),
             operations: Box::new(FakeOperations::default()),
             remote: Box::new(FakeRemoteStore::default()),
+            advertiser: Box::new(FakeAdvertiser::default()),
             dispatch: Some(Box::new(FakeDispatch::default())),
             wake: None,
         })

@@ -1,0 +1,15 @@
+{
+  "body": {
+    "projects": [
+      {
+        "id": "bc0596cd-1126-4fc9-847a-1e5ce1b9b3e5",
+        "name": "#1",
+        "op": "pj",
+        "root": "/tmp",
+        "space": "df0206b9-0f89-48d2-97a5-6a6be00fee83"
+      }
+    ]
+  },
+  "epoch": "6386092b-b275-4aaa-9b31-8a64d4c528bd",
+  "revision": 0
+}

@@ -32,7 +32,7 @@ use crate::ports::events::EventSource;
 use crate::ports::host::{HostId, ProcessHost, SpawnSpec};
 use crate::ports::opener::Opener;
 use crate::ports::project_config::ProjectConfigReader;
-use crate::ports::remote::{Listen, RemoteStore};
+use crate::ports::remote::{Advertisement, Advertiser, Listen, RemoteStore};
 use crate::ports::round_files::RoundFiles;
 use crate::ports::secrets::SecretStore;
 use crate::ports::store::{Store, StoreError};
@@ -76,6 +76,8 @@ pub struct Services {
     pub operations: Box<dyn Operations>,
     /// The remote port's identity and device files.
     pub remote: Box<dyn RemoteStore>,
+    /// Bonjour, for the remote port while it is on the local network.
+    pub advertiser: Box<dyn Advertiser>,
     /// Dispatch's port: tickets as views, decisions answered. The app
     /// takes it into a worker of its own when it starts, so it is
     /// `None` after `SwitchboardApp::with_services`; `None` before it
@@ -1494,6 +1496,9 @@ impl SwitchboardApp {
                             return failed(Err::<(), _>(e), || "bind the remote port");
                         }
                     }
+                } else {
+                    // A rename alone: the record carries the name.
+                    self.advertise_remote();
                 }
                 failed(saved, || "save the host identity")
             }
@@ -1526,6 +1531,7 @@ impl SwitchboardApp {
     fn bind_remote(&mut self) -> io::Result<SocketAddr> {
         self.remote = None;
         self.remote_bound = None;
+        self.services.advertiser.withdraw();
         if self.core.read_only() {
             return Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
@@ -1558,7 +1564,28 @@ impl SwitchboardApp {
         let addr = bound.addr();
         self.remote = Some(bound);
         self.remote_bound = Some(identity.listen);
+        self.advertise_remote();
         Ok(addr)
+    }
+
+    /// Advertise the port over Bonjour while it is bound to the local
+    /// network, under the identity's current name; withdrawn otherwise.
+    /// A refusal from the responder is logged and leaves the port
+    /// reachable by address.
+    fn advertise_remote(&mut self) {
+        let Some(identity) = self.core.identity() else {
+            return;
+        };
+        let on_lan = self.remote_bound.as_ref().is_some_and(|l| l.lan);
+        match self.remote_addr() {
+            Some(addr) if on_lan => {
+                let ad = Advertisement::new(identity.server_id, &identity.server_name, addr.port());
+                if let Err(e) = self.services.advertiser.advertise(&ad) {
+                    log::warn!("bonjour: {e}");
+                }
+            }
+            _ => self.services.advertiser.withdraw(),
+        }
     }
 
     /// Where the remote port is bound, while it is.

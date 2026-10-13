@@ -1,0 +1,208 @@
+import Foundation
+import SwitchboardProtocol
+
+/// Where a host answers.
+public struct Address: Hashable, Codable, Sendable, CustomStringConvertible {
+    public let host: String
+    public let port: UInt16
+
+    public init(host: String, port: UInt16) {
+        self.host = host
+        self.port = port
+    }
+
+    /// `host:port`, as the QR code and the dialog print it.
+    public init?(_ text: String) {
+        guard let colon = text.lastIndex(of: ":"),
+            let port = UInt16(text[text.index(after: colon)...])
+        else { return nil }
+        var host = String(text[..<colon])
+        if host.hasPrefix("["), host.hasSuffix("]") {
+            host = String(host.dropFirst().dropLast())
+        }
+        guard !host.isEmpty else { return nil }
+        self.init(host: host, port: port)
+    }
+
+    public var description: String {
+        host.contains(":") ? "[\(host)]:\(port)" : "\(host):\(port)"
+    }
+
+    public var baseURL: URL {
+        URL(string: "https://\(description)/api/v1/")!
+    }
+}
+
+public enum RemoteError: Error, CustomStringConvertible, Sendable {
+    /// The host answered with an error body.
+    case refused(status: Int, code: String, message: String)
+    /// The handshake failed the pin; `seen` is the hash the host showed.
+    case pinMismatch(expected: String, seen: String?)
+    case transport(String)
+    case badReply(String)
+
+    public var description: String {
+        switch self {
+        case .refused(let status, let code, let message): return "\(status) \(code): \(message)"
+        case .pinMismatch(let expected, let seen):
+            return "the host's key \(seen ?? "?") is not the pinned \(expected)"
+        case .transport(let text): return text
+        case .badReply(let text): return "bad reply: \(text)"
+        }
+    }
+
+    /// A refusal that means the token is no longer good.
+    public var isUnauthorized: Bool {
+        if case .refused(401, _, _) = self { return true }
+        return false
+    }
+}
+
+/// What a per-host connection needs from the network, so the core is
+/// tested against a fake and `HostClient` is the real one.
+public protocol HostAPI: Sendable {
+    func info() async throws -> Envelope<ServerInfo>
+    func pair(_ request: PairRequest) async throws -> Envelope<PairReply>
+    func projects() async throws -> Envelope<ProjectsBody>
+    func spaces() async throws -> Envelope<SpacesBody>
+    func sets(space: String) async throws -> Envelope<SetsBody>
+    func sessions(project: String) async throws -> Envelope<SessionsBody>
+    func session(_ id: String) async throws -> Envelope<SessionBody>
+    func waiting() async throws -> Envelope<SessionsBody>
+    func screen(_ id: String, lines: Int?) async throws -> Envelope<ScreenBody>
+}
+
+/// One host over HTTPS with the pinning delegate and a bearer token.
+public final class HostClient: HostAPI, @unchecked Sendable {
+    public let address: Address
+    public let delegate: PinnedSessionDelegate
+    private let session: URLSession
+    private let lock = NSLock()
+    private var bearer: String?
+
+    public init(address: Address, pin: PinPolicy, token: String? = nil) {
+        self.address = address
+        self.delegate = PinnedSessionDelegate(policy: pin)
+        self.bearer = token
+        let config = URLSessionConfiguration.ephemeral
+        config.timeoutIntervalForRequest = 10
+        config.waitsForConnectivity = false
+        config.httpAdditionalHeaders = ["Accept": "application/json"]
+        self.session = URLSession(configuration: config, delegate: delegate, delegateQueue: nil)
+    }
+
+    deinit {
+        session.invalidateAndCancel()
+    }
+
+    public var token: String? {
+        get {
+            lock.lock()
+            defer { lock.unlock() }
+            return bearer
+        }
+        set {
+            lock.lock()
+            bearer = newValue
+            lock.unlock()
+        }
+    }
+
+    public func info() async throws -> Envelope<ServerInfo> {
+        try await get("info", query: nil)
+    }
+
+    public func pair(_ request: PairRequest) async throws -> Envelope<PairReply> {
+        guard case .expect = delegate.policy else {
+            throw RemoteError.transport("a pairing needs the host's key pinned first")
+        }
+        var req = URLRequest(url: address.baseURL.appendingPathComponent("pair"))
+        req.httpMethod = "POST"
+        req.httpBody = try Wire.encoder().encode(request)
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        return try await send(req)
+    }
+
+    public func projects() async throws -> Envelope<ProjectsBody> {
+        try await get("projects", query: nil)
+    }
+
+    public func spaces() async throws -> Envelope<SpacesBody> {
+        try await get("spaces", query: nil)
+    }
+
+    public func sets(space: String) async throws -> Envelope<SetsBody> {
+        try await get("spaces/\(space)/sets", query: nil)
+    }
+
+    public func sessions(project: String) async throws -> Envelope<SessionsBody> {
+        try await get("projects/\(project)/sessions", query: nil)
+    }
+
+    public func session(_ id: String) async throws -> Envelope<SessionBody> {
+        try await get("sessions/\(id)", query: nil)
+    }
+
+    public func waiting() async throws -> Envelope<SessionsBody> {
+        try await get("waiting", query: nil)
+    }
+
+    public func screen(_ id: String, lines: Int?) async throws -> Envelope<ScreenBody> {
+        try await get("sessions/\(id)/screen", query: lines.map { "lines=\($0)" })
+    }
+
+    private func get<T: Decodable & Sendable>(_ path: String, query: String?) async throws
+        -> Envelope<T>
+    {
+        var url = address.baseURL.appendingPathComponent(path)
+        if let query, var parts = URLComponents(url: url, resolvingAgainstBaseURL: false) {
+            parts.percentEncodedQuery = query
+            url = parts.url ?? url
+        }
+        var req = URLRequest(url: url)
+        req.httpMethod = "GET"
+        return try await send(req)
+    }
+
+    private func send<T: Decodable & Sendable>(_ request: URLRequest) async throws -> Envelope<T> {
+        var request = request
+        if let token {
+            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        }
+        let data: Data
+        let response: URLResponse
+        do {
+            (data, response) = try await session.data(for: request)
+        } catch {
+            if case .expect(let expected) = delegate.policy, let seen = delegate.mismatch {
+                throw RemoteError.pinMismatch(expected: expected, seen: seen)
+            }
+            let nsError = error as NSError
+            if nsError.domain == NSURLErrorDomain,
+                nsError.code == NSURLErrorServerCertificateUntrusted
+                    || nsError.code == NSURLErrorCancelled,
+                case .expect(let expected) = delegate.policy
+            {
+                throw RemoteError.pinMismatch(expected: expected, seen: nil)
+            }
+            throw RemoteError.transport(error.localizedDescription)
+        }
+        guard let http = response as? HTTPURLResponse else {
+            throw RemoteError.badReply("not HTTP")
+        }
+        if http.statusCode == 200 {
+            do {
+                return try Wire.decode(Envelope<T>.self, from: data)
+            } catch {
+                throw RemoteError.badReply("\(error)")
+            }
+        }
+        if let failure = try? Wire.decode(ErrorEnvelope.self, from: data) {
+            throw RemoteError.refused(
+                status: http.statusCode, code: failure.error.code, message: failure.error.message)
+        }
+        throw RemoteError.refused(
+            status: http.statusCode, code: "http",
+            message: String(decoding: data.prefix(200), as: UTF8.self))
+    }
+}

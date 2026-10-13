@@ -3,6 +3,7 @@
 
 pub mod agents;
 pub mod artifacts;
+pub mod bonjour;
 pub mod control;
 pub mod controller;
 pub mod diff;

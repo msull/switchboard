@@ -3,3 +3,6 @@ target/
 .env
 .env.*
 .claude/worktrees/
+# The Swift package's build products.
+client/.build/
+client/.swiftpm/

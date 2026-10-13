@@ -24,7 +24,7 @@ use crate::ports::events::{EventSource, SessionEvent};
 use crate::ports::host::{HostId, HostInfo, HostStatus, ProcessHost, SpawnSpec};
 use crate::ports::opener::Opener;
 use crate::ports::project_config::{ProjectConfig, ProjectConfigReader};
-use crate::ports::remote::{Identity, PairedDevice, RemoteStore};
+use crate::ports::remote::{Advertisement, Advertiser, Identity, PairedDevice, RemoteStore};
 use crate::ports::store::{Loaded, Store, StoreError};
 use crate::ports::transcript::{Conversation, TranscriptReader};
 
@@ -40,6 +40,7 @@ pub fn services() -> Services {
         agents: Box::new(FakeAgents),
         opener: Box::new(FakeOpener::default()),
         remote: Box::new(FakeRemoteStore::default()),
+        advertiser: Box::new(FakeAdvertiser::default()),
         transcripts: Box::new(FakeTranscripts::default()),
         secrets: Box::new(FakeSecrets::default()),
         project_config: Box::new(FakeProjectConfig),
@@ -604,5 +605,32 @@ pub struct FakeArtifacts;
 impl crate::ports::artifacts::ArtifactFinder for FakeArtifacts {
     fn find(&self, _cwd: &Path, _patterns: &[String], _since: SystemTime) -> Vec<PathBuf> {
         Vec::new()
+    }
+}
+
+/// Bonjour as a log: `Some` for each advertisement, `None` for each
+/// withdrawal, in order.
+#[derive(Debug, Clone, Default)]
+pub struct FakeAdvertiser(pub Arc<Mutex<Vec<Option<Advertisement>>>>);
+
+impl FakeAdvertiser {
+    pub fn log(&self) -> std::sync::MutexGuard<'_, Vec<Option<Advertisement>>> {
+        self.0.lock().expect("fake advertiser lock")
+    }
+
+    /// The advertisement in force, if the last call was not a withdrawal.
+    #[must_use]
+    pub fn current(&self) -> Option<Advertisement> {
+        self.log().last().cloned().flatten()
+    }
+}
+
+impl Advertiser for FakeAdvertiser {
+    fn advertise(&mut self, ad: &Advertisement) -> Result<(), String> {
+        self.log().push(Some(ad.clone()));
+        Ok(())
+    }
+    fn withdraw(&mut self) {
+        self.log().push(None);
     }
 }

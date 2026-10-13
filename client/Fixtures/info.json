@@ -1,0 +1,20 @@
+{
+  "body": {
+    "capabilities": [
+      "read"
+    ],
+    "limits": {
+      "body_bytes": 1048576,
+      "notes_bytes": 65536,
+      "screen_lines": 200,
+      "string_bytes": 4096
+    },
+    "pairing_open": false,
+    "protocol": 1,
+    "server_id": "bde60e57-d51a-4f7d-b0f9-6e3cf31a2bca",
+    "server_name": "Desk Mac",
+    "spki_sha256": "46218f34afb219e848c973bc92025a07eb55a013829a5b4d3fc96bb90ae9b866"
+  },
+  "epoch": "6386092b-b275-4aaa-9b31-8a64d4c528bd",
+  "revision": 0
+}

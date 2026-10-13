@@ -114,3 +114,53 @@ pub trait RemoteStore: Send {
     fn load_devices(&self) -> Result<Vec<PairedDevice>, String>;
     fn save_devices(&self, devices: &[PairedDevice]) -> Result<(), String>;
 }
+
+/// What the host advertises over Bonjour while it listens on the local
+/// network: `_switchboard._tcp` under an instance name, with TXT records
+/// a client can match against a known server before it connects. Never
+/// a token, never key material: the key hash is read from `/info` over
+/// the pinned connection, not from a multicast record anyone can send.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Advertisement {
+    /// The Bonjour instance name: the display name with a short id
+    /// suffix, so two installations on one machine stay distinct.
+    pub instance: String,
+    pub server_id: Uuid,
+    pub server_name: String,
+    pub port: u16,
+}
+
+impl Advertisement {
+    /// The service type, as the client browses for it.
+    pub const SERVICE: &'static str = "_switchboard._tcp";
+    /// The protocol major version in the `v` TXT record.
+    pub const PROTOCOL: &'static str = "1";
+
+    #[must_use]
+    pub fn new(server_id: Uuid, server_name: &str, port: u16) -> Self {
+        let short = &server_id.simple().to_string()[..6];
+        Self {
+            instance: format!("{server_name} ({short})"),
+            server_id,
+            server_name: server_name.to_owned(),
+            port,
+        }
+    }
+
+    /// The TXT records, in the order they are published.
+    #[must_use]
+    pub fn txt(&self) -> Vec<(String, String)> {
+        vec![
+            ("v".into(), Self::PROTOCOL.into()),
+            ("name".into(), self.server_name.clone()),
+            ("id".into(), self.server_id.to_string()),
+        ]
+    }
+}
+
+/// Bonjour as the host uses it: one advertisement at a time, replaced by
+/// the next `advertise` and withdrawn when the port leaves the LAN.
+pub trait Advertiser: Send {
+    fn advertise(&mut self, ad: &Advertisement) -> Result<(), String>;
+    fn withdraw(&mut self);
+}

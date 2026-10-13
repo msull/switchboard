@@ -1,0 +1,10 @@
+{
+  "body": {
+    "device_id": "78fff1bd-6618-40fd-8143-ba2bd0a2e340",
+    "scope": "read",
+    "server_id": "bde60e57-d51a-4f7d-b0f9-6e3cf31a2bca",
+    "token": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  },
+  "epoch": "6386092b-b275-4aaa-9b31-8a64d4c528bd",
+  "revision": 0
+}

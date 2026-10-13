@@ -200,6 +200,7 @@ fn main() -> eframe::Result {
                 remote: Box::new(switchboard::adapters::remote::RemoteFiles::new(
                     data_dir.clone(),
                 )),
+                advertiser: Box::new(switchboard::adapters::bonjour::Bonjour::default()),
                 dispatch: Some(Box::new(DispatchSocket::detect())),
                 wake,
             };

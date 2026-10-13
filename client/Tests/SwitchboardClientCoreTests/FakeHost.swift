@@ -1,0 +1,173 @@
+import Foundation
+import SwitchboardClientCore
+import SwitchboardProtocol
+import SwitchboardTransport
+
+/// A host in memory: whatever the test puts in it, at the revision and
+/// epoch it says, with the failures it is told to produce.
+final class FakeHost: HostAPI, @unchecked Sendable {
+    let lock = NSLock()
+    var serverID: ServerID
+    var name: String
+    var spki: String
+    var epoch = "e1"
+    var revision: UInt64 = 1
+    var projects: [ProjectView] = []
+    var spaces: [SpaceView] = []
+    var sets: [String: [SetView]] = [:]
+    var sessions: [String: [SessionView]] = [:]
+    /// Thrown by every call while set.
+    var failure: RemoteError?
+    var pairCode = "ABCD2345"
+    var pairs = 0
+    var calls: [String] = []
+
+    init(serverID: ServerID, name: String, spki: String) {
+        self.serverID = serverID
+        self.name = name
+        self.spki = spki
+    }
+
+    func set(_ change: (FakeHost) -> Void) {
+        lock.lock()
+        change(self)
+        lock.unlock()
+    }
+
+    private func answer<T: Sendable>(_ call: String, _ body: () -> T) throws -> Envelope<T> {
+        lock.lock()
+        defer { lock.unlock() }
+        calls.append(call)
+        if let failure { throw failure }
+        return Envelope(epoch: epoch, revision: revision, body: body())
+    }
+
+    func info() async throws -> Envelope<ServerInfo> {
+        try answer("info") {
+            try! Wire.decode(
+                ServerInfo.self,
+                from: Data(
+                    """
+                    {"server_id":"\(serverID)","server_name":"\(name)","protocol":1,
+                     "capabilities":["read"],"spki_sha256":"\(spki)",
+                     "limits":{"body_bytes":1,"string_bytes":1,"notes_bytes":1,"screen_lines":1},
+                     "pairing_open":false}
+                    """.utf8))
+        }
+    }
+
+    private func check(_ request: PairRequest) -> (wrongCode: Bool, wrongKey: Bool) {
+        lock.lock()
+        defer { lock.unlock() }
+        return (request.code != pairCode, request.spkiSha256 != spki)
+    }
+
+    func pair(_ request: PairRequest) async throws -> Envelope<PairReply> {
+        let (wrongCode, wrongKey) = check(request)
+        if wrongCode {
+            throw RemoteError.refused(status: 403, code: "wrong_code", message: "wrong code")
+        }
+        if wrongKey {
+            throw RemoteError.refused(status: 403, code: "wrong_key", message: "another host's key")
+        }
+        return try answer("pair") {
+            pairs += 1
+            return try! Wire.decode(
+                PairReply.self,
+                from: Data(
+                    """
+                    {"token":"tok-\(pairs)","scope":"read","server_id":"\(serverID)","device_id":"d1"}
+                    """.utf8))
+        }
+    }
+
+    func projects() async throws -> Envelope<ProjectsBody> {
+        try answer("projects") { ProjectsBody(projects: projects) }
+    }
+
+    func spaces() async throws -> Envelope<SpacesBody> {
+        try answer("spaces") { SpacesBody(spaces: spaces) }
+    }
+
+    func sets(space: String) async throws -> Envelope<SetsBody> {
+        try answer("sets") { SetsBody(sets: sets[space] ?? []) }
+    }
+
+    func sessions(project: String) async throws -> Envelope<SessionsBody> {
+        try answer("sessions") { SessionsBody(sessions: sessions[project] ?? []) }
+    }
+
+    func session(_ id: String) async throws -> Envelope<SessionBody> {
+        try answer("session") {
+            SessionBody(session: sessions.values.flatMap { $0 }.first { $0.id == id }!)
+        }
+    }
+
+    func waiting() async throws -> Envelope<SessionsBody> {
+        try answer("waiting") { SessionsBody(sessions: sessions.values.flatMap { $0 }.filter(\.waiting)) }
+    }
+
+    func screen(_ id: String, lines: Int?) async throws -> Envelope<ScreenBody> {
+        throw RemoteError.refused(status: 400, code: "failed", message: "no pane")
+    }
+}
+
+
+/// Every host a test reaches, by address, and what each connection was
+/// opened with. Each call is routed afresh, as a new TCP connection
+/// would be: a host that moved is not found at its old address, and a
+/// pin that is not the host's current key fails as the handshake does,
+/// with nothing sent.
+final class FakeNetwork: @unchecked Sendable {
+    private let lock = NSLock()
+    var hosts: [Address: FakeHost] = [:]
+    var opened: [(Address, PinPolicy, String?)] = []
+
+    var factory: HostAPIFactory {
+        { [self] address, pin, token in
+            lock.lock()
+            opened.append((address, pin, token))
+            lock.unlock()
+            return Route(network: self, address: address, pin: pin)
+        }
+    }
+
+    func route(_ address: Address, _ pin: PinPolicy) throws -> FakeHost {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let host = hosts[address] else {
+            throw RemoteError.transport("no host at \(address)")
+        }
+        if case .expect(let expected) = pin, expected != host.spki {
+            throw RemoteError.pinMismatch(expected: expected, seen: host.spki)
+        }
+        return host
+    }
+}
+
+/// One connection's view of the network: the handshake on every call.
+struct Route: HostAPI {
+    let network: FakeNetwork
+    let address: Address
+    let pin: PinPolicy
+
+    func info() async throws -> Envelope<ServerInfo> { try await network.route(address, pin).info() }
+    func pair(_ request: PairRequest) async throws -> Envelope<PairReply> {
+        try await network.route(address, pin).pair(request)
+    }
+    func projects() async throws -> Envelope<ProjectsBody> { try await network.route(address, pin).projects() }
+    func spaces() async throws -> Envelope<SpacesBody> { try await network.route(address, pin).spaces() }
+    func sets(space: String) async throws -> Envelope<SetsBody> {
+        try await network.route(address, pin).sets(space: space)
+    }
+    func sessions(project: String) async throws -> Envelope<SessionsBody> {
+        try await network.route(address, pin).sessions(project: project)
+    }
+    func session(_ id: String) async throws -> Envelope<SessionBody> {
+        try await network.route(address, pin).session(id)
+    }
+    func waiting() async throws -> Envelope<SessionsBody> { try await network.route(address, pin).waiting() }
+    func screen(_ id: String, lines: Int?) async throws -> Envelope<ScreenBody> {
+        try await network.route(address, pin).screen(id, lines: lines)
+    }
+}

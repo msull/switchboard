@@ -618,7 +618,7 @@ fn step(app: &mut SwitchboardApp, w: &[&str]) -> Result<(), String> {
         }
         [
             "set-env" | "set-secret" | "dotenv" | "environment" | "config" | "env-setup"
-            | "pairing" | "remote-devices",
+            | "pairing" | "remote-devices" | "remote-listen",
             ..,
         ] => {
             env_step(app, w)?;
@@ -733,6 +733,18 @@ fn env_step(app: &mut SwitchboardApp, w: &[&str]) -> Result<(), String> {
         }),
         ["remote-devices"] => {
             app.ui_state.remote_dialog = Some(crate::ui::remote::RemoteDraft::open(app.core()));
+        }
+        // `remote-listen lan 43187` puts the port on the local network.
+        ["remote-listen", place, port] => {
+            let lan = match *place {
+                "lan" => true,
+                "loopback" => false,
+                other => return Err(format!("remote-listen: {other} is not lan or loopback")),
+            };
+            let port = port
+                .parse()
+                .map_err(|e| format!("remote-listen: port {port}: {e}"))?;
+            app.dispatch(AppAction::SetRemoteListen { lan, port });
         }
         _ => return Err(format!("unknown environment line: {}", w.join(" "))),
     }

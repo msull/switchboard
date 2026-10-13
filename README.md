@@ -15,6 +15,7 @@ cargo test --locked --workspace                      # unit + headless UI + tmux
 cargo test --locked -p egui_term --lib               # the vendored terminal widget (outside the workspace)
 cargo clippy --locked --workspace --all-targets -- -D warnings   # lint
 cargo fmt --all                                      # format
+(cd client && swift test)                            # the Swift client's packages (Xcode; not in the hook or CI)
 ./scripts/test-times.sh                              # every test timed serially, the slowest ten, the budget checked
 ```
 
@@ -211,6 +212,9 @@ Dev aids, all environment variables:
   was given (`curl --insecure` trusts any certificate; a real client
   pins the key hash the dialog shows):
   `curl -sk -H "Authorization: Bearer <token>" https://127.0.0.1:43187/api/v1/waiting`.
+  The Swift client's command-line browser does the pinned version:
+  `client/README.md`. Script lines `remote-listen lan <port>` and
+  `pairing <code>` put an instance on the network with a window open.
 - `DISPATCH_DATA_DIR=<dir>`: where the Dispatch page looks for
   `dispatch.sock` and where its console opens (the `dispatch` binary
   reads the same variable). Tickets' trees go under
@@ -246,6 +250,7 @@ Dev aids, all environment variables:
   `show-file`, `files`, `side-position`, `terminal`, `select-file`,
   `set-env`, `set-secret`, `dotenv`, `environment`, `config`,
   `env-setup unlock|lock`, `pairing <code>|close`, `remote-devices`,
+  `remote-listen lan|loopback <port>`,
   `send`, `interrupt`, `return`, `kill`, `remove`, `approve`, `revoke`, `side`,
   `switchboard`, `working-set`, `new-working-set`, `clone-working-set`,
   `rename-working-set`, `delete-working-set`, `new-recent-set`,
@@ -298,13 +303,14 @@ src/core/
   diff.rs                a changed file's diff as held per ticket, lane and path, when a re-read is due, which unchanged runs fold
   dispatch.rs            Dispatch as the app shows it: the runner's last status as views, decisions answered as calls, a ticket's events and full view read once per change and its timeline, a project's supervisor chip, the console session
   tests.rs               state-transition tests for the core
-src/ports/               traits: store, host, events, agent, opener, transcript, secrets, project_config, round_files, artifacts, changes (a branch's commits and files over its base, one file's diff), controller, control (the operations log), dispatch (Dispatch's port), remote (the identity and paired-device files)
+src/ports/               traits: store, host, events, agent, opener, transcript, secrets, project_config, round_files, artifacts, changes (a branch's commits and files over its base, one file's diff), controller, control (the operations log), dispatch (Dispatch's port), remote (the identity and paired-device files, and the Bonjour advertisement)
 src/adapters/
   store.rs               JSON store: atomic writes, .bak, flock
   tmux.rs                tmux process host on the private socket
   hooks.rs               append-first event log + socket wake-up + hook settings JSON
   control.rs             the control port: operations.log (append-only, synced) and control.sock (one thread per connection, requests handed to the frame)
   remote.rs              the remote port: identity.json and devices.json, the certificate and key (`rcgen`), the pinned client a device uses, and the TLS listener (`rustls`, one thread per connection, pools of 4 unauthenticated and 12 paired, 5 s handshake, `/pair` and `/info` rate limits, requests handed to the frame 8 per pass)
+  bonjour.rs             `_switchboard._tcp` over `mdns-sd` while the remote port is on the local network (macOS; a stub elsewhere): the display name with a short id suffix, TXT `v`, `name`, `id`
   dispatch.rs            the Dispatch port's client over <Dispatch data dir>/dispatch.sock, reconnecting after an error; the `dispatch` beside the app's binary
   dock.rs                Dock badge with the waiting-session count (macOS)
   controller.rs          the nunchuk over USB serial: a thread owns the port, reconnects, hands events over a channel
@@ -356,12 +362,13 @@ src/ui/
 assets/fonts/            Source Serif 4 (Regular, Semibold, Italic; OFL), embedded by theme.rs
 tests/ui.rs              headless flows via egui_kittest with fakes
 tests/control.rs         the control port over a real socket with fakes: ops on records, logged replies, interrupted launches, a pane's screen with secrets named
-tests/remote.rs          the remote port over a real TLS listener with fakes: /info to anyone, pairing with the host's key and code, a token that reads every view, revocation, scope, the allowlist, bounded strings, a redacted screen, a missing key remaking the identity
+tests/remote.rs          the remote port over a real TLS listener with fakes: /info to anyone, pairing with the host's key and code, a token that reads every view, revocation, scope, the allowlist, bounded strings, a redacted screen, a missing key remaking the identity, Bonjour following the listen preference, and the client fixtures (`client/Fixtures`, rewritten with `SWITCHBOARD_WRITE_FIXTURES=1`)
 tests/fixtures/          a small real Claude Code transcript for the parser tests
 tests/live.rs            ignored: real claude / codex / Ghostty runs
 tests/gate.rs            Milestone 1 gate: real store, tmux, hooks; agents ignored
 scripts/test-times.sh    every test's time, serially, through libtest's `--report-time`; the slowest ten, each binary's total, the 5 s budget
 scripts/ci-test.sh       CI's test step: the workspace, then one retry of the failed tests, warning `flaky:` for each that passes on it
+client/                  the Swift client (docs/remote-client.md §7): `SwitchboardProtocol` (the wire views as Codable, qualified refs, the envelope), `SwitchboardTransport` (HTTPS with the SPKI-pinning delegate, Bonjour browsing), `SwitchboardClientCore` (known servers, credentials, one connection actor per host with the revision rule, the unified store), `SwitchboardUI` (SwiftUI browser and server views), the `switchboard-remote` command-line browser, tests, and `Fixtures/` shared with `tests/remote.rs`
 control/                 switchboard-control: the control port's wire contract (requests, replies, views; `session.resume` resumes an agent without a terminal and never launches fresh; `session.prompt` types a prompt only into a Claude Code agent between turns, else fails naming why) and a blocking client; std + serde only
 dispatch-control/        dispatch-control: the wire contract of Dispatch's own port (tickets as views, a ticket's events after a cursor, decide, queue, take, resume, close, worktrees, a project's supervisor and `supervisor-fresh`), how a bring-up reads, and a blocking client; std + serde only
 dispatch/                the `dispatch` binary (docs/dispatch.md; docs/dispatch-agent-guide.md is the command-line guide for agents that take tickets; docs/dispatch-pipeline-guide.md builds a pipeline file up step by step, every TOML block in it checked by a test; docs/dispatch-pipeline-improvements.md is the open list of pipeline changes drawn from tickets run so far): a ticket scheduler that drives Switchboard over the control port and never links the app

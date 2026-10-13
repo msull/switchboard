@@ -19,7 +19,7 @@ use rustls::pki_types::ServerName;
 use rustls::{ClientConfig, ClientConnection, StreamOwned};
 use switchboard::SwitchboardApp;
 use switchboard::adapters::fakes::{
-    self, FakeHost, FakeOperations, FakeRemoteStore, FakeSecrets, MemoryStore,
+    self, FakeAdvertiser, FakeHost, FakeOperations, FakeRemoteStore, FakeSecrets, MemoryStore,
 };
 use switchboard::adapters::remote::{self, pinned_client};
 use switchboard::app::Services;
@@ -36,6 +36,7 @@ struct Port {
     host: FakeHost,
     secrets: FakeSecrets,
     remote: FakeRemoteStore,
+    advertiser: FakeAdvertiser,
     _dir: tempfile::TempDir,
 }
 
@@ -50,10 +51,12 @@ fn port() -> Port {
 }
 
 fn port_with(host: FakeHost, secrets: FakeSecrets, remote: FakeRemoteStore) -> Port {
+    let advertiser = FakeAdvertiser::default();
     let services = Services {
         secrets: Box::new(secrets.clone()),
         host: Box::new(host.clone()),
         remote: Box::new(remote.clone()),
+        advertiser: Box::new(advertiser.clone()),
         operations: Box::new(FakeOperations::default()),
         ..fakes::services()
     };
@@ -81,6 +84,7 @@ fn port_with(host: FakeHost, secrets: FakeSecrets, remote: FakeRemoteStore) -> P
         host,
         secrets,
         remote,
+        advertiser,
         _dir: dir,
     }
 }
@@ -769,4 +773,215 @@ fn a_change_of_address_rebinds_the_port() {
     port.addr = after;
     let (status, _) = get(&mut port, "/api/v1/info", None);
     assert_eq!(status, 200, "served on the new socket");
+}
+
+/// Bonjour follows the listen preference: nothing on loopback, the
+/// record while the port is on the local network, under the current
+/// name, and withdrawn when the owner turns the network off.
+#[test]
+fn bonjour_advertises_only_while_the_port_is_on_the_lan() {
+    let mut port = port();
+    assert_eq!(
+        port.advertiser.current(),
+        None,
+        "loopback is not advertised"
+    );
+    // The core refuses port 0; the test's override still picks a free one.
+    port.app.dispatch(AppAction::SetRemoteListen {
+        lan: true,
+        port: 43187,
+    });
+    let addr = port.app.remote_addr().unwrap();
+    assert!(addr.ip().is_unspecified(), "bound to every interface");
+    let ad = port.advertiser.current().expect("advertised on the LAN");
+    let identity = port.remote.state().identity.clone().unwrap();
+    assert_eq!(ad.port, addr.port());
+    assert_eq!(ad.server_id, identity.server_id);
+    assert_eq!(ad.server_name, identity.server_name);
+    assert!(
+        ad.instance.starts_with(&identity.server_name),
+        "{:?} carries the display name",
+        ad.instance
+    );
+    assert!(
+        ad.instance
+            .contains(&identity.server_id.simple().to_string()[..6]),
+        "{:?} carries a short id suffix",
+        ad.instance
+    );
+    let txt = ad.txt();
+    assert!(txt.contains(&("v".to_owned(), "1".to_owned())));
+    assert!(txt.contains(&("id".to_owned(), identity.server_id.to_string())));
+    assert!(
+        !txt.iter().any(|(_, v)| v == &identity.spki_sha256),
+        "no key material in the TXT records"
+    );
+
+    port.app.dispatch(AppAction::SetServerName("Desk".into()));
+    let renamed = port.advertiser.current().expect("still advertised");
+    assert_eq!(renamed.server_name, "Desk");
+    assert!(renamed.instance.starts_with("Desk ("));
+    assert_eq!(
+        port.app.remote_addr(),
+        Some(addr),
+        "a rename re-advertises without rebinding"
+    );
+
+    port.app.dispatch(AppAction::SetRemoteListen {
+        lan: false,
+        port: 43187,
+    });
+    assert_eq!(port.advertiser.current(), None, "withdrawn off the LAN");
+    assert!(port.app.remote_addr().unwrap().ip().is_loopback());
+}
+
+/// The Swift client's fixtures: one reply of each shape the port sends,
+/// as `client/Fixtures/*.json`. The committed files must still decode
+/// as the wire types here (the `reply` tag put back), and the Swift
+/// tests decode the same files, so a shape change on either side fails
+/// a test. `SWITCHBOARD_WRITE_FIXTURES=1` rewrites them from a seeded
+/// port.
+/// Every fixture from a seeded port, written to `dir`.
+fn write_fixtures(dir: &std::path::Path) {
+    let mut port = port();
+    let (space, project, session) = seed(&mut port, "ticket 1\nnotes with two lines");
+    let record = RecordId(uuid::Uuid::parse_str(&session).unwrap());
+    let pane = HostId(record.host_name());
+    port.host.state().statuses.push(HostStatus {
+        id: pane.clone(),
+        liveness: HostLiveness::Running {
+            pid: 7,
+            command: "claude".into(),
+        },
+        cwd: None,
+        last_activity: None,
+        title: None,
+    });
+    port.host
+        .state()
+        .snapshots
+        .insert(pane, "$ claude\n> fix the test\n\n".into());
+    port.app.poll_now();
+    control(
+        &mut port,
+        Request::new(
+            "st",
+            Body::SetNew {
+                space: space.clone(),
+                name: "Desk".into(),
+            },
+        ),
+    );
+    // A fixed name: the fake's default is this machine's hostname.
+    port.app
+        .dispatch(AppAction::SetServerName("Desk Mac".into()));
+    let identity = port.remote.state().identity.clone().unwrap();
+    let (_, info) = get(&mut port, "/api/v1/info", None);
+    port.app.dispatch(AppAction::OpenPairing {
+        code: "ABCD2345".into(),
+        scope: Scope::Read,
+    });
+    let body = serde_json::json!({
+        "code": "ABCD2345", "device_name": "Vision Pro", "spki_sha256": identity.spki_sha256
+    });
+    let (_, paired) = call(&mut port, "POST", "/api/v1/pair", None, &body.to_string());
+    let token = paired["body"]["token"].as_str().unwrap().to_owned();
+    let t = Some(token.as_str());
+    let mut files = vec![
+        ("info", info),
+        ("pair", paired),
+        ("projects", get(&mut port, "/api/v1/projects", t).1),
+        ("spaces", get(&mut port, "/api/v1/spaces", t).1),
+        (
+            "sets",
+            get(&mut port, &format!("/api/v1/spaces/{space}/sets"), t).1,
+        ),
+        (
+            "sessions",
+            get(
+                &mut port,
+                &format!("/api/v1/projects/{project}/sessions"),
+                t,
+            )
+            .1,
+        ),
+        (
+            "session",
+            get(&mut port, &format!("/api/v1/sessions/{session}"), t).1,
+        ),
+        ("waiting", get(&mut port, "/api/v1/waiting", t).1),
+        (
+            "screen",
+            get(&mut port, &format!("/api/v1/sessions/{session}/screen"), t).1,
+        ),
+        ("error", get(&mut port, "/api/v1/projects", None).1),
+        (
+            "pin",
+            serde_json::json!({
+                "certificate": identity.certificate,
+                "spki_sha256": identity.spki_sha256,
+            }),
+        ),
+    ];
+    for (name, value) in &mut files {
+        if *name == "pair" {
+            // A fixture never carries a real token.
+            value["body"]["token"] = serde_json::json!("A".repeat(43));
+        }
+        let text = serde_json::to_string_pretty(value).unwrap();
+        std::fs::write(dir.join(format!("{name}.json")), text + "\n").unwrap();
+    }
+}
+
+#[test]
+fn the_client_fixtures_decode_on_both_sides() {
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("client/Fixtures");
+    if std::env::var_os("SWITCHBOARD_WRITE_FIXTURES").is_some() {
+        write_fixtures(&dir);
+    }
+    let read = |name: &str| -> serde_json::Value {
+        let path = dir.join(format!("{name}.json"));
+        let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{path:?}: {e}"));
+        serde_json::from_str(&text).unwrap_or_else(|e| panic!("{path:?}: {e}"))
+    };
+    for (name, tag) in [
+        ("projects", "projects"),
+        ("spaces", "spaces"),
+        ("sets", "sets"),
+        ("sessions", "sessions"),
+        ("session", "session"),
+        ("waiting", "waiting"),
+        ("screen", "screen"),
+    ] {
+        let fixture = read(name);
+        assert!(fixture["epoch"].is_string(), "{name}: epoch");
+        assert!(fixture["revision"].is_u64(), "{name}: revision");
+        let mut body = fixture["body"].clone();
+        body["reply"] = serde_json::json!(tag);
+        let reply: Reply = serde_json::from_value(body)
+            .unwrap_or_else(|e| panic!("{name}.json no longer decodes as the wire type: {e}"));
+        assert!(
+            !matches!(reply, Reply::Failed { .. }),
+            "{name}: a failure fixture"
+        );
+    }
+    let info = read("info");
+    assert_eq!(info["body"]["protocol"], 1);
+    assert!(info["body"]["spki_sha256"].is_string());
+    let pair = read("pair");
+    assert_eq!(pair["body"]["token"].as_str().map(str::len), Some(43));
+    assert_eq!(pair["body"]["scope"], "read");
+    let error = read("error");
+    assert_eq!(code(&error), "unauthorized");
+    let pin = read("pin");
+    let der = base64::Engine::decode(
+        &base64::engine::general_purpose::STANDARD,
+        pin["certificate"].as_str().unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        remote::spki_sha256_of_cert(&der).unwrap(),
+        pin["spki_sha256"].as_str().unwrap(),
+        "the pin fixture's hash is the certificate's"
+    );
 }

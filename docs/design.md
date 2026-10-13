@@ -3166,6 +3166,30 @@ Built so far:
   is answered on the frame as the control port answers it, until the
   screen cache of A4), Bonjour (A2), and `server_name` lives in
   `identity.json` rather than `Settings`, which the spec now says.
+- **A2, two hosts and the first client.** The host advertises
+  `_switchboard._tcp` through `mdns-sd` (`adapters/bonjour.rs`, a stub
+  off macOS) while the port is on the local network, under the display
+  name with a short id suffix and TXT `v`, `name` and `id`; a rename
+  re-advertises, loopback withdraws. The Swift package under `client/`
+  is the protocol (the wire views as `Codable`, decoded against
+  fixtures the Rust port writes and checks), the transport (`URLSession`
+  with a delegate that accepts only a certificate over the pinned
+  P-256 key, and `Network.framework` browsing), the core (known servers
+  apart from discovery, credentials in the Keychain for the apps and an
+  owner-only file for the command-line browser, one `ServerConnection`
+  actor per host with the §6.2 states, the per-key revision rule, the
+  epoch check, a key change dropping the token and keeping the entry,
+  and the unified store with source labels and offline marks) and a
+  SwiftUI browser. Measured on this Mac with two throwaway instances:
+  discovery finds both, the command-line browser pairs with each and
+  shows both hosts' sessions under distinct labels, a killed host's
+  items stay visible marked offline while the other keeps refreshing,
+  and the host back on another port is reconnected under the same pin
+  within one refresh, because a host that is not connected is resolved
+  again from its Bonjour record on every tick (a killed process sends
+  no goodbye). Not in A2: the visionOS and iPadOS app targets (an
+  Xcode project; the package builds for both), events (A3), and the
+  Swift tests are not in the pre-commit hook or CI.
 
 ## Open questions
 

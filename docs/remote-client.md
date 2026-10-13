@@ -134,7 +134,7 @@ Each host is authoritative for its own resources. The client aggregates views wi
 - Only the instance holding the store lock listens (as the control port does); a read-only instance refuses to bind.
 - Bind to loopback by default until remote access is explicitly enabled in Settings. For LAN access, bind the chosen interface and require pairing.
 - Configurable port in `identity.json` (§3.1), default `43187`, overridable with `SWITCHBOARD_REMOTE_PORT` (a dev aid, documented in the README) so two instances can run on one machine; `0` picks a free one, which the tests use.
-- Advertise `_switchboard._tcp` via Bonjour only while listening on a non-loopback interface. TXT records carry the protocol major version and the display name; never a token, never key material.
+- Advertise `_switchboard._tcp` via Bonjour only while listening on a non-loopback interface. TXT records carry the protocol major version (`v`), the display name (`name`) and the `server_id` (`id`, so a client matches a record to a known server before it connects); never a token, never key material. The instance name is the display name with a short id suffix, so two installations on one machine stay distinct.
 - If Switchboard closes, the port goes away. A standalone daemon is not in scope.
 
 ### 4.2 API conventions
@@ -300,6 +300,7 @@ A local network is not a trust boundary: these APIs can instruct coding agents a
 - Manual host and port entry for networks where mDNS is blocked.
 - Known servers and pinned identities are persisted separately from transient discovery results.
 - A changed IP address is not a new server.
+- A host that is not connected is resolved again from its Bonjour record before each retry: a host that died sends no goodbye for its old record, so a browse alone does not report the move.
 
 ### 6.2 Per-host state machine
 
@@ -404,7 +405,7 @@ Five commits, each leaving the app running and each with its README and design.m
 
 **A1 — Identity and an authenticated read-only host.** `identity.json` (id, certificate, `server_name` and the listen preference: off the LAN by default, loopback until enabled), the key in the Keychain under its installation's account, `SWITCHBOARD_REMOTE_PORT`. `ports::remote`, `adapters/remote.rs` with the bounds of §4.1 and the two-step content handoff, a fake, the `Effect` and `AppAction` arms, the allowlist, the redaction function. The pairing window and QR code in the settings menu, the paired-devices dialog with scope and Revoke, `devices.json`. Endpoints: `/info`, `/pair`, projects, spaces, sets, one set, sessions, session, waiting, screen. No events yet; a reply carries `epoch` and `revision` from the counter, which only the diff of A3 will move. The screen is answered on the frame as the control port answers it (a pane snapshot, redacted); the worker handoff arrives with the screen cache of A4, since there is nothing to version before it. *Built 2026-10-12; see design.md's remote client status.* Tests: `tests/remote.rs` against a real socket with fakes, modelled on `tests/control.rs`, covering pairing, the pin check, scope, revocation, the allowlist and screen redaction; a UI test for the dialog. Acceptance: a paired `curl` with the pinned certificate reads every view over the LAN; an unpaired one gets `/info` and nothing else.
 
-**A2 — Two hosts and the first client.** Bonjour advertisement and the Linux stub. The Swift protocol, transport with the pinning delegate, `ServerRegistry`, `ConnectionManager`, and a read-only browser of sessions and sets with source labels, refreshing on a timer. Acceptance: two installations have distinct `server_id`s and keys; Bonjour discovers both; the client pairs with both and connects simultaneously; nothing mixes identifiers; taking one offline leaves the other working and its items visibly stale; a changed IP reconnects under the same pin.
+**A2 — Two hosts and the first client.** Bonjour advertisement and the Linux stub. The Swift protocol, transport with the pinning delegate, `ServerRegistry`, `ConnectionManager`, and a read-only browser of sessions and sets with source labels, refreshing on a timer. *Built 2026-10-12 as the package under `client/` with a command-line browser for the Mac; the app targets come with Milestone B; see design.md's remote client status.* Acceptance: two installations have distinct `server_id`s and keys; Bonjour discovers both; the client pairs with both and connects simultaneously; nothing mixes identifiers; taking one offline leaves the other working and its items visibly stale; a changed IP reconnects under the same pin.
 
 **A3 — Synchronization.** The read-model diff after every pass, the revision counter moving, `changed` and `removed` events for metadata and collections, the WebSocket with `hello`, subscribe-then-snapshot and reconciliation by revision on the client, epoch handling, `resync_required`. `ops` and the log-before-run path in `serve` (no commands yet, but the path is tested here). Acceptance: the timer refresh of A2 is gone and every host-side change reaches the client within a pass; the mutation-between-hello-and-snapshot test passes on both sides.
 
