@@ -21,10 +21,13 @@ public struct PresentationState: Codable, Equatable, Sendable {
     public struct ModeEntry: Codable, Equatable, Sendable {
         public var mode: ViewMode
         public var at: Date
+        /// Where the window stands in its conversation, once it has one.
+        public var place: ConversationPlace?
 
-        public init(mode: ViewMode, at: Date = Date()) {
+        public init(mode: ViewMode, at: Date = Date(), place: ConversationPlace? = nil) {
             self.mode = mode
             self.at = at
+            self.place = place
         }
     }
 
@@ -35,14 +38,27 @@ public struct PresentationState: Codable, Equatable, Sendable {
     public init() {}
 
     public mutating func setMode(_ mode: ViewMode, for window: UUID, at: Date = Date()) {
-        modes[window] = ModeEntry(mode: mode, at: at)
-        while modes.count > Self.modeCap, let oldest = modes.min(by: { $0.value.at < $1.value.at }) {
-            modes[oldest.key] = nil
-        }
+        modes[window] = ModeEntry(mode: mode, at: at, place: modes[window]?.place)
+        trimModes()
     }
 
     public func mode(for window: UUID) -> ViewMode? {
         modes[window]?.mode
+    }
+
+    public mutating func setPlace(_ place: ConversationPlace, for window: UUID, at: Date = Date()) {
+        modes[window] = ModeEntry(mode: modes[window]?.mode ?? .compact, at: at, place: place)
+        trimModes()
+    }
+
+    public func place(for window: UUID) -> ConversationPlace? {
+        modes[window]?.place
+    }
+
+    private mutating func trimModes() {
+        while modes.count > Self.modeCap, let oldest = modes.min(by: { $0.value.at < $1.value.at }) {
+            modes[oldest.key] = nil
+        }
     }
 
     /// The request that reaches the open window on `ref`, if one is

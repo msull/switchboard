@@ -86,6 +86,59 @@ public enum ScreenScale {
     }
 }
 
+/// One activity in one turn, for the folds a window keeps open.
+public struct ActivityKey: Codable, Hashable, Sendable {
+    public let turn: Int
+    public let index: Int
+
+    public init(turn: Int, index: Int) {
+        self.turn = turn
+        self.index = index
+    }
+}
+
+/// Where a window stands in a conversation (§7.1): the turn at the top
+/// of the view or the end it follows, and the folds open, keyed by the
+/// transcript so another one starts over. Kept across the page merges
+/// and reconnects that replace the turns under the view.
+public struct ConversationPlace: Codable, Equatable, Sendable {
+    public var resumeID: String
+    /// The turn at the top of the view while not following the end.
+    public var turn: Int?
+    /// At the end: the view moves with the host as turns arrive.
+    public var following = true
+    public var openTurns: Set<Int> = []
+    public var openActivities: Set<ActivityKey> = []
+
+    public init(resumeID: String, turn: Int? = nil, following: Bool = true) {
+        self.resumeID = resumeID
+        self.turn = turn
+        self.following = following
+    }
+
+    /// The place against the conversation now held: another transcript
+    /// starts over at the end with nothing open; a turn no longer held
+    /// (the page was replaced after a reconnect) follows the end too.
+    public func fitted(to conversation: ConversationState) -> ConversationPlace {
+        if conversation.resumeID != resumeID {
+            return ConversationPlace(resumeID: conversation.resumeID)
+        }
+        var place = self
+        if let turn, !conversation.turns.contains(where: { $0.n == turn }) {
+            place.turn = nil
+            place.following = true
+        }
+        return place
+    }
+
+    /// The turn to put at the top on a restore: none when following
+    /// the end, which the view scrolls to instead.
+    public func target(in conversation: ConversationState) -> Int? {
+        guard !following, let turn, conversation.turns.contains(where: { $0.n == turn }) else { return nil }
+        return turn
+    }
+}
+
 /// The main window, one per app: the id and the value it is opened
 /// with, so opening it again brings the open one forward instead of
 /// making a second.

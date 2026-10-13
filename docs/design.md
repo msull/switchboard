@@ -3410,6 +3410,20 @@ Built so far:
   lowered again; on the client the op per command, the three status
   outcomes after a timeout, the one resend and the give-up, and the
   refusals.
+- **C3, restoration.** A card window keeps its place in a
+  conversation (`ConversationPlace`): the turn at the top of the view,
+  or the end it follows, and the folds open per turn and per activity,
+  keyed by the transcript's `resume_id`. The scroll view is positioned
+  by turn number, so a page merging under the view keeps the turn at
+  the top where it is, and "Earlier turns" pins the turn that was
+  first; the end is followed only while the end marker is on screen,
+  so reading an old turn while the agent works no longer jumps. The
+  folds live in the window rather than the rows, so a turn replaced by
+  a refetch, or the whole conversation dropped and re-read on a
+  reconnect, comes back with the same folds open. The place is saved
+  beside the window's mode in `presentation.json` (an older file reads
+  with no place), so a relaunch restores it; a turn no longer held
+  after a reconnect, or another transcript, falls back to the end.
 
 ## Open questions
 

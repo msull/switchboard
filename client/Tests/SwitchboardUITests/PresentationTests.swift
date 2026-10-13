@@ -56,6 +56,60 @@ final class PresentationTests: XCTestCase {
 /// (visionOS restores the windows), the oldest entries go past the cap,
 /// and nothing from a host is in the file.
 final class PresentationStoreTests: XCTestCase {
+    func testAWindowsPlaceInItsConversationFollowsTheTranscriptAndSurvivesTheFile() throws {
+        func conversation(_ id: String, _ turns: [Int]) -> ConversationState {
+            ConversationState(page: ConversationBody(
+                resumeID: id, total: turns.last ?? 0, from: turns.first ?? 1, next: nil,
+                turns: turns.map { TurnView(n: $0, user: "p", finalText: "a") }))
+        }
+        let held = conversation("h", [4, 5, 6])
+        var place = ConversationPlace(resumeID: "h", turn: 5, following: false)
+        place.openTurns = [5]
+        place.openActivities = [ActivityKey(turn: 5, index: 2)]
+        XCTAssertEqual(place.fitted(to: held), place, "the turn is held: nothing changes")
+        XCTAssertEqual(place.target(in: held), 5)
+        // The turn went with a replaced page: the view follows the end.
+        let later = conversation("h", [7, 8])
+        let refitted = place.fitted(to: later)
+        XCTAssertNil(refitted.turn)
+        XCTAssertTrue(refitted.following)
+        XCTAssertEqual(refitted.openTurns, [5], "folds are kept for when the turn comes back")
+        XCTAssertNil(refitted.target(in: later))
+        // Another transcript starts over.
+        let cleared = place.fitted(to: conversation("h2", [1]))
+        XCTAssertEqual(cleared, ConversationPlace(resumeID: "h2"))
+        XCTAssertTrue(cleared.openTurns.isEmpty)
+        // Following the end: no target, whatever the turn says.
+        var following = place
+        following.following = true
+        XCTAssertNil(following.target(in: held))
+
+        // Through the file, beside the window's mode, and an entry
+        // written before places existed still reads.
+        var state = PresentationState()
+        let window = UUID()
+        state.setMode(.conversation, for: window, at: Date(timeIntervalSince1970: 1))
+        state.setPlace(place, for: window, at: Date(timeIntervalSince1970: 2))
+        XCTAssertEqual(state.mode(for: window), .conversation, "the mode stays")
+        state.setMode(.screen, for: window, at: Date(timeIntervalSince1970: 3))
+        XCTAssertEqual(state.place(for: window), place, "and so does the place")
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let back = try decoder.decode(PresentationState.self, from: try encoder.encode(state))
+        XCTAssertEqual(back, state)
+        // An entry with no place encodes without the key, which is what
+        // a file written before places existed holds.
+        var before = PresentationState()
+        before.setMode(.screen, for: window, at: Date(timeIntervalSince1970: 1))
+        let old = try encoder.encode(before)
+        XCTAssertFalse(String(decoding: old, as: UTF8.self).contains("place"))
+        let older = try decoder.decode(PresentationState.self, from: old)
+        XCTAssertEqual(older.mode(for: window), .screen)
+        XCTAssertNil(older.place(for: window))
+    }
+
     func testAModeRoundTripsThroughTheFileAndTheCapDropsTheOldest() throws {
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)

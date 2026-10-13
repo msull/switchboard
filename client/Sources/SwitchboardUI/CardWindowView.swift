@@ -189,7 +189,8 @@ public struct CardWindowView: View {
         case .lastResponse:
             LastResponseView(model: model, ref: item.ref).environment(\.textScale, screenScale)
         case .conversation:
-            ConversationView(model: model, ref: item.ref).environment(\.textScale, screenScale)
+            ConversationView(model: model, ref: item.ref, window: request.id)
+                .environment(\.textScale, screenScale)
         case .runOutput:
             RunOutputView(model: model, ref: item.ref, scale: screenScale)
         }
@@ -389,7 +390,21 @@ struct LastResponseView: View {
 struct ConversationView: View {
     @Bindable var model: BrowserModel
     let ref: SessionRef
+    /// The window, whose place in the conversation is kept.
+    let window: UUID
     @State private var loading = false
+    /// Where the view stands: the turn at the top, or the end it
+    /// follows, and the folds open. Seeded from the window's saved
+    /// place and kept across merges and reconnects; a turn's id is its
+    /// number, so a page replacing the turns under the view keeps the
+    /// one at the top in place.
+    @State private var place: ConversationPlace?
+    /// The turn at the top of the view, as the scroll view reports it.
+    @State private var top: Int?
+
+    /// The ids in the scroll target layout that are not turns.
+    private static let earlierID = 0
+    private static let endID = Int.max
 
     var body: some View {
         Group {
@@ -400,8 +415,12 @@ struct ConversationView: View {
                             if conversation.hasEarlier {
                                 Button {
                                     loading = true
+                                    let keep = conversation.firstHeld
                                     Task {
                                         await model.loadEarlier(ref)
+                                        // The turns go in above; the one that was
+                                        // at the top stays there.
+                                        if let keep { top = keep }
                                         loading = false
                                     }
                                 } label: {
@@ -412,19 +431,30 @@ struct ConversationView: View {
                                 .buttonStyle(.bordered)
                                 .controlSize(.small)
                                 .disabled(loading)
+                                .id(Self.earlierID)
                             }
                             ForEach(conversation.turns) { turn in
-                                TurnRow(model: model, ref: ref, turn: turn)
+                                TurnRow(
+                                    model: model, ref: ref, turn: turn,
+                                    open: fold(turn.n),
+                                    openActivity: { index in fold(ActivityKey(turn: turn.n, index: index)) })
                             }
-                            Color.clear.frame(height: 1).id("end")
+                            Color.clear.frame(height: 1)
+                                .id(Self.endID)
+                                .onAppear { place?.following = true }
+                                .onDisappear { place?.following = false }
                         }
+                        .scrollTargetLayout()
                         .frame(maxWidth: .infinity, alignment: .leading)
                     }
-                    .onChange(of: conversation.lastHeld) { _, _ in proxy.scrollTo("end", anchor: .bottom) }
-                    .onChange(of: conversation.turns.last?.finalText) { _, _ in
-                        proxy.scrollTo("end", anchor: .bottom)
+                    .scrollPosition(id: $top, anchor: .top)
+                    .onAppear { restore(conversation, proxy) }
+                    .onChange(of: conversation.resumeID) { _, _ in restore(conversation, proxy) }
+                    .onChange(of: conversation.lastHeld) { _, _ in follow(proxy) }
+                    .onChange(of: conversation.turns.last?.finalText) { _, _ in follow(proxy) }
+                    .onChange(of: top) { _, new in
+                        if let new, new != Self.earlierID, new != Self.endID { place?.turn = new }
                     }
-                    .onAppear { proxy.scrollTo("end", anchor: .bottom) }
                 }
             } else {
                 VStack {
@@ -443,6 +473,50 @@ struct ConversationView: View {
             }
             await model.unwatchConversation(ref)
         }
+        .onChange(of: place?.openTurns) { _, _ in remember() }
+        .onChange(of: place?.openActivities) { _, _ in remember() }
+        .onDisappear { remember() }
+    }
+
+    /// Put the view where the window stood: the end it follows, or
+    /// the turn it had at the top, when that turn is still held.
+    private func restore(_ conversation: ConversationState, _ proxy: ScrollViewProxy) {
+        let saved = place ?? model.place(for: window) ?? ConversationPlace(resumeID: conversation.resumeID)
+        let fitted = saved.fitted(to: conversation)
+        place = fitted
+        if let turn = fitted.target(in: conversation) {
+            top = turn
+            proxy.scrollTo(turn, anchor: .top)
+        } else {
+            proxy.scrollTo(Self.endID, anchor: .bottom)
+        }
+    }
+
+    /// The end moved: follow it only when the view was there.
+    private func follow(_ proxy: ScrollViewProxy) {
+        if place?.following ?? true {
+            proxy.scrollTo(Self.endID, anchor: .bottom)
+        }
+    }
+
+    private func remember() {
+        if let place { model.setPlace(place, for: window) }
+    }
+
+    private func fold(_ turn: Int) -> Binding<Bool> {
+        Binding(
+            get: { place?.openTurns.contains(turn) ?? false },
+            set: { open in
+                if open { place?.openTurns.insert(turn) } else { place?.openTurns.remove(turn) }
+            })
+    }
+
+    private func fold(_ key: ActivityKey) -> Binding<Bool> {
+        Binding(
+            get: { place?.openActivities.contains(key) ?? false },
+            set: { open in
+                if open { place?.openActivities.insert(key) } else { place?.openActivities.remove(key) }
+            })
     }
 }
 
@@ -451,7 +525,10 @@ struct TurnRow: View {
     @Bindable var model: BrowserModel
     let ref: SessionRef
     let turn: TurnView
-    @State private var open = false
+    /// The folds, owned by the window so they survive the turn being
+    /// replaced under the row.
+    @Binding var open: Bool
+    let openActivity: (Int) -> Binding<Bool>
     @Environment(\.textScale) private var scale
 
     var body: some View {
@@ -470,7 +547,7 @@ struct TurnRow: View {
                 DisclosureGroup(isExpanded: $open) {
                     VStack(alignment: .leading, spacing: 4) {
                         ForEach(turn.activity) { activity in
-                            ActivityRow(activity: activity)
+                            ActivityRow(activity: activity, open: openActivity(activity.index))
                         }
                     }
                     .padding(.leading, 8)
@@ -511,7 +588,7 @@ struct TurnRow: View {
 /// One activity line; a tool call opens on its input and result.
 struct ActivityRow: View {
     let activity: ActivityView
-    @State private var open = false
+    @Binding var open: Bool
     @Environment(\.textScale) private var scale
 
     var body: some View {

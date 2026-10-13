@@ -250,6 +250,17 @@ public final class BrowserModel {
         save()
     }
 
+    /// Where a card window stands in its conversation, if it has been
+    /// there before.
+    public func place(for window: UUID) -> ConversationPlace? {
+        presentation.place(for: window)
+    }
+
+    public func setPlace(_ place: ConversationPlace, for window: UUID) {
+        presentation.setPlace(place, for: window)
+        save()
+    }
+
     public var sessions: [UnifiedSession] {
         store.sessions.filter(presentation.filters.admits)
     }
