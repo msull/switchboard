@@ -47,7 +47,7 @@ use crate::ports::round_files::RoundFiles;
 use crate::ports::secrets::SecretStore;
 use crate::ports::store::{Store, StoreError};
 use crate::ports::transcript::TranscriptReader;
-use crate::ui::UiState;
+use crate::ui::{UiState, prompt_box};
 
 /// How often the host is listed and the event log read.
 const POLL_INTERVAL: Duration = Duration::from_secs(1);
@@ -186,6 +186,10 @@ pub struct SwitchboardApp {
     /// dispatch since then makes another pass worth taking.
     fingerprints: Option<Fingerprints>,
     dirty: bool,
+    /// Each session's draft as last broadcast, so a device holding a
+    /// draft hears when the editor under it moves.
+    draft_marks: HashMap<RecordId, u64>,
+    last_draft_pass: Option<Instant>,
     /// The devices subscribed to events, each with its connection's
     /// queue; a revocation drops the device's entry and so its socket.
     subscribers: Vec<Subscriber>,
@@ -290,6 +294,8 @@ impl SwitchboardApp {
             revision: 0,
             fingerprints: None,
             dirty: false,
+            draft_marks: HashMap::new(),
+            last_draft_pass: None,
             subscribers: Vec::new(),
             content: None,
             observed: None,
@@ -1424,6 +1430,7 @@ impl SwitchboardApp {
     /// most `DRAIN_PER_PASS` requests per pass, in arrival order.
     pub fn serve_pending(&mut self) {
         self.diff_pass();
+        self.draft_pass();
         let incoming: Vec<Incoming> = self
             .control
             .as_mut()
@@ -2399,6 +2406,12 @@ impl SwitchboardApp {
             ("POST", ["sessions", session, verb @ ("send" | "resume" | "trust")]) => {
                 return Served::Now(self.remote_command(request, &device, session, verb));
             }
+            ("GET" | "POST", ["sessions", session, "draft"]) => {
+                return Served::Now(self.remote_draft(request, &device, session));
+            }
+            ("POST", ["sessions", session, "dictation"]) => {
+                return Served::Now(self.remote_dictation(request, &device, session));
+            }
             (
                 "GET",
                 ["sessions", _, "screen" | "conversation" | "last-response"]
@@ -2485,6 +2498,240 @@ impl SwitchboardApp {
         self.remote_reply(request, &reply, STRING_CAP)
     }
 
+    /// The session whose draft a device asks for: an agent session,
+    /// since only those have a Prompt Box editor.
+    fn draft_record(
+        &self,
+        request: &RemoteRequest,
+        session: &str,
+    ) -> Result<SessionRecord, RemoteReply> {
+        let record = parse_uuid("session", session)
+            .ok()
+            .and_then(|id| self.core.session(RecordId(id)));
+        let Some(record) = record else {
+            return Err(self.refuse(request, 404, "not_found", "no such session", true));
+        };
+        if !matches!(record.kind, SessionKind::Agent(_)) {
+            return Err(self.refuse(
+                request,
+                400,
+                "no_draft",
+                "only an agent session has a prompt",
+                true,
+            ));
+        }
+        Ok(record.clone())
+    }
+
+    /// The draft as the device reads it, from the session's editor,
+    /// made now if the session has not been opened on the host.
+    fn draft_reply(&mut self, record: &SessionRecord) -> RemoteReply {
+        let editor =
+            prompt_box::ensure_editor(&self.core, &self.services, &mut self.ui_state, record);
+        let draft = serde_json::to_value(prompt_box::draft_view(editor)).unwrap_or_default();
+        self.envelope(200, &serde_json::json!({ "draft": draft }), true)
+    }
+
+    /// A session's prompt, its Prompt Box editor on the host (§4.5):
+    /// read by any paired device, and under the control scope edited
+    /// with the editor's own tools. `send` takes the draft's text to
+    /// the pane through `serve` with the device's op as the key, as
+    /// the plain send does, and clears the editor when it went.
+    fn remote_draft(
+        &mut self,
+        request: &RemoteRequest,
+        device: &PairedDevice,
+        session: &str,
+    ) -> RemoteReply {
+        let record = match self.draft_record(request, session) {
+            Ok(record) => record,
+            Err(reply) => return reply,
+        };
+        if request.method == "GET" {
+            return self.draft_reply(&record);
+        }
+        if device.scope != Scope::Control {
+            return self.refuse(
+                request,
+                403,
+                "scope",
+                "this device reads only; raise its scope on the host",
+                true,
+            );
+        }
+        let Ok(body) = serde_json::from_slice::<serde_json::Value>(&request.body) else {
+            return self.refuse(request, 400, "bad_request", "the body is not JSON", true);
+        };
+        let field = |name: &str| body.get(name).and_then(|v| v.as_str());
+        let action = field("action").unwrap_or_default();
+        let text = field("text");
+        if text.is_some_and(|t| t.len() > SEND_BYTES_CAP) {
+            return self.refuse(request, 400, "bad_request", "text is at most 16 KiB", true);
+        }
+        if action == "send" {
+            let op = field("op").map(str::trim).unwrap_or_default();
+            if op.is_empty() || op.len() > OP_CAP {
+                return self.refuse(
+                    request,
+                    400,
+                    "bad_request",
+                    "op is the operation id, 1 to 64 characters",
+                    true,
+                );
+            }
+            let editor =
+                prompt_box::ensure_editor(&self.core, &self.services, &mut self.ui_state, &record);
+            let text = prompt_box::draft_view(editor).text.trim().to_owned();
+            if text.is_empty() {
+                // A repeat of a send that went: the draft was cleared
+                // by it, and the op's log line is the answer.
+                let status = self.answer(&wire::Body::OpStatus {
+                    operation: op.to_owned(),
+                });
+                if let wire::Reply::OpStatus {
+                    status: wire::OpStatus::Done { reply },
+                } = status
+                {
+                    return self.remote_reply(request, &reply, STRING_CAP);
+                }
+                return self.refuse(request, 400, "failed", "the draft is empty", true);
+            }
+            let reply = self.serve(&wire::Request::new(
+                op,
+                wire::Body::SessionSend {
+                    session: session.to_owned(),
+                    text,
+                },
+            ));
+            match &reply {
+                wire::Reply::Failed { reason } if reason.starts_with("interrupted") => {
+                    return self.refuse(request, 409, "interrupted", reason, true);
+                }
+                wire::Reply::Failed { .. } => {
+                    return self.remote_reply(request, &reply, STRING_CAP);
+                }
+                _ => {}
+            }
+            let editor =
+                prompt_box::ensure_editor(&self.core, &self.services, &mut self.ui_state, &record);
+            editor.dispatch(promptbox::core::AppAction::ClearPrompt);
+            return self.draft_reply(&record);
+        }
+        let Some(action) = prompt_box::DraftAction::parse(action, text) else {
+            return self.refuse(
+                request,
+                400,
+                "bad_request",
+                "action is replace (with text), undo, redo, clear, clean_up, delete_sentence, delete_paragraph or send (with op)",
+                true,
+            );
+        };
+        let editor =
+            prompt_box::ensure_editor(&self.core, &self.services, &mut self.ui_state, &record);
+        if let Err(reason) = action.apply(editor) {
+            return self.refuse(request, 400, "failed", &reason, true);
+        }
+        self.draft_reply(&record)
+    }
+
+    /// A device's speech events into a session's editor (§4.5), as the
+    /// host's own recognizer feeds it: the device recognizes, the
+    /// editor keeps the document. The reply is the draft as it stands,
+    /// so the device need not wait for the event.
+    fn remote_dictation(
+        &mut self,
+        request: &RemoteRequest,
+        device: &PairedDevice,
+        session: &str,
+    ) -> RemoteReply {
+        let record = match self.draft_record(request, session) {
+            Ok(record) => record,
+            Err(reply) => return reply,
+        };
+        if device.scope != Scope::Control {
+            return self.refuse(
+                request,
+                403,
+                "scope",
+                "this device reads only; raise its scope on the host",
+                true,
+            );
+        }
+        let Ok(body) = serde_json::from_slice::<serde_json::Value>(&request.body) else {
+            return self.refuse(request, 400, "bad_request", "the body is not JSON", true);
+        };
+        let Some(recognizer) = body.get("session").and_then(serde_json::Value::as_u64) else {
+            return self.refuse(
+                request,
+                400,
+                "bad_request",
+                "session is the device's recognizer session, a number",
+                true,
+            );
+        };
+        let events = body.get("events").cloned().unwrap_or_default();
+        let Ok(events) = serde_json::from_value::<Vec<prompt_box::DictationEvent>>(events) else {
+            return self.refuse(
+                request,
+                400,
+                "bad_request",
+                "events is a list of {sequence, kind, utterance, revision, text}",
+                true,
+            );
+        };
+        if events.len() > DICTATION_EVENTS_CAP
+            || events.iter().any(|e| e.text.len() > SEND_BYTES_CAP)
+        {
+            return self.refuse(
+                request,
+                400,
+                "bad_request",
+                "at most 256 events of at most 16 KiB each",
+                true,
+            );
+        }
+        let editor =
+            prompt_box::ensure_editor(&self.core, &self.services, &mut self.ui_state, &record);
+        prompt_box::apply_dictation(editor, recognizer, &events);
+        self.draft_reply(&record)
+    }
+
+    /// Every draft a device could hold, fingerprinted against the
+    /// last pass: one `changed {draft}` per editor that moved, at most
+    /// a few times a second while dictation revises it. Only while
+    /// someone is subscribed, since nothing else reads the events.
+    fn draft_pass(&mut self) {
+        if self.remote.is_none() || self.subscribers.is_empty() {
+            return;
+        }
+        if self
+            .last_draft_pass
+            .is_some_and(|t| t.elapsed() < DRAFT_PASS_EVERY)
+        {
+            return;
+        }
+        self.last_draft_pass = Some(Instant::now());
+        let editors = &self.ui_state.prompt_boxes.editors;
+        self.draft_marks.retain(|id, _| editors.contains_key(id));
+        let mut moved = Vec::new();
+        for (id, editor) in editors {
+            let mark = prompt_box::draft_mark(editor);
+            if self.draft_marks.get(id) != Some(&mark) {
+                self.draft_marks.insert(*id, mark);
+                moved.push(*id);
+            }
+        }
+        if moved.is_empty() {
+            return;
+        }
+        self.revision += 1;
+        let at_ms = epoch_millis(SystemTime::now());
+        for id in moved {
+            let text = self.event_json("changed", Some(("draft", &id.0.to_string())), at_ms);
+            self.broadcast(&text);
+        }
+    }
+
     /// Who this host is, to anyone: nothing in it is a secret and
     /// nothing in it is trusted until the key is pinned.
     fn remote_info(&self) -> RemoteReply {
@@ -2499,7 +2746,7 @@ impl SwitchboardApp {
             "server_id": identity.server_id,
             "server_name": identity.server_name,
             "protocol": REMOTE_PROTOCOL,
-            "capabilities": ["read", "control"],
+            "capabilities": ["read", "control", "draft"],
             "spki_sha256": identity.spki_sha256,
             "limits": {
                 "body_bytes": BODY_CAP,
@@ -3205,6 +3452,10 @@ const STRING_CAP: usize = 4 * 1024;
 /// may make.
 const SEND_BYTES_CAP: usize = 16 * 1024;
 const OP_CAP: usize = 64;
+/// The most speech events one dictation request carries.
+const DICTATION_EVENTS_CAP: usize = 256;
+/// How often the drafts are fingerprinted for `changed` events.
+const DRAFT_PASS_EVERY: Duration = Duration::from_millis(150);
 const NOTES_CAP_ALONE: usize = 64 * 1024;
 
 /// Cut every string in `value` to its cap, `notes` to `notes_cap` and

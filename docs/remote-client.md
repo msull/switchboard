@@ -177,6 +177,9 @@ Each host is authoritative for its own resources. The client aggregates views wi
 | POST | `/api/v1/sessions/{id}/send` | `session.send` | control |
 | POST | `/api/v1/sessions/{id}/resume` | `session.resume` | control |
 | POST | `/api/v1/sessions/{id}/trust` | `session.trust` | control |
+| GET | `/api/v1/sessions/{id}/draft` | `session.draft` | read |
+| POST | `/api/v1/sessions/{id}/draft` | `session.draft` | control |
+| POST | `/api/v1/sessions/{id}/dictation` | `session.dictation` | control |
 | GET | `/api/v1/ops/{op}` | `op.status` | read |
 | GET | `/api/v1/events` | WebSocket upgrade | read |
 
@@ -267,6 +270,12 @@ Because the subscriber is registered on the frame thread before any later pass c
 - `send` puts keys into the pane, as the app's own message box does. "Accepted" means the keys were sent. Progress is the record's state: `PromptSubmitted`, then working, then `Stop` with the new last response. A send to a pane sitting at Claude Code's folder trust question is accepted but goes nowhere until `trust` answers it; the session view carries `trust_question`, and the client shows the same "Trust this folder" button the app shows.
 - `resume` on a not-running agent is user-initiated, so allowed, but the client confirms it ("Resume spends a turn") before sending; the host never resumes on its own.
 - Failures name the reason: not running, not resumable, unknown record, scope missing, pairing revoked, log unavailable.
+
+**The draft.** An agent session's prompt on the host is its Prompt Box editor (design.md, "Prompt Box status"), one document with undo, the live utterance as a provisional span, voice commands and the AI pass. A device does not keep a prompt of its own: it reads the editor's draft and works on it, so dictation from the headset, dictation at the desk and typing on either meet in one text, and a prompt begun on one device can be finished on the other. The editor exists whether or not the session is drawn on the host, as it does for a card's microphone.
+
+- `GET sessions/{id}/draft` (any paired device) answers `{draft: {text, live, status, status_text, can_undo, can_redo, ai, busy}}`: the rendered text, the byte range of the utterance still being recognized or null, the editor's status (`idle`, `listening`, `finishing`, `degraded`, `error`) with its reason, whether undo and redo apply, whether the host has an `OpenAI` key for the AI pass, and whether a pass is running. Only an agent session has a draft (`no_draft` otherwise). The host emits `changed {draft, id}` for an editor whose draft moved, fingerprinted a few times a second while a subscriber is connected, and a device holding the draft re-reads it; no watch is needed, since the editor is the host's own state rather than a source the worker polls.
+- `POST sessions/{id}/draft` (control) applies one of the editor's tools and answers with the draft as it stands: `{action: "replace", text}` sets the text whole (what the device typed; last writer wins, one person), `undo`, `redo`, `clear`, `clean_up` (the AI pass, refused `failed` when the host has no key), `delete_sentence`, `delete_paragraph`, and `{action: "send", op}`, which takes the draft's text to the pane exactly as `session.send` does, under the device's op as the key, and clears the editor when it went; a repeat of a send that went is answered from the log. A send of an empty draft is refused.
+- `POST sessions/{id}/dictation` (control) carries `{session, events}`: the device's recognizer session, a number the device picks apart from the host's own, and its speech events in order, each `{sequence, kind, utterance, revision, text}` with `kind` one of `started`, `voice_started`, `partial`, `final`, `voice_ended`, `stopped`. The host feeds them to the editor as its own recognizer's events: `started` puts the editor's status at listening, a partial is the provisional span revised in place, a final commits the utterance at its anchor, `stopped` returns the status to idle. At most 256 events of 16 KiB each per request. The reply is the draft as it stands, so the device sees its words land without waiting for the event. The device segments speech into utterances itself (the Apple recognizer starts over after a pause and closes an utterance by re-sending its words later); the editor keeps the document. Two recognizers into one editor (the desk's and the headset's) are kept apart by their session numbers.
 
 ### 4.6 Dispatch and waiting
 

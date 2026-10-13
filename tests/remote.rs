@@ -68,6 +68,8 @@ fn port_with(host: FakeHost, secrets: FakeSecrets, remote: FakeRemoteStore) -> P
         ..fakes::services()
     };
     let mut app = SwitchboardApp::with_services(services);
+    // The editors a draft is read from save through a fake dialog.
+    app.ui_state.prompt_boxes.native = false;
     app.start();
     let dir = tempfile::Builder::new()
         .prefix("sbr")
@@ -681,6 +683,156 @@ fn running(port: &mut Port, session: &str, screen: &str) {
     port.app.poll_now();
 }
 
+/// A session's draft is its Prompt Box editor on the host (§4.5): a
+/// device's speech events land in it as the host's recognizer's do,
+/// utterance by utterance, the editor's tools work on it, and `send`
+/// takes its text to the pane under the device's op and clears it.
+/// Any paired device reads it; only the control scope changes it.
+#[test]
+#[allow(clippy::too_many_lines)]
+fn a_draft_is_the_sessions_editor_fed_by_dictation_and_worked_by_its_tools() {
+    let mut port = port();
+    let (_, project, session) = seed(&mut port, "");
+    let token = pair(&mut port, "ABCD2345", Scope::Read, "Vision Pro");
+    let t = Some(token.as_str());
+    let draft = format!("/api/v1/sessions/{session}/draft");
+    let dictation = format!("/api/v1/sessions/{session}/dictation");
+
+    let (status, reply) = get(&mut port, &draft, t);
+    assert_eq!(status, 200, "{reply}");
+    assert_eq!(reply["body"]["draft"]["text"], "");
+    assert_eq!(reply["body"]["draft"]["status"], "idle");
+    assert_eq!(reply["body"]["draft"]["can_undo"], false);
+    assert_eq!(reply["body"]["draft"]["ai"], false);
+    let (status, reply) = call(
+        &mut port,
+        "POST",
+        &dictation,
+        t,
+        r#"{"session":7,"events":[]}"#,
+    );
+    assert_eq!((status, code(&reply)), (403, "scope"), "{reply}");
+    let (status, reply) = call(&mut port, "POST", &draft, t, r#"{"action":"undo"}"#);
+    assert_eq!((status, code(&reply)), (403, "scope"), "{reply}");
+
+    let id = port.app.core().devices()[0].id;
+    port.app.dispatch(AppAction::SetDeviceScope {
+        device: id,
+        scope: Scope::Control,
+    });
+    let s = subscribe(&mut port, &token);
+    let _hello = next_frame(&mut port, &s, 5);
+
+    // An utterance revises in place and commits on its final; the
+    // next one goes after it, spaced by the editor.
+    let (status, reply) = call(
+        &mut port,
+        "POST",
+        &dictation,
+        t,
+        r#"{"session":7,"events":[
+            {"sequence":1,"kind":"started"},
+            {"sequence":2,"kind":"voice_started","utterance":1},
+            {"sequence":3,"kind":"partial","utterance":1,"revision":1,"text":"fix the"},
+            {"sequence":4,"kind":"partial","utterance":1,"revision":2,"text":"fix the test"},
+            {"sequence":5,"kind":"final","utterance":1,"text":"Fix the test."}]}"#,
+    );
+    assert_eq!(status, 200, "{reply}");
+    let view = &reply["body"]["draft"];
+    assert_eq!(view["text"], "Fix the test.");
+    assert_eq!(view["status"], "listening");
+    assert_eq!(view["live"], serde_json::Value::Null);
+    assert_eq!(view["can_undo"], true);
+    let (_, reply) = call(
+        &mut port,
+        "POST",
+        &dictation,
+        t,
+        r#"{"session":7,"events":[
+            {"sequence":6,"kind":"voice_started","utterance":2},
+            {"sequence":7,"kind":"partial","utterance":2,"revision":1,"text":"and run"}]}"#,
+    );
+    let view = &reply["body"]["draft"];
+    assert_eq!(view["text"], "Fix the test. and run");
+    assert_eq!(view["live"], serde_json::json!([13, 21]));
+    let (_, reply) = call(
+        &mut port,
+        "POST",
+        &dictation,
+        t,
+        r#"{"session":7,"events":[
+            {"sequence":8,"kind":"final","utterance":2,"text":"and run it"},
+            {"sequence":9,"kind":"stopped"}]}"#,
+    );
+    let view = &reply["body"]["draft"];
+    assert_eq!(view["text"], "Fix the test. and run it");
+    assert_eq!(view["status"], "idle");
+    let seen = resources(&events(&mut port, &s));
+    assert!(
+        seen.contains(&("changed".into(), "draft".into(), session.clone())),
+        "{seen:?}"
+    );
+
+    // The editor's tools: undo takes the last utterance back, replace
+    // is what a device typed, the AI pass needs a key.
+    let (_, reply) = call(&mut port, "POST", &draft, t, r#"{"action":"undo"}"#);
+    assert_eq!(reply["body"]["draft"]["text"], "Fix the test.");
+    assert_eq!(reply["body"]["draft"]["can_redo"], true);
+    let (_, reply) = call(
+        &mut port,
+        "POST",
+        &draft,
+        t,
+        r#"{"action":"replace","text":"ship it"}"#,
+    );
+    assert_eq!(reply["body"]["draft"]["text"], "ship it");
+    let (status, reply) = call(&mut port, "POST", &draft, t, r#"{"action":"clean_up"}"#);
+    assert_eq!((status, code(&reply)), (400, "failed"), "{reply}");
+    let (status, reply) = call(&mut port, "POST", &draft, t, r#"{"action":"shout"}"#);
+    assert_eq!((status, code(&reply)), (400, "bad_request"), "{reply}");
+    let (status, reply) = call(&mut port, "POST", &draft, t, r#"{"action":"send"}"#);
+    assert_eq!((status, code(&reply)), (400, "bad_request"), "{reply}");
+
+    // Send goes to the pane under the op, once, and clears the draft;
+    // a session that is not running refuses and keeps it.
+    let (status, reply) = call(
+        &mut port,
+        "POST",
+        &draft,
+        t,
+        r#"{"action":"send","op":"d1"}"#,
+    );
+    assert_eq!((status, code(&reply)), (400, "failed"), "{reply}");
+    assert!(port.host.state().written.is_empty());
+    let (_, reply) = get(&mut port, &draft, t);
+    assert_eq!(reply["body"]["draft"]["text"], "ship it");
+    running(&mut port, &session, "");
+    let (status, reply) = call(
+        &mut port,
+        "POST",
+        &draft,
+        t,
+        r#"{"action":"send","op":"d2"}"#,
+    );
+    assert_eq!(status, 200, "{reply}");
+    assert_eq!(reply["body"]["draft"]["text"], "");
+    assert_eq!(port.host.state().written.len(), 1);
+    let (status, _) = call(
+        &mut port,
+        "POST",
+        &draft,
+        t,
+        r#"{"action":"send","op":"d2"}"#,
+    );
+    assert_eq!(status, 200);
+    assert_eq!(port.host.state().written.len(), 1, "the op is the key");
+
+    // Only an agent session has a prompt.
+    let (_, shell) = command_with_run(&mut port, &project, "echo");
+    let (status, reply) = get(&mut port, &format!("/api/v1/sessions/{}/draft", shell.0), t);
+    assert_eq!((status, code(&reply)), (400, "no_draft"), "{reply}");
+}
+
 /// The control scope (§4.5): `send`, `resume` and `trust` go through
 /// the control socket's `serve`, so the device's op is the idempotency
 /// key and a repeat is answered from the log without reaching the pane
@@ -982,6 +1134,8 @@ fn two_instances_have_distinct_identities_and_a_read_only_one_does_not_listen() 
         ..fakes::services()
     };
     let mut app = SwitchboardApp::with_services(services);
+    // The editors a draft is read from save through a fake dialog.
+    app.ui_state.prompt_boxes.native = false;
     app.start();
     app.set_remote_port_override(Some(0));
     assert!(app.listen_remote(|| {}).is_err());
@@ -1246,6 +1400,17 @@ fn content_fixtures(
             .1,
         ),
         ("op_status", get(port, "/api/v1/ops/fixture-send", t).1),
+        (
+            "draft",
+            call(
+                port,
+                "POST",
+                &format!("/api/v1/sessions/{session}/dictation"),
+                t,
+                r#"{"session":7,"events":[{"sequence":1,"kind":"started"},{"sequence":2,"kind":"voice_started","utterance":1},{"sequence":3,"kind":"final","utterance":1,"text":"Fix the test."},{"sequence":4,"kind":"partial","utterance":2,"revision":1,"text":"and run"}]}"#,
+            )
+            .1,
+        ),
     ]
 }
 
@@ -1294,6 +1459,9 @@ fn the_client_fixtures_decode_on_both_sides() {
     let output = read("run_output");
     assert_eq!(output["body"]["n"], 1);
     assert!(output["body"]["text"].is_string());
+    let draft = read("draft");
+    assert_eq!(draft["body"]["draft"]["text"], "Fix the test. and run");
+    assert_eq!(draft["body"]["draft"]["status"], "listening");
     let info = read("info");
     assert_eq!(info["body"]["protocol"], 1);
     assert!(info["body"]["spki_sha256"].is_string());

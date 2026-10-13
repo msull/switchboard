@@ -5,7 +5,7 @@
         "card": "starting",
         "cwd": "/tmp",
         "held_until_ms": null,
-        "id": "34c649c2-9bc8-4542-b6a6-b37b81d3a741",
+        "id": "fa1db80b-fc0b-4e71-9ff6-8a04cbfa3d88",
         "kind": "claude",
         "last_activity_ms": null,
         "last_exit": null,
@@ -15,10 +15,10 @@
         "notes": "ticket 1\nnotes with two lines",
         "op": "se",
         "pending": [],
-        "project": "11fd0199-af78-43b1-8229-7133e32e56fc",
+        "project": "36e17a6f-8717-4833-ba93-f783e21df0f3",
         "prompt_refusal": "no turn reported yet",
         "quiet_secs": null,
-        "resume_id": "eeb1a1ef-27e4-4a33-b2d6-d1b8827a9a2c",
+        "resume_id": "5eca1cff-6914-4303-93ae-fb3251f3aed1",
         "trust_question": false,
         "waiting": false,
         "waiting_reason": null,
@@ -28,7 +28,7 @@
         "card": "not running",
         "cwd": "/tmp",
         "held_until_ms": null,
-        "id": "41543c0b-f792-4779-b529-414e7cdc6bd7",
+        "id": "8e5201b5-5ce4-4771-aa08-a339a5b794ad",
         "kind": "command",
         "last_activity_ms": null,
         "last_exit": null,
@@ -38,7 +38,7 @@
         "notes": "",
         "op": "cmd",
         "pending": [],
-        "project": "11fd0199-af78-43b1-8229-7133e32e56fc",
+        "project": "36e17a6f-8717-4833-ba93-f783e21df0f3",
         "prompt_refusal": "not a Claude Code session",
         "quiet_secs": null,
         "resume_id": null,
@@ -49,6 +49,6 @@
       }
     ]
   },
-  "epoch": "4d9b99db-f398-4a54-a359-f2e011f479f7",
+  "epoch": "91bac231-a889-4a5b-9db3-f4c704b57e4c",
   "revision": 10
 }

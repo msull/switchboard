@@ -1,0 +1,19 @@
+{
+  "body": {
+    "draft": {
+      "ai": false,
+      "busy": false,
+      "can_redo": false,
+      "can_undo": true,
+      "live": [
+        13,
+        21
+      ],
+      "status": "listening",
+      "status_text": null,
+      "text": "Fix the test. and run"
+    }
+  },
+  "epoch": "91bac231-a889-4a5b-9db3-f4c704b57e4c",
+  "revision": 13
+}

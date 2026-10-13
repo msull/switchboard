@@ -3414,6 +3414,28 @@ Built so far:
   lowered again; on the client the op per command, the three status
   outcomes after a timeout, the one resend and the give-up, and the
   refusals.
+- **C3, the draft.** An agent session's prompt as a device reads and
+  works on it is its Prompt Box editor on the host, made on demand as
+  the card's microphone makes one (`prompt_box::ensure_editor`).
+  `GET sessions/{id}/draft` answers the editor's rendered text, the
+  live utterance's range, its status and what undo, redo and the AI
+  pass can do (`DraftView`); `POST` with `action` applies replace,
+  undo, redo, clear, clean_up, delete_sentence or delete_paragraph,
+  or `send` with the device's `op`, which takes the draft to the pane
+  through `serve` as the plain send does and clears the editor (a
+  repeat of a send that went is answered from the log; an empty draft
+  is refused); `POST sessions/{id}/dictation` feeds a device's speech
+  events (`started`, `voice_started`, `partial`, `final`,
+  `voice_ended`, `stopped`, with the device's own recognizer session
+  number) to the editor as `SpeechEventReceived`, so the device
+  recognizes and the editor keeps the document. The drafts are
+  fingerprinted every 150 ms while a subscriber is connected and an
+  editor that moved emits `changed {draft, id}`; the device holding it
+  re-reads. `/info` lists the `draft` capability. Known gaps: the AI
+  pass runs in the editor's worker, pumped by the host's frame, so a
+  host whose window is occluded finishes it on its next frame; the
+  Mac's own voice runtime and a device dictate into the same editor
+  under different session numbers, and nothing stops both at once.
 - **C3, restoration.** A card window keeps its place in a
   conversation (`ConversationPlace`): the turn at the top of the view,
   or the end it follows, and the folds open per turn and per activity,

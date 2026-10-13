@@ -339,7 +339,7 @@ src/content.rs           the app's content caches and the port's content worker:
 src/script.rs            SWITCHBOARD_SCRIPT dev aid
 src/ui/
   mod.rs                 UiState, draw loop (collect actions, then dispatch), keyboard, side panel tabs
-  prompt_box.rs          the Prompt Box editor per agent session, one voice runtime bound to one of them
+  prompt_box.rs          the Prompt Box editor per agent session, one voice runtime bound to one of them; the draft a device reads, its tools and its dictation
   theme.rs               the look: color tokens per theme, Source Serif 4, type scale, shared widgets (dot, kicker, buttons)
   rail.rs                left project rail (brand, All sessions, Dispatch with its pending decisions, projects with dots, Go to, Settings); a session's neighbours beside it; its list scrolls between a fixed head and Go to / Settings
   switcher.rs            Settings menu and the toasts (notice, host error)

@@ -2,7 +2,8 @@
   "body": {
     "capabilities": [
       "read",
-      "control"
+      "control",
+      "draft"
     ],
     "limits": {
       "activity_bytes": 512,
@@ -18,10 +19,10 @@
     },
     "pairing_open": false,
     "protocol": 1,
-    "server_id": "8b08d10c-bd99-4f1c-8a01-74e4e18c651c",
+    "server_id": "f1273cd7-2736-4264-b295-fa77dae229f9",
     "server_name": "Desk Mac",
-    "spki_sha256": "632aeaeb7906d6e84d423bd4522a587d91dcd81ff426c48e1e8bdffcca841a09"
+    "spki_sha256": "2971a563b49146351e170cbdd88cc65cd306510e1f0efb60700fd268cb433b41"
   },
-  "epoch": "4d9b99db-f398-4a54-a359-f2e011f479f7",
+  "epoch": "91bac231-a889-4a5b-9db3-f4c704b57e4c",
   "revision": 10
 }

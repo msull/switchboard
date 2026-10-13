@@ -10,7 +10,7 @@ final class FixturesTests: XCTestCase {
     func testEveryFixtureDecodes() throws {
         let info: Envelope<ServerInfo> = try Fixtures.load("info")
         XCTAssertEqual(info.body.protocolVersion, RemoteProtocol.version)
-        XCTAssertEqual(info.body.capabilities, ["read", "control"])
+        XCTAssertEqual(info.body.capabilities, ["read", "control", "draft"])
         XCTAssertEqual(info.body.spkiSha256.count, 64)
         XCTAssertEqual(info.body.limits.screenLines, 200)
         XCTAssertFalse(info.body.pairingOpen)
