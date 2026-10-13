@@ -27,10 +27,10 @@ struct SwitchboardVisionApp: App {
         .defaultSize(width: 760, height: 560)
     }
 
-    /// A dev aid: `SWITCHBOARD_INVITE` holds an invite's JSON (the text
-    /// of the host's QR code) and the app pairs with it on launch, so a
-    /// simulator run needs no typing (`simctl launch` passes it as
-    /// `SIMCTL_CHILD_SWITCHBOARD_INVITE`).
+    /// A dev aid: `SWITCHBOARD_INVITE` holds invites' JSON (the text of
+    /// each host's QR code, one per line) and the app pairs with them
+    /// on launch, so a simulator run needs no typing (`simctl launch`
+    /// passes it as `SIMCTL_CHILD_SWITCHBOARD_INVITE`).
     static var inviteFromEnvironment: String? {
         ProcessInfo.processInfo.environment["SWITCHBOARD_INVITE"]
     }

@@ -73,3 +73,62 @@ final class PresentationStoreTests: XCTestCase {
         XCTAssertTrue(text.contains("\"screen\"") || text.contains("\"compact\""))
     }
 }
+
+/// Browsing state (§8, §7.2): the filters and layout round-trip, focus
+/// keeps its session across a reorder and wraps, and the saved windows
+/// the system did not restore are the ones to reopen.
+final class BrowsingTests: XCTestCase {
+    let a = ServerID("11111111-1111-1111-1111-111111111111")
+
+    func item(_ id: String, card: String = "idle") -> UnifiedSession {
+        UnifiedSession(
+            ref: SessionRef(serverID: a, recordID: id),
+            session: SessionView(id: id, project: "p", name: id, card: card),
+            serverName: "Desk", stale: false)
+    }
+
+    func testFiltersLayoutAndFocusRoundTripThroughTheFile() throws {
+        var state = PresentationState()
+        state.browse = .grid
+        state.filters.kinds = [.claude]
+        state.filters.cards = ["waiting on you"]
+        state.focused = SessionRef(serverID: a, recordID: "r2")
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let back = try decoder.decode(PresentationState.self, from: try encoder.encode(state))
+        XCTAssertEqual(back, state)
+        XCTAssertTrue(state.filters.admits(item("r1", card: "waiting on you")), "a waiting Claude session passes")
+        XCTAssertFalse(state.filters.admits(item("r1", card: "idle")), "an idle one does not")
+    }
+
+    func testFocusStaysOnItsSessionAcrossAReorderAndWraps() {
+        let items = [item("a"), item("b"), item("c")]
+        XCTAssertEqual(FocusCursor.index(of: nil, in: items), 0, "nothing focused: the first")
+        let b = items[1].ref
+        XCTAssertEqual(FocusCursor.index(of: b, in: [item("c"), item("b"), item("a")]), 1)
+        XCTAssertEqual(FocusCursor.moved(b, by: 1, in: items), items[2].ref)
+        XCTAssertEqual(FocusCursor.moved(items[2].ref, by: 1, in: items), items[0].ref, "wraps")
+        XCTAssertEqual(FocusCursor.moved(items[0].ref, by: -1, in: items), items[2].ref)
+        let gone = SessionRef(serverID: a, recordID: "zz")
+        XCTAssertEqual(FocusCursor.index(of: gone, in: items), 0, "a focused session that left: the first")
+        XCTAssertNil(FocusCursor.index(of: gone, in: []))
+    }
+
+    func testTheWindowsToReopenAreTheSavedOnesNotRestoredWhoseSessionsAreListed() {
+        var state = PresentationState()
+        let restored = UUID()
+        let missing = UUID()
+        let unlisted = UUID()
+        state.windows = [
+            restored: SessionRef(serverID: a, recordID: "r1"),
+            missing: SessionRef(serverID: a, recordID: "r1"),
+            unlisted: SessionRef(serverID: a, recordID: "r9"),
+        ]
+        let listed: Set<SessionRef> = [SessionRef(serverID: a, recordID: "r1")]
+        let reopen = state.windowsToReopen(appeared: [restored], listed: listed)
+        XCTAssertEqual(reopen.map(\.id), [missing])
+        XCTAssertEqual(reopen.first?.ref.recordID, "r1")
+    }
+}

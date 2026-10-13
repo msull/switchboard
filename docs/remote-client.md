@@ -421,6 +421,8 @@ Across A1 to A4: README (Layout, dev aids, data directory) and the design.md sta
 - Closing a window never ends a session.
 - Reconnect preserves open windows and refreshes them through subscribe-then-snapshot.
 
+*Built 2026-10-12 on the visionOS simulator, three commits (B1 the app shell on an xcodegen project, B2 card windows, B3 browsing and persistence); see design.md's remote client status. The headset itself waits on the one-time Xcode device setup.*
+
 ### Milestone C — Interactive sessions
 
 - `session.conversation`, `session.last_response`, `session.runs`, `session.run_output` and `file.read` on the wire and the port, with `read_pinned` in the files adapter, `read_masked` on the transcript reader and the overlap read in `scrollback`.

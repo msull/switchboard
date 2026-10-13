@@ -1,4 +1,6 @@
 import Foundation
+import SwitchboardClientCore
+import SwitchboardProtocol
 
 /// The user's presentation state (§7): what the client itself decides
 /// and keeps in its container, never anything a host sent. visionOS
@@ -6,6 +8,15 @@ import Foundation
 /// keyed by the window id it was opened with.
 public struct PresentationState: Codable, Equatable, Sendable {
     public var modes: [UUID: ModeEntry] = [:]
+    /// How the main window browses, and what it shows.
+    public var browse: BrowseMode = .list
+    public var filters = Filters()
+    /// The session focus mode is on, kept by ref so a reorder keeps it.
+    public var focused: SessionRef?
+    /// The card windows open when the state was last saved, by window
+    /// id. The system restores windows on relaunch when it can; the
+    /// ones it does not bring back are reopened from here.
+    public var windows: [UUID: SessionRef] = [:]
 
     public struct ModeEntry: Codable, Equatable, Sendable {
         public var mode: ViewMode
@@ -32,6 +43,56 @@ public struct PresentationState: Codable, Equatable, Sendable {
 
     public func mode(for window: UUID) -> ViewMode? {
         modes[window]?.mode
+    }
+
+    /// The saved windows a launch must open itself: the ones the
+    /// system did not restore (`appeared`) whose sessions are listed.
+    public func windowsToReopen(appeared: Set<UUID>, listed: Set<SessionRef>) -> [CardWindowRequest] {
+        windows
+            .filter { !appeared.contains($0.key) && listed.contains($0.value) }
+            .map { CardWindowRequest(id: $0.key, ref: $0.value) }
+            .sorted { $0.id.uuidString < $1.id.uuidString }
+    }
+}
+
+/// How the main window lays the sessions out (§7.2).
+public enum BrowseMode: String, Codable, CaseIterable, Sendable, Identifiable {
+    case list
+    case grid
+    case focus
+
+    public var id: String { rawValue }
+
+    public var title: String {
+        switch self {
+        case .list: return "List"
+        case .grid: return "Grid"
+        case .focus: return "Focus"
+        }
+    }
+
+    public var symbol: String {
+        switch self {
+        case .list: return "list.bullet"
+        case .grid: return "square.grid.2x2"
+        case .focus: return "rectangle.inset.filled"
+        }
+    }
+}
+
+/// Focus mode's cursor over the sessions in view: one at a time, kept
+/// by ref so a session moving in the order stays focused, and clamped
+/// to what is listed when it is gone.
+public enum FocusCursor {
+    public static func index(of focused: SessionRef?, in items: [UnifiedSession]) -> Int? {
+        guard !items.isEmpty else { return nil }
+        return items.firstIndex { $0.ref == focused } ?? 0
+    }
+
+    public static func moved(_ focused: SessionRef?, by step: Int, in items: [UnifiedSession]) -> SessionRef? {
+        guard let i = index(of: focused, in: items) else { return nil }
+        let next = (i + step + items.count) % items.count
+        return items[next].ref
     }
 }
 

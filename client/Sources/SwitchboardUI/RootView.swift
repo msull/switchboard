@@ -17,7 +17,24 @@ public struct RootView: View {
     }
 
     public var body: some View {
-        tabs.task(id: openOnStart) { await openRequested() }
+        tabs
+            .task(id: openOnStart) { await openRequested() }
+            .task { await reopenSaved() }
+    }
+
+    /// The card windows open at the last save that the system did not
+    /// bring back: a short grace for its restoration, then each whose
+    /// session is listed is opened under its saved id, and so its mode.
+    private func reopenSaved() async {
+        try? await Task.sleep(nanoseconds: 1_500_000_000)
+        for _ in 0..<100 {
+            let pending = model.windowsToReopen()
+            for request in pending {
+                openWindow(value: request)
+            }
+            if model.presentation.windows.allSatisfy({ model.appeared.contains($0.key) }) { return }
+            try? await Task.sleep(nanoseconds: 300_000_000)
+        }
     }
 
     private func openRequested() async {

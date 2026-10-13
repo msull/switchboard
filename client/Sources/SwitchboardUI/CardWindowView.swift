@@ -43,7 +43,11 @@ public struct CardWindowView: View {
         }
         .padding()
         .navigationTitle(item?.session.name ?? "Session")
-        .onAppear { mode = model.mode(for: request.id) }
+        .onAppear {
+            mode = model.mode(for: request.id)
+            model.windowAppeared(request)
+        }
+        .onDisappear { model.windowClosed(request) }
         .onChange(of: mode) { _, new in model.setMode(new, for: request.id) }
     }
 

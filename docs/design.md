@@ -3288,6 +3288,29 @@ Built so far:
   showed in the window within the poll interval; the system restored
   the previous run's card windows on one relaunch and not on another
   forced termination, which is its call.
+- **B3, browsing and persistence.** The main window lays the sessions
+  out as a list, a grid, or one session in focus with previous and
+  next (the cursor is kept by ref, so a session moving in the order
+  stays focused), with the §8 filters as toggles over hosts, kinds and
+  the states in view (an empty set admits everything, so turning one
+  member off selects the rest first); working sets are grouped by
+  source. The layout, the filters, the focused session, each card
+  window's mode and the card windows open at the last save live in
+  `presentation.json`; a launch waits a moment for the system's own
+  window restoration and then reopens the saved windows it did not
+  bring back, under their ids, so each keeps its mode. Seen on the
+  simulator with two throwaway hosts: both hosts' sessions under
+  labels told apart by the short id, a window from each host open at
+  once, a screen window surviving the host's restart (the offline
+  banner with the mode row disabled, then the pane refilled live once
+  the watch was resent after `hello`), and a screen window reopened
+  with its mode and content after the app was terminated. Milestone B
+  is built on the simulator; the headset itself waits on the one-time
+  Xcode setup (Developer Mode, the device paired in Xcode's Devices
+  window, a development team on the target). Not in B: the
+  conversation, last-response and run-output modes (Milestone C), the
+  QR scanner (the invite is pasted or passed at launch), and the
+  Xcode project is generated, not checked in.
 
 ## Open questions
 

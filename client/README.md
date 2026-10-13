@@ -7,7 +7,7 @@ macOS 14, iOS 17 and visionOS 1.
 
 ```sh
 swift build                      # every target
-swift test                       # 33 tests: fixtures, pinning, the connection core, events, watches, presentation
+swift test                       # 36 tests: fixtures, pinning, the connection core, events, watches, presentation, browsing
 swift run switchboard-remote     # the command-line browser (usage below)
 scripts/sim.sh run               # the visionOS app on the simulator (below)
 ```
@@ -46,11 +46,15 @@ scripts/sim.sh run               # the visionOS app on the simulator (below)
   `CardWindowView`, one window on one session with the `compact` and
   `screen` modes (the screen holds a watch while it is on screen) and a
   banner when the host is away or the session was removed; the
-  presentation model (`ViewMode`, `CardWindowRequest`, `CardStanding`)
-  and `PresentationState` in a JSON file in the app's container, since
-  visionOS restores windows on relaunch and a restored card must keep
-  its mode. Nothing visionOS-only, so the iPad shell draws the same
-  views.
+  presentation model (`ViewMode`, `CardWindowRequest`, `CardStanding`,
+  `BrowseMode`, `FocusCursor`) and `PresentationState` in a JSON file
+  in the app's container: the layout (list, grid, or one session in
+  focus), the filters (hosts, kinds, states), the focused session, each
+  card window's mode by window id, and the card windows open at the
+  last save. visionOS restores an app's windows on relaunch when it
+  can; the saved ones it does not bring back are reopened under their
+  ids after a short grace, so they keep their modes. Nothing
+  visionOS-only, so the iPad shell draws the same views.
 - `Apps/SwitchboardVision`: the visionOS app, an entry that declares
   the scenes and where the registry lives (`servers.json` in the app's
   container, the token and pin in the Keychain, nothing from a host on
@@ -80,7 +84,8 @@ SIMCTL_CHILD_SWITCHBOARD_INVITE="$INVITE" xcrun simctl launch --terminate-runnin
   "Apple Vision Pro" com.sadburger.switchboard.vision
 ```
 
-A second dev aid, `SWITCHBOARD_OPEN`, lists card windows to open once
+`SWITCHBOARD_INVITE` may hold several invites, one per line, for two
+hosts at once. A second dev aid, `SWITCHBOARD_OPEN`, lists card windows to open once
 their sessions are listed, as `<record id>[:<mode>]` entries separated
 by commas (`SIMCTL_CHILD_SWITCHBOARD_OPEN="$ID:screen"`).
 

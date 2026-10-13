@@ -41,7 +41,7 @@ public struct HostStatus: Identifiable, Sendable, Equatable {
 }
 
 /// The user's filters over the unified view (§8).
-public struct Filters: Sendable, Equatable {
+public struct Filters: Sendable, Equatable, Codable {
     public var servers: Set<ServerID> = []
     public var kinds: Set<SessionKind> = []
     public var cards: Set<String> = []
