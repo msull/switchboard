@@ -214,6 +214,14 @@ final class BrowsingTests: XCTestCase {
         XCTAssertEqual(Set(ViewMode.allCases.map(\.symbol)).count, ViewMode.allCases.count, "every mode has its own icon")
     }
 
+    func testDictationJoinsWhatWasHeardAfterWhatWasTyped() {
+        XCTAssertEqual(Dictation.joined("", "fix the test"), "fix the test")
+        XCTAssertEqual(Dictation.joined("please", "fix the test "), "please fix the test")
+        XCTAssertEqual(Dictation.joined("please ", "fix"), "please fix")
+        XCTAssertEqual(Dictation.joined("please", ""), "please")
+        XCTAssertEqual(Dictation.joined("line\n", "next"), "line\nnext")
+    }
+
     func testAClickReachesTheOpenWindowOnItsSessionOrMakesANewOne() {
         var state = PresentationState()
         let r1 = SessionRef(serverID: a, recordID: "r1")

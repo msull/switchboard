@@ -31,6 +31,10 @@
 	<array>
 		<string>_switchboard._tcp</string>
 	</array>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Switchboard listens while you dictate a message to a session.</string>
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>Switchboard turns what you dictate into the message you send a session.</string>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>Switchboard finds the Macs running Switchboard on your network and talks to the ones you pair with.</string>
 </dict>

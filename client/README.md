@@ -7,7 +7,7 @@ macOS 14, iOS 17 and visionOS 1.
 
 ```sh
 swift build                      # every target
-swift test                       # 51 tests: fixtures, commands, pinning, the connection core, events, watches, conversations, presentation, browsing
+swift test                       # 52 tests: fixtures, commands, pinning, the connection core, events, watches, conversations, presentation, browsing
 swift run switchboard-remote     # the command-line browser (usage below)
 scripts/sim.sh run               # the visionOS app on the simulator (below)
 ```
@@ -70,7 +70,12 @@ scripts/sim.sh run               # the visionOS app on the simulator (below)
   turn into icons rather than wrap, so a tall narrow card fits, and a
   banner when the host is away or the session was removed; on a
   Claude session a control bar (`ControlBar`): a message field with
-  Send (the system keyboard's dictation is the voice input), "Trust
+  Send and a microphone button that starts dictation at once through
+  the Speech framework (`Dictation`: on-device recognition where the
+  device has it, what is heard revised in place after what was typed;
+  the system keyboard's own mic still works; visionOS gives an app no
+  gaze or dwell event and "look to dictate" belongs to search fields
+  only, so the button is a tap), "Trust
   this folder" when the host says the question is up, and Resume for a
   session that is not running, behind "Resume spends a turn"; a read
   device sees why the bar is off instead; the

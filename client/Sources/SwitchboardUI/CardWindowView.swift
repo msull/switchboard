@@ -217,6 +217,10 @@ struct ControlBar: View {
     @State private var busy = false
     @State private var note: String?
     @State private var confirmResume = false
+    @State private var dictation = Dictation()
+    /// The field's text when dictation started: what is heard goes
+    /// after it, revised in place as the recognizer settles.
+    @State private var typedBeforeDictation = ""
 
     private var canControl: Bool { enabled && scope == .control && !busy }
 
@@ -244,11 +248,34 @@ struct ControlBar: View {
                                 Button("Resume") { run { await model.resume(ref) } }
                             }
                     }
-                    TextField("Message", text: $draft, axis: .vertical)
-                        .lineLimit(1...4)
-                        .textFieldStyle(.roundedBorder)
-                        .onSubmit(send)
+                    HStack(alignment: .bottom, spacing: 6) {
+                        Button {
+                            if !dictation.listening { typedBeforeDictation = draft }
+                            Task { await dictation.toggle() }
+                        } label: {
+                            Image(systemName: dictation.listening ? "waveform" : "mic.fill")
+                                .symbolEffect(.variableColor.iterative, isActive: dictation.listening)
+                                .frame(width: 22, height: 22)
+                        }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(dictation.listening ? AnyShapeStyle(.red) : AnyShapeStyle(.secondary))
                         .disabled(!canControl)
+                        .accessibilityLabel(dictation.listening ? "Stop dictation" : "Dictate")
+                        TextField("Message", text: $draft, axis: .vertical)
+                            .lineLimit(2...5)
+                            .textFieldStyle(.plain)
+                            .onSubmit(send)
+                            .disabled(!canControl)
+                    }
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 8)
+                    .background(.quaternary, in: RoundedRectangle(cornerRadius: 12))
+                    .onChange(of: dictation.heard) { _, heard in
+                        draft = Dictation.joined(typedBeforeDictation, heard)
+                    }
+                    .onChange(of: dictation.problem) { _, problem in
+                        if let problem { note = problem }
+                    }
                     Button(action: send) {
                         Image(systemName: "paperplane.fill")
                     }
@@ -265,6 +292,7 @@ struct ControlBar: View {
     }
 
     private func send() {
+        dictation.stop()
         let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty, canControl else { return }
         run {

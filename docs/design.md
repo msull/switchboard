@@ -3399,8 +3399,12 @@ Built so far:
   pairing (only an unauthorized or revoked token drops it), and a
   timeout on a command does not count against the connection. The
   card window of a Claude session ends in a control bar: a message
-  field (the system keyboard's dictation is the voice input; nothing
-  is voice-specific), Send, "Trust this folder" when the session view
+  field with a microphone button that starts dictation at once
+  through the Speech framework, on-device where the device has it,
+  the words revised in place after what was typed (the keyboard's own
+  mic still works; "look to dictate" is a system affordance of search
+  fields only, and an app gets no gaze event, so the button is a tap),
+  Send, "Trust this folder" when the session view
   carries the question, and Resume for a not-running session with a
   handle, behind "Resume spends a turn". The bar is disabled unless
   the session is live, and a read device sees why instead of the
