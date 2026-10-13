@@ -11,10 +11,23 @@ public final class BrowserModel {
     public private(set) var store = UnifiedStore()
     public private(set) var discovered: [DiscoveredServerRow] = []
     public var filters = Filters()
+    /// The screen last read per watched session, mirrored from its
+    /// connection; the holders per session are the open screen views.
+    public private(set) var screens: [SessionRef: ScreenBody] = [:]
+    private var holders: [SessionRef: Int] = [:]
+    /// Every session seen from a host, and the ones a connected host
+    /// no longer lists: a window on one says it was removed.
+    private var seen: Set<SessionRef> = []
+    public private(set) var removed: Set<SessionRef> = []
+    /// The client's own presentation state, kept in its container.
+    public private(set) var presentation = PresentationState()
+    private let presentationStore: PresentationStore
     private var pump: Task<Void, Never>?
 
-    public init(manager: ConnectionManager) {
+    public init(manager: ConnectionManager, presentationStore: PresentationStore = MemoryPresentationStore()) {
         self.manager = manager
+        self.presentationStore = presentationStore
+        presentation = (try? presentationStore.load()) ?? PresentationState()
     }
 
     /// Mirror the manager's store every `interval` seconds.
@@ -41,6 +54,9 @@ public final class BrowserModel {
         if let invite, let parsed = try? PairingInvite.parse(invite) {
             try? await manager.pair(invite: parsed)
         }
+        await manager.setOnChange { [weak self] in
+            Task { @MainActor in await self?.pull() }
+        }
         await manager.start()
         start()
     }
@@ -50,6 +66,46 @@ public final class BrowserModel {
         discovered = await manager.discovered.map {
             DiscoveredServerRow(instance: $0.instance, serverID: $0.serverID, name: $0.name)
         }.sorted { $0.instance < $1.instance }
+        var screens: [SessionRef: ScreenBody] = [:]
+        for ref in holders.keys {
+            screens[ref] = await manager.screen(for: ref)
+        }
+        self.screens = screens
+        let present = Set(store.sessions.map(\.ref))
+        let connected = Set(store.hosts.filter { $0.state.isConnected }.map(\.id))
+        seen.formUnion(present)
+        removed = seen.subtracting(present).filter { connected.contains($0.serverID) }
+    }
+
+    /// A screen view opened on `ref`: the first holder takes the watch.
+    public func watch(_ ref: SessionRef) async {
+        holders[ref, default: 0] += 1
+        if holders[ref] == 1 {
+            await manager.watch(screen: ref)
+        }
+        await pull()
+    }
+
+    /// A screen view closed: the last holder releases the watch.
+    public func unwatch(_ ref: SessionRef) async {
+        guard let n = holders[ref] else { return }
+        if n > 1 {
+            holders[ref] = n - 1
+            return
+        }
+        holders[ref] = nil
+        screens[ref] = nil
+        await manager.unwatch(screen: ref)
+    }
+
+    /// The mode a card window shows, `compact` until it chooses.
+    public func mode(for window: UUID) -> ViewMode {
+        presentation.mode(for: window) ?? .compact
+    }
+
+    public func setMode(_ mode: ViewMode, for window: UUID) {
+        presentation.setMode(mode, for: window)
+        try? presentationStore.save(presentation)
     }
 
     public var sessions: [UnifiedSession] {
@@ -65,9 +121,11 @@ public struct DiscoveredServerRow: Identifiable, Sendable, Equatable {
 }
 
 /// Sessions and sets from every connected host, each card labelled
-/// with its source and marked when the host is not connected.
+/// with its source and marked when the host is not connected; a
+/// session opens as a window of its own.
 public struct BrowserView: View {
     @Bindable var model: BrowserModel
+    @Environment(\.openWindow) private var openWindow
 
     public init(model: BrowserModel) {
         self.model = model
@@ -80,7 +138,12 @@ public struct BrowserView: View {
                     Text("No sessions from a connected host.").foregroundStyle(.secondary)
                 }
                 ForEach(model.sessions) { item in
-                    SessionCardView(item: item)
+                    Button {
+                        openWindow(value: CardWindowRequest(ref: item.ref))
+                    } label: {
+                        SessionCardView(item: item)
+                    }
+                    .buttonStyle(.plain)
                 }
             }
             Section("Working sets") {

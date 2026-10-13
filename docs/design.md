@@ -3266,6 +3266,28 @@ Built so far:
   launch-time `SWITCHBOARD_INVITE` pairs it with a host without
   typing. Measured: the simulator paired with a throwaway host on this
   Mac and listed its sessions under the source label.
+- **B2, card windows.** A session in the browser opens as a window of
+  its own through `WindowGroup(for: CardWindowRequest.self)`: a
+  request is the qualified session plus a window id, so two requests
+  on one session are two windows. The window offers the modes its
+  kind can take, draws `compact` and `screen`, and greys the rest with
+  the note that they arrive with Milestone C; the screen mode holds a
+  watch for as long as it is on screen (the model counts holders, so
+  two windows on one pane send one `watch`) and the pane's text
+  follows the host's `changed` events. The browser model now mirrors
+  the manager's store when the manager says it changed rather than on
+  a timer. A host that is not connected leaves the window on what it
+  last showed with the mode row disabled; a session a connected host
+  no longer lists is marked removed; closing a window releases the
+  watch and nothing else. Each window's mode is kept in
+  `presentation.json` in the app's container by window id, because
+  visionOS restores an app's windows on relaunch and a restored card
+  came up in the default mode before this. A launch-time
+  `SWITCHBOARD_OPEN` opens card windows for the simulator run. Seen
+  on the simulator: a line typed into the watched pane on the host
+  showed in the window within the poll interval; the system restored
+  the previous run's card windows on one relaunch and not on another
+  forced termination, which is its call.
 
 ## Open questions
 

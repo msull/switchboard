@@ -297,7 +297,7 @@ public struct SessionBody: Decodable, Sendable {
     public let session: SessionView
     public init(session: SessionView) { self.session = session }
 }
-public struct ScreenBody: Decodable, Sendable {
+public struct ScreenBody: Decodable, Sendable, Equatable {
     public let text: String
     public let truncated: Bool
 

@@ -130,6 +130,7 @@ public actor ConnectionManager {
     public private(set) var store = UnifiedStore()
     private var loop: Task<Void, Never>?
     private var discovery: Discovery?
+    private var onChange: (@Sendable () -> Void)?
 
     public init(
         registry: RegistryStore, credentials: CredentialStore, deviceName: String,
@@ -142,6 +143,12 @@ public actor ConnectionManager {
     }
 
     public var known: [KnownServer] { servers }
+
+    /// Told after every rebuild of the store, so a view model mirrors
+    /// it when it moves rather than on a timer.
+    public func setOnChange(_ handler: @escaping @Sendable () -> Void) {
+        onChange = handler
+    }
 
     /// Load the registry and make a connection per server.
     public func load() async throws {
@@ -354,5 +361,6 @@ public actor ConnectionManager {
                 servers[i] = server
             }
         }
+        onChange?()
     }
 }

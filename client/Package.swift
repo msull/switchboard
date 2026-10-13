@@ -25,5 +25,6 @@ let package = Package(
         .testTarget(name: "SwitchboardProtocolTests", dependencies: ["SwitchboardProtocol"]),
         .testTarget(name: "SwitchboardTransportTests", dependencies: ["SwitchboardTransport"]),
         .testTarget(name: "SwitchboardClientCoreTests", dependencies: ["SwitchboardClientCore"]),
+        .testTarget(name: "SwitchboardUITests", dependencies: ["SwitchboardUI"]),
     ]
 )

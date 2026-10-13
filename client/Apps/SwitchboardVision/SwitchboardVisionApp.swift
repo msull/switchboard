@@ -8,13 +8,23 @@ import SwitchboardUI
 
 @main
 struct SwitchboardVisionApp: App {
-    @State private var model = BrowserModel(manager: SwitchboardVisionApp.makeManager())
+    @State private var model = BrowserModel(
+        manager: SwitchboardVisionApp.makeManager(),
+        presentationStore: FilePresentationStore(url: SwitchboardVisionApp.support.appendingPathComponent("presentation.json")))
 
     var body: some Scene {
         WindowGroup("Switchboard") {
-            RootView(model: model)
+            RootView(model: model, openOnStart: Self.openFromEnvironment)
                 .task { await model.boot(invite: Self.inviteFromEnvironment) }
         }
+        // A card window per request: the system places it, and two
+        // requests on one session are two windows (§7.2).
+        WindowGroup(for: CardWindowRequest.self) { $request in
+            if let request {
+                CardWindowView(model: model, request: request)
+            }
+        }
+        .defaultSize(width: 760, height: 560)
     }
 
     /// A dev aid: `SWITCHBOARD_INVITE` holds an invite's JSON (the text
@@ -25,11 +35,23 @@ struct SwitchboardVisionApp: App {
         ProcessInfo.processInfo.environment["SWITCHBOARD_INVITE"]
     }
 
+    /// A dev aid: `SWITCHBOARD_OPEN` lists card windows to open on
+    /// launch, `<record id>[:<mode>]` separated by commas.
+    static var openFromEnvironment: [String] {
+        (ProcessInfo.processInfo.environment["SWITCHBOARD_OPEN"] ?? "")
+            .split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }
+    }
+
+    /// The app's container directory, made on first use.
+    static var support: URL {
+        let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        try? FileManager.default.createDirectory(at: support, withIntermediateDirectories: true)
+        return support
+    }
+
     /// The known servers in the app's container, the token and pin in
     /// the Keychain; nothing a host sent is ever written to disk.
     static func makeManager() -> ConnectionManager {
-        let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-        try? FileManager.default.createDirectory(at: support, withIntermediateDirectories: true)
         return ConnectionManager(
             registry: FileRegistry(url: support.appendingPathComponent("servers.json")),
             credentials: KeychainCredentials(),

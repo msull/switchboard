@@ -7,7 +7,7 @@ macOS 14, iOS 17 and visionOS 1.
 
 ```sh
 swift build                      # every target
-swift test                       # 29 tests: fixtures, pinning, the connection core, events, watches
+swift test                       # 33 tests: fixtures, pinning, the connection core, events, watches, presentation
 swift run switchboard-remote     # the command-line browser (usage below)
 scripts/sim.sh run               # the visionOS app on the simulator (below)
 ```
@@ -42,8 +42,15 @@ scripts/sim.sh run               # the visionOS app on the simulator (below)
   only retries hosts that are not connected.
 - `SwitchboardUI`: `RootView` (the main window's tabs), `BrowserView`,
   `SessionCardView`, `SourceLabel` and `ServersView` in SwiftUI, over a
-  `BrowserModel`; nothing visionOS-only, so the iPad shell draws the
-  same views.
+  `BrowserModel` that mirrors the manager's store when it changes;
+  `CardWindowView`, one window on one session with the `compact` and
+  `screen` modes (the screen holds a watch while it is on screen) and a
+  banner when the host is away or the session was removed; the
+  presentation model (`ViewMode`, `CardWindowRequest`, `CardStanding`)
+  and `PresentationState` in a JSON file in the app's container, since
+  visionOS restores windows on relaunch and a restored card must keep
+  its mode. Nothing visionOS-only, so the iPad shell draws the same
+  views.
 - `Apps/SwitchboardVision`: the visionOS app, an entry that declares
   the scenes and where the registry lives (`servers.json` in the app's
   container, the token and pin in the Keychain, nothing from a host on
@@ -72,6 +79,10 @@ INVITE=$(pbpaste)   # after "Copy invite" in the host's Remote devices dialog
 SIMCTL_CHILD_SWITCHBOARD_INVITE="$INVITE" xcrun simctl launch --terminate-running-process \
   "Apple Vision Pro" com.sadburger.switchboard.vision
 ```
+
+A second dev aid, `SWITCHBOARD_OPEN`, lists card windows to open once
+their sessions are listed, as `<record id>[:<mode>]` entries separated
+by commas (`SIMCTL_CHILD_SWITCHBOARD_OPEN="$ID:screen"`).
 
 Bonjour on visionOS needs `NSBonjourServices` and
 `NSLocalNetworkUsageDescription` in `Info.plist`; both are there. The
