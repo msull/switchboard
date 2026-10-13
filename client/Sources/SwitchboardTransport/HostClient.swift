@@ -111,6 +111,8 @@ public protocol HostAPI: Sendable {
     func draftAction(_ id: String, _ body: DraftActionBody) async throws -> Envelope<DraftBody>
     /// The device's speech events into the draft.
     func dictate(_ id: String, _ body: DictationBody) async throws -> Envelope<DraftBody>
+    /// A pinned file of a project, whole (§4.3).
+    func file(project: String, path: String) async throws -> Envelope<FileBody>
 }
 
 /// One host over HTTPS with the pinning delegate and a bearer token.
@@ -280,6 +282,13 @@ public final class HostClient: HostAPI, @unchecked Sendable {
 
     public func dictate(_ id: String, _ body: DictationBody) async throws -> Envelope<DraftBody> {
         try await post("sessions/\(id)/dictation", json: body)
+    }
+
+    public func file(project: String, path: String) async throws -> Envelope<FileBody> {
+        let escaped = path.split(separator: "/", omittingEmptySubsequences: false)
+            .map { $0.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? String($0) }
+            .joined(separator: "/")
+        return try await get("projects/\(project)/files/\(escaped)", query: nil)
     }
 
     public func runs(_ id: String) async throws -> Envelope<RunsBody> {

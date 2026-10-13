@@ -138,6 +138,8 @@ public actor ServerConnection {
     public private(set) var runOutputs: [RunKey: RunOutputBody] = [:]
     /// The drafts held, by session: the host's editor as last read.
     public private(set) var drafts: [String: DraftView] = [:]
+    /// The pinned files held, by `project/path`.
+    public private(set) var files: [String: FileBody] = [:]
     /// Told whenever the snapshot or the state moved, so the owner can
     /// rebuild its view without polling.
     private var onChange: (@Sendable () -> Void)?
@@ -529,8 +531,48 @@ public actor ServerConnection {
             }
         case .draft(let session):
             if drafts[session] != nil { await readDraft(session) }
+        case .file(let project, let path):
+            if files["\(project)/\(path)"] != nil { await readFile(project: project, path: path) }
         default:
             return
+        }
+    }
+
+    /// Hold a watch on a pinned file; the first holder reads it.
+    public func watch(file project: String, path: String) async {
+        let key = ResourceKey.file(project: project, path: path)
+        let first = (watches[key] ?? 0) == 0
+        await watch(key)
+        if first {
+            await readFile(project: project, path: path)
+        }
+    }
+
+    public func unwatch(file project: String, path: String) async {
+        await unwatch(.file(project: project, path: path))
+        files["\(project)/\(path)"] = nil
+    }
+
+    /// Read a pinned file now, under the revision rule. A refusal (not
+    /// pinned, over the limit, not a text file) clears what was held
+    /// and is kept as the last error.
+    public func readFile(project: String, path: String) async {
+        guard let api else { return }
+        let id = "\(project)/\(path)"
+        do {
+            let reply = try await api.file(project: project, path: path)
+            apply(.file(project: project, path: path), at: reply.revision) {
+                files[id] = reply.body
+            }
+            changed()
+        } catch RemoteError.refused(let status, _, let message) where status == 400 || status == 404 || status == 413 {
+            files[id] = nil
+            lastError = message
+            changed()
+        } catch let error as RemoteError {
+            handle(error)
+        } catch {
+            handle(.transport("\(error)"))
         }
     }
 
@@ -541,6 +583,7 @@ public actor ServerConnection {
         runs = [:]
         runOutputs = [:]
         drafts = [:]
+        files = [:]
     }
 
     // MARK: The draft
@@ -907,7 +950,7 @@ public actor ServerConnection {
         case .waiting:
             // Derived from the sessions, whose own events accompany it.
             return
-        case .screen, .conversation, .runs, .runOutput, .draft:
+        case .screen, .conversation, .runs, .runOutput, .draft, .file:
             // Content: read through its own reader, never as a view.
             return
         }

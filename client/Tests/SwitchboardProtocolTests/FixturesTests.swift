@@ -149,4 +149,11 @@ enum Fixtures {
     static func decode<T: Decodable>(_ type: T.Type, _ name: String) throws -> T {
         try Wire.decode(type, from: data(name))
     }
+
+    func testAFileFixtureDecodes() throws {
+        let file: Envelope<FileBody> = try Fixtures.load("file")
+        XCTAssertEqual(file.body.path, "docs/plan.md")
+        XCTAssertEqual(file.body.size, UInt64(file.body.text.utf8.count))
+        XCTAssertNotNil(file.body.modifiedMs)
+    }
 }

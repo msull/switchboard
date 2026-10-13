@@ -100,6 +100,9 @@ public enum ResourceKey: Hashable, Sendable {
     /// A session's draft, the host's editor: read on `changed`, with
     /// no watch, since the host emits it for every subscriber.
     case draft(session: String)
+    /// A pinned file of a project, a content key; the wire id is
+    /// `project/path`.
+    case file(project: String, path: String)
 
     /// The `kind` and `id` a frame names for this key.
     public var wire: (kind: String, id: String) {
@@ -118,6 +121,7 @@ public enum ResourceKey: Hashable, Sendable {
         case .runs(let session): return ("runs", session)
         case .runOutput(let session, let run): return ("run_output", "\(session)/\(run)")
         case .draft(let session): return ("draft", session)
+        case .file(let project, let path): return ("file", "\(project)/\(path)")
         }
     }
 
@@ -125,7 +129,7 @@ public enum ResourceKey: Hashable, Sendable {
     /// rather than a view it fingerprints.
     public var isContent: Bool {
         switch self {
-        case .screen, .conversation, .runOutput: return true
+        case .screen, .conversation, .runOutput, .file: return true
         default: return false
         }
     }
@@ -147,6 +151,10 @@ public enum ResourceKey: Hashable, Sendable {
         case "conversation": self = .conversation(session: ref.id)
         case "runs": self = .runs(session: ref.id)
         case "draft": self = .draft(session: ref.id)
+        case "file":
+            guard let slash = ref.id.firstIndex(of: "/") else { return nil }
+            self = .file(
+                project: String(ref.id[..<slash]), path: String(ref.id[ref.id.index(after: slash)...]))
         case "run_output":
             guard let slash = ref.id.lastIndex(of: "/"), let run = Int(ref.id[ref.id.index(after: slash)...])
             else { return nil }

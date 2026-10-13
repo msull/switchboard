@@ -273,4 +273,32 @@ final class WatchTests: XCTestCase {
         let exit = await connection.runs["r1"]?[1].exit
         XCTAssertEqual(exit, 0, "the runs collection refetched on its event")
     }
+
+    /// A pinned file is content like a screen: the first holder watches
+    /// and reads, `changed {file}` re-reads, and a refusal clears it.
+    func testAPinnedFileIsWatchedReadAndFollowsChanged() async throws {
+        let (manager, fake, connection) = try await host()
+        fake.set { $0.files["p/docs/plan.md"] = FileBody(path: "docs/plan.md", text: "# Plan", size: 6) }
+        let ref = FileRef(serverID: a, projectID: "p", path: "docs/plan.md")
+        await manager.watch(file: ref)
+        let first = await manager.file(for: ref)
+        XCTAssertEqual(first?.text, "# Plan")
+        let keys = await connection.watchedKeys
+        XCTAssertEqual(keys.map { $0.wire.kind + ":" + $0.wire.id }, ["file:p/docs/plan.md"])
+        fake.set {
+            $0.files["p/docs/plan.md"] = FileBody(path: "docs/plan.md", text: "# Plan\nmore", size: 11)
+            $0.revision = 2
+        }
+        fake.emit(.changed, ResourceRef(kind: "file", id: "p/docs/plan.md"), revision: 2)
+        await settle(connection) { await $0.files["p/docs/plan.md"]?.text == "# Plan\nmore" }
+        let second = await manager.file(for: ref)
+        XCTAssertEqual(second?.text, "# Plan\nmore")
+        fake.set { $0.files = [:] }
+        await connection.readFile(project: "p", path: "docs/plan.md")
+        let gone = await manager.file(for: ref)
+        XCTAssertNil(gone, "an unpinned file is cleared")
+        await manager.unwatch(file: ref)
+        let after = await connection.watchedKeys
+        XCTAssertTrue(after.isEmpty)
+    }
 }

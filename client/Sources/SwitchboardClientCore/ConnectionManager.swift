@@ -246,6 +246,20 @@ public actor ConnectionManager {
         await connections[ref.serverID]?.lastResponses[ref.recordID]
     }
 
+    // MARK: Pinned files (§4.3)
+
+    public func watch(file ref: FileRef) async {
+        await connections[ref.serverID]?.watch(file: ref.projectID, path: ref.path)
+    }
+
+    public func unwatch(file ref: FileRef) async {
+        await connections[ref.serverID]?.unwatch(file: ref.projectID, path: ref.path)
+    }
+
+    public func file(for ref: FileRef) async -> FileBody? {
+        await connections[ref.serverID]?.files["\(ref.projectID)/\(ref.path)"]
+    }
+
     // MARK: The draft (§4.5)
 
     /// Whether a host keeps a draft per session.

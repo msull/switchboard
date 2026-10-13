@@ -297,6 +297,28 @@ public struct SessionBody: Decodable, Sendable {
     public let session: SessionView
     public init(session: SessionView) { self.session = session }
 }
+/// A pinned file read whole (§4.3): its path under the project root,
+/// its text masked of the project's secrets, its size and when it was
+/// modified. A file over the host's limit is refused, never cut.
+public struct FileBody: Decodable, Sendable, Equatable {
+    public let path: String
+    public let text: String
+    public let size: UInt64
+    public let modifiedMs: UInt64?
+
+    public init(path: String, text: String, size: UInt64, modifiedMs: UInt64? = nil) {
+        self.path = path
+        self.text = text
+        self.size = size
+        self.modifiedMs = modifiedMs
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case path, text, size
+        case modifiedMs = "modified_ms"
+    }
+}
+
 public struct ScreenBody: Decodable, Sendable, Equatable {
     public let text: String
     public let truncated: Bool

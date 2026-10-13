@@ -48,6 +48,8 @@ final class FakeHost: HostAPI, @unchecked Sendable {
     /// `(recognizer session, events)` as received.
     var dictations: [(UInt64, [DictationEvent])] = []
     var capabilities = ["read", "control", "draft"]
+    /// The pinned files, by `project/path`; a missing one is `not_pinned`.
+    var files: [String: FileBody] = [:]
     /// The op of every command, in order.
     var ops: [String] = []
     /// Runs after a `sessions` reply is built and before it is returned:
@@ -289,6 +291,16 @@ final class FakeHost: HostAPI, @unchecked Sendable {
         return try answer("op:\(op)") { OpStatusBody(status: status) }
     }
 
+    func file(project: String, path: String) async throws -> Envelope<FileBody> {
+        lock.lock()
+        let file = files["\(project)/\(path)"]
+        lock.unlock()
+        guard let file else {
+            throw RemoteError.refused(status: 404, code: "not_pinned", message: "no working set pins this file")
+        }
+        return try answer("file:\(project)/\(path)") { file }
+    }
+
     func draft(_ id: String) async throws -> Envelope<DraftBody> {
         lock.lock()
         let draft = drafts[id]
@@ -479,6 +491,9 @@ struct Route: HostAPI {
     }
     func dictate(_ id: String, _ body: DictationBody) async throws -> Envelope<DraftBody> {
         try await network.route(address, pin).dictate(id, body)
+    }
+    func file(project: String, path: String) async throws -> Envelope<FileBody> {
+        try await network.route(address, pin).file(project: project, path: path)
     }
     func lastResponse(_ id: String) async throws -> Envelope<LastResponseBody> {
         try await network.route(address, pin).lastResponse(id)
