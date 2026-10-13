@@ -164,12 +164,13 @@ public struct CardWindowView: View {
                         Button(ScreenScale.label(preset)) { screenScale = preset }
                             .buttonStyle(.bordered)
                             .controlSize(.small)
+                            .fixedSize()
                             .tint(preset == screenScale ? .accentColor : nil)
                     }
                 }
             }
             .padding()
-            .frame(width: 360)
+            .frame(width: 440)
         }
     }
 
