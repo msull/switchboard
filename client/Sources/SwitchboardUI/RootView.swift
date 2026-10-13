@@ -46,7 +46,11 @@ public struct RootView: View {
                 let parts = entry.split(separator: ":", maxSplits: 1).map(String.init)
                 guard let item = model.store.sessions.first(where: { $0.session.id == parts[0] })
                 else { continue }
-                let request = CardWindowRequest(ref: item.ref)
+                // A saved window on the session that the reopen pass
+                // has not brought back yet would be missed: wait for
+                // it, so the dev aid lands where a click would.
+                if model.windowsToReopen().contains(where: { $0.ref == item.ref }) { continue }
+                let request = model.windowRequest(for: item.ref)
                 if parts.count == 2, let mode = ViewMode(rawValue: parts[1]) {
                     model.setMode(mode, for: request.id)
                 }

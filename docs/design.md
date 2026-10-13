@@ -3269,7 +3269,10 @@ Built so far:
 - **B2, card windows.** A session in the browser opens as a window of
   its own through `WindowGroup(for: CardWindowRequest.self)`: a
   request is the qualified session plus a window id, so two requests
-  on one session are two windows. The window offers the modes its
+  on one session are two windows, while opening a request again brings
+  its window forward: a click on a listed session goes to the window
+  it already has, and "Open another window" in its context menu makes
+  a second. The window offers the modes its
   kind can take, draws `compact` and `screen`, and greys the rest with
   the note that they arrive with Milestone C; the screen mode holds a
   watch for as long as it is on screen (the model counts holders, so

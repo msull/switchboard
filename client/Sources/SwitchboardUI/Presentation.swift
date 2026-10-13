@@ -58,8 +58,6 @@ public enum ViewMode: String, Codable, CaseIterable, Sendable, Identifiable {
     public static let arrivesWith = "Milestone C"
 }
 
-/// What a card window is opened on: a qualified session and an id of
-/// its own, so two windows on one session are two windows.
 /// The screen's text scale in a card window: a multiplier on the
 /// base type size, set by a slider or snapped to a preset.
 public enum ScreenScale {
@@ -108,6 +106,10 @@ public struct MainWindowGuard: Equatable, Sendable {
     }
 }
 
+/// What a card window is opened on: a qualified session and an id of
+/// its own. Opening a request whose window is open brings that window
+/// forward, so a click on a listed session goes to its window when
+/// there is one, and a request with a fresh id is a second window.
 public struct CardWindowRequest: Codable, Hashable, Sendable {
     public let id: UUID
     public let ref: SessionRef

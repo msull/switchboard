@@ -22,9 +22,10 @@ struct SwitchboardVisionApp: App {
         } defaultValue: {
             MainWindow.value
         }
-        // A card window per request: the system places it, and two
-        // requests on one session are two windows (§7.2). It boots the
-        // model too, since a relaunch may restore only card windows.
+        // A card window per request: the system places it, and brings
+        // it forward when the same request is opened again (§7.2). It
+        // boots the model too, since a relaunch may restore only card
+        // windows.
         WindowGroup(for: CardWindowRequest.self) { $request in
             if let request {
                 CardWindowView(model: model, request: request)

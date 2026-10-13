@@ -185,6 +185,13 @@ public final class BrowserModel {
         save()
     }
 
+    /// The request a click on `ref` opens: its window when one is on
+    /// screen, which the window group then brings forward, or a new
+    /// one.
+    public func windowRequest(for ref: SessionRef) -> CardWindowRequest {
+        presentation.openWindow(on: ref, appeared: appeared) ?? CardWindowRequest(ref: ref)
+    }
+
     /// The saved windows the system did not restore, once their
     /// sessions are listed.
     public func windowsToReopen() -> [CardWindowRequest] {
@@ -236,7 +243,13 @@ public struct BrowserView: View {
         }
     }
 
+    /// The session's window, brought forward when it has one.
     private func open(_ item: UnifiedSession) {
+        openWindow(value: model.windowRequest(for: item.ref))
+    }
+
+    /// A second window on the session, from the context menu.
+    private func openAnother(_ item: UnifiedSession) {
         openWindow(value: CardWindowRequest(ref: item.ref))
     }
 
@@ -253,6 +266,7 @@ public struct BrowserView: View {
                 ForEach(model.sessions) { item in
                     Button { open(item) } label: { SessionCardView(item: item) }
                         .buttonStyle(.plain)
+                        .contextMenu { Button("Open another window") { openAnother(item) } }
                 }
             }
             setsSections
@@ -271,6 +285,7 @@ public struct BrowserView: View {
                             .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
                     }
                     .buttonStyle(.plain)
+                    .contextMenu { Button("Open another window") { openAnother(item) } }
                 }
             }
             .padding()

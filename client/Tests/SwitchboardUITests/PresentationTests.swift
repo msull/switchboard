@@ -155,4 +155,18 @@ final class BrowsingTests: XCTestCase {
         XCTAssertTrue(ScreenScale.presets.contains(ScreenScale.initial))
         XCTAssertEqual(Set(ViewMode.allCases.map(\.symbol)).count, ViewMode.allCases.count, "every mode has its own icon")
     }
+
+    func testAClickReachesTheOpenWindowOnItsSessionOrMakesANewOne() {
+        var state = PresentationState()
+        let r1 = SessionRef(serverID: a, recordID: "r1")
+        let r2 = SessionRef(serverID: a, recordID: "r2")
+        let low = UUID(uuidString: "00000000-0000-0000-0000-000000000001")!
+        let high = UUID(uuidString: "00000000-0000-0000-0000-000000000002")!
+        let gone = UUID()
+        state.windows = [high: r1, low: r1, gone: r2]
+        let appeared: Set<UUID> = [low, high]
+        XCTAssertEqual(state.openWindow(on: r1, appeared: appeared)?.id, low, "one window, the same each time")
+        XCTAssertNil(state.openWindow(on: r2, appeared: appeared), "a saved window not on screen this run is not it")
+        XCTAssertNil(state.openWindow(on: SessionRef(serverID: a, recordID: "r3"), appeared: appeared))
+    }
 }

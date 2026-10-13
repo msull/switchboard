@@ -45,6 +45,16 @@ public struct PresentationState: Codable, Equatable, Sendable {
         modes[window]?.mode
     }
 
+    /// The request that reaches the open window on `ref`, if one is
+    /// on screen this run (`appeared`); the lowest id when there are
+    /// several, so repeated clicks land on one window.
+    public func openWindow(on ref: SessionRef, appeared: Set<UUID>) -> CardWindowRequest? {
+        windows
+            .filter { $0.value == ref && appeared.contains($0.key) }
+            .map { CardWindowRequest(id: $0.key, ref: $0.value) }
+            .min { $0.id.uuidString < $1.id.uuidString }
+    }
+
     /// The saved windows a launch must open itself: the ones the
     /// system did not restore (`appeared`) whose sessions are listed.
     public func windowsToReopen(appeared: Set<UUID>, listed: Set<SessionRef>) -> [CardWindowRequest] {

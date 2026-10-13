@@ -43,7 +43,9 @@ scripts/sim.sh run               # the visionOS app on the simulator (below)
 - `SwitchboardUI`: `RootView` (the main window's tabs), `BrowserView`,
   `SessionCardView`, `SourceLabel` and `ServersView` in SwiftUI, over a
   `BrowserModel` that mirrors the manager's store when it changes;
-  `CardWindowView`, one window on one session with the `compact` and
+  `CardWindowView`, one window on one session (a click on a listed
+  session brings its open window forward; the context menu opens
+  another) with the `compact` and
   `screen` modes (the screen holds a watch while it is on screen, and
   its text scales through a readout in the mode row that opens a
   slider and the snap sizes, `ScreenScale`, as state of the window:
