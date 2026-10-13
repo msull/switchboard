@@ -122,7 +122,7 @@ impl Gate {
             agents: Box::new(Agents::detect(&self.data_dir)),
             opener: Box::new(self.opener.clone()),
             transcripts: std::sync::Arc::new(ClaudeTranscripts),
-            secrets: Box::new(FakeSecrets::default()),
+            secrets: std::sync::Arc::new(FakeSecrets::default()),
             project_config: Box::new(FileConfigReader::new()),
             round_files: Box::new(switchboard::adapters::round_files::DiskRoundFiles),
             changes: std::sync::Arc::new(switchboard::adapters::git::GitChanges),

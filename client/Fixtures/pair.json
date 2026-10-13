@@ -1,10 +1,10 @@
 {
   "body": {
-    "device_id": "05bf3ff1-ae7f-47b6-a284-460b94cecec9",
+    "device_id": "1989f4b0-f840-44b1-adfa-e3f41c6dd7b5",
     "scope": "read",
-    "server_id": "f1273cd7-2736-4264-b295-fa77dae229f9",
+    "server_id": "31565046-eabc-42e1-ac2a-c2a1b8550937",
     "token": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
   },
-  "epoch": "91bac231-a889-4a5b-9db3-f4c704b57e4c",
+  "epoch": "3bbab47a-9fef-4df7-8484-4a8c79a07518",
   "revision": 10
 }

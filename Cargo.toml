@@ -64,6 +64,7 @@ getrandom = "0.3"
 base64 = "0.22"
 qrcode = { version = "0.14", default-features = false }
 tungstenite = "0.30"
+rustix = { version = "1.1.5", features = ["fs"] }
 
 # Native calls stay behind `cfg(target_os = "macos")`; CI builds on Linux.
 [target.'cfg(target_os = "macos")'.dependencies]

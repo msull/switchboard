@@ -7,7 +7,7 @@ macOS 14, iOS 17 and visionOS 1.
 
 ```sh
 swift build                      # every target
-swift test                       # 61 tests: fixtures, commands, pinning, the connection core, events, watches, conversations, the draft, presentation, browsing
+swift test                       # 62 tests: fixtures, commands, pinning, the connection core, events, watches, conversations, the draft, presentation, browsing
 swift run switchboard-remote     # the command-line browser (usage below)
 scripts/sim.sh run               # the visionOS app on the simulator (below)
 ```
@@ -18,7 +18,7 @@ scripts/sim.sh run               # the visionOS app on the simulator (below)
   own snake_case keys spelled out, the reply envelope, `/info` and
   `/pair`, the QR invite, the content replies (`ConversationBody` with
   its turns and their activity, `LastResponseBody`, `RunsBody`,
-  `RunOutputBody`), and qualified refs (`SessionRef`,
+  `RunOutputBody`, `FileBody`), and qualified refs (`SessionRef`,
   `WorkingSetRef`, `FileRef`, `RunRef`). `Fixtures/*.json` are written by the
   Rust port's test (`SWITCHBOARD_WRITE_FIXTURES=1 cargo test --test
   remote fixtures`) and decoded by both sides' tests.
@@ -44,7 +44,7 @@ scripts/sim.sh run               # the visionOS app on the simulator (below)
   the last, resent after a reconnect before the snapshot, with what is
   held on a key re-read on `changed` past its held revision: the
   screen, the last response and the conversation from its last turn,
-  a run's output; `ConversationState`, the pages merged by turn;
+  a run's output, a pinned file (`watch(file:)`, `readFile`); `ConversationState`, the pages merged by turn;
   `command`, a send, resume or trust under the control scope with a
   UUID op per command, and on a timeout the op's status rather than a
   resend: done takes the logged reply, interrupted is reported as

@@ -53,7 +53,7 @@ fn port_with(
 ) -> Port {
     let opener = FakeOpener::default();
     let services = Services {
-        secrets: Box::new(secrets),
+        secrets: std::sync::Arc::new(secrets),
         store: Box::new(MemoryStore {
             initial,
             ..MemoryStore::default()
@@ -1024,7 +1024,7 @@ fn env_port() -> EnvPort {
     let operations = switchboard::adapters::control::OperationsLog::open(log_dir.path())
         .expect("operations log");
     let services = Services {
-        secrets: Box::new(secrets.clone()),
+        secrets: std::sync::Arc::new(secrets.clone()),
         host: std::sync::Arc::new(host.clone()),
         operations: Box::new(operations),
         ..fakes::services()

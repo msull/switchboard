@@ -42,7 +42,7 @@ pub fn services() -> Services {
         remote: Box::new(FakeRemoteStore::default()),
         advertiser: Box::new(FakeAdvertiser::default()),
         transcripts: Arc::new(FakeTranscripts::default()),
-        secrets: Box::new(FakeSecrets::default()),
+        secrets: std::sync::Arc::new(FakeSecrets::default()),
         project_config: Box::new(FakeProjectConfig),
         round_files: Box::new(FakeRoundFiles),
         changes: Arc::new(FakeChanges::default()),
@@ -522,16 +522,28 @@ impl RemoteStore for FakeRemoteStore {
 
 /// Secrets in memory, shared so a test can read back what the app stored.
 #[derive(Debug, Clone, Default)]
-pub struct FakeSecrets(pub Arc<Mutex<HashMap<String, String>>>);
+pub struct FakeSecrets {
+    values: Arc<Mutex<HashMap<String, String>>>,
+    /// Every read fails while set, as a locked Keychain would.
+    pub failing: Arc<std::sync::atomic::AtomicBool>,
+}
 
 impl FakeSecrets {
     pub fn state(&self) -> std::sync::MutexGuard<'_, HashMap<String, String>> {
-        self.0.lock().expect("fake secrets lock")
+        self.values.lock().expect("fake secrets lock")
+    }
+
+    pub fn set_failing(&self, failing: bool) {
+        self.failing
+            .store(failing, std::sync::atomic::Ordering::SeqCst);
     }
 }
 
 impl crate::ports::secrets::SecretStore for FakeSecrets {
     fn get(&self, account: &str) -> Result<Option<String>, String> {
+        if self.failing.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err("the store is locked".into());
+        }
         Ok(self.state().get(account).cloned())
     }
     fn set(&self, account: &str, value: &str) -> Result<(), String> {

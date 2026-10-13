@@ -15,7 +15,7 @@ cargo test --locked --workspace                      # unit + headless UI + tmux
 cargo test --locked -p egui_term --lib               # the vendored terminal widget (outside the workspace)
 cargo clippy --locked --workspace --all-targets -- -D warnings   # lint
 cargo fmt --all                                      # format
-(cd client && swift test)                            # the Swift client's packages, 61 tests (Xcode; not in the hook or CI)
+(cd client && swift test)                            # the Swift client's packages, 62 tests (Xcode; not in the hook or CI)
 (cd client && scripts/sim.sh run)                    # the visionOS app on the simulator (xcodegen; see client/README.md)
 ./scripts/test-times.sh                              # every test timed serially, the slowest ten, the budget checked
 ```
@@ -321,7 +321,7 @@ src/adapters/
   dispatch.rs            the Dispatch port's client over <Dispatch data dir>/dispatch.sock, reconnecting after an error; the `dispatch` beside the app's binary
   dock.rs                Dock badge with the waiting-session count (macOS)
   controller.rs          the nunchuk over USB serial: a thread owns the port, reconnects, hands events over a channel
-  files.rs               project file index: gitignore-aware scan, lazy children, fuzzy match; the existing file a path an agent typed names
+  files.rs               project file index: gitignore-aware scan, lazy children, fuzzy match; the existing file a path an agent typed names; `open_pinned`, the descriptor walk the remote port reads a pinned file through (no symlink followed, a FIFO refused, dotenv refused, the version from the inode, change time and size)
   git.rs                 branches, change counts, per-path status; finds repos one or two dirs down; a branch's commits and numstat over its base, one file's diff (`GitChanges`)
   diff.rs                one file's `git diff` read into numbered hunks, changed words marked with `similar`
   keychain.rs            secrets as generic-password items in the login Keychain (tests use a temp keychain)
@@ -335,7 +335,7 @@ src/adapters/
   ghostty.rs             open, reveal, Ghostty window launch and raise
   fakes.rs               test doubles for every port
 src/app.rs               SwitchboardApp: owns core + adapters; runs effects; polls host and events; answers control-port queries (`session.screen` with the project's secret values redacted); serves the remote port (the views on the frame, a screen through the content worker with the policy resolved on the frame, the watch set, the revision per content key, and the control scope's `send`, `resume` and `trust` through the control socket's `serve` so the op is the idempotency key)
-src/content.rs           the app's content caches and the port's content worker: parsed transcripts with the handle and file time each was read at (`ConversationCache`), read by the views through `DrawCtx`; `ContentWorker`, the one thread that reads content for a device (a pane's full window hashed as the source version; a Claude Code transcript parsed masked and kept on the worker by handle, file version and policy, served as a page of turns by number with the head of each tool call's text, as one turn whole, or as the last response, the three sharing one key; a run's log tail with the overlap that masks a value on the window's edge) and polls the watched keys every two seconds; `redact`, the content keys, the policy with its fingerprint, the page, turn and tail caps, the versions and the watch set's bounds (128 keys, a minute idle)
+src/content.rs           the app's content caches and the port's content worker: parsed transcripts with the handle and file time each was read at (`ConversationCache`), read by the views through `DrawCtx`; `ContentWorker`, the one thread that reads content for a device (a pane's full window hashed as the source version; a Claude Code transcript parsed masked and kept on the worker by handle, file version and policy, served as a page of turns by number with the head of each tool call's text, as one turn whole, or as the last response, the three sharing one key; a run's log tail with the overlap that masks a value on the window's edge; a pinned file whole, cached by its version) and polls the watched keys every two seconds; the policy resolved on the worker from what the frame hands it (`PolicySpec`, `resolve_policy`), cached per spec; `redact`, the content keys, the policy with its fingerprint, the page, turn, tail and file caps, the versions and the watch set's bounds (128 keys, a minute idle)
 src/script.rs            SWITCHBOARD_SCRIPT dev aid
 src/ui/
   mod.rs                 UiState, draw loop (collect actions, then dispatch), keyboard, side panel tabs

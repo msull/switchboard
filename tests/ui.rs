@@ -213,7 +213,7 @@ fn fake_services(opener: FakeOpener, secrets: FakeSecrets, host: FakeHost) -> Se
     Services {
         host: std::sync::Arc::new(host),
         opener: Box::new(opener),
-        secrets: Box::new(secrets),
+        secrets: std::sync::Arc::new(secrets),
         ..fakes::services()
     }
 }

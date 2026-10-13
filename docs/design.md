@@ -3459,6 +3459,31 @@ Built so far:
   beside the window's mode in `presentation.json` (an older file reads
   with no place), so a relaunch restores it; a turn no longer held
   after a reconnect, or another transcript, falls back to the end.
+- **C4, the policy off the frame and `file.read`.** The frame no
+  longer resolves a redaction policy: a content job carries a
+  `PolicySpec` (the project's environment, the sets it and the session
+  may use, and `policy_epoch`, moved by every save and secret change)
+  and the content worker reads the dotenv files and the secret store,
+  caching the policy per spec for a minute, so a slow Keychain call
+  costs the worker, never a frame; `Services.secrets` is an `Arc` for
+  that. A store that fails refuses with `policy` (503) rather than
+  answering unmasked. `GET projects/{id}/files/{path}` reads a file
+  some working set pins (`PinTarget::File`), through
+  `adapters::files::open_pinned`: the path checked before the disk,
+  the root opened as a directory descriptor and every component
+  opened from the previous one with `NOFOLLOW` (no symlink is followed,
+  parent or leaf; macOS says `ENOTDIR` where Linux says `ELOOP`), the
+  leaf non-blocking so a FIFO does not park the thread and checked to
+  be a regular file, dotenv names refused whatever is pinned, the read
+  one byte past the 768 KiB limit so growth cannot pass it, the version
+  the inode, change time and size. The worker caches the masked file
+  per key and re-reads only when the version or the policy moved; a
+  watched file emits `changed {file, project/path}` on the poll.
+  Refusals: `not_pinned` (404), `too_large` (413, with the size),
+  `failed` (400) for a dotenv file, a symlink, a FIFO or a non-text
+  file. The client holds files as content (`FileBody`, `watch(file:)`,
+  re-read on `changed`); no window shows one yet, which the working set
+  view brings. Milestone C is complete.
 
 ## Open questions
 

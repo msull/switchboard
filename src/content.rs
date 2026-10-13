@@ -23,10 +23,13 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime};
 
+use crate::adapters::files::{self, FileError};
 use crate::adapters::remote::RemoteReply;
 use crate::adapters::scrollback;
-use crate::core::{RecordId, ResumeHandle};
+use crate::core::model::{EnvSet, EnvVar, ProjectEnv};
+use crate::core::{ProjectId, RecordId, ResumeHandle, resolve_sets};
 use crate::ports::host::{HostId, ProcessHost};
+use crate::ports::secrets::SecretStore;
 use crate::ports::transcript::{
     ActivityKind, Conversation, TranscriptReader, TranscriptVersion, Turn,
 };
@@ -60,6 +63,9 @@ pub const ACTIVITY_BYTES_CAP: usize = 512;
 /// The most turns a page carries, and how many without `limit`.
 pub const PAGE_TURNS_CAP: usize = 100;
 pub const PAGE_TURNS_DEFAULT: usize = 20;
+/// A pinned file is sent whole or not at all: more source bytes than
+/// this answer `too_large`.
+pub const FILE_BYTES_CAP: u64 = 768 * 1024;
 /// How many jobs may wait for the worker.
 const JOBS: usize = 64;
 
@@ -72,6 +78,9 @@ pub enum ContentKey {
     Conversation(RecordId),
     /// One run's log, by the record and the run number.
     RunOutput(RecordId, u32),
+    /// A file some working set pins, by its project and its path under
+    /// the root.
+    File(ProjectId, PathBuf),
 }
 
 impl ContentKey {
@@ -82,15 +91,18 @@ impl ContentKey {
             Self::Screen(_) => "screen",
             Self::Conversation(_) => "conversation",
             Self::RunOutput(..) => "run_output",
+            Self::File(..) => "file",
         }
     }
 
-    /// The `id` on the wire: the record, or `record/n` for a run.
+    /// The `id` on the wire: the record, `record/n` for a run, or
+    /// `project/path` for a file.
     #[must_use]
     pub fn id(&self) -> String {
         match self {
             Self::Screen(id) | Self::Conversation(id) => id.0.to_string(),
             Self::RunOutput(id, n) => format!("{}/{n}", id.0),
+            Self::File(project, path) => format!("{}/{}", project.0, path.display()),
         }
     }
 
@@ -105,16 +117,122 @@ impl ContentKey {
                 let (rec, n) = id.split_once('/')?;
                 Some(Self::RunOutput(record(rec)?, n.parse().ok()?))
             }
+            "file" => {
+                let (project, path) = id.split_once('/')?;
+                let project = ProjectId(uuid::Uuid::parse_str(project).ok()?);
+                Some(Self::File(project, PathBuf::from(path)))
+            }
             _ => None,
         }
     }
 
+    /// The session a key reads from; a file has none.
     #[must_use]
-    pub fn record(&self) -> RecordId {
+    pub fn record(&self) -> Option<RecordId> {
         match self {
-            Self::Screen(id) | Self::Conversation(id) | Self::RunOutput(id, _) => *id,
+            Self::Screen(id) | Self::Conversation(id) | Self::RunOutput(id, _) => Some(*id),
+            Self::File(..) => None,
         }
     }
+}
+
+/// What a policy is resolved from, gathered on the frame from the
+/// core: the project's environment and the sets it and the session
+/// may use. The values come from the secret store on the worker, so a
+/// slow Keychain call never costs a frame. `epoch` counts the saves
+/// and secret changes the frame saw, so a value changed under an
+/// unchanged name resolves again.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct PolicySpec {
+    pub epoch: u64,
+    pub project: ProjectId,
+    pub root: PathBuf,
+    pub global: Vec<EnvVar>,
+    pub project_env: ProjectEnv,
+    pub sets: Vec<EnvSet>,
+    pub project_sets: Vec<String>,
+    pub record_sets: Vec<String>,
+}
+
+impl PolicySpec {
+    /// Names this spec in the worker's cache.
+    #[must_use]
+    pub fn fingerprint(&self) -> u64 {
+        let mut h = DefaultHasher::new();
+        serde_json::to_string(self).unwrap_or_default().hash(&mut h);
+        h.finish()
+    }
+}
+
+/// The policy a spec names: the project's secret variables and its
+/// granted sets' secrets, read from dotenv files and the store. A
+/// store that fails is an error, never an unmasked text.
+pub fn resolve_policy(spec: &PolicySpec, secrets: &dyn SecretStore) -> Result<Policy, String> {
+    let mut dotenv = Vec::new();
+    if spec.project_env.load_dotenv {
+        for file in spec.project_env.files() {
+            match std::fs::read_to_string(spec.root.join(&file)) {
+                Ok(text) => dotenv.push((file, crate::adapters::dotenv::parse(&text))),
+                Err(e) => log::warn!("{file} in {}: {e}", spec.root.display()),
+            }
+        }
+    }
+    let example = std::fs::read_to_string(spec.root.join(".env.example"))
+        .map(|t| crate::adapters::dotenv::names(&t))
+        .unwrap_or_default();
+    let mut failed = None;
+    let lookup = |account: &str| match secrets.get(account) {
+        Ok(value) => value,
+        Err(e) => {
+            // Closures take the environment by shared reference here;
+            // a `Cell` would be cleaner, but one failure is enough.
+            log::warn!("secret {account}: {e}");
+            None
+        }
+    };
+    let resolved = crate::core::env::resolve(
+        &spec.global,
+        spec.project,
+        &spec.project_env,
+        &dotenv,
+        &example,
+        &lookup,
+    );
+    let mut values: Vec<(String, String)> = resolved
+        .vars
+        .into_iter()
+        .filter(|v| v.secret)
+        .filter_map(|v| v.value.filter(|x| !x.is_empty()).map(|x| (v.name, x)))
+        .collect();
+    // A child of `switchboard-env exec` may print a set's secret too.
+    let sets = resolve_sets(&spec.sets, &spec.project_sets, &spec.record_sets, &lookup)?;
+    let secret_names: Vec<&str> = spec
+        .sets
+        .iter()
+        .flat_map(|s| s.vars.iter().filter(|v| v.secret).map(|v| v.name.as_str()))
+        .collect();
+    values.extend(
+        sets.pairs
+            .into_iter()
+            .filter(|(name, value)| !value.is_empty() && secret_names.contains(&name.as_str())),
+    );
+    // A store that answered with an error for any secret account is a
+    // failure of the whole policy: nothing is sent unredacted.
+    for account in spec
+        .project_env
+        .vars
+        .iter()
+        .filter(|v| v.secret)
+        .map(|v| crate::core::SecretScope::Project(spec.project).account(&v.name))
+    {
+        if let Err(e) = secrets.get(&account) {
+            failed = Some(e);
+        }
+    }
+    if let Some(e) = failed {
+        return Err(e);
+    }
+    Ok(Policy::new(values))
 }
 
 /// The secret values a text leaving the port is masked of, and the
@@ -158,6 +276,11 @@ pub enum Source {
     Pane(HostId),
     Transcript(ResumeHandle),
     Log(PathBuf),
+    /// A pinned file: the project root and the path under it.
+    File {
+        root: PathBuf,
+        relative: PathBuf,
+    },
 }
 
 /// Where a page is anchored. A page anchored at its start runs
@@ -192,25 +315,59 @@ pub enum ContentView {
     Tail {
         lines: usize,
     },
+    /// A file whole.
+    Whole,
 }
 
-/// One read for the worker: what to read, how to mask it, and where
-/// the reply goes (nowhere for a poll).
+/// One read for the worker: what to read, what names the policy to
+/// mask it with, and where the reply goes (nowhere for a poll).
 #[derive(Clone)]
 pub struct ContentJob {
     pub key: ContentKey,
     pub source: Source,
     pub view: ContentView,
-    pub policy: Policy,
+    pub policy: PolicySpec,
     pub reply: Option<SyncSender<RemoteReply>>,
 }
 
+/// Why the worker could not read, as the reply names it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ContentError {
+    /// The source could not be read: `failed`, with the reason.
+    Failed(String),
+    /// The policy could not be resolved: `policy`; nothing is sent.
+    Policy(String),
+    /// A file over the limit: `too_large`, with its size.
+    TooLarge(u64),
+}
+
+impl ContentError {
+    /// The status, code and reason of the refusal.
+    #[must_use]
+    pub fn refusal(&self) -> (u16, &'static str, String) {
+        match self {
+            Self::Failed(reason) => (400, "failed", reason.clone()),
+            Self::Policy(_) => (
+                503,
+                "policy",
+                "the secret set could not be resolved; nothing is sent unredacted".into(),
+            ),
+            Self::TooLarge(size) => (
+                413,
+                "too_large",
+                format!("the file is {size} bytes; the limit is {FILE_BYTES_CAP}"),
+            ),
+        }
+    }
+}
+
 /// What the worker saw for a job: the source version and the masked
-/// body, or why it could not read.
+/// body, or why it could not read; `policy` is the fingerprint of the
+/// policy it masked with, which the version carries.
 pub struct Observed {
     pub key: ContentKey,
     pub policy: u64,
-    pub result: Result<(u64, serde_json::Value), String>,
+    pub result: Result<(u64, serde_json::Value), ContentError>,
     pub reply: Option<SyncSender<RemoteReply>>,
 }
 
@@ -235,7 +392,7 @@ pub struct Watch {
 /// What goes down the worker's channel: a read, or a word that the
 /// poll interval moved.
 enum Work {
-    Job(ContentJob),
+    Job(Box<ContentJob>),
     Nudge,
 }
 
@@ -256,6 +413,7 @@ impl ContentWorker {
     pub fn spawn(
         host: Arc<dyn ProcessHost>,
         transcripts: Arc<dyn TranscriptReader>,
+        secrets: Arc<dyn SecretStore>,
         observed: Sender<Observed>,
         wake: Arc<dyn Fn() + Send + Sync>,
     ) -> Self {
@@ -268,14 +426,14 @@ impl ContentWorker {
             std::thread::Builder::new()
                 .name("switchboard-content".into())
                 .spawn(move || {
-                    let mut parsed = Parsed::default();
+                    let mut cache = Cache::new(secrets);
                     let every = || *poll.lock().expect("poll");
                     let mut next_poll = Instant::now() + every();
                     while !stop.load(Ordering::SeqCst) {
                         let wait = next_poll.saturating_duration_since(Instant::now());
                         match inbox.recv_timeout(wait) {
                             Ok(Work::Job(job)) => {
-                                let out = observe(&*host, &*transcripts, &mut parsed, &job);
+                                let out = observe(&*host, &*transcripts, &mut cache, &job);
                                 if observed.send(out).is_err() {
                                     return;
                                 }
@@ -285,11 +443,9 @@ impl ContentWorker {
                             Err(mpsc::RecvTimeoutError::Disconnected) => return,
                             Err(mpsc::RecvTimeoutError::Timeout) => {
                                 let jobs = watch.lock().map(|w| w.clone()).unwrap_or_default();
-                                let keep: Vec<RecordId> =
-                                    jobs.iter().map(|j| j.key.record()).collect();
-                                parsed.retain(&keep);
+                                cache.retain(&jobs);
                                 for job in jobs {
-                                    let out = observe(&*host, &*transcripts, &mut parsed, &job);
+                                    let out = observe(&*host, &*transcripts, &mut cache, &job);
                                     if observed.send(out).is_err() {
                                         return;
                                     }
@@ -315,7 +471,7 @@ impl ContentWorker {
     /// the job is dropped.
     #[must_use]
     pub fn submit(&self, job: ContentJob) -> bool {
-        self.jobs.try_send(Work::Job(job)).is_ok()
+        self.jobs.try_send(Work::Job(Box::new(job))).is_ok()
     }
 
     /// Replace what the poll reads.
@@ -345,13 +501,27 @@ impl Drop for ContentWorker {
     }
 }
 
-/// The worker's masked transcripts, one per record, each with the
-/// handle, file version and policy it was parsed under: a poll is a
-/// stat, and a read of an unchanged file is served from here. Records
-/// no longer watched or read are dropped at the next poll.
-#[derive(Default)]
-struct Parsed {
-    entries: HashMap<RecordId, ParsedEntry>,
+/// What the worker keeps between jobs: the policies resolved per
+/// spec, the masked transcripts per record, and the masked files per
+/// key, each with the version it was made under, so a poll is a stat
+/// and a read of an unchanged source is served from here. Entries no
+/// longer watched or read are dropped at the next poll.
+struct Cache {
+    secrets: Arc<dyn SecretStore>,
+    policies: HashMap<u64, (Policy, Instant)>,
+    transcripts: HashMap<RecordId, ParsedEntry>,
+    files: HashMap<ContentKey, FileEntry>,
+}
+
+impl Cache {
+    fn new(secrets: Arc<dyn SecretStore>) -> Self {
+        Self {
+            secrets,
+            policies: HashMap::new(),
+            transcripts: HashMap::new(),
+            files: HashMap::new(),
+        }
+    }
 }
 
 struct ParsedEntry {
@@ -362,25 +532,46 @@ struct ParsedEntry {
     touched: Instant,
 }
 
-impl Parsed {
-    /// The masked conversation for `job`'s record under `handle`, read
-    /// only when the file, the handle or the policy moved since.
+struct FileEntry {
+    version: u64,
+    policy: u64,
+    body: serde_json::Value,
+    touched: Instant,
+}
+
+impl Cache {
+    /// The policy `spec` names, resolved once per spec.
+    fn policy(&mut self, spec: &PolicySpec) -> Result<Policy, ContentError> {
+        let key = spec.fingerprint();
+        if let Some((policy, touched)) = self.policies.get_mut(&key) {
+            *touched = Instant::now();
+            return Ok(policy.clone());
+        }
+        let policy = resolve_policy(spec, &*self.secrets).map_err(ContentError::Policy)?;
+        self.policies.insert(key, (policy.clone(), Instant::now()));
+        Ok(policy)
+    }
+
+    /// The masked conversation for `record` under `handle`, read only
+    /// when the file, the handle or the policy moved since.
     fn conversation(
         &mut self,
         transcripts: &dyn TranscriptReader,
         record: RecordId,
         handle: &ResumeHandle,
         policy: &Policy,
-    ) -> Result<(u64, &Conversation), String> {
+    ) -> Result<(u64, &Conversation), ContentError> {
         let version = transcripts
             .version(handle)
-            .ok_or_else(|| "no transcript file yet".to_owned())?;
-        let current = self.entries.get(&record).is_some_and(|e| {
+            .ok_or_else(|| ContentError::Failed("no transcript file yet".to_owned()))?;
+        let current = self.transcripts.get(&record).is_some_and(|e| {
             &e.handle == handle && e.version == version && e.policy == policy.fingerprint
         });
         if !current {
-            let conversation = transcripts.read_masked(handle, &|s| policy.mask(s))?;
-            self.entries.insert(
+            let conversation = transcripts
+                .read_masked(handle, &|s| policy.mask(s))
+                .map_err(ContentError::Failed)?;
+            self.transcripts.insert(
                 record,
                 ParsedEntry {
                     handle: handle.clone(),
@@ -391,19 +582,70 @@ impl Parsed {
                 },
             );
         }
-        let entry = self.entries.get_mut(&record).expect("just inserted");
+        let entry = self.transcripts.get_mut(&record).expect("just inserted");
         entry.touched = Instant::now();
         let mut h = DefaultHasher::new();
         (handle.provider_id(), version).hash(&mut h);
         Ok((h.finish(), &entry.conversation))
     }
 
-    /// Keep only the records in `keep` and anything read in the last
-    /// minute, so a read with no watch is not reparsed on each read.
-    fn retain(&mut self, keep: &[RecordId]) {
+    /// The masked file under `key`: the walk and the stat every time,
+    /// the read only when the file or the policy moved since.
+    fn file(
+        &mut self,
+        key: &ContentKey,
+        root: &std::path::Path,
+        relative: &std::path::Path,
+        policy: &Policy,
+    ) -> Result<(u64, serde_json::Value), ContentError> {
+        let opened = files::open_pinned(root, relative).map_err(file_error)?;
+        let version = opened.version;
+        if let Some(entry) = self.files.get_mut(key)
+            && entry.version == version
+            && entry.policy == policy.fingerprint
+        {
+            entry.touched = Instant::now();
+            return Ok((version, entry.body.clone()));
+        }
+        let size = opened.size;
+        let modified_ms = opened.modified_ms;
+        let text = opened.read(FILE_BYTES_CAP).map_err(file_error)?;
+        let body = serde_json::json!({
+            "path": relative.to_string_lossy(),
+            "text": policy.mask(&text),
+            "size": size,
+            "modified_ms": modified_ms,
+        });
+        self.files.insert(
+            key.clone(),
+            FileEntry {
+                version,
+                policy: policy.fingerprint,
+                body: body.clone(),
+                touched: Instant::now(),
+            },
+        );
+        Ok((version, body))
+    }
+
+    /// Keep only what `jobs` still watch and anything read in the last
+    /// minute, so a read with no watch is not redone on each read.
+    fn retain(&mut self, jobs: &[ContentJob]) {
         let now = Instant::now();
-        self.entries
-            .retain(|id, e| keep.contains(id) || now - e.touched < WATCH_IDLE);
+        let records: Vec<RecordId> = jobs.iter().filter_map(|j| j.key.record()).collect();
+        self.transcripts
+            .retain(|id, e| records.contains(id) || now - e.touched < WATCH_IDLE);
+        self.files
+            .retain(|key, e| jobs.iter().any(|j| &j.key == key) || now - e.touched < WATCH_IDLE);
+        self.policies
+            .retain(|_, (_, touched)| now - *touched < WATCH_IDLE);
+    }
+}
+
+fn file_error(e: FileError) -> ContentError {
+    match e {
+        FileError::TooLarge(size) => ContentError::TooLarge(size),
+        other => ContentError::Failed(other.to_string()),
     }
 }
 
@@ -412,21 +654,37 @@ impl Parsed {
 fn observe(
     host: &dyn ProcessHost,
     transcripts: &dyn TranscriptReader,
-    parsed: &mut Parsed,
+    cache: &mut Cache,
     job: &ContentJob,
 ) -> Observed {
+    let policy = match cache.policy(&job.policy) {
+        Ok(policy) => policy,
+        Err(e) => {
+            return Observed {
+                key: job.key.clone(),
+                policy: 0,
+                result: Err(e),
+                reply: job.reply.clone(),
+            };
+        }
+    };
     let result = match (&job.source, job.view) {
         (Source::Pane(pane), ContentView::Screen { lines }) => host
             .snapshot(pane, Some(SCREEN_LINES_CAP + SCREEN_SLACK_LINES))
-            .map_err(|e| format!("snapshot: {e}"))
+            .map_err(|e| ContentError::Failed(format!("snapshot: {e}")))
             .map(|text| {
                 let mut h = DefaultHasher::new();
                 text.hash(&mut h);
-                let redacted = job.policy.mask(&text);
+                let redacted = policy.mask(&text);
                 (h.finish(), tail_body(&redacted, lines))
             }),
-        (Source::Transcript(handle), view) => parsed
-            .conversation(transcripts, job.key.record(), handle, &job.policy)
+        (Source::Transcript(handle), view) => cache
+            .conversation(
+                transcripts,
+                job.key.record().unwrap_or(RecordId(uuid::Uuid::nil())),
+                handle,
+                &policy,
+            )
             .map(|(source, conversation)| {
                 let resume_id = handle.provider_id();
                 let body = match view {
@@ -438,9 +696,12 @@ fn observe(
                 };
                 (source, body)
             }),
+        (Source::File { root, relative }, ContentView::Whole) => {
+            cache.file(&job.key, root, relative, &policy)
+        }
         (Source::Log(path), ContentView::Tail { lines }) => {
-            scrollback::tail_masked(path, lines, &|s| job.policy.mask(s), job.policy.overlap())
-                .map_err(|e| format!("log: {e}"))
+            scrollback::tail_masked(path, lines, &|s| policy.mask(s), policy.overlap())
+                .map_err(|e| ContentError::Failed(format!("log: {e}")))
                 .map(|(version, text)| {
                     let mut h = DefaultHasher::new();
                     version.hash(&mut h);
@@ -451,11 +712,13 @@ fn observe(
                     (h.finish(), body)
                 })
         }
-        (source, view) => Err(format!("{view:?} is not a view of {source:?}")),
+        (source, view) => Err(ContentError::Failed(format!(
+            "{view:?} is not a view of {source:?}"
+        ))),
     };
     Observed {
         key: job.key.clone(),
-        policy: job.policy.fingerprint,
+        policy: policy.fingerprint,
         result,
         reply: job.reply.clone(),
     }

@@ -21,11 +21,12 @@ use crate::adapters::remote::{
 };
 use crate::adapters::scrollback::scrollback_dir;
 use crate::content::{
-    ACTIVITY_BYTES_CAP, ContentJob, ContentKey, ContentVersion, ContentView, ContentWorker,
-    ConversationCache, Observed, PAGE_TURNS_CAP, PAGE_TURNS_DEFAULT, PageFrom, Policy,
-    RUN_LINES_CAP, SCREEN_LINES_CAP, SCREEN_SLACK_LINES, Source, TURN_BYTES_CAP, WATCH_CAP,
-    WATCH_IDLE, Watch, redact,
+    self, ACTIVITY_BYTES_CAP, ContentJob, ContentKey, ContentVersion, ContentView, ContentWorker,
+    ConversationCache, FILE_BYTES_CAP, Observed, PAGE_TURNS_CAP, PAGE_TURNS_DEFAULT, PageFrom,
+    Policy, PolicySpec, RUN_LINES_CAP, SCREEN_LINES_CAP, SCREEN_SLACK_LINES, Source,
+    TURN_BYTES_CAP, WATCH_CAP, WATCH_IDLE, Watch, redact,
 };
+use crate::core::model::PinTarget;
 use crate::core::revision::Fingerprints;
 use crate::core::{
     Activity, AgentKind, AppAction, AppCore, Clock, Composer, ControlAction, ControlOutcome,
@@ -73,7 +74,8 @@ pub struct Services {
     pub agents: Box<dyn AgentLauncher>,
     pub opener: Box<dyn Opener>,
     pub transcripts: Arc<dyn TranscriptReader>,
-    pub secrets: Box<dyn SecretStore>,
+    /// An `Arc`: the content worker resolves policies through it.
+    pub secrets: Arc<dyn SecretStore>,
     pub project_config: Box<dyn ProjectConfigReader>,
     pub round_files: Box<dyn RoundFiles>,
     /// A branch's commits and files over its base, for the ticket page.
@@ -202,9 +204,9 @@ pub struct SwitchboardApp {
     watches: std::collections::HashMap<ContentKey, Watch>,
     watch_dirty: bool,
     last_watch_sweep: Option<Instant>,
-    /// Each session's redaction policy as last resolved; cleared by any
-    /// save or secret change, since either may have moved it.
-    policies: std::collections::HashMap<RecordId, Policy>,
+    /// Counts the saves and secret changes, which may have moved a
+    /// policy: part of every policy spec, so the worker resolves again.
+    policy_epoch: u64,
     /// File diffs being read on threads of their own.
     diff_reads: DiffReads,
 }
@@ -303,7 +305,7 @@ impl SwitchboardApp {
             watches: std::collections::HashMap::new(),
             watch_dirty: false,
             last_watch_sweep: None,
-            policies: std::collections::HashMap::new(),
+            policy_epoch: 0,
             diff_reads: DiffReads::default(),
         }
     }
@@ -595,7 +597,7 @@ impl SwitchboardApp {
             | Effect::StoreSecret { .. }
             | Effect::DeleteSecret(_) => {
                 // Any of these may have moved a session's secret set.
-                self.policies.clear();
+                self.policy_epoch += 1;
                 self.watch_dirty = true;
                 self.run_store_effect(effect)
             }
@@ -1490,7 +1492,7 @@ impl SwitchboardApp {
         } = observation;
         match result {
             Ok((source, body)) => {
-                if self.core.session(key.record()).is_some() {
+                if self.content_present(&key) {
                     let moved = self
                         .versions
                         .get(&key)
@@ -1529,16 +1531,28 @@ impl SwitchboardApp {
                     let _ = reply.try_send(out);
                 }
             }
-            Err(reason) => {
+            Err(error) => {
                 if let Some(reply) = reply {
-                    log::info!("remote: {} {} refused: failed", key.kind(), key.id());
+                    let (status, code, reason) = error.refusal();
+                    log::info!("remote: {} {} refused: {code}", key.kind(), key.id());
                     let _ = reply.try_send(RemoteReply {
-                        status: 400,
-                        body: self.error_json("failed", &reason),
+                        status,
+                        body: self.error_json(code, &reason),
                         authenticated: true,
                     });
                 }
             }
+        }
+    }
+
+    /// Whether what a key reads is still on the host: its session, or
+    /// for a file its project.
+    fn content_present(&self, key: &ContentKey) -> bool {
+        match key {
+            ContentKey::File(project, _) => self.core.workspace(*project).is_some(),
+            _ => key
+                .record()
+                .is_some_and(|id| self.core.session(id).is_some()),
         }
     }
 
@@ -1653,6 +1667,7 @@ impl SwitchboardApp {
                 ContentKey::RunOutput(..) => ContentView::Tail {
                     lines: RUN_LINES_CAP,
                 },
+                ContentKey::File(..) => ContentView::Whole,
             };
             if let Ok(job) = self.content_job(&key, view, None) {
                 jobs.push(job);
@@ -1664,15 +1679,42 @@ impl SwitchboardApp {
     }
 
     /// The job that reads `key`: its source resolved from the record
-    /// (a running pane, a Claude Code transcript, a run's log) and the
-    /// session's policy. The error is a refusal's code and reason.
+    /// (a running pane, a Claude Code transcript, a run's log) or the
+    /// project (a pinned file), and the spec of the policy to mask it
+    /// with, which the worker resolves. The error is a refusal's code
+    /// and reason.
     fn content_job(
         &mut self,
         key: &ContentKey,
         view: ContentView,
         reply: Option<mpsc::SyncSender<RemoteReply>>,
     ) -> Result<ContentJob, (u16, &'static str, String)> {
-        let id = key.record();
+        if let ContentKey::File(project, path) = key {
+            let Some(workspace) = self.core.workspace(*project) else {
+                return Err((404, "not_found", "no such project".into()));
+            };
+            let pinned = self.core.working_sets().iter().any(|set| {
+                set.items
+                    .iter()
+                    .any(|item| item.target == PinTarget::File(*project, path.clone()))
+            });
+            if !pinned {
+                return Err((404, "not_pinned", "no working set pins this file".into()));
+            }
+            return Ok(ContentJob {
+                key: key.clone(),
+                source: Source::File {
+                    root: workspace.project.root.clone(),
+                    relative: path.clone(),
+                },
+                view,
+                policy: self.policy_spec(*project, None),
+                reply,
+            });
+        }
+        let Some(id) = key.record() else {
+            return Err((404, "not_found", "no such session".into()));
+        };
         let Some(record) = self.core.session(id) else {
             return Err((404, "not_found", "no such session".into()));
         };
@@ -1714,62 +1756,48 @@ impl SwitchboardApp {
                 };
                 Source::Log(scrollback_dir(&self.services.store.data_dir()).join(&run.log))
             }
+            ContentKey::File(..) => unreachable!("handled above"),
         };
-        let policy = self.policy_for(id).map_err(|reason| {
-            log::warn!(
-                "remote: {} for {}: policy: {reason}",
-                key.kind(),
-                id.host_name()
-            );
-            (
-                503,
-                "policy",
-                "the secret set could not be resolved; nothing is sent unredacted".into(),
-            )
-        })?;
         Ok(ContentJob {
             key: key.clone(),
             source,
             view,
-            policy,
+            policy: self.policy_spec(record.project, Some(record)),
             reply,
         })
     }
 
-    /// A session's redaction policy: the project's secret variables and
-    /// its granted sets' secrets, with the fingerprint that names it. A
-    /// secret store that fails is an error, never an unmasked text.
+    /// What names a policy, from the core: the project's environment
+    /// and the sets it and the session may use, with the epoch. The
+    /// values are read on the worker.
+    fn policy_spec(&self, project: ProjectId, record: Option<&SessionRecord>) -> PolicySpec {
+        let workspace = self.core.workspace(project);
+        PolicySpec {
+            epoch: self.policy_epoch,
+            project,
+            root: workspace
+                .map(|w| w.project.root.clone())
+                .unwrap_or_default(),
+            global: self.core.settings().env.clone(),
+            project_env: workspace.map(|w| w.project.env.clone()).unwrap_or_default(),
+            sets: self.core.settings().env_sets.clone(),
+            project_sets: workspace
+                .map(|w| w.project.env_sets.clone())
+                .unwrap_or_default(),
+            record_sets: record.map(|r| r.env_sets.clone()).unwrap_or_default(),
+        }
+    }
+
+    /// A session's redaction policy on the frame, for the control
+    /// socket's own screen read.
     fn resolve_policy(&self, id: RecordId) -> Result<Policy, String> {
         let Some(record) = self.core.session(id) else {
             return Err("no such session".into());
         };
-        let mut secrets: Vec<(String, String)> =
-            resolve_project_env(&self.core, &self.services, record.project)
-                .vars
-                .into_iter()
-                .filter(|v| v.secret)
-                .filter_map(|v| v.value.filter(|x| !x.is_empty()).map(|x| (v.name, x)))
-                .collect();
-        // A child of `switchboard-env exec` may print a set's secret too.
-        let resolved = self.resolve_record_sets(record)?;
-        let secret_names = self.set_secret_names();
-        secrets.extend(
-            resolved
-                .pairs
-                .into_iter()
-                .filter(|(name, value)| !value.is_empty() && secret_names.contains(name)),
-        );
-        Ok(Policy::new(secrets))
-    }
-
-    /// `resolve_policy`, cached until a save or a secret change.
-    fn policy_for(&mut self, id: RecordId) -> Result<Policy, String> {
-        if let Some(p) = self.policies.get(&id) {
-            return Ok(p.clone());
-        }
-        let policy = self.resolve_policy(id)?;
-        self.policies.insert(id, policy.clone());
-        Ok(policy)
+        content::resolve_policy(
+            &self.policy_spec(record.project, Some(record)),
+            &*self.services.secrets,
+        )
     }
 
     /// The content reads by path: the screen, the conversation page or
@@ -1781,6 +1809,9 @@ impl SwitchboardApp {
         segments: &[&str],
         reply: &mpsc::SyncSender<RemoteReply>,
     ) -> Served {
+        if let ["projects", project, "files", path @ ..] = segments {
+            return self.remote_file_route(request, project, path, reply);
+        }
         let id = match parse_uuid("session", segments[1]) {
             Ok(id) => RecordId(id),
             Err(reason) => return Served::Now(self.refuse(request, 400, "failed", &reason, true)),
@@ -1806,41 +1837,10 @@ impl SwitchboardApp {
                 }
             },
             [_, _, "conversation"] => {
-                let from = match (request.param("from"), request.param("before")) {
-                    (None, None) => PageFrom::Turn(1),
-                    (Some("last"), None) => PageFrom::Last,
-                    (Some(n), None) => match n.parse::<usize>() {
-                        Ok(n) if n >= 1 => PageFrom::Turn(n),
-                        _ => {
-                            return Served::Now(self.refuse(
-                                request,
-                                400,
-                                "bad_request",
-                                "from is a turn number or last",
-                                true,
-                            ));
-                        }
-                    },
-                    (None, Some(n)) => match n.parse::<usize>() {
-                        Ok(n) if n >= 1 => PageFrom::Before(n),
-                        _ => {
-                            return Served::Now(self.refuse(
-                                request,
-                                400,
-                                "bad_request",
-                                "before is a turn number",
-                                true,
-                            ));
-                        }
-                    },
-                    (Some(_), Some(_)) => {
-                        return Served::Now(self.refuse(
-                            request,
-                            400,
-                            "bad_request",
-                            "from and before do not go together",
-                            true,
-                        ));
+                let from = match Self::page_from(request) {
+                    Ok(from) => from,
+                    Err(reason) => {
+                        return Served::Now(self.refuse(request, 400, "bad_request", reason, true));
                     }
                 };
                 let limit = request
@@ -1881,6 +1881,61 @@ impl SwitchboardApp {
             }
         };
         self.remote_content(request, &key, view, reply)
+    }
+
+    /// Where a page is anchored, from `from` (a turn number or `last`)
+    /// or `before` (a turn number), which do not go together.
+    fn page_from(request: &RemoteRequest) -> Result<PageFrom, &'static str> {
+        match (request.param("from"), request.param("before")) {
+            (None, None) => Ok(PageFrom::Turn(1)),
+            (Some("last"), None) => Ok(PageFrom::Last),
+            (Some(n), None) => match n.parse::<usize>() {
+                Ok(n) if n >= 1 => Ok(PageFrom::Turn(n)),
+                _ => Err("from is a turn number or last"),
+            },
+            (None, Some(n)) => match n.parse::<usize>() {
+                Ok(n) if n >= 1 => Ok(PageFrom::Before(n)),
+                _ => Err("before is a turn number"),
+            },
+            (Some(_), Some(_)) => Err("from and before do not go together"),
+        }
+    }
+
+    /// A pinned file by its project and its path under the root; the
+    /// path is checked here before the walk checks it again.
+    fn remote_file_route(
+        &mut self,
+        request: &RemoteRequest,
+        project: &str,
+        path: &[&str],
+        reply: &mpsc::SyncSender<RemoteReply>,
+    ) -> Served {
+        let project = match parse_uuid("project", project) {
+            Ok(id) => ProjectId(id),
+            Err(reason) => {
+                return Served::Now(self.refuse(request, 400, "failed", &reason, true));
+            }
+        };
+        let relative = PathBuf::from(path.join("/"));
+        let clean = !path.is_empty()
+            && relative
+                .components()
+                .all(|c| matches!(c, std::path::Component::Normal(_)));
+        if !clean {
+            return Served::Now(self.refuse(
+                request,
+                400,
+                "bad_request",
+                "the path is relative to the project root, with no . or .. component",
+                true,
+            ));
+        }
+        self.remote_content(
+            request,
+            &ContentKey::File(project, relative),
+            ContentView::Whole,
+            reply,
+        )
     }
 
     /// A device's content read: the frame checks the record and
@@ -2294,6 +2349,7 @@ impl SwitchboardApp {
             self.content = Some(ContentWorker::spawn(
                 Arc::clone(&self.services.host),
                 Arc::clone(&self.services.transcripts),
+                Arc::clone(&self.services.secrets),
                 tx,
                 wake,
             ));
@@ -2416,7 +2472,8 @@ impl SwitchboardApp {
                 "GET",
                 ["sessions", _, "screen" | "conversation" | "last-response"]
                 | ["sessions", _, "conversation", _]
-                | ["sessions", _, "runs", _, "output"],
+                | ["sessions", _, "runs", _, "output"]
+                | ["projects", _, "files", _, ..],
             ) => {
                 return self.remote_content_route(request, &segments, reply);
             }
@@ -2759,6 +2816,7 @@ impl SwitchboardApp {
                 "activity_bytes": ACTIVITY_BYTES_CAP,
                 "send_bytes": SEND_BYTES_CAP,
                 "op_chars": OP_CAP,
+                "file_bytes": FILE_BYTES_CAP,
             },
             "pairing_open": self.core.pairing_at(self.clock()).is_some(),
         });
@@ -3221,16 +3279,6 @@ impl SwitchboardApp {
         wire::Reply::Screen {
             text: kept[kept.len().saturating_sub(n)..].join("\n"),
         }
-    }
-
-    /// The names of every set variable marked secret.
-    fn set_secret_names(&self) -> Vec<String> {
-        self.core
-            .settings()
-            .env_sets
-            .iter()
-            .flat_map(|s| s.vars.iter().filter(|v| v.secret).map(|v| v.name.clone()))
-            .collect()
     }
 
     /// Every record `op` made: the ones still present with their state,

@@ -29,7 +29,9 @@ use switchboard::core::{AppAction, RecordId};
 use switchboard::ports::host::{HostId, HostStatus, Liveness as HostLiveness};
 use switchboard::ports::remote::{Listen, Scope};
 use switchboard::ports::transcript::{Conversation, Turn};
-use switchboard_control::{Body, Client, Launch, Made, RecordKind, Reply, Request, SessionKind};
+use switchboard_control::{
+    Body, Client, Launch, Made, Pin, PinTarget, RecordKind, Rect, Reply, Request, SessionKind,
+};
 use tungstenite::client::IntoClientRequest as _;
 
 struct Port {
@@ -59,7 +61,7 @@ fn port_with(host: FakeHost, secrets: FakeSecrets, remote: FakeRemoteStore) -> P
     let advertiser = FakeAdvertiser::default();
     let transcripts = FakeTranscripts::default();
     let services = Services {
-        secrets: Box::new(secrets.clone()),
+        secrets: std::sync::Arc::new(secrets.clone()),
         host: Arc::new(host.clone()),
         remote: Box::new(remote.clone()),
         advertiser: Box::new(advertiser.clone()),
@@ -640,7 +642,6 @@ fn the_allowlist_refuses_everything_else_with_no_side_effect() {
         ("GET", "/api/v1/env/resolve".into()),
         ("POST", "/api/v1/projects".into()),
         ("DELETE", format!("/api/v1/sessions/{session}")),
-        ("GET", format!("/api/v1/projects/{project}/files/README.md")),
         ("GET", "/api/v2/projects".into()),
     ] {
         let (status, reply) = call(&mut port, method, &path, t, r#"{"text":"hi"}"#);
@@ -650,6 +651,13 @@ fn the_allowlist_refuses_everything_else_with_no_side_effect() {
             "{method} {path}: {reply}"
         );
     }
+    // A file no set pins is refused by name, with nothing read.
+    let (status, reply) = get(
+        &mut port,
+        &format!("/api/v1/projects/{project}/files/README.md"),
+        t,
+    );
+    assert_eq!((status, code(&reply)), (404, "not_pinned"), "{reply}");
     assert!(
         port.host.state().written.is_empty(),
         "nothing reached a pane"
@@ -831,6 +839,205 @@ fn a_draft_is_the_sessions_editor_fed_by_dictation_and_worked_by_its_tools() {
     let (_, shell) = command_with_run(&mut port, &project, "echo");
     let (status, reply) = get(&mut port, &format!("/api/v1/sessions/{}/draft", shell.0), t);
     assert_eq!((status, code(&reply)), (400, "no_draft"), "{reply}");
+}
+
+/// A project with a root of its own on disk, for the file reads.
+fn project_with_root(port: &mut Port, space: &str, root: &std::path::Path) -> String {
+    let reply = control(
+        port,
+        Request::new(
+            "pj2",
+            Body::ProjectAdd {
+                space: space.to_owned(),
+                name: "#2".into(),
+                root: root.to_path_buf(),
+            },
+        ),
+    );
+    made_id(&reply, RecordKind::Project)
+}
+
+/// A working set in `space` pinning `paths` of `project`.
+fn pin_files(port: &mut Port, space: &str, project: &str, paths: &[&str]) -> String {
+    let reply = control(
+        port,
+        Request::new(
+            "st",
+            Body::SetNew {
+                space: space.to_owned(),
+                name: "Desk".into(),
+            },
+        ),
+    );
+    let set = made_id(&reply, RecordKind::Set);
+    let items = paths
+        .iter()
+        .enumerate()
+        .map(|(i, path)| Pin {
+            target: PinTarget::File {
+                project: project.to_owned(),
+                path: PathBuf::from(path),
+            },
+            rect: Rect {
+                x: 0,
+                y: u32::try_from(i).unwrap() * 2,
+                w: 2,
+                h: 2,
+            },
+        })
+        .collect();
+    let reply = control(
+        port,
+        Request::new(
+            "ss",
+            Body::SetSync {
+                set: set.clone(),
+                items,
+            },
+        ),
+    );
+    assert!(
+        !matches!(reply, Reply::Failed { .. }),
+        "set.sync: {reply:?}"
+    );
+    set
+}
+
+/// `file.read` (§4.3): a file some working set pins is read whole,
+/// masked of the project's secrets, with its size and modification
+/// time; a dotenv file is refused though pinned, a file over the
+/// limit is refused with its size, and a watched file moves on the
+/// poll when it is edited. The policy is resolved on the worker.
+#[test]
+#[allow(clippy::too_many_lines)]
+fn a_pinned_file_is_read_masked_and_watched_and_only_when_pinned() {
+    let mut port = port();
+    let (space, _, _) = seed(&mut port, "");
+    let dir = tempfile::Builder::new()
+        .prefix("sbfile")
+        .tempdir_in("/tmp")
+        .unwrap();
+    std::fs::create_dir(dir.path().join("docs")).unwrap();
+    let plan = "# Plan\nuse tok-5e3cr3t here\n";
+    std::fs::write(dir.path().join("docs/plan.md"), plan).unwrap();
+    std::fs::write(dir.path().join(".env"), "API_TOKEN=tok-5e3cr3t\n").unwrap();
+    std::fs::write(dir.path().join("docs/big.txt"), "x".repeat(800 * 1024)).unwrap();
+    let project = project_with_root(&mut port, &space, dir.path());
+    let pid = switchboard::core::ProjectId(uuid::Uuid::parse_str(&project).unwrap());
+    port.app.dispatch(AppAction::SetProjectEnv(
+        pid,
+        switchboard::core::ProjectEnv {
+            vars: vec![switchboard::core::EnvVar {
+                name: "API_TOKEN".into(),
+                value: String::new(),
+                secret: true,
+            }],
+            ..Default::default()
+        },
+    ));
+    port.secrets.state().insert(
+        switchboard::core::SecretScope::Project(pid).account("API_TOKEN"),
+        "tok-5e3cr3t".into(),
+    );
+    port.app.set_watch_poll(Duration::from_millis(50));
+    let token = pair(&mut port, "ABCD2345", Scope::Read, "Vision Pro");
+    let t = Some(token.as_str());
+    let path = format!("/api/v1/projects/{project}/files/docs/plan.md");
+
+    let (status, reply) = get(&mut port, &path, t);
+    assert_eq!((status, code(&reply)), (404, "not_pinned"), "{reply}");
+    pin_files(
+        &mut port,
+        &space,
+        &project,
+        &["docs/plan.md", ".env", "docs/big.txt", "docs/missing.md"],
+    );
+    let (status, reply) = get(&mut port, &path, t);
+    assert_eq!(status, 200, "{reply}");
+    assert_eq!(reply["body"]["text"], "# Plan\nuse <API_TOKEN> here\n");
+    assert_eq!(reply["body"]["path"], "docs/plan.md");
+    assert_eq!(reply["body"]["size"], plan.len());
+    assert!(reply["body"]["modified_ms"].is_u64(), "{reply}");
+    assert!(!reply.to_string().contains("tok-5e3cr3t"), "{reply}");
+    let first = reply["revision"].as_u64().unwrap();
+    let (_, again) = get(&mut port, &path, t);
+    assert_eq!(
+        again["revision"], first,
+        "an unchanged file keeps its revision"
+    );
+
+    let (status, reply) = get(
+        &mut port,
+        &format!("/api/v1/projects/{project}/files/.env"),
+        t,
+    );
+    assert_eq!((status, code(&reply)), (400, "failed"), "{reply}");
+    assert!(!reply.to_string().contains("tok-5e3cr3t"), "{reply}");
+    let (status, reply) = get(
+        &mut port,
+        &format!("/api/v1/projects/{project}/files/docs/big.txt"),
+        t,
+    );
+    assert_eq!((status, code(&reply)), (413, "too_large"), "{reply}");
+    assert!(
+        reply["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("819200"),
+        "{reply}"
+    );
+    let (status, reply) = get(
+        &mut port,
+        &format!("/api/v1/projects/{project}/files/docs/missing.md"),
+        t,
+    );
+    assert_eq!((status, code(&reply)), (400, "failed"), "{reply}");
+    let (status, reply) = get(
+        &mut port,
+        &format!("/api/v1/projects/{project}/files/docs/../plan.md"),
+        t,
+    );
+    assert_eq!((status, code(&reply)), (400, "bad_request"), "{reply}");
+    let (status, reply) = get(&mut port, &format!("/api/v1/projects/{project}/files"), t);
+    assert_eq!(status, 404, "{reply}");
+
+    // Watched: an edit moves it on the poll, with a new revision.
+    let sub = subscribe(&mut port, &token);
+    let id = format!("{project}/docs/plan.md");
+    sub.send("watch", "file", &id);
+    let seen = resources(&events(&mut port, &sub));
+    assert!(
+        seen.contains(&("watching".into(), "file".into(), id.clone())),
+        "{seen:?}"
+    );
+    std::thread::sleep(Duration::from_millis(20));
+    std::fs::write(dir.path().join("docs/plan.md"), "# Plan\nrevised\n").unwrap();
+    let got = events(&mut port, &sub);
+    let seen = resources(&got);
+    assert!(
+        seen.contains(&("changed".into(), "file".into(), id.clone())),
+        "{seen:?}"
+    );
+    let (_, reply) = get(&mut port, &path, t);
+    assert_eq!(reply["body"]["text"], "# Plan\nrevised\n");
+    assert!(reply["revision"].as_u64().unwrap() > first);
+
+    // A secret store that fails refuses rather than answers unmasked:
+    // the policy is read again after any save, and the store is asked.
+    port.secrets.set_failing(true);
+    port.app.dispatch(AppAction::SetProjectEnv(
+        pid,
+        switchboard::core::ProjectEnv {
+            vars: vec![switchboard::core::EnvVar {
+                name: "API_TOKEN".into(),
+                value: String::new(),
+                secret: true,
+            }],
+            ..Default::default()
+        },
+    ));
+    let (status, reply) = get(&mut port, &path, t);
+    assert_eq!((status, code(&reply)), (503, "policy"), "{reply}");
 }
 
 /// The control scope (§4.5): `send`, `resume` and `trust` go through
@@ -1329,6 +1536,7 @@ fn write_fixtures(dir: &std::path::Path) {
         scope: Scope::Control,
     });
     files.extend(content_fixtures(&mut port, &session, &command, &token));
+    files.push(("file", file_fixture(&mut port, &space, &token)));
     for (name, value) in &mut files {
         if *name == "pair" {
             // A fixture never carries a real token.
@@ -1337,6 +1545,28 @@ fn write_fixtures(dir: &std::path::Path) {
         let text = serde_json::to_string_pretty(value).unwrap();
         std::fs::write(dir.join(format!("{name}.json")), text + "\n").unwrap();
     }
+}
+
+/// A pinned file of a project with a root on disk, read.
+fn file_fixture(port: &mut Port, space: &str, token: &str) -> serde_json::Value {
+    let root = tempfile::Builder::new()
+        .prefix("sbfix")
+        .tempdir_in("/tmp")
+        .unwrap();
+    std::fs::create_dir(root.path().join("docs")).unwrap();
+    std::fs::write(
+        root.path().join("docs/plan.md"),
+        "# Plan\n\n1. Fix the test.\n",
+    )
+    .unwrap();
+    let pinned = project_with_root(port, space, root.path());
+    pin_files(port, space, &pinned, &["docs/plan.md"]);
+    get(
+        port,
+        &format!("/api/v1/projects/{pinned}/files/docs/plan.md"),
+        Some(token),
+    )
+    .1
 }
 
 /// The content replies: a page, the last response, the runs, a tail.
@@ -1459,6 +1689,9 @@ fn the_client_fixtures_decode_on_both_sides() {
     let output = read("run_output");
     assert_eq!(output["body"]["n"], 1);
     assert!(output["body"]["text"].is_string());
+    let file = read("file");
+    assert_eq!(file["body"]["path"], "docs/plan.md");
+    assert!(file["body"]["text"].is_string() && file["body"]["size"].is_u64());
     let draft = read("draft");
     assert_eq!(draft["body"]["draft"]["text"], "Fix the test. and run");
     assert_eq!(draft["body"]["draft"]["status"], "listening");

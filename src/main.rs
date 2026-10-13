@@ -222,13 +222,13 @@ fn main() -> eframe::Result {
 
 /// The Keychain on macOS. Elsewhere the app only has to build (CI runs
 /// on Linux), so secrets live in memory for the process.
-fn secret_store() -> Box<dyn switchboard::ports::secrets::SecretStore> {
+fn secret_store() -> std::sync::Arc<dyn switchboard::ports::secrets::SecretStore> {
     #[cfg(target_os = "macos")]
     {
-        Box::new(switchboard::adapters::keychain::KeychainStore::login())
+        std::sync::Arc::new(switchboard::adapters::keychain::KeychainStore::login())
     }
     #[cfg(not(target_os = "macos"))]
     {
-        Box::new(switchboard::adapters::fakes::FakeSecrets::default())
+        std::sync::Arc::new(switchboard::adapters::fakes::FakeSecrets::default())
     }
 }
