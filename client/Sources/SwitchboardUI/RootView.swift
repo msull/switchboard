@@ -18,6 +18,8 @@ public struct RootView: View {
 
     public var body: some View {
         tabs
+            .onAppear { model.mainWindowAppeared() }
+            .onDisappear { model.mainWindowDisappeared() }
             .task(id: openOnStart) { await openRequested() }
             .task { await reopenSaved() }
     }

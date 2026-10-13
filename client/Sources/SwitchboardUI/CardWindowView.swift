@@ -10,6 +10,7 @@ public struct CardWindowView: View {
     @Bindable var model: BrowserModel
     public let request: CardWindowRequest
     @State private var mode: ViewMode = .compact
+    @Environment(\.openWindow) private var openWindow
 
     public init(model: BrowserModel, request: CardWindowRequest) {
         self.model = model
@@ -49,6 +50,17 @@ public struct CardWindowView: View {
         }
         .onDisappear { model.windowClosed(request) }
         .onChange(of: mode) { _, new in model.setMode(new, for: request.id) }
+        .task { await bringMainWindowBack() }
+    }
+
+    /// A launch that restored only card windows has no browser: after
+    /// the grace the system gets to restore one, the first card window
+    /// to ask opens it.
+    private func bringMainWindowBack() async {
+        try? await Task.sleep(nanoseconds: 1_500_000_000)
+        if model.claimMainWindow() {
+            openWindow(id: MainWindow.id, value: MainWindow.value)
+        }
     }
 
     private var header: some View {
@@ -64,6 +76,12 @@ public struct CardWindowView: View {
             if let item {
                 SourceLabel(name: item.serverName, stale: item.stale)
             }
+            Button {
+                openWindow(id: MainWindow.id, value: MainWindow.value)
+            } label: {
+                Label("Sessions", systemImage: "rectangle.grid.2x2")
+            }
+            .help("The main window, with every session")
         }
     }
 

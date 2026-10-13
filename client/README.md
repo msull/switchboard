@@ -53,8 +53,13 @@ scripts/sim.sh run               # the visionOS app on the simulator (below)
   card window's mode by window id, and the card windows open at the
   last save. visionOS restores an app's windows on relaunch when it
   can; the saved ones it does not bring back are reopened under their
-  ids after a short grace, so they keep their modes. Nothing
-  visionOS-only, so the iPad shell draws the same views.
+  ids after a short grace, so they keep their modes. A run that ended
+  with only card windows comes back without the browser, so every
+  scene boots the model and the first card window to find the main
+  window missing after that grace opens it; its header's Sessions
+  button brings the main window forward at any time (`MainWindow`,
+  `MainWindowGuard`). Nothing visionOS-only, so the iPad shell draws
+  the same views.
 - `Apps/SwitchboardVision`: the visionOS app, an entry that declares
   the scenes and where the registry lives (`servers.json` in the app's
   container, the token and pin in the Keychain, nothing from a host on
@@ -92,8 +97,15 @@ by commas (`SIMCTL_CHILD_SWITCHBOARD_OPEN="$ID:screen"`).
 Bonjour on visionOS needs `NSBonjourServices` and
 `NSLocalNetworkUsageDescription` in `Info.plist`; both are there. The
 headset itself needs the one-time Xcode setup: Developer Mode on the
-device, the device paired in Xcode's Devices window, and a development
-team chosen for the target.
+device (Settings, Privacy & Security), the device paired in Xcode's
+Devices window (with the headset on its Remote Devices settings
+screen), and the app run from Xcode once with a development team on
+the target so the device trusts the developer. After that
+`scripts/device.sh run` builds, installs and launches on the headset
+from the terminal, and `devices` lists what the Mac is paired with.
+The team comes from `DEVELOPMENT_TEAM` in the environment or in the
+repo's git-ignored `.env`; `project.yml` reads it at generation, so a
+project generated without one (as for the simulator) has no team.
 
 ## The command-line browser
 

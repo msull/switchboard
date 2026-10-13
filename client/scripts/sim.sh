@@ -14,7 +14,8 @@ BUNDLE=com.sadburger.switchboard.vision
 APP="$DERIVED/Build/Products/Debug-xrsimulator/Switchboard.app"
 
 build() {
-    xcodegen generate --quiet
+    # The simulator signs nothing: the spec's team is empty unless set.
+    DEVELOPMENT_TEAM="${DEVELOPMENT_TEAM:-}" xcodegen generate --quiet
     xcodebuild -project SwitchboardClient.xcodeproj -scheme SwitchboardVision \
         -destination "platform=visionOS Simulator,name=$SIM" \
         -derivedDataPath "$DERIVED" -quiet build

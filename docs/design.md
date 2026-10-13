@@ -3304,10 +3304,19 @@ Built so far:
   once, a screen window surviving the host's restart (the offline
   banner with the mode row disabled, then the pane refilled live once
   the watch was resent after `hello`), and a screen window reopened
-  with its mode and content after the app was terminated. Milestone B
-  is built on the simulator; the headset itself waits on the one-time
-  Xcode setup (Developer Mode, the device paired in Xcode's Devices
-  window, a development team on the target). Not in B: the
+  with its mode and content after the app was terminated. On the
+  headset the first run showed a gap the simulator could not: a run
+  that ends with only card windows is restored without the browser,
+  and nothing started the connections either, since the boot lived in
+  the main window's view. Every scene now boots the model (the first
+  call does the work), the first card window to find the main window
+  missing after the restoration grace opens it, and the card header
+  carries a Sessions button that brings the main window forward (it
+  is a value-keyed window group, so this never makes a second one).
+  Milestone B runs on the headset, installed from the terminal with
+  `client/scripts/device.sh` once the one-time Xcode setup was done
+  (Developer Mode, the device paired in Xcode's Devices window, one
+  run from Xcode with a development team on the target). Not in B: the
   conversation, last-response and run-output modes (Milestone C), the
   QR scanner (the invite is pasted or passed at launch), and the
   Xcode project is generated, not checked in.

@@ -13,15 +13,22 @@ struct SwitchboardVisionApp: App {
         presentationStore: FilePresentationStore(url: SwitchboardVisionApp.support.appendingPathComponent("presentation.json")))
 
     var body: some Scene {
-        WindowGroup("Switchboard") {
+        // The main window carries a fixed value so that opening it
+        // from a card window brings the open one forward rather than
+        // making a second; the launch window gets the same value.
+        WindowGroup("Switchboard", id: MainWindow.id, for: Int.self) { _ in
             RootView(model: model, openOnStart: Self.openFromEnvironment)
                 .task { await model.boot(invite: Self.inviteFromEnvironment) }
+        } defaultValue: {
+            MainWindow.value
         }
         // A card window per request: the system places it, and two
-        // requests on one session are two windows (§7.2).
+        // requests on one session are two windows (§7.2). It boots the
+        // model too, since a relaunch may restore only card windows.
         WindowGroup(for: CardWindowRequest.self) { $request in
             if let request {
                 CardWindowView(model: model, request: request)
+                    .task { await model.boot(invite: Self.inviteFromEnvironment) }
             }
         }
         .defaultSize(width: 760, height: 560)

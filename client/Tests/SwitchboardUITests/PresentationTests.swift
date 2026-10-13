@@ -131,4 +131,15 @@ final class BrowsingTests: XCTestCase {
         XCTAssertEqual(reopen.map(\.id), [missing])
         XCTAssertEqual(reopen.first?.ref.recordID, "r1")
     }
+
+    func testTheMainWindowIsBroughtBackOnceAndOnlyWhenItIsMissing() {
+        var missing = MainWindowGuard()
+        XCTAssertTrue(missing.claim(), "the first card window to ask opens it")
+        XCTAssertFalse(missing.claim(), "the next does not")
+        var shown = MainWindowGuard()
+        shown.visible = true
+        XCTAssertFalse(shown.claim(), "a restored main window needs no help")
+        shown.visible = false
+        XCTAssertTrue(shown.claim(), "the main window went away before the ask")
+    }
 }

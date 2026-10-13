@@ -25,6 +25,10 @@ public final class BrowserModel {
     public private(set) var presentation = PresentationState()
     private let presentationStore: PresentationStore
     private var pump: Task<Void, Never>?
+    private var booting: Task<Void, Never>?
+    /// Whether the main window is on screen, and whether a card
+    /// window has already taken the job of bringing it back.
+    public private(set) var mainWindow = MainWindowGuard()
 
     public init(manager: ConnectionManager, presentationStore: PresentationStore = MemoryPresentationStore()) {
         self.manager = manager
@@ -50,8 +54,20 @@ public final class BrowserModel {
 
     /// Load the registry, pair with each invite given (a dev aid, one
     /// per line), start the manager's loop with Bonjour, and mirror
-    /// its store; the apps call this once from their first scene.
+    /// its store. Every scene calls this when it appears, since any
+    /// of them may be the only one restored; the first call does the
+    /// work and the others wait for it.
     public func boot(invite: String? = nil) async {
+        if let booting {
+            await booting.value
+            return
+        }
+        let task = Task { await self.bootOnce(invite: invite) }
+        booting = task
+        await task.value
+    }
+
+    private func bootOnce(invite: String?) async {
         try? await manager.load()
         for line in (invite ?? "").split(separator: "\n") {
             if let parsed = try? PairingInvite.parse(String(line)) {
@@ -139,6 +155,20 @@ public final class BrowserModel {
             presentation.focused = newValue
             save()
         }
+    }
+
+    public func mainWindowAppeared() {
+        mainWindow.visible = true
+    }
+
+    public func mainWindowDisappeared() {
+        mainWindow.visible = false
+    }
+
+    /// A card window asks, after the restoration grace, whether it is
+    /// the one to open the main window.
+    public func claimMainWindow() -> Bool {
+        mainWindow.claim()
     }
 
     /// A card window is on screen: remembered for the next launch.

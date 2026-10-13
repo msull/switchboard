@@ -49,6 +49,34 @@ public enum ViewMode: String, Codable, CaseIterable, Sendable, Identifiable {
 
 /// What a card window is opened on: a qualified session and an id of
 /// its own, so two windows on one session are two windows.
+/// The main window, one per app: the id and the value it is opened
+/// with, so opening it again brings the open one forward instead of
+/// making a second.
+public enum MainWindow {
+    public static let id = "main"
+    public static let value = 0
+}
+
+/// Whether a card window should bring the main window back at launch.
+/// visionOS restores the windows that were open when the app last
+/// quit, so a run that ended with only card windows comes back
+/// without the browser, and nothing else opens it. The first card
+/// window to ask after the restoration grace claims the job, unless
+/// the main window has appeared by then.
+public struct MainWindowGuard: Equatable, Sendable {
+    public var visible = false
+    public var claimed = false
+
+    public init() {}
+
+    /// True once, for the window that should open the main one.
+    public mutating func claim() -> Bool {
+        if visible || claimed { return false }
+        claimed = true
+        return true
+    }
+}
+
 public struct CardWindowRequest: Codable, Hashable, Sendable {
     public let id: UUID
     public let ref: SessionRef

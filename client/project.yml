@@ -32,6 +32,10 @@ targets:
         INFOPLIST_FILE: Apps/SwitchboardVision/Info.plist
         GENERATE_INFOPLIST_FILE: "NO"
         CODE_SIGN_STYLE: Automatic
+        # The team signs device builds; it is read from the environment
+        # at generation (scripts/device.sh takes it from the repo's
+        # git-ignored .env), and the simulator needs none.
+        DEVELOPMENT_TEAM: ${DEVELOPMENT_TEAM}
         SWIFT_VERSION: "5.10"
         SWIFT_STRICT_CONCURRENCY: complete
         TARGETED_DEVICE_FAMILY: "7"
