@@ -100,8 +100,10 @@ scripts/sim.sh run               # the visionOS app on the simulator (below)
   run), the editor's tools sit in a row over the field at its left,
   away from Send (`DraftTools`: undo,
   redo, the last sentence deleted, clear, the AI pass where the host
-  has a key) and Send takes the draft to the pane under an op; a
-  caption says when the host's editor is listening or degraded. On an
+  has a key) and Send takes the draft to the pane under an op; one
+  reserved line under the field carries a note, a degraded editor or
+  the AI pass running, and says nothing of listening, so nothing
+  shifts. On an
   older host the field is the device's own, what is heard goes after
   what was typed, and a hand edit while listening keeps the field's
   text with the live utterance going on after it; the prompt window

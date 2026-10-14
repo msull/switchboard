@@ -93,11 +93,7 @@ public struct PromptWindowView: View {
                 .controlSize(.small)
                 .disabled(!canControl || (draft?.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true))
             }
-            if let note {
-                Text(note).font(.caption).foregroundStyle(.secondary)
-            } else if let draft, let status = DraftTools.caption(draft) {
-                Text(status).font(.caption).foregroundStyle(.secondary)
-            }
+            DraftTools.captionLine(note ?? draft.flatMap(DraftTools.caption))
         }
         .padding()
         .navigationTitle("Prompt")

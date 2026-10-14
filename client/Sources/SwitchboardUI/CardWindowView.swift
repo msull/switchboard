@@ -334,11 +334,7 @@ struct ControlBar: View {
                     .disabled(!canControl || empty)
                     .accessibilityLabel("Send")
                 }
-                if let note {
-                    Text(note).font(.caption).foregroundStyle(.secondary)
-                } else if let host = hostDraft, let status = DraftTools.caption(host) {
-                    Text(status).font(.caption).foregroundStyle(.secondary)
-                }
+                DraftTools.captionLine(note ?? hostDraft.flatMap(DraftTools.caption))
             }
         }
         .task(id: hosted) {
@@ -487,14 +483,24 @@ struct DraftTools: View {
         .help(label)
     }
 
-    /// The line under the field for a draft that is not simply idle.
+    /// What the line under the field says of a draft: a trouble, or
+    /// the AI pass running; listening and finishing are the field's
+    /// own business and say nothing.
     static func caption(_ draft: DraftView) -> String? {
         switch draft.status {
-        case "listening": return "Listening into the host's editor."
-        case "finishing": return "Finishing the last words."
         case "degraded", "error": return draft.statusText ?? draft.status
         default: return draft.busy ? "The AI pass is running on the host." : nil
         }
+    }
+
+    /// The line under the field, one line tall whether or not it has
+    /// something to say, so a note never shifts the field.
+    static func captionLine(_ text: String?) -> some View {
+        Text(text ?? " ")
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .lineLimit(1)
+            .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 
@@ -614,6 +620,10 @@ struct ConversationView: View {
     @State private var place: ConversationPlace?
     /// The turn at the top of the view, as the scroll view reports it.
     @State private var top: Int?
+    /// The end was asked for and the view is not there yet: a scroll
+    /// still decelerating overrides the first scroll, so the end is
+    /// asked for again when it settles.
+    @State private var pulling = false
 
     /// The ids in the scroll target layout that are not turns.
     private static let earlierID = 0
@@ -667,11 +677,17 @@ struct ConversationView: View {
                             contentHeight: geometry.contentSize.height)
                     } action: { _, atEnd in
                         place?.following = atEnd
+                        if atEnd { pulling = false }
+                    }
+                    .onScrollPhaseChange { _, phase in
+                        if phase == .idle, pulling {
+                            withAnimation { proxy.scrollTo(Self.endID, anchor: .bottom) }
+                        }
                     }
                     .overlay(alignment: .bottom) {
                         if place?.following == false {
                             Button {
-                                place?.following = true
+                                pulling = true
                                 withAnimation { proxy.scrollTo(Self.endID, anchor: .bottom) }
                             } label: {
                                 Image(systemName: "ellipsis")
