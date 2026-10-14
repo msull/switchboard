@@ -18,6 +18,9 @@ final class FakeHost: HostAPI, @unchecked Sendable {
     var sessions: [String: [SessionView]] = [:]
     /// Thrown by every call while set.
     var failure: RemoteError?
+    /// How long a single-session read takes, whatever happens to the
+    /// task meanwhile: a request in flight when its pump is replaced.
+    var sessionDelay: TimeInterval = 0
     var pairCode = "ABCD2345"
     var pairs = 0
     /// Every call by name; a frame a device sent is `watch:<id>` or
@@ -213,7 +216,16 @@ final class FakeHost: HostAPI, @unchecked Sendable {
     }
 
     func session(_ id: String) async throws -> Envelope<SessionBody> {
-        try answer("session") {
+        lock.lock()
+        let delay = sessionDelay
+        lock.unlock()
+        if delay > 0 {
+            // Not `Task.sleep`: cancellation must not cut it short.
+            await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in
+                DispatchQueue.global().asyncAfter(deadline: .now() + delay) { c.resume() }
+            }
+        }
+        return try answer("session") {
             SessionBody(session: sessions.values.flatMap { $0 }.first { $0.id == id }!)
         }
     }

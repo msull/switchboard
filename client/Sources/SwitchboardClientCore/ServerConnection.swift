@@ -119,6 +119,10 @@ public actor ServerConnection {
     private var nextTry = Date.distantPast
     private var subscription: EventSubscription?
     private var pump: Task<Void, Never>?
+    /// Which subscription the pump serves: a frame or a closed socket
+    /// from a pump that was replaced is ignored, since a cancelled
+    /// pump can still deliver what it had already read.
+    private var subscriptionGeneration = 0
     private var buffer: [EventFrame] = []
     private var buffering = false
     /// How many views hold each watched content key; `watch` goes out
@@ -304,20 +308,23 @@ public actor ServerConnection {
     /// The frames after `hello`, each applied as it arrives.
     private func startPump(_ subscription: EventSubscription) {
         pump?.cancel()
+        subscriptionGeneration += 1
+        let generation = subscriptionGeneration
         pump = Task { [weak self] in
             do {
                 for try await frame in subscription.frames {
                     guard let self else { return }
-                    await self.received(frame)
+                    await self.received(frame, generation: generation)
                 }
-                await self?.socketEnded(reason: "the host closed the events socket")
+                await self?.socketEnded(reason: "the host closed the events socket", generation: generation)
             } catch {
-                await self?.socketEnded(reason: "\(error)")
+                await self?.socketEnded(reason: "\(error)", generation: generation)
             }
         }
     }
 
-    private func received(_ frame: EventFrame) async {
+    private func received(_ frame: EventFrame, generation: Int) async {
+        guard generation == subscriptionGeneration else { return }
         if buffering {
             buffer.append(frame)
             return
@@ -332,8 +339,8 @@ public actor ServerConnection {
         }
     }
 
-    private func socketEnded(reason: String) {
-        guard subscription != nil else { return }
+    private func socketEnded(reason: String, generation: Int) {
+        guard generation == subscriptionGeneration, subscription != nil else { return }
         subscription = nil
         pump = nil
         if case .unpaired = state { return }
@@ -397,8 +404,10 @@ public actor ServerConnection {
     /// One event against the held revisions: a `changed` past what a
     /// resource was fetched at refetches that resource, a `removed`
     /// drops it, and anything at or below the held revision was already
-    /// in the snapshot.
-    private func apply(_ frame: EventFrame, api: HostAPI) async throws {
+    /// in the snapshot. With no snapshot to reconcile against, any
+    /// frame fetches everything: one resource can never stand in for
+    /// the list.
+    func apply(_ frame: EventFrame, api: HostAPI) async throws {
         switch frame.kind {
         case .hello, .watching, .unknown:
             return
@@ -413,6 +422,11 @@ public actor ServerConnection {
             return
         case .changed, .removed:
             break
+        }
+        guard snapshot != nil else {
+            try await fetchAll(api: api)
+            changed()
+            return
         }
         guard let ref = frame.resource, let key = ResourceKey(ref), let revision = frame.revision
         else { return }
@@ -910,7 +924,7 @@ public actor ServerConnection {
     }
 
     private func refetch(_ key: ResourceKey, api: HostAPI) async throws {
-        var next = snapshot ?? HostSnapshot(epoch: "", revision: 0)
+        guard var next = snapshot else { return try await fetchAll(api: api) }
         switch key {
         case .projects, .project:
             let reply = try await api.projects()
@@ -1023,6 +1037,7 @@ public actor ServerConnection {
     private func closeSubscription() {
         pump?.cancel()
         pump = nil
+        subscriptionGeneration += 1
         subscription?.close()
         subscription = nil
         buffering = false

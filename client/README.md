@@ -7,7 +7,7 @@ macOS 14, iOS 17 and visionOS 1.
 
 ```sh
 swift build                      # every target
-swift test                       # 62 tests: fixtures, commands, pinning, the connection core, events, watches, conversations, the draft, presentation, browsing
+swift test                       # 64 tests: fixtures, commands, pinning, the connection core, events, watches, conversations, the draft, presentation, browsing
 swift run switchboard-remote     # the command-line browser (usage below)
 scripts/sim.sh run               # the visionOS app on the simulator (below)
 ```
@@ -38,7 +38,10 @@ scripts/sim.sh run               # the visionOS app on the simulator (below)
   `ServerConnection` actor (the §6.2 states, backoff, subscribe then
   snapshot with the buffered events reconciled against each resource's
   held revision, live events refetching only past it, the epoch check,
-  `resync_required` and a closed socket reconnecting, a key change
+  a frame with no snapshot to reconcile against fetching everything
+  rather than seeding the list from one resource, a replaced
+  subscription's late end ignored, `resync_required` and a closed
+  socket reconnecting, a key change
   dropping the token and keeping the entry, reference-counted content
   watches by resource key sent at the first holder and released at
   the last, resent after a reconnect before the snapshot, with what is

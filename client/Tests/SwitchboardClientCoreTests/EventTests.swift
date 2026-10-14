@@ -159,6 +159,78 @@ final class EventTests: XCTestCase {
         XCTAssertEqual(resyncs, 1)
     }
 
+    /// With no snapshot (a host restart dropped it and the refetch
+    /// failed), a frame for one session must not seed the list with
+    /// that session alone.
+    func testAFrameWithNoSnapshotFetchesEverythingInstead() async throws {
+        let network = FakeNetwork()
+        let fake = FakeHost(serverID: a, name: "Desk", spki: "ka")
+        fake.set {
+            $0.spaces = [SpaceView(id: "s", name: "Space")]
+            $0.projects = [ProjectView(id: "p", name: "P", space: "s")]
+            $0.sessions = [
+                "p": [
+                    SessionView(id: "r1", project: "p", name: "one"),
+                    SessionView(id: "r2", project: "p", name: "two"),
+                ]
+            ]
+        }
+        network.hosts = [addrA: fake]
+        let manager = ConnectionManager(
+            registry: MemoryRegistry(), credentials: MemoryCredentials(), deviceName: "t",
+            factory: network.factory)
+        try await manager.pair(
+            invite: PairingInvite(
+                serverID: a, spkiSha256: "ka", code: "ABCD2345", addresses: ["10.0.0.1:43187"]))
+        let found = await manager.connection(a)
+        let connection = try XCTUnwrap(found)
+        // The host restarted and its refetch failed: no snapshot stands.
+        fake.set {
+            $0.epoch = "e2"
+            $0.failure = .transport("timed out")
+        }
+        fake.emit(.changed, ResourceRef(kind: "session", id: "r1"), revision: 2)
+        _ = await settle(manager) { !$0.hosts[0].state.isConnected }
+        fake.set { $0.failure = nil }
+        let before = await connection.snapshot
+        XCTAssertNil(before, "the failed refetch left nothing")
+        let singles = calls(fake, "session")
+        try await connection.apply(
+            EventFrame(
+                kind: .changed, serverID: a, epoch: "e2", revision: 3,
+                resource: ResourceRef(kind: "session", id: "r1")),
+            api: fake)
+        let after = await connection.snapshot
+        let snapshot = try XCTUnwrap(after)
+        XCTAssertEqual(snapshot.epoch, "e2", "the host's epoch, never a placeholder")
+        XCTAssertEqual(snapshot.sessions.map(\.name).sorted(), ["one", "two"])
+        XCTAssertEqual(calls(fake, "session"), singles, "no single fetch stood in for the list")
+    }
+
+    /// A connect while connected replaces the subscription. The old
+    /// pump, still inside a refetch when it was replaced, finishes
+    /// later and finds its socket gone; that must not take the new
+    /// subscription down.
+    func testAReplacedSubscriptionsEndIsIgnored() async throws {
+        let (manager, fake) = try await host()
+        let found = await manager.connection(a)
+        let connection = try XCTUnwrap(found)
+        fake.set { $0.sessionDelay = 0.3 }
+        fake.emit(.changed, ResourceRef(kind: "session", id: "r1"), revision: 2)
+        try await Task.sleep(nanoseconds: 50_000_000)
+        await connection.connect()
+        // The old pump's refetch returns and its loop ends after this.
+        for _ in 0..<40 {
+            try await Task.sleep(nanoseconds: 10_000_000)
+            await manager.rebuild()
+        }
+        let store = await manager.store
+        XCTAssertEqual(store.hosts.first?.state, .connected)
+        XCTAssertEqual(fake.subscriberCount, 1)
+        let error = await connection.lastError
+        XCTAssertNil(error)
+    }
+
     func testAClosedSocketIsReconnectedByTheLoop() async throws {
         let (manager, fake) = try await host()
         fake.closeSockets()

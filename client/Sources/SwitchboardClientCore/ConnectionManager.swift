@@ -443,15 +443,17 @@ public actor ConnectionManager {
     }
 
     /// One pass of the loop: re-resolve and reconnect every host that
-    /// is not connected and whose backoff has elapsed.
+    /// is not connected and whose backoff has elapsed. A host in the
+    /// middle of a connect is left to it: a second connect would close
+    /// the first's subscription under its fetch.
     public func retryOffline() async {
         await reresolveOffline()
         await withTaskGroup(of: Void.self) { group in
             for connection in connections.values {
                 group.addTask {
                     let state = await connection.state
-                    guard !state.isConnected, state != .unpaired, state != .syncing,
-                        await connection.dueForTry
+                    guard !state.isConnected, state != .unpaired, state != .connecting,
+                        state != .syncing, await connection.dueForTry
                     else { return }
                     await connection.connect()
                 }
