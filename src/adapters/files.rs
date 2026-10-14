@@ -691,6 +691,9 @@ pub fn open_pinned(root: &Path, relative: &Path) -> Result<PinnedFile, FileError
         ));
     }
     let size = u64::try_from(stat.st_size).unwrap_or(0);
+    // `st_mtime_nsec` is `i64` on macOS and `u64` on Linux, where the
+    // conversion is the identity and clippy calls it useless.
+    #[allow(clippy::useless_conversion)]
     let modified_ms = u64::try_from(stat.st_mtime)
         .ok()
         .map(|s| s * 1000 + u64::try_from(stat.st_mtime_nsec).unwrap_or(0) / 1_000_000);
