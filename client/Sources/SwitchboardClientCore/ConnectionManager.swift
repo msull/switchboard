@@ -387,15 +387,13 @@ public actor ConnectionManager {
     /// A host that is not connected is looked up again in what Bonjour
     /// shows before each try: a host that moved sends no goodbye for
     /// its old record, so the change is seen by resolving, not browsing.
-    private func reresolveOffline() async {
-        for (id, connection) in connections {
-            let state = await connection.state
-            guard !state.isConnected, state != .unpaired,
-                let record = discovered.first(where: { $0.serverID == id }),
-                let address = try? await Discovery.resolve(record.endpoint)
-            else { continue }
-            await connection.setAddresses([address])
-        }
+    /// Each host resolves on its own task, so one that answers slowly
+    /// or not at all holds up no other host's try.
+    private func reresolve(_ id: ServerID, _ connection: ServerConnection) async {
+        guard let record = discovered.first(where: { $0.serverID == id }),
+            let address = try? await Discovery.resolve(record.endpoint)
+        else { return }
+        await connection.setAddresses([address])
     }
 
     /// Connect every enabled host, each on its own task.
@@ -409,10 +407,15 @@ public actor ConnectionManager {
     }
 
     public func refreshAll() async {
-        await reresolveOffline()
         await withTaskGroup(of: Void.self) { group in
-            for connection in connections.values {
-                group.addTask { await connection.refresh() }
+            for (id, connection) in connections {
+                group.addTask {
+                    let state = await connection.state
+                    if !state.isConnected, state != .unpaired {
+                        await self.reresolve(id, connection)
+                    }
+                    await connection.refresh()
+                }
             }
         }
         await rebuild()
@@ -447,14 +450,14 @@ public actor ConnectionManager {
     /// middle of a connect is left to it: a second connect would close
     /// the first's subscription under its fetch.
     public func retryOffline() async {
-        await reresolveOffline()
         await withTaskGroup(of: Void.self) { group in
-            for connection in connections.values {
+            for (id, connection) in connections {
                 group.addTask {
                     let state = await connection.state
                     guard !state.isConnected, state != .unpaired, state != .connecting,
                         state != .syncing, await connection.dueForTry
                     else { return }
+                    await self.reresolve(id, connection)
                     await connection.connect()
                 }
             }

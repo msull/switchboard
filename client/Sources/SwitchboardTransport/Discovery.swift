@@ -68,11 +68,21 @@ public final class Discovery: @unchecked Sendable {
     /// The address behind a browsed endpoint: a connection is opened to
     /// learn the path's remote host and port, then closed. The host sees
     /// a TCP connection with no handshake, which its 5 s timeout drops.
-    public static func resolve(_ endpoint: NWEndpoint) async throws -> Address {
+    /// A connect that the system would rather wait out (a host that
+    /// just went to sleep, a stale record) is given up at once, and
+    /// one that never answers at `timeout`: the caller retries on its
+    /// own clock, and a resolve that never returns would stop it.
+    public static func resolve(_ endpoint: NWEndpoint, timeout: TimeInterval = 5) async throws -> Address {
         let connection = NWConnection(to: endpoint, using: .tcp)
         let queue = DispatchQueue(label: "switchboard.resolve")
         return try await withCheckedThrowingContinuation { continuation in
             let done = Resolved()
+            queue.asyncAfter(deadline: .now() + timeout) {
+                done.finish {
+                    continuation.resume(throwing: RemoteError.transport("no answer within \(Int(timeout)) s"))
+                }
+                connection.cancel()
+            }
             connection.stateUpdateHandler = { state in
                 switch state {
                 case .ready:
@@ -96,7 +106,7 @@ public final class Discovery: @unchecked Sendable {
                         continuation.resume(returning: Address(host: text, port: port.rawValue))
                     }
                     connection.cancel()
-                case .failed(let error):
+                case .failed(let error), .waiting(let error):
                     done.finish { continuation.resume(throwing: RemoteError.transport("\(error)")) }
                     connection.cancel()
                 case .cancelled:
