@@ -70,6 +70,20 @@ pub fn op_id(program: &str) -> String {
     format!("{program}-{}-{nanos}", std::process::id())
 }
 
+/// Whether `op` is one Dispatch gives a record it makes for its own
+/// use: a ticket's project, or a worker session in it (the planner,
+/// an implementer, a reviewer), named `<ticket>-<nonce>` as two runs
+/// of eight hex digits. A supervisor's records are the owner's to
+/// watch and are named `sup-<project>-<nonce>`, and a record the owner
+/// made has no op. The remote port lists a worker record, and tells a
+/// subscriber about it, only when asked with `scope=all`.
+#[must_use]
+pub fn is_dispatch_worker_op(op: &str) -> bool {
+    let hex = |s: &str| s.len() == 8 && s.bytes().all(|b| b.is_ascii_hexdigit());
+    op.split_once('-')
+        .is_some_and(|(ticket, nonce)| hex(ticket) && hex(nonce))
+}
+
 /// An environment set's name as Switchboard accepts it:
 /// `[a-z0-9][a-z0-9-]*`, so it cannot hold a `/` and alias another set's
 /// Keychain account.
@@ -890,6 +904,16 @@ fn to_line<T: Serialize>(value: &T) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_dispatch_worker_op_is_a_ticket_and_a_nonce() {
+        assert!(super::is_dispatch_worker_op("2fac53cf-1a0b9b3f"));
+        assert!(!super::is_dispatch_worker_op("sup-Switchboard-710de0ce"));
+        assert!(!super::is_dispatch_worker_op("view-Delta-1a0b9b3f"));
+        assert!(!super::is_dispatch_worker_op("pj"));
+        assert!(!super::is_dispatch_worker_op("2fac53cf-1a0b9b3f-extra"));
+        assert!(!super::is_dispatch_worker_op("2FAC53CG-1a0b9b3f"));
+    }
+
     use super::*;
 
     fn round_trip_request(body: Body) {

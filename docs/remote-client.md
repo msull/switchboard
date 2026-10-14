@@ -160,13 +160,13 @@ Each host is authoritative for its own resources. The client aggregates views wi
 |---|---|---|---|
 | GET | `/api/v1/info` | new: `info` | none (identity only, before pairing) |
 | POST | `/api/v1/pair` | pairing handshake (§5) | none, only inside the pairing window |
-| GET | `/api/v1/projects` | `projects` | read |
+| GET | `/api/v1/projects` | `projects`; `?scope=all` includes Dispatch's worker records | read |
 | GET | `/api/v1/spaces` | `spaces` | read |
 | GET | `/api/v1/spaces/{id}/sets` | `sets` | read |
 | GET | `/api/v1/sets/{id}` | new: `set` (the `SetView` with pins) | read |
-| GET | `/api/v1/projects/{id}/sessions` | `sessions` | read |
+| GET | `/api/v1/projects/{id}/sessions` | `sessions`; `?scope=all` as above | read |
 | GET | `/api/v1/sessions/{id}` | `session` | read |
-| GET | `/api/v1/waiting` | `waiting` | read |
+| GET | `/api/v1/waiting` | `waiting`; `?scope=all` as above | read |
 | GET | `/api/v1/sessions/{id}/screen?lines=n` | `session.screen` | read |
 | GET | `/api/v1/sessions/{id}/conversation?from=turn\|last&limit=n`, or `?before=turn&limit=n` | new: `session.conversation` | read |
 | GET | `/api/v1/sessions/{id}/conversation/{n}` | new: `session.turn` (one turn with its activity uncut) | read |
@@ -228,6 +228,7 @@ Envelope:
 Event types:
 
 - `hello {epoch, revision}`: the first frame on every subscription.
+- **Scope.** A listing leaves out the records Dispatch made for its own use: a ticket's project with everything in it, and a worker session (the planner, an implementer, a reviewer) in any project, told by the `<ticket>-<nonce>` form of the op they were made under (`switchboard_control::is_dispatch_worker_op`). A supervisor's records (`sup-…`) and the owner's own are listed as ever, and a worker record is still read by its id, which is how the ticket view to come will reach them. `?scope=all` on `projects`, `sessions`, `waiting` and on the `events` subscription lists them and announces them; a plain subscription gets no `project`, `sessions`, `session` or `runs` frame about one. `info` lists `scope` among its capabilities. The point is the wire: hundreds of worker sessions on a host, which the headset fetched one project at a time, are now neither fetched nor announced.
 - `changed {kind, id}` with the **metadata kinds** `project`, `space`, `set`, `session`; the **content kinds** `conversation`, `screen`, `run_output` (`id` = `record/n`), `file` (a pinned file, `id` = `project_id/path`); and the collection kinds `projects`, `spaces`, `sets` (with the space's id), `sessions` (with the project's id), `runs` (with the record's id), `waiting`, emitted when a collection's member id set moves and answered by refetching the collection whole; a global collection's `id` is the empty string. Each kind is its own resource key on the client (§4.2); a member fetched as part of its collection holds the collection's revision until it is read alone.
 - `removed {kind, id}`: the resource is gone; the client drops it and marks any window on it "removed on <server>".
 - `watching {kind, id}`: the answer to a `watch` frame (below).

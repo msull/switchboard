@@ -3484,6 +3484,17 @@ Built so far:
   file. The client holds files as content (`FileBody`, `watch(file:)`,
   re-read on `changed`); no window shows one yet, which the working set
   view brings. Milestone C is complete.
+- **Scope on the listings.** A listing over the remote port leaves
+  out the records Dispatch made for its own use (a ticket's project
+  and its sessions, a worker session anywhere), told by the
+  `<ticket>-<nonce>` op they were made under
+  (`switchboard_control::is_dispatch_worker_op`); a supervisor's
+  (`sup-…`) and the owner's own stay. `?scope=all` on `projects`,
+  `sessions`, `waiting` and the `events` subscription lists and
+  announces them, and a worker record is still read by its id, for
+  the ticket view to come. Frames for a worker record go to `scope=all`
+  subscribers alone. The control socket is untouched, so Dispatch sees
+  everything as before.
 
 ## Open questions
 

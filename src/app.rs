@@ -3,7 +3,7 @@
 //! the event log on a timer; keeps the UI's captions fresh. Rendering
 //! lives in [`crate::ui`].
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io;
 use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
@@ -216,6 +216,30 @@ struct Subscriber {
     id: u64,
     queue: SubscriberQueue,
     device: uuid::Uuid,
+    /// Subscribed with `scope=all`: told about Dispatch's worker
+    /// records too, which a plain subscriber never hears of.
+    all: bool,
+}
+
+/// The records Dispatch made for its own use, as `scope=all` alone
+/// lists them: a ticket's project with everything in it, and a worker
+/// session in any project (`wire::is_dispatch_worker_op`).
+#[derive(Default)]
+struct WorkerRecords {
+    projects: HashSet<String>,
+    sessions: HashSet<String>,
+}
+
+impl WorkerRecords {
+    /// Whether a frame about `resource` is for `scope=all` only.
+    fn covers(&self, resource: &crate::core::revision::Resource) -> bool {
+        use crate::core::revision::ResourceKind as K;
+        match resource.kind {
+            K::Project | K::Sessions => self.projects.contains(&resource.id),
+            K::Session | K::Runs => self.sessions.contains(&resource.id),
+            K::Space | K::Set | K::Projects | K::Spaces | K::Sets | K::Waiting => false,
+        }
+    }
 }
 
 /// How a remote request was answered: now, or by the content worker
@@ -1509,7 +1533,7 @@ impl SwitchboardApp {
                         );
                         let text =
                             self.event_json("changed", Some((key.kind(), &key.id())), now_ms());
-                        self.broadcast(&text);
+                        self.broadcast(&text, false);
                     }
                 }
                 if let Some(reply) = reply {
@@ -2051,6 +2075,11 @@ impl SwitchboardApp {
         }
         self.revision += 1;
         let at_ms = epoch_millis(SystemTime::now());
+        let workers = if self.subscribers.iter().all(|s| s.all) {
+            WorkerRecords::default()
+        } else {
+            self.worker_records()
+        };
         for change in changes {
             let kind = if change.removed { "removed" } else { "changed" };
             let text = self.event_json(
@@ -2058,7 +2087,7 @@ impl SwitchboardApp {
                 Some((change.resource.kind.word(), &change.resource.id)),
                 at_ms,
             );
-            self.broadcast(&text);
+            self.broadcast(&text, workers.covers(&change.resource));
         }
     }
 
@@ -2078,13 +2107,54 @@ impl SwitchboardApp {
         value.to_string()
     }
 
-    /// Hand one frame to every subscriber. A full queue is a subscriber
-    /// that fell `SUBSCRIBER_QUEUE` events behind: it is dropped with
-    /// its overflow flag set, never trimmed, so its connection sends
+    /// The worker records as they stand, for the frames that stay
+    /// with `scope=all` subscribers.
+    fn worker_records(&self) -> WorkerRecords {
+        let mut out = WorkerRecords::default();
+        for p in self.core.project_views(None) {
+            let Ok(id) = uuid::Uuid::parse_str(&p.id) else {
+                continue;
+            };
+            let Some(w) = self.core.workspace(ProjectId(id)) else {
+                continue;
+            };
+            let whole = p.op.as_deref().is_some_and(wire::is_dispatch_worker_op);
+            if whole {
+                out.projects.insert(p.id.clone());
+            }
+            for s in &w.sessions {
+                if whole || s.op.as_deref().is_some_and(wire::is_dispatch_worker_op) {
+                    out.sessions.insert(s.id.0.to_string());
+                }
+            }
+        }
+        out
+    }
+
+    /// Drops Dispatch's worker records from a listing, for a request
+    /// without `scope=all`.
+    fn hide_workers(reply: &mut wire::Reply) {
+        let shown = |op: &Option<String>| !op.as_deref().is_some_and(wire::is_dispatch_worker_op);
+        match reply {
+            wire::Reply::Projects { projects } => projects.retain(|p| shown(&p.op)),
+            wire::Reply::Sessions { sessions } | wire::Reply::Waiting { sessions } => {
+                sessions.retain(|s| shown(&s.op));
+            }
+            _ => {}
+        }
+    }
+
+    /// Hand one frame to every subscriber, or with `all_only` to the
+    /// `scope=all` ones. A full queue is a subscriber that fell
+    /// `SUBSCRIBER_QUEUE` events behind: it is dropped with its
+    /// overflow flag set, never trimmed, so its connection sends
     /// `resync_required` and closes.
-    fn broadcast(&mut self, text: &str) {
-        self.subscribers
-            .retain(|s| match s.queue.tx.try_send(text.to_owned()) {
+    fn broadcast(&mut self, text: &str, all_only: bool) {
+        self.subscribers.retain(|s| {
+            if all_only && !s.all {
+                return true;
+            }
+            match s.queue.tx.try_send(text.to_owned()) {
                 Ok(()) => true,
                 Err(mpsc::TrySendError::Full(_)) => {
                     s.queue.overflow.store(true, Ordering::SeqCst);
@@ -2092,7 +2162,8 @@ impl SwitchboardApp {
                     false
                 }
                 Err(mpsc::TrySendError::Disconnected(_)) => false,
-            });
+            }
+        });
     }
 
     /// Accept a device's subscription: `hello` with the revision as it
@@ -2127,6 +2198,7 @@ impl SwitchboardApp {
             id: queue.id,
             queue,
             device,
+            all: request.param("scope") == Some("all"),
         });
         RemoteReply {
             status: remote::SUBSCRIBED,
@@ -2487,7 +2559,11 @@ impl SwitchboardApp {
                 ));
             }
         };
-        Served::Now(self.remote_reply(request, &self.answer(&body), notes_cap))
+        let mut reply = self.answer(&body);
+        if request.param("scope") != Some("all") {
+            Self::hide_workers(&mut reply);
+        }
+        Served::Now(self.remote_reply(request, &reply, notes_cap))
     }
 
     /// A command under `control` scope. The body's `op` is the operation
@@ -2785,7 +2861,7 @@ impl SwitchboardApp {
         let at_ms = epoch_millis(SystemTime::now());
         for id in moved {
             let text = self.event_json("changed", Some(("draft", &id.0.to_string())), at_ms);
-            self.broadcast(&text);
+            self.broadcast(&text, false);
         }
     }
 
@@ -2803,7 +2879,7 @@ impl SwitchboardApp {
             "server_id": identity.server_id,
             "server_name": identity.server_name,
             "protocol": REMOTE_PROTOCOL,
-            "capabilities": ["read", "control", "draft"],
+            "capabilities": ["read", "control", "draft", "scope"],
             "spki_sha256": identity.spki_sha256,
             "limits": {
                 "body_bytes": BODY_CAP,

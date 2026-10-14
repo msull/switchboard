@@ -1752,7 +1752,13 @@ impl Subscriber {
 }
 
 fn subscribe(port: &mut Port, token: &str) -> Subscriber {
+    subscribe_at(port, token, "/api/v1/events")
+}
+
+/// A subscription at `path`, for its query (`?scope=all`).
+fn subscribe_at(port: &mut Port, token: &str, path: &str) -> Subscriber {
     let addr = port.addr;
+    let url = format!("wss://localhost{path}");
     let config = Arc::clone(&port.client);
     let token = token.to_owned();
     let (tx, frames) = std::sync::mpsc::channel();
@@ -1767,9 +1773,7 @@ fn subscribe(port: &mut Port, token: &str) -> Subscriber {
         while s.conn.is_handshaking() {
             s.conn.complete_io(&mut s.sock).expect("handshake");
         }
-        let mut request = "wss://localhost/api/v1/events"
-            .into_client_request()
-            .unwrap();
+        let mut request = url.into_client_request().unwrap();
         request
             .headers_mut()
             .insert("Authorization", format!("Bearer {token}").parse().unwrap());
@@ -1934,6 +1938,151 @@ fn a_subscriber_gets_hello_then_changed_and_removed_as_the_state_moves() {
     assert!(
         moved.contains(&("changed".into(), "sessions".into(), project.clone())),
         "{moved:?}"
+    );
+}
+
+/// Dispatch's worker records, a ticket's project and a worker session
+/// with an op of Dispatch's `<ticket>-<nonce>` form, are the ticket
+/// view's and not the browser's: a listing leaves them out and a plain
+/// subscriber never hears of them, while `scope=all` gets everything.
+/// A supervisor's records and the owner's own are listed as ever, and
+/// a worker record is still read by its id.
+/// A project added over the control port under `op`.
+fn project_under_op(port: &mut Port, op: &str, space: &str, name: &str) -> String {
+    let reply = control(
+        port,
+        Request::new(
+            op,
+            Body::ProjectAdd {
+                space: space.to_owned(),
+                name: name.into(),
+                root: PathBuf::from("/tmp"),
+            },
+        ),
+    );
+    made_id(&reply, RecordKind::Project)
+}
+
+/// A session made over the control port under `op`.
+fn session_under_op(port: &mut Port, op: &str, project: &str, name: &str) -> String {
+    let reply = control(
+        port,
+        Request::new(
+            op,
+            Body::SessionNew {
+                project: project.to_owned(),
+                name: name.into(),
+                session_kind: SessionKind::Claude,
+                cwd: PathBuf::from("/tmp"),
+                launch: Launch::Shell,
+                prompt: None,
+                notes: String::new(),
+                env: std::collections::BTreeMap::new(),
+                env_sets: Vec::new(),
+                replaces: None,
+            },
+        ),
+    );
+    made_id(&reply, RecordKind::Session)
+}
+
+/// The ids of a listing at `path`, under `key`.
+fn listed(port: &mut Port, path: &str, token: &str, key: &str) -> Vec<String> {
+    let (status, reply) = get(port, path, Some(token));
+    assert_eq!(status, 200, "{reply}");
+    reply["body"][key]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v["id"].as_str().unwrap().to_owned())
+        .collect()
+}
+
+/// The ids of the `session` frames a subscriber got.
+fn session_frames(port: &mut Port, s: &Subscriber) -> Vec<String> {
+    resources(&events(port, s))
+        .into_iter()
+        .filter(|(_, kind, _)| kind == "session")
+        .map(|(_, _, id)| id)
+        .collect()
+}
+
+#[test]
+fn dispatchs_worker_records_are_listed_and_announced_only_for_scope_all() {
+    let mut port = port();
+    let (space, project, session) = seed(&mut port, "");
+    let ticket = project_under_op(&mut port, "2fac53cf-1a0b9b3f", &space, "#7");
+    let planner = session_under_op(&mut port, "2fac53cf-cfb35312", &ticket, "planner");
+    let sup_project = project_under_op(&mut port, "sup-Switchboard-710de0ce", &space, "Sup · S");
+    let supervisor = session_under_op(&mut port, "sup-Switchboard-62f47554", &sup_project, "Sup");
+    let reviewer = session_under_op(&mut port, "2fac53cf-c6c61153", &project, "reviewer");
+    port.app.poll_now();
+    let token = pair(&mut port, "ABCD2345", Scope::Read, "Vision Pro");
+    let shown = listed(&mut port, "/api/v1/projects", &token, "projects");
+    assert!(
+        shown.contains(&project) && shown.contains(&sup_project),
+        "{shown:?}"
+    );
+    assert!(!shown.contains(&ticket), "the ticket's project is left out");
+    let all = listed(&mut port, "/api/v1/projects?scope=all", &token, "projects");
+    assert!(all.contains(&ticket), "scope=all lists it");
+    let path = format!("/api/v1/projects/{project}/sessions");
+    let shown = listed(&mut port, &path, &token, "sessions");
+    assert!(
+        shown.contains(&session) && !shown.contains(&reviewer),
+        "{shown:?}"
+    );
+    let all = listed(&mut port, &format!("{path}?scope=all"), &token, "sessions");
+    assert!(all.contains(&reviewer), "scope=all lists the worker");
+    let path = format!("/api/v1/projects/{sup_project}/sessions");
+    let shown = listed(&mut port, &path, &token, "sessions");
+    assert!(
+        shown.contains(&supervisor),
+        "a supervisor's session is the owner's"
+    );
+    let (status, _) = get(
+        &mut port,
+        &format!("/api/v1/sessions/{reviewer}"),
+        Some(&token),
+    );
+    assert_eq!(status, 200, "a worker record is still read by its id");
+
+    let plain = subscribe(&mut port, &token);
+    let all = subscribe_at(&mut port, &token, "/api/v1/events?scope=all");
+    for (id, name) in [
+        (&reviewer, "reviewer 2"),
+        (&planner, "planner 2"),
+        (&supervisor, "Supervisor 2"),
+        (&session, "investigator 2"),
+    ] {
+        let record = RecordId(uuid::Uuid::parse_str(id).unwrap());
+        port.app
+            .dispatch(AppAction::RenameSession(record, name.into()));
+    }
+    let heard = resources(&events(&mut port, &plain));
+    assert!(
+        !heard
+            .iter()
+            .any(|(_, kind, id)| kind == "sessions" && id == &ticket),
+        "no frame about the ticket project's collection: {heard:?}"
+    );
+    let plain_ids: Vec<String> = heard
+        .into_iter()
+        .filter(|(_, kind, _)| kind == "session")
+        .map(|(_, _, id)| id)
+        .collect();
+    assert!(
+        plain_ids.contains(&session) && plain_ids.contains(&supervisor),
+        "{plain_ids:?}"
+    );
+    assert!(
+        !plain_ids.contains(&reviewer) && !plain_ids.contains(&planner),
+        "{plain_ids:?}"
+    );
+    let all_ids = session_frames(&mut port, &all);
+    assert!(
+        all_ids.contains(&reviewer) && all_ids.contains(&planner),
+        "{all_ids:?}"
     );
 }
 
