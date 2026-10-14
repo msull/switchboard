@@ -6,7 +6,7 @@ import PackageDescription
 
 let package = Package(
     name: "SwitchboardClient",
-    platforms: [.macOS(.v14), .iOS(.v17), .visionOS(.v1)],
+    platforms: [.macOS("15.0"), .iOS("18.0"), .visionOS("2.0")],
     products: [
         .library(name: "SwitchboardProtocol", targets: ["SwitchboardProtocol"]),
         .library(name: "SwitchboardTransport", targets: ["SwitchboardTransport"]),

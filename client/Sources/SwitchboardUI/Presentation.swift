@@ -116,6 +116,17 @@ public struct ConversationPlace: Codable, Equatable, Sendable {
         self.following = following
     }
 
+    /// How far short of the end the view may stand and still follow
+    /// it, in points: a bounce or a finger lifted early leaves it a
+    /// little above, which is not a reader going back.
+    public static let followSlack = 32.0
+
+    /// Whether a view whose visible span ends at `visibleBottom`, in
+    /// content `contentHeight` tall, follows the end.
+    public static func follows(visibleBottom: Double, contentHeight: Double) -> Bool {
+        visibleBottom >= contentHeight - followSlack
+    }
+
     /// The place against the conversation now held: another transcript
     /// starts over at the end with nothing open; a turn no longer held
     /// (the page was replaced after a reconnect) follows the end too.

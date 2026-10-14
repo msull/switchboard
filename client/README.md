@@ -7,7 +7,7 @@ macOS 14, iOS 17 and visionOS 1.
 
 ```sh
 swift build                      # every target
-swift test                       # 64 tests: fixtures, commands, pinning, the connection core, events, watches, conversations, the draft, presentation, browsing
+swift test                       # 65 tests: fixtures, commands, pinning, the connection core, events, watches, conversations, the draft, presentation, browsing
 swift run switchboard-remote     # the command-line browser (usage below)
 scripts/sim.sh run               # the visionOS app on the simulator (below)
 ```
@@ -67,7 +67,10 @@ scripts/sim.sh run               # the visionOS app on the simulator (below)
   another) with the `compact`, `screen`, `last_response` (the answer
   with its inline Markdown), `conversation` (turns with the activity
   folded, each tool call's text whole on demand, earlier pages on
-  demand, the end following the host; the window keeps its place,
+  demand, the end following the host while the view stands at it,
+  with a bounce's slack, and an ellipsis button at the foot of the
+  turns, shown only off the end, that takes the view back to following
+  it; the window keeps its place,
   `ConversationPlace`: the turn at the top or the end it follows and
   the folds open, so a page merging under the view, a reconnect or a
   relaunch puts it back where it was, and another transcript starts

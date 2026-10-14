@@ -654,13 +654,35 @@ struct ConversationView: View {
                             }
                             Color.clear.frame(height: 1)
                                 .id(Self.endID)
-                                .onAppear { place?.following = true }
-                                .onDisappear { place?.following = false }
                         }
                         .scrollTargetLayout()
                         .frame(maxWidth: .infinity, alignment: .leading)
                     }
                     .scrollPosition(id: $top, anchor: .top)
+                    // Following is where the view stands, with slack for
+                    // a bounce, not whether a one-point marker is on screen.
+                    .onScrollGeometryChange(for: Bool.self) { geometry in
+                        ConversationPlace.follows(
+                            visibleBottom: geometry.visibleRect.maxY,
+                            contentHeight: geometry.contentSize.height)
+                    } action: { _, atEnd in
+                        place?.following = atEnd
+                    }
+                    .overlay(alignment: .bottom) {
+                        if place?.following == false {
+                            Button {
+                                place?.following = true
+                                withAnimation { proxy.scrollTo(Self.endID, anchor: .bottom) }
+                            } label: {
+                                Image(systemName: "ellipsis")
+                            }
+                            .buttonStyle(.bordered)
+                            .buttonBorderShape(.circle)
+                            .controlSize(.small)
+                            .accessibilityLabel("Follow the end of the conversation")
+                            .padding(.bottom, 6)
+                        }
+                    }
                     .onAppear { restore(conversation, proxy) }
                     .onChange(of: conversation.resumeID) { _, _ in restore(conversation, proxy) }
                     .onChange(of: conversation.lastHeld) { _, _ in follow(proxy) }
