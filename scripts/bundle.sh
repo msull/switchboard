@@ -20,6 +20,9 @@ DEST="${1:-$HOME/Applications}"
 APP="$DEST/Switchboard.app"
 ID="com.sadburger.switchboard"
 VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+# The build number a release stamps on the bundle (release.sh passes
+# the version and the date); a local build carries the version alone.
+BUILD="${BUNDLE_BUILD:-$VERSION}"
 
 # The signature the installed app had, so a change of identity below can
 # clear the grants macOS keyed on it (otherwise it denies silently).
@@ -58,7 +61,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>CFBundleName</key>            <string>Switchboard</string>
   <key>CFBundleDisplayName</key>     <string>Switchboard</string>
   <key>CFBundleIdentifier</key>      <string>$ID</string>
-  <key>CFBundleVersion</key>         <string>$VERSION</string>
+  <key>CFBundleVersion</key>         <string>$BUILD</string>
   <key>CFBundleShortVersionString</key> <string>$VERSION</string>
   <key>CFBundleExecutable</key>      <string>switchboard</string>
   <key>CFBundlePackageType</key>     <string>APPL</string>

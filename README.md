@@ -167,6 +167,7 @@ as you type; Save is the only time Switchboard writes into
 
 ```sh
 ./scripts/bundle.sh          # installs ~/Applications/Switchboard.app
+./scripts/release.sh         # publishes the signed bundle as a GitHub release of HEAD (--dry-run: build and zip only)
 ./scripts/icon.sh            # regenerates the icons from assets/Switchboard.svg and assets/vision/*.svg
 ```
 
@@ -187,6 +188,28 @@ renders the SVG with AppKit into `assets/Switchboard.icns` for Finder and
 three layers of the visionOS icon (`assets/vision/*.svg`, the same
 drawing split for the headset's parallax and circular mask) into the
 client's asset catalog.
+
+Another Mac runs a release rather than a build. `scripts/release.sh`
+builds the bundle through `bundle.sh` into a staging directory, stamps
+`CFBundleVersion` with the version and the date, zips it with `ditto`
+(a plain `zip` would lose the signature), tags the commit
+`v<version>-<date>-<commit>` and attaches the zip to a GitHub release
+with install notes and the zip's SHA-256. On the other Mac, with `tmux`,
+Ghostty and `gh` installed:
+
+```sh
+gh release download <tag> -R msull/switchboard -p 'Switchboard-*.zip' -D ~/Downloads
+ditto -x -k ~/Downloads/Switchboard-<tag>.zip ~/Applications
+open ~/Applications/Switchboard.app
+```
+
+`gh` and `curl` set no quarantine flag, so Gatekeeper asks nothing of
+the bundle, which is signed but not notarized; a browser download
+carries the flag, and `xattr -dr com.apple.quarantine <app>` clears
+it. The release is signed with the same Developer ID every time, so the
+other Mac's Accessibility grant and Keychain allowances survive an
+update. That Mac makes its own identity and key on first launch, so it
+is a second host to the remote client, never a copy of this one.
 
 Dev aids, all environment variables:
 
@@ -375,6 +398,7 @@ tests/live.rs            ignored: real claude / codex / Ghostty runs
 tests/gate.rs            Milestone 1 gate: real store, tmux, hooks; agents ignored
 scripts/test-times.sh    every test's time, serially, through libtest's `--report-time`; the slowest ten, each binary's total, the 5 s budget
 scripts/ci-test.sh       CI's test step: the workspace, then one retry of the failed tests, warning `flaky:` for each that passes on it
+scripts/release.sh       the signed bundle zipped and attached to a GitHub release of HEAD under `v<version>-<date>-<commit>`, for another Mac to install without building
 client/                  the Swift client (docs/remote-client.md §7): `SwitchboardProtocol` (the wire views as Codable, qualified refs, the envelope, the event frame and resource keys), `SwitchboardTransport` (HTTPS and the events WebSocket with the SPKI-pinning delegate, Bonjour browsing), `SwitchboardClientCore` (known servers, credentials, one connection actor per host that subscribes before it snapshots and reconciles events by revision, holds reference-counted screen watches that are resent after a reconnect, the unified store), `SwitchboardUI` (SwiftUI browser and server views), the `switchboard-remote` command-line browser, tests, `Fixtures/` shared with `tests/remote.rs`, and the apps: `project.yml` (xcodegen writes the git-ignored Xcode project from it), `Apps/SwitchboardVision/` (the visionOS entry, thin over `SwitchboardUI`: the main window with list, grid and focus layouts and the filters, and the card window group), `scripts/sim.sh` (build, run and screenshot on the simulator), `scripts/device.sh` (build, install and launch on a paired headset)
 control/                 switchboard-control: the control port's wire contract (requests, replies, views; `session.resume` resumes an agent without a terminal and never launches fresh; `session.prompt` types a prompt only into a Claude Code agent between turns, else fails naming why) and a blocking client; std + serde only
 dispatch-control/        dispatch-control: the wire contract of Dispatch's own port (tickets as views, a ticket's events after a cursor, decide, queue, take, resume, close, worktrees, a project's supervisor and `supervisor-fresh`), how a bring-up reads, and a blocking client; std + serde only
