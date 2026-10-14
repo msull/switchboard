@@ -111,12 +111,14 @@ public struct PromptWindowView: View {
             if let problem { note = problem }
         }
         .onAppear {
+            LaunchLog.note("prompt appeared")
             dictation.onEvents = { recognizer, events in
                 guard let ref = await model.activeInput, await model.hasDraft(ref) else { return }
                 _ = await model.dictate(ref, recognizer: recognizer, events: events)
             }
         }
         .onDisappear {
+            LaunchLog.note("prompt disappeared")
             dictation.stop()
             if let held {
                 Task { await model.releaseDraft(held) }
@@ -127,11 +129,16 @@ public struct PromptWindowView: View {
 
     /// A launch that restored only this window has no browser on a
     /// system that does not present it: after the launch grace, it is
-    /// opened from here, as a card window would.
+    /// opened from here, as a card window would; only a restored
+    /// window asks.
     private func bringMainWindowBack() async {
+        guard LaunchGrace.within() else { return }
         try? await Task.sleep(nanoseconds: LaunchGrace.nanoseconds)
         if model.claimMainWindow() {
+            LaunchLog.note("prompt opens main")
             openWindow(id: MainWindow.id, value: MainWindow.value)
+        } else {
+            LaunchLog.note("prompt leaves main \(model.mainWindow)")
         }
     }
 

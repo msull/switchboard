@@ -8,7 +8,7 @@ targets visionOS 26.
 
 ```sh
 swift build                      # every target
-swift test                       # 65 tests: fixtures, commands, pinning, the connection core, events, watches, conversations, the draft, presentation, browsing
+swift test                       # 66 tests: fixtures, commands, pinning, the connection core, events, watches, conversations, the draft, presentation, browsing
 swift run switchboard-remote     # the command-line browser (usage below)
 scripts/sim.sh run               # the visionOS app on the simulator (below)
 ```
@@ -187,6 +187,17 @@ variables are read by the process, so an activation of a running app
 sees the ones it was launched with; a `prompt` entry without a wait
 opens inside the launch grace, which is how the window teardown above
 was measured.
+
+The headset gives the Mac no log, so the app keeps one of its own:
+`launch.log` in its container records what the windows did since
+launch (appeared, disappeared, scene phases, who opened the main
+window), under 64 KiB, window ids and events only. Copy it off with
+
+```sh
+xcrun devicectl device copy from --device <udid> --domain-type appDataContainer \
+  --domain-identifier com.sadburger.switchboard.vision \
+  --source "Library/Application Support/launch.log" --destination launch.log
+```
 
 Bonjour on visionOS needs `NSBonjourServices` and
 `NSLocalNetworkUsageDescription` in `Info.plist`; both are there. The

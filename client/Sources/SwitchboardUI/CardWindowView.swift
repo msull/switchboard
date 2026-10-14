@@ -14,6 +14,7 @@ public struct CardWindowView: View {
     /// goes with the window, and a new window starts at 1.
     @State private var screenScale = ScreenScale.initial
     @Environment(\.openWindow) private var openWindow
+    @Environment(\.scenePhase) private var scenePhase
 
     public init(model: BrowserModel, request: CardWindowRequest) {
         self.model = model
@@ -53,21 +54,31 @@ public struct CardWindowView: View {
         .padding()
         .navigationTitle(item?.session.name ?? "Session")
         .onAppear {
+            LaunchLog.note("card \(request.id) appeared")
             mode = model.mode(for: request.id)
             model.windowAppeared(request)
         }
-        .onDisappear { model.windowClosed(request) }
+        .onDisappear {
+            LaunchLog.note("card \(request.id) disappeared")
+            model.windowClosed(request)
+        }
+        .onChange(of: scenePhase) { _, phase in LaunchLog.note("card \(request.id) phase \(phase)") }
         .onChange(of: mode) { _, new in model.setMode(new, for: request.id) }
         .task { await bringMainWindowBack() }
     }
 
     /// A launch that restored only card windows has no browser on a
     /// system that does not present it: after the launch grace, the
-    /// first card window to ask opens it.
+    /// first card window to ask opens it. Only a restored window asks;
+    /// one opened later would bring back a browser the user closed.
     private func bringMainWindowBack() async {
+        guard LaunchGrace.within() else { return }
         try? await Task.sleep(nanoseconds: LaunchGrace.nanoseconds)
         if model.claimMainWindow() {
+            LaunchLog.note("card \(request.id) opens main")
             openWindow(id: MainWindow.id, value: MainWindow.value)
+        } else {
+            LaunchLog.note("card \(request.id) leaves main \(model.mainWindow)")
         }
     }
 
@@ -98,6 +109,7 @@ public struct CardWindowView: View {
             .accessibilityLabel("Prompt window")
             .help("The prompt window: the whole draft of the session being worked on")
             Button {
+                LaunchLog.note("card \(request.id) sessions button opens main")
                 openWindow(id: MainWindow.id, value: MainWindow.value)
             } label: {
                 Image(systemName: "rectangle.grid.2x2")

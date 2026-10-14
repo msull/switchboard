@@ -7,6 +7,7 @@ public struct RootView: View {
     @Bindable var model: BrowserModel
     @Environment(\.openWindow) private var openWindow
     @Environment(\.dismissWindow) private var dismissWindow
+    @Environment(\.scenePhase) private var scenePhase
     /// A dev aid: card windows to open once their sessions are listed,
     /// as `<record id>[:<mode>]` entries, so a simulator run reaches a
     /// window without a tap; `prompt` opens the prompt window.
@@ -19,8 +20,15 @@ public struct RootView: View {
 
     public var body: some View {
         tabs
-            .onAppear { model.mainWindowAppeared() }
-            .onDisappear { model.mainWindowDisappeared() }
+            .onAppear {
+                LaunchLog.note("main appeared")
+                model.mainWindowAppeared()
+            }
+            .onDisappear {
+                LaunchLog.note("main disappeared")
+                model.mainWindowDisappeared()
+            }
+            .onChange(of: scenePhase) { _, phase in LaunchLog.note("main phase \(phase)") }
             .task(id: openOnStart) { await openRequested() }
             .task { await reopenSaved() }
             .task { await closeAllOnRequest() }
@@ -54,6 +62,7 @@ public struct RootView: View {
         for _ in 0..<100 {
             let pending = model.windowsToReopen()
             for request in pending {
+                LaunchLog.note("main reopens card \(request.id)")
                 openWindow(value: request)
             }
             if model.presentation.windows.allSatisfy({ model.appeared.contains($0.key) }) { return }

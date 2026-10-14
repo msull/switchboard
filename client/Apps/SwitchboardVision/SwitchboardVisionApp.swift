@@ -14,6 +14,8 @@ struct SwitchboardVisionApp: App {
 
     init() {
         _ = LaunchGrace.launchedAt
+        LaunchLog.file = Self.support.appendingPathComponent("launch.log")
+        LaunchLog.note("launch pid \(ProcessInfo.processInfo.processIdentifier)")
     }
 
     var body: some Scene {

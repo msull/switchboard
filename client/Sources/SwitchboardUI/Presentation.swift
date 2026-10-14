@@ -185,6 +185,31 @@ public enum LaunchGrace {
     }
 }
 
+/// A dev aid for the headset, which gives the Mac no log: what the
+/// windows did since launch, appended to `launch.log` in the app's
+/// container (kept under 64 KiB), where `devicectl` copies it from.
+/// Lines carry window ids and events, nothing a host sent.
+@MainActor
+public enum LaunchLog {
+    public static var file: URL?
+
+    public static func note(_ line: String) {
+        guard let file else { return }
+        let elapsed = String(format: "%7.2f", Date().timeIntervalSince(LaunchGrace.launchedAt))
+        let text = "\(elapsed) \(line)\n"
+        let manager = FileManager.default
+        let size = (try? manager.attributesOfItem(atPath: file.path)[.size] as? Int) ?? 0
+        if size > 65_536 { try? manager.removeItem(at: file) }
+        if let handle = try? FileHandle(forWritingTo: file) {
+            defer { try? handle.close() }
+            _ = try? handle.seekToEnd()
+            try? handle.write(contentsOf: Data(text.utf8))
+        } else {
+            try? text.write(to: file, atomically: true, encoding: .utf8)
+        }
+    }
+}
+
 /// Whether a card window should bring the main window back at launch.
 /// visionOS restores the windows that were open when the app last
 /// quit, so a run that ended with only card windows comes back

@@ -190,6 +190,24 @@ final class BrowsingTests: XCTestCase {
         XCTAssertEqual(reopen.first?.ref.recordID, "r1")
     }
 
+    @MainActor func testTheLaunchLogAppendsToItsFileAndStartsOverWhenLarge() throws {
+        let file = FileManager.default.temporaryDirectory.appendingPathComponent("launch-\(UUID()).log")
+        defer { try? FileManager.default.removeItem(at: file) }
+        LaunchLog.file = file
+        defer { LaunchLog.file = nil }
+        LaunchLog.note("launch")
+        LaunchLog.note("main appeared")
+        let text = try String(contentsOf: file, encoding: .utf8)
+        let lines = text.split(separator: "\n")
+        XCTAssertEqual(lines.count, 2)
+        XCTAssertTrue(lines[1].hasSuffix(" main appeared"))
+        try Data(repeating: UInt8(ascii: "x"), count: 70_000).write(to: file)
+        LaunchLog.note("again")
+        let after = try String(contentsOf: file, encoding: .utf8)
+        XCTAssertTrue(after.hasSuffix(" again\n"))
+        XCTAssertLessThan(after.count, 100)
+    }
+
     func testTheLaunchGraceIsTheFirstSecondsOfTheProcess() {
         let launched = Date()
         XCTAssertTrue(LaunchGrace.within(at: launched.addingTimeInterval(1), since: launched))
