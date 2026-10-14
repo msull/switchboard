@@ -662,23 +662,24 @@ struct ConversationView: View {
                                     open: fold(turn.n),
                                     openActivity: { index in fold(ActivityKey(turn: turn.n, index: index)) })
                             }
-                            Color.clear.frame(height: 1)
+                            // The end: following is any of this marker on
+                            // screen, so a bounce or a finger lifted a hair
+                            // early still follows, and whatever the view's
+                            // insets are, a scroll to it reaches it.
+                            Color.clear.frame(height: ConversationPlace.endSlack)
                                 .id(Self.endID)
+                                .onScrollVisibilityChange(threshold: 0.02) { visible in
+                                    place?.following = visible
+                                    if visible { pulling = false }
+                                }
                         }
                         .scrollTargetLayout()
                         .frame(maxWidth: .infinity, alignment: .leading)
                     }
                     .scrollPosition(id: $top, anchor: .top)
-                    // Following is where the view stands, with slack for
-                    // a bounce, not whether a one-point marker is on screen.
-                    .onScrollGeometryChange(for: Bool.self) { geometry in
-                        ConversationPlace.follows(
-                            visibleBottom: geometry.visibleRect.maxY,
-                            contentHeight: geometry.contentSize.height)
-                    } action: { _, atEnd in
-                        place?.following = atEnd
-                        if atEnd { pulling = false }
-                    }
+                    // The field under the view growing shrinks the view;
+                    // at the end, the end stays in view rather than the top.
+                    .defaultScrollAnchor(.bottom, for: .sizeChanges)
                     .onScrollPhaseChange { _, phase in
                         if phase == .idle, pulling {
                             withAnimation { proxy.scrollTo(Self.endID, anchor: .bottom) }

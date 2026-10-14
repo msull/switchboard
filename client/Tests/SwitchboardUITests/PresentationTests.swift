@@ -110,14 +110,6 @@ final class PresentationStoreTests: XCTestCase {
         XCTAssertNil(older.place(for: window))
     }
 
-    func testTheViewFollowsTheEndWithinTheSlackAndAfterABounce() {
-        XCTAssertTrue(ConversationPlace.follows(visibleBottom: 1000, contentHeight: 1000))
-        XCTAssertTrue(ConversationPlace.follows(visibleBottom: 980, contentHeight: 1000), "a hair short")
-        XCTAssertTrue(ConversationPlace.follows(visibleBottom: 1040, contentHeight: 1000), "a bounce past")
-        XCTAssertFalse(ConversationPlace.follows(visibleBottom: 900, contentHeight: 1000), "scrolled back")
-        XCTAssertTrue(ConversationPlace.follows(visibleBottom: 300, contentHeight: 200), "shorter than the view")
-    }
-
     func testAModeRoundTripsThroughTheFileAndTheCapDropsTheOldest() throws {
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
