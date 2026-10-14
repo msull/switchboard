@@ -525,25 +525,35 @@ enum Scaled {
     }
 }
 
-/// Text the agent wrote, with its Markdown read where it parses and
-/// shown plain where it does not.
+/// Text the agent wrote: its inline Markdown read where it parses and
+/// shown plain where it does not, and its tables laid out as grids.
 struct AgentText: View {
     let text: String
     @Environment(\.textScale) private var scale
 
     var body: some View {
-        Group {
-            if let rich = try? AttributedString(
-                markdown: text,
-                options: AttributedString.MarkdownParsingOptions(interpretedSyntax: .inlineOnlyPreservingWhitespace))
-            {
-                Text(rich)
-            } else {
-                Text(text)
+        let segments = MarkdownTable.split(text)
+        VStack(alignment: .leading, spacing: 10) {
+            ForEach(Array(segments.enumerated()), id: \.offset) { _, segment in
+                switch segment {
+                case .prose(let prose):
+                    Text(Self.inline(prose))
+                        .font(Scaled.prose(scale))
+                        .textSelection(.enabled)
+                case .table(let table):
+                    MarkdownTableView(table: table)
+                }
             }
         }
-        .font(Scaled.prose(scale))
-        .textSelection(.enabled)
+    }
+
+    /// The text with its inline marks read, or as written when they
+    /// do not parse.
+    static func inline(_ text: String) -> AttributedString {
+        (try? AttributedString(
+            markdown: text,
+            options: AttributedString.MarkdownParsingOptions(interpretedSyntax: .inlineOnlyPreservingWhitespace)))
+            ?? AttributedString(text)
     }
 }
 

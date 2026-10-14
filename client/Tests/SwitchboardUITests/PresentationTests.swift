@@ -213,6 +213,40 @@ final class BrowsingTests: XCTestCase {
         XCTAssertEqual(Set(ViewMode.allCases.map(\.symbol)).count, ViewMode.allCases.count, "every mode has its own icon")
     }
 
+    func testTablesAreCutOutOfProseWithTheirCellsAndAlignments() {
+        let text = """
+            Two columns:
+
+            | Name | Count |
+            |:-----|------:|
+            | a \\| b | **1** |
+            | c |
+            | d | 2 | extra |
+
+            and after.
+            """
+        let segments = MarkdownTable.split(text)
+        XCTAssertEqual(segments.count, 3)
+        XCTAssertEqual(segments.first, .prose("Two columns:"))
+        XCTAssertEqual(segments.last, .prose("and after."))
+        guard case .table(let table) = segments[1] else { return XCTFail("no table") }
+        XCTAssertEqual(table.header, ["Name", "Count"])
+        XCTAssertEqual(table.alignments, [.leading, .trailing])
+        XCTAssertEqual(table.rows, [["a | b", "**1**"], ["c"], ["d", "2", "extra"]])
+        XCTAssertEqual(table.columns, 3)
+        XCTAssertEqual(table.cell(1, 1), "", "a short row reads empty")
+        XCTAssertEqual(MarkdownTable.delimiter("| :-: | --- |"), [.center, .leading])
+        XCTAssertNil(MarkdownTable.delimiter("| a | b |"))
+    }
+
+    func testPipesWithoutADelimiterRowOrInsideAFenceStayProse() {
+        XCTAssertEqual(MarkdownTable.split("a | b\nc | d"), [.prose("a | b\nc | d")])
+        let fenced = "```\n| a | b |\n|---|---|\n| 1 | 2 |\n```"
+        XCTAssertEqual(MarkdownTable.split(fenced), [.prose(fenced)])
+        XCTAssertEqual(MarkdownTable.split(""), [.prose("")])
+        XCTAssertEqual(MarkdownTable.split("| a | b |\n|---|---|"), [.table(MarkdownTable(header: ["a", "b"], alignments: [.leading, .leading], rows: []))], "a header alone is a table")
+    }
+
     func testDictationJoinsWhatWasHeardAfterWhatWasTyped() {
         XCTAssertEqual(Dictation.joined("", "fix the test"), "fix the test")
         XCTAssertEqual(Dictation.joined("please", "fix the test "), "please fix the test")

@@ -8,7 +8,7 @@ targets visionOS 26.
 
 ```sh
 swift build                      # every target
-swift test                       # 64 tests: fixtures, commands, pinning, the connection core, events, watches, conversations, the draft, presentation, browsing
+swift test                       # 66 tests: fixtures, commands, pinning, the connection core, events, watches, conversations, the draft, presentation, browsing
 swift run switchboard-remote     # the command-line browser (usage below)
 scripts/sim.sh run               # the visionOS app on the simulator (below)
 ```
@@ -66,7 +66,8 @@ scripts/sim.sh run               # the visionOS app on the simulator (below)
   `CardWindowView`, one window on one session (a click on a listed
   session brings its open window forward; the context menu opens
   another) with the `compact`, `screen`, `last_response` (the answer
-  with its inline Markdown), `conversation` (turns with the activity
+  with its inline Markdown, its tables cut out by `MarkdownTable` and
+  laid out as grids), `conversation` (turns with the activity
   folded, each tool call's text whole on demand, earlier pages on
   demand, the end following the host while any of a tall marker after
   the last turn is on screen, so a bounce leaves the view following,
