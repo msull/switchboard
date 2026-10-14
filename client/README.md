@@ -163,7 +163,17 @@ SIMCTL_CHILD_SWITCHBOARD_INVITE="$INVITE" xcrun simctl launch --terminate-runnin
 `SWITCHBOARD_INVITE` may hold several invites, one per line, for two
 hosts at once. A second dev aid, `SWITCHBOARD_OPEN`, lists card windows to open once
 their sessions are listed, as `<record id>[:<mode>]` entries separated
-by commas (`SIMCTL_CHILD_SWITCHBOARD_OPEN="$ID:screen"`).
+by commas (`SIMCTL_CHILD_SWITCHBOARD_OPEN="$ID:screen"`); the entry
+`prompt` opens the prompt window, `prompt:<seconds>` after a wait. A
+third, `SWITCHBOARD_CLOSE_WINDOWS_AFTER=<seconds>`, closes every window
+that long after launch, once per process: the state the app is in when
+its last window is closed by hand, so that a `simctl launch` of the
+running app then stands in for a tap on its icon. Two things to know
+on the simulator: opening the prompt window within the first seconds
+of a launch, while the system is still restoring scenes, ends with
+every window closed about six seconds in (open it later instead), and
+the launch variables are read by the process, so an activation of a
+running app sees the ones it was launched with.
 
 Bonjour on visionOS needs `NSBonjourServices` and
 `NSLocalNetworkUsageDescription` in `Info.plist`; both are there. The

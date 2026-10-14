@@ -151,7 +151,14 @@ public enum MainWindow {
 /// input is active, with the editor's tools, wherever it is placed.
 public enum PromptWindow {
     public static let id = "prompt"
-    public static let value = 0
+    public static let value = Key()
+
+    /// The window's presented value, a type of its own: the system
+    /// matches windows by presented type and value, so a prompt window
+    /// presenting the main window's `Int` was taken for it.
+    public struct Key: Codable, Hashable, Sendable {
+        public init() {}
+    }
 }
 
 /// Whether a card window should bring the main window back at launch.

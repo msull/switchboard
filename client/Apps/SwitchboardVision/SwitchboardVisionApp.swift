@@ -36,7 +36,7 @@ struct SwitchboardVisionApp: App {
         // The prompt window, one per app like the main one: the whole
         // draft of the session whose input is active, placed once and
         // left where it is while the cards come and go.
-        WindowGroup("Prompt", id: PromptWindow.id, for: Int.self) { _ in
+        WindowGroup("Prompt", id: PromptWindow.id, for: PromptWindow.Key.self) { _ in
             PromptWindowView(model: model)
                 .task { await model.boot(invite: Self.inviteFromEnvironment) }
         } defaultValue: {

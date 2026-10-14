@@ -12,6 +12,7 @@ import SwitchboardProtocol
 /// nothing else changes with it open.
 public struct PromptWindowView: View {
     @Bindable var model: BrowserModel
+    @Environment(\.openWindow) private var openWindow
     @State private var dictation = Dictation()
     @State private var scale = ScreenScale.initial
     @State private var busy = false
@@ -124,6 +125,17 @@ public struct PromptWindowView: View {
             if let held {
                 Task { await model.releaseDraft(held) }
             }
+        }
+        .task { await bringMainWindowBack() }
+    }
+
+    /// A launch that restored only this window has no browser: after
+    /// the grace the system gets to restore one, it is opened from
+    /// here, as a card window would.
+    private func bringMainWindowBack() async {
+        try? await Task.sleep(nanoseconds: 1_500_000_000)
+        if model.claimMainWindow() {
+            openWindow(id: MainWindow.id, value: MainWindow.value)
         }
     }
 
