@@ -8,7 +8,7 @@ targets visionOS 26.
 
 ```sh
 swift build                      # every target
-swift test                       # 66 tests: fixtures, commands, pinning, the connection core, events, watches, conversations, the draft, presentation, browsing
+swift test                       # 64 tests: fixtures, commands, pinning, the connection core, events, watches, conversations, the draft, presentation, browsing
 swift run switchboard-remote     # the command-line browser (usage below)
 scripts/sim.sh run               # the visionOS app on the simulator (below)
 ```
@@ -125,23 +125,18 @@ scripts/sim.sh run               # the visionOS app on the simulator (below)
   `BrowseMode`, `FocusCursor`) and `PresentationState` in a JSON file
   in the app's container: the layout (list, grid, or one session in
   focus), the filters (hosts, kinds, states), the focused session, each
-  card window's mode by window id, and the card windows open at the
-  last save. visionOS restores an app's windows on relaunch when it
-  can; the saved ones it does not bring back are reopened under their
-  ids once the launch grace has passed, so they keep their modes. The
-  first seconds of a launch belong to the system's scene restoration:
-  a window the app opens before it is done is torn down with every
-  other window when it finishes (6.8 s after launch on the visionOS 26
-  simulator, the app left running with no window at all), so anything
-  the app opens on its own at launch waits `LaunchGrace` (8 s), and a
-  saved window closed within it is kept for the reopen pass. The main
-  window is declared as presented at launch, so a run that ended with
-  only card windows still comes back with the browser; every scene
-  boots the model, and the first card window to find the main window
-  missing after the grace opens it. A card's header Sessions button
-  brings the main window forward at any time (`MainWindow`,
-  `MainWindowGuard`). Nothing visionOS-only, so the iPad shell draws
-  the same views.
+  and each card window's mode by window id. A launch opens the main
+  window and nothing else: the card and prompt window groups are not
+  restored, and the main one is declared as presented, so the app
+  always comes back to the browser however it was left. The first
+  seconds of a launch belong to the system's scene restoration, and a
+  window the app opens before it is done is torn down with every other
+  window when it finishes (6.8 s after launch on the visionOS 26
+  simulator, the app left running with no window at all), so the dev
+  aids that open windows at launch wait `LaunchGrace` (8 s). A card's
+  header Sessions button brings the main window forward at any time
+  (`MainWindow`). Nothing visionOS-only, so the iPad shell draws the
+  same views.
 - `Apps/SwitchboardVision`: the visionOS app, an entry that declares
   the scenes and where the registry lives (`servers.json` in the app's
   container, the token and pin in the Keychain, nothing from a host on
@@ -190,8 +185,8 @@ was measured.
 
 The headset gives the Mac no log, so the app keeps one of its own:
 `launch.log` in its container records what the windows did since
-launch (appeared, disappeared, scene phases, who opened the main
-window), under 64 KiB, window ids and events only. Copy it off with
+launch (appeared, disappeared, scene phases), under 64 KiB, window
+ids and events only. Copy it off with
 
 ```sh
 xcrun devicectl device copy from --device <udid> --domain-type appDataContainer \

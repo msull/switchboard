@@ -171,7 +171,8 @@ public enum PromptWindow {
 /// restoration: a window the app opens before it is done is torn down
 /// with every other window when it finishes (measured at 6.8 s on the
 /// visionOS 26 simulator, the app left running with no window at all).
-/// Anything the app opens on its own at launch waits this long.
+/// Only the main window comes back at launch, but a dev aid that opens
+/// a window at launch still waits this long.
 public enum LaunchGrace {
     public static let seconds = 8.0
     public static var nanoseconds: UInt64 { UInt64(seconds * 1_000_000_000) }
@@ -210,26 +211,6 @@ public enum LaunchLog {
     }
 }
 
-/// Whether a card window should bring the main window back at launch.
-/// visionOS restores the windows that were open when the app last
-/// quit, so a run that ended with only card windows comes back
-/// without the browser, and nothing else opens it. The first card
-/// window to ask after the restoration grace claims the job, unless
-/// the main window has appeared by then.
-public struct MainWindowGuard: Equatable, Sendable {
-    public var visible = false
-    public var claimed = false
-
-    public init() {}
-
-    /// True once, for the window that should open the main one.
-    public mutating func claim() -> Bool {
-        if visible || claimed { return false }
-        claimed = true
-        return true
-    }
-}
-
 /// What a card window is opened on: a qualified session and an id of
 /// its own. Opening a request whose window is open brings that window
 /// forward, so a click on a listed session goes to its window when
@@ -241,6 +222,16 @@ public struct CardWindowRequest: Codable, Hashable, Sendable {
     public init(id: UUID = UUID(), ref: SessionRef) {
         self.id = id
         self.ref = ref
+    }
+
+    /// The request that reaches the window open on `ref` among the
+    /// ones on screen; the lowest id when there are several, so
+    /// repeated clicks land on one window.
+    public static func open(on ref: SessionRef, among windows: [UUID: SessionRef]) -> CardWindowRequest? {
+        windows
+            .filter { $0.value == ref }
+            .map { CardWindowRequest(id: $0.key, ref: $0.value) }
+            .min { $0.id.uuidString < $1.id.uuidString }
     }
 }
 

@@ -64,23 +64,8 @@ public struct CardWindowView: View {
         }
         .onChange(of: scenePhase) { _, phase in LaunchLog.note("card \(request.id) phase \(phase)") }
         .onChange(of: mode) { _, new in model.setMode(new, for: request.id) }
-        .task { await bringMainWindowBack() }
     }
 
-    /// A launch that restored only card windows has no browser on a
-    /// system that does not present it: after the launch grace, the
-    /// first card window to ask opens it. Only a restored window asks;
-    /// one opened later would bring back a browser the user closed.
-    private func bringMainWindowBack() async {
-        guard LaunchGrace.within() else { return }
-        try? await Task.sleep(nanoseconds: LaunchGrace.nanoseconds)
-        if model.claimMainWindow() {
-            LaunchLog.note("card \(request.id) opens main")
-            openWindow(id: MainWindow.id, value: MainWindow.value)
-        } else {
-            LaunchLog.note("card \(request.id) leaves main \(model.mainWindow)")
-        }
-    }
 
     private var header: some View {
         HStack {

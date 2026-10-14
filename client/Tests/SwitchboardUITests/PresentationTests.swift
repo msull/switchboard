@@ -174,22 +174,6 @@ final class BrowsingTests: XCTestCase {
         XCTAssertNil(FocusCursor.index(of: gone, in: []))
     }
 
-    func testTheWindowsToReopenAreTheSavedOnesNotRestoredWhoseSessionsAreListed() {
-        var state = PresentationState()
-        let restored = UUID()
-        let missing = UUID()
-        let unlisted = UUID()
-        state.windows = [
-            restored: SessionRef(serverID: a, recordID: "r1"),
-            missing: SessionRef(serverID: a, recordID: "r1"),
-            unlisted: SessionRef(serverID: a, recordID: "r9"),
-        ]
-        let listed: Set<SessionRef> = [SessionRef(serverID: a, recordID: "r1")]
-        let reopen = state.windowsToReopen(appeared: [restored], listed: listed)
-        XCTAssertEqual(reopen.map(\.id), [missing])
-        XCTAssertEqual(reopen.first?.ref.recordID, "r1")
-    }
-
     @MainActor func testTheLaunchLogAppendsToItsFileAndStartsOverWhenLarge() throws {
         let file = FileManager.default.temporaryDirectory.appendingPathComponent("launch-\(UUID()).log")
         defer { try? FileManager.default.removeItem(at: file) }
@@ -216,17 +200,6 @@ final class BrowsingTests: XCTestCase {
         XCTAssertFalse(LaunchGrace.within(at: launched.addingTimeInterval(60), since: launched))
     }
 
-    func testTheMainWindowIsBroughtBackOnceAndOnlyWhenItIsMissing() {
-        var missing = MainWindowGuard()
-        XCTAssertTrue(missing.claim(), "the first card window to ask opens it")
-        XCTAssertFalse(missing.claim(), "the next does not")
-        var shown = MainWindowGuard()
-        shown.visible = true
-        XCTAssertFalse(shown.claim(), "a restored main window needs no help")
-        shown.visible = false
-        XCTAssertTrue(shown.claim(), "the main window went away before the ask")
-    }
-
     func testTheScreenScaleIsClampedAndReadAsAPercentage() {
         XCTAssertEqual(ScreenScale.initial, 1)
         XCTAssertEqual(ScreenScale.clamped(0.1), ScreenScale.range.lowerBound)
@@ -249,17 +222,12 @@ final class BrowsingTests: XCTestCase {
     }
 
     func testAClickReachesTheOpenWindowOnItsSessionOrMakesANewOne() {
-        var state = PresentationState()
         let r1 = SessionRef(serverID: a, recordID: "r1")
-        let r2 = SessionRef(serverID: a, recordID: "r2")
         let low = UUID(uuidString: "00000000-0000-0000-0000-000000000001")!
         let high = UUID(uuidString: "00000000-0000-0000-0000-000000000002")!
-        let gone = UUID()
-        state.windows = [high: r1, low: r1, gone: r2]
-        let appeared: Set<UUID> = [low, high]
-        XCTAssertEqual(state.openWindow(on: r1, appeared: appeared)?.id, low, "one window, the same each time")
-        XCTAssertNil(state.openWindow(on: r2, appeared: appeared), "a saved window not on screen this run is not it")
-        XCTAssertNil(state.openWindow(on: SessionRef(serverID: a, recordID: "r3"), appeared: appeared))
+        let open = [high: r1, low: r1]
+        XCTAssertEqual(CardWindowRequest.open(on: r1, among: open)?.id, low, "one window, the same each time")
+        XCTAssertNil(CardWindowRequest.open(on: SessionRef(serverID: a, recordID: "r3"), among: open))
     }
 
     func testUtterancesCommitTheLiveOneWhenTheNextStartsLater() {

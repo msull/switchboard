@@ -21,10 +21,10 @@ struct SwitchboardVisionApp: App {
     var body: some Scene {
         // The main window carries a fixed value so that opening it
         // from a card window brings the open one forward rather than
-        // making a second; the launch window gets the same value. The
-        // system presents it at every launch, beside whatever it
-        // restores: the app must not open it itself in the first
-        // seconds (`LaunchGrace`).
+        // making a second; the launch window gets the same value. It
+        // is the one window a launch presents: the others are never
+        // restored, so the app always opens to the browser, and the
+        // app itself opens nothing in the first seconds (`LaunchGrace`).
         WindowGroup("Switchboard", id: MainWindow.id, for: Int.self) { _ in
             RootView(model: model, openOnStart: Self.openFromEnvironment)
                 .task { await model.boot(invite: Self.inviteFromEnvironment) }
@@ -33,26 +33,24 @@ struct SwitchboardVisionApp: App {
         }
         .defaultLaunchBehavior(.presented)
         // A card window per request: the system places it, and brings
-        // it forward when the same request is opened again (§7.2). It
-        // boots the model too, since a relaunch may restore only card
-        // windows.
+        // it forward when the same request is opened again (§7.2).
         WindowGroup(for: CardWindowRequest.self) { $request in
             if let request {
                 CardWindowView(model: model, request: request)
-                    .task { await model.boot(invite: Self.inviteFromEnvironment) }
             }
         }
         .defaultSize(width: 760, height: 560)
+        .restorationBehavior(.disabled)
         // The prompt window, one per app like the main one: the whole
         // draft of the session whose input is active, placed once and
         // left where it is while the cards come and go.
         WindowGroup("Prompt", id: PromptWindow.id, for: PromptWindow.Key.self) { _ in
             PromptWindowView(model: model)
-                .task { await model.boot(invite: Self.inviteFromEnvironment) }
         } defaultValue: {
             PromptWindow.value
         }
         .defaultSize(width: 900, height: 420)
+        .restorationBehavior(.disabled)
     }
 
     /// A dev aid: `SWITCHBOARD_INVITE` holds invites' JSON (the text of

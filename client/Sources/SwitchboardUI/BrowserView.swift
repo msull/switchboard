@@ -10,9 +10,10 @@ public final class BrowserModel {
     public let manager: ConnectionManager
     public private(set) var store = UnifiedStore()
     public private(set) var discovered: [DiscoveredServerRow] = []
-    /// The card windows that have appeared this run, restored by the
-    /// system or opened here, so the reopen pass skips them.
-    public private(set) var appeared: Set<UUID> = []
+    /// The card windows on screen, by window id, so a click on a listed
+    /// session reaches its window. Nothing here outlives the process:
+    /// a launch brings back the main window and no other.
+    public private(set) var open: [UUID: SessionRef] = [:]
     /// The screen last read per watched session, mirrored from its
     /// connection; the holders per session are the open screen views.
     public private(set) var screens: [SessionRef: ScreenBody] = [:]
@@ -47,9 +48,6 @@ public final class BrowserModel {
     private let presentationStore: PresentationStore
     private var pump: Task<Void, Never>?
     private var booting: Task<Void, Never>?
-    /// Whether the main window is on screen, and whether a card
-    /// window has already taken the job of bringing it back.
-    public private(set) var mainWindow = MainWindowGuard()
 
     public init(manager: ConnectionManager, presentationStore: PresentationStore = MemoryPresentationStore()) {
         self.manager = manager
@@ -375,50 +373,21 @@ public final class BrowserModel {
         }
     }
 
-    public func mainWindowAppeared() {
-        mainWindow.visible = true
-    }
-
-    public func mainWindowDisappeared() {
-        mainWindow.visible = false
-    }
-
-    /// A card window asks, after the restoration grace, whether it is
-    /// the one to open the main window.
-    public func claimMainWindow() -> Bool {
-        mainWindow.claim()
-    }
-
-    /// A card window is on screen: remembered for the next launch.
+    /// A card window is on screen.
     public func windowAppeared(_ request: CardWindowRequest) {
-        appeared.insert(request.id)
-        presentation.windows[request.id] = request.ref
-        save()
+        open[request.id] = request.ref
     }
 
-    /// A card window went away: closed by the user, and forgotten. In
-    /// the launch grace it is the system's restoration pass taking the
-    /// window, not the user, so it stays saved and the reopen pass
-    /// brings it back after the grace. A window the process dies with
-    /// stays in the file too.
-    public func windowClosed(_ request: CardWindowRequest, now: Date = Date()) {
-        appeared.remove(request.id)
-        if LaunchGrace.within(at: now) { return }
-        presentation.windows[request.id] = nil
-        save()
+    /// A card window went away.
+    public func windowClosed(_ request: CardWindowRequest) {
+        open[request.id] = nil
     }
 
     /// The request a click on `ref` opens: its window when one is on
     /// screen, which the window group then brings forward, or a new
     /// one.
     public func windowRequest(for ref: SessionRef) -> CardWindowRequest {
-        presentation.openWindow(on: ref, appeared: appeared) ?? CardWindowRequest(ref: ref)
-    }
-
-    /// The saved windows the system did not restore, once their
-    /// sessions are listed.
-    public func windowsToReopen() -> [CardWindowRequest] {
-        presentation.windowsToReopen(appeared: appeared, listed: Set(store.sessions.map(\.ref)))
+        CardWindowRequest.open(on: ref, among: open) ?? CardWindowRequest(ref: ref)
     }
 
     private func save() {

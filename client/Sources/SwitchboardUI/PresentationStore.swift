@@ -3,9 +3,8 @@ import SwitchboardClientCore
 import SwitchboardProtocol
 
 /// The user's presentation state (§7): what the client itself decides
-/// and keeps in its container, never anything a host sent. visionOS
-/// restores an app's windows on relaunch, so a card window's mode is
-/// keyed by the window id it was opened with.
+/// and keeps in its container, never anything a host sent. A card
+/// window's mode is keyed by the window id it was opened with.
 public struct PresentationState: Codable, Equatable, Sendable {
     public var modes: [UUID: ModeEntry] = [:]
     /// How the main window browses, and what it shows.
@@ -13,10 +12,6 @@ public struct PresentationState: Codable, Equatable, Sendable {
     public var filters = Filters()
     /// The session focus mode is on, kept by ref so a reorder keeps it.
     public var focused: SessionRef?
-    /// The card windows open when the state was last saved, by window
-    /// id. The system restores windows on relaunch when it can; the
-    /// ones it does not bring back are reopened from here.
-    public var windows: [UUID: SessionRef] = [:]
 
     public struct ModeEntry: Codable, Equatable, Sendable {
         public var mode: ViewMode
@@ -61,24 +56,6 @@ public struct PresentationState: Codable, Equatable, Sendable {
         }
     }
 
-    /// The request that reaches the open window on `ref`, if one is
-    /// on screen this run (`appeared`); the lowest id when there are
-    /// several, so repeated clicks land on one window.
-    public func openWindow(on ref: SessionRef, appeared: Set<UUID>) -> CardWindowRequest? {
-        windows
-            .filter { $0.value == ref && appeared.contains($0.key) }
-            .map { CardWindowRequest(id: $0.key, ref: $0.value) }
-            .min { $0.id.uuidString < $1.id.uuidString }
-    }
-
-    /// The saved windows a launch must open itself: the ones the
-    /// system did not restore (`appeared`) whose sessions are listed.
-    public func windowsToReopen(appeared: Set<UUID>, listed: Set<SessionRef>) -> [CardWindowRequest] {
-        windows
-            .filter { !appeared.contains($0.key) && listed.contains($0.value) }
-            .map { CardWindowRequest(id: $0.key, ref: $0.value) }
-            .sorted { $0.id.uuidString < $1.id.uuidString }
-    }
 }
 
 /// How the main window lays the sessions out (§7.2).

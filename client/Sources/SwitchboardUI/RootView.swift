@@ -20,17 +20,10 @@ public struct RootView: View {
 
     public var body: some View {
         tabs
-            .onAppear {
-                LaunchLog.note("main appeared")
-                model.mainWindowAppeared()
-            }
-            .onDisappear {
-                LaunchLog.note("main disappeared")
-                model.mainWindowDisappeared()
-            }
+            .onAppear { LaunchLog.note("main appeared") }
+            .onDisappear { LaunchLog.note("main disappeared") }
             .onChange(of: scenePhase) { _, phase in LaunchLog.note("main phase \(phase)") }
             .task(id: openOnStart) { await openRequested() }
-            .task { await reopenSaved() }
             .task { await closeAllOnRequest() }
     }
 
@@ -48,27 +41,12 @@ public struct RootView: View {
         Self.closedOnRequest = true
         try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
         dismissWindow(id: PromptWindow.id)
-        for (id, ref) in model.presentation.windows {
+        for (id, ref) in model.open {
             dismissWindow(value: CardWindowRequest(id: id, ref: ref))
         }
         dismissWindow(id: MainWindow.id)
     }
 
-    /// The card windows open at the last save that the system did not
-    /// bring back: after the launch grace, each whose session is listed
-    /// is opened under its saved id, and so its mode.
-    private func reopenSaved() async {
-        try? await Task.sleep(nanoseconds: LaunchGrace.nanoseconds)
-        for _ in 0..<100 {
-            let pending = model.windowsToReopen()
-            for request in pending {
-                LaunchLog.note("main reopens card \(request.id)")
-                openWindow(value: request)
-            }
-            if model.presentation.windows.allSatisfy({ model.appeared.contains($0.key) }) { return }
-            try? await Task.sleep(nanoseconds: 300_000_000)
-        }
-    }
 
     private func openRequested() async {
         var pending = openOnStart.filter { !$0.isEmpty }
@@ -88,10 +66,6 @@ public struct RootView: View {
                 let parts = entry.split(separator: ":", maxSplits: 1).map(String.init)
                 guard let item = model.store.sessions.first(where: { $0.session.id == parts[0] })
                 else { continue }
-                // A saved window on the session that the reopen pass
-                // has not brought back yet would be missed: wait for
-                // it, so the dev aid lands where a click would.
-                if model.windowsToReopen().contains(where: { $0.ref == item.ref }) { continue }
                 let request = model.windowRequest(for: item.ref)
                 if parts.count == 2, let mode = ViewMode(rawValue: parts[1]) {
                     model.setMode(mode, for: request.id)

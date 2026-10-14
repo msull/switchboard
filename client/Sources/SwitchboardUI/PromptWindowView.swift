@@ -124,23 +124,8 @@ public struct PromptWindowView: View {
                 Task { await model.releaseDraft(held) }
             }
         }
-        .task { await bringMainWindowBack() }
     }
 
-    /// A launch that restored only this window has no browser on a
-    /// system that does not present it: after the launch grace, it is
-    /// opened from here, as a card window would; only a restored
-    /// window asks.
-    private func bringMainWindowBack() async {
-        guard LaunchGrace.within() else { return }
-        try? await Task.sleep(nanoseconds: LaunchGrace.nanoseconds)
-        if model.claimMainWindow() {
-            LaunchLog.note("prompt opens main")
-            openWindow(id: MainWindow.id, value: MainWindow.value)
-        } else {
-            LaunchLog.note("prompt leaves main \(model.mainWindow)")
-        }
-    }
 
     private var header: some View {
         HStack {
