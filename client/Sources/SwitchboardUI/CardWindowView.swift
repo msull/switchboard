@@ -621,6 +621,8 @@ struct ConversationView: View {
     /// still decelerating overrides the first scroll, so the end is
     /// asked for again when it settles.
     @State private var pulling = false
+    /// The end marker is on screen, as the scroll view reports it.
+    @State private var atEnd = true
 
     /// The ids in the scroll target layout that are not turns.
     private static let earlierID = 0
@@ -631,59 +633,67 @@ struct ConversationView: View {
             if let conversation = model.conversations[ref] {
                 ScrollViewReader { proxy in
                     ScrollView {
-                        LazyVStack(alignment: .leading, spacing: 14) {
-                            if conversation.hasEarlier {
-                                Button {
-                                    loading = true
-                                    let keep = conversation.firstHeld
-                                    Task {
-                                        await model.loadEarlier(ref)
-                                        // The turns go in above; the one that was
-                                        // at the top stays there.
-                                        if let keep { top = keep }
-                                        loading = false
+                        VStack(alignment: .leading, spacing: 0) {
+                            LazyVStack(alignment: .leading, spacing: 14) {
+                                if conversation.hasEarlier {
+                                    Button {
+                                        loading = true
+                                        let keep = conversation.firstHeld
+                                        Task {
+                                            await model.loadEarlier(ref)
+                                            // The turns go in above; the one that was
+                                            // at the top stays there.
+                                            if let keep { top = keep }
+                                            loading = false
+                                        }
+                                    } label: {
+                                        Label(
+                                            "Earlier turns (\((conversation.firstHeld ?? 1) - 1) before)",
+                                            systemImage: "arrow.up")
                                     }
-                                } label: {
-                                    Label(
-                                        "Earlier turns (\((conversation.firstHeld ?? 1) - 1) before)",
-                                        systemImage: "arrow.up")
+                                    .buttonStyle(.bordered)
+                                    .controlSize(.small)
+                                    .disabled(loading)
+                                    .id(Self.earlierID)
                                 }
-                                .buttonStyle(.bordered)
-                                .controlSize(.small)
-                                .disabled(loading)
-                                .id(Self.earlierID)
+                                ForEach(conversation.turns) { turn in
+                                    TurnRow(
+                                        model: model, ref: ref, turn: turn,
+                                        open: fold(turn.n),
+                                        openActivity: { index in fold(ActivityKey(turn: turn.n, index: index)) })
+                                }
                             }
-                            ForEach(conversation.turns) { turn in
-                                TurnRow(
-                                    model: model, ref: ref, turn: turn,
-                                    open: fold(turn.n),
-                                    openActivity: { index in fold(ActivityKey(turn: turn.n, index: index)) })
-                            }
+                            .scrollTargetLayout()
                             // The end: following is any of this marker on
                             // screen, so a bounce or a finger lifted a hair
                             // early still follows, and whatever the view's
-                            // insets are, a scroll to it reaches it.
+                            // insets are, a scroll to it reaches it. It sits
+                            // outside the lazy stack, which would make and
+                            // drop it as the view moves and lose its reports.
                             Color.clear.frame(height: ConversationPlace.endSlack)
                                 .id(Self.endID)
-                                .onScrollVisibilityChange(threshold: 0.02) { visible in
-                                    place?.following = visible
-                                    if visible { pulling = false }
-                                }
+                                .onScrollVisibilityChange(threshold: 0.02) { visible in atEnd = visible }
                         }
-                        .scrollTargetLayout()
                         .frame(maxWidth: .infinity, alignment: .leading)
                     }
                     .scrollPosition(id: $top, anchor: .top)
-                    // The field under the view growing shrinks the view;
-                    // at the end, the end stays in view rather than the top.
+                    // The view opens at the end, laid out from the bottom
+                    // rather than scrolled there across rows not yet
+                    // measured; and the field under the view growing
+                    // shrinks the view, where the end stays in view.
+                    .defaultScrollAnchor(.bottom)
                     .defaultScrollAnchor(.bottom, for: .sizeChanges)
+                    .onChange(of: atEnd) { _, visible in
+                        place?.following = visible
+                        if visible { pulling = false }
+                    }
                     .onScrollPhaseChange { _, phase in
                         if phase == .idle, pulling {
                             withAnimation { proxy.scrollTo(Self.endID, anchor: .bottom) }
                         }
                     }
                     .overlay(alignment: .bottom) {
-                        if place?.following == false {
+                        if !atEnd {
                             Button {
                                 pulling = true
                                 withAnimation { proxy.scrollTo(Self.endID, anchor: .bottom) }
