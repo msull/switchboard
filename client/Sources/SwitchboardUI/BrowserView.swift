@@ -396,9 +396,14 @@ public final class BrowserModel {
         save()
     }
 
-    /// A card window was closed by the user; a window the process
-    /// dies with stays in the file and is reopened.
-    public func windowClosed(_ request: CardWindowRequest) {
+    /// A card window went away: closed by the user, and forgotten. In
+    /// the launch grace it is the system's restoration pass taking the
+    /// window, not the user, so it stays saved and the reopen pass
+    /// brings it back after the grace. A window the process dies with
+    /// stays in the file too.
+    public func windowClosed(_ request: CardWindowRequest, now: Date = Date()) {
+        appeared.remove(request.id)
+        if LaunchGrace.within(at: now) { return }
         presentation.windows[request.id] = nil
         save()
     }

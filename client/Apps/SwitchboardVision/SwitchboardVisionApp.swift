@@ -12,16 +12,24 @@ struct SwitchboardVisionApp: App {
         manager: SwitchboardVisionApp.makeManager(),
         presentationStore: FilePresentationStore(url: SwitchboardVisionApp.support.appendingPathComponent("presentation.json")))
 
+    init() {
+        _ = LaunchGrace.launchedAt
+    }
+
     var body: some Scene {
         // The main window carries a fixed value so that opening it
         // from a card window brings the open one forward rather than
-        // making a second; the launch window gets the same value.
+        // making a second; the launch window gets the same value. The
+        // system presents it at every launch, beside whatever it
+        // restores: the app must not open it itself in the first
+        // seconds (`LaunchGrace`).
         WindowGroup("Switchboard", id: MainWindow.id, for: Int.self) { _ in
             RootView(model: model, openOnStart: Self.openFromEnvironment)
                 .task { await model.boot(invite: Self.inviteFromEnvironment) }
         } defaultValue: {
             MainWindow.value
         }
+        .defaultLaunchBehavior(.presented)
         // A card window per request: the system places it, and brings
         // it forward when the same request is opened again (§7.2). It
         // boots the model too, since a relaunch may restore only card

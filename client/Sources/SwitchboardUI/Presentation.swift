@@ -167,6 +167,24 @@ public enum PromptWindow {
     }
 }
 
+/// The first seconds of a launch belong to the system's scene
+/// restoration: a window the app opens before it is done is torn down
+/// with every other window when it finishes (measured at 6.8 s on the
+/// visionOS 26 simulator, the app left running with no window at all).
+/// Anything the app opens on its own at launch waits this long.
+public enum LaunchGrace {
+    public static let seconds = 8.0
+    public static var nanoseconds: UInt64 { UInt64(seconds * 1_000_000_000) }
+    /// When the process started, as the app's first touch of it; the
+    /// app touches it at init.
+    public static let launchedAt = Date()
+
+    /// Whether `now` is still in the grace since `launchedAt`.
+    public static func within(at now: Date = Date(), since launched: Date = launchedAt) -> Bool {
+        now.timeIntervalSince(launched) < seconds
+    }
+}
+
 /// Whether a card window should bring the main window back at launch.
 /// visionOS restores the windows that were open when the app last
 /// quit, so a run that ended with only card windows comes back

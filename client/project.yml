@@ -8,7 +8,7 @@ options:
   xcodeVersion: "26.2"
   createIntermediateGroups: true
   deploymentTarget:
-    visionOS: "2.0"
+    visionOS: "26.0"
 packages:
   SwitchboardClient:
     path: .

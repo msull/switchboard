@@ -47,10 +47,10 @@ public struct RootView: View {
     }
 
     /// The card windows open at the last save that the system did not
-    /// bring back: a short grace for its restoration, then each whose
-    /// session is listed is opened under its saved id, and so its mode.
+    /// bring back: after the launch grace, each whose session is listed
+    /// is opened under its saved id, and so its mode.
     private func reopenSaved() async {
-        try? await Task.sleep(nanoseconds: 1_500_000_000)
+        try? await Task.sleep(nanoseconds: LaunchGrace.nanoseconds)
         for _ in 0..<100 {
             let pending = model.windowsToReopen()
             for request in pending {
@@ -63,6 +63,9 @@ public struct RootView: View {
 
     private func openRequested() async {
         var pending = openOnStart.filter { !$0.isEmpty }
+        if !pending.isEmpty {
+            try? await Task.sleep(nanoseconds: LaunchGrace.nanoseconds)
+        }
         // `prompt` opens the prompt window, `prompt:<seconds>` after a wait.
         if let entry = pending.first(where: { $0 == "prompt" || $0.hasPrefix("prompt:") }) {
             pending.removeAll { $0 == entry }

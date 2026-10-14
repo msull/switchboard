@@ -61,11 +61,11 @@ public struct CardWindowView: View {
         .task { await bringMainWindowBack() }
     }
 
-    /// A launch that restored only card windows has no browser: after
-    /// the grace the system gets to restore one, the first card window
-    /// to ask opens it.
+    /// A launch that restored only card windows has no browser on a
+    /// system that does not present it: after the launch grace, the
+    /// first card window to ask opens it.
     private func bringMainWindowBack() async {
-        try? await Task.sleep(nanoseconds: 1_500_000_000)
+        try? await Task.sleep(nanoseconds: LaunchGrace.nanoseconds)
         if model.claimMainWindow() {
             openWindow(id: MainWindow.id, value: MainWindow.value)
         }

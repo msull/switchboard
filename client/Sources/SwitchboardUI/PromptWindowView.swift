@@ -125,11 +125,11 @@ public struct PromptWindowView: View {
         .task { await bringMainWindowBack() }
     }
 
-    /// A launch that restored only this window has no browser: after
-    /// the grace the system gets to restore one, it is opened from
-    /// here, as a card window would.
+    /// A launch that restored only this window has no browser on a
+    /// system that does not present it: after the launch grace, it is
+    /// opened from here, as a card window would.
     private func bringMainWindowBack() async {
-        try? await Task.sleep(nanoseconds: 1_500_000_000)
+        try? await Task.sleep(nanoseconds: LaunchGrace.nanoseconds)
         if model.claimMainWindow() {
             openWindow(id: MainWindow.id, value: MainWindow.value)
         }

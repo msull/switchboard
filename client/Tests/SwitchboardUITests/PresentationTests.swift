@@ -190,6 +190,14 @@ final class BrowsingTests: XCTestCase {
         XCTAssertEqual(reopen.first?.ref.recordID, "r1")
     }
 
+    func testTheLaunchGraceIsTheFirstSecondsOfTheProcess() {
+        let launched = Date()
+        XCTAssertTrue(LaunchGrace.within(at: launched.addingTimeInterval(1), since: launched))
+        XCTAssertTrue(LaunchGrace.within(at: launched.addingTimeInterval(7.9), since: launched))
+        XCTAssertFalse(LaunchGrace.within(at: launched.addingTimeInterval(8), since: launched))
+        XCTAssertFalse(LaunchGrace.within(at: launched.addingTimeInterval(60), since: launched))
+    }
+
     func testTheMainWindowIsBroughtBackOnceAndOnlyWhenItIsMissing() {
         var missing = MainWindowGuard()
         XCTAssertTrue(missing.claim(), "the first card window to ask opens it")

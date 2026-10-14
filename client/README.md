@@ -3,11 +3,12 @@
 The Swift half of `docs/remote-client.md`: the packages the visionOS
 and iPadOS apps are built from, and a command-line browser for the Mac
 that exercises them against real hosts. Builds with Xcode 26 for
-macOS 14, iOS 17 and visionOS 1.
+macOS 15, iOS 18 and visionOS 2 (the packages); the visionOS app itself
+targets visionOS 26.
 
 ```sh
 swift build                      # every target
-swift test                       # 64 tests: fixtures, commands, pinning, the connection core, events, watches, conversations, the draft, presentation, browsing
+swift test                       # 65 tests: fixtures, commands, pinning, the connection core, events, watches, conversations, the draft, presentation, browsing
 swift run switchboard-remote     # the command-line browser (usage below)
 scripts/sim.sh run               # the visionOS app on the simulator (below)
 ```
@@ -127,11 +128,18 @@ scripts/sim.sh run               # the visionOS app on the simulator (below)
   card window's mode by window id, and the card windows open at the
   last save. visionOS restores an app's windows on relaunch when it
   can; the saved ones it does not bring back are reopened under their
-  ids after a short grace, so they keep their modes. A run that ended
-  with only card windows comes back without the browser, so every
-  scene boots the model and the first card window to find the main
-  window missing after that grace opens it; its header's Sessions
-  button brings the main window forward at any time (`MainWindow`,
+  ids once the launch grace has passed, so they keep their modes. The
+  first seconds of a launch belong to the system's scene restoration:
+  a window the app opens before it is done is torn down with every
+  other window when it finishes (6.8 s after launch on the visionOS 26
+  simulator, the app left running with no window at all), so anything
+  the app opens on its own at launch waits `LaunchGrace` (8 s), and a
+  saved window closed within it is kept for the reopen pass. The main
+  window is declared as presented at launch, so a run that ended with
+  only card windows still comes back with the browser; every scene
+  boots the model, and the first card window to find the main window
+  missing after the grace opens it. A card's header Sessions button
+  brings the main window forward at any time (`MainWindow`,
   `MainWindowGuard`). Nothing visionOS-only, so the iPad shell draws
   the same views.
 - `Apps/SwitchboardVision`: the visionOS app, an entry that declares
@@ -174,12 +182,11 @@ by commas (`SIMCTL_CHILD_SWITCHBOARD_OPEN="$ID:screen"`); the entry
 third, `SWITCHBOARD_CLOSE_WINDOWS_AFTER=<seconds>`, closes every window
 that long after launch, once per process: the state the app is in when
 its last window is closed by hand, so that a `simctl launch` of the
-running app then stands in for a tap on its icon. Two things to know
-on the simulator: opening the prompt window within the first seconds
-of a launch, while the system is still restoring scenes, ends with
-every window closed about six seconds in (open it later instead), and
-the launch variables are read by the process, so an activation of a
-running app sees the ones it was launched with.
+running app then stands in for a tap on its icon. The launch
+variables are read by the process, so an activation of a running app
+sees the ones it was launched with; a `prompt` entry without a wait
+opens inside the launch grace, which is how the window teardown above
+was measured.
 
 Bonjour on visionOS needs `NSBonjourServices` and
 `NSLocalNetworkUsageDescription` in `Info.plist`; both are there. The
