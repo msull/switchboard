@@ -448,6 +448,8 @@ Across A1 to A4: README (Layout, dev aids, data directory) and the design.md sta
 
 - The same modules and components on iPad with platform-appropriate navigation and windows.
 
+*Not started; Milestones A to C merged without it (2026-10-14).*
+
 ## 11. Tests and failure cases
 
 Host, in `tests/remote.rs` and the adapter's own tests unless said otherwise:

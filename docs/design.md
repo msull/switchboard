@@ -3495,6 +3495,29 @@ Built so far:
   the ticket view to come. Frames for a worker record go to `scope=all`
   subscribers alone. The control socket is untouched, so Dispatch sees
   everything as before.
+- **On the headset (2026-10-14).** Scene restoration is ruled out: a
+  launch opens the Sessions window and nothing else (the card and
+  prompt window groups have `restorationBehavior(.disabled)`), after a
+  restored window kept the process alive out of view so that an icon
+  tap presented nothing. A launch log in the app's container
+  (`launch.log`: launches, window appearances, scene phases) stands in
+  for a device syslog the Mac cannot read. The conversation's end
+  marker lives outside the lazy stack, so the follow button and
+  opening at the end hold on the device. Markdown tables in an answer
+  are laid out as grids. A Bonjour resolve that gets no answer is
+  given up after 5 s, and each offline host resolves on its own task,
+  after the retry loop hung on one resolve left waiting by the system.
+- **Known gaps at the first merge.** Milestone D, the iPad shell, is
+  not started. The Codex transcript parser, so a Codex session's
+  conversation is empty on a device. The Dispatch ticket view
+  (`scope=all` is served; no view asks for it). Removing dead sessions
+  from a device. The Recent sessions set counts worker sessions. The
+  screen and run-output modes follow the end without the
+  conversation's end marker. The draft path makes the editor on the
+  frame (`prompt_box::ensure_editor` reads the voice key there), so an
+  unsigned host freezes on the Keychain prompt while a device asks for
+  a draft; the signed bundle never prompts. Remote access off the LAN
+  is §9 of the spec, deferred.
 
 ## Open questions
 
