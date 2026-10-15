@@ -1,6 +1,7 @@
 import SwiftUI
 import SwitchboardClientCore
 import SwitchboardProtocol
+import SwitchboardTransport
 
 /// The shared read model the views draw from, refreshed from the
 /// manager's store on the main actor.
@@ -98,6 +99,20 @@ public final class BrowserModel {
         }
         await manager.start()
         start()
+    }
+
+    /// A discovered host's `/info` and address, for the pairing sheet.
+    public func lookup(_ instance: String) async throws -> HostLookup {
+        guard let record = await manager.discovered.first(where: { $0.instance == instance }) else {
+            throw RemoteError.transport("\(instance) is no longer on the network")
+        }
+        return try await manager.lookup(record)
+    }
+
+    /// Pair with a host looked up, by the code typed from its dialog.
+    public func pair(_ lookup: HostLookup, code: String) async throws {
+        try await manager.pair(lookup, code: code)
+        await pull()
     }
 
     public func pull() async {
@@ -651,6 +666,7 @@ public struct ServersView: View {
     @Bindable var model: BrowserModel
     @State private var inviteText = ""
     @State private var error: String?
+    @State private var pairing: DiscoveredServerRow?
 
     public init(model: BrowserModel) {
         self.model = model
@@ -694,10 +710,14 @@ public struct ServersView: View {
                         Text(row.name ?? row.instance)
                         Spacer()
                         Text(row.serverID?.short ?? "").font(.caption).foregroundStyle(.secondary)
+                        if row.serverID != nil, !known(row) {
+                            Button("Pair") { pairing = row }
+                                .buttonStyle(.borderless)
+                        }
                     }
                 }
             }
-            Section("Pair") {
+            Section("Pair by text") {
                 TextField("Paste the QR code's text", text: $inviteText, axis: .vertical)
                 Button("Pair") {
                     Task { await pair() }
@@ -707,6 +727,14 @@ public struct ServersView: View {
                 }
             }
         }
+        .sheet(item: $pairing) { row in
+            PairSheet(row: row, model: model)
+        }
+    }
+
+    /// A discovered record whose host is already known and paired.
+    private func known(_ row: DiscoveredServerRow) -> Bool {
+        model.store.hosts.contains { $0.id == row.serverID && !$0.server.needsPairing }
     }
 
     private func stateWord(_ host: HostStatus) -> String {
@@ -732,5 +760,95 @@ public struct ServersView: View {
         } catch {
             self.error = "\(error)"
         }
+    }
+}
+
+/// Pairing with a discovered host without a camera: the host is looked
+/// up and the key it presents is shown as the host's dialog shows its
+/// own, for the owner to compare by eye, then the dialog's code is
+/// typed. The key seen is pinned for the pairing, so the code reaches
+/// only the host whose key was checked (§5).
+struct PairSheet: View {
+    let row: DiscoveredServerRow
+    @Bindable var model: BrowserModel
+    @Environment(\.dismiss) private var dismiss
+    @State private var lookup: HostLookup?
+    @State private var code = ""
+    @State private var problem: String?
+    @State private var busy = false
+
+    private var ready: Bool {
+        lookup != nil && code.filter { !$0.isWhitespace }.count == 8 && !busy
+    }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section {
+                    LabeledContent("Host", value: lookup?.info.serverName ?? row.name ?? row.instance)
+                    LabeledContent("Address", value: lookup.map { "\($0.address)" } ?? "looking up")
+                    LabeledContent("Key", value: lookup.map { KeyFingerprint.short($0.info.spkiSha256) } ?? "")
+                        .fontDesign(.monospaced)
+                    Text("Open Remote devices on the host and allow pairing. Check that its Key line reads the same, then type its code.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                Section("Code") {
+                    TextField("Eight characters", text: $code)
+                        .fontDesign(.monospaced)
+                        .codeEntry()
+                    if let lookup, !lookup.info.pairingOpen {
+                        Text("The host is not allowing pairing right now.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+                if let problem {
+                    Section {
+                        Text(problem).foregroundStyle(.red).font(.caption)
+                    }
+                }
+            }
+            .navigationTitle("Pair")
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { dismiss() }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Pair") { Task { await pair() } }.disabled(!ready)
+                }
+            }
+        }
+        .task {
+            do {
+                lookup = try await model.lookup(row.instance)
+            } catch {
+                problem = "\(error)"
+            }
+        }
+    }
+
+    private func pair() async {
+        guard let lookup else { return }
+        busy = true
+        defer { busy = false }
+        do {
+            try await model.pair(lookup, code: code)
+            dismiss()
+        } catch {
+            problem = "\(error)"
+        }
+    }
+}
+
+extension View {
+    /// A pairing code is typed as the host shows it: capitals, no
+    /// autocorrect. The package also builds on the Mac for the tests,
+    /// where these modifiers do not exist.
+    @ViewBuilder
+    func codeEntry() -> some View {
+        #if os(iOS) || os(visionOS)
+        self.textInputAutocapitalization(.characters).autocorrectionDisabled()
+        #else
+        self
+        #endif
     }
 }

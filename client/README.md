@@ -8,7 +8,7 @@ targets visionOS 26.
 
 ```sh
 swift build                      # every target
-swift test                       # 67 tests: fixtures, commands, pinning, the connection core, events, watches, conversations, the draft, presentation, browsing
+swift test                       # 71 tests: fixtures, commands, pinning, the connection core, events, watches, conversations, the draft, presentation, browsing
 swift run switchboard-remote     # the command-line browser (usage below)
 scripts/sim.sh run               # the visionOS app on the simulator (below)
 ```
@@ -61,7 +61,10 @@ scripts/sim.sh run               # the visionOS app on the simulator (below)
   with the unified store, filters and the cross-host order; its loop
   only retries hosts that are not connected.
 - `SwitchboardUI`: `RootView` (the main window's tabs), `BrowserView`,
-  `SessionCardView`, `SourceLabel` and `ServersView` in SwiftUI, over a
+  `SessionCardView`, `SourceLabel` and `ServersView` (known and
+  discovered hosts; a discovered one pairs through `PairSheet`, which
+  shows the key it presents for the owner to check against the host's
+  dialog and takes the typed code) in SwiftUI, over a
   `BrowserModel` that mirrors the manager's store when it changes;
   `CardWindowView`, one window on one session (a click on a listed
   session brings its open window forward; the context menu opens

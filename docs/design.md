@@ -3507,6 +3507,17 @@ Built so far:
   are laid out as grids. A Bonjour resolve that gets no answer is
   given up after 5 s, and each offline host resolves on its own task,
   after the retry loop hung on one resolve left waiting by the system.
+- **Pairing by the typed code (2026-10-14).** visionOS gives an app
+  no camera, so the QR code is never scanned on the headset. A
+  discovered host that is not paired offers Pair on the Servers screen:
+  the client resolves its record, reads `/info` under no trust and
+  shows the key the host presented in the dialog's own short form
+  (`KeyFingerprint.short`, the first sixteen hex digits in fours), the
+  owner compares it with the Key line on the Mac and types the
+  eight-character code, and the pairing goes out pinned to that key
+  (`ConnectionManager.lookup` and `pair(_:code:)`; the resolver is
+  injectable for the tests). Pasting the invite's text stays as the
+  fallback.
 - **Known gaps at the first merge.** Milestone D, the iPad shell, is
   not started. The Codex transcript parser, so a Codex session's
   conversation is empty on a device. The Dispatch ticket view

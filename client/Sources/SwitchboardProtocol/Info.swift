@@ -73,6 +73,18 @@ public struct PairReply: Decodable, Sendable {
     }
 }
 
+/// A host's key as both ends show it to the owner for a comparison by
+/// eye: the first sixteen hex digits of the SPKI hash in groups of
+/// four, as the host's pairing dialog prints them.
+public enum KeyFingerprint {
+    public static func short(_ hex: String) -> String {
+        let digits = Array(hex.prefix(16))
+        return stride(from: 0, to: digits.count, by: 4)
+            .map { String(digits[$0..<min($0 + 4, digits.count)]) }
+            .joined(separator: " ")
+    }
+}
+
 /// What the host's QR code holds while its pairing window is open: the
 /// installation, the key to pin before the code is sent, the code, and
 /// where the host answered from. Also pasted by hand.

@@ -1,4 +1,5 @@
 import Foundation
+import Network
 import SwitchboardProtocol
 import SwitchboardTransport
 
@@ -115,6 +116,23 @@ public struct UnifiedStore: Sendable, Equatable {
     }
 }
 
+/// What a discovered host says of itself before any trust: where it
+/// was reached and its `/info`, whose key the owner checks against the
+/// host's dialog before typing the code (§5).
+public struct HostLookup: Sendable, Equatable {
+    public let address: Address
+    public let info: ServerInfo
+
+    public init(address: Address, info: ServerInfo) {
+        self.address = address
+        self.info = info
+    }
+}
+
+/// The address behind a browsed endpoint; `Discovery.resolve` outside
+/// the tests.
+public typealias EndpointResolver = @Sendable (NWEndpoint) async throws -> Address
+
 /// Owns one `ServerConnection` per known server, the registry, and the
 /// unified store. A connected host drives the store through its
 /// events; the loop only retries hosts that are not connected, with
@@ -131,6 +149,7 @@ public actor ConnectionManager {
     private var loop: Task<Void, Never>?
     private var discovery: Discovery?
     private var onChange: (@Sendable () -> Void)?
+    private var resolver: EndpointResolver = { try await Discovery.resolve($0) }
 
     public init(
         registry: RegistryStore, credentials: CredentialStore, deviceName: String,
@@ -143,6 +162,12 @@ public actor ConnectionManager {
     }
 
     public var known: [KnownServer] { servers }
+
+    /// How a browsed endpoint becomes an address; the tests answer it
+    /// themselves.
+    public func setResolver(_ resolver: @escaping EndpointResolver) {
+        self.resolver = resolver
+    }
 
     /// Told after every rebuild of the store, so a view model mirrors
     /// it when it moves rather than on a timer.
@@ -195,6 +220,33 @@ public actor ConnectionManager {
         connections[id] = connection
         await persist()
         return connection
+    }
+
+    /// Look a discovered host up before pairing: resolve its record,
+    /// read `/info` under no trust, and refuse a host that is not the
+    /// one the record named. Nothing here is believed; the key it
+    /// presents is for the owner to compare with the host's dialog.
+    public func lookup(_ record: DiscoveredServer) async throws -> HostLookup {
+        let address = try await resolver(record.endpoint)
+        let info = try await factory(address, .observe, nil).info().body
+        if let id = record.serverID, id != info.serverID {
+            throw RemoteError.badReply(
+                "the host at \(address) is \(info.serverName), not the one advertised")
+        }
+        return HostLookup(address: address, info: info)
+    }
+
+    /// Pair with a host looked up, by the code typed from its dialog.
+    /// The key it presented is pinned for the pairing, so the code goes
+    /// only to the host whose key the owner checked; spaces and case
+    /// in the code are the owner's to get wrong.
+    public func pair(_ lookup: HostLookup, code: String) async throws {
+        let code = code.filter { !$0.isWhitespace }.uppercased()
+        try await pair(
+            invite: PairingInvite(
+                serverID: lookup.info.serverID, spkiSha256: lookup.info.spkiSha256, code: code,
+                addresses: []),
+            address: lookup.address)
     }
 
     /// Pair from an invite: the host is added if new, the key pinned
@@ -378,7 +430,7 @@ public actor ConnectionManager {
         discovered = set
         for record in set {
             guard let id = record.serverID, let connection = connections[id] else { continue }
-            if let address = try? await Discovery.resolve(record.endpoint) {
+            if let address = try? await resolver(record.endpoint) {
                 await connection.setAddresses([address])
             }
         }
@@ -391,7 +443,7 @@ public actor ConnectionManager {
     /// or not at all holds up no other host's try.
     private func reresolve(_ id: ServerID, _ connection: ServerConnection) async {
         guard let record = discovered.first(where: { $0.serverID == id }),
-            let address = try? await Discovery.resolve(record.endpoint)
+            let address = try? await resolver(record.endpoint)
         else { return }
         await connection.setAddresses([address])
     }
